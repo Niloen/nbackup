@@ -1,0 +1,403 @@
+// Package engine is NBackup's orchestrator, analogous to Amanda's driver. It
+// wires the planner, dump method, transfer pipeline, media store, catalog, and
+// policy together to execute runs, restores, verification, and pruning. It is
+// the only place that knows about all the abstractions at once; everything below
+// it depends only on interfaces.
+package engine
+
+import (
+	"fmt"
+	"io"
+	"time"
+
+	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/method"
+	"github.com/Niloen/nbackup/internal/planner"
+	"github.com/Niloen/nbackup/internal/policy"
+	"github.com/Niloen/nbackup/internal/restore"
+	"github.com/Niloen/nbackup/internal/slot"
+
+	// Register the bundled media and method implementations.
+	_ "github.com/Niloen/nbackup/internal/media/localdisk"
+	_ "github.com/Niloen/nbackup/internal/media/s3"
+	_ "github.com/Niloen/nbackup/internal/media/tape"
+	_ "github.com/Niloen/nbackup/internal/method/gnutar"
+)
+
+// Logf is an optional progress logger.
+type Logf func(format string, args ...any)
+
+func (l Logf) log(format string, args ...any) {
+	if l != nil {
+		l(format, args...)
+	}
+}
+
+// Engine holds the wired-up components for one configuration.
+type Engine struct {
+	cfg    *config.Config
+	cat    *catalog.Catalog
+	method method.Method
+	pol    policy.Policy
+}
+
+// New constructs an Engine from configuration: it opens the landing store via
+// the media registry, the dump method via the method registry, and loads the
+// catalog.
+func New(cfg *config.Config) (*Engine, error) {
+	store, err := media.OpenStore(cfg.Landing.Media, media.Options{
+		Path:   cfg.CatalogPath(),
+		Bucket: cfg.Media.S3.Bucket,
+	})
+	if err != nil {
+		return nil, err
+	}
+	cat, err := catalog.Open(store, cfg.WorkdirPath())
+	if err != nil {
+		return nil, err
+	}
+	m, err := method.Open("gnutar", method.Options{TarPath: cfg.TarPath()})
+	if err != nil {
+		return nil, err
+	}
+	budget, _ := cfg.BudgetBytes()
+	minAge, _ := cfg.MinimumAge()
+	return &Engine{
+		cfg:    cfg,
+		cat:    cat,
+		method: m,
+		pol:    policy.Policy{MinimumAge: minAge, Budget: budget},
+	}, nil
+}
+
+// Catalog exposes the catalog for read-only commands.
+func (e *Engine) Catalog() *catalog.Catalog { return e.cat }
+
+// Policy exposes the retention policy.
+func (e *Engine) Policy() policy.Policy { return e.pol }
+
+// Plan builds the plan for a run date.
+func (e *Engine) Plan(date time.Time) *planner.Plan {
+	return planner.Build(e.cfg.DLEs(), e.cat.History(), e.cfg.FullIntervalDays(), date)
+}
+
+// Estimate returns the uncompressed bytes a planned item would archive.
+func (e *Engine) Estimate(item planner.Item) (int64, error) {
+	req := method.BackupRequest{DLE: item.DLE, Level: item.Level}
+	if item.Level >= 1 {
+		req.BaseSnap = e.cat.SnapshotPath(item.Name, item.BaseLevel)
+	}
+	return e.method.Estimate(req)
+}
+
+// Run executes the plan for a date, producing one sealed slot.
+func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
+	if err := e.method.Check(); err != nil {
+		return nil, err
+	}
+	plan := e.Plan(date)
+	store := e.cat.Store()
+
+	slotID, seq, err := e.cat.NextSlotID(date)
+	if err != nil {
+		return nil, err
+	}
+	s := &slot.Slot{
+		ID:        slotID,
+		Date:      slot.DateString(date),
+		Sequence:  seq,
+		CreatedAt: time.Now().UTC(),
+		Status:    slot.StatusOpen,
+		Generator: "nbdump",
+	}
+	manifest := &slot.Manifest{SlotID: slotID}
+	checksums := map[string]string{}
+
+	for _, item := range plan.Items {
+		arch, files, err := e.backupItem(s, item, logf)
+		if err != nil {
+			return nil, err
+		}
+		s.Archives = append(s.Archives, *arch)
+		s.TotalBytes += arch.Compressed
+		checksums[arch.File] = arch.SHA256
+		manifest.Archives = append(manifest.Archives, *files)
+		e.recordRun(s, item)
+	}
+
+	if err := e.writeObject(slotID, slot.FileManifest, manifest.Marshal); err != nil {
+		return nil, err
+	}
+	if err := e.putBytes(slotID, slot.FileChecksums, slot.FormatChecksums(checksums)); err != nil {
+		return nil, err
+	}
+
+	logf.log("verifying %d archive checksum(s)", len(checksums))
+	if err := e.verifyChecksums(slotID, checksums); err != nil {
+		return nil, err
+	}
+
+	// Seal: write SLOT.json last.
+	s.Status = slot.StatusSealed
+	s.SealedAt = time.Now().UTC()
+	if err := e.writeObject(slotID, slot.FileSlot, s.Marshal); err != nil {
+		return nil, err
+	}
+	if err := e.cat.SaveHistory(); err != nil {
+		return nil, fmt.Errorf("save history: %w", err)
+	}
+	_ = store
+	return s, nil
+}
+
+// backupItem archives a single DLE into the slot and returns its metadata.
+func (e *Engine) backupItem(s *slot.Slot, item planner.Item, logf Logf) (*slot.Archive, *slot.ArchiveFiles, error) {
+	fileName := fmt.Sprintf("%s-L%d.tar.zst", item.Name, item.Level)
+	rel := slot.DirArchives + "/" + fileName
+
+	req := method.BackupRequest{
+		DLE:     item.DLE,
+		Level:   item.Level,
+		OutSnap: e.cat.SnapshotPath(item.Name, item.Level),
+	}
+	if item.Level >= 1 {
+		req.BaseSnap = e.cat.SnapshotPath(item.Name, item.BaseLevel)
+		if !e.cat.SnapshotExists(item.Name, item.BaseLevel) {
+			return nil, nil, fmt.Errorf("DLE %s: incremental L%d needs the L%d snapshot but it is missing",
+				item.Name, item.Level, item.BaseLevel)
+		}
+	}
+
+	logf.log("archiving %s (L%d) from %s", item.Name, item.Level, item.DLE.Path)
+
+	// dest (media) <- filter (zstd+checksum) <- source (dump method).
+	w, err := e.cat.Store().Create(s.ID, rel)
+	if err != nil {
+		return nil, nil, err
+	}
+	sink, err := newSink(w)
+	if err != nil {
+		w.Close()
+		return nil, nil, err
+	}
+	res, berr := e.method.Backup(req, sink)
+	closeErr := sink.Close()
+	wCloseErr := w.Close()
+	if berr != nil {
+		return nil, nil, fmt.Errorf("archive %s: %w", item.Name, berr)
+	}
+	if closeErr != nil {
+		return nil, nil, closeErr
+	}
+	if wCloseErr != nil {
+		return nil, nil, wCloseErr
+	}
+
+	logf.log("  %d file(s), %s compressed", res.FileCount, humanBytes(sink.Compressed()))
+
+	arch := &slot.Archive{
+		DLE:          item.Name,
+		Host:         item.DLE.Host,
+		Path:         item.DLE.Path,
+		Method:       e.method.Name(),
+		Level:        item.Level,
+		File:         rel,
+		Compressed:   sink.Compressed(),
+		Uncompressed: res.Uncompressed,
+		FileCount:    res.FileCount,
+		SHA256:       sink.SHA256(),
+		BaseSlot:     item.BaseSlot,
+	}
+	files := &slot.ArchiveFiles{DLE: item.Name, Level: item.Level, Files: res.Members}
+	return arch, files, nil
+}
+
+func (e *Engine) recordRun(s *slot.Slot, item planner.Item) {
+	d := e.cat.History().DLE(item.Name)
+	if item.Level == 0 {
+		d.LastFullDate = s.Date
+		d.LastFullSlot = s.ID
+	}
+	d.Runs = append(d.Runs, catalog.RunRecord{Date: s.Date, Slot: s.ID, Level: item.Level})
+}
+
+// Restore reconstructs a DLE as of a slot into destDir.
+func (e *Engine) Restore(slotID, dleName, destDir string, logf Logf) error {
+	if err := e.method.Check(); err != nil {
+		return err
+	}
+	slots, err := e.cat.Slots()
+	if err != nil {
+		return err
+	}
+	steps, err := restore.Chain(slots, dleName, slotID)
+	if err != nil {
+		return err
+	}
+	for _, step := range steps {
+		logf.log("extracting %s L%d -> %s", step.SlotID, step.Level, destDir)
+		if err := e.extractStep(step, dleName, destDir); err != nil {
+			return fmt.Errorf("extract %s: %w", step.File, err)
+		}
+	}
+	return nil
+}
+
+func (e *Engine) extractStep(step restore.Step, dleName, destDir string) error {
+	rc, err := e.cat.Store().Open(step.SlotID, step.File)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	src, err := newSource(rc)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	return e.method.Restore(e.findDLE(dleName), src, destDir)
+}
+
+// DLEsInSlot returns the distinct DLE names archived in a slot.
+func (e *Engine) DLEsInSlot(s *slot.Slot) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range s.Archives {
+		if !seen[a.DLE] {
+			seen[a.DLE] = true
+			out = append(out, a.DLE)
+		}
+	}
+	return out
+}
+
+// Verify checks the checksums of the given slots (all if none given).
+func (e *Engine) Verify(slotIDs []string, logf Logf) (failures int, err error) {
+	if len(slotIDs) == 0 {
+		slots, err := e.cat.Slots()
+		if err != nil {
+			return 0, err
+		}
+		for _, s := range slots {
+			slotIDs = append(slotIDs, s.ID)
+		}
+	}
+	for _, id := range slotIDs {
+		ok, verr := e.verifySlot(id, logf)
+		if verr != nil {
+			logf.log("%s: ERROR %v", id, verr)
+			failures++
+			continue
+		}
+		if !ok {
+			failures++
+		}
+	}
+	return failures, nil
+}
+
+func (e *Engine) verifySlot(id string, logf Logf) (bool, error) {
+	data, err := e.readObject(id, slot.FileChecksums)
+	if err != nil {
+		return false, err
+	}
+	sums, err := slot.ParseChecksums(data)
+	if err != nil {
+		return false, err
+	}
+	ok := true
+	for rel, want := range sums {
+		got, herr := e.hashObject(id, rel)
+		if herr != nil {
+			logf.log("%s: %s MISSING (%v)", id, rel, herr)
+			ok = false
+			continue
+		}
+		if got != want {
+			logf.log("%s: %s CHECKSUM MISMATCH", id, rel)
+			ok = false
+		}
+	}
+	if ok {
+		logf.log("%s: OK (%d archive(s))", id, len(sums))
+	}
+	return ok, nil
+}
+
+// Prune evaluates retention and optionally deletes eligible slots.
+func (e *Engine) Prune(now time.Time, apply bool, logf Logf) (eligible int, err error) {
+	slots, err := e.cat.Slots()
+	if err != nil {
+		return 0, err
+	}
+	for _, d := range e.pol.Prune(slots, now) {
+		if !d.Delete {
+			logf.log("keep   %s  (%s)", d.Slot.ID, d.Reason)
+			continue
+		}
+		eligible++
+		if apply {
+			if err := e.cat.Store().Remove(d.Slot.ID); err != nil {
+				return eligible, fmt.Errorf("delete %s: %w", d.Slot.ID, err)
+			}
+			logf.log("DELETE %s  (%s freed)", d.Slot.ID, humanBytes(d.Slot.TotalBytes))
+		} else {
+			logf.log("would delete %s  (%s)", d.Slot.ID, humanBytes(d.Slot.TotalBytes))
+		}
+	}
+	return eligible, nil
+}
+
+// --- object I/O helpers over the store ---
+
+func (e *Engine) writeObject(slotID, name string, marshal func() ([]byte, error)) error {
+	data, err := marshal()
+	if err != nil {
+		return err
+	}
+	return e.putBytes(slotID, name, data)
+}
+
+func (e *Engine) putBytes(slotID, name string, data []byte) error {
+	w, err := e.cat.Store().Create(slotID, name)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(data); err != nil {
+		w.Close()
+		return err
+	}
+	return w.Close()
+}
+
+func (e *Engine) readObject(slotID, name string) ([]byte, error) {
+	rc, err := e.cat.Store().Open(slotID, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+func (e *Engine) hashObject(slotID, name string) (string, error) {
+	rc, err := e.cat.Store().Open(slotID, name)
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close()
+	return hashReader(rc)
+}
+
+func (e *Engine) verifyChecksums(slotID string, want map[string]string) error {
+	for rel, w := range want {
+		got, err := e.hashObject(slotID, rel)
+		if err != nil {
+			return fmt.Errorf("verify %s: %w", rel, err)
+		}
+		if got != w {
+			return fmt.Errorf("checksum mismatch for %s before sealing", rel)
+		}
+	}
+	return nil
+}

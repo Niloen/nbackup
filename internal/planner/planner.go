@@ -2,8 +2,8 @@
 // Amanda-style multilevel scheme (levels 0-9): a full (level 0) starts each
 // cycle, and each subsequent run increments the level so it captures only what
 // changed since the previous level, keeping daily volume small. Fulls are
-// staggered across DLEs to avoid spikes. Priority order follows the PRD:
-// recoverability and cycle safety first, then budget, then balancing volume.
+// staggered across DLEs to avoid spikes. It is pure, operating over the catalog
+// history.
 package planner
 
 import (
@@ -11,9 +11,12 @@ import (
 	"hash/fnv"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/config"
-	"github.com/Niloen/nbackup/internal/state"
+	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/dle"
 )
+
+// MaxLevel is the highest incremental level assigned (Amanda uses levels 0-9).
+const MaxLevel = 9
 
 // Plan is the result of a planning run.
 type Plan struct {
@@ -24,7 +27,7 @@ type Plan struct {
 
 // Item is the planned backup of a single DLE.
 type Item struct {
-	Source    config.Source
+	DLE       dle.DLE
 	Name      string
 	Level     int    // 0 = full, 1..9 = incremental
 	BaseLevel int    // level whose snapshot this builds on (-1 for a full)
@@ -33,19 +36,16 @@ type Item struct {
 }
 
 // Build produces a plan for the given date without scanning sources.
-func Build(cfg *config.Config, st *state.State, today time.Time) *Plan {
-	interval := cfg.FullIntervalDays()
+func Build(dles []dle.DLE, hist *catalog.History, interval int, today time.Time) *Plan {
 	p := &Plan{Date: today, Interval: interval}
-	for _, src := range cfg.Sources {
-		name := src.Name()
-		d := st.DLE(name)
-		level, reason := decide(name, d, today, interval)
-		item := Item{Source: src, Name: name, Level: level, BaseLevel: -1, Reason: reason}
+	for _, d := range dles {
+		name := d.Name()
+		st := hist.DLE(name)
+		level, reason := decide(name, st, today, interval)
+		item := Item{DLE: d, Name: name, Level: level, BaseLevel: -1, Reason: reason}
 		if level >= 1 {
 			item.BaseLevel = level - 1
-			if n := len(d.Runs); n > 0 {
-				item.BaseSlot = d.Runs[n-1].Slot
-			}
+			item.BaseSlot = st.LastSlot()
 		}
 		p.Items = append(p.Items, item)
 	}
@@ -59,8 +59,8 @@ func Build(cfg *config.Config, st *state.State, today time.Time) *Plan {
 //   - Full due (>= interval) on this DLE's staggered day -> full; an overdue
 //     full (>= 2x interval) is forced regardless of staggering.
 //   - Otherwise -> the next incremental level (one higher than the last run,
-//     capped at the maximum level), capturing changes since that level.
-func decide(name string, d *state.DLEState, today time.Time, interval int) (int, string) {
+//     capped at MaxLevel), capturing changes since that level.
+func decide(name string, d *catalog.DLEState, today time.Time, interval int) (int, string) {
 	days := d.DaysSinceFull(today)
 	if days < 0 {
 		return 0, "first backup of this DLE (no full exists yet)"
@@ -75,8 +75,8 @@ func decide(name string, d *state.DLEState, today time.Time, interval int) (int,
 		}
 	}
 	level := d.IncrementalsSinceFull() + 1
-	if level > config.MaxLevel {
-		level = config.MaxLevel
+	if level > MaxLevel {
+		level = MaxLevel
 	}
 	return level, fmt.Sprintf("incremental L%d (changes since L%d, last full %dd ago)", level, level-1, days)
 }

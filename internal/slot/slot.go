@@ -1,12 +1,11 @@
-// Package slot defines NBackup's primary artifact: an immutable, self-contained
-// directory describing a single backup run.
+// Package slot defines NBackup's primary artifact format: the metadata of an
+// immutable, self-contained backup run. It is pure data plus (de)serialization;
+// it makes no assumptions about where the bytes live (that is a media concern).
 package slot
 
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,17 +46,17 @@ type Archive struct {
 	DLE          string `json:"dle"`          // DLE name, e.g. "app01-home"
 	Host         string `json:"host"`         // source host
 	Path         string `json:"path"`         // source path
-	Level        int    `json:"level"`        // 0 = full, >=1 = incremental (GNU tar listed-incremental)
+	Method       string `json:"method"`       // dump method that produced it
+	Level        int    `json:"level"`        // 0 = full, >=1 = incremental
 	File         string `json:"file"`         // path relative to slot root
 	Compressed   int64  `json:"compressed"`   // size on disk
-	Uncompressed int64  `json:"uncompressed"` // tar stream size (from --totals)
+	Uncompressed int64  `json:"uncompressed"` // archive stream size before compression
 	FileCount    int    `json:"file_count"`   // number of member entries archived
 	SHA256       string `json:"sha256"`       // checksum of the archive file
 	BaseSlot     string `json:"base_slot"`    // for level>=1, the slot whose state this builds on
 }
 
-// Manifest is the content of MANIFEST.json: per-archive member listings as
-// produced by GNU tar.
+// Manifest is the content of MANIFEST.json: per-archive member listings.
 type Manifest struct {
 	SlotID   string         `json:"slot_id"`
 	Archives []ArchiveFiles `json:"archives"`
@@ -69,6 +68,9 @@ type ArchiveFiles struct {
 	Level int      `json:"level"`
 	Files []string `json:"files"`
 }
+
+// IsSealed reports whether the slot has been sealed.
+func (s *Slot) IsSealed() bool { return s.Status == StatusSealed }
 
 // ID builds a slot ID from a date and sequence number. Sequence 1 yields the
 // bare "slot-DATE"; higher sequences append ".N".
@@ -121,31 +123,11 @@ func Less(a, b *Slot) bool {
 	return a.Sequence < b.Sequence
 }
 
-// Write serializes the slot metadata into the slot directory, sealing it.
-func (s *Slot) Write(dir string) error {
-	return writeJSON(filepath.Join(dir, FileSlot), s)
-}
+// Marshal serializes the slot metadata as indented JSON.
+func (s *Slot) Marshal() ([]byte, error) { return marshalJSON(s) }
 
-// WriteManifest serializes the manifest into the slot directory.
-func (m *Manifest) Write(dir string) error {
-	return writeJSON(filepath.Join(dir, FileManifest), m)
-}
-
-func writeJSON(path string, v any) error {
-	data, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o644)
-}
-
-// Read loads SLOT.json from a slot directory.
-func Read(dir string) (*Slot, error) {
-	data, err := os.ReadFile(filepath.Join(dir, FileSlot))
-	if err != nil {
-		return nil, err
-	}
+// ParseSlot deserializes SLOT.json content.
+func ParseSlot(data []byte) (*Slot, error) {
 	var s Slot
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", FileSlot, err)
@@ -156,12 +138,11 @@ func Read(dir string) (*Slot, error) {
 	return &s, nil
 }
 
-// ReadManifest loads MANIFEST.json from a slot directory.
-func ReadManifest(dir string) (*Manifest, error) {
-	data, err := os.ReadFile(filepath.Join(dir, FileManifest))
-	if err != nil {
-		return nil, err
-	}
+// Marshal serializes the manifest as indented JSON.
+func (m *Manifest) Marshal() ([]byte, error) { return marshalJSON(m) }
+
+// ParseManifest deserializes MANIFEST.json content.
+func ParseManifest(data []byte) (*Manifest, error) {
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", FileManifest, err)
@@ -169,9 +150,17 @@ func ReadManifest(dir string) (*Manifest, error) {
 	return &m, nil
 }
 
-// WriteChecksums writes the CHECKSUMS.sha256 file in the standard
-// "<hex>  <path>" format understood by sha256sum.
-func WriteChecksums(dir string, sums map[string]string) error {
+func marshalJSON(v any) ([]byte, error) {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+// FormatChecksums renders a path->hex map in the "<hex>  <path>" format
+// understood by sha256sum, sorted by path.
+func FormatChecksums(sums map[string]string) []byte {
 	paths := make([]string, 0, len(sums))
 	for p := range sums {
 		paths = append(paths, p)
@@ -181,15 +170,11 @@ func WriteChecksums(dir string, sums map[string]string) error {
 	for _, p := range paths {
 		fmt.Fprintf(&b, "%s  %s\n", sums[p], p)
 	}
-	return os.WriteFile(filepath.Join(dir, FileChecksums), []byte(b.String()), 0o644)
+	return []byte(b.String())
 }
 
-// ReadChecksums parses CHECKSUMS.sha256 into a path->hex map.
-func ReadChecksums(dir string) (map[string]string, error) {
-	data, err := os.ReadFile(filepath.Join(dir, FileChecksums))
-	if err != nil {
-		return nil, err
-	}
+// ParseChecksums parses CHECKSUMS.sha256 content into a path->hex map.
+func ParseChecksums(data []byte) (map[string]string, error) {
 	out := map[string]string{}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -203,35 +188,4 @@ func ReadChecksums(dir string) (map[string]string, error) {
 		out[parts[1]] = parts[0]
 	}
 	return out, nil
-}
-
-// IsSealed reports whether a slot directory contains a sealed slot.
-func IsSealed(dir string) bool {
-	s, err := Read(dir)
-	return err == nil && s.Status == StatusSealed
-}
-
-// List returns the sealed (and open) slots found under a catalog root, sorted
-// ascending by run order (date, then sequence).
-func List(catalog string) ([]*Slot, error) {
-	entries, err := os.ReadDir(catalog)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var slots []*Slot
-	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), "slot-") {
-			continue
-		}
-		s, err := Read(filepath.Join(catalog, e.Name()))
-		if err != nil {
-			continue // skip unreadable/partial slots
-		}
-		slots = append(slots, s)
-	}
-	sort.Slice(slots, func(i, j int) bool { return Less(slots[i], slots[j]) })
-	return slots, nil
 }

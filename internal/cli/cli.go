@@ -1,14 +1,15 @@
-// Package cli holds helpers shared by the nb* command-line tools.
+// Package cli holds helpers shared by the nb* command-line tools. Commands are
+// thin wrappers that build an engine.Engine from configuration and render its
+// results.
 package cli
 
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/config"
-	"github.com/Niloen/nbackup/internal/slot"
+	"github.com/Niloen/nbackup/internal/engine"
 )
 
 // DefaultConfigPath is used when -c is not given.
@@ -23,18 +24,6 @@ func Fatalf(format string, args ...any) {
 	os.Exit(1)
 }
 
-// ResolveCatalog determines the catalog (slot store) directory. Precedence:
-// explicit flag, then config media.local-disk.path, then the default.
-func ResolveCatalog(flagCatalog string, cfg *config.Config) string {
-	if flagCatalog != "" {
-		return flagCatalog
-	}
-	if cfg != nil && cfg.Media.LocalDisk.Path != "" {
-		return cfg.Media.LocalDisk.Path
-	}
-	return DefaultCatalog
-}
-
 // ParseDate parses a YYYY-MM-DD date, or returns today (UTC) when empty.
 func ParseDate(s string) (time.Time, error) {
 	if s == "" {
@@ -43,20 +32,47 @@ func ParseDate(s string) (time.Time, error) {
 	return time.Parse("2006-01-02", s)
 }
 
-// CatalogBytes returns the total compressed size recorded across all slots.
-func CatalogBytes(catalog string) (int64, error) {
-	slots, err := slot.List(catalog)
+// loadConfig loads configuration for commands that need full config (plan/dump),
+// applying a catalog override and a default catalog path.
+func loadConfig(cfgPath, catalogOverride string) (*config.Config, error) {
+	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	var total int64
-	for _, s := range slots {
-		total += s.TotalBytes
-	}
-	return total, nil
+	applyCatalog(cfg, catalogOverride)
+	return cfg, nil
 }
 
-// SlotDir returns the directory for a slot ID under the catalog.
-func SlotDir(catalog, slotID string) string {
-	return filepath.Join(catalog, slotID)
+// loadConfigRO loads configuration for read-only commands, synthesizing a
+// minimal config when none exists so a bare -C still works.
+func loadConfigRO(cfgPath, catalogOverride string) *config.Config {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		cfg = &config.Config{}
+		cfg.Landing.Media = "local-disk"
+	}
+	applyCatalog(cfg, catalogOverride)
+	return cfg
+}
+
+func applyCatalog(cfg *config.Config, catalogOverride string) {
+	if catalogOverride != "" {
+		cfg.Media.LocalDisk.Path = catalogOverride
+		cfg.Workdir = catalogOverride
+	}
+	if cfg.Media.LocalDisk.Path == "" {
+		cfg.Media.LocalDisk.Path = DefaultCatalog
+	}
+	if cfg.Landing.Media == "" {
+		cfg.Landing.Media = "local-disk"
+	}
+}
+
+func newEngine(cfg *config.Config) (*engine.Engine, error) {
+	return engine.New(cfg)
+}
+
+// logfStdout writes progress lines to stdout.
+func logfStdout(format string, args ...any) {
+	fmt.Printf(format+"\n", args...)
 }

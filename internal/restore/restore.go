@@ -1,13 +1,11 @@
-// Package restore reconstructs a DLE's data from a slot by applying its full
-// backup followed by every later incremental in the chain, in run order. GNU
-// tar's incremental extraction applies deletions recorded in each archive.
+// Package restore computes the ordered chain of archives needed to reconstruct a
+// DLE as of a target slot. It is pure: it works over slot metadata and returns
+// the steps; the engine performs the I/O and extraction.
 package restore
 
 import (
 	"fmt"
-	"path/filepath"
 
-	"github.com/Niloen/nbackup/internal/archive"
 	"github.com/Niloen/nbackup/internal/slot"
 )
 
@@ -16,17 +14,13 @@ type Step struct {
 	SlotID string
 	Level  int
 	File   string // path relative to the slot directory
-	Dir    string // absolute slot directory
 }
 
-// Chain computes the ordered list of archives needed to restore a DLE as of the
-// target slot: the most recent full at or before the target (in run order),
-// plus every later backup for that DLE up to the target (inclusive).
-func Chain(catalog, dleName, targetSlotID string) ([]Step, error) {
-	slots, err := slot.List(catalog)
-	if err != nil {
-		return nil, err
-	}
+// Chain returns the archives needed to restore a DLE as of the target slot, in
+// run order: the most recent full at or before the target, plus every later
+// backup for that DLE up to the target (inclusive). The input slots must be
+// sorted in run order.
+func Chain(slots []*slot.Slot, dleName, targetSlotID string) ([]Step, error) {
 	targetIdx := -1
 	for i, s := range slots {
 		if s.ID == targetSlotID {
@@ -38,7 +32,6 @@ func Chain(catalog, dleName, targetSlotID string) ([]Step, error) {
 		return nil, fmt.Errorf("slot %s not found in catalog", targetSlotID)
 	}
 
-	// Most recent full for this DLE at or before the target, in run order.
 	fullIdx := -1
 	for i := 0; i <= targetIdx; i++ {
 		for _, a := range slots[i].Archives {
@@ -61,31 +54,8 @@ func Chain(catalog, dleName, targetSlotID string) ([]Step, error) {
 			if i == fullIdx && a.Level != 0 {
 				continue // at the full's slot, take only the full
 			}
-			steps = append(steps, Step{
-				SlotID: s.ID,
-				Level:  a.Level,
-				File:   a.File,
-				Dir:    filepath.Join(catalog, s.ID),
-			})
+			steps = append(steps, Step{SlotID: s.ID, Level: a.Level, File: a.File})
 		}
 	}
 	return steps, nil
-}
-
-// Run restores dleName as of targetSlotID into destDir using the given GNU tar
-// binary.
-func Run(tarBin, catalog, dleName, targetSlotID, destDir string, logf func(string, ...any)) error {
-	steps, err := Chain(catalog, dleName, targetSlotID)
-	if err != nil {
-		return err
-	}
-	for _, step := range steps {
-		if logf != nil {
-			logf("extracting %s L%d -> %s", step.SlotID, step.Level, destDir)
-		}
-		if err := archive.Extract(tarBin, filepath.Join(step.Dir, step.File), destDir); err != nil {
-			return fmt.Errorf("extract %s: %w", step.File, err)
-		}
-	}
-	return nil
 }

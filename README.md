@@ -175,6 +175,40 @@ Not yet implemented (declared in config for forward-compatibility):
 - **Exclude/include rules** and tar tuning (one-file-system and sparse are on by
   default, as in Amanda).
 
+## Architecture
+
+NBackup's internals mirror Amanda's pluggable-API structure: mechanism lives
+behind interfaces with named, registered implementations, and a single
+orchestrator composes them.
+
+| Package | Responsibility | Amanda analogue |
+|---|---|---|
+| `dle` | the DLE domain type (host, path, method) | Disklist |
+| `slot` | slot format: pure data + (de)serialization | Header / amar |
+| `media` | `Store` (landing) + `Vault` (copies) interfaces + registry | Device API |
+| `media/localdisk`, `media/s3`, `media/tape` | implementations (s3/tape are registered stubs) | tape/s3/vfs devices |
+| `method` | `Method` dump interface + registry | Application API |
+| `method/gnutar` | GNU tar implementation (all tar/snapshot specifics) | amgtar |
+| `xfer` | stream pipeline: zstd + checksum + counting | Xfer API |
+| `catalog` | slot listing, run `History`, snapshot library, slot-id allocation | catalog / curinfo |
+| `policy` | retention/cycle/budget decisions (pure) | Policy |
+| `planner` | multilevel level scheduling (pure) | planner |
+| `engine` | the driver: wires planner→method→xfer→media→catalog | driver / taper |
+| `cli` | thin command wiring | amdump / amadmin |
+
+Dependencies flow one way: `cli → engine → {planner, policy, method, media,
+catalog, xfer, slot, dle, config}`. Domain packages stay pure; `method`/`media`
+are pluggable adapters; `engine` is the only component aware of all of them. A
+backup reads as a pipeline — **source** (`method.Backup`) → **filter**
+(`xfer` zstd+checksum) → **dest** (`media.Store`) — and adding a storage medium
+or dump method is a registry registration, not a conditional in the core.
+
+One deliberate split: slots (the source of truth) live on the `media.Store`,
+while local operational state — the run history and the GNU tar snapshot library
+— lives in a local **workdir** (default: the catalog path), so it stays local
+even when the store is remote, exactly as Amanda keeps `gnutar-lists` and
+`curinfo` on the host.
+
 ## Development
 
 ```bash

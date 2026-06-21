@@ -4,10 +4,9 @@ package config
 import (
 	"fmt"
 	"os"
-	"regexp"
-	"strings"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/dle"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"gopkg.in/yaml.v3"
 )
@@ -32,9 +31,12 @@ type Config struct {
 		FullIntervalDays int `yaml:"full_interval_days"`
 	} `yaml:"planner"`
 
-	// GnuTarPath overrides the GNU tar binary used for archives (default "tar";
-	// use "gtar" on systems where GNU tar is not the default tar).
+	// GnuTarPath overrides the GNU tar binary used by the gnutar method.
 	GnuTarPath string `yaml:"gnutar_path"`
+
+	// Workdir holds local operational state (history + snapshot library).
+	// Defaults to the local-disk media path.
+	Workdir string `yaml:"workdir"`
 
 	Media struct {
 		S3 struct {
@@ -43,34 +45,14 @@ type Config struct {
 		Tape struct {
 			Enabled   bool   `yaml:"enabled"`
 			Retention string `yaml:"retention"`
+			Device    string `yaml:"device"`
 		} `yaml:"tape"`
 		LocalDisk struct {
 			Path string `yaml:"path"`
 		} `yaml:"local-disk"`
 	} `yaml:"media"`
 
-	Sources []Source `yaml:"sources"`
-}
-
-// Source is a DLE (a backup source): one path on one host.
-type Source struct {
-	Host string `yaml:"host"`
-	Path string `yaml:"path"`
-}
-
-var slugStrip = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
-
-// Name returns a stable, filesystem-safe identifier for a DLE, e.g.
-// host "app01" + path "/home" -> "app01-home".
-func (s Source) Name() string {
-	p := strings.Trim(s.Path, "/")
-	p = strings.ReplaceAll(p, "/", "-")
-	if p == "" {
-		p = "root"
-	}
-	name := s.Host + "-" + p
-	name = slugStrip.ReplaceAllString(name, "_")
-	return name
+	Sources []dle.DLE `yaml:"sources"`
 }
 
 // Load reads and validates a configuration file.
@@ -83,13 +65,14 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
-	if err := c.validate(); err != nil {
+	if err := c.Validate(); err != nil {
 		return nil, err
 	}
 	return &c, nil
 }
 
-func (c *Config) validate() error {
+// Validate checks required fields and normalizes defaults.
+func (c *Config) Validate() error {
 	if len(c.Sources) == 0 {
 		return fmt.Errorf("config has no sources")
 	}
@@ -109,6 +92,9 @@ func (c *Config) validate() error {
 	}
 	return nil
 }
+
+// DLEs returns the configured backup sources.
+func (c *Config) DLEs() []dle.DLE { return c.Sources }
 
 // BudgetBytes returns the configured storage budget in bytes, or 0 if unset.
 func (c *Config) BudgetBytes() (int64, error) {
@@ -142,6 +128,16 @@ func (c *Config) TarPath() string {
 	return "tar"
 }
 
-// MaxLevel is the highest incremental level the planner will assign (Amanda
-// uses levels 0-9).
-const MaxLevel = 9
+// CatalogPath returns the local-disk media path (where slots live).
+func (c *Config) CatalogPath() string {
+	return c.Media.LocalDisk.Path
+}
+
+// WorkdirPath returns the local operational-state directory, defaulting to the
+// catalog path.
+func (c *Config) WorkdirPath() string {
+	if c.Workdir != "" {
+		return c.Workdir
+	}
+	return c.Media.LocalDisk.Path
+}
