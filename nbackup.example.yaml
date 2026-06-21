@@ -1,0 +1,39 @@
+# Example NBackup configuration.
+# Copy to nbackup.yaml and adjust paths.
+
+storage:
+  # Target ceiling for total catalog size. The planner reports usage against
+  # this; `nb slot prune` retires old slots to stay within it.
+  budget: 20TB
+
+cycle:
+  # A slot cannot be pruned until it is older than this.
+  minimum_age: 30d
+  require_verified_successor: true
+
+landing:
+  # Where slots are first created. Only local-disk is implemented today.
+  media: local-disk
+
+planner:
+  # Target days between full backups per DLE (default 7). Fulls are staggered
+  # across DLEs to avoid daily spikes.
+  full_interval_days: 7
+
+media:
+  local-disk:
+    # The catalog: where slot-YYYY-MM-DD directories live.
+    path: /var/lib/nbackup/catalog
+
+  # Declared for forward-compatibility; not yet wired up.
+  s3:
+    bucket: company-backups
+  tape:
+    enabled: false
+    retention: 180d
+
+sources:
+  - host: app01
+    path: /home
+  - host: db01
+    path: /var/lib/postgresql

@@ -1,0 +1,100 @@
+// Package sizeutil parses and formats human-friendly sizes and durations
+// used throughout NBackup configuration (e.g. "20TB", "30d").
+package sizeutil
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// ParseBytes parses a human-readable size such as "20TB", "500GB", "1024",
+// "10MiB". Decimal units (KB/MB/GB/TB/PB) are powers of 1000; binary units
+// (KiB/MiB/GiB/TiB/PiB) are powers of 1024. A bare number is bytes.
+func ParseBytes(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty size")
+	}
+	// Split numeric prefix from unit suffix.
+	i := 0
+	for i < len(s) && (s[i] == '.' || s[i] == '-' || s[i] == '+' || (s[i] >= '0' && s[i] <= '9')) {
+		i++
+	}
+	numPart := strings.TrimSpace(s[:i])
+	unit := strings.TrimSpace(strings.ToLower(s[i:]))
+
+	num, err := strconv.ParseFloat(numPart, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size %q: %w", s, err)
+	}
+
+	var mult float64 = 1
+	switch unit {
+	case "", "b":
+		mult = 1
+	case "kb", "k":
+		mult = 1e3
+	case "mb", "m":
+		mult = 1e6
+	case "gb", "g":
+		mult = 1e9
+	case "tb", "t":
+		mult = 1e12
+	case "pb", "p":
+		mult = 1e15
+	case "kib":
+		mult = 1 << 10
+	case "mib":
+		mult = 1 << 20
+	case "gib":
+		mult = 1 << 30
+	case "tib":
+		mult = 1 << 40
+	case "pib":
+		mult = 1 << 50
+	default:
+		return 0, fmt.Errorf("unknown size unit %q", unit)
+	}
+	return int64(num * mult), nil
+}
+
+// FormatBytes renders a byte count in a compact human-readable form.
+func FormatBytes(b int64) string {
+	const unit = 1000
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "kMGTPE"[exp])
+}
+
+// ParseDuration parses durations including a day ("d") and week ("w") suffix,
+// which the standard library does not support. Examples: "30d", "2w", "12h".
+func ParseDuration(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	switch {
+	case strings.HasSuffix(s, "d"):
+		n, err := strconv.ParseFloat(strings.TrimSuffix(s, "d"), 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid duration %q: %w", s, err)
+		}
+		return time.Duration(n * 24 * float64(time.Hour)), nil
+	case strings.HasSuffix(s, "w"):
+		n, err := strconv.ParseFloat(strings.TrimSuffix(s, "w"), 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid duration %q: %w", s, err)
+		}
+		return time.Duration(n * 7 * 24 * float64(time.Hour)), nil
+	default:
+		return time.ParseDuration(s)
+	}
+}

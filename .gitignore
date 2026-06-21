@@ -1,0 +1,9 @@
+# build output
+/bin/
+
+# editor backups
+*~
+
+# local catalogs / test artifacts
+/nbackup-catalog/
+*.tar.zst
