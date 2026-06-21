@@ -4,50 +4,70 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
-// TestRoundTripFullAndIncremental verifies that a full archive plus an
-// incremental archive, extracted in order, reproduce the live data including a
-// modified and a newly added file.
-func TestRoundTripFullAndIncremental(t *testing.T) {
+// TestGnuTarIncrementalRoundTrip verifies a full + incremental chain reproduces
+// the live tree, including a modified file, a NEW file, and — crucially — a
+// DELETED file, which GNU tar's listed-incremental restore must remove.
+func TestGnuTarIncrementalRoundTrip(t *testing.T) {
+	if err := CheckTar(""); err != nil {
+		t.Skipf("GNU tar not available: %v", err)
+	}
 	src := t.TempDir()
-	mustWrite(t, filepath.Join(src, "a.txt"), "alpha")
-	mustWrite(t, filepath.Join(src, "sub", "b.txt"), "beta")
-
+	snaps := t.TempDir()
 	out := t.TempDir()
-	full := filepath.Join(out, "full.tar.zst")
-	res, err := Create(CreateOptions{SourcePath: src, OutFile: full})
+
+	mustWrite(t, filepath.Join(src, "a.txt"), "alpha")
+	mustWrite(t, filepath.Join(src, "b.txt"), "beta")
+	mustWrite(t, filepath.Join(src, "sub", "c.txt"), "gamma")
+
+	l0 := filepath.Join(out, "l0.tar.zst")
+	r0, err := Create(CreateOptions{
+		SourcePath:  src,
+		OutFile:     l0,
+		Level:       0,
+		OutSnapshot: filepath.Join(snaps, "L0.snar"),
+	})
 	if err != nil {
-		t.Fatalf("full create: %v", err)
+		t.Fatalf("L0 create: %v", err)
 	}
-	if res.FileCount != 2 {
-		t.Fatalf("full file count = %d, want 2", res.FileCount)
+	if r0.FileCount != 3 {
+		t.Fatalf("L0 file count = %d, want 3", r0.FileCount)
 	}
 
-	// Modify one file, add one file.
-	mustWrite(t, filepath.Join(src, "a.txt"), "alpha-changed")
-	mustWrite(t, filepath.Join(src, "c.txt"), "gamma")
+	// listed-incremental compares mtime/ctime at 1s granularity; wait so the
+	// modification is unambiguously newer than the L0 snapshot.
+	time.Sleep(1100 * time.Millisecond)
+	mustWrite(t, filepath.Join(src, "a.txt"), "alpha-CHANGED")
+	mustRemove(t, filepath.Join(src, "b.txt"))
+	mustWrite(t, filepath.Join(src, "d.txt"), "delta")
 
-	incr := filepath.Join(out, "incr.tar.zst")
-	res2, err := Create(CreateOptions{SourcePath: src, OutFile: incr, Base: res.Snapshot})
-	if err != nil {
-		t.Fatalf("incr create: %v", err)
-	}
-	if res2.FileCount != 2 {
-		t.Fatalf("incremental file count = %d, want 2 (changed + new)", res2.FileCount)
+	l1 := filepath.Join(out, "l1.tar.zst")
+	if _, err := Create(CreateOptions{
+		SourcePath:   src,
+		OutFile:      l1,
+		Level:        1,
+		BaseSnapshot: filepath.Join(snaps, "L0.snar"),
+		OutSnapshot:  filepath.Join(snaps, "L1.snar"),
+	}); err != nil {
+		t.Fatalf("L1 create: %v", err)
 	}
 
 	dest := t.TempDir()
-	if err := Extract(full, dest); err != nil {
-		t.Fatalf("extract full: %v", err)
+	if err := Extract("", l0, dest); err != nil {
+		t.Fatalf("extract L0: %v", err)
 	}
-	if err := Extract(incr, dest); err != nil {
-		t.Fatalf("extract incr: %v", err)
+	if err := Extract("", l1, dest); err != nil {
+		t.Fatalf("extract L1: %v", err)
 	}
 
-	assertContent(t, filepath.Join(dest, "a.txt"), "alpha-changed")
-	assertContent(t, filepath.Join(dest, "sub", "b.txt"), "beta")
-	assertContent(t, filepath.Join(dest, "c.txt"), "gamma")
+	assertContent(t, filepath.Join(dest, "a.txt"), "alpha-CHANGED")
+	assertContent(t, filepath.Join(dest, "sub", "c.txt"), "gamma")
+	assertContent(t, filepath.Join(dest, "d.txt"), "delta")
+	if _, err := os.Stat(filepath.Join(dest, "b.txt")); !os.IsNotExist(err) {
+		t.Errorf("b.txt should have been deleted on restore, stat err = %v", err)
+	}
 }
 
 func mustWrite(t *testing.T, path, content string) {
@@ -56,6 +76,13 @@ func mustWrite(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustRemove(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -36,6 +36,9 @@ func TestBuildAssignsBaseSlot(t *testing.T) {
 	st.DLEs["h-data"] = &state.DLEState{
 		LastFullDate: "2026-06-20",
 		LastFullSlot: "slot-2026-06-20",
+		Runs: []state.RunRecord{
+			{Date: "2026-06-20", Slot: "slot-2026-06-20", Level: 0},
+		},
 	}
 	p := Build(cfg, st, time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC))
 	if len(p.Items) != 1 {

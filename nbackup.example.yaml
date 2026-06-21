@@ -15,9 +15,13 @@ landing:
   # Where slots are first created. Only local-disk is implemented today.
   media: local-disk
 
+# GNU tar binary. Default "tar" (Linux); set to "gtar" on macOS/BSD.
+# gnutar_path: gtar
+
 planner:
   # Target days between full backups per DLE (default 7). Fulls are staggered
-  # across DLEs to avoid daily spikes.
+  # across DLEs to avoid daily spikes. Between fulls, incremental levels climb
+  # (L1, L2, ...) up to L9, each capturing changes since the previous level.
   full_interval_days: 7
 
 media:

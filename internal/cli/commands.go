@@ -43,6 +43,13 @@ func CmdPlan(args []string) error {
 	plan := planner.Build(cfg, st, date)
 	fmt.Printf("Plan for run %s  (full interval %dd, catalog %s)\n\n", slot.DateString(date), plan.Interval, catalog)
 
+	if !*noEstimate {
+		if err := archive.CheckTar(cfg.TarPath()); err != nil {
+			fmt.Printf("(size estimates disabled: %v)\n\n", err)
+			*noEstimate = true
+		}
+	}
+
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "DLE\tLEVEL\tEST. SIZE\tREASON")
 	var estTotal int64
@@ -53,11 +60,15 @@ func CmdPlan(args []string) error {
 		}
 		estStr := "-"
 		if !*noEstimate {
-			var base archive.Snapshot
-			if item.Level >= 1 {
-				base = st.DLE(item.Name).BaseSnapshot
+			eo := archive.CreateOptions{
+				Tar:        cfg.TarPath(),
+				SourcePath: item.Source.Path,
+				Level:      item.Level,
 			}
-			if n, err := planner.Estimate(item, base); err == nil {
+			if item.Level >= 1 {
+				eo.BaseSnapshot = state.SnapshotPath(catalog, item.Name, item.BaseLevel)
+			}
+			if n, err := archive.Estimate(eo); err == nil {
 				estStr = "~" + sizeutil.FormatBytes(n) + " raw"
 				estTotal += n
 			} else {
@@ -300,7 +311,7 @@ func cmdPrune(args []string) error {
 			return false, fmt.Sprintf("within minimum age (%s)", cfg.Cycle.MinimumAge)
 		}
 		for _, a := range target.Archives {
-			if !hasNewerFull(slots, a.DLE, target.Date) {
+			if !hasNewerFull(slots, a.DLE, target) {
 				return false, fmt.Sprintf("no newer full for DLE %s (last recovery path)", a.DLE)
 			}
 		}
@@ -330,10 +341,10 @@ func cmdPrune(args []string) error {
 	return nil
 }
 
-func hasNewerFull(slots []*slot.Slot, dle, afterDate string) bool {
+func hasNewerFull(slots []*slot.Slot, dle string, target *slot.Slot) bool {
 	for _, s := range slots {
-		if s.Date <= afterDate {
-			continue
+		if !slot.Less(target, s) {
+			continue // s must come strictly after target in run order
 		}
 		for _, a := range s.Archives {
 			if a.DLE == dle && a.Level == 0 {
@@ -354,6 +365,10 @@ func CmdRestore(args []string) error {
 	fs.Parse(args)
 
 	catalog := resolveCatalogMaybeConfig(*catalogFlag, *cfgPath)
+	tarBin := resolveTar(*cfgPath)
+	if err := archive.CheckTar(tarBin); err != nil {
+		return err
+	}
 	if fs.NArg() < 1 {
 		return fmt.Errorf("usage: nbrestore [-dle NAME] -dest DIR <slot-id>")
 	}
@@ -389,7 +404,7 @@ func CmdRestore(args []string) error {
 			return err
 		}
 		fmt.Printf("restoring DLE %s as of %s -> %s\n", name, slotID, out)
-		if err := restore.Run(catalog, name, slotID, out, logf); err != nil {
+		if err := restore.Run(tarBin, catalog, name, slotID, out, logf); err != nil {
 			return err
 		}
 	}
@@ -408,4 +423,14 @@ func resolveCatalogMaybeConfig(catalogFlag, cfgPath string) string {
 		return DefaultCatalog
 	}
 	return ResolveCatalog("", cfg)
+}
+
+// resolveTar returns the GNU tar binary from config, defaulting when the config
+// is absent.
+func resolveTar(cfgPath string) string {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return archive.DefaultTar
+	}
+	return cfg.TarPath()
 }

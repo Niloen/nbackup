@@ -1,5 +1,6 @@
 // Package backup orchestrates a single run: it executes a plan into a new,
-// sealed slot on the landing medium and updates catalog state.
+// sealed slot on the landing medium and updates catalog state, including the
+// GNU tar snapshot library used for incrementals.
 package backup
 
 import (
@@ -27,18 +28,22 @@ func (o Options) logf(format string, args ...any) {
 	}
 }
 
-// Run executes the plan, producing one sealed slot. It follows the PRD
-// sealing workflow: write archives, write manifests, verify checksums, then
-// write SLOT.json to seal the slot, after which it is immutable.
+// Run executes the plan, producing one sealed slot. It follows the PRD sealing
+// workflow: write archives, write manifests, verify checksums, then write
+// SLOT.json to seal the slot, after which it is immutable. Repeated runs on the
+// same day produce sequence-suffixed slots (slot-DATE.2, .3, ...).
 func Run(cfg *config.Config, st *state.State, p *planner.Plan, opts Options) (*slot.Slot, error) {
 	if cfg.Landing.Media != "local-disk" {
 		return nil, fmt.Errorf("landing medium %q is not implemented in this version (only local-disk)", cfg.Landing.Media)
 	}
+	tarBin := cfg.TarPath()
+	if err := archive.CheckTar(tarBin); err != nil {
+		return nil, err
+	}
 
-	slotID := slot.ID(p.Date)
-	dir := filepath.Join(opts.Catalog, slotID)
-	if slot.IsSealed(dir) {
-		return nil, fmt.Errorf("a sealed slot already exists for %s; slots are immutable", slot.DateString(p.Date))
+	slotID, seq, dir, err := nextSlot(opts.Catalog, p.Date)
+	if err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Join(dir, slot.DirArchives), 0o755); err != nil {
 		return nil, err
@@ -48,6 +53,7 @@ func Run(cfg *config.Config, st *state.State, p *planner.Plan, opts Options) (*s
 	s := &slot.Slot{
 		ID:        slotID,
 		Date:      slot.DateString(p.Date),
+		Sequence:  seq,
 		CreatedAt: now,
 		Status:    slot.StatusOpen,
 		Generator: "nbdump",
@@ -56,24 +62,28 @@ func Run(cfg *config.Config, st *state.State, p *planner.Plan, opts Options) (*s
 	checksums := map[string]string{}
 
 	for _, item := range p.Items {
-		levelTag := fmt.Sprintf("L%d", item.Level)
-		fileName := fmt.Sprintf("%s-%s.tar.zst", item.Name, levelTag)
+		fileName := fmt.Sprintf("%s-L%d.tar.zst", item.Name, item.Level)
 		relPath := filepath.ToSlash(filepath.Join(slot.DirArchives, fileName))
 		outFile := filepath.Join(dir, slot.DirArchives, fileName)
 
-		var base archive.Snapshot
+		var baseSnap string
 		if item.Level >= 1 {
-			base = st.DLE(item.Name).BaseSnapshot
-			if base == nil {
-				return nil, fmt.Errorf("DLE %s: incremental requested but no base snapshot exists", item.Name)
+			baseSnap = state.SnapshotPath(opts.Catalog, item.Name, item.BaseLevel)
+			if _, err := os.Stat(baseSnap); err != nil {
+				return nil, fmt.Errorf("DLE %s: incremental L%d needs L%d snapshot but it is missing (%v)",
+					item.Name, item.Level, item.BaseLevel, err)
 			}
 		}
+		outSnap := state.SnapshotPath(opts.Catalog, item.Name, item.Level)
 
-		opts.logf("archiving %s (%s) from %s", item.Name, levelTag, item.Source.Path)
+		opts.logf("archiving %s (L%d) from %s", item.Name, item.Level, item.Source.Path)
 		res, err := archive.Create(archive.CreateOptions{
-			SourcePath: item.Source.Path,
-			OutFile:    outFile,
-			Base:       base,
+			Tar:          tarBin,
+			SourcePath:   item.Source.Path,
+			OutFile:      outFile,
+			Level:        item.Level,
+			BaseSnapshot: baseSnap,
+			OutSnapshot:  outSnap,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("archive %s: %w", item.Name, err)
@@ -96,7 +106,7 @@ func Run(cfg *config.Config, st *state.State, p *planner.Plan, opts Options) (*s
 		manifest.Archives = append(manifest.Archives, slot.ArchiveFiles{
 			DLE:   item.Name,
 			Level: item.Level,
-			Files: res.Entries,
+			Files: res.Members,
 		})
 
 		// Update planner state.
@@ -104,11 +114,10 @@ func Run(cfg *config.Config, st *state.State, p *planner.Plan, opts Options) (*s
 		if item.Level == 0 {
 			d.LastFullDate = s.Date
 			d.LastFullSlot = slotID
-			d.BaseSnapshot = res.Snapshot
 		}
 		d.Runs = append(d.Runs, state.RunRecord{Date: s.Date, Slot: slotID, Level: item.Level})
 
-		opts.logf("  %d files, %s compressed", res.FileCount, human(res.Compressed))
+		opts.logf("  %d file(s), %s compressed", res.FileCount, human(res.Compressed))
 	}
 
 	// Write manifest and checksums.
@@ -141,6 +150,32 @@ func Run(cfg *config.Config, st *state.State, p *planner.Plan, opts Options) (*s
 		return nil, fmt.Errorf("save state: %w", err)
 	}
 	return s, nil
+}
+
+// nextSlot picks the slot ID for a run on the given date. The first run of the
+// day is "slot-DATE"; subsequent runs get the next free ".N" suffix. A leftover
+// open (unsealed) slot from a failed attempt is reused.
+func nextSlot(catalog string, date time.Time) (id string, seq int, dir string, err error) {
+	day := slot.DateString(date)
+	for seq = 1; ; seq++ {
+		id = slot.IDFromParts(day, seq)
+		dir = filepath.Join(catalog, id)
+		info, statErr := os.Stat(dir)
+		if os.IsNotExist(statErr) {
+			return id, seq, dir, nil
+		}
+		if statErr != nil {
+			return "", 0, "", statErr
+		}
+		if info.IsDir() && !slot.IsSealed(dir) {
+			// Reuse a failed, unsealed attempt.
+			if err := os.RemoveAll(dir); err != nil {
+				return "", 0, "", err
+			}
+			return id, seq, dir, nil
+		}
+		// Sealed slot exists; try the next sequence.
+	}
 }
 
 func human(b int64) string {

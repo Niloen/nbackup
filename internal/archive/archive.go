@@ -1,56 +1,63 @@
 // Package archive creates and extracts the tar.zst archives stored inside a
-// slot. Archives are ordinary tar streams (zstd-compressed) so they remain
-// restorable with standard tools.
+// slot. It drives the system GNU tar binary so archives use tar's standard
+// listed-incremental format (the same mechanism Amanda uses): incrementals
+// carry directory census entries, so deletions propagate on restore and the
+// archives remain restorable with stock GNU tar. Compression is applied in
+// process with zstd, so no external zstd binary is required.
 package archive
 
 import (
-	"archive/tar"
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"sort"
+	"regexp"
+	"strconv"
 	"strings"
-	"time"
 
 	"github.com/klauspost/compress/zstd"
-	"github.com/Niloen/nbackup/internal/slot"
 )
 
-// FileMeta records the state of a file at backup time, used to detect changes
-// for incremental backups.
-type FileMeta struct {
-	ModTime time.Time `json:"mod_time"`
-	Size    int64     `json:"size"`
-}
-
-// Snapshot maps a file's path (relative to the DLE root) to its metadata.
-type Snapshot map[string]FileMeta
+// DefaultTar is the GNU tar binary used when none is configured.
+const DefaultTar = "tar"
 
 // CreateOptions configures a single archive creation.
 type CreateOptions struct {
-	SourcePath string   // absolute path of the DLE root to archive
-	OutFile    string   // destination .tar.zst path
-	Base       Snapshot // when non-nil, only files newer than the base are archived (incremental)
+	Tar          string // GNU tar binary (default "tar")
+	SourcePath   string // directory (DLE root) to archive
+	OutFile      string // destination .tar.zst path
+	Level        int    // 0 = full, >=1 = incremental
+	BaseSnapshot string // for level>=1: snapshot (.snar) of the base level; empty for level 0
+	OutSnapshot  string // path to write the updated snapshot for this level
 }
 
 // Result reports what was archived.
 type Result struct {
 	SHA256       string
-	Compressed   int64
-	Uncompressed int64
-	FileCount    int
-	Entries      []slot.Entry
-	Snapshot     Snapshot // full snapshot of the source (always captured)
+	Compressed   int64    // bytes written to OutFile
+	Uncompressed int64    // tar stream size, from --totals
+	FileCount    int      // number of member entries
+	Members      []string // member paths as listed by tar
 }
 
-// Create writes a tar.zst archive of SourcePath to OutFile. If Base is nil a
-// full backup is produced; otherwise only files that are new or modified
-// relative to Base are included. A complete snapshot of the source is always
-// returned so it can serve as the base for a later incremental.
+var totalsRE = regexp.MustCompile(`Total bytes written: (\d+)`)
+
+// Create writes a tar.zst archive of SourcePath to OutFile using GNU tar's
+// listed-incremental mode, and writes the updated snapshot to OutSnapshot.
+//
+// For level 0, BaseSnapshot is empty and tar produces a full backup while
+// creating a fresh snapshot. For higher levels, BaseSnapshot is copied to
+// OutSnapshot and tar records only changes since that state, updating the
+// snapshot in place.
 func Create(opts CreateOptions) (*Result, error) {
+	if err := prepareSnapshot(opts); err != nil {
+		return nil, err
+	}
+
 	out, err := os.Create(opts.OutFile)
 	if err != nil {
 		return nil, err
@@ -59,193 +66,211 @@ func Create(opts CreateOptions) (*Result, error) {
 
 	hasher := sha256.New()
 	counter := &countWriter{}
-	mw := io.MultiWriter(out, hasher, counter)
-
-	zw, err := zstd.NewWriter(mw)
+	zw, err := zstd.NewWriter(io.MultiWriter(out, hasher, counter))
 	if err != nil {
 		return nil, err
 	}
-	tw := tar.NewWriter(zw)
 
-	res := &Result{Snapshot: Snapshot{}}
-	incremental := opts.Base != nil
-
-	root := filepath.Clean(opts.SourcePath)
-	walkErr := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(root, p)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-
-		// Always record regular files in the snapshot of current state.
-		if info.Mode().IsRegular() {
-			res.Snapshot[rel] = FileMeta{ModTime: info.ModTime(), Size: info.Size()}
-		}
-
-		// Decide whether to include this entry in the archive.
-		if incremental {
-			if !changed(opts.Base, rel, info) {
-				return nil
-			}
-			// In incrementals, skip plain directory entries; tar recreates
-			// parent directories of changed files automatically.
-			if info.IsDir() {
-				return nil
-			}
-		}
-
-		return writeEntry(tw, p, rel, info, res)
-	})
-	if walkErr != nil {
-		tw.Close()
-		zw.Close()
-		return nil, walkErr
-	}
-
-	if err := tw.Close(); err != nil {
+	indexFile, err := os.CreateTemp("", "nbackup-index-*")
+	if err != nil {
 		return nil, err
 	}
-	if err := zw.Close(); err != nil {
+	indexPath := indexFile.Name()
+	indexFile.Close()
+	defer os.Remove(indexPath)
+
+	totals, err := runTarCreate(opts, zw, opts.OutSnapshot, indexPath)
+	if cerr := zw.Close(); cerr != nil && err == nil {
+		err = cerr
+	}
+	if err != nil {
 		return nil, err
 	}
 	if err := out.Close(); err != nil {
 		return nil, err
 	}
 
-	sort.Slice(res.Entries, func(i, j int) bool { return res.Entries[i].Path < res.Entries[j].Path })
-	res.SHA256 = hex.EncodeToString(hasher.Sum(nil))
-	res.Compressed = counter.n
-	return res, nil
-}
-
-// changed reports whether the file at rel differs from the base snapshot.
-func changed(base Snapshot, rel string, info os.FileInfo) bool {
-	if !info.Mode().IsRegular() {
-		// Non-regular entries (symlinks) are included only on full backups;
-		// for simplicity treat them as unchanged in incrementals.
-		return false
-	}
-	prev, ok := base[rel]
-	if !ok {
-		return true // new file
-	}
-	return info.Size() != prev.Size || info.ModTime().After(prev.ModTime)
-}
-
-func writeEntry(tw *tar.Writer, fullPath, rel string, info os.FileInfo, res *Result) error {
-	var link string
-	if info.Mode()&os.ModeSymlink != 0 {
-		var err error
-		link, err = os.Readlink(fullPath)
-		if err != nil {
-			return err
-		}
-	}
-	hdr, err := tar.FileInfoHeader(info, link)
+	members, err := readIndex(indexPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	hdr.Name = rel
-	if info.IsDir() {
-		hdr.Name = rel + "/"
-	}
-	if err := tw.WriteHeader(hdr); err != nil {
-		return err
-	}
-
-	if info.Mode().IsRegular() {
-		f, err := os.Open(fullPath)
-		if err != nil {
-			return err
-		}
-		n, err := io.Copy(tw, f)
-		f.Close()
-		if err != nil {
-			return err
-		}
-		res.FileCount++
-		res.Uncompressed += n
-		res.Entries = append(res.Entries, slot.Entry{
-			Path:    rel,
-			Size:    info.Size(),
-			ModTime: info.ModTime(),
-			Mode:    uint32(info.Mode().Perm()),
-		})
-	}
-	return nil
+	return &Result{
+		SHA256:       hex.EncodeToString(hasher.Sum(nil)),
+		Compressed:   counter.n,
+		Uncompressed: totals,
+		FileCount:    countFiles(members),
+		Members:      members,
+	}, nil
 }
 
-// Extract unpacks a tar.zst archive into destDir.
-func Extract(archiveFile, destDir string) error {
+// Estimate runs tar in the same listed-incremental mode but discards the output,
+// returning the uncompressed bytes that would be archived. It uses temporary
+// copies of the snapshots so the real snapshot library is untouched.
+func Estimate(opts CreateOptions) (int64, error) {
+	tmpOut, err := os.CreateTemp("", "nbackup-estsnap-*")
+	if err != nil {
+		return 0, err
+	}
+	tmpSnap := tmpOut.Name()
+	tmpOut.Close()
+	defer os.Remove(tmpSnap)
+
+	est := opts
+	est.OutSnapshot = tmpSnap
+	if err := prepareSnapshot(est); err != nil {
+		return 0, err
+	}
+	return runTarCreate(est, io.Discard, tmpSnap, "")
+}
+
+// prepareSnapshot seeds OutSnapshot from BaseSnapshot for incrementals, or
+// ensures it is absent for a full (so tar starts a fresh snapshot).
+func prepareSnapshot(opts CreateOptions) error {
+	if opts.OutSnapshot == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(opts.OutSnapshot), 0o755); err != nil {
+		return err
+	}
+	if opts.Level == 0 || opts.BaseSnapshot == "" {
+		// Full backup: remove any stale snapshot so tar treats it as level 0.
+		if err := os.Remove(opts.OutSnapshot); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	return copyFile(opts.BaseSnapshot, opts.OutSnapshot)
+}
+
+// runTarCreate invokes GNU tar, streaming the archive to w and returning the
+// uncompressed byte total reported by --totals. If indexPath is non-empty, the
+// member listing is written there.
+func runTarCreate(opts CreateOptions, w io.Writer, snapshot, indexPath string) (int64, error) {
+	tarBin := opts.Tar
+	if tarBin == "" {
+		tarBin = DefaultTar
+	}
+	args := []string{
+		"--create", "--file=-",
+		"--directory=" + opts.SourcePath,
+		"--one-file-system", "--sparse",
+		"--listed-incremental=" + snapshot,
+		"--totals",
+	}
+	if indexPath != "" {
+		args = append(args, "--verbose", "--index-file="+indexPath)
+	}
+	args = append(args, ".")
+
+	cmd := exec.Command(tarBin, args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return 0, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return 0, err
+	}
+	if err := cmd.Start(); err != nil {
+		return 0, fmt.Errorf("start %s: %w", tarBin, err)
+	}
+
+	// Drain stderr concurrently to find the totals line and surface diagnostics.
+	totalsCh := make(chan int64, 1)
+	errCh := make(chan string, 1)
+	go func() {
+		var total int64
+		var diag strings.Builder
+		sc := bufio.NewScanner(stderr)
+		sc.Buffer(make([]byte, 64*1024), 1024*1024)
+		for sc.Scan() {
+			line := sc.Text()
+			if m := totalsRE.FindStringSubmatch(line); m != nil {
+				total, _ = strconv.ParseInt(m[1], 10, 64)
+				continue
+			}
+			diag.WriteString(line)
+			diag.WriteByte('\n')
+		}
+		totalsCh <- total
+		errCh <- diag.String()
+	}()
+
+	copyErr := func() error {
+		_, e := io.Copy(w, stdout)
+		return e
+	}()
+
+	total := <-totalsCh
+	diag := <-errCh
+	waitErr := cmd.Wait()
+	if copyErr != nil {
+		return 0, fmt.Errorf("read tar output: %w", copyErr)
+	}
+	if waitErr != nil {
+		// GNU tar exit code 1 means "some files differed/changed during read",
+		// which is a warning, not a failure.
+		if ee, ok := waitErr.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+			return total, nil
+		}
+		return 0, fmt.Errorf("%s failed: %w\n%s", tarBin, waitErr, strings.TrimSpace(diag))
+	}
+	return total, nil
+}
+
+// Extract unpacks one archive into destDir using GNU tar's incremental
+// extraction (--listed-incremental=/dev/null), which applies deletions recorded
+// in the archive. Archives must be extracted in chain order (full, then
+// incrementals) for deletions to apply correctly.
+func Extract(tarBin, archiveFile, destDir string) error {
+	if tarBin == "" {
+		tarBin = DefaultTar
+	}
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return err
+	}
 	f, err := os.Open(archiveFile)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-
 	zr, err := zstd.NewReader(f)
 	if err != nil {
 		return err
 	}
 	defer zr.Close()
 
-	tr := tar.NewReader(zr)
-	destRoot := filepath.Clean(destDir)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
+	cmd := exec.Command(tarBin,
+		"--extract", "--file=-",
+		"--directory="+destDir,
+		"--listed-incremental=/dev/null",
+		"--numeric-owner",
+	)
+	cmd.Stdin = zr
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+			return nil // warnings only
 		}
-		if err != nil {
-			return err
-		}
-		target, err := safeJoin(destRoot, hdr.Name)
-		if err != nil {
-			return err
-		}
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, os.FileMode(hdr.Mode)&os.ModePerm); err != nil {
-				return err
-			}
-		case tar.TypeSymlink:
-			_ = os.Remove(target)
-			if err := os.Symlink(hdr.Linkname, target); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
-			}
-			out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(hdr.Mode)&os.ModePerm)
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(out, tr); err != nil {
-				out.Close()
-				return err
-			}
-			out.Close()
-			_ = os.Chtimes(target, hdr.ModTime, hdr.ModTime)
-		}
+		return fmt.Errorf("%s extract failed: %w\n%s", tarBin, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }
 
-// safeJoin prevents path-traversal during extraction.
-func safeJoin(root, name string) (string, error) {
-	clean := filepath.Clean(filepath.Join(root, name))
-	if clean != root && !strings.HasPrefix(clean, root+string(os.PathSeparator)) {
-		return "", fmt.Errorf("unsafe path in archive: %q", name)
+// CheckTar verifies that the configured tar binary is GNU tar.
+func CheckTar(tarBin string) error {
+	if tarBin == "" {
+		tarBin = DefaultTar
 	}
-	return clean, nil
+	out, err := exec.Command(tarBin, "--version").Output()
+	if err != nil {
+		return fmt.Errorf("cannot run %q: %w (GNU tar is required)", tarBin, err)
+	}
+	if !strings.Contains(string(out), "GNU tar") {
+		return fmt.Errorf("%q is not GNU tar; listed-incremental backups require GNU tar", tarBin)
+	}
+	return nil
 }
 
 // HashFile returns the hex sha256 of a file.
@@ -260,6 +285,53 @@ func HashFile(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func readIndex(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var members []string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line != "" && line != "./" {
+			members = append(members, line)
+		}
+	}
+	return members, sc.Err()
+}
+
+// countFiles counts members that are not directories (directory entries end
+// with "/").
+func countFiles(members []string) int {
+	n := 0
+	for _, m := range members {
+		if !strings.HasSuffix(m, "/") {
+			n++
+		}
+	}
+	return n
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 type countWriter struct{ n int64 }

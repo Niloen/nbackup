@@ -1,19 +1,24 @@
-// Package state persists planner history and incremental base snapshots in the
-// catalog. It is an operational cache: slots remain fully self-describing
-// without it, but it lets the planner pick levels and incrementals find a base.
+// Package state persists planner history and the GNU tar snapshot library in
+// the catalog. It is operational state, analogous to Amanda's gnutar-lists: the
+// snapshot (.snar) files let incremental backups find their base level, and the
+// run history lets the planner choose levels. Sealed slots remain
+// self-describing without it.
 package state
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
-
-	"github.com/Niloen/nbackup/internal/archive"
 )
 
-// FileName is the state file stored at the catalog root.
-const FileName = "state.json"
+const (
+	// FileName is the state file stored at the catalog root.
+	FileName = "state.json"
+	// DirSnapshots holds per-DLE, per-level tar snapshot files.
+	DirSnapshots = "snapshots"
+)
 
 // State is the catalog-wide planner state.
 type State struct {
@@ -22,10 +27,9 @@ type State struct {
 
 // DLEState tracks one DLE's backup history.
 type DLEState struct {
-	LastFullDate string           `json:"last_full_date"` // YYYY-MM-DD, empty if never
-	LastFullSlot string           `json:"last_full_slot"`
-	BaseSnapshot archive.Snapshot `json:"base_snapshot"` // snapshot captured at the last full
-	Runs         []RunRecord      `json:"runs"`
+	LastFullDate string      `json:"last_full_date"` // YYYY-MM-DD, empty if never
+	LastFullSlot string      `json:"last_full_slot"`
+	Runs         []RunRecord `json:"runs"`
 }
 
 // RunRecord is a historical backup of a DLE.
@@ -89,4 +93,29 @@ func (d *DLEState) DaysSinceFull(today time.Time) int {
 		return -1
 	}
 	return int(today.Sub(last).Hours() / 24)
+}
+
+// IncrementalsSinceFull counts runs recorded after the most recent full.
+func (d *DLEState) IncrementalsSinceFull() int {
+	n := 0
+	for i := len(d.Runs) - 1; i >= 0; i-- {
+		if d.Runs[i].Level == 0 {
+			break
+		}
+		n++
+	}
+	return n
+}
+
+// LastLevel returns the level of the most recent recorded run, or -1 if none.
+func (d *DLEState) LastLevel() int {
+	if len(d.Runs) == 0 {
+		return -1
+	}
+	return d.Runs[len(d.Runs)-1].Level
+}
+
+// SnapshotPath is the canonical location of a DLE's snapshot for a given level.
+func SnapshotPath(catalog, dle string, level int) string {
+	return filepath.Join(catalog, DirSnapshots, dle, fmt.Sprintf("L%d.snar", level))
 }

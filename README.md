@@ -31,12 +31,24 @@ slot-2026-06-21/
     db01-pg-L1.tar.zst
 ```
 
-Archives are ordinary tar streams compressed with zstd. Recovery never requires
-NBackup:
+Archives are produced by **GNU tar** (the same engine Amanda uses) in
+listed-incremental format, compressed with zstd. Recovery never requires
+NBackup — a full (L0) is an ordinary tar, and the whole chain restores with
+stock GNU tar:
 
 ```bash
-tar --zstd -xf app01-home-L0.tar.zst      # or: zstd -dc file.tar.zst | tar -xf -
+# single full archive:
+zstd -dc app01-home-L0.tar.zst | tar -xf -
+
+# a full + incrementals, replayed in order (applies deletions):
+for a in slot-*/archives/app01-home-L*.tar.zst; do
+  zstd -dc "$a" | tar --extract --listed-incremental=/dev/null
+done
 ```
+
+> Requires **GNU tar** at runtime (`tar` on Linux, `gtar` on macOS/BSD). The
+> `zstd` CLI is only needed for the manual restore above — NBackup itself
+> compresses/decompresses in process.
 
 ## Install
 
@@ -73,18 +85,28 @@ Every command accepts `-c <config>` and `-C <catalog>` overrides.
 
 ## How it works
 
-### Planning (balanced scheduling)
+### Planning (balanced, multilevel scheduling)
 
-`nb plan` / `nb dump` decide a level per DLE:
+NBackup uses Amanda's **multilevel** scheme (levels 0–9). `nb plan` / `nb dump`
+decide a level per DLE:
 
 - No full ever for the DLE → **L0 (full)** — required before any incremental.
-- Last full younger than `full_interval_days` → **L1 (incremental)**.
-- Last full at/over the interval → **due for a full**, staggered to a
+- Last full at/over `full_interval_days` → **due for a full**, staggered to a
   per-DLE day so fulls don't all land on the same day. A full overdue by
   ≥ 2× the interval is forced regardless.
+- Otherwise → the **next incremental level** (one higher than the last run,
+  capped at 9). Level N captures only what changed since level N−1, so daily
+  volume stays small.
 
-Incrementals archive only files that are new or modified since the DLE's last
-full, compared against a snapshot stored in the catalog's `state.json`.
+Levels are realized with GNU tar's listed-incremental **snapshot library**, kept
+under `<catalog>/snapshots/<dle>/L<n>.snar` — exactly the mechanism Amanda uses
+to turn tar's two-level primitive into N-level backups.
+
+### Slot naming and multiple runs per day
+
+The first run of a day is `slot-YYYY-MM-DD`. Run again the same day and you get
+`slot-YYYY-MM-DD.2`, `.3`, … Each slot stays immutable; a sealed date is never
+overwritten. Restores and pruning order slots by date **then** sequence.
 
 ### Sealing
 
@@ -96,8 +118,11 @@ sealed date is refused.
 ### Restore
 
 Restoring a DLE as of a slot replays its most recent full at or before that
-slot, then every later incremental up to it, in order. You can restore a single
-DLE (`-dle`) or all DLEs in the slot.
+slot, then every later incremental up to it, in run order, with GNU tar's
+incremental extraction. Because the incrementals carry directory census data,
+**deletions are applied** — a file removed between the full and the chosen slot
+is absent after restore. You can restore a single DLE (`-dle`) or all DLEs in
+the slot.
 
 ### Pruning (cycle safety)
 
@@ -127,11 +152,18 @@ sources:
     path: /var/lib/postgresql
 ```
 
+## Requirements
+
+- **Go 1.25+** to build.
+- **GNU tar** at runtime (`tar` on Linux, `gtar` elsewhere; set `gnutar_path` in
+  config to override). NBackup checks the binary is GNU tar before running.
+
 ## Status & limitations (first version)
 
-Implemented: local-disk landing, balanced full/incremental planning, immutable
-sealed slots, checksum verification, point-in-time restore, budget reporting,
-cycle-safe pruning.
+Implemented: local-disk landing, balanced **multilevel (L0–L9)** planning with a
+GNU tar snapshot library, immutable sealed slots with **sequence-suffixed**
+same-day runs, **deletion-aware** incremental restore, checksum verification,
+point-in-time restore, budget reporting, cycle-safe pruning.
 
 Not yet implemented (declared in config for forward-compatibility):
 
@@ -140,8 +172,8 @@ Not yet implemented (declared in config for forward-compatibility):
   yet automatically driven to fit the budget.
 - **Remote sources** — `host` is metadata; `path` is read from the local
   filesystem (run the agent where the data is, or mount it).
-- **Deletion tracking in incrementals** — a file deleted between a full and an
-  incremental will reappear on restore. Levels are L0/L1 only (no L2+ yet).
+- **Exclude/include rules** and tar tuning (one-file-system and sparse are on by
+  default, as in Amanda).
 
 ## Development
 

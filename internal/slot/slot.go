@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,8 +31,9 @@ const (
 
 // Slot is the content of SLOT.json.
 type Slot struct {
-	ID         string    `json:"id"`          // e.g. "slot-2026-06-21"
+	ID         string    `json:"id"`          // e.g. "slot-2026-06-21" or "slot-2026-06-21.2"
 	Date       string    `json:"date"`        // run date, YYYY-MM-DD
+	Sequence   int       `json:"sequence"`    // 1 for the first run of the day, 2+ for later runs
 	CreatedAt  time.Time `json:"created_at"`  // when creation started
 	SealedAt   time.Time `json:"sealed_at"`   // when sealed (zero if open)
 	Status     string    `json:"status"`      // open | sealed
@@ -42,42 +44,44 @@ type Slot struct {
 
 // Archive describes a single tar.zst within a slot.
 type Archive struct {
-	DLE          string `json:"dle"`           // DLE name, e.g. "app01-home"
-	Host         string `json:"host"`          // source host
-	Path         string `json:"path"`          // source path
-	Level        int    `json:"level"`         // 0 = full, >=1 = incremental
-	File         string `json:"file"`          // path relative to slot root
-	Compressed   int64  `json:"compressed"`    // size on disk
-	Uncompressed int64  `json:"uncompressed"`  // sum of file sizes archived
-	FileCount    int    `json:"file_count"`    // number of regular files
-	SHA256       string `json:"sha256"`        // checksum of the archive file
-	BaseSlot     string `json:"base_slot"`     // for level>=1, the L0 slot ID it builds on
+	DLE          string `json:"dle"`          // DLE name, e.g. "app01-home"
+	Host         string `json:"host"`         // source host
+	Path         string `json:"path"`         // source path
+	Level        int    `json:"level"`        // 0 = full, >=1 = incremental (GNU tar listed-incremental)
+	File         string `json:"file"`         // path relative to slot root
+	Compressed   int64  `json:"compressed"`   // size on disk
+	Uncompressed int64  `json:"uncompressed"` // tar stream size (from --totals)
+	FileCount    int    `json:"file_count"`   // number of member entries archived
+	SHA256       string `json:"sha256"`       // checksum of the archive file
+	BaseSlot     string `json:"base_slot"`    // for level>=1, the slot whose state this builds on
 }
 
-// Manifest is the content of MANIFEST.json: per-archive file listings.
+// Manifest is the content of MANIFEST.json: per-archive member listings as
+// produced by GNU tar.
 type Manifest struct {
 	SlotID   string         `json:"slot_id"`
 	Archives []ArchiveFiles `json:"archives"`
 }
 
-// ArchiveFiles lists the files contained in one archive.
+// ArchiveFiles lists the members contained in one archive.
 type ArchiveFiles struct {
-	DLE   string  `json:"dle"`
-	Level int     `json:"level"`
-	Files []Entry `json:"files"`
+	DLE   string   `json:"dle"`
+	Level int      `json:"level"`
+	Files []string `json:"files"`
 }
 
-// Entry is a single file recorded in the manifest.
-type Entry struct {
-	Path    string    `json:"path"`
-	Size    int64     `json:"size"`
-	ModTime time.Time `json:"mod_time"`
-	Mode    uint32    `json:"mode"`
+// ID builds a slot ID from a date and sequence number. Sequence 1 yields the
+// bare "slot-DATE"; higher sequences append ".N".
+func ID(date time.Time, seq int) string {
+	return IDFromParts(DateString(date), seq)
 }
 
-// ID builds a slot ID from a date.
-func ID(date time.Time) string {
-	return "slot-" + date.Format("2006-01-02")
+// IDFromParts builds a slot ID from a date string and sequence number.
+func IDFromParts(date string, seq int) string {
+	if seq <= 1 {
+		return "slot-" + date
+	}
+	return fmt.Sprintf("slot-%s.%d", date, seq)
 }
 
 // DateString formats a date the way slots use it.
@@ -88,6 +92,33 @@ func DateString(date time.Time) string {
 // ParseDateField parses a slot's Date field (YYYY-MM-DD).
 func ParseDateField(s string) (time.Time, error) {
 	return time.Parse("2006-01-02", s)
+}
+
+// ParseID extracts the date and sequence from a slot ID. A bare "slot-DATE" has
+// sequence 1.
+func ParseID(id string) (date string, seq int, err error) {
+	rest, ok := strings.CutPrefix(id, "slot-")
+	if !ok {
+		return "", 0, fmt.Errorf("not a slot id: %q", id)
+	}
+	date, seqStr, hasSeq := strings.Cut(rest, ".")
+	if !hasSeq {
+		return date, 1, nil
+	}
+	seq, err = strconv.Atoi(seqStr)
+	if err != nil {
+		return "", 0, fmt.Errorf("bad sequence in slot id %q: %w", id, err)
+	}
+	return date, seq, nil
+}
+
+// Less reports whether slot a comes before slot b in run order, keyed by date
+// then sequence (so "slot-DATE.10" correctly follows "slot-DATE.2").
+func Less(a, b *Slot) bool {
+	if a.Date != b.Date {
+		return a.Date < b.Date
+	}
+	return a.Sequence < b.Sequence
 }
 
 // Write serializes the slot metadata into the slot directory, sealing it.
@@ -118,6 +149,9 @@ func Read(dir string) (*Slot, error) {
 	var s Slot
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", FileSlot, err)
+	}
+	if s.Sequence == 0 {
+		s.Sequence = 1
 	}
 	return &s, nil
 }
@@ -177,8 +211,8 @@ func IsSealed(dir string) bool {
 	return err == nil && s.Status == StatusSealed
 }
 
-// List returns the sealed (and open) slots found under a catalog root,
-// sorted ascending by date.
+// List returns the sealed (and open) slots found under a catalog root, sorted
+// ascending by run order (date, then sequence).
 func List(catalog string) ([]*Slot, error) {
 	entries, err := os.ReadDir(catalog)
 	if err != nil {
@@ -198,6 +232,6 @@ func List(catalog string) ([]*Slot, error) {
 		}
 		slots = append(slots, s)
 	}
-	sort.Slice(slots, func(i, j int) bool { return slots[i].Date < slots[j].Date })
+	sort.Slice(slots, func(i, j int) bool { return Less(slots[i], slots[j]) })
 	return slots, nil
 }

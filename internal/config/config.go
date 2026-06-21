@@ -32,6 +32,10 @@ type Config struct {
 		FullIntervalDays int `yaml:"full_interval_days"`
 	} `yaml:"planner"`
 
+	// GnuTarPath overrides the GNU tar binary used for archives (default "tar";
+	// use "gtar" on systems where GNU tar is not the default tar).
+	GnuTarPath string `yaml:"gnutar_path"`
+
 	Media struct {
 		S3 struct {
 			Bucket string `yaml:"bucket"`
@@ -129,3 +133,15 @@ func (c *Config) FullIntervalDays() int {
 	}
 	return 7
 }
+
+// TarPath returns the configured GNU tar binary, defaulting to "tar".
+func (c *Config) TarPath() string {
+	if c.GnuTarPath != "" {
+		return c.GnuTarPath
+	}
+	return "tar"
+}
+
+// MaxLevel is the highest incremental level the planner will assign (Amanda
+// uses levels 0-9).
+const MaxLevel = 9
