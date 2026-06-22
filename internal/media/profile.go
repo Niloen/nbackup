@@ -9,18 +9,16 @@ import (
 	"github.com/Niloen/nbackup/internal/slot"
 )
 
-// Profile describes a medium's capacity characteristics and reclamation
-// strategy, translated from its native config into the common currency the
-// planner and pruning use. The planner consumes only the byte quantities
-// (medium-agnostic); the reclamation granularity (object vs volume) is hidden
+// Profile describes a medium's capacity and reclamation strategy, translated
+// from its native config into the common currency pruning uses. Capacity is the
+// only genuinely per-medium quantity; balancing dumps over time is a global
+// planning concern, not a property of where bytes land, so it lives in the
+// planner, not here. The reclamation granularity (object vs volume) is hidden
 // inside Retention.
 type Profile interface {
 	// TotalBytes is the total retainable capacity (0 = unbounded). For object
 	// stores this is the budget; for tape it is tapes * tape_size.
 	TotalBytes() int64
-	// PreferredRunBytes is the target volume per run, used to balance fulls
-	// (0 = no target; the planner falls back to a fixed interval).
-	PreferredRunBytes() int64
 	// Retention is the per-medium reclamation strategy.
 	Retention() Retention
 }
@@ -63,21 +61,18 @@ func OpenProfile(typ string, opts Options) (Profile, error) {
 
 // --- size-based profile (object stores: local-disk, s3) ---
 
-// NewSizeProfile builds a byte-budget profile from "budget" and "preferred".
+// NewSizeProfile builds a byte-budget profile from "budget".
 func NewSizeProfile(opts Options) (Profile, error) {
 	capacity, _ := parseBytes(opts.Get("budget"))
-	preferred, _ := parseBytes(opts.Get("preferred"))
-	return sizeProfile{capacity: capacity, preferred: preferred}, nil
+	return sizeProfile{capacity: capacity}, nil
 }
 
 type sizeProfile struct {
-	capacity  int64
-	preferred int64
+	capacity int64
 }
 
-func (p sizeProfile) TotalBytes() int64        { return p.capacity }
-func (p sizeProfile) PreferredRunBytes() int64 { return p.preferred }
-func (p sizeProfile) Retention() Retention     { return sizeRetention{budget: p.capacity} }
+func (p sizeProfile) TotalBytes() int64    { return p.capacity }
+func (p sizeProfile) Retention() Retention { return sizeRetention{budget: p.capacity} }
 
 // sizeRetention reclaims the oldest non-protected slots until total <= budget.
 type sizeRetention struct{ budget int64 }
@@ -123,9 +118,8 @@ type volumeProfile struct {
 	tapeSize int64
 }
 
-func (p volumeProfile) TotalBytes() int64        { return p.tapes * p.tapeSize }
-func (p volumeProfile) PreferredRunBytes() int64 { return p.tapeSize } // ~one tape per run
-func (p volumeProfile) Retention() Retention     { return volumeRetention{} }
+func (p volumeProfile) TotalBytes() int64    { return p.tapes * p.tapeSize }
+func (p volumeProfile) Retention() Retention { return volumeRetention{} }
 
 // volumeRetention is a placeholder: tape reclamation is whole-volume reuse,
 // which needs a volume catalog and changer (not yet implemented).

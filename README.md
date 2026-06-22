@@ -98,11 +98,11 @@ decide a level per DLE:
   capped at 9). Level N captures only what changed since level N−1, so daily
   volume stays small.
 
-When the landing medium sets a **`preferred`** run size, the planner derives the
-cycle interval from it (`total full bytes / preferred`) and **bin-packs** which
-DLEs take their full on which day so each run's full volume is balanced — the
-PRD's "automatic full frequency" and "balance daily volume." Without a preferred
-size it falls back to `planner.full_interval_days` with hash-staggered fulls.
+To **balance daily volume**, the planner **bin-packs** which DLEs take their full
+on which day of the `full_interval_days` cycle, by last-full size (largest into
+the lightest day) — so fulls spread evenly instead of spiking. Before any
+full-size history exists it falls back to hash-staggered placement. This is a
+global, temporal concern, independent of the landing medium.
 
 Levels are realized with GNU tar's listed-incremental **snapshot library**, kept
 under `<catalog>/snapshots/<dle>/L<n>.snar` — exactly the mechanism Amanda uses
@@ -189,19 +189,17 @@ dump method (the "Application") plus its options (compression, `exclude`,
 
 ### Capacity and retention are per-medium
 
-Each medium expresses its capacity in its own units, which NBackup translates
-into two byte quantities the planner and pruning use:
+Each medium declares its **capacity** in its own units — object stores spell it
+as `budget` (`20TB`); tape spells it as `tapes × tape_size` (`0` = unbounded).
+Capacity is the only genuinely per-medium quantity. `minimum_age` (a per-medium
+safety floor) and the global `cycle.require_verified_successor` round out
+retention.
 
-- **capacity** (total retainable bytes): object stores spell it as `budget`
-  (`20TB`); tape spells it as `tapes × tape_size`. `0` = unbounded.
-- **preferred** (target full volume per run): the planner balances fulls so each
-  run stays near this. Tape derives it from `tape_size`.
-
-`minimum_age` (a per-medium safety floor) and the global
-`cycle.require_verified_successor` round out retention. The planner consumes only
-the byte quantities — it never knows whether the medium is tape or an object
-store; the difference (delete a slot vs reclaim a whole tape) lives entirely in
-the medium's retention strategy.
+Balancing dumps over time is **not** a medium property — it's a global, temporal
+planning concern (an S3 bucket has no meaningful per-run size). So the planner
+spreads fulls across the global cycle on its own (see Planning). Pruning consumes
+only capacity; the reclamation difference (delete a slot vs reclaim a whole tape)
+lives entirely in the medium's retention strategy.
 
 ## Requirements
 

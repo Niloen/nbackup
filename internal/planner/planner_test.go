@@ -45,13 +45,12 @@ func TestMultilevelClimb(t *testing.T) {
 	}
 }
 
-// TestPreferredSizeDerivesInterval checks that a preferred run size derives the
-// full interval from total full bytes and balances DLEs across the cycle.
-func TestPreferredSizeDerivesInterval(t *testing.T) {
-	today := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+// TestBalancesFullsAcrossCycle checks that fulls are spread across the cycle's
+// days by size rather than all landing on one day.
+func TestBalancesFullsAcrossCycle(t *testing.T) {
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	dles := []config.DLE{}
-	// 4 DLEs of 100 bytes each = 400 total; preferred 100/run -> interval 4.
+	var dles []config.DLE
+	// 4 equal-sized DLEs over a 2-day cycle should split 2 per day.
 	for _, h := range []string{"a", "b", "c", "d"} {
 		name := config.DLE{Host: h, Path: "/data"}.Name()
 		hist.DLEs[name] = &catalog.DLEState{
@@ -62,9 +61,16 @@ func TestPreferredSizeDerivesInterval(t *testing.T) {
 		}
 		dles = append(dles, config.DLE{Host: h, Path: "/data"})
 	}
-	p := Build(dles, hist, Params{PreferredRunBytes: 100}, today)
-	if p.Interval != 4 {
-		t.Errorf("interval = %d, want 4 (400 bytes / 100 per run)", p.Interval)
+	interval, fullDay := schedule(dles, hist, Params{FullIntervalDays: 2})
+	if interval != 2 {
+		t.Fatalf("interval = %d, want 2", interval)
+	}
+	counts := map[int]int{}
+	for _, day := range fullDay {
+		counts[day]++
+	}
+	if counts[0] != 2 || counts[1] != 2 {
+		t.Errorf("fulls not balanced across days: %v", counts)
 	}
 }
 

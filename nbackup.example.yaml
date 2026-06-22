@@ -14,7 +14,6 @@ media:
     type: local-disk
     path: /var/lib/nbackup/catalog
     budget: 20TB        # capacity ceiling; `nb slot prune` reclaims oldest to fit
-    preferred: 2TB      # target full volume per run; the planner balances to this
     minimum_age: 30d    # a slot can't be retired from this medium until older
   cloud:
     type: s3
@@ -39,8 +38,9 @@ landing: fast-disk
 # gnutar_path: tar
 
 planner:
-  # Target days between full backups per DLE (default 7). Fulls are staggered
-  # across DLEs; between fulls, incremental levels climb (L1, L2, ...) to L9.
+  # The cycle length: target days between fulls per DLE (default 7). The planner
+  # balances fulls across these days by size to smooth daily volume; between
+  # fulls, incremental levels climb (L1, L2, ...) up to L9.
   full_interval_days: 7
 
 # Named method+option bundles (Amanda's "dumptype"). A DLE selects one.

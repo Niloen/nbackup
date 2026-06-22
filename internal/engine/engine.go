@@ -148,12 +148,10 @@ func (e *Engine) RebuildCatalog() (int, error) {
 // Catalog exposes the catalog for read-only commands.
 func (e *Engine) Catalog() *catalog.Catalog { return e.cat }
 
-// Plan builds the plan for a run date, balancing fulls to the landing medium's
-// preferred run size.
+// Plan builds the plan for a run date, balancing fulls across the cycle.
 func (e *Engine) Plan(date time.Time) *planner.Plan {
 	return planner.Build(e.cfg.DLEs(), e.cat.History(), planner.Params{
-		PreferredRunBytes: e.profile.PreferredRunBytes(),
-		FullIntervalDays:  e.cfg.FullIntervalDays(),
+		FullIntervalDays: e.cfg.FullIntervalDays(),
 	}, date)
 }
 

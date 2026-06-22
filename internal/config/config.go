@@ -59,7 +59,6 @@ type Config struct {
 type Media struct {
 	Type       string            `yaml:"type"`
 	Budget     string            `yaml:"budget"`      // capacity ceiling, e.g. "20TB" ("" = unbounded)
-	Preferred  string            `yaml:"preferred"`   // preferred per-run dump size (throughput target)
 	MinimumAge string            `yaml:"minimum_age"` // cycle age before a slot may be retired here
 	Params     map[string]string `yaml:",inline"`     // type-specific connection params (path, bucket, tapes, ...)
 }
@@ -72,7 +71,7 @@ func (m Media) BudgetBytes() (int64, error) {
 	return sizeutil.ParseBytes(m.Budget)
 }
 
-// ProfileOptions flattens the medium's policy fields and connection params into
+// ProfileOptions flattens the medium's capacity field and connection params into
 // the generic option map a media.Profile factory consumes.
 func (m Media) ProfileOptions() map[string]string {
 	opts := map[string]string{}
@@ -80,7 +79,6 @@ func (m Media) ProfileOptions() map[string]string {
 		opts[k] = v
 	}
 	opts["budget"] = m.Budget
-	opts["preferred"] = m.Preferred
 	return opts
 }
 

@@ -1,10 +1,9 @@
 // Package planner decides, for each DLE, which backup level to run. It uses an
 // Amanda-style multilevel scheme (levels 0-9): a full (level 0) starts each
 // cycle, and each subsequent run increments the level so it captures only what
-// changed since the previous level. Fulls are balanced across the cycle so each
-// run's volume stays near the medium's preferred run size, avoiding spikes. It
-// is pure: it works over the catalog history and plain byte targets, with no
-// knowledge of media types.
+// changed since the previous level. Fulls are balanced across the cycle by size
+// (bin-packed into the interval's days) so daily volume is smooth — a global,
+// temporal concern, independent of which medium the slots land on.
 package planner
 
 import (
@@ -20,13 +19,10 @@ import (
 // MaxLevel is the highest incremental level assigned (Amanda uses levels 0-9).
 const MaxLevel = 9
 
-// Params are the planner's tuning inputs, derived from the landing medium.
+// Params are the planner's tuning inputs.
 type Params struct {
-	// PreferredRunBytes is the target full volume per run. When >0 and full
-	// sizes are known, it derives the full interval and balances fulls by size.
-	PreferredRunBytes int64
-	// FullIntervalDays is the fallback interval when PreferredRunBytes is 0 or
-	// no full-size history exists yet.
+	// FullIntervalDays is the cycle length: the target days between fulls per
+	// DLE. Fulls are spread across this many days to balance daily volume.
 	FullIntervalDays int
 }
 
@@ -65,48 +61,41 @@ func Build(dles []config.DLE, hist *catalog.History, p Params, today time.Time) 
 	return plan
 }
 
-// schedule returns the effective full interval and each DLE's assigned day of
-// the cycle [0,interval). When a preferred run size and full-size history are
-// available, the interval is derived (total full bytes / preferred) and DLEs are
-// bin-packed across the cycle days by size so each day's full volume is balanced.
-// Otherwise it falls back to a fixed interval with hash-based staggering.
+// schedule returns the full interval (the global cycle length) and each DLE's
+// assigned day of the cycle [0,interval). DLEs are bin-packed across the cycle's
+// days by last-full size (largest first into the lightest day) so each day's
+// full volume is balanced. Before any full-size history exists it falls back to
+// hash-based staggering.
 func schedule(dles []config.DLE, hist *catalog.History, p Params) (int, map[string]int) {
-	fallback := p.FullIntervalDays
-	if fallback < 1 {
-		fallback = 7
-	}
-
-	var totalFull int64
-	for _, d := range dles {
-		totalFull += hist.DLE(d.Name()).LastFullBytes
-	}
-
-	if p.PreferredRunBytes <= 0 || totalFull == 0 {
-		fullDay := map[string]int{}
-		for _, d := range dles {
-			fullDay[d.Name()] = int(hashName(d.Name()) % uint32(fallback))
-		}
-		return fallback, fullDay
-	}
-
-	interval := int((totalFull + p.PreferredRunBytes - 1) / p.PreferredRunBytes)
+	interval := p.FullIntervalDays
 	if interval < 1 {
-		interval = 1
+		interval = 7
 	}
 
-	// Greedy bin-pack DLEs (largest full first) into `interval` day-bins.
 	type sized struct {
 		name  string
 		bytes int64
 	}
 	items := make([]sized, 0, len(dles))
+	var totalFull int64
 	for _, d := range dles {
-		items = append(items, sized{d.Name(), hist.DLE(d.Name()).LastFullBytes})
+		b := hist.DLE(d.Name()).LastFullBytes
+		totalFull += b
+		items = append(items, sized{d.Name(), b})
 	}
-	sort.Slice(items, func(i, j int) bool { return items[i].bytes > items[j].bytes })
 
-	bins := make([]int64, interval)
 	fullDay := map[string]int{}
+	if totalFull == 0 {
+		// No size history yet: stagger by hash.
+		for _, it := range items {
+			fullDay[it.name] = int(hashName(it.name) % uint32(interval))
+		}
+		return interval, fullDay
+	}
+
+	// Greedy bin-pack DLEs (largest full first) into `interval` day-bins.
+	sort.Slice(items, func(i, j int) bool { return items[i].bytes > items[j].bytes })
+	bins := make([]int64, interval)
 	for _, it := range items {
 		lightest := 0
 		for b := 1; b < interval; b++ {
