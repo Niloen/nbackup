@@ -182,20 +182,22 @@ dumptypes:
     method: gnutar
     exclude: "*.log,*.tmp"
 
+# The disklist: grouped by dumptype, then host, then paths.
 sources:
-  - host: app01
-    path: /home              # uses the "default" dumptype
-  - host: db01
-    path: /var/lib/postgresql
-    dumptype: no-logs
+  default:
+    app01: [/home, /etc]
+  no-logs:
+    db01: [/var/lib/postgresql, /var/log]
 ```
 
 **Media** is a map of named definitions, each with a `type` and type-specific
 parameters; `landing` names the one slots are written to. Adding a medium type
 is a registry registration — no config struct changes. **Dumptypes** are named
-`{method + options}` bundles that DLEs reference, so a DLE associates with a
-dump method (the "Application") plus its options (compression, `exclude`,
-`one-file-system`, …) without hardcoding.
+`{method + options}` bundles (Amanda's dumptype): a dump method (the
+"Application") plus its options (compression, `exclude`, `one-file-system`, …).
+**Sources** (the disklist) are grouped by dumptype → host → paths, so each DLE
+is just a path under the dumptype that governs it — all per-DLE tuning lives in
+the dumptype, never on the entry.
 
 ### Capacity and retention are per-medium
 

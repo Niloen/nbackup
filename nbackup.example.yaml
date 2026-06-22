@@ -57,10 +57,9 @@ dumptypes:
     exclude: "*.log,*.tmp"
     # estimate: exact   # run a live tar estimate each plan (default: use last sizes)
 
+# The disklist: grouped by dumptype, then host, then the paths to back up.
 sources:
-  - host: app01
-    path: /home
-    dumptype: default
-  - host: db01
-    path: /var/lib/postgresql
-    dumptype: no-logs
+  default:
+    app01: [/home, /etc]
+  no-logs:
+    db01: [/var/lib/postgresql, /var/log]

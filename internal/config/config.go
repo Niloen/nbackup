@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -54,7 +55,47 @@ type Config struct {
 	// DumpTypes is a map of named method+option bundles (Amanda's dumptype).
 	DumpTypes map[string]DumpType `yaml:"dumptypes"`
 
-	Sources []DLE `yaml:"sources"`
+	Sources Sources `yaml:"sources"`
+}
+
+// Sources is the disklist. In config it is written grouped by dumptype, then
+// host, then a list of paths:
+//
+//	sources:
+//	  default:
+//	    app01: [/home, /etc]
+//	  no-logs:
+//	    db01: [/var/lib/postgresql]
+//
+// It flattens to a sorted list of DLEs. Per-DLE behavior lives in the named
+// dumptype, not the entry (as in Amanda).
+type Sources []DLE
+
+// UnmarshalYAML decodes the grouped form into a flat, sorted []DLE.
+func (s *Sources) UnmarshalYAML(node *yaml.Node) error {
+	var raw map[string]map[string][]string
+	if err := node.Decode(&raw); err != nil {
+		return fmt.Errorf("sources must be a mapping of dumptype -> {host: [paths]}: %w", err)
+	}
+	var dles []DLE
+	for dumptype, hosts := range raw {
+		for host, paths := range hosts {
+			for _, path := range paths {
+				dles = append(dles, DLE{Host: host, Path: path, DumpType: dumptype})
+			}
+		}
+	}
+	sort.Slice(dles, func(i, j int) bool {
+		if dles[i].Host != dles[j].Host {
+			return dles[i].Host < dles[j].Host
+		}
+		if dles[i].Path != dles[j].Path {
+			return dles[i].Path < dles[j].Path
+		}
+		return dles[i].DumpType < dles[j].DumpType
+	})
+	*s = dles
+	return nil
 }
 
 // Media is one named storage definition: a type, capacity/retention policy for
