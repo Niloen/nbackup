@@ -24,6 +24,7 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 		Media:   map[string]config.Media{"disk": {Type: "local-disk", Params: map[string]string{"path": catalogDir}}},
 		Sources: []config.DLE{{Host: "h", Path: src}},
 	}
+	cfg.Compress.Codec = "none" // exercise the pipeline without depending on a compressor binary
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -61,6 +62,50 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 	assertContent(t, filepath.Join(dest, "keep.txt"), "v2")
 	if _, err := os.Stat(filepath.Join(dest, "gone.txt")); !os.IsNotExist(err) {
 		t.Errorf("gone.txt should be deleted after restore, stat err = %v", err)
+	}
+}
+
+// TestParallelDumpers runs several DLEs with dumpers > 1, exercising concurrent
+// writes into one slot, and verifies every archive is present and restorable.
+func TestParallelDumpers(t *testing.T) {
+	catalogDir := t.TempDir()
+	cfg := &config.Config{
+		Landing: "disk",
+		Media:   map[string]config.Media{"disk": {Type: "local-disk", Params: map[string]string{"path": catalogDir}}},
+	}
+	cfg.Compress.Codec = "none" // no compressor-binary dependency in tests
+	cfg.Parallelism.Dumpers = 3
+
+	names := []string{"alpha", "bravo", "charlie", "delta"}
+	for _, n := range names {
+		dir := t.TempDir()
+		write(t, filepath.Join(dir, n+".txt"), "content-"+n)
+		cfg.Sources = append(cfg.Sources, config.DLE{Host: "h", Path: dir})
+	}
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("parallel run: %v", err)
+	}
+	if len(s.Archives) != len(cfg.Sources) {
+		t.Fatalf("expected %d archives, got %d", len(cfg.Sources), len(s.Archives))
+	}
+
+	// Each DLE restores to its original content.
+	for i, d := range cfg.Sources {
+		dest := t.TempDir()
+		if err := eng.Restore(s.ID, d.Name(), dest, nil); err != nil {
+			t.Fatalf("restore %s: %v", d.Name(), err)
+		}
+		assertContent(t, filepath.Join(dest, names[i]+".txt"), "content-"+names[i])
 	}
 }
 

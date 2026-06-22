@@ -1,0 +1,211 @@
+// Package filter runs stream compressors/decompressors as external child
+// processes, the way Amanda orchestrates gzip/custom compress. NBackup stays a
+// thin driver: it pipes bytes through a child and lets the proven tool do the
+// CPU-heavy work, so compression can be threaded and niced independently of nb
+// (in-process compression previously pinned every core).
+//
+// A codec is a registered name (zstd, gzip, none) that knows how to build the
+// argv for compressing and decompressing. The archive records which codec
+// produced it, so restore reverses the exact transform.
+package filter
+
+import (
+	"fmt"
+	"io"
+	"os/exec"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// Options tune a codec invocation.
+type Options struct {
+	Program string // override the codec's default binary (e.g. an absolute path); "" = default
+	Level   int    // compression level; 0 = codec default
+	Threads int    // worker threads where supported; 0 = codec default
+	Nice    int    // run the child under `nice -n Nice` for CPU politeness; 0 = no nice
+}
+
+// Spec describes a codec: its archive file extension and how to build the child
+// argv. A nil argv builder means "no external process" (the none codec).
+type Spec struct {
+	Name           string
+	Ext            string // archive extension, e.g. "zst", "gz"; "" for none
+	compressArgv   func(o Options) []string
+	decompressArgv func(o Options) []string
+}
+
+var registry = map[string]Spec{}
+
+func register(s Spec) { registry[s.Name] = s }
+
+func init() {
+	register(Spec{
+		Name: "zstd", Ext: "zst",
+		compressArgv: func(o Options) []string {
+			argv := []string{prog(o, "zstd")}
+			if o.Level > 0 {
+				argv = append(argv, "-"+strconv.Itoa(o.Level))
+			}
+			if o.Threads > 0 {
+				argv = append(argv, "-T"+strconv.Itoa(o.Threads))
+			}
+			return append(argv, "-c")
+		},
+		decompressArgv: func(o Options) []string { return []string{prog(o, "zstd"), "-d", "-c"} },
+	})
+	register(Spec{
+		Name: "gzip", Ext: "gz",
+		compressArgv: func(o Options) []string {
+			argv := []string{prog(o, "gzip")}
+			if o.Level > 0 {
+				argv = append(argv, "-"+strconv.Itoa(o.Level))
+			}
+			return append(argv, "-c")
+		},
+		decompressArgv: func(o Options) []string { return []string{prog(o, "gzip"), "-d", "-c"} },
+	})
+	register(Spec{Name: "none", Ext: ""}) // identity: no child process
+}
+
+func prog(o Options, def string) string {
+	if o.Program != "" {
+		return o.Program
+	}
+	return def
+}
+
+func spec(codec string) (Spec, error) {
+	s, ok := registry[codec]
+	if !ok {
+		return Spec{}, fmt.Errorf("unknown codec %q (known: %s)", codec, strings.Join(names(), ", "))
+	}
+	return s, nil
+}
+
+func names() []string {
+	out := make([]string, 0, len(registry))
+	for k := range registry {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Ext returns the archive file extension for a codec ("" for none).
+func Ext(codec string) (string, error) {
+	s, err := spec(codec)
+	if err != nil {
+		return "", err
+	}
+	return s.Ext, nil
+}
+
+// Check verifies the codec is known and its binary is available on PATH.
+func Check(codec string, o Options) error {
+	s, err := spec(codec)
+	if err != nil {
+		return err
+	}
+	if s.compressArgv == nil {
+		return nil // none: nothing to run
+	}
+	bin := s.compressArgv(o)[0]
+	if _, err := exec.LookPath(bin); err != nil {
+		return fmt.Errorf("codec %q needs %q on PATH: %w", codec, bin, err)
+	}
+	return nil
+}
+
+// Compress returns a WriteCloser that pipes everything written to it through the
+// codec's compressor child and on to dst. Close finishes and waits the child.
+func Compress(codec string, dst io.Writer, o Options) (io.WriteCloser, error) {
+	s, err := spec(codec)
+	if err != nil {
+		return nil, err
+	}
+	if s.compressArgv == nil {
+		return nopWriteCloser{dst}, nil
+	}
+	cmd := command(s.compressArgv(o), o)
+	cmd.Stdout = dst
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start %s: %w", cmd.Path, err)
+	}
+	return &procWriter{cmd: cmd, stdin: stdin, stderr: &stderr}, nil
+}
+
+// Decompress returns a ReadCloser that yields the decompressed form of src by
+// piping it through the codec's decompressor child. Close waits the child.
+func Decompress(codec string, src io.Reader, o Options) (io.ReadCloser, error) {
+	s, err := spec(codec)
+	if err != nil {
+		return nil, err
+	}
+	if s.decompressArgv == nil {
+		return io.NopCloser(src), nil
+	}
+	cmd := command(s.decompressArgv(o), o)
+	cmd.Stdin = src
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start %s: %w", cmd.Path, err)
+	}
+	return &procReader{cmd: cmd, stdout: stdout, stderr: &stderr}, nil
+}
+
+// command builds the exec.Cmd, prefixing `nice` for politeness when requested.
+func command(argv []string, o Options) *exec.Cmd {
+	if o.Nice != 0 {
+		argv = append([]string{"nice", "-n", strconv.Itoa(o.Nice)}, argv...)
+	}
+	return exec.Command(argv[0], argv[1:]...)
+}
+
+type procWriter struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stderr *strings.Builder
+}
+
+func (p *procWriter) Write(b []byte) (int, error) { return p.stdin.Write(b) }
+
+func (p *procWriter) Close() error {
+	stdinErr := p.stdin.Close()
+	waitErr := p.cmd.Wait()
+	if waitErr != nil {
+		return fmt.Errorf("%s: %w\n%s", p.cmd.Path, waitErr, strings.TrimSpace(p.stderr.String()))
+	}
+	return stdinErr
+}
+
+type procReader struct {
+	cmd    *exec.Cmd
+	stdout io.ReadCloser
+	stderr *strings.Builder
+}
+
+func (p *procReader) Read(b []byte) (int, error) { return p.stdout.Read(b) }
+
+func (p *procReader) Close() error {
+	p.stdout.Close()
+	if err := p.cmd.Wait(); err != nil {
+		return fmt.Errorf("%s: %w\n%s", p.cmd.Path, err, strings.TrimSpace(p.stderr.String()))
+	}
+	return nil
+}
+
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }

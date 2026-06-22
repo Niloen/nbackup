@@ -15,6 +15,7 @@ type Step struct {
 	Level  int
 	File   string // path relative to the slot directory
 	Method string // dump method that produced the archive
+	Codec  string // compression codec to reverse before extracting
 }
 
 // Chain returns the archives needed to restore a DLE as of the target slot, in
@@ -55,7 +56,7 @@ func Chain(slots []*slot.Slot, dleName, targetSlotID string) ([]Step, error) {
 			if i == fullIdx && a.Level != 0 {
 				continue // at the full's slot, take only the full
 			}
-			steps = append(steps, Step{SlotID: s.ID, Level: a.Level, File: a.File, Method: a.Method})
+			steps = append(steps, Step{SlotID: s.ID, Level: a.Level, File: a.File, Method: a.Method, Codec: a.Codec})
 		}
 	}
 	return steps, nil

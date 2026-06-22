@@ -47,6 +47,7 @@ type Archive struct {
 	Host         string `json:"host"`         // source host
 	Path         string `json:"path"`         // source path
 	Method       string `json:"method"`       // dump method that produced it
+	Codec        string `json:"codec"`        // compression codec (zstd|gzip|none); reversed on restore
 	Level        int    `json:"level"`        // 0 = full, >=1 = incremental
 	File         string `json:"file"`         // path relative to slot root
 	Compressed   int64  `json:"compressed"`   // size on disk

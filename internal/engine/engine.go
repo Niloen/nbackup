@@ -8,10 +8,13 @@ package engine
 import (
 	"fmt"
 	"io"
+	"runtime"
+	"sync"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/filter"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/method"
 	"github.com/Niloen/nbackup/internal/planner"
@@ -48,6 +51,8 @@ type Engine struct {
 	minAge  time.Duration
 	cat     *catalog.Catalog
 	methods map[string]method.Method // by cache key (dumptype or "@method")
+	codec   string                   // compression codec for new archives
+	fopts   filter.Options           // codec invocation options (level/threads/nice)
 }
 
 // New constructs an Engine from configuration: it opens the landing store and
@@ -75,14 +80,22 @@ func New(cfg *config.Config) (*Engine, error) {
 		return nil, err
 	}
 	minAge, _ := mediaDef.MinAge()
+	fopts := filter.Options{
+		Program: cfg.Compress.Program,
+		Level:   cfg.Compress.Level,
+		Threads: cfg.Compress.Threads,
+		Nice:    cfg.Nice,
+	}
 	return &Engine{
 		cfg:     cfg,
 		store:   store,
-		reader:  slotio.NewReader(store),
+		reader:  slotio.NewReader(store, fopts),
 		profile: profile,
 		minAge:  minAge,
 		cat:     cat,
 		methods: map[string]method.Method{},
+		codec:   cfg.CompressCodec(),
+		fopts:   fopts,
 	}, nil
 }
 
@@ -240,7 +253,12 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 		logf.log("WARNING: %s", w)
 	}
 
-	// Pre-flight: resolve and check every method before creating a slot.
+	// Pre-flight before creating a slot: the codec binary and every dump method.
+	// Resolving every method here also populates the method cache, so the parallel
+	// dumpers below only read it (no concurrent writes).
+	if err := filter.Check(e.codec, e.fopts); err != nil {
+		return nil, err
+	}
 	for _, item := range plan.Items {
 		m, err := e.methodForDumpType(item.DLE.DumpTypeName())
 		if err != nil {
@@ -256,12 +274,13 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 		return nil, err
 	}
 	s := slot.NewSlot(slotID, slot.DateString(date), seq, "nbdump", time.Now().UTC())
-	w := slotio.NewWriter(e.store, s)
+	w, err := slotio.NewWriter(e.store, s, e.codec, e.fopts)
+	if err != nil {
+		return nil, err
+	}
 
-	for _, item := range plan.Items {
-		if err := e.backupItem(w, item, logf); err != nil {
-			return nil, err
-		}
+	if err := e.runDumpers(plan.Items, w, logf); err != nil {
+		return nil, err
 	}
 
 	logf.log("verifying %d archive checksum(s)", w.ArchiveCount())
@@ -273,6 +292,67 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 		return nil, fmt.Errorf("update catalog cache: %w", err)
 	}
 	return sealed, nil
+}
+
+// runDumpers backs up every planned item into the slot. With parallelism.dumpers
+// > 1 it runs that many dumpers concurrently (Amanda's inparallel), bounded by a
+// semaphore; the first error stops scheduling further items and is returned. Each
+// dumper writes a distinct object into the slot, which the medium must allow
+// concurrently (local-disk does) and the slot Writer serializes its bookkeeping.
+func (e *Engine) runDumpers(items []planner.Item, w *slotio.Writer, logf Logf) error {
+	dumpers := e.cfg.Dumpers()
+	if dumpers <= 1 || len(items) <= 1 {
+		for _, item := range items {
+			if err := e.backupItem(w, item, logf); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	threads := e.fopts.Threads
+	if threads < 1 {
+		threads = 1
+	}
+	if cores := runtime.GOMAXPROCS(0); dumpers*threads > cores {
+		logf.log("WARNING: %d dumpers x %d compressor thread(s) = %d exceeds %d cores; CPU may be oversubscribed",
+			dumpers, threads, dumpers*threads, cores)
+	}
+
+	var (
+		wg       sync.WaitGroup
+		sem      = make(chan struct{}, dumpers)
+		mu       sync.Mutex
+		firstErr error
+	)
+	failed := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return firstErr != nil
+	}
+	for _, item := range items {
+		if failed() {
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(it planner.Item) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if failed() {
+				return
+			}
+			if err := e.backupItem(w, it, logf); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+			}
+		}(item)
+	}
+	wg.Wait()
+	return firstErr
 }
 
 // allocSlotID picks the slot ID for a run on the given date: the first run of
@@ -373,7 +453,7 @@ func (e *Engine) extractStep(step restore.Step, destDir string) error {
 	if err != nil {
 		return err
 	}
-	rc, err := e.reader.OpenArchive(step.SlotID, step.File)
+	rc, err := e.reader.OpenArchive(step.SlotID, step.File, step.Codec)
 	if err != nil {
 		return err
 	}

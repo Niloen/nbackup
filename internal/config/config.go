@@ -18,6 +18,9 @@ import (
 // DefaultDumpType is used by DLEs that do not name one.
 const DefaultDumpType = "default"
 
+// DefaultCodec is the compression codec assumed when compress.codec is unset.
+const DefaultCodec = "zstd"
+
 // DefaultMethod is the dump method assumed when a dumptype omits one.
 const DefaultMethod = "gnutar"
 
@@ -48,6 +51,23 @@ type Config struct {
 	// Workdir holds local operational state (slot cache + snapshot library).
 	// Defaults to the landing medium's path when that medium is local-disk.
 	Workdir string `yaml:"workdir"`
+
+	// Compress configures the external compressor archives are piped through.
+	Compress struct {
+		Codec   string `yaml:"codec"`   // zstd|gzip|none (default zstd)
+		Level   int    `yaml:"level"`   // codec level; 0 = codec default
+		Threads int    `yaml:"threads"` // worker threads where supported; 0 = codec default
+		Program string `yaml:"program"` // optional binary override (name or path)
+	} `yaml:"compress"`
+
+	// Nice runs orchestrated child processes under `nice -n Nice` for CPU
+	// politeness; 0 = no nice.
+	Nice int `yaml:"nice"`
+
+	// Parallelism bounds concurrent work within a run.
+	Parallelism struct {
+		Dumpers int `yaml:"dumpers"` // concurrent DLE dumps per run (default 1)
+	} `yaml:"parallelism"`
 
 	// Media is a map of named storage definitions.
 	Media map[string]Media `yaml:"media"`
@@ -257,6 +277,22 @@ func (c *Config) ResolveDumpType(name string) DumpType {
 		dt.Method = DefaultMethod
 	}
 	return dt
+}
+
+// CompressCodec returns the configured codec, defaulting to zstd.
+func (c *Config) CompressCodec() string {
+	if c.Compress.Codec != "" {
+		return c.Compress.Codec
+	}
+	return DefaultCodec
+}
+
+// Dumpers returns the number of concurrent DLE dumps per run (default 1).
+func (c *Config) Dumpers() int {
+	if c.Parallelism.Dumpers > 1 {
+		return c.Parallelism.Dumpers
+	}
+	return 1
 }
 
 // FullIntervalDays returns the dump cycle in whole days (default 7).

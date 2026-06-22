@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/Niloen/nbackup/internal/filter"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/slot"
 	"github.com/Niloen/nbackup/internal/xfer"
@@ -12,20 +13,24 @@ import (
 // Reader reads slot contents back from a media.Store.
 type Reader struct {
 	store media.Store
+	fopts filter.Options
 }
 
-// NewReader returns a Reader over store.
-func NewReader(store media.Store) *Reader { return &Reader{store: store} }
+// NewReader returns a Reader over store. fopts carries codec settings (e.g. a
+// binary override) used when decompressing archives.
+func NewReader(store media.Store, fopts filter.Options) *Reader {
+	return &Reader{store: store, fopts: fopts}
+}
 
-// OpenArchive opens an archive's decompressed stream for restore. The caller is
-// responsible for closing the returned reader, which closes both the
-// decompressor and the underlying store object.
-func (r *Reader) OpenArchive(slotID, file string) (io.ReadCloser, error) {
+// OpenArchive opens an archive's decompressed stream for restore, reversing the
+// codec the archive was written with. The caller closes the returned reader,
+// which closes the decompressor child and the underlying store object.
+func (r *Reader) OpenArchive(slotID, file, codec string) (io.ReadCloser, error) {
 	obj, err := r.store.Open(slotID, file)
 	if err != nil {
 		return nil, err
 	}
-	src, err := xfer.NewZstdSource(obj)
+	src, err := filter.Decompress(codec, obj, r.fopts)
 	if err != nil {
 		obj.Close()
 		return nil, err
