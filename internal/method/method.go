@@ -1,24 +1,22 @@
 // Package method is NBackup's dump-method abstraction, analogous to Amanda's
 // Application API (amgtar, amstar, ampgsql, ...). A Method produces a raw backup
 // stream and consumes one for restore; it knows nothing about compression,
-// checksums, or where bytes are stored. Implementations register themselves so
-// a DLE can select a method by name.
+// checksums, where bytes are stored, or configuration. It operates on a source
+// path and is configured with generic options (supplied by a dumptype).
 package method
 
 import (
 	"fmt"
 	"io"
 	"sort"
-
-	"github.com/Niloen/nbackup/internal/dle"
 )
 
 // BackupRequest describes one archive to produce.
 type BackupRequest struct {
-	DLE      dle.DLE
-	Level    int    // 0 = full, >=1 = incremental
-	BaseSnap string // path to the base snapshot for incrementals; "" for a full
-	OutSnap  string // path to write the updated snapshot for this level
+	SourcePath string // directory to archive
+	Level      int    // 0 = full, >=1 = incremental
+	BaseSnap   string // path to the base snapshot for incrementals; "" for a full
+	OutSnap    string // path to write the updated snapshot for this level
 }
 
 // BackupResult reports what was produced.
@@ -38,12 +36,28 @@ type Method interface {
 	// Backup writes the raw archive stream to out.
 	Backup(r BackupRequest, out io.Writer) (*BackupResult, error)
 	// Restore consumes a raw archive stream and writes into destDir.
-	Restore(d dle.DLE, in io.Reader, destDir string) error
+	Restore(in io.Reader, destDir string) error
 }
 
-// Options carries method-specific configuration to a factory.
-type Options struct {
-	TarPath string // gnutar: GNU tar binary
+// Options are generic key/value parameters from a dumptype (e.g. "tar_path",
+// "one-file-system").
+type Options map[string]string
+
+// Get returns the value for a key, or "".
+func (o Options) Get(key string) string { return o[key] }
+
+// Bool parses a boolean option, returning def when unset or unparseable.
+func (o Options) Bool(key string, def bool) bool {
+	switch o[key] {
+	case "":
+		return def
+	case "true", "yes", "1", "on":
+		return true
+	case "false", "no", "0", "off":
+		return false
+	default:
+		return def
+	}
 }
 
 // Factory constructs a Method from options.

@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/dle"
 	"github.com/Niloen/nbackup/internal/method"
 )
 
@@ -31,14 +30,13 @@ func TestBackupRestoreWithDeletion(t *testing.T) {
 	src := t.TempDir()
 	snaps := t.TempDir()
 	out := t.TempDir()
-	d := dle.DLE{Host: "h", Path: src}
 
 	write(t, filepath.Join(src, "a.txt"), "alpha")
 	write(t, filepath.Join(src, "b.txt"), "beta")
 	write(t, filepath.Join(src, "sub", "c.txt"), "gamma")
 
 	l0 := filepath.Join(out, "l0.tar")
-	backup(t, m, method.BackupRequest{DLE: d, Level: 0, OutSnap: filepath.Join(snaps, "L0.snar")}, l0)
+	backup(t, m, method.BackupRequest{SourcePath: src, Level: 0, OutSnap: filepath.Join(snaps, "L0.snar")}, l0)
 
 	time.Sleep(1100 * time.Millisecond) // 1s mtime granularity
 	write(t, filepath.Join(src, "a.txt"), "alpha-CHANGED")
@@ -49,20 +47,51 @@ func TestBackupRestoreWithDeletion(t *testing.T) {
 
 	l1 := filepath.Join(out, "l1.tar")
 	backup(t, m, method.BackupRequest{
-		DLE: d, Level: 1,
+		SourcePath: src, Level: 1,
 		BaseSnap: filepath.Join(snaps, "L0.snar"),
 		OutSnap:  filepath.Join(snaps, "L1.snar"),
 	}, l1)
 
 	dest := t.TempDir()
-	restore(t, m, d, l0, dest)
-	restore(t, m, d, l1, dest)
+	restore(t, m, l0, dest)
+	restore(t, m, l1, dest)
 
 	assertContent(t, filepath.Join(dest, "a.txt"), "alpha-CHANGED")
 	assertContent(t, filepath.Join(dest, "sub", "c.txt"), "gamma")
 	assertContent(t, filepath.Join(dest, "d.txt"), "delta")
 	if _, err := os.Stat(filepath.Join(dest, "b.txt")); !os.IsNotExist(err) {
 		t.Errorf("b.txt should have been deleted on restore, stat err = %v", err)
+	}
+}
+
+// TestExcludeOption verifies a dumptype option flows through to tar.
+func TestExcludeOption(t *testing.T) {
+	if _, err := method.Open("gnutar", method.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := method.Open("gnutar", method.Options{"exclude": "*.log"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Check(); err != nil {
+		t.Skipf("GNU tar not available: %v", err)
+	}
+	src := t.TempDir()
+	snaps := t.TempDir()
+	out := t.TempDir()
+	write(t, filepath.Join(src, "keep.txt"), "keep")
+	write(t, filepath.Join(src, "drop.log"), "drop")
+
+	l0 := filepath.Join(out, "l0.tar")
+	backup(t, m, method.BackupRequest{SourcePath: src, Level: 0, OutSnap: filepath.Join(snaps, "L0.snar")}, l0)
+
+	dest := t.TempDir()
+	restore(t, m, l0, dest)
+	if _, err := os.Stat(filepath.Join(dest, "keep.txt")); err != nil {
+		t.Errorf("keep.txt should be present: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "drop.log")); !os.IsNotExist(err) {
+		t.Errorf("drop.log should have been excluded, stat err = %v", err)
 	}
 }
 
@@ -78,14 +107,14 @@ func backup(t *testing.T, m method.Method, req method.BackupRequest, outFile str
 	}
 }
 
-func restore(t *testing.T, m method.Method, d dle.DLE, inFile, dest string) {
+func restore(t *testing.T, m method.Method, inFile, dest string) {
 	t.Helper()
 	f, err := os.Open(inFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if err := m.Restore(d, f, dest); err != nil {
+	if err := m.Restore(f, dest); err != nil {
 		t.Fatalf("restore %s: %v", inFile, err)
 	}
 }

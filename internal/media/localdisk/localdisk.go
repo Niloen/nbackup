@@ -15,10 +15,11 @@ import (
 
 func init() {
 	media.RegisterStore("local-disk", func(opts media.Options) (media.Store, error) {
-		if opts.Path == "" {
+		path := opts.Get("path")
+		if path == "" {
 			return nil, fmt.Errorf("local-disk medium requires a path")
 		}
-		return &store{root: opts.Path}, nil
+		return &store{root: path}, nil
 	})
 }
 

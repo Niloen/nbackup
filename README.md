@@ -128,30 +128,52 @@ the slot.
 ### Pruning (cycle safety)
 
 `nb slot prune` is a dry-run by default. A slot is eligible for deletion only
-when it is older than `cycle.minimum_age` **and** every DLE it holds has a newer
-full backup elsewhere — so the last valid recovery path is never removed. Add
-`--apply` to actually delete.
+when it is older than the landing medium's `minimum_age` **and** every DLE it
+holds has a newer full backup elsewhere — so the last valid recovery path is
+never removed. Add `--apply` to actually delete. (Budget and `minimum_age` are
+per-medium, so each store is pruned against its own limits.)
 
 ## Configuration
 
 See [`nbackup.example.yaml`](nbackup.example.yaml). Minimal example:
 
 ```yaml
-storage:
-  budget: 20TB
 cycle:
-  minimum_age: 30d
-landing:
-  media: local-disk
+  require_verified_successor: true   # cross-cutting safety
+
+# Named storage definitions; `landing` selects which one slots are created on.
+# Budget and minimum_age are per-medium (each store has its own capacity/cycle).
 media:
-  local-disk:
+  disk:
+    type: local-disk
     path: /var/lib/nbackup/catalog
+    budget: 20TB
+    minimum_age: 30d
+landing: disk
+
+# Named method+option bundles (Amanda's "dumptype"); a DLE selects one.
+dumptypes:
+  default:
+    method: gnutar
+    one-file-system: "true"
+  no-logs:
+    method: gnutar
+    exclude: "*.log,*.tmp"
+
 sources:
   - host: app01
-    path: /home
+    path: /home              # uses the "default" dumptype
   - host: db01
     path: /var/lib/postgresql
+    dumptype: no-logs
 ```
+
+**Media** is a map of named definitions, each with a `type` and type-specific
+parameters; `landing` names the one slots are written to. Adding a medium type
+is a registry registration — no config struct changes. **Dumptypes** are named
+`{method + options}` bundles that DLEs reference, so a DLE associates with a
+dump method (the "Application") plus its options (compression, `exclude`,
+`one-file-system`, …) without hardcoding.
 
 ## Requirements
 
@@ -184,11 +206,11 @@ orchestrator composes them.
 
 | Package | Responsibility | Amanda analogue |
 |---|---|---|
-| `dle` | the DLE domain type (host, path, method) | Disklist |
+| `config` | config + domain entities: `DLE`, `Media`, `DumpType` | Disklist / dumptype / storage |
 | `slot` | slot format: pure data + (de)serialization | Header / amar |
 | `media` | `Store` (landing) + `Vault` (copies) interfaces + registry | Device API |
 | `media/localdisk`, `media/s3`, `media/tape` | implementations (s3/tape are registered stubs) | tape/s3/vfs devices |
-| `method` | `Method` dump interface + registry | Application API |
+| `method` | `Method` dump interface + registry (configured via dumptype options) | Application API |
 | `method/gnutar` | GNU tar implementation (all tar/snapshot specifics) | amgtar |
 | `xfer` | stream pipeline: zstd + checksum + counting | Xfer API |
 | `catalog` | local cache of the slot index + snapshot library; derives run `History` | catalog / curinfo / tapelist |

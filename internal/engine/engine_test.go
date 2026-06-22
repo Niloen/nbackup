@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/config"
-	"github.com/Niloen/nbackup/internal/dle"
 )
 
 // TestRunRestoreEndToEnd exercises the full engine over the local-disk store:
@@ -20,17 +19,18 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 	write(t, filepath.Join(src, "keep.txt"), "v1")
 	write(t, filepath.Join(src, "gone.txt"), "temp")
 
-	cfg := &config.Config{}
-	cfg.Landing.Media = "local-disk"
-	cfg.Media.LocalDisk.Path = catalogDir
-	cfg.Sources = []dle.DLE{{Host: "h", Path: src}}
+	cfg := &config.Config{
+		Landing: "disk",
+		Media:   map[string]config.Media{"disk": {Type: "local-disk", Params: map[string]string{"path": catalogDir}}},
+		Sources: []config.DLE{{Host: "h", Path: src}},
+	}
 
 	eng, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.method.Check(); err != nil {
-		t.Skipf("GNU tar not available: %v", err)
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
 	}
 
 	day1 := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
@@ -54,7 +54,7 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 	}
 
 	dest := t.TempDir()
-	name := dle.DLE{Host: "h", Path: src}.Name()
+	name := config.DLE{Host: "h", Path: src}.Name()
 	if err := eng.Restore(s2.ID, name, dest, nil); err != nil {
 		t.Fatalf("restore: %v", err)
 	}

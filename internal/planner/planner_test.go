@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
-	"github.com/Niloen/nbackup/internal/dle"
+	"github.com/Niloen/nbackup/internal/config"
 )
 
 func TestDecideLevels(t *testing.T) {
@@ -54,7 +54,7 @@ func TestBuildAssignsBaseSlot(t *testing.T) {
 			{Date: "2026-06-20", Slot: "slot-2026-06-20", Level: 0},
 		},
 	}
-	dles := []dle.DLE{{Host: "h", Path: "/data"}}
+	dles := []config.DLE{{Host: "h", Path: "/data"}}
 	p := Build(dles, hist, 7, time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC))
 	if len(p.Items) != 1 {
 		t.Fatalf("want 1 item, got %d", len(p.Items))

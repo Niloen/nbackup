@@ -12,10 +12,11 @@ import (
 
 func init() {
 	media.RegisterStore("s3", func(opts media.Options) (media.Store, error) {
-		if opts.Bucket == "" {
+		bucket := opts.Get("bucket")
+		if bucket == "" {
 			return nil, fmt.Errorf("s3 medium requires a bucket")
 		}
-		return &store{bucket: opts.Bucket}, nil
+		return &store{bucket: bucket}, nil
 	})
 }
 

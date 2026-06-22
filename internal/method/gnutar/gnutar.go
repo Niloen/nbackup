@@ -17,24 +17,37 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Niloen/nbackup/internal/dle"
 	"github.com/Niloen/nbackup/internal/method"
 )
 
 func init() {
 	method.Register("gnutar", func(opts method.Options) (method.Method, error) {
-		bin := opts.TarPath
+		bin := opts.Get("tar_path")
 		if bin == "" {
 			bin = "tar"
 		}
-		return &gnutar{bin: bin}, nil
+		var exclude []string
+		for _, p := range strings.Split(opts.Get("exclude"), ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				exclude = append(exclude, p)
+			}
+		}
+		return &gnutar{
+			bin:           bin,
+			oneFileSystem: opts.Bool("one-file-system", true),
+			sparse:        opts.Bool("sparse", true),
+			exclude:       exclude,
+		}, nil
 	})
 }
 
 type gnutar struct {
-	bin       string
-	checkOnce sync.Once
-	checkErr  error
+	bin           string
+	oneFileSystem bool
+	sparse        bool
+	exclude       []string
+	checkOnce     sync.Once
+	checkErr      error
 }
 
 func (g *gnutar) Name() string { return "gnutar" }
@@ -112,7 +125,7 @@ func (g *gnutar) Estimate(r method.BackupRequest) (int64, error) {
 
 // Restore consumes a raw tar stream and extracts it with incremental semantics,
 // applying deletions recorded in the archive.
-func (g *gnutar) Restore(d dle.DLE, in io.Reader, destDir string) error {
+func (g *gnutar) Restore(in io.Reader, destDir string) error {
 	if err := g.Check(); err != nil {
 		return err
 	}
@@ -158,10 +171,18 @@ func (g *gnutar) prepareSnapshot(r method.BackupRequest) error {
 func (g *gnutar) runCreate(r method.BackupRequest, w io.Writer, snapshot, indexPath string) (int64, error) {
 	args := []string{
 		"--create", "--file=-",
-		"--directory=" + r.DLE.Path,
-		"--one-file-system", "--sparse",
+		"--directory=" + r.SourcePath,
 		"--listed-incremental=" + snapshot,
 		"--totals",
+	}
+	if g.oneFileSystem {
+		args = append(args, "--one-file-system")
+	}
+	if g.sparse {
+		args = append(args, "--sparse")
+	}
+	for _, p := range g.exclude {
+		args = append(args, "--exclude="+p)
 	}
 	if indexPath != "" {
 		args = append(args, "--verbose", "--index-file="+indexPath)

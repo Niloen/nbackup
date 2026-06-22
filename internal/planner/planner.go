@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
-	"github.com/Niloen/nbackup/internal/dle"
+	"github.com/Niloen/nbackup/internal/config"
 )
 
 // MaxLevel is the highest incremental level assigned (Amanda uses levels 0-9).
@@ -27,7 +27,7 @@ type Plan struct {
 
 // Item is the planned backup of a single DLE.
 type Item struct {
-	DLE       dle.DLE
+	DLE       config.DLE
 	Name      string
 	Level     int    // 0 = full, 1..9 = incremental
 	BaseLevel int    // level whose snapshot this builds on (-1 for a full)
@@ -36,7 +36,7 @@ type Item struct {
 }
 
 // Build produces a plan for the given date without scanning sources.
-func Build(dles []dle.DLE, hist *catalog.History, interval int, today time.Time) *Plan {
+func Build(dles []config.DLE, hist *catalog.History, interval int, today time.Time) *Plan {
 	p := &Plan{Date: today, Interval: interval}
 	for _, d := range dles {
 		name := d.Name()

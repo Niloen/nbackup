@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/Niloen/nbackup/internal/dle"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
@@ -16,17 +15,6 @@ func newSource(src io.Reader) (io.ReadCloser, error) { return xfer.NewZstdSource
 
 // hashReader returns the hex sha256 of everything read from r.
 func hashReader(r io.Reader) (string, error) { return xfer.HashReader(r) }
-
-// findDLE returns the configured DLE with the given name, or a bare DLE if not
-// found (e.g. restoring from a slot whose source is no longer configured).
-func (e *Engine) findDLE(name string) dle.DLE {
-	for _, d := range e.cfg.DLEs() {
-		if d.Name() == name {
-			return d
-		}
-	}
-	return dle.DLE{}
-}
 
 func humanBytes(b int64) string {
 	const unit = 1000

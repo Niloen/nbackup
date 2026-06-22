@@ -34,7 +34,7 @@ func CmdPlan(args []string) error {
 	}
 
 	plan := eng.Plan(date)
-	fmt.Printf("Plan for run %s  (full interval %dd, catalog %s)\n\n", slot.DateString(date), plan.Interval, cfg.CatalogPath())
+	fmt.Printf("Plan for run %s  (full interval %dd, landing %q)\n\n", slot.DateString(date), plan.Interval, cfg.Landing)
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "DLE\tLEVEL\tEST. SIZE\tREASON")
@@ -58,7 +58,7 @@ func CmdPlan(args []string) error {
 	tw.Flush()
 
 	current := eng.Catalog().TotalBytes()
-	budget, _ := cfg.BudgetBytes()
+	budget := eng.Policy().Budget
 	fmt.Printf("\nCatalog currently stored: %s\n", sizeutil.FormatBytes(current))
 	if !*noEstimate {
 		fmt.Printf("This run (raw, pre-compression): ~%s\n", sizeutil.FormatBytes(estTotal))
@@ -116,7 +116,11 @@ func CmdVerify(args []string) error {
 	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
 	fs.Parse(args)
 
-	eng, err := newEngine(loadConfigRO(*cfgPath, *catalogFlag))
+	cfg, err := loadConfigRO(*cfgPath, *catalogFlag)
+	if err != nil {
+		return err
+	}
+	eng, err := newEngine(cfg)
 	if err != nil {
 		return err
 	}
@@ -147,7 +151,11 @@ func cmdSlotList(args []string) error {
 	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
 	fs.Parse(args)
 
-	eng, err := newEngine(loadConfigRO(*cfgPath, *catalogFlag))
+	cfg, err := loadConfigRO(*cfgPath, *catalogFlag)
+	if err != nil {
+		return err
+	}
+	eng, err := newEngine(cfg)
 	if err != nil {
 		return err
 	}
@@ -178,7 +186,11 @@ func cmdSlotShow(args []string) error {
 	if fs.NArg() < 1 {
 		return fmt.Errorf("usage: nbslot show <slot-id>")
 	}
-	eng, err := newEngine(loadConfigRO(*cfgPath, *catalogFlag))
+	cfg, err := loadConfigRO(*cfgPath, *catalogFlag)
+	if err != nil {
+		return err
+	}
+	eng, err := newEngine(cfg)
 	if err != nil {
 		return err
 	}
@@ -239,7 +251,11 @@ func CmdCatalog(args []string) error {
 	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
 	fs.Parse(args[1:])
 
-	eng, err := newEngine(loadConfigRO(*cfgPath, *catalogFlag))
+	cfg, err := loadConfigRO(*cfgPath, *catalogFlag)
+	if err != nil {
+		return err
+	}
+	eng, err := newEngine(cfg)
 	if err != nil {
 		return err
 	}
@@ -266,7 +282,11 @@ func CmdRestore(args []string) error {
 	if *dest == "" {
 		return fmt.Errorf("-dest is required")
 	}
-	eng, err := newEngine(loadConfigRO(*cfgPath, *catalogFlag))
+	cfg, err := loadConfigRO(*cfgPath, *catalogFlag)
+	if err != nil {
+		return err
+	}
+	eng, err := newEngine(cfg)
 	if err != nil {
 		return err
 	}

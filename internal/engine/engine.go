@@ -37,22 +37,24 @@ func (l Logf) log(format string, args ...any) {
 
 // Engine holds the wired-up components for one configuration. It owns the media
 // store; the catalog is a local cache the engine refreshes from the store.
+// Dump methods are resolved per dumptype and cached.
 type Engine struct {
-	cfg    *config.Config
-	store  media.Store
-	cat    *catalog.Catalog
-	method method.Method
-	pol    policy.Policy
+	cfg     *config.Config
+	store   media.Store
+	cat     *catalog.Catalog
+	pol     policy.Policy
+	methods map[string]method.Method // by cache key (dumptype or "@method")
 }
 
 // New constructs an Engine from configuration: it opens the landing store via
-// the media registry, the dump method via the method registry, and loads the
-// catalog cache (refreshing it from the store the first time it is needed).
+// the media registry and loads the catalog cache (refreshing it from the store
+// the first time it is needed). Dump methods are opened lazily per dumptype.
 func New(cfg *config.Config) (*Engine, error) {
-	store, err := media.OpenStore(cfg.Landing.Media, media.Options{
-		Path:   cfg.CatalogPath(),
-		Bucket: cfg.Media.S3.Bucket,
-	})
+	mediaDef, err := cfg.LandingMedia()
+	if err != nil {
+		return nil, err
+	}
+	store, err := media.OpenStore(mediaDef.Type, media.Options(mediaDef.Params))
 	if err != nil {
 		return nil, err
 	}
@@ -63,19 +65,57 @@ func New(cfg *config.Config) (*Engine, error) {
 	if err := cat.EnsureFresh(store); err != nil {
 		return nil, err
 	}
-	m, err := method.Open("gnutar", method.Options{TarPath: cfg.TarPath()})
+	budget, _ := mediaDef.BudgetBytes()
+	minAge, _ := mediaDef.MinAge()
+	return &Engine{
+		cfg:     cfg,
+		store:   store,
+		cat:     cat,
+		pol:     policy.Policy{MinimumAge: minAge, Budget: budget},
+		methods: map[string]method.Method{},
+	}, nil
+}
+
+// methodForDumpType resolves and caches the dump method for a dumptype,
+// configured with the dumptype's options (plus the global tar path).
+func (e *Engine) methodForDumpType(dtName string) (method.Method, error) {
+	if m, ok := e.methods[dtName]; ok {
+		return m, nil
+	}
+	dt := e.cfg.ResolveDumpType(dtName)
+	m, err := method.Open(dt.Method, e.methodOptions(dt.Params))
 	if err != nil {
 		return nil, err
 	}
-	budget, _ := cfg.BudgetBytes()
-	minAge, _ := cfg.MinimumAge()
-	return &Engine{
-		cfg:    cfg,
-		store:  store,
-		cat:    cat,
-		method: m,
-		pol:    policy.Policy{MinimumAge: minAge, Budget: budget},
-	}, nil
+	e.methods[dtName] = m
+	return m, nil
+}
+
+// methodByName resolves and caches a method by name with only global options
+// (used for restore, where the archive records the producing method).
+func (e *Engine) methodByName(name string) (method.Method, error) {
+	key := "@" + name
+	if m, ok := e.methods[key]; ok {
+		return m, nil
+	}
+	m, err := method.Open(name, e.methodOptions(nil))
+	if err != nil {
+		return nil, err
+	}
+	e.methods[key] = m
+	return m, nil
+}
+
+// methodOptions merges dumptype params with global method configuration.
+func (e *Engine) methodOptions(params map[string]string) method.Options {
+	opts := method.Options{}
+	for k, v := range params {
+		opts[k] = v
+	}
+	if _, ok := opts["tar_path"]; !ok && e.cfg.GnuTarPath != "" {
+		opts["tar_path"] = e.cfg.GnuTarPath
+	}
+	return opts
 }
 
 // RebuildCatalog rescans the store and rewrites the local cache, returning the
@@ -97,19 +137,31 @@ func (e *Engine) Plan(date time.Time) *planner.Plan {
 
 // Estimate returns the uncompressed bytes a planned item would archive.
 func (e *Engine) Estimate(item planner.Item) (int64, error) {
-	req := method.BackupRequest{DLE: item.DLE, Level: item.Level}
+	m, err := e.methodForDumpType(item.DLE.DumpTypeName())
+	if err != nil {
+		return 0, err
+	}
+	req := method.BackupRequest{SourcePath: item.DLE.Path, Level: item.Level}
 	if item.Level >= 1 {
 		req.BaseSnap = e.cat.SnapshotPath(item.Name, item.BaseLevel)
 	}
-	return e.method.Estimate(req)
+	return m.Estimate(req)
 }
 
 // Run executes the plan for a date, producing one sealed slot.
 func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
-	if err := e.method.Check(); err != nil {
-		return nil, err
-	}
 	plan := e.Plan(date)
+
+	// Pre-flight: resolve and check every method before creating a slot.
+	for _, item := range plan.Items {
+		m, err := e.methodForDumpType(item.DLE.DumpTypeName())
+		if err != nil {
+			return nil, err
+		}
+		if err := m.Check(); err != nil {
+			return nil, err
+		}
+	}
 
 	slotID, seq, err := e.allocSlotID(date)
 	if err != nil {
@@ -194,13 +246,18 @@ func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 
 // backupItem archives a single DLE into the slot and returns its metadata.
 func (e *Engine) backupItem(s *slot.Slot, item planner.Item, logf Logf) (*slot.Archive, *slot.ArchiveFiles, error) {
+	m, err := e.methodForDumpType(item.DLE.DumpTypeName())
+	if err != nil {
+		return nil, nil, err
+	}
+
 	fileName := fmt.Sprintf("%s-L%d.tar.zst", item.Name, item.Level)
 	rel := slot.DirArchives + "/" + fileName
 
 	req := method.BackupRequest{
-		DLE:     item.DLE,
-		Level:   item.Level,
-		OutSnap: e.cat.SnapshotPath(item.Name, item.Level),
+		SourcePath: item.DLE.Path,
+		Level:      item.Level,
+		OutSnap:    e.cat.SnapshotPath(item.Name, item.Level),
 	}
 	if item.Level >= 1 {
 		req.BaseSnap = e.cat.SnapshotPath(item.Name, item.BaseLevel)
@@ -222,7 +279,7 @@ func (e *Engine) backupItem(s *slot.Slot, item planner.Item, logf Logf) (*slot.A
 		w.Close()
 		return nil, nil, err
 	}
-	res, berr := e.method.Backup(req, sink)
+	res, berr := m.Backup(req, sink)
 	closeErr := sink.Close()
 	wCloseErr := w.Close()
 	if berr != nil {
@@ -241,7 +298,7 @@ func (e *Engine) backupItem(s *slot.Slot, item planner.Item, logf Logf) (*slot.A
 		DLE:          item.Name,
 		Host:         item.DLE.Host,
 		Path:         item.DLE.Path,
-		Method:       e.method.Name(),
+		Method:       m.Name(),
 		Level:        item.Level,
 		File:         rel,
 		Compressed:   sink.Compressed(),
@@ -256,23 +313,24 @@ func (e *Engine) backupItem(s *slot.Slot, item planner.Item, logf Logf) (*slot.A
 
 // Restore reconstructs a DLE as of a slot into destDir.
 func (e *Engine) Restore(slotID, dleName, destDir string, logf Logf) error {
-	if err := e.method.Check(); err != nil {
-		return err
-	}
 	steps, err := restore.Chain(e.cat.Slots(), dleName, slotID)
 	if err != nil {
 		return err
 	}
 	for _, step := range steps {
 		logf.log("extracting %s L%d -> %s", step.SlotID, step.Level, destDir)
-		if err := e.extractStep(step, dleName, destDir); err != nil {
+		if err := e.extractStep(step, destDir); err != nil {
 			return fmt.Errorf("extract %s: %w", step.File, err)
 		}
 	}
 	return nil
 }
 
-func (e *Engine) extractStep(step restore.Step, dleName, destDir string) error {
+func (e *Engine) extractStep(step restore.Step, destDir string) error {
+	m, err := e.methodByName(step.Method)
+	if err != nil {
+		return err
+	}
 	rc, err := e.store.Open(step.SlotID, step.File)
 	if err != nil {
 		return err
@@ -283,7 +341,7 @@ func (e *Engine) extractStep(step restore.Step, dleName, destDir string) error {
 		return err
 	}
 	defer src.Close()
-	return e.method.Restore(e.findDLE(dleName), src, destDir)
+	return m.Restore(src, destDir)
 }
 
 // DLEsInSlot returns the distinct DLE names archived in a slot.

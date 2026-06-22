@@ -12,7 +12,7 @@ import (
 
 func newStore(t *testing.T, path string) media.Store {
 	t.Helper()
-	s, err := media.OpenStore("local-disk", media.Options{Path: path})
+	s, err := media.OpenStore("local-disk", media.Options{"path": path})
 	if err != nil {
 		t.Fatal(err)
 	}

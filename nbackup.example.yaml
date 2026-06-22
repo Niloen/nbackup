@@ -1,43 +1,59 @@
 # Example NBackup configuration.
-# Copy to nbackup.yaml and adjust paths.
-
-storage:
-  # Target ceiling for total catalog size. The planner reports usage against
-  # this; `nb slot prune` retires old slots to stay within it.
-  budget: 20TB
+# Copy to nbackup.yaml and adjust.
 
 cycle:
-  # A slot cannot be pruned until it is older than this.
-  minimum_age: 30d
+  # Cross-cutting safety: never retire the last verified recovery path.
   require_verified_successor: true
 
-landing:
-  # Where slots are first created. Only local-disk is implemented today.
-  media: local-disk
+# Named storage definitions. Each has a `type`, its own capacity/retention
+# (budget + minimum_age are per-medium, since each store has its own limits),
+# plus type-specific connection parameters.
+# Only local-disk is implemented today; s3/tape are registered placeholders.
+media:
+  fast-disk:
+    type: local-disk
+    path: /var/lib/nbackup/catalog
+    budget: 20TB        # ceiling for this medium; `nb slot prune` keeps within it
+    minimum_age: 30d    # a slot can't be retired from this medium until older
+  cloud:
+    type: s3
+    bucket: company-backups
+    # no budget → unbounded (cost-managed elsewhere)
+  lto:
+    type: tape
+    device: /dev/nst0
+    minimum_age: 180d
 
-# GNU tar binary. Default "tar" (Linux); set to "gtar" on macOS/BSD.
-# gnutar_path: gtar
+# Which medium slots are created on.
+landing: fast-disk
+
+# Optional: where local operational state (slot cache + tar snapshots) lives.
+# Defaults to the landing medium's path when that medium is local-disk.
+# workdir: /var/lib/nbackup/state
+
+# Global default GNU tar binary (use "gtar" on macOS/BSD). A dumptype may
+# override it with a "tar_path" option.
+# gnutar_path: tar
 
 planner:
   # Target days between full backups per DLE (default 7). Fulls are staggered
-  # across DLEs to avoid daily spikes. Between fulls, incremental levels climb
-  # (L1, L2, ...) up to L9, each capturing changes since the previous level.
+  # across DLEs; between fulls, incremental levels climb (L1, L2, ...) to L9.
   full_interval_days: 7
 
-media:
-  local-disk:
-    # The catalog: where slot-YYYY-MM-DD directories live.
-    path: /var/lib/nbackup/catalog
-
-  # Declared for forward-compatibility; not yet wired up.
-  s3:
-    bucket: company-backups
-  tape:
-    enabled: false
-    retention: 180d
+# Named method+option bundles (Amanda's "dumptype"). A DLE selects one.
+dumptypes:
+  default:
+    method: gnutar
+    one-file-system: "true"
+    sparse: "true"
+  no-logs:
+    method: gnutar
+    exclude: "*.log,*.tmp"
 
 sources:
   - host: app01
     path: /home
+    dumptype: default
   - host: db01
     path: /var/lib/postgresql
+    dumptype: no-logs

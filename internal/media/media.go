@@ -18,13 +18,13 @@ type Object struct {
 	Size int64
 }
 
-// Options carries medium-specific configuration to a factory. Each
-// implementation reads the fields it understands.
-type Options struct {
-	Path   string // local-disk: root directory
-	Bucket string // s3: bucket name
-	Device string // tape: device path
-}
+// Options carries medium-specific configuration to a factory as generic
+// key/value parameters (e.g. "path" for local-disk, "bucket" for s3). Keeping
+// it generic means adding a medium type requires no change here.
+type Options map[string]string
+
+// Get returns the value for a parameter key, or "".
+func (o Options) Get(key string) string { return o[key] }
 
 // Store is a landing medium: slots are created, read, listed, and removed as
 // sets of named objects. The slot format is identical across stores.
