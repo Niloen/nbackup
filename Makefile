@@ -1,4 +1,4 @@
-BINARIES := nb nbdump nbplan nbrestore nbverify nbslot
+BINARIES := nb nbdump nbplan nbrestore nbverify nbslot nbcatalog
 BINDIR := bin
 
 .PHONY: all build test vet clean install

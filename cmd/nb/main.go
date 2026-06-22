@@ -18,6 +18,7 @@ Commands:
   slot       List/show/prune slots           (alias: nbslot)
   verify     Verify slot checksums           (alias: nbverify)
   restore    Restore a DLE from a slot       (alias: nbrestore)
+  catalog    Maintain the local slot cache   (alias: nbcatalog)
 
 Run "nb <command> -h" for command options.
 `
@@ -42,6 +43,8 @@ func main() {
 		err = cli.CmdVerify(args)
 	case "restore":
 		err = cli.CmdRestore(args)
+	case "catalog":
+		err = cli.CmdCatalog(args)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return

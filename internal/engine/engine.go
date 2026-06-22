@@ -35,9 +35,11 @@ func (l Logf) log(format string, args ...any) {
 	}
 }
 
-// Engine holds the wired-up components for one configuration.
+// Engine holds the wired-up components for one configuration. It owns the media
+// store; the catalog is a local cache the engine refreshes from the store.
 type Engine struct {
 	cfg    *config.Config
+	store  media.Store
 	cat    *catalog.Catalog
 	method method.Method
 	pol    policy.Policy
@@ -45,7 +47,7 @@ type Engine struct {
 
 // New constructs an Engine from configuration: it opens the landing store via
 // the media registry, the dump method via the method registry, and loads the
-// catalog.
+// catalog cache (refreshing it from the store the first time it is needed).
 func New(cfg *config.Config) (*Engine, error) {
 	store, err := media.OpenStore(cfg.Landing.Media, media.Options{
 		Path:   cfg.CatalogPath(),
@@ -54,8 +56,11 @@ func New(cfg *config.Config) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	cat, err := catalog.Open(store, cfg.WorkdirPath())
+	cat, err := catalog.Open(cfg.WorkdirPath())
 	if err != nil {
+		return nil, err
+	}
+	if err := cat.EnsureFresh(store); err != nil {
 		return nil, err
 	}
 	m, err := method.Open("gnutar", method.Options{TarPath: cfg.TarPath()})
@@ -66,10 +71,17 @@ func New(cfg *config.Config) (*Engine, error) {
 	minAge, _ := cfg.MinimumAge()
 	return &Engine{
 		cfg:    cfg,
+		store:  store,
 		cat:    cat,
 		method: m,
 		pol:    policy.Policy{MinimumAge: minAge, Budget: budget},
 	}, nil
+}
+
+// RebuildCatalog rescans the store and rewrites the local cache, returning the
+// number of slots indexed.
+func (e *Engine) RebuildCatalog() (int, error) {
+	return e.cat.Rebuild(e.store)
 }
 
 // Catalog exposes the catalog for read-only commands.
@@ -98,9 +110,8 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 		return nil, err
 	}
 	plan := e.Plan(date)
-	store := e.cat.Store()
 
-	slotID, seq, err := e.cat.NextSlotID(date)
+	slotID, seq, err := e.allocSlotID(date)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +135,6 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 		s.TotalBytes += arch.Compressed
 		checksums[arch.File] = arch.SHA256
 		manifest.Archives = append(manifest.Archives, *files)
-		e.recordRun(s, item)
 	}
 
 	if err := e.writeObject(slotID, slot.FileManifest, manifest.Marshal); err != nil {
@@ -139,17 +149,47 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 		return nil, err
 	}
 
-	// Seal: write SLOT.json last.
+	// Seal: write SLOT.json last, then record the slot in the local cache.
 	s.Status = slot.StatusSealed
 	s.SealedAt = time.Now().UTC()
 	if err := e.writeObject(slotID, slot.FileSlot, s.Marshal); err != nil {
 		return nil, err
 	}
-	if err := e.cat.SaveHistory(); err != nil {
-		return nil, fmt.Errorf("save history: %w", err)
+	if err := e.cat.Add(s); err != nil {
+		return nil, fmt.Errorf("update catalog cache: %w", err)
 	}
-	_ = store
 	return s, nil
+}
+
+// allocSlotID picks the slot ID for a run on the given date: the first run of
+// the day is "slot-DATE", later runs get the next free ".N". A leftover open
+// (unsealed) slot from a failed attempt is reclaimed. This consults the store
+// (the write path may touch media) so it is robust to a stale cache.
+func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
+	ids, err := e.store.ListSlots()
+	if err != nil {
+		return "", 0, err
+	}
+	existing := map[string]bool{}
+	for _, x := range ids {
+		existing[x] = true
+	}
+	day := slot.DateString(date)
+	for seq = 1; ; seq++ {
+		id = slot.IDFromParts(day, seq)
+		if !existing[id] {
+			return id, seq, nil
+		}
+		sealed, serr := catalog.SealedID(e.store, id)
+		if serr == nil && sealed {
+			continue // a sealed slot occupies this id; try the next sequence
+		}
+		// Unsealed/unreadable leftover: reclaim it.
+		if err := e.store.Remove(id); err != nil {
+			return "", 0, err
+		}
+		return id, seq, nil
+	}
 }
 
 // backupItem archives a single DLE into the slot and returns its metadata.
@@ -173,7 +213,7 @@ func (e *Engine) backupItem(s *slot.Slot, item planner.Item, logf Logf) (*slot.A
 	logf.log("archiving %s (L%d) from %s", item.Name, item.Level, item.DLE.Path)
 
 	// dest (media) <- filter (zstd+checksum) <- source (dump method).
-	w, err := e.cat.Store().Create(s.ID, rel)
+	w, err := e.store.Create(s.ID, rel)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -214,25 +254,12 @@ func (e *Engine) backupItem(s *slot.Slot, item planner.Item, logf Logf) (*slot.A
 	return arch, files, nil
 }
 
-func (e *Engine) recordRun(s *slot.Slot, item planner.Item) {
-	d := e.cat.History().DLE(item.Name)
-	if item.Level == 0 {
-		d.LastFullDate = s.Date
-		d.LastFullSlot = s.ID
-	}
-	d.Runs = append(d.Runs, catalog.RunRecord{Date: s.Date, Slot: s.ID, Level: item.Level})
-}
-
 // Restore reconstructs a DLE as of a slot into destDir.
 func (e *Engine) Restore(slotID, dleName, destDir string, logf Logf) error {
 	if err := e.method.Check(); err != nil {
 		return err
 	}
-	slots, err := e.cat.Slots()
-	if err != nil {
-		return err
-	}
-	steps, err := restore.Chain(slots, dleName, slotID)
+	steps, err := restore.Chain(e.cat.Slots(), dleName, slotID)
 	if err != nil {
 		return err
 	}
@@ -246,7 +273,7 @@ func (e *Engine) Restore(slotID, dleName, destDir string, logf Logf) error {
 }
 
 func (e *Engine) extractStep(step restore.Step, dleName, destDir string) error {
-	rc, err := e.cat.Store().Open(step.SlotID, step.File)
+	rc, err := e.store.Open(step.SlotID, step.File)
 	if err != nil {
 		return err
 	}
@@ -275,11 +302,7 @@ func (e *Engine) DLEsInSlot(s *slot.Slot) []string {
 // Verify checks the checksums of the given slots (all if none given).
 func (e *Engine) Verify(slotIDs []string, logf Logf) (failures int, err error) {
 	if len(slotIDs) == 0 {
-		slots, err := e.cat.Slots()
-		if err != nil {
-			return 0, err
-		}
-		for _, s := range slots {
+		for _, s := range e.cat.Slots() {
 			slotIDs = append(slotIDs, s.ID)
 		}
 	}
@@ -327,19 +350,18 @@ func (e *Engine) verifySlot(id string, logf Logf) (bool, error) {
 
 // Prune evaluates retention and optionally deletes eligible slots.
 func (e *Engine) Prune(now time.Time, apply bool, logf Logf) (eligible int, err error) {
-	slots, err := e.cat.Slots()
-	if err != nil {
-		return 0, err
-	}
-	for _, d := range e.pol.Prune(slots, now) {
+	for _, d := range e.pol.Prune(e.cat.Slots(), now) {
 		if !d.Delete {
 			logf.log("keep   %s  (%s)", d.Slot.ID, d.Reason)
 			continue
 		}
 		eligible++
 		if apply {
-			if err := e.cat.Store().Remove(d.Slot.ID); err != nil {
+			if err := e.store.Remove(d.Slot.ID); err != nil {
 				return eligible, fmt.Errorf("delete %s: %w", d.Slot.ID, err)
+			}
+			if err := e.cat.Remove(d.Slot.ID); err != nil {
+				return eligible, fmt.Errorf("update catalog cache: %w", err)
 			}
 			logf.log("DELETE %s  (%s freed)", d.Slot.ID, humanBytes(d.Slot.TotalBytes))
 		} else {
@@ -360,7 +382,7 @@ func (e *Engine) writeObject(slotID, name string, marshal func() ([]byte, error)
 }
 
 func (e *Engine) putBytes(slotID, name string, data []byte) error {
-	w, err := e.cat.Store().Create(slotID, name)
+	w, err := e.store.Create(slotID, name)
 	if err != nil {
 		return err
 	}
@@ -372,7 +394,7 @@ func (e *Engine) putBytes(slotID, name string, data []byte) error {
 }
 
 func (e *Engine) readObject(slotID, name string) ([]byte, error) {
-	rc, err := e.cat.Store().Open(slotID, name)
+	rc, err := e.store.Open(slotID, name)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +403,7 @@ func (e *Engine) readObject(slotID, name string) ([]byte, error) {
 }
 
 func (e *Engine) hashObject(slotID, name string) (string, error) {
-	rc, err := e.cat.Store().Open(slotID, name)
+	rc, err := e.store.Open(slotID, name)
 	if err != nil {
 		return "", err
 	}

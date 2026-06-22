@@ -57,10 +57,7 @@ func CmdPlan(args []string) error {
 	}
 	tw.Flush()
 
-	current, err := eng.Catalog().TotalBytes()
-	if err != nil {
-		return err
-	}
+	current := eng.Catalog().TotalBytes()
 	budget, _ := cfg.BudgetBytes()
 	fmt.Printf("\nCatalog currently stored: %s\n", sizeutil.FormatBytes(current))
 	if !*noEstimate {
@@ -154,10 +151,7 @@ func cmdSlotList(args []string) error {
 	if err != nil {
 		return err
 	}
-	slots, err := eng.Catalog().Slots()
-	if err != nil {
-		return err
-	}
+	slots := eng.Catalog().Slots()
 	if len(slots) == 0 {
 		fmt.Println("no slots in catalog")
 		return nil
@@ -232,6 +226,28 @@ func cmdPrune(args []string) error {
 	if !*apply && eligible > 0 {
 		fmt.Printf("\n%d slot(s) eligible. Re-run with --apply to delete.\n", eligible)
 	}
+	return nil
+}
+
+// CmdCatalog implements `nbcatalog`: maintain the local slot-index cache.
+func CmdCatalog(args []string) error {
+	if len(args) == 0 || args[0] != "rebuild" {
+		return fmt.Errorf("usage: nbcatalog rebuild [-c config] [-C catalog]")
+	}
+	fs := flag.NewFlagSet("nbcatalog rebuild", flag.ExitOnError)
+	cfgPath := fs.String("c", DefaultConfigPath, "path to config file")
+	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
+	fs.Parse(args[1:])
+
+	eng, err := newEngine(loadConfigRO(*cfgPath, *catalogFlag))
+	if err != nil {
+		return err
+	}
+	n, err := eng.RebuildCatalog()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("catalog cache rebuilt from media: %d slot(s) indexed\n", n)
 	return nil
 }
 

@@ -67,6 +67,7 @@ This produces the `nb` umbrella tool plus standalone commands:
 | `nbslot`    | `nb slot`    | List / show / prune slots                |
 | `nbverify`  | `nb verify`  | Verify slot checksums                    |
 | `nbrestore` | `nb restore` | Restore a DLE from a slot                |
+| `nbcatalog` | `nb catalog` | Maintain the local slot-index cache      |
 
 ## Quick start
 
@@ -190,7 +191,7 @@ orchestrator composes them.
 | `method` | `Method` dump interface + registry | Application API |
 | `method/gnutar` | GNU tar implementation (all tar/snapshot specifics) | amgtar |
 | `xfer` | stream pipeline: zstd + checksum + counting | Xfer API |
-| `catalog` | slot listing, run `History`, snapshot library, slot-id allocation | catalog / curinfo |
+| `catalog` | local cache of the slot index + snapshot library; derives run `History` | catalog / curinfo / tapelist |
 | `policy` | retention/cycle/budget decisions (pure) | Policy |
 | `planner` | multilevel level scheduling (pure) | planner |
 | `engine` | the driver: wires planner→method→xfer→media→catalog | driver / taper |
@@ -203,11 +204,29 @@ backup reads as a pipeline — **source** (`method.Backup`) → **filter**
 (`xfer` zstd+checksum) → **dest** (`media.Store`) — and adding a storage medium
 or dump method is a registry registration, not a conditional in the core.
 
-One deliberate split: slots (the source of truth) live on the `media.Store`,
-while local operational state — the run history and the GNU tar snapshot library
-— lives in a local **workdir** (default: the catalog path), so it stays local
-even when the store is remote, exactly as Amanda keeps `gnutar-lists` and
-`curinfo` on the host.
+### The catalog is a cache
+
+Slots on the `media.Store` are the **source of truth**; they are fully
+self-describing. The `catalog` is a **local cache** of their index (kept in the
+workdir as `catalog.json`), so planning, listing, restore-location, pruning, and
+budget reporting never touch the media — which matters when the store is slow or
+offline (S3/Glacier/tape). This mirrors Amanda, which never scans tapes to
+operate: it keeps `curinfo`/`tapelist`/catalog databases locally and treats the
+media as self-describing enough to rebuild them.
+
+Consequences:
+
+- **Run `History` is derived** from the cached slots, not separately persisted —
+  so there is no second source to drift. (Each `SLOT.json` records the date and
+  per-archive level, which is all the planner needs.)
+- The cache is kept in sync **by construction**: `nb dump` adds the sealed slot,
+  `nb slot prune` removes deleted ones.
+- If the cache is **lost**, it is rebuilt automatically on the next command. For
+  out-of-band changes (slots copied/removed directly on the store), run
+  `nb catalog rebuild` to reconcile — the one operation that rescans the media.
+- The **only** non-derivable local state is the GNU tar snapshot library
+  (`snapshots/…/L<n>.snar`). It is precious — losing it forces a new full —
+  exactly like Amanda's `gnutar-lists`.
 
 ## Development
 

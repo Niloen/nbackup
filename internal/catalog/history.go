@@ -1,16 +1,10 @@
 package catalog
 
-import (
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"time"
-)
+import "time"
 
-// HistoryFile is the per-catalog history file (analogous to Amanda's curinfo).
-const HistoryFile = "state.json"
-
-// History records each DLE's backup runs, used by the planner to choose levels.
+// History is a per-DLE view of backup runs, derived from the slot index. The
+// planner consumes it to choose levels. It is not persisted on its own — it is
+// always computed from the slots (the source of truth).
 type History struct {
 	DLEs map[string]*DLEState `json:"dles"`
 }
@@ -27,40 +21,6 @@ type RunRecord struct {
 	Date  string `json:"date"`
 	Slot  string `json:"slot"`
 	Level int    `json:"level"`
-}
-
-func loadHistory(workdir string) (*History, error) {
-	data, err := os.ReadFile(filepath.Join(workdir, HistoryFile))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &History{DLEs: map[string]*DLEState{}}, nil
-		}
-		return nil, err
-	}
-	var h History
-	if err := json.Unmarshal(data, &h); err != nil {
-		return nil, err
-	}
-	if h.DLEs == nil {
-		h.DLEs = map[string]*DLEState{}
-	}
-	return &h, nil
-}
-
-func (h *History) save(workdir string) error {
-	data, err := json.MarshalIndent(h, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	if err := os.MkdirAll(workdir, 0o755); err != nil {
-		return err
-	}
-	tmp := filepath.Join(workdir, HistoryFile+".tmp")
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(workdir, HistoryFile))
 }
 
 // DLE returns the state for a DLE, creating it if absent.
