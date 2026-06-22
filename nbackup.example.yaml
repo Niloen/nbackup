@@ -2,8 +2,17 @@
 # Copy to nbackup.yaml and adjust.
 
 cycle:
+  # The dump cycle: target time between fulls per DLE (default 7d). Each run
+  # estimates every DLE and degrades over-budget/over-target fulls to
+  # incrementals to balance daily volume; between fulls, levels climb to L9.
+  length: 7d
   # Cross-cutting safety: never retire the last verified recovery path.
   require_verified_successor: true
+  # Promotion fills light runs by pulling future fulls forward. Off by default
+  # so balancing never spends extra storage; when on it's capped at this
+  # fraction of capacity.
+  # promote: true
+  # promote_headroom: 0.8
 
 # Named storage definitions. Each has a `type`, its own capacity/retention
 # (budget + minimum_age are per-medium, since each store has its own limits),
@@ -36,17 +45,6 @@ landing: fast-disk
 # Global default GNU tar binary (use "gtar" on macOS/BSD). A dumptype may
 # override it with a "tar_path" option.
 # gnutar_path: tar
-
-planner:
-  # The cycle length: target days between fulls per DLE (default 7). Each run
-  # estimates every DLE and degrades (demotes) over-budget/over-target fulls to
-  # incrementals to balance daily volume; between fulls, levels climb to L9.
-  full_interval_days: 7
-  # Promotion fills light runs by pulling future fulls forward. Off by default
-  # so balancing never spends extra storage; when on it's capped at this
-  # fraction of capacity.
-  # promote: true
-  # promote_headroom: 0.8
 
 # Named method+option bundles (Amanda's "dumptype"). A DLE selects one.
 dumptypes:

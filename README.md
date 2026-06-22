@@ -160,6 +160,7 @@ See [`nbackup.example.yaml`](nbackup.example.yaml). Minimal example:
 
 ```yaml
 cycle:
+  length: 7d                         # dump cycle: time between fulls per DLE
   require_verified_successor: true   # cross-cutting safety
 
 # Named storage definitions; `landing` selects which one slots are created on.

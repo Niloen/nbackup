@@ -24,21 +24,22 @@ const DefaultMethod = "gnutar"
 type Config struct {
 	// Cycle holds cross-cutting retention safety. Capacity-oriented retention
 	// (budget, minimum_age) lives per-medium, not here.
+	// Cycle is the dump cycle and its retention safety: how often each DLE gets
+	// a full, how runs are balanced, and the cross-cutting recovery guarantee.
 	Cycle struct {
+		// Length is the dump cycle: target time between fulls per DLE (e.g. "7d").
+		Length string `yaml:"length"`
+		// RequireVerifiedSuccessor: never retire the last verified recovery path.
 		RequireVerifiedSuccessor bool `yaml:"require_verified_successor"`
-	} `yaml:"cycle"`
-
-	// Landing names the media definition where slots are created.
-	Landing string `yaml:"landing"`
-
-	Planner struct {
-		FullIntervalDays int `yaml:"full_interval_days"`
 		// Promote enables pulling future fulls forward to fill light runs.
 		// Off by default so balancing never spends extra storage.
 		Promote bool `yaml:"promote"`
 		// PromoteHeadroom caps promotion at this fraction of capacity (default 0.8).
 		PromoteHeadroom float64 `yaml:"promote_headroom"`
-	} `yaml:"planner"`
+	} `yaml:"cycle"`
+
+	// Landing names the media definition where slots are created.
+	Landing string `yaml:"landing"`
 
 	// GnuTarPath is a global default GNU tar binary for the gnutar method.
 	GnuTarPath string `yaml:"gnutar_path"`
@@ -167,6 +168,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("landing %q is not a defined medium", c.Landing)
 		}
 	}
+	if c.Cycle.Length != "" {
+		if _, err := sizeutil.ParseDuration(c.Cycle.Length); err != nil {
+			return fmt.Errorf("cycle.length: %w", err)
+		}
+	}
 	for name, m := range c.Media {
 		if _, err := m.BudgetBytes(); err != nil {
 			return fmt.Errorf("media %s: budget: %w", name, err)
@@ -212,12 +218,20 @@ func (c *Config) ResolveDumpType(name string) DumpType {
 	return dt
 }
 
-// FullIntervalDays returns the target days between full backups for a DLE.
+// FullIntervalDays returns the dump cycle in whole days (default 7).
 func (c *Config) FullIntervalDays() int {
-	if c.Planner.FullIntervalDays > 0 {
-		return c.Planner.FullIntervalDays
+	if c.Cycle.Length == "" {
+		return 7
 	}
-	return 7
+	d, err := sizeutil.ParseDuration(c.Cycle.Length)
+	if err != nil || d <= 0 {
+		return 7
+	}
+	days := int(d.Hours() / 24)
+	if days < 1 {
+		days = 1
+	}
+	return days
 }
 
 // WorkdirPath returns the local operational-state directory, defaulting to the

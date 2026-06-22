@@ -155,7 +155,7 @@ func (e *Engine) Plan(date time.Time) *planner.Plan {
 	return planner.Build(dles, e.cat.History(), e.estimates(dles), planner.Params{
 		FullIntervalDays:    e.cfg.FullIntervalDays(),
 		CapacityRoomBytes:   e.capacityRoom(date),
-		Promote:             e.cfg.Planner.Promote,
+		Promote:             e.cfg.Cycle.Promote,
 		PromoteCeilingBytes: e.promoteCeiling(),
 	}, date)
 }
@@ -222,7 +222,7 @@ func (e *Engine) promoteCeiling() int64 {
 	if capacity <= 0 {
 		return -1
 	}
-	h := e.cfg.Planner.PromoteHeadroom
+	h := e.cfg.Cycle.PromoteHeadroom
 	if h <= 0 || h > 1 {
 		h = 0.8
 	}
