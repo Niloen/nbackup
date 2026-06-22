@@ -46,6 +46,23 @@ landing: fast-disk
 # override it with a "tar_path" option.
 # gnutar_path: tar
 
+# Compression. Archives are piped through an external compressor child (like
+# Amanda), so the CPU work is in a separate, throttleable process. The codec
+# binary must be on PATH (zstd by default; gzip; or "none" for no compression).
+compress:
+  codec: zstd        # zstd | gzip | none
+  level: 3           # codec level (0 = codec default)
+  threads: 0         # compressor worker threads (0 = codec default; zstd: single)
+  # program: /usr/bin/zstd   # optional binary override
+
+# Run several dumps at once (Amanda's inparallel). Keep dumpers x compressor
+# threads <= cores to avoid oversubscribing CPU.
+parallelism:
+  dumpers: 1         # concurrent DLE dumps per run
+
+# Optional CPU politeness: run child processes under `nice -n <value>`.
+# nice: 10
+
 # Named method+option bundles (Amanda's "dumptype"). A DLE selects one.
 dumptypes:
   default:

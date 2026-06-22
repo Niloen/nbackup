@@ -32,9 +32,10 @@ slot-2026-06-21/
 ```
 
 Archives are produced by **GNU tar** (the same engine Amanda uses) in
-listed-incremental format, compressed with zstd. Recovery never requires
-NBackup — a full (L0) is an ordinary tar, and the whole chain restores with
-stock GNU tar:
+listed-incremental format, then piped through an external compressor (`zstd` by
+default; `gzip` or `none` also built in). Recovery never requires NBackup — a
+full (L0) is an ordinary compressed tar, and the whole chain restores with stock
+tools:
 
 ```bash
 # single full archive:
@@ -46,9 +47,10 @@ for a in slot-*/archives/app01-home-L*.tar.zst; do
 done
 ```
 
-> Requires **GNU tar** at runtime (`tar` on Linux, `gtar` on macOS/BSD). The
-> `zstd` CLI is only needed for the manual restore above — NBackup itself
-> compresses/decompresses in process.
+> Requires **GNU tar** and the configured **compressor** (`zstd` by default) at
+> runtime. Like Amanda, NBackup orchestrates these as external child processes
+> rather than reimplementing them — so the same `zstd`/`tar` used for the manual
+> restore above are exactly what produced the archives.
 
 ## Install
 
@@ -233,6 +235,9 @@ lives entirely in the medium's retention strategy.
 - **Go 1.25+** to build.
 - **GNU tar** at runtime (`tar` on Linux, `gtar` elsewhere; set `gnutar_path` in
   config to override). NBackup checks the binary is GNU tar before running.
+- The configured **compressor** on `PATH`: `zstd` (default) or `gzip`; `none`
+  needs nothing. NBackup checks it before running. Optional `nice` is used for
+  CPU politeness when configured.
 
 ## Status & limitations (first version)
 
@@ -266,19 +271,23 @@ orchestrator composes them.
 | `media/localdisk`, `media/s3`, `media/tape` | implementations (s3 is a stub Store; tape is a capacity profile only) | tape/s3/vfs devices |
 | `method` | `Method` dump interface + registry (configured via dumptype options) | Application API |
 | `method/gnutar` | GNU tar implementation (all tar/snapshot specifics) | amgtar |
-| `xfer` | stream pipeline: zstd + checksum + counting | Xfer API |
+| `filter` | external compressor child processes (zstd/gzip/none) + registry | gzip/custom compress |
+| `xfer` | in-process stream metering: checksum + byte counting | Xfer API |
 | `catalog` | local cache of the slot index + snapshot library; derives run `History` | catalog / curinfo / tapelist |
 | `policy` | cross-cutting retention safety floor: protected slots (pure) | Policy |
 | `planner` | multilevel level scheduling (pure) | planner |
-| `engine` | the driver: wires planner→method→xfer→media→catalog | driver / taper |
+| `engine` | the driver: schedules parallel dumpers, wires planner→method→filter→media→catalog | driver / taper |
 | `cli` | thin command wiring | amdump / amadmin |
 
-Dependencies flow one way: `cli → engine → {planner, policy, method, slotio,
-catalog, config}` and the leaf packages `{media, xfer, slot, sizeutil}`. Domain
-packages stay pure; `method`/`media` are pluggable adapters; `engine` is the
-only component aware of all of them. A backup reads as a pipeline — **source**
-(`method.Backup`) → **filter** (`xfer` zstd+checksum) → **dest** (`media.Store`),
-composed by `slotio` — and adding a storage medium or dump method is a registry
+Dependencies flow one way: `cli → engine → {planner, policy, method, filter,
+slotio, catalog, config}` and the leaf packages `{media, xfer, slot, sizeutil}`.
+Domain packages stay pure; `method`/`media`/`filter` are pluggable adapters;
+`engine` is the only component aware of all of them. A backup reads as a pipeline
+of processes — **source** (`tar` via `method.Backup`) → **filter** (external
+compressor child) → **dest** (`media.Store`), metered (checksum + size) and
+composed by `slotio`. Like Amanda, `engine` runs up to `parallelism.dumpers`
+dumpers concurrently (each a `tar`+compressor pipeline) and can `nice` the
+children. Adding a storage medium, dump method, or codec is a registry
 registration, not a conditional in the core.
 
 ### The catalog is a cache
