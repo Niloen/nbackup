@@ -6,29 +6,20 @@ package slot
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	// FileSlot is the slot metadata file written last to seal a slot.
-	FileSlot = "SLOT.json"
-	// FileManifest enumerates the archives and their contents.
-	FileManifest = "MANIFEST.json"
-	// FileChecksums lists sha256 checksums of every archive file.
-	FileChecksums = "CHECKSUMS.sha256"
-	// DirArchives holds the tar.zst archive files.
-	DirArchives = "archives"
-
 	// StatusOpen marks a slot whose creation is in progress.
 	StatusOpen = "open"
 	// StatusSealed marks an immutable, complete slot.
 	StatusSealed = "sealed"
 )
 
-// Slot is the content of SLOT.json.
+// Slot is a run's metadata. It is persisted as the payload of the per-slot seal
+// record (the last file written to a volume); its presence marks the slot sealed.
 type Slot struct {
 	ID         string    `json:"id"`          // e.g. "slot-2026-06-21" or "slot-2026-06-21.2"
 	Date       string    `json:"date"`        // run date, YYYY-MM-DD
@@ -41,33 +32,22 @@ type Slot struct {
 	TotalBytes int64     `json:"total_bytes"` // sum of compressed archive sizes
 }
 
-// Archive describes a single tar.zst within a slot.
+// Archive describes a single DLE dump within a slot. It is identified on a volume
+// by (Slot, DLE, Level); its physical position is held by the catalog, not here,
+// so a slot's metadata is portable across volumes.
 type Archive struct {
-	DLE          string `json:"dle"`          // DLE name, e.g. "app01-home"
-	Host         string `json:"host"`         // source host
-	Path         string `json:"path"`         // source path
-	Method       string `json:"method"`       // dump method that produced it
-	Codec        string `json:"codec"`        // compression codec (zstd|gzip|none); reversed on restore
-	Level        int    `json:"level"`        // 0 = full, >=1 = incremental
-	File         string `json:"file"`         // path relative to slot root
-	Compressed   int64  `json:"compressed"`   // size on disk
-	Uncompressed int64  `json:"uncompressed"` // archive stream size before compression
-	FileCount    int    `json:"file_count"`   // number of member entries archived
-	SHA256       string `json:"sha256"`       // checksum of the archive file
-	BaseSlot     string `json:"base_slot"`    // for level>=1, the slot whose state this builds on
-}
-
-// Manifest is the content of MANIFEST.json: per-archive member listings.
-type Manifest struct {
-	SlotID   string         `json:"slot_id"`
-	Archives []ArchiveFiles `json:"archives"`
-}
-
-// ArchiveFiles lists the members contained in one archive.
-type ArchiveFiles struct {
-	DLE   string   `json:"dle"`
-	Level int      `json:"level"`
-	Files []string `json:"files"`
+	DLE          string   `json:"dle"`          // DLE name, e.g. "app01-home"
+	Host         string   `json:"host"`         // source host
+	Path         string   `json:"path"`         // source path
+	Method       string   `json:"method"`       // dump method that produced it
+	Codec        string   `json:"codec"`        // compression codec (zstd|gzip|none); reversed on restore
+	Level        int      `json:"level"`        // 0 = full, >=1 = incremental
+	Compressed   int64    `json:"compressed"`   // payload size on the volume
+	Uncompressed int64    `json:"uncompressed"` // archive stream size before compression
+	FileCount    int      `json:"file_count"`   // number of member entries archived
+	SHA256       string   `json:"sha256"`       // checksum of the payload
+	BaseSlot     string   `json:"base_slot"`    // for level>=1, the slot whose state this builds on
+	Members      []string `json:"members"`      // member paths archived (was MANIFEST)
 }
 
 // NewSlot starts a new open slot for a run. Archives are added with AddArchive
@@ -153,11 +133,11 @@ func Less(a, b *Slot) bool {
 // Marshal serializes the slot metadata as indented JSON.
 func (s *Slot) Marshal() ([]byte, error) { return marshalJSON(s) }
 
-// ParseSlot deserializes SLOT.json content.
+// ParseSlot deserializes a slot's seal-record payload.
 func ParseSlot(data []byte) (*Slot, error) {
 	var s Slot
 	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", FileSlot, err)
+		return nil, fmt.Errorf("parse slot metadata: %w", err)
 	}
 	if s.Sequence == 0 {
 		s.Sequence = 1
@@ -165,45 +145,10 @@ func ParseSlot(data []byte) (*Slot, error) {
 	return &s, nil
 }
 
-// Marshal serializes the manifest as indented JSON.
-func (m *Manifest) Marshal() ([]byte, error) { return marshalJSON(m) }
-
 func marshalJSON(v any) ([]byte, error) {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 	return append(data, '\n'), nil
-}
-
-// FormatChecksums renders a path->hex map in the "<hex>  <path>" format
-// understood by sha256sum, sorted by path.
-func FormatChecksums(sums map[string]string) []byte {
-	paths := make([]string, 0, len(sums))
-	for p := range sums {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
-	var b strings.Builder
-	for _, p := range paths {
-		fmt.Fprintf(&b, "%s  %s\n", sums[p], p)
-	}
-	return []byte(b.String())
-}
-
-// ParseChecksums parses CHECKSUMS.sha256 content into a path->hex map.
-func ParseChecksums(data []byte) (map[string]string, error) {
-	out := map[string]string{}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.Fields(line)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("malformed checksum line: %q", line)
-		}
-		out[parts[1]] = parts[0]
-	}
-	return out, nil
 }

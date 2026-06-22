@@ -199,9 +199,9 @@ func cmdSlotShow(args []string) error {
 	fmt.Printf("  sealed:  %s\n", s.SealedAt.Format("2006-01-02 15:04:05 MST"))
 	fmt.Printf("  total:   %s\n\n", sizeutil.FormatBytes(s.TotalBytes))
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "DLE\tLEVEL\tFILES\tSIZE\tFILE")
+	fmt.Fprintln(tw, "DLE\tLEVEL\tFILES\tSIZE\tCODEC")
 	for _, a := range s.Archives {
-		fmt.Fprintf(tw, "%s\tL%d\t%d\t%s\t%s\n", a.DLE, a.Level, a.FileCount, sizeutil.FormatBytes(a.Compressed), a.File)
+		fmt.Fprintf(tw, "%s\tL%d\t%d\t%s\t%s\n", a.DLE, a.Level, a.FileCount, sizeutil.FormatBytes(a.Compressed), a.Codec)
 	}
 	tw.Flush()
 	return nil
@@ -234,6 +234,36 @@ func cmdPrune(args []string) error {
 	if !*apply && eligible > 0 {
 		fmt.Printf("\n%d slot(s) eligible. Re-run with --apply to delete.\n", eligible)
 	}
+	return nil
+}
+
+// CmdCopy implements `nb copy`: stream a slot from the landing medium to another
+// configured medium (e.g. disk -> tape).
+func CmdCopy(args []string) error {
+	fs := flag.NewFlagSet("nb copy", flag.ExitOnError)
+	cfgPath := fs.String("c", DefaultConfigPath, "path to config file")
+	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
+	to := fs.String("to", "", "destination medium name (required)")
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: nb copy --to <medium> <slot-id>")
+	}
+	if *to == "" {
+		return fmt.Errorf("--to <medium> is required")
+	}
+	cfg, err := loadConfig(*cfgPath, *catalogFlag)
+	if err != nil {
+		return err
+	}
+	eng, err := newEngine(cfg)
+	if err != nil {
+		return err
+	}
+	if err := eng.CopySlot(fs.Arg(0), *to, logfStdout); err != nil {
+		return err
+	}
+	fmt.Println("copy complete")
 	return nil
 }
 

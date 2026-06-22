@@ -41,11 +41,11 @@ func (l Logf) log(format string, args ...any) {
 }
 
 // Engine holds the wired-up components for one configuration. It owns the media
-// store; the catalog is a local cache the engine refreshes from the store.
+// volume; the catalog is a local cache the engine refreshes from the volume.
 // Dump methods are resolved per dumptype and cached.
 type Engine struct {
 	cfg     *config.Config
-	store   media.Store
+	vol     media.Volume
 	reader  *slotio.Reader
 	profile media.Profile
 	minAge  time.Duration
@@ -55,16 +55,16 @@ type Engine struct {
 	fopts   filter.Options           // codec invocation options (level/threads/nice)
 }
 
-// New constructs an Engine from configuration: it opens the landing store and
+// New constructs an Engine from configuration: it opens the landing volume and
 // its capacity profile via the media registry, and loads the catalog cache
-// (refreshing it from the store the first time it is needed). Dump methods are
+// (refreshing it from the volume the first time it is needed). Dump methods are
 // opened lazily per dumptype.
 func New(cfg *config.Config) (*Engine, error) {
 	mediaDef, err := cfg.LandingMedia()
 	if err != nil {
 		return nil, err
 	}
-	store, err := media.OpenStore(mediaDef.Type, media.Options(mediaDef.Params))
+	vol, err := media.OpenVolume(mediaDef.Type, media.Options(mediaDef.Params))
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +76,7 @@ func New(cfg *config.Config) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := cat.EnsureFresh(store); err != nil {
+	if err := cat.EnsureFresh(vol); err != nil {
 		return nil, err
 	}
 	minAge, _ := mediaDef.MinAge()
@@ -88,8 +88,8 @@ func New(cfg *config.Config) (*Engine, error) {
 	}
 	return &Engine{
 		cfg:     cfg,
-		store:   store,
-		reader:  slotio.NewReader(store, fopts),
+		vol:     vol,
+		reader:  slotio.NewReader(vol, fopts),
 		profile: profile,
 		minAge:  minAge,
 		cat:     cat,
@@ -154,10 +154,37 @@ func (e *Engine) methodOptions(params map[string]string) method.Options {
 	return opts
 }
 
-// RebuildCatalog rescans the store and rewrites the local cache, returning the
+// RebuildCatalog rescans the volume and rewrites the local cache, returning the
 // number of slots indexed.
 func (e *Engine) RebuildCatalog() (int, error) {
-	return e.cat.Rebuild(e.store)
+	return e.cat.Rebuild(e.vol)
+}
+
+// CopySlot streams a sealed slot from the landing volume to another configured
+// medium, file by file. The destination assigns its own positions; restore from
+// it works after a catalog rebuild against that medium.
+func (e *Engine) CopySlot(slotID, targetMedia string, logf Logf) error {
+	if _, err := e.cat.ReadSlot(slotID); err != nil {
+		return err
+	}
+	if targetMedia == e.cfg.Landing {
+		return fmt.Errorf("target medium %q is the landing medium", targetMedia)
+	}
+	def, ok := e.cfg.Media[targetMedia]
+	if !ok {
+		return fmt.Errorf("unknown medium %q", targetMedia)
+	}
+	dst, err := media.OpenVolume(def.Type, media.Options(def.Params))
+	if err != nil {
+		return err
+	}
+	logf.log("copying %s to %q", slotID, targetMedia)
+	n, err := media.CopySlot(dst, e.vol, slotID)
+	if err != nil {
+		return err
+	}
+	logf.log("copied %d file(s) to %q", n, targetMedia)
+	return nil
 }
 
 // Catalog exposes the catalog for read-only commands.
@@ -274,7 +301,7 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 		return nil, err
 	}
 	s := slot.NewSlot(slotID, slot.DateString(date), seq, "nbdump", time.Now().UTC())
-	w, err := slotio.NewWriter(e.store, s, e.codec, e.fopts)
+	w, err := slotio.NewWriter(e.vol, s, e.codec, e.fopts)
 	if err != nil {
 		return nil, err
 	}
@@ -288,7 +315,11 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := e.cat.Add(sealed); err != nil {
+	posMap := map[string]int{}
+	for _, p := range w.Positions() {
+		posMap[catalog.ArchiveKey(p.DLE, p.Level)] = p.Pos
+	}
+	if err := e.cat.Add(sealed, posMap); err != nil {
 		return nil, fmt.Errorf("update catalog cache: %w", err)
 	}
 	return sealed, nil
@@ -356,30 +387,33 @@ func (e *Engine) runDumpers(items []planner.Item, w *slotio.Writer, logf Logf) e
 }
 
 // allocSlotID picks the slot ID for a run on the given date: the first run of
-// the day is "slot-DATE", later runs get the next free ".N". A leftover open
-// (unsealed) slot from a failed attempt is reclaimed. This consults the store
-// (the write path may touch media) so it is robust to a stale cache.
+// the day is "slot-DATE", later runs get the next free ".N". A leftover unsealed
+// slot from a failed attempt is reclaimed. This consults the volume (the write
+// path may touch media) so it is robust to a stale cache.
 func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
-	ids, err := e.store.ListSlots()
+	files, err := e.vol.Files()
 	if err != nil {
 		return "", 0, err
 	}
-	existing := map[string]bool{}
-	for _, x := range ids {
-		existing[x] = true
+	present := map[string]bool{} // slot id -> has any file
+	sealed := map[string]bool{}  // slot id -> has a seal record
+	for _, f := range files {
+		present[f.Header.Slot] = true
+		if f.Header.Kind == media.KindSeal {
+			sealed[f.Header.Slot] = true
+		}
 	}
 	day := slot.DateString(date)
 	for seq = 1; ; seq++ {
 		id = slot.IDFromParts(day, seq)
-		if !existing[id] {
+		if !present[id] {
 			return id, seq, nil
 		}
-		sealed, serr := catalog.SealedID(e.store, id)
-		if serr == nil && sealed {
+		if sealed[id] {
 			continue // a sealed slot occupies this id; try the next sequence
 		}
-		// Unsealed/unreadable leftover: reclaim it.
-		if err := e.store.Remove(id); err != nil {
+		// Unsealed leftover from a failed attempt: reclaim it.
+		if err := e.vol.RemoveSlot(id); err != nil {
 			return "", 0, err
 		}
 		return id, seq, nil
@@ -440,9 +474,9 @@ func (e *Engine) Restore(slotID, dleName, destDir string, logf Logf) error {
 		return err
 	}
 	for _, step := range steps {
-		logf.log("extracting %s L%d -> %s", step.SlotID, step.Level, destDir)
+		logf.log("extracting %s %s L%d -> %s", step.SlotID, step.DLE, step.Level, destDir)
 		if err := e.extractStep(step, destDir); err != nil {
-			return fmt.Errorf("extract %s: %w", step.File, err)
+			return fmt.Errorf("extract %s %s L%d: %w", step.SlotID, step.DLE, step.Level, err)
 		}
 	}
 	return nil
@@ -453,7 +487,11 @@ func (e *Engine) extractStep(step restore.Step, destDir string) error {
 	if err != nil {
 		return err
 	}
-	rc, err := e.reader.OpenArchive(step.SlotID, step.File, step.Codec)
+	pos, ok := e.cat.Position(step.SlotID, step.DLE, step.Level)
+	if !ok {
+		return fmt.Errorf("position not found in catalog (run `nb catalog rebuild`)")
+	}
+	rc, err := e.reader.OpenArchive(pos, step.Codec)
 	if err != nil {
 		return err
 	}
@@ -496,17 +534,33 @@ func (e *Engine) Verify(slotIDs []string, logf Logf) (failures int, err error) {
 }
 
 func (e *Engine) verifySlot(id string, logf Logf) (bool, error) {
-	res, err := e.reader.VerifySlot(id)
+	s, err := e.cat.ReadSlot(id)
 	if err != nil {
 		return false, err
 	}
-	for _, p := range res.Problems {
-		logf.log("%s: %s", id, p)
+	ok := true
+	for _, a := range s.Archives {
+		pos, found := e.cat.Position(id, a.DLE, a.Level)
+		if !found {
+			logf.log("%s: %s L%d POSITION MISSING", id, a.DLE, a.Level)
+			ok = false
+			continue
+		}
+		good, verr := e.reader.VerifyFile(pos, a.SHA256)
+		if verr != nil {
+			logf.log("%s: %s L%d ERROR %v", id, a.DLE, a.Level, verr)
+			ok = false
+			continue
+		}
+		if !good {
+			logf.log("%s: %s L%d CHECKSUM MISMATCH", id, a.DLE, a.Level)
+			ok = false
+		}
 	}
-	if res.OK() {
-		logf.log("%s: OK (%d archive(s))", id, res.Archives)
+	if ok {
+		logf.log("%s: OK (%d archive(s))", id, len(s.Archives))
 	}
-	return res.OK(), nil
+	return ok, nil
 }
 
 // Prune reconciles the landing medium to its retention model: it computes the
@@ -539,7 +593,7 @@ func (e *Engine) Prune(now time.Time, apply bool, logf Logf) (eligible int, err 
 		}
 		eligible++
 		if apply {
-			if err := e.store.Remove(s.ID); err != nil {
+			if err := e.vol.RemoveSlot(s.ID); err != nil {
 				return eligible, fmt.Errorf("delete %s: %w", s.ID, err)
 			}
 			if err := e.cat.Remove(s.ID); err != nil {

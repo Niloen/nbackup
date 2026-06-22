@@ -1,75 +1,53 @@
 package slotio
 
 import (
-	"fmt"
 	"io"
 
 	"github.com/Niloen/nbackup/internal/filter"
 	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/slot"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// Reader reads slot contents back from a media.Store.
+// Reader reads slot contents back from a media.Volume.
 type Reader struct {
-	store media.Store
+	vol   media.Volume
 	fopts filter.Options
 }
 
-// NewReader returns a Reader over store. fopts carries codec settings (e.g. a
+// NewReader returns a Reader over vol. fopts carries codec settings (e.g. a
 // binary override) used when decompressing archives.
-func NewReader(store media.Store, fopts filter.Options) *Reader {
-	return &Reader{store: store, fopts: fopts}
+func NewReader(vol media.Volume, fopts filter.Options) *Reader {
+	return &Reader{vol: vol, fopts: fopts}
 }
 
-// OpenArchive opens an archive's decompressed stream for restore, reversing the
-// codec the archive was written with. The caller closes the returned reader,
-// which closes the decompressor child and the underlying store object.
-func (r *Reader) OpenArchive(slotID, file, codec string) (io.ReadCloser, error) {
-	obj, err := r.store.Open(slotID, file)
+// OpenArchive opens the decompressed stream of the archive file at pos, reversing
+// the codec it was written with. The caller closes the returned reader, which
+// closes the decompressor child and the underlying volume file.
+func (r *Reader) OpenArchive(pos int, codec string) (io.ReadCloser, error) {
+	_, payload, err := r.vol.ReadFile(pos)
 	if err != nil {
 		return nil, err
 	}
-	src, err := filter.Decompress(codec, obj, r.fopts)
+	src, err := filter.Decompress(codec, payload, r.fopts)
 	if err != nil {
-		obj.Close()
+		payload.Close()
 		return nil, err
 	}
-	return multiCloser{Reader: src, closers: []io.Closer{src, obj}}, nil
+	return multiCloser{Reader: src, closers: []io.Closer{src, payload}}, nil
 }
 
-// VerifyResult is the outcome of verifying one slot's archives.
-type VerifyResult struct {
-	Archives int      // number of archives checked
-	Problems []string // human-readable description of each failed archive
-}
-
-// OK reports whether every archive matched its recorded checksum.
-func (v VerifyResult) OK() bool { return len(v.Problems) == 0 }
-
-// VerifySlot re-hashes every archive recorded in the slot's checksum file and
-// compares it to the recorded value.
-func (r *Reader) VerifySlot(slotID string) (VerifyResult, error) {
-	data, err := readBytes(r.store, slotID, slot.FileChecksums)
+// VerifyFile re-hashes the raw payload at pos and compares it to want.
+func (r *Reader) VerifyFile(pos int, want string) (bool, error) {
+	_, payload, err := r.vol.ReadFile(pos)
 	if err != nil {
-		return VerifyResult{}, err
+		return false, err
 	}
-	sums, err := slot.ParseChecksums(data)
+	defer payload.Close()
+	got, err := xfer.HashReader(payload)
 	if err != nil {
-		return VerifyResult{}, err
+		return false, err
 	}
-	res := VerifyResult{Archives: len(sums)}
-	for rel, want := range sums {
-		got, herr := hashObject(r.store, slotID, rel)
-		if herr != nil {
-			res.Problems = append(res.Problems, fmt.Sprintf("%s MISSING (%v)", rel, herr))
-			continue
-		}
-		if got != want {
-			res.Problems = append(res.Problems, fmt.Sprintf("%s CHECKSUM MISMATCH", rel))
-		}
-	}
-	return res, nil
+	return got == want, nil
 }
 
 // multiCloser adapts a reader plus the closers backing it into one ReadCloser.
@@ -86,36 +64,4 @@ func (m multiCloser) Close() error {
 		}
 	}
 	return err
-}
-
-// --- object I/O over a Store (shared by Writer and Reader) ---
-
-func putBytes(store media.Store, slotID, name string, data []byte) error {
-	w, err := store.Create(slotID, name)
-	if err != nil {
-		return err
-	}
-	if _, err := w.Write(data); err != nil {
-		w.Close()
-		return err
-	}
-	return w.Close()
-}
-
-func readBytes(store media.Store, slotID, name string) ([]byte, error) {
-	rc, err := store.Open(slotID, name)
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
-	return io.ReadAll(rc)
-}
-
-func hashObject(store media.Store, slotID, name string) (string, error) {
-	rc, err := store.Open(slotID, name)
-	if err != nil {
-		return "", err
-	}
-	defer rc.Close()
-	return xfer.HashReader(rc)
 }

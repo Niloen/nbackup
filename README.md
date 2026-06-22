@@ -17,33 +17,36 @@ This is a first version. See [PRD.md](PRD.md) for the full product vision.
 - **DLE** — a backup source (`host` + `path`).
 - **Run** — one planner execution, typically daily.
 - **Cycle** — a safety boundary controlling when slots may be deleted.
-- **Media** — where slot copies live (local disk today; S3/tape planned).
+- **Media** — a **Volume** where slots live: local disk, a virtual tape, or (stub)
+  S3. Slots stream between volumes (`nb copy`), e.g. disk → tape.
 
-A slot looks exactly like the PRD describes:
+A medium is a **volume**: an ordered sequence of self-describing files (Amanda's
+Device API). Each file begins with a fixed 32 KB header block — identity metadata
+(slot, DLE, level, codec, …) — followed by the payload; a slot is a run of archive
+files plus a final **seal record** (the slot's metadata) that marks it complete.
+Files are addressed by position (a tape file number), so the same shape maps to
+disk, an object store, or tape. On local disk the layout is human-friendly:
 
 ```text
-slot-2026-06-21/
-  SLOT.json          # slot metadata; written last, which "seals" the slot
-  MANIFEST.json      # per-archive file listings
-  CHECKSUMS.sha256   # sha256 of every archive (sha256sum-compatible)
-  archives/
-    app01-home-L0.tar.zst
-    db01-pg-L1.tar.zst
+slots/slot-2026-06-21/
+  000000-app01-home-L0     # 32 KB header block, then the compressed tar payload
+  000001-db01-pg-L1
+  000002-seal              # slot metadata (identity + sizes + checksums)
 ```
 
 Archives are produced by **GNU tar** (the same engine Amanda uses) in
 listed-incremental format, then piped through an external compressor (`zstd` by
-default; `gzip` or `none` also built in). Recovery never requires NBackup — a
-full (L0) is an ordinary compressed tar, and the whole chain restores with stock
-tools:
+default; `gzip` or `none` also built in). Recovery never requires NBackup — skip
+the header block and a full (L0) is an ordinary compressed tar, and the whole
+chain restores with stock tools:
 
 ```bash
-# single full archive:
-zstd -dc app01-home-L0.tar.zst | tar -xf -
+# single full archive (dd skips the 32 KB header block):
+dd bs=32k skip=1 < 000000-app01-home-L0 | zstd -dc | tar -xf -
 
 # a full + incrementals, replayed in order (applies deletions):
-for a in slot-*/archives/app01-home-L*.tar.zst; do
-  zstd -dc "$a" | tar --extract --listed-incremental=/dev/null
+for a in slots/slot-*/0*-app01-home-L*; do
+  dd bs=32k skip=1 < "$a" | zstd -dc | tar --extract --listed-incremental=/dev/null
 done
 ```
 
@@ -70,6 +73,7 @@ This produces the `nb` umbrella tool plus standalone commands:
 | `nbverify`  | `nb verify`  | Verify slot checksums                    |
 | `nbrestore` | `nb restore` | Restore a DLE from a slot                |
 | `nbcatalog` | `nb catalog` | Maintain the local slot-index cache      |
+| —           | `nb copy`    | Copy a slot to another medium (disk → tape) |
 
 ## Quick start
 
@@ -142,10 +146,11 @@ overwritten. Restores and pruning order slots by date **then** sequence.
 
 ### Sealing
 
-A run writes archives, then `MANIFEST.json` and `CHECKSUMS.sha256`, verifies the
-checksums against what landed on disk, and finally writes `SLOT.json` with
-`status: sealed`. After sealing, a slot is treated as immutable — re-running a
-sealed date is refused.
+A run writes the archive files, verifies their checksums against what landed on
+the volume, and finally appends the **seal record** — one file carrying the slot
+metadata (identity, sizes, checksums, member listings) with `status: sealed`. The
+seal record is written last, so its presence marks the slot complete; after
+sealing, a slot is immutable — re-running a sealed date is refused.
 
 ### Restore
 
@@ -241,14 +246,17 @@ lives entirely in the medium's retention strategy.
 
 ## Status & limitations (first version)
 
-Implemented: local-disk landing, balanced **multilevel (L0–L9)** planning with a
-GNU tar snapshot library, immutable sealed slots with **sequence-suffixed**
+Implemented: local-disk and **virtual-tape** Volumes, **copying slots between
+media** (`nb copy`, e.g. disk → tape), balanced **multilevel (L0–L9)** planning
+with a GNU tar snapshot library, immutable sealed slots with **sequence-suffixed**
 same-day runs, **deletion-aware** incremental restore, checksum verification,
 point-in-time restore, budget reporting, cycle-safe pruning.
 
 Not yet implemented (declared in config for forward-compatibility):
 
-- **S3 and tape media** — only `local-disk` landing works today.
+- **Real tape drives** — the `tape` medium is a file-backed virtual tape (the
+  same sequential, file-numbered Volume a `/dev/nst0` drive would back via `mt`).
+- **S3 media** — registered as a Volume stub; no S3 client yet.
 - **Budget-driven retention** — budget is reported; pruning is cycle-based, not
   yet automatically driven to fit the budget.
 - **Remote sources** — `host` is metadata; `path` is read from the local
@@ -265,10 +273,10 @@ orchestrator composes them.
 | Package | Responsibility | Amanda analogue |
 |---|---|---|
 | `config` | config + domain entities: `DLE`, `Media`, `DumpType` | Disklist / dumptype / storage |
-| `slot` | slot format: pure data + lifecycle (`NewSlot`/`AddArchive`/`Seal`) | Header / amar |
-| `slotio` | authors & reads a slot on a `Store` (layout, sealing, verify) | taper / amrestore |
-| `media` | `Store` I/O + `Profile` (capacity + reclamation) + registry | Device API + Policy |
-| `media/localdisk`, `media/s3`, `media/tape` | implementations (s3 is a stub Store; tape is a capacity profile only) | tape/s3/vfs devices |
+| `slot` | slot metadata: pure data + lifecycle (`NewSlot`/`AddArchive`/`Seal`) | Header / amar |
+| `slotio` | maps a slot onto a `Volume`'s files (headers, seal record, verify) | taper / amrestore |
+| `media` | `Volume` (positional, self-describing files + headers) + `Profile` + registry | Device API |
+| `media/localdisk`, `media/tape`, `media/s3` | Volume implementations: disk (random-access), virtual tape (sequential, file-numbered, labeled), s3 (stub) | tape/vfs/s3 devices |
 | `method` | `Method` dump interface + registry (configured via dumptype options) | Application API |
 | `method/gnutar` | GNU tar implementation (all tar/snapshot specifics) | amgtar |
 | `filter` | external compressor child processes (zstd/gzip/none) + registry | gzip/custom compress |
@@ -284,7 +292,7 @@ slotio, catalog, config}` and the leaf packages `{media, xfer, slot, sizeutil}`.
 Domain packages stay pure; `method`/`media`/`filter` are pluggable adapters;
 `engine` is the only component aware of all of them. A backup reads as a pipeline
 of processes — **source** (`tar` via `method.Backup`) → **filter** (external
-compressor child) → **dest** (`media.Store`), metered (checksum + size) and
+compressor child) → **dest** (`media.Volume`), metered (checksum + size) and
 composed by `slotio`. Like Amanda, `engine` runs up to `parallelism.dumpers`
 dumpers concurrently (each a `tar`+compressor pipeline) and can `nice` the
 children. Adding a storage medium, dump method, or codec is a registry
@@ -292,18 +300,19 @@ registration, not a conditional in the core.
 
 ### The catalog is a cache
 
-Slots on the `media.Store` are the **source of truth**; they are fully
-self-describing. The `catalog` is a **local cache** of their index (kept in the
-workdir as `catalog.json`), so planning, listing, restore-location, pruning, and
-budget reporting never touch the media — which matters when the store is slow or
-offline (S3/Glacier/tape). This mirrors Amanda, which never scans tapes to
-operate: it keeps `curinfo`/`tapelist`/catalog databases locally and treats the
-media as self-describing enough to rebuild them.
+Slots on the `media.Volume` are the **source of truth**; every file is
+self-describing (header block) and every slot carries a seal record. The
+`catalog` is a **local cache** of the slot index *and each archive's volume
+position* (kept in the workdir as `catalog.json`), so planning, listing,
+restore-location, pruning, and budget reporting never touch the media — which
+matters when the volume is slow or offline (S3/Glacier/tape). This mirrors
+Amanda, which never scans tapes to operate: it keeps `curinfo`/`tapelist`/catalog
+databases locally and rebuilds them from self-describing media when needed.
 
 Consequences:
 
 - **Run `History` is derived** from the cached slots, not separately persisted —
-  so there is no second source to drift. (Each `SLOT.json` records the date and
+  so there is no second source to drift. (Each seal record holds the date and
   per-archive level, which is all the planner needs.)
 - The cache is kept in sync **by construction**: `nb dump` adds the sealed slot,
   `nb slot prune` removes deleted ones.

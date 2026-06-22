@@ -109,6 +109,65 @@ func TestParallelDumpers(t *testing.T) {
 	}
 }
 
+// TestCopyToTapeAndRestore dumps to disk, copies the slot to a (virtual) tape
+// medium, then restores it from the tape alone — exercising CopySlot and a tape
+// Volume end to end.
+func TestCopyToTapeAndRestore(t *testing.T) {
+	src := t.TempDir()
+	diskDir := t.TempDir()
+	tapeDir := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "copy me to tape")
+
+	cfg := &config.Config{
+		Landing: "disk",
+		Media: map[string]config.Media{
+			"disk": {Type: "local-disk", Params: map[string]string{"path": diskDir}},
+			"tape": {Type: "tape", Params: map[string]string{"dir": tapeDir}},
+		},
+		Sources: []config.DLE{{Host: "h", Path: src}},
+	}
+	cfg.Compress.Codec = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	day := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
+	s, err := eng.Run(day, nil)
+	if err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+	if err := eng.CopySlot(s.ID, "tape", nil); err != nil {
+		t.Fatalf("copy to tape: %v", err)
+	}
+
+	// Restore from the tape alone: a fresh engine landed on the tape rebuilds its
+	// catalog from the volume, then restores.
+	tcfg := &config.Config{
+		Landing: "tape",
+		Media:   map[string]config.Media{"tape": {Type: "tape", Params: map[string]string{"dir": tapeDir}}},
+		Sources: []config.DLE{{Host: "h", Path: src}},
+		Workdir: t.TempDir(), // separate catalog cache, forcing a rebuild from tape
+	}
+	tcfg.Compress.Codec = "none"
+	teng, err := New(tcfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := teng.RebuildCatalog(); err != nil || n != 1 {
+		t.Fatalf("rebuild from tape: n=%d err=%v", n, err)
+	}
+	dest := t.TempDir()
+	name := config.DLE{Host: "h", Path: src}.Name()
+	if err := teng.Restore(s.ID, name, dest, nil); err != nil {
+		t.Fatalf("restore from tape: %v", err)
+	}
+	assertContent(t, filepath.Join(dest, "f.txt"), "copy me to tape")
+}
+
 func write(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

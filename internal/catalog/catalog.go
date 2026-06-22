@@ -1,10 +1,10 @@
 // Package catalog is NBackup's local cache and bookkeeping layer, analogous to
-// Amanda's curinfo/tapelist/catalog databases. Because the media store may be
-// slow or offline (tape, Glacier), the catalog keeps a local index of slots so
-// that planning, listing, restore-location, pruning, and budget reporting never
-// touch the media. The slots on the store remain the source of truth: the cache
-// is a projection of them and can be rebuilt by rescanning the store. Per-DLE
-// run History is derived from the index, so it is never separately persisted.
+// Amanda's curinfo/tapelist/catalog databases. Because the media volume may be
+// slow or offline (tape, Glacier), the catalog keeps a local index of slots — and
+// of each archive's volume position — so planning, listing, restore-location,
+// pruning, and budget reporting never touch the media. The volume remains the
+// source of truth: it is self-describing (every file has a header, every slot a
+// seal record), so the cache can be rebuilt by scanning it.
 //
 // The only non-derivable local state is the GNU tar snapshot library (.snar
 // files), which lives in the workdir and is precious — losing it forces a full.
@@ -29,18 +29,28 @@ const (
 	DirSnapshots = "snapshots"
 )
 
-// Catalog is a local cache of sealed slots plus the snapshot library. It holds
-// no long-lived store reference; the store is passed in only to refresh.
+// ArchiveKey is the per-slot key identifying an archive by DLE and level.
+func ArchiveKey(dle string, level int) string { return fmt.Sprintf("%s/%d", dle, level) }
+
+// Catalog is a local cache of sealed slots plus a map of each archive's volume
+// position. It holds no long-lived volume reference; the volume is passed in only
+// to refresh.
 type Catalog struct {
 	workdir string
-	index   []*slot.Slot // cached sealed slots, sorted in run order
-	loaded  bool         // whether the cache was loaded or refreshed this session
+	index   []*slot.Slot              // cached sealed slots, sorted in run order
+	pos     map[string]map[string]int // slotID -> ArchiveKey -> volume position
+	loaded  bool
 }
 
-// Open loads the catalog cache from the workdir. If the cache file is absent,
-// the catalog is empty and not yet loaded (EnsureFresh will populate it).
+type cacheFile struct {
+	Slots []*slot.Slot              `json:"slots"`
+	Pos   map[string]map[string]int `json:"pos"`
+}
+
+// Open loads the catalog cache from the workdir. If the cache file is absent, the
+// catalog is empty and not yet loaded (EnsureFresh will populate it).
 func Open(workdir string) (*Catalog, error) {
-	c := &Catalog{workdir: workdir}
+	c := &Catalog{workdir: workdir, pos: map[string]map[string]int{}}
 	data, err := os.ReadFile(filepath.Join(workdir, CacheFile))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -48,24 +58,25 @@ func Open(workdir string) (*Catalog, error) {
 		}
 		return nil, err
 	}
-	var slots []*slot.Slot
-	if err := json.Unmarshal(data, &slots); err != nil {
+	var cf cacheFile
+	if err := json.Unmarshal(data, &cf); err != nil {
 		return nil, fmt.Errorf("parse catalog cache: %w", err)
 	}
-	c.setIndex(slots)
+	c.setIndex(cf.Slots)
+	if cf.Pos != nil {
+		c.pos = cf.Pos
+	}
 	c.loaded = true
 	return c, nil
 }
 
-// EnsureFresh populates an empty cache from the store the first time it is
-// needed (e.g. a lost cache or a catalog created before caching). If slots are
-// found, the cache is materialized to disk once. Up-to-date caches are left
-// untouched; out-of-band drift is reconciled with an explicit Rebuild.
-func (c *Catalog) EnsureFresh(store media.Store) error {
+// EnsureFresh populates an empty cache from the volume the first time it is needed
+// (a lost cache, or a catalog created before caching).
+func (c *Catalog) EnsureFresh(vol media.Volume) error {
 	if c.loaded {
 		return nil
 	}
-	if err := c.refresh(store); err != nil {
+	if err := c.refresh(vol); err != nil {
 		return err
 	}
 	c.loaded = true
@@ -75,11 +86,9 @@ func (c *Catalog) EnsureFresh(store media.Store) error {
 	return nil
 }
 
-// Rebuild rescans the store and replaces the cache, persisting it. This is the
-// explicit reconcile path (the only operation that reads every slot's metadata
-// off the media).
-func (c *Catalog) Rebuild(store media.Store) (int, error) {
-	if err := c.refresh(store); err != nil {
+// Rebuild rescans the volume and replaces the cache, persisting it.
+func (c *Catalog) Rebuild(vol media.Volume) (int, error) {
+	if err := c.refresh(vol); err != nil {
 		return 0, err
 	}
 	c.loaded = true
@@ -89,21 +98,46 @@ func (c *Catalog) Rebuild(store media.Store) (int, error) {
 	return len(c.index), nil
 }
 
-// refresh reads sealed slots from the store into the in-memory index.
-func (c *Catalog) refresh(store media.Store) error {
-	ids, err := store.ListSlots()
+// refresh rebuilds the in-memory index from the volume's self-index: it groups
+// files by slot, reads each sealed slot's seal record for metadata, and records
+// every archive's position.
+func (c *Catalog) refresh(vol media.Volume) error {
+	files, err := vol.Files()
 	if err != nil {
 		return err
 	}
+	bySlot := map[string][]media.FileInfo{}
+	for _, f := range files {
+		bySlot[f.Header.Slot] = append(bySlot[f.Header.Slot], f)
+	}
+
 	var slots []*slot.Slot
-	for _, id := range ids {
-		s, err := readSlot(store, id)
-		if err != nil || !s.IsSealed() {
-			continue // skip partial/open/unreadable slots
+	pos := map[string]map[string]int{}
+	for slotID, fs := range bySlot {
+		sealPos := -1
+		for _, f := range fs {
+			if f.Header.Kind == media.KindSeal {
+				sealPos = f.Pos
+			}
+		}
+		if sealPos < 0 {
+			continue // unsealed / incomplete slot
+		}
+		s, err := readSeal(vol, sealPos)
+		if err != nil {
+			continue // unreadable seal: skip
 		}
 		slots = append(slots, s)
+		pm := map[string]int{}
+		for _, f := range fs {
+			if f.Header.Kind == media.KindArchive {
+				pm[ArchiveKey(f.Header.DLE, f.Header.Level)] = f.Pos
+			}
+		}
+		pos[slotID] = pm
 	}
 	c.setIndex(slots)
+	c.pos = pos
 	return nil
 }
 
@@ -120,6 +154,16 @@ func (c *Catalog) ReadSlot(id string) (*slot.Slot, error) {
 	return nil, fmt.Errorf("slot %s not in catalog (run `nb catalog rebuild` if it exists on media)", id)
 }
 
+// Position returns the volume position of a slot's archive, or false if unknown.
+func (c *Catalog) Position(slotID, dle string, level int) (int, bool) {
+	m, ok := c.pos[slotID]
+	if !ok {
+		return 0, false
+	}
+	p, ok := m[ArchiveKey(dle, level)]
+	return p, ok
+}
+
 // TotalBytes sums the recorded compressed size across cached slots.
 func (c *Catalog) TotalBytes() int64 {
 	var total int64
@@ -129,8 +173,8 @@ func (c *Catalog) TotalBytes() int64 {
 	return total
 }
 
-// Add records a newly sealed slot in the cache and persists it.
-func (c *Catalog) Add(s *slot.Slot) error {
+// Add records a newly sealed slot and its archive positions, then persists.
+func (c *Catalog) Add(s *slot.Slot, positions map[string]int) error {
 	filtered := c.index[:0:0]
 	for _, e := range c.index {
 		if e.ID != s.ID {
@@ -138,6 +182,7 @@ func (c *Catalog) Add(s *slot.Slot) error {
 		}
 	}
 	c.setIndex(append(filtered, s))
+	c.pos[s.ID] = positions
 	c.loaded = true
 	return c.persist()
 }
@@ -151,6 +196,7 @@ func (c *Catalog) Remove(id string) error {
 		}
 	}
 	c.setIndex(kept)
+	delete(c.pos, id)
 	return c.persist()
 }
 
@@ -190,7 +236,7 @@ func (c *Catalog) persist() error {
 	if err := os.MkdirAll(c.workdir, 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(c.index, "", "  ")
+	data, err := json.MarshalIndent(cacheFile{Slots: c.index, Pos: c.pos}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -202,9 +248,9 @@ func (c *Catalog) persist() error {
 	return os.Rename(tmp, filepath.Join(c.workdir, CacheFile))
 }
 
-// readSlot loads a single slot's metadata from the store.
-func readSlot(store media.Store, id string) (*slot.Slot, error) {
-	rc, err := store.Open(id, slot.FileSlot)
+// readSeal reads and parses a slot's seal-record payload from the volume.
+func readSeal(vol media.Volume, pos int) (*slot.Slot, error) {
+	_, rc, err := vol.ReadFile(pos)
 	if err != nil {
 		return nil, err
 	}
@@ -214,14 +260,4 @@ func readSlot(store media.Store, id string) (*slot.Slot, error) {
 		return nil, err
 	}
 	return slot.ParseSlot(data)
-}
-
-// SealedID reports whether a slot ID exists and is sealed on the store. Used by
-// the write path to allocate non-colliding slot IDs.
-func SealedID(store media.Store, id string) (bool, error) {
-	s, err := readSlot(store, id)
-	if err != nil {
-		return false, err
-	}
-	return s.IsSealed(), nil
 }

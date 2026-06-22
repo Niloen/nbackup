@@ -9,11 +9,12 @@ import (
 	"github.com/Niloen/nbackup/internal/slot"
 )
 
-// Step is one archive to extract during a restore.
+// Step is one archive to extract during a restore. It identifies the archive
+// logically; the engine resolves its volume position via the catalog.
 type Step struct {
 	SlotID string
+	DLE    string
 	Level  int
-	File   string // path relative to the slot directory
 	Method string // dump method that produced the archive
 	Codec  string // compression codec to reverse before extracting
 }
@@ -56,7 +57,7 @@ func Chain(slots []*slot.Slot, dleName, targetSlotID string) ([]Step, error) {
 			if i == fullIdx && a.Level != 0 {
 				continue // at the full's slot, take only the full
 			}
-			steps = append(steps, Step{SlotID: s.ID, Level: a.Level, File: a.File, Method: a.Method, Codec: a.Codec})
+			steps = append(steps, Step{SlotID: s.ID, DLE: a.DLE, Level: a.Level, Method: a.Method, Codec: a.Codec})
 		}
 	}
 	return steps, nil

@@ -1,9 +1,9 @@
-// Package slotio authors and reads slots on a media.Store. It owns the slot's
-// on-media layout — archive object paths, the manifest and checksum files, and
-// the seal-last protocol — so the engine supplies only backup streams and
-// descriptive metadata and never has to know how a slot is laid out on storage.
-// Compression is delegated to package filter (an external child process); slotio
-// only meters (checksums + counts) the compressed bytes on their way to storage.
+// Package slotio authors and reads slots on a media.Volume. It owns how a slot
+// maps onto a volume's files — one file per archive plus a final seal record
+// carrying the slot's metadata — so the engine supplies only backup streams and
+// descriptive metadata, never positions or filenames. Compression is delegated to
+// package filter (an external child process); slotio meters (checksums + counts)
+// the compressed bytes on their way to the volume.
 package slotio
 
 import (
@@ -37,71 +37,74 @@ type ArchiveSpec struct {
 	BaseSlot string
 }
 
-// Writer authors a single slot onto a media.Store. Callers create archives with
-// WriteArchive (safe to call concurrently) and finalize with Seal. The on-media
-// layout, compression codec, and integrity protocol are the Writer's concern.
+// Writer authors a single slot onto a media.Volume. Callers create archives with
+// WriteArchive (safe to call concurrently) and finalize with Seal.
 type Writer struct {
-	store media.Store
+	vol   media.Volume
 	codec string
-	ext   string
 	fopts filter.Options
 
 	mu        sync.Mutex // guards the records below (WriteArchive may run concurrently)
 	slot      *slot.Slot
-	manifest  *slot.Manifest
-	checksums map[string]string
+	positions []archivePos // remembered for the pre-seal verify
 }
 
-// NewWriter begins authoring the given open slot onto store, compressing archives
+type archivePos struct {
+	pos    int
+	sha256 string
+}
+
+// NewWriter begins authoring the given open slot onto vol, compressing archives
 // with the named codec.
-func NewWriter(store media.Store, s *slot.Slot, codec string, fopts filter.Options) (*Writer, error) {
-	ext, err := filter.Ext(codec)
-	if err != nil {
+func NewWriter(vol media.Volume, s *slot.Slot, codec string, fopts filter.Options) (*Writer, error) {
+	if _, err := filter.Ext(codec); err != nil { // validate the codec name early
 		return nil, err
 	}
-	return &Writer{
-		store:     store,
-		codec:     codec,
-		ext:       ext,
-		fopts:     fopts,
-		slot:      s,
-		manifest:  &slot.Manifest{SlotID: s.ID},
-		checksums: map[string]string{},
-	}, nil
+	return &Writer{vol: vol, codec: codec, fopts: fopts, slot: s}, nil
 }
 
-// WriteArchive streams one archive into the slot: it opens the destination
-// object, meters (checksum + size) the compressed bytes, and pipes the produced
-// raw stream through the codec's compressor child on the way to storage. It then
-// records the archive in the slot, manifest, and checksum set, and returns the
-// recorded metadata. Safe for concurrent use across DLEs.
+// WriteArchive appends one archive file to the volume: it writes an identity
+// header, then pipes the produced raw stream through the codec's compressor child
+// while metering (checksum + size) the compressed bytes. It records the archive in
+// the slot and returns the recorded metadata. Safe for concurrent use.
 func (w *Writer) WriteArchive(spec ArchiveSpec, produce func(out io.Writer) (Produced, error)) (slot.Archive, error) {
-	rel := fmt.Sprintf("%s/%s-L%d.tar", slot.DirArchives, spec.DLE, spec.Level)
-	if w.ext != "" {
-		rel += "." + w.ext
+	h := media.Header{
+		Slot:      w.slot.ID,
+		Kind:      media.KindArchive,
+		DLE:       spec.DLE,
+		Host:      spec.Host,
+		Path:      spec.Path,
+		Method:    spec.Method,
+		Codec:     w.codec,
+		Level:     spec.Level,
+		BaseSlot:  spec.BaseSlot,
+		CreatedAt: w.slot.CreatedAt,
 	}
 
-	obj, err := w.store.Create(w.slot.ID, rel)
+	var (
+		res  Produced
+		sha  string
+		size int64
+	)
+	pos, err := w.vol.AppendFile(h, func(out io.Writer) error {
+		meter := xfer.NewMeter(out)
+		cw, e := filter.Compress(w.codec, meter, w.fopts)
+		if e != nil {
+			return e
+		}
+		r, e := produce(cw)
+		if e != nil {
+			cw.Close()
+			return e
+		}
+		if e := cw.Close(); e != nil {
+			return e
+		}
+		res, sha, size = r, meter.SHA256(), meter.Bytes()
+		return nil
+	})
 	if err != nil {
 		return slot.Archive{}, err
-	}
-	meter := xfer.NewMeter(obj)
-	cw, err := filter.Compress(w.codec, meter, w.fopts)
-	if err != nil {
-		obj.Close()
-		return slot.Archive{}, err
-	}
-	res, perr := produce(cw)
-	closeErr := cw.Close() // finishes the compressor child; meter now holds the totals
-	objCloseErr := obj.Close()
-	if perr != nil {
-		return slot.Archive{}, perr
-	}
-	if closeErr != nil {
-		return slot.Archive{}, closeErr
-	}
-	if objCloseErr != nil {
-		return slot.Archive{}, objCloseErr
 	}
 
 	arch := slot.Archive{
@@ -111,20 +114,17 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, produce func(out io.Writer) (Pro
 		Method:       spec.Method,
 		Codec:        w.codec,
 		Level:        spec.Level,
-		File:         rel,
-		Compressed:   meter.Bytes(),
+		Compressed:   size,
 		Uncompressed: res.Uncompressed,
 		FileCount:    res.FileCount,
-		SHA256:       meter.SHA256(),
+		SHA256:       sha,
 		BaseSlot:     spec.BaseSlot,
+		Members:      res.Members,
 	}
 
 	w.mu.Lock()
 	w.slot.AddArchive(arch)
-	w.manifest.Archives = append(w.manifest.Archives, slot.ArchiveFiles{
-		DLE: spec.DLE, Level: spec.Level, Files: res.Members,
-	})
-	w.checksums[rel] = arch.SHA256
+	w.positions = append(w.positions, archivePos{pos: pos, sha256: sha})
 	w.mu.Unlock()
 	return arch, nil
 }
@@ -136,51 +136,61 @@ func (w *Writer) ArchiveCount() int {
 	return len(w.slot.Archives)
 }
 
-// Seal writes the manifest and checksum file, verifies every archive's checksum
-// against what actually landed on the store, then seals the slot and writes
-// SLOT.json last (the marker that makes the slot complete). The sealed slot is
-// returned. Call after all WriteArchive calls have completed.
+// ArchivePosition is one archive's identity and volume position.
+type ArchivePosition struct {
+	DLE   string
+	Level int
+	Pos   int
+}
+
+// Positions returns the volume position of every archive written, for the
+// catalog to index. Call after all WriteArchive calls have completed.
+func (w *Writer) Positions() []ArchivePosition {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]ArchivePosition, len(w.positions))
+	for i, p := range w.positions {
+		a := w.slot.Archives[i]
+		out[i] = ArchivePosition{DLE: a.DLE, Level: a.Level, Pos: p.pos}
+	}
+	return out
+}
+
+// Seal verifies every written archive against its recorded checksum, seals the
+// slot, and appends the seal record (the slot's metadata) as the final file — the
+// marker that makes the slot complete. The sealed slot is returned.
 func (w *Writer) Seal(now time.Time) (*slot.Slot, error) {
-	if err := w.putMarshal(slot.FileManifest, w.manifest.Marshal); err != nil {
-		return nil, err
-	}
-	if err := w.putBytes(slot.FileChecksums, slot.FormatChecksums(w.checksums)); err != nil {
-		return nil, err
-	}
-	if err := w.verify(); err != nil {
-		return nil, err
+	for _, p := range w.positions {
+		got, err := w.hashFile(p.pos)
+		if err != nil {
+			return nil, fmt.Errorf("verify position %d: %w", p.pos, err)
+		}
+		if got != p.sha256 {
+			return nil, fmt.Errorf("checksum mismatch at position %d before sealing", p.pos)
+		}
 	}
 	if err := w.slot.Seal(now); err != nil {
 		return nil, err
 	}
-	if err := w.putMarshal(slot.FileSlot, w.slot.Marshal); err != nil {
+	data, err := w.slot.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	seal := media.Header{Slot: w.slot.ID, Kind: media.KindSeal, CreatedAt: now}
+	if _, err := w.vol.AppendFile(seal, func(out io.Writer) error {
+		_, e := out.Write(data)
+		return e
+	}); err != nil {
 		return nil, err
 	}
 	return w.slot, nil
 }
 
-// verify re-reads each written archive and confirms its checksum before sealing.
-func (w *Writer) verify() error {
-	for rel, want := range w.checksums {
-		got, err := hashObject(w.store, w.slot.ID, rel)
-		if err != nil {
-			return fmt.Errorf("verify %s: %w", rel, err)
-		}
-		if got != want {
-			return fmt.Errorf("checksum mismatch for %s before sealing", rel)
-		}
-	}
-	return nil
-}
-
-func (w *Writer) putBytes(name string, data []byte) error {
-	return putBytes(w.store, w.slot.ID, name, data)
-}
-
-func (w *Writer) putMarshal(name string, marshal func() ([]byte, error)) error {
-	data, err := marshal()
+func (w *Writer) hashFile(pos int) (string, error) {
+	_, rc, err := w.vol.ReadFile(pos)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return w.putBytes(name, data)
+	defer rc.Close()
+	return xfer.HashReader(rc)
 }
