@@ -1,8 +1,10 @@
-package localdisk
+package disk
 
 import (
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -11,7 +13,7 @@ import (
 
 func openVol(t *testing.T, path string) media.Volume {
 	t.Helper()
-	v, err := media.OpenVolume("local-disk", media.Options{"path": path})
+	v, err := media.OpenVolume("disk", media.Options{"path": path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,6 +52,32 @@ func TestVolumeRoundTrip(t *testing.T) {
 	}
 	if string(data) != "hello world" {
 		t.Errorf("payload = %q, want %q", data, "hello world")
+	}
+
+	// The on-disk payload file is a CLEAN archive (no header to skip) and the
+	// header lives in a separate .hdr sidecar — usable directly with stock tools.
+	slotDir := filepath.Join(dir, "slots", "slot-2026-06-22")
+	entries, err := os.ReadDir(slotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payloadName, hdrName string
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".hdr" {
+			hdrName = e.Name()
+		} else {
+			payloadName = e.Name()
+		}
+	}
+	if hdrName == "" || payloadName == "" {
+		t.Fatalf("expected a payload + .hdr sidecar, got %v", entries)
+	}
+	raw, err := os.ReadFile(filepath.Join(slotDir, payloadName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "hello world" {
+		t.Errorf("payload file is not a clean archive: %q", raw)
 	}
 
 	// Reopen (rescan from disk) must reconstruct the index and read back.

@@ -47,24 +47,30 @@ type FileInfo struct {
 }
 
 // Options carries medium-specific configuration to a factory as generic
-// key/value parameters (e.g. "path" for local-disk, "bucket" for s3).
+// key/value parameters (e.g. "path" for disk, "bucket" for s3).
 type Options map[string]string
 
 // Get returns the value for a parameter key, or "".
 func (o Options) Get(key string) string { return o[key] }
 
 // Volume is a medium holding an ordered sequence of header-framed files.
+//
+// Contract: opening a Volume must be cheap (no reading every file), and
+// AppendFile/ReadFile must not scan — they seek by position. Only Files() is a
+// full pass over the volume; it is the catalog-rebuild path (on tape, a literal
+// scan from the start, as Amanda re-reads a tape). Normal backup/restore/copy
+// resolve positions from the catalog and call ReadFile, never Files().
 type Volume interface {
 	Name() string
 	// AppendFile writes h, then the payload produced by write, and returns the
 	// file's position. The Volume owns concurrency and position assignment
-	// (local-disk allows concurrent appends; tape serializes).
+	// (disk allows concurrent appends; tape serializes).
 	AppendFile(h Header, write func(w io.Writer) error) (pos int, err error)
 	// ReadFile positions to pos and returns its header and a payload stream the
 	// caller must close.
 	ReadFile(pos int) (Header, io.ReadCloser, error)
 	// Files returns every file's position and header in order — the volume's
-	// self-index, used to rebuild the catalog.
+	// self-index, used to rebuild the catalog. May be O(volume) (a full scan).
 	Files() ([]FileInfo, error)
 	// RemoveSlot reclaims every file belonging to a slot.
 	RemoveSlot(slot string) error

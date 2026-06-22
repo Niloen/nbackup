@@ -21,33 +21,41 @@ This is a first version. See [PRD.md](PRD.md) for the full product vision.
   S3. Slots stream between volumes (`nb copy`), e.g. disk → tape.
 
 A medium is a **volume**: an ordered sequence of self-describing files (Amanda's
-Device API). Each file begins with a fixed 32 KB header block — identity metadata
-(slot, DLE, level, codec, …) — followed by the payload; a slot is a run of archive
-files plus a final **seal record** (the slot's metadata) that marks it complete.
-Files are addressed by position (a tape file number), so the same shape maps to
-disk, an object store, or tape. On local disk the layout is human-friendly:
+Device API), each carrying an identity **header** (slot, DLE, level, codec, …),
+addressed by position (a tape file number). A slot is a run of archive files plus
+a final **seal record** (the slot's metadata) that marks it complete. The same
+shape maps to disk, an object store, or tape; each medium frames the header its
+own way. On **disk** the header is a separate `.hdr` sidecar so the payload stays
+a clean archive, and files are human-friendly:
 
 ```text
 slots/slot-2026-06-21/
-  000000-app01-home-L0     # 32 KB header block, then the compressed tar payload
-  000001-db01-pg-L1
-  000002-seal              # slot metadata (identity + sizes + checksums)
+  000000-app01-home-L0.tar.zst   # clean compressed tar (payload)
+  000000-app01-home-L0.hdr       # JSON header sidecar
+  000001-db01-pg-L1.tar.zst
+  000001-db01-pg-L1.hdr
+  000002-seal.json               # slot metadata (identity + sizes + checksums)
+  000002-seal.hdr
 ```
+
+(On **tape** the header is instead a fixed 32 KB block inline ahead of each
+payload, since a tape has no sidecars.)
 
 Archives are produced by **GNU tar** (the same engine Amanda uses) in
 listed-incremental format, then piped through an external compressor (`zstd` by
-default; `gzip` or `none` also built in). Recovery never requires NBackup — skip
-the header block and a full (L0) is an ordinary compressed tar, and the whole
-chain restores with stock tools:
+default; `gzip` or `none` also built in). Recovery never requires NBackup — a disk
+payload is an ordinary compressed tar, and the whole chain restores with stock
+tools:
 
 ```bash
-# single full archive (dd skips the 32 KB header block):
-dd bs=32k skip=1 < 000000-app01-home-L0 | zstd -dc | tar -xf -
+# single full archive (the disk payload is a clean tar.zst — no header to skip):
+zstd -dc 000000-app01-home-L0.tar.zst | tar -xf -
 
 # a full + incrementals, replayed in order (applies deletions):
-for a in slots/slot-*/0*-app01-home-L*; do
-  dd bs=32k skip=1 < "$a" | zstd -dc | tar --extract --listed-incremental=/dev/null
+for a in slots/slot-*/0*-app01-home-L*.tar.zst; do
+  zstd -dc "$a" | tar --extract --listed-incremental=/dev/null
 done
+# (from tape, skip the 32 KB inline header first: dd bs=32k skip=1 < file | zstd -dc | …)
 ```
 
 > Requires **GNU tar** and the configured **compressor** (`zstd` by default) at
@@ -189,7 +197,7 @@ cycle:
 # Budget and minimum_age are per-medium (each store has its own capacity/cycle).
 media:
   disk:
-    type: local-disk
+    type: disk
     path: /var/lib/nbackup/catalog
     budget: 20TB
     minimum_age: 30d
@@ -246,16 +254,19 @@ lives entirely in the medium's retention strategy.
 
 ## Status & limitations (first version)
 
-Implemented: local-disk and **virtual-tape** Volumes, **copying slots between
-media** (`nb copy`, e.g. disk → tape), balanced **multilevel (L0–L9)** planning
-with a GNU tar snapshot library, immutable sealed slots with **sequence-suffixed**
-same-day runs, **deletion-aware** incremental restore, checksum verification,
-point-in-time restore, budget reporting, cycle-safe pruning.
+Implemented: disk and tape Volumes, **copying slots between media** (`nb copy`,
+e.g. disk → tape), balanced **multilevel (L0–L9)** planning with a GNU tar
+snapshot library, immutable sealed slots with **sequence-suffixed** same-day runs,
+**deletion-aware** incremental restore, checksum verification, point-in-time
+restore, budget reporting, cycle-safe pruning.
+
+The `tape` medium has two backends behind one internal device seam: a `dir:`
+virtual tape (file-backed, fully tested) and a `device:` real drive (`mt` +
+`/dev/nst0`). The real-drive backend is structurally complete but unverified
+without hardware, so CI exercises the virtual tape.
 
 Not yet implemented (declared in config for forward-compatibility):
 
-- **Real tape drives** — the `tape` medium is a file-backed virtual tape (the
-  same sequential, file-numbered Volume a `/dev/nst0` drive would back via `mt`).
 - **S3 media** — registered as a Volume stub; no S3 client yet.
 - **Budget-driven retention** — budget is reported; pruning is cycle-based, not
   yet automatically driven to fit the budget.
@@ -276,7 +287,7 @@ orchestrator composes them.
 | `slot` | slot metadata: pure data + lifecycle (`NewSlot`/`AddArchive`/`Seal`) | Header / amar |
 | `slotio` | maps a slot onto a `Volume`'s files (headers, seal record, verify) | taper / amrestore |
 | `media` | `Volume` (positional, self-describing files + headers) + `Profile` + registry | Device API |
-| `media/localdisk`, `media/tape`, `media/s3` | Volume implementations: disk (random-access), virtual tape (sequential, file-numbered, labeled), s3 (stub) | tape/vfs/s3 devices |
+| `media/disk`, `media/tape`, `media/s3` | Volume impls: disk (sidecar headers, clean payloads), tape (sequential, file-numbered; `dir:` virtual or `device:` real via an mt seam), s3 (stub) | vfs/tape/s3 devices |
 | `method` | `Method` dump interface + registry (configured via dumptype options) | Application API |
 | `method/gnutar` | GNU tar implementation (all tar/snapshot specifics) | amgtar |
 | `filter` | external compressor child processes (zstd/gzip/none) + registry | gzip/custom compress |

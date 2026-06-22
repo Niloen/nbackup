@@ -1,20 +1,15 @@
-// Package tape implements media.Volume as a virtual tape: a flat, sequential
-// sequence of numbered files (Amanda's "file:" device, the standard way to test
-// the tape model). It captures what makes tape distinct from random-access disk:
-// files are addressed by absolute file number, the first file is a volume label,
-// appends are strictly serial, and reclamation is whole-volume (no per-slot
-// delete) — you relabel a tape to reuse it. A real /dev/nst0 drive would back the
-// same Volume via mt(1) fast-forward; only the I/O backend differs.
+// Package tape implements media.Volume for tape-like media: a flat, sequential
+// sequence of files addressed by file number, the first being a volume label.
+// What differs between a real drive and a test/no-hardware setup is only the
+// low-level positioning and block I/O, captured by the small `device` interface
+// (an mt analogue). The Volume logic — header framing, file numbering, label,
+// rebuild scan — is written once on top. `dir:` selects the directory-backed
+// device (emulation, fully tested); `device:` selects the real mt/drive device.
 package tape
 
 import (
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
-	"sort"
-	"strconv"
-	"sync"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/media"
@@ -22,35 +17,52 @@ import (
 
 func init() {
 	media.RegisterVolume("tape", func(opts media.Options) (media.Volume, error) {
-		dir := opts.Get("dir")
-		if dir == "" {
-			return nil, fmt.Errorf("tape medium requires a 'dir' (virtual tape directory); real tape drives are not yet supported")
+		var (
+			dev device
+			err error
+		)
+		switch {
+		case opts.Get("dir") != "":
+			dev, err = openDir(opts.Get("dir"))
+		case opts.Get("device") != "":
+			dev, err = openMT(opts.Get("device"))
+		default:
+			return nil, fmt.Errorf("tape medium requires 'dir' (virtual tape) or 'device' (real drive)")
 		}
-		return open(dir, opts.Get("label"))
+		if err != nil {
+			return nil, err
+		}
+		return newTape(dev, opts.Get("label"))
 	})
 	media.RegisterProfile("tape", media.NewVolumeProfile)
 }
 
-type tape struct {
-	dir  string
-	mu   sync.Mutex
-	next int
-	idx  map[int]media.Header
+// device is the mt-level seam: a tape as a sequence of files addressed by number.
+// Implementations emulate a directory (dirDevice) or drive a real tape (mtDevice).
+type device interface {
+	// writeFile appends a file at end-of-data and returns its file number.
+	writeFile(write func(w io.Writer) error) (pos int, err error)
+	// readFile fast-forwards to file pos and returns its bytes (caller closes).
+	readFile(pos int) (io.ReadCloser, error)
+	// count returns the number of files on the volume (the next file number).
+	count() (int, error)
 }
 
-func open(dir, label string) (*tape, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+type tape struct {
+	dev device
+}
+
+func newTape(dev device, label string) (*tape, error) {
+	t := &tape{dev: dev}
+	n, err := dev.count()
+	if err != nil {
 		return nil, err
 	}
-	t := &tape{dir: dir, idx: map[int]media.Header{}}
-	if err := t.scan(); err != nil {
-		return nil, err
-	}
-	if t.next == 0 { // fresh tape: write the volume label as file 0
+	if n == 0 { // a fresh volume gets a label at file 0
 		if label == "" {
-			label = filepath.Base(dir)
+			label = "nbackup"
 		}
-		if _, err := t.AppendFile(media.Header{Kind: media.KindLabel, Slot: "", DLE: label, CreatedAt: time.Now().UTC()},
+		if _, err := t.AppendFile(media.Header{Kind: media.KindLabel, DLE: label, CreatedAt: time.Now().UTC()},
 			func(io.Writer) error { return nil }); err != nil {
 			return nil, err
 		}
@@ -60,97 +72,54 @@ func open(dir, label string) (*tape, error) {
 
 func (t *tape) Name() string { return "tape" }
 
-func (t *tape) path(pos int) string { return filepath.Join(t.dir, fmt.Sprintf("%06d", pos)) }
-
-// AppendFile writes the next file. It holds the lock for the whole write: a tape
-// has one head, so appends are strictly serial.
+// AppendFile frames an inline header block ahead of the payload (a tape cannot
+// carry a sidecar) and appends it as the next file.
 func (t *tape) AppendFile(h media.Header, write func(w io.Writer) error) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	pos := t.next
-	f, err := os.Create(t.path(pos))
-	if err != nil {
-		return 0, err
-	}
-	if err := media.EncodeHeader(f, h); err != nil {
-		f.Close()
-		return 0, err
-	}
-	if err := write(f); err != nil {
-		f.Close()
-		return 0, err
-	}
-	if err := f.Close(); err != nil {
-		return 0, err
-	}
-	t.next = pos + 1
-	t.idx[pos] = h
-	return pos, nil
+	return t.dev.writeFile(func(w io.Writer) error {
+		if err := media.EncodeHeader(w, h); err != nil {
+			return err
+		}
+		return write(w)
+	})
 }
 
-// ReadFile fast-forwards to a file number and returns its header and payload.
+// ReadFile fast-forwards to a file number and decodes its leading header; the
+// returned stream is positioned at the payload.
 func (t *tape) ReadFile(pos int) (media.Header, io.ReadCloser, error) {
-	f, err := os.Open(t.path(pos))
+	rc, err := t.dev.readFile(pos)
 	if err != nil {
-		return media.Header{}, nil, fmt.Errorf("no file at position %d: %w", pos, err)
-	}
-	h, err := media.DecodeHeader(f)
-	if err != nil {
-		f.Close()
 		return media.Header{}, nil, err
 	}
-	return h, f, nil
+	h, err := media.DecodeHeader(rc)
+	if err != nil {
+		rc.Close()
+		return media.Header{}, nil, err
+	}
+	return h, rc, nil
 }
 
+// Files scans the whole volume reading each header. This is the catalog-rebuild
+// path (a full pass, as Amanda re-reads a tape); normal reads seek by file number
+// from the catalog and never call this.
 func (t *tape) Files() ([]media.FileInfo, error) {
-	t.mu.Lock()
-	out := make([]media.FileInfo, 0, len(t.idx))
-	for pos, h := range t.idx {
+	n, err := t.dev.count()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]media.FileInfo, 0, n)
+	for pos := 0; pos < n; pos++ {
+		h, rc, err := t.ReadFile(pos)
+		if err != nil {
+			return nil, err
+		}
+		rc.Close()
 		out = append(out, media.FileInfo{Pos: pos, Header: h})
 	}
-	t.mu.Unlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].Pos < out[j].Pos })
 	return out, nil
 }
 
-// RemoveSlot is unsupported: a tape reclaims space by relabeling the whole volume,
+// RemoveSlot is unsupported: tape reclaims space by relabeling the whole volume,
 // not by deleting individual files.
 func (t *tape) RemoveSlot(string) error {
 	return fmt.Errorf("tape: per-slot removal unsupported; reuse is whole-volume (relabel)")
-}
-
-func (t *tape) scan() error {
-	entries, err := os.ReadDir(t.dir)
-	if err != nil {
-		return err
-	}
-	max := -1
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		pos, err := strconv.Atoi(e.Name())
-		if err != nil {
-			continue // not a tape file
-		}
-		h, err := readHeader(t.path(pos))
-		if err != nil {
-			return err
-		}
-		t.idx[pos] = h
-		if pos > max {
-			max = pos
-		}
-	}
-	t.next = max + 1
-	return nil
-}
-
-func readHeader(path string) (media.Header, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return media.Header{}, err
-	}
-	defer f.Close()
-	return media.DecodeHeader(f)
 }

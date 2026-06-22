@@ -67,7 +67,7 @@ func loadConfigRO(cfgPath, catalogOverride string) (*config.Config, error) {
 }
 
 // applyCatalog applies a -C override (and a default when no media is configured)
-// by defining a local-disk landing medium pointing at the directory.
+// by defining a disk landing medium pointing at the directory.
 func applyCatalog(cfg *config.Config, catalogOverride string) {
 	if catalogOverride != "" {
 		setLocalLanding(cfg, "cli", catalogOverride)
@@ -80,7 +80,7 @@ func applyCatalog(cfg *config.Config, catalogOverride string) {
 
 func setLocalLanding(cfg *config.Config, name, path string) {
 	cfg.Media = map[string]config.Media{
-		name: {Type: "local-disk", Params: map[string]string{"path": path}},
+		name: {Type: "disk", Params: map[string]string{"path": path}},
 	}
 	cfg.Landing = name
 	cfg.Workdir = path

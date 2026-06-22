@@ -9,7 +9,7 @@ import (
 	"github.com/Niloen/nbackup/internal/config"
 )
 
-// TestRunRestoreEndToEnd exercises the full engine over the local-disk store:
+// TestRunRestoreEndToEnd exercises the full engine over the disk store:
 // full backup, incremental with a deletion, then a chain restore that must match
 // the live tree.
 func TestRunRestoreEndToEnd(t *testing.T) {
@@ -21,7 +21,7 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 
 	cfg := &config.Config{
 		Landing: "disk",
-		Media:   map[string]config.Media{"disk": {Type: "local-disk", Params: map[string]string{"path": catalogDir}}},
+		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
 		Sources: []config.DLE{{Host: "h", Path: src}},
 	}
 	cfg.Compress.Codec = "none" // exercise the pipeline without depending on a compressor binary
@@ -71,7 +71,7 @@ func TestParallelDumpers(t *testing.T) {
 	catalogDir := t.TempDir()
 	cfg := &config.Config{
 		Landing: "disk",
-		Media:   map[string]config.Media{"disk": {Type: "local-disk", Params: map[string]string{"path": catalogDir}}},
+		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
 	}
 	cfg.Compress.Codec = "none" // no compressor-binary dependency in tests
 	cfg.Parallelism.Dumpers = 3
@@ -121,7 +121,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 	cfg := &config.Config{
 		Landing: "disk",
 		Media: map[string]config.Media{
-			"disk": {Type: "local-disk", Params: map[string]string{"path": diskDir}},
+			"disk": {Type: "disk", Params: map[string]string{"path": diskDir}},
 			"tape": {Type: "tape", Params: map[string]string{"dir": tapeDir}},
 		},
 		Sources: []config.DLE{{Host: "h", Path: src}},

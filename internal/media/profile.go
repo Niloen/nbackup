@@ -50,7 +50,7 @@ func OpenProfile(typ string, opts Options) (Profile, error) {
 	return f(opts)
 }
 
-// --- size-based profile (object stores: local-disk, s3) ---
+// --- size-based profile (object stores: disk, s3) ---
 
 // NewSizeProfile builds a byte-budget profile from "budget".
 func NewSizeProfile(opts Options) (Profile, error) {

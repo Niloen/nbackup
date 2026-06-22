@@ -17,16 +17,17 @@ cycle:
 # Named storage definitions. Each is a Volume with a `type`, its own
 # capacity/retention (budget + minimum_age are per-medium), plus type-specific
 # connection parameters. Slots can be copied between media with `nb copy`
-# (e.g. `nb copy <slot> --to lto`). local-disk and tape work today; s3 is a stub.
+# (e.g. `nb copy <slot> --to lto`). disk and tape work today; s3 is a stub.
 media:
   fast-disk:
-    type: local-disk
+    type: disk          # a filesystem directory (local or NFS)
     path: /var/lib/nbackup/catalog
     budget: 20TB        # capacity ceiling; `nb slot prune` reclaims oldest to fit
     minimum_age: 30d    # a slot can't be retired from this medium until older
   lto:
-    type: tape          # a virtual tape: a sequential, file-numbered directory
-    dir: /var/lib/nbackup/vtape
+    type: tape          # `device:` drives a real drive via mt; `dir:` is a virtual tape
+    device: /dev/nst0   # real drive (no-rewind device)
+    # dir: /var/lib/nbackup/vtape   # OR a file-backed virtual tape (no hardware)
     tapes: 20           # capacity is tapes × tape_size
     tape_size: 6TB
     minimum_age: 180d
@@ -39,7 +40,7 @@ media:
 landing: fast-disk
 
 # Optional: where local operational state (slot cache + tar snapshots) lives.
-# Defaults to the landing medium's path when that medium is local-disk.
+# Defaults to the landing medium's path when that medium is disk.
 # workdir: /var/lib/nbackup/state
 
 # Global default GNU tar binary (use "gtar" on macOS/BSD). A dumptype may

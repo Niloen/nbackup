@@ -25,7 +25,7 @@ import (
 	"github.com/Niloen/nbackup/internal/slotio"
 
 	// Register the bundled media and method implementations.
-	_ "github.com/Niloen/nbackup/internal/media/localdisk"
+	_ "github.com/Niloen/nbackup/internal/media/disk"
 	_ "github.com/Niloen/nbackup/internal/media/s3"
 	_ "github.com/Niloen/nbackup/internal/media/tape"
 	_ "github.com/Niloen/nbackup/internal/method/gnutar"
@@ -329,7 +329,7 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 // > 1 it runs that many dumpers concurrently (Amanda's inparallel), bounded by a
 // semaphore; the first error stops scheduling further items and is returned. Each
 // dumper writes a distinct object into the slot, which the medium must allow
-// concurrently (local-disk does) and the slot Writer serializes its bookkeeping.
+// concurrently (disk does) and the slot Writer serializes its bookkeeping.
 func (e *Engine) runDumpers(items []planner.Item, w *slotio.Writer, logf Logf) error {
 	dumpers := e.cfg.Dumpers()
 	if dumpers <= 1 || len(items) <= 1 {

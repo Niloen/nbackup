@@ -8,12 +8,12 @@ import (
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/slot"
 
-	_ "github.com/Niloen/nbackup/internal/media/localdisk"
+	_ "github.com/Niloen/nbackup/internal/media/disk"
 )
 
 func newVolume(t *testing.T, path string) media.Volume {
 	t.Helper()
-	v, err := media.OpenVolume("local-disk", media.Options{"path": path})
+	v, err := media.OpenVolume("disk", media.Options{"path": path})
 	if err != nil {
 		t.Fatal(err)
 	}

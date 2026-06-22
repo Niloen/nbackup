@@ -49,7 +49,7 @@ type Config struct {
 	GnuTarPath string `yaml:"gnutar_path"`
 
 	// Workdir holds local operational state (slot cache + snapshot library).
-	// Defaults to the landing medium's path when that medium is local-disk.
+	// Defaults to the landing medium's path when that medium is disk.
 	Workdir string `yaml:"workdir"`
 
 	// Compress configures the external compressor archives are piped through.
@@ -119,7 +119,7 @@ func (s *Sources) UnmarshalYAML(node *yaml.Node) error {
 }
 
 // Media is one named storage definition: a type, capacity/retention policy for
-// this medium, and type-specific connection parameters (e.g. local-disk has
+// this medium, and type-specific connection parameters (e.g. disk has
 // "path", s3 has "bucket"). Budget and retention are per-medium because each
 // store has its own capacity and reuse cycle (as in Amanda's per-storage
 // retention).
@@ -312,12 +312,12 @@ func (c *Config) FullIntervalDays() int {
 }
 
 // WorkdirPath returns the local operational-state directory, defaulting to the
-// landing medium's path when that medium is local-disk.
+// landing medium's path when that medium is disk.
 func (c *Config) WorkdirPath() string {
 	if c.Workdir != "" {
 		return c.Workdir
 	}
-	if m, err := c.LandingMedia(); err == nil && m.Type == "local-disk" {
+	if m, err := c.LandingMedia(); err == nil && m.Type == "disk" {
 		return m.Params["path"]
 	}
 	return ""
