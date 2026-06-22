@@ -18,6 +18,7 @@ func init() {
 		}
 		return &store{bucket: bucket}, nil
 	})
+	media.RegisterProfile("s3", media.NewSizeProfile)
 }
 
 type store struct{ bucket string }

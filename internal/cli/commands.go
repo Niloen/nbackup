@@ -58,19 +58,19 @@ func CmdPlan(args []string) error {
 	tw.Flush()
 
 	current := eng.Catalog().TotalBytes()
-	budget := eng.Policy().Budget
+	capacity := eng.Capacity()
 	fmt.Printf("\nCatalog currently stored: %s\n", sizeutil.FormatBytes(current))
 	if !*noEstimate {
 		fmt.Printf("This run (raw, pre-compression): ~%s\n", sizeutil.FormatBytes(estTotal))
 	}
-	if budget > 0 {
-		over, pct := eng.Policy().BudgetStatus(current)
-		fmt.Printf("Budget: %s (%.1f%% used)\n", sizeutil.FormatBytes(budget), pct)
+	if capacity > 0 {
+		over, pct := eng.BudgetStatus(current)
+		fmt.Printf("Capacity: %s (%.1f%% used)\n", sizeutil.FormatBytes(capacity), pct)
 		if over {
-			fmt.Printf("WARNING: catalog is over budget; run `nbslot prune` to retire old slots\n")
+			fmt.Printf("WARNING: over capacity; run `nbslot prune` to reclaim oldest slots\n")
 		}
 	} else {
-		fmt.Printf("Budget: not set\n")
+		fmt.Printf("Capacity: unbounded\n")
 	}
 	return nil
 }

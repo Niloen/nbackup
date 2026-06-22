@@ -1,7 +1,8 @@
-// Package policy expresses NBackup's retention rules, analogous to Amanda's
-// Policy. It decides which slots may be retired while preserving recoverability
-// and cycle safety, and reports budget status. It is pure: it operates on slot
-// metadata and returns decisions, performing no I/O.
+// Package policy expresses NBackup's cross-cutting retention safety — the rules
+// that hold regardless of which medium a slot lives on. It computes the set of
+// "protected" slots that capacity-driven reclamation (a per-medium concern) must
+// never touch: the last recovery path for any DLE, and slots younger than the
+// medium's minimum age. It is pure and performs no I/O.
 package policy
 
 import (
@@ -11,41 +12,31 @@ import (
 	"github.com/Niloen/nbackup/internal/slot"
 )
 
-// Policy holds the configured retention rules.
-type Policy struct {
-	MinimumAge time.Duration // a slot younger than this is never retired
-	Budget     int64         // target ceiling in bytes (0 = unset)
-}
-
-// Decision is a per-slot prune verdict.
-type Decision struct {
-	Slot   *slot.Slot
-	Delete bool
-	Reason string
-}
-
-// Prune evaluates every slot and returns a decision for each. A slot is
-// deletable only when it is older than MinimumAge AND every DLE it holds has a
-// newer full backup elsewhere — so the last valid recovery path is preserved.
-func (p Policy) Prune(slots []*slot.Slot, now time.Time) []Decision {
-	decisions := make([]Decision, 0, len(slots))
+// Protected returns a map of slotID -> reason for slots that must never be
+// reclaimed. A slot is protected if it is younger than minAge, or if any DLE it
+// holds has no newer full backup elsewhere (so it is that DLE's last recovery
+// path).
+//
+// requireVerifiedSuccessor is reserved: today the existence of a newer full is
+// the successor requirement; once verification status is tracked it will further
+// require that successor to be verified.
+func Protected(slots []*slot.Slot, minAge time.Duration, now time.Time, requireVerifiedSuccessor bool) map[string]string {
+	_ = requireVerifiedSuccessor
+	protected := map[string]string{}
 	for _, s := range slots {
-		decisions = append(decisions, p.evaluate(s, slots, now))
-	}
-	return decisions
-}
-
-func (p Policy) evaluate(target *slot.Slot, all []*slot.Slot, now time.Time) Decision {
-	date, _ := slot.ParseDateField(target.Date)
-	if p.MinimumAge > 0 && now.Sub(date) < p.MinimumAge {
-		return Decision{Slot: target, Reason: fmt.Sprintf("within minimum age (%s)", p.MinimumAge)}
-	}
-	for _, a := range target.Archives {
-		if !hasNewerFull(all, a.DLE, target) {
-			return Decision{Slot: target, Reason: fmt.Sprintf("no newer full for DLE %s (last recovery path)", a.DLE)}
+		date, _ := slot.ParseDateField(s.Date)
+		if minAge > 0 && now.Sub(date) < minAge {
+			protected[s.ID] = fmt.Sprintf("within minimum age (%s)", minAge)
+			continue
+		}
+		for _, a := range s.Archives {
+			if !hasNewerFull(slots, a.DLE, s) {
+				protected[s.ID] = fmt.Sprintf("last recovery path for DLE %s", a.DLE)
+				break
+			}
 		}
 	}
-	return Decision{Slot: target, Delete: true, Reason: "outside cycle; newer recovery path exists"}
+	return protected
 }
 
 func hasNewerFull(slots []*slot.Slot, dle string, target *slot.Slot) bool {
@@ -60,13 +51,4 @@ func hasNewerFull(slots []*slot.Slot, dle string, target *slot.Slot) bool {
 		}
 	}
 	return false
-}
-
-// BudgetStatus reports whether current usage exceeds the budget and the percent
-// used. Percent is 0 when no budget is set.
-func (p Policy) BudgetStatus(currentBytes int64) (over bool, pct float64) {
-	if p.Budget <= 0 {
-		return false, 0
-	}
-	return currentBytes > p.Budget, float64(currentBytes) / float64(p.Budget) * 100
 }

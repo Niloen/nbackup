@@ -39,22 +39,29 @@ func (l Logf) log(format string, args ...any) {
 // store; the catalog is a local cache the engine refreshes from the store.
 // Dump methods are resolved per dumptype and cached.
 type Engine struct {
-	cfg     *config.Config
-	store   media.Store
-	cat     *catalog.Catalog
-	pol     policy.Policy
-	methods map[string]method.Method // by cache key (dumptype or "@method")
+	cfg                      *config.Config
+	store                    media.Store
+	profile                  media.Profile
+	minAge                   time.Duration
+	requireVerifiedSuccessor bool
+	cat                      *catalog.Catalog
+	methods                  map[string]method.Method // by cache key (dumptype or "@method")
 }
 
-// New constructs an Engine from configuration: it opens the landing store via
-// the media registry and loads the catalog cache (refreshing it from the store
-// the first time it is needed). Dump methods are opened lazily per dumptype.
+// New constructs an Engine from configuration: it opens the landing store and
+// its capacity profile via the media registry, and loads the catalog cache
+// (refreshing it from the store the first time it is needed). Dump methods are
+// opened lazily per dumptype.
 func New(cfg *config.Config) (*Engine, error) {
 	mediaDef, err := cfg.LandingMedia()
 	if err != nil {
 		return nil, err
 	}
 	store, err := media.OpenStore(mediaDef.Type, media.Options(mediaDef.Params))
+	if err != nil {
+		return nil, err
+	}
+	profile, err := media.OpenProfile(mediaDef.Type, media.Options(mediaDef.ProfileOptions()))
 	if err != nil {
 		return nil, err
 	}
@@ -65,15 +72,29 @@ func New(cfg *config.Config) (*Engine, error) {
 	if err := cat.EnsureFresh(store); err != nil {
 		return nil, err
 	}
-	budget, _ := mediaDef.BudgetBytes()
 	minAge, _ := mediaDef.MinAge()
 	return &Engine{
-		cfg:     cfg,
-		store:   store,
-		cat:     cat,
-		pol:     policy.Policy{MinimumAge: minAge, Budget: budget},
-		methods: map[string]method.Method{},
+		cfg:                      cfg,
+		store:                    store,
+		profile:                  profile,
+		minAge:                   minAge,
+		requireVerifiedSuccessor: cfg.Cycle.RequireVerifiedSuccessor,
+		cat:                      cat,
+		methods:                  map[string]method.Method{},
 	}, nil
+}
+
+// Capacity returns the landing medium's total retainable bytes (0 = unbounded).
+func (e *Engine) Capacity() int64 { return e.profile.TotalBytes() }
+
+// BudgetStatus reports whether current usage exceeds capacity and the percent
+// used (0 when unbounded).
+func (e *Engine) BudgetStatus(current int64) (over bool, pct float64) {
+	c := e.profile.TotalBytes()
+	if c <= 0 {
+		return false, 0
+	}
+	return current > c, float64(current) / float64(c) * 100
 }
 
 // methodForDumpType resolves and caches the dump method for a dumptype,
@@ -127,12 +148,13 @@ func (e *Engine) RebuildCatalog() (int, error) {
 // Catalog exposes the catalog for read-only commands.
 func (e *Engine) Catalog() *catalog.Catalog { return e.cat }
 
-// Policy exposes the retention policy.
-func (e *Engine) Policy() policy.Policy { return e.pol }
-
-// Plan builds the plan for a run date.
+// Plan builds the plan for a run date, balancing fulls to the landing medium's
+// preferred run size.
 func (e *Engine) Plan(date time.Time) *planner.Plan {
-	return planner.Build(e.cfg.DLEs(), e.cat.History(), e.cfg.FullIntervalDays(), date)
+	return planner.Build(e.cfg.DLEs(), e.cat.History(), planner.Params{
+		PreferredRunBytes: e.profile.PreferredRunBytes(),
+		FullIntervalDays:  e.cfg.FullIntervalDays(),
+	}, date)
 }
 
 // Estimate returns the uncompressed bytes a planned item would archive.
@@ -406,24 +428,46 @@ func (e *Engine) verifySlot(id string, logf Logf) (bool, error) {
 	return ok, nil
 }
 
-// Prune evaluates retention and optionally deletes eligible slots.
+// Prune reconciles the landing medium to its retention model: it computes the
+// protected slots (cross-cutting safety) and asks the medium's retention
+// strategy which non-protected slots to reclaim to fit capacity.
 func (e *Engine) Prune(now time.Time, apply bool, logf Logf) (eligible int, err error) {
-	for _, d := range e.pol.Prune(e.cat.Slots(), now) {
-		if !d.Delete {
-			logf.log("keep   %s  (%s)", d.Slot.ID, d.Reason)
+	slots := e.cat.Slots()
+	protected := policy.Protected(slots, e.minAge, now, e.requireVerifiedSuccessor)
+	plan := e.profile.Retention().Plan(slots, protected, now)
+
+	reclaim := map[string]media.Reclamation{}
+	for _, r := range plan.Reclaim {
+		reclaim[r.SlotID] = r
+	}
+
+	for _, s := range slots {
+		if _, ok := reclaim[s.ID]; ok {
+			continue // reported below
+		}
+		if reason := protected[s.ID]; reason != "" {
+			logf.log("keep   %s  (%s)", s.ID, reason)
+		} else {
+			logf.log("keep   %s  (fits capacity)", s.ID)
+		}
+	}
+
+	for _, s := range slots {
+		r, ok := reclaim[s.ID]
+		if !ok {
 			continue
 		}
 		eligible++
 		if apply {
-			if err := e.store.Remove(d.Slot.ID); err != nil {
-				return eligible, fmt.Errorf("delete %s: %w", d.Slot.ID, err)
+			if err := e.store.Remove(s.ID); err != nil {
+				return eligible, fmt.Errorf("delete %s: %w", s.ID, err)
 			}
-			if err := e.cat.Remove(d.Slot.ID); err != nil {
+			if err := e.cat.Remove(s.ID); err != nil {
 				return eligible, fmt.Errorf("update catalog cache: %w", err)
 			}
-			logf.log("DELETE %s  (%s freed)", d.Slot.ID, humanBytes(d.Slot.TotalBytes))
+			logf.log("DELETE %s  (%s freed, %s)", s.ID, humanBytes(r.Bytes), r.Note)
 		} else {
-			logf.log("would delete %s  (%s)", d.Slot.ID, humanBytes(d.Slot.TotalBytes))
+			logf.log("would delete %s  (%s, %s)", s.ID, humanBytes(r.Bytes), r.Note)
 		}
 	}
 	return eligible, nil

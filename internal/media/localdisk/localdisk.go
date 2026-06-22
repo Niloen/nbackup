@@ -21,6 +21,7 @@ func init() {
 		}
 		return &store{root: path}, nil
 	})
+	media.RegisterProfile("local-disk", media.NewSizeProfile)
 }
 
 type store struct{ root string }

@@ -92,12 +92,17 @@ NBackup uses Amanda's **multilevel** scheme (levels 0–9). `nb plan` / `nb dump
 decide a level per DLE:
 
 - No full ever for the DLE → **L0 (full)** — required before any incremental.
-- Last full at/over `full_interval_days` → **due for a full**, staggered to a
-  per-DLE day so fulls don't all land on the same day. A full overdue by
-  ≥ 2× the interval is forced regardless.
+- A full is **due** (older than the cycle interval) on this DLE's assigned day →
+  **L0**. A full overdue by ≥ 2× the interval is forced regardless.
 - Otherwise → the **next incremental level** (one higher than the last run,
   capped at 9). Level N captures only what changed since level N−1, so daily
   volume stays small.
+
+When the landing medium sets a **`preferred`** run size, the planner derives the
+cycle interval from it (`total full bytes / preferred`) and **bin-packs** which
+DLEs take their full on which day so each run's full volume is balanced — the
+PRD's "automatic full frequency" and "balance daily volume." Without a preferred
+size it falls back to `planner.full_interval_days` with hash-staggered fulls.
 
 Levels are realized with GNU tar's listed-incremental **snapshot library**, kept
 under `<catalog>/snapshots/<dle>/L<n>.snar` — exactly the mechanism Amanda uses
@@ -127,11 +132,18 @@ the slot.
 
 ### Pruning (cycle safety)
 
-`nb slot prune` is a dry-run by default. A slot is eligible for deletion only
-when it is older than the landing medium's `minimum_age` **and** every DLE it
-holds has a newer full backup elsewhere — so the last valid recovery path is
-never removed. Add `--apply` to actually delete. (Budget and `minimum_age` are
-per-medium, so each store is pruned against its own limits.)
+`nb slot prune` is a dry-run by default. Pruning has two layers:
+
+1. **Safety floor** (shared, medium-agnostic): a slot is *protected* if it is
+   younger than the medium's `minimum_age`, or if any DLE it holds has no newer
+   full elsewhere (its last recovery path). Protected slots are never reclaimed.
+2. **Capacity reclamation** (per-medium): among non-protected slots, the medium's
+   retention strategy reclaims to fit capacity. For object stores this deletes
+   the **oldest slots until total ≤ budget**; for tape it will reclaim whole
+   tapes (not yet implemented).
+
+Add `--apply` to actually delete. Capacity and `minimum_age` are per-medium, so
+each store is pruned against its own limits.
 
 ## Configuration
 
@@ -175,6 +187,22 @@ is a registry registration — no config struct changes. **Dumptypes** are named
 dump method (the "Application") plus its options (compression, `exclude`,
 `one-file-system`, …) without hardcoding.
 
+### Capacity and retention are per-medium
+
+Each medium expresses its capacity in its own units, which NBackup translates
+into two byte quantities the planner and pruning use:
+
+- **capacity** (total retainable bytes): object stores spell it as `budget`
+  (`20TB`); tape spells it as `tapes × tape_size`. `0` = unbounded.
+- **preferred** (target full volume per run): the planner balances fulls so each
+  run stays near this. Tape derives it from `tape_size`.
+
+`minimum_age` (a per-medium safety floor) and the global
+`cycle.require_verified_successor` round out retention. The planner consumes only
+the byte quantities — it never knows whether the medium is tape or an object
+store; the difference (delete a slot vs reclaim a whole tape) lives entirely in
+the medium's retention strategy.
+
 ## Requirements
 
 - **Go 1.25+** to build.
@@ -208,10 +236,11 @@ orchestrator composes them.
 |---|---|---|
 | `config` | config + domain entities: `DLE`, `Media`, `DumpType` | Disklist / dumptype / storage |
 | `slot` | slot format: pure data + (de)serialization | Header / amar |
-| `media` | `Store` (landing) + `Vault` (copies) interfaces + registry | Device API |
+| `media` | `Store`/`Vault` I/O + `Profile` (capacity) + `Retention` (reclamation) + registry | Device API + Policy |
 | `media/localdisk`, `media/s3`, `media/tape` | implementations (s3/tape are registered stubs) | tape/s3/vfs devices |
 | `method` | `Method` dump interface + registry (configured via dumptype options) | Application API |
 | `method/gnutar` | GNU tar implementation (all tar/snapshot specifics) | amgtar |
+| `policy` | cross-cutting safety floor (protected slots) | Policy |
 | `xfer` | stream pipeline: zstd + checksum + counting | Xfer API |
 | `catalog` | local cache of the slot index + snapshot library; derives run `History` | catalog / curinfo / tapelist |
 | `policy` | retention/cycle/budget decisions (pure) | Policy |

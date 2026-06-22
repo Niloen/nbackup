@@ -13,15 +13,18 @@ media:
   fast-disk:
     type: local-disk
     path: /var/lib/nbackup/catalog
-    budget: 20TB        # ceiling for this medium; `nb slot prune` keeps within it
+    budget: 20TB        # capacity ceiling; `nb slot prune` reclaims oldest to fit
+    preferred: 2TB      # target full volume per run; the planner balances to this
     minimum_age: 30d    # a slot can't be retired from this medium until older
   cloud:
     type: s3
     bucket: company-backups
-    # no budget → unbounded (cost-managed elsewhere)
+    budget: 50TB        # object stores express capacity as a byte budget
   lto:
     type: tape
     device: /dev/nst0
+    tapes: 20           # tape expresses capacity as a tape count × size
+    tape_size: 6TB
     minimum_age: 180d
 
 # Which medium slots are created on.

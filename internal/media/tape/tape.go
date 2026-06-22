@@ -14,6 +14,7 @@ func init() {
 	media.RegisterVault("tape", func(opts media.Options) (media.Vault, error) {
 		return &vault{device: opts.Get("device")}, nil
 	})
+	media.RegisterProfile("tape", media.NewVolumeProfile)
 }
 
 type vault struct{ device string }

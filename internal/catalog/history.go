@@ -11,9 +11,10 @@ type History struct {
 
 // DLEState tracks one DLE's backup history.
 type DLEState struct {
-	LastFullDate string      `json:"last_full_date"` // YYYY-MM-DD, empty if never
-	LastFullSlot string      `json:"last_full_slot"`
-	Runs         []RunRecord `json:"runs"`
+	LastFullDate  string      `json:"last_full_date"` // YYYY-MM-DD, empty if never
+	LastFullSlot  string      `json:"last_full_slot"`
+	LastFullBytes int64       `json:"last_full_bytes"` // compressed size of the last full (for planner balancing)
+	Runs          []RunRecord `json:"runs"`
 }
 
 // RunRecord is a historical backup of a DLE.
