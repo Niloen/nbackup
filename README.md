@@ -88,21 +88,30 @@ Every command accepts `-c <config>` and `-C <catalog>` overrides.
 
 ### Planning (balanced, multilevel scheduling)
 
-NBackup uses Amanda's **multilevel** scheme (levels 0–9). `nb plan` / `nb dump`
-decide a level per DLE:
+NBackup uses Amanda's **multilevel** scheme (levels 0–9) with a dynamic,
+estimate-driven schedule. Each run:
 
-- No full ever for the DLE → **L0 (full)** — required before any incremental.
-- A full is **due** (older than the cycle interval) on this DLE's assigned day →
-  **L0**. A full overdue by ≥ 2× the interval is forced regardless.
-- Otherwise → the **next incremental level** (one higher than the last run,
-  capped at 9). Level N captures only what changed since level N−1, so daily
-  volume stays small.
+1. **Estimates** every DLE's full and next-incremental size. By default it uses
+   the last recorded sizes (cheap, accurate for stable data); a dumptype with
+   `estimate: exact` runs a live `tar` estimate each run.
+2. Sets a base decision per DLE: never-fulled → **mandatory L0**; past the cycle
+   deadline (≈ 2× interval) → **forced L0**; due (≥ interval) → **L0**;
+   otherwise the **next incremental level** (capped at L9).
+3. **Degrades** to balance: while the run exceeds the capacity ceiling (hard,
+   priority #3) or the balance target `Σ full_est / interval` (soft, #4), it
+   demotes the least-urgent non-mandatory due-fulls to incrementals — pushing
+   their full to a later day. Mandatory fulls are never touched (so one big DLE
+   on its day may still be large — that's fine).
+4. Optionally **promotes** (off by default): pulls soonest-due future fulls
+   forward to fill a light run, bounded by once-per-interval **and** a capacity
+   headroom so it never spends storage past the limit.
 
-To **balance daily volume**, the planner **bin-packs** which DLEs take their full
-on which day of the `full_interval_days` cycle, by last-full size (largest into
-the lightest day) — so fulls spread evenly instead of spiking. Before any
-full-size history exists it falls back to hash-staggered placement. This is a
-global, temporal concern, independent of the landing medium.
+This encodes the PRD priority order directly (recoverability and cycle safety are
+immovable; capacity overrides balance; balance never costs storage). It also
+**de-clumps the cold start**: day one fulls everything (recoverability first),
+and degrade spreads the resulting lock-step over the next cycle or two. The
+planner consumes only bytes — it never knows whether the medium is tape or an
+object store.
 
 Levels are realized with GNU tar's listed-incremental **snapshot library**, kept
 under `<catalog>/snapshots/<dle>/L<n>.snar` — exactly the mechanism Amanda uses

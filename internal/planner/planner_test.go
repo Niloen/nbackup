@@ -8,23 +8,37 @@ import (
 	"github.com/Niloen/nbackup/internal/config"
 )
 
-func TestDecideLevels(t *testing.T) {
-	today := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+func dleNamed(h string) config.DLE { return config.DLE{Host: h, Path: "/data"} }
 
-	// No prior full -> must be a full.
-	if lvl, _ := decide(&catalog.DLEState{}, today, 7, 0); lvl != 0 {
+// levelOf returns the planned level for a DLE name.
+func levelOf(p *Plan, name string) int {
+	for _, it := range p.Items {
+		if it.Name == name {
+			return it.Level
+		}
+	}
+	return -99
+}
+
+func TestLevelDecisions(t *testing.T) {
+	today := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	mk := func(d *catalog.DLEState) *Plan {
+		hist := &catalog.History{DLEs: map[string]*catalog.DLEState{"h-data": d}}
+		return Build([]config.DLE{dleNamed("h")}, hist, nil, Params{FullIntervalDays: 7}, today)
+	}
+
+	// No prior full -> mandatory full.
+	if lvl := levelOf(mk(&catalog.DLEState{}), "h-data"); lvl != 0 {
 		t.Errorf("first backup: got L%d, want L0", lvl)
 	}
-
-	// Recent full -> incremental.
+	// Recent full -> incremental L1.
 	recent := &catalog.DLEState{LastFullDate: today.AddDate(0, 0, -1).Format("2006-01-02")}
-	if lvl, _ := decide(recent, today, 7, 0); lvl != 1 {
+	if lvl := levelOf(mk(recent), "h-data"); lvl != 1 {
 		t.Errorf("recent full: got L%d, want L1", lvl)
 	}
-
-	// Very overdue full (>= 2x interval) -> forced full regardless of stagger.
+	// Overdue past the deadline -> forced full.
 	overdue := &catalog.DLEState{LastFullDate: today.AddDate(0, 0, -20).Format("2006-01-02")}
-	if lvl, _ := decide(overdue, today, 7, 0); lvl != 0 {
+	if lvl := levelOf(mk(overdue), "h-data"); lvl != 0 {
 		t.Errorf("overdue full: got L%d, want L0", lvl)
 	}
 }
@@ -39,60 +53,73 @@ func TestMultilevelClimb(t *testing.T) {
 			{Date: "2026-06-21", Slot: "slot-2026-06-21", Level: 1},
 		},
 	}
-	lvl, _ := decide(d, today, 7, 0)
-	if lvl != 2 {
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{"h-data": d}}
+	p := Build([]config.DLE{dleNamed("h")}, hist, nil, Params{FullIntervalDays: 7}, today)
+	if lvl := levelOf(p, "h-data"); lvl != 2 {
 		t.Errorf("after L0,L1 the next level should be L2, got L%d", lvl)
 	}
 }
 
-// TestBalancesFullsAcrossCycle checks that fulls are spread across the cycle's
-// days by size rather than all landing on one day.
-func TestBalancesFullsAcrossCycle(t *testing.T) {
+// TestDegradeBalancesFulls checks that when several DLEs are due on the same day,
+// degrade demotes the excess to incrementals to meet the balance target.
+func TestDegradeBalancesFulls(t *testing.T) {
+	today := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	// 4 DLEs, each last full 2 days ago (due at interval=2, below deadline 4).
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
 	var dles []config.DLE
-	// 4 equal-sized DLEs over a 2-day cycle should split 2 per day.
+	est := map[string]Estimate{}
 	for _, h := range []string{"a", "b", "c", "d"} {
-		name := config.DLE{Host: h, Path: "/data"}.Name()
+		d := dleNamed(h)
+		name := d.Name()
 		hist.DLEs[name] = &catalog.DLEState{
-			LastFullDate:  "2026-06-01",
-			LastFullSlot:  "slot-2026-06-01",
+			LastFullDate:  today.AddDate(0, 0, -2).Format("2006-01-02"),
+			LastFullSlot:  "slot-x",
 			LastFullBytes: 100,
-			Runs:          []catalog.RunRecord{{Date: "2026-06-01", Slot: "slot-2026-06-01", Level: 0}},
+			Runs:          []catalog.RunRecord{{Date: "old", Slot: "slot-x", Level: 0}},
 		}
-		dles = append(dles, config.DLE{Host: h, Path: "/data"})
+		dles = append(dles, d)
+		est[name] = Estimate{Full: 100, Incr: 10}
 	}
-	interval, fullDay := schedule(dles, hist, Params{FullIntervalDays: 2})
-	if interval != 2 {
-		t.Fatalf("interval = %d, want 2", interval)
+	// total full 400, interval 2 -> target 200 -> keep 2 fulls, degrade 2.
+	p := Build(dles, hist, est, Params{FullIntervalDays: 2, CapacityRoomBytes: -1}, today)
+	fulls := 0
+	for _, it := range p.Items {
+		if it.Level == 0 {
+			fulls++
+		}
 	}
-	counts := map[int]int{}
-	for _, day := range fullDay {
-		counts[day]++
-	}
-	if counts[0] != 2 || counts[1] != 2 {
-		t.Errorf("fulls not balanced across days: %v", counts)
+	if fulls != 2 {
+		t.Errorf("expected 2 fulls after degrade to target 200, got %d", fulls)
 	}
 }
 
-func TestBuildAssignsBaseSlot(t *testing.T) {
+// TestCapacityRoomForcesDegrade checks the hard ceiling overrides the balance
+// target: a tiny capacity room degrades more aggressively.
+func TestCapacityRoomForcesDegrade(t *testing.T) {
+	today := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	hist.DLEs["h-data"] = &catalog.DLEState{
-		LastFullDate: "2026-06-20",
-		LastFullSlot: "slot-2026-06-20",
-		Runs: []catalog.RunRecord{
-			{Date: "2026-06-20", Slot: "slot-2026-06-20", Level: 0},
-		},
+	var dles []config.DLE
+	est := map[string]Estimate{}
+	for _, h := range []string{"a", "b", "c", "d"} {
+		d := dleNamed(h)
+		name := d.Name()
+		hist.DLEs[name] = &catalog.DLEState{
+			LastFullDate:  today.AddDate(0, 0, -2).Format("2006-01-02"),
+			LastFullBytes: 100,
+			Runs:          []catalog.RunRecord{{Date: "old", Slot: "slot-x", Level: 0}},
+		}
+		dles = append(dles, d)
+		est[name] = Estimate{Full: 100, Incr: 10}
 	}
-	dles := []config.DLE{{Host: "h", Path: "/data"}}
-	p := Build(dles, hist, Params{FullIntervalDays: 7}, time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC))
-	if len(p.Items) != 1 {
-		t.Fatalf("want 1 item, got %d", len(p.Items))
+	// room 130: keep at most 1 full (100) + 3 incr (30) = 130.
+	p := Build(dles, hist, est, Params{FullIntervalDays: 2, CapacityRoomBytes: 130}, today)
+	fulls := 0
+	for _, it := range p.Items {
+		if it.Level == 0 {
+			fulls++
+		}
 	}
-	it := p.Items[0]
-	if it.Level != 1 {
-		t.Fatalf("expected L1 incremental, got L%d", it.Level)
-	}
-	if it.BaseSlot != "slot-2026-06-20" || it.BaseLevel != 0 {
-		t.Errorf("base = (%q, L%d), want (slot-2026-06-20, L0)", it.BaseSlot, it.BaseLevel)
+	if fulls != 1 {
+		t.Errorf("expected 1 full under capacity room 130, got %d", fulls)
 	}
 }

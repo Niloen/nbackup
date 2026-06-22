@@ -165,6 +165,8 @@ func (c *Catalog) History() *History {
 				d.LastFullDate = s.Date
 				d.LastFullSlot = s.ID
 				d.LastFullBytes = a.Compressed
+			} else {
+				d.LastIncrBytes = a.Compressed
 			}
 		}
 	}

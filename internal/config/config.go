@@ -33,6 +33,11 @@ type Config struct {
 
 	Planner struct {
 		FullIntervalDays int `yaml:"full_interval_days"`
+		// Promote enables pulling future fulls forward to fill light runs.
+		// Off by default so balancing never spends extra storage.
+		Promote bool `yaml:"promote"`
+		// PromoteHeadroom caps promotion at this fraction of capacity (default 0.8).
+		PromoteHeadroom float64 `yaml:"promote_headroom"`
 	} `yaml:"planner"`
 
 	// GnuTarPath is a global default GNU tar binary for the gnutar method.

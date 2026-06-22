@@ -1,14 +1,15 @@
 // Package planner decides, for each DLE, which backup level to run. It uses an
-// Amanda-style multilevel scheme (levels 0-9): a full (level 0) starts each
-// cycle, and each subsequent run increments the level so it captures only what
-// changed since the previous level. Fulls are balanced across the cycle by size
-// (bin-packed into the interval's days) so daily volume is smooth — a global,
-// temporal concern, independent of which medium the slots land on.
+// Amanda-style multilevel scheme (levels 0-9) with a dynamic, estimate-driven
+// schedule: each run estimates every DLE, then balances by degrading (demoting
+// over-budget/over-target fulls to incrementals) and optionally promoting
+// (pulling future fulls forward to fill light runs). The PRD priority order is
+// encoded directly: mandatory fulls (recoverability, cycle deadline) are
+// immovable, the capacity ceiling overrides the balance target, and promotion is
+// off by default so balancing never spends extra storage.
 package planner
 
 import (
 	"fmt"
-	"hash/fnv"
 	"sort"
 	"time"
 
@@ -19,17 +20,32 @@ import (
 // MaxLevel is the highest incremental level assigned (Amanda uses levels 0-9).
 const MaxLevel = 9
 
-// Params are the planner's tuning inputs.
+// Estimate is the predicted size of a DLE's full and next-incremental dumps.
+type Estimate struct {
+	Full int64
+	Incr int64
+}
+
+// Params are the planner's tuning inputs, derived from config and the medium.
 type Params struct {
-	// FullIntervalDays is the cycle length: the target days between fulls per
-	// DLE. Fulls are spread across this many days to balance daily volume.
+	// FullIntervalDays is the cycle length: the target days between fulls.
 	FullIntervalDays int
+	// CapacityRoomBytes is the hard per-run ceiling from the medium's capacity
+	// (bytes that can be written without overflowing after pruning). Negative
+	// means unbounded.
+	CapacityRoomBytes int64
+	// Promote enables pulling future fulls forward to fill light runs.
+	Promote bool
+	// PromoteCeilingBytes bounds promotion so it never spends storage past this
+	// headroom. Negative means unbounded.
+	PromoteCeilingBytes int64
 }
 
 // Plan is the result of a planning run.
 type Plan struct {
 	Date     time.Time
 	Interval int
+	Target   int64 // balanced full-bytes target per run
 	Items    []Item
 }
 
@@ -38,110 +54,155 @@ type Item struct {
 	DLE       config.DLE
 	Name      string
 	Level     int    // 0 = full, 1..9 = incremental
-	BaseLevel int    // level whose snapshot this builds on (-1 for a full)
+	BaseLevel int    // level whose snapshot an incremental builds on (-1 for a full)
+	EstBytes  int64  // estimated size of the chosen dump
 	Reason    string // human-readable explanation
 	BaseSlot  string // slot whose state an incremental builds on
 }
 
-// Build produces a plan for the given date without scanning sources.
-func Build(dles []config.DLE, hist *catalog.History, p Params, today time.Time) *Plan {
-	interval, fullDay := schedule(dles, hist, p)
-	plan := &Plan{Date: today, Interval: interval}
-	for _, d := range dles {
-		name := d.Name()
-		st := hist.DLE(name)
-		level, reason := decide(st, today, interval, fullDay[name])
-		item := Item{DLE: d, Name: name, Level: level, BaseLevel: -1, Reason: reason}
-		if level >= 1 {
-			item.BaseLevel = level - 1
-			item.BaseSlot = st.LastSlot()
-		}
-		plan.Items = append(plan.Items, item)
-	}
-	return plan
+type cand struct {
+	dle       config.DLE
+	name      string
+	st        *catalog.DLEState
+	days      int // days since last full, -1 if never
+	full      bool
+	mandatory bool
+	due       bool
+	estFull   int64
+	estIncr   int64
+	reason    string
 }
 
-// schedule returns the full interval (the global cycle length) and each DLE's
-// assigned day of the cycle [0,interval). DLEs are bin-packed across the cycle's
-// days by last-full size (largest first into the lightest day) so each day's
-// full volume is balanced. Before any full-size history exists it falls back to
-// hash-based staggering.
-func schedule(dles []config.DLE, hist *catalog.History, p Params) (int, map[string]int) {
+// Build produces a plan for the given date from per-DLE estimates.
+func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, p Params, today time.Time) *Plan {
 	interval := p.FullIntervalDays
 	if interval < 1 {
 		interval = 7
 	}
 
-	type sized struct {
-		name  string
-		bytes int64
-	}
-	items := make([]sized, 0, len(dles))
+	cands := make([]*cand, 0, len(dles))
 	var totalFull int64
 	for _, d := range dles {
-		b := hist.DLE(d.Name()).LastFullBytes
-		totalFull += b
-		items = append(items, sized{d.Name(), b})
-	}
-
-	fullDay := map[string]int{}
-	if totalFull == 0 {
-		// No size history yet: stagger by hash.
-		for _, it := range items {
-			fullDay[it.name] = int(hashName(it.name) % uint32(interval))
+		name := d.Name()
+		st := hist.DLE(name)
+		e := est[name]
+		totalFull += e.Full
+		c := &cand{dle: d, name: name, st: st, days: st.DaysSinceFull(today), estFull: e.Full, estIncr: e.Incr}
+		switch {
+		case c.days < 0:
+			c.full, c.mandatory = true, true
+			c.reason = "first backup of this DLE (mandatory full)"
+		case c.days >= 2*interval:
+			c.full, c.mandatory = true, true
+			c.reason = fmt.Sprintf("forced full (deadline reached: %dd >= %dd)", c.days, 2*interval)
+		case c.days >= interval:
+			c.full, c.due = true, true
+			c.reason = fmt.Sprintf("full due (%dd since last full)", c.days)
+		default:
+			c.reason = fmt.Sprintf("incremental (%dd since last full)", c.days)
 		}
-		return interval, fullDay
+		cands = append(cands, c)
 	}
 
-	// Greedy bin-pack DLEs (largest full first) into `interval` day-bins.
-	sort.Slice(items, func(i, j int) bool { return items[i].bytes > items[j].bytes })
-	bins := make([]int64, interval)
-	for _, it := range items {
-		lightest := 0
-		for b := 1; b < interval; b++ {
-			if bins[b] < bins[lightest] {
-				lightest = b
+	target := totalFull / int64(interval)
+	degrade(cands, target, p.CapacityRoomBytes)
+	if p.Promote {
+		promote(cands, target, p.PromoteCeilingBytes)
+	}
+
+	plan := &Plan{Date: today, Interval: interval, Target: target}
+	for _, c := range cands {
+		it := Item{DLE: c.dle, Name: c.name, BaseLevel: -1, Reason: c.reason}
+		if c.full {
+			it.Level, it.EstBytes = 0, c.estFull
+		} else {
+			lvl := c.st.IncrementalsSinceFull() + 1
+			if lvl > MaxLevel {
+				lvl = MaxLevel
 			}
+			it.Level, it.BaseLevel, it.EstBytes, it.BaseSlot = lvl, lvl-1, c.estIncr, c.st.LastSlot()
 		}
-		fullDay[it.name] = lightest
-		bins[lightest] += it.bytes
+		plan.Items = append(plan.Items, it)
 	}
-	return interval, fullDay
+	return plan
 }
 
-// decide chooses a backup level for one DLE.
-//
-//   - No full ever -> full (required before any incremental).
-//   - Full due (>= interval) on this DLE's assigned day -> full; an overdue full
-//     (>= 2x interval) is forced regardless.
-//   - Otherwise -> the next incremental level (one higher than the last run,
-//     capped at MaxLevel), capturing changes since that level.
-func decide(d *catalog.DLEState, today time.Time, interval, fullDay int) (int, string) {
-	days := d.DaysSinceFull(today)
-	if days < 0 {
-		return 0, "first backup of this DLE (no full exists yet)"
-	}
-	if days >= interval {
-		if epochDay(today)%interval == fullDay {
-			return 0, fmt.Sprintf("scheduled full (balanced day, last full %dd ago)", days)
-		}
-		if days >= 2*interval {
-			return 0, fmt.Sprintf("forced full (overdue: %dd >= %dd)", days, 2*interval)
+func runBytes(cands []*cand) int64 {
+	var t int64
+	for _, c := range cands {
+		if c.full {
+			t += c.estFull
+		} else {
+			t += c.estIncr
 		}
 	}
-	level := d.IncrementalsSinceFull() + 1
-	if level > MaxLevel {
-		level = MaxLevel
+	return t
+}
+
+func fullBytes(cands []*cand) int64 {
+	var t int64
+	for _, c := range cands {
+		if c.full {
+			t += c.estFull
+		}
 	}
-	return level, fmt.Sprintf("incremental L%d (changes since L%d, last full %dd ago)", level, level-1, days)
+	return t
 }
 
-func hashName(s string) uint32 {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(s))
-	return h.Sum32()
+// degrade demotes the least-urgent non-mandatory due-fulls to incrementals while
+// the run exceeds the capacity room (hard, priority #3) or the balance target
+// (soft, priority #4). Mandatory fulls are never touched, so a single big DLE on
+// its day may still exceed the ceiling — that is accepted.
+func degrade(cands []*cand, target, room int64) {
+	var candidates []*cand
+	for _, c := range cands {
+		if c.full && !c.mandatory && c.due {
+			candidates = append(candidates, c)
+		}
+	}
+	// Least urgent first: smallest days since full, then largest size.
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].days != candidates[j].days {
+			return candidates[i].days < candidates[j].days
+		}
+		return candidates[i].estFull > candidates[j].estFull
+	})
+	overHard := func() bool { return room >= 0 && runBytes(cands) > room }
+	overSoft := func() bool { return target > 0 && fullBytes(cands) > target }
+	for _, c := range candidates {
+		if !overHard() && !overSoft() {
+			break
+		}
+		c.full, c.due = false, false
+		c.reason = "degraded to incremental (over capacity/balance target)"
+	}
 }
 
-func epochDay(t time.Time) int {
-	return int(t.UTC().Truncate(24*time.Hour).Unix() / 86400)
+// promote pulls soonest-due mid-cycle DLEs forward to full early, filling a light
+// run toward the target. It is bounded by once-per-interval (only mid-cycle DLEs,
+// never re-fulling a current one) and by the capacity headroom, so it never
+// spends storage past the ceiling.
+func promote(cands []*cand, target, ceiling int64) {
+	if target <= 0 {
+		return
+	}
+	var future []*cand
+	for _, c := range cands {
+		if !c.full && c.days >= 0 {
+			future = append(future, c)
+		}
+	}
+	// Soonest due first: largest days since full.
+	sort.Slice(future, func(i, j int) bool { return future[i].days > future[j].days })
+	for _, c := range future {
+		if fullBytes(cands) >= target {
+			break
+		}
+		projected := runBytes(cands) - c.estIncr + c.estFull
+		if ceiling >= 0 && projected > ceiling {
+			continue
+		}
+		c.full = true
+		c.reason = fmt.Sprintf("promoted full (was %dd into cycle)", c.days)
+	}
 }

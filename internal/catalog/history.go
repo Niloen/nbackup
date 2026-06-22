@@ -13,7 +13,8 @@ type History struct {
 type DLEState struct {
 	LastFullDate  string      `json:"last_full_date"` // YYYY-MM-DD, empty if never
 	LastFullSlot  string      `json:"last_full_slot"`
-	LastFullBytes int64       `json:"last_full_bytes"` // compressed size of the last full (for planner balancing)
+	LastFullBytes int64       `json:"last_full_bytes"` // compressed size of the last full
+	LastIncrBytes int64       `json:"last_incr_bytes"` // compressed size of the last incremental
 	Runs          []RunRecord `json:"runs"`
 }
 

@@ -148,24 +148,85 @@ func (e *Engine) RebuildCatalog() (int, error) {
 // Catalog exposes the catalog for read-only commands.
 func (e *Engine) Catalog() *catalog.Catalog { return e.cat }
 
-// Plan builds the plan for a run date, balancing fulls across the cycle.
+// Plan builds the plan for a run date: it estimates every DLE, then balances
+// fulls (degrade to fit capacity, optionally promote to fill light runs).
 func (e *Engine) Plan(date time.Time) *planner.Plan {
-	return planner.Build(e.cfg.DLEs(), e.cat.History(), planner.Params{
-		FullIntervalDays: e.cfg.FullIntervalDays(),
+	dles := e.cfg.DLEs()
+	return planner.Build(dles, e.cat.History(), e.estimates(dles), planner.Params{
+		FullIntervalDays:    e.cfg.FullIntervalDays(),
+		CapacityRoomBytes:   e.capacityRoom(date),
+		Promote:             e.cfg.Planner.Promote,
+		PromoteCeilingBytes: e.promoteCeiling(),
 	}, date)
 }
 
-// Estimate returns the uncompressed bytes a planned item would archive.
-func (e *Engine) Estimate(item planner.Item) (int64, error) {
-	m, err := e.methodForDumpType(item.DLE.DumpTypeName())
-	if err != nil {
-		return 0, err
+// estimates predicts each DLE's full and next-incremental size. By default it
+// uses the last recorded sizes (cheap, accurate for stable data); a dumptype
+// with `estimate: exact` runs a live tar estimate each run.
+func (e *Engine) estimates(dles []config.DLE) map[string]planner.Estimate {
+	hist := e.cat.History()
+	out := make(map[string]planner.Estimate, len(dles))
+	for _, d := range dles {
+		name := d.Name()
+		st := hist.DLE(name)
+		out[name] = e.estimateDLE(d, name, st)
 	}
-	req := method.BackupRequest{SourcePath: item.DLE.Path, Level: item.Level}
-	if item.Level >= 1 {
-		req.BaseSnap = e.cat.SnapshotPath(item.Name, item.BaseLevel)
+	return out
+}
+
+func (e *Engine) estimateDLE(d config.DLE, name string, st *catalog.DLEState) planner.Estimate {
+	if e.cfg.ResolveDumpType(d.DumpTypeName()).Params["estimate"] == "exact" {
+		if m, err := e.methodForDumpType(d.DumpTypeName()); err == nil && m.Check() == nil {
+			full, _ := m.Estimate(method.BackupRequest{SourcePath: d.Path, Level: 0})
+			var incr int64
+			lvl := st.IncrementalsSinceFull() + 1
+			if lvl > planner.MaxLevel {
+				lvl = planner.MaxLevel
+			}
+			if st.LastFullDate != "" && e.cat.SnapshotExists(name, lvl-1) {
+				incr, _ = m.Estimate(method.BackupRequest{
+					SourcePath: d.Path, Level: lvl, BaseSnap: e.cat.SnapshotPath(name, lvl-1),
+				})
+			}
+			return planner.Estimate{Full: full, Incr: incr}
+		}
 	}
-	return m.Estimate(req)
+	return planner.Estimate{Full: st.LastFullBytes, Incr: st.LastIncrBytes}
+}
+
+// capacityRoom is the hard per-run write ceiling: capacity minus the bytes that
+// cannot be reclaimed by pruning (the protected set). Negative = unbounded.
+func (e *Engine) capacityRoom(now time.Time) int64 {
+	capacity := e.profile.TotalBytes()
+	if capacity <= 0 {
+		return -1
+	}
+	slots := e.cat.Slots()
+	protected := policy.Protected(slots, e.minAge, now, e.requireVerifiedSuccessor)
+	var protectedBytes int64
+	for _, s := range slots {
+		if _, ok := protected[s.ID]; ok {
+			protectedBytes += s.TotalBytes
+		}
+	}
+	if room := capacity - protectedBytes; room > 0 {
+		return room
+	}
+	return 0
+}
+
+// promoteCeiling is the storage headroom promotion must not exceed, defaulting
+// to 80% of capacity. Negative = unbounded.
+func (e *Engine) promoteCeiling() int64 {
+	capacity := e.profile.TotalBytes()
+	if capacity <= 0 {
+		return -1
+	}
+	h := e.cfg.Planner.PromoteHeadroom
+	if h <= 0 || h > 1 {
+		h = 0.8
+	}
+	return int64(float64(capacity) * h)
 }
 
 // Run executes the plan for a date, producing one sealed slot.

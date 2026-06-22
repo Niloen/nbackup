@@ -17,7 +17,6 @@ func CmdPlan(args []string) error {
 	cfgPath := fs.String("c", DefaultConfigPath, "path to config file")
 	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
 	dateStr := fs.String("date", "", "run date YYYY-MM-DD (default today)")
-	noEstimate := fs.Bool("no-estimate", false, "skip scanning sources for size estimates")
 	fs.Parse(args)
 
 	cfg, err := loadConfig(*cfgPath, *catalogFlag)
@@ -34,7 +33,8 @@ func CmdPlan(args []string) error {
 	}
 
 	plan := eng.Plan(date)
-	fmt.Printf("Plan for run %s  (full interval %dd, landing %q)\n\n", slot.DateString(date), plan.Interval, cfg.Landing)
+	fmt.Printf("Plan for run %s  (cycle %dd, balance target ~%s/run, landing %q)\n\n",
+		slot.DateString(date), plan.Interval, sizeutil.FormatBytes(plan.Target), cfg.Landing)
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "DLE\tLEVEL\tEST. SIZE\tREASON")
@@ -44,25 +44,15 @@ func CmdPlan(args []string) error {
 		if item.Level >= 1 {
 			levelStr = fmt.Sprintf("L%d (incr)", item.Level)
 		}
-		estStr := "-"
-		if !*noEstimate {
-			if n, err := eng.Estimate(item); err == nil {
-				estStr = "~" + sizeutil.FormatBytes(n) + " raw"
-				estTotal += n
-			} else {
-				estStr = "unreadable"
-			}
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", item.Name, levelStr, estStr, item.Reason)
+		fmt.Fprintf(tw, "%s\t%s\t~%s\t%s\n", item.Name, levelStr, sizeutil.FormatBytes(item.EstBytes), item.Reason)
+		estTotal += item.EstBytes
 	}
 	tw.Flush()
 
 	current := eng.Catalog().TotalBytes()
 	capacity := eng.Capacity()
 	fmt.Printf("\nCatalog currently stored: %s\n", sizeutil.FormatBytes(current))
-	if !*noEstimate {
-		fmt.Printf("This run (raw, pre-compression): ~%s\n", sizeutil.FormatBytes(estTotal))
-	}
+	fmt.Printf("This run (estimated): ~%s\n", sizeutil.FormatBytes(estTotal))
 	if capacity > 0 {
 		over, pct := eng.BudgetStatus(current)
 		fmt.Printf("Capacity: %s (%.1f%% used)\n", sizeutil.FormatBytes(capacity), pct)

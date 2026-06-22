@@ -38,10 +38,15 @@ landing: fast-disk
 # gnutar_path: tar
 
 planner:
-  # The cycle length: target days between fulls per DLE (default 7). The planner
-  # balances fulls across these days by size to smooth daily volume; between
-  # fulls, incremental levels climb (L1, L2, ...) up to L9.
+  # The cycle length: target days between fulls per DLE (default 7). Each run
+  # estimates every DLE and degrades (demotes) over-budget/over-target fulls to
+  # incrementals to balance daily volume; between fulls, levels climb to L9.
   full_interval_days: 7
+  # Promotion fills light runs by pulling future fulls forward. Off by default
+  # so balancing never spends extra storage; when on it's capped at this
+  # fraction of capacity.
+  # promote: true
+  # promote_headroom: 0.8
 
 # Named method+option bundles (Amanda's "dumptype"). A DLE selects one.
 dumptypes:
@@ -52,6 +57,7 @@ dumptypes:
   no-logs:
     method: gnutar
     exclude: "*.log,*.tmp"
+    # estimate: exact   # run a live tar estimate each plan (default: use last sizes)
 
 sources:
   - host: app01
