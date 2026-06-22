@@ -163,9 +163,10 @@ func (e *Engine) Plan(date time.Time) *planner.Plan {
 	}, date)
 }
 
-// estimates predicts each DLE's full and next-incremental size. By default it
-// uses the last recorded sizes (cheap, accurate for stable data); a dumptype
-// with `estimate: exact` runs a live tar estimate each run.
+// estimates predicts each DLE's full and next-incremental size by asking the dump
+// method (Amanda's "client" estimate). For gnutar this is a fast metadata-only
+// tar pass; see gnutar.Estimate. Sizes are uncompressed — an upper bound on the
+// compressed bytes finally stored.
 func (e *Engine) estimates(dles []config.DLE) map[string]planner.Estimate {
 	hist := e.cat.History()
 	out := make(map[string]planner.Estimate, len(dles))
@@ -178,23 +179,23 @@ func (e *Engine) estimates(dles []config.DLE) map[string]planner.Estimate {
 }
 
 func (e *Engine) estimateDLE(d config.DLE, name string, st *catalog.DLEState) planner.Estimate {
-	if e.cfg.ResolveDumpType(d.DumpTypeName()).Params["estimate"] == "exact" {
-		if m, err := e.methodForDumpType(d.DumpTypeName()); err == nil && m.Check() == nil {
-			full, _ := m.Estimate(method.BackupRequest{SourcePath: d.Path, Level: 0})
-			var incr int64
-			lvl := st.IncrementalsSinceFull() + 1
-			if lvl > planner.MaxLevel {
-				lvl = planner.MaxLevel
-			}
-			if st.LastFullDate != "" && e.cat.SnapshotExists(name, lvl-1) {
-				incr, _ = m.Estimate(method.BackupRequest{
-					SourcePath: d.Path, Level: lvl, BaseSnap: e.cat.SnapshotPath(name, lvl-1),
-				})
-			}
-			return planner.Estimate{Full: full, Incr: incr}
-		}
+	m, err := e.methodForDumpType(d.DumpTypeName())
+	if err != nil || m.Check() != nil {
+		return planner.Estimate{} // no estimator available (e.g. tar missing)
 	}
-	return planner.Estimate{Full: st.LastFullBytes, Incr: st.LastIncrBytes}
+	full, _ := m.Estimate(method.BackupRequest{SourcePath: d.Path, Level: 0})
+
+	var incr int64
+	lvl := st.IncrementalsSinceFull() + 1
+	if lvl > planner.MaxLevel {
+		lvl = planner.MaxLevel
+	}
+	if st.LastFullDate != "" && e.cat.SnapshotExists(name, lvl-1) {
+		incr, _ = m.Estimate(method.BackupRequest{
+			SourcePath: d.Path, Level: lvl, BaseSnap: e.cat.SnapshotPath(name, lvl-1),
+		})
+	}
+	return planner.Estimate{Full: full, Incr: incr}
 }
 
 // capacityRoom is the hard per-run write ceiling: capacity minus the bytes that

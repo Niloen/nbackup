@@ -72,10 +72,9 @@ func TestDegradeBalancesFulls(t *testing.T) {
 		d := dleNamed(h)
 		name := d.Name()
 		hist.DLEs[name] = &catalog.DLEState{
-			LastFullDate:  today.AddDate(0, 0, -2).Format("2006-01-02"),
-			LastFullSlot:  "slot-x",
-			LastFullBytes: 100,
-			Runs:          []catalog.RunRecord{{Date: "old", Slot: "slot-x", Level: 0}},
+			LastFullDate: today.AddDate(0, 0, -2).Format("2006-01-02"),
+			LastFullSlot: "slot-x",
+			Runs:         []catalog.RunRecord{{Date: "old", Slot: "slot-x", Level: 0}},
 		}
 		dles = append(dles, d)
 		est[name] = Estimate{Full: 100, Incr: 10}
@@ -140,9 +139,8 @@ func TestCapacityRoomForcesDegrade(t *testing.T) {
 		d := dleNamed(h)
 		name := d.Name()
 		hist.DLEs[name] = &catalog.DLEState{
-			LastFullDate:  today.AddDate(0, 0, -2).Format("2006-01-02"),
-			LastFullBytes: 100,
-			Runs:          []catalog.RunRecord{{Date: "old", Slot: "slot-x", Level: 0}},
+			LastFullDate: today.AddDate(0, 0, -2).Format("2006-01-02"),
+			Runs:         []catalog.RunRecord{{Date: "old", Slot: "slot-x", Level: 0}},
 		}
 		dles = append(dles, d)
 		est[name] = Estimate{Full: 100, Incr: 10}

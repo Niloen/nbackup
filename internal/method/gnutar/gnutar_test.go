@@ -3,6 +3,7 @@ package gnutar
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,6 +93,50 @@ func TestExcludeOption(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dest, "drop.log")); !os.IsNotExist(err) {
 		t.Errorf("drop.log should have been excluded, stat err = %v", err)
+	}
+}
+
+// TestEstimate checks the /dev/null client estimate: the full reflects the data
+// size, excludes lower it, and an unchanged incremental is far smaller than a full.
+func TestEstimate(t *testing.T) {
+	m := newMethod(t)
+	src := t.TempDir()
+	snaps := t.TempDir()
+
+	write(t, filepath.Join(src, "big.bin"), strings.Repeat("x", 200000))
+	write(t, filepath.Join(src, "small.txt"), "hi")
+
+	full, err := m.Estimate(method.BackupRequest{SourcePath: src, Level: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full < 200000 {
+		t.Errorf("full estimate %d should be >= the 200000-byte file", full)
+	}
+
+	// Excluding the big file yields a much smaller estimate.
+	me, err := method.Open("gnutar", method.Options{"exclude": "*.bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	excl, err := me.Estimate(method.BackupRequest{SourcePath: src, Level: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if excl >= full {
+		t.Errorf("excluded estimate %d should be < full estimate %d", excl, full)
+	}
+
+	// An unchanged incremental against a real snapshot estimates far below a full.
+	time.Sleep(1100 * time.Millisecond) // snapshot time must beat file mtimes (1s granularity)
+	l0snap := filepath.Join(snaps, "L0.snar")
+	backup(t, m, method.BackupRequest{SourcePath: src, Level: 0, OutSnap: l0snap}, filepath.Join(t.TempDir(), "l0.tar"))
+	incr, err := m.Estimate(method.BackupRequest{SourcePath: src, Level: 1, BaseSnap: l0snap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if incr >= full {
+		t.Errorf("unchanged incremental estimate %d should be < full %d", incr, full)
 	}
 }
 

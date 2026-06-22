@@ -55,7 +55,6 @@ dumptypes:
   no-logs:
     method: gnutar
     exclude: "*.log,*.tmp"
-    # estimate: exact   # run a live tar estimate each plan (default: use last sizes)
 
 # The disklist: grouped by dumptype, then host, then the paths to back up.
 sources:

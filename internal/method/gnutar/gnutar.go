@@ -101,8 +101,12 @@ func (g *gnutar) Backup(r method.BackupRequest, out io.Writer) (*method.BackupRe
 	}, nil
 }
 
-// Estimate runs tar to a discarded output with temporary snapshots, so the real
-// snapshot library is untouched.
+// Estimate computes the dump size the way Amanda's client estimate does: it runs
+// tar with the archive targeted at /dev/null. GNU tar detects the null device and
+// walks metadata without reading file bodies, so this is fast yet exact — it
+// honors excludes, one-file-system, and the listed-incremental base natively. A
+// throwaway snapshot is used so the real .snar library is untouched. The result
+// is the uncompressed archive size (an upper bound on the bytes finally stored).
 func (g *gnutar) Estimate(r method.BackupRequest) (int64, error) {
 	if err := g.Check(); err != nil {
 		return 0, err
@@ -120,7 +124,21 @@ func (g *gnutar) Estimate(r method.BackupRequest) (int64, error) {
 	if err := g.prepareSnapshot(est); err != nil {
 		return 0, err
 	}
-	return g.runCreate(est, io.Discard, tmpSnap, "")
+
+	args := g.createArgs(est, "/dev/null", tmpSnap, "")
+	cmd := exec.Command(g.bin, args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil && !isWarning(err) {
+		return 0, fmt.Errorf("%s estimate failed: %w\n%s", g.bin, err, strings.TrimSpace(stderr.String()))
+	}
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if m := totalsRE.FindStringSubmatch(line); m != nil {
+			n, _ := strconv.ParseInt(m[1], 10, 64)
+			return n, nil
+		}
+	}
+	return 0, nil
 }
 
 // Restore consumes a raw tar stream and extracts it with incremental semantics,
@@ -168,9 +186,12 @@ func (g *gnutar) prepareSnapshot(r method.BackupRequest) error {
 	return copyFile(r.BaseSnap, r.OutSnap)
 }
 
-func (g *gnutar) runCreate(r method.BackupRequest, w io.Writer, snapshot, indexPath string) (int64, error) {
+// createArgs builds the shared tar create-mode argument list. fileTarget is "-"
+// for a streamed backup or "/dev/null" for an estimate; indexPath, when set, adds
+// the verbose member index (backup only).
+func (g *gnutar) createArgs(r method.BackupRequest, fileTarget, snapshot, indexPath string) []string {
 	args := []string{
-		"--create", "--file=-",
+		"--create", "--file=" + fileTarget,
 		"--directory=" + r.SourcePath,
 		"--listed-incremental=" + snapshot,
 		"--totals",
@@ -187,9 +208,11 @@ func (g *gnutar) runCreate(r method.BackupRequest, w io.Writer, snapshot, indexP
 	if indexPath != "" {
 		args = append(args, "--verbose", "--index-file="+indexPath)
 	}
-	args = append(args, ".")
+	return append(args, ".")
+}
 
-	cmd := exec.Command(g.bin, args...)
+func (g *gnutar) runCreate(r method.BackupRequest, w io.Writer, snapshot, indexPath string) (int64, error) {
+	cmd := exec.Command(g.bin, g.createArgs(r, "-", snapshot, indexPath)...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return 0, err

@@ -9,13 +9,12 @@ type History struct {
 	DLEs map[string]*DLEState `json:"dles"`
 }
 
-// DLEState tracks one DLE's backup history.
+// DLEState tracks one DLE's backup history. Sizes are not stored: estimates are
+// computed fresh from the dump method each run (Amanda's client estimate).
 type DLEState struct {
-	LastFullDate  string      `json:"last_full_date"` // YYYY-MM-DD, empty if never
-	LastFullSlot  string      `json:"last_full_slot"`
-	LastFullBytes int64       `json:"last_full_bytes"` // compressed size of the last full
-	LastIncrBytes int64       `json:"last_incr_bytes"` // compressed size of the last incremental
-	Runs          []RunRecord `json:"runs"`
+	LastFullDate string      `json:"last_full_date"` // YYYY-MM-DD, empty if never
+	LastFullSlot string      `json:"last_full_slot"`
+	Runs         []RunRecord `json:"runs"`
 }
 
 // RunRecord is a historical backup of a DLE.

@@ -91,9 +91,11 @@ Every command accepts `-c <config>` and `-C <catalog>` overrides.
 NBackup uses Amanda's **multilevel** scheme (levels 0–9) with a dynamic,
 estimate-driven schedule. Each run:
 
-1. **Estimates** every DLE's full and next-incremental size. By default it uses
-   the last recorded sizes (cheap, accurate for stable data); a dumptype with
-   `estimate: exact` runs a live `tar` estimate each run.
+1. **Estimates** every DLE's full and next-incremental size by running the dump
+   method (Amanda's "client" estimate). For GNU tar this is a `tar` pass targeted
+   at `/dev/null`: tar walks metadata without reading file bodies, so it is fast
+   yet exactly honors excludes, one-file-system, and the incremental snapshot.
+   Sizes are uncompressed — an upper bound on the compressed bytes finally stored.
 2. Sets a base decision per DLE: never-fulled → **mandatory L0**; past the cycle
    deadline (≈ 2× interval) → **forced L0**; due (≥ interval) → **L0**;
    otherwise the **next incremental level** (capped at L9).
