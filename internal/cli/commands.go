@@ -35,6 +35,12 @@ func CmdPlan(args []string) error {
 	plan := eng.Plan(date)
 	fmt.Printf("Plan for run %s  (cycle %dd, balance target ~%s/run, landing %q)\n\n",
 		slot.DateString(date), plan.Interval, sizeutil.FormatBytes(plan.Target), cfg.Landing)
+	for _, w := range plan.Warnings {
+		fmt.Printf("WARNING: %s\n", w)
+	}
+	if len(plan.Warnings) > 0 {
+		fmt.Println()
+	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "DLE\tLEVEL\tEST. SIZE\tREASON")

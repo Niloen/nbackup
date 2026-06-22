@@ -93,6 +93,42 @@ func TestDegradeBalancesFulls(t *testing.T) {
 	}
 }
 
+// TestCycleCapacityWarning checks the structural cycle check: when one full of
+// every DLE cannot fit capacity, the plan carries a warning (recoverability is
+// at risk) but still schedules the backups.
+func TestCycleCapacityWarning(t *testing.T) {
+	today := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
+	var dles []config.DLE
+	est := map[string]Estimate{}
+	for _, h := range []string{"a", "b", "c"} {
+		d := dleNamed(h)
+		dles = append(dles, d)
+		est[d.Name()] = Estimate{Full: 100, Incr: 10} // total full 300
+	}
+
+	// Capacity 250 < total full 300 -> warn.
+	p := Build(dles, hist, est, Params{FullIntervalDays: 7, CapacityBytes: 250}, today)
+	if len(p.Warnings) == 0 {
+		t.Errorf("expected a structural warning when a recovery set (300) exceeds capacity (250)")
+	}
+	if len(p.Items) != 3 {
+		t.Errorf("backups must still be scheduled despite the warning, got %d items", len(p.Items))
+	}
+
+	// Capacity 400 >= total full 300 -> no warning.
+	p = Build(dles, hist, est, Params{FullIntervalDays: 7, CapacityBytes: 400}, today)
+	if len(p.Warnings) != 0 {
+		t.Errorf("did not expect a warning when the recovery set fits, got %v", p.Warnings)
+	}
+
+	// Unbounded capacity (0) -> no warning.
+	p = Build(dles, hist, est, Params{FullIntervalDays: 7, CapacityBytes: 0}, today)
+	if len(p.Warnings) != 0 {
+		t.Errorf("unbounded capacity should not warn, got %v", p.Warnings)
+	}
+}
+
 // TestCapacityRoomForcesDegrade checks the hard ceiling overrides the balance
 // target: a tiny capacity room degrades more aggressively.
 func TestCapacityRoomForcesDegrade(t *testing.T) {

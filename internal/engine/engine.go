@@ -154,6 +154,7 @@ func (e *Engine) Plan(date time.Time) *planner.Plan {
 	dles := e.cfg.DLEs()
 	return planner.Build(dles, e.cat.History(), e.estimates(dles), planner.Params{
 		FullIntervalDays:    e.cfg.FullIntervalDays(),
+		CapacityBytes:       e.profile.TotalBytes(),
 		CapacityRoomBytes:   e.capacityRoom(date),
 		Promote:             e.cfg.Cycle.Promote,
 		PromoteCeilingBytes: e.promoteCeiling(),
@@ -232,6 +233,9 @@ func (e *Engine) promoteCeiling() int64 {
 // Run executes the plan for a date, producing one sealed slot.
 func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 	plan := e.Plan(date)
+	for _, w := range plan.Warnings {
+		logf.log("WARNING: %s", w)
+	}
 
 	// Pre-flight: resolve and check every method before creating a slot.
 	for _, item := range plan.Items {

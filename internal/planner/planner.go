@@ -4,8 +4,15 @@
 // over-budget/over-target fulls to incrementals) and optionally promoting
 // (pulling future fulls forward to fill light runs). The PRD priority order is
 // encoded directly: mandatory fulls (recoverability, cycle deadline) are
-// immovable, the capacity ceiling overrides the balance target, and promotion is
-// off by default so balancing never spends extra storage.
+// immovable, the per-run capacity ceiling overrides the balance target, and
+// promotion is off by default so balancing never spends extra storage.
+//
+// Capacity is enforced at two scopes. Per run, degrade keeps a single run's peak
+// under the room left before pruning would evict a protected slot. Per cycle,
+// Build checks that a complete recovery set (one full of every DLE) fits the
+// medium at all; that is structural — degrading only defers a due full to its
+// deadline within the same cycle, never reducing the cycle's full demand — so it
+// is surfaced as a warning rather than silently scheduled around.
 package planner
 
 import (
@@ -15,6 +22,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
 // MaxLevel is the highest incremental level assigned (Amanda uses levels 0-9).
@@ -30,9 +38,16 @@ type Estimate struct {
 type Params struct {
 	// FullIntervalDays is the cycle length: the target days between fulls.
 	FullIntervalDays int
-	// CapacityRoomBytes is the hard per-run ceiling from the medium's capacity
-	// (bytes that can be written without overflowing after pruning). Negative
-	// means unbounded.
+	// CapacityBytes is the medium's total retainable capacity, used for the
+	// structural cycle check (can a complete recovery set — one full of every
+	// DLE — be retained at all). Zero or negative means unbounded.
+	CapacityBytes int64
+	// CapacityRoomBytes is the hard per-run ceiling: bytes that can be written
+	// without pruning being forced to evict a protected slot (capacity minus the
+	// protected set). It bounds a single run's peak; it does not, and cannot,
+	// bound the cycle total — degrading a due full only defers it to its deadline
+	// within the same cycle, so the cycle's full demand is governed by
+	// CapacityBytes above, not by this per-run ceiling. Negative means unbounded.
 	CapacityRoomBytes int64
 	// Promote enables pulling future fulls forward to fill light runs.
 	Promote bool
@@ -47,6 +62,7 @@ type Plan struct {
 	Interval int
 	Target   int64 // balanced full-bytes target per run
 	Items    []Item
+	Warnings []string // structural problems no scheduling can fix (e.g. cycle won't fit capacity)
 }
 
 // Item is the planned backup of a single DLE.
@@ -111,6 +127,17 @@ func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, p 
 	}
 
 	plan := &Plan{Date: today, Interval: interval, Target: target}
+	// Structural cycle check (priority #1, recoverability): over a cycle every
+	// DLE is fulled once, and with minimum_age >= cycle those fulls coexist on
+	// the medium. If a single complete recovery set cannot fit capacity, no
+	// scheduling can keep the medium recoverable — surface it rather than
+	// silently pruning the oldest recovery points away. This is the cycle-scope
+	// counterpart to the per-run CapacityRoomBytes ceiling enforced in degrade.
+	if p.CapacityBytes > 0 && totalFull > p.CapacityBytes {
+		plan.Warnings = append(plan.Warnings, fmt.Sprintf(
+			"capacity too small to retain a complete recovery set: one full of every DLE needs ~%s but capacity is %s; the oldest recovery points will be pruned and full recoverability cannot be guaranteed",
+			sizeutil.FormatBytes(totalFull), sizeutil.FormatBytes(p.CapacityBytes)))
+	}
 	for _, c := range cands {
 		it := Item{DLE: c.dle, Name: c.name, BaseLevel: -1, Reason: c.reason}
 		if c.full {
@@ -150,9 +177,14 @@ func fullBytes(cands []*cand) int64 {
 }
 
 // degrade demotes the least-urgent non-mandatory due-fulls to incrementals while
-// the run exceeds the capacity room (hard, priority #3) or the balance target
-// (soft, priority #4). Mandatory fulls are never touched, so a single big DLE on
-// its day may still exceed the ceiling — that is accepted.
+// the run exceeds the per-run capacity room (hard, priority #3) or the balance
+// target (soft, priority #4). Mandatory fulls are never touched, so a single big
+// DLE on its day may still exceed the ceiling — that is accepted.
+//
+// This only smooths a single run's peak. It cannot reduce the cycle's full
+// demand: a demoted due-full still climbs to its deadline and is forced full
+// within the same cycle. Whether the cycle as a whole fits the medium is a
+// structural property checked separately against CapacityBytes (see Build).
 func degrade(cands []*cand, target, room int64) {
 	var candidates []*cand
 	for _, c := range cands {

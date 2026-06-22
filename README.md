@@ -97,14 +97,27 @@ estimate-driven schedule. Each run:
 2. Sets a base decision per DLE: never-fulled → **mandatory L0**; past the cycle
    deadline (≈ 2× interval) → **forced L0**; due (≥ interval) → **L0**;
    otherwise the **next incremental level** (capped at L9).
-3. **Degrades** to balance: while the run exceeds the capacity ceiling (hard,
-   priority #3) or the balance target `Σ full_est / interval` (soft, #4), it
-   demotes the least-urgent non-mandatory due-fulls to incrementals — pushing
+3. **Degrades** to balance: while the run exceeds the per-run capacity ceiling
+   (hard, priority #3) or the balance target `Σ full_est / interval` (soft, #4),
+   it demotes the least-urgent non-mandatory due-fulls to incrementals — pushing
    their full to a later day. Mandatory fulls are never touched (so one big DLE
    on its day may still be large — that's fine).
 4. Optionally **promotes** (off by default): pulls soonest-due future fulls
    forward to fill a light run, bounded by once-per-interval **and** a capacity
    headroom so it never spends storage past the limit.
+
+Capacity binds at **two scopes**, and they are not the same check:
+
+- **Per run** (step 3) bounds a single run's peak to the room left before pruning
+  would have to evict a *protected* slot (`capacity − protected set`). Within that
+  ceiling a run may be lumpy — taking more than its even share is fine.
+- **Per cycle** is structural: over a cycle every DLE is fulled once, and with
+  `minimum_age ≥ cycle` those fulls coexist on the medium, so a **complete
+  recovery set** (one full of every DLE) must fit capacity. Degrading cannot help
+  here — a demoted due-full just climbs to its deadline and is forced full inside
+  the same cycle, so the cycle's full demand is fixed. When `Σ full_est` exceeds
+  capacity the plan carries a **warning** (recoverability is at risk; backups
+  still run) rather than silently pruning the oldest recovery points away.
 
 This encodes the PRD priority order directly (recoverability and cycle safety are
 immovable; capacity overrides balance; balance never costs storage). It also
