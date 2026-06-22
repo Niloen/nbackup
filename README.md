@@ -258,25 +258,26 @@ orchestrator composes them.
 | Package | Responsibility | Amanda analogue |
 |---|---|---|
 | `config` | config + domain entities: `DLE`, `Media`, `DumpType` | Disklist / dumptype / storage |
-| `slot` | slot format: pure data + (de)serialization | Header / amar |
-| `media` | `Store`/`Vault` I/O + `Profile` (capacity) + `Retention` (reclamation) + registry | Device API + Policy |
-| `media/localdisk`, `media/s3`, `media/tape` | implementations (s3/tape are registered stubs) | tape/s3/vfs devices |
+| `slot` | slot format: pure data + lifecycle (`NewSlot`/`AddArchive`/`Seal`) | Header / amar |
+| `slotio` | authors & reads a slot on a `Store` (layout, sealing, verify) | taper / amrestore |
+| `media` | `Store` I/O + `Profile` (capacity + reclamation) + registry | Device API + Policy |
+| `media/localdisk`, `media/s3`, `media/tape` | implementations (s3 is a stub Store; tape is a capacity profile only) | tape/s3/vfs devices |
 | `method` | `Method` dump interface + registry (configured via dumptype options) | Application API |
 | `method/gnutar` | GNU tar implementation (all tar/snapshot specifics) | amgtar |
-| `policy` | cross-cutting safety floor (protected slots) | Policy |
 | `xfer` | stream pipeline: zstd + checksum + counting | Xfer API |
 | `catalog` | local cache of the slot index + snapshot library; derives run `History` | catalog / curinfo / tapelist |
-| `policy` | retention/cycle/budget decisions (pure) | Policy |
+| `policy` | cross-cutting retention safety floor: protected slots (pure) | Policy |
 | `planner` | multilevel level scheduling (pure) | planner |
 | `engine` | the driver: wires planner→method→xfer→media→catalog | driver / taper |
 | `cli` | thin command wiring | amdump / amadmin |
 
-Dependencies flow one way: `cli → engine → {planner, policy, method, media,
-catalog, xfer, slot, dle, config}`. Domain packages stay pure; `method`/`media`
-are pluggable adapters; `engine` is the only component aware of all of them. A
-backup reads as a pipeline — **source** (`method.Backup`) → **filter**
-(`xfer` zstd+checksum) → **dest** (`media.Store`) — and adding a storage medium
-or dump method is a registry registration, not a conditional in the core.
+Dependencies flow one way: `cli → engine → {planner, policy, method, slotio,
+catalog, config}` and the leaf packages `{media, xfer, slot, sizeutil}`. Domain
+packages stay pure; `method`/`media` are pluggable adapters; `engine` is the
+only component aware of all of them. A backup reads as a pipeline — **source**
+(`method.Backup`) → **filter** (`xfer` zstd+checksum) → **dest** (`media.Store`),
+composed by `slotio` — and adding a storage medium or dump method is a registry
+registration, not a conditional in the core.
 
 ### The catalog is a cache
 

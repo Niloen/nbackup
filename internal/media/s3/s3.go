@@ -29,7 +29,5 @@ func ni(op string) error { return fmt.Errorf("s3.%s: %w", op, media.ErrNotImplem
 
 func (s *store) Create(slotID, name string) (io.WriteCloser, error) { return nil, ni("Create") }
 func (s *store) Open(slotID, name string) (io.ReadCloser, error)    { return nil, ni("Open") }
-func (s *store) Stat(slotID, name string) (media.Object, error)     { return media.Object{}, ni("Stat") }
-func (s *store) List(slotID string) ([]media.Object, error)         { return nil, ni("List") }
 func (s *store) ListSlots() ([]string, error)                       { return nil, ni("ListSlots") }
 func (s *store) Remove(slotID string) error                         { return ni("Remove") }

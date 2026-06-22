@@ -17,11 +17,10 @@ import (
 // holds has no newer full backup elsewhere (so it is that DLE's last recovery
 // path).
 //
-// requireVerifiedSuccessor is reserved: today the existence of a newer full is
-// the successor requirement; once verification status is tracked it will further
-// require that successor to be verified.
-func Protected(slots []*slot.Slot, minAge time.Duration, now time.Time, requireVerifiedSuccessor bool) map[string]string {
-	_ = requireVerifiedSuccessor
+// Note: once verification status is tracked, the successor requirement should
+// tighten from "a newer full exists" to "a newer verified full exists"
+// (config.Cycle.RequireVerifiedSuccessor).
+func Protected(slots []*slot.Slot, minAge time.Duration, now time.Time) map[string]string {
 	protected := map[string]string{}
 	for _, s := range slots {
 		date, _ := slot.ParseDateField(s.Date)

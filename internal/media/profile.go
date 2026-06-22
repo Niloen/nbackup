@@ -14,13 +14,15 @@ import (
 // only genuinely per-medium quantity; balancing dumps over time is a global
 // planning concern, not a property of where bytes land, so it lives in the
 // planner, not here. The reclamation granularity (object vs volume) is hidden
-// inside Retention.
+// behind Reclaim.
 type Profile interface {
 	// TotalBytes is the total retainable capacity (0 = unbounded). For object
 	// stores this is the budget; for tape it is tapes * tape_size.
 	TotalBytes() int64
-	// Retention is the per-medium reclamation strategy.
-	Retention() Retention
+	// Reclaim chooses the slots to delete to satisfy this medium's capacity,
+	// given the protected set (slots that must never be reclaimed, computed by
+	// policy). It returns the reclamations to perform, in deletion order.
+	Reclaim(slots []*slot.Slot, protected map[string]string, now time.Time) []Reclamation
 }
 
 // Reclamation is one slot (or volume) chosen for reclamation.
@@ -28,17 +30,6 @@ type Reclamation struct {
 	SlotID string
 	Bytes  int64
 	Note   string
-}
-
-// ReclaimPlan is the set of reclamations to perform.
-type ReclaimPlan struct {
-	Reclaim []Reclamation
-}
-
-// Retention decides what to reclaim to satisfy a medium's capacity, given the
-// protected set (slots that must never be reclaimed, computed by policy).
-type Retention interface {
-	Plan(slots []*slot.Slot, protected map[string]string, now time.Time) ReclaimPlan
 }
 
 // ProfileFactory constructs a Profile from generic options.
@@ -71,37 +62,34 @@ type sizeProfile struct {
 	capacity int64
 }
 
-func (p sizeProfile) TotalBytes() int64    { return p.capacity }
-func (p sizeProfile) Retention() Retention { return sizeRetention{budget: p.capacity} }
+func (p sizeProfile) TotalBytes() int64 { return p.capacity }
 
-// sizeRetention reclaims the oldest non-protected slots until total <= budget.
-type sizeRetention struct{ budget int64 }
-
-func (r sizeRetention) Plan(slots []*slot.Slot, protected map[string]string, now time.Time) ReclaimPlan {
-	plan := ReclaimPlan{}
-	if r.budget <= 0 {
-		return plan // unbounded: nothing to reclaim
+// Reclaim deletes the oldest non-protected slots until total <= capacity.
+func (p sizeProfile) Reclaim(slots []*slot.Slot, protected map[string]string, now time.Time) []Reclamation {
+	if p.capacity <= 0 {
+		return nil // unbounded: nothing to reclaim
 	}
 	var total int64
 	for _, s := range slots {
 		total += s.TotalBytes
 	}
-	if total <= r.budget {
-		return plan
+	if total <= p.capacity {
+		return nil
 	}
 	ordered := append([]*slot.Slot(nil), slots...)
 	sort.Slice(ordered, func(i, j int) bool { return slot.Less(ordered[i], ordered[j]) }) // oldest first
+	var out []Reclamation
 	for _, s := range ordered {
-		if total <= r.budget {
+		if total <= p.capacity {
 			break
 		}
 		if _, isProtected := protected[s.ID]; isProtected {
 			continue
 		}
-		plan.Reclaim = append(plan.Reclaim, Reclamation{SlotID: s.ID, Bytes: s.TotalBytes, Note: "over budget"})
+		out = append(out, Reclamation{SlotID: s.ID, Bytes: s.TotalBytes, Note: "over budget"})
 		total -= s.TotalBytes
 	}
-	return plan
+	return out
 }
 
 // --- volume-based profile (tape) — capacity known, reclamation deferred ---
@@ -118,15 +106,12 @@ type volumeProfile struct {
 	tapeSize int64
 }
 
-func (p volumeProfile) TotalBytes() int64    { return p.tapes * p.tapeSize }
-func (p volumeProfile) Retention() Retention { return volumeRetention{} }
+func (p volumeProfile) TotalBytes() int64 { return p.tapes * p.tapeSize }
 
-// volumeRetention is a placeholder: tape reclamation is whole-volume reuse,
-// which needs a volume catalog and changer (not yet implemented).
-type volumeRetention struct{}
-
-func (volumeRetention) Plan(slots []*slot.Slot, protected map[string]string, now time.Time) ReclaimPlan {
-	return ReclaimPlan{}
+// Reclaim is a placeholder: tape reclamation is whole-volume reuse, which needs
+// a volume catalog and changer (not yet implemented).
+func (p volumeProfile) Reclaim(slots []*slot.Slot, protected map[string]string, now time.Time) []Reclamation {
+	return nil
 }
 
 func parseBytes(s string) (int64, error) {

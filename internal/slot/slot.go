@@ -69,14 +69,40 @@ type ArchiveFiles struct {
 	Files []string `json:"files"`
 }
 
+// NewSlot starts a new open slot for a run. Archives are added with AddArchive
+// and the slot is finalized with Seal; callers should not set the lifecycle
+// fields (Status, timestamps, TotalBytes) directly.
+func NewSlot(id, date string, seq int, generator string, now time.Time) *Slot {
+	return &Slot{
+		ID:        id,
+		Date:      date,
+		Sequence:  seq,
+		CreatedAt: now,
+		Status:    StatusOpen,
+		Generator: generator,
+	}
+}
+
+// AddArchive appends an archive and keeps TotalBytes in sync, so the running
+// total can never drift from the recorded archives.
+func (s *Slot) AddArchive(a Archive) {
+	s.Archives = append(s.Archives, a)
+	s.TotalBytes += a.Compressed
+}
+
+// Seal marks the slot immutable. It refuses to seal a slot with no archives, so
+// an empty run can never be recorded as a recovery point.
+func (s *Slot) Seal(now time.Time) error {
+	if len(s.Archives) == 0 {
+		return fmt.Errorf("cannot seal slot %s: no archives", s.ID)
+	}
+	s.Status = StatusSealed
+	s.SealedAt = now
+	return nil
+}
+
 // IsSealed reports whether the slot has been sealed.
 func (s *Slot) IsSealed() bool { return s.Status == StatusSealed }
-
-// ID builds a slot ID from a date and sequence number. Sequence 1 yields the
-// bare "slot-DATE"; higher sequences append ".N".
-func ID(date time.Time, seq int) string {
-	return IDFromParts(DateString(date), seq)
-}
 
 // IDFromParts builds a slot ID from a date string and sequence number.
 func IDFromParts(date string, seq int) string {
@@ -140,15 +166,6 @@ func ParseSlot(data []byte) (*Slot, error) {
 
 // Marshal serializes the manifest as indented JSON.
 func (m *Manifest) Marshal() ([]byte, error) { return marshalJSON(m) }
-
-// ParseManifest deserializes MANIFEST.json content.
-func ParseManifest(data []byte) (*Manifest, error) {
-	var m Manifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", FileManifest, err)
-	}
-	return &m, nil
-}
 
 func marshalJSON(v any) ([]byte, error) {
 	data, err := json.MarshalIndent(v, "", "  ")

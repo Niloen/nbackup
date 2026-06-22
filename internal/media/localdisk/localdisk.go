@@ -44,37 +44,6 @@ func (s *store) Open(slotID, name string) (io.ReadCloser, error) {
 	return os.Open(s.path(slotID, name))
 }
 
-func (s *store) Stat(slotID, name string) (media.Object, error) {
-	fi, err := os.Stat(s.path(slotID, name))
-	if err != nil {
-		return media.Object{}, err
-	}
-	return media.Object{Name: name, Size: fi.Size()}, nil
-}
-
-func (s *store) List(slotID string) ([]media.Object, error) {
-	base := filepath.Join(s.root, slotID)
-	var objs []media.Object
-	err := filepath.Walk(base, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(base, p)
-		if err != nil {
-			return err
-		}
-		objs = append(objs, media.Object{Name: filepath.ToSlash(rel), Size: info.Size()})
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return objs, nil
-}
-
 func (s *store) ListSlots() ([]string, error) {
 	entries, err := os.ReadDir(s.root)
 	if err != nil {

@@ -59,14 +59,6 @@ func (d *DLEState) IncrementalsSinceFull() int {
 	return n
 }
 
-// LastLevel returns the level of the most recent recorded run, or -1 if none.
-func (d *DLEState) LastLevel() int {
-	if len(d.Runs) == 0 {
-		return -1
-	}
-	return d.Runs[len(d.Runs)-1].Level
-}
-
 // LastSlot returns the slot ID of the most recent recorded run, or "" if none.
 func (d *DLEState) LastSlot() string {
 	if len(d.Runs) == 0 {
