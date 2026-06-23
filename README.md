@@ -267,17 +267,21 @@ tar snapshot library, immutable sealed slots with **sequence-suffixed** same-day
 runs, **deletion-aware** incremental restore, checksum verification, point-in-time
 restore, per-medium budget reporting, cycle-safe pruning.
 
-The `tape` medium is a **library of tapes behind one drive**: `bays: N` physical
-positions, each holding a finite `volume_size` tape, with `dir:` (a file-backed
-virtual library, no hardware) or `device:` (a real drive via `mt`). You label a
-blank tape (`nb label`), and inventory or mount tapes with `nb changer list` /
-`nb changer load`. Tapes carry a self-describing label that NBackup **verifies
-before every write**, so a foreign, wrong, or still-active reel is never
-clobbered. A tape fills to end-of-tape and is then changed manually; `appendable:
-true` (default) packs many runs per tape (Bacula-style), `appendable: false` uses
-one run per tape (Amanda-style). Restore auto-mounts whichever tape holds the
-copy it needs. (Internals: [ARCHITECTURE.md](ARCHITECTURE.md). Automatic tape
-advance and spanning are the next step.)
+The `tape` medium comes in two shapes that differ in *who changes the tape*. A
+**robotic library** (`dir:` file-backed, or `device:` a real drive via `mt`) has
+`bays: N` physical positions, each a finite `volume_size` tape, and a command
+moves which bay is mounted. A **single drive you change by hand** (`mode: manual`)
+shows one bay (`drive`) whose tape *you* swap, with the other reels on a shelf;
+when a backup or restore needs a different tape, NBackup **prompts you to swap it
+in and waits** (an unattended run errors instead of hanging). Either way you label
+a blank tape (`nb label`) and inventory or load tapes with `nb changer list` / `nb
+changer load`. Tapes carry a self-describing label that NBackup **verifies before
+every write**, so a foreign, wrong, or still-active reel is never clobbered.
+`appendable: true` (default) packs many runs per tape (Bacula-style), `appendable:
+false` uses one run per tape (Amanda-style). Restore mounts (robot) or prompts for
+(manual) whichever tape holds the copy it needs. (Internals:
+[ARCHITECTURE.md](ARCHITECTURE.md). Automatic tape advance and spanning are the
+next step.)
 
 Not yet implemented (declared in config for forward-compatibility):
 

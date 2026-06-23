@@ -42,6 +42,37 @@ func (l Logf) log(format string, args ...any) {
 	}
 }
 
+// Operator handles physical actions the engine cannot perform itself — chiefly
+// swapping the reel in a single-drive (manual) tape station when the loaded tape
+// won't do. The CLI implements it interactively over stdin; an unattended run
+// leaves it nil, so a manual swap degrades to an actionable error instead of
+// blocking forever waiting for a human.
+type Operator interface {
+	// Swap asks the operator to load a reel into the drive for the stated need and
+	// returns the chosen reel's Bay id (from req.Shelf), or ok=false to abort
+	// (leaving the drive unchanged).
+	Swap(req SwapRequest) (reel string, ok bool)
+}
+
+// SwapRequest describes why a manual tape swap is needed and what is available.
+type SwapRequest struct {
+	Medium string            // medium name
+	Pool   string            // its label pool
+	Reason string            // why the loaded reel won't do (the underlying error)
+	Need   string            // a specific volume label wanted (read); "" means any writable (write)
+	Loaded media.BayStatus   // what is in the drive now (zero value when empty)
+	Shelf  []media.BayStatus // reels available to load
+}
+
+// reloadable wraps a write-eligibility failure that loading a different volume
+// could fix (so a manual station can prompt for a swap), as opposed to a hard
+// failure (stale catalog, I/O) that swapping would not help.
+type reloadable struct{ error }
+
+func reloadableErr(format string, a ...any) error { return reloadable{fmt.Errorf(format, a...)} }
+
+func isReloadable(err error) bool { r := reloadable{}; return errors.As(err, &r) }
+
 // Engine holds the wired-up components for one configuration. It owns the media
 // volume; the catalog is a local cache the engine refreshes from the volume.
 // Dump methods are resolved per dumptype and cached.
@@ -57,7 +88,12 @@ type Engine struct {
 	methods    map[string]method.Method // by cache key (dumptype or "@method")
 	codec      string                   // compression codec for new archives
 	fopts      filter.Options           // codec invocation options (level/threads/nice)
+	op         Operator                 // optional: handles manual tape swaps (nil = unattended)
 }
+
+// SetOperator attaches an operator so manual single-drive media can prompt for a
+// reel swap mid-command. Without one, manual swaps degrade to an actionable error.
+func (e *Engine) SetOperator(op Operator) { e.op = op }
 
 // New constructs an Engine from configuration: it opens the landing volume and
 // its capacity profile via the media registry, and loads the catalog cache
@@ -284,7 +320,7 @@ func (e *Engine) CopySlot(slotID, targetMedia string, force bool, logf Logf) err
 			}
 		}
 	}
-	volName, epoch, err := e.verifyWritable(dst, targetMedia, def.IsAppendable(), time.Now().UTC())
+	volName, epoch, err := e.verifyWritableInteractive(dst, targetMedia, def.IsAppendable(), time.Now().UTC(), logf)
 	if err != nil {
 		return err
 	}
@@ -323,14 +359,14 @@ func (e *Engine) verifyWritable(vol media.Volume, medium string, appendable bool
 	lbl, labeled, err := lv.ReadLabel()
 	switch {
 	case errors.Is(err, media.ErrNoVolume):
-		return "", 0, fmt.Errorf("medium %q has no tape loaded; load one with `nb changer load %s <bay>` or label a blank one with `nb label %s <name>`", medium, medium, medium)
+		return "", 0, reloadableErr("medium %q has no tape loaded; load one with `nb changer load %s <bay>` or label a blank one with `nb label %s <name>`", medium, medium, medium)
 	case errors.Is(err, media.ErrForeignVolume):
-		return "", 0, fmt.Errorf("medium %q holds non-NBackup data; refusing to overwrite — relabel it explicitly with `nb label --force %s <name>`", medium, medium)
+		return "", 0, reloadableErr("medium %q holds non-NBackup data; refusing to overwrite — relabel it explicitly with `nb label --force %s <name>`", medium, medium)
 	case err != nil:
 		return "", 0, err
 	case !labeled: // blank volume
 		if !e.cfg.AutoLabel {
-			return "", 0, fmt.Errorf("medium %q is blank/unlabeled; run `nb label %s <name>` first (or set auto_label: true)", medium, medium)
+			return "", 0, reloadableErr("medium %q is blank/unlabeled; run `nb label %s <name>` first (or set auto_label: true)", medium, medium)
 		}
 		lbl = media.Label{Name: fmt.Sprintf("%s-%s", medium, slot.DateString(now)), Pool: medium, Epoch: 1, WrittenAt: now}
 		if err := lv.WriteLabel(lbl); err != nil {
@@ -338,7 +374,7 @@ func (e *Engine) verifyWritable(vol media.Volume, medium string, appendable bool
 		}
 	}
 	if lbl.Pool != "" && lbl.Pool != medium {
-		return "", 0, fmt.Errorf("mounted volume %q belongs to pool %q, not %q — wrong tape", lbl.Name, lbl.Pool, medium)
+		return "", 0, reloadableErr("mounted volume %q belongs to pool %q, not %q — wrong tape", lbl.Name, lbl.Pool, medium)
 	}
 	// Relabeled-since check: a tape we know whose epoch advanced means the catalog
 	// is stale for it. (A genuinely different tape is not an error — that is what
@@ -349,13 +385,59 @@ func (e *Engine) verifyWritable(vol media.Volume, medium string, appendable bool
 	// One-run-per-tape media refuse to append onto a tape that already holds a run.
 	if !appendable {
 		if held := e.cat.SlotsOnVolume(lbl.Name); len(held) > 0 {
-			return "", 0, fmt.Errorf("medium %q is not appendable and tape %q already holds %d run(s); load a fresh tape", medium, lbl.Name, len(held))
+			return "", 0, reloadableErr("medium %q is not appendable and tape %q already holds %d run(s); load a fresh tape", medium, lbl.Name, len(held))
 		}
 	}
 	if err := e.cat.RecordVolume(lbl); err != nil {
 		return "", 0, err
 	}
 	return lbl.Name, lbl.Epoch, nil
+}
+
+// verifyWritableInteractive is verifyWritable plus the manual-station swap loop:
+// on a single-drive (manual) medium whose loaded tape is unusable in a way a
+// different reel would fix, it prompts the operator to swap and retries. Robotic
+// libraries and unattended runs fall straight through to the underlying error.
+func (e *Engine) verifyWritableInteractive(vol media.Volume, medium string, appendable bool, now time.Time, logf Logf) (string, int, error) {
+	for {
+		name, epoch, err := e.verifyWritable(vol, medium, appendable, now)
+		if err == nil {
+			return name, epoch, nil
+		}
+		mc, ok := vol.(media.ManualChanger)
+		if !ok || !isReloadable(err) {
+			return "", 0, err
+		}
+		if e.op == nil {
+			return "", 0, fmt.Errorf("%v (load a writable tape into the drive and retry)", err)
+		}
+		reel, ok := e.promptSwap(mc, medium, "", err)
+		if !ok {
+			return "", 0, fmt.Errorf("%v (no tape loaded)", err)
+		}
+		logf.log("loading reel %s into the %q drive", reel, medium)
+		if err := mc.Insert(reel); err != nil {
+			return "", 0, err
+		}
+	}
+}
+
+// promptSwap asks the operator (via e.op) to pick a reel to load on a manual
+// medium. need is the specific volume label wanted (reads) or "" (writes).
+func (e *Engine) promptSwap(mc media.ManualChanger, medium, need string, cause error) (string, bool) {
+	shelf, err := mc.Shelf()
+	if err != nil {
+		return "", false
+	}
+	var loaded media.BayStatus
+	if bays, err := mc.Bays(); err == nil && len(bays) > 0 {
+		loaded = bays[0]
+	}
+	reason := ""
+	if cause != nil {
+		reason = cause.Error()
+	}
+	return e.op.Swap(SwapRequest{Medium: medium, Pool: medium, Reason: reason, Need: need, Loaded: loaded, Shelf: shelf})
 }
 
 // assertVolume confirms the volume mounted on a medium matches a placement's
@@ -381,6 +463,9 @@ func (e *Engine) assertVolume(vol media.Volume, p catalog.Placement) error {
 // automatic; a real manual changer would prompt the operator. Non-changer media
 // are a no-op (a single addressable volume).
 func (e *Engine) mountForRead(vol media.Volume, p catalog.Placement) error {
+	if mc, ok := vol.(media.ManualChanger); ok {
+		return e.mountManualForRead(mc, p)
+	}
 	ch, ok := vol.(media.Changer)
 	if !ok {
 		return nil
@@ -403,8 +488,32 @@ func (e *Engine) mountForRead(vol media.Volume, p catalog.Placement) error {
 	return fmt.Errorf("tape %q (holding a copy of the slot on %q) is not in the library; load it with `nb changer load %s <bay>`", p.Volume, p.Medium, p.Medium)
 }
 
-// readVolumeLabel reads the loaded volume's label name, if any.
-func readVolumeLabel(vol media.Volume) (name string, labeled bool, err error) {
+// mountManualForRead loads the reel a placement needs on a single-drive (manual)
+// medium: if it is not already in the drive, it prompts the operator to swap it in
+// (the bay's content changes), looping until the right tape is loaded or the
+// operator aborts. Unattended, it returns an actionable error rather than blocking.
+func (e *Engine) mountManualForRead(mc media.ManualChanger, p catalog.Placement) error {
+	for {
+		if lbl, labeled, err := readVolumeLabel(mc); err == nil && labeled && lbl == p.Volume {
+			return nil // the needed reel is already in the drive
+		}
+		if e.op == nil {
+			return fmt.Errorf("medium %q needs tape %q in the drive (a copy of the slot is on it); load it and retry", p.Medium, p.Volume)
+		}
+		reel, ok := e.promptSwap(mc, p.Medium, p.Volume, fmt.Errorf("need tape %q", p.Volume))
+		if !ok {
+			return fmt.Errorf("tape %q was not loaded into the %q drive", p.Volume, p.Medium)
+		}
+		if err := mc.Insert(reel); err != nil {
+			return err
+		}
+	}
+}
+
+// readVolumeLabel reads the loaded volume's label name, if any. It accepts any
+// medium handle (Volume or Changer view) and is a no-op for address-identified
+// media that carry no label.
+func readVolumeLabel(vol any) (name string, labeled bool, err error) {
 	lv, ok := vol.(media.Labeled)
 	if !ok {
 		return "", false, nil
@@ -467,9 +576,13 @@ func (e *Engine) LabelVolume(mediumName, name string, relabel, force bool, now t
 		return fmt.Errorf("medium %q is address-identified and does not use labels", mediumName)
 	}
 
-	// On a changer, pick the physical bay this label belongs to and mount it: an
-	// existing tape for --relabel, a blank one for a new label.
-	if ch, ok := vol.(media.Changer); ok {
+	// On a single-drive (manual) station there is no bay to choose: labeling acts
+	// on whatever reel the operator has loaded into the drive. On a robotic library,
+	// pick the physical bay this label belongs to and mount it — an existing tape
+	// for --relabel, a blank one for a new label.
+	if _, ok := vol.(media.ManualChanger); ok {
+		// nothing to mount; the loaded reel (if any) is the target
+	} else if ch, ok := vol.(media.Changer); ok {
 		bay, err := chooseBay(ch, name, relabel)
 		if err != nil {
 			return err
@@ -567,7 +680,7 @@ func (e *Engine) Bays(mediumName string) (loaded string, bays []media.BayStatus,
 	}
 	ch, ok := vol.(media.Changer)
 	if !ok {
-		return "", nil, fmt.Errorf("medium %q is not a tape library", mediumName)
+		return "", nil, fmt.Errorf("medium %q has no changer to inventory (it is addressed directly, not by loading tapes)", mediumName)
 	}
 	bays, err = ch.Bays()
 	if err != nil {
@@ -584,9 +697,13 @@ func (e *Engine) LoadVolume(mediumName, target string, byLabel bool, logf Logf) 
 	if err != nil {
 		return err
 	}
+	// A single-drive (manual) station loads a reel from the room into its one drive.
+	if mc, ok := vol.(media.ManualChanger); ok {
+		return e.insertManual(mc, mediumName, target, byLabel, logf)
+	}
 	ch, ok := vol.(media.Changer)
 	if !ok {
-		return fmt.Errorf("medium %q is not a tape library", mediumName)
+		return fmt.Errorf("medium %q has no changer to load (it is addressed directly, not by loading tapes)", mediumName)
 	}
 	bay := target
 	if byLabel {
@@ -615,6 +732,53 @@ func (e *Engine) LoadVolume(mediumName, target string, byLabel bool, logf Logf) 
 		logf.log("loaded %q: bay %s (blank)", mediumName, bay)
 	}
 	return nil
+}
+
+// insertManual loads a reel from a manual station's room into its single drive,
+// addressed by reel id or (with byLabel) by the label it carries.
+func (e *Engine) insertManual(mc media.ManualChanger, mediumName, target string, byLabel bool, logf Logf) error {
+	shelf, err := mc.Shelf()
+	if err != nil {
+		return err
+	}
+	reel := ""
+	for _, b := range shelf {
+		if (byLabel && b.Label == target) || (!byLabel && b.Bay == target) {
+			reel = b.Bay
+			break
+		}
+	}
+	if reel == "" {
+		what := "reel"
+		if byLabel {
+			what = "tape labeled"
+		}
+		return fmt.Errorf("no %s %q in the %q room (it may already be in the drive)", what, target, mediumName)
+	}
+	if err := mc.Insert(reel); err != nil {
+		return err
+	}
+	if lbl, labeled, _ := readVolumeLabel(mc); labeled {
+		logf.log("loaded %q: reel %s holds %q", mediumName, reel, lbl)
+	} else {
+		logf.log("loaded %q: reel %s (blank)", mediumName, reel)
+	}
+	return nil
+}
+
+// Shelf returns the offline reels of a single-drive (manual) medium — those in the
+// room but not in the drive — or nil for any other medium. Used by `nb changer
+// list` to show the operator what is available to load.
+func (e *Engine) Shelf(mediumName string) ([]media.BayStatus, error) {
+	vol, _, _, err := e.mediumVolume(mediumName)
+	if err != nil {
+		return nil, err
+	}
+	mc, ok := vol.(media.ManualChanger)
+	if !ok {
+		return nil, nil
+	}
+	return mc.Shelf()
 }
 
 // Plan builds the plan for a run date: it estimates every DLE, then balances
@@ -723,7 +887,7 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 		}
 	}
 
-	volName, epoch, err := e.verifyWritable(e.vol, e.mediumName, e.mediumDef.IsAppendable(), time.Now().UTC())
+	volName, epoch, err := e.verifyWritableInteractive(e.vol, e.mediumName, e.mediumDef.IsAppendable(), time.Now().UTC(), logf)
 	if err != nil {
 		return nil, err
 	}

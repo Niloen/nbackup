@@ -420,6 +420,170 @@ func TestTapeAppendableFalse(t *testing.T) {
 	}
 }
 
+// scriptedOperator stands in for a human at a single-drive station: it loads the
+// reel the engine asks for (the needed label on a read, any blank reel on a
+// write) and counts how many swaps it performed.
+type scriptedOperator struct{ swaps int }
+
+func (o *scriptedOperator) Swap(r SwapRequest) (string, bool) {
+	o.swaps++
+	if r.Need != "" { // a read wants a specific label
+		for _, b := range r.Shelf {
+			if b.Label == r.Need {
+				return b.Bay, true
+			}
+		}
+		return "", false
+	}
+	for _, b := range r.Shelf { // a write wants any writable (blank) reel
+		if b.Blank {
+			return b.Bay, true
+		}
+	}
+	return "", false
+}
+
+// TestManualStationWriteSwap: a copy to a single-drive station with an empty drive
+// prompts the operator to load a reel; with auto_label on, the freshly loaded blank
+// reel is labeled and the copy proceeds — the write-side swap path.
+func TestManualStationWriteSwap(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "manual write")
+
+	cfg := &config.Config{
+		Landing: "disk",
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"lto":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "1"}},
+		},
+		Sources:   []config.DLE{{Host: "h", Path: src}},
+		Workdir:   t.TempDir(),
+		AutoLabel: true,
+	}
+	cfg.Compress.Codec = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	op := &scriptedOperator{}
+	eng.SetOperator(op)
+
+	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+	// The drive is empty: the copy must prompt for a reel, then auto-label it.
+	if err := eng.CopySlot(s.ID, "lto", false, logfDiscard); err != nil {
+		t.Fatalf("copy to manual station: %v", err)
+	}
+	if op.swaps == 0 {
+		t.Fatal("expected the operator to be prompted to load a reel")
+	}
+	found := false
+	for _, p := range eng.cat.Placements(s.ID) {
+		if p.Medium == "lto" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("slot should have a placement on the manual station")
+	}
+}
+
+// TestManualStationReadSwap: two slots land on two reels of a single-drive station;
+// with the disk copies gone, restoring each prompts the operator to swap the reel
+// holding it into the one drive — the read-side swap path.
+func TestManualStationReadSwap(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "v1")
+
+	cfg := &config.Config{
+		Landing: "disk",
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"lto":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "2"}},
+		},
+		Sources: []config.DLE{{Host: "h", Path: src}},
+		Workdir: t.TempDir(),
+	}
+	cfg.Compress.Codec = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	s1, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump 1: %v", err)
+	}
+	// Reel A: load it, label it, copy s1 (the loaded reel is usable — no swap).
+	if err := eng.LoadVolume("lto", "reel-01", false, logfDiscard); err != nil {
+		t.Fatalf("load reel-01: %v", err)
+	}
+	if err := eng.LabelVolume("lto", "Reel-A", false, false, time.Now().UTC(), nil); err != nil {
+		t.Fatalf("label Reel-A: %v", err)
+	}
+	if err := eng.CopySlot(s1.ID, "lto", false, logfDiscard); err != nil {
+		t.Fatalf("copy s1: %v", err)
+	}
+
+	write(t, filepath.Join(src, "f.txt"), "v2")
+	time.Sleep(1100 * time.Millisecond)
+	s2, err := eng.Run(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump 2: %v", err)
+	}
+	// Reel B: load (swaps A out of the one drive), label, copy s2.
+	if err := eng.LoadVolume("lto", "reel-02", false, logfDiscard); err != nil {
+		t.Fatalf("load reel-02: %v", err)
+	}
+	if err := eng.LabelVolume("lto", "Reel-B", false, false, time.Now().UTC(), nil); err != nil {
+		t.Fatalf("label Reel-B: %v", err)
+	}
+	if err := eng.CopySlot(s2.ID, "lto", false, logfDiscard); err != nil {
+		t.Fatalf("copy s2: %v", err)
+	}
+
+	// Drop the disk copies so restore must read from the reels.
+	if err := eng.vol.RemoveSlot(s1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.vol.RemoveSlot(s2.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	op := &scriptedOperator{}
+	eng.SetOperator(op)
+
+	name := config.DLE{Host: "h", Path: src}.Name()
+	// The drive holds Reel-B; restoring s1 must prompt to swap in Reel-A.
+	d1 := t.TempDir()
+	if err := eng.Restore(s1.ID, name, d1, logfDiscard); err != nil {
+		t.Fatalf("restore s1 (swap in Reel-A): %v", err)
+	}
+	assertContent(t, filepath.Join(d1, "f.txt"), "v1")
+	// And s2 must prompt to swap Reel-B back in.
+	d2 := t.TempDir()
+	if err := eng.Restore(s2.ID, name, d2, logfDiscard); err != nil {
+		t.Fatalf("restore s2 (swap in Reel-B): %v", err)
+	}
+	assertContent(t, filepath.Join(d2, "f.txt"), "v2")
+
+	if op.swaps == 0 {
+		t.Fatal("expected the operator to be prompted to swap reels on read")
+	}
+}
+
+func logfDiscard(string, ...any) {}
+
 func write(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

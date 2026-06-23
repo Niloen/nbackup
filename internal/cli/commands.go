@@ -91,6 +91,7 @@ func CmdDump(args []string) error {
 	if err != nil {
 		return err
 	}
+	eng.SetOperator(stdinOperator{})
 	date, err := ParseDate(*dateStr)
 	if err != nil {
 		return err
@@ -300,6 +301,7 @@ func CmdCopy(args []string) error {
 	if err != nil {
 		return err
 	}
+	eng.SetOperator(stdinOperator{})
 	if err := eng.CopySlot(pos[0], *to, *force, logfStdout); err != nil {
 		return err
 	}
@@ -489,6 +491,25 @@ func cmdChangerList(args []string) error {
 			sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
 	}
 	tw.Flush()
+
+	// A single-drive (manual) station also has reels in the room — offline, not in
+	// any bay — that the operator can load. List them so their ids/labels are known.
+	if shelf, err := eng.Shelf(pos[0]); err == nil && len(shelf) > 0 {
+		fmt.Println("\nIn the room (load with `nb changer load`, or when prompted):")
+		rw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		fmt.Fprintln(rw, "  REEL\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
+		for _, b := range shelf {
+			label, status := b.Label, "append"
+			if b.Blank {
+				label, status = "(blank)", "blank"
+			} else if b.Capacity > 0 && b.Used >= b.Capacity {
+				status = "full"
+			}
+			fmt.Fprintf(rw, "  %s\t%s\t%s\t%s\t%s\t%d\n", b.Bay, label, status,
+				sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
+		}
+		rw.Flush()
+	}
 	return nil
 }
 
@@ -535,6 +556,7 @@ func CmdRestore(args []string) error {
 	if err != nil {
 		return err
 	}
+	eng.SetOperator(stdinOperator{})
 	slotID := pos[0]
 	s, err := eng.Catalog().ReadSlot(slotID)
 	if err != nil {

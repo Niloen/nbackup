@@ -25,8 +25,8 @@ func init() {
 		var ch changer
 		switch {
 		case opts.Get("dir") != "":
-			// The emulated library is finite: volume_size caps each bay so a tape
-			// fills like a real reel; `bays` is how many physical positions exist.
+			// The emulated medium is finite: volume_size caps each tape so it fills
+			// like a real reel.
 			var capacity int64
 			if s := opts.Get("volume_size"); s != "" {
 				c, err := sizeutil.ParseBytes(s)
@@ -35,13 +35,35 @@ func init() {
 				}
 				capacity = c
 			}
-			bays := 1
-			if s := opts.Get("bays"); s != "" {
-				n, err := strconv.Atoi(s)
-				if err != nil {
-					return nil, fmt.Errorf("bays: %w", err)
+			// mode: manual is the single-drive station — one bay ("drive") whose
+			// content the operator swaps from an offline room of reels (case 1). The
+			// default is the robotic library — many physical bays a robot switches
+			// between (case 2). They count different things, so they use different
+			// keys: `reels` (how many tapes are in the room) vs `bays` (positions).
+			if opts.Get("mode") == "manual" {
+				if opts.Get("bays") != "" {
+					return nil, fmt.Errorf("manual tape station has a single drive, not bays; use `reels` for how many tapes are in the room")
 				}
-				bays = n
+				reels, err := atoiOpt(opts.Get("reels"), 1)
+				if err != nil {
+					return nil, fmt.Errorf("reels: %w", err)
+				}
+				mc, err := openManualChanger(opts.Get("dir"), capacity, reels)
+				if err != nil {
+					return nil, err
+				}
+				t := &tape{ch: mc}
+				if dev, bay, ok := mc.loaded(); ok {
+					t.dev, t.bay = dev, bay
+				}
+				return &manualTape{tape: t, mc: mc}, nil
+			}
+			if opts.Get("reels") != "" {
+				return nil, fmt.Errorf("`reels` applies only to a manual tape station (mode: manual); a robotic library counts `bays`")
+			}
+			bays, err := atoiOpt(opts.Get("bays"), 1)
+			if err != nil {
+				return nil, fmt.Errorf("bays: %w", err)
 			}
 			dc, err := openDirChanger(opts.Get("dir"), capacity, bays)
 			if err != nil {
@@ -64,6 +86,14 @@ func init() {
 		return t, nil
 	})
 	media.RegisterProfile("tape", media.NewVolumeProfile)
+}
+
+// atoiOpt parses an integer option, returning def when the value is empty.
+func atoiOpt(s string, def int) (int, error) {
+	if s == "" {
+		return def, nil
+	}
+	return strconv.Atoi(s)
 }
 
 // device is the mt-level seam: one mounted tape as a sequence of files addressed

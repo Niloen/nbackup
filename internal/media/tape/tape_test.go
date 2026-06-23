@@ -228,6 +228,98 @@ func TestTapeLibrary(t *testing.T) {
 	}
 }
 
+// TestManualStation covers the single-drive (mode: manual) changer: it presents
+// exactly one bay ("drive") whose content the operator swaps, the other reels sit
+// on the shelf, and inserting a reel changes the one drive's content rather than
+// switching bay. The loaded reel survives reopen.
+func TestManualStation(t *testing.T) {
+	dir := t.TempDir()
+	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "mode": "manual", "reels": "3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mc, ok := v.(media.ManualChanger)
+	if !ok {
+		t.Fatal("mode: manual should yield a media.ManualChanger")
+	}
+
+	// One bay, the drive, empty to start; all three reels are in the room.
+	bays, err := mc.Bays()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bays) != 1 || bays[0].Bay != "drive" {
+		t.Fatalf("a manual station should report one 'drive' bay, got %+v", bays)
+	}
+	if _, ok := mc.Loaded(); ok {
+		t.Fatal("a fresh station should have an empty drive")
+	}
+	if shelf, _ := mc.Shelf(); len(shelf) != 3 {
+		t.Fatalf("expected 3 reels in the room, got %d", len(shelf))
+	}
+
+	// Load a reel and label it; the drive's content is now that reel.
+	if err := mc.Insert("reel-01"); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.(media.Labeled).WriteLabel(media.Label{Name: "VOL-A", Pool: "p", Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if bay, ok := mc.Loaded(); !ok || bay != "drive" {
+		t.Fatalf("loaded bay = %q ok=%v, want drive/true", bay, ok)
+	}
+	bays, _ = mc.Bays()
+	if len(bays) != 1 || bays[0].Bay != "drive" || bays[0].Label != "VOL-A" {
+		t.Fatalf("drive should hold VOL-A, got %+v", bays)
+	}
+	// reel-01 is in the drive, so the room now lists only the other two.
+	shelf, _ := mc.Shelf()
+	if len(shelf) != 2 {
+		t.Fatalf("expected 2 reels in the room after loading one, got %+v", shelf)
+	}
+	for _, b := range shelf {
+		if b.Bay == "reel-01" {
+			t.Fatalf("the loaded reel should not appear on the shelf: %+v", shelf)
+		}
+	}
+
+	// Swap in a different reel: the SAME one bay changes content (not a new bay).
+	if err := mc.Insert("reel-02"); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.(media.Labeled).WriteLabel(media.Label{Name: "VOL-B", Pool: "p", Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+	bays, _ = mc.Bays()
+	if len(bays) != 1 || bays[0].Label != "VOL-B" {
+		t.Fatalf("after swap the one drive should hold VOL-B, got %+v", bays)
+	}
+
+	// Reopen: the loaded reel persists, and the room reports the set-aside reels.
+	v2, err := media.OpenVolume("tape", media.Options{"dir": dir, "mode": "manual", "reels": "3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mc2 := v2.(media.ManualChanger)
+	if b2, _, _ := readVolumeName(v2); b2 != "VOL-B" {
+		t.Fatalf("after reopen the drive should still hold VOL-B, got %q", b2)
+	}
+	room := map[string]string{}
+	shelf2, _ := mc2.Shelf()
+	for _, b := range shelf2 {
+		room[b.Bay] = b.Label
+	}
+	if room["reel-01"] != "VOL-A" || room["reel-03"] != "" {
+		t.Fatalf("room labels wrong: %+v", room)
+	}
+}
+
+// readVolumeName reads the loaded volume's label name (test helper).
+func readVolumeName(v media.Volume) (string, bool, error) {
+	lbl, ok, err := v.(media.Labeled).ReadLabel()
+	return lbl.Name, ok, err
+}
+
 // TestTapeForeignVolume: a non-empty tape whose file 0 is not our label reports
 // ErrForeignVolume, so it is never silently overwritten.
 func TestTapeForeignVolume(t *testing.T) {

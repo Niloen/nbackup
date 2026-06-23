@@ -25,7 +25,7 @@ media:
     budget: 20TB        # capacity ceiling; `nb slot prune` reclaims oldest to fit
     minimum_age: 30d    # a slot can't be retired from this medium until older
   lto:
-    type: tape          # a LIBRARY of bays behind one drive
+    type: tape          # a ROBOTIC LIBRARY of bays behind one drive
     device: /dev/nst0   # real single drive (no-rewind device), a one-bay library
     # dir: /var/lib/nbackup/vtape   # OR a file-backed virtual library (no hardware)
     bays: 20            # physical bays; total capacity is bays × volume_size
@@ -40,6 +40,21 @@ media:
     #   nb label lto lto-0001             # grab a blank bay and label it
     #   nb changer load lto bay-02        # mount a bay (or: nb changer load --label lto lto-0007)
     #   nb label --relabel lto lto-0042   # recycle an aged-out tape
+  desk-drive:
+    type: tape          # a SINGLE DRIVE you change tapes in by hand
+    dir: /var/lib/nbackup/station   # file-backed station (a real one is device: /dev/nst0)
+    mode: manual        # one bay ("drive") whose content the operator swaps; the
+                        # other reels sit on an offline shelf the system can't see
+    reels: 6            # how many tapes are in the room (file-backed sim only — a
+                        # real drive has just the one bay and a shelf you stock yourself)
+    volume_size: 6TB
+    minimum_age: 180d
+    appendable: false   # typical for a hand-changed drive: one run per tape
+    # When a backup or restore needs a different tape, NBackup prompts you to swap
+    # the reel in the drive and waits (unattended runs error instead of blocking):
+    #   nb changer list desk-drive        # the drive + reels in the room
+    #   nb changer load desk-drive bay-03 # load a reel by id (or --label by name)
+    #   nb label desk-drive lto-0001      # label whatever reel is loaded
   cloud:
     type: s3            # registered stub; no S3 client yet
     bucket: company-backups
