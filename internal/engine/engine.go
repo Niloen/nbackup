@@ -6,6 +6,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"runtime"
@@ -311,14 +312,43 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	if err != nil {
 		return err
 	}
-	volName, epoch, err := e.verifyWritableInteractive(dst, targetMedia, def.IsAppendable(), time.Now().UTC(), logf)
+	now := time.Now().UTC()
+	appendable := def.IsAppendable()
+	volName, epoch, err := e.verifyWritableInteractive(dst, targetMedia, appendable, now, logf)
 	if err != nil {
 		return err
 	}
 	logf.log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
-	files, err := media.CopySlot(dst, src, slotID)
-	if err != nil {
-		return err
+	// A slot is atomic and its copy lives on one volume, so spanning is per-slot:
+	// if the loaded volume fills mid-copy, roll the changer to the next writable
+	// volume and rewrite the whole slot there. The partial files left on the full
+	// volume are unsealed, so a scan/rebuild ignores them. `tried` stops the loop
+	// from re-mounting an exhausted bay; `fresh` means the loaded volume started
+	// empty, so a second EOM is the slot genuinely not fitting on any one volume.
+	tried := map[string]bool{}
+	if ch, ok := dst.(media.Library); ok {
+		if bay, ok := ch.Loaded(); ok {
+			tried[bay] = true
+		}
+	}
+	var files []media.FileInfo
+	fresh := false
+	for {
+		files, err = media.CopySlot(dst, src, slotID)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, media.ErrVolumeFull) {
+			return err
+		}
+		if fresh {
+			return fmt.Errorf("slot %s does not fit on an empty volume of medium %q; NBackup does not split one slot across volumes", slotID, targetMedia)
+		}
+		logf.log("medium %q: volume %q is full, rolling to the next volume", targetMedia, volName)
+		volName, epoch, fresh, err = e.advanceWritable(dst, targetMedia, appendable, tried, now, logf)
+		if err != nil {
+			return fmt.Errorf("copy %s to %q needs another volume: %w", slotID, targetMedia, err)
+		}
 	}
 	p := catalog.Placement{Medium: targetMedia, Volume: volName, Epoch: epoch}
 	for _, f := range files {

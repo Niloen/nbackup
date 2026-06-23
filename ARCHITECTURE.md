@@ -193,12 +193,18 @@ without hardware).
   (pack many runs per tape until full); `appendable: false` is **Amanda-style**
   (one run per tape). This is a deliberate, named lineage choice — real tapes are
   physically appendable; Amanda chooses not to, Bacula does.
-- **Manual switching (no auto-advance).** On a robotic library a full/foreign/wrong
-  tape is refused and the operator `nb load`s the next bay (or `nb label
-  --relabel`s an aged one); reads **auto-mount** the bay holding each placement's
-  label. On a single-drive station the same situations prompt for a physical reel
-  swap (above). Either way switching is operator-driven — the engine never advances
-  a tape on its own (see deferred auto-advance).
+- **Switching: auto on copy/sync, operator-driven on dump.** A **copy/sync**
+  (`CopySlot`) that fills the loaded volume mid-write rolls itself onto the next
+  writable volume and rewrites the whole slot there: a robotic library mounts the
+  next writable bay (blank → auto-labeled, or an empty in-pool tape — never a tape
+  holding runs); a single-drive station prompts for a reel swap; an unbounded or
+  changer-less medium returns an actionable error. Spanning is **per-slot** — a
+  slot copy still lands wholly on one volume (Placement is unchanged), so a slot
+  larger than an empty volume is an error, not a mid-slot split. A **dump run**
+  does *not* auto-advance (a run must fit the loaded tape; EOT mid-run aborts it
+  uncommitted — retry on a fresh tape). Reads always **auto-mount** the bay holding
+  each placement's label. The roll lives in `advanceWritable` (`changer.go`), the
+  one place that dispatches on medium shape.
 
 **Labels as a capability.** Verified before every write (refuse foreign / blank
 unless `auto_label` / wrong-pool / relabeled-since-cached). Address-identified
@@ -268,13 +274,17 @@ medium it lands on.
 
 ## Deferred / known next steps
 
-- Tape **auto-advance & whole-volume recycle** on EOT (today: manual switching —
-  a run must fit the loaded tape; end-of-tape mid-run aborts the run uncommitted,
-  retry on a fresh tape). The swap prompt fires at tape *selection*, not mid-write.
-- **Tape spanning** — one archive (or a run's archives) split across two tapes.
-  Blocked on the catalog `Placement` model, which binds one slot copy to one
-  volume + the seal that commits it; spanning means reworking Placement, the
-  cross-tape seal/commit, and per-volume rebuild. Deliberately deferred.
+- **Dump-run auto-advance & whole-volume recycle** on EOT. Copy/sync now roll onto
+  the next writable volume mid-write (`advanceWritable`), but a *dump run* still must
+  fit the loaded tape; EOT mid-run aborts it uncommitted, retry on a fresh tape. The
+  dump swap prompt fires at tape *selection*, not mid-write. Auto-recycling an
+  aged-out tape (vs. only blank / empty in-pool tapes) is also still manual
+  (`nb label --relabel`).
+- **Mid-slot tape spanning** — one archive (or slot) split across two tapes. Blocked
+  on the catalog `Placement` model, which binds one slot copy to one volume + the
+  seal that commits it; mid-slot spanning means reworking Placement, the cross-tape
+  seal/commit, and per-volume rebuild. Deliberately deferred — copy/sync span at
+  *slot* granularity instead (a slot too big for one volume is an error).
 - **S3** Volume implementation (registered stub today).
 - **Budget-driven retention** — budget is reported; pruning is cycle-based.
 - **Remote sources** — `host` is metadata; `path` is read locally.

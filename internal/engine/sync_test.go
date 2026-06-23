@@ -2,6 +2,7 @@ package engine
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,6 +188,102 @@ func TestSyncFromNonLanding(t *testing.T) {
 		t.Fatalf("restore from cold copy: %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "f.txt"), "tiered")
+}
+
+// TestSyncSpansLibraryVolumes syncs several disk slots onto a robotic tape library
+// whose tapes are too small to hold them all: the changer must roll itself onto a
+// fresh bay (auto-labeled) each time a tape fills, so every slot lands across
+// distinct volumes. Each slot must then restore from the library on its own — proof
+// the rolled-onto bytes are whole and the catalog points at the right tape.
+func TestSyncSpansLibraryVolumes(t *testing.T) {
+	src := t.TempDir()
+
+	cfg := &config.Config{
+		Landing:   "disk",
+		AutoLabel: true, // let the changer label each fresh tape it rolls onto
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			// Small tapes (256 KiB) across 4 bays: one slot fits, two do not.
+			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "4", "volume_size": "262144"}},
+		},
+		Sources: []config.DLE{{Host: "h", Path: src}},
+		Workdir: t.TempDir(),
+	}
+	cfg.Compress.Codec = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	// Three slots, each ~90 KiB of payload (codec none), so one fits on a 256 KiB
+	// tape but two do not — the second slot forces a roll onto a fresh bay.
+	payloads := map[string]string{}
+	var ids []string
+	for i, day := range []int{21, 22, 23} {
+		body := strings.Repeat(string(rune('a'+i)), 90*1024)
+		write(t, filepath.Join(src, "f.txt"), body)
+		s, err := eng.Run(time.Date(2026, 6, day, 0, 0, 0, 0, time.UTC), nil)
+		if err != nil {
+			t.Fatalf("dump %d: %v", day, err)
+		}
+		ids = append(ids, s.ID)
+		payloads[s.ID] = body
+	}
+
+	// Seed the first (blank) bay so the library has a tape in the drive to start on;
+	// the changer auto-labels and rolls onto the rest as each fills.
+	if err := eng.LoadVolume("lib", "bay-01", false, nil); err != nil {
+		t.Fatalf("load bay-01: %v", err)
+	}
+
+	report, err := eng.SyncTo("", "lib", SyncSelection{}, true, false, nil)
+	if err != nil {
+		t.Fatalf("sync disk->lib: %v", err)
+	}
+	if report.Copied() != 3 {
+		t.Fatalf("copied = %d, want 3", report.Copied())
+	}
+
+	// Every slot is on the library, and they are spread across more than one volume
+	// (the whole point — a single tape could not hold them).
+	vols := map[string]bool{}
+	for _, id := range ids {
+		placed := false
+		for _, p := range eng.cat.Placements(id) {
+			if p.Medium == "lib" {
+				placed, vols[p.Volume] = true, true
+			}
+		}
+		if !placed {
+			t.Fatalf("slot %s not on the library after sync", id)
+		}
+	}
+	if len(vols) < 2 {
+		t.Fatalf("all slots landed on a single volume %v; the changer did not roll", vols)
+	}
+
+	// Drop the disk copies so restore must read from the library, exercising the
+	// changer auto-mounting the right bay for each slot.
+	name := config.DLE{Host: "h", Path: src}.Name()
+	for _, id := range ids {
+		if err := eng.vol.RemoveSlot(id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := eng.cat.RemovePlacement(id, "disk"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range ids {
+		dest := t.TempDir()
+		if err := eng.Restore(id, name, dest, nil); err != nil {
+			t.Fatalf("restore %s from library: %v", id, err)
+		}
+		assertContent(t, filepath.Join(dest, "f.txt"), payloads[id])
+	}
 }
 
 // TestSyncTargetIsLanding rejects syncing a medium to itself.

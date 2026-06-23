@@ -425,9 +425,12 @@ that NBackup **verifies before every write**, so a foreign, wrong, or still-acti
 reel is never clobbered.
 `appendable: true` (default) packs many runs per tape (Bacula-style), `appendable:
 false` uses one run per tape (Amanda-style). Restore mounts (robot) or prompts for
-(manual) whichever tape holds the copy it needs. (Internals:
-[ARCHITECTURE.md](ARCHITECTURE.md). Automatic tape advance and spanning are the
-next step.)
+(manual) whichever tape holds the copy it needs. A **copy or sync** that fills a
+tape mid-write **rolls onto the next one automatically** — a robotic library mounts
+the next writable bay (auto-labeling a blank), a manual drive prompts for a swap —
+so a multi-tape `nb sync` to a library just works (a dump *run*, though, must still
+fit one tape). (Internals: [ARCHITECTURE.md](ARCHITECTURE.md). Mid-slot spanning and
+dump-run auto-advance are the next step.)
 
 Not yet implemented (declared in config for forward-compatibility):
 

@@ -74,7 +74,7 @@ func (e *Engine) verifyWritable(vol media.Volume, medium string, appendable bool
 		if !e.cfg.AutoLabel {
 			return "", 0, reloadableErr("medium %q is blank/unlabeled; run `nb label %s <name>` first (or set auto_label: true)", medium, medium)
 		}
-		lbl = media.Label{Name: fmt.Sprintf("%s-%s", medium, slot.DateString(now)), Pool: medium, Epoch: 1, WrittenAt: now}
+		lbl = media.Label{Name: e.autoLabelName(medium, now), Pool: medium, Epoch: 1, WrittenAt: now}
 		if err := lv.WriteLabel(lbl); err != nil {
 			return "", 0, err
 		}
@@ -98,6 +98,21 @@ func (e *Engine) verifyWritable(vol media.Volume, medium string, appendable bool
 		return "", 0, err
 	}
 	return lbl.Name, lbl.Epoch, nil
+}
+
+// autoLabelName picks a unique auto-label for a blank volume: medium-date, or
+// medium-date-N when an earlier name is taken — so a single run that rolls across
+// several blank tapes (a filling library) does not stamp every fresh tape with the
+// same name (which would collide in the catalog, keyed by label name).
+func (e *Engine) autoLabelName(medium string, now time.Time) string {
+	base := fmt.Sprintf("%s-%s", medium, slot.DateString(now))
+	name := base
+	for n := 2; ; n++ {
+		if _, ok := e.cat.Volume(name); !ok {
+			return name
+		}
+		name = fmt.Sprintf("%s-%d", base, n)
+	}
 }
 
 // verifyWritableInteractive is verifyWritable plus the manual-station swap loop:
@@ -126,6 +141,95 @@ func (e *Engine) verifyWritableInteractive(vol media.Volume, medium string, appe
 		if err := mc.Insert(reel); err != nil {
 			return "", 0, err
 		}
+	}
+}
+
+// advanceWritable rolls a medium to its next writable volume after the loaded one
+// filled (media.ErrVolumeFull mid-write), so a multi-volume copy/sync keeps going.
+// On a robotic Library it mounts and verifies the next writable bay the run has not
+// already tried; on a ShelfStation it prompts the operator to load another reel. A
+// plain Station (real single drive) or an address-identified medium (disk, s3) is a
+// single volume that cannot roll itself, so it returns an actionable error. `tried`
+// accumulates the volumes already attempted so the caller's loop terminates;
+// `wasEmpty` reports whether the new volume started with no runs (so the caller can
+// tell "slot too big for any volume" from "the previous volume was nearly full").
+func (e *Engine) advanceWritable(vol media.Volume, medium string, appendable bool, tried map[string]bool, now time.Time, logf Logf) (volName string, epoch int, wasEmpty bool, err error) {
+	switch m := vol.(type) {
+	case media.Library:
+		return e.advanceLibrary(m, medium, appendable, tried, now, logf)
+	case media.ShelfStation:
+		return e.advanceShelfStation(m, medium, appendable, tried, now, logf)
+	case media.Station:
+		return "", 0, false, fmt.Errorf("medium %q is a single-drive station with no loadable shelf; load a fresh tape and re-run (the copy resumes where it stopped)", medium)
+	default:
+		return "", 0, false, fmt.Errorf("medium %q is a single volume with no changer; it cannot span volumes", medium)
+	}
+}
+
+// advanceLibrary mounts the next writable bay of a robotic library: a blank one
+// (auto-labeled) or an empty in-pool tape, skipping bays already tried this run. It
+// never silently overwrites a tape that holds runs — verifyWritable makes the final
+// pool/epoch/appendable call once a bay is mounted, and a rejected bay is skipped.
+func (e *Engine) advanceLibrary(ch media.Library, medium string, appendable bool, tried map[string]bool, now time.Time, logf Logf) (string, int, bool, error) {
+	bays, err := ch.Bays()
+	if err != nil {
+		return "", 0, false, err
+	}
+	var lastErr error
+	for _, b := range bays {
+		if tried[b.ID] {
+			continue
+		}
+		tried[b.ID] = true
+		if err := ch.Mount(b.ID); err != nil {
+			return "", 0, false, err
+		}
+		name, epoch, verr := e.verifyWritable(ch, medium, appendable, now)
+		if verr != nil {
+			lastErr = verr // wrong pool / holds runs / blank with auto_label off: try the next bay
+			continue
+		}
+		wasEmpty := len(e.cat.SlotsOnVolume(name)) == 0
+		logf.log("medium %q: rolled to bay %s (volume %q)", medium, b.ID, name)
+		return name, epoch, wasEmpty, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("all %d bays are already loaded or tried", len(bays))
+	}
+	return "", 0, false, fmt.Errorf("medium %q has no further writable bay (load or relabel more tapes): %w", medium, lastErr)
+}
+
+// advanceShelfStation prompts the operator to load another reel into a single-drive
+// station's drive after the loaded one filled, looping until a writable reel is in
+// the drive or the operator aborts. Unattended (no operator) it returns an
+// actionable error rather than blocking.
+func (e *Engine) advanceShelfStation(mc media.ShelfStation, medium string, appendable bool, tried map[string]bool, now time.Time, logf Logf) (string, int, bool, error) {
+	if e.op == nil {
+		return "", 0, false, fmt.Errorf("medium %q drive is full; load a fresh tape and re-run (the copy resumes where it stopped)", medium)
+	}
+	for {
+		expect := e.expectedTapeFor(medium, now).Label
+		reel, ok := e.promptSwap(mc, medium, "", expect, fmt.Errorf("volume full; another tape is needed"))
+		if !ok {
+			return "", 0, false, fmt.Errorf("medium %q drive is full and no further tape was loaded", medium)
+		}
+		if tried[reel] {
+			return "", 0, false, fmt.Errorf("medium %q: reel %q was already used and is full", medium, reel)
+		}
+		tried[reel] = true
+		logf.log("loading reel %s into the %q drive", reel, medium)
+		if err := mc.Insert(reel); err != nil {
+			return "", 0, false, err
+		}
+		name, epoch, verr := e.verifyWritable(mc, medium, appendable, now)
+		if verr == nil {
+			wasEmpty := len(e.cat.SlotsOnVolume(name)) == 0
+			return name, epoch, wasEmpty, nil
+		}
+		if !isReloadable(verr) {
+			return "", 0, false, verr
+		}
+		// reloadable (blank without auto_label, wrong pool, …): prompt for another reel
 	}
 }
 

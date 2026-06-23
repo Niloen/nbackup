@@ -83,8 +83,10 @@ type Labeled interface {
 var ErrForeignVolume = fmt.Errorf("foreign volume: file 0 is not an NBackup label")
 
 // ErrVolumeFull reports that a write hit the end of the volume (a finite volume's
-// capacity, e.g. a tape). The partial file is discarded; without spanning, the
-// whole archive must be rewritten on another volume. Callers test it with errors.Is.
+// capacity, e.g. a tape). The partial file is discarded (left unsealed, so a scan
+// ignores it). A copy/sync to a changer catches this and rolls onto the next
+// writable volume, rewriting the whole slot there — spanning is per-slot, never
+// mid-slot. Callers test it with errors.Is.
 var ErrVolumeFull = fmt.Errorf("volume full: end of volume reached")
 
 // ErrNoVolume reports that an operation needs a volume mounted in the drive, but
