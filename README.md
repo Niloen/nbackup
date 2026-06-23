@@ -106,7 +106,7 @@ examples, and `nb completion <shell>` to generate shell completion.
 ```bash
 cp nbackup.example.yaml nbackup.yaml   # edit sources + catalog path
 
-nb plan                # preview today's plan and budget usage
+nb plan                # preview today's plan and capacity usage
 nb plan --days 30      # forecast the next 30 daily runs (when fulls land)
 nb dump                # run the backup, producing one sealed slot
 nb dump --dry-run --date 2026-07-15    # plan that day's run; writes nothing
@@ -140,37 +140,40 @@ estimate-driven schedule. Each run:
    at `/dev/null`: tar walks metadata without reading file bodies, so it is fast
    yet exactly honors excludes, one-file-system, and the incremental snapshot.
    Sizes are uncompressed — an upper bound on the compressed bytes finally stored.
-2. Sets a base decision per DLE: never-fulled → **mandatory L0**; past the cycle
-   deadline (≈ 2× interval) → **forced L0**; due (≥ interval) → **L0**;
-   otherwise the **next incremental level** (capped at L9).
-3. **Degrades** to balance: while the run exceeds the per-run capacity ceiling
-   (hard, priority #3) or the balance target `Σ full_est / interval` (soft, #4),
-   it demotes the least-urgent non-mandatory due-fulls to incrementals — pushing
-   their full to a later day. Mandatory fulls are never touched (so one big DLE
-   on its day may still be large — that's fine).
-4. Optionally **promotes** (off by default): pulls soonest-due future fulls
-   forward to fill a light run, bounded by once-per-interval **and** a capacity
-   headroom so it never spends storage past the limit.
+2. Sets a base decision per DLE: never-fulled → **mandatory L0**; at or past the
+   **cycle deadline** → **forced L0**; otherwise the **next incremental level**
+   (capped at L9). The cycle is a *hard* ceiling — a full never ages past it — so
+   there is nothing to demote: a full is either due or it isn't.
+3. **Promotes** to balance: pulls a future full forward onto a light run so daily
+   volume stays even and same-day deadline pile-ups are spread. This is the *only*
+   balancing lever, it is automatic (no knob), and it looks at the whole cycle —
+   not a daily average. It builds a **deadline calendar** of upcoming fulls and
+   promotes a DLE onto today only when (a) today is genuinely lighter than the
+   future day that full would land on, (b) the move strictly lowers that peak,
+   (c) today is the **last responsible moment** — no lighter day remains before
+   the deadline to do it more cheaply — and (d) it fits the per-run room. Point (c)
+   is what stops the classic skew failure: a big lone DLE is never re-fulled early
+   to chase an average, because moving it would just relocate the peak.
 
-Capacity binds at **two scopes**, and they are not the same check:
+Capacity is the one number you give a medium, and it binds at **two scopes**:
 
-- **Per run** (step 3) bounds a single run's peak to the room left before pruning
-  would have to evict a *protected* slot (`capacity − protected set`). Within that
-  ceiling a run may be lumpy — taking more than its even share is fine.
+- **Per run** bounds promotion to the room left before pruning would have to evict
+  a *protected* slot (`capacity − protected set`, tightened by the landing
+  volume's remaining room). With no free capacity, promotion does nothing; with
+  capacity to spare, it spends it to keep backups fresh — which is what budgeting
+  that capacity is for. A run may still be lumpy (a big DLE on its deadline day).
 - **Per cycle** is structural: over a cycle every DLE is fulled once, and with
   `minimum_age ≥ cycle` those fulls coexist on the medium, so a **complete
-  recovery set** (one full of every DLE) must fit capacity. Degrading cannot help
-  here — a demoted due-full just climbs to its deadline and is forced full inside
-  the same cycle, so the cycle's full demand is fixed. When `Σ full_est` exceeds
-  capacity the plan carries a **warning** (recoverability is at risk; backups
-  still run) rather than silently pruning the oldest recovery points away.
+  recovery set** (one full of every DLE) must fit capacity. When `Σ full_est`
+  exceeds capacity the plan carries a **warning** (recoverability is at risk;
+  backups still run) — the honest signal to grow capacity or lengthen the cycle —
+  rather than silently pruning the oldest recovery points away.
 
 This encodes the PRD priority order directly (recoverability and cycle safety are
-immovable; capacity overrides balance; balance never costs storage). It also
-**de-clumps the cold start**: day one fulls everything (recoverability first),
-and degrade spreads the resulting lock-step over the next cycle or two. The
-planner consumes only bytes — it never knows whether the medium is tape or an
-object store.
+immovable; capacity bounds balance). It also **de-clumps the cold start**: day one
+fulls everything (recoverability first), and promotion staggers the resulting
+lock-step apart over the next cycle or two. The planner consumes only bytes — it
+never knows whether the medium is tape or an object store.
 
 Levels are realized with GNU tar's listed-incremental **snapshot library**, kept
 under `<catalog>/snapshots/<dle>/L<n>.snar` — exactly the mechanism Amanda uses
@@ -288,11 +291,12 @@ deletion-accurate state.
 `nb prune` is a dry-run by default. Pruning has two layers:
 
 1. **Safety floor** (shared, medium-agnostic): a slot is *protected* if it is
-   younger than the medium's `minimum_age`, or if any DLE it holds has no newer
-   full elsewhere (its last recovery path). Protected slots are never reclaimed.
+   younger than the medium's `minimum_age` (which defaults to one cycle), or if any
+   DLE it holds has no newer full elsewhere (its last recovery path). Protected
+   slots are never reclaimed.
 2. **Capacity reclamation** (per-medium): among non-protected slots, the medium's
    retention strategy reclaims to fit capacity. For object stores this deletes
-   the **oldest slots until total ≤ budget**; for tape it will reclaim whole
+   the **oldest slots until total ≤ capacity**; for tape it will reclaim whole
    tapes (not yet implemented).
 
 Add `--apply` to actually delete. Capacity and `minimum_age` are per-medium, so
@@ -342,18 +346,15 @@ recovery path exists elsewhere (the protected-set floor), so run `nb sync` befor
 See [`nbackup.example.yaml`](nbackup.example.yaml). Minimal example:
 
 ```yaml
-cycle:
-  length: 7d                         # dump cycle: time between fulls per DLE
-  require_verified_successor: true   # cross-cutting safety
+cycle: 7d                            # dump cycle: hard max time between fulls per DLE
 
 # Named storage definitions; `landing` selects which one slots are created on.
-# Budget and minimum_age are per-medium (each store has its own capacity/cycle).
+# Capacity is per-medium (each store has its own space); minimum_age is optional.
 media:
   disk:
     type: disk
     path: /var/lib/nbackup/catalog
-    budget: 20TB
-    minimum_age: 30d
+    capacity: 20TB                   # the space NBackup may use here
 landing: disk
 
 # Named method+option bundles (Amanda's "dumptype"); a DLE selects one.
@@ -384,11 +385,13 @@ the dumptype, never on the entry.
 
 ### Capacity and retention are per-medium
 
-Each medium declares its **capacity** in its own units — object stores spell it
-as `budget` (`20TB`); tape spells it as `bays × volume_size` (`0` = unbounded).
-Capacity is the only genuinely per-medium quantity. `minimum_age` (a per-medium
-safety floor) and the global `cycle.require_verified_successor` round out
-retention.
+Each medium declares its **capacity** — the space NBackup may use there. Disk and
+S3 spell it directly (`capacity: 20TB`); a tape library derives it as
+`bays × volume_size` (`0` = unbounded). Capacity is the headline knob: tell a
+medium how much space you have and the planner uses it (promotion fills free
+space; pruning reclaims to stay within it). `minimum_age` is an optional per-medium
+safety floor that defaults to one cycle — long enough that yesterday's run never
+overwrites a slot still inside the recovery window.
 
 Balancing dumps over time is **not** a medium property — it's a global, temporal
 planning concern (an S3 bucket has no meaningful per-run size). So the planner
@@ -412,7 +415,7 @@ e.g. disk → tape) with the copy **recorded as a second placement** so restore 
 verify use any available copy, balanced **multilevel (L0–L9)** planning with a GNU
 tar snapshot library, immutable sealed slots with **sequence-suffixed** same-day
 runs, **deletion-aware** incremental restore, checksum verification, point-in-time
-restore, per-medium budget reporting, cycle-safe pruning.
+restore, per-medium capacity reporting, cycle-safe pruning.
 
 The `tape` medium comes in shapes that differ in *who changes the tape*. A
 **robotic library** (`dir:` file-backed) has `bays: N` physical positions, each a
@@ -441,8 +444,8 @@ order. (Internals: [ARCHITECTURE.md](ARCHITECTURE.md).)
 Not yet implemented (declared in config for forward-compatibility):
 
 - **S3 media** — registered as a Volume stub; no S3 client yet.
-- **Budget-driven retention** — budget is reported; pruning is cycle-based, not
-  yet automatically driven to fit the budget.
+- **Capacity-driven retention** — capacity is reported and bounds promotion;
+  pruning is cycle-based, not yet automatically driven to fit capacity.
 - **Remote sources** — `host` is metadata; `path` is read from the local
   filesystem (run the agent where the data is, or mount it).
 - **Exclude/include rules** and tar tuning (one-file-system and sparse are on by

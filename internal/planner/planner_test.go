@@ -20,11 +20,21 @@ func levelOf(p *Plan, name string) int {
 	return -99
 }
 
+func fullsIn(p *Plan) int {
+	n := 0
+	for _, it := range p.Items {
+		if it.Level == 0 {
+			n++
+		}
+	}
+	return n
+}
+
 func TestLevelDecisions(t *testing.T) {
 	today := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	mk := func(d *catalog.DLEState) *Plan {
 		hist := &catalog.History{DLEs: map[string]*catalog.DLEState{"h-data": d}}
-		return Build([]config.DLE{dleNamed("h")}, hist, nil, Params{FullIntervalDays: 7}, today)
+		return Build([]config.DLE{dleNamed("h")}, hist, nil, Params{CycleDays: 7}, today)
 	}
 
 	// No prior full -> mandatory full.
@@ -36,10 +46,11 @@ func TestLevelDecisions(t *testing.T) {
 	if lvl := levelOf(mk(recent), "h-data"); lvl != 1 {
 		t.Errorf("recent full: got L%d, want L1", lvl)
 	}
-	// Overdue past the deadline -> forced full.
-	overdue := &catalog.DLEState{LastFullDate: today.AddDate(0, 0, -20).Format("2006-01-02")}
-	if lvl := levelOf(mk(overdue), "h-data"); lvl != 0 {
-		t.Errorf("overdue full: got L%d, want L0", lvl)
+	// At/past the cycle deadline -> forced full. The cycle is a hard ceiling, so a
+	// full never ages past it.
+	due := &catalog.DLEState{LastFullDate: today.AddDate(0, 0, -7).Format("2006-01-02")}
+	if lvl := levelOf(mk(due), "h-data"); lvl != 0 {
+		t.Errorf("at cycle deadline: got L%d, want L0", lvl)
 	}
 }
 
@@ -54,51 +65,120 @@ func TestMultilevelClimb(t *testing.T) {
 		},
 	}
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{"h-data": d}}
-	p := Build([]config.DLE{dleNamed("h")}, hist, nil, Params{FullIntervalDays: 7}, today)
+	p := Build([]config.DLE{dleNamed("h")}, hist, nil, Params{CycleDays: 7}, today)
 	if lvl := levelOf(p, "h-data"); lvl != 2 {
 		t.Errorf("after L0,L1 the next level should be L2, got L%d", lvl)
 	}
 }
 
-// TestDegradeBalancesFulls checks that when several DLEs are due on the same day,
-// degrade demotes the excess to incrementals to meet the balance target.
-func TestDegradeBalancesFulls(t *testing.T) {
+// TestPromotionFillsLightRun checks that when two equal DLEs share a deadline
+// tomorrow (a future peak), the planner pulls exactly one forward to today so the
+// pile-up is spread across two days rather than landing on one.
+func TestPromotionFillsLightRun(t *testing.T) {
 	today := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
-	// 4 DLEs, each last full 2 days ago (due at interval=2, below deadline 4).
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
 	var dles []config.DLE
 	est := map[string]Estimate{}
-	for _, h := range []string{"a", "b", "c", "d"} {
+	for _, h := range []string{"a", "b"} {
 		d := dleNamed(h)
-		name := d.Name()
-		hist.DLEs[name] = &catalog.DLEState{
-			LastFullDate: today.AddDate(0, 0, -2).Format("2006-01-02"),
-			LastFullSlot: "slot-x",
+		// Last full 6 days ago: with a 7-day cycle the deadline is tomorrow.
+		hist.DLEs[d.Name()] = &catalog.DLEState{
+			LastFullDate: today.AddDate(0, 0, -6).Format("2006-01-02"),
 			Runs:         []catalog.RunRecord{{Date: "old", Slot: "slot-x", Level: 0}},
 		}
 		dles = append(dles, d)
-		est[name] = Estimate{Full: 100, Incr: 10}
+		est[d.Name()] = Estimate{Full: 100, Incr: 10}
 	}
-	// total full 400, interval 2 -> target 200 -> keep 2 fulls, degrade 2.
-	p := Build(dles, hist, est, Params{FullIntervalDays: 2, CapacityRoomBytes: -1}, today)
-	fulls := 0
-	for _, it := range p.Items {
-		if it.Level == 0 {
-			fulls++
-		}
-	}
-	if fulls != 2 {
-		t.Errorf("expected 2 fulls after degrade to target 200, got %d", fulls)
+	p := Build(dles, hist, est, Params{CycleDays: 7, RoomBytes: -1}, today)
+	if n := fullsIn(p); n != 1 {
+		t.Errorf("expected exactly one DLE promoted to spread a shared deadline, got %d fulls", n)
 	}
 }
 
-// TestDegradeStaggersLockstepFulls checks that two big DLEs whose last fulls
-// coincide are spread onto different days rather than piling onto a shared hard
-// deadline. Each big full dwarfs the per-run balance target, so the naive degrade
-// would demote both due fulls every day until 2*interval forced them full on the
-// same day. Keeping the run's last full instead drains them one per run and
-// staggers their cycles apart.
-func TestDegradeStaggersLockstepFulls(t *testing.T) {
+// TestPromotionBoundedByRoom checks promotion never pushes a run past the per-run
+// capacity room: the same shared-deadline pair is left as incrementals when there
+// is no room to pull a full forward.
+func TestPromotionBoundedByRoom(t *testing.T) {
+	today := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
+	var dles []config.DLE
+	est := map[string]Estimate{}
+	for _, h := range []string{"a", "b"} {
+		d := dleNamed(h)
+		hist.DLEs[d.Name()] = &catalog.DLEState{
+			LastFullDate: today.AddDate(0, 0, -6).Format("2006-01-02"),
+			Runs:         []catalog.RunRecord{{Date: "old", Slot: "slot-x", Level: 0}},
+		}
+		dles = append(dles, d)
+		est[d.Name()] = Estimate{Full: 100, Incr: 10}
+	}
+	// Baseline run = 2 incrementals = 20. Promoting one would make it 110; room 50
+	// forbids it, so nothing is promoted.
+	p := Build(dles, hist, est, Params{CycleDays: 7, RoomBytes: 50}, today)
+	if n := fullsIn(p); n != 0 {
+		t.Errorf("expected no promotion under tight room, got %d fulls", n)
+	}
+}
+
+// TestPromotionDoesNotChaseAverage is the core skew guard: a single big DLE far
+// from its deadline is NOT pulled forward to fill a light run. Leveling the
+// deadline calendar (not a daily byte average) means an irreducible lone full is
+// only ever done at the last responsible moment, never re-fulled early.
+func TestPromotionDoesNotChaseAverage(t *testing.T) {
+	today := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{
+		"big-data": {
+			// Fulled yesterday: 6 days of cycle left, far from the deadline.
+			LastFullDate: today.AddDate(0, 0, -1).Format("2006-01-02"),
+			Runs:         []catalog.RunRecord{{Date: "old", Slot: "slot-x", Level: 0}},
+		},
+	}}
+	est := map[string]Estimate{"big-data": {Full: 1_000_000_000, Incr: 1000}}
+	// A huge free room: an average-chasing planner would re-full the big DLE today
+	// to "use" it. Calendar leveling must not.
+	p := Build([]config.DLE{dleNamed("big")}, hist, est, Params{CycleDays: 7, RoomBytes: -1}, today)
+	if lvl := levelOf(p, "big-data"); lvl == 0 {
+		t.Errorf("a big DLE far from its deadline was promoted (chasing an average); want an incremental")
+	}
+}
+
+// TestPromotionDoesNotOverFullBigDLE checks the skew guard over a window: with one
+// big DLE and many small ones, the big DLE is fulled about once per cycle, not
+// repeatedly pulled forward to flatten daily volume.
+func TestPromotionDoesNotOverFullBigDLE(t *testing.T) {
+	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
+	var dles []config.DLE
+	est := map[string]Estimate{}
+	dles = append(dles, dleNamed("big"))
+	est["big-data"] = Estimate{Full: 1_000_000, Incr: 1000}
+	for _, h := range []string{"s1", "s2", "s3", "s4", "s5", "s6"} {
+		dles = append(dles, dleNamed(h))
+		est[dleNamed(h).Name()] = Estimate{Full: 10, Incr: 1}
+	}
+
+	plans := Simulate(dles, hist, est, Params{CycleDays: 7, RoomBytes: -1}, start, 21)
+	bigFulls := 0
+	for _, p := range plans {
+		if levelOf(p, "big-data") == 0 {
+			bigFulls++
+		}
+	}
+	// Day 0 is the mandatory bootstrap full; deadlines then fall ~day 7 and ~day 14.
+	// Four fulls over 21 days is the cycle cadence; more means it was over-promoted.
+	if bigFulls > 4 {
+		t.Errorf("big DLE fulled %d times in 21 days (cycle 7); promotion is over-fulling it", bigFulls)
+	}
+	if bigFulls < 3 {
+		t.Errorf("big DLE only fulled %d times in 21 days; it should full once per cycle", bigFulls)
+	}
+}
+
+// TestPromotionStaggersLockstepFulls checks that two big DLEs whose last fulls
+// coincide are spread onto different days rather than piling onto a shared
+// deadline. Promotion pulls one forward at the last responsible moment, draining
+// the lock-step one per run and staggering their cycles apart.
+func TestPromotionStaggersLockstepFulls(t *testing.T) {
 	start := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
 	var dles []config.DLE
@@ -112,21 +192,15 @@ func TestDegradeStaggersLockstepFulls(t *testing.T) {
 			Runs:         []catalog.RunRecord{{Date: day0, Slot: "slot-x", Level: 0}},
 		}
 		dles = append(dles, d)
-		// Each full far exceeds the target (totalFull/interval).
 		est[d.Name()] = Estimate{Full: 3_300_000_000, Incr: 50_000}
 	}
 
-	plans := Simulate(dles, hist, est, Params{FullIntervalDays: 7, CapacityRoomBytes: -1}, start, 30)
+	plans := Simulate(dles, hist, est, Params{CycleDays: 7, RoomBytes: -1}, start, 30)
 
 	fullsPerDay := 0
 	bothSameDay := 0
 	for _, p := range plans {
-		n := 0
-		for _, it := range p.Items {
-			if it.Level == 0 {
-				n++
-			}
-		}
+		n := fullsIn(p)
 		fullsPerDay += n
 		if n > 1 {
 			bothSameDay++
@@ -135,8 +209,8 @@ func TestDegradeStaggersLockstepFulls(t *testing.T) {
 	if bothSameDay != 0 {
 		t.Errorf("lock-step DLEs piled onto %d shared day(s); fulls must stagger to one per run", bothSameDay)
 	}
-	// Both DLEs still get fulled regularly (roughly once per interval each over 30
-	// days): the fix must not starve fulls, only spread them.
+	// Both DLEs still get fulled regularly across the window: the fix must not
+	// starve fulls, only spread them.
 	if fullsPerDay < 6 {
 		t.Errorf("expected the big DLEs to keep fulling across the window, got %d fulls total", fullsPerDay)
 	}
@@ -157,7 +231,7 @@ func TestCycleCapacityWarning(t *testing.T) {
 	}
 
 	// Capacity 250 < total full 300 -> warn.
-	p := Build(dles, hist, est, Params{FullIntervalDays: 7, CapacityBytes: 250}, today)
+	p := Build(dles, hist, est, Params{CycleDays: 7, CapacityBytes: 250}, today)
 	if len(p.Warnings) == 0 {
 		t.Errorf("expected a structural warning when a recovery set (300) exceeds capacity (250)")
 	}
@@ -166,13 +240,13 @@ func TestCycleCapacityWarning(t *testing.T) {
 	}
 
 	// Capacity 400 >= total full 300 -> no warning.
-	p = Build(dles, hist, est, Params{FullIntervalDays: 7, CapacityBytes: 400}, today)
+	p = Build(dles, hist, est, Params{CycleDays: 7, CapacityBytes: 400}, today)
 	if len(p.Warnings) != 0 {
 		t.Errorf("did not expect a warning when the recovery set fits, got %v", p.Warnings)
 	}
 
 	// Unbounded capacity (0) -> no warning.
-	p = Build(dles, hist, est, Params{FullIntervalDays: 7, CapacityBytes: 0}, today)
+	p = Build(dles, hist, est, Params{CycleDays: 7, CapacityBytes: 0}, today)
 	if len(p.Warnings) != 0 {
 		t.Errorf("unbounded capacity should not warn, got %v", p.Warnings)
 	}
@@ -180,23 +254,18 @@ func TestCycleCapacityWarning(t *testing.T) {
 
 // TestSimulateSchedule checks the forward forecast advances history between days:
 // a fresh DLE fulls on day 0, climbs incrementals through the cycle, and fulls
-// again when the interval is reached — and the caller's history is left untouched.
+// again at the deadline — and the caller's history is left untouched. A lone DLE
+// is never promoted (it cannot reduce its own peak), so the schedule is clean.
 func TestSimulateSchedule(t *testing.T) {
 	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
 	dles := []config.DLE{dleNamed("h")}
 	est := map[string]Estimate{"h-data": {Full: 100, Incr: 10}}
 
-	plans := Simulate(dles, hist, est, Params{FullIntervalDays: 7, CapacityRoomBytes: -1}, start, 15)
+	plans := Simulate(dles, hist, est, Params{CycleDays: 7, RoomBytes: -1}, start, 15)
 	if len(plans) != 15 {
 		t.Fatalf("want 15 plans, got %d", len(plans))
 	}
-	// Day 0 is the mandatory first full. Incrementals then climb (proving
-	// IncrementalsSinceFull advances day to day). The day-7 due full is kept: a
-	// lone DLE's full exceeds the balance target, but degrade never demotes a run's
-	// last full for the soft target (that would only defer it to the deadline), so
-	// the cycle fulls cleanly every interval (proving DaysSinceFull advances and
-	// resets at day 7 and again at day 14).
 	want := []int{0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6, 0}
 	for i, p := range plans {
 		if !p.Date.Equal(start.AddDate(0, 0, i)) {
@@ -216,38 +285,8 @@ func TestSimulateSchedule(t *testing.T) {
 func TestSimulateClampsDays(t *testing.T) {
 	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	plans := Simulate([]config.DLE{dleNamed("h")}, hist, nil, Params{FullIntervalDays: 7}, start, 0)
+	plans := Simulate([]config.DLE{dleNamed("h")}, hist, nil, Params{CycleDays: 7}, start, 0)
 	if len(plans) != 1 {
 		t.Fatalf("days=0 should clamp to one plan, got %d", len(plans))
-	}
-}
-
-// TestCapacityRoomForcesDegrade checks the hard ceiling overrides the balance
-// target: a tiny capacity room degrades more aggressively.
-func TestCapacityRoomForcesDegrade(t *testing.T) {
-	today := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
-	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	var dles []config.DLE
-	est := map[string]Estimate{}
-	for _, h := range []string{"a", "b", "c", "d"} {
-		d := dleNamed(h)
-		name := d.Name()
-		hist.DLEs[name] = &catalog.DLEState{
-			LastFullDate: today.AddDate(0, 0, -2).Format("2006-01-02"),
-			Runs:         []catalog.RunRecord{{Date: "old", Slot: "slot-x", Level: 0}},
-		}
-		dles = append(dles, d)
-		est[name] = Estimate{Full: 100, Incr: 10}
-	}
-	// room 130: keep at most 1 full (100) + 3 incr (30) = 130.
-	p := Build(dles, hist, est, Params{FullIntervalDays: 2, CapacityRoomBytes: 130}, today)
-	fulls := 0
-	for _, it := range p.Items {
-		if it.Level == 0 {
-			fulls++
-		}
-	}
-	if fulls != 1 {
-		t.Errorf("expected 1 full under capacity room 130, got %d", fulls)
 	}
 }

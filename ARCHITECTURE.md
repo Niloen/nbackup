@@ -267,8 +267,8 @@ younger than `minimum_age`, or the last recovery path for some DLE) plus a
 per-medium capacity strategy.
 
 **Capacity model (`media.Profile`).** A profile exposes two numbers that the
-planner keeps distinct. `TotalBytes` is the **pool** — the retainable budget
-(`volumes × volume_size` for a tape library, `budget` for an object store) — and
+planner keeps distinct. `TotalBytes` is the **pool** — the retainable capacity
+(`volumes × volume_size` for a tape library, `capacity` for an object store) — and
 drives reclamation and the structural cycle check (can a complete recovery set be
 retained at all). `VolumeSize` is one **reel**, the basis of the per-run ceiling:
 a run fills the reel it lands on before spilling to the next, so a single run can
@@ -307,7 +307,8 @@ the medium it lands on.
   in-pool* tape; auto-recycling an aged-out tape (vs. relabeling it) is still manual
   (`nb label --relabel`).
 - **S3** Volume implementation (registered stub today).
-- **Budget-driven retention** — budget is reported; pruning is cycle-based.
+- **Capacity-driven retention** — capacity is reported and bounds promotion;
+  pruning is cycle-based, not yet automatically driven to fit capacity.
 - **Remote sources** — `host` is metadata; `path` is read locally.
 - Real `mtDevice` hardware validation — also the only spanning path not exercised
   (real-drive spanning is proactive-via-`part_size` and structurally complete but
