@@ -91,7 +91,7 @@ func New(cfg *config.Config) (*Engine, error) {
 	if err := cat.EnsureFresh(name, vol); err != nil {
 		return nil, err
 	}
-	minAge, _ := mediaDef.MinAge()
+	minAge := cfg.MinAgeFor(mediaDef)
 	fopts := filter.Options{
 		Program: cfg.Compress.Program,
 		Level:   cfg.Compress.Level,
@@ -134,9 +134,9 @@ func (e *Engine) mediumVolume(name string) (vol media.Volume, def config.Media, 
 // Capacity returns the landing medium's total retainable bytes (0 = unbounded).
 func (e *Engine) Capacity() int64 { return e.profile.TotalBytes() }
 
-// BudgetStatus reports whether current usage exceeds capacity and the percent
+// CapacityStatus reports whether current usage exceeds capacity and the percent
 // used (0 when unbounded).
-func (e *Engine) BudgetStatus(current int64) (over bool, pct float64) {
+func (e *Engine) CapacityStatus(current int64) (over bool, pct float64) {
 	c := e.profile.TotalBytes()
 	if c <= 0 {
 		return false, 0
@@ -502,7 +502,7 @@ func (e *Engine) expectedTapeFor(medium string, now time.Time) TapeExpectation {
 		return exp
 	}
 
-	minAge, _ := def.MinAge()
+	minAge := e.cfg.MinAgeFor(def)
 	protected := policy.Protected(e.cat.Slots(), minAge, now)
 	for _, v := range pool {
 		held := e.cat.SlotsOnVolume(v.Label.Name)
@@ -522,8 +522,9 @@ func (e *Engine) expectedTapeFor(medium string, now time.Time) TapeExpectation {
 	return exp
 }
 
-// Plan builds the plan for a run date: it estimates every DLE, then balances
-// fulls (degrade to fit capacity, optionally promote to fill light runs).
+// Plan builds the plan for a run date: it estimates every DLE, fulls the ones
+// due by the cycle deadline, and promotes future fulls forward to level light
+// runs (bounded by the per-run capacity room).
 func (e *Engine) Plan(date time.Time) *planner.Plan {
 	dles := e.cfg.DLEs()
 	return planner.Build(dles, e.cat.History(), e.estimates(dles), e.plannerParams(date), date)
@@ -544,11 +545,9 @@ func (e *Engine) Simulate(start time.Time, days int) []*planner.Plan {
 // forecast use identical balancing rules.
 func (e *Engine) plannerParams(date time.Time) planner.Params {
 	return planner.Params{
-		FullIntervalDays:    e.cfg.FullIntervalDays(),
-		CapacityBytes:       e.profile.TotalBytes(),
-		CapacityRoomBytes:   e.capacityRoom(date),
-		Promote:             e.cfg.Cycle.Promote,
-		PromoteCeilingBytes: e.promoteCeiling(),
+		CycleDays:     e.cfg.CycleDays(),
+		CapacityBytes: e.profile.TotalBytes(),
+		RoomBytes:     e.capacityRoom(date),
 	}
 }
 
@@ -648,20 +647,6 @@ func minRoom(a, b int64) int64 {
 	default:
 		return b
 	}
-}
-
-// promoteCeiling is the storage headroom promotion must not exceed, defaulting
-// to 80% of capacity. Negative = unbounded.
-func (e *Engine) promoteCeiling() int64 {
-	capacity := e.profile.TotalBytes()
-	if capacity <= 0 {
-		return -1
-	}
-	h := e.cfg.Cycle.PromoteHeadroom
-	if h <= 0 || h > 1 {
-		h = 0.8
-	}
-	return int64(float64(capacity) * h)
 }
 
 // Run executes the plan for a date, producing one sealed slot.

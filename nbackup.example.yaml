@@ -1,29 +1,23 @@
 # Example NBackup configuration.
 # Copy to nbackup.yaml and adjust.
 
-cycle:
-  # The dump cycle: target time between fulls per DLE (default 7d). Each run
-  # estimates every DLE and degrades over-budget/over-target fulls to
-  # incrementals to balance daily volume; between fulls, levels climb to L9.
-  length: 7d
-  # Cross-cutting safety: never retire the last verified recovery path.
-  require_verified_successor: true
-  # Promotion fills light runs by pulling future fulls forward. Off by default
-  # so balancing never spends extra storage; when on it's capped at this
-  # fraction of capacity.
-  # promote: true
-  # promote_headroom: 0.8
+# The dump cycle: the target — and hard maximum — time between fulls for every
+# DLE (default 7d). It is the only scheduling knob. Each run fulls the DLEs due
+# by their deadline and climbs incrementals (to L9) in between; light runs are
+# automatically filled by pulling a future full forward, bounded by free
+# capacity. A full never ages past one cycle.
+cycle: 7d
 
-# Named storage definitions. Each is a Volume with a `type`, its own
-# capacity/retention (budget + minimum_age are per-medium), plus type-specific
-# connection parameters. Slots can be copied between media with `nb copy`
-# (e.g. `nb copy <slot> --to lto`). disk and tape work today; s3 is a stub.
+# Named storage definitions. Each is a Volume with a `type`, its own capacity and
+# retention, plus type-specific connection parameters. Slots can be copied
+# between media with `nb copy` (e.g. `nb copy <slot> --to lto`). disk and tape
+# work today; s3 is a stub.
 media:
   fast-disk:
     type: disk          # a filesystem directory (local or NFS)
     path: /var/lib/nbackup/catalog
-    budget: 20TB        # capacity ceiling; `nb slot prune` reclaims oldest to fit
-    minimum_age: 30d    # a slot can't be retired from this medium until older
+    capacity: 20TB      # space NBackup may use here; `nb prune` reclaims oldest to fit
+    # minimum_age: 30d  # retention floor before a slot may be retired (default: one cycle)
   lto:
     type: tape          # a ROBOTIC LIBRARY of bays behind one drive
     device: /dev/nst0   # real single drive (no-rewind device), a one-bay library
@@ -58,7 +52,7 @@ media:
   cloud:
     type: s3            # registered stub; no S3 client yet
     bucket: company-backups
-    budget: 50TB        # object stores express capacity as a byte budget
+    capacity: 50TB      # space NBackup may use in the bucket
 
 # Which medium slots are created on (the landing).
 landing: fast-disk

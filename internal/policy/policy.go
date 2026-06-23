@@ -18,8 +18,7 @@ import (
 // path).
 //
 // Note: once verification status is tracked, the successor requirement should
-// tighten from "a newer full exists" to "a newer verified full exists"
-// (config.Cycle.RequireVerifiedSuccessor).
+// tighten from "a newer full exists" to "a newer verified full exists".
 func Protected(slots []*slot.Slot, minAge time.Duration, now time.Time) map[string]string {
 	protected := map[string]string{}
 	for _, s := range slots {

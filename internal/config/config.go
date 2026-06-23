@@ -31,21 +31,12 @@ const DefaultWorkdir = "nbackup-catalog"
 
 // Config is the top-level NBackup configuration.
 type Config struct {
-	// Cycle holds cross-cutting retention safety. Capacity-oriented retention
-	// (budget, minimum_age) lives per-medium, not here.
-	// Cycle is the dump cycle and its retention safety: how often each DLE gets
-	// a full, how runs are balanced, and the cross-cutting recovery guarantee.
-	Cycle struct {
-		// Length is the dump cycle: target time between fulls per DLE (e.g. "7d").
-		Length string `yaml:"length"`
-		// RequireVerifiedSuccessor: never retire the last verified recovery path.
-		RequireVerifiedSuccessor bool `yaml:"require_verified_successor"`
-		// Promote enables pulling future fulls forward to fill light runs.
-		// Off by default so balancing never spends extra storage.
-		Promote bool `yaml:"promote"`
-		// PromoteHeadroom caps promotion at this fraction of capacity (default 0.8).
-		PromoteHeadroom float64 `yaml:"promote_headroom"`
-	} `yaml:"cycle"`
+	// Cycle is the dump cycle: the target — and hard maximum — time between fulls
+	// for every DLE (e.g. "7d", the default). It is the one scheduling knob; how
+	// runs are balanced within it is automatic (see package planner). A full never
+	// ages past one cycle. Capacity-oriented retention (capacity, minimum_age)
+	// lives per-medium, since each store has its own space and reuse cadence.
+	Cycle string `yaml:"cycle"`
 
 	// Landing names the media definition where slots are created.
 	Landing string `yaml:"landing"`
@@ -135,13 +126,13 @@ func (s *Sources) UnmarshalYAML(node *yaml.Node) error {
 
 // Media is one named storage definition: a type, capacity/retention policy for
 // this medium, and type-specific connection parameters (e.g. disk has
-// "path", s3 has "bucket"). Budget and retention are per-medium because each
-// store has its own capacity and reuse cycle (as in Amanda's per-storage
+// "path", s3 has "bucket"). Capacity and retention are per-medium because each
+// store has its own space and reuse cadence (as in Amanda's per-storage
 // retention).
 type Media struct {
 	Type       string            `yaml:"type"`
-	Budget     string            `yaml:"budget"`      // capacity ceiling, e.g. "20TB" ("" = unbounded)
-	MinimumAge string            `yaml:"minimum_age"` // cycle age before a slot may be retired here
+	Capacity   string            `yaml:"capacity"`    // space NBackup may use here, e.g. "20TB" ("" = unbounded)
+	MinimumAge string            `yaml:"minimum_age"` // retention floor before a slot may be retired here (default: one cycle)
 	Appendable *bool             `yaml:"appendable"`  // tape: pack many runs per tape (default) vs one run per tape
 	Params     map[string]string `yaml:",inline"`     // type-specific connection params (path, bucket, tapes, ...)
 }
@@ -151,12 +142,12 @@ type Media struct {
 // must be changed (Amanda-style). Address-identified media ignore it.
 func (m Media) IsAppendable() bool { return m.Appendable == nil || *m.Appendable }
 
-// BudgetBytes returns this medium's capacity ceiling in bytes, or 0 if unset.
-func (m Media) BudgetBytes() (int64, error) {
-	if m.Budget == "" {
+// CapacityBytes returns this medium's capacity in bytes, or 0 if unset (unbounded).
+func (m Media) CapacityBytes() (int64, error) {
+	if m.Capacity == "" {
 		return 0, nil
 	}
-	return sizeutil.ParseBytes(m.Budget)
+	return sizeutil.ParseBytes(m.Capacity)
 }
 
 // ProfileOptions flattens the medium's capacity field and connection params into
@@ -166,11 +157,13 @@ func (m Media) ProfileOptions() map[string]string {
 	for k, v := range m.Params {
 		opts[k] = v
 	}
-	opts["budget"] = m.Budget
+	opts["capacity"] = m.Capacity
 	return opts
 }
 
-// MinAge returns this medium's cycle minimum age, or 0 if unset.
+// MinAge returns this medium's explicitly configured retention floor, or 0 if
+// unset. Callers that want the effective floor (defaulting to one cycle) should
+// use Config.MinAgeFor instead.
 func (m Media) MinAge() (time.Duration, error) {
 	if m.MinimumAge == "" {
 		return 0, nil
@@ -260,14 +253,14 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("landing %q is not a defined medium", c.Landing)
 		}
 	}
-	if c.Cycle.Length != "" {
-		if _, err := sizeutil.ParseDuration(c.Cycle.Length); err != nil {
-			return fmt.Errorf("cycle.length: %w", err)
+	if c.Cycle != "" {
+		if _, err := sizeutil.ParseDuration(c.Cycle); err != nil {
+			return fmt.Errorf("cycle: %w", err)
 		}
 	}
 	for name, m := range c.Media {
-		if _, err := m.BudgetBytes(); err != nil {
-			return fmt.Errorf("media %s: budget: %w", name, err)
+		if _, err := m.CapacityBytes(); err != nil {
+			return fmt.Errorf("media %s: capacity: %w", name, err)
 		}
 		if _, err := m.MinAge(); err != nil {
 			return fmt.Errorf("media %s: minimum_age: %w", name, err)
@@ -360,20 +353,39 @@ func (c *Config) Dumpers() int {
 	return 1
 }
 
-// FullIntervalDays returns the dump cycle in whole days (default 7).
-func (c *Config) FullIntervalDays() int {
-	if c.Cycle.Length == "" {
-		return 7
+// DefaultCycle is the dump cycle assumed when `cycle` is unset.
+const DefaultCycle = 7 * 24 * time.Hour
+
+// CycleDuration returns the dump cycle as a duration (default DefaultCycle).
+func (c *Config) CycleDuration() time.Duration {
+	if c.Cycle == "" {
+		return DefaultCycle
 	}
-	d, err := sizeutil.ParseDuration(c.Cycle.Length)
+	d, err := sizeutil.ParseDuration(c.Cycle)
 	if err != nil || d <= 0 {
-		return 7
+		return DefaultCycle
 	}
-	days := int(d.Hours() / 24)
+	return d
+}
+
+// CycleDays returns the dump cycle in whole days (default 7).
+func (c *Config) CycleDays() int {
+	days := int(c.CycleDuration().Hours() / 24)
 	if days < 1 {
 		days = 1
 	}
 	return days
+}
+
+// MinAgeFor returns a medium's effective retention floor: its configured
+// minimum_age, or the dump cycle when unset. Defaulting to one cycle keeps the
+// "yesterday must not overwrite last month" safety without a knob — a slot stays
+// retainable for at least the window in which it is still a recovery base.
+func (c *Config) MinAgeFor(m Media) time.Duration {
+	if age, err := m.MinAge(); err == nil && age > 0 {
+		return age
+	}
+	return c.CycleDuration()
 }
 
 // WorkdirPath returns the catalog's own operational-state directory (slot cache +

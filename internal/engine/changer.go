@@ -432,7 +432,7 @@ func (e *Engine) LabelVolume(mediumName, name string, relabel, force bool, now t
 	if err != nil {
 		return err
 	}
-	minAge, _ := def.MinAge()
+	minAge := e.cfg.MinAgeFor(def)
 	lv, ok := vol.(media.Labeled)
 	if !ok {
 		return fmt.Errorf("medium %q is address-identified and does not use labels", mediumName)

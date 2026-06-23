@@ -51,8 +51,8 @@ func newPlanCmd(a *app) *cobra.Command {
 			}
 
 			plan := eng.Plan(date)
-			fmt.Printf("Plan for run %s  (cycle %dd, balance target ~%s/run, landing %q)\n\n",
-				slot.DateString(date), plan.Interval, sizeutil.FormatBytes(plan.Target), eng.Landing())
+			fmt.Printf("Plan for run %s  (cycle %dd, landing %q)\n\n",
+				slot.DateString(date), plan.Interval, eng.Landing())
 			for _, w := range plan.Warnings {
 				fmt.Printf("WARNING: %s\n", w)
 			}
@@ -67,7 +67,7 @@ func newPlanCmd(a *app) *cobra.Command {
 			fmt.Printf("\nCatalog currently stored: %s\n", sizeutil.FormatBytes(current))
 			fmt.Printf("This run (estimated): ~%s\n", sizeutil.FormatBytes(estTotal))
 			if capacity > 0 {
-				over, pct := eng.BudgetStatus(current)
+				over, pct := eng.CapacityStatus(current)
 				fmt.Printf("Capacity: %s (%.1f%% used)\n", sizeutil.FormatBytes(capacity), pct)
 				if over {
 					fmt.Printf("WARNING: over capacity; run `nb prune` to reclaim oldest slots\n")
@@ -110,8 +110,8 @@ func fprintPlanItems(w io.Writer, plan *planner.Plan) int64 {
 // constant (see engine.Simulate), so the per-day size tracks the chosen levels.
 func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 	plans := eng.Simulate(start, days)
-	fmt.Printf("Forecast: %d daily runs from %s  (cycle %dd, balance target ~%s/run, landing %q)\n\n",
-		days, slot.DateString(start), plans[0].Interval, sizeutil.FormatBytes(plans[0].Target), eng.Landing())
+	fmt.Printf("Forecast: %d daily runs from %s  (cycle %dd, landing %q)\n\n",
+		days, slot.DateString(start), plans[0].Interval, eng.Landing())
 
 	// Structural warnings (e.g. a recovery set that won't fit capacity) are
 	// constant across the window; surface each one once, above the schedule.

@@ -17,7 +17,7 @@ import (
 // behind Reclaim.
 type Profile interface {
 	// TotalBytes is the total retainable capacity (0 = unbounded). For object
-	// stores this is the budget; for a tape library it is volumes * volume_size.
+	// stores this is the capacity; for a tape library it is volumes * volume_size.
 	// It governs reclamation and the planner's structural cycle check (can a
 	// complete recovery set be retained at all).
 	TotalBytes() int64
@@ -62,9 +62,9 @@ func OpenProfile(typ string, opts Options) (Profile, error) {
 
 // --- size-based profile (object stores: disk, s3) ---
 
-// NewSizeProfile builds a byte-budget profile from "budget".
+// NewSizeProfile builds a byte-capacity profile from "capacity".
 func NewSizeProfile(opts Options) (Profile, error) {
-	capacity, _ := parseBytes(opts.Get("budget"))
+	capacity, _ := parseBytes(opts.Get("capacity"))
 	return sizeProfile{capacity: capacity}, nil
 }
 
@@ -100,7 +100,7 @@ func (p sizeProfile) Reclaim(slots []*slot.Slot, protected map[string]string, no
 		if _, isProtected := protected[s.ID]; isProtected {
 			continue
 		}
-		out = append(out, Reclamation{SlotID: s.ID, Bytes: s.TotalBytes, Note: "over budget"})
+		out = append(out, Reclamation{SlotID: s.ID, Bytes: s.TotalBytes, Note: "over capacity"})
 		total -= s.TotalBytes
 	}
 	return out
