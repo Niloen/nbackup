@@ -34,6 +34,33 @@ func (h *History) DLE(name string) *DLEState {
 	return d
 }
 
+// RecordRun advances a DLE's state as if a run of the given level had been sealed:
+// it appends the run and, for a full (level 0), moves the last-full markers. This
+// is the single in-memory rule for how a sealed run changes history — the catalog's
+// derivation from slots and the planner's forward simulation both go through it, so
+// a simulated day advances exactly as a real one would.
+func (h *History) RecordRun(dle, slotID, date string, level int) {
+	d := h.DLE(dle)
+	d.Runs = append(d.Runs, RunRecord{Date: date, Slot: slotID, Level: level})
+	if level == 0 {
+		d.LastFullDate = date
+		d.LastFullSlot = slotID
+	}
+}
+
+// Clone returns a deep copy whose DLEStates and run slices are independent of the
+// original, so a caller can advance it (RecordRun) without mutating the
+// catalog-derived history. Used by the planner's forward simulation.
+func (h *History) Clone() *History {
+	out := &History{DLEs: make(map[string]*DLEState, len(h.DLEs))}
+	for name, d := range h.DLEs {
+		cp := *d
+		cp.Runs = append([]RunRecord(nil), d.Runs...)
+		out.DLEs[name] = &cp
+	}
+	return out
+}
+
 // DaysSinceFull returns whole days since the last full, or -1 if never.
 func (d *DLEState) DaysSinceFull(today time.Time) int {
 	if d.LastFullDate == "" {

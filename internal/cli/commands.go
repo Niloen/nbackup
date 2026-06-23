@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -12,21 +13,27 @@ import (
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/slot"
 )
 
-// newPlanCmd implements `nb plan`: show what the next run would do.
+// newPlanCmd implements `nb plan`: show what the next run would do, or — with
+// --days — an extended forecast of running daily for that many days.
 func newPlanCmd(a *app) *cobra.Command {
 	var dateStr string
+	var days int
 	cmd := &cobra.Command{
 		Use:     "plan",
 		Short:   "Show what the next run would do",
-		Long:    "Preview the next run: which DLEs would be dumped at which level, estimated sizes, and capacity/budget status. Reads only; nothing is written.",
-		Example: "  nb plan\n  nb plan --date 2026-06-21",
+		Long:    "Preview the next run: which DLEs would be dumped at which level, estimated sizes, and capacity/budget status. With --days N, forecast N consecutive daily runs instead, projecting the schedule forward day-by-day (when fulls land, how incrementals climb). Reads only; nothing is written.",
+		Example: "  nb plan\n  nb plan --date 2026-06-21\n  nb plan --days 30",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if days < 1 {
+				return fmt.Errorf("--days must be at least 1")
+			}
 			cfg, err := a.load()
 			if err != nil {
 				return err
@@ -39,6 +46,9 @@ func newPlanCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if days > 1 {
+				return runPlanForecast(eng, date, days)
+			}
 
 			plan := eng.Plan(date)
 			fmt.Printf("Plan for run %s  (cycle %dd, balance target ~%s/run, landing %q)\n\n",
@@ -50,18 +60,7 @@ func newPlanCmd(a *app) *cobra.Command {
 				fmt.Println()
 			}
 
-			tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-			fmt.Fprintln(tw, "DLE\tLEVEL\tEST. SIZE\tREASON")
-			var estTotal int64
-			for _, item := range plan.Items {
-				levelStr := fmt.Sprintf("L%d (full)", item.Level)
-				if item.Level >= 1 {
-					levelStr = fmt.Sprintf("L%d (incr)", item.Level)
-				}
-				fmt.Fprintf(tw, "%s\t%s\t~%s\t%s\n", item.Name, levelStr, sizeutil.FormatBytes(item.EstBytes), item.Reason)
-				estTotal += item.EstBytes
-			}
-			tw.Flush()
+			estTotal := fprintPlanItems(os.Stdout, plan)
 
 			current := eng.StoredBytes()
 			capacity := eng.Capacity()
@@ -83,7 +82,79 @@ func newPlanCmd(a *app) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dateStr, "date", "", "run date YYYY-MM-DD (default today)")
+	cmd.Flags().IntVar(&days, "days", 1, "forecast this many consecutive daily runs from --date")
 	return cmd
+}
+
+// fprintPlanItems writes a plan's per-DLE level/size/reason table to w and returns
+// the total estimated bytes. Shared by `nb plan` and the `nb dump --dry-run`
+// preview so a single run renders identically in both.
+func fprintPlanItems(w io.Writer, plan *planner.Plan) int64 {
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "DLE\tLEVEL\tEST. SIZE\tREASON")
+	var estTotal int64
+	for _, item := range plan.Items {
+		levelStr := fmt.Sprintf("L%d (full)", item.Level)
+		if item.Level >= 1 {
+			levelStr = fmt.Sprintf("L%d (incr)", item.Level)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t~%s\t%s\n", item.Name, levelStr, sizeutil.FormatBytes(item.EstBytes), item.Reason)
+		estTotal += item.EstBytes
+	}
+	tw.Flush()
+	return estTotal
+}
+
+// runPlanForecast renders an extended plan: one row per simulated daily run,
+// projecting the level schedule forward. Estimates are sampled once and held
+// constant (see engine.Simulate), so the per-day size tracks the chosen levels.
+func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
+	plans := eng.Simulate(start, days)
+	fmt.Printf("Forecast: %d daily runs from %s  (cycle %dd, balance target ~%s/run, landing %q)\n\n",
+		days, slot.DateString(start), plans[0].Interval, sizeutil.FormatBytes(plans[0].Target), eng.Landing())
+
+	// Structural warnings (e.g. a recovery set that won't fit capacity) are
+	// constant across the window; surface each one once, above the schedule.
+	seen := map[string]bool{}
+	for _, p := range plans {
+		for _, w := range p.Warnings {
+			if !seen[w] {
+				seen[w] = true
+				fmt.Printf("WARNING: %s\n", w)
+			}
+		}
+	}
+	if len(seen) > 0 {
+		fmt.Println()
+	}
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "DATE\tFULL\tINCR\tEST. SIZE\tFULLS")
+	var windowTotal int64
+	for _, p := range plans {
+		var fulls, incrs int
+		var est int64
+		var fullNames []string
+		for _, it := range p.Items {
+			est += it.EstBytes
+			if it.Level == 0 {
+				fulls++
+				fullNames = append(fullNames, it.Name)
+			} else {
+				incrs++
+			}
+		}
+		windowTotal += est
+		names := strings.Join(fullNames, ", ")
+		if names == "" {
+			names = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%d\t%d\t~%s\t%s\n",
+			slot.DateString(p.Date), fulls, incrs, sizeutil.FormatBytes(est), names)
+	}
+	tw.Flush()
+	fmt.Printf("\nWindow total (estimated): ~%s over %d run(s)\n", sizeutil.FormatBytes(windowTotal), days)
+	return nil
 }
 
 // describeExpectation renders the tape the next run will write to (Amanda's
@@ -113,19 +184,32 @@ func describeExpectation(exp engine.TapeExpectation, date time.Time) string {
 		exp.Label, slot.DateString(exp.WrittenAt), age, detail)
 }
 
-// newDumpCmd implements `nb dump`: execute a run and seal a slot.
+// newDumpCmd implements `nb dump`: execute a run and seal a slot, or — with
+// --dry-run — plan the run for --date and print it without writing anything.
 func newDumpCmd(a *app) *cobra.Command {
 	var dateStr string
+	var dryRun bool
 	cmd := &cobra.Command{
 		Use:     "dump",
 		Short:   "Execute a run and seal a slot",
-		Long:    "Execute a planner run, dumping each scheduled DLE and sealing exactly one immutable slot. Use --quiet to suppress progress output.",
-		Example: "  nb dump\n  nb dump --date 2026-06-21\n  nb -c prod.yaml dump -q",
+		Long:    "Execute a planner run, dumping each scheduled DLE and sealing exactly one immutable slot. Use --quiet to suppress progress output. --date sets the run date (with or without --dry-run). With --dry-run the run for --date is planned against the current catalog and printed, exactly as a real dump would decide it, but nothing is written.",
+		Example: "  nb dump\n  nb dump --date 2026-06-21\n  nb dump --dry-run --date 2026-07-15\n  nb -c prod.yaml dump -q",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.load()
 			if err != nil {
 				return err
+			}
+			date, err := ParseDate(dateStr)
+			if err != nil {
+				return err
+			}
+			if dryRun {
+				eng, err := newEngine(cfg)
+				if err != nil {
+					return err
+				}
+				return runDumpDryRun(eng, date)
 			}
 			eng, unlock, err := a.lockedEngine(cfg)
 			if err != nil {
@@ -133,10 +217,6 @@ func newDumpCmd(a *app) *cobra.Command {
 			}
 			defer unlock()
 			eng.SetOperator(stdinOperator{})
-			date, err := ParseDate(dateStr)
-			if err != nil {
-				return err
-			}
 			s, err := eng.Run(date, a.logf())
 			if err != nil {
 				return err
@@ -146,7 +226,29 @@ func newDumpCmd(a *app) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dateStr, "date", "", "run date YYYY-MM-DD (default today)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "plan the run for --date and print it without writing anything")
 	return cmd
+}
+
+// runDumpDryRun previews the dump on `date` without writing: it plans that run
+// exactly as `nb dump --date <date>` would — against the current catalog, the same
+// decision logic a real run uses — and prints it. Nothing is sealed.
+func runDumpDryRun(eng *engine.Engine, date time.Time) error {
+	plan := eng.Plan(date)
+
+	fmt.Println("DRY RUN — no data is written.")
+	fmt.Printf("This is the run on %s.\n\n", slot.DateString(date))
+	for _, w := range plan.Warnings {
+		fmt.Printf("WARNING: %s\n", w)
+	}
+	if len(plan.Warnings) > 0 {
+		fmt.Println()
+	}
+
+	estTotal := fprintPlanItems(os.Stdout, plan)
+	fmt.Printf("\nThis run (estimated): ~%s\n", sizeutil.FormatBytes(estTotal))
+	fmt.Printf("Would seal %s. Run without --dry-run to execute.\n", slot.IDFromParts(slot.DateString(date), 1))
+	return nil
 }
 
 // newStatusCmd implements `nb status`: show the progress of the current (or most

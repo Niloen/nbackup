@@ -397,12 +397,7 @@ func (c *Catalog) History() *History {
 	for _, e := range c.entries { // already in run order
 		s := e.Slot
 		for _, a := range s.Archives {
-			d := h.DLE(a.DLE)
-			d.Runs = append(d.Runs, RunRecord{Date: s.Date, Slot: s.ID, Level: a.Level})
-			if a.Level == 0 {
-				d.LastFullDate = s.Date
-				d.LastFullSlot = s.ID
-			}
+			h.RecordRun(a.DLE, s.ID, s.Date, a.Level)
 		}
 	}
 	return h

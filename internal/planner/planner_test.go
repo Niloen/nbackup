@@ -128,6 +128,50 @@ func TestCycleCapacityWarning(t *testing.T) {
 	}
 }
 
+// TestSimulateSchedule checks the forward forecast advances history between days:
+// a fresh DLE fulls on day 0, climbs incrementals through the cycle, and fulls
+// again when the interval is reached — and the caller's history is left untouched.
+func TestSimulateSchedule(t *testing.T) {
+	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
+	dles := []config.DLE{dleNamed("h")}
+	est := map[string]Estimate{"h-data": {Full: 100, Incr: 10}}
+
+	plans := Simulate(dles, hist, est, Params{FullIntervalDays: 7, CapacityRoomBytes: -1}, start, 15)
+	if len(plans) != 15 {
+		t.Fatalf("want 15 plans, got %d", len(plans))
+	}
+	// Day 0 is the mandatory first full. Incrementals then climb (proving
+	// IncrementalsSinceFull advances day to day), capped at MaxLevel (9). The day-7
+	// due full is degraded back to an incremental — for a lone DLE the balance
+	// target (~full/interval) can't hold a whole full, so it defers to the hard
+	// deadline at 2*interval (day 14), which fulls again (proving DaysSinceFull
+	// advances and resets).
+	want := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 9, 9, 0}
+	for i, p := range plans {
+		if !p.Date.Equal(start.AddDate(0, 0, i)) {
+			t.Errorf("day %d: plan date %s, want %s", i, p.Date, start.AddDate(0, 0, i))
+		}
+		if lvl := levelOf(p, "h-data"); lvl != want[i] {
+			t.Errorf("day %d: got L%d, want L%d", i, lvl, want[i])
+		}
+	}
+	// The forecast clones history; the caller's copy must be unmodified.
+	if len(hist.DLEs) != 0 {
+		t.Errorf("Simulate mutated the input history: %v", hist.DLEs)
+	}
+}
+
+// TestSimulateClampsDays checks a non-positive day count still yields one plan.
+func TestSimulateClampsDays(t *testing.T) {
+	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
+	plans := Simulate([]config.DLE{dleNamed("h")}, hist, nil, Params{FullIntervalDays: 7}, start, 0)
+	if len(plans) != 1 {
+		t.Fatalf("days=0 should clamp to one plan, got %d", len(plans))
+	}
+}
+
 // TestCapacityRoomForcesDegrade checks the hard ceiling overrides the balance
 // target: a tiny capacity room degrades more aggressively.
 func TestCapacityRoomForcesDegrade(t *testing.T) {
