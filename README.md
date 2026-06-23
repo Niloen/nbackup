@@ -1,14 +1,19 @@
 # NBackup
 
-A modern, slot-based backup system inspired by Amanda. NBackup preserves
-Amanda's strongest operational properties — balanced scheduling, immutable daily
-artifacts, human-readable contents, tape-cycle safety — while producing portable
-backup artifacts you can restore with standard tools.
+A slot-based backup system in Go. Its design comes from **[Amanda][amanda]** —
+balanced multilevel scheduling, immutable daily artifacts, human-readable
+contents, and cycle-based safety. What NBackup adds is **first-class disk and
+cloud storage**: Amanda is tape-first, while NBackup treats local disk, virtual
+tape, and object stores (S3) as equal targets, and makes the common modern shape
+— land fast on disk, then replicate offsite — a first-class operation.
 
 > A backup administrator should be able to reason about backups by looking at a
 > sequence of immutable daily backup slots rather than a database of chunks.
 
-This is a first version. See [PRD.md](PRD.md) for the full product vision.
+Its artifacts are portable: every backup restores with standard tools, no
+NBackup required. This is a first version — see [PRD.md](PRD.md) for the full
+product vision. (The rest of this page assumes the Amanda lineage above and
+calls it out again only where a specific mechanism is worth tracing back.)
 
 ## Core ideas
 
@@ -16,18 +21,22 @@ This is a first version. See [PRD.md](PRD.md) for the full product vision.
   immutable directory you can copy, inspect, and understand without NBackup.
 - **DLE** — a backup source (`host` + `path`).
 - **Run** — one planner execution, typically daily.
-- **Cycle** — a safety boundary controlling when slots may be deleted.
-- **Media** — a **Volume** where slots live: local disk, a virtual tape, or (stub)
-  S3. Slots stream between volumes (`nb copy` for one, `nb sync` for many), e.g.
-  land fast on disk then replicate offsite to tape or S3.
+- **Cycle** — the dump cycle: the target and hard-max time between fulls of each
+  DLE, and the window retention protects.
+- **Volume** — where slots live: local disk, a virtual tape, or (stub) S3. Slots
+  stream between volumes (`nb copy` for one, `nb sync` for many) — e.g. land fast
+  on disk, then replicate offsite to tape or S3.
 
-A medium is a **volume**: an ordered sequence of self-describing files (Amanda's
-Device API), each carrying an identity **header** (slot, DLE, level, codec, …),
-addressed by position (a tape file number). A slot is a run of archive files plus
-a final **seal record** (the slot's metadata) that marks it complete. The same
-shape maps to disk, an object store, or tape; each medium frames the header its
-own way. On **disk** the header is a separate `.hdr` sidecar so the payload stays
-a clean archive, and files are human-friendly:
+## Artifacts you can read
+
+A **volume** is an ordered sequence of self-describing files, each carrying an
+identity **header** (slot, DLE, level, codec, …) and addressed by position. A
+**slot** is a run of archive files plus a final **seal record** (the slot's
+metadata) that marks it complete. The same shape maps to disk, an object store,
+or tape; each medium frames the header its own way.
+
+On **disk** the header is a separate `.hdr` sidecar so the payload stays a clean
+archive, and the files are human-friendly:
 
 ```text
 slots/slot-2026-06-21/
@@ -42,11 +51,11 @@ slots/slot-2026-06-21/
 (On **tape** the header is instead a fixed 32 KB block inline ahead of each
 payload, since a tape has no sidecars.)
 
-Archives are produced by **GNU tar** (the same engine Amanda uses) in
-listed-incremental format, then piped through an external compressor (`zstd` by
-default; `gzip` or `none` also built in). Recovery never requires NBackup — a disk
-payload is an ordinary compressed tar, and the whole chain restores with stock
-tools:
+Archives are produced by **GNU tar** in listed-incremental format, then piped
+through an external compressor (`zstd` by default; `gzip` or `none` also built
+in). NBackup orchestrates `tar` and the compressor as child processes rather
+than reimplementing them — so the tools that produced an archive are exactly the
+tools that restore it, and **recovery never requires NBackup**:
 
 ```bash
 # single full archive (the disk payload is a clean tar.zst — no header to skip):
@@ -62,11 +71,6 @@ done
 #  for p in part0 part1 …; do dd bs=32k skip=1 < "$p"; done | zstd -dc | tar -xf -)
 ```
 
-> Requires **GNU tar** and the configured **compressor** (`zstd` by default) at
-> runtime. Like Amanda, NBackup orchestrates these as external child processes
-> rather than reimplementing them — so the same `zstd`/`tar` used for the manual
-> restore above are exactly what produced the archives.
-
 ## Install
 
 ```bash
@@ -75,7 +79,9 @@ make build          # builds ./bin/nb
 go install ./cmd/nb
 ```
 
-This produces a single `nb` binary with these subcommands:
+This produces a single `nb` binary. The convention: you **inspect** with a noun
+(`nb slot`, `nb medium`) and **act** with a flat verb (`nb dump`, `nb restore`,
+`nb prune`, …).
 
 | Command              | Purpose                                                  |
 |----------------------|----------------------------------------------------------|
@@ -94,9 +100,6 @@ This produces a single `nb` binary with these subcommands:
 | `nb load`            | Load a volume into a medium's drive (bay or shelf reel)   |
 | `nb prune`           | Delete slots past the cycle/capacity limits             |
 | `nb rebuild`         | Rebuild the local slot-index cache from media            |
-
-The convention: you **inspect** with a noun (`nb slot`, `nb medium`) and **act**
-with a flat verb (`nb dump`, `nb restore`, `nb prune`, …).
 
 Run `nb help <command>` (or `nb <command> --help`) for per-command usage and
 examples, and `nb completion <shell>` to generate shell completion.
@@ -130,66 +133,67 @@ command line — before or after the subcommand and its positional arguments:
 
 ## How it works
 
-### Planning (balanced, multilevel scheduling)
+### Planning
 
-NBackup uses Amanda's **multilevel** scheme (levels 0–9) with a dynamic,
-estimate-driven schedule. Each run:
+NBackup uses a **multilevel** scheme (levels 0–9) with a dynamic,
+estimate-driven schedule and only two inputs — the **cycle** and the medium's
+**capacity**, no balancing knobs. Levels are realized with GNU tar's
+listed-incremental **snapshot library** under `<catalog>/snapshots/<dle>/L<n>.snar`,
+turning tar's two-level primitive into N-level backups.
 
-1. **Estimates** every DLE's full and next-incremental size by running the dump
-   method (Amanda's "client" estimate). For GNU tar this is a `tar` pass targeted
-   at `/dev/null`: tar walks metadata without reading file bodies, so it is fast
-   yet exactly honors excludes, one-file-system, and the incremental snapshot.
-   Sizes are uncompressed — an upper bound on the compressed bytes finally stored.
-2. Sets a base decision per DLE: never-fulled → **mandatory L0**; at or past the
-   **cycle deadline** → **forced L0**; otherwise the **next incremental level**
-   (capped at L9). The cycle is a *hard* ceiling — a full never ages past it — so
-   there is nothing to demote: a full is either due or it isn't.
-3. **Promotes** to balance: pulls a future full forward onto a light run so daily
-   volume stays even and same-day deadline pile-ups are spread. This is the *only*
-   balancing lever, it is automatic (no knob), and it looks at the whole cycle —
-   not a daily average. It builds a **deadline calendar** of upcoming fulls and
-   promotes a DLE onto today only when (a) today is genuinely lighter than the
-   future day that full would land on, (b) the move strictly lowers that peak,
-   (c) today is the **last responsible moment** — no lighter day remains before
-   the deadline to do it more cheaply — and (d) it fits the per-run room. Point (c)
-   is what stops the classic skew failure: a big lone DLE is never re-fulled early
-   to chase an average, because moving it would just relocate the peak.
+**What each run decides.** In order:
 
-Capacity is the one number you give a medium, and it binds at **two scopes**:
+1. **Estimate** every DLE's full and next-incremental size by running the dump
+   method against `/dev/null` — tar walks metadata without reading file bodies,
+   so it is fast yet exactly honors excludes, one-file-system, and the
+   incremental snapshot. Sizes are uncompressed: an upper bound on the bytes
+   finally stored.
+2. **Pick a base level** per DLE: never-fulled → mandatory L0; at or past the
+   **cycle deadline** → forced L0; otherwise the next incremental level (capped
+   at L9). The cycle is a *hard* ceiling — a full never ages past it — so there
+   is nothing to demote: a full is either due or it isn't.
+3. **Promote** to balance — the *only* balancing lever, automatic (no knob). It
+   builds a **deadline calendar** of upcoming fulls and pulls a full from the
+   heaviest future day onto a lighter run, spreading deadline pile-ups apart. It
+   promotes a DLE onto today only while (a) today is lighter than that future
+   peak, (b) the move strictly lowers the peak — so a *lone* big DLE is never
+   re-fulled early, since moving it would just relocate the peak — and (c) it
+   fits the per-run room. With no free capacity promotion does nothing; with room
+   to spare it spends it to keep backups fresh.
 
-- **Per run** bounds promotion to the room left before pruning would have to evict
-  a *protected* slot (`capacity − protected set`, tightened by the landing
-  volume's remaining room). With no free capacity, promotion does nothing; with
-  capacity to spare, it spends it to keep backups fresh — which is what budgeting
-  that capacity is for. A run may still be lumpy (a big DLE on its deadline day).
-- **Per cycle** is structural: over a cycle every DLE is fulled once, and with
-  `minimum_age ≥ cycle` those fulls coexist on the medium, so a **complete
-  recovery set** (one full of every DLE) must fit capacity. When `Σ full_est`
-  exceeds capacity the plan carries a **warning** (recoverability is at risk;
-  backups still run) — the honest signal to grow capacity or lengthen the cycle —
-  rather than silently pruning the oldest recovery points away.
+This **de-clumps the cold start**: day one fulls everything (recoverability
+first), and promotion staggers the resulting lock-step apart over the next cycle
+or two. The planner consumes only bytes — it never knows whether the medium is
+tape or an object store.
 
-This encodes the PRD priority order directly (recoverability and cycle safety are
-immovable; capacity bounds balance). It also **de-clumps the cold start**: day one
-fulls everything (recoverability first), and promotion staggers the resulting
-lock-step apart over the next cycle or two. The planner consumes only bytes — it
-never knows whether the medium is tape or an object store.
+#### Two capacity limits
 
-Levels are realized with GNU tar's listed-incremental **snapshot library**, kept
-under `<catalog>/snapshots/<dle>/L<n>.snar` — exactly the mechanism Amanda uses
-to turn tar's two-level primitive into N-level backups.
+Capacity is the one number you give a medium, and it binds at two different
+scopes:
 
-**Forecasting the schedule.** `nb plan --days N` projects the planner forward over
-N consecutive daily runs, advancing a *copy* of the history after each simulated
-run — so the forecast shows when each DLE's next full actually lands and how its
-incrementals climb in between, not just today's decision repeated. Estimates and
-the capacity ceiling are sampled once and held constant, making this a
-*level-schedule* forecast rather than a capacity timeline; nothing is written.
+| Scope | What must fit | How it's bounded |
+|-------|---------------|------------------|
+| **Per run** | A single run's peak. | **Promotion** is capped at the room left before pruning would evict a *protected* slot (`capacity − protected set`, tightened by the landing volume's free space). No room → no promotion; a run may still be lumpy when a big DLE hits its own deadline. |
+| **Per cycle** | A **complete recovery set**: one full of every DLE — they coexist when `minimum_age ≥ cycle`, so `Σ full_est` must fit capacity. | Structural — no scheduling can change the cycle's fixed full demand. |
 
-`nb dump --dry-run [--date <day>]` is the single-run dry run: it plans the run for
-`--date` against the current catalog — the exact decision a real `nb dump --date
-<day>` would make — and prints it without sealing anything. (`--date` means the
-same run date in both modes.)
+When `Σ full_est` exceeds capacity the plan carries a **warning** —
+recoverability is at risk, backups still run — the honest signal to grow capacity
+or lengthen the cycle, rather than silently pruning the oldest recovery points
+away. The priority order is immovable: recoverability and cycle safety come
+first; capacity bounds balance.
+
+#### Forecasting
+
+`nb plan --days N` projects the planner forward over N daily runs, advancing a
+*copy* of the history after each simulated run — so the forecast shows when each
+DLE's next full actually lands and how its incrementals climb in between, not
+just today's decision repeated. Estimates and the capacity ceiling are sampled
+once and held constant (a *level-schedule* forecast, not a capacity timeline);
+nothing is written.
+
+`nb dump --dry-run [--date <day>]` is the single-run dry run: it plans the run
+for `--date` against the current catalog — the exact decision a real `nb dump
+--date <day>` would make — and prints it without sealing anything.
 
 ### Slot naming and multiple runs per day
 
@@ -201,15 +205,15 @@ overwritten. Restores and pruning order slots by date **then** sequence.
 
 A run writes the archive files, verifies their checksums against what landed on
 the volume, and finally appends the **seal record** — one file carrying the slot
-metadata (identity, sizes, checksums, member listings) with `status: sealed`. The
-seal record is written last, so its presence marks the slot complete; after
+metadata (identity, sizes, checksums, member listings) with `status: sealed`.
+The seal record is written last, so its presence marks the slot complete; after
 sealing, a slot is immutable — re-running a sealed date is refused.
 
 ### Monitoring a run
 
-A long `nb dump` (run detached, e.g. from cron) reports progress to a status file
-in the catalog workdir as it goes. From any other shell, `nb status` reads that
-file and prints an at-a-glance report — like Amanda's `amstatus`:
+A long `nb dump` (run detached, e.g. from cron) reports progress to a status
+file in the catalog workdir as it goes. From any other shell, `nb status` reads
+that file and prints an at-a-glance report:
 
 ```text
 Run slot-2026-06-21  [running]
@@ -228,10 +232,11 @@ Rate:     48.10 MB/s
 ETA:      17m18s
 ```
 
-Each DLE's percentage is uncompressed bytes against the planner estimate; the run
-streams source→compressor→volume in one pass, so there is a single `dumping`
-state per DLE (no separate dumper/taper queues). `nb status --watch 2s` refreshes
-until the run finishes; afterwards `nb status` shows the last run's final result.
+Each DLE's percentage is uncompressed bytes against the planner estimate; the
+run streams source→compressor→volume in one pass, so there is a single `dumping`
+state per DLE (no separate dumper/taper queues). `nb status --watch 2s`
+refreshes until the run finishes; afterwards `nb status` shows the last run's
+final result.
 
 ### Restore
 
@@ -239,19 +244,19 @@ Restoring a DLE as of a slot replays its most recent full at or before that
 slot, then every later incremental up to it, in run order, with GNU tar's
 incremental extraction. Because the incrementals carry directory census data,
 **deletions are applied** — a file removed between the full and the chosen slot
-is absent after restore. You can restore a single DLE (`-dle`) or all DLEs in
+is absent after restore. You can restore a single DLE (`--dle`) or all DLEs in
 the slot.
 
 ### Recover (browse a date, pick files)
 
-`nb recover` is NBackup's [amrecover][amrecover]: browse a DLE's filesystem **as
-it stood on a date** and pull back individual files or directories, instead of
-the whole DLE. The browse view merges the restore chain (the full plus every
-later incremental up to the date) so each path shows its newest version on or
-before the date, and each file is recovered from the archive that actually holds
-it. No separate index server is needed — the index is the member list every seal
-already records, so browsing reads only the catalog and touches media only when
-you extract.
+`nb recover` is the file-level counterpart to `nb restore`: browse a DLE's
+filesystem **as it stood on a date** and pull back individual files or
+directories instead of the whole DLE. The browse view merges the restore chain
+(the full plus every later incremental up to the date) so each path shows its
+newest version on or before the date, and each file is recovered from the
+archive that actually holds it. No separate index server is needed — the index
+is the member list every seal already records, so browsing reads only the
+catalog and touches media only when you extract.
 
 ```bash
 nb recover                                   # interactive shell (below)
@@ -262,8 +267,7 @@ nb recover --dle app01-home --date 2026-06-20 \
     --path /etc/hosts --path /etc/nginx --dest /tmp/out
 ```
 
-The interactive shell mirrors amrecover — `setdisk` chooses the DLE, `setdate`
-the as-of date, then navigate and select:
+The interactive shell tracks a current DLE and date, then navigate and select:
 
 ```
 recover> setdisk app01-home
@@ -277,23 +281,21 @@ recovered 12 entr(ies) from 2 archive(s) into /tmp/out
 ```
 
 Paths are relative to the DLE's backed-up root. Selecting a directory pulls its
-whole subtree (each file from the archive that last changed it). Unlike a whole-DLE
-`nb restore`, selected-file recovery never deletes — it only writes the files you
-asked for. One fidelity note: GNU tar records deletions in its snapshot, not in
-the member index, so a file deleted at a later incremental still shows up in the
-browse view; recover the *whole* DLE with `nb restore` when you need
-deletion-accurate state.
-
-[amrecover]: https://wiki.zmanda.com/man/amrecover.8.html
+whole subtree (each file from the archive that last changed it). Unlike a
+whole-DLE `nb restore`, selected-file recovery never deletes — it only writes the
+files you asked for. One fidelity note: GNU tar records deletions in its
+snapshot, not in the member index, so a file deleted at a later incremental still
+shows up in the browse view; recover the *whole* DLE with `nb restore` when you
+need deletion-accurate state.
 
 ### Pruning (cycle safety)
 
 `nb prune` is a dry-run by default. Pruning has two layers:
 
 1. **Safety floor** (shared, medium-agnostic): a slot is *protected* if it is
-   younger than the medium's `minimum_age` (which defaults to one cycle), or if any
-   DLE it holds has no newer full elsewhere (its last recovery path). Protected
-   slots are never reclaimed.
+   younger than the medium's `minimum_age` (which defaults to one cycle), or if
+   any DLE it holds has no newer full elsewhere (its last recovery path).
+   Protected slots are never reclaimed.
 2. **Capacity reclamation** (per-medium): among non-protected slots, the medium's
    retention strategy reclaims to fit capacity. For object stores this deletes
    the **oldest slots until total ≤ capacity**; for tape it will reclaim whole
@@ -305,10 +307,10 @@ each store is pruned against its own limits.
 ### Replication / tiered storage
 
 The common operational shape is **land fast, replicate offsite**: dump to local
-disk (cheap, fast, online), then mirror sealed slots to tape or S3 for the offsite
-copy. `nb sync` is the batch form of `nb copy` (Amanda's *vaulting*): it copies
-every slot the target medium is missing, **oldest first** (so an interrupted sync
-makes contiguous, replayable progress and a full lands before its incrementals).
+disk (cheap, fast, online), then mirror sealed slots to tape or S3 for the
+offsite copy. `nb sync` is the batch form of `nb copy`: it copies every slot the
+target medium is missing, **oldest first** (so an interrupted sync makes
+contiguous, replayable progress and a full lands before its incrementals).
 
 ```bash
 nb sync --to lto            # dry-run: what disk has that tape doesn't
@@ -319,14 +321,15 @@ nb sync --from lto --to disk --apply    # un-vault: restage tape back to disk
 ```
 
 The source defaults to the landing medium; **`--from` overrides it**, so the same
-command both pushes offsite (disk → tape/S3) and pulls back (tape → disk) — reading
-a tape source mounts the volume holding each slot, just like a restore.
+command both pushes offsite (disk → tape/S3) and pulls back (tape → disk) —
+reading a tape source mounts the volume holding each slot, just like a restore.
 
-It is **dry-run by default** (like `nb slot prune`) and **idempotent**: each slot
+It is **dry-run by default** (like `nb prune`) and **idempotent**: each slot
 copies atomically and records a second placement, so re-running resumes where an
 interrupted sync left off and a fully-mirrored target reports "up to date". On a
 hard error (target full or offline) it stops and reports progress. Declare
-recurring targets in the config so a cron line is just `nb dump && nb sync --apply`:
+recurring targets in the config so a cron line is just `nb dump && nb sync
+--apply`:
 
 ```yaml
 sync:
@@ -339,17 +342,17 @@ sync:
 
 Replication and pruning compose: a slot becomes prunable from disk only once its
 recovery path exists elsewhere (the protected-set floor), so run `nb sync` before
-`nb slot prune` to tier old slots off local disk safely.
+`nb prune` to tier old slots off local disk safely.
 
 ## Configuration
 
 See [`nbackup.example.yaml`](nbackup.example.yaml). Minimal example:
 
 ```yaml
-cycle: 7d                            # dump cycle: hard max time between fulls per DLE
+cycle: 7d                            # target & hard-max time between fulls per DLE
 
 # Named storage definitions; `landing` selects which one slots are created on.
-# Capacity is per-medium (each store has its own space); minimum_age is optional.
+# Capacity is per-medium; minimum_age is optional (defaults to one cycle).
 media:
   disk:
     type: disk
@@ -374,30 +377,30 @@ sources:
     db01: [/var/lib/postgresql, /var/log]
 ```
 
-**Media** is a map of named definitions, each with a `type` and type-specific
-parameters; `landing` names the one slots are written to. Adding a medium type
-is a registry registration — no config struct changes. **Dumptypes** are named
-`{method + options}` bundles (Amanda's dumptype): a dump method (the
-"Application") plus its options (compression, `exclude`, `one-file-system`, …).
-**Sources** (the disklist) are grouped by dumptype → host → paths, so each DLE
-is just a path under the dumptype that governs it — all per-DLE tuning lives in
-the dumptype, never on the entry.
+- **Media** is a map of named definitions, each with a `type` and type-specific
+  parameters; `landing` names the one slots are written to. Adding a medium type
+  is a registry registration — no config struct changes.
+- **Dumptypes** are named `{method + options}` bundles: a dump method (the
+  "Application") plus its options (compression, `exclude`, `one-file-system`, …).
+- **Sources** (the disklist) are grouped by dumptype → host → paths, so each DLE
+  is just a path under the dumptype that governs it — all per-DLE tuning lives in
+  the dumptype, never on the entry.
 
 ### Capacity and retention are per-medium
 
 Each medium declares its **capacity** — the space NBackup may use there. Disk and
 S3 spell it directly (`capacity: 20TB`); a tape library derives it as
 `bays × volume_size` (`0` = unbounded). Capacity is the headline knob: tell a
-medium how much space you have and the planner uses it (promotion fills free
-space; pruning reclaims to stay within it). `minimum_age` is an optional per-medium
+medium how much space you have and the planner uses it — promotion fills free
+space, pruning reclaims to stay within it. `minimum_age` is an optional per-medium
 safety floor that defaults to one cycle — long enough that yesterday's run never
 overwrites a slot still inside the recovery window.
 
 Balancing dumps over time is **not** a medium property — it's a global, temporal
 planning concern (an S3 bucket has no meaningful per-run size). So the planner
-spreads fulls across the global cycle on its own (see Planning). Pruning consumes
-only capacity; the reclamation difference (delete a slot vs reclaim a whole tape)
-lives entirely in the medium's retention strategy.
+spreads fulls across the global cycle on its own (see [Planning](#planning)).
+Pruning consumes only capacity; the reclamation difference (delete a slot vs
+reclaim a whole tape) lives entirely in the medium's retention strategy.
 
 ## Requirements
 
@@ -417,31 +420,39 @@ tar snapshot library, immutable sealed slots with **sequence-suffixed** same-day
 runs, **deletion-aware** incremental restore, checksum verification, point-in-time
 restore, per-medium capacity reporting, cycle-safe pruning.
 
-The `tape` medium comes in shapes that differ in *who changes the tape*. A
-**robotic library** (`dir:` file-backed) has `bays: N` physical positions, each a
-finite `volume_size` tape, and a command moves which bay is mounted. A **single
-drive you change by hand** — the disk-emulated station (`mode: manual`), or a real
-drive (`device:` via `mt`) — shows only the reel currently in the drive; the
-emulated station also lists the other reels on a shelf you can load. When a backup
-or restore needs a different tape, NBackup **prompts you to swap it in and waits**
-(an unattended run errors instead of hanging). Either way you label a blank tape
-(`nb label`), inventory a medium with `nb medium <name>` (its bays, or the drive
-and shelf), and load a tape with `nb load`. Tapes carry a self-describing label
-that NBackup **verifies before every write**, so a foreign, wrong, or still-active
-reel is never clobbered.
-`appendable: true` (default) packs many runs per tape (Bacula-style), `appendable:
-false` uses one run per tape (Amanda-style). Restore mounts (robot) or prompts for
-(manual) whichever tape holds the copy it needs. A run that **fills a tape
-mid-write spans onto the next one automatically** — both a `nb dump` and a `nb
-copy`/`nb sync` — splitting even a single large archive across tapes: a robotic
-library mounts the next writable bay (auto-labeling a blank), a manual drive prompts
-for a swap. Spanning is *proactive* — set `volume_size` so NBackup sizes each chunk
-to fit before writing it (a real drive with no readable capacity can instead set
-`part_size`); if a chunk still overflows, the run fails with a clear message rather
-than guessing. A restore reassembles a spanned archive by mounting its tapes in
-order. (Internals: [ARCHITECTURE.md](ARCHITECTURE.md).)
+### Tape
 
-Not yet implemented (declared in config for forward-compatibility):
+The `tape` medium comes in shapes that differ in *who changes the tape*:
+
+- A **robotic library** (`dir:` file-backed) has `bays: N` physical positions,
+  each a finite `volume_size` tape, and a command moves which bay is mounted.
+- A **single drive you change by hand** — the disk-emulated station (`mode:
+  manual`), or a real drive (`device:` via `mt`) — shows only the reel currently
+  in the drive; the emulated station also lists the other reels on a shelf you
+  can load.
+
+When a backup or restore needs a different tape, NBackup **prompts you to swap it
+in and waits** (an unattended run errors instead of hanging). Either way you
+label a blank tape (`nb label`), inventory a medium with `nb medium <name>` (its
+bays, or the drive and shelf), and load a tape with `nb load`. Tapes carry a
+self-describing label that NBackup **verifies before every write**, so a foreign,
+wrong, or still-active reel is never clobbered.
+
+`appendable: true` (default) packs many runs per tape; `appendable: false` uses
+one run per tape. Restore mounts (robot) or prompts for (manual) whichever tape
+holds the copy it needs. A run that **fills a tape mid-write spans onto the next
+one automatically** — for both `nb dump` and `nb copy`/`nb sync`, splitting even a
+single large archive across tapes: a robotic library mounts the next writable bay
+(auto-labeling a blank), a manual drive prompts for a swap. Spanning is
+**proactive** — set `volume_size` so NBackup sizes each chunk to fit *before*
+writing it (a real drive with no readable capacity can instead set `part_size`);
+if a chunk still overflows, the run fails with a clear message rather than
+guessing. A restore reassembles a spanned archive by mounting its tapes in order.
+(Internals: [ARCHITECTURE.md](ARCHITECTURE.md).)
+
+### Not yet implemented
+
+Declared in config for forward-compatibility:
 
 - **S3 media** — registered as a Volume stub; no S3 client yet.
 - **Capacity-driven retention** — capacity is reported and bounds promotion;
@@ -449,7 +460,7 @@ Not yet implemented (declared in config for forward-compatibility):
 - **Remote sources** — `host` is metadata; `path` is read from the local
   filesystem (run the agent where the data is, or mount it).
 - **Exclude/include rules** and tar tuning (one-file-system and sparse are on by
-  default, as in Amanda).
+  default).
 
 ## Architecture
 
@@ -462,8 +473,8 @@ restore-location, and pruning never touch a slow or offline volume, and a single
 scan rebuilds it (`nb rebuild`).
 
 Contributors and agents: see **[ARCHITECTURE.md](ARCHITECTURE.md)** for the
-package map, the catalog `Entry`/`Placement` model, the design decisions and their
-rationale, and the project conventions.
+package map, the catalog `Entry`/`Placement` model, the design decisions and
+their rationale, and the project conventions.
 
 ## Development
 
@@ -471,3 +482,5 @@ rationale, and the project conventions.
 make test     # go test ./...
 make vet      # go vet ./...
 ```
+
+[amanda]: https://www.amanda.org/
