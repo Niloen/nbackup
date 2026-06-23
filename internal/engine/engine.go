@@ -17,6 +17,7 @@ import (
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/filter"
+	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/method"
 	"github.com/Niloen/nbackup/internal/planner"
@@ -59,12 +60,24 @@ type Engine struct {
 	methods    map[string]method.Method // by cache key (dumptype or "@method")
 	codec      string                   // compression codec for new archives
 	fopts      filter.Options           // codec invocation options (level/threads/nice)
-	op         Operator                 // optional: handles manual tape swaps (nil = unattended)
+	op         librarian.Operator       // optional: handles manual tape swaps (nil = unattended)
 }
 
 // SetOperator attaches an operator so manual single-drive media can prompt for a
 // reel swap mid-command. Without one, manual swaps degrade to an actionable error.
-func (e *Engine) SetOperator(op Operator) { e.op = op }
+func (e *Engine) SetOperator(op librarian.Operator) { e.op = op }
+
+// librarianFor builds a librarian for a configured medium's open volume. For the
+// engine's own medium it wraps the already-open landing handle (own=true), so its
+// cached state stays coherent and the catalog — which caches exactly this medium —
+// can be rebuilt against it.
+func (e *Engine) librarianFor(name string) (lib *librarian.Librarian, def config.Media, own bool, err error) {
+	vol, d, own, err := e.mediumVolume(name)
+	if err != nil {
+		return nil, config.Media{}, false, err
+	}
+	return librarian.New(vol, name, e.cat, e.op, e.cfg.AutoLabel), d, own, nil
+}
 
 // New constructs an Engine from configuration: it opens the landing volume and
 // its capacity profile via the media registry, and loads the catalog cache
@@ -308,13 +321,15 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	if err != nil {
 		return err
 	}
-	dst, def, _, err := e.mediumVolume(targetMedia)
+	lib, def, _, err := e.librarianFor(targetMedia)
 	if err != nil {
 		return err
 	}
+	dst := lib.Volume()
 	now := time.Now().UTC()
 	appendable := def.IsAppendable()
-	volName, epoch, err := e.verifyWritableInteractive(dst, targetMedia, appendable, now, logf)
+	expect := e.expectedTapeFor(targetMedia, now).Label
+	volName, epoch, err := lib.PrepareWrite(appendable, expect, now, librarian.Logf(logf))
 	if err != nil {
 		return err
 	}
@@ -331,11 +346,6 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	// stops the loop re-mounting an exhausted bay; `fresh` means the loaded volume
 	// started empty, so a slot that still will not fit cannot fit on any one volume.
 	tried := map[string]bool{}
-	if ch, ok := dst.(media.Library); ok {
-		if bay, ok := ch.Loaded(); ok {
-			tried[bay] = true
-		}
-	}
 	tooBig := func() error {
 		return fmt.Errorf("slot %s (~%s) does not fit on an empty volume of medium %q; NBackup does not split one slot across volumes", slotID, sizeutil.FormatBytes(slotFootprint(s)), targetMedia)
 	}
@@ -345,12 +355,12 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	// that cannot hold it either.
 	fresh := len(e.cat.SlotsOnVolume(volName)) == 0
 	for {
-		if rem, known := loadedRemaining(dst); known && slotFootprint(s) > rem {
+		if rem, known := lib.Remaining(); known && slotFootprint(s) > rem {
 			if fresh {
 				return tooBig() // even a just-rolled-onto empty volume cannot hold it
 			}
 			logf.log("medium %q: slot %s (~%s) will not fit the %s left on %q; rolling to the next volume", targetMedia, slotID, sizeutil.FormatBytes(slotFootprint(s)), sizeutil.FormatBytes(rem), volName)
-			volName, epoch, fresh, err = e.advanceWritable(dst, targetMedia, appendable, tried, now, logf)
+			volName, epoch, fresh, err = lib.Advance(appendable, tried, expect, now, librarian.Logf(logf))
 			if err != nil {
 				return fmt.Errorf("copy %s to %q needs another volume: %w", slotID, targetMedia, err)
 			}
@@ -367,7 +377,7 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 			return tooBig()
 		}
 		logf.log("medium %q: volume %q is full, rolling to the next volume", targetMedia, volName)
-		volName, epoch, fresh, err = e.advanceWritable(dst, targetMedia, appendable, tried, now, logf)
+		volName, epoch, fresh, err = lib.Advance(appendable, tried, expect, now, librarian.Logf(logf))
 		if err != nil {
 			return fmt.Errorf("copy %s to %q needs another volume: %w", slotID, targetMedia, err)
 		}
@@ -401,21 +411,71 @@ func (e *Engine) copySource(slotID, fromMedia string) (media.Volume, error) {
 	if src.Medium == "" {
 		return nil, fmt.Errorf("slot %s has no copy on source medium %q", slotID, fromMedia)
 	}
-	vol := e.vol
-	if fromMedia != e.mediumName {
-		v, _, _, err := e.mediumVolume(fromMedia)
-		if err != nil {
-			return nil, err
-		}
-		vol = v
-	}
-	if err := e.mountForRead(vol, src); err != nil {
+	lib, _, _, err := e.librarianFor(fromMedia)
+	if err != nil {
 		return nil, err
 	}
-	if err := e.assertVolume(vol, src); err != nil {
+	if err := lib.MountForRead(src); err != nil {
 		return nil, err
 	}
-	return vol, nil
+	return lib.Volume(), nil
+}
+
+// slotFootprint estimates the bytes a slot's copy will occupy on a destination
+// volume: its compressed archive payloads plus a fixed header block per file (one
+// per archive and one for the seal). It deliberately omits the seal's own payload,
+// so it is a slight UNDER-estimate — `footprint > remaining` therefore proves the
+// slot cannot fit, never the reverse, so a pre-check on it never rolls prematurely;
+// the media.ErrVolumeFull backstop still catches a slot that the estimate cleared
+// but the exact bytes (or an imprecise real tape) could not hold.
+func slotFootprint(s *slot.Slot) int64 {
+	return s.TotalBytes + int64(len(s.Archives)+1)*media.HeaderBlock
+}
+
+// readerFor opens a Reader positioned to read a placement's volume, after mounting
+// the right tape (on a changer) and verifying its identity. For the engine's own
+// medium it reuses the open handle and reader.
+func (e *Engine) readerFor(p catalog.Placement) (*slotio.Reader, error) {
+	lib, _, own, err := e.librarianFor(p.Medium)
+	if err != nil {
+		return nil, err
+	}
+	if err := lib.MountForRead(p); err != nil {
+		return nil, err
+	}
+	if own {
+		return e.reader, nil
+	}
+	return slotio.NewReader(lib.Volume(), e.fopts), nil
+}
+
+// LabelVolume writes (or rewrites) the identity label of a medium's volume — the
+// deliberate operator act that makes a tape writable.
+func (e *Engine) LabelVolume(mediumName, name string, relabel, force bool, now time.Time, logf Logf) error {
+	lib, def, own, err := e.librarianFor(mediumName)
+	if err != nil {
+		return err
+	}
+	minAge, _ := def.MinAge()
+	return lib.Label(name, relabel, force, own, minAge, now, librarian.Logf(logf))
+}
+
+// ChangerView inventories a changer medium for `nb medium <name>`.
+func (e *Engine) ChangerView(mediumName string) (librarian.View, error) {
+	lib, _, _, err := e.librarianFor(mediumName)
+	if err != nil {
+		return librarian.View{}, err
+	}
+	return lib.View()
+}
+
+// LoadVolume mounts a volume on a changer medium, by bay/reel id or (byLabel) label.
+func (e *Engine) LoadVolume(mediumName, target string, byLabel bool, logf Logf) error {
+	lib, _, _, err := e.librarianFor(mediumName)
+	if err != nil {
+		return err
+	}
+	return lib.Load(target, byLabel, librarian.Logf(logf))
 }
 
 // Catalog exposes the catalog for read-only commands.
@@ -687,7 +747,10 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 		}
 	}
 
-	volName, epoch, err := e.verifyWritableInteractive(e.vol, e.mediumName, e.mediumDef.IsAppendable(), time.Now().UTC(), logf)
+	now := time.Now().UTC()
+	lib := librarian.New(e.vol, e.mediumName, e.cat, e.op, e.cfg.AutoLabel)
+	expect := e.expectedTapeFor(e.mediumName, now).Label
+	volName, epoch, err := lib.PrepareWrite(e.mediumDef.IsAppendable(), expect, now, librarian.Logf(logf))
 	if err != nil {
 		return nil, err
 	}

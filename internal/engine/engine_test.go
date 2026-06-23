@@ -8,6 +8,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/slot"
@@ -473,7 +474,7 @@ func TestTapeAppendableFalse(t *testing.T) {
 // write) and counts how many swaps it performed.
 type scriptedOperator struct{ swaps int }
 
-func (o *scriptedOperator) Swap(r SwapRequest) (string, bool) {
+func (o *scriptedOperator) Swap(r librarian.SwapRequest) (string, bool) {
 	o.swaps++
 	if r.Need != "" { // a read wants a specific label
 		for _, b := range r.Shelf {

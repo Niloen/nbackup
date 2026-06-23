@@ -94,58 +94,60 @@ var ErrVolumeFull = fmt.Errorf("volume full: end of volume reached")
 // nothing loaded. The engine wraps this with medium-specific guidance.
 var ErrNoVolume = fmt.Errorf("no volume loaded in the drive")
 
-// Library is a robotic, bay-addressed changer: a tape library / autochanger whose
-// robot mounts any of many physical positions (bays) into the one drive. It is
-// deliberately label-AGNOSTIC — like a real robot it addresses bays and never reads
-// the magnetic label itself; the label is read from the medium only after a bay is
-// mounted (via Labeled.ReadLabel). The engine resolves labels↔bays on top of this
-// seam. Every id reported by Bays()/Loaded() is a valid Mount() target.
+// Drive is a medium with one mounted volume at a time: it can report what is loaded.
+// Both a robotic library (the volume the robot has in the drive) and a single-drive
+// station (the loaded reel) are Drives; address-identified media (disk, s3) are not.
+// It is the device read every changer shape shares, kept minimal so callers that
+// only need "what's loaded" — capacity pre-checks, inventory — don't depend on the
+// positioning or room interfaces.
 //
-// A Library IS a Volume — the one currently mounted in the drive: the embedded
-// Volume operations act on the mounted bay, and Mount changes which bay that is.
-// A Station (single-drive station) is also a Volume but is NOT a Library: it has no
-// robot and no addressable bays, so the two are siblings, not a subtype. ("Siblings,
-// not subtype" is about Library vs Station — both are Volumes.)
-type Library interface {
+// A Drive IS a Volume — the one currently in the drive: the embedded Volume
+// operations act on the loaded volume.
+type Drive interface {
 	Volume
-	// Mount loads the named bay into the drive (error if the bay does not exist).
-	// Subsequent Volume/Labeled operations act on the mounted bay.
-	Mount(bay string) error
-	// Loaded returns the bay currently in the drive; ok is false when empty.
-	Loaded() (bay string, ok bool)
-	// Bays lists the library's physical positions and what each holds.
+	// Loaded reports the volume currently in the drive; ok is false when empty.
+	Loaded() (VolumeStatus, bool)
+}
+
+// Changer is the robotic-library device: a drive fed by a robot that mounts any of
+// many physical bays. It is what distinguishes a robotic library from a single-drive
+// station — the library reaches every tape itself (Bays + Mount), the station cannot
+// and so does NOT implement Changer (it is a Drive plus a Shelf instead). Holding a
+// Volume, the librarian reads the shape from this one assertion: a Changer is a
+// robotic library; anything else is a single drive or a plain volume.
+//
+// It is deliberately label-AGNOSTIC: like a real robot it addresses bays and never
+// reads the magnetic label itself; the label is read only after a bay is mounted
+// (via Labeled.ReadLabel). It carries ONLY what real hardware's software can do —
+// position the robot among bays it can reach.
+type Changer interface {
+	Drive
+	// Bays lists the physical positions the robot can mount. Every reported id is a
+	// valid Mount target.
 	Bays() ([]VolumeStatus, error)
+	// Mount loads the named bay into the drive (a robot move).
+	Mount(bay string) error
 }
 
-// Station is a single-drive medium whose loaded volume an operator changes by hand:
-// a standalone tape drive, or its disk-emulated equivalent. Unlike a Library it has
-// no robot and no addressable bays — the software sees only the one volume in the
-// drive, never an inventory of the others. The engine prompts the operator to swap
-// rather than mounting automatically.
+// Shelf is the operator-managed environment of a single-drive station — the reels in
+// the room and the act of loading one into the one drive. Loading a reel a human
+// keeps on a shelf is a physical act with no device API, so it lives here, apart
+// from the Drive/Changer device seams. The librarian consults it only to actually do
+// a swap (prompt over the room, then Insert the operator's choice); it is never a
+// general shape marker.
 //
-// A Station IS a Volume — the one currently in the drive: the embedded Volume
-// operations act on the loaded reel.
-type Station interface {
-	Volume
-	// LoadedVolume reports the volume currently in the drive; ok is false when the
-	// drive is empty.
-	LoadedVolume() (VolumeStatus, bool)
-}
-
-// ShelfStation is a Station whose off-drive volumes the software can itself
-// enumerate and load — the disk-emulated single-drive station, where the reels are
-// directories on a shelf. A real standalone tape drive is a Station but NOT a
-// ShelfStation: its reels are invisible to software and its swaps are purely
-// physical (the operator loads a tape by hand; the software only re-reads the
-// drive). Insert effects the swap in software, displacing whatever is loaded back
-// to the shelf.
-type ShelfStation interface {
-	Station
-	// Shelf lists the reels in the room but not currently in the drive.
+// A real standalone drive implements Shelf degenerately: an empty room (software
+// cannot see the reels) and an Insert that errors (only a human loads it). The disk
+// emulator implements it functionally — its reels are directories it can enumerate
+// and load — so the manual-swap UX is exercisable in one process.
+type Shelf interface {
+	// Shelf lists the reels in the room but not currently in the drive. Empty for a
+	// real drive (software cannot see the room).
 	Shelf() ([]VolumeStatus, error)
-	// Insert swaps the named shelf reel into the single drive. id is a reel id
-	// reported by Shelf.
-	Insert(id string) error
+	// Insert loads the named room reel into the single drive, displacing whatever is
+	// loaded back to the room. A real drive returns an error (only a human can load
+	// it); the emulator effects the swap in software.
+	Insert(reel string) error
 }
 
 // VolumeStatus is one volume's physical state: a bay in a Library, or the reel

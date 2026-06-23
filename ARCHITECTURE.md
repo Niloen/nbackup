@@ -30,7 +30,9 @@ restore with stock tools.
   pool, epoch). A *capability* (`media.Labeled`); address-identified media skip it.
 - **Bay** — a physical position in a robotic tape library (`bay-01…`), the durable
   cartridge identity. Distinct from the Label written inside it. A single-drive
-  station has no bays; its cartridges are **reels** (`reel-01…`) on a shelf.
+  station has no bay inventory — its one mountable position is the drive itself, and
+  its off-drive cartridges are **reels** (`reel-01…`) on a **shelf** (the
+  environment, `media.Shelf`), loaded by an operator rather than a robot.
 
 ## Package map
 
@@ -43,7 +45,8 @@ registry registration, not a conditional in the core.
 | `config` | config + domain entities: `DLE`, `Media`, `DumpType` | disklist / dumptype / storage |
 | `slot` | slot metadata: pure data + lifecycle (`NewSlot`/`AddArchive`/`Seal`) | header / amar |
 | `slotio` | maps a slot onto a `Volume`'s files (headers, seal, verify, `Expect`) | taper / amrestore |
-| `media` | `Volume` + `Labeled` + `Library`/`Station`/`ShelfStation` + `Profile` + registry | Device API |
+| `media` | `Volume` + `Labeled` + `Drive`/`Changer` (device) + `Shelf` (environment) + `Profile` + registry | Device API |
+| `librarian` | operates a medium's `Changer`/`Shelf` + label protocol (make-writable, advance, mount, label, load) | changer / amtape |
 | `media/disk`, `media/tape`, `media/s3` | Volume impls (disk sidecar headers; tape library; s3 stub) | vfs / tape / s3 devices |
 | `method` + `method/gnutar` | dump `Method` interface + registry; GNU tar impl | Application API / amgtar |
 | `filter` | external compressor child processes (zstd/gzip/none) + registry | compress |
@@ -110,7 +113,7 @@ verification, same placement record, same per-slot atomicity — so an interrupt
 repeated sync resumes for free, and it **stops at the first hard error** (a full or
 offline target won't fix itself by continuing). The source defaults to the landing
 medium but is configurable (`--from` / rule `from:`): `CopySlot` resolves the
-source placement and mounts it for reading via the same `mountForRead`/`assertVolume`
+source placement and mounts it for reading via the same `Librarian.MountForRead`
 path `readerFor` uses, so a tape/S3 source works (un-vaulting tape→disk, or a
 second offsite tier), and copy-to-landing is now allowed (the old "target is the
 source" guard became a `from == to` guard). The config `sync:` rules are the
@@ -145,32 +148,39 @@ the three medium-neutral interfaces capture. `dir:` is a directory-backed librar
 `device:` is a real single drive (`mt`+`/dev/nst0`; structurally complete, untested
 without hardware).
 
-- **Three shapes — robot, real drive, emulated station.** They differ on one axis:
-  *who picks the volume, and what the software can see.* A **robotic library**
-  (`dir:`, the default, `media.Library`) reports many bays and a command moves the
-  mounted *position* between them — any bay id is a valid `Mount` target. A
-  **single-drive station** has no bays: the software sees only the one reel in the
-  drive (`media.Station.LoadedVolume`). The disk-emulated station (`mode: manual`,
-  `media.ShelfStation`) can additionally enumerate its offline **shelf** reels and
-  `Insert` one into the drive; a real `device:` drive is a plain `Station` — its
-  reels are invisible and its swaps are physical (operator loads by hand; the
-  software only re-reads the drive). Both `Library` and `Station` **embed
-  `media.Volume`** — a changer *is* the volume currently in its drive, plus the
-  positioning controls — so code holds a `Volume` and discovers the shape by one type
-  assertion, never carrying a separate handle. `Library` and `Station` are
-  **siblings, not subtype** (a station is never bay-addressed; "siblings" is about
-  the two of them, both being Volumes), so generic catalog/engine code can't
-  bay-iterate a station. Reels are addressed by their own ids (`reel-01…`), never a
-  synthetic "drive" position — `"drive"` is CLI presentation only. All media-shape
-  dispatch (the `vol.(media.Library/Station/ShelfStation)` assertions) is confined to
-  `engine/changer.go`; the rest of the engine stays shape-agnostic.
+- **Device vs environment — `Drive`, `Changer`, `Shelf`.** The shapes split on what
+  *real hardware's software* can do, across three small seams. `media.Drive` is the
+  device read both changer shapes share — `Loaded` (what volume is in the drive),
+  embedding `media.Volume`. `media.Changer` **is** the robotic library: a `Drive`
+  that also enumerates its bays and positions the robot (`Bays` + `Mount`). The shape
+  is **one assertion** — *a `Changer` is a robotic library; anything that is not a
+  `Changer` is a single-drive station or a plain volume.* A single drive is **not** a
+  `Changer`: it has no robot and no bays, so it is a `Drive` plus a `Shelf`.
+  `media.Shelf` is the **environment** — the operator-managed room (`Shelf` to
+  enumerate the reels, `Insert` to load one) — because loading a reel a human keeps on
+  a shelf is a physical act with no device API. The librarian consults `Shelf` **only
+  to actually do a swap** (prompt over the room, then `Insert` the choice), never as a
+  general shape marker. The disk-emulated station (`mode: manual`) implements `Shelf`
+  functionally (its reels are subdirs it enumerates and inserts in-process); a real
+  `device:` drive degenerately (empty room, `Insert` errors — only a human loads it).
+  Reels are addressed by their own ids (`reel-01…`), never a synthetic "drive"
+  position — `"drive"` is CLI presentation only. All media-shape dispatch is confined
+  to package `librarian`; the rest of the engine stays shape-agnostic.
+- **Librarian — the operator-facing changer service.** Package `librarian` turns
+  intents (make writable, advance, mount-for-read, label, load, inventory) into
+  positioning, and runs the label protocol on top. The single unified algorithm —
+  *try the mountable `Bays`, else ask the operator over the `Shelf`* — produces both
+  user experiences from the inventory data: a robotic library iterates its many bays
+  and rarely prompts; a single drive has one bay, so it prompts immediately. It is a
+  shared service (dump, copy/sync, restore, rebuild, label, load all use it), so the
+  future sub-engine split is mechanical.
 - **Operator seam.** A single-drive station can't change its own tape, so when the
-  loaded reel won't do, the engine asks an `Operator` (CLI: stdin) to swap and
-  retries — on writes (`verifyWritable`: blank/foreign/wrong-pool/full → load a
-  writable reel, auto-labeled if `auto_label`) and on reads (`mountForRead`: load
-  the reel holding the needed label). Unattended (no operator) it degrades to an
-  actionable error instead of blocking. A `reloadable` error marks the cases a swap
-  can fix (vs a stale catalog, which a swap can't).
+  loaded reel won't do, the librarian asks a `librarian.Operator` (CLI: stdin) to
+  swap and retries — on writes (`PrepareWrite`/`Advance`: blank/foreign/wrong-pool/
+  full → load a writable reel, auto-labeled if `auto_label`) and on reads
+  (`MountForRead`: load the reel holding the needed label). Unattended (no operator)
+  it degrades to an actionable error instead of blocking. A `reloadable` error marks
+  the cases a swap can fix (vs a stale catalog, which a swap can't).
 - **Expected tape (Amanda's "amdump will expect tape X").** `Engine.ExpectedTape`
   names the volume the next run will write to, derived from the catalog (the
   tapelist) and `policy.Protected`, never from a physical scan: a one-run-per-tape
@@ -182,9 +192,9 @@ without hardware).
   reel to load, not just "a fresh tape". This is **guidance only** — the engine
   still won't overwrite a reusable tape on its own; recycling it is a deliberate
   `nb label --relabel` (see deferred whole-volume recycle).
-- **Bay/reel (physical) vs Label (logical) are distinct.** A `Library` is
+- **Bay/reel (physical) vs Label (logical) are distinct.** A `Changer` is
   **label-agnostic** — like a real robot it mounts bays and reads barcodes, never
-  the magnetic label; the engine reads the label *after* mounting. A blank
+  the magnetic label; the librarian reads the label *after* mounting. A blank
   cartridge has a bay but no label; relabel rewrites the label, same bay. The
   catalog references **labels** (durable data identity); bays/reels stay internal.
 - **Finite volumes.** A write past `volume_size` hits `media.ErrVolumeFull`
@@ -199,7 +209,7 @@ without hardware).
   writable bay (blank → auto-labeled, or an empty in-pool tape — never a tape
   holding runs); a single-drive station prompts for a reel swap; an unbounded or
   changer-less medium returns an actionable error. The fit test is **belt-and-
-  suspenders**: a *proactive* pre-check (`loadedRemaining` vs `slotFootprint`) rolls
+  suspenders**: a *proactive* pre-check (`Librarian.Remaining` vs `slotFootprint`) rolls
   *before* writing when the loaded volume's known remaining capacity cannot hold the
   slot, so no doomed partial is written and nothing is re-read; a *reactive*
   `media.ErrVolumeFull` catch is the backstop for media whose remaining capacity
@@ -210,7 +220,7 @@ without hardware).
   mid-slot split. A **dump run** does *not* auto-advance (a run must fit the loaded
   tape; EOT mid-run aborts it uncommitted — retry on a fresh tape). Reads always
   **auto-mount** the bay holding each placement's label. The roll lives in
-  `advanceWritable` (`changer.go`), the one place that dispatches on medium shape.
+  `Librarian.Advance` (package `librarian`), the one place that dispatches on shape.
 
 **Labels as a capability.** Verified before every write (refuse foreign / blank
 unless `auto_label` / wrong-pool / relabeled-since-cached). Address-identified
@@ -218,7 +228,7 @@ media (disk, S3) carry no label and skip the whole dance.
 
 **Medium-neutral vocabulary.** The generic media/changer/config layer must not say
 "tape": `bays`, `volume_size`, `media.ErrNoVolume`,
-`media.Library`/`Station`/`ShelfStation`/`VolumeStatus`, `nb medium`, `nb load`.
+`media.Drive`/`Changer`/`Shelf`/`VolumeStatus`, `nb medium`, `nb load`.
 Tape specifics (`type: tape`, the `tape` package, `mt`, `vtape`, the `reel`
 vocabulary) stay local, so a future `usb`/removable-disk medium reuses the vocabulary.
 
@@ -255,8 +265,8 @@ remaining room (`volume_size −` what's already on it). They are genuinely
 separate: a **bare drive** (`type: tape`, `device:`) has an unbounded pool (the
 operator's shelf is unknowable, `TotalBytes == 0`) but a finite reel. The volume
 profile reads the same count key the changer does — `bays` for a library, `reels`
-for a manual ShelfStation — so the planner's capacity never disagrees with the
-medium it lands on.
+for a manual single-drive station — so the planner's capacity never disagrees with
+the medium it lands on.
 
 ## Conventions for working here
 
@@ -281,7 +291,7 @@ medium it lands on.
 ## Deferred / known next steps
 
 - **Dump-run auto-advance & whole-volume recycle** on EOT. Copy/sync now roll onto
-  the next writable volume mid-write (`advanceWritable`), but a *dump run* still must
+  the next writable volume mid-write (`Librarian.Advance`), but a *dump run* still must
   fit the loaded tape; EOT mid-run aborts it uncommitted, retry on a fresh tape. The
   dump swap prompt fires at tape *selection*, not mid-write. Auto-recycling an
   aged-out tape (vs. only blank / empty in-pool tapes) is also still manual

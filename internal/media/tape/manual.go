@@ -24,7 +24,7 @@ func reelName(i int) string { return fmt.Sprintf("%s%02d", reelPrefix, i) }
 // sees only the loaded reel — the others sit on the shelf, invisible until loaded,
 // exactly as a lone drive cannot read reels that are not in it. Inserting a reel
 // changes the one drive's content; reels are addressed by their own ids, never a
-// fixed "drive" position. It backs a shelfStationTape (a robotic library is a
+// fixed "drive" position. It backs a shelfChanger (a robotic library is a
 // dirChanger).
 type manualChanger struct {
 	root      string
@@ -138,23 +138,25 @@ func (c *manualChanger) reelStatus(reel string) (media.VolumeStatus, error) {
 	return deviceStatus(reel, dev, c.capacity), nil
 }
 
-// shelfStationTape is the disk-emulated single-drive station (media.ShelfStation):
-// its reels are directories the software can enumerate (Shelf) and load (Insert).
-// The robotic-library tape (libraryTape) deliberately does not satisfy ShelfStation.
-type shelfStationTape struct {
+// shelfChanger is the disk-emulated single-drive station: a media.Drive (the loaded
+// reel) plus a media.Shelf — its room of reels are directories the software can
+// enumerate (Shelf) and load (Insert), so the manual-swap UX runs in one process. It
+// is NOT a media.Changer: a single drive has no robot and no bays. The robotic
+// library (roboticChanger) is the opposite — a Changer with no Shelf.
+type shelfChanger struct {
 	*tape
 	mc *manualChanger
 }
 
-// LoadedVolume reports the reel in the drive (media.Station).
-func (m *shelfStationTape) LoadedVolume() (media.VolumeStatus, bool) { return m.mc.loadedStatus() }
+// Loaded reports the reel in the drive (media.Drive); ok is false when empty.
+func (m *shelfChanger) Loaded() (media.VolumeStatus, bool) { return m.mc.loadedStatus() }
 
-// Shelf lists the reels available to load (media.ShelfStation).
-func (m *shelfStationTape) Shelf() ([]media.VolumeStatus, error) { return m.mc.shelf() }
+// Shelf lists the reels available to load (media.Shelf).
+func (m *shelfChanger) Shelf() ([]media.VolumeStatus, error) { return m.mc.shelf() }
 
-// Insert swaps a shelf reel into the single drive (media.ShelfStation): the drive's
-// content changes, and subsequent Volume/Labeled ops act on the new reel.
-func (m *shelfStationTape) Insert(reel string) error {
+// Insert swaps a shelf reel into the single drive (media.Shelf): the drive's content
+// changes, and subsequent Volume/Labeled ops act on the new reel.
+func (m *shelfChanger) Insert(reel string) error {
 	dev, err := m.mc.mount(reel)
 	if err != nil {
 		return err
