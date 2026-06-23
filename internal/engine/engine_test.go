@@ -628,6 +628,39 @@ func TestManualStationReadSwap(t *testing.T) {
 	}
 }
 
+// TestManualStationLandingLabel: labeling the engine's own (landing) single-drive
+// station rebuilds its catalog against the freshly-labeled reel. Regression for the
+// catalog rebuild treating the manual changer like a robotic library — iterating
+// Bays() and mounting the synthetic "drive" bay id, which is not a mountable reel.
+func TestManualStationLandingLabel(t *testing.T) {
+	cfg := &config.Config{
+		Landing: "vtape",
+		Media: map[string]config.Media{
+			"vtape": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "3"}},
+		},
+		Sources: []config.DLE{{Host: "h", Path: t.TempDir()}},
+		Workdir: t.TempDir(),
+	}
+	cfg.Compress.Codec = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A reel must be in the drive to label it.
+	if err := eng.LoadVolume("vtape", "reel-01", false, logfDiscard); err != nil {
+		t.Fatalf("load reel-01: %v", err)
+	}
+	// Labeling the landing medium triggers a catalog rebuild against the loaded reel;
+	// it must not try to mount the synthetic "drive" bay.
+	if err := eng.LabelVolume("vtape", "Label1", false, false, time.Now().UTC(), nil); err != nil {
+		t.Fatalf("label landing manual station: %v", err)
+	}
+	if known, ok := eng.cat.Volume("Label1"); !ok || known.Label.Epoch != 1 {
+		t.Fatalf("catalog should record Label1 at epoch 1 after rebuild (ok=%v)", ok)
+	}
+}
+
 func logfDiscard(string, ...any) {}
 
 func write(t *testing.T, path, content string) {
