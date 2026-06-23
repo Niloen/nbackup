@@ -9,18 +9,18 @@
 // never ages past it — so there is nothing to "demote": a full is either due or
 // it is not.
 //
-// The one balancing lever is promotion: pulling a future full forward to fill a
-// light run so daily volume stays even and same-day deadline pile-ups are spread.
-// Promotion is automatic and looks at the whole cycle, not a local average. It
-// builds a deadline calendar of upcoming fulls and only promotes a DLE onto today
-// when (a) today is genuinely lighter than the future day that DLE would land on,
-// (b) the move strictly lowers that peak, (c) today is the *last responsible
-// moment* — no lighter day remains before the deadline to do it more cheaply, so a
-// big lone DLE is never re-fulled early just to chase an average — and (d) it fits
-// the per-run room left before pruning would evict a protected slot. With no free
-// capacity, promotion does nothing; with capacity to spare, it spends it to keep
-// backups fresh and balanced — which is exactly what budgeting that capacity is
-// for.
+// The one balancing lever is promotion: pulling a future full forward onto today
+// to level the daily full load across the cycle, so a pile-up of deadlines on one
+// day is spread over the lighter runs before it. It works from a deadline calendar
+// (each not-yet-due DLE sits on the day its full is due) and repeatedly relieves
+// the heaviest future day by pulling one of its fulls onto today, as long as (a)
+// today is lighter than that peak, (b) the move keeps today below it so the peak
+// strictly drops — which is why a *lone* big DLE is never promoted: moving it only
+// relocates its peak, never lowers it, so it waits for its own deadline rather than
+// being re-fulled early to chase an average — and (c) it fits the per-run room left
+// before pruning would evict a protected slot. With no free capacity, promotion
+// does nothing; with capacity to spare, it spends it to keep backups fresh and
+// balanced — which is exactly what budgeting that capacity is for.
 //
 // Whether the cycle fits the medium *at all* is a separate, structural check:
 // over a cycle every DLE is fulled once, and (with minimum_age >= cycle) those
@@ -198,70 +198,60 @@ func runBytes(cands []*cand) int64 {
 }
 
 // promote pulls future fulls forward onto today to level the daily full load
-// across the cycle. It works from a deadline calendar (each not-yet-due DLE
-// contributes its full estimate to the day its deadline falls on) and the
-// already-chosen mandatory fulls (today's fixed load).
+// across the cycle. It builds a deadline calendar — each not-yet-due DLE sits on
+// the day (an offset from today) its full is due — adds up today's already-fixed
+// load (the mandatory fulls), then repeatedly relieves the heaviest future day by
+// pulling one of its fulls onto today.
 //
-// It promotes only at the *last responsible moment*: a DLE is pulled onto today
-// just when today is the lightest remaining opportunity before its deadline. A
-// future day that is lighter than the peak it precedes means a cheaper, later
-// chance still exists, so we wait — which is why a big lone DLE (whose deadline
-// day no earlier day can undercut, but which would itself become the new peak if
-// moved) is never re-fulled early to chase an average. Each promotion must keep
-// today strictly below the day it relieves (so the move lowers the global peak)
-// and must fit the per-run room (so promotion spends only free capacity).
+// Two guards keep it from chasing an average. Each move must keep today strictly
+// below the peak it relieves, so the move lowers the global peak rather than just
+// relocating it — which alone means a *lone* big DLE is never promoted (moving it
+// leaves the same peak, on a different day). And each move must fit the per-run
+// room, so promotion spends only genuinely free capacity. When the heaviest day
+// cannot be relieved (its fulls are too big to drop the peak or to fit room) it is
+// set aside and the next-heaviest is tried; promotion stops once today is no longer
+// lighter than any remaining peak.
 func promote(cands []*cand, cycle int, room int64) {
-	// Build the deadline calendar. offset 0 is today; an incremental candidate
-	// with a prior full `days` ago is due in `cycle-days` days (>= 1).
+	// Deadline calendar: an incremental candidate last fulled `days` ago is due in
+	// `cycle-days` days (offset >= 1). byOffset groups the candidates due on each
+	// day, load is their total full bytes, and todayLoad is today's fixed load.
+	// Never-fulled DLEs are mandatory fulls, not candidates.
 	byOffset := map[int][]*cand{}
 	load := map[int]int64{}
-	var today int64 // today's full-byte load (the mandatory fulls already chosen)
+	var todayLoad int64
 	for _, c := range cands {
-		if c.full {
-			today += c.estFull
-			continue
+		switch {
+		case c.full:
+			todayLoad += c.estFull
+		case c.days >= 0:
+			off := cycle - c.days
+			if off < 1 {
+				off = 1
+			}
+			byOffset[off] = append(byOffset[off], c)
+			load[off] += c.estFull
 		}
-		if c.days < 0 {
-			continue // never-fulled DLEs are mandatory fulls, not candidates
-		}
-		off := cycle - c.days
-		if off < 1 {
-			off = 1
-		}
-		byOffset[off] = append(byOffset[off], c)
-		load[off] += c.estFull
 	}
 
 	total := runBytes(cands)
 	for {
-		// Among future days heavier than today, find those that cannot be relieved
-		// later more cheaply: no earlier future day is lighter than this day's load.
-		// Relieve the heaviest such day first.
-		targetOff, targetLoad := 0, int64(0)
+		// Find the heaviest future day. If today already carries at least as much, no
+		// move can lower the peak, so promotion is done.
+		peakOff, peakLoad := 0, int64(0)
 		for off, l := range load {
-			if l <= today || l <= targetLoad {
-				continue
-			}
-			deferrable := false
-			for o := 1; o < off; o++ {
-				if load[o] < l {
-					deferrable = true
-					break
-				}
-			}
-			if !deferrable {
-				targetOff, targetLoad = off, l
+			if l > peakLoad {
+				peakOff, peakLoad = off, l
 			}
 		}
-		if targetOff == 0 {
+		if peakOff == 0 || todayLoad >= peakLoad {
 			return
 		}
-		// Promote the largest candidate on that day that still leaves today strictly
-		// below it (so the peak strictly drops) and fits the per-run room.
+		// Pull the largest full off the peak day that still leaves today below it (so
+		// the peak strictly drops) and fits the per-run room.
 		var pick *cand
 		var pickIdx int
-		for i, c := range byOffset[targetOff] {
-			if today+c.estFull >= targetLoad {
+		for i, c := range byOffset[peakOff] {
+			if todayLoad+c.estFull >= peakLoad {
 				continue
 			}
 			if room >= 0 && total-c.estIncr+c.estFull > room {
@@ -272,17 +262,16 @@ func promote(cands []*cand, cycle int, room int64) {
 			}
 		}
 		if pick == nil {
-			// Nothing on this day can be relieved usefully; drop it so the scan moves
-			// on instead of spinning.
-			delete(load, targetOff)
-			delete(byOffset, targetOff)
+			// This peak can't be relieved usefully; set it aside and try the next.
+			delete(load, peakOff)
+			delete(byOffset, peakOff)
 			continue
 		}
 		pick.full = true
 		pick.reason = fmt.Sprintf("promoted full (filling a light run; %dd into a %dd cycle)", pick.days, cycle)
-		today += pick.estFull
+		todayLoad += pick.estFull
 		total += pick.estFull - pick.estIncr
-		load[targetOff] -= pick.estFull
-		byOffset[targetOff] = append(byOffset[targetOff][:pickIdx], byOffset[targetOff][pickIdx+1:]...)
+		load[peakOff] -= pick.estFull
+		byOffset[peakOff] = append(byOffset[peakOff][:pickIdx], byOffset[peakOff][pickIdx+1:]...)
 	}
 }

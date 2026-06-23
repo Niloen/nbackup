@@ -176,7 +176,7 @@ func TestPromotionDoesNotOverFullBigDLE(t *testing.T) {
 
 // TestPromotionStaggersLockstepFulls checks that two big DLEs whose last fulls
 // coincide are spread onto different days rather than piling onto a shared
-// deadline. Promotion pulls one forward at the last responsible moment, draining
+// deadline. Promotion relieves the shared peak by pulling one forward, draining
 // the lock-step one per run and staggering their cycles apart.
 func TestPromotionStaggersLockstepFulls(t *testing.T) {
 	start := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
@@ -213,6 +213,47 @@ func TestPromotionStaggersLockstepFulls(t *testing.T) {
 	// starve fulls, only spread them.
 	if fullsPerDay < 6 {
 		t.Errorf("expected the big DLEs to keep fulling across the window, got %d fulls total", fullsPerDay)
+	}
+}
+
+// TestPromotionSpreadsClusterAcrossCycle checks the whole-cycle leveling guarantee:
+// a clump of equally heavy DLEs sharing one deadline is spread across the cycle so
+// no single run carries more than one of their fulls. Relieving the heaviest future
+// day (not just tomorrow) drains the clump one per day; an initial transient aside,
+// the steady state is one full per day, never a pile-up.
+func TestPromotionSpreadsClusterAcrossCycle(t *testing.T) {
+	start := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
+	var dles []config.DLE
+	est := map[string]Estimate{}
+	day0 := start.Format("2006-01-02")
+	// Five equally heavy DLEs all fulled on the same day -> one shared deadline.
+	for _, h := range []string{"a", "b", "c", "d", "e"} {
+		d := dleNamed(h)
+		hist.DLEs[d.Name()] = &catalog.DLEState{
+			LastFullDate: day0,
+			LastFullSlot: "slot-x",
+			Runs:         []catalog.RunRecord{{Date: day0, Slot: "slot-x", Level: 0}},
+		}
+		dles = append(dles, d)
+		est[d.Name()] = Estimate{Full: 1_000_000_000, Incr: 1000}
+	}
+
+	plans := Simulate(dles, hist, est, Params{CycleDays: 7, RoomBytes: -1}, start, 28)
+
+	// Skip the first cycle (the one-time destagger transient) and assert the steady
+	// state never piles two fulls onto one run, yet keeps fulling regularly.
+	steady, fulls := plans[7:], 0
+	for _, p := range steady {
+		n := fullsIn(p)
+		fulls += n
+		if n > 1 {
+			t.Errorf("%s: %d fulls on one run; a shared-deadline cluster must spread to one per run", p.Date.Format("2006-01-02"), n)
+		}
+	}
+	// Three 7-day cycles in the steady window -> ~15 fulls (5 DLEs/cycle).
+	if fulls < 12 {
+		t.Errorf("cluster under-fulled in steady state: %d fulls over %d days", fulls, len(steady))
 	}
 }
 
