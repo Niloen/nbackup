@@ -10,3 +10,6 @@
 
 # the real config is local; only the example is tracked
 /nbackup.yaml
+
+# Claude Code worktrees / local agent state
+.claude/
