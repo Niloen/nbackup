@@ -189,6 +189,21 @@ whole volume (relabel). Pruning has a shared safety floor (`policy.Protected`:
 younger than `minimum_age`, or the last recovery path for some DLE) plus a
 per-medium capacity strategy.
 
+**Capacity model (`media.Profile`).** A profile exposes two numbers that the
+planner keeps distinct. `TotalBytes` is the **pool** — the retainable budget
+(`volumes × volume_size` for a tape library, `budget` for an object store) — and
+drives reclamation and the structural cycle check (can a complete recovery set be
+retained at all). `VolumeSize` is one **reel**, the basis of the per-run ceiling:
+a run fills the reel it lands on before spilling to the next, so a single run can
+never exceed one reel. The engine's `capacityRoom` feeds the planner the tighter
+of the two — pool free room (`capacity − protected`) and the landing reel's
+remaining room (`volume_size −` what's already on it). They are genuinely
+separate: a **bare drive** (`type: tape`, `device:`) has an unbounded pool (the
+operator's shelf is unknowable, `TotalBytes == 0`) but a finite reel. The volume
+profile reads the same count key the changer does — `bays` for a library, `reels`
+for a manual ShelfStation — so the planner's capacity never disagrees with the
+medium it lands on.
+
 ## Conventions for working here
 
 - **Commits:** only when the user explicitly says so. **Never push** (no
