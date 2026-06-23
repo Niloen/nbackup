@@ -194,38 +194,39 @@ var ErrNotImplemented = fmt.Errorf("not implemented in this version")
 // CopySlot streams every file of a slot from src to dst, in position order
 // (archives then the seal record), so the slot lands sealed on dst. Slot metadata
 // is position-free, so dst assigns its own positions — this is the one mechanism
-// for moving slots between any two media (disk <-> tape). Returns the number of
-// files copied.
-func CopySlot(dst, src Volume, slotID string) (int, error) {
+// for moving slots between any two media (disk <-> tape). It returns the copied
+// files with their headers and their new positions on dst, so the caller can
+// record where each archive landed.
+func CopySlot(dst, src Volume, slotID string) ([]FileInfo, error) {
 	files, err := src.Files()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	n := 0
+	var copied []FileInfo
 	for _, f := range files {
 		if f.Header.Slot != slotID {
 			continue
 		}
-		if err := copyOne(dst, src, f); err != nil {
-			return n, err
+		pos, err := copyOne(dst, src, f)
+		if err != nil {
+			return copied, err
 		}
-		n++
+		copied = append(copied, FileInfo{Pos: pos, Header: f.Header})
 	}
-	if n == 0 {
-		return 0, fmt.Errorf("slot %s not found on source volume %q", slotID, src.Name())
+	if len(copied) == 0 {
+		return nil, fmt.Errorf("slot %s not found on source volume %q", slotID, src.Name())
 	}
-	return n, nil
+	return copied, nil
 }
 
-func copyOne(dst, src Volume, f FileInfo) error {
+func copyOne(dst, src Volume, f FileInfo) (int, error) {
 	_, rc, err := src.ReadFile(f.Pos)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer rc.Close()
-	_, err = dst.AppendFile(f.Header, func(w io.Writer) error {
+	return dst.AppendFile(f.Header, func(w io.Writer) error {
 		_, e := io.Copy(w, rc)
 		return e
 	})
-	return err
 }

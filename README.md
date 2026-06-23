@@ -256,10 +256,11 @@ lives entirely in the medium's retention strategy.
 ## Status & limitations (first version)
 
 Implemented: disk and tape Volumes, **copying slots between media** (`nb copy`,
-e.g. disk → tape), balanced **multilevel (L0–L9)** planning with a GNU tar
-snapshot library, immutable sealed slots with **sequence-suffixed** same-day runs,
-**deletion-aware** incremental restore, checksum verification, point-in-time
-restore, budget reporting, cycle-safe pruning.
+e.g. disk → tape) with the copy **recorded as a second placement** so restore and
+verify use any available copy, balanced **multilevel (L0–L9)** planning with a GNU
+tar snapshot library, immutable sealed slots with **sequence-suffixed** same-day
+runs, **deletion-aware** incremental restore, checksum verification, point-in-time
+restore, per-medium budget reporting, cycle-safe pruning.
 
 The `tape` medium has two backends behind one internal device seam: a `dir:`
 virtual tape (file-backed, fully tested) and a `device:` real drive (`mt` +
@@ -327,13 +328,16 @@ registration, not a conditional in the core.
 
 Slots on the `media.Volume` are the **source of truth**; every file is
 self-describing (header block), every slot carries a seal record, and every
-labeled volume carries a label record. The `catalog` is a **local cache** of the
-slot index, *each archive's volume position*, and the *volume registry*
-(`catalog.Volumes`), so planning, listing, restore-location, pruning, and budget
-reporting never touch the media — which matters when the volume is slow or offline
-(S3/Glacier/tape). This mirrors Amanda, which never scans tapes to operate: it
-keeps `curinfo`/`tapelist`/catalog databases locally and rebuilds them from
-self-describing media when needed.
+labeled volume carries a label record. The `catalog` is a **local cache** whose
+model separates what a slot *is* from where its copies *are*: an **`Entry`** pairs
+one medium-independent slot with a set of **`Placement`s**, each naming a volume
+and the file position of every archive on it. So a slot copied disk→tape is one
+entry with two placements; restore reads from whichever copy is available. The
+cache also holds the **volume registry** (`catalog.Volumes`). Planning, listing,
+restore-location, pruning, and budget reporting never touch the media — which
+matters when a volume is slow or offline (S3/Glacier/tape). This mirrors Amanda,
+which never scans tapes to operate: it keeps `curinfo`/`tapelist`/catalog databases
+locally and rebuilds them from self-describing media when needed.
 
 The catalog lives in its **own directory** (`workdir`, default `nbackup-catalog`),
 **independent of any storage medium** — it is a cache over the whole pool, not part

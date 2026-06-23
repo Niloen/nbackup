@@ -1,10 +1,14 @@
 // Package catalog is NBackup's local cache and bookkeeping layer, analogous to
-// Amanda's curinfo/tapelist/catalog databases. Because the media volume may be
-// slow or offline (tape, Glacier), the catalog keeps a local index of slots — and
-// of each archive's volume position — so planning, listing, restore-location,
-// pruning, and budget reporting never touch the media. The volume remains the
-// source of truth: it is self-describing (every file has a header, every slot a
-// seal record), so the cache can be rebuilt by scanning it.
+// Amanda's curinfo/tapelist/catalog databases. Because a media volume may be slow
+// or offline (tape, Glacier), the catalog keeps a local index so planning,
+// listing, restore-location, pruning, and budget reporting never touch the media.
+//
+// Its model separates what a slot *is* from where its copies *are*: an Entry pairs
+// one medium-independent slot (its content, from the seal record) with the set of
+// Placements that hold a copy — each a volume plus the file position of every
+// archive on it. The media remain the source of truth (every file self-describing,
+// every slot sealed, every labeled volume identified), so the whole cache rebuilds
+// by scanning: seals -> slots, labels -> the volume registry.
 //
 // The only non-derivable local state is the GNU tar snapshot library (.snar
 // files), which lives in the workdir and is precious — losing it forces a full.
@@ -23,45 +27,69 @@ import (
 )
 
 const (
-	// CacheFile is the slot-index cache stored in the workdir.
+	// CacheFile is the catalog cache stored in the workdir.
 	CacheFile = "catalog.json"
 	// DirSnapshots holds per-DLE, per-level GNU tar snapshot files.
 	DirSnapshots = "snapshots"
 )
 
-// ArchiveKey is the per-slot key identifying an archive by DLE and level.
-func ArchiveKey(dle string, level int) string { return fmt.Sprintf("%s/%d", dle, level) }
+// Entry is the catalog's per-slot record: one logical slot plus every place a
+// copy of it lives.
+type Entry struct {
+	Slot       *slot.Slot  `json:"slot"`       // medium-independent content (from the seal)
+	Placements []Placement `json:"placements"` // one per volume holding a copy
+}
 
-// Catalog is a local cache of sealed slots plus a map of each archive's volume
-// position. It holds no long-lived volume reference; the volume is passed in only
-// to refresh.
+// Placement is one copy of a slot on one volume.
+type Placement struct {
+	Medium   string       `json:"medium"`          // config medium name — how to open it
+	Volume   string       `json:"volume"`          // volume label name (== Medium for unlabeled media)
+	Epoch    int          `json:"epoch,omitempty"` // label epoch when recorded; staleness check on read
+	Archives []ArchivePos `json:"archives"`        // file position of each archive on this volume
+}
+
+// Pos returns the file position of an archive on this placement's volume.
+func (p Placement) Pos(dle string, level int) (int, bool) {
+	for _, a := range p.Archives {
+		if a.DLE == dle && a.Level == level {
+			return a.Pos, true
+		}
+	}
+	return 0, false
+}
+
+// ArchivePos is one archive's identity and its file position on a volume.
+type ArchivePos struct {
+	DLE   string `json:"dle"`
+	Level int    `json:"level"`
+	Pos   int    `json:"pos"`
+}
+
+// VolumeRecord is the catalog's cached identity of a labeled volume (Amanda's
+// tapelist entry, medium-neutrally named). "Which slots are on it" and "is it
+// reusable" are derived from placements + retention, not stored here.
+type VolumeRecord struct {
+	Label media.Label `json:"label"`
+}
+
+// Catalog is a local cache of slot entries plus a registry of labeled volumes. It
+// holds no long-lived volume reference; volumes are passed in only to (re)scan.
 type Catalog struct {
 	workdir string
-	index   []*slot.Slot              // cached sealed slots, sorted in run order
-	pos     map[string]map[string]int // slotID -> ArchiveKey -> volume position
-	volumes []*VolumeRecord           // the volume registry (Labeled media only)
+	entries []*Entry
+	volumes map[string]*VolumeRecord // by volume label name
 	loaded  bool
 }
 
-// VolumeRecord is the catalog's cached knowledge of one volume in a pool
-// (Amanda's tapelist entry, medium-neutrally named): its on-medium identity and
-// the slots it holds. Reusability is derived, not stored — a volume is reusable
-// iff every slot on it is past retention and none is the last verified successor.
-type VolumeRecord struct {
-	Label media.Label `json:"label"`
-	Slots []string    `json:"slots"`
-}
-
 type cacheFile struct {
-	Slots   []*slot.Slot              `json:"slots"`
-	Pos     map[string]map[string]int `json:"pos"`
-	Volumes []*VolumeRecord           `json:"volumes,omitempty"`
+	Entries []*Entry                 `json:"entries"`
+	Volumes map[string]*VolumeRecord `json:"volumes,omitempty"`
 }
 
 // Open loads the catalog cache from the workdir. If the cache file is absent, the
 // catalog is empty and not yet loaded (EnsureFresh will populate it).
 func Open(workdir string) (*Catalog, error) {
-	c := &Catalog{workdir: workdir, pos: map[string]map[string]int{}}
+	c := &Catalog{workdir: workdir, volumes: map[string]*VolumeRecord{}}
 	data, err := os.ReadFile(filepath.Join(workdir, CacheFile))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -73,78 +101,105 @@ func Open(workdir string) (*Catalog, error) {
 	if err := json.Unmarshal(data, &cf); err != nil {
 		return nil, fmt.Errorf("parse catalog cache: %w", err)
 	}
-	c.setIndex(cf.Slots)
-	if cf.Pos != nil {
-		c.pos = cf.Pos
+	c.entries = cf.Entries
+	if cf.Volumes != nil {
+		c.volumes = cf.Volumes
 	}
-	c.volumes = cf.Volumes
+	c.sortEntries()
 	c.loaded = true
 	return c, nil
 }
 
-// EnsureFresh populates an empty cache from the volume the first time it is needed
-// (a lost cache, or a catalog created before caching).
-func (c *Catalog) EnsureFresh(vol media.Volume) error {
+// EnsureFresh populates an empty cache by scanning one medium's volume the first
+// time it is needed (a lost cache, or a catalog created before caching). Copies on
+// other media are picked up as operations record them, or via a full Rebuild.
+func (c *Catalog) EnsureFresh(medium string, vol media.Volume) error {
 	if c.loaded {
 		return nil
 	}
-	if err := c.refresh(vol); err != nil {
+	if err := c.ingest(medium, vol); err != nil {
 		return err
 	}
+	c.sortEntries()
 	c.loaded = true
-	if len(c.index) > 0 {
+	if len(c.entries) > 0 || len(c.volumes) > 0 {
 		return c.persist()
 	}
 	return nil
 }
 
-// Rebuild rescans the volume and replaces the cache, persisting it.
-func (c *Catalog) Rebuild(vol media.Volume) (int, error) {
-	if err := c.refresh(vol); err != nil {
-		return 0, err
+// Rebuild rescans the given media (keyed by medium name) and replaces the cache.
+// A slot seen on several volumes yields several placements on one logical entry.
+// Returns the number of distinct slots indexed.
+func (c *Catalog) Rebuild(volumes map[string]media.Volume) (int, error) {
+	c.entries = nil
+	c.volumes = map[string]*VolumeRecord{}
+	for medium, vol := range volumes {
+		if err := c.ingest(medium, vol); err != nil {
+			return 0, err
+		}
 	}
+	c.sortEntries()
 	c.loaded = true
 	if err := c.persist(); err != nil {
 		return 0, err
 	}
-	return len(c.index), nil
+	return len(c.entries), nil
 }
 
-// refresh rebuilds the in-memory index and volume registry from the volume's
-// self-index (the same Files() scan yields both: seals -> slots, label -> volume).
-func (c *Catalog) refresh(vol media.Volume) error {
-	slots, pos, err := scanSlots(vol)
+// ingest scans one volume and merges its slots and placements into the cache.
+func (c *Catalog) ingest(medium string, vol media.Volume) error {
+	slots, placements, label, err := scanVolume(medium, vol)
 	if err != nil {
 		return err
 	}
-	c.setIndex(slots)
-	c.pos = pos
-	c.volumes = readVolume(vol, c.slotIDs())
+	for _, s := range slots {
+		e := c.entryByID(s.ID)
+		if e == nil {
+			e = &Entry{Slot: s}
+			c.entries = append(c.entries, e)
+		} else {
+			e.Slot = s
+		}
+		if p, ok := placements[s.ID]; ok {
+			e.setPlacement(p)
+		}
+	}
+	if label != nil {
+		c.volumes[label.Name] = &VolumeRecord{Label: *label}
+	}
 	return nil
 }
 
-// ScanSlots reads a volume's sealed slots without touching the cache. It is the
-// rebuild scan, shared by catalog refresh and by callers needing a volume's
-// current contents (e.g. checking whether a tape is still active before relabel).
+// ScanSlots reads a volume's sealed slots without touching the cache — used to
+// check a volume's current contents (e.g. whether a tape is still active before
+// relabel).
 func ScanSlots(vol media.Volume) ([]*slot.Slot, error) {
-	slots, _, err := scanSlots(vol)
+	slots, _, _, err := scanVolume("", vol)
 	return slots, err
 }
 
-// scanSlots groups a volume's files by slot, reads each sealed slot's seal record
-// for metadata, and records every archive's position.
-func scanSlots(vol media.Volume) ([]*slot.Slot, map[string]map[string]int, error) {
+// scanVolume groups a volume's files by slot, reads each sealed slot's seal record
+// and the volume's label, and builds a Placement (with archive positions) per slot.
+func scanVolume(medium string, vol media.Volume) (slots []*slot.Slot, placements map[string]Placement, label *media.Label, err error) {
 	files, err := vol.Files()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
+
+	volName, epoch := medium, 0
+	if lv, ok := vol.(media.Labeled); ok {
+		if lbl, labeled, lerr := lv.ReadLabel(); lerr == nil && labeled {
+			label = &lbl
+			volName, epoch = lbl.Name, lbl.Epoch
+		}
+	}
+
 	bySlot := map[string][]media.FileInfo{}
 	for _, f := range files {
 		bySlot[f.Header.Slot] = append(bySlot[f.Header.Slot], f)
 	}
-
-	var slots []*slot.Slot
-	pos := map[string]map[string]int{}
+	placements = map[string]Placement{}
 	for slotID, fs := range bySlot {
 		sealPos := -1
 		for _, f := range fs {
@@ -155,130 +210,150 @@ func scanSlots(vol media.Volume) ([]*slot.Slot, map[string]map[string]int, error
 		if sealPos < 0 {
 			continue // unsealed / incomplete slot
 		}
-		s, err := readSeal(vol, sealPos)
-		if err != nil {
+		s, serr := readSeal(vol, sealPos)
+		if serr != nil {
 			continue // unreadable seal: skip
 		}
 		slots = append(slots, s)
-		pm := map[string]int{}
+		p := Placement{Medium: medium, Volume: volName, Epoch: epoch}
 		for _, f := range fs {
 			if f.Header.Kind == media.KindArchive {
-				pm[ArchiveKey(f.Header.DLE, f.Header.Level)] = f.Pos
+				p.Archives = append(p.Archives, ArchivePos{DLE: f.Header.DLE, Level: f.Header.Level, Pos: f.Pos})
 			}
 		}
-		pos[slotID] = pm
+		placements[slotID] = p
 	}
-	return slots, pos, nil
+	return slots, placements, label, nil
 }
 
-// readVolume builds the registry entry for a Labeled volume holding the given
-// slots. Address-identified media (no label) and blank/foreign tapes yield none.
-func readVolume(vol media.Volume, slotIDs []string) []*VolumeRecord {
-	lv, ok := vol.(media.Labeled)
-	if !ok {
-		return nil
+// Record stores a slot's content and adds-or-replaces its placement on
+// p.Medium, then persists. Both dump and copy use this — they differ only in
+// which medium the placement names.
+func (c *Catalog) Record(s *slot.Slot, p Placement) error {
+	e := c.entryByID(s.ID)
+	if e == nil {
+		e = &Entry{Slot: s}
+		c.entries = append(c.entries, e)
+		c.sortEntries()
+	} else {
+		e.Slot = s
 	}
-	lbl, labeled, err := lv.ReadLabel()
-	if err != nil || !labeled {
-		return nil
-	}
-	return []*VolumeRecord{{Label: lbl, Slots: slotIDs}}
+	e.setPlacement(p)
+	c.loaded = true
+	return c.persist()
 }
 
-// slotIDs returns the cached slot IDs in run order.
-func (c *Catalog) slotIDs() []string {
-	out := make([]string, 0, len(c.index))
-	for _, s := range c.index {
-		out = append(out, s.ID)
+// RemovePlacement drops the copy of a slot on one medium. When the last copy is
+// gone the whole entry is removed (gone=true) — the slot no longer exists anywhere.
+func (c *Catalog) RemovePlacement(slotID, medium string) (gone bool, err error) {
+	e := c.entryByID(slotID)
+	if e == nil {
+		return false, nil
+	}
+	kept := e.Placements[:0:0]
+	for _, p := range e.Placements {
+		if p.Medium != medium {
+			kept = append(kept, p)
+		}
+	}
+	e.Placements = kept
+	if len(e.Placements) == 0 {
+		c.removeEntry(slotID)
+		gone = true
+	}
+	return gone, c.persist()
+}
+
+// RecordVolume upserts a labeled volume's identity in the registry, so a later run
+// can detect a swapped or relabeled volume.
+func (c *Catalog) RecordVolume(lbl media.Label) error {
+	c.volumes[lbl.Name] = &VolumeRecord{Label: lbl}
+	c.loaded = true
+	return c.persist()
+}
+
+// Slots returns the cached slots in run order.
+func (c *Catalog) Slots() []*slot.Slot {
+	out := make([]*slot.Slot, 0, len(c.entries))
+	for _, e := range c.entries {
+		out = append(out, e.Slot)
 	}
 	return out
 }
 
-// Volumes returns the cached volume registry.
-func (c *Catalog) Volumes() []*VolumeRecord { return c.volumes }
-
-// SetVolume records the label of the volume the catalog currently tracks, so a
-// later run can detect a swapped or relabeled tape. Slots are taken from the
-// current index (single-volume model).
-func (c *Catalog) SetVolume(lbl media.Label) error {
-	c.volumes = []*VolumeRecord{{Label: lbl, Slots: c.slotIDs()}}
-	c.loaded = true
-	return c.persist()
-}
-
-// Slots returns the cached sealed slots in run order.
-func (c *Catalog) Slots() []*slot.Slot { return c.index }
-
 // ReadSlot returns a cached slot by ID.
 func (c *Catalog) ReadSlot(id string) (*slot.Slot, error) {
-	for _, s := range c.index {
-		if s.ID == id {
-			return s, nil
-		}
+	if e := c.entryByID(id); e != nil {
+		return e.Slot, nil
 	}
 	return nil, fmt.Errorf("slot %s not in catalog (run `nb catalog rebuild` if it exists on media)", id)
 }
 
-// Position returns the volume position of a slot's archive, or false if unknown.
-func (c *Catalog) Position(slotID, dle string, level int) (int, bool) {
-	m, ok := c.pos[slotID]
-	if !ok {
-		return 0, false
+// Placements returns the copies of a slot, for a reader to choose among.
+func (c *Catalog) Placements(slotID string) []Placement {
+	if e := c.entryByID(slotID); e != nil {
+		return e.Placements
 	}
-	p, ok := m[ArchiveKey(dle, level)]
-	return p, ok
+	return nil
 }
 
-// TotalBytes sums the recorded compressed size across cached slots.
-func (c *Catalog) TotalBytes() int64 {
+// SlotsOn returns the slots with a copy on the named medium, in run order.
+func (c *Catalog) SlotsOn(medium string) []*slot.Slot {
+	var out []*slot.Slot
+	for _, e := range c.entries {
+		if e.placedOn(medium) {
+			out = append(out, e.Slot)
+		}
+	}
+	return out
+}
+
+// MediumBytes sums the stored bytes of slots with a copy on the named medium.
+func (c *Catalog) MediumBytes(medium string) int64 {
 	var total int64
-	for _, s := range c.index {
-		total += s.TotalBytes
+	for _, e := range c.entries {
+		if e.placedOn(medium) {
+			total += e.Slot.TotalBytes
+		}
 	}
 	return total
 }
 
-// Add records a newly sealed slot and its archive positions, then persists.
-func (c *Catalog) Add(s *slot.Slot, positions map[string]int) error {
-	filtered := c.index[:0:0]
-	for _, e := range c.index {
-		if e.ID != s.ID {
-			filtered = append(filtered, e)
-		}
+// Volumes returns the volume registry, sorted by name.
+func (c *Catalog) Volumes() []VolumeRecord {
+	out := make([]VolumeRecord, 0, len(c.volumes))
+	for _, v := range c.volumes {
+		out = append(out, *v)
 	}
-	c.setIndex(append(filtered, s))
-	c.pos[s.ID] = positions
-	c.loaded = true
-	c.syncVolumeSlots()
-	return c.persist()
+	sort.Slice(out, func(i, j int) bool { return out[i].Label.Name < out[j].Label.Name })
+	return out
 }
 
-// syncVolumeSlots keeps the tracked volume's slot list in step with the index
-// (single-volume model: every cached slot lives on the one tracked volume).
-func (c *Catalog) syncVolumeSlots() {
-	if len(c.volumes) == 1 {
-		c.volumes[0].Slots = c.slotIDs()
+// Volume returns a labeled volume's record by name.
+func (c *Catalog) Volume(name string) (VolumeRecord, bool) {
+	if v, ok := c.volumes[name]; ok {
+		return *v, true
 	}
+	return VolumeRecord{}, false
 }
 
-// Remove drops a slot from the cache and persists it.
-func (c *Catalog) Remove(id string) error {
-	var kept []*slot.Slot
-	for _, s := range c.index {
-		if s.ID != id {
-			kept = append(kept, s)
+// VolumeForMedium returns the volume currently tracked for a medium. With one
+// volume per medium (no changer yet) this is unique; it is the seam the changer
+// generalizes.
+func (c *Catalog) VolumeForMedium(medium string) (media.Label, bool) {
+	for _, v := range c.volumes {
+		if v.Label.Pool == medium {
+			return v.Label, true
 		}
 	}
-	c.setIndex(kept)
-	delete(c.pos, id)
-	c.syncVolumeSlots()
-	return c.persist()
+	return media.Label{}, false
 }
 
 // History derives per-DLE run history from the cached slots (source of truth).
 func (c *Catalog) History() *History {
 	h := &History{DLEs: map[string]*DLEState{}}
-	for _, s := range c.index { // already in run order
+	for _, e := range c.entries { // already in run order
+		s := e.Slot
 		for _, a := range s.Archives {
 			d := h.DLE(a.DLE)
 			d.Runs = append(d.Runs, RunRecord{Date: s.Date, Slot: s.ID, Level: a.Level})
@@ -302,16 +377,54 @@ func (c *Catalog) SnapshotExists(dleName string, level int) bool {
 	return err == nil
 }
 
-func (c *Catalog) setIndex(slots []*slot.Slot) {
-	sort.Slice(slots, func(i, j int) bool { return slot.Less(slots[i], slots[j]) })
-	c.index = slots
+func (e *Entry) placedOn(medium string) bool {
+	for _, p := range e.Placements {
+		if p.Medium == medium {
+			return true
+		}
+	}
+	return false
+}
+
+// setPlacement replaces the placement on the same medium, or appends a new one.
+func (e *Entry) setPlacement(p Placement) {
+	for i, ep := range e.Placements {
+		if ep.Medium == p.Medium {
+			e.Placements[i] = p
+			return
+		}
+	}
+	e.Placements = append(e.Placements, p)
+}
+
+func (c *Catalog) entryByID(id string) *Entry {
+	for _, e := range c.entries {
+		if e.Slot.ID == id {
+			return e
+		}
+	}
+	return nil
+}
+
+func (c *Catalog) removeEntry(id string) {
+	kept := c.entries[:0:0]
+	for _, e := range c.entries {
+		if e.Slot.ID != id {
+			kept = append(kept, e)
+		}
+	}
+	c.entries = kept
+}
+
+func (c *Catalog) sortEntries() {
+	sort.Slice(c.entries, func(i, j int) bool { return slot.Less(c.entries[i].Slot, c.entries[j].Slot) })
 }
 
 func (c *Catalog) persist() error {
 	if err := os.MkdirAll(c.workdir, 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(cacheFile{Slots: c.index, Pos: c.pos, Volumes: c.volumes}, "", "  ")
+	data, err := json.MarshalIndent(cacheFile{Entries: c.entries, Volumes: c.volumes}, "", "  ")
 	if err != nil {
 		return err
 	}

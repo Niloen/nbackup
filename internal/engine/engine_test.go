@@ -144,6 +144,10 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
+	// Copy is a write, so the tape must be labeled first.
+	if err := eng.LabelVolume("tape", "tape-0001", false, false, time.Now().UTC(), nil); err != nil {
+		t.Fatalf("label tape: %v", err)
+	}
 	if err := eng.CopySlot(s.ID, "tape", nil); err != nil {
 		t.Fatalf("copy to tape: %v", err)
 	}
@@ -161,7 +165,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n, err := teng.RebuildCatalog(); err != nil || n != 1 {
+	if n, err := teng.RebuildCatalog(nil); err != nil || n != 1 {
 		t.Fatalf("rebuild from tape: n=%d err=%v", n, err)
 	}
 	dest := t.TempDir()
@@ -220,6 +224,59 @@ func TestTapeLabelVerify(t *testing.T) {
 	if _, err := eng.Run(day2, nil); err == nil {
 		t.Fatal("expected dump to be refused when the mounted tape's label differs from the catalog")
 	}
+}
+
+// TestCopyRecordsPlacementAndFailover dumps to disk, copies to a second medium,
+// confirms the slot now has two placements, then physically removes the primary
+// copy and restores — proving restore falls over to the recorded copy.
+func TestCopyRecordsPlacementAndFailover(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "two homes")
+
+	cfg := &config.Config{
+		Landing: "disk",
+		Media: map[string]config.Media{
+			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+		},
+		Sources: []config.DLE{{Host: "h", Path: src}},
+		Workdir: t.TempDir(),
+	}
+	cfg.Compress.Codec = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+	if err := eng.CopySlot(s.ID, "archive", nil); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+
+	if got := len(eng.cat.Placements(s.ID)); got != 2 {
+		t.Fatalf("expected 2 placements after copy, got %d", got)
+	}
+	if eng.cat.MediumBytes("archive") == 0 {
+		t.Errorf("archive medium should report stored bytes")
+	}
+
+	// Physically remove the primary copy but leave its placement recorded: restore
+	// must try it, fail, and fall over to the archive copy.
+	if err := eng.vol.RemoveSlot(s.ID); err != nil {
+		t.Fatal(err)
+	}
+	dest := t.TempDir()
+	name := config.DLE{Host: "h", Path: src}.Name()
+	if err := eng.Restore(s.ID, name, dest, nil); err != nil {
+		t.Fatalf("restore (failover to copy): %v", err)
+	}
+	assertContent(t, filepath.Join(dest, "f.txt"), "two homes")
 }
 
 func write(t *testing.T, path, content string) {

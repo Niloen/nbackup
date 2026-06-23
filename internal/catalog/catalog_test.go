@@ -53,6 +53,16 @@ func sealed(id, date string, seq int, archives ...slot.Archive) *slot.Slot {
 		SealedAt: time.Unix(0, 0).UTC(), Archives: archives, TotalBytes: 100}
 }
 
+// placementPos finds an archive's recorded position in any of a slot's placements.
+func placementPos(c *Catalog, slotID, dle string, level int) (int, bool) {
+	for _, p := range c.Placements(slotID) {
+		if pos, ok := p.Pos(dle, level); ok {
+			return pos, true
+		}
+	}
+	return 0, false
+}
+
 // TestCacheLifecycle covers refresh-from-volume, position indexing, persistence,
 // reload without the volume, and history derivation.
 func TestCacheLifecycle(t *testing.T) {
@@ -75,17 +85,17 @@ func TestCacheLifecycle(t *testing.T) {
 	if len(cat.Slots()) != 0 {
 		t.Fatalf("expected empty cache before EnsureFresh, got %d", len(cat.Slots()))
 	}
-	if err := cat.EnsureFresh(vol); err != nil {
+	if err := cat.EnsureFresh("disk", vol); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(cat.Slots()); got != 2 {
 		t.Fatalf("expected 2 sealed slots indexed, got %d", got)
 	}
-	if _, ok := cat.Position("slot-2026-06-20", "h-data", 0); !ok {
+	if _, ok := placementPos(cat, "slot-2026-06-20", "h-data", 0); !ok {
 		t.Errorf("expected a recorded position for slot-2026-06-20 h-data L0")
 	}
 
-	// Reopen: cache loads from disk; reads (incl. positions) work with NO volume.
+	// Reopen: cache loads from disk; reads (incl. placements) work with NO volume.
 	cat2, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -93,8 +103,11 @@ func TestCacheLifecycle(t *testing.T) {
 	if got := len(cat2.Slots()); got != 2 {
 		t.Fatalf("reloaded cache has %d slots, want 2", got)
 	}
-	if _, ok := cat2.Position("slot-2026-06-21", "h-data", 1); !ok {
-		t.Errorf("reloaded cache lost the position index")
+	if _, ok := placementPos(cat2, "slot-2026-06-21", "h-data", 1); !ok {
+		t.Errorf("reloaded cache lost the placement index")
+	}
+	if b := cat2.MediumBytes("disk"); b != 200 {
+		t.Errorf("MediumBytes(disk) = %d, want 200", b)
 	}
 
 	// History is derived from the slots.
@@ -108,7 +121,7 @@ func TestCacheLifecycle(t *testing.T) {
 	}
 
 	// Rebuild reconciles and reports the count.
-	n, err := cat2.Rebuild(vol)
+	n, err := cat2.Rebuild(map[string]media.Volume{"disk": vol})
 	if err != nil {
 		t.Fatal(err)
 	}

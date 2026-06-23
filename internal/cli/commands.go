@@ -56,7 +56,7 @@ func CmdPlan(args []string) error {
 	}
 	tw.Flush()
 
-	current := eng.Catalog().TotalBytes()
+	current := eng.StoredBytes()
 	capacity := eng.Capacity()
 	fmt.Printf("\nCatalog currently stored: %s\n", sizeutil.FormatBytes(current))
 	fmt.Printf("This run (estimated): ~%s\n", sizeutil.FormatBytes(estTotal))
@@ -311,7 +311,7 @@ func CmdCatalog(args []string) error {
 	if err != nil {
 		return err
 	}
-	n, err := eng.RebuildCatalog()
+	n, err := eng.RebuildCatalog(logfStdout)
 	if err != nil {
 		return err
 	}
