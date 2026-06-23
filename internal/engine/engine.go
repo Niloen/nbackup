@@ -580,12 +580,14 @@ func (e *Engine) StoredBytes() int64 { return e.cat.MediumBytes(e.mediumName) }
 // oldest reusable volume the run would recycle, or a fresh tape when none is
 // reusable; for an appendable medium it names the current volume the run extends.
 type TapeExpectation struct {
-	Medium     string    // the labeled medium this expectation is for
-	Appendable bool      // true: extend a volume; false: one run per tape (recycle/fresh)
-	Label      string    // the expected volume's label; "" when a fresh tape is expected
-	WrittenAt  time.Time // when that volume was last labeled (zero for a fresh tape)
-	Recycles   int       // runs on it the next run would overwrite (non-appendable reuse)
-	NewTape    bool      // no reusable volume exists — a fresh/blank tape is expected
+	Medium      string    // the labeled medium this expectation is for
+	Appendable  bool      // true: extend a volume; false: one run per tape (recycle/fresh)
+	Label       string    // the expected volume's label; "" when a fresh tape is expected
+	WrittenAt   time.Time // when that volume was last labeled (zero for a fresh tape)
+	Recycles    int       // runs on it the next run would overwrite (non-appendable reuse)
+	NewTape     bool      // no reusable volume exists — a fresh/blank tape is expected
+	VolumeBytes int64     // the reel's physical capacity (volume_size); 0 = unknown/unsized
+	UsedBytes   int64     // bytes already on the expected reel (0 for a fresh/recycled reel)
 }
 
 // ExpectedTape reports the tape the next run on the landing medium will write to,
@@ -595,7 +597,17 @@ func (e *Engine) ExpectedTape(now time.Time) (TapeExpectation, bool) {
 	if _, ok := e.vol.(media.Labeled); !ok {
 		return TapeExpectation{}, false
 	}
-	return e.expectedTapeFor(e.mediumName, now), true
+	exp := e.expectedTapeFor(e.mediumName, now)
+	// The reel's capacity and current fill bound this run physically: an appendable
+	// run extends the latest reel (room = size - used), a fresh or recycled reel
+	// offers a whole reel (used stays 0).
+	exp.VolumeBytes = e.profile.VolumeSize()
+	if exp.Appendable && !exp.NewTape {
+		for _, s := range e.cat.SlotsOnVolume(exp.Label) {
+			exp.UsedBytes += s.TotalBytes
+		}
+	}
+	return exp, true
 }
 
 // expectedTapeFor computes the expected volume for a labeled medium from the
@@ -922,9 +934,20 @@ func (e *Engine) estimateDLE(d config.DLE, name string, st *catalog.DLEState) pl
 	return planner.Estimate{Full: full, Incr: incr}
 }
 
-// capacityRoom is the hard per-run write ceiling: capacity minus the bytes that
-// cannot be reclaimed by pruning (the protected set). Negative = unbounded.
+// capacityRoom is the hard per-run write ceiling fed to the planner: the most a
+// single run may write. It is the tighter of two independent bounds — the pool's
+// free room (retention: capacity minus the protected set, the bytes pruning
+// cannot reclaim) and the landing volume's remaining room (physical: a run fills
+// the reel it appends to before spilling to the next). Either is unbounded (-1)
+// on media that lack it — object stores have no reel, a bare drive has no bounded
+// pool — and the result is unbounded only when both are.
 func (e *Engine) capacityRoom(now time.Time) int64 {
+	return minRoom(e.poolRoom(now), e.volumeRoom(now))
+}
+
+// poolRoom is the retention bound: capacity minus the bytes pruning cannot
+// reclaim (the protected set). Negative = unbounded (no pool budget).
+func (e *Engine) poolRoom(now time.Time) int64 {
 	capacity := e.profile.TotalBytes()
 	if capacity <= 0 {
 		return -1
@@ -941,6 +964,37 @@ func (e *Engine) capacityRoom(now time.Time) int64 {
 		return room
 	}
 	return 0
+}
+
+// volumeRoom is the physical bound: the bytes left on the reel the run lands on
+// before it spills to the next. An appendable run extends the latest reel, so its
+// room is volume_size minus what is already on it; a fresh or recycled reel
+// offers a whole volume_size. Negative = unbounded (the medium has no reel size).
+func (e *Engine) volumeRoom(now time.Time) int64 {
+	exp, ok := e.ExpectedTape(now)
+	if !ok || exp.VolumeBytes <= 0 {
+		return -1
+	}
+	if room := exp.VolumeBytes - exp.UsedBytes; room > 0 {
+		return room
+	}
+	return 0
+}
+
+// minRoom returns the tighter of two per-run ceilings, treating negative as
+// unbounded (no bound from that source); the result is unbounded only when both
+// inputs are.
+func minRoom(a, b int64) int64 {
+	switch {
+	case a < 0:
+		return b
+	case b < 0:
+		return a
+	case a < b:
+		return a
+	default:
+		return b
+	}
 }
 
 // promoteCeiling is the storage headroom promotion must not exceed, defaulting

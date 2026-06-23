@@ -94,6 +94,11 @@ func describeExpectation(exp engine.TapeExpectation, date time.Time) string {
 		if exp.NewTape {
 			return fmt.Sprintf("expects a fresh tape (pool %q is empty)", exp.Medium)
 		}
+		if exp.VolumeBytes > 0 {
+			return fmt.Sprintf("appends to %q (%s of %s used, %s free on this reel)",
+				exp.Label, sizeutil.FormatBytes(exp.UsedBytes), sizeutil.FormatBytes(exp.VolumeBytes),
+				sizeutil.FormatBytes(exp.VolumeBytes-exp.UsedBytes))
+		}
 		return fmt.Sprintf("appends to %q", exp.Label)
 	}
 	if exp.NewTape {

@@ -698,9 +698,16 @@ func recordVol(t *testing.T, eng *Engine, name string, writtenAt time.Time) {
 // recordFullOn records a sealed full of one DLE on a given volume.
 func recordFullOn(t *testing.T, eng *Engine, date, dle, volume string) {
 	t.Helper()
+	recordSizedFullOn(t, eng, date, dle, volume, 0)
+}
+
+// recordSizedFullOn records a sealed full of one DLE on a volume with a given
+// payload size, so a reel's fill can be asserted.
+func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, bytes int64) {
+	t.Helper()
 	id := slot.IDFromParts(date, 1)
 	s := slot.NewSlot(id, date, 1, "test", time.Now())
-	s.AddArchive(slot.Archive{DLE: dle, Level: 0})
+	s.AddArchive(slot.Archive{DLE: dle, Level: 0, Compressed: bytes})
 	if err := s.Seal(time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -767,6 +774,45 @@ func TestExpectedTapeAppendsToLatest(t *testing.T) {
 	}
 	if exp.NewTape || exp.Label != "lto-0002" {
 		t.Fatalf("want to append to latest lto-0002, got %+v", exp)
+	}
+}
+
+// TestExpectedTapeReportsReelFill: an appendable run's expectation carries the
+// landing reel's capacity (volume_size) and current fill, so a single run is
+// bounded by the reel's remaining room (not the whole pool) and `nb plan` can
+// show how full the tape is before it spills.
+func TestExpectedTapeReportsReelFill(t *testing.T) {
+	appendable := true
+	cfg := &config.Config{
+		Landing: "lto",
+		Media: map[string]config.Media{
+			"lto": {
+				Type:       "tape",
+				Appendable: &appendable,
+				Params:     map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "2", "volume_size": "1000"},
+			},
+		},
+		Workdir: t.TempDir(),
+	}
+	cfg.Compress.Codec = "none"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+
+	recordVol(t, eng, "lto-0001", time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC))
+	recordSizedFullOn(t, eng, "2026-06-20", "h", "lto-0001", 600)
+
+	exp, ok := eng.ExpectedTape(now)
+	if !ok {
+		t.Fatal("a labeled medium should yield an expectation")
+	}
+	if exp.Label != "lto-0001" {
+		t.Fatalf("want append to lto-0001, got %+v", exp)
+	}
+	if exp.VolumeBytes != 1000 || exp.UsedBytes != 600 {
+		t.Fatalf("want a 1000-byte reel with 600 used, got VolumeBytes=%d UsedBytes=%d", exp.VolumeBytes, exp.UsedBytes)
 	}
 }
 

@@ -42,12 +42,14 @@ type Params struct {
 	// structural cycle check (can a complete recovery set — one full of every
 	// DLE — be retained at all). Zero or negative means unbounded.
 	CapacityBytes int64
-	// CapacityRoomBytes is the hard per-run ceiling: bytes that can be written
-	// without pruning being forced to evict a protected slot (capacity minus the
-	// protected set). It bounds a single run's peak; it does not, and cannot,
-	// bound the cycle total — degrading a due full only defers it to its deadline
-	// within the same cycle, so the cycle's full demand is governed by
-	// CapacityBytes above, not by this per-run ceiling. Negative means unbounded.
+	// CapacityRoomBytes is the hard per-run ceiling: the most a single run may
+	// write, the tighter of the pool's free room (capacity minus the protected
+	// set — bytes pruning cannot reclaim) and the landing volume's remaining room
+	// (a run fills the reel it appends to before spilling to the next). It bounds a
+	// single run's peak; it does not, and cannot, bound the cycle total — degrading
+	// a due full only defers it to its deadline within the same cycle, so the
+	// cycle's full demand is governed by CapacityBytes above, not by this per-run
+	// ceiling. Negative means unbounded.
 	CapacityRoomBytes int64
 	// Promote enables pulling future fulls forward to fill light runs.
 	Promote bool
