@@ -3,6 +3,7 @@ package engine
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -712,7 +713,11 @@ func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, byte
 	if err := s.Seal(time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	p := catalog.Placement{Medium: "lto", Volume: volume, Epoch: 1, Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Pos: 1}}}
+	p := catalog.Placement{
+		Medium:   "lto",
+		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.PartPos{{Volume: volume, Epoch: 1, Pos: 1}}}},
+		Seal:     catalog.PartPos{Volume: volume, Epoch: 1, Pos: 2},
+	}
 	if err := eng.cat.Record(s, p); err != nil {
 		t.Fatal(err)
 	}
@@ -836,6 +841,191 @@ func TestExpectedTapeDiskHasNone(t *testing.T) {
 }
 
 func logfDiscard(string, ...any) {}
+
+// TestDumpSpansArchiveAcrossTapes dumps a source larger than one tape directly onto
+// a tape library, so a single DLE's archive must split into parts across several
+// auto-labeled bays. It then verifies the slot and restores it, exercising the read
+// path mounting each bay in sequence to reassemble the spanned archive.
+func TestDumpSpansArchiveAcrossTapes(t *testing.T) {
+	src := t.TempDir()
+	// ~150 KiB in one file → one archive larger than a single 160 KiB tape (each tape
+	// also spends a 32 KiB header on its label and on each part), so it must span.
+	body := strings.Repeat("nbackup-spanning-", 9*1024)
+	write(t, filepath.Join(src, "big.txt"), body)
+
+	cfg := &config.Config{
+		Landing:   "lib",
+		AutoLabel: true,
+		Media: map[string]config.Media{
+			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "6", "volume_size": "163840"}},
+		},
+		Sources: []config.DLE{{Host: "h", Path: src}},
+		Workdir: t.TempDir(),
+	}
+	cfg.Compress.Codec = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	// Seed a blank bay in the drive so the run has somewhere to start; it auto-labels
+	// and rolls onto the rest as each fills.
+	if err := eng.LoadVolume("lib", "bay-01", false, nil); err != nil {
+		t.Fatalf("load bay-01: %v", err)
+	}
+
+	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+
+	// The single archive must have split into several parts.
+	if len(s.Archives) != 1 {
+		t.Fatalf("want 1 archive, got %d", len(s.Archives))
+	}
+	if s.Archives[0].Parts < 2 {
+		t.Fatalf("archive Parts = %d, want >= 2 (the dump must span tapes)", s.Archives[0].Parts)
+	}
+	// The copy must span more than one volume.
+	ps := eng.cat.Placements(s.ID)
+	if len(ps) != 1 {
+		t.Fatalf("placements = %d, want 1", len(ps))
+	}
+	if vols := ps[0].Volumes(); len(vols) < 2 {
+		t.Fatalf("placement spans %v, want >= 2 volumes", vols)
+	}
+
+	// Verify reassembles and re-hashes the spanned archive across its tapes.
+	if failures, err := eng.Verify([]string{s.ID}, nil); err != nil || failures != 0 {
+		t.Fatalf("verify: failures=%d err=%v", failures, err)
+	}
+
+	// Restore must mount each bay in sequence to rebuild the original file.
+	dest := t.TempDir()
+	name := config.DLE{Host: "h", Path: src}.Name()
+	if err := eng.Restore(s.ID, name, dest, nil); err != nil {
+		t.Fatalf("restore from spanned tapes: %v", err)
+	}
+	assertContent(t, filepath.Join(dest, "big.txt"), body)
+}
+
+// TestCopySpansArchiveAcrossTapes dumps one big archive to disk, then copies it to a
+// small-tape library where the single archive must split across bays (re-splitting
+// the already-compressed payload, not recompressing). It drops the disk copy and
+// restores from the spanned tapes.
+func TestCopySpansArchiveAcrossTapes(t *testing.T) {
+	src := t.TempDir()
+	body := strings.Repeat("copy-spanning-payload-", 7*1024)
+	write(t, filepath.Join(src, "big.txt"), body)
+
+	cfg := &config.Config{
+		Landing:   "disk",
+		AutoLabel: true,
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "6", "volume_size": "163840"}},
+		},
+		Sources: []config.DLE{{Host: "h", Path: src}},
+		Workdir: t.TempDir(),
+	}
+	cfg.Compress.Codec = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+	if err := eng.LoadVolume("lib", "bay-01", false, nil); err != nil {
+		t.Fatalf("load bay-01: %v", err)
+	}
+	if err := eng.CopySlot(s.ID, "", "lib", false, nil); err != nil {
+		t.Fatalf("copy disk->lib: %v", err)
+	}
+
+	var tape catalog.Placement
+	for _, p := range eng.cat.Placements(s.ID) {
+		if p.Medium == "lib" {
+			tape = p
+		}
+	}
+	if parts, _ := tape.Parts(config.DLE{Host: "h", Path: src}.Name(), 0); len(parts) < 2 {
+		t.Fatalf("copied archive parts = %d, want >= 2 (must span)", len(parts))
+	}
+
+	// Drop the disk copy so restore must read the spanned tape copy.
+	if err := eng.vol.RemoveSlot(s.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.cat.RemovePlacement(s.ID, "disk"); err != nil {
+		t.Fatal(err)
+	}
+	dest := t.TempDir()
+	name := config.DLE{Host: "h", Path: src}.Name()
+	if err := eng.Restore(s.ID, name, dest, nil); err != nil {
+		t.Fatalf("restore from spanned tape copy: %v", err)
+	}
+	assertContent(t, filepath.Join(dest, "big.txt"), body)
+}
+
+// TestPartSizeSplitsWithinTape sets a small part_size on a roomy tape: the archive is
+// chopped into several parts that all stay on the one tape (intra-volume splitting —
+// the real-drive path where capacity is bounded by part_size, not a bay size). It
+// must still verify and restore.
+func TestPartSizeSplitsWithinTape(t *testing.T) {
+	src := t.TempDir()
+	body := strings.Repeat("part-size-", 12*1024) // ~120 KiB
+	write(t, filepath.Join(src, "big.txt"), body)
+
+	cfg := &config.Config{
+		Landing:   "lib",
+		AutoLabel: true,
+		Media: map[string]config.Media{
+			// One roomy 4 MiB bay, but part_size caps each part at 64 KiB.
+			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "1", "volume_size": "4194304", "part_size": "65536"}},
+		},
+		Sources: []config.DLE{{Host: "h", Path: src}},
+		Workdir: t.TempDir(),
+	}
+	cfg.Compress.Codec = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	if err := eng.LoadVolume("lib", "bay-01", false, nil); err != nil {
+		t.Fatalf("load bay-01: %v", err)
+	}
+	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+	if s.Archives[0].Parts < 2 {
+		t.Fatalf("archive Parts = %d, want >= 2 (part_size must split it)", s.Archives[0].Parts)
+	}
+	if vols := eng.cat.Placements(s.ID)[0].Volumes(); len(vols) != 1 {
+		t.Fatalf("parts should stay on one tape, got volumes %v", vols)
+	}
+	if failures, err := eng.Verify([]string{s.ID}, nil); err != nil || failures != 0 {
+		t.Fatalf("verify: failures=%d err=%v", failures, err)
+	}
+	dest := t.TempDir()
+	if err := eng.Restore(s.ID, config.DLE{Host: "h", Path: src}.Name(), dest, nil); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	assertContent(t, filepath.Join(dest, "big.txt"), body)
+}
 
 func write(t *testing.T, path, content string) {
 	t.Helper()

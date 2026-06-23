@@ -23,9 +23,11 @@ restore with stock tools.
 - **Medium** — a named storage definition; opens as a **Volume**.
 - **Volume** — an ordered sequence of header-framed, self-describing files
   addressed by position (Amanda's Device API). Disk, tape, S3 all map to it.
-- **Catalog Entry / Placement** — the catalog separates *what a slot is* (one
+- **Catalog Entry / Placement / Part** — the catalog separates *what a slot is* (one
   medium-independent `Entry`, from the seal) from *where its copies live* (N
-  `Placement`s, each a volume + the file position of every archive).
+  `Placement`s, one per medium). A placement holds each archive's ordered **parts**
+  (a part = `volume + position`; one part unless the archive spanned volumes) plus the
+  seal's location.
 - **Label** — logical identity written on a labeled volume's file 0 (magic, name,
   pool, epoch). A *capability* (`media.Labeled`); address-identified media skip it.
 - **Bay** — a physical position in a robotic tape library (`bay-01…`), the durable
@@ -198,29 +200,40 @@ without hardware).
   cartridge has a bay but no label; relabel rewrites the label, same bay. The
   catalog references **labels** (durable data identity); bays/reels stay internal.
 - **Finite volumes.** A write past `volume_size` hits `media.ErrVolumeFull`
-  (end-of-tape), the partial file is discarded.
+  (end-of-tape), the partial file is discarded. Spanning sizes each part to fit
+  *before* writing, so this is a backstop, not the normal path (see Spanning below).
 - **Append vs one-run-per-tape.** `appendable: true` (default) is **Bacula-style**
   (pack many runs per tape until full); `appendable: false` is **Amanda-style**
   (one run per tape). This is a deliberate, named lineage choice — real tapes are
   physically appendable; Amanda chooses not to, Bacula does.
-- **Switching: auto on copy/sync, operator-driven on dump.** A **copy/sync**
-  (`CopySlot`) rolls onto the next writable volume when a slot will not fit the
-  loaded one, and writes the whole slot there: a robotic library mounts the next
-  writable bay (blank → auto-labeled, or an empty in-pool tape — never a tape
-  holding runs); a single-drive station prompts for a reel swap; an unbounded or
-  changer-less medium returns an actionable error. The fit test is **belt-and-
-  suspenders**: a *proactive* pre-check (`Librarian.Remaining` vs `slotFootprint`) rolls
-  *before* writing when the loaded volume's known remaining capacity cannot hold the
-  slot, so no doomed partial is written and nothing is re-read; a *reactive*
-  `media.ErrVolumeFull` catch is the backstop for media whose remaining capacity
-  software cannot see ahead (a real drive signals EOT only by hitting it) or when
-  the conservative estimate cleared but the exact bytes did not. Spanning is
-  **per-slot** — a slot copy still lands wholly on one volume (Placement is
-  unchanged), so a slot larger than an empty volume is a fail-fast error, not a
-  mid-slot split. A **dump run** does *not* auto-advance (a run must fit the loaded
-  tape; EOT mid-run aborts it uncommitted — retry on a fresh tape). Reads always
-  **auto-mount** the bay holding each placement's label. The roll lives in
-  `Librarian.Advance` (package `librarian`), the one place that dispatches on shape.
+- **Spanning: a slot (and one archive) can cross volumes, proactively.** Both a
+  **dump** and a **copy/sync** split work across tapes mid-archive — one DLE's
+  compressed byte stream may itself span several tapes (Amanda's part/chunk model).
+  The unit is the **part**: a contiguous byte-range of an archive's payload, its own
+  self-describing file (header carries the part *index*; the seal carries the part
+  *count*). An archive is always a list of parts (one in the common case). Splitting
+  is **proactive**: the operator sets `volume_size`, so the writer (`slotio.Writer`
+  via a `librarian.WriteSink`) sizes each part to the loaded volume's known remaining
+  capacity (optionally capped by `part_size`) and rolls onto the next writable volume
+  *between* parts — a robotic library mounts the next writable bay (blank →
+  auto-labeled, or an empty in-pool tape — never a tape holding runs); a single-drive
+  station prompts for a reel swap; an unbounded or changer-less medium writes one
+  part. There is **no reactive "keep what fit on EOT"** and no holding-disk buffer
+  (NBackup streams source→compressor→volume in one pass, so a part already on tape
+  cannot be re-read to rewrite it). If a sized part *still* overflows (a wrong
+  estimate, or a real drive whose remaining capacity software cannot see),
+  `media.ErrVolumeFull` discards the partial and the run **fails** with an actionable
+  message — we do not recover. The seal (written last, on the final volume) commits
+  the whole slot; an interrupted span leaves seal-less orphan parts, ignored by
+  scan/rebuild and reclaimed by relabel — the same atomicity as a single-volume slot.
+  Because a single drive cannot interleave two archives' parts, a spanning-capable
+  landing **clamps dumpers to 1** (a single tape writes serially). Reads
+  **auto-mount** the volume holding each part, in order — `slotio`'s concatenating
+  reader drains part *k* fully before mounting *k+1*, then reverses the codec over the
+  concatenation. The roll/mount lives in `package librarian` (`WriteSink`,
+  `Advance`, `MountVolume`), the one place that dispatches on medium shape.
+  Real-drive (`device:`) spanning is proactive-via-`part_size` only and structurally
+  complete but untested; the `dir:`-emulated library/station spans and is tested.
 
 **Labels as a capability.** Verified before every write (refuse foreign / blank
 unless `auto_label` / wrong-pool / relabeled-since-cached). Address-identified
@@ -290,21 +303,15 @@ the medium it lands on.
 
 ## Deferred / known next steps
 
-- **Dump-run auto-advance & whole-volume recycle** on EOT. Copy/sync now roll onto
-  the next writable volume mid-write (`Librarian.Advance`), but a *dump run* still must
-  fit the loaded tape; EOT mid-run aborts it uncommitted, retry on a fresh tape. The
-  dump swap prompt fires at tape *selection*, not mid-write. Auto-recycling an
-  aged-out tape (vs. only blank / empty in-pool tapes) is also still manual
+- **Whole-volume recycle** on EOT. Spanning rolls onto the next *blank / empty
+  in-pool* tape; auto-recycling an aged-out tape (vs. relabeling it) is still manual
   (`nb label --relabel`).
-- **Mid-slot tape spanning** — one archive (or slot) split across two tapes. Blocked
-  on the catalog `Placement` model, which binds one slot copy to one volume + the
-  seal that commits it; mid-slot spanning means reworking Placement, the cross-tape
-  seal/commit, and per-volume rebuild. Deliberately deferred — copy/sync span at
-  *slot* granularity instead (a slot too big for one volume is an error).
 - **S3** Volume implementation (registered stub today).
 - **Budget-driven retention** — budget is reported; pruning is cycle-based.
 - **Remote sources** — `host` is metadata; `path` is read locally.
-- Real `mtDevice` hardware validation.
+- Real `mtDevice` hardware validation — also the only spanning path not exercised
+  (real-drive spanning is proactive-via-`part_size` and structurally complete but
+  untested; the `dir:` emulator spans and is tested).
 
 For user-facing usage, config, and the restore-with-stock-tools story, see the
 [README](README.md).

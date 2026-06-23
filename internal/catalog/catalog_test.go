@@ -9,6 +9,7 @@ import (
 	"github.com/Niloen/nbackup/internal/slot"
 
 	_ "github.com/Niloen/nbackup/internal/media/disk"
+	_ "github.com/Niloen/nbackup/internal/media/tape"
 )
 
 func newVolume(t *testing.T, path string) media.Volume {
@@ -53,11 +54,12 @@ func sealed(id, date string, seq int, archives ...slot.Archive) *slot.Slot {
 		SealedAt: time.Unix(0, 0).UTC(), Archives: archives, TotalBytes: 100}
 }
 
-// placementPos finds an archive's recorded position in any of a slot's placements.
+// placementPos finds an archive's first recorded part position in any of a slot's
+// placements.
 func placementPos(c *Catalog, slotID, dle string, level int) (int, bool) {
 	for _, p := range c.Placements(slotID) {
-		if pos, ok := p.Pos(dle, level); ok {
-			return pos, true
+		if parts, ok := p.Parts(dle, level); ok {
+			return parts[0].Pos, true
 		}
 	}
 	return 0, false
@@ -127,5 +129,91 @@ func TestCacheLifecycle(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("rebuild indexed %d, want 2", n)
+	}
+}
+
+// writePart writes one archive part (with its part index) onto the mounted volume.
+func writePart(t *testing.T, v media.Volume, slotID, dle string, level, part int) int {
+	t.Helper()
+	pos, err := v.AppendFile(media.Header{Slot: slotID, Kind: media.KindArchive, DLE: dle, Level: level, Part: part},
+		func(w io.Writer) error { _, e := w.Write([]byte("part-payload")); return e })
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pos
+}
+
+// TestRebuildReassemblesSpannedSlot writes one archive's two parts across two library
+// bays — part 0 + seal-less on the first, part 1 + the seal on the second — and
+// confirms a rebuild reassembles a single placement spanning both volumes, with the
+// parts in order and the seal on the second.
+func TestRebuildReassemblesSpannedSlot(t *testing.T) {
+	dir := t.TempDir()
+	open := func() media.Volume {
+		v, err := media.OpenVolume("tape", media.Options{"dir": dir, "bays": "2", "volume_size": "1048576"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	vol := open()
+	ch := vol.(media.Changer)
+	lv := vol.(media.Labeled)
+	now := time.Unix(0, 0).UTC()
+
+	// Bay 1 holds part 0 of the archive (no seal — it is committed elsewhere).
+	if err := ch.Mount("bay-01"); err != nil {
+		t.Fatal(err)
+	}
+	if err := lv.WriteLabel(media.Label{Name: "vol-a", Pool: "tape", Epoch: 1, WrittenAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	writePart(t, vol, "slot-2026-06-21", "h-data", 0, 0)
+
+	// Bay 2 holds part 1 and the seal that commits the (2-part) archive.
+	if err := ch.Mount("bay-02"); err != nil {
+		t.Fatal(err)
+	}
+	if err := lv.WriteLabel(media.Label{Name: "vol-b", Pool: "tape", Epoch: 1, WrittenAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	writePart(t, vol, "slot-2026-06-21", "h-data", 0, 1)
+	s := sealed("slot-2026-06-21", "2026-06-21", 1, slot.Archive{DLE: "h-data", Level: 0, Parts: 2})
+	data, err := s.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vol.AppendFile(media.Header{Slot: s.ID, Kind: media.KindSeal}, func(w io.Writer) error {
+		_, e := w.Write(data)
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cat, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.Rebuild(map[string]media.Volume{"tape": open()}); err != nil {
+		t.Fatal(err)
+	}
+
+	ps := cat.Placements("slot-2026-06-21")
+	if len(ps) != 1 {
+		t.Fatalf("placements = %d, want 1", len(ps))
+	}
+	p := ps[0]
+	parts, ok := p.Parts("h-data", 0)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("archive parts = %v (ok=%v), want 2", parts, ok)
+	}
+	if parts[0].Volume != "vol-a" || parts[1].Volume != "vol-b" {
+		t.Fatalf("part volumes = %q,%q, want vol-a,vol-b", parts[0].Volume, parts[1].Volume)
+	}
+	if p.Seal.Volume != "vol-b" {
+		t.Fatalf("seal volume = %q, want vol-b", p.Seal.Volume)
+	}
+	if got := p.Volumes(); len(got) != 2 {
+		t.Fatalf("placement volumes = %v, want 2", got)
 	}
 }

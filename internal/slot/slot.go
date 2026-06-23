@@ -36,18 +36,19 @@ type Slot struct {
 // by (Slot, DLE, Level); its physical position is held by the catalog, not here,
 // so a slot's metadata is portable across volumes.
 type Archive struct {
-	DLE          string   `json:"dle"`          // DLE name, e.g. "app01-home"
-	Host         string   `json:"host"`         // source host
-	Path         string   `json:"path"`         // source path
-	Method       string   `json:"method"`       // dump method that produced it
-	Codec        string   `json:"codec"`        // compression codec (zstd|gzip|none); reversed on restore
-	Level        int      `json:"level"`        // 0 = full, >=1 = incremental
-	Compressed   int64    `json:"compressed"`   // payload size on the volume
-	Uncompressed int64    `json:"uncompressed"` // archive stream size before compression
-	FileCount    int      `json:"file_count"`   // number of member entries archived
-	SHA256       string   `json:"sha256"`       // checksum of the payload
-	BaseSlot     string   `json:"base_slot"`    // for level>=1, the slot whose state this builds on
-	Members      []string `json:"members"`      // member paths archived: slash-separated, directories with a trailing slash (the method-neutral convention recovery browses); the raw token is replayed to the producing method on extract (was MANIFEST)
+	DLE          string   `json:"dle"`             // DLE name, e.g. "app01-home"
+	Host         string   `json:"host"`            // source host
+	Path         string   `json:"path"`            // source path
+	Method       string   `json:"method"`          // dump method that produced it
+	Codec        string   `json:"codec"`           // compression codec (zstd|gzip|none); reversed on restore
+	Level        int      `json:"level"`           // 0 = full, >=1 = incremental
+	Compressed   int64    `json:"compressed"`      // payload size on the volume
+	Uncompressed int64    `json:"uncompressed"`    // archive stream size before compression
+	FileCount    int      `json:"file_count"`      // number of member entries archived
+	SHA256       string   `json:"sha256"`          // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
+	Parts        int      `json:"parts,omitempty"` // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's media.Header.Part
+	BaseSlot     string   `json:"base_slot"`       // for level>=1, the slot whose state this builds on
+	Members      []string `json:"members"`         // member paths archived: slash-separated, directories with a trailing slash (the method-neutral convention recovery browses); the raw token is replayed to the producing method on extract (was MANIFEST)
 }
 
 // NewSlot starts a new open slot for a run. Archives are added with AddArchive

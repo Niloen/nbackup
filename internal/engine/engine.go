@@ -6,7 +6,6 @@
 package engine
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"runtime"
@@ -116,7 +115,7 @@ func New(cfg *config.Config) (*Engine, error) {
 		mediumName: name,
 		mediumDef:  mediaDef,
 		vol:        vol,
-		reader:     slotio.NewReader(vol, fopts),
+		reader:     slotio.NewReader(fopts),
 		profile:    profile,
 		minAge:     minAge,
 		cat:        cat,
@@ -313,11 +312,11 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	if !force {
 		for _, p := range e.cat.Placements(slotID) {
 			if p.Medium == targetMedia {
-				return fmt.Errorf("slot %s is already on medium %q (volume %q); use --force to copy again", slotID, targetMedia, p.Volume)
+				return fmt.Errorf("slot %s is already on medium %q (volume(s) %v); use --force to copy again", slotID, targetMedia, p.Volumes())
 			}
 		}
 	}
-	src, err := e.copySource(slotID, fromMedia)
+	srcLib, srcPlacement, err := e.copySource(slotID, fromMedia)
 	if err != nil {
 		return err
 	}
@@ -325,7 +324,10 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	if err != nil {
 		return err
 	}
-	dst := lib.Volume()
+	partSize, err := e.partSizeFor(targetMedia)
+	if err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	appendable := def.IsAppendable()
 	expect := e.expectedTapeFor(targetMedia, now).Label
@@ -334,73 +336,45 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		return err
 	}
 	logf.log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
-	// A slot is atomic and its copy lives on one volume, so spanning is per-slot:
-	// if the slot will not fit the loaded volume, roll the changer to the next
-	// writable volume and write the whole slot there. Two complementary checks: a
-	// PROACTIVE one rolls before writing when the loaded volume's known remaining
-	// capacity cannot hold the slot (so no doomed partial is written, nothing is
-	// re-read); a REACTIVE one catches media.ErrVolumeFull for media whose capacity
-	// software cannot see ahead of time (a real drive signals EOT only by hitting
-	// it) or when the estimate cleared but the exact bytes did not. Partial files
-	// left on a filled volume are unsealed, so a scan/rebuild ignores them. `tried`
-	// stops the loop re-mounting an exhausted bay; `fresh` means the loaded volume
-	// started empty, so a slot that still will not fit cannot fit on any one volume.
-	tried := map[string]bool{}
-	tooBig := func() error {
-		return fmt.Errorf("slot %s (~%s) does not fit on an empty volume of medium %q; NBackup does not split one slot across volumes", slotID, sizeutil.FormatBytes(slotFootprint(s)), targetMedia)
+
+	// Re-author the slot onto the target: each archive's already-compressed payload
+	// (the source copy's parts concatenated) is re-split into parts sized to the
+	// target's volumes, rolling onto a fresh volume mid-archive when one fills. The
+	// bytes are unchanged, so checksums and members carry over; only the part layout
+	// is new. The slot's logical content (the source seal) is what the catalog keeps.
+	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
+	cpy := slot.NewSlot(s.ID, s.Date, s.Sequence, s.Generator, s.CreatedAt)
+	w, err := slotio.NewWriter(sink, cpy, e.codec, e.fopts)
+	if err != nil {
+		return err
 	}
-	var files []media.FileInfo
-	// fresh: the loaded volume holds no runs, so a slot that will not fit it fits no
-	// volume of this medium — fail fast rather than rolling onto (and labeling) tapes
-	// that cannot hold it either.
-	fresh := len(e.cat.SlotsOnVolume(volName)) == 0
-	for {
-		if rem, known := lib.Remaining(); known && slotFootprint(s) > rem {
-			if fresh {
-				return tooBig() // even a just-rolled-onto empty volume cannot hold it
-			}
-			logf.log("medium %q: slot %s (~%s) will not fit the %s left on %q; rolling to the next volume", targetMedia, slotID, sizeutil.FormatBytes(slotFootprint(s)), sizeutil.FormatBytes(rem), volName)
-			volName, epoch, fresh, err = lib.Advance(appendable, tried, expect, now, librarian.Logf(logf))
-			if err != nil {
-				return fmt.Errorf("copy %s to %q needs another volume: %w", slotID, targetMedia, err)
-			}
-			continue
+	srcOpen := e.partOpener(srcLib)
+	for _, a := range s.Archives {
+		parts, ok := srcPlacement.Parts(a.DLE, a.Level)
+		if !ok {
+			return fmt.Errorf("source copy of %s on %q is missing %s L%d", slotID, fromMedia, a.DLE, a.Level)
 		}
-		files, err = media.CopySlot(dst, src, slotID)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, media.ErrVolumeFull) {
-			return err
-		}
-		if fresh {
-			return tooBig()
-		}
-		logf.log("medium %q: volume %q is full, rolling to the next volume", targetMedia, volName)
-		volName, epoch, fresh, err = lib.Advance(appendable, tried, expect, now, librarian.Logf(logf))
-		if err != nil {
-			return fmt.Errorf("copy %s to %q needs another volume: %w", slotID, targetMedia, err)
+		raw := e.reader.OpenRawParts(toSlotioParts(parts), slotio.Expect{Slot: slotID, DLE: a.DLE, Level: a.Level}, srcOpen)
+		_, werr := w.CopyArchive(a, raw)
+		raw.Close()
+		if werr != nil {
+			return fmt.Errorf("copy %s L%d to %q: %w", a.DLE, a.Level, targetMedia, werr)
 		}
 	}
-	p := catalog.Placement{Medium: targetMedia, Volume: volName, Epoch: epoch}
-	for _, f := range files {
-		if f.Header.Kind == media.KindArchive {
-			p.Archives = append(p.Archives, catalog.ArchivePos{DLE: f.Header.DLE, Level: f.Header.Level, Pos: f.Pos})
-		}
+	if _, err := w.Seal(now); err != nil {
+		return fmt.Errorf("seal copy on %q: %w", targetMedia, err)
 	}
-	if err := e.cat.Record(s, p); err != nil {
+	if err := e.cat.Record(s, placementFrom(targetMedia, w)); err != nil {
 		return fmt.Errorf("record copy in catalog: %w", err)
 	}
-	logf.log("copied %d file(s) to %q", len(files), targetMedia)
+	logf.log("copied %s (%d archive(s)) to %q", slotID, len(s.Archives), targetMedia)
 	return nil
 }
 
-// copySource resolves the volume that holds a slot on the source medium and mounts
-// it for reading — the read side of a copy. It mirrors readerFor: the engine's own
-// medium reuses the open handle; any other medium is opened fresh; a changer is
-// mounted to the volume holding the slot and its identity verified. It errors if
-// the slot has no copy on fromMedia (the catalog knows of none to read).
-func (e *Engine) copySource(slotID, fromMedia string) (media.Volume, error) {
+// copySource resolves the placement that holds a slot on the source medium and a
+// librarian over that medium, for the read side of a copy. It errors if the slot has
+// no copy on fromMedia (the catalog knows of none to read).
+func (e *Engine) copySource(slotID, fromMedia string) (*librarian.Librarian, catalog.Placement, error) {
 	var src catalog.Placement
 	for _, p := range e.cat.Placements(slotID) {
 		if p.Medium == fromMedia {
@@ -409,44 +383,71 @@ func (e *Engine) copySource(slotID, fromMedia string) (media.Volume, error) {
 		}
 	}
 	if src.Medium == "" {
-		return nil, fmt.Errorf("slot %s has no copy on source medium %q", slotID, fromMedia)
+		return nil, catalog.Placement{}, fmt.Errorf("slot %s has no copy on source medium %q", slotID, fromMedia)
 	}
 	lib, _, _, err := e.librarianFor(fromMedia)
 	if err != nil {
-		return nil, err
+		return nil, catalog.Placement{}, err
 	}
-	if err := lib.MountForRead(src); err != nil {
-		return nil, err
-	}
-	return lib.Volume(), nil
+	return lib, src, nil
 }
 
-// slotFootprint estimates the bytes a slot's copy will occupy on a destination
-// volume: its compressed archive payloads plus a fixed header block per file (one
-// per archive and one for the seal). It deliberately omits the seal's own payload,
-// so it is a slight UNDER-estimate — `footprint > remaining` therefore proves the
-// slot cannot fit, never the reverse, so a pre-check on it never rolls prematurely;
-// the media.ErrVolumeFull backstop still catches a slot that the estimate cleared
-// but the exact bytes (or an imprecise real tape) could not hold.
-func slotFootprint(s *slot.Slot) int64 {
-	return s.TotalBytes + int64(len(s.Archives)+1)*media.HeaderBlock
+// partOpener builds a slotio.PartOpener over a librarian: it mounts the volume each
+// part lives on (and verifies its identity), then opens the part's file. Reading a
+// spanned archive calls it once per part, in order — a single drive holds one tape.
+func (e *Engine) partOpener(lib *librarian.Librarian) slotio.PartOpener {
+	return func(p slotio.PartPosition) (media.Header, io.ReadCloser, error) {
+		if err := lib.MountVolume(p.Volume, p.Epoch); err != nil {
+			return media.Header{}, nil, err
+		}
+		return lib.Volume().ReadFile(p.Pos)
+	}
 }
 
-// readerFor opens a Reader positioned to read a placement's volume, after mounting
-// the right tape (on a changer) and verifying its identity. For the engine's own
-// medium it reuses the open handle and reader.
-func (e *Engine) readerFor(p catalog.Placement) (*slotio.Reader, error) {
-	lib, _, own, err := e.librarianFor(p.Medium)
+// toSlotioParts converts catalog part positions to the slotio reader's form.
+func toSlotioParts(parts []catalog.PartPos) []slotio.PartPosition {
+	out := make([]slotio.PartPosition, len(parts))
+	for i, p := range parts {
+		out[i] = slotio.PartPosition{Volume: p.Volume, Epoch: p.Epoch, Pos: p.Pos}
+	}
+	return out
+}
+
+// placementFrom builds a catalog placement from a sealed writer's recorded part
+// positions and seal location.
+func placementFrom(medium string, w *slotio.Writer) catalog.Placement {
+	p := catalog.Placement{Medium: medium}
+	for _, ap := range w.Positions() {
+		cp := catalog.ArchivePos{DLE: ap.DLE, Level: ap.Level}
+		for _, pt := range ap.Parts {
+			cp.Parts = append(cp.Parts, catalog.PartPos{Volume: pt.Volume, Epoch: pt.Epoch, Pos: pt.Pos})
+		}
+		p.Archives = append(p.Archives, cp)
+	}
+	sp := w.SealPosition()
+	p.Seal = catalog.PartPos{Volume: sp.Volume, Epoch: sp.Epoch, Pos: sp.Pos}
+	return p
+}
+
+// partSizeFor reads a medium's optional part_size parameter (the deliberate per-part
+// chunk bound). It must be at least two header blocks so a part can carry payload.
+func (e *Engine) partSizeFor(medium string) (int64, error) {
+	d, ok := e.cfg.Media[medium]
+	if !ok {
+		return 0, fmt.Errorf("unknown medium %q", medium)
+	}
+	s := d.Params["part_size"]
+	if s == "" {
+		return 0, nil
+	}
+	n, err := sizeutil.ParseBytes(s)
 	if err != nil {
-		return nil, err
+		return 0, fmt.Errorf("medium %q part_size: %w", medium, err)
 	}
-	if err := lib.MountForRead(p); err != nil {
-		return nil, err
+	if n < 2*media.HeaderBlock {
+		return 0, fmt.Errorf("medium %q part_size %s is too small; use at least %s", medium, sizeutil.FormatBytes(n), sizeutil.FormatBytes(2*media.HeaderBlock))
 	}
-	if own {
-		return e.reader, nil
-	}
-	return slotio.NewReader(lib.Volume(), e.fopts), nil
+	return n, nil
 }
 
 // LabelVolume writes (or rewrites) the identity label of a medium's volume — the
@@ -749,8 +750,13 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 
 	now := time.Now().UTC()
 	lib := librarian.New(e.vol, e.mediumName, e.cat, e.op, e.cfg.AutoLabel)
+	partSize, err := e.partSizeFor(e.mediumName)
+	if err != nil {
+		return nil, err
+	}
+	appendable := e.mediumDef.IsAppendable()
 	expect := e.expectedTapeFor(e.mediumName, now).Label
-	volName, epoch, err := lib.PrepareWrite(e.mediumDef.IsAppendable(), expect, now, librarian.Logf(logf))
+	volName, epoch, err := lib.PrepareWrite(appendable, expect, now, librarian.Logf(logf))
 	if err != nil {
 		return nil, err
 	}
@@ -760,33 +766,39 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 		return nil, err
 	}
 	s := slot.NewSlot(slotID, slot.DateString(date), seq, "nbdump", time.Now().UTC())
-	w, err := slotio.NewWriter(e.vol, s, e.codec, e.fopts)
+	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
+	w, err := slotio.NewWriter(sink, s, e.codec, e.fopts)
 	if err != nil {
 		return nil, err
 	}
 
+	// A spanning-capable landing (a finite tape changer, or part_size set) writes one
+	// drive serially: it cannot interleave two archives' parts and roll mid-write, so
+	// dumpers are clamped to 1. Disk (unbounded) keeps the configured parallelism.
+	dumpers := e.cfg.Dumpers()
+	if dumpers > 1 && lib.CanSpan(partSize) {
+		logf.log("medium %q can span volumes; running 1 dumper (a single drive writes serially)", e.mediumName)
+		dumpers = 1
+	}
+
 	// Track live progress to the run-status file so `nb status` can watch a
 	// detached run. Progress reporting never blocks or fails the backup.
-	tr := progress.NewTracker(slotID, e.cfg.Dumpers(), planProgress(plan.Items), time.Now,
+	tr := progress.NewTracker(slotID, dumpers, planProgress(plan.Items), time.Now,
 		progress.NewFileSink(e.cfg.WorkdirPath(), time.Now))
 
-	if err := e.runDumpers(plan.Items, w, tr, logf); err != nil {
+	if err := e.runDumpers(plan.Items, dumpers, w, tr, logf); err != nil {
 		tr.SetPhase(progress.PhaseFailed)
 		return nil, err
 	}
 
 	tr.SetPhase(progress.PhaseSealing)
-	logf.log("verifying %d archive checksum(s)", w.ArchiveCount())
+	logf.log("verifying archive checksum(s)")
 	sealed, err := w.Seal(time.Now().UTC())
 	if err != nil {
 		tr.SetPhase(progress.PhaseFailed)
 		return nil, err
 	}
-	placement := catalog.Placement{Medium: e.mediumName, Volume: volName, Epoch: epoch}
-	for _, p := range w.Positions() {
-		placement.Archives = append(placement.Archives, catalog.ArchivePos{DLE: p.DLE, Level: p.Level, Pos: p.Pos})
-	}
-	if err := e.cat.Record(sealed, placement); err != nil {
+	if err := e.cat.Record(sealed, placementFrom(e.mediumName, w)); err != nil {
 		tr.SetPhase(progress.PhaseFailed)
 		return nil, fmt.Errorf("update catalog cache: %w", err)
 	}
@@ -809,8 +821,7 @@ func planProgress(items []planner.Item) []progress.Plan {
 // semaphore; the first error stops scheduling further items and is returned. Each
 // dumper writes a distinct object into the slot, which the medium must allow
 // concurrently (disk does) and the slot Writer serializes its bookkeeping.
-func (e *Engine) runDumpers(items []planner.Item, w *slotio.Writer, tr *progress.Tracker, logf Logf) error {
-	dumpers := e.cfg.Dumpers()
+func (e *Engine) runDumpers(items []planner.Item, dumpers int, w *slotio.Writer, tr *progress.Tracker, logf Logf) error {
 	if dumpers <= 1 || len(items) <= 1 {
 		for _, item := range items {
 			if err := e.backupItem(w, item, tr, logf); err != nil {
@@ -1043,16 +1054,16 @@ func (e *Engine) openArchive(slotID, dle string, level int, codec string) (io.Re
 	}
 	var lastErr error
 	for _, p := range placements {
-		pos, ok := p.Pos(dle, level)
+		parts, ok := p.Parts(dle, level)
 		if !ok {
 			continue
 		}
-		rdr, err := e.readerFor(p)
+		lib, _, _, err := e.librarianFor(p.Medium)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		rc, err := rdr.OpenArchive(pos, codec, slotio.Expect{Slot: slotID, DLE: dle, Level: level})
+		rc, err := e.reader.OpenArchiveParts(toSlotioParts(parts), codec, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib))
 		if err != nil {
 			lastErr = err
 			continue
@@ -1113,20 +1124,21 @@ func (e *Engine) verifySlot(id string, logf Logf) (bool, error) {
 	// Verify every copy on every medium, so a corrupt copy is caught even when
 	// another is fine.
 	for _, p := range placements {
-		rdr, err := e.readerFor(p)
+		lib, _, _, err := e.librarianFor(p.Medium)
 		if err != nil {
 			logf.log("%s [%s]: ERROR %v", id, p.Medium, err)
 			ok = false
 			continue
 		}
+		opener := e.partOpener(lib)
 		for _, a := range s.Archives {
-			pos, found := p.Pos(a.DLE, a.Level)
+			parts, found := p.Parts(a.DLE, a.Level)
 			if !found {
 				logf.log("%s [%s]: %s L%d POSITION MISSING", id, p.Medium, a.DLE, a.Level)
 				ok = false
 				continue
 			}
-			good, verr := rdr.VerifyFile(pos, slotio.Expect{Slot: id, DLE: a.DLE, Level: a.Level}, a.SHA256)
+			good, verr := e.reader.VerifyParts(toSlotioParts(parts), slotio.Expect{Slot: id, DLE: a.DLE, Level: a.Level}, a.SHA256, opener)
 			if verr != nil {
 				logf.log("%s [%s]: %s L%d ERROR %v", id, p.Medium, a.DLE, a.Level, verr)
 				ok = false

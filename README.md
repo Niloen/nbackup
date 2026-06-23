@@ -57,6 +57,9 @@ for a in slots/slot-*/0*-app01-home-L*.tar.zst; do
   zstd -dc "$a" | tar --extract --listed-incremental=/dev/null
 done
 # (from tape, skip the 32 KB inline header first: dd bs=32k skip=1 < file | zstd -dc | …)
+# (a tape archive that SPANNED volumes is split into parts — strip each part's 32 KB
+#  header and concatenate them in order before decompressing:
+#  for p in part0 part1 …; do dd bs=32k skip=1 < "$p"; done | zstd -dc | tar -xf -)
 ```
 
 > Requires **GNU tar** and the configured **compressor** (`zstd` by default) at
@@ -425,12 +428,15 @@ that NBackup **verifies before every write**, so a foreign, wrong, or still-acti
 reel is never clobbered.
 `appendable: true` (default) packs many runs per tape (Bacula-style), `appendable:
 false` uses one run per tape (Amanda-style). Restore mounts (robot) or prompts for
-(manual) whichever tape holds the copy it needs. A **copy or sync** that fills a
-tape mid-write **rolls onto the next one automatically** — a robotic library mounts
-the next writable bay (auto-labeling a blank), a manual drive prompts for a swap —
-so a multi-tape `nb sync` to a library just works (a dump *run*, though, must still
-fit one tape). (Internals: [ARCHITECTURE.md](ARCHITECTURE.md). Mid-slot spanning and
-dump-run auto-advance are the next step.)
+(manual) whichever tape holds the copy it needs. A run that **fills a tape
+mid-write spans onto the next one automatically** — both a `nb dump` and a `nb
+copy`/`nb sync` — splitting even a single large archive across tapes: a robotic
+library mounts the next writable bay (auto-labeling a blank), a manual drive prompts
+for a swap. Spanning is *proactive* — set `volume_size` so NBackup sizes each chunk
+to fit before writing it (a real drive with no readable capacity can instead set
+`part_size`); if a chunk still overflows, the run fails with a clear message rather
+than guessing. A restore reassembles a spanned archive by mounting its tapes in
+order. (Internals: [ARCHITECTURE.md](ARCHITECTURE.md).)
 
 Not yet implemented (declared in config for forward-compatibility):
 

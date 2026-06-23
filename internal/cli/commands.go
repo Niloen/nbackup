@@ -410,8 +410,14 @@ func copiesSummary(ps []catalog.Placement) string {
 	}
 	names := make([]string, 0, len(ps))
 	for _, p := range ps {
-		if p.Volume != "" && p.Volume != p.Medium {
-			names = append(names, p.Medium+":"+p.Volume)
+		labeled := make([]string, 0, 2)
+		for _, v := range p.Volumes() {
+			if v != "" && v != p.Medium {
+				labeled = append(labeled, v)
+			}
+		}
+		if len(labeled) > 0 {
+			names = append(names, p.Medium+":"+strings.Join(labeled, "+"))
 		} else {
 			names = append(names, p.Medium)
 		}
@@ -452,18 +458,27 @@ func newSlotShowCmd(a *app) *cobra.Command {
 			placements := eng.Catalog().Placements(s.ID)
 			fmt.Printf("\nCOPIES (%d)\n", len(placements))
 			ptw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-			fmt.Fprintln(ptw, "  MEDIUM\tVOLUME\tEPOCH\tPOSITIONS")
+			fmt.Fprintln(ptw, "  MEDIUM\tVOLUMES\tPOSITIONS")
 			for _, p := range placements {
-				volume, epoch := "-", "-"
-				if p.Volume != "" && p.Volume != p.Medium {
-					volume = p.Volume
-					epoch = fmt.Sprintf("%d", p.Epoch)
+				volumes := "-"
+				labeled := make([]string, 0, 2)
+				for _, v := range p.Volumes() {
+					if v != "" && v != p.Medium {
+						labeled = append(labeled, v)
+					}
+				}
+				if len(labeled) > 0 {
+					volumes = strings.Join(labeled, "+")
 				}
 				positions := make([]string, 0, len(p.Archives))
 				for _, ar := range p.Archives {
-					positions = append(positions, fmt.Sprintf("%s/L%d@%d", ar.DLE, ar.Level, ar.Pos))
+					locs := make([]string, 0, len(ar.Parts))
+					for _, pt := range ar.Parts {
+						locs = append(locs, fmt.Sprintf("%d", pt.Pos))
+					}
+					positions = append(positions, fmt.Sprintf("%s/L%d@%s", ar.DLE, ar.Level, strings.Join(locs, ",")))
 				}
-				fmt.Fprintf(ptw, "  %s\t%s\t%s\t%s\n", p.Medium, volume, epoch, strings.Join(positions, " "))
+				fmt.Fprintf(ptw, "  %s\t%s\t%s\n", p.Medium, volumes, strings.Join(positions, " "))
 			}
 			ptw.Flush()
 			return nil

@@ -28,6 +28,12 @@ func init() {
 		if path == "" {
 			return nil, fmt.Errorf("disk medium requires a path")
 		}
+		// Disk is unbounded, so an archive is always a single part; part_size (the
+		// tape-spanning chunk bound) is meaningless here and refused to avoid a
+		// silently ignored knob.
+		if opts.Get("part_size") != "" {
+			return nil, fmt.Errorf("disk medium does not support part_size (it is unbounded and never splits archives)")
+		}
 		return open(filepath.Join(path, "slots"))
 	})
 	media.RegisterProfile("disk", media.NewSizeProfile)
