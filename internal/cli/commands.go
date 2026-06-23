@@ -11,6 +11,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/slot"
 )
@@ -113,6 +114,58 @@ func newDumpCmd(a *app) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&dateStr, "date", "", "run date YYYY-MM-DD (default today)")
 	return cmd
+}
+
+// newStatusCmd implements `nb status`: show the progress of the current (or most
+// recent) run by reading the run-status file `nb dump` writes — NBackup's
+// amstatus. It needs no engine, only the catalog workdir, so it is cheap to poll.
+func newStatusCmd(a *app) *cobra.Command {
+	var watch time.Duration
+	cmd := &cobra.Command{
+		Use:     "status",
+		Short:   "Show the progress of the current or most recent run",
+		Long:    "Read the run-status file `nb dump` maintains and render a progress report: each DLE's state and percent of estimate, totals, throughput, and ETA. With --watch it refreshes on an interval. Reflects an in-flight run, or the last finished one.",
+		Example: "  nb status\n  nb status --watch 2s",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := a.loadRO()
+			if err != nil {
+				return err
+			}
+			dir := cfg.WorkdirPath()
+			if watch <= 0 {
+				return renderStatus(dir)
+			}
+			for {
+				fmt.Print("\033[H\033[2J") // home cursor + clear screen
+				if err := renderStatus(dir); err != nil {
+					return err
+				}
+				snap, err := progress.Load(dir)
+				if err == nil && snap.Phase.Terminal() {
+					return nil // run finished; stop watching
+				}
+				time.Sleep(watch)
+			}
+		},
+	}
+	cmd.Flags().DurationVar(&watch, "watch", 0, "refresh every interval (e.g. 2s) until the run finishes")
+	return cmd
+}
+
+// renderStatus loads and prints one run-status snapshot, or a friendly note when
+// no run has written one yet.
+func renderStatus(dir string) error {
+	snap, err := progress.Load(dir)
+	if progress.IsNotExist(err) {
+		fmt.Println("no run in progress (no status recorded yet)")
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	progress.Render(os.Stdout, snap, time.Now())
+	return nil
 }
 
 // newVerifyCmd implements `nb verify`: check archive checksums of one or all slots.

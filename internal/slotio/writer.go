@@ -67,7 +67,11 @@ func NewWriter(vol media.Volume, s *slot.Slot, codec string, fopts filter.Option
 // header, then pipes the produced raw stream through the codec's compressor child
 // while metering (checksum + size) the compressed bytes. It records the archive in
 // the slot and returns the recorded metadata. Safe for concurrent use.
-func (w *Writer) WriteArchive(spec ArchiveSpec, produce func(out io.Writer) (Produced, error)) (slot.Archive, error) {
+//
+// progress, if non-nil, is called as the stream flows with the running
+// (uncompressed, compressed) byte counts — the live signal for `nb status`. It
+// runs on the producing goroutine, so it must be cheap.
+func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, compressed int64), produce func(out io.Writer) (Produced, error)) (slot.Archive, error) {
 	h := media.Header{
 		Slot:      w.slot.ID,
 		Kind:      media.KindArchive,
@@ -92,7 +96,13 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, produce func(out io.Writer) (Pro
 		if e != nil {
 			return e
 		}
-		r, e := produce(cw)
+		// Meter the uncompressed source on its way into the compressor; report it
+		// alongside the compressed bytes the meter has pushed to the volume.
+		var src io.Writer = cw
+		if progress != nil {
+			src = xfer.NewCounter(cw, func(total int64) { progress(total, meter.Bytes()) })
+		}
+		r, e := produce(src)
 		if e != nil {
 			cw.Close()
 			return e

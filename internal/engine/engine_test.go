@@ -8,6 +8,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/progress"
 )
 
 // TestRunRestoreEndToEnd exercises the full engine over the disk store:
@@ -286,6 +287,51 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 		t.Fatalf("restore (failover to copy): %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "f.txt"), "two homes")
+}
+
+// TestRunWritesStatus confirms a dump leaves a terminal run-status file in the
+// catalog workdir, reflecting the sealed slot — the input `nb status` reads.
+func TestRunWritesStatus(t *testing.T) {
+	src := t.TempDir()
+	workdir := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "status me")
+
+	cfg := &config.Config{
+		Landing: "disk",
+		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
+		Sources: []config.DLE{{Host: "h", Path: src}},
+		Workdir: workdir,
+	}
+	cfg.Compress.Codec = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	s, err := eng.Run(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+
+	snap, err := progress.Load(workdir)
+	if err != nil {
+		t.Fatalf("load status: %v", err)
+	}
+	if snap.SlotID != s.ID {
+		t.Errorf("status slot = %q, want %q", snap.SlotID, s.ID)
+	}
+	if snap.Phase != progress.PhaseDone {
+		t.Errorf("status phase = %s, want done", snap.Phase)
+	}
+	if _, done, failed, _ := snap.Counts(); done != 1 || failed != 0 {
+		t.Errorf("counts done=%d failed=%d, want 1/0", done, failed)
+	}
+	if snap.DLEs[0].DoneBytes == 0 {
+		t.Error("status should record archived bytes")
+	}
 }
 
 func boolp(b bool) *bool { return &b }

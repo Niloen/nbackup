@@ -47,6 +47,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(
 		newPlanCmd(a),
 		newDumpCmd(a),
+		newStatusCmd(a),
 		newSlotCmd(a),
 		newVerifyCmd(a),
 		newRestoreCmd(a),
