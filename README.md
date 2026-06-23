@@ -84,6 +84,7 @@ This produces the `nb` umbrella tool plus standalone commands:
 | —           | `nb copy`    | Copy a slot to another medium (disk → tape) |
 | —           | `nb label`   | Label a volume (required for tape before its first dump) |
 | —           | `nb medium`  | List media (capacity, usage, volume) or detail one |
+| —           | `nb tape`    | Inventory (`list`) or mount (`load`) tapes in a library |
 
 ## Quick start
 
@@ -266,23 +267,39 @@ tar snapshot library, immutable sealed slots with **sequence-suffixed** same-day
 runs, **deletion-aware** incremental restore, checksum verification, point-in-time
 restore, per-medium budget reporting, cycle-safe pruning.
 
-The `tape` medium has two backends behind one internal device seam: a `dir:`
-virtual tape (file-backed, fully tested) and a `device:` real drive (`mt` +
-`/dev/nst0`). The real-drive backend is structurally complete but unverified
-without hardware, so CI exercises the virtual tape.
+The `tape` medium is a **library of bays behind one drive**, modeled with two
+internal seams: a `device` (the `mt` analogue — file I/O of one mounted tape) and
+a `changer` (the robot analogue — which bay is in the drive). `dir:` selects a
+directory-backed library (each bay a subdirectory, finite per-bay `tape_size`,
+fully tested); `device:` selects a real single drive (`mt` + `/dev/nst0`, a
+one-bay library), structurally complete but unverified without hardware, so CI
+exercises the virtual library.
 
-**Volume labels (tape).** Tapes carry a self-describing identity label at file 0
-(`nbackup` magic, name, pool, epoch) — the volume-level analogue of a slot's seal
-record. The label is a *capability* (`media.Labeled`), so address-identified media
-(disk, S3) carry none and skip the dance entirely. Before a dump, the engine reads
-and verifies the label and **refuses to write** to a foreign, blank (unless
-`auto_label`), wrong, or relabeled-since-cached reel — Amanda's overwrite guard.
-Label a tape with `nb label <medium> <name>`; reuse an expired one with
-`nb label --relabel` (refused while it still holds protected slots, override with
-`--force`). On read, every archive's header is asserted against the catalog's
-expectation, catching a swapped tape or a stale catalog. The catalog caches the
-volume registry (`catalog.Volumes`, medium-neutral for Amanda's *tapelist*).
-Multi-tape pools/changers are the next step; today a tape medium is one volume.
+**Bays vs labels.** A *bay* is a physical position (`bay-01…`, the durable
+cartridge identity); a *label* is logical data written at file 0 (`nbackup` magic,
+name, pool, epoch). They are deliberately distinct: a blank cartridge has a bay
+but no label, and relabeling rewrites the label without changing the bay. Like a
+real autochanger, the `changer` is **label-agnostic** — it mounts bays; the label
+is read from the drive only after mounting. `tapes: N` stocks the library with N
+blank bays; `nb tape list` inventories bay→label; `nb tape load` mounts one.
+
+**Append vs one-run-per-tape.** A tape fills until end-of-tape (`ErrVolumeFull`),
+then you change tapes. `appendable: true` (default, Bacula-style) packs many runs
+onto a tape until full; `appendable: false` (Amanda-style) uses one run per tape.
+Switching is **manual**: a full tape is refused and you `nb tape load` the next
+(or `nb label --relabel` an aged-out one). Automatic advance and tape spanning
+are the next step.
+
+**Volume labels.** The label is a *capability* (`media.Labeled`), so
+address-identified media (disk, S3) carry none and skip the dance. Before a write
+the engine verifies the loaded tape's label and **refuses** a foreign, blank
+(unless `auto_label`), wrong-pool, or relabeled-since-cached reel — Amanda's
+overwrite guard. Label a tape with `nb label <medium> <name>` (it grabs a blank
+bay); reuse an expired one with `nb label --relabel` (refused while it holds
+protected slots; `--force` overrides). On read, the changer **auto-mounts** the
+bay holding each copy's tape, and every archive header is asserted against the
+catalog. The catalog caches the volume registry (`catalog.Volumes`, Amanda's
+*tapelist*).
 
 Not yet implemented (declared in config for forward-compatibility):
 

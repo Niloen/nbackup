@@ -147,8 +147,38 @@ func (c *Catalog) Rebuild(volumes map[string]media.Volume) (int, error) {
 	return len(c.entries), nil
 }
 
-// ingest scans one volume and merges its slots and placements into the cache.
+// ingest merges a medium's slots and placements into the cache. For a changer
+// (a tape library) it scans every non-blank bay in turn, restoring whatever was
+// mounted; for a single volume it scans it directly.
 func (c *Catalog) ingest(medium string, vol media.Volume) error {
+	ch, ok := vol.(media.Changer)
+	if !ok {
+		return c.ingestOne(medium, vol)
+	}
+	prev, hadPrev := ch.Loaded()
+	bays, err := ch.Bays()
+	if err != nil {
+		return err
+	}
+	for _, b := range bays {
+		if b.Blank {
+			continue
+		}
+		if err := ch.Mount(b.Bay); err != nil {
+			return err
+		}
+		if err := c.ingestOne(medium, vol); err != nil {
+			return err
+		}
+	}
+	if hadPrev {
+		return ch.Mount(prev)
+	}
+	return nil
+}
+
+// ingestOne scans one mounted volume and merges its slots and placements.
+func (c *Catalog) ingestOne(medium string, vol media.Volume) error {
 	slots, placements, label, err := scanVolume(medium, vol)
 	if err != nil {
 		return err
@@ -308,6 +338,21 @@ func (c *Catalog) SlotsOn(medium string) []*slot.Slot {
 	return out
 }
 
+// SlotsOnVolume returns the slots with a copy on a specific volume (label), in
+// run order — used to tell whether a tape already holds a run.
+func (c *Catalog) SlotsOnVolume(volume string) []*slot.Slot {
+	var out []*slot.Slot
+	for _, e := range c.entries {
+		for _, p := range e.Placements {
+			if p.Volume == volume {
+				out = append(out, e.Slot)
+				break
+			}
+		}
+	}
+	return out
+}
+
 // MediumBytes sums the stored bytes of slots with a copy on the named medium.
 func (c *Catalog) MediumBytes(medium string) int64 {
 	var total int64
@@ -337,9 +382,9 @@ func (c *Catalog) Volume(name string) (VolumeRecord, bool) {
 	return VolumeRecord{}, false
 }
 
-// VolumeForMedium returns the volume currently tracked for a medium. With one
-// volume per medium (no changer yet) this is unique; it is the seam the changer
-// generalizes.
+// VolumeForMedium returns any volume tracked for a medium (matched by pool). It
+// predates the changer and is only meaningful for media with a single volume;
+// changer media hold many, so callers use Volume(name) / SlotsOnVolume instead.
 func (c *Catalog) VolumeForMedium(medium string) (media.Label, bool) {
 	for _, v := range c.volumes {
 		if v.Label.Pool == medium {

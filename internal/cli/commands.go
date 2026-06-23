@@ -433,7 +433,83 @@ func volumeStr(m engine.MediumInfo) string {
 	if m.Volume == "" {
 		return "-"
 	}
-	return fmt.Sprintf("%s (epoch %d)", m.Volume, m.Epoch)
+	if m.Epoch > 0 {
+		return fmt.Sprintf("%s (epoch %d)", m.Volume, m.Epoch)
+	}
+	return m.Volume
+}
+
+// CmdTape implements `nb tape`: the manual changer — inventory the library or
+// mount a tape. Reading the actual label requires loading a tape in the drive,
+// so this is also how you point the drive at a specific reel before a write.
+func CmdTape(args []string) error {
+	if len(args) > 0 && args[0] == "load" {
+		return cmdTapeLoad(args[1:])
+	}
+	if len(args) > 0 && args[0] == "list" {
+		return cmdTapeList(args[1:])
+	}
+	return fmt.Errorf("usage: nb tape list <medium> | nb tape load <medium> <bay> [--label]")
+}
+
+func cmdTapeList(args []string) error {
+	fs := flag.NewFlagSet("nb tape list", flag.ExitOnError)
+	cfgPath := fs.String("c", DefaultConfigPath, "path to config file")
+	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
+	pos := parseArgs(fs, args)
+	if len(pos) < 1 {
+		return fmt.Errorf("usage: nb tape list <medium>")
+	}
+	cfg, err := loadConfigRO(*cfgPath, *catalogFlag)
+	if err != nil {
+		return err
+	}
+	eng, err := newEngine(cfg)
+	if err != nil {
+		return err
+	}
+	loaded, bays, err := eng.TapeBays(pos[0])
+	if err != nil {
+		return err
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "\tBAY\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
+	for _, b := range bays {
+		mark := " "
+		if b.Bay == loaded {
+			mark = "*"
+		}
+		label, status := b.Label, "append"
+		if b.Blank {
+			label, status = "(blank)", "blank"
+		} else if b.Capacity > 0 && b.Used >= b.Capacity {
+			status = "full"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\n", mark, b.Bay, label, status,
+			sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
+	}
+	tw.Flush()
+	return nil
+}
+
+func cmdTapeLoad(args []string) error {
+	fs := flag.NewFlagSet("nb tape load", flag.ExitOnError)
+	cfgPath := fs.String("c", DefaultConfigPath, "path to config file")
+	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
+	byLabel := fs.Bool("label", false, "treat the argument as a volume label rather than a bay id")
+	pos := parseArgs(fs, args)
+	if len(pos) < 2 {
+		return fmt.Errorf("usage: nb tape load [--label] <medium> <bay-or-label>")
+	}
+	cfg, err := loadConfig(*cfgPath, *catalogFlag)
+	if err != nil {
+		return err
+	}
+	eng, err := newEngine(cfg)
+	if err != nil {
+		return err
+	}
+	return eng.LoadTape(pos[0], pos[1], *byLabel, logfStdout)
 }
 
 // CmdRestore implements `nbrestore`: rebuild a DLE (or all DLEs) from a slot.
