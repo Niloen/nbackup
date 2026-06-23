@@ -54,8 +54,6 @@ func open(root string) (*volume, error) {
 	return v, nil
 }
 
-func (v *volume) Name() string { return "disk" }
-
 var slug = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
 // stem is the friendly filename base (without extension) for a file.
