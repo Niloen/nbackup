@@ -18,7 +18,7 @@ import (
 // DefaultConfigPath is used when -c is not given.
 const DefaultConfigPath = "nbackup.yaml"
 
-// DefaultCatalog is used when neither -C nor config provides a catalog path.
+// DefaultCatalog is used when neither --catalog nor config provides a catalog path.
 const DefaultCatalog = "nbackup-catalog"
 
 // Fatalf prints to stderr and exits non-zero.
@@ -46,8 +46,8 @@ func loadConfig(cfgPath, catalogOverride string) (*config.Config, error) {
 	return cfg, nil
 }
 
-// loadConfigRO loads configuration for read-only commands. With -C it uses that
-// directory directly (ignoring any config file). Otherwise it reads the config
+// loadConfigRO loads configuration for read-only commands. With --catalog it uses
+// that directory directly (ignoring any config file). Otherwise it reads the config
 // if present (surfacing parse/validation errors) or synthesizes a default
 // catalog when no config file exists.
 func loadConfigRO(cfgPath, catalogOverride string) (*config.Config, error) {

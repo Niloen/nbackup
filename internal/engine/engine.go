@@ -815,7 +815,7 @@ func (e *Engine) extractStep(step restore.Step, destDir string) error {
 func (e *Engine) openArchive(slotID, dle string, level int, codec string) (io.ReadCloser, error) {
 	placements := e.placementsFor(slotID)
 	if len(placements) == 0 {
-		return nil, fmt.Errorf("slot %s not in catalog (run `nb catalog rebuild`)", slotID)
+		return nil, fmt.Errorf("slot %s not in catalog (run `nb rebuild`)", slotID)
 	}
 	var lastErr error
 	for _, p := range placements {

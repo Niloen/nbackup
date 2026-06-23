@@ -74,7 +74,7 @@ the manifest stays. (Slot earns its keep; we considered and rejected dropping it
 
 **The catalog is a cache; the media are the source of truth.** Every file is
 self-describing (header), every slot sealed, every labeled volume carries its
-label — so one `Files()` scan rebuilds everything (`nb catalog rebuild`): seals →
+label — so one `Files()` scan rebuilds everything (`nb rebuild`): seals →
 slots, labels → volume registry. The catalog lives in its **own `workdir`**
 (default `nbackup-catalog`), *independent of any medium* — it is a cache over the
 whole pool, not part of one medium. The `Entry`/`Placement` model means a slot
@@ -86,7 +86,7 @@ drift). The only non-derivable local state is the GNU tar snapshot library
 **One mutating `nb` per config at a time** (`internal/lock`, Amanda's per-config
 amflock). Rather than make the catalog concurrently writable, we serialize the
 whole mutating run: every command that writes the catalog or media (`dump`,
-`copy`, `label`, `load`, `catalog rebuild`, `prune --apply`) takes a
+`copy`, `label`, `load`, `rebuild`, `prune --apply`) takes a
 non-blocking advisory `flock` on `workdir/lock` before opening the engine, and a
 second invocation fails fast (`ErrHeld`). flock is tied to the open fd, so a
 crash releases it — no stale lockfiles. Read-only commands take no lock: catalog
@@ -222,9 +222,13 @@ medium it lands on.
 - **Test environment:** `zstd` is **not** installed — tests use codec `none`;
   `tar`, `gzip`, `nice` are present. Tests that need GNU tar `t.Skip` when absent.
 - **CLI:** flags may appear before or after positionals (`parseArgs`); subcommand
-  dispatch (`slot show`, `catalog rebuild`) keys on the first arg. Per-medium
-  status (incl. bays / drive + shelf) lives in `nb medium <name>`; `nb load` is the
-  one physical action verb (sibling of `nb label`).
+  dispatch (`slot show`) keys on the first arg. The convention is **inspect with a
+  noun** (`nb slot`, `nb medium`), **act with a flat verb** (`nb dump`, `nb verify`,
+  `nb prune`, `nb rebuild`, …) — so the nouns carry only read subcommands and every
+  mutation is a top-level verb. Per-medium status (incl. bays / drive + shelf) lives
+  in `nb medium <name>`; `nb load` is the one physical action verb (sibling of
+  `nb label`). `--catalog` has no short flag (a case-only `-C`/`-c` pair is too easy
+  to slip).
 
 ## Deferred / known next steps
 

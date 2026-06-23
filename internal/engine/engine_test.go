@@ -218,7 +218,7 @@ func TestTapeLabelVerify(t *testing.T) {
 	}
 
 	// Out-of-band relabel of the loaded tape (same name, bumped epoch) makes the
-	// catalog stale for it; a dump must refuse until `nb catalog rebuild`. (Loading
+	// catalog stale for it; a dump must refuse until `nb rebuild`. (Loading
 	// a genuinely different tape from the pool is not an error under a changer.)
 	lv := eng.vol.(media.Labeled)
 	if err := lv.WriteLabel(media.Label{Name: "lto-0001", Pool: "lto", Epoch: 2}); err != nil {

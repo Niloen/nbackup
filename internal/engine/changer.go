@@ -86,7 +86,7 @@ func (e *Engine) verifyWritable(vol media.Volume, medium string, appendable bool
 	// is stale for it. (A genuinely different tape is not an error — that is what
 	// loading another tape in the pool is for.)
 	if known, ok := e.cat.Volume(lbl.Name); ok && known.Label.Epoch != lbl.Epoch {
-		return "", 0, fmt.Errorf("volume %q was relabeled since the catalog was updated (epoch %d mounted vs %d cached); run `nb catalog rebuild`", lbl.Name, lbl.Epoch, known.Label.Epoch)
+		return "", 0, fmt.Errorf("volume %q was relabeled since the catalog was updated (epoch %d mounted vs %d cached); run `nb rebuild`", lbl.Name, lbl.Epoch, known.Label.Epoch)
 	}
 	// One-run-per-tape media refuse to append onto a tape that already holds a run.
 	if !appendable {
@@ -161,7 +161,7 @@ func (e *Engine) assertVolume(vol media.Volume, p catalog.Placement) error {
 		return err
 	}
 	if !labeled || lbl.Name != p.Volume || lbl.Epoch != p.Epoch {
-		return fmt.Errorf("medium %q has volume %q (epoch %d) mounted, but slot copy is on %q (epoch %d) — mount it or run `nb catalog rebuild`",
+		return fmt.Errorf("medium %q has volume %q (epoch %d) mounted, but slot copy is on %q (epoch %d) — mount it or run `nb rebuild`",
 			p.Medium, lbl.Name, lbl.Epoch, p.Volume, p.Epoch)
 	}
 	return nil

@@ -76,7 +76,7 @@ func assertArchive(h media.Header, want Expect) error {
 		return fmt.Errorf("position holds a %q record, not an archive", h.Kind)
 	}
 	if h.Slot != want.Slot || h.DLE != want.DLE || h.Level != want.Level {
-		return fmt.Errorf("position holds %s %s L%d, expected %s %s L%d (wrong volume or stale catalog — run `nb catalog rebuild`)",
+		return fmt.Errorf("position holds %s %s L%d, expected %s %s L%d (wrong volume or stale catalog — run `nb rebuild`)",
 			h.Slot, h.DLE, h.Level, want.Slot, want.DLE, want.Level)
 	}
 	return nil
