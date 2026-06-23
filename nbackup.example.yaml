@@ -63,6 +63,20 @@ media:
 # Which medium slots are created on (the landing).
 landing: fast-disk
 
+# Replication (Amanda's vaulting). Each rule mirrors one medium's sealed slots onto
+# another — the batch, idempotent form of `nb copy`. A cron line of
+# `nb dump && nb sync --apply` lands fast on disk, then pushes copies offsite.
+# `nb sync` (no --to) runs every rule; `nb sync --to lto` syncs one ad-hoc target.
+# Sync is dry-run by default; pass --apply to copy. The source defaults to the
+# landing medium; set `from` (or --from) to copy from any other medium (e.g. to
+# restage tape back to disk, or to chain a second offsite tier).
+# sync:
+#   - to: cloud           # mirror landing -> object store
+#   - to: lto
+#     last: 4             # keep only the 4 most recent slots on tape
+#   - from: lto           # second tier: tape -> deep archive (source need not be landing)
+#     to: deep-archive
+
 # Where the catalog's local state (slot cache + tar snapshots) lives. This is the
 # catalog's own directory, independent of any storage medium — the catalog is a
 # cache over the whole pool, not part of one medium. Defaults to ./nbackup-catalog.

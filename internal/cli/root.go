@@ -53,6 +53,7 @@ func NewRootCmd() *cobra.Command {
 		newVerifyCmd(a),
 		newRestoreCmd(a),
 		newCopyCmd(a),
+		newSyncCmd(a),
 		newLabelCmd(a),
 		newLoadCmd(a),
 		newMediumCmd(a),

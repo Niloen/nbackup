@@ -83,6 +83,25 @@ available copy. Run `History` is *derived* from cached slots (no second source t
 drift). The only non-derivable local state is the GNU tar snapshot library
 (`snapshots/…/L<n>.snar`) — precious; losing it forces a full.
 
+**Sync is batch copy, not a new subsystem (`nb sync` = Amanda's vault).** A
+single-slot `CopySlot` already streams from the landing medium to a target and
+records a second `Placement` (idempotent: a slot already on the target is skipped).
+`nb sync` is just that looped over a *selection* of landing slots — every slot the
+target is missing, **oldest-first** (a contiguous, replayable offsite copy; a slot's
+full lands before its incrementals). It reuses `CopySlot` verbatim — same label
+verification, same placement record, same per-slot atomicity — so an interrupted or
+repeated sync resumes for free, and it **stops at the first hard error** (a full or
+offline target won't fix itself by continuing). The source defaults to the landing
+medium but is configurable (`--from` / rule `from:`): `CopySlot` resolves the
+source placement and mounts it for reading via the same `mountForRead`/`assertVolume`
+path `readerFor` uses, so a tape/S3 source works (un-vaulting tape→disk, or a
+second offsite tier), and copy-to-landing is now allowed (the old "target is the
+source" guard became a `from == to` guard). The config `sync:` rules are the
+declarative form (`{from, to, last}`) so a cron `nb dump && nb sync
+--apply` tiers offsite hands-off. Sync composes with pruning rather than driving it:
+the protected-set floor already keeps a slot on disk until its recovery path exists
+elsewhere, so "sync then prune" tiers old slots off local disk safely.
+
 **One mutating `nb` per config at a time** (`internal/lock`, Amanda's per-config
 amflock). Rather than make the catalog concurrently writable, we serialize the
 whole mutating run: every command that writes the catalog or media (`dump`,

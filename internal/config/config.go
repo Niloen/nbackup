@@ -82,6 +82,11 @@ type Config struct {
 	// Media is a map of named storage definitions.
 	Media map[string]Media `yaml:"media"`
 
+	// Sync declares replication rules: each mirrors the landing medium's sealed
+	// slots onto a target medium (Amanda's vaulting). `nb sync` with no --to runs
+	// every rule; `nb sync --to X` is the ad-hoc form and needs no rule.
+	Sync []SyncRule `yaml:"sync"`
+
 	// DumpTypes is a map of named method+option bundles (Amanda's dumptype).
 	DumpTypes map[string]DumpType `yaml:"dumptypes"`
 
@@ -173,6 +178,16 @@ func (m Media) MinAge() (time.Duration, error) {
 	return sizeutil.ParseDuration(m.MinimumAge)
 }
 
+// SyncRule mirrors one medium's slots onto another. Selection bounds keep an
+// expensive target (tape, object store) to a recent window; an unbounded rule
+// replicates everything. The source defaults to the landing medium (the same
+// medium `nb copy` streams from) but may be any other medium via `from`.
+type SyncRule struct {
+	To   string `yaml:"to"`   // target medium name (required; must differ from the source)
+	From string `yaml:"from"` // source medium name ("" = the landing medium)
+	Last int    `yaml:"last"` // copy only the N most recent slots (0 = all)
+}
+
 // DumpType bundles a dump method with its options, referenced by DLEs.
 type DumpType struct {
 	Method string            `yaml:"method"`
@@ -256,6 +271,31 @@ func (c *Config) Validate() error {
 		}
 		if _, err := m.MinAge(); err != nil {
 			return fmt.Errorf("media %s: minimum_age: %w", name, err)
+		}
+	}
+	for i, r := range c.Sync {
+		if r.To == "" {
+			return fmt.Errorf("sync rule %d: `to` is required", i)
+		}
+		if len(c.Media) > 0 {
+			if _, ok := c.Media[r.To]; !ok {
+				return fmt.Errorf("sync rule %d: target %q is not a defined medium", i, r.To)
+			}
+			if r.From != "" {
+				if _, ok := c.Media[r.From]; !ok {
+					return fmt.Errorf("sync rule %d: source %q is not a defined medium", i, r.From)
+				}
+			}
+		}
+		from := r.From
+		if from == "" {
+			from = c.Landing
+		}
+		if from == r.To {
+			return fmt.Errorf("sync rule %d: source and target are the same medium %q", i, r.To)
+		}
+		if r.Last < 0 {
+			return fmt.Errorf("sync rule %d: `last` must not be negative", i)
 		}
 	}
 	return nil

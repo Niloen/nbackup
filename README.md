@@ -18,7 +18,8 @@ This is a first version. See [PRD.md](PRD.md) for the full product vision.
 - **Run** — one planner execution, typically daily.
 - **Cycle** — a safety boundary controlling when slots may be deleted.
 - **Media** — a **Volume** where slots live: local disk, a virtual tape, or (stub)
-  S3. Slots stream between volumes (`nb copy`), e.g. disk → tape.
+  S3. Slots stream between volumes (`nb copy` for one, `nb sync` for many), e.g.
+  land fast on disk then replicate offsite to tape or S3.
 
 A medium is a **volume**: an ordered sequence of self-describing files (Amanda's
 Device API), each carrying an identity **header** (slot, DLE, level, codec, …),
@@ -83,7 +84,8 @@ This produces a single `nb` binary with these subcommands:
 | `nb slot prune`      | Delete slots past the cycle/capacity limits             |
 | `nb verify`          | Verify slot checksums                                    |
 | `nb restore`         | Restore a DLE from a slot                                |
-| `nb copy`            | Copy a slot to another medium (disk → tape)             |
+| `nb copy`            | Copy one slot between media (`--from`/`--to`, e.g. disk → tape) |
+| `nb sync`            | Mirror landing slots onto another medium (disk → tape/s3)|
 | `nb label`           | Label a volume (required for tape before its first dump) |
 | `nb load`            | Load a volume into a medium's drive (bay or shelf reel)   |
 | `nb medium`          | List media, or detail one (incl. bays / drive + shelf)    |
@@ -230,6 +232,45 @@ the slot.
 
 Add `--apply` to actually delete. Capacity and `minimum_age` are per-medium, so
 each store is pruned against its own limits.
+
+### Replication / tiered storage
+
+The common operational shape is **land fast, replicate offsite**: dump to local
+disk (cheap, fast, online), then mirror sealed slots to tape or S3 for the offsite
+copy. `nb sync` is the batch form of `nb copy` (Amanda's *vaulting*): it copies
+every slot the target medium is missing, **oldest first** (so an interrupted sync
+makes contiguous, replayable progress and a full lands before its incrementals).
+
+```bash
+nb sync --to lto            # dry-run: what disk has that tape doesn't
+nb sync --to lto --apply    # copy the backlog
+nb sync --to glacier --last 4 --apply   # only the 4 most recent slots
+nb sync --apply             # run every rule in the config's `sync:` block
+nb sync --from lto --to disk --apply    # un-vault: restage tape back to disk
+```
+
+The source defaults to the landing medium; **`--from` overrides it**, so the same
+command both pushes offsite (disk → tape/S3) and pulls back (tape → disk) — reading
+a tape source mounts the volume holding each slot, just like a restore.
+
+It is **dry-run by default** (like `nb slot prune`) and **idempotent**: each slot
+copies atomically and records a second placement, so re-running resumes where an
+interrupted sync left off and a fully-mirrored target reports "up to date". On a
+hard error (target full or offline) it stops and reports progress. Declare
+recurring targets in the config so a cron line is just `nb dump && nb sync --apply`:
+
+```yaml
+sync:
+  - to: glacier        # mirror everything to the object store
+  - to: lto
+    last: 4            # keep only the 4 most recent slots on tape
+  - from: lto          # second tier: tape -> deep-archive (source need not be landing)
+    to: deep-archive
+```
+
+Replication and pruning compose: a slot becomes prunable from disk only once its
+recovery path exists elsewhere (the protected-set floor), so run `nb sync` before
+`nb slot prune` to tier old slots off local disk safely.
 
 ## Configuration
 

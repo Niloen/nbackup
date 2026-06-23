@@ -151,7 +151,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 	if err := eng.LabelVolume("tape", "tape-0001", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label tape: %v", err)
 	}
-	if err := eng.CopySlot(s.ID, "tape", false, nil); err != nil {
+	if err := eng.CopySlot(s.ID, "", "tape", false, nil); err != nil {
 		t.Fatalf("copy to tape: %v", err)
 	}
 
@@ -259,15 +259,15 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
-	if err := eng.CopySlot(s.ID, "archive", false, nil); err != nil {
+	if err := eng.CopySlot(s.ID, "", "archive", false, nil); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
 
 	// A second copy to the same medium is refused (idempotent) unless forced.
-	if err := eng.CopySlot(s.ID, "archive", false, nil); err == nil {
+	if err := eng.CopySlot(s.ID, "", "archive", false, nil); err == nil {
 		t.Fatal("expected re-copy to the same medium to be refused without --force")
 	}
-	if err := eng.CopySlot(s.ID, "archive", true, nil); err != nil {
+	if err := eng.CopySlot(s.ID, "", "archive", true, nil); err != nil {
 		t.Fatalf("forced re-copy: %v", err)
 	}
 
@@ -371,7 +371,7 @@ func TestTapeLibraryRestore(t *testing.T) {
 	if err := eng.LabelVolume("lib", "Tape1", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label Tape1: %v", err)
 	}
-	if err := eng.CopySlot(s1.ID, "lib", false, nil); err != nil {
+	if err := eng.CopySlot(s1.ID, "", "lib", false, nil); err != nil {
 		t.Fatalf("copy s1: %v", err)
 	}
 
@@ -384,7 +384,7 @@ func TestTapeLibraryRestore(t *testing.T) {
 	if err := eng.LabelVolume("lib", "Tape2", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label Tape2: %v", err)
 	}
-	if err := eng.CopySlot(s2.ID, "lib", false, nil); err != nil {
+	if err := eng.CopySlot(s2.ID, "", "lib", false, nil); err != nil {
 		t.Fatalf("copy s2: %v", err)
 	}
 
@@ -452,18 +452,18 @@ func TestTapeAppendableFalse(t *testing.T) {
 	if err := eng.LabelVolume("lib", "Tape1", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label Tape1: %v", err)
 	}
-	if err := eng.CopySlot(s1.ID, "lib", false, nil); err != nil {
+	if err := eng.CopySlot(s1.ID, "", "lib", false, nil); err != nil {
 		t.Fatalf("copy s1 to fresh tape: %v", err)
 	}
 	// Tape1 now holds a run; a non-appendable medium refuses a second run on it.
-	if err := eng.CopySlot(s2.ID, "lib", false, nil); err == nil {
+	if err := eng.CopySlot(s2.ID, "", "lib", false, nil); err == nil {
 		t.Fatal("expected copy onto a non-appendable tape that already holds a run to be refused")
 	}
 	// A fresh tape accepts it.
 	if err := eng.LabelVolume("lib", "Tape2", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label Tape2: %v", err)
 	}
-	if err := eng.CopySlot(s2.ID, "lib", false, nil); err != nil {
+	if err := eng.CopySlot(s2.ID, "", "lib", false, nil); err != nil {
 		t.Fatalf("copy s2 to fresh tape: %v", err)
 	}
 }
@@ -525,7 +525,7 @@ func TestManualStationWriteSwap(t *testing.T) {
 		t.Fatalf("dump: %v", err)
 	}
 	// The drive is empty: the copy must prompt for a reel, then auto-label it.
-	if err := eng.CopySlot(s.ID, "lto", false, logfDiscard); err != nil {
+	if err := eng.CopySlot(s.ID, "", "lto", false, logfDiscard); err != nil {
 		t.Fatalf("copy to manual station: %v", err)
 	}
 	if op.swaps == 0 {
@@ -579,7 +579,7 @@ func TestManualStationReadSwap(t *testing.T) {
 	if err := eng.LabelVolume("lto", "Reel-A", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label Reel-A: %v", err)
 	}
-	if err := eng.CopySlot(s1.ID, "lto", false, logfDiscard); err != nil {
+	if err := eng.CopySlot(s1.ID, "", "lto", false, logfDiscard); err != nil {
 		t.Fatalf("copy s1: %v", err)
 	}
 
@@ -596,7 +596,7 @@ func TestManualStationReadSwap(t *testing.T) {
 	if err := eng.LabelVolume("lto", "Reel-B", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label Reel-B: %v", err)
 	}
-	if err := eng.CopySlot(s2.ID, "lto", false, logfDiscard); err != nil {
+	if err := eng.CopySlot(s2.ID, "", "lto", false, logfDiscard); err != nil {
 		t.Fatalf("copy s2: %v", err)
 	}
 

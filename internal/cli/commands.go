@@ -402,13 +402,13 @@ func newSlotPruneCmd(a *app) *cobra.Command {
 // newCopyCmd implements `nb copy`: stream a slot from the landing medium to
 // another configured medium (e.g. disk -> tape).
 func newCopyCmd(a *app) *cobra.Command {
-	var to string
+	var from, to string
 	var force bool
 	cmd := &cobra.Command{
 		Use:     "copy <slot-id>",
-		Short:   "Copy a slot to another medium (e.g. disk -> tape)",
-		Long:    "Stream a slot from the landing medium to another configured medium. The destination medium is selected with --to.",
-		Example: "  nb copy --to tape slot-2026-06-21",
+		Short:   "Copy a slot from one medium to another (e.g. disk -> tape)",
+		Long:    "Stream a slot from one configured medium to another. The destination is selected with --to; the source defaults to the landing medium and is overridden with --from (e.g. un-vault tape -> disk).",
+		Example: "  nb copy --to tape slot-2026-06-21\n  nb copy --from tape --to disk slot-2026-06-21",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.load()
@@ -421,7 +421,7 @@ func newCopyCmd(a *app) *cobra.Command {
 			}
 			defer unlock()
 			eng.SetOperator(stdinOperator{})
-			if err := eng.CopySlot(args[0], to, force, a.logf()); err != nil {
+			if err := eng.CopySlot(args[0], from, to, force, a.logf()); err != nil {
 				return err
 			}
 			fmt.Println("copy complete")
@@ -429,9 +429,111 @@ func newCopyCmd(a *app) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&to, "to", "", "destination medium name (required)")
+	cmd.Flags().StringVar(&from, "from", "", "source medium name (default: the landing medium)")
 	cmd.Flags().BoolVar(&force, "force", false, "re-copy even if the slot is already recorded on the target medium")
 	cmd.MarkFlagRequired("to")
 	return cmd
+}
+
+// newSyncCmd implements `nb sync`: the batch form of `nb copy`. It mirrors every
+// landing slot a target is missing onto that target (Amanda's vaulting), oldest
+// first. With --to it syncs one ad-hoc target; without --to it runs the rules in
+// the config's `sync:` block. Dry-run by default (like `nb slot prune`).
+func newSyncCmd(a *app) *cobra.Command {
+	var from, to, sinceStr string
+	var last int
+	var apply, force bool
+	cmd := &cobra.Command{
+		Use:   "sync",
+		Short: "Mirror one medium's slots onto another (e.g. disk -> tape/s3)",
+		Long: "Copy every slot the target medium is missing from a source medium, oldest " +
+			"first. The batch, idempotent form of `nb copy`: an interrupted or repeated sync " +
+			"resumes, copying only what is not yet on the target. The source defaults to the " +
+			"landing medium and is overridden with --from. With --to it syncs one target; " +
+			"without --to it runs the `sync:` rules from the config. Dry-run by default; pass " +
+			"--apply to actually copy.",
+		Example: "  nb sync\n  nb sync --to lto\n  nb sync --to glacier --last 4 --apply\n  nb sync --from lto --to disk --apply",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := a.load()
+			if err != nil {
+				return err
+			}
+			since, err := ParseDate(sinceStr)
+			if err != nil {
+				return err
+			}
+			if sinceStr == "" {
+				since = time.Time{} // ParseDate defaults to today; sync wants "no bound"
+			}
+
+			// Resolve the targets: an explicit --to (ad-hoc), or every configured rule.
+			type target struct {
+				from, name string
+				sel        engine.SyncSelection
+			}
+			var targets []target
+			if to != "" {
+				targets = append(targets, target{from, to, engine.SyncSelection{Last: last, Since: since}})
+			} else {
+				for _, r := range cfg.Sync {
+					targets = append(targets, target{r.From, r.To, engine.SyncSelection{Last: r.Last}})
+				}
+				if len(targets) == 0 {
+					return fmt.Errorf("no sync target: pass --to <medium> or add a `sync:` block to the config")
+				}
+			}
+
+			// Dry-run only reads; --apply writes media + catalog, so lock it.
+			var eng *engine.Engine
+			if apply {
+				var unlock func()
+				eng, unlock, err = a.lockedEngine(cfg)
+				if err != nil {
+					return err
+				}
+				defer unlock()
+				eng.SetOperator(stdinOperator{})
+			} else if eng, err = newEngine(cfg); err != nil {
+				return err
+			}
+
+			for _, t := range targets {
+				report, err := eng.SyncTo(t.from, t.name, t.sel, apply, force, a.logf())
+				if report != nil {
+					printSyncReport(report, apply)
+				}
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&to, "to", "", "target medium (omit to run the config's sync: rules)")
+	cmd.Flags().StringVar(&from, "from", "", "source medium (default: the landing medium)")
+	cmd.Flags().IntVar(&last, "last", 0, "copy only the N most recent slots (0 = all)")
+	cmd.Flags().StringVar(&sinceStr, "since", "", "copy only slots created on/after this date YYYY-MM-DD")
+	cmd.Flags().BoolVar(&apply, "apply", false, "actually copy (default is dry-run)")
+	cmd.Flags().BoolVar(&force, "force", false, "re-copy slots already recorded on the target")
+	return cmd
+}
+
+// printSyncReport renders one target's backlog, matching the prune dry-run style.
+func printSyncReport(r *engine.SyncReport, apply bool) {
+	if len(r.Items) == 0 {
+		fmt.Printf("%s -> %s: up to date\n", r.From, r.To)
+		return
+	}
+	if apply {
+		fmt.Printf("%s -> %s: copied %d slot(s), %s\n", r.From, r.To, r.Copied(), sizeutil.FormatBytes(r.Bytes()))
+		return
+	}
+	fmt.Printf("%s -> %s: %d slot(s) to copy, %s (dry-run; --apply to copy):\n",
+		r.From, r.To, len(r.Items), sizeutil.FormatBytes(r.Bytes()))
+	for _, it := range r.Items {
+		fmt.Printf("  %-24s %2d archive(s)  %s\n", it.SlotID, it.Archives, sizeutil.FormatBytes(it.Bytes))
+	}
 }
 
 // newLabelCmd implements `nb label`: write (or rewrite) a volume's identity
