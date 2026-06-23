@@ -101,7 +101,9 @@ examples, and `nb completion <shell>` to generate shell completion.
 cp nbackup.example.yaml nbackup.yaml   # edit sources + catalog path
 
 nb plan                # preview today's plan and budget usage
+nb plan --days 30      # forecast the next 30 daily runs (when fulls land)
 nb dump                # run the backup, producing one sealed slot
+nb dump --dry-run --date 2026-07-15    # plan that day's run; writes nothing
 nb status              # progress of the running (or most recent) dump
 nb slot                # list slots (with a COPIES column: where each lives)
 nb slot show slot-2026-06-21   # archives + every copy's volume and file positions
@@ -167,6 +169,18 @@ object store.
 Levels are realized with GNU tar's listed-incremental **snapshot library**, kept
 under `<catalog>/snapshots/<dle>/L<n>.snar` — exactly the mechanism Amanda uses
 to turn tar's two-level primitive into N-level backups.
+
+**Forecasting the schedule.** `nb plan --days N` projects the planner forward over
+N consecutive daily runs, advancing a *copy* of the history after each simulated
+run — so the forecast shows when each DLE's next full actually lands and how its
+incrementals climb in between, not just today's decision repeated. Estimates and
+the capacity ceiling are sampled once and held constant, making this a
+*level-schedule* forecast rather than a capacity timeline; nothing is written.
+
+`nb dump --dry-run [--date <day>]` is the single-run dry run: it plans the run for
+`--date` against the current catalog — the exact decision a real `nb dump --date
+<day>` would make — and prints it without sealing anything. (`--date` means the
+same run date in both modes.)
 
 ### Slot naming and multiple runs per day
 

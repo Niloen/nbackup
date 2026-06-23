@@ -156,6 +156,37 @@ func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, p 
 	return plan
 }
 
+// Simulate projects the planner forward over `days` consecutive daily runs from
+// `start`, advancing a cloned history after each simulated run so each day's plan
+// reflects the fulls and incrementals the runs before it would have produced (the
+// next full lands at the cycle deadline, incrementals climb in between). It writes
+// nothing — the caller's history is untouched.
+//
+// Estimates and params are sampled once and held constant across the window: this
+// forecasts the *level schedule* from today's sizes, not capacity drift as slots
+// accumulate. The per-day EstBytes therefore tracks the chosen levels, not a
+// reclamation timeline.
+func Simulate(dles []config.DLE, hist *catalog.History, est map[string]Estimate, p Params, start time.Time, days int) []*Plan {
+	if days < 1 {
+		days = 1
+	}
+	h := hist.Clone()
+	plans := make([]*Plan, 0, days)
+	for i := 0; i < days; i++ {
+		date := start.AddDate(0, 0, i)
+		plan := Build(dles, h, est, p, date)
+		plans = append(plans, plan)
+		// Advance the cloned history as if this day's run had been sealed, so the
+		// next day's DaysSinceFull / IncrementalsSinceFull see it.
+		day := date.Format("2006-01-02")
+		slotID := "slot-" + day
+		for _, it := range plan.Items {
+			h.RecordRun(it.Name, slotID, day, it.Level)
+		}
+	}
+	return plans
+}
+
 func runBytes(cands []*cand) int64 {
 	var t int64
 	for _, c := range cands {

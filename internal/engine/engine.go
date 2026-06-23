@@ -430,13 +430,30 @@ func (e *Engine) expectedTapeFor(medium string, now time.Time) TapeExpectation {
 // fulls (degrade to fit capacity, optionally promote to fill light runs).
 func (e *Engine) Plan(date time.Time) *planner.Plan {
 	dles := e.cfg.DLEs()
-	return planner.Build(dles, e.cat.History(), e.estimates(dles), planner.Params{
+	return planner.Build(dles, e.cat.History(), e.estimates(dles), e.plannerParams(date), date)
+}
+
+// Simulate forecasts the next `days` daily runs from `start` without writing
+// anything: it plans each day and advances a cloned history between them, so the
+// level schedule — when each DLE's full next lands, how its incrementals climb — is
+// projected forward. Estimates and the capacity ceiling are sampled once at `start`
+// and held constant, so this is a schedule forecast, not a capacity timeline.
+func (e *Engine) Simulate(start time.Time, days int) []*planner.Plan {
+	dles := e.cfg.DLEs()
+	return planner.Simulate(dles, e.cat.History(), e.estimates(dles), e.plannerParams(start), start, days)
+}
+
+// plannerParams derives the planner's tuning inputs from config and the medium for
+// a run date. Shared by Plan and Simulate so a single-day plan and the forward
+// forecast use identical balancing rules.
+func (e *Engine) plannerParams(date time.Time) planner.Params {
+	return planner.Params{
 		FullIntervalDays:    e.cfg.FullIntervalDays(),
 		CapacityBytes:       e.profile.TotalBytes(),
 		CapacityRoomBytes:   e.capacityRoom(date),
 		Promote:             e.cfg.Cycle.Promote,
 		PromoteCeilingBytes: e.promoteCeiling(),
-	}, date)
+	}
 }
 
 // estimates predicts each DLE's full and next-incremental size by asking the dump
