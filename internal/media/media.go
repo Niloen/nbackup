@@ -99,9 +99,13 @@ var ErrNoVolume = fmt.Errorf("no volume loaded in the drive")
 // mounted (via Labeled.ReadLabel). The engine resolves labels↔bays on top of this
 // seam. Every id reported by Bays()/Loaded() is a valid Mount() target.
 //
-// A Station (single-drive station) is NOT a Library: it has no robot and no
-// addressable bays, so the two are siblings, not a subtype.
+// A Library IS a Volume — the one currently mounted in the drive: the embedded
+// Volume operations act on the mounted bay, and Mount changes which bay that is.
+// A Station (single-drive station) is also a Volume but is NOT a Library: it has no
+// robot and no addressable bays, so the two are siblings, not a subtype. ("Siblings,
+// not subtype" is about Library vs Station — both are Volumes.)
 type Library interface {
+	Volume
 	// Mount loads the named bay into the drive (error if the bay does not exist).
 	// Subsequent Volume/Labeled operations act on the mounted bay.
 	Mount(bay string) error
@@ -116,7 +120,11 @@ type Library interface {
 // no robot and no addressable bays — the software sees only the one volume in the
 // drive, never an inventory of the others. The engine prompts the operator to swap
 // rather than mounting automatically.
+//
+// A Station IS a Volume — the one currently in the drive: the embedded Volume
+// operations act on the loaded reel.
 type Station interface {
+	Volume
 	// LoadedVolume reports the volume currently in the drive; ok is false when the
 	// drive is empty.
 	LoadedVolume() (VolumeStatus, bool)
@@ -166,7 +174,6 @@ func (o Options) Get(key string) string { return o[key] }
 // scan from the start, as Amanda re-reads a tape). Normal backup/restore/copy
 // resolve positions from the catalog and call ReadFile, never Files().
 type Volume interface {
-	Name() string
 	// AppendFile writes h, then the payload produced by write, and returns the
 	// file's position. The Volume owns concurrency and position assignment
 	// (disk allows concurrent appends; tape serializes).
@@ -283,7 +290,7 @@ func CopySlot(dst, src Volume, slotID string) ([]FileInfo, error) {
 		copied = append(copied, FileInfo{Pos: pos, Header: f.Header})
 	}
 	if len(copied) == 0 {
-		return nil, fmt.Errorf("slot %s not found on source volume %q", slotID, src.Name())
+		return nil, fmt.Errorf("slot %s not found on the source volume", slotID)
 	}
 	return copied, nil
 }

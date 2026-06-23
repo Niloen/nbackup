@@ -118,10 +118,16 @@ without hardware).
   `media.ShelfStation`) can additionally enumerate its offline **shelf** reels and
   `Insert` one into the drive; a real `device:` drive is a plain `Station` — its
   reels are invisible and its swaps are physical (operator loads by hand; the
-  software only re-reads the drive). `Library` and `Station` are **siblings, not
-  subtype** (a station is never bay-addressed), so generic catalog/engine code can't
+  software only re-reads the drive). Both `Library` and `Station` **embed
+  `media.Volume`** — a changer *is* the volume currently in its drive, plus the
+  positioning controls — so code holds a `Volume` and discovers the shape by one type
+  assertion, never carrying a separate handle. `Library` and `Station` are
+  **siblings, not subtype** (a station is never bay-addressed; "siblings" is about
+  the two of them, both being Volumes), so generic catalog/engine code can't
   bay-iterate a station. Reels are addressed by their own ids (`reel-01…`), never a
-  synthetic "drive" position — `"drive"` is CLI presentation only.
+  synthetic "drive" position — `"drive"` is CLI presentation only. All media-shape
+  dispatch (the `vol.(media.Library/Station/ShelfStation)` assertions) is confined to
+  `engine/changer.go`; the rest of the engine stays shape-agnostic.
 - **Operator seam.** A single-drive station can't change its own tape, so when the
   loaded reel won't do, the engine asks an `Operator` (CLI: stdin) to swap and
   retries — on writes (`verifyWritable`: blank/foreign/wrong-pool/full → load a

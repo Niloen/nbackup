@@ -42,7 +42,7 @@ func newPlanCmd(a *app) *cobra.Command {
 
 			plan := eng.Plan(date)
 			fmt.Printf("Plan for run %s  (cycle %dd, balance target ~%s/run, landing %q)\n\n",
-				slot.DateString(date), plan.Interval, sizeutil.FormatBytes(plan.Target), cfg.Landing)
+				slot.DateString(date), plan.Interval, sizeutil.FormatBytes(plan.Target), eng.Landing())
 			for _, w := range plan.Warnings {
 				fmt.Printf("WARNING: %s\n", w)
 			}
