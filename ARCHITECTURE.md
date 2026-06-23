@@ -47,6 +47,7 @@ registry registration, not a conditional in the core.
 | `method` + `method/gnutar` | dump `Method` interface + registry; GNU tar impl | Application API / amgtar |
 | `filter` | external compressor child processes (zstd/gzip/none) + registry | compress |
 | `xfer` | in-process stream metering: checksum + byte counting | Xfer API |
+| `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `catalog` | local cache of slot index + volume registry + snapshot library; derives `History` | catalog / curinfo / tapelist |
 | `policy` | retention safety floor: protected slots (pure) | policy |
 | `planner` | multilevel level scheduling (pure) | planner |
@@ -54,7 +55,8 @@ registry registration, not a conditional in the core.
 | `cli` | thin command wiring | amdump / amadmin |
 
 Dependencies flow one way: `cli → engine → {planner, policy, method, filter,
-slotio, catalog, config}` over leaf packages `{media, xfer, slot, sizeutil}`.
+slotio, catalog, config, progress}` over leaf packages `{media, xfer, slot,
+sizeutil}`.
 Domain packages stay pure; `method`/`media`/`filter` are pluggable adapters;
 `engine` is the only component aware of all of them. A backup is a pipeline of
 processes: **source** (`tar` via `method.Backup`) → **filter** (compressor child)
@@ -127,6 +129,22 @@ media (disk, S3) carry no label and skip the whole dance.
 "tape": `bays`, `volume_size`, `media.ErrNoVolume`, `media.Changer`/`BayStatus`,
 `nb changer`. Tape specifics (`type: tape`, the `tape` package, `mt`, `vtape`)
 stay local, so a future `usb`/removable-disk medium reuses the vocabulary.
+
+**Run monitoring is a status file, not a daemon.** `nb dump` drives a
+`progress.Tracker` whose dumpers report start / live bytes / finish; the tracker
+flushes a single JSON snapshot to `<workdir>/run-status.json` (atomic temp+rename,
+byte updates throttled to 1 s, state changes forced). `nb status` is a *separate*
+process that just reads and renders that file — Amanda's amdump-log + amstatus
+split, minus the daemon, which fits "state lives in inspectable files." It needs no
+engine (no media scan), so it is cheap to poll, and the final `done`/`failed`
+snapshot is left in place as the last-run record. Progress reporting never blocks
+or fails a backup (a write error is a stderr warning). **Faithful adaptation:**
+NBackup has no holding disk — each DLE streams source→compressor→volume in one
+pass — so Amanda's separate dumper/taper queues collapse to one `dumping` state
+per DLE, metered by uncompressed bytes against the planner estimate. The new
+measurement point is an uncompressed `xfer.Counter` on the tar→compressor stream
+in `slotio.WriteArchive`; compressed bytes come from the existing `xfer.Meter`
+(now atomic so it can be polled live).
 
 **Reclamation asymmetry.** Disk reclaims per slot (`RemoveSlot`); tape reclaims a
 whole volume (relabel). Pruning has a shared safety floor (`policy.Protected`:

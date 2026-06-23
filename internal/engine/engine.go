@@ -21,6 +21,7 @@ import (
 	"github.com/Niloen/nbackup/internal/method"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/policy"
+	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/restore"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/slot"
@@ -738,13 +739,21 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 		return nil, err
 	}
 
-	if err := e.runDumpers(plan.Items, w, logf); err != nil {
+	// Track live progress to the run-status file so `nb status` can watch a
+	// detached run. Progress reporting never blocks or fails the backup.
+	tr := progress.NewTracker(slotID, e.cfg.Dumpers(), planProgress(plan.Items), time.Now,
+		progress.NewFileSink(e.cfg.WorkdirPath(), time.Now))
+
+	if err := e.runDumpers(plan.Items, w, tr, logf); err != nil {
+		tr.SetPhase(progress.PhaseFailed)
 		return nil, err
 	}
 
+	tr.SetPhase(progress.PhaseSealing)
 	logf.log("verifying %d archive checksum(s)", w.ArchiveCount())
 	sealed, err := w.Seal(time.Now().UTC())
 	if err != nil {
+		tr.SetPhase(progress.PhaseFailed)
 		return nil, err
 	}
 	placement := catalog.Placement{Medium: e.mediumName, Volume: volName, Epoch: epoch}
@@ -752,9 +761,21 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 		placement.Archives = append(placement.Archives, catalog.ArchivePos{DLE: p.DLE, Level: p.Level, Pos: p.Pos})
 	}
 	if err := e.cat.Record(sealed, placement); err != nil {
+		tr.SetPhase(progress.PhaseFailed)
 		return nil, fmt.Errorf("update catalog cache: %w", err)
 	}
+	tr.SetPhase(progress.PhaseDone)
 	return sealed, nil
+}
+
+// planProgress projects planner items onto the progress package's seed type,
+// keeping progress unaware of the planner.
+func planProgress(items []planner.Item) []progress.Plan {
+	out := make([]progress.Plan, len(items))
+	for i, it := range items {
+		out[i] = progress.Plan{Name: it.Name, Level: it.Level, EstBytes: it.EstBytes}
+	}
+	return out
 }
 
 // runDumpers backs up every planned item into the slot. With parallelism.dumpers
@@ -762,11 +783,11 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 // semaphore; the first error stops scheduling further items and is returned. Each
 // dumper writes a distinct object into the slot, which the medium must allow
 // concurrently (disk does) and the slot Writer serializes its bookkeeping.
-func (e *Engine) runDumpers(items []planner.Item, w *slotio.Writer, logf Logf) error {
+func (e *Engine) runDumpers(items []planner.Item, w *slotio.Writer, tr *progress.Tracker, logf Logf) error {
 	dumpers := e.cfg.Dumpers()
 	if dumpers <= 1 || len(items) <= 1 {
 		for _, item := range items {
-			if err := e.backupItem(w, item, logf); err != nil {
+			if err := e.backupItem(w, item, tr, logf); err != nil {
 				return err
 			}
 		}
@@ -805,7 +826,7 @@ func (e *Engine) runDumpers(items []planner.Item, w *slotio.Writer, logf Logf) e
 			if failed() {
 				return
 			}
-			if err := e.backupItem(w, it, logf); err != nil {
+			if err := e.backupItem(w, it, tr, logf); err != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
@@ -854,8 +875,19 @@ func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 
 // backupItem archives a single DLE into the slot via the writer. It owns the
 // dump-method side (resolving the method, building the request, requiring the
-// base snapshot for incrementals); the writer owns the on-media side.
-func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, logf Logf) error {
+// base snapshot for incrementals); the writer owns the on-media side. It reports
+// the DLE's lifecycle (start, live bytes, finish/fail) to the run tracker.
+func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tracker, logf Logf) (err error) {
+	tr.StartDLE(item.Name)
+	var arch slot.Archive
+	defer func() {
+		if err != nil {
+			tr.FinishDLE(item.Name, 0, 0, 0, err)
+		} else {
+			tr.FinishDLE(item.Name, arch.FileCount, arch.Uncompressed, arch.Compressed, nil)
+		}
+	}()
+
 	m, err := e.methodForDumpType(item.DLE.DumpTypeName())
 	if err != nil {
 		return err
@@ -884,7 +916,8 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, logf Logf) erro
 		Level:    item.Level,
 		BaseSlot: item.BaseSlot,
 	}
-	arch, err := w.WriteArchive(spec, func(out io.Writer) (slotio.Produced, error) {
+	progressFn := func(uncompressed, compressed int64) { tr.AddBytes(item.Name, uncompressed, compressed) }
+	arch, err = w.WriteArchive(spec, progressFn, func(out io.Writer) (slotio.Produced, error) {
 		res, berr := m.Backup(req, out)
 		if berr != nil {
 			return slotio.Produced{}, berr

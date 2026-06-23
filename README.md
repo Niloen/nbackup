@@ -77,6 +77,7 @@ This produces a single `nb` binary with these subcommands:
 |----------------------|----------------------------------------------------------|
 | `nb plan`            | Show what the next run would do                          |
 | `nb dump`            | Execute a run and seal a slot                            |
+| `nb status`          | Show progress of the current (or most recent) run        |
 | `nb slot`            | List slots (default)                                     |
 | `nb slot show`       | Show a single slot's archives and copies                |
 | `nb slot prune`      | Delete slots past the cycle/capacity limits             |
@@ -99,6 +100,7 @@ cp nbackup.example.yaml nbackup.yaml   # edit sources + catalog path
 
 nb plan                # preview today's plan and budget usage
 nb dump                # run the backup, producing one sealed slot
+nb status              # progress of the running (or most recent) dump
 nb slot                # list slots (with a COPIES column: where each lives)
 nb slot show slot-2026-06-21   # archives + every copy's volume and file positions
 nb medium              # media overview: type, slots, usage / capacity, volume
@@ -177,6 +179,34 @@ the volume, and finally appends the **seal record** — one file carrying the sl
 metadata (identity, sizes, checksums, member listings) with `status: sealed`. The
 seal record is written last, so its presence marks the slot complete; after
 sealing, a slot is immutable — re-running a sealed date is refused.
+
+### Monitoring a run
+
+A long `nb dump` (run detached, e.g. from cron) reports progress to a status file
+in the catalog workdir as it goes. From any other shell, `nb status` reads that
+file and prints an at-a-glance report — like Amanda's `amstatus`:
+
+```text
+Run slot-2026-06-21  [running]
+  started:  2026-06-21 02:00:03  (elapsed 4m12s)
+  dumpers:  2 configured, 2 active
+  dles:     1 done, 2 active, 1 pending
+
+DLE          LEVEL  STATE    PROGRESS           DONE       EST        WRITTEN
+app01-etc    L1     done     [##########] 100%  120.00 kB  ~118.0 kB  41.00 kB
+app01-home   L0     dumping  [####......]  42%  8.40 GB    ~20.0 GB   3.10 GB
+db01-pg      L0     dumping  [##........]  18%  3.60 GB    ~20.0 GB   1.40 GB
+app01-var    L1     pending  -                  0 B        ~2.0 GB    0 B
+
+Total:    12.12 GB of ~62.12 GB  (20%)
+Rate:     48.10 MB/s
+ETA:      17m18s
+```
+
+Each DLE's percentage is uncompressed bytes against the planner estimate; the run
+streams source→compressor→volume in one pass, so there is a single `dumping`
+state per DLE (no separate dumper/taper queues). `nb status --watch 2s` refreshes
+until the run finishes; afterwards `nb status` shows the last run's final result.
 
 ### Restore
 
