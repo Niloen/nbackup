@@ -46,6 +46,42 @@ type FileInfo struct {
 	Header Header
 }
 
+// LabelMagic marks a label record as NBackup's, so a foreign or blank volume is
+// never mistaken for one of ours (and so never silently overwritten).
+const LabelMagic = "nbackup"
+
+// Label is a volume's self-describing identity, stored as the payload of the
+// file-0 label record. It is to a volume what a seal record is to a slot: the
+// on-medium fact a catalog caches. Only media whose physical mount is ambiguous
+// (tape — the reel behind the drive can be swapped) carry one; address-identified
+// media (disk, s3) do not.
+type Label struct {
+	Magic     string    `json:"magic"`              // LabelMagic — proves the volume is ours
+	Name      string    `json:"name"`               // unique, human-facing (e.g. "lto-0007")
+	Pool      string    `json:"pool"`               // the medium/pool name; blocks cross-pool clobber
+	Sequence  int       `json:"sequence,omitempty"` // ordinal within the pool (optional)
+	Epoch     int       `json:"epoch"`              // bumped on every (re)label; detects a stale catalog
+	WrittenAt time.Time `json:"written_at"`
+}
+
+// Labeled is implemented by media that identify themselves on the medium (tape).
+// The engine type-asserts this to decide whether to run the label-verify protocol
+// before writing or reading; media that don't implement it are trusted by address.
+type Labeled interface {
+	// ReadLabel returns the volume's label. ok is false only when the volume is
+	// blank (no files). A non-empty volume whose file 0 is not a valid NBackup
+	// label is reported as ErrForeignVolume — it must not be silently overwritten.
+	ReadLabel() (lbl Label, ok bool, err error)
+	// WriteLabel resets the volume to empty and writes lbl as file 0. This is the
+	// (re)labeling operation and destroys any existing contents; the caller owns
+	// the policy decision of whether that is allowed.
+	WriteLabel(lbl Label) error
+}
+
+// ErrForeignVolume reports a non-empty volume whose file 0 is not an NBackup
+// label (someone else's tape, or non-NBackup data).
+var ErrForeignVolume = fmt.Errorf("foreign volume: file 0 is not an NBackup label")
+
 // Options carries medium-specific configuration to a factory as generic
 // key/value parameters (e.g. "path" for disk, "bucket" for s3).
 type Options map[string]string

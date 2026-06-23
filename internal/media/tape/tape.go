@@ -8,9 +8,9 @@
 package tape
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/Niloen/nbackup/internal/media"
 )
@@ -32,7 +32,7 @@ func init() {
 		if err != nil {
 			return nil, err
 		}
-		return newTape(dev, opts.Get("label"))
+		return &tape{dev: dev}, nil
 	})
 	media.RegisterProfile("tape", media.NewVolumeProfile)
 }
@@ -46,28 +46,13 @@ type device interface {
 	readFile(pos int) (io.ReadCloser, error)
 	// count returns the number of files on the volume (the next file number).
 	count() (int, error)
+	// reset truncates the volume to empty (next write becomes file 0). It is the
+	// physical basis of (re)labeling — relabel = reset then write a new file 0.
+	reset() error
 }
 
 type tape struct {
 	dev device
-}
-
-func newTape(dev device, label string) (*tape, error) {
-	t := &tape{dev: dev}
-	n, err := dev.count()
-	if err != nil {
-		return nil, err
-	}
-	if n == 0 { // a fresh volume gets a label at file 0
-		if label == "" {
-			label = "nbackup"
-		}
-		if _, err := t.AppendFile(media.Header{Kind: media.KindLabel, DLE: label, CreatedAt: time.Now().UTC()},
-			func(io.Writer) error { return nil }); err != nil {
-			return nil, err
-		}
-	}
-	return t, nil
 }
 
 func (t *tape) Name() string { return "tape" }
@@ -122,4 +107,49 @@ func (t *tape) Files() ([]media.FileInfo, error) {
 // not by deleting individual files.
 func (t *tape) RemoveSlot(string) error {
 	return fmt.Errorf("tape: per-slot removal unsupported; reuse is whole-volume (relabel)")
+}
+
+// ReadLabel reads the file-0 label record. A blank tape (no files) reports
+// ok=false; a non-empty tape whose file 0 is not our label is foreign.
+func (t *tape) ReadLabel() (media.Label, bool, error) {
+	n, err := t.dev.count()
+	if err != nil {
+		return media.Label{}, false, err
+	}
+	if n == 0 {
+		return media.Label{}, false, nil // blank
+	}
+	h, rc, err := t.ReadFile(0)
+	if err != nil {
+		return media.Label{}, false, err
+	}
+	defer rc.Close()
+	if h.Kind != media.KindLabel {
+		return media.Label{}, false, media.ErrForeignVolume
+	}
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return media.Label{}, false, err
+	}
+	var lbl media.Label
+	if err := json.Unmarshal(data, &lbl); err != nil || lbl.Magic != media.LabelMagic {
+		return media.Label{}, false, media.ErrForeignVolume
+	}
+	return lbl, true, nil
+}
+
+// WriteLabel resets the volume and writes lbl as file 0, destroying any prior
+// contents. The caller is responsible for deciding this is allowed.
+func (t *tape) WriteLabel(lbl media.Label) error {
+	if err := t.dev.reset(); err != nil {
+		return err
+	}
+	lbl.Magic = media.LabelMagic
+	data, err := json.Marshal(lbl)
+	if err != nil {
+		return err
+	}
+	_, err = t.AppendFile(media.Header{Kind: media.KindLabel, CreatedAt: lbl.WrittenAt},
+		func(w io.Writer) error { _, e := w.Write(data); return e })
+	return err
 }

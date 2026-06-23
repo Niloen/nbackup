@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"text/tabwriter"
+	"time"
 
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/sizeutil"
@@ -265,6 +266,31 @@ func CmdCopy(args []string) error {
 	}
 	fmt.Println("copy complete")
 	return nil
+}
+
+// CmdLabel implements `nb label`: write (or rewrite) a volume's identity label.
+// This is the deliberate act that makes a tape writable; it guards against
+// overwriting foreign data or a still-active volume.
+func CmdLabel(args []string) error {
+	fs := flag.NewFlagSet("nb label", flag.ExitOnError)
+	cfgPath := fs.String("c", DefaultConfigPath, "path to config file")
+	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
+	relabel := fs.Bool("relabel", false, "reuse a volume already labeled by NBackup")
+	force := fs.Bool("force", false, "override safety refusals (foreign data / still-active volume)")
+	fs.Parse(args)
+
+	if fs.NArg() < 2 {
+		return fmt.Errorf("usage: nb label [--relabel] [--force] <medium> <name>")
+	}
+	cfg, err := loadConfig(*cfgPath, *catalogFlag)
+	if err != nil {
+		return err
+	}
+	eng, err := newEngine(cfg)
+	if err != nil {
+		return err
+	}
+	return eng.LabelVolume(fs.Arg(0), fs.Arg(1), *relabel, *force, time.Now().UTC(), logfStdout)
 }
 
 // CmdCatalog implements `nbcatalog`: maintain the local slot-index cache.

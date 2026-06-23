@@ -82,6 +82,7 @@ This produces the `nb` umbrella tool plus standalone commands:
 | `nbrestore` | `nb restore` | Restore a DLE from a slot                |
 | `nbcatalog` | `nb catalog` | Maintain the local slot-index cache      |
 | —           | `nb copy`    | Copy a slot to another medium (disk → tape) |
+| —           | `nb label`   | Label a volume (required for tape before its first dump) |
 
 ## Quick start
 
@@ -265,6 +266,19 @@ virtual tape (file-backed, fully tested) and a `device:` real drive (`mt` +
 `/dev/nst0`). The real-drive backend is structurally complete but unverified
 without hardware, so CI exercises the virtual tape.
 
+**Volume labels (tape).** Tapes carry a self-describing identity label at file 0
+(`nbackup` magic, name, pool, epoch) — the volume-level analogue of a slot's seal
+record. The label is a *capability* (`media.Labeled`), so address-identified media
+(disk, S3) carry none and skip the dance entirely. Before a dump, the engine reads
+and verifies the label and **refuses to write** to a foreign, blank (unless
+`auto_label`), wrong, or relabeled-since-cached reel — Amanda's overwrite guard.
+Label a tape with `nb label <medium> <name>`; reuse an expired one with
+`nb label --relabel` (refused while it still holds protected slots, override with
+`--force`). On read, every archive's header is asserted against the catalog's
+expectation, catching a swapped tape or a stale catalog. The catalog caches the
+volume registry (`catalog.Volumes`, medium-neutral for Amanda's *tapelist*).
+Multi-tape pools/changers are the next step; today a tape medium is one volume.
+
 Not yet implemented (declared in config for forward-compatibility):
 
 - **S3 media** — registered as a Volume stub; no S3 client yet.
@@ -312,13 +326,19 @@ registration, not a conditional in the core.
 ### The catalog is a cache
 
 Slots on the `media.Volume` are the **source of truth**; every file is
-self-describing (header block) and every slot carries a seal record. The
-`catalog` is a **local cache** of the slot index *and each archive's volume
-position* (kept in the workdir as `catalog.json`), so planning, listing,
-restore-location, pruning, and budget reporting never touch the media — which
-matters when the volume is slow or offline (S3/Glacier/tape). This mirrors
-Amanda, which never scans tapes to operate: it keeps `curinfo`/`tapelist`/catalog
-databases locally and rebuilds them from self-describing media when needed.
+self-describing (header block), every slot carries a seal record, and every
+labeled volume carries a label record. The `catalog` is a **local cache** of the
+slot index, *each archive's volume position*, and the *volume registry*
+(`catalog.Volumes`), so planning, listing, restore-location, pruning, and budget
+reporting never touch the media — which matters when the volume is slow or offline
+(S3/Glacier/tape). This mirrors Amanda, which never scans tapes to operate: it
+keeps `curinfo`/`tapelist`/catalog databases locally and rebuilds them from
+self-describing media when needed.
+
+The catalog lives in its **own directory** (`workdir`, default `nbackup-catalog`),
+**independent of any storage medium** — it is a cache over the whole pool, not part
+of one medium. One `Files()` scan rebuilds everything: seals → the slot index,
+labels → the volume registry (`nb catalog rebuild`).
 
 Consequences:
 

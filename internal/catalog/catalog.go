@@ -39,12 +39,23 @@ type Catalog struct {
 	workdir string
 	index   []*slot.Slot              // cached sealed slots, sorted in run order
 	pos     map[string]map[string]int // slotID -> ArchiveKey -> volume position
+	volumes []*VolumeRecord           // the volume registry (Labeled media only)
 	loaded  bool
 }
 
+// VolumeRecord is the catalog's cached knowledge of one volume in a pool
+// (Amanda's tapelist entry, medium-neutrally named): its on-medium identity and
+// the slots it holds. Reusability is derived, not stored — a volume is reusable
+// iff every slot on it is past retention and none is the last verified successor.
+type VolumeRecord struct {
+	Label media.Label `json:"label"`
+	Slots []string    `json:"slots"`
+}
+
 type cacheFile struct {
-	Slots []*slot.Slot              `json:"slots"`
-	Pos   map[string]map[string]int `json:"pos"`
+	Slots   []*slot.Slot              `json:"slots"`
+	Pos     map[string]map[string]int `json:"pos"`
+	Volumes []*VolumeRecord           `json:"volumes,omitempty"`
 }
 
 // Open loads the catalog cache from the workdir. If the cache file is absent, the
@@ -66,6 +77,7 @@ func Open(workdir string) (*Catalog, error) {
 	if cf.Pos != nil {
 		c.pos = cf.Pos
 	}
+	c.volumes = cf.Volumes
 	c.loaded = true
 	return c, nil
 }
@@ -98,13 +110,33 @@ func (c *Catalog) Rebuild(vol media.Volume) (int, error) {
 	return len(c.index), nil
 }
 
-// refresh rebuilds the in-memory index from the volume's self-index: it groups
-// files by slot, reads each sealed slot's seal record for metadata, and records
-// every archive's position.
+// refresh rebuilds the in-memory index and volume registry from the volume's
+// self-index (the same Files() scan yields both: seals -> slots, label -> volume).
 func (c *Catalog) refresh(vol media.Volume) error {
-	files, err := vol.Files()
+	slots, pos, err := scanSlots(vol)
 	if err != nil {
 		return err
+	}
+	c.setIndex(slots)
+	c.pos = pos
+	c.volumes = readVolume(vol, c.slotIDs())
+	return nil
+}
+
+// ScanSlots reads a volume's sealed slots without touching the cache. It is the
+// rebuild scan, shared by catalog refresh and by callers needing a volume's
+// current contents (e.g. checking whether a tape is still active before relabel).
+func ScanSlots(vol media.Volume) ([]*slot.Slot, error) {
+	slots, _, err := scanSlots(vol)
+	return slots, err
+}
+
+// scanSlots groups a volume's files by slot, reads each sealed slot's seal record
+// for metadata, and records every archive's position.
+func scanSlots(vol media.Volume) ([]*slot.Slot, map[string]map[string]int, error) {
+	files, err := vol.Files()
+	if err != nil {
+		return nil, nil, err
 	}
 	bySlot := map[string][]media.FileInfo{}
 	for _, f := range files {
@@ -136,9 +168,42 @@ func (c *Catalog) refresh(vol media.Volume) error {
 		}
 		pos[slotID] = pm
 	}
-	c.setIndex(slots)
-	c.pos = pos
-	return nil
+	return slots, pos, nil
+}
+
+// readVolume builds the registry entry for a Labeled volume holding the given
+// slots. Address-identified media (no label) and blank/foreign tapes yield none.
+func readVolume(vol media.Volume, slotIDs []string) []*VolumeRecord {
+	lv, ok := vol.(media.Labeled)
+	if !ok {
+		return nil
+	}
+	lbl, labeled, err := lv.ReadLabel()
+	if err != nil || !labeled {
+		return nil
+	}
+	return []*VolumeRecord{{Label: lbl, Slots: slotIDs}}
+}
+
+// slotIDs returns the cached slot IDs in run order.
+func (c *Catalog) slotIDs() []string {
+	out := make([]string, 0, len(c.index))
+	for _, s := range c.index {
+		out = append(out, s.ID)
+	}
+	return out
+}
+
+// Volumes returns the cached volume registry.
+func (c *Catalog) Volumes() []*VolumeRecord { return c.volumes }
+
+// SetVolume records the label of the volume the catalog currently tracks, so a
+// later run can detect a swapped or relabeled tape. Slots are taken from the
+// current index (single-volume model).
+func (c *Catalog) SetVolume(lbl media.Label) error {
+	c.volumes = []*VolumeRecord{{Label: lbl, Slots: c.slotIDs()}}
+	c.loaded = true
+	return c.persist()
 }
 
 // Slots returns the cached sealed slots in run order.
@@ -184,7 +249,16 @@ func (c *Catalog) Add(s *slot.Slot, positions map[string]int) error {
 	c.setIndex(append(filtered, s))
 	c.pos[s.ID] = positions
 	c.loaded = true
+	c.syncVolumeSlots()
 	return c.persist()
+}
+
+// syncVolumeSlots keeps the tracked volume's slot list in step with the index
+// (single-volume model: every cached slot lives on the one tracked volume).
+func (c *Catalog) syncVolumeSlots() {
+	if len(c.volumes) == 1 {
+		c.volumes[0].Slots = c.slotIDs()
+	}
 }
 
 // Remove drops a slot from the cache and persists it.
@@ -197,6 +271,7 @@ func (c *Catalog) Remove(id string) error {
 	}
 	c.setIndex(kept)
 	delete(c.pos, id)
+	c.syncVolumeSlots()
 	return c.persist()
 }
 
@@ -236,7 +311,7 @@ func (c *Catalog) persist() error {
 	if err := os.MkdirAll(c.workdir, 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(cacheFile{Slots: c.index, Pos: c.pos}, "", "  ")
+	data, err := json.MarshalIndent(cacheFile{Slots: c.index, Pos: c.pos, Volumes: c.volumes}, "", "  ")
 	if err != nil {
 		return err
 	}

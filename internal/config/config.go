@@ -24,6 +24,11 @@ const DefaultCodec = "zstd"
 // DefaultMethod is the dump method assumed when a dumptype omits one.
 const DefaultMethod = "gnutar"
 
+// DefaultWorkdir is where the catalog cache and snapshot library live when
+// `workdir` is unset. It is deliberately independent of any storage medium: the
+// catalog is a cache over the whole pool, not a thing owned by one medium.
+const DefaultWorkdir = "nbackup-catalog"
+
 // Config is the top-level NBackup configuration.
 type Config struct {
 	// Cycle holds cross-cutting retention safety. Capacity-oriented retention
@@ -48,8 +53,8 @@ type Config struct {
 	// GnuTarPath is a global default GNU tar binary for the gnutar method.
 	GnuTarPath string `yaml:"gnutar_path"`
 
-	// Workdir holds local operational state (slot cache + snapshot library).
-	// Defaults to the landing medium's path when that medium is disk.
+	// Workdir holds the catalog's local state (slot cache + snapshot library),
+	// independent of any storage medium. Defaults to DefaultWorkdir.
 	Workdir string `yaml:"workdir"`
 
 	// Compress configures the external compressor archives are piped through.
@@ -63,6 +68,11 @@ type Config struct {
 	// Nice runs orchestrated child processes under `nice -n Nice` for CPU
 	// politeness; 0 = no nice.
 	Nice int `yaml:"nice"`
+
+	// AutoLabel lets a dump label a blank tape automatically instead of requiring
+	// an explicit `nb label`. Off by default: explicit labeling is what makes the
+	// overwrite guard meaningful. It never clobbers foreign or non-blank media.
+	AutoLabel bool `yaml:"auto_label"`
 
 	// Parallelism bounds concurrent work within a run.
 	Parallelism struct {
@@ -248,22 +258,31 @@ func (c *Config) Validate() error {
 // DLEs returns the configured backup sources.
 func (c *Config) DLEs() []DLE { return c.Sources }
 
+// LandingName resolves the name of the medium used for landing: the configured
+// `landing`, or the sole medium when exactly one is defined.
+func (c *Config) LandingName() (string, error) {
+	if c.Landing != "" {
+		if _, ok := c.Media[c.Landing]; !ok && len(c.Media) > 0 {
+			return "", fmt.Errorf("landing %q is not a defined medium", c.Landing)
+		}
+		return c.Landing, nil
+	}
+	if len(c.Media) == 1 {
+		for name := range c.Media {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("no landing medium selected (set `landing:` to a media name)")
+}
+
 // LandingMedia resolves the media definition used for landing. If no landing is
 // named but exactly one medium is defined, that one is used.
 func (c *Config) LandingMedia() (Media, error) {
-	if c.Landing == "" {
-		if len(c.Media) == 1 {
-			for _, m := range c.Media {
-				return m, nil
-			}
-		}
-		return Media{}, fmt.Errorf("no landing medium selected (set `landing:` to a media name)")
+	name, err := c.LandingName()
+	if err != nil {
+		return Media{}, err
 	}
-	m, ok := c.Media[c.Landing]
-	if !ok {
-		return Media{}, fmt.Errorf("landing %q is not a defined medium", c.Landing)
-	}
-	return m, nil
+	return c.Media[name], nil
 }
 
 // ResolveDumpType returns the named dumptype, applying the default method when
@@ -311,14 +330,12 @@ func (c *Config) FullIntervalDays() int {
 	return days
 }
 
-// WorkdirPath returns the local operational-state directory, defaulting to the
-// landing medium's path when that medium is disk.
+// WorkdirPath returns the catalog's own operational-state directory (slot cache +
+// snapshot library), independent of any storage medium. It defaults to
+// DefaultWorkdir when `workdir` is unset.
 func (c *Config) WorkdirPath() string {
 	if c.Workdir != "" {
 		return c.Workdir
 	}
-	if m, err := c.LandingMedia(); err == nil && m.Type == "disk" {
-		return m.Params["path"]
-	}
-	return ""
+	return DefaultWorkdir
 }

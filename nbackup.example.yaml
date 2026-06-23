@@ -31,6 +31,10 @@ media:
     tapes: 20           # capacity is tapes × tape_size
     tape_size: 6TB
     minimum_age: 180d
+    # Tapes carry a self-describing identity label (file 0) that NBackup verifies
+    # before writing — so a wrong, foreign, or still-active reel is never clobbered.
+    # Label a blank tape before its first dump:  nb label lto lto-0001
+    # Reuse an expired tape:                     nb label --relabel lto lto-0042
   cloud:
     type: s3            # registered stub; no S3 client yet
     bucket: company-backups
@@ -39,9 +43,15 @@ media:
 # Which medium slots are created on (the landing).
 landing: fast-disk
 
-# Optional: where local operational state (slot cache + tar snapshots) lives.
-# Defaults to the landing medium's path when that medium is disk.
-# workdir: /var/lib/nbackup/state
+# Where the catalog's local state (slot cache + tar snapshots) lives. This is the
+# catalog's own directory, independent of any storage medium — the catalog is a
+# cache over the whole pool, not part of one medium. Defaults to ./nbackup-catalog.
+# workdir: /var/lib/nbackup/catalog
+
+# Let a dump auto-label a *blank* tape instead of requiring `nb label` first.
+# Off by default: explicit labeling is what makes the overwrite guard meaningful.
+# It never overwrites foreign or non-blank media.
+# auto_label: false
 
 # Global default GNU tar binary (use "gtar" on macOS/BSD). A dumptype may
 # override it with a "tar_path" option.

@@ -6,6 +6,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"runtime"
@@ -44,15 +45,17 @@ func (l Logf) log(format string, args ...any) {
 // volume; the catalog is a local cache the engine refreshes from the volume.
 // Dump methods are resolved per dumptype and cached.
 type Engine struct {
-	cfg     *config.Config
-	vol     media.Volume
-	reader  *slotio.Reader
-	profile media.Profile
-	minAge  time.Duration
-	cat     *catalog.Catalog
-	methods map[string]method.Method // by cache key (dumptype or "@method")
-	codec   string                   // compression codec for new archives
-	fopts   filter.Options           // codec invocation options (level/threads/nice)
+	cfg        *config.Config
+	mediumName string       // name of the medium new dumps land on
+	mediumDef  config.Media // its definition
+	vol        media.Volume
+	reader     *slotio.Reader
+	profile    media.Profile
+	minAge     time.Duration
+	cat        *catalog.Catalog
+	methods    map[string]method.Method // by cache key (dumptype or "@method")
+	codec      string                   // compression codec for new archives
+	fopts      filter.Options           // codec invocation options (level/threads/nice)
 }
 
 // New constructs an Engine from configuration: it opens the landing volume and
@@ -60,10 +63,11 @@ type Engine struct {
 // (refreshing it from the volume the first time it is needed). Dump methods are
 // opened lazily per dumptype.
 func New(cfg *config.Config) (*Engine, error) {
-	mediaDef, err := cfg.LandingMedia()
+	name, err := cfg.LandingName()
 	if err != nil {
 		return nil, err
 	}
+	mediaDef := cfg.Media[name]
 	vol, err := media.OpenVolume(mediaDef.Type, media.Options(mediaDef.Params))
 	if err != nil {
 		return nil, err
@@ -87,16 +91,36 @@ func New(cfg *config.Config) (*Engine, error) {
 		Nice:    cfg.Nice,
 	}
 	return &Engine{
-		cfg:     cfg,
-		vol:     vol,
-		reader:  slotio.NewReader(vol, fopts),
-		profile: profile,
-		minAge:  minAge,
-		cat:     cat,
-		methods: map[string]method.Method{},
-		codec:   cfg.CompressCodec(),
-		fopts:   fopts,
+		cfg:        cfg,
+		mediumName: name,
+		mediumDef:  mediaDef,
+		vol:        vol,
+		reader:     slotio.NewReader(vol, fopts),
+		profile:    profile,
+		minAge:     minAge,
+		cat:        cat,
+		methods:    map[string]method.Method{},
+		codec:      cfg.CompressCodec(),
+		fopts:      fopts,
 	}, nil
+}
+
+// mediumVolume returns a Volume for the named medium. For the engine's own
+// medium it returns the already-open handle (own=true) so that handle's cached
+// state stays coherent and the catalog — which caches exactly this medium — can be
+// rebuilt against it; any other medium is opened as a fresh handle. This is the
+// single place that distinguishes "my medium" from the rest, so the rest of the
+// engine never compares medium names itself.
+func (e *Engine) mediumVolume(name string) (vol media.Volume, def config.Media, own bool, err error) {
+	if name == e.mediumName {
+		return e.vol, e.mediumDef, true, nil
+	}
+	d, ok := e.cfg.Media[name]
+	if !ok {
+		return nil, config.Media{}, false, fmt.Errorf("unknown medium %q", name)
+	}
+	v, err := media.OpenVolume(d.Type, media.Options(d.Params))
+	return v, d, false, err
 }
 
 // Capacity returns the landing medium's total retainable bytes (0 = unbounded).
@@ -167,16 +191,12 @@ func (e *Engine) CopySlot(slotID, targetMedia string, logf Logf) error {
 	if _, err := e.cat.ReadSlot(slotID); err != nil {
 		return err
 	}
-	if targetMedia == e.cfg.Landing {
-		return fmt.Errorf("target medium %q is the landing medium", targetMedia)
-	}
-	def, ok := e.cfg.Media[targetMedia]
-	if !ok {
-		return fmt.Errorf("unknown medium %q", targetMedia)
-	}
-	dst, err := media.OpenVolume(def.Type, media.Options(def.Params))
+	dst, _, own, err := e.mediumVolume(targetMedia)
 	if err != nil {
 		return err
+	}
+	if own {
+		return fmt.Errorf("target medium %q is the copy source", targetMedia)
 	}
 	logf.log("copying %s to %q", slotID, targetMedia)
 	n, err := media.CopySlot(dst, e.vol, slotID)
@@ -189,6 +209,104 @@ func (e *Engine) CopySlot(slotID, targetMedia string, logf Logf) error {
 
 // Catalog exposes the catalog for read-only commands.
 func (e *Engine) Catalog() *catalog.Catalog { return e.cat }
+
+// verifyWritable enforces the label protocol before a dump writes to the landing
+// volume. Address-identified media (disk, s3) are trusted by their path/bucket and
+// skip it. For labeled (tape) media it refuses to write to a foreign, blank
+// (unless auto_label), wrong, or relabeled-since volume — the overwrite and
+// wrong-tape protection — and records the accepted label for next time.
+func (e *Engine) verifyWritable(now time.Time) error {
+	lv, ok := e.vol.(media.Labeled)
+	if !ok {
+		return nil
+	}
+	pool := e.mediumName
+	lbl, labeled, err := lv.ReadLabel()
+	switch {
+	case errors.Is(err, media.ErrForeignVolume):
+		return fmt.Errorf("loaded volume holds non-NBackup data; refusing to overwrite — relabel it explicitly with `nb label --force %s <name>`", pool)
+	case err != nil:
+		return err
+	case !labeled: // blank volume
+		if !e.cfg.AutoLabel {
+			return fmt.Errorf("loaded volume is blank/unlabeled; run `nb label %s <name>` before dumping (or set auto_label: true)", pool)
+		}
+		lbl = media.Label{Name: fmt.Sprintf("%s-%s", pool, slot.DateString(now)), Pool: pool, Epoch: 1, WrittenAt: now}
+		if err := lv.WriteLabel(lbl); err != nil {
+			return err
+		}
+	}
+	if lbl.Pool != "" && lbl.Pool != pool {
+		return fmt.Errorf("loaded volume %q belongs to pool %q, not %q — wrong tape", lbl.Name, lbl.Pool, pool)
+	}
+	if vols := e.cat.Volumes(); len(vols) > 0 {
+		known := vols[0].Label
+		if known.Name != lbl.Name {
+			return fmt.Errorf("wrong volume: catalog expects %q but %q is loaded — check the mounted tape", known.Name, lbl.Name)
+		}
+		if known.Epoch != lbl.Epoch {
+			return fmt.Errorf("volume %q was relabeled since the catalog was updated (epoch %d on tape vs %d cached); run `nb catalog rebuild`", lbl.Name, lbl.Epoch, known.Epoch)
+		}
+	}
+	return e.cat.SetVolume(lbl)
+}
+
+// LabelVolume writes (or rewrites) the identity label of a medium's volume — the
+// deliberate operator act that makes a tape writable. It refuses to overwrite
+// foreign data or a still-active volume unless forced; relabeling our own volume
+// requires --relabel and bumps the epoch.
+func (e *Engine) LabelVolume(mediumName, name string, relabel, force bool, now time.Time, logf Logf) error {
+	vol, def, own, err := e.mediumVolume(mediumName)
+	if err != nil {
+		return err
+	}
+	minAge, _ := def.MinAge()
+	lv, ok := vol.(media.Labeled)
+	if !ok {
+		return fmt.Errorf("medium %q is address-identified and does not use labels", mediumName)
+	}
+
+	cur, labeled, err := lv.ReadLabel()
+	epoch := 1
+	switch {
+	case errors.Is(err, media.ErrForeignVolume):
+		if !force {
+			return fmt.Errorf("volume holds non-NBackup data; refusing to overwrite (use --force)")
+		}
+	case err != nil:
+		return err
+	case labeled:
+		if !relabel {
+			return fmt.Errorf("volume is already labeled %q (epoch %d); use --relabel to reuse it", cur.Name, cur.Epoch)
+		}
+		slots, serr := catalog.ScanSlots(vol)
+		if serr != nil {
+			return serr
+		}
+		if protected := policy.Protected(slots, minAge, now); len(protected) > 0 && !force {
+			return fmt.Errorf("volume %q still holds %d protected slot(s); refusing to relabel (use --force)", cur.Name, len(protected))
+		}
+		epoch = cur.Epoch + 1
+	}
+
+	lbl := media.Label{Name: name, Pool: mediumName, Epoch: epoch, WrittenAt: now}
+	if err := lv.WriteLabel(lbl); err != nil {
+		return err
+	}
+	if got, ok, err := lv.ReadLabel(); err != nil || !ok || got.Name != name {
+		return fmt.Errorf("label write could not be confirmed (read back %q, ok=%v, err=%v)", got.Name, ok, err)
+	}
+	logf.log("labeled %q as %q (epoch %d)", mediumName, name, epoch)
+
+	// Relabeling the engine's own medium wipes the contents the catalog caches:
+	// rebuild from the now-empty volume so the catalog reflects reality.
+	if own {
+		if _, err := e.cat.Rebuild(e.vol); err != nil {
+			return fmt.Errorf("rebuild catalog after labeling: %w", err)
+		}
+	}
+	return nil
+}
 
 // Plan builds the plan for a run date: it estimates every DLE, then balances
 // fulls (degrade to fit capacity, optionally promote to fill light runs).
@@ -294,6 +412,10 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 		if err := m.Check(); err != nil {
 			return nil, err
 		}
+	}
+
+	if err := e.verifyWritable(time.Now().UTC()); err != nil {
+		return nil, err
 	}
 
 	slotID, seq, err := e.allocSlotID(date)
@@ -491,7 +613,7 @@ func (e *Engine) extractStep(step restore.Step, destDir string) error {
 	if !ok {
 		return fmt.Errorf("position not found in catalog (run `nb catalog rebuild`)")
 	}
-	rc, err := e.reader.OpenArchive(pos, step.Codec)
+	rc, err := e.reader.OpenArchive(pos, step.Codec, slotio.Expect{Slot: step.SlotID, DLE: step.DLE, Level: step.Level})
 	if err != nil {
 		return err
 	}
@@ -546,7 +668,7 @@ func (e *Engine) verifySlot(id string, logf Logf) (bool, error) {
 			ok = false
 			continue
 		}
-		good, verr := e.reader.VerifyFile(pos, a.SHA256)
+		good, verr := e.reader.VerifyFile(pos, slotio.Expect{Slot: id, DLE: a.DLE, Level: a.Level}, a.SHA256)
 		if verr != nil {
 			logf.log("%s: %s L%d ERROR %v", id, a.DLE, a.Level, verr)
 			ok = false

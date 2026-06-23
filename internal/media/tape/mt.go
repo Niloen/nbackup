@@ -91,6 +91,14 @@ func (m *mtDevice) writeFile(write func(w io.Writer) error) (int, error) {
 	return pos, nil
 }
 
+// reset rewinds to beginning-of-tape; the subsequent label write at file 0 (plus
+// its filemark) logically discards everything beyond it.
+func (m *mtDevice) reset() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.mt("rewind")
+}
+
 func (m *mtDevice) readFile(pos int) (io.ReadCloser, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -74,3 +74,27 @@ func (d *dirDevice) readFile(pos int) (io.ReadCloser, error) {
 	}
 	return f, nil
 }
+
+// reset deletes every numbered file so the next write starts at file 0 — the
+// directory equivalent of overwriting a tape from BOT.
+func (d *dirDevice) reset() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	entries, err := os.ReadDir(d.dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		if err := os.Remove(filepath.Join(d.dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	d.next = 0
+	return nil
+}

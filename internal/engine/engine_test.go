@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/media"
 )
 
 // TestRunRestoreEndToEnd exercises the full engine over the disk store:
@@ -23,6 +24,7 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 		Landing: "disk",
 		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
 		Sources: []config.DLE{{Host: "h", Path: src}},
+		Workdir: t.TempDir(), // catalog state lives separately from the storage medium
 	}
 	cfg.Compress.Codec = "none" // exercise the pipeline without depending on a compressor binary
 
@@ -72,6 +74,7 @@ func TestParallelDumpers(t *testing.T) {
 	cfg := &config.Config{
 		Landing: "disk",
 		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
+		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none" // no compressor-binary dependency in tests
 	cfg.Parallelism.Dumpers = 3
@@ -125,6 +128,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 			"tape": {Type: "tape", Params: map[string]string{"dir": tapeDir}},
 		},
 		Sources: []config.DLE{{Host: "h", Path: src}},
+		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
 
@@ -166,6 +170,56 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 		t.Fatalf("restore from tape: %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "f.txt"), "copy me to tape")
+}
+
+// TestTapeLabelVerify exercises the label protocol on a tape landing: a dump is
+// refused on a blank tape, succeeds after `nb label`, and is refused when the
+// catalog expects a different label than the one mounted (a swapped tape).
+func TestTapeLabelVerify(t *testing.T) {
+	src := t.TempDir()
+	tapeDir := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "data")
+
+	cfg := &config.Config{
+		Landing: "lto",
+		Media:   map[string]config.Media{"lto": {Type: "tape", Params: map[string]string{"dir": tapeDir}}},
+		Sources: []config.DLE{{Host: "h", Path: src}},
+		Workdir: t.TempDir(),
+	}
+	cfg.Compress.Codec = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	day := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
+
+	// Blank tape: dump refused.
+	if _, err := eng.Run(day, nil); err == nil {
+		t.Fatal("expected dump to be refused on a blank/unlabeled tape")
+	}
+
+	// Label it, then a dump succeeds.
+	if err := eng.LabelVolume("lto", "lto-0001", false, false, time.Now().UTC(), nil); err != nil {
+		t.Fatalf("label: %v", err)
+	}
+	if _, err := eng.Run(day, nil); err != nil {
+		t.Fatalf("dump after label: %v", err)
+	}
+
+	// Simulate a swapped tape: relabel the volume out-of-band to a different name,
+	// then a dump must be refused (catalog expects lto-0001).
+	lv := eng.vol.(media.Labeled)
+	if err := lv.WriteLabel(media.Label{Name: "lto-9999", Pool: "lto", Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+	day2 := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+	if _, err := eng.Run(day2, nil); err == nil {
+		t.Fatal("expected dump to be refused when the mounted tape's label differs from the catalog")
+	}
 }
 
 func write(t *testing.T, path, content string) {
