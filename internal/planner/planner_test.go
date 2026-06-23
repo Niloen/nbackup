@@ -92,6 +92,56 @@ func TestDegradeBalancesFulls(t *testing.T) {
 	}
 }
 
+// TestDegradeStaggersLockstepFulls checks that two big DLEs whose last fulls
+// coincide are spread onto different days rather than piling onto a shared hard
+// deadline. Each big full dwarfs the per-run balance target, so the naive degrade
+// would demote both due fulls every day until 2*interval forced them full on the
+// same day. Keeping the run's last full instead drains them one per run and
+// staggers their cycles apart.
+func TestDegradeStaggersLockstepFulls(t *testing.T) {
+	start := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
+	var dles []config.DLE
+	est := map[string]Estimate{}
+	day0 := start.Format("2006-01-02")
+	for _, h := range []string{"downloads", "videos"} {
+		d := dleNamed(h)
+		hist.DLEs[d.Name()] = &catalog.DLEState{
+			LastFullDate: day0,
+			LastFullSlot: "slot-x",
+			Runs:         []catalog.RunRecord{{Date: day0, Slot: "slot-x", Level: 0}},
+		}
+		dles = append(dles, d)
+		// Each full far exceeds the target (totalFull/interval).
+		est[d.Name()] = Estimate{Full: 3_300_000_000, Incr: 50_000}
+	}
+
+	plans := Simulate(dles, hist, est, Params{FullIntervalDays: 7, CapacityRoomBytes: -1}, start, 30)
+
+	fullsPerDay := 0
+	bothSameDay := 0
+	for _, p := range plans {
+		n := 0
+		for _, it := range p.Items {
+			if it.Level == 0 {
+				n++
+			}
+		}
+		fullsPerDay += n
+		if n > 1 {
+			bothSameDay++
+		}
+	}
+	if bothSameDay != 0 {
+		t.Errorf("lock-step DLEs piled onto %d shared day(s); fulls must stagger to one per run", bothSameDay)
+	}
+	// Both DLEs still get fulled regularly (roughly once per interval each over 30
+	// days): the fix must not starve fulls, only spread them.
+	if fullsPerDay < 6 {
+		t.Errorf("expected the big DLEs to keep fulling across the window, got %d fulls total", fullsPerDay)
+	}
+}
+
 // TestCycleCapacityWarning checks the structural cycle check: when one full of
 // every DLE cannot fit capacity, the plan carries a warning (recoverability is
 // at risk) but still schedules the backups.
@@ -142,12 +192,12 @@ func TestSimulateSchedule(t *testing.T) {
 		t.Fatalf("want 15 plans, got %d", len(plans))
 	}
 	// Day 0 is the mandatory first full. Incrementals then climb (proving
-	// IncrementalsSinceFull advances day to day), capped at MaxLevel (9). The day-7
-	// due full is degraded back to an incremental — for a lone DLE the balance
-	// target (~full/interval) can't hold a whole full, so it defers to the hard
-	// deadline at 2*interval (day 14), which fulls again (proving DaysSinceFull
-	// advances and resets).
-	want := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 9, 9, 0}
+	// IncrementalsSinceFull advances day to day). The day-7 due full is kept: a
+	// lone DLE's full exceeds the balance target, but degrade never demotes a run's
+	// last full for the soft target (that would only defer it to the deadline), so
+	// the cycle fulls cleanly every interval (proving DaysSinceFull advances and
+	// resets at day 7 and again at day 14).
+	want := []int{0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6, 0}
 	for i, p := range plans {
 		if !p.Date.Equal(start.AddDate(0, 0, i)) {
 			t.Errorf("day %d: plan date %s, want %s", i, p.Date, start.AddDate(0, 0, i))

@@ -214,6 +214,15 @@ func fullBytes(cands []*cand) int64 {
 // target (soft, priority #4). Mandatory fulls are never touched, so a single big
 // DLE on its day may still exceed the ceiling — that is accepted.
 //
+// Soft-target demotions never empty a run of its fulls. A single full that already
+// exceeds the balance target is irreducible — fulls are atomic, so demoting the
+// last one cannot bring the run closer to target; it only defers that full to its
+// hard deadline. Two DLEs whose last fulls coincide would then defer in lock-step
+// and pile onto the same deadline day, the opposite of balancing. Keeping the
+// most-urgent full in place drains the cycle one full per run and naturally
+// staggers such DLEs apart. The hard capacity ceiling still overrides and may
+// demote down to zero fulls — capacity beats balance.
+//
 // This only smooths a single run's peak. It cannot reduce the cycle's full
 // demand: a demoted due-full still climbs to its deadline and is forced full
 // within the same cycle. Whether the cycle as a whole fits the medium is a
@@ -234,8 +243,24 @@ func degrade(cands []*cand, target, room int64) {
 	})
 	overHard := func() bool { return room >= 0 && runBytes(cands) > room }
 	overSoft := func() bool { return target > 0 && fullBytes(cands) > target }
+	fullsLeft := func() int {
+		n := 0
+		for _, c := range cands {
+			if c.full {
+				n++
+			}
+		}
+		return n
+	}
 	for _, c := range candidates {
-		if !overHard() && !overSoft() {
+		hard := overHard()
+		if !hard && !overSoft() {
+			break
+		}
+		// Under soft-only pressure, stop before emptying the run of fulls: the last
+		// remaining full is irreducible and demoting it would only defer to a deadline
+		// pile-up. The hard ceiling has no such floor.
+		if !hard && fullsLeft() <= 1 {
 			break
 		}
 		c.full, c.due = false, false
