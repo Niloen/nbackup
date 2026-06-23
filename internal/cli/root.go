@@ -58,6 +58,7 @@ func NewRootCmd() *cobra.Command {
 		newRestoreCmd(a),
 		newRecoverCmd(a),
 		newCopyCmd(a),
+		newSyncCmd(a),
 		newLabelCmd(a),
 		newLoadCmd(a),
 		newPruneCmd(a),

@@ -276,20 +276,22 @@ func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
 	return e.cat.Rebuild(vols)
 }
 
-// CopySlot streams a sealed slot from the engine's own volume to another
-// configured medium, then records the new copy in the catalog (a second
-// placement). Copy is a write, so it runs the same label verification as a dump.
-func (e *Engine) CopySlot(slotID, targetMedia string, force bool, logf Logf) error {
+// CopySlot streams a sealed slot from one configured medium to another, then
+// records the new copy in the catalog (a second placement). The source defaults to
+// the landing medium when fromMedia is ""; any other medium holding the slot is
+// allowed (e.g. un-vaulting tape -> disk). Reading the source mounts the volume
+// that holds the slot (on a changer); the write to the target runs the same label
+// verification as a dump.
+func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, logf Logf) error {
 	s, err := e.cat.ReadSlot(slotID)
 	if err != nil {
 		return err
 	}
-	dst, def, own, err := e.mediumVolume(targetMedia)
-	if err != nil {
-		return err
+	if fromMedia == "" {
+		fromMedia = e.mediumName
 	}
-	if own {
-		return fmt.Errorf("target medium %q is the copy source", targetMedia)
+	if fromMedia == targetMedia {
+		return fmt.Errorf("copy source and target are the same medium %q", targetMedia)
 	}
 	// Idempotency: a slot already recorded on the target is not re-copied. On
 	// append-only media a second copy would orphan the first (unreferenced files,
@@ -301,12 +303,20 @@ func (e *Engine) CopySlot(slotID, targetMedia string, force bool, logf Logf) err
 			}
 		}
 	}
+	src, err := e.copySource(slotID, fromMedia)
+	if err != nil {
+		return err
+	}
+	dst, def, _, err := e.mediumVolume(targetMedia)
+	if err != nil {
+		return err
+	}
 	volName, epoch, err := e.verifyWritableInteractive(dst, targetMedia, def.IsAppendable(), time.Now().UTC(), logf)
 	if err != nil {
 		return err
 	}
-	logf.log("copying %s to %q", slotID, targetMedia)
-	files, err := media.CopySlot(dst, e.vol, slotID)
+	logf.log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
+	files, err := media.CopySlot(dst, src, slotID)
 	if err != nil {
 		return err
 	}
@@ -321,6 +331,39 @@ func (e *Engine) CopySlot(slotID, targetMedia string, force bool, logf Logf) err
 	}
 	logf.log("copied %d file(s) to %q", len(files), targetMedia)
 	return nil
+}
+
+// copySource resolves the volume that holds a slot on the source medium and mounts
+// it for reading — the read side of a copy. It mirrors readerFor: the engine's own
+// medium reuses the open handle; any other medium is opened fresh; a changer is
+// mounted to the volume holding the slot and its identity verified. It errors if
+// the slot has no copy on fromMedia (the catalog knows of none to read).
+func (e *Engine) copySource(slotID, fromMedia string) (media.Volume, error) {
+	var src catalog.Placement
+	for _, p := range e.cat.Placements(slotID) {
+		if p.Medium == fromMedia {
+			src = p
+			break
+		}
+	}
+	if src.Medium == "" {
+		return nil, fmt.Errorf("slot %s has no copy on source medium %q", slotID, fromMedia)
+	}
+	vol := e.vol
+	if fromMedia != e.mediumName {
+		v, _, _, err := e.mediumVolume(fromMedia)
+		if err != nil {
+			return nil, err
+		}
+		vol = v
+	}
+	if err := e.mountForRead(vol, src); err != nil {
+		return nil, err
+	}
+	if err := e.assertVolume(vol, src); err != nil {
+		return nil, err
+	}
+	return vol, nil
 }
 
 // Catalog exposes the catalog for read-only commands.

@@ -175,7 +175,7 @@ func makeTapeFixture() error {
 		if err := eng.LabelVolume("tape", "tape-0001", false, false, time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
 			return fmt.Errorf("label tape: %w", err)
 		}
-		if err := eng.CopySlot(s.ID, "tape", false, nil); err != nil {
+		if err := eng.CopySlot(s.ID, "", "tape", false, nil); err != nil {
 			return fmt.Errorf("copy to tape: %w", err)
 		}
 		return nil
