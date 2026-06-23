@@ -83,6 +83,7 @@ This produces the `nb` umbrella tool plus standalone commands:
 | `nbcatalog` | `nb catalog` | Maintain the local slot-index cache      |
 | —           | `nb copy`    | Copy a slot to another medium (disk → tape) |
 | —           | `nb label`   | Label a volume (required for tape before its first dump) |
+| —           | `nb medium`  | List media (capacity, usage, volume) or detail one |
 
 ## Quick start
 
@@ -91,13 +92,16 @@ cp nbackup.example.yaml nbackup.yaml   # edit sources + catalog path
 
 nb plan                # preview today's plan and budget usage
 nb dump                # run the backup, producing one sealed slot
-nb slot                # list slots
-nb slot show slot-2026-06-21
+nb slot                # list slots (with a COPIES column: where each lives)
+nb slot show slot-2026-06-21   # archives + every copy's volume and file positions
+nb medium              # media overview: type, slots, usage / capacity, volume
+nb medium lto          # one medium's volume and the slots it holds
 nb verify              # re-check all archive checksums
 nb restore -dle app01-home -dest /tmp/out slot-2026-06-21
 ```
 
-Every command accepts `-c <config>` and `-C <catalog>` overrides.
+Every command accepts `-c <config>` and `-C <catalog>` overrides, and flags may
+appear before or after positional arguments.
 
 ## How it works
 

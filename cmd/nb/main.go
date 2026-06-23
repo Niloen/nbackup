@@ -20,6 +20,7 @@ Commands:
   restore    Restore a DLE from a slot       (alias: nbrestore)
   copy       Copy a slot to another medium   (e.g. disk -> tape)
   label      Label a volume (required for tape before first dump)
+  medium     List media and their capacity/volumes
   catalog    Maintain the local slot cache   (alias: nbcatalog)
 
 Run "nb <command> -h" for command options.
@@ -49,6 +50,8 @@ func main() {
 		err = cli.CmdCopy(args)
 	case "label":
 		err = cli.CmdLabel(args)
+	case "medium":
+		err = cli.CmdMedium(args)
 	case "catalog":
 		err = cli.CmdCatalog(args)
 	case "-h", "--help", "help":

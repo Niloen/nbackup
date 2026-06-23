@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"time"
@@ -88,6 +89,24 @@ func setLocalLanding(cfg *config.Config, name, path string) {
 
 func newEngine(cfg *config.Config) (*engine.Engine, error) {
 	return engine.New(cfg)
+}
+
+// parseArgs parses fs allowing flags and positionals to be interleaved. Go's
+// flag package stops at the first non-flag argument, so `nb copy slot --to x`
+// would silently ignore --to; this scans flag runs repeatedly, collecting the
+// positionals in order, so flag position no longer matters. It returns the
+// positional arguments (use these instead of fs.Args()/fs.Arg()).
+func parseArgs(fs *flag.FlagSet, args []string) []string {
+	var positional []string
+	for {
+		fs.Parse(args) // FlagSet uses ExitOnError; a bad flag exits with usage
+		if fs.NArg() == 0 {
+			break
+		}
+		positional = append(positional, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+	return positional
 }
 
 // logfStdout writes progress lines to stdout.

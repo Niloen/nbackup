@@ -4,9 +4,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/slot"
@@ -18,7 +20,7 @@ func CmdPlan(args []string) error {
 	cfgPath := fs.String("c", DefaultConfigPath, "path to config file")
 	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
 	dateStr := fs.String("date", "", "run date YYYY-MM-DD (default today)")
-	fs.Parse(args)
+	parseArgs(fs, args)
 
 	cfg, err := loadConfig(*cfgPath, *catalogFlag)
 	if err != nil {
@@ -79,7 +81,7 @@ func CmdDump(args []string) error {
 	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
 	dateStr := fs.String("date", "", "run date YYYY-MM-DD (default today)")
 	quiet := fs.Bool("q", false, "suppress progress output")
-	fs.Parse(args)
+	parseArgs(fs, args)
 
 	cfg, err := loadConfig(*cfgPath, *catalogFlag)
 	if err != nil {
@@ -111,7 +113,7 @@ func CmdVerify(args []string) error {
 	fs := flag.NewFlagSet("nbverify", flag.ExitOnError)
 	cfgPath := fs.String("c", DefaultConfigPath, "path to config file")
 	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
-	fs.Parse(args)
+	slotIDs := parseArgs(fs, args)
 
 	cfg, err := loadConfigRO(*cfgPath, *catalogFlag)
 	if err != nil {
@@ -121,7 +123,7 @@ func CmdVerify(args []string) error {
 	if err != nil {
 		return err
 	}
-	failures, err := eng.Verify(fs.Args(), logfStdout)
+	failures, err := eng.Verify(slotIDs, logfStdout)
 	if err != nil {
 		return err
 	}
@@ -146,7 +148,7 @@ func cmdSlotList(args []string) error {
 	fs := flag.NewFlagSet("nbslot", flag.ExitOnError)
 	cfgPath := fs.String("c", DefaultConfigPath, "path to config file")
 	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
-	fs.Parse(args)
+	parseArgs(fs, args)
 
 	cfg, err := loadConfigRO(*cfgPath, *catalogFlag)
 	if err != nil {
@@ -162,25 +164,43 @@ func cmdSlotList(args []string) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "SLOT\tSTATUS\tARCHIVES\tSIZE\tSEALED")
+	fmt.Fprintln(tw, "SLOT\tSTATUS\tARCHIVES\tSIZE\tSEALED\tCOPIES")
 	for _, s := range slots {
 		sealed := "-"
 		if !s.SealedAt.IsZero() {
 			sealed = s.SealedAt.Format("2006-01-02 15:04")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", s.ID, s.Status, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes), sealed)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", s.ID, s.Status, len(s.Archives),
+			sizeutil.FormatBytes(s.TotalBytes), sealed, copiesSummary(eng.Catalog().Placements(s.ID)))
 	}
 	tw.Flush()
 	return nil
+}
+
+// copiesSummary renders a slot's placements as a compact comma list, naming the
+// volume label only when it differs from the medium (i.e. for labeled tapes).
+func copiesSummary(ps []catalog.Placement) string {
+	if len(ps) == 0 {
+		return "-"
+	}
+	names := make([]string, 0, len(ps))
+	for _, p := range ps {
+		if p.Volume != "" && p.Volume != p.Medium {
+			names = append(names, p.Medium+":"+p.Volume)
+		} else {
+			names = append(names, p.Medium)
+		}
+	}
+	return strings.Join(names, ", ")
 }
 
 func cmdSlotShow(args []string) error {
 	fs := flag.NewFlagSet("nbslot show", flag.ExitOnError)
 	cfgPath := fs.String("c", DefaultConfigPath, "path to config file")
 	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
-	fs.Parse(args)
+	pos := parseArgs(fs, args)
 
-	if fs.NArg() < 1 {
+	if len(pos) < 1 {
 		return fmt.Errorf("usage: nbslot show <slot-id>")
 	}
 	cfg, err := loadConfigRO(*cfgPath, *catalogFlag)
@@ -191,7 +211,7 @@ func cmdSlotShow(args []string) error {
 	if err != nil {
 		return err
 	}
-	s, err := eng.Catalog().ReadSlot(fs.Arg(0))
+	s, err := eng.Catalog().ReadSlot(pos[0])
 	if err != nil {
 		return err
 	}
@@ -205,6 +225,24 @@ func cmdSlotShow(args []string) error {
 		fmt.Fprintf(tw, "%s\tL%d\t%d\t%s\t%s\n", a.DLE, a.Level, a.FileCount, sizeutil.FormatBytes(a.Compressed), a.Codec)
 	}
 	tw.Flush()
+
+	placements := eng.Catalog().Placements(s.ID)
+	fmt.Printf("\nCOPIES (%d)\n", len(placements))
+	ptw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(ptw, "  MEDIUM\tVOLUME\tEPOCH\tPOSITIONS")
+	for _, p := range placements {
+		volume, epoch := "-", "-"
+		if p.Volume != "" && p.Volume != p.Medium {
+			volume = p.Volume
+			epoch = fmt.Sprintf("%d", p.Epoch)
+		}
+		positions := make([]string, 0, len(p.Archives))
+		for _, a := range p.Archives {
+			positions = append(positions, fmt.Sprintf("%s/L%d@%d", a.DLE, a.Level, a.Pos))
+		}
+		fmt.Fprintf(ptw, "  %s\t%s\t%s\t%s\n", p.Medium, volume, epoch, strings.Join(positions, " "))
+	}
+	ptw.Flush()
 	return nil
 }
 
@@ -214,7 +252,7 @@ func cmdPrune(args []string) error {
 	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
 	apply := fs.Bool("apply", false, "actually delete (default is dry-run)")
 	dateStr := fs.String("date", "", "reference 'now' date YYYY-MM-DD (default today)")
-	fs.Parse(args)
+	parseArgs(fs, args)
 
 	cfg, err := loadConfig(*cfgPath, *catalogFlag)
 	if err != nil {
@@ -245,9 +283,10 @@ func CmdCopy(args []string) error {
 	cfgPath := fs.String("c", DefaultConfigPath, "path to config file")
 	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
 	to := fs.String("to", "", "destination medium name (required)")
-	fs.Parse(args)
+	force := fs.Bool("force", false, "re-copy even if the slot is already recorded on the target medium")
+	pos := parseArgs(fs, args)
 
-	if fs.NArg() < 1 {
+	if len(pos) < 1 {
 		return fmt.Errorf("usage: nb copy --to <medium> <slot-id>")
 	}
 	if *to == "" {
@@ -261,7 +300,7 @@ func CmdCopy(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := eng.CopySlot(fs.Arg(0), *to, logfStdout); err != nil {
+	if err := eng.CopySlot(pos[0], *to, *force, logfStdout); err != nil {
 		return err
 	}
 	fmt.Println("copy complete")
@@ -277,9 +316,9 @@ func CmdLabel(args []string) error {
 	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
 	relabel := fs.Bool("relabel", false, "reuse a volume already labeled by NBackup")
 	force := fs.Bool("force", false, "override safety refusals (foreign data / still-active volume)")
-	fs.Parse(args)
+	pos := parseArgs(fs, args)
 
-	if fs.NArg() < 2 {
+	if len(pos) < 2 {
 		return fmt.Errorf("usage: nb label [--relabel] [--force] <medium> <name>")
 	}
 	cfg, err := loadConfig(*cfgPath, *catalogFlag)
@@ -290,7 +329,7 @@ func CmdLabel(args []string) error {
 	if err != nil {
 		return err
 	}
-	return eng.LabelVolume(fs.Arg(0), fs.Arg(1), *relabel, *force, time.Now().UTC(), logfStdout)
+	return eng.LabelVolume(pos[0], pos[1], *relabel, *force, time.Now().UTC(), logfStdout)
 }
 
 // CmdCatalog implements `nbcatalog`: maintain the local slot-index cache.
@@ -301,7 +340,7 @@ func CmdCatalog(args []string) error {
 	fs := flag.NewFlagSet("nbcatalog rebuild", flag.ExitOnError)
 	cfgPath := fs.String("c", DefaultConfigPath, "path to config file")
 	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
-	fs.Parse(args[1:])
+	parseArgs(fs, args[1:])
 
 	cfg, err := loadConfigRO(*cfgPath, *catalogFlag)
 	if err != nil {
@@ -319,6 +358,84 @@ func CmdCatalog(args []string) error {
 	return nil
 }
 
+// CmdMedium implements `nb medium`: list configured media with capacity and the
+// volume each currently holds, or detail one medium and the slots it stores.
+func CmdMedium(args []string) error {
+	fs := flag.NewFlagSet("nb medium", flag.ExitOnError)
+	cfgPath := fs.String("c", DefaultConfigPath, "path to config file")
+	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
+	pos := parseArgs(fs, args)
+
+	cfg, err := loadConfigRO(*cfgPath, *catalogFlag)
+	if err != nil {
+		return err
+	}
+	eng, err := newEngine(cfg)
+	if err != nil {
+		return err
+	}
+	if len(pos) >= 1 {
+		return mediumDetail(eng, pos[0])
+	}
+	return mediumList(eng)
+}
+
+func mediumList(eng *engine.Engine) error {
+	media := eng.Media()
+	if len(media) == 0 {
+		fmt.Println("no media configured")
+		return nil
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "MEDIUM\tTYPE\tSLOTS\tUSED\tCAPACITY\tVOLUME")
+	for _, m := range media {
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", m.Name, m.Type, m.Slots,
+			sizeutil.FormatBytes(m.Used), capacityStr(m.Capacity), volumeStr(m))
+	}
+	tw.Flush()
+	return nil
+}
+
+func mediumDetail(eng *engine.Engine, name string) error {
+	m, ok := eng.Medium(name)
+	if !ok {
+		return fmt.Errorf("unknown medium %q", name)
+	}
+	fmt.Printf("Medium %s  (%s)\n", m.Name, m.Type)
+	fmt.Printf("  volume:  %s\n", volumeStr(m))
+	fmt.Printf("  used:    %s / %s\n\n", sizeutil.FormatBytes(m.Used), capacityStr(m.Capacity))
+	slots := eng.Catalog().SlotsOn(name)
+	if len(slots) == 0 {
+		fmt.Println("no slots on this medium")
+		return nil
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "SLOT\tSIZE\tARCHIVES\tSEALED")
+	for _, s := range slots {
+		sealed := "-"
+		if !s.SealedAt.IsZero() {
+			sealed = s.SealedAt.Format("2006-01-02 15:04")
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", s.ID, sizeutil.FormatBytes(s.TotalBytes), len(s.Archives), sealed)
+	}
+	tw.Flush()
+	return nil
+}
+
+func capacityStr(c int64) string {
+	if c <= 0 {
+		return "unbounded"
+	}
+	return sizeutil.FormatBytes(c)
+}
+
+func volumeStr(m engine.MediumInfo) string {
+	if m.Volume == "" {
+		return "-"
+	}
+	return fmt.Sprintf("%s (epoch %d)", m.Volume, m.Epoch)
+}
+
 // CmdRestore implements `nbrestore`: rebuild a DLE (or all DLEs) from a slot.
 func CmdRestore(args []string) error {
 	fs := flag.NewFlagSet("nbrestore", flag.ExitOnError)
@@ -326,9 +443,9 @@ func CmdRestore(args []string) error {
 	catalogFlag := fs.String("C", "", "catalog directory (overrides config)")
 	dleName := fs.String("dle", "", "DLE name to restore (default: all DLEs in the slot)")
 	dest := fs.String("dest", "", "destination directory (required)")
-	fs.Parse(args)
+	pos := parseArgs(fs, args)
 
-	if fs.NArg() < 1 {
+	if len(pos) < 1 {
 		return fmt.Errorf("usage: nbrestore [-dle NAME] -dest DIR <slot-id>")
 	}
 	if *dest == "" {
@@ -342,7 +459,7 @@ func CmdRestore(args []string) error {
 	if err != nil {
 		return err
 	}
-	slotID := fs.Arg(0)
+	slotID := pos[0]
 	s, err := eng.Catalog().ReadSlot(slotID)
 	if err != nil {
 		return err

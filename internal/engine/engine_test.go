@@ -148,7 +148,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 	if err := eng.LabelVolume("tape", "tape-0001", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label tape: %v", err)
 	}
-	if err := eng.CopySlot(s.ID, "tape", nil); err != nil {
+	if err := eng.CopySlot(s.ID, "tape", false, nil); err != nil {
 		t.Fatalf("copy to tape: %v", err)
 	}
 
@@ -255,8 +255,16 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
-	if err := eng.CopySlot(s.ID, "archive", nil); err != nil {
+	if err := eng.CopySlot(s.ID, "archive", false, nil); err != nil {
 		t.Fatalf("copy: %v", err)
+	}
+
+	// A second copy to the same medium is refused (idempotent) unless forced.
+	if err := eng.CopySlot(s.ID, "archive", false, nil); err == nil {
+		t.Fatal("expected re-copy to the same medium to be refused without --force")
+	}
+	if err := eng.CopySlot(s.ID, "archive", true, nil); err != nil {
+		t.Fatalf("forced re-copy: %v", err)
 	}
 
 	if got := len(eng.cat.Placements(s.ID)); got != 2 {

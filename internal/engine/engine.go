@@ -137,6 +137,57 @@ func (e *Engine) BudgetStatus(current int64) (over bool, pct float64) {
 	return current > c, float64(current) / float64(c) * 100
 }
 
+// MediumInfo is a per-medium summary for catalog visibility (`nb medium`): what
+// the medium is, how much it holds against its capacity, and (for labeled media)
+// the volume currently associated with it in the catalog.
+type MediumInfo struct {
+	Name     string
+	Type     string
+	Slots    int
+	Used     int64
+	Capacity int64  // 0 = unbounded
+	Volume   string // label name; "" for address-identified media (disk, s3)
+	Epoch    int
+}
+
+// Media returns a summary of every configured medium, sorted by name.
+func (e *Engine) Media() []MediumInfo {
+	names := make([]string, 0, len(e.cfg.Media))
+	for n := range e.cfg.Media {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]MediumInfo, 0, len(names))
+	for _, n := range names {
+		info, _ := e.Medium(n)
+		out = append(out, info)
+	}
+	return out
+}
+
+// Medium returns the summary for one configured medium; ok is false if the name
+// is unknown.
+func (e *Engine) Medium(name string) (MediumInfo, bool) {
+	d, ok := e.cfg.Media[name]
+	if !ok {
+		return MediumInfo{}, false
+	}
+	info := MediumInfo{
+		Name:  name,
+		Type:  d.Type,
+		Slots: len(e.cat.SlotsOn(name)),
+		Used:  e.cat.MediumBytes(name),
+	}
+	if prof, err := media.OpenProfile(d.Type, media.Options(d.ProfileOptions())); err == nil {
+		info.Capacity = prof.TotalBytes()
+	}
+	if lbl, ok := e.cat.VolumeForMedium(name); ok {
+		info.Volume = lbl.Name
+		info.Epoch = lbl.Epoch
+	}
+	return info, true
+}
+
 // methodForDumpType resolves and caches the dump method for a dumptype,
 // configured with the dumptype's options (plus the global tar path).
 func (e *Engine) methodForDumpType(dtName string) (method.Method, error) {
@@ -201,7 +252,7 @@ func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
 // CopySlot streams a sealed slot from the engine's own volume to another
 // configured medium, then records the new copy in the catalog (a second
 // placement). Copy is a write, so it runs the same label verification as a dump.
-func (e *Engine) CopySlot(slotID, targetMedia string, logf Logf) error {
+func (e *Engine) CopySlot(slotID, targetMedia string, force bool, logf Logf) error {
 	s, err := e.cat.ReadSlot(slotID)
 	if err != nil {
 		return err
@@ -212,6 +263,16 @@ func (e *Engine) CopySlot(slotID, targetMedia string, logf Logf) error {
 	}
 	if own {
 		return fmt.Errorf("target medium %q is the copy source", targetMedia)
+	}
+	// Idempotency: a slot already recorded on the target is not re-copied. On
+	// append-only media a second copy would orphan the first (unreferenced files,
+	// reclaimable only by relabel); --force overrides for a deliberate re-copy.
+	if !force {
+		for _, p := range e.cat.Placements(slotID) {
+			if p.Medium == targetMedia {
+				return fmt.Errorf("slot %s is already on medium %q (volume %q); use --force to copy again", slotID, targetMedia, p.Volume)
+			}
+		}
 	}
 	volName, epoch, err := e.verifyWritable(dst, targetMedia, time.Now().UTC())
 	if err != nil {
