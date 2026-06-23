@@ -148,7 +148,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 	if err := eng.LabelVolume("tape", "tape-0001", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label tape: %v", err)
 	}
-	if err := eng.CopySlot(s.ID, "tape", nil); err != nil {
+	if err := eng.CopySlot(s.ID, "tape", false, nil); err != nil {
 		t.Fatalf("copy to tape: %v", err)
 	}
 
@@ -214,15 +214,16 @@ func TestTapeLabelVerify(t *testing.T) {
 		t.Fatalf("dump after label: %v", err)
 	}
 
-	// Simulate a swapped tape: relabel the volume out-of-band to a different name,
-	// then a dump must be refused (catalog expects lto-0001).
+	// Out-of-band relabel of the loaded tape (same name, bumped epoch) makes the
+	// catalog stale for it; a dump must refuse until `nb catalog rebuild`. (Loading
+	// a genuinely different tape from the pool is not an error under a changer.)
 	lv := eng.vol.(media.Labeled)
-	if err := lv.WriteLabel(media.Label{Name: "lto-9999", Pool: "lto", Epoch: 1}); err != nil {
+	if err := lv.WriteLabel(media.Label{Name: "lto-0001", Pool: "lto", Epoch: 2}); err != nil {
 		t.Fatal(err)
 	}
 	day2 := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
 	if _, err := eng.Run(day2, nil); err == nil {
-		t.Fatal("expected dump to be refused when the mounted tape's label differs from the catalog")
+		t.Fatal("expected dump to be refused when the mounted tape was relabeled since the catalog was updated")
 	}
 }
 
@@ -255,8 +256,16 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
-	if err := eng.CopySlot(s.ID, "archive", nil); err != nil {
+	if err := eng.CopySlot(s.ID, "archive", false, nil); err != nil {
 		t.Fatalf("copy: %v", err)
+	}
+
+	// A second copy to the same medium is refused (idempotent) unless forced.
+	if err := eng.CopySlot(s.ID, "archive", false, nil); err == nil {
+		t.Fatal("expected re-copy to the same medium to be refused without --force")
+	}
+	if err := eng.CopySlot(s.ID, "archive", true, nil); err != nil {
+		t.Fatalf("forced re-copy: %v", err)
 	}
 
 	if got := len(eng.cat.Placements(s.ID)); got != 2 {
@@ -277,6 +286,138 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 		t.Fatalf("restore (failover to copy): %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "f.txt"), "two homes")
+}
+
+func boolp(b bool) *bool { return &b }
+
+// TestTapeLibraryRestore copies two slots onto two different tapes in a library,
+// removes the disk copies, then restores both — proving the changer auto-mounts
+// the bay holding each slot's tape on the read side.
+func TestTapeLibraryRestore(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "v1")
+
+	cfg := &config.Config{
+		Landing: "disk",
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
+		},
+		Sources: []config.DLE{{Host: "h", Path: src}},
+		Workdir: t.TempDir(),
+	}
+	cfg.Compress.Codec = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	s1, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump 1: %v", err)
+	}
+	if err := eng.LabelVolume("lib", "Tape1", false, false, time.Now().UTC(), nil); err != nil {
+		t.Fatalf("label Tape1: %v", err)
+	}
+	if err := eng.CopySlot(s1.ID, "lib", false, nil); err != nil {
+		t.Fatalf("copy s1: %v", err)
+	}
+
+	write(t, filepath.Join(src, "f.txt"), "v2")
+	time.Sleep(1100 * time.Millisecond)
+	s2, err := eng.Run(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump 2: %v", err)
+	}
+	if err := eng.LabelVolume("lib", "Tape2", false, false, time.Now().UTC(), nil); err != nil {
+		t.Fatalf("label Tape2: %v", err)
+	}
+	if err := eng.CopySlot(s2.ID, "lib", false, nil); err != nil {
+		t.Fatalf("copy s2: %v", err)
+	}
+
+	// The two copies must live on different tapes.
+	if v := eng.cat.Placements(s1.ID); len(v) < 2 {
+		t.Fatalf("s1 should have a tape copy, placements=%v", v)
+	}
+
+	// Drop the disk copies so restore must fall over to the tapes (different bays).
+	if err := eng.vol.RemoveSlot(s1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.vol.RemoveSlot(s2.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	name := config.DLE{Host: "h", Path: src}.Name()
+	d1 := t.TempDir()
+	if err := eng.Restore(s1.ID, name, d1, nil); err != nil {
+		t.Fatalf("restore s1 (auto-mount Tape1): %v", err)
+	}
+	assertContent(t, filepath.Join(d1, "f.txt"), "v1")
+	d2 := t.TempDir()
+	if err := eng.Restore(s2.ID, name, d2, nil); err != nil {
+		t.Fatalf("restore s2 (auto-mount Tape2): %v", err)
+	}
+	assertContent(t, filepath.Join(d2, "f.txt"), "v2")
+}
+
+// TestTapeAppendableFalse: a one-run-per-tape medium refuses a second run on a
+// tape that already holds one; a fresh tape accepts it.
+func TestTapeAppendableFalse(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "data")
+
+	cfg := &config.Config{
+		Landing: "disk",
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"lib":  {Type: "tape", Appendable: boolp(false), Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
+		},
+		Sources: []config.DLE{{Host: "h", Path: src}},
+		Workdir: t.TempDir(),
+	}
+	cfg.Compress.Codec = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	s1, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump 1: %v", err)
+	}
+	write(t, filepath.Join(src, "f.txt"), "data2")
+	time.Sleep(1100 * time.Millisecond)
+	s2, err := eng.Run(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump 2: %v", err)
+	}
+
+	if err := eng.LabelVolume("lib", "Tape1", false, false, time.Now().UTC(), nil); err != nil {
+		t.Fatalf("label Tape1: %v", err)
+	}
+	if err := eng.CopySlot(s1.ID, "lib", false, nil); err != nil {
+		t.Fatalf("copy s1 to fresh tape: %v", err)
+	}
+	// Tape1 now holds a run; a non-appendable medium refuses a second run on it.
+	if err := eng.CopySlot(s2.ID, "lib", false, nil); err == nil {
+		t.Fatal("expected copy onto a non-appendable tape that already holds a run to be refused")
+	}
+	// A fresh tape accepts it.
+	if err := eng.LabelVolume("lib", "Tape2", false, false, time.Now().UTC(), nil); err != nil {
+		t.Fatalf("label Tape2: %v", err)
+	}
+	if err := eng.CopySlot(s2.ID, "lib", false, nil); err != nil {
+		t.Fatalf("copy s2 to fresh tape: %v", err)
+	}
 }
 
 func write(t *testing.T, path, content string) {

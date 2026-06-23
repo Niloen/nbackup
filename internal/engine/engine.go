@@ -137,6 +137,67 @@ func (e *Engine) BudgetStatus(current int64) (over bool, pct float64) {
 	return current > c, float64(current) / float64(c) * 100
 }
 
+// MediumInfo is a per-medium summary for catalog visibility (`nb medium`): what
+// the medium is, how much it holds against its capacity, and (for labeled media)
+// the volume currently associated with it in the catalog.
+type MediumInfo struct {
+	Name     string
+	Type     string
+	Slots    int
+	Used     int64
+	Capacity int64  // 0 = unbounded
+	Volume   string // label name; "" for address-identified media (disk, s3)
+	Epoch    int
+}
+
+// Media returns a summary of every configured medium, sorted by name.
+func (e *Engine) Media() []MediumInfo {
+	names := make([]string, 0, len(e.cfg.Media))
+	for n := range e.cfg.Media {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]MediumInfo, 0, len(names))
+	for _, n := range names {
+		info, _ := e.Medium(n)
+		out = append(out, info)
+	}
+	return out
+}
+
+// Medium returns the summary for one configured medium; ok is false if the name
+// is unknown.
+func (e *Engine) Medium(name string) (MediumInfo, bool) {
+	d, ok := e.cfg.Media[name]
+	if !ok {
+		return MediumInfo{}, false
+	}
+	info := MediumInfo{
+		Name:  name,
+		Type:  d.Type,
+		Slots: len(e.cat.SlotsOn(name)),
+		Used:  e.cat.MediumBytes(name),
+	}
+	if prof, err := media.OpenProfile(d.Type, media.Options(d.ProfileOptions())); err == nil {
+		info.Capacity = prof.TotalBytes()
+	}
+	// A changer medium (tape library) holds many volumes; summarize the count and
+	// point at `nb changer` for the detail. A single labeled volume shows its name.
+	if d.Type == "tape" {
+		n := 0
+		for _, v := range e.cat.Volumes() {
+			if v.Label.Pool == name {
+				n++
+			}
+		}
+		info.Volume = fmt.Sprintf("%d tape(s)", n)
+	} else if lbl, ok := e.cat.VolumeForMedium(name); ok {
+		info.Volume = lbl.Name
+		info.Epoch = lbl.Epoch
+	}
+	return info, true
+}
+
 // methodForDumpType resolves and caches the dump method for a dumptype,
 // configured with the dumptype's options (plus the global tar path).
 func (e *Engine) methodForDumpType(dtName string) (method.Method, error) {
@@ -201,19 +262,29 @@ func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
 // CopySlot streams a sealed slot from the engine's own volume to another
 // configured medium, then records the new copy in the catalog (a second
 // placement). Copy is a write, so it runs the same label verification as a dump.
-func (e *Engine) CopySlot(slotID, targetMedia string, logf Logf) error {
+func (e *Engine) CopySlot(slotID, targetMedia string, force bool, logf Logf) error {
 	s, err := e.cat.ReadSlot(slotID)
 	if err != nil {
 		return err
 	}
-	dst, _, own, err := e.mediumVolume(targetMedia)
+	dst, def, own, err := e.mediumVolume(targetMedia)
 	if err != nil {
 		return err
 	}
 	if own {
 		return fmt.Errorf("target medium %q is the copy source", targetMedia)
 	}
-	volName, epoch, err := e.verifyWritable(dst, targetMedia, time.Now().UTC())
+	// Idempotency: a slot already recorded on the target is not re-copied. On
+	// append-only media a second copy would orphan the first (unreferenced files,
+	// reclaimable only by relabel); --force overrides for a deliberate re-copy.
+	if !force {
+		for _, p := range e.cat.Placements(slotID) {
+			if p.Medium == targetMedia {
+				return fmt.Errorf("slot %s is already on medium %q (volume %q); use --force to copy again", slotID, targetMedia, p.Volume)
+			}
+		}
+	}
+	volName, epoch, err := e.verifyWritable(dst, targetMedia, def.IsAppendable(), time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -244,13 +315,15 @@ func (e *Engine) Catalog() *catalog.Catalog { return e.cat }
 // (tape) media it refuses a foreign, blank (unless auto_label), wrong-pool, wrong,
 // or relabeled-since volume — the overwrite and wrong-tape protection — records the
 // accepted label, and returns the volume identity to record in a placement.
-func (e *Engine) verifyWritable(vol media.Volume, medium string, now time.Time) (volName string, epoch int, err error) {
+func (e *Engine) verifyWritable(vol media.Volume, medium string, appendable bool, now time.Time) (volName string, epoch int, err error) {
 	lv, ok := vol.(media.Labeled)
 	if !ok {
 		return medium, 0, nil // address-identified: identity is the medium itself
 	}
 	lbl, labeled, err := lv.ReadLabel()
 	switch {
+	case errors.Is(err, media.ErrNoVolume):
+		return "", 0, fmt.Errorf("medium %q has no tape loaded; load one with `nb changer load %s <bay>` or label a blank one with `nb label %s <name>`", medium, medium, medium)
 	case errors.Is(err, media.ErrForeignVolume):
 		return "", 0, fmt.Errorf("medium %q holds non-NBackup data; refusing to overwrite — relabel it explicitly with `nb label --force %s <name>`", medium, medium)
 	case err != nil:
@@ -267,12 +340,16 @@ func (e *Engine) verifyWritable(vol media.Volume, medium string, now time.Time) 
 	if lbl.Pool != "" && lbl.Pool != medium {
 		return "", 0, fmt.Errorf("mounted volume %q belongs to pool %q, not %q — wrong tape", lbl.Name, lbl.Pool, medium)
 	}
-	if known, ok := e.cat.VolumeForMedium(medium); ok {
-		if known.Name != lbl.Name {
-			return "", 0, fmt.Errorf("wrong volume on %q: catalog expects %q but %q is mounted", medium, known.Name, lbl.Name)
-		}
-		if known.Epoch != lbl.Epoch {
-			return "", 0, fmt.Errorf("volume %q was relabeled since the catalog was updated (epoch %d mounted vs %d cached); run `nb catalog rebuild`", lbl.Name, lbl.Epoch, known.Epoch)
+	// Relabeled-since check: a tape we know whose epoch advanced means the catalog
+	// is stale for it. (A genuinely different tape is not an error — that is what
+	// loading another tape in the pool is for.)
+	if known, ok := e.cat.Volume(lbl.Name); ok && known.Label.Epoch != lbl.Epoch {
+		return "", 0, fmt.Errorf("volume %q was relabeled since the catalog was updated (epoch %d mounted vs %d cached); run `nb catalog rebuild`", lbl.Name, lbl.Epoch, known.Label.Epoch)
+	}
+	// One-run-per-tape media refuse to append onto a tape that already holds a run.
+	if !appendable {
+		if held := e.cat.SlotsOnVolume(lbl.Name); len(held) > 0 {
+			return "", 0, fmt.Errorf("medium %q is not appendable and tape %q already holds %d run(s); load a fresh tape", medium, lbl.Name, len(held))
 		}
 	}
 	if err := e.cat.RecordVolume(lbl); err != nil {
@@ -299,11 +376,51 @@ func (e *Engine) assertVolume(vol media.Volume, p catalog.Placement) error {
 	return nil
 }
 
+// mountForRead loads the bay holding a placement's volume on a changer medium
+// (a tape library), so the reader can seek it. On disk-emulated tape this is
+// automatic; a real manual changer would prompt the operator. Non-changer media
+// are a no-op (a single addressable volume).
+func (e *Engine) mountForRead(vol media.Volume, p catalog.Placement) error {
+	ch, ok := vol.(media.Changer)
+	if !ok {
+		return nil
+	}
+	if bay, ok := ch.Loaded(); ok {
+		if lbl, labeled, err := readVolumeLabel(vol); err == nil && labeled && lbl == p.Volume {
+			return nil // the right tape is already in the drive
+		}
+		_ = bay
+	}
+	bays, err := ch.Bays()
+	if err != nil {
+		return err
+	}
+	for _, b := range bays {
+		if b.Label == p.Volume {
+			return ch.Mount(b.Bay)
+		}
+	}
+	return fmt.Errorf("tape %q (holding a copy of the slot on %q) is not in the library; load it with `nb changer load %s <bay>`", p.Volume, p.Medium, p.Medium)
+}
+
+// readVolumeLabel reads the loaded volume's label name, if any.
+func readVolumeLabel(vol media.Volume) (name string, labeled bool, err error) {
+	lv, ok := vol.(media.Labeled)
+	if !ok {
+		return "", false, nil
+	}
+	lbl, ok, err := lv.ReadLabel()
+	return lbl.Name, ok, err
+}
+
 // readerFor opens a Reader positioned to read a placement's volume, after
-// verifying the mounted volume's identity. For the engine's own medium it reuses
-// the open handle and reader.
+// mounting the right tape (on a changer) and verifying its identity. For the
+// engine's own medium it reuses the open handle and reader.
 func (e *Engine) readerFor(p catalog.Placement) (*slotio.Reader, error) {
 	if p.Medium == e.mediumName {
+		if err := e.mountForRead(e.vol, p); err != nil {
+			return nil, err
+		}
 		if err := e.assertVolume(e.vol, p); err != nil {
 			return nil, err
 		}
@@ -311,6 +428,9 @@ func (e *Engine) readerFor(p catalog.Placement) (*slotio.Reader, error) {
 	}
 	vol, _, _, err := e.mediumVolume(p.Medium)
 	if err != nil {
+		return nil, err
+	}
+	if err := e.mountForRead(vol, p); err != nil {
 		return nil, err
 	}
 	if err := e.assertVolume(vol, p); err != nil {
@@ -345,6 +465,18 @@ func (e *Engine) LabelVolume(mediumName, name string, relabel, force bool, now t
 	lv, ok := vol.(media.Labeled)
 	if !ok {
 		return fmt.Errorf("medium %q is address-identified and does not use labels", mediumName)
+	}
+
+	// On a changer, pick the physical bay this label belongs to and mount it: an
+	// existing tape for --relabel, a blank one for a new label.
+	if ch, ok := vol.(media.Changer); ok {
+		bay, err := chooseBay(ch, name, relabel)
+		if err != nil {
+			return err
+		}
+		if err := ch.Mount(bay); err != nil {
+			return err
+		}
 	}
 
 	cur, labeled, err := lv.ReadLabel()
@@ -385,6 +517,102 @@ func (e *Engine) LabelVolume(mediumName, name string, relabel, force bool, now t
 		if _, err := e.cat.Rebuild(map[string]media.Volume{e.mediumName: e.vol}); err != nil {
 			return fmt.Errorf("rebuild catalog after labeling: %w", err)
 		}
+	}
+	return nil
+}
+
+// chooseBay selects which physical bay a label operation targets: for --relabel,
+// the bay already holding that label; for a new label, a blank bay (preferring
+// one already in the drive). It refuses to reuse an existing label without
+// --relabel, or to label when no blank bay is free.
+func chooseBay(ch media.Changer, name string, relabel bool) (string, error) {
+	bays, err := ch.Bays()
+	if err != nil {
+		return "", err
+	}
+	if relabel {
+		for _, b := range bays {
+			if b.Label == name {
+				return b.Bay, nil
+			}
+		}
+		return "", fmt.Errorf("no tape labeled %q in the library to relabel", name)
+	}
+	for _, b := range bays {
+		if b.Label == name {
+			return "", fmt.Errorf("a tape labeled %q already exists; use --relabel to reuse it", name)
+		}
+	}
+	if cur, ok := ch.Loaded(); ok {
+		for _, b := range bays {
+			if b.Bay == cur && b.Blank {
+				return cur, nil // label the blank already in the drive
+			}
+		}
+	}
+	for _, b := range bays {
+		if b.Blank {
+			return b.Bay, nil
+		}
+	}
+	return "", fmt.Errorf("no blank bay available; all %d are in use — relabel an aged-out tape with `nb label --relabel`", len(bays))
+}
+
+// Bays inventories a changer medium's library: the loaded bay and every bay's
+// physical state plus the label it holds.
+func (e *Engine) Bays(mediumName string) (loaded string, bays []media.BayStatus, err error) {
+	vol, _, _, err := e.mediumVolume(mediumName)
+	if err != nil {
+		return "", nil, err
+	}
+	ch, ok := vol.(media.Changer)
+	if !ok {
+		return "", nil, fmt.Errorf("medium %q is not a tape library", mediumName)
+	}
+	bays, err = ch.Bays()
+	if err != nil {
+		return "", nil, err
+	}
+	loaded, _ = ch.Loaded()
+	return loaded, bays, nil
+}
+
+// LoadVolume mounts a volume on a changer medium, addressed by bay id, or by
+// label when byLabel is set (the host-side "load the volume labeled X" helper).
+func (e *Engine) LoadVolume(mediumName, target string, byLabel bool, logf Logf) error {
+	vol, _, _, err := e.mediumVolume(mediumName)
+	if err != nil {
+		return err
+	}
+	ch, ok := vol.(media.Changer)
+	if !ok {
+		return fmt.Errorf("medium %q is not a tape library", mediumName)
+	}
+	bay := target
+	if byLabel {
+		bays, err := ch.Bays()
+		if err != nil {
+			return err
+		}
+		found := ""
+		for _, b := range bays {
+			if b.Label == target {
+				found = b.Bay
+				break
+			}
+		}
+		if found == "" {
+			return fmt.Errorf("no tape labeled %q in the library", target)
+		}
+		bay = found
+	}
+	if err := ch.Mount(bay); err != nil {
+		return err
+	}
+	if lbl, labeled, _ := readVolumeLabel(vol); labeled {
+		logf.log("loaded %q: bay %s holds %q", mediumName, bay, lbl)
+	} else {
+		logf.log("loaded %q: bay %s (blank)", mediumName, bay)
 	}
 	return nil
 }
@@ -495,7 +723,7 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 		}
 	}
 
-	volName, epoch, err := e.verifyWritable(e.vol, e.mediumName, time.Now().UTC())
+	volName, epoch, err := e.verifyWritable(e.vol, e.mediumName, e.mediumDef.IsAppendable(), time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}

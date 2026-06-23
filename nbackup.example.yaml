@@ -25,16 +25,21 @@ media:
     budget: 20TB        # capacity ceiling; `nb slot prune` reclaims oldest to fit
     minimum_age: 30d    # a slot can't be retired from this medium until older
   lto:
-    type: tape          # `device:` drives a real drive via mt; `dir:` is a virtual tape
-    device: /dev/nst0   # real drive (no-rewind device)
-    # dir: /var/lib/nbackup/vtape   # OR a file-backed virtual tape (no hardware)
-    tapes: 20           # capacity is tapes × tape_size
-    tape_size: 6TB
+    type: tape          # a LIBRARY of bays behind one drive
+    device: /dev/nst0   # real single drive (no-rewind device), a one-bay library
+    # dir: /var/lib/nbackup/vtape   # OR a file-backed virtual library (no hardware)
+    bays: 20            # physical bays; total capacity is bays × volume_size
+    volume_size: 6TB    # per-volume capacity — a write past it hits end-of-tape
     minimum_age: 180d
+    appendable: true    # default: pack many runs per tape (Bacula-style) until full.
+                        # false = one run per tape (Amanda-style).
     # Tapes carry a self-describing identity label (file 0) that NBackup verifies
     # before writing — so a wrong, foreign, or still-active reel is never clobbered.
-    # Label a blank tape before its first dump:  nb label lto lto-0001
-    # Reuse an expired tape:                     nb label --relabel lto lto-0042
+    # The changer addresses physical bays; the label is read after mounting:
+    #   nb changer list lto               # inventory bay -> label
+    #   nb label lto lto-0001             # grab a blank bay and label it
+    #   nb changer load lto bay-02        # mount a bay (or: nb changer load --label lto lto-0007)
+    #   nb label --relabel lto lto-0042   # recycle an aged-out tape
   cloud:
     type: s3            # registered stub; no S3 client yet
     bucket: company-backups

@@ -137,8 +137,14 @@ type Media struct {
 	Type       string            `yaml:"type"`
 	Budget     string            `yaml:"budget"`      // capacity ceiling, e.g. "20TB" ("" = unbounded)
 	MinimumAge string            `yaml:"minimum_age"` // cycle age before a slot may be retired here
+	Appendable *bool             `yaml:"appendable"`  // tape: pack many runs per tape (default) vs one run per tape
 	Params     map[string]string `yaml:",inline"`     // type-specific connection params (path, bucket, tapes, ...)
 }
+
+// IsAppendable reports whether a tape may accumulate many runs until full
+// (Bacula-style, the default). When false, a tape holds a single run before it
+// must be changed (Amanda-style). Address-identified media ignore it.
+func (m Media) IsAppendable() bool { return m.Appendable == nil || *m.Appendable }
 
 // BudgetBytes returns this medium's capacity ceiling in bytes, or 0 if unset.
 func (m Media) BudgetBytes() (int64, error) {

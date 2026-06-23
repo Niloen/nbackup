@@ -92,21 +92,23 @@ func (p sizeProfile) Reclaim(slots []*slot.Slot, protected map[string]string, no
 	return out
 }
 
-// --- volume-based profile (tape) — capacity known, reclamation deferred ---
+// --- volume-based profile (libraries of removable volumes, e.g. tape) —
+// capacity known, reclamation deferred ---
 
-// NewVolumeProfile builds a tape profile from "tapes" and "tape_size".
+// NewVolumeProfile builds a removable-volume library profile from "bays" (how
+// many volumes the library holds) and "volume_size" (each volume's capacity).
 func NewVolumeProfile(opts Options) (Profile, error) {
-	tapes, _ := strconv.ParseInt(opts.Get("tapes"), 10, 64)
-	tapeSize, _ := parseBytes(opts.Get("tape_size"))
-	return volumeProfile{tapes: tapes, tapeSize: tapeSize}, nil
+	bays, _ := strconv.ParseInt(opts.Get("bays"), 10, 64)
+	volumeSize, _ := parseBytes(opts.Get("volume_size"))
+	return volumeProfile{bays: bays, volumeSize: volumeSize}, nil
 }
 
 type volumeProfile struct {
-	tapes    int64
-	tapeSize int64
+	bays       int64
+	volumeSize int64
 }
 
-func (p volumeProfile) TotalBytes() int64 { return p.tapes * p.tapeSize }
+func (p volumeProfile) TotalBytes() int64 { return p.bays * p.volumeSize }
 
 // Reclaim is a placeholder: tape reclamation is whole-volume reuse, which needs
 // a volume catalog and changer (not yet implemented).

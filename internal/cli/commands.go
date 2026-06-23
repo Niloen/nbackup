@@ -3,11 +3,14 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/slot"
 )
@@ -183,22 +186,40 @@ func runSlotList(a *app) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "SLOT\tSTATUS\tARCHIVES\tSIZE\tSEALED")
+	fmt.Fprintln(tw, "SLOT\tSTATUS\tARCHIVES\tSIZE\tSEALED\tCOPIES")
 	for _, s := range slots {
 		sealed := "-"
 		if !s.SealedAt.IsZero() {
 			sealed = s.SealedAt.Format("2006-01-02 15:04")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", s.ID, s.Status, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes), sealed)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", s.ID, s.Status, len(s.Archives),
+			sizeutil.FormatBytes(s.TotalBytes), sealed, copiesSummary(eng.Catalog().Placements(s.ID)))
 	}
 	tw.Flush()
 	return nil
 }
 
+// copiesSummary renders a slot's placements as a compact comma list, naming the
+// volume label only when it differs from the medium (i.e. for labeled tapes).
+func copiesSummary(ps []catalog.Placement) string {
+	if len(ps) == 0 {
+		return "-"
+	}
+	names := make([]string, 0, len(ps))
+	for _, p := range ps {
+		if p.Volume != "" && p.Volume != p.Medium {
+			names = append(names, p.Medium+":"+p.Volume)
+		} else {
+			names = append(names, p.Medium)
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
 func newSlotShowCmd(a *app) *cobra.Command {
 	return &cobra.Command{
 		Use:     "show <slot-id>",
-		Short:   "Show a single slot's archives",
+		Short:   "Show a single slot's archives and copies",
 		Example: "  nb slot show slot-2026-06-21",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -224,6 +245,24 @@ func newSlotShowCmd(a *app) *cobra.Command {
 				fmt.Fprintf(tw, "%s\tL%d\t%d\t%s\t%s\n", ar.DLE, ar.Level, ar.FileCount, sizeutil.FormatBytes(ar.Compressed), ar.Codec)
 			}
 			tw.Flush()
+
+			placements := eng.Catalog().Placements(s.ID)
+			fmt.Printf("\nCOPIES (%d)\n", len(placements))
+			ptw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+			fmt.Fprintln(ptw, "  MEDIUM\tVOLUME\tEPOCH\tPOSITIONS")
+			for _, p := range placements {
+				volume, epoch := "-", "-"
+				if p.Volume != "" && p.Volume != p.Medium {
+					volume = p.Volume
+					epoch = fmt.Sprintf("%d", p.Epoch)
+				}
+				positions := make([]string, 0, len(p.Archives))
+				for _, ar := range p.Archives {
+					positions = append(positions, fmt.Sprintf("%s/L%d@%d", ar.DLE, ar.Level, ar.Pos))
+				}
+				fmt.Fprintf(ptw, "  %s\t%s\t%s\t%s\n", p.Medium, volume, epoch, strings.Join(positions, " "))
+			}
+			ptw.Flush()
 			return nil
 		},
 	}
@@ -270,6 +309,7 @@ func newSlotPruneCmd(a *app) *cobra.Command {
 // another configured medium (e.g. disk -> tape).
 func newCopyCmd(a *app) *cobra.Command {
 	var to string
+	var force bool
 	cmd := &cobra.Command{
 		Use:     "copy <slot-id>",
 		Short:   "Copy a slot to another medium (e.g. disk -> tape)",
@@ -285,7 +325,7 @@ func newCopyCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := eng.CopySlot(args[0], to, a.logf()); err != nil {
+			if err := eng.CopySlot(args[0], to, force, a.logf()); err != nil {
 				return err
 			}
 			fmt.Println("copy complete")
@@ -293,6 +333,7 @@ func newCopyCmd(a *app) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&to, "to", "", "destination medium name (required)")
+	cmd.Flags().BoolVar(&force, "force", false, "re-copy even if the slot is already recorded on the target medium")
 	cmd.MarkFlagRequired("to")
 	return cmd
 }
@@ -322,6 +363,170 @@ func newLabelCmd(a *app) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&relabel, "relabel", false, "reuse a volume already labeled by NBackup")
 	cmd.Flags().BoolVar(&force, "force", false, "override safety refusals (foreign data / still-active volume)")
+	return cmd
+}
+
+// newMediumCmd implements `nb medium`: list media (default) or detail one.
+func newMediumCmd(a *app) *cobra.Command {
+	return &cobra.Command{
+		Use:     "medium [name]",
+		Short:   "List media and their capacity/volumes, or detail one",
+		Long:    "List every configured medium with its type, slot count, usage, capacity, and current volume. Pass a medium name to show its volume and the slots it holds.",
+		Example: "  nb medium\n  nb medium lto",
+		Args:    cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := a.loadRO()
+			if err != nil {
+				return err
+			}
+			eng, err := newEngine(cfg)
+			if err != nil {
+				return err
+			}
+			if len(args) >= 1 {
+				return mediumDetail(eng, args[0])
+			}
+			return mediumList(eng)
+		},
+	}
+}
+
+func mediumList(eng *engine.Engine) error {
+	media := eng.Media()
+	if len(media) == 0 {
+		fmt.Println("no media configured")
+		return nil
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "MEDIUM\tTYPE\tSLOTS\tUSED\tCAPACITY\tVOLUME")
+	for _, m := range media {
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", m.Name, m.Type, m.Slots,
+			sizeutil.FormatBytes(m.Used), capacityStr(m.Capacity), volumeStr(m))
+	}
+	tw.Flush()
+	return nil
+}
+
+func mediumDetail(eng *engine.Engine, name string) error {
+	m, ok := eng.Medium(name)
+	if !ok {
+		return fmt.Errorf("unknown medium %q", name)
+	}
+	fmt.Printf("Medium %s  (%s)\n", m.Name, m.Type)
+	fmt.Printf("  volume:  %s\n", volumeStr(m))
+	fmt.Printf("  used:    %s / %s\n\n", sizeutil.FormatBytes(m.Used), capacityStr(m.Capacity))
+	slots := eng.Catalog().SlotsOn(name)
+	if len(slots) == 0 {
+		fmt.Println("no slots on this medium")
+		return nil
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "SLOT\tSIZE\tARCHIVES\tSEALED")
+	for _, s := range slots {
+		sealed := "-"
+		if !s.SealedAt.IsZero() {
+			sealed = s.SealedAt.Format("2006-01-02 15:04")
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", s.ID, sizeutil.FormatBytes(s.TotalBytes), len(s.Archives), sealed)
+	}
+	tw.Flush()
+	return nil
+}
+
+func capacityStr(c int64) string {
+	if c <= 0 {
+		return "unbounded"
+	}
+	return sizeutil.FormatBytes(c)
+}
+
+func volumeStr(m engine.MediumInfo) string {
+	if m.Volume == "" {
+		return "-"
+	}
+	if m.Epoch > 0 {
+		return fmt.Sprintf("%s (epoch %d)", m.Volume, m.Epoch)
+	}
+	return m.Volume
+}
+
+// newChangerCmd implements `nb changer`: the manual changer — inventory the
+// library (list) or mount a volume (load). Reading the actual label requires
+// loading a volume in the drive, so this is also how you point the drive at a
+// specific reel before a write.
+func newChangerCmd(a *app) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "changer",
+		Short: "Inventory or mount volumes in a library (tape, ...)",
+		Long:  "Drive the manual changer: inventory the bays of a library medium, or load a specific volume into its drive before a read or write.",
+		Args:  cobra.NoArgs,
+	}
+	cmd.AddCommand(newChangerListCmd(a), newChangerLoadCmd(a))
+	return cmd
+}
+
+func newChangerListCmd(a *app) *cobra.Command {
+	return &cobra.Command{
+		Use:     "list <medium>",
+		Short:   "Inventory the bays of a library medium",
+		Example: "  nb changer list lto",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := a.loadRO()
+			if err != nil {
+				return err
+			}
+			eng, err := newEngine(cfg)
+			if err != nil {
+				return err
+			}
+			loaded, bays, err := eng.Bays(args[0])
+			if err != nil {
+				return err
+			}
+			tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+			fmt.Fprintln(tw, "\tBAY\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
+			for _, b := range bays {
+				mark := " "
+				if b.Bay == loaded {
+					mark = "*"
+				}
+				label, status := b.Label, "append"
+				if b.Blank {
+					label, status = "(blank)", "blank"
+				} else if b.Capacity > 0 && b.Used >= b.Capacity {
+					status = "full"
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\n", mark, b.Bay, label, status,
+					sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
+			}
+			tw.Flush()
+			return nil
+		},
+	}
+}
+
+func newChangerLoadCmd(a *app) *cobra.Command {
+	var byLabel bool
+	cmd := &cobra.Command{
+		Use:     "load <medium> <bay-or-label>",
+		Short:   "Mount a volume into the library's drive",
+		Long:    "Load the volume in <bay-or-label> into the medium's drive. By default the argument is a bay id; with --label it is matched against volume labels instead.",
+		Example: "  nb changer load lto 3\n  nb changer load --label lto DAILY-01",
+		Args:    cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := a.load()
+			if err != nil {
+				return err
+			}
+			eng, err := newEngine(cfg)
+			if err != nil {
+				return err
+			}
+			return eng.LoadVolume(args[0], args[1], byLabel, a.logf())
+		},
+	}
+	cmd.Flags().BoolVar(&byLabel, "label", false, "treat the argument as a volume label rather than a bay id")
 	return cmd
 }
 

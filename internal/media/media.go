@@ -82,6 +82,44 @@ type Labeled interface {
 // label (someone else's tape, or non-NBackup data).
 var ErrForeignVolume = fmt.Errorf("foreign volume: file 0 is not an NBackup label")
 
+// ErrVolumeFull reports that a write hit the end of the volume (a finite volume's
+// capacity, e.g. a tape). The partial file is discarded; without spanning, the
+// whole archive must be rewritten on another volume. Callers test it with errors.Is.
+var ErrVolumeFull = fmt.Errorf("volume full: end of volume reached")
+
+// ErrNoVolume reports that an operation needs a volume mounted in the drive, but
+// the drive is empty — a changer (tape library, removable-disk tray, …) with
+// nothing loaded. The engine wraps this with medium-specific guidance.
+var ErrNoVolume = fmt.Errorf("no volume loaded in the drive")
+
+// Changer is implemented by media that hold many physical volumes behind a single
+// drive: a tape library / autochanger (or its manual, disk-emulated equivalent).
+// It is deliberately label-AGNOSTIC: like a real robot it addresses physical
+// positions (bays) and never reads the magnetic label itself — the label is read
+// from the medium only after a bay is mounted (via Labeled.ReadLabel). The engine
+// resolves labels↔bays on top of this seam.
+type Changer interface {
+	// Mount loads the named bay into the drive (error if the bay does not exist).
+	// Subsequent Volume/Labeled operations act on the mounted bay.
+	Mount(bay string) error
+	// Loaded returns the bay currently in the drive; ok is false when empty.
+	Loaded() (bay string, ok bool)
+	// Bays lists the library's physical positions and what each holds.
+	Bays() ([]BayStatus, error)
+}
+
+// BayStatus is one physical position's state. Label is the volume label written
+// on the cartridge in that bay ("" when blank) — for the disk emulator it stands
+// in for the barcode a real library's reader would report without a drive read.
+type BayStatus struct {
+	Bay      string
+	Label    string
+	Blank    bool
+	Used     int64
+	Capacity int64
+	Files    int
+}
+
 // Options carries medium-specific configuration to a factory as generic
 // key/value parameters (e.g. "path" for disk, "bucket" for s3).
 type Options map[string]string
