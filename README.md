@@ -267,39 +267,17 @@ tar snapshot library, immutable sealed slots with **sequence-suffixed** same-day
 runs, **deletion-aware** incremental restore, checksum verification, point-in-time
 restore, per-medium budget reporting, cycle-safe pruning.
 
-The `tape` medium is a **library of bays behind one drive**, modeled with two
-internal seams: a `device` (the `mt` analogue — file I/O of one mounted tape) and
-a `changer` (the robot analogue — which bay is in the drive). `dir:` selects a
-directory-backed library (each bay a subdirectory, finite per-bay `volume_size`,
-fully tested); `device:` selects a real single drive (`mt` + `/dev/nst0`, a
-one-bay library), structurally complete but unverified without hardware, so CI
-exercises the virtual library.
-
-**Bays vs labels.** A *bay* is a physical position (`bay-01…`, the durable
-cartridge identity); a *label* is logical data written at file 0 (`nbackup` magic,
-name, pool, epoch). They are deliberately distinct: a blank cartridge has a bay
-but no label, and relabeling rewrites the label without changing the bay. Like a
-real autochanger, the `changer` is **label-agnostic** — it mounts bays; the label
-is read from the drive only after mounting. `bays: N` stocks the library with N
-blank bays; `nb changer list` inventories bay→label; `nb changer load` mounts one.
-
-**Append vs one-run-per-tape.** A tape fills until end-of-tape (`ErrVolumeFull`),
-then you change tapes. `appendable: true` (default, Bacula-style) packs many runs
-onto a tape until full; `appendable: false` (Amanda-style) uses one run per tape.
-Switching is **manual**: a full tape is refused and you `nb changer load` the next
-(or `nb label --relabel` an aged-out one). Automatic advance and tape spanning
-are the next step.
-
-**Volume labels.** The label is a *capability* (`media.Labeled`), so
-address-identified media (disk, S3) carry none and skip the dance. Before a write
-the engine verifies the loaded tape's label and **refuses** a foreign, blank
-(unless `auto_label`), wrong-pool, or relabeled-since-cached reel — Amanda's
-overwrite guard. Label a tape with `nb label <medium> <name>` (it grabs a blank
-bay); reuse an expired one with `nb label --relabel` (refused while it holds
-protected slots; `--force` overrides). On read, the changer **auto-mounts** the
-bay holding each copy's tape, and every archive header is asserted against the
-catalog. The catalog caches the volume registry (`catalog.Volumes`, Amanda's
-*tapelist*).
+The `tape` medium is a **library of tapes behind one drive**: `bays: N` physical
+positions, each holding a finite `volume_size` tape, with `dir:` (a file-backed
+virtual library, no hardware) or `device:` (a real drive via `mt`). You label a
+blank tape (`nb label`), and inventory or mount tapes with `nb changer list` /
+`nb changer load`. Tapes carry a self-describing label that NBackup **verifies
+before every write**, so a foreign, wrong, or still-active reel is never
+clobbered. A tape fills to end-of-tape and is then changed manually; `appendable:
+true` (default) packs many runs per tape (Bacula-style), `appendable: false` uses
+one run per tape (Amanda-style). Restore auto-mounts whichever tape holds the
+copy it needs. (Internals: [ARCHITECTURE.md](ARCHITECTURE.md). Automatic tape
+advance and spanning are the next step.)
 
 Not yet implemented (declared in config for forward-compatibility):
 
@@ -314,70 +292,16 @@ Not yet implemented (declared in config for forward-compatibility):
 ## Architecture
 
 NBackup's internals mirror Amanda's pluggable-API structure: mechanism lives
-behind interfaces with named, registered implementations, and a single
-orchestrator composes them.
+behind interfaces with named, registered implementations, and one orchestrator
+(`engine`) composes them. The **media are the source of truth** (every file
+self-describing, every slot sealed, every labeled volume identified); the
+**catalog is a local cache** with its own directory, so planning, listing,
+restore-location, and pruning never touch a slow or offline volume, and a single
+scan rebuilds it (`nb catalog rebuild`).
 
-| Package | Responsibility | Amanda analogue |
-|---|---|---|
-| `config` | config + domain entities: `DLE`, `Media`, `DumpType` | Disklist / dumptype / storage |
-| `slot` | slot metadata: pure data + lifecycle (`NewSlot`/`AddArchive`/`Seal`) | Header / amar |
-| `slotio` | maps a slot onto a `Volume`'s files (headers, seal record, verify) | taper / amrestore |
-| `media` | `Volume` (positional, self-describing files + headers) + `Profile` + registry | Device API |
-| `media/disk`, `media/tape`, `media/s3` | Volume impls: disk (sidecar headers, clean payloads), tape (sequential, file-numbered; `dir:` virtual or `device:` real via an mt seam), s3 (stub) | vfs/tape/s3 devices |
-| `method` | `Method` dump interface + registry (configured via dumptype options) | Application API |
-| `method/gnutar` | GNU tar implementation (all tar/snapshot specifics) | amgtar |
-| `filter` | external compressor child processes (zstd/gzip/none) + registry | gzip/custom compress |
-| `xfer` | in-process stream metering: checksum + byte counting | Xfer API |
-| `catalog` | local cache of the slot index + snapshot library; derives run `History` | catalog / curinfo / tapelist |
-| `policy` | cross-cutting retention safety floor: protected slots (pure) | Policy |
-| `planner` | multilevel level scheduling (pure) | planner |
-| `engine` | the driver: schedules parallel dumpers, wires planner→method→filter→media→catalog | driver / taper |
-| `cli` | thin command wiring | amdump / amadmin |
-
-Dependencies flow one way: `cli → engine → {planner, policy, method, filter,
-slotio, catalog, config}` and the leaf packages `{media, xfer, slot, sizeutil}`.
-Domain packages stay pure; `method`/`media`/`filter` are pluggable adapters;
-`engine` is the only component aware of all of them. A backup reads as a pipeline
-of processes — **source** (`tar` via `method.Backup`) → **filter** (external
-compressor child) → **dest** (`media.Volume`), metered (checksum + size) and
-composed by `slotio`. Like Amanda, `engine` runs up to `parallelism.dumpers`
-dumpers concurrently (each a `tar`+compressor pipeline) and can `nice` the
-children. Adding a storage medium, dump method, or codec is a registry
-registration, not a conditional in the core.
-
-### The catalog is a cache
-
-Slots on the `media.Volume` are the **source of truth**; every file is
-self-describing (header block), every slot carries a seal record, and every
-labeled volume carries a label record. The `catalog` is a **local cache** whose
-model separates what a slot *is* from where its copies *are*: an **`Entry`** pairs
-one medium-independent slot with a set of **`Placement`s**, each naming a volume
-and the file position of every archive on it. So a slot copied disk→tape is one
-entry with two placements; restore reads from whichever copy is available. The
-cache also holds the **volume registry** (`catalog.Volumes`). Planning, listing,
-restore-location, pruning, and budget reporting never touch the media — which
-matters when a volume is slow or offline (S3/Glacier/tape). This mirrors Amanda,
-which never scans tapes to operate: it keeps `curinfo`/`tapelist`/catalog databases
-locally and rebuilds them from self-describing media when needed.
-
-The catalog lives in its **own directory** (`workdir`, default `nbackup-catalog`),
-**independent of any storage medium** — it is a cache over the whole pool, not part
-of one medium. One `Files()` scan rebuilds everything: seals → the slot index,
-labels → the volume registry (`nb catalog rebuild`).
-
-Consequences:
-
-- **Run `History` is derived** from the cached slots, not separately persisted —
-  so there is no second source to drift. (Each seal record holds the date and
-  per-archive level, which is all the planner needs.)
-- The cache is kept in sync **by construction**: `nb dump` adds the sealed slot,
-  `nb slot prune` removes deleted ones.
-- If the cache is **lost**, it is rebuilt automatically on the next command. For
-  out-of-band changes (slots copied/removed directly on the store), run
-  `nb catalog rebuild` to reconcile — the one operation that rescans the media.
-- The **only** non-derivable local state is the GNU tar snapshot library
-  (`snapshots/…/L<n>.snar`). It is precious — losing it forces a new full —
-  exactly like Amanda's `gnutar-lists`.
+Contributors and agents: see **[ARCHITECTURE.md](ARCHITECTURE.md)** for the
+package map, the catalog `Entry`/`Placement` model, the design decisions and their
+rationale, and the project conventions.
 
 ## Development
 
