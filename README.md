@@ -82,7 +82,8 @@ This produces a single `nb` binary with these subcommands:
 | `nb slot show`       | Show a single slot's archives and copies                |
 | `nb medium`          | List media, or detail one (incl. bays / drive + shelf)    |
 | `nb verify`          | Verify slot checksums (named slots, or `--all`)          |
-| `nb restore`         | Restore a DLE from a slot                                |
+| `nb restore`         | Restore a whole DLE from a slot                          |
+| `nb recover`         | Browse a DLE as of a date and recover selected files     |
 | `nb copy`            | Copy a slot to another medium (disk → tape)             |
 | `nb label`           | Label a volume (required for tape before its first dump) |
 | `nb load`            | Load a volume into a medium's drive (bay or shelf reel)   |
@@ -232,6 +233,50 @@ incremental extraction. Because the incrementals carry directory census data,
 **deletions are applied** — a file removed between the full and the chosen slot
 is absent after restore. You can restore a single DLE (`-dle`) or all DLEs in
 the slot.
+
+### Recover (browse a date, pick files)
+
+`nb recover` is NBackup's [amrecover][amrecover]: browse a DLE's filesystem **as
+it stood on a date** and pull back individual files or directories, instead of
+the whole DLE. The browse view merges the restore chain (the full plus every
+later incremental up to the date) so each path shows its newest version on or
+before the date, and each file is recovered from the archive that actually holds
+it. No separate index server is needed — the index is the member list every seal
+already records, so browsing reads only the catalog and touches media only when
+you extract.
+
+```bash
+nb recover                                   # interactive shell (below)
+
+# one-shot, scriptable:
+nb recover --dle app01-home --date 2026-06-20 --list --path /etc
+nb recover --dle app01-home --date 2026-06-20 \
+    --path /etc/hosts --path /etc/nginx --dest /tmp/out
+```
+
+The interactive shell mirrors amrecover — `setdisk` chooses the DLE, `setdate`
+the as-of date, then navigate and select:
+
+```
+recover> setdisk app01-home
+recover> setdate 2026-06-20
+recover app01-home:/> cd etc
+recover app01-home:/etc> ls
+  hosts   nginx/   passwd
+recover app01-home:/etc> add hosts nginx
+recover app01-home:/etc> extract /tmp/out
+recovered 12 entr(ies) from 2 archive(s) into /tmp/out
+```
+
+Paths are relative to the DLE's backed-up root. Selecting a directory pulls its
+whole subtree (each file from the archive that last changed it). Unlike a whole-DLE
+`nb restore`, selected-file recovery never deletes — it only writes the files you
+asked for. One fidelity note: GNU tar records deletions in its snapshot, not in
+the member index, so a file deleted at a later incremental still shows up in the
+browse view; recover the *whole* DLE with `nb restore` when you need
+deletion-accurate state.
+
+[amrecover]: https://wiki.zmanda.com/man/amrecover.8.html
 
 ### Pruning (cycle safety)
 

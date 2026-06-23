@@ -159,7 +159,7 @@ func restore(t *testing.T, m method.Method, inFile, dest string) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if err := m.Restore(f, dest); err != nil {
+	if err := m.Restore(f, dest, nil); err != nil {
 		t.Fatalf("restore %s: %v", inFile, err)
 	}
 }

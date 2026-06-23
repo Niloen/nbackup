@@ -51,13 +51,15 @@ registry registration, not a conditional in the core.
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `catalog` | local cache of slot index + volume registry + snapshot library; derives `History` | catalog / curinfo / tapelist |
 | `policy` | retention safety floor: protected slots (pure) | policy |
+| `restore` | the archive chain to rebuild a DLE as of a slot (pure) | amrestore |
+| `recovery` | as-of-date browse tree + per-archive file selection (pure) | amrecover |
 | `planner` | multilevel level scheduling (pure) | planner |
 | `engine` | the driver: parallel dumpers, wires planner→method→filter→media→catalog | driver / taper |
 | `cli` | thin command wiring | amdump / amadmin |
 
 Dependencies flow one way: `cli → engine → {planner, policy, method, filter,
-slotio, catalog, config, progress}` over leaf packages `{media, xfer, slot,
-sizeutil}`.
+slotio, catalog, config, progress, restore, recovery}` over leaf packages
+`{media, xfer, slot, sizeutil}` (`recovery` builds on `restore`).
 Domain packages stay pure; `method`/`media`/`filter` are pluggable adapters;
 `engine` is the only component aware of all of them. A backup is a pipeline of
 processes: **source** (`tar` via `method.Backup`) → **filter** (compressor child)
@@ -82,6 +84,21 @@ copied disk→tape is one Entry with two Placements; restore/verify pick any
 available copy. Run `History` is *derived* from cached slots (no second source to
 drift). The only non-derivable local state is the GNU tar snapshot library
 (`snapshots/…/L<n>.snar`) — precious; losing it forces a full.
+
+**Recover is amrecover without an index server.** Amanda runs a separate index
+server holding per-dump gzipped path lists so `amrecover` can browse without
+reading tapes. NBackup needs none: the **member list is already in every seal**
+(`slot.Archive.Members`), which the catalog caches, so `nb recover` browses by
+reading the catalog alone — media is touched only on extract. `recovery.BuildTree`
+merges the restore chain's member lists in run order (most-recent-wins), giving an
+as-of-date filesystem where each path resolves to the archive that last held it;
+`Collect` turns a selection into the fewest per-archive extractions (one tar run
+per source archive, exact members via `--no-recursion`). Two deliberate splits
+from whole-DLE `restore`: selected-file recovery extracts the named members in
+*plain* tar mode and **never applies deletions** (you get exactly what you ask
+for), whereas a chain `restore` uses `--listed-incremental` to honor them; and the
+browse tree is a union, so a file deleted at a later incremental still appears
+(the member index records additions, not deletions — that lives in the snapshot).
 
 **One mutating `nb` per config at a time** (`internal/lock`, Amanda's per-config
 amflock). Rather than make the catalog concurrently writable, we serialize the
