@@ -95,10 +95,11 @@ func newDumpCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eng, err := newEngine(cfg)
+			eng, unlock, err := a.lockedEngine(cfg)
 			if err != nil {
 				return err
 			}
+			defer unlock()
 			date, err := ParseDate(dateStr)
 			if err != nil {
 				return err
@@ -282,8 +283,16 @@ func newSlotPruneCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eng, err := newEngine(cfg)
-			if err != nil {
+			// Dry-run prune only reads; --apply deletes slots, so lock it.
+			var eng *engine.Engine
+			if apply {
+				var unlock func()
+				eng, unlock, err = a.lockedEngine(cfg)
+				if err != nil {
+					return err
+				}
+				defer unlock()
+			} else if eng, err = newEngine(cfg); err != nil {
 				return err
 			}
 			now, err := ParseDate(dateStr)
@@ -321,10 +330,11 @@ func newCopyCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eng, err := newEngine(cfg)
+			eng, unlock, err := a.lockedEngine(cfg)
 			if err != nil {
 				return err
 			}
+			defer unlock()
 			if err := eng.CopySlot(args[0], to, force, a.logf()); err != nil {
 				return err
 			}
@@ -354,10 +364,11 @@ func newLabelCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eng, err := newEngine(cfg)
+			eng, unlock, err := a.lockedEngine(cfg)
 			if err != nil {
 				return err
 			}
+			defer unlock()
 			return eng.LabelVolume(args[0], args[1], relabel, force, time.Now().UTC(), a.logf())
 		},
 	}
@@ -519,10 +530,11 @@ func newChangerLoadCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eng, err := newEngine(cfg)
+			eng, unlock, err := a.lockedEngine(cfg)
 			if err != nil {
 				return err
 			}
+			defer unlock()
 			return eng.LoadVolume(args[0], args[1], byLabel, a.logf())
 		},
 	}
@@ -553,10 +565,11 @@ func newCatalogRebuildCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eng, err := newEngine(cfg)
+			eng, unlock, err := a.lockedEngine(cfg)
 			if err != nil {
 				return err
 			}
+			defer unlock()
 			n, err := eng.RebuildCatalog(a.logf())
 			if err != nil {
 				return err

@@ -5,6 +5,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/lock"
 )
 
 const rootLong = `NBackup - immutable, slot-based backups.
@@ -73,6 +74,24 @@ func (a *app) load() (*config.Config, error) {
 // loadRO reads configuration for read-only commands.
 func (a *app) loadRO() (*config.Config, error) {
 	return loadConfigRO(a.cfgPath, a.catalog)
+}
+
+// lockedEngine takes the per-config exclusive lock, then builds the engine —
+// for commands that mutate the catalog or media. The lock is acquired before
+// construction so it also covers the catalog write that New may trigger when it
+// populates a cold cache. The returned release func unlocks; callers defer it.
+// On any failure the lock is released and a nil engine is returned.
+func (a *app) lockedEngine(cfg *config.Config) (*engine.Engine, func(), error) {
+	lk, err := lock.Acquire(cfg.WorkdirPath())
+	if err != nil {
+		return nil, nil, err
+	}
+	eng, err := newEngine(cfg)
+	if err != nil {
+		lk.Release()
+		return nil, nil, err
+	}
+	return eng, func() { lk.Release() }, nil
 }
 
 // logf returns the progress logger, or nil when --quiet is set.

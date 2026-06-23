@@ -80,6 +80,18 @@ available copy. Run `History` is *derived* from cached slots (no second source t
 drift). The only non-derivable local state is the GNU tar snapshot library
 (`snapshots/…/L<n>.snar`) — precious; losing it forces a full.
 
+**One mutating `nb` per config at a time** (`internal/lock`, Amanda's per-config
+amflock). Rather than make the catalog concurrently writable, we serialize the
+whole mutating run: every command that writes the catalog or media (`dump`,
+`copy`, `label`, `changer load`, `catalog rebuild`, `prune --apply`) takes a
+non-blocking advisory `flock` on `workdir/lock` before opening the engine, and a
+second invocation fails fast (`ErrHeld`). flock is tied to the open fd, so a
+crash releases it — no stale lockfiles. Read-only commands take no lock: catalog
+writes land via atomic rename (write-tmp + `os.Rename`), so a reader always sees
+a complete old-or-new cache. (Caveat: flock is unreliable over NFS; a workdir is
+expected to be on a local filesystem. The lock is per *config workdir*, not per
+medium — two configs sharing one physical volume are not yet guarded.)
+
 **Media model.** A `Volume` is positional, self-describing files; framing differs
 per medium (disk: a `.hdr` sidecar so the payload is a clean `.tar.<codec>`; tape:
 a fixed 32 KB header block inline, since tape has no sidecars). `Open` is cheap;
