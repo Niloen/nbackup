@@ -66,23 +66,28 @@ done
 ## Install
 
 ```bash
-make build          # builds all binaries into ./bin
+make build          # builds ./bin/nb
 # or
-go install ./cmd/...
+go install ./cmd/nb
 ```
 
-This produces the `nb` umbrella tool plus standalone commands:
+This produces a single `nb` binary with these subcommands:
 
-| Tool        | `nb` alias   | Purpose                                  |
-|-------------|--------------|------------------------------------------|
-| `nbdump`    | `nb dump`    | Execute a run and seal a slot            |
-| `nbplan`    | `nb plan`    | Show what the next run would do          |
-| `nbslot`    | `nb slot`    | List / show / prune slots                |
-| `nbverify`  | `nb verify`  | Verify slot checksums                    |
-| `nbrestore` | `nb restore` | Restore a DLE from a slot                |
-| `nbcatalog` | `nb catalog` | Maintain the local slot-index cache      |
-| —           | `nb copy`    | Copy a slot to another medium (disk → tape) |
-| —           | `nb label`   | Label a volume (required for tape before its first dump) |
+| Command            | Purpose                                                  |
+|--------------------|----------------------------------------------------------|
+| `nb plan`          | Show what the next run would do                          |
+| `nb dump`          | Execute a run and seal a slot                            |
+| `nb slot`          | List slots (default)                                     |
+| `nb slot show`     | Show a single slot's archives                           |
+| `nb slot prune`    | Delete slots past the cycle/capacity limits             |
+| `nb verify`        | Verify slot checksums                                   |
+| `nb restore`       | Restore a DLE from a slot                               |
+| `nb copy`          | Copy a slot to another medium (disk → tape)             |
+| `nb label`         | Label a volume (required for tape before its first dump) |
+| `nb catalog rebuild` | Rebuild the local slot-index cache from media         |
+
+Run `nb help <command>` (or `nb <command> --help`) for per-command usage and
+examples, and `nb completion <shell>` to generate shell completion.
 
 ## Quick start
 
@@ -94,10 +99,17 @@ nb dump                # run the backup, producing one sealed slot
 nb slot                # list slots
 nb slot show slot-2026-06-21
 nb verify              # re-check all archive checksums
-nb restore -dle app01-home -dest /tmp/out slot-2026-06-21
+nb restore --dle app01-home --dest /tmp/out slot-2026-06-21
 ```
 
-Every command accepts `-c <config>` and `-C <catalog>` overrides.
+These global flags work with every command and may appear anywhere on the
+command line:
+
+| Flag              | Purpose                                  |
+|-------------------|------------------------------------------|
+| `-c, --config`    | path to config file (default `nbackup.yaml`) |
+| `-C, --catalog`   | catalog directory (overrides config)     |
+| `-q, --quiet`     | suppress progress output                 |
 
 ## How it works
 
