@@ -141,21 +141,35 @@ func (g *gnutar) Estimate(r method.BackupRequest) (int64, error) {
 	return 0, nil
 }
 
-// Restore consumes a raw tar stream and extracts it with incremental semantics,
-// applying deletions recorded in the archive.
-func (g *gnutar) Restore(in io.Reader, destDir string) error {
+// Restore consumes a raw tar stream and extracts into destDir. With no members it
+// extracts the whole archive in listed-incremental mode, applying the deletions
+// recorded in the archive (a chain restore). With members it extracts only those
+// named entries in plain mode — selected-file recovery, which never deletes.
+func (g *gnutar) Restore(in io.Reader, destDir string, members []string) error {
 	if err := g.Check(); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return err
 	}
-	cmd := exec.Command(g.bin,
+	args := []string{
 		"--extract", "--file=-",
-		"--directory="+destDir,
-		"--listed-incremental=/dev/null",
+		"--directory=" + destDir,
 		"--numeric-owner",
-	)
+	}
+	if len(members) == 0 {
+		// Whole-archive chain restore: honor the incremental dumpdir so deletions
+		// recorded since the base are applied.
+		args = append(args, "--listed-incremental=/dev/null")
+	} else {
+		// Selected files: match the exact members and do not apply deletions.
+		// --no-recursion makes each named member match only itself, so listing a
+		// directory alongside its files (we enumerate every descendant ourselves)
+		// doesn't double-match and spuriously report the files "not found".
+		args = append(args, "--no-recursion")
+		args = append(args, members...)
+	}
+	cmd := exec.Command(g.bin, args...)
 	cmd.Stdin = in
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

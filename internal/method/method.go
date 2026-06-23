@@ -35,8 +35,11 @@ type Method interface {
 	Estimate(r BackupRequest) (int64, error)
 	// Backup writes the raw archive stream to out.
 	Backup(r BackupRequest, out io.Writer) (*BackupResult, error)
-	// Restore consumes a raw archive stream and writes into destDir.
-	Restore(in io.Reader, destDir string) error
+	// Restore consumes a raw archive stream and writes into destDir. With no
+	// members it restores the whole archive applying incremental deletions (a
+	// chain restore); with members it extracts only those named entries and does
+	// not delete (selected-file recovery).
+	Restore(in io.Reader, destDir string, members []string) error
 }
 
 // Options are generic key/value parameters from a dumptype (e.g. "tar_path",

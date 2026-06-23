@@ -21,6 +21,7 @@ import (
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/policy"
 	"github.com/Niloen/nbackup/internal/progress"
+	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/restore"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/slot"
@@ -807,7 +808,55 @@ func (e *Engine) extractStep(step restore.Step, destDir string) error {
 		return err
 	}
 	defer rc.Close()
-	return m.Restore(rc, destDir)
+	return m.Restore(rc, destDir, nil)
+}
+
+// OpenRecover builds a browsable filesystem of a DLE as of a date (YYYY-MM-DD) —
+// the amrecover entry point. It reads only the catalog (the member index lives in
+// the seals), so no media is touched until files are extracted.
+func (e *Engine) OpenRecover(dle, asOf string) (*recovery.Tree, error) {
+	return recovery.BuildTree(e.cat.Slots(), dle, asOf)
+}
+
+// ExtractSelection extracts a selected set of files, grouped by their source
+// archive, into destDir. It returns the number of member entries extracted.
+func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, logf Logf) (int, error) {
+	files := 0
+	for _, st := range steps {
+		m, err := e.methodByName(st.Method)
+		if err != nil {
+			return files, err
+		}
+		rc, err := e.openArchive(st.SlotID, st.DLE, st.Level, st.Codec)
+		if err != nil {
+			return files, err
+		}
+		logf.log("extracting %d file(s) from %s %s L%d", len(st.Members), st.SlotID, st.DLE, st.Level)
+		err = m.Restore(rc, destDir, st.Members)
+		rc.Close()
+		if err != nil {
+			return files, fmt.Errorf("extract from %s %s L%d: %w", st.SlotID, st.DLE, st.Level, err)
+		}
+		files += len(st.Members)
+	}
+	return files, nil
+}
+
+// DLENames returns the distinct DLE names recorded across all catalog slots,
+// sorted — the DLEs a recovery session can choose from.
+func (e *Engine) DLENames() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range e.cat.Slots() {
+		for _, a := range s.Archives {
+			if !seen[a.DLE] {
+				seen[a.DLE] = true
+				out = append(out, a.DLE)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // openArchive opens an archive from any available copy, preferring the engine's

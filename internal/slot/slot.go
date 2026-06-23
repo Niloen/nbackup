@@ -47,7 +47,7 @@ type Archive struct {
 	FileCount    int      `json:"file_count"`   // number of member entries archived
 	SHA256       string   `json:"sha256"`       // checksum of the payload
 	BaseSlot     string   `json:"base_slot"`    // for level>=1, the slot whose state this builds on
-	Members      []string `json:"members"`      // member paths archived (was MANIFEST)
+	Members      []string `json:"members"`      // member paths archived: slash-separated, directories with a trailing slash (the method-neutral convention recovery browses); the raw token is replayed to the producing method on extract (was MANIFEST)
 }
 
 // NewSlot starts a new open slot for a run. Archives are added with AddArchive
