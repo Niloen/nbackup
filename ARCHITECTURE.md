@@ -122,6 +122,17 @@ a one-bay library; structurally complete, untested without hardware).
   the reel holding the needed label). Unattended (no operator) it degrades to an
   actionable error instead of blocking. A `reloadable` error marks the cases a swap
   can fix (vs a stale catalog, which a swap can't).
+- **Expected tape (Amanda's "amdump will expect tape X").** `Engine.ExpectedTape`
+  names the volume the next run will write to, derived from the catalog (the
+  tapelist) and `policy.Protected`, never from a physical scan: a one-run-per-tape
+  (non-appendable) run reuses the **oldest volume whose every run is unprotected**
+  (past `minimum_age`, with a newer recovery path) — exactly Amanda's taper picking
+  the oldest reusable tape — or a *fresh tape* when none is reusable; an appendable
+  run extends the most recently written volume. `nb plan` prints it, and it seeds
+  the swap prompt's suggestion (`SwapRequest.Expect`) so the operator is told *which*
+  reel to load, not just "a fresh tape". This is **guidance only** — the engine
+  still won't overwrite a reusable tape on its own; recycling it is a deliberate
+  `nb label --relabel` (see deferred whole-volume recycle).
 - **Bay (physical) vs Label (logical) are distinct.** The `changer` is
   **label-agnostic** — like a real robot it mounts bays and reads barcodes, never
   the magnetic label; the engine reads the label *after* mounting. A blank

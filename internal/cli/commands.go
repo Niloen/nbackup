@@ -75,11 +75,36 @@ func newPlanCmd(a *app) *cobra.Command {
 			} else {
 				fmt.Printf("Capacity: unbounded\n")
 			}
+			if exp, ok := eng.ExpectedTape(date); ok {
+				fmt.Printf("Tape: %s\n", describeExpectation(exp, date))
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&dateStr, "date", "", "run date YYYY-MM-DD (default today)")
 	return cmd
+}
+
+// describeExpectation renders the tape the next run will write to (Amanda's
+// "amdump will expect tape X") for `nb plan`, with the volume's age relative to
+// the run date.
+func describeExpectation(exp engine.TapeExpectation, date time.Time) string {
+	if exp.Appendable {
+		if exp.NewTape {
+			return fmt.Sprintf("expects a fresh tape (pool %q is empty)", exp.Medium)
+		}
+		return fmt.Sprintf("appends to %q", exp.Label)
+	}
+	if exp.NewTape {
+		return fmt.Sprintf("expects a fresh tape (no reusable volume in pool %q)", exp.Medium)
+	}
+	age := int(date.Sub(exp.WrittenAt).Hours() / 24)
+	detail := fmt.Sprintf("recycles %d aged run(s)", exp.Recycles)
+	if exp.Recycles == 0 {
+		detail = "empty, ready to write"
+	}
+	return fmt.Sprintf("expects %q (labeled %s, %dd ago; %s) — or a fresh tape",
+		exp.Label, slot.DateString(exp.WrittenAt), age, detail)
 }
 
 // newDumpCmd implements `nb dump`: execute a run and seal a slot.

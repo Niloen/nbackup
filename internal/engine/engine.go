@@ -61,6 +61,7 @@ type SwapRequest struct {
 	Pool   string            // its label pool
 	Reason string            // why the loaded reel won't do (the underlying error)
 	Need   string            // a specific volume label wanted (read); "" means any writable (write)
+	Expect string            // on a write, the label the run expects to (re)use (the oldest reusable volume); "" when a fresh tape is expected
 	Loaded media.BayStatus   // what is in the drive now (zero value when empty)
 	Shelf  []media.BayStatus // reels available to load
 }
@@ -412,7 +413,8 @@ func (e *Engine) verifyWritableInteractive(vol media.Volume, medium string, appe
 		if e.op == nil {
 			return "", 0, fmt.Errorf("%v (load a writable tape into the drive and retry)", err)
 		}
-		reel, ok := e.promptSwap(mc, medium, "", err)
+		expect := e.expectedTapeFor(medium, now).Label
+		reel, ok := e.promptSwap(mc, medium, "", expect, err)
 		if !ok {
 			return "", 0, fmt.Errorf("%v (no tape loaded)", err)
 		}
@@ -424,8 +426,10 @@ func (e *Engine) verifyWritableInteractive(vol media.Volume, medium string, appe
 }
 
 // promptSwap asks the operator (via e.op) to pick a reel to load on a manual
-// medium. need is the specific volume label wanted (reads) or "" (writes).
-func (e *Engine) promptSwap(mc media.ManualChanger, medium, need string, cause error) (string, bool) {
+// medium. need is the specific volume label wanted (reads) or "" (writes); expect
+// is the volume a write would prefer (the oldest reusable tape) or "" (reads / a
+// fresh tape).
+func (e *Engine) promptSwap(mc media.ManualChanger, medium, need, expect string, cause error) (string, bool) {
 	shelf, err := mc.Shelf()
 	if err != nil {
 		return "", false
@@ -438,7 +442,7 @@ func (e *Engine) promptSwap(mc media.ManualChanger, medium, need string, cause e
 	if cause != nil {
 		reason = cause.Error()
 	}
-	return e.op.Swap(SwapRequest{Medium: medium, Pool: medium, Reason: reason, Need: need, Loaded: loaded, Shelf: shelf})
+	return e.op.Swap(SwapRequest{Medium: medium, Pool: medium, Reason: reason, Need: need, Expect: expect, Loaded: loaded, Shelf: shelf})
 }
 
 // assertVolume confirms the volume mounted on a medium matches a placement's
@@ -501,7 +505,7 @@ func (e *Engine) mountManualForRead(mc media.ManualChanger, p catalog.Placement)
 		if e.op == nil {
 			return fmt.Errorf("medium %q needs tape %q in the drive (a copy of the slot is on it); load it and retry", p.Medium, p.Volume)
 		}
-		reel, ok := e.promptSwap(mc, p.Medium, p.Volume, fmt.Errorf("need tape %q", p.Volume))
+		reel, ok := e.promptSwap(mc, p.Medium, p.Volume, "", fmt.Errorf("need tape %q", p.Volume))
 		if !ok {
 			return fmt.Errorf("tape %q was not loaded into the %q drive", p.Volume, p.Medium)
 		}
@@ -561,6 +565,78 @@ func (e *Engine) placementsFor(slotID string) []catalog.Placement {
 
 // StoredBytes is the bytes currently stored on the engine's own medium.
 func (e *Engine) StoredBytes() int64 { return e.cat.MediumBytes(e.mediumName) }
+
+// TapeExpectation describes the volume the next run on a labeled medium will
+// write to — NBackup's analogue of Amanda's "amdump will expect tape X". It is
+// derived from the catalog (the tapelist) and the retention policy, never from a
+// physical scan: for a one-run-per-tape (non-appendable) medium it names the
+// oldest reusable volume the run would recycle, or a fresh tape when none is
+// reusable; for an appendable medium it names the current volume the run extends.
+type TapeExpectation struct {
+	Medium     string    // the labeled medium this expectation is for
+	Appendable bool      // true: extend a volume; false: one run per tape (recycle/fresh)
+	Label      string    // the expected volume's label; "" when a fresh tape is expected
+	WrittenAt  time.Time // when that volume was last labeled (zero for a fresh tape)
+	Recycles   int       // runs on it the next run would overwrite (non-appendable reuse)
+	NewTape    bool      // no reusable volume exists — a fresh/blank tape is expected
+}
+
+// ExpectedTape reports the tape the next run on the landing medium will write to,
+// or ok=false for address-identified media (disk, s3) that carry no label and so
+// have no tape to expect.
+func (e *Engine) ExpectedTape(now time.Time) (TapeExpectation, bool) {
+	if _, ok := e.vol.(media.Labeled); !ok {
+		return TapeExpectation{}, false
+	}
+	return e.expectedTapeFor(e.mediumName, now), true
+}
+
+// expectedTapeFor computes the expected volume for a labeled medium from the
+// catalog's volume registry (the tapelist) ordered oldest-written-first. A
+// non-appendable run reuses the oldest volume whose every run is unprotected (the
+// retention safety floor: past minimum age, with a newer recovery path), matching
+// Amanda's taper picking the oldest reusable tape; an appendable run extends the
+// most recently written volume in the pool.
+func (e *Engine) expectedTapeFor(medium string, now time.Time) TapeExpectation {
+	def := e.cfg.Media[medium]
+	exp := TapeExpectation{Medium: medium, Appendable: def.IsAppendable()}
+
+	var pool []catalog.VolumeRecord
+	for _, v := range e.cat.Volumes() {
+		if v.Label.Pool == medium {
+			pool = append(pool, v)
+		}
+	}
+	sort.Slice(pool, func(i, j int) bool { return pool[i].Label.WrittenAt.Before(pool[j].Label.WrittenAt) })
+
+	if exp.Appendable {
+		if n := len(pool); n > 0 {
+			exp.Label, exp.WrittenAt = pool[n-1].Label.Name, pool[n-1].Label.WrittenAt
+		} else {
+			exp.NewTape = true
+		}
+		return exp
+	}
+
+	minAge, _ := def.MinAge()
+	protected := policy.Protected(e.cat.Slots(), minAge, now)
+	for _, v := range pool {
+		held := e.cat.SlotsOnVolume(v.Label.Name)
+		reusable := true
+		for _, s := range held {
+			if _, p := protected[s.ID]; p {
+				reusable = false
+				break
+			}
+		}
+		if reusable {
+			exp.Label, exp.WrittenAt, exp.Recycles = v.Label.Name, v.Label.WrittenAt, len(held)
+			return exp
+		}
+	}
+	exp.NewTape = true // nothing reusable — the run needs a fresh tape
+	return exp
+}
 
 // LabelVolume writes (or rewrites) the identity label of a medium's volume — the
 // deliberate operator act that makes a tape writable. It refuses to overwrite

@@ -111,6 +111,9 @@ type stdinOperator struct{}
 func (stdinOperator) Swap(r engine.SwapRequest) (string, bool) {
 	fmt.Printf("\nmedium %q needs a tape: %s\n", r.Medium, r.Reason)
 	fmt.Printf("in drive: %s\n", reelDesc(r.Loaded))
+	if r.Expect != "" {
+		fmt.Printf("this run expects tape %q (the oldest reusable volume — load it to recycle, or a fresh tape)\n", r.Expect)
+	}
 	if len(r.Shelf) == 0 {
 		fmt.Println("no reels in the room to load")
 		return "", false
@@ -145,7 +148,8 @@ func (stdinOperator) Swap(r engine.SwapRequest) (string, bool) {
 }
 
 // suggestReel is the reel the engine would prefer: the one carrying the needed
-// label (a read), else the first blank reel (a write needs a writable tape).
+// label (a read); for a write, the tape the run expects (the oldest reusable
+// volume) if it is in the room, else the first blank reel.
 func suggestReel(r engine.SwapRequest) string {
 	if r.Need != "" {
 		for _, b := range r.Shelf {
@@ -154,6 +158,13 @@ func suggestReel(r engine.SwapRequest) string {
 			}
 		}
 		return ""
+	}
+	if r.Expect != "" {
+		for _, b := range r.Shelf {
+			if b.Label == r.Expect {
+				return b.Bay
+			}
+		}
 	}
 	for _, b := range r.Shelf {
 		if b.Blank {
