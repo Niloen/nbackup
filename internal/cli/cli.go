@@ -118,9 +118,9 @@ func (stdinOperator) Swap(r engine.SwapRequest) (string, bool) {
 		fmt.Println("no reels in the room to load")
 		return "", false
 	}
-	fmt.Println("reels in the room (not in any bay):")
+	fmt.Println("reels in the room (not in the drive):")
 	for _, b := range r.Shelf {
-		fmt.Printf("  %-10s %s\n", b.Bay, reelDesc(b))
+		fmt.Printf("  %-10s %s\n", b.ID, reelDesc(b))
 	}
 	def := suggestReel(r)
 	prompt := "load which reel? (id or label"
@@ -139,8 +139,8 @@ func (stdinOperator) Swap(r engine.SwapRequest) (string, bool) {
 		choice = def
 	}
 	for _, b := range r.Shelf {
-		if b.Bay == choice || (b.Label != "" && b.Label == choice) {
-			return b.Bay, true
+		if b.ID == choice || (b.Label != "" && b.Label == choice) {
+			return b.ID, true
 		}
 	}
 	fmt.Printf("no reel %q in the room\n", choice)
@@ -154,7 +154,7 @@ func suggestReel(r engine.SwapRequest) string {
 	if r.Need != "" {
 		for _, b := range r.Shelf {
 			if b.Label == r.Need {
-				return b.Bay
+				return b.ID
 			}
 		}
 		return ""
@@ -162,22 +162,22 @@ func suggestReel(r engine.SwapRequest) string {
 	if r.Expect != "" {
 		for _, b := range r.Shelf {
 			if b.Label == r.Expect {
-				return b.Bay
+				return b.ID
 			}
 		}
 	}
 	for _, b := range r.Shelf {
 		if b.Blank {
-			return b.Bay
+			return b.ID
 		}
 	}
 	return ""
 }
 
 // reelDesc renders a reel/drive status for the operator prompt.
-func reelDesc(b media.BayStatus) string {
+func reelDesc(b media.VolumeStatus) string {
 	switch {
-	case b.Bay == "" && b.Label == "":
+	case b.ID == "" && b.Label == "":
 		return "(empty)"
 	case b.Blank:
 		return "(blank)"

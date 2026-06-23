@@ -92,44 +92,58 @@ var ErrVolumeFull = fmt.Errorf("volume full: end of volume reached")
 // nothing loaded. The engine wraps this with medium-specific guidance.
 var ErrNoVolume = fmt.Errorf("no volume loaded in the drive")
 
-// Changer is implemented by media that hold many physical volumes behind a single
-// drive: a tape library / autochanger (or its manual, disk-emulated equivalent).
-// It is deliberately label-AGNOSTIC: like a real robot it addresses physical
-// positions (bays) and never reads the magnetic label itself — the label is read
-// from the medium only after a bay is mounted (via Labeled.ReadLabel). The engine
-// resolves labels↔bays on top of this seam.
-type Changer interface {
+// Library is a robotic, bay-addressed changer: a tape library / autochanger whose
+// robot mounts any of many physical positions (bays) into the one drive. It is
+// deliberately label-AGNOSTIC — like a real robot it addresses bays and never reads
+// the magnetic label itself; the label is read from the medium only after a bay is
+// mounted (via Labeled.ReadLabel). The engine resolves labels↔bays on top of this
+// seam. Every id reported by Bays()/Loaded() is a valid Mount() target.
+//
+// A Station (single-drive station) is NOT a Library: it has no robot and no
+// addressable bays, so the two are siblings, not a subtype.
+type Library interface {
 	// Mount loads the named bay into the drive (error if the bay does not exist).
 	// Subsequent Volume/Labeled operations act on the mounted bay.
 	Mount(bay string) error
 	// Loaded returns the bay currently in the drive; ok is false when empty.
 	Loaded() (bay string, ok bool)
 	// Bays lists the library's physical positions and what each holds.
-	Bays() ([]BayStatus, error)
+	Bays() ([]VolumeStatus, error)
 }
 
-// ManualChanger is a Changer with a single fixed drive whose cartridge an
-// operator swaps by hand, rather than a robot addressing many bays. Bays() reports
-// exactly one position (the drive); the other reels sit on an offline Shelf the
-// changer cannot see in its own inventory (a single drive has no barcode reader
-// for reels not in it). Insert performs the operator's physical swap — it loads a
-// shelf reel into the drive, the displaced reel returning to the shelf — so the
-// one bay's *content* changes; we never switch bay. This models the single-drive
-// tape station (case 1); a robotic library (case 2) is a plain Changer.
-type ManualChanger interface {
-	Changer
-	// Shelf lists the reels available to load that are not currently in the drive.
-	Shelf() ([]BayStatus, error)
-	// Insert swaps the named shelf reel into the single drive, displacing whatever
-	// is loaded back to the shelf. reel is a Bay id reported by Shelf.
-	Insert(reel string) error
+// Station is a single-drive medium whose loaded volume an operator changes by hand:
+// a standalone tape drive, or its disk-emulated equivalent. Unlike a Library it has
+// no robot and no addressable bays — the software sees only the one volume in the
+// drive, never an inventory of the others. The engine prompts the operator to swap
+// rather than mounting automatically.
+type Station interface {
+	// LoadedVolume reports the volume currently in the drive; ok is false when the
+	// drive is empty.
+	LoadedVolume() (VolumeStatus, bool)
 }
 
-// BayStatus is one physical position's state. Label is the volume label written
-// on the cartridge in that bay ("" when blank) — for the disk emulator it stands
-// in for the barcode a real library's reader would report without a drive read.
-type BayStatus struct {
-	Bay      string
+// ShelfStation is a Station whose off-drive volumes the software can itself
+// enumerate and load — the disk-emulated single-drive station, where the reels are
+// directories on a shelf. A real standalone tape drive is a Station but NOT a
+// ShelfStation: its reels are invisible to software and its swaps are purely
+// physical (the operator loads a tape by hand; the software only re-reads the
+// drive). Insert effects the swap in software, displacing whatever is loaded back
+// to the shelf.
+type ShelfStation interface {
+	Station
+	// Shelf lists the reels in the room but not currently in the drive.
+	Shelf() ([]VolumeStatus, error)
+	// Insert swaps the named shelf reel into the single drive. id is a reel id
+	// reported by Shelf.
+	Insert(id string) error
+}
+
+// VolumeStatus is one volume's physical state: a bay in a Library, or the reel
+// in (or available to) a Station's drive. Label is the volume label written on the
+// cartridge ("" when blank) — for the disk emulator it stands in for the barcode a
+// real library's reader would report without a drive read.
+type VolumeStatus struct {
+	ID       string // bay id (Library) or reel id (Station shelf); "" for a real drive
 	Label    string
 	Blank    bool
 	Used     int64

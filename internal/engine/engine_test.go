@@ -478,14 +478,14 @@ func (o *scriptedOperator) Swap(r SwapRequest) (string, bool) {
 	if r.Need != "" { // a read wants a specific label
 		for _, b := range r.Shelf {
 			if b.Label == r.Need {
-				return b.Bay, true
+				return b.ID, true
 			}
 		}
 		return "", false
 	}
 	for _, b := range r.Shelf { // a write wants any writable (blank) reel
 		if b.Blank {
-			return b.Bay, true
+			return b.ID, true
 		}
 	}
 	return "", false
@@ -632,8 +632,8 @@ func TestManualStationReadSwap(t *testing.T) {
 
 // TestManualStationLandingLabel: labeling the engine's own (landing) single-drive
 // station rebuilds its catalog against the freshly-labeled reel. Regression for the
-// catalog rebuild treating the manual changer like a robotic library — iterating
-// Bays() and mounting the synthetic "drive" bay id, which is not a mountable reel.
+// catalog rebuild treating a Station like a robotic Library — iterating bays and
+// mounting a bay id, which a single-drive station has none of.
 func TestManualStationLandingLabel(t *testing.T) {
 	cfg := &config.Config{
 		Landing: "vtape",
@@ -654,7 +654,7 @@ func TestManualStationLandingLabel(t *testing.T) {
 		t.Fatalf("load reel-01: %v", err)
 	}
 	// Labeling the landing medium triggers a catalog rebuild against the loaded reel;
-	// it must not try to mount the synthetic "drive" bay.
+	// it must not try to bay-iterate a single-drive station.
 	if err := eng.LabelVolume("vtape", "Label1", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label landing manual station: %v", err)
 	}

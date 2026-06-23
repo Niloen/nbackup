@@ -11,11 +11,6 @@ import (
 	"github.com/Niloen/nbackup/internal/media"
 )
 
-// driveBay is the single, fixed bay id a manual station exposes. Unlike a robotic
-// library — where the mounted *position* moves between many bays — a single drive
-// has one position whose *content* the operator swaps.
-const driveBay = "drive"
-
 // reelPrefix names the room's reels. A manual station has no bays (just the one
 // drive); its reels are identified by their own ids — reel-01, reel-02, …
 const reelPrefix = "reel-"
@@ -25,11 +20,12 @@ func reelName(i int) string { return fmt.Sprintf("%s%02d", reelPrefix, i) }
 
 // manualChanger emulates a single-drive tape station: one physical drive an
 // operator loads by hand from an offline shelf of reels. On disk it reuses the
-// library layout (bay-NN subdirectories + the .loaded marker), but presents it as
-// the single drive: bays() reports only the loaded reel as "drive", and the other
-// reels are the shelf — invisible to the changer's inventory, exactly as a lone
-// drive cannot read reels that are not in it. Inserting a reel changes the one
-// drive's content; we never switch bay. (A robotic library is a dirChanger.)
+// library layout (reel-NN subdirectories + the .loaded marker), but the software
+// sees only the loaded reel — the others sit on the shelf, invisible until loaded,
+// exactly as a lone drive cannot read reels that are not in it. Inserting a reel
+// changes the one drive's content; reels are addressed by their own ids, never a
+// fixed "drive" position. It backs a shelfStationTape (a robotic library is a
+// dirChanger).
 type manualChanger struct {
 	root      string
 	capacity  int64
@@ -78,8 +74,8 @@ func (c *manualChanger) mount(reel string) (device, error) {
 	return dev, nil
 }
 
-// loaded reports the single drive: its bay id is always "drive"; the reel behind
-// it is whatever was last inserted. ok is false only when the drive is empty.
+// loaded reports the reel in the drive by its own id (reel-NN), and the device
+// behind it. ok is false only when the drive is empty.
 func (c *manualChanger) loaded() (device, string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -90,30 +86,27 @@ func (c *manualChanger) loaded() (device, string, bool) {
 	if err != nil {
 		return nil, "", false
 	}
-	return dev, driveBay, true
+	return dev, c.loadedBay, true
 }
 
-// bays reports the single drive position (the manual-station view of a Changer):
-// always one entry, "drive", carrying the loaded reel's status — or a blank drive
-// when empty.
-func (c *manualChanger) bays() ([]media.BayStatus, error) {
+// loadedStatus inventories the reel currently in the drive; ok is false when empty.
+func (c *manualChanger) loadedStatus() (media.VolumeStatus, bool) {
 	c.mu.Lock()
 	loadedBay := c.loadedBay
 	c.mu.Unlock()
 	if loadedBay == "" {
-		return []media.BayStatus{{Bay: driveBay, Blank: true}}, nil
+		return media.VolumeStatus{}, false
 	}
 	st, err := c.reelStatus(loadedBay)
 	if err != nil {
-		return nil, err
+		return media.VolumeStatus{}, false
 	}
-	st.Bay = driveBay
-	return []media.BayStatus{st}, nil
+	return st, true
 }
 
 // shelf lists every reel in the room except the one in the drive, each by its
 // physical reel id (its durable identity; the operator types this or its label).
-func (c *manualChanger) shelf() ([]media.BayStatus, error) {
+func (c *manualChanger) shelf() ([]media.VolumeStatus, error) {
 	c.mu.Lock()
 	loadedBay := c.loadedBay
 	c.mu.Unlock()
@@ -121,7 +114,7 @@ func (c *manualChanger) shelf() ([]media.BayStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []media.BayStatus
+	var out []media.VolumeStatus
 	for _, e := range entries {
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), reelPrefix) || e.Name() == loadedBay {
 			continue
@@ -132,43 +125,40 @@ func (c *manualChanger) shelf() ([]media.BayStatus, error) {
 		}
 		out = append(out, st)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Bay < out[j].Bay })
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 
 // reelStatus inventories one reel directory (its label, fill, file count).
-func (c *manualChanger) reelStatus(reel string) (media.BayStatus, error) {
+func (c *manualChanger) reelStatus(reel string) (media.VolumeStatus, error) {
 	dev, err := openDir(filepath.Join(c.root, reel), c.capacity)
 	if err != nil {
-		return media.BayStatus{}, err
+		return media.VolumeStatus{}, err
 	}
-	n, _ := dev.count()
-	st := media.BayStatus{Bay: reel, Capacity: c.capacity, Used: dev.used, Files: n, Blank: n == 0}
-	if lbl, ok, _ := readLabel(dev); ok {
-		st.Label = lbl.Name
-	}
-	return st, nil
+	return deviceStatus(reel, dev, c.capacity), nil
 }
 
-// manualTape is a tape whose changer is a single-drive manual station. It adds the
-// operator-swap operations (Shelf/Insert) of media.ManualChanger to the base tape,
-// so the engine can prompt for and perform a reel swap; a robotic-library tape
-// (plain *tape) deliberately does not satisfy ManualChanger.
-type manualTape struct {
+// shelfStationTape is the disk-emulated single-drive station (media.ShelfStation):
+// its reels are directories the software can enumerate (Shelf) and load (Insert).
+// The robotic-library tape (libraryTape) deliberately does not satisfy ShelfStation.
+type shelfStationTape struct {
 	*tape
 	mc *manualChanger
 }
 
-// Shelf lists the reels available to load (media.ManualChanger).
-func (m *manualTape) Shelf() ([]media.BayStatus, error) { return m.mc.shelf() }
+// LoadedVolume reports the reel in the drive (media.Station).
+func (m *shelfStationTape) LoadedVolume() (media.VolumeStatus, bool) { return m.mc.loadedStatus() }
 
-// Insert swaps a shelf reel into the single drive (media.ManualChanger): the one
-// bay's content changes, and subsequent Volume/Labeled ops act on the new reel.
-func (m *manualTape) Insert(reel string) error {
+// Shelf lists the reels available to load (media.ShelfStation).
+func (m *shelfStationTape) Shelf() ([]media.VolumeStatus, error) { return m.mc.shelf() }
+
+// Insert swaps a shelf reel into the single drive (media.ShelfStation): the drive's
+// content changes, and subsequent Volume/Labeled ops act on the new reel.
+func (m *shelfStationTape) Insert(reel string) error {
 	dev, err := m.mc.mount(reel)
 	if err != nil {
 		return err
 	}
-	m.dev, m.bay = dev, driveBay
+	m.dev, m.bay = dev, reel
 	return nil
 }

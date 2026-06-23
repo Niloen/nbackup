@@ -82,14 +82,14 @@ func (c *dirChanger) loaded() (device, string, bool) {
 	return dev, c.loadedBay, true
 }
 
-func (c *dirChanger) bays() ([]media.BayStatus, error) {
+func (c *dirChanger) bays() ([]media.VolumeStatus, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entries, err := os.ReadDir(c.root)
 	if err != nil {
 		return nil, err
 	}
-	var out []media.BayStatus
+	var out []media.VolumeStatus
 	for _, e := range entries {
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), "bay-") {
 			continue
@@ -98,14 +98,9 @@ func (c *dirChanger) bays() ([]media.BayStatus, error) {
 		if err != nil {
 			return nil, err
 		}
-		n, _ := dev.count()
-		st := media.BayStatus{Bay: e.Name(), Capacity: c.capacity, Used: dev.used, Files: n, Blank: n == 0}
-		if lbl, ok, _ := readLabel(dev); ok {
-			st.Label = lbl.Name
-		}
-		out = append(out, st)
+		out = append(out, deviceStatus(e.Name(), dev, c.capacity))
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Bay < out[j].Bay })
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 

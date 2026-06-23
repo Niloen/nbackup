@@ -11,6 +11,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/slot"
@@ -531,6 +532,19 @@ func capacityStr(c int64) string {
 	return sizeutil.FormatBytes(c)
 }
 
+// volumeLabelStatus renders a volume's display label and fill status for inventory
+// listings (a blank volume, a full one, or an appendable labeled one).
+func volumeLabelStatus(b media.VolumeStatus) (label, status string) {
+	switch {
+	case b.Blank:
+		return "(blank)", "blank"
+	case b.Capacity > 0 && b.Used >= b.Capacity:
+		return b.Label, "full"
+	default:
+		return b.Label, "append"
+	}
+}
+
 func volumeStr(m engine.MediumInfo) string {
 	if m.Volume == "" {
 		return "-"
@@ -571,43 +585,42 @@ func newChangerListCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			loaded, bays, err := eng.Bays(args[0])
+			view, err := eng.ChangerView(args[0])
 			if err != nil {
 				return err
 			}
-			tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-			fmt.Fprintln(tw, "\tBAY\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
-			for _, b := range bays {
-				mark := " "
-				if b.Bay == loaded {
-					mark = "*"
+			if view.Library {
+				tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+				fmt.Fprintln(tw, "\tBAY\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
+				for _, b := range view.Bays {
+					mark := " "
+					if b.ID == view.Loaded {
+						mark = "*"
+					}
+					label, status := volumeLabelStatus(b)
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\n", mark, b.ID, label, status,
+						sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
 				}
-				label, status := b.Label, "append"
-				if b.Blank {
-					label, status = "(blank)", "blank"
-				} else if b.Capacity > 0 && b.Used >= b.Capacity {
-					status = "full"
-				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\n", mark, b.Bay, label, status,
-					sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
+				tw.Flush()
+				return nil
 			}
-			tw.Flush()
 
-			// A single-drive (manual) station also has reels in the room — offline,
-			// not in any bay — that the operator can load. List them so their
-			// ids/labels are known.
-			if shelf, err := eng.Shelf(args[0]); err == nil && len(shelf) > 0 {
+			// A single-drive station: show what is in the drive, then (if it can
+			// enumerate them) the offline reels in the room the operator can load.
+			if view.DriveOK {
+				label, status := volumeLabelStatus(view.Drive)
+				fmt.Printf("in drive: %s (%s, %s used, %d files)\n", label, status,
+					sizeutil.FormatBytes(view.Drive.Used), view.Drive.Files)
+			} else {
+				fmt.Println("in drive: (empty)")
+			}
+			if len(view.Shelf) > 0 {
 				fmt.Println("\nIn the room (load with `nb changer load`, or when prompted):")
 				rw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 				fmt.Fprintln(rw, "  REEL\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
-				for _, b := range shelf {
-					label, status := b.Label, "append"
-					if b.Blank {
-						label, status = "(blank)", "blank"
-					} else if b.Capacity > 0 && b.Used >= b.Capacity {
-						status = "full"
-					}
-					fmt.Fprintf(rw, "  %s\t%s\t%s\t%s\t%s\t%d\n", b.Bay, label, status,
+				for _, b := range view.Shelf {
+					label, status := volumeLabelStatus(b)
+					fmt.Fprintf(rw, "  %s\t%s\t%s\t%s\t%s\t%d\n", b.ID, label, status,
 						sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
 				}
 				rw.Flush()
