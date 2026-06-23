@@ -21,7 +21,7 @@ Commands:
   copy       Copy a slot to another medium   (e.g. disk -> tape)
   label      Label a volume (required for tape before first dump)
   medium     List media and their capacity/volumes
-  tape       Inventory or mount tapes in a library (changer)
+  changer    Inventory or mount volumes in a library (tape, …)
   catalog    Maintain the local slot cache   (alias: nbcatalog)
 
 Run "nb <command> -h" for command options.
@@ -53,8 +53,8 @@ func main() {
 		err = cli.CmdLabel(args)
 	case "medium":
 		err = cli.CmdMedium(args)
-	case "tape":
-		err = cli.CmdTape(args)
+	case "changer":
+		err = cli.CmdChanger(args)
 	case "catalog":
 		err = cli.CmdCatalog(args)
 	case "-h", "--help", "help":

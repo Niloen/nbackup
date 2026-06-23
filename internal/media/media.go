@@ -82,15 +82,15 @@ type Labeled interface {
 // label (someone else's tape, or non-NBackup data).
 var ErrForeignVolume = fmt.Errorf("foreign volume: file 0 is not an NBackup label")
 
-// ErrVolumeFull reports that a write hit the end of the volume (a finite tape's
-// capacity). The partial file is discarded; without spanning, the whole archive
-// must be rewritten on another volume. Callers test it with errors.Is.
-var ErrVolumeFull = fmt.Errorf("volume full: end of tape reached")
+// ErrVolumeFull reports that a write hit the end of the volume (a finite volume's
+// capacity, e.g. a tape). The partial file is discarded; without spanning, the
+// whole archive must be rewritten on another volume. Callers test it with errors.Is.
+var ErrVolumeFull = fmt.Errorf("volume full: end of volume reached")
 
-// ErrNoTape reports that an operation needs a tape mounted in the drive, but the
-// drive is empty — a changer with nothing loaded. Load one (`nb tape load`) or
-// label a blank one (`nb label`) first.
-var ErrNoTape = fmt.Errorf("no tape loaded in the drive")
+// ErrNoVolume reports that an operation needs a volume mounted in the drive, but
+// the drive is empty — a changer (tape library, removable-disk tray, …) with
+// nothing loaded. The engine wraps this with medium-specific guidance.
+var ErrNoVolume = fmt.Errorf("no volume loaded in the drive")
 
 // Changer is implemented by media that hold many physical volumes behind a single
 // drive: a tape library / autochanger (or its manual, disk-emulated equivalent).

@@ -25,25 +25,25 @@ func init() {
 		var ch changer
 		switch {
 		case opts.Get("dir") != "":
-			// The emulated library is finite: tape_size caps each bay so a tape
-			// fills like a real reel; `tapes` is how many physical bays exist.
+			// The emulated library is finite: volume_size caps each bay so a tape
+			// fills like a real reel; `bays` is how many physical positions exist.
 			var capacity int64
-			if s := opts.Get("tape_size"); s != "" {
+			if s := opts.Get("volume_size"); s != "" {
 				c, err := sizeutil.ParseBytes(s)
 				if err != nil {
-					return nil, fmt.Errorf("tape_size: %w", err)
+					return nil, fmt.Errorf("volume_size: %w", err)
 				}
 				capacity = c
 			}
-			tapes := 1
-			if s := opts.Get("tapes"); s != "" {
+			bays := 1
+			if s := opts.Get("bays"); s != "" {
 				n, err := strconv.Atoi(s)
 				if err != nil {
-					return nil, fmt.Errorf("tapes: %w", err)
+					return nil, fmt.Errorf("bays: %w", err)
 				}
-				tapes = n
+				bays = n
 			}
-			dc, err := openDirChanger(opts.Get("dir"), capacity, tapes)
+			dc, err := openDirChanger(opts.Get("dir"), capacity, bays)
 			if err != nil {
 				return nil, err
 			}
@@ -101,7 +101,7 @@ func (t *tape) Name() string { return "tape" }
 
 func (t *tape) requireDev() (device, error) {
 	if t.dev == nil {
-		return nil, media.ErrNoTape
+		return nil, media.ErrNoVolume
 	}
 	return t.dev, nil
 }

@@ -301,7 +301,7 @@ func TestTapeLibraryRestore(t *testing.T) {
 		Landing: "disk",
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
-			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "tapes": "2"}},
+			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
 		},
 		Sources: []config.DLE{{Host: "h", Path: src}},
 		Workdir: t.TempDir(),
@@ -376,7 +376,7 @@ func TestTapeAppendableFalse(t *testing.T) {
 		Landing: "disk",
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
-			"lib":  {Type: "tape", Appendable: boolp(false), Params: map[string]string{"dir": t.TempDir(), "tapes": "2"}},
+			"lib":  {Type: "tape", Appendable: boolp(false), Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
 		},
 		Sources: []config.DLE{{Host: "h", Path: src}},
 		Workdir: t.TempDir(),

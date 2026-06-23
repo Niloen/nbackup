@@ -131,7 +131,7 @@ func TestTapeFull(t *testing.T) {
 	// Each file carries a 32 KiB header block; size the tape to hold a label and
 	// one small archive, so a second archive's header overflows it.
 	capacity := int64(3 * media.HeaderBlock)
-	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "tape_size": fmt.Sprintf("%d", capacity)})
+	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "volume_size": fmt.Sprintf("%d", capacity)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestTapeFull(t *testing.T) {
 // reports each bay's label (its barcode stand-in).
 func TestTapeLibrary(t *testing.T) {
 	dir := t.TempDir()
-	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "tapes": "3"})
+	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "bays": "3"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestTapeLibrary(t *testing.T) {
 	}
 
 	// Reopen: the loaded marker persists (bay-02), and inventory maps bays→labels.
-	v2, err := media.OpenVolume("tape", media.Options{"dir": dir, "tapes": "3"})
+	v2, err := media.OpenVolume("tape", media.Options{"dir": dir, "bays": "3"})
 	if err != nil {
 		t.Fatal(err)
 	}

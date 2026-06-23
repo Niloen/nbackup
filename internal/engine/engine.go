@@ -182,7 +182,7 @@ func (e *Engine) Medium(name string) (MediumInfo, bool) {
 		info.Capacity = prof.TotalBytes()
 	}
 	// A changer medium (tape library) holds many volumes; summarize the count and
-	// point at `nb tape` for the detail. A single labeled volume shows its name.
+	// point at `nb changer` for the detail. A single labeled volume shows its name.
 	if d.Type == "tape" {
 		n := 0
 		for _, v := range e.cat.Volumes() {
@@ -322,8 +322,8 @@ func (e *Engine) verifyWritable(vol media.Volume, medium string, appendable bool
 	}
 	lbl, labeled, err := lv.ReadLabel()
 	switch {
-	case errors.Is(err, media.ErrNoTape):
-		return "", 0, fmt.Errorf("medium %q has no tape loaded; load one with `nb tape load %s <bay>` or label a blank one with `nb label %s <name>`", medium, medium, medium)
+	case errors.Is(err, media.ErrNoVolume):
+		return "", 0, fmt.Errorf("medium %q has no tape loaded; load one with `nb changer load %s <bay>` or label a blank one with `nb label %s <name>`", medium, medium, medium)
 	case errors.Is(err, media.ErrForeignVolume):
 		return "", 0, fmt.Errorf("medium %q holds non-NBackup data; refusing to overwrite — relabel it explicitly with `nb label --force %s <name>`", medium, medium)
 	case err != nil:
@@ -400,7 +400,7 @@ func (e *Engine) mountForRead(vol media.Volume, p catalog.Placement) error {
 			return ch.Mount(b.Bay)
 		}
 	}
-	return fmt.Errorf("tape %q (holding a copy of the slot on %q) is not in the library; load it with `nb tape load %s <bay>`", p.Volume, p.Medium, p.Medium)
+	return fmt.Errorf("tape %q (holding a copy of the slot on %q) is not in the library; load it with `nb changer load %s <bay>`", p.Volume, p.Medium, p.Medium)
 }
 
 // readVolumeLabel reads the loaded volume's label name, if any.
@@ -558,9 +558,9 @@ func chooseBay(ch media.Changer, name string, relabel bool) (string, error) {
 	return "", fmt.Errorf("no blank bay available; all %d are in use — relabel an aged-out tape with `nb label --relabel`", len(bays))
 }
 
-// TapeBays inventories a changer medium's library: the loaded bay and every
-// bay's physical state plus the label it holds.
-func (e *Engine) TapeBays(mediumName string) (loaded string, bays []media.BayStatus, err error) {
+// Bays inventories a changer medium's library: the loaded bay and every bay's
+// physical state plus the label it holds.
+func (e *Engine) Bays(mediumName string) (loaded string, bays []media.BayStatus, err error) {
 	vol, _, _, err := e.mediumVolume(mediumName)
 	if err != nil {
 		return "", nil, err
@@ -577,9 +577,9 @@ func (e *Engine) TapeBays(mediumName string) (loaded string, bays []media.BaySta
 	return loaded, bays, nil
 }
 
-// LoadTape mounts a tape on a changer medium, addressed by bay id, or by label
-// when byLabel is set (the host-side "load the tape labeled X" convenience).
-func (e *Engine) LoadTape(mediumName, target string, byLabel bool, logf Logf) error {
+// LoadVolume mounts a volume on a changer medium, addressed by bay id, or by
+// label when byLabel is set (the host-side "load the volume labeled X" helper).
+func (e *Engine) LoadVolume(mediumName, target string, byLabel bool, logf Logf) error {
 	vol, _, _, err := e.mediumVolume(mediumName)
 	if err != nil {
 		return err

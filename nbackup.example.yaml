@@ -28,17 +28,17 @@ media:
     type: tape          # a LIBRARY of bays behind one drive
     device: /dev/nst0   # real single drive (no-rewind device), a one-bay library
     # dir: /var/lib/nbackup/vtape   # OR a file-backed virtual library (no hardware)
-    tapes: 20           # physical bays; total capacity is tapes × tape_size
-    tape_size: 6TB      # per-tape capacity — a write past it hits end-of-tape
+    bays: 20            # physical bays; total capacity is bays × volume_size
+    volume_size: 6TB    # per-volume capacity — a write past it hits end-of-tape
     minimum_age: 180d
     appendable: true    # default: pack many runs per tape (Bacula-style) until full.
                         # false = one run per tape (Amanda-style).
     # Tapes carry a self-describing identity label (file 0) that NBackup verifies
     # before writing — so a wrong, foreign, or still-active reel is never clobbered.
     # The changer addresses physical bays; the label is read after mounting:
-    #   nb tape list lto                  # inventory bay -> label
+    #   nb changer list lto               # inventory bay -> label
     #   nb label lto lto-0001             # grab a blank bay and label it
-    #   nb tape load lto bay-02           # mount a bay (or: nb tape load --label lto lto-0007)
+    #   nb changer load lto bay-02        # mount a bay (or: nb changer load --label lto lto-0007)
     #   nb label --relabel lto lto-0042   # recycle an aged-out tape
   cloud:
     type: s3            # registered stub; no S3 client yet

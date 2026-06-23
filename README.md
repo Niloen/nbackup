@@ -84,7 +84,7 @@ This produces the `nb` umbrella tool plus standalone commands:
 | —           | `nb copy`    | Copy a slot to another medium (disk → tape) |
 | —           | `nb label`   | Label a volume (required for tape before its first dump) |
 | —           | `nb medium`  | List media (capacity, usage, volume) or detail one |
-| —           | `nb tape`    | Inventory (`list`) or mount (`load`) tapes in a library |
+| —           | `nb changer` | Inventory (`list`) or mount (`load`) volumes in a library |
 
 ## Quick start
 
@@ -238,7 +238,7 @@ the dumptype, never on the entry.
 ### Capacity and retention are per-medium
 
 Each medium declares its **capacity** in its own units — object stores spell it
-as `budget` (`20TB`); tape spells it as `tapes × tape_size` (`0` = unbounded).
+as `budget` (`20TB`); tape spells it as `bays × volume_size` (`0` = unbounded).
 Capacity is the only genuinely per-medium quantity. `minimum_age` (a per-medium
 safety floor) and the global `cycle.require_verified_successor` round out
 retention.
@@ -270,7 +270,7 @@ restore, per-medium budget reporting, cycle-safe pruning.
 The `tape` medium is a **library of bays behind one drive**, modeled with two
 internal seams: a `device` (the `mt` analogue — file I/O of one mounted tape) and
 a `changer` (the robot analogue — which bay is in the drive). `dir:` selects a
-directory-backed library (each bay a subdirectory, finite per-bay `tape_size`,
+directory-backed library (each bay a subdirectory, finite per-bay `volume_size`,
 fully tested); `device:` selects a real single drive (`mt` + `/dev/nst0`, a
 one-bay library), structurally complete but unverified without hardware, so CI
 exercises the virtual library.
@@ -280,13 +280,13 @@ cartridge identity); a *label* is logical data written at file 0 (`nbackup` magi
 name, pool, epoch). They are deliberately distinct: a blank cartridge has a bay
 but no label, and relabeling rewrites the label without changing the bay. Like a
 real autochanger, the `changer` is **label-agnostic** — it mounts bays; the label
-is read from the drive only after mounting. `tapes: N` stocks the library with N
-blank bays; `nb tape list` inventories bay→label; `nb tape load` mounts one.
+is read from the drive only after mounting. `bays: N` stocks the library with N
+blank bays; `nb changer list` inventories bay→label; `nb changer load` mounts one.
 
 **Append vs one-run-per-tape.** A tape fills until end-of-tape (`ErrVolumeFull`),
 then you change tapes. `appendable: true` (default, Bacula-style) packs many runs
 onto a tape until full; `appendable: false` (Amanda-style) uses one run per tape.
-Switching is **manual**: a full tape is refused and you `nb tape load` the next
+Switching is **manual**: a full tape is refused and you `nb changer load` the next
 (or `nb label --relabel` an aged-out one). Automatic advance and tape spanning
 are the next step.
 
