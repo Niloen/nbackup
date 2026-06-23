@@ -128,8 +128,6 @@ type tape struct {
 	bay string // mounted bay/reel id (for display); "" when empty
 }
 
-func (t *tape) Name() string { return "tape" }
-
 func (t *tape) requireDev() (device, error) {
 	if t.dev == nil {
 		return nil, media.ErrNoVolume

@@ -391,18 +391,6 @@ func (c *Catalog) Volume(name string) (VolumeRecord, bool) {
 	return VolumeRecord{}, false
 }
 
-// VolumeForMedium returns any volume tracked for a medium (matched by pool). It
-// predates the changer and is only meaningful for media with a single volume;
-// changer media hold many, so callers use Volume(name) / SlotsOnVolume instead.
-func (c *Catalog) VolumeForMedium(medium string) (media.Label, bool) {
-	for _, v := range c.volumes {
-		if v.Label.Pool == medium {
-			return v.Label, true
-		}
-	}
-	return media.Label{}, false
-}
-
 // History derives per-DLE run history from the cached slots (source of truth).
 func (c *Catalog) History() *History {
 	h := &History{DLEs: map[string]*DLEState{}}

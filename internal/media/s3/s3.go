@@ -23,8 +23,6 @@ func init() {
 
 type volume struct{ bucket string }
 
-func (v *volume) Name() string { return "s3" }
-
 func ni(op string) error { return fmt.Errorf("s3.%s: %w", op, media.ErrNotImplemented) }
 
 func (v *volume) AppendFile(media.Header, func(io.Writer) error) (int, error) {
