@@ -255,7 +255,10 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 		placed := false
 		for _, p := range eng.cat.Placements(id) {
 			if p.Medium == "lib" {
-				placed, vols[p.Volume] = true, true
+				placed = true
+				for _, v := range p.Volumes() {
+					vols[v] = true
+				}
 			}
 		}
 		if !placed {
@@ -286,10 +289,10 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 	}
 }
 
-// TestSyncSlotTooBigFailsFast checks the proactive pre-check: a slot larger than a
-// whole tape is rejected up front (not split, not written as a doomed partial). The
-// loaded tape must carry only its label afterward — no orphaned archive bytes.
-func TestSyncSlotTooBigFailsFast(t *testing.T) {
+// TestSyncSlotOutOfTapes checks that a slot too big to fit even by spanning every
+// available tape fails with an actionable "no further writable bay" error and is not
+// recorded — the orphaned, unsealed parts left behind are reclaimable by relabel.
+func TestSyncSlotOutOfTapes(t *testing.T) {
 	src := t.TempDir()
 	write(t, filepath.Join(src, "f.txt"), strings.Repeat("z", 200*1024)) // ~200 KiB
 
@@ -298,7 +301,8 @@ func TestSyncSlotTooBigFailsFast(t *testing.T) {
 		AutoLabel: true,
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
-			// One 64 KiB bay: far too small for the slot above.
+			// One 64 KiB bay: far too small for the slot above, with no second bay to
+			// span onto.
 			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "1", "volume_size": "65536"}},
 		},
 		Sources: []config.DLE{{Host: "h", Path: src}},
@@ -325,21 +329,11 @@ func TestSyncSlotTooBigFailsFast(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected sync of an oversized slot to fail")
 	}
-	if !strings.Contains(err.Error(), "does not fit on an empty volume") {
+	if !strings.Contains(err.Error(), "no further writable bay") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if eng.placedOn(s.ID, "lib") {
 		t.Fatal("oversized slot must not be recorded on the library")
-	}
-	// The loaded bay holds only its label — no doomed partial was written.
-	view, err := eng.ChangerView("lib")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, b := range view.Bays {
-		if b.ID == view.Loaded && b.Files != 1 {
-			t.Fatalf("loaded bay has %d files, want 1 (label only — no partial)", b.Files)
-		}
 	}
 }
 

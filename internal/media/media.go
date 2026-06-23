@@ -37,6 +37,7 @@ type Header struct {
 	Codec     string    `json:"codec,omitempty"`
 	Level     int       `json:"level,omitempty"`
 	BaseSlot  string    `json:"base_slot,omitempty"`
+	Part      int       `json:"part,omitempty"` // 0-based index of this part within its archive (0 = first/only); the archive's total part count lives in the seal (slot.Archive.Parts), not here
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -84,9 +85,11 @@ var ErrForeignVolume = fmt.Errorf("foreign volume: file 0 is not an NBackup labe
 
 // ErrVolumeFull reports that a write hit the end of the volume (a finite volume's
 // capacity, e.g. a tape). The partial file is discarded (left unsealed, so a scan
-// ignores it). A copy/sync to a changer catches this and rolls onto the next
-// writable volume, rewriting the whole slot there — spanning is per-slot, never
-// mid-slot. Callers test it with errors.Is.
+// ignores it). Spanning is PROACTIVE: the writer sizes each archive part to fit the
+// loaded volume's known remaining capacity and rolls onto the next volume between
+// parts, so this error is the backstop for an estimate that came up short (or a
+// volume whose remaining capacity software cannot see ahead) — the caller fails with
+// an actionable message rather than recovering. Callers test it with errors.Is.
 var ErrVolumeFull = fmt.Errorf("volume full: end of volume reached")
 
 // ErrNoVolume reports that an operation needs a volume mounted in the drive, but
@@ -270,43 +273,3 @@ func VolumeTypes() []string {
 
 // ErrNotImplemented is returned by registered-but-incomplete media.
 var ErrNotImplemented = fmt.Errorf("not implemented in this version")
-
-// CopySlot streams every file of a slot from src to dst, in position order
-// (archives then the seal record), so the slot lands sealed on dst. Slot metadata
-// is position-free, so dst assigns its own positions — this is the one mechanism
-// for moving slots between any two media (disk <-> tape). It returns the copied
-// files with their headers and their new positions on dst, so the caller can
-// record where each archive landed.
-func CopySlot(dst, src Volume, slotID string) ([]FileInfo, error) {
-	files, err := src.Files()
-	if err != nil {
-		return nil, err
-	}
-	var copied []FileInfo
-	for _, f := range files {
-		if f.Header.Slot != slotID {
-			continue
-		}
-		pos, err := copyOne(dst, src, f)
-		if err != nil {
-			return copied, err
-		}
-		copied = append(copied, FileInfo{Pos: pos, Header: f.Header})
-	}
-	if len(copied) == 0 {
-		return nil, fmt.Errorf("slot %s not found on the source volume", slotID)
-	}
-	return copied, nil
-}
-
-func copyOne(dst, src Volume, f FileInfo) (int, error) {
-	_, rc, err := src.ReadFile(f.Pos)
-	if err != nil {
-		return 0, err
-	}
-	defer rc.Close()
-	return dst.AppendFile(f.Header, func(w io.Writer) error {
-		_, e := io.Copy(w, rc)
-		return e
-	})
-}

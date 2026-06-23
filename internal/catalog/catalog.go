@@ -37,32 +37,76 @@ const (
 // copy of it lives.
 type Entry struct {
 	Slot       *slot.Slot  `json:"slot"`       // medium-independent content (from the seal)
-	Placements []Placement `json:"placements"` // one per volume holding a copy
+	Placements []Placement `json:"placements"` // one per medium holding a copy
 }
 
-// Placement is one copy of a slot on one volume.
+// Placement is one copy of a slot on one medium. The copy's archives may span
+// several of the medium's volumes (tape spanning): each archive names the volumes
+// and positions its parts landed on. The seal record (the commit marker, written
+// last) lives at Seal — on the final volume the copy occupies.
 type Placement struct {
-	Medium   string       `json:"medium"`          // config medium name — how to open it
-	Volume   string       `json:"volume"`          // volume label name (== Medium for unlabeled media)
-	Epoch    int          `json:"epoch,omitempty"` // label epoch when recorded; staleness check on read
-	Archives []ArchivePos `json:"archives"`        // file position of each archive on this volume
+	Medium   string       `json:"medium"`   // config medium name — how to open it
+	Archives []ArchivePos `json:"archives"` // each archive and the positions of its parts
+	Seal     PartPos      `json:"seal"`     // where the seal record lives
 }
 
-// Pos returns the file position of an archive on this placement's volume.
-func (p Placement) Pos(dle string, level int) (int, bool) {
+// PartPos is one part's location: a volume (label name, == Medium for unlabeled
+// media) plus a file position on it.
+type PartPos struct {
+	Volume string `json:"volume"`
+	Epoch  int    `json:"epoch,omitempty"` // label epoch when recorded; staleness check on read
+	Pos    int    `json:"pos"`
+}
+
+// ArchivePos is one archive's identity and the ordered locations of its parts. An
+// archive that fits one volume has a single part; a spanned archive has its
+// compressed payload split into several parts across volumes, in order.
+type ArchivePos struct {
+	DLE   string    `json:"dle"`
+	Level int       `json:"level"`
+	Parts []PartPos `json:"parts"`
+}
+
+// Parts returns the ordered part locations of an archive on this placement.
+func (p Placement) Parts(dle string, level int) ([]PartPos, bool) {
 	for _, a := range p.Archives {
 		if a.DLE == dle && a.Level == level {
-			return a.Pos, true
+			return a.Parts, len(a.Parts) > 0
 		}
 	}
-	return 0, false
+	return nil, false
 }
 
-// ArchivePos is one archive's identity and its file position on a volume.
-type ArchivePos struct {
-	DLE   string `json:"dle"`
-	Level int    `json:"level"`
-	Pos   int    `json:"pos"`
+// Volumes returns the distinct volumes this placement occupies — every archive
+// part's volume plus the seal's — in first-seen order. It is what tells which tapes
+// a copy needs mounted.
+func (p Placement) Volumes() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(v string) {
+		if v != "" && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	for _, a := range p.Archives {
+		for _, pt := range a.Parts {
+			add(pt.Volume)
+		}
+	}
+	add(p.Seal.Volume)
+	return out
+}
+
+// OnVolume reports whether any part of this placement (or its seal) lives on the
+// named volume.
+func (p Placement) OnVolume(volume string) bool {
+	for _, v := range p.Volumes() {
+		if v == volume {
+			return true
+		}
+	}
+	return false
 }
 
 // VolumeRecord is the catalog's cached identity of a labeled volume (Amanda's
@@ -154,6 +198,19 @@ func (c *Catalog) Rebuild(volumes map[string]media.Volume) (int, error) {
 // mounted unattended — so it is scanned as just the loaded reel, or skipped when the
 // drive is empty. A plain volume (no drive) is scanned directly.
 func (c *Catalog) ingest(medium string, vol media.Volume) error {
+	acc := newMediumScan()
+	scanInto := func(v media.Volume) error {
+		res, err := scanVolume(medium, v)
+		if err != nil {
+			return err
+		}
+		acc.add(res)
+		if res.label != nil {
+			c.volumes[res.label.Name] = &VolumeRecord{Label: *res.label}
+		}
+		return nil
+	}
+
 	ch, isLibrary := vol.(media.Changer)
 	if !isLibrary {
 		if d, ok := vol.(media.Drive); ok {
@@ -161,7 +218,11 @@ func (c *Catalog) ingest(medium string, vol media.Volume) error {
 				return nil // single drive with an empty drive: nothing to scan
 			}
 		}
-		return c.ingestOne(medium, vol)
+		if err := scanInto(vol); err != nil {
+			return err
+		}
+		c.assemble(medium, acc)
+		return nil
 	}
 	prev, hadPrev := ch.Loaded()
 	bays, err := ch.Bays()
@@ -175,57 +236,120 @@ func (c *Catalog) ingest(medium string, vol media.Volume) error {
 		if err := ch.Mount(b.ID); err != nil {
 			return err
 		}
-		if err := c.ingestOne(medium, vol); err != nil {
+		if err := scanInto(vol); err != nil {
 			return err
 		}
 	}
 	if hadPrev {
-		return ch.Mount(prev.ID)
+		if err := ch.Mount(prev.ID); err != nil {
+			return err
+		}
 	}
+	c.assemble(medium, acc)
 	return nil
 }
 
-// ingestOne scans one mounted volume and merges its slots and placements.
-func (c *Catalog) ingestOne(medium string, vol media.Volume) error {
-	slots, placements, label, err := scanVolume(medium, vol)
-	if err != nil {
-		return err
-	}
-	for _, s := range slots {
-		e := c.entryByID(s.ID)
+// assemble turns one medium's accumulated part files and seals into placements: each
+// sealed slot becomes one placement whose archives gather their parts (ordered by
+// part index) from across the medium's volumes. A part missing from the scan (a tape
+// not present) leaves a short part list — verify/restore reports the gap and fails
+// over to another copy.
+func (c *Catalog) assemble(medium string, acc *mediumScan) {
+	for slotID, sl := range acc.seals {
+		e := c.entryByID(slotID)
 		if e == nil {
-			e = &Entry{Slot: s}
+			e = &Entry{Slot: sl.meta}
 			c.entries = append(c.entries, e)
 		} else {
-			e.Slot = s
+			e.Slot = sl.meta
 		}
-		if p, ok := placements[s.ID]; ok {
-			e.setPlacement(p)
+		p := Placement{Medium: medium, Seal: sl.loc}
+		for _, a := range sl.meta.Archives {
+			n := a.Parts
+			if n < 1 {
+				n = 1 // a single whole archive records Parts as 0 or 1
+			}
+			ap := ArchivePos{DLE: a.DLE, Level: a.Level}
+			for part := 0; part < n; part++ {
+				if loc, ok := acc.parts[partKey{slot: slotID, dle: a.DLE, level: a.Level, part: part}]; ok {
+					ap.Parts = append(ap.Parts, loc)
+				}
+			}
+			p.Archives = append(p.Archives, ap)
 		}
+		e.setPlacement(p)
 	}
-	if label != nil {
-		c.volumes[label.Name] = &VolumeRecord{Label: *label}
-	}
-	return nil
 }
 
 // ScanSlots reads a volume's sealed slots without touching the cache — used to
 // check a volume's current contents (e.g. whether a tape is still active before
 // relabel).
 func ScanSlots(vol media.Volume) ([]*slot.Slot, error) {
-	slots, _, _, err := scanVolume("", vol)
-	return slots, err
+	res, err := scanVolume("", vol)
+	if err != nil {
+		return nil, err
+	}
+	slots := make([]*slot.Slot, 0, len(res.seals))
+	for _, s := range res.seals {
+		slots = append(slots, s.meta)
+	}
+	return slots, nil
 }
 
-// scanVolume groups a volume's files by slot, reads each sealed slot's seal record
-// and the volume's label, and builds a Placement (with archive positions) per slot.
-func scanVolume(medium string, vol media.Volume) (slots []*slot.Slot, placements map[string]Placement, label *media.Label, err error) {
+// partKey identifies one archive part within a slot across a medium's volumes.
+type partKey struct {
+	slot, dle   string
+	level, part int
+}
+
+// scannedSeal is a seal record found during a scan: the slot it commits and where it
+// lives.
+type scannedSeal struct {
+	meta *slot.Slot
+	loc  PartPos
+}
+
+// scanResult is one volume's contribution to a medium scan: its archive part files,
+// its seals, and its label (if any).
+type scanResult struct {
+	parts map[partKey]PartPos
+	seals map[string]scannedSeal
+	label *media.Label
+}
+
+// mediumScan accumulates a whole medium's parts and seals across its volumes before
+// placements are assembled (a slot's parts may straddle several volumes, and the seal
+// committing them lives on only one).
+type mediumScan struct {
+	parts map[partKey]PartPos
+	seals map[string]scannedSeal
+}
+
+func newMediumScan() *mediumScan {
+	return &mediumScan{parts: map[partKey]PartPos{}, seals: map[string]scannedSeal{}}
+}
+
+func (m *mediumScan) add(res scanResult) {
+	for k, loc := range res.parts {
+		m.parts[k] = loc // last-seen wins (an orphaned re-copy is harmless to reads)
+	}
+	for slotID, s := range res.seals {
+		m.seals[slotID] = s
+	}
+}
+
+// scanVolume reads one volume's files into raw part-file and seal records, plus the
+// volume's label. It does not assemble placements — that happens per medium, after
+// every volume is scanned, because a slot's parts (and its committing seal) may sit
+// on different volumes.
+func scanVolume(medium string, vol media.Volume) (scanResult, error) {
 	files, err := vol.Files()
 	if err != nil {
-		return nil, nil, nil, err
+		return scanResult{}, err
 	}
 
 	volName, epoch := medium, 0
+	var label *media.Label
 	if lv, ok := vol.(media.Labeled); ok {
 		if lbl, labeled, lerr := lv.ReadLabel(); lerr == nil && labeled {
 			label = &lbl
@@ -233,35 +357,21 @@ func scanVolume(medium string, vol media.Volume) (slots []*slot.Slot, placements
 		}
 	}
 
-	bySlot := map[string][]media.FileInfo{}
+	res := scanResult{parts: map[partKey]PartPos{}, seals: map[string]scannedSeal{}, label: label}
 	for _, f := range files {
-		bySlot[f.Header.Slot] = append(bySlot[f.Header.Slot], f)
-	}
-	placements = map[string]Placement{}
-	for slotID, fs := range bySlot {
-		sealPos := -1
-		for _, f := range fs {
-			if f.Header.Kind == media.KindSeal {
-				sealPos = f.Pos
+		switch f.Header.Kind {
+		case media.KindArchive:
+			res.parts[partKey{slot: f.Header.Slot, dle: f.Header.DLE, level: f.Header.Level, part: f.Header.Part}] =
+				PartPos{Volume: volName, Epoch: epoch, Pos: f.Pos}
+		case media.KindSeal:
+			s, serr := readSeal(vol, f.Pos)
+			if serr != nil {
+				continue // unreadable seal: skip
 			}
+			res.seals[f.Header.Slot] = scannedSeal{meta: s, loc: PartPos{Volume: volName, Epoch: epoch, Pos: f.Pos}}
 		}
-		if sealPos < 0 {
-			continue // unsealed / incomplete slot
-		}
-		s, serr := readSeal(vol, sealPos)
-		if serr != nil {
-			continue // unreadable seal: skip
-		}
-		slots = append(slots, s)
-		p := Placement{Medium: medium, Volume: volName, Epoch: epoch}
-		for _, f := range fs {
-			if f.Header.Kind == media.KindArchive {
-				p.Archives = append(p.Archives, ArchivePos{DLE: f.Header.DLE, Level: f.Header.Level, Pos: f.Pos})
-			}
-		}
-		placements[slotID] = p
 	}
-	return slots, placements, label, nil
+	return res, nil
 }
 
 // Record stores a slot's content and adds-or-replaces its placement on
@@ -352,7 +462,7 @@ func (c *Catalog) SlotsOnVolume(volume string) []*slot.Slot {
 	var out []*slot.Slot
 	for _, e := range c.entries {
 		for _, p := range e.Placements {
-			if p.Volume == volume {
+			if p.OnVolume(volume) {
 				out = append(out, e.Slot)
 				break
 			}

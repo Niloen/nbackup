@@ -299,6 +299,101 @@ func (l *Librarian) Remaining() (int64, bool) {
 	return st.Capacity - st.Used, true
 }
 
+// CanSpan reports whether a write to this medium can span volumes mid-archive: it
+// needs either a knowable remaining capacity (a finite reel, so the writer can size
+// each part to fit and roll proactively) or a configured part_size. Disk and any
+// medium without a loaded finite volume cannot span. The engine uses this to serialize
+// dumpers when spanning is possible (a single drive cannot interleave two archives'
+// parts).
+func (l *Librarian) CanSpan(partSize int64) bool {
+	if partSize > 0 {
+		return true
+	}
+	_, known := l.Remaining()
+	return known
+}
+
+// WriteSink drives a multi-part, possibly multi-volume write for the slotio writer:
+// it sizes each part to the loaded volume's remaining capacity (capped by part_size),
+// rolls onto a fresh volume when the loaded one fills, and places the seal record. It
+// is created after PrepareWrite has mounted and accepted the first volume.
+type WriteSink struct {
+	l          *Librarian
+	appendable bool
+	partSize   int64
+	now        time.Time
+	logf       Logf
+	tried      map[string]bool
+	volume     string
+	epoch      int
+}
+
+// WriteSink builds a sink starting on the volume PrepareWrite accepted (its label and
+// epoch). partSize (0 = none) caps each part for media whose remaining capacity is
+// unknowable or to bound part size deliberately.
+func (l *Librarian) WriteSink(volume string, epoch int, appendable bool, partSize int64, now time.Time, logf Logf) *WriteSink {
+	return &WriteSink{l: l, appendable: appendable, partSize: partSize, now: now, logf: logf,
+		tried: map[string]bool{}, volume: volume, epoch: epoch}
+}
+
+// maxPart is the payload bytes the next part may carry on the loaded volume: its
+// remaining capacity minus a header, capped by part_size; -1 when unbounded.
+func (s *WriteSink) maxPart() int64 {
+	room, known := s.l.Remaining()
+	if !known {
+		if s.partSize > 0 {
+			return s.partSize - media.HeaderBlock
+		}
+		return -1
+	}
+	avail := room - media.HeaderBlock
+	if avail < 0 {
+		avail = 0
+	}
+	if s.partSize > 0 {
+		if cap := s.partSize - media.HeaderBlock; cap < avail {
+			avail = cap
+		}
+	}
+	return avail
+}
+
+func (s *WriteSink) advance() error {
+	volName, epoch, _, err := s.l.Advance(s.appendable, s.tried, "", s.now, s.logf)
+	if err != nil {
+		return err
+	}
+	s.volume, s.epoch = volName, epoch
+	return nil
+}
+
+// NextPart implements slotio.VolumeSink: it rolls onto a fresh volume if the loaded
+// one cannot hold a header plus a byte, then returns the volume and the part's byte cap.
+func (s *WriteSink) NextPart() (media.Volume, int64, string, int, error) {
+	for max := s.maxPart(); max >= 0 && max < 1; max = s.maxPart() {
+		if err := s.advance(); err != nil {
+			return nil, 0, "", 0, err
+		}
+	}
+	return s.l.vol, s.maxPart(), s.volume, s.epoch, nil
+}
+
+// PlaceSeal implements slotio.VolumeSink: it rolls first if the seal (one whole file
+// of the given payload size) will not fit the loaded volume.
+func (s *WriteSink) PlaceSeal(size int64) (media.Volume, string, int, error) {
+	if room, known := s.l.Remaining(); known && room-media.HeaderBlock < size {
+		if err := s.advance(); err != nil {
+			return nil, "", 0, err
+		}
+	}
+	return s.l.vol, s.volume, s.epoch, nil
+}
+
+// Current implements slotio.VolumeSink: the loaded volume and its identity, no roll.
+func (s *WriteSink) Current() (media.Volume, string, int) {
+	return s.l.vol, s.volume, s.epoch
+}
+
 // promptSwap asks the operator (via l.op) to pick a reel to load on a single-drive
 // station. need is the specific volume label wanted (reads) or "" (writes); expect
 // is the volume a write would prefer (the oldest reusable tape) or "".
@@ -320,27 +415,28 @@ func (l *Librarian) promptSwap(need, expect string, cause error) (string, bool) 
 	return l.op.Swap(SwapRequest{Medium: l.medium, Pool: l.medium, Reason: reason, Need: need, Expect: expect, Loaded: loaded, Shelf: shelf})
 }
 
-// MountForRead loads the volume holding a placement's slot and verifies its identity
-// so the reader can seek it. A robotic library mounts the bay automatically; a
+// MountVolume loads the named volume (a part's volume) and verifies its identity so
+// the reader can seek it. A robotic library mounts the bay automatically; a
 // single-drive station prompts the operator to swap the reel in; non-changer media
-// are a no-op (a single addressable volume).
-func (l *Librarian) MountForRead(p catalog.Placement) error {
-	if err := l.mount(p); err != nil {
+// are a no-op (a single addressable volume). Reading an archive that spans volumes
+// calls this once per part, in order — a single drive holds only one tape at a time.
+func (l *Librarian) MountVolume(volume string, epoch int) error {
+	if err := l.mount(volume); err != nil {
 		return err
 	}
-	return l.assertVolume(p)
+	return l.assertVolume(volume, epoch)
 }
 
-func (l *Librarian) mount(p catalog.Placement) error {
+func (l *Librarian) mount(volume string) error {
 	if !l.isLibrary && !l.isStation {
 		return nil // address-identified: a single volume, nothing to mount
 	}
-	if l.mountedMatches(p.Volume) {
+	if l.mountedMatches(volume) {
 		return nil // the right tape is already in the drive
 	}
 	// A single-drive station prompts the operator to swap the needed reel in.
 	if l.isStation {
-		return l.mountViaShelf(p)
+		return l.mountViaShelf(volume)
 	}
 	// A robotic library auto-mounts the bay holding the needed label.
 	bays, err := l.changer.Bays()
@@ -348,28 +444,28 @@ func (l *Librarian) mount(p catalog.Placement) error {
 		return err
 	}
 	for _, b := range bays {
-		if b.Label == p.Volume {
+		if b.Label == volume {
 			return l.changer.Mount(b.ID)
 		}
 	}
-	return fmt.Errorf("tape %q (holding a copy of the slot on %q) is not in the library; load it with `nb load %s <bay>`", p.Volume, p.Medium, p.Medium)
+	return fmt.Errorf("tape %q (holding a copy of the slot on %q) is not in the library; load it with `nb load %s <bay>`", volume, l.medium, l.medium)
 }
 
-// mountViaShelf loads the reel a placement needs on a single-drive station: if it is
-// not already in the drive, it prompts the operator to swap it in, looping until the
-// right tape is loaded or the operator aborts. Unattended, it returns an actionable
-// error rather than blocking.
-func (l *Librarian) mountViaShelf(p catalog.Placement) error {
+// mountViaShelf loads the named reel on a single-drive station: if it is not already
+// in the drive, it prompts the operator to swap it in, looping until the right tape
+// is loaded or the operator aborts. Unattended, it returns an actionable error rather
+// than blocking.
+func (l *Librarian) mountViaShelf(volume string) error {
 	for {
-		if l.mountedMatches(p.Volume) {
+		if l.mountedMatches(volume) {
 			return nil
 		}
 		if l.op == nil {
-			return fmt.Errorf("medium %q needs tape %q in the drive (a copy of the slot is on it); load it and retry", p.Medium, p.Volume)
+			return fmt.Errorf("medium %q needs tape %q in the drive (a copy of the slot is on it); load it and retry", l.medium, volume)
 		}
-		reel, ok := l.promptSwap(p.Volume, "", fmt.Errorf("need tape %q", p.Volume))
+		reel, ok := l.promptSwap(volume, "", fmt.Errorf("need tape %q", volume))
 		if !ok {
-			return fmt.Errorf("tape %q was not loaded into the %q drive", p.Volume, p.Medium)
+			return fmt.Errorf("tape %q was not loaded into the %q drive", volume, l.medium)
 		}
 		if err := l.shelf.Insert(reel); err != nil {
 			return err
@@ -377,9 +473,9 @@ func (l *Librarian) mountViaShelf(p catalog.Placement) error {
 	}
 }
 
-// assertVolume confirms the volume mounted on a medium matches a placement's
-// recorded identity (label name + epoch), before reading from it.
-func (l *Librarian) assertVolume(p catalog.Placement) error {
+// assertVolume confirms the volume mounted on the medium matches the recorded
+// identity (label name + epoch) of a part to read, before reading from it.
+func (l *Librarian) assertVolume(volume string, epoch int) error {
 	lv, ok := l.vol.(media.Labeled)
 	if !ok {
 		return nil // address-identified: identity is the medium itself
@@ -388,9 +484,9 @@ func (l *Librarian) assertVolume(p catalog.Placement) error {
 	if err != nil {
 		return err
 	}
-	if !labeled || lbl.Name != p.Volume || lbl.Epoch != p.Epoch {
-		return fmt.Errorf("medium %q has volume %q (epoch %d) mounted, but slot copy is on %q (epoch %d) — mount it or run `nb rebuild`",
-			p.Medium, lbl.Name, lbl.Epoch, p.Volume, p.Epoch)
+	if !labeled || lbl.Name != volume || lbl.Epoch != epoch {
+		return fmt.Errorf("medium %q has volume %q (epoch %d) mounted, but a slot part is on %q (epoch %d) — mount it or run `nb rebuild`",
+			l.medium, lbl.Name, lbl.Epoch, volume, epoch)
 	}
 	return nil
 }
