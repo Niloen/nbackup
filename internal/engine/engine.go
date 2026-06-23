@@ -320,20 +320,42 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	}
 	logf.log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
 	// A slot is atomic and its copy lives on one volume, so spanning is per-slot:
-	// if the loaded volume fills mid-copy, roll the changer to the next writable
-	// volume and rewrite the whole slot there. The partial files left on the full
-	// volume are unsealed, so a scan/rebuild ignores them. `tried` stops the loop
-	// from re-mounting an exhausted bay; `fresh` means the loaded volume started
-	// empty, so a second EOM is the slot genuinely not fitting on any one volume.
+	// if the slot will not fit the loaded volume, roll the changer to the next
+	// writable volume and write the whole slot there. Two complementary checks: a
+	// PROACTIVE one rolls before writing when the loaded volume's known remaining
+	// capacity cannot hold the slot (so no doomed partial is written, nothing is
+	// re-read); a REACTIVE one catches media.ErrVolumeFull for media whose capacity
+	// software cannot see ahead of time (a real drive signals EOT only by hitting
+	// it) or when the estimate cleared but the exact bytes did not. Partial files
+	// left on a filled volume are unsealed, so a scan/rebuild ignores them. `tried`
+	// stops the loop re-mounting an exhausted bay; `fresh` means the loaded volume
+	// started empty, so a slot that still will not fit cannot fit on any one volume.
 	tried := map[string]bool{}
 	if ch, ok := dst.(media.Library); ok {
 		if bay, ok := ch.Loaded(); ok {
 			tried[bay] = true
 		}
 	}
+	tooBig := func() error {
+		return fmt.Errorf("slot %s (~%s) does not fit on an empty volume of medium %q; NBackup does not split one slot across volumes", slotID, sizeutil.FormatBytes(slotFootprint(s)), targetMedia)
+	}
 	var files []media.FileInfo
-	fresh := false
+	// fresh: the loaded volume holds no runs, so a slot that will not fit it fits no
+	// volume of this medium — fail fast rather than rolling onto (and labeling) tapes
+	// that cannot hold it either.
+	fresh := len(e.cat.SlotsOnVolume(volName)) == 0
 	for {
+		if rem, known := loadedRemaining(dst); known && slotFootprint(s) > rem {
+			if fresh {
+				return tooBig() // even a just-rolled-onto empty volume cannot hold it
+			}
+			logf.log("medium %q: slot %s (~%s) will not fit the %s left on %q; rolling to the next volume", targetMedia, slotID, sizeutil.FormatBytes(slotFootprint(s)), sizeutil.FormatBytes(rem), volName)
+			volName, epoch, fresh, err = e.advanceWritable(dst, targetMedia, appendable, tried, now, logf)
+			if err != nil {
+				return fmt.Errorf("copy %s to %q needs another volume: %w", slotID, targetMedia, err)
+			}
+			continue
+		}
 		files, err = media.CopySlot(dst, src, slotID)
 		if err == nil {
 			break
@@ -342,7 +364,7 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 			return err
 		}
 		if fresh {
-			return fmt.Errorf("slot %s does not fit on an empty volume of medium %q; NBackup does not split one slot across volumes", slotID, targetMedia)
+			return tooBig()
 		}
 		logf.log("medium %q: volume %q is full, rolling to the next volume", targetMedia, volName)
 		volName, epoch, fresh, err = e.advanceWritable(dst, targetMedia, appendable, tried, now, logf)

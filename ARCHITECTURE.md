@@ -194,17 +194,23 @@ without hardware).
   (one run per tape). This is a deliberate, named lineage choice — real tapes are
   physically appendable; Amanda chooses not to, Bacula does.
 - **Switching: auto on copy/sync, operator-driven on dump.** A **copy/sync**
-  (`CopySlot`) that fills the loaded volume mid-write rolls itself onto the next
-  writable volume and rewrites the whole slot there: a robotic library mounts the
-  next writable bay (blank → auto-labeled, or an empty in-pool tape — never a tape
+  (`CopySlot`) rolls onto the next writable volume when a slot will not fit the
+  loaded one, and writes the whole slot there: a robotic library mounts the next
+  writable bay (blank → auto-labeled, or an empty in-pool tape — never a tape
   holding runs); a single-drive station prompts for a reel swap; an unbounded or
-  changer-less medium returns an actionable error. Spanning is **per-slot** — a
-  slot copy still lands wholly on one volume (Placement is unchanged), so a slot
-  larger than an empty volume is an error, not a mid-slot split. A **dump run**
-  does *not* auto-advance (a run must fit the loaded tape; EOT mid-run aborts it
-  uncommitted — retry on a fresh tape). Reads always **auto-mount** the bay holding
-  each placement's label. The roll lives in `advanceWritable` (`changer.go`), the
-  one place that dispatches on medium shape.
+  changer-less medium returns an actionable error. The fit test is **belt-and-
+  suspenders**: a *proactive* pre-check (`loadedRemaining` vs `slotFootprint`) rolls
+  *before* writing when the loaded volume's known remaining capacity cannot hold the
+  slot, so no doomed partial is written and nothing is re-read; a *reactive*
+  `media.ErrVolumeFull` catch is the backstop for media whose remaining capacity
+  software cannot see ahead (a real drive signals EOT only by hitting it) or when
+  the conservative estimate cleared but the exact bytes did not. Spanning is
+  **per-slot** — a slot copy still lands wholly on one volume (Placement is
+  unchanged), so a slot larger than an empty volume is a fail-fast error, not a
+  mid-slot split. A **dump run** does *not* auto-advance (a run must fit the loaded
+  tape; EOT mid-run aborts it uncommitted — retry on a fresh tape). Reads always
+  **auto-mount** the bay holding each placement's label. The roll lives in
+  `advanceWritable` (`changer.go`), the one place that dispatches on medium shape.
 
 **Labels as a capability.** Verified before every write (refuse foreign / blank
 unless `auto_label` / wrong-pool / relabeled-since-cached). Address-identified

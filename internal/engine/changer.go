@@ -166,6 +166,56 @@ func (e *Engine) advanceWritable(vol media.Volume, medium string, appendable boo
 	}
 }
 
+// loadedRemaining reports the writable bytes left on the volume currently in a
+// medium's drive, when that is knowable: a finite library bay or a finite station
+// reel. ok is false for an unbounded volume or a medium whose remaining capacity
+// software cannot see (a real drive reports EOT only by hitting it) — the caller
+// then relies on the reactive media.ErrVolumeFull path instead of pre-checking.
+func loadedRemaining(vol media.Volume) (int64, bool) {
+	switch m := vol.(type) {
+	case media.Library:
+		bay, ok := m.Loaded()
+		if !ok {
+			return 0, false
+		}
+		bays, err := m.Bays()
+		if err != nil {
+			return 0, false
+		}
+		for _, b := range bays {
+			if b.ID == bay {
+				return remainingOf(b)
+			}
+		}
+	case media.Station:
+		if st, ok := m.LoadedVolume(); ok {
+			return remainingOf(st)
+		}
+	}
+	return 0, false
+}
+
+func remainingOf(st media.VolumeStatus) (int64, bool) {
+	if st.Capacity <= 0 {
+		return 0, false // unbounded: nothing to pre-check against
+	}
+	if st.Used >= st.Capacity {
+		return 0, true
+	}
+	return st.Capacity - st.Used, true
+}
+
+// slotFootprint estimates the bytes a slot's copy will occupy on a destination
+// volume: its compressed archive payloads plus a fixed header block per file (one
+// per archive and one for the seal). It deliberately omits the seal's own payload,
+// so it is a slight UNDER-estimate — `footprint > remaining` therefore proves the
+// slot cannot fit, never the reverse, so a pre-check on it never rolls prematurely;
+// the media.ErrVolumeFull backstop still catches a slot that the estimate cleared
+// but the exact bytes (or an imprecise real tape) could not hold.
+func slotFootprint(s *slot.Slot) int64 {
+	return s.TotalBytes + int64(len(s.Archives)+1)*media.HeaderBlock
+}
+
 // advanceLibrary mounts the next writable bay of a robotic library: a blank one
 // (auto-labeled) or an empty in-pool tape, skipping bays already tried this run. It
 // never silently overwrites a tape that holds runs — verifyWritable makes the final
