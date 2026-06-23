@@ -86,7 +86,7 @@ drift). The only non-derivable local state is the GNU tar snapshot library
 **One mutating `nb` per config at a time** (`internal/lock`, Amanda's per-config
 amflock). Rather than make the catalog concurrently writable, we serialize the
 whole mutating run: every command that writes the catalog or media (`dump`,
-`copy`, `label`, `changer load`, `catalog rebuild`, `prune --apply`) takes a
+`copy`, `label`, `load`, `catalog rebuild`, `prune --apply`) takes a
 non-blocking advisory `flock` on `workdir/lock` before opening the engine, and a
 second invocation fails fast (`ErrHeld`). flock is tied to the open fd, so a
 crash releases it — no stale lockfiles. Read-only commands take no lock: catalog
@@ -152,7 +152,7 @@ without hardware).
   (one run per tape). This is a deliberate, named lineage choice — real tapes are
   physically appendable; Amanda chooses not to, Bacula does.
 - **Manual switching (no auto-advance).** On a robotic library a full/foreign/wrong
-  tape is refused and the operator `nb changer load`s the next bay (or `nb label
+  tape is refused and the operator `nb load`s the next bay (or `nb label
   --relabel`s an aged one); reads **auto-mount** the bay holding each placement's
   label. On a single-drive station the same situations prompt for a physical reel
   swap (above). Either way switching is operator-driven — the engine never advances
@@ -164,9 +164,9 @@ media (disk, S3) carry no label and skip the whole dance.
 
 **Medium-neutral vocabulary.** The generic media/changer/config layer must not say
 "tape": `bays`, `volume_size`, `media.ErrNoVolume`,
-`media.Library`/`Station`/`ShelfStation`/`VolumeStatus`, `nb changer`. Tape
-specifics (`type: tape`, the `tape` package, `mt`, `vtape`, the `reel` vocabulary)
-stay local, so a future `usb`/removable-disk medium reuses the vocabulary.
+`media.Library`/`Station`/`ShelfStation`/`VolumeStatus`, `nb medium`, `nb load`.
+Tape specifics (`type: tape`, the `tape` package, `mt`, `vtape`, the `reel`
+vocabulary) stay local, so a future `usb`/removable-disk medium reuses the vocabulary.
 
 **Run monitoring is a status file, not a daemon.** `nb dump` drives a
 `progress.Tracker` whose dumpers report start / live bytes / finish; the tracker
@@ -201,7 +201,9 @@ per-medium capacity strategy.
 - **Test environment:** `zstd` is **not** installed — tests use codec `none`;
   `tar`, `gzip`, `nice` are present. Tests that need GNU tar `t.Skip` when absent.
 - **CLI:** flags may appear before or after positionals (`parseArgs`); subcommand
-  dispatch (`slot show`, `changer load`) keys on the first arg.
+  dispatch (`slot show`, `catalog rebuild`) keys on the first arg. Per-medium
+  status (incl. bays / drive + shelf) lives in `nb medium <name>`; `nb load` is the
+  one physical action verb (sibling of `nb label`).
 
 ## Deferred / known next steps
 

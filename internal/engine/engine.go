@@ -220,7 +220,7 @@ func (e *Engine) Medium(name string) (MediumInfo, bool) {
 		info.Capacity = prof.TotalBytes()
 	}
 	// A changer medium (tape library) holds many volumes; summarize the count and
-	// point at `nb changer` for the detail. A single labeled volume shows its name.
+	// point at `nb medium <name>` for the detail. A single labeled volume shows its name.
 	if d.Type == "tape" {
 		n := 0
 		for _, v := range e.cat.Volumes() {
@@ -361,7 +361,7 @@ func (e *Engine) verifyWritable(vol media.Volume, medium string, appendable bool
 	lbl, labeled, err := lv.ReadLabel()
 	switch {
 	case errors.Is(err, media.ErrNoVolume):
-		return "", 0, reloadableErr("medium %q has no tape loaded; load one with `nb changer load %s <bay>` or label a blank one with `nb label %s <name>`", medium, medium, medium)
+		return "", 0, reloadableErr("medium %q has no tape loaded; load one with `nb load %s <bay>` or label a blank one with `nb label %s <name>`", medium, medium, medium)
 	case errors.Is(err, media.ErrForeignVolume):
 		return "", 0, reloadableErr("medium %q holds non-NBackup data; refusing to overwrite — relabel it explicitly with `nb label --force %s <name>`", medium, medium)
 	case err != nil:
@@ -497,7 +497,7 @@ func (e *Engine) mountForRead(vol media.Volume, p catalog.Placement) error {
 			return ch.Mount(b.ID)
 		}
 	}
-	return fmt.Errorf("tape %q (holding a copy of the slot on %q) is not in the library; load it with `nb changer load %s <bay>`", p.Volume, p.Medium, p.Medium)
+	return fmt.Errorf("tape %q (holding a copy of the slot on %q) is not in the library; load it with `nb load %s <bay>`", p.Volume, p.Medium, p.Medium)
 }
 
 // mountManualForRead loads the reel a placement needs on a single-drive station: if
@@ -755,7 +755,7 @@ func chooseBay(ch media.Library, name string, relabel bool) (string, error) {
 	return "", fmt.Errorf("no blank bay available; all %d are in use — relabel an aged-out tape with `nb label --relabel`", len(bays))
 }
 
-// ChangerView is a medium's loadable inventory for `nb changer list`: a robotic
+// ChangerView is a medium's physical inventory for `nb medium <name>`: a robotic
 // library's bays, or a single-drive station's drive plus any shelf reels it can
 // load. Exactly one of Library/Station is set.
 type ChangerView struct {

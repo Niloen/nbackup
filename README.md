@@ -85,9 +85,8 @@ This produces a single `nb` binary with these subcommands:
 | `nb restore`         | Restore a DLE from a slot                                |
 | `nb copy`            | Copy a slot to another medium (disk → tape)             |
 | `nb label`           | Label a volume (required for tape before its first dump) |
-| `nb medium`          | List media (capacity, usage, volume) or detail one       |
-| `nb changer list`    | Inventory the bays of a library medium                   |
-| `nb changer load`    | Mount a volume into a library's drive                    |
+| `nb load`            | Load a volume into a medium's drive (bay or shelf reel)   |
+| `nb medium`          | List media, or detail one (incl. bays / drive + shelf)    |
 | `nb catalog rebuild` | Rebuild the local slot-index cache from media            |
 
 Run `nb help <command>` (or `nb <command> --help`) for per-command usage and
@@ -317,9 +316,10 @@ drive (`device:` via `mt`) — shows only the reel currently in the drive; the
 emulated station also lists the other reels on a shelf you can load. When a backup
 or restore needs a different tape, NBackup **prompts you to swap it in and waits**
 (an unattended run errors instead of hanging). Either way you label a blank tape
-(`nb label`) and inventory or load tapes with `nb changer list` / `nb changer
-load`. Tapes carry a self-describing label that NBackup **verifies before every
-write**, so a foreign, wrong, or still-active reel is never clobbered.
+(`nb label`), inventory a medium with `nb medium <name>` (its bays, or the drive
+and shelf), and load a tape with `nb load`. Tapes carry a self-describing label
+that NBackup **verifies before every write**, so a foreign, wrong, or still-active
+reel is never clobbered.
 `appendable: true` (default) packs many runs per tape (Bacula-style), `appendable:
 false` uses one run per tape (Amanda-style). Restore mounts (robot) or prompts for
 (manual) whichever tape holds the copy it needs. (Internals:

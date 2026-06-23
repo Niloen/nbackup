@@ -35,25 +35,25 @@ media:
                         # false = one run per tape (Amanda-style).
     # Tapes carry a self-describing identity label (file 0) that NBackup verifies
     # before writing — so a wrong, foreign, or still-active reel is never clobbered.
-    # The changer addresses physical bays; the label is read after mounting:
-    #   nb changer list lto               # inventory bay -> label
+    # A robotic library addresses physical bays; the label is read after mounting:
+    #   nb medium lto                     # inventory bay -> label (and what's loaded)
     #   nb label lto lto-0001             # grab a blank bay and label it
-    #   nb changer load lto bay-02        # mount a bay (or: nb changer load --label lto lto-0007)
+    #   nb load lto bay-02                # mount a bay (or: nb load --label lto lto-0007)
     #   nb label --relabel lto lto-0042   # recycle an aged-out tape
   desk-drive:
     type: tape          # a SINGLE DRIVE you change tapes in by hand
     dir: /var/lib/nbackup/station   # file-backed station (a real one is device: /dev/nst0)
-    mode: manual        # one bay ("drive") whose content the operator swaps; the
+    mode: manual        # one drive whose reel the operator swaps by hand; the
                         # other reels sit on an offline shelf the system can't see
     reels: 6            # how many tapes are in the room (file-backed sim only — a
-                        # real drive has just the one bay and a shelf you stock yourself)
+                        # real drive just shows what's loaded and a shelf you stock yourself)
     volume_size: 6TB
     minimum_age: 180d
     appendable: false   # typical for a hand-changed drive: one run per tape
     # When a backup or restore needs a different tape, NBackup prompts you to swap
     # the reel in the drive and waits (unattended runs error instead of blocking):
-    #   nb changer list desk-drive        # the drive + reels in the room
-    #   nb changer load desk-drive bay-03 # load a reel by id (or --label by name)
+    #   nb medium desk-drive              # the drive + reels in the room
+    #   nb load desk-drive reel-03        # load a reel by id (or --label by name)
     #   nb label desk-drive lto-0001      # label whatever reel is loaded
   cloud:
     type: s3            # registered stub; no S3 client yet

@@ -506,7 +506,9 @@ func mediumDetail(eng *engine.Engine, name string) error {
 	}
 	fmt.Printf("Medium %s  (%s)\n", m.Name, m.Type)
 	fmt.Printf("  volume:  %s\n", volumeStr(m))
-	fmt.Printf("  used:    %s / %s\n\n", sizeutil.FormatBytes(m.Used), capacityStr(m.Capacity))
+	fmt.Printf("  used:    %s / %s\n", sizeutil.FormatBytes(m.Used), capacityStr(m.Capacity))
+	printInventory(eng, name)
+	fmt.Println()
 	slots := eng.Catalog().SlotsOn(name)
 	if len(slots) == 0 {
 		fmt.Println("no slots on this medium")
@@ -523,6 +525,49 @@ func mediumDetail(eng *engine.Engine, name string) error {
 	}
 	tw.Flush()
 	return nil
+}
+
+// printInventory shows a medium's physical inventory beneath its `nb medium`
+// detail: a robotic library's bays, or a single-drive station's drive and the
+// reels on its shelf. Media with no changer (disk, s3) print nothing.
+func printInventory(eng *engine.Engine, name string) {
+	view, err := eng.ChangerView(name)
+	if err != nil {
+		return // address-identified medium: nothing physical to inventory
+	}
+	if view.Library {
+		tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		fmt.Fprintln(tw, "\n\tBAY\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
+		for _, b := range view.Bays {
+			mark := " "
+			if b.ID == view.Loaded {
+				mark = "*"
+			}
+			label, status := volumeLabelStatus(b)
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\n", mark, b.ID, label, status,
+				sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
+		}
+		tw.Flush()
+		return
+	}
+	if view.DriveOK {
+		label, status := volumeLabelStatus(view.Drive)
+		fmt.Printf("  drive:   %s (%s, %s used, %d files)\n", label, status,
+			sizeutil.FormatBytes(view.Drive.Used), view.Drive.Files)
+	} else {
+		fmt.Println("  drive:   (empty)")
+	}
+	if len(view.Shelf) > 0 {
+		fmt.Println("\nIn the room (load with `nb load`, or when prompted):")
+		rw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		fmt.Fprintln(rw, "  REEL\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
+		for _, b := range view.Shelf {
+			label, status := volumeLabelStatus(b)
+			fmt.Fprintf(rw, "  %s\t%s\t%s\t%s\t%s\t%d\n", b.ID, label, status,
+				sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
+		}
+		rw.Flush()
+	}
 }
 
 func capacityStr(c int64) string {
@@ -555,88 +600,17 @@ func volumeStr(m engine.MediumInfo) string {
 	return m.Volume
 }
 
-// newChangerCmd implements `nb changer`: the manual changer — inventory the
-// library (list) or mount a volume (load). Reading the actual label requires
-// loading a volume in the drive, so this is also how you point the drive at a
-// specific reel before a write.
-func newChangerCmd(a *app) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "changer",
-		Short: "Inventory or mount volumes in a library (tape, ...)",
-		Long:  "Drive the manual changer: inventory the bays of a library medium, or load a specific volume into its drive before a read or write.",
-		Args:  cobra.NoArgs,
-	}
-	cmd.AddCommand(newChangerListCmd(a), newChangerLoadCmd(a))
-	return cmd
-}
-
-func newChangerListCmd(a *app) *cobra.Command {
-	return &cobra.Command{
-		Use:     "list <medium>",
-		Short:   "Inventory the bays of a library medium",
-		Example: "  nb changer list lto",
-		Args:    cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := a.loadRO()
-			if err != nil {
-				return err
-			}
-			eng, err := newEngine(cfg)
-			if err != nil {
-				return err
-			}
-			view, err := eng.ChangerView(args[0])
-			if err != nil {
-				return err
-			}
-			if view.Library {
-				tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-				fmt.Fprintln(tw, "\tBAY\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
-				for _, b := range view.Bays {
-					mark := " "
-					if b.ID == view.Loaded {
-						mark = "*"
-					}
-					label, status := volumeLabelStatus(b)
-					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\n", mark, b.ID, label, status,
-						sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
-				}
-				tw.Flush()
-				return nil
-			}
-
-			// A single-drive station: show what is in the drive, then (if it can
-			// enumerate them) the offline reels in the room the operator can load.
-			if view.DriveOK {
-				label, status := volumeLabelStatus(view.Drive)
-				fmt.Printf("in drive: %s (%s, %s used, %d files)\n", label, status,
-					sizeutil.FormatBytes(view.Drive.Used), view.Drive.Files)
-			} else {
-				fmt.Println("in drive: (empty)")
-			}
-			if len(view.Shelf) > 0 {
-				fmt.Println("\nIn the room (load with `nb changer load`, or when prompted):")
-				rw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-				fmt.Fprintln(rw, "  REEL\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
-				for _, b := range view.Shelf {
-					label, status := volumeLabelStatus(b)
-					fmt.Fprintf(rw, "  %s\t%s\t%s\t%s\t%s\t%d\n", b.ID, label, status,
-						sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
-				}
-				rw.Flush()
-			}
-			return nil
-		},
-	}
-}
-
-func newChangerLoadCmd(a *app) *cobra.Command {
+// newLoadCmd implements `nb load`: mount a volume into a changer medium's drive —
+// a robotic library bay, or a reel from a single-drive station's shelf — so the
+// next read or write acts on it. The physical sibling of `nb label`; what's in the
+// drive is shown by `nb medium <name>`.
+func newLoadCmd(a *app) *cobra.Command {
 	var byLabel bool
 	cmd := &cobra.Command{
-		Use:     "load <medium> <bay-or-label>",
-		Short:   "Mount a volume into the library's drive",
-		Long:    "Load the volume in <bay-or-label> into the medium's drive. By default the argument is a bay id; with --label it is matched against volume labels instead.",
-		Example: "  nb changer load lto 3\n  nb changer load --label lto DAILY-01",
+		Use:     "load <medium> <bay-reel-or-label>",
+		Short:   "Load a volume into a medium's drive",
+		Long:    "Load a volume into the medium's drive: a bay on a robotic library, or a reel from a single-drive station's shelf. By default the argument is a bay/reel id; with --label it is matched against volume labels instead. Inventory the medium with `nb medium <name>`.",
+		Example: "  nb load lto bay-03\n  nb load --label lto DAILY-01\n  nb load vtape reel-02",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.load()
@@ -651,7 +625,7 @@ func newChangerLoadCmd(a *app) *cobra.Command {
 			return eng.LoadVolume(args[0], args[1], byLabel, a.logf())
 		},
 	}
-	cmd.Flags().BoolVar(&byLabel, "label", false, "treat the argument as a volume label rather than a bay id")
+	cmd.Flags().BoolVar(&byLabel, "label", false, "treat the argument as a volume label rather than a bay/reel id")
 	return cmd
 }
 

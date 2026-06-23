@@ -54,8 +54,8 @@ func NewRootCmd() *cobra.Command {
 		newRestoreCmd(a),
 		newCopyCmd(a),
 		newLabelCmd(a),
+		newLoadCmd(a),
 		newMediumCmd(a),
-		newChangerCmd(a),
 		newCatalogCmd(a),
 	)
 	return root
