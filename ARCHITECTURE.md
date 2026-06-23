@@ -28,8 +28,9 @@ restore with stock tools.
   `Placement`s, each a volume + the file position of every archive).
 - **Label** — logical identity written on a labeled volume's file 0 (magic, name,
   pool, epoch). A *capability* (`media.Labeled`); address-identified media skip it.
-- **Bay** — a physical position in a tape library (`bay-01…`), the durable
-  cartridge identity. Distinct from the Label written inside it.
+- **Bay** — a physical position in a robotic tape library (`bay-01…`), the durable
+  cartridge identity. Distinct from the Label written inside it. A single-drive
+  station has no bays; its cartridges are **reels** (`reel-01…`) on a shelf.
 
 ## Package map
 
@@ -42,7 +43,7 @@ registry registration, not a conditional in the core.
 | `config` | config + domain entities: `DLE`, `Media`, `DumpType` | disklist / dumptype / storage |
 | `slot` | slot metadata: pure data + lifecycle (`NewSlot`/`AddArchive`/`Seal`) | header / amar |
 | `slotio` | maps a slot onto a `Volume`'s files (headers, seal, verify, `Expect`) | taper / amrestore |
-| `media` | `Volume` + `Labeled` + `Changer` + `Profile` + registry | Device API |
+| `media` | `Volume` + `Labeled` + `Library`/`Station`/`ShelfStation` + `Profile` + registry | Device API |
 | `media/disk`, `media/tape`, `media/s3` | Volume impls (disk sidecar headers; tape library; s3 stub) | vfs / tape / s3 devices |
 | `method` + `method/gnutar` | dump `Method` interface + registry; GNU tar impl | Application API / amgtar |
 | `filter` | external compressor child processes (zstd/gzip/none) + registry | compress |
@@ -100,21 +101,27 @@ a fixed 32 KB header block inline, since tape has no sidecars). `Open` is cheap;
 `ReadFile` seeks by position; only `Files()` is a full scan (the rebuild path).
 Normal ops resolve positions from the catalog and never scan.
 
-**Tape = a library of bays behind one drive**, two internal seams: `device` (the
-`mt` analogue, one mounted tape) and `changer` (the robot analogue, which bay is
-loaded). `dir:` is a directory-backed library (each bay a subdir, finite per-bay
-`volume_size`, fully tested); `device:` is a real single drive (`mt`+`/dev/nst0`,
-a one-bay library; structurally complete, untested without hardware).
+**Tape = volumes behind one drive.** The `device` seam (the `mt` analogue, one
+mounted tape) is shared by all shapes; the positioning surface differs and is what
+the three medium-neutral interfaces capture. `dir:` is a directory-backed library
+(each bay a subdir, finite per-bay `volume_size`, fully tested); `dir:` +
+`mode: manual` is the disk-emulated single-drive station (reels are subdirs);
+`device:` is a real single drive (`mt`+`/dev/nst0`; structurally complete, untested
+without hardware).
 
-- **Two changer kinds — robot vs single drive.** They differ on one axis: *who
-  picks the reel.* A **robotic library** (`dir:`, the default) reports many bays
-  and a command moves the mounted *position* between them. A **single-drive
-  station** (`dir:` + `mode: manual`, a `media.ManualChanger`) reports exactly one
-  bay (`drive`) whose *content* the operator swaps by hand; the other reels sit on
-  an offline **shelf** the changer can't enumerate (no barcode reader off the
-  drive). `Insert` swaps a shelf reel into the one drive — the bay's content
-  changes, the bay never does. The disk emulator covers both; a real `device:`
-  drive is the single-drive case in hardware.
+- **Three shapes — robot, real drive, emulated station.** They differ on one axis:
+  *who picks the volume, and what the software can see.* A **robotic library**
+  (`dir:`, the default, `media.Library`) reports many bays and a command moves the
+  mounted *position* between them — any bay id is a valid `Mount` target. A
+  **single-drive station** has no bays: the software sees only the one reel in the
+  drive (`media.Station.LoadedVolume`). The disk-emulated station (`mode: manual`,
+  `media.ShelfStation`) can additionally enumerate its offline **shelf** reels and
+  `Insert` one into the drive; a real `device:` drive is a plain `Station` — its
+  reels are invisible and its swaps are physical (operator loads by hand; the
+  software only re-reads the drive). `Library` and `Station` are **siblings, not
+  subtype** (a station is never bay-addressed), so generic catalog/engine code can't
+  bay-iterate a station. Reels are addressed by their own ids (`reel-01…`), never a
+  synthetic "drive" position — `"drive"` is CLI presentation only.
 - **Operator seam.** A single-drive station can't change its own tape, so when the
   loaded reel won't do, the engine asks an `Operator` (CLI: stdin) to swap and
   retries — on writes (`verifyWritable`: blank/foreign/wrong-pool/full → load a
@@ -133,11 +140,11 @@ a one-bay library; structurally complete, untested without hardware).
   reel to load, not just "a fresh tape". This is **guidance only** — the engine
   still won't overwrite a reusable tape on its own; recycling it is a deliberate
   `nb label --relabel` (see deferred whole-volume recycle).
-- **Bay (physical) vs Label (logical) are distinct.** The `changer` is
+- **Bay/reel (physical) vs Label (logical) are distinct.** A `Library` is
   **label-agnostic** — like a real robot it mounts bays and reads barcodes, never
   the magnetic label; the engine reads the label *after* mounting. A blank
   cartridge has a bay but no label; relabel rewrites the label, same bay. The
-  catalog references **labels** (durable data identity); bays stay internal.
+  catalog references **labels** (durable data identity); bays/reels stay internal.
 - **Finite volumes.** A write past `volume_size` hits `media.ErrVolumeFull`
   (end-of-tape), the partial file is discarded.
 - **Append vs one-run-per-tape.** `appendable: true` (default) is **Bacula-style**
@@ -156,8 +163,9 @@ unless `auto_label` / wrong-pool / relabeled-since-cached). Address-identified
 media (disk, S3) carry no label and skip the whole dance.
 
 **Medium-neutral vocabulary.** The generic media/changer/config layer must not say
-"tape": `bays`, `volume_size`, `media.ErrNoVolume`, `media.Changer`/`BayStatus`,
-`nb changer`. Tape specifics (`type: tape`, the `tape` package, `mt`, `vtape`)
+"tape": `bays`, `volume_size`, `media.ErrNoVolume`,
+`media.Library`/`Station`/`ShelfStation`/`VolumeStatus`, `nb changer`. Tape
+specifics (`type: tape`, the `tape` package, `mt`, `vtape`, the `reel` vocabulary)
 stay local, so a future `usb`/removable-disk medium reuses the vocabulary.
 
 **Run monitoring is a status file, not a daemon.** `nb dump` drives a
