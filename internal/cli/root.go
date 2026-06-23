@@ -42,21 +42,25 @@ func NewRootCmd() *cobra.Command {
 
 	pf := root.PersistentFlags()
 	pf.StringVarP(&a.cfgPath, "config", "c", DefaultConfigPath, "path to config file")
-	pf.StringVarP(&a.catalog, "catalog", "C", "", "catalog directory (overrides config)")
+	// --catalog has no short flag: a `-C`/`-c` pair distinguished only by case is
+	// an easy slip on two heavily-used globals.
+	pf.StringVar(&a.catalog, "catalog", "", "catalog directory (overrides config)")
 	pf.BoolVarP(&a.quiet, "quiet", "q", false, "suppress progress output")
 
+	// Convention: inspect with a noun (`slot`, `medium`), act with a flat verb.
 	root.AddCommand(
 		newPlanCmd(a),
 		newDumpCmd(a),
 		newStatusCmd(a),
 		newSlotCmd(a),
+		newMediumCmd(a),
 		newVerifyCmd(a),
 		newRestoreCmd(a),
 		newCopyCmd(a),
 		newLabelCmd(a),
 		newLoadCmd(a),
-		newMediumCmd(a),
-		newCatalogCmd(a),
+		newPruneCmd(a),
+		newRebuildCmd(a),
 	)
 	return root
 }

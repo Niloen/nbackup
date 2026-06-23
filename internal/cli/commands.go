@@ -71,7 +71,7 @@ func newPlanCmd(a *app) *cobra.Command {
 				over, pct := eng.BudgetStatus(current)
 				fmt.Printf("Capacity: %s (%.1f%% used)\n", sizeutil.FormatBytes(capacity), pct)
 				if over {
-					fmt.Printf("WARNING: over capacity; run `nb slot prune` to reclaim oldest slots\n")
+					fmt.Printf("WARNING: over capacity; run `nb prune` to reclaim oldest slots\n")
 				}
 			} else {
 				fmt.Printf("Capacity: unbounded\n")
@@ -201,15 +201,25 @@ func renderStatus(dir string) error {
 	return nil
 }
 
-// newVerifyCmd implements `nb verify`: check archive checksums of one or all slots.
+// newVerifyCmd implements `nb verify`: check archive checksums of named slots, or
+// every slot with --all. Verifying all slots can mount every volume in the pool
+// (each tape in turn), so the whole-pool scan is gated behind an explicit flag
+// rather than triggered by a bare `nb verify`.
 func newVerifyCmd(a *app) *cobra.Command {
-	return &cobra.Command{
+	var all bool
+	cmd := &cobra.Command{
 		Use:     "verify [slot-id...]",
 		Short:   "Verify slot checksums",
-		Long:    "Re-check archive checksums against the catalog. With no arguments every slot is verified; otherwise only the named slots.",
-		Example: "  nb verify\n  nb verify slot-2026-06-21",
+		Long:    "Re-check archive checksums against the catalog. Pass slot ids to verify just those; pass --all to verify every slot (which may mount every volume in the pool).",
+		Example: "  nb verify slot-2026-06-21\n  nb verify --all",
 		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if all && len(args) > 0 {
+				return fmt.Errorf("--all cannot be combined with explicit slot ids")
+			}
+			if !all && len(args) == 0 {
+				return fmt.Errorf("specify slot ids to verify, or --all to verify every slot")
+			}
 			cfg, err := a.loadRO()
 			if err != nil {
 				return err
@@ -217,6 +227,9 @@ func newVerifyCmd(a *app) *cobra.Command {
 			eng, err := newEngine(cfg)
 			if err != nil {
 				return err
+			}
+			if all && !a.quiet {
+				fmt.Printf("verifying %d slot(s) in the catalog\n", len(eng.Catalog().Slots()))
 			}
 			failures, err := eng.Verify(args, a.logf())
 			if err != nil {
@@ -228,21 +241,23 @@ func newVerifyCmd(a *app) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&all, "all", false, "verify every slot in the catalog")
+	return cmd
 }
 
 // newSlotCmd implements `nb slot`: list slots (default), show a slot, or prune.
 func newSlotCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "slot",
-		Short: "List, show, or prune slots",
-		Long:  "Inspect the slot catalog. With no subcommand it lists slots; see the subcommands to show a single slot or prune expired ones.",
+		Short: "List or show slots",
+		Long:  "Inspect the slot catalog. With no subcommand it lists slots; see the subcommands to show a single slot. (Reclaim slots with `nb prune`.)",
 		Args:  cobra.NoArgs,
 		// Bare `nb slot` lists slots, preserving prior behavior.
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSlotList(a)
 		},
 	}
-	cmd.AddCommand(newSlotListCmd(a), newSlotShowCmd(a), newSlotPruneCmd(a))
+	cmd.AddCommand(newSlotListCmd(a), newSlotShowCmd(a))
 	return cmd
 }
 
@@ -354,14 +369,15 @@ func newSlotShowCmd(a *app) *cobra.Command {
 	}
 }
 
-func newSlotPruneCmd(a *app) *cobra.Command {
+// newPruneCmd implements `nb prune`: reclaim slots past the cycle/capacity limits.
+func newPruneCmd(a *app) *cobra.Command {
 	var apply bool
 	var dateStr string
 	cmd := &cobra.Command{
 		Use:     "prune",
 		Short:   "Delete slots past the cycle/capacity limits",
 		Long:    "Reclaim slots that fall outside the cycle and per-medium capacity limits. Dry-run by default; pass --apply to actually delete.",
-		Example: "  nb slot prune\n  nb slot prune --apply",
+		Example: "  nb prune\n  nb prune --apply",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.load()
@@ -634,19 +650,9 @@ func newLoadCmd(a *app) *cobra.Command {
 	return cmd
 }
 
-// newCatalogCmd implements `nb catalog`: maintain the local slot-index cache.
-func newCatalogCmd(a *app) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "catalog",
-		Short: "Maintain the local slot-index cache",
-		Long:  "The catalog is a local cache of slot metadata. See the subcommands to rebuild it from the self-describing media.",
-		Args:  cobra.NoArgs,
-	}
-	cmd.AddCommand(newCatalogRebuildCmd(a))
-	return cmd
-}
-
-func newCatalogRebuildCmd(a *app) *cobra.Command {
+// newRebuildCmd implements `nb rebuild`: rebuild the local slot-index cache by
+// rescanning the self-describing media.
+func newRebuildCmd(a *app) *cobra.Command {
 	return &cobra.Command{
 		Use:   "rebuild",
 		Short: "Rebuild the catalog cache by rescanning media",

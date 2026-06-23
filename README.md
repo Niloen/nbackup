@@ -80,14 +80,17 @@ This produces a single `nb` binary with these subcommands:
 | `nb status`          | Show progress of the current (or most recent) run        |
 | `nb slot`            | List slots (default)                                     |
 | `nb slot show`       | Show a single slot's archives and copies                |
-| `nb slot prune`      | Delete slots past the cycle/capacity limits             |
-| `nb verify`          | Verify slot checksums                                    |
+| `nb medium`          | List media, or detail one (incl. bays / drive + shelf)    |
+| `nb verify`          | Verify slot checksums (named slots, or `--all`)          |
 | `nb restore`         | Restore a DLE from a slot                                |
 | `nb copy`            | Copy a slot to another medium (disk → tape)             |
 | `nb label`           | Label a volume (required for tape before its first dump) |
 | `nb load`            | Load a volume into a medium's drive (bay or shelf reel)   |
-| `nb medium`          | List media, or detail one (incl. bays / drive + shelf)    |
-| `nb catalog rebuild` | Rebuild the local slot-index cache from media            |
+| `nb prune`           | Delete slots past the cycle/capacity limits             |
+| `nb rebuild`         | Rebuild the local slot-index cache from media            |
+
+The convention: you **inspect** with a noun (`nb slot`, `nb medium`) and **act**
+with a flat verb (`nb dump`, `nb restore`, `nb prune`, …).
 
 Run `nb help <command>` (or `nb <command> --help`) for per-command usage and
 examples, and `nb completion <shell>` to generate shell completion.
@@ -104,7 +107,7 @@ nb slot                # list slots (with a COPIES column: where each lives)
 nb slot show slot-2026-06-21   # archives + every copy's volume and file positions
 nb medium              # media overview: type, slots, usage / capacity, volume
 nb medium lto          # one medium's volume and the slots it holds
-nb verify              # re-check all archive checksums
+nb verify --all        # re-check every slot's archive checksums
 nb restore --dle app01-home --dest /tmp/out slot-2026-06-21
 ```
 
@@ -114,7 +117,7 @@ command line — before or after the subcommand and its positional arguments:
 | Flag              | Purpose                                  |
 |-------------------|------------------------------------------|
 | `-c, --config`    | path to config file (default `nbackup.yaml`) |
-| `-C, --catalog`   | catalog directory (overrides config)     |
+| `--catalog`       | catalog directory (overrides config)     |
 | `-q, --quiet`     | suppress progress output                 |
 
 ## How it works
@@ -218,7 +221,7 @@ the slot.
 
 ### Pruning (cycle safety)
 
-`nb slot prune` is a dry-run by default. Pruning has two layers:
+`nb prune` is a dry-run by default. Pruning has two layers:
 
 1. **Safety floor** (shared, medium-agnostic): a slot is *protected* if it is
    younger than the medium's `minimum_age`, or if any DLE it holds has no newer
@@ -344,7 +347,7 @@ behind interfaces with named, registered implementations, and one orchestrator
 self-describing, every slot sealed, every labeled volume identified); the
 **catalog is a local cache** with its own directory, so planning, listing,
 restore-location, and pruning never touch a slow or offline volume, and a single
-scan rebuilds it (`nb catalog rebuild`).
+scan rebuilds it (`nb rebuild`).
 
 Contributors and agents: see **[ARCHITECTURE.md](ARCHITECTURE.md)** for the
 package map, the catalog `Entry`/`Placement` model, the design decisions and their
