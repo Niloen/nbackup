@@ -6,9 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/progress"
+	"github.com/Niloen/nbackup/internal/slot"
 )
 
 // TestRunRestoreEndToEnd exercises the full engine over the disk store:
@@ -658,6 +660,131 @@ func TestManualStationLandingLabel(t *testing.T) {
 	}
 	if known, ok := eng.cat.Volume("Label1"); !ok || known.Label.Epoch != 1 {
 		t.Fatalf("catalog should record Label1 at epoch 1 after rebuild (ok=%v)", ok)
+	}
+}
+
+// tapeEngine builds an engine over a single-drive (manual) tape landing medium
+// with the given appendability and minimum age, with no slots or volumes yet.
+func tapeEngine(t *testing.T, appendable bool, minAge string) *Engine {
+	t.Helper()
+	cfg := &config.Config{
+		Landing: "lto",
+		Media: map[string]config.Media{
+			"lto": {
+				Type:       "tape",
+				MinimumAge: minAge,
+				Appendable: &appendable,
+				Params:     map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "4"},
+			},
+		},
+		Workdir: t.TempDir(),
+	}
+	cfg.Compress.Codec = "none"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return eng
+}
+
+// recordVol registers a labeled volume in the catalog at a written-at time.
+func recordVol(t *testing.T, eng *Engine, name string, writtenAt time.Time) {
+	t.Helper()
+	if err := eng.cat.RecordVolume(media.Label{Name: name, Pool: "lto", Epoch: 1, WrittenAt: writtenAt}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// recordFullOn records a sealed full of one DLE on a given volume.
+func recordFullOn(t *testing.T, eng *Engine, date, dle, volume string) {
+	t.Helper()
+	id := slot.IDFromParts(date, 1)
+	s := slot.NewSlot(id, date, 1, "test", time.Now())
+	s.AddArchive(slot.Archive{DLE: dle, Level: 0})
+	if err := s.Seal(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	p := catalog.Placement{Medium: "lto", Volume: volume, Epoch: 1, Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Pos: 1}}}
+	if err := eng.cat.Record(s, p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestExpectedTapeReusesOldest: on a one-run-per-tape medium the next run expects
+// the oldest volume whose runs are all reusable (past minimum age with a newer
+// recovery path) — Amanda's taper picking the oldest reusable tape.
+func TestExpectedTapeReusesOldest(t *testing.T) {
+	eng := tapeEngine(t, false, "10d")
+	now := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+
+	recordVol(t, eng, "lto-0001", time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	recordVol(t, eng, "lto-0002", time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC))
+	recordFullOn(t, eng, "2026-06-01", "h", "lto-0001") // old, superseded -> reusable
+	recordFullOn(t, eng, "2026-06-20", "h", "lto-0002") // recent full -> protected
+
+	exp, ok := eng.ExpectedTape(now)
+	if !ok {
+		t.Fatal("a labeled medium should yield an expectation")
+	}
+	if exp.NewTape || exp.Label != "lto-0001" {
+		t.Fatalf("want oldest reusable lto-0001, got %+v", exp)
+	}
+	if exp.Recycles != 1 {
+		t.Fatalf("want 1 run recycled, got %d", exp.Recycles)
+	}
+}
+
+// TestExpectedTapeNeedsFresh: when every volume still holds a protected run, the
+// run expects a fresh tape rather than recycling a protected one.
+func TestExpectedTapeNeedsFresh(t *testing.T) {
+	eng := tapeEngine(t, false, "10d")
+	now := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+
+	recordVol(t, eng, "lto-0001", time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC))
+	recordFullOn(t, eng, "2026-06-20", "h", "lto-0001") // within minimum age -> protected
+
+	exp, ok := eng.ExpectedTape(now)
+	if !ok {
+		t.Fatal("a labeled medium should yield an expectation")
+	}
+	if !exp.NewTape || exp.Label != "" {
+		t.Fatalf("want a fresh tape, got %+v", exp)
+	}
+}
+
+// TestExpectedTapeAppendsToLatest: an appendable medium extends the most recently
+// written volume rather than recycling an old one.
+func TestExpectedTapeAppendsToLatest(t *testing.T) {
+	eng := tapeEngine(t, true, "")
+	now := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+
+	recordVol(t, eng, "lto-0001", time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	recordVol(t, eng, "lto-0002", time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC))
+
+	exp, ok := eng.ExpectedTape(now)
+	if !ok {
+		t.Fatal("a labeled medium should yield an expectation")
+	}
+	if exp.NewTape || exp.Label != "lto-0002" {
+		t.Fatalf("want to append to latest lto-0002, got %+v", exp)
+	}
+}
+
+// TestExpectedTapeDiskHasNone: an address-identified medium (disk) carries no
+// label, so there is no tape to expect.
+func TestExpectedTapeDiskHasNone(t *testing.T) {
+	cfg := &config.Config{
+		Landing: "disk",
+		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
+		Workdir: t.TempDir(),
+	}
+	cfg.Compress.Codec = "none"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := eng.ExpectedTape(time.Now()); ok {
+		t.Fatal("disk medium should not yield a tape expectation")
 	}
 }
 
