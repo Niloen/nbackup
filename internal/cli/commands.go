@@ -101,6 +101,7 @@ func newDumpCmd(a *app) *cobra.Command {
 				return err
 			}
 			defer unlock()
+			eng.SetOperator(stdinOperator{})
 			date, err := ParseDate(dateStr)
 			if err != nil {
 				return err
@@ -388,6 +389,7 @@ func newCopyCmd(a *app) *cobra.Command {
 				return err
 			}
 			defer unlock()
+			eng.SetOperator(stdinOperator{})
 			if err := eng.CopySlot(args[0], to, force, a.logf()); err != nil {
 				return err
 			}
@@ -565,6 +567,26 @@ func newChangerListCmd(a *app) *cobra.Command {
 					sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
 			}
 			tw.Flush()
+
+			// A single-drive (manual) station also has reels in the room — offline,
+			// not in any bay — that the operator can load. List them so their
+			// ids/labels are known.
+			if shelf, err := eng.Shelf(args[0]); err == nil && len(shelf) > 0 {
+				fmt.Println("\nIn the room (load with `nb changer load`, or when prompted):")
+				rw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+				fmt.Fprintln(rw, "  REEL\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
+				for _, b := range shelf {
+					label, status := b.Label, "append"
+					if b.Blank {
+						label, status = "(blank)", "blank"
+					} else if b.Capacity > 0 && b.Used >= b.Capacity {
+						status = "full"
+					}
+					fmt.Fprintf(rw, "  %s\t%s\t%s\t%s\t%s\t%d\n", b.Bay, label, status,
+						sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
+				}
+				rw.Flush()
+			}
 			return nil
 		},
 	}
@@ -651,6 +673,7 @@ func newRestoreCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			eng.SetOperator(stdinOperator{})
 			slotID := args[0]
 			s, err := eng.Catalog().ReadSlot(slotID)
 			if err != nil {

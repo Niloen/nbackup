@@ -108,6 +108,23 @@ type Changer interface {
 	Bays() ([]BayStatus, error)
 }
 
+// ManualChanger is a Changer with a single fixed drive whose cartridge an
+// operator swaps by hand, rather than a robot addressing many bays. Bays() reports
+// exactly one position (the drive); the other reels sit on an offline Shelf the
+// changer cannot see in its own inventory (a single drive has no barcode reader
+// for reels not in it). Insert performs the operator's physical swap — it loads a
+// shelf reel into the drive, the displaced reel returning to the shelf — so the
+// one bay's *content* changes; we never switch bay. This models the single-drive
+// tape station (case 1); a robotic library (case 2) is a plain Changer.
+type ManualChanger interface {
+	Changer
+	// Shelf lists the reels available to load that are not currently in the drive.
+	Shelf() ([]BayStatus, error)
+	// Insert swaps the named shelf reel into the single drive, displacing whatever
+	// is loaded back to the shelf. reel is a Bay id reported by Shelf.
+	Insert(reel string) error
+}
+
 // BayStatus is one physical position's state. Label is the volume label written
 // on the cartridge in that bay ("" when blank) — for the disk emulator it stands
 // in for the barcode a real library's reader would report without a drive read.

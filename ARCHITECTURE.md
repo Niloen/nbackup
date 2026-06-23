@@ -106,6 +106,22 @@ loaded). `dir:` is a directory-backed library (each bay a subdir, finite per-bay
 `volume_size`, fully tested); `device:` is a real single drive (`mt`+`/dev/nst0`,
 a one-bay library; structurally complete, untested without hardware).
 
+- **Two changer kinds — robot vs single drive.** They differ on one axis: *who
+  picks the reel.* A **robotic library** (`dir:`, the default) reports many bays
+  and a command moves the mounted *position* between them. A **single-drive
+  station** (`dir:` + `mode: manual`, a `media.ManualChanger`) reports exactly one
+  bay (`drive`) whose *content* the operator swaps by hand; the other reels sit on
+  an offline **shelf** the changer can't enumerate (no barcode reader off the
+  drive). `Insert` swaps a shelf reel into the one drive — the bay's content
+  changes, the bay never does. The disk emulator covers both; a real `device:`
+  drive is the single-drive case in hardware.
+- **Operator seam.** A single-drive station can't change its own tape, so when the
+  loaded reel won't do, the engine asks an `Operator` (CLI: stdin) to swap and
+  retries — on writes (`verifyWritable`: blank/foreign/wrong-pool/full → load a
+  writable reel, auto-labeled if `auto_label`) and on reads (`mountForRead`: load
+  the reel holding the needed label). Unattended (no operator) it degrades to an
+  actionable error instead of blocking. A `reloadable` error marks the cases a swap
+  can fix (vs a stale catalog, which a swap can't).
 - **Bay (physical) vs Label (logical) are distinct.** The `changer` is
   **label-agnostic** — like a real robot it mounts bays and reads barcodes, never
   the magnetic label; the engine reads the label *after* mounting. A blank
@@ -117,9 +133,12 @@ a one-bay library; structurally complete, untested without hardware).
   (pack many runs per tape until full); `appendable: false` is **Amanda-style**
   (one run per tape). This is a deliberate, named lineage choice — real tapes are
   physically appendable; Amanda chooses not to, Bacula does.
-- **Manual changer.** Switching is manual: a full/foreign/wrong tape is refused;
-  the operator `nb changer load`s the next bay (or `nb label --relabel`s an aged
-  one). Reads **auto-mount** the bay holding each placement's label.
+- **Manual switching (no auto-advance).** On a robotic library a full/foreign/wrong
+  tape is refused and the operator `nb changer load`s the next bay (or `nb label
+  --relabel`s an aged one); reads **auto-mount** the bay holding each placement's
+  label. On a single-drive station the same situations prompt for a physical reel
+  swap (above). Either way switching is operator-driven — the engine never advances
+  a tape on its own (see deferred auto-advance).
 
 **Labels as a capability.** Verified before every write (refuse foreign / blank
 unless `auto_label` / wrong-pool / relabeled-since-cached). Address-identified
@@ -167,8 +186,13 @@ per-medium capacity strategy.
 
 ## Deferred / known next steps
 
-- Tape **auto-advance & whole-volume recycle** on EOT (today: manual changer).
-- **Tape spanning** — one archive split across two tapes.
+- Tape **auto-advance & whole-volume recycle** on EOT (today: manual switching —
+  a run must fit the loaded tape; end-of-tape mid-run aborts the run uncommitted,
+  retry on a fresh tape). The swap prompt fires at tape *selection*, not mid-write.
+- **Tape spanning** — one archive (or a run's archives) split across two tapes.
+  Blocked on the catalog `Placement` model, which binds one slot copy to one
+  volume + the seal that commits it; spanning means reworking Placement, the
+  cross-tape seal/commit, and per-volume rebuild. Deliberately deferred.
 - **S3** Volume implementation (registered stub today).
 - **Budget-driven retention** — budget is reported; pruning is cycle-based.
 - **Remote sources** — `host` is metadata; `path` is read locally.
