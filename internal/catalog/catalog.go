@@ -147,21 +147,20 @@ func (c *Catalog) Rebuild(volumes map[string]media.Volume) (int, error) {
 	return len(c.entries), nil
 }
 
-// ingest merges a medium's slots and placements into the cache. A robotic Library
-// (a tape library) scans every non-blank bay in turn, restoring whatever was
-// mounted. A single-drive Station can only read the reel currently in the drive —
-// the rest sit offline and cannot be mounted unattended — so it is scanned directly
-// as just the loaded reel, or skipped when the drive is empty. A plain volume is
-// scanned directly.
+// ingest merges a medium's slots and placements into the cache. A robotic library
+// (a media.Changer) scans every non-blank bay in turn, restoring whatever was
+// mounted. A single-drive station (a media.Drive that is not a Changer) can only read
+// the reel currently in the drive — the rest sit offline in the room and cannot be
+// mounted unattended — so it is scanned as just the loaded reel, or skipped when the
+// drive is empty. A plain volume (no drive) is scanned directly.
 func (c *Catalog) ingest(medium string, vol media.Volume) error {
-	if st, station := vol.(media.Station); station {
-		if _, loaded := st.LoadedVolume(); !loaded {
-			return nil
+	ch, isLibrary := vol.(media.Changer)
+	if !isLibrary {
+		if d, ok := vol.(media.Drive); ok {
+			if _, loaded := d.Loaded(); !loaded {
+				return nil // single drive with an empty drive: nothing to scan
+			}
 		}
-		return c.ingestOne(medium, vol)
-	}
-	ch, ok := vol.(media.Library)
-	if !ok {
 		return c.ingestOne(medium, vol)
 	}
 	prev, hadPrev := ch.Loaded()
@@ -181,7 +180,7 @@ func (c *Catalog) ingest(medium string, vol media.Volume) error {
 		}
 	}
 	if hadPrev {
-		return ch.Mount(prev)
+		return ch.Mount(prev.ID)
 	}
 	return nil
 }

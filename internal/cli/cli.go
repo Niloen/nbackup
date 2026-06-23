@@ -12,6 +12,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
 )
 
@@ -108,7 +109,7 @@ var stdinReader = bufio.NewReader(os.Stdin)
 // an actionable error instead of blocking.
 type stdinOperator struct{}
 
-func (stdinOperator) Swap(r engine.SwapRequest) (string, bool) {
+func (stdinOperator) Swap(r librarian.SwapRequest) (string, bool) {
 	fmt.Printf("\nmedium %q needs a tape: %s\n", r.Medium, r.Reason)
 	fmt.Printf("in drive: %s\n", reelDesc(r.Loaded))
 	if r.Expect != "" {
@@ -150,7 +151,7 @@ func (stdinOperator) Swap(r engine.SwapRequest) (string, bool) {
 // suggestReel is the reel the engine would prefer: the one carrying the needed
 // label (a read); for a write, the tape the run expects (the oldest reusable
 // volume) if it is in the room, else the first blank reel.
-func suggestReel(r engine.SwapRequest) string {
+func suggestReel(r librarian.SwapRequest) string {
 	if r.Need != "" {
 		for _, b := range r.Shelf {
 			if b.Label == r.Need {
