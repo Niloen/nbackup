@@ -10,7 +10,7 @@ import (
 )
 
 // TestSyncMirrorsLandingToTarget runs two backups onto disk, then exercises
-// `nb sync`: a dry-run reports the backlog without copying, --apply mirrors both
+// `nb sync`: a dry-run reports the backlog without copying, a real run mirrors both
 // slots onto the archive medium (recording a second placement each), a re-sync is
 // a no-op (idempotent), and --last bounds the selection to the most recent slot.
 func TestSyncMirrorsLandingToTarget(t *testing.T) {
@@ -62,7 +62,7 @@ func TestSyncMirrorsLandingToTarget(t *testing.T) {
 		t.Fatal("dry-run must not copy")
 	}
 
-	// --apply mirrors both onto the archive medium.
+	// A real run mirrors both onto the archive medium.
 	report, err = eng.SyncTo("", "archive", SyncSelection{}, true, false, nil)
 	if err != nil {
 		t.Fatalf("sync apply: %v", err)

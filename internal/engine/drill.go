@@ -29,7 +29,7 @@ import (
 // operator) may prompt to swap a tape for a target. Unattended (Options.Unattended,
 // for cron) attaches no operator and pre-filters out any target whose source copy
 // would need a human to load a tape, marking it Skipped (a non-failing SLO warning)
-// rather than blocking or failing — so a nightly `nb drill --apply --unattended`
+// rather than blocking or failing — so a nightly `nb drill --unattended`
 // never needs a person.
 
 // DrillOptions controls a drill run.
@@ -485,7 +485,7 @@ const wormProbeSlot = "drill-worm-probe"
 // delete proves it is not (the probe is recreated next run). Immutability is
 // configured operator-side (S3 Object Lock, LTO WORM); NBackup only detects it, never
 // sets it. Append-only media (tape) are immutable by construction and are reported
-// without writing a probe. The active probe runs only on --apply.
+// without writing a probe. The active probe is skipped in --dry-run.
 func (e *Engine) wormProbe(medium string, apply bool, now time.Time) WormResult {
 	res := WormResult{Medium: medium}
 	vol, _, _, err := e.mediumVolume(medium)
@@ -502,7 +502,7 @@ func (e *Engine) wormProbe(medium string, apply bool, now time.Time) WormResult 
 		return res
 	}
 	if !apply {
-		res.Detail = "not probed (dry-run / --worm off); pass --apply --worm to test immutability"
+		res.Detail = "not probed (dry-run / --worm off); pass --worm (without --dry-run) to test immutability"
 		return res
 	}
 	if err := e.ensureWormProbe(vol, now); err != nil {

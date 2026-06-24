@@ -20,10 +20,10 @@ type SyncItem struct {
 	SlotID   string
 	Archives int
 	Bytes    int64 // compressed size on the volume
-	Copied   bool  // set true once --apply copies it
+	Copied   bool  // set true once a real run copies it
 }
 
-// SyncReport is the backlog of one sync target (and, after --apply, what was
+// SyncReport is the backlog of one sync target (and, after a real run, what was
 // copied). It is what the CLI renders for both dry-run and apply.
 type SyncReport struct {
 	From  string
@@ -54,7 +54,7 @@ func (r *SyncReport) Bytes() int64 {
 	return n
 }
 
-// Copied counts the items actually copied (after --apply).
+// Copied counts the items actually copied (after a real run).
 func (r *SyncReport) Copied() int {
 	n := 0
 	for _, it := range r.Items {
