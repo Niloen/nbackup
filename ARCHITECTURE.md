@@ -55,7 +55,7 @@ registry registration, not a conditional in the core.
 | `filter` | external compressor child processes (zstd/gzip/none) + registry | compress |
 | `crypt` | external encryptor child processes (gpg/none) + registry | amcrypt/amgpgcrypt |
 | `streamproc` | the shared "external stream-transform child" plumbing (stdin→stdout, optional `nice`) that `filter` and `crypt` both run on | — |
-| `xfer` | in-process stream metering: checksum + byte counting | Xfer API |
+| `xfer` | in-process stream pieces: checksum + byte counting, and the per-medium bandwidth cap (`Limiter`) | Xfer API / netusage |
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `report` | per-run history record + JSONL/summary file I/O + digest render | amreport |
 | `notify` | pluggable alert backends (smtp/webhook) + registry + dispatch | amreport mailto |
@@ -76,8 +76,8 @@ pure leaf (record + render); the engine does **not** depend on either.
 Domain packages stay pure; `method`/`media`/`filter`/`crypt` are pluggable adapters;
 `engine` is the only component aware of all of them. A backup is a pipeline of
 processes: **source** (`tar` via `method.Backup`) → **filter** (compressor child)
-→ **crypt** (encryptor child) → **dest** (`media.Volume`), metered by `xfer`,
-composed by `slotio`.
+→ **crypt** (encryptor child) → **dest** (`media.Volume`), metered and optionally
+rate-limited by `xfer`, composed by `slotio`.
 
 ## Load-bearing decisions (the *why*)
 
@@ -340,8 +340,29 @@ without hardware).
 unless `auto_label` / wrong-pool / relabeled-since-cached). Address-identified
 media (disk, S3) carry no label and skip the whole dance.
 
+**Network politeness is a per-medium throughput cap (the `nice` of bandwidth).**
+NBackup already runs its child processes under `nice` for CPU politeness; a
+cloud-first user needs the network analogue, or an uncapped `nb dump`/`nb sync` to
+S3 saturates the office uplink during business hours (and once remote sources land,
+the read side will too). The cap is a medium config knob — `throughput: 50MB/s`
+(bytes/sec, `/s` optional) — because the thing being protected is the uplink *to a
+given medium*. It is enforced by a token-bucket `xfer.Limiter`, a new in-process
+stream stage that wraps the **medium-facing** stream: on write it paces the bytes
+landing on the volume (inside `slotio.Writer.drainParts`), which back-pressures the
+one-pass pipeline through its pipe — no holding-disk buffer, and the wait is a timer
+sleep so it cannot deadlock; on read it paces each part stream the medium hands back
+(wrapped in `engine.partOpener`, the single choke point every restore / un-vault /
+drill / sync-source read flows through). One `Limiter` is built per medium and
+**shared**, so several concurrent dumpers to one medium draw from a single budget —
+Amanda's global *netusage* ceiling, which here collapses into the per-medium cap
+because a run writes a single landing medium (no separate global knob needed). The
+default is uncapped: a nil `Limiter` returns the stream untouched, so a run with no
+`throughput` set behaves byte-for-byte as before. It composes with `nice` (CPU) and
+stays medium-neutral — it lives in `xfer`/`engine`, never in a medium package.
+(Deferred: time-of-day awareness — a tighter cap during business hours.)
+
 **Medium-neutral vocabulary.** The generic media/changer/config layer must not say
-"tape": `bays`, `volume_size`, `media.ErrNoVolume`,
+"tape": `bays`, `volume_size`, `throughput`, `media.ErrNoVolume`,
 `media.Drive`/`Changer`/`Shelf`/`VolumeStatus`, `nb medium`, `nb load`.
 Tape specifics (`type: tape`, the `tape` package, `mt`, `vtape`, the `reel`
 vocabulary) stay local, so a future `usb`/removable-disk medium reuses the vocabulary.
@@ -443,9 +464,9 @@ the medium it lands on.
 
 - **Whole-volume recycle** on EOT. Spanning rolls onto the next *blank / empty
   in-pool* tape; auto-recycling an aged-out tape (vs. relabeling it) is still manual
-  (`nb label --relabel`).
-- **Capacity-driven retention** — capacity is reported and bounds promotion;
-  pruning is cycle-based, not yet automatically driven to fit capacity.
+  (`nb label --relabel`). (Capacity-driven retention is otherwise implemented:
+  `sizeProfile.Reclaim` already prunes object stores and disk to fit `capacity`;
+  only whole-*volume* tape recycle remains.)
 - **Remote sources** — `host` is metadata; `path` is read locally.
 - Real `mtDevice` hardware validation — also the only spanning path not exercised
   (real-drive spanning is proactive-via-`part_size` and structurally complete but

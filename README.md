@@ -585,6 +585,19 @@ spreads fulls across the global cycle on its own (see [Planning](#planning)).
 Pruning consumes only capacity; the reclamation difference (delete a slot vs
 reclaim a whole tape) lives entirely in the medium's retention strategy.
 
+### Bandwidth politeness is per-medium
+
+A medium may declare a **throughput** cap — `throughput: 50MB/s` (bytes/sec, the
+`/s` is optional; default uncapped). It is the network analogue of the `nice` CPU
+politeness NBackup already applies: it keeps an `nb dump`/`nb sync` from saturating
+the office uplink during business hours, and a restore/drill download from the same
+medium honors the same budget (the cap is symmetric on reads). It is enforced as a
+token bucket on the medium-facing stream, so it back-pressures the one-pass pipeline
+without a holding-disk buffer. When several dumpers write one medium concurrently
+they **share** the single budget (Amanda's `netusage`), since a run lands on one
+medium. Set it on the medium whose link you must protect — typically the cloud or a
+remote tier.
+
 ## Requirements
 
 - **Go 1.25+** to build.

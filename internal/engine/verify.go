@@ -147,7 +147,7 @@ func (e *Engine) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerd
 			})
 			continue
 		}
-		opener := e.partOpener(lib)
+		opener := e.partOpener(lib, p.Medium)
 		for _, a := range s.Archives {
 			v := e.verifyArchive(id, a, p, opts, opener, logf)
 			sv.Archives = append(sv.Archives, v)

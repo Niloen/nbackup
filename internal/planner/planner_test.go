@@ -142,6 +142,54 @@ func TestPromotionDoesNotChaseAverage(t *testing.T) {
 	}
 }
 
+// TestPromotionTinyCoDeadlineDoesNotUnlockBigDLE guards the dominating-DLE case:
+// a big DLE mid-cycle must not be re-fulled merely because a tiny DLE shares its
+// deadline day. The tiny co-resident inflates that day's load above the big DLE's
+// own size, but the overshoot guard compares today against the day's load *after
+// the big full leaves it*, so the big move is still blocked. Both DLEs are a few
+// days old (not fulled today), so this exercises the overshoot guard specifically,
+// not the just-fulled exclusion.
+func TestPromotionTinyCoDeadlineDoesNotUnlockBigDLE(t *testing.T) {
+	today := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
+	day := func(n int) string { return today.AddDate(0, 0, -n).Format("2006-01-02") }
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{
+		// Both last fulled 3 days ago: deadline is 4 days out, and they share it.
+		"big-data":  {LastFullDate: day(3), Runs: []catalog.RunRecord{{Date: day(3), Slot: "slot-x", Level: 0}}},
+		"tiny-data": {LastFullDate: day(3), Runs: []catalog.RunRecord{{Date: day(3), Slot: "slot-x", Level: 0}}},
+	}}
+	est := map[string]Estimate{
+		"big-data":  {Full: 3_640_000_000, Incr: 10_000},
+		"tiny-data": {Full: 10_000, Incr: 10_000},
+	}
+	p := Build([]config.DLE{dleNamed("big"), dleNamed("tiny")}, hist, est, Params{CycleDays: 7, RoomBytes: -1}, today)
+	if lvl := levelOf(p, "big-data"); lvl == 0 {
+		t.Errorf("big DLE re-fulled mid-cycle because a tiny DLE shared its deadline; want an incremental")
+	}
+}
+
+// TestPromotionSkipsJustFulledDLE guards the just-fulled exclusion: two big DLEs
+// fulled on the same day share a future deadline, but neither may be promoted today
+// because each was already fulled today — pulling a full "forward" onto the day it
+// already lives on is pure waste, and it would recur on every same-day run. The
+// stagger that spreads their shared deadline must wait until they are at least a day
+// old (see TestPromotionStaggersLockstepFulls, which destaggers from day 1 on).
+func TestPromotionSkipsJustFulledDLE(t *testing.T) {
+	today := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
+	day0 := today.Format("2006-01-02")
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{
+		"downloads-data": {LastFullDate: day0, Runs: []catalog.RunRecord{{Date: day0, Slot: "slot-x", Level: 0}}},
+		"videos-data":    {LastFullDate: day0, Runs: []catalog.RunRecord{{Date: day0, Slot: "slot-x", Level: 0}}},
+	}}
+	est := map[string]Estimate{
+		"downloads-data": {Full: 3_640_000_000, Incr: 80_000},
+		"videos-data":    {Full: 2_960_000_000, Incr: 10_000},
+	}
+	p := Build([]config.DLE{dleNamed("downloads"), dleNamed("videos")}, hist, est, Params{CycleDays: 7, RoomBytes: -1}, today)
+	if n := fullsIn(p); n != 0 {
+		t.Errorf("a DLE fulled today was re-fulled by promotion (%d fulls); just-fulled DLEs are not promotion targets", n)
+	}
+}
+
 // TestPromotionDoesNotOverFullBigDLE checks the skew guard over a window: with one
 // big DLE and many small ones, the big DLE is fulled about once per cycle, not
 // repeatedly pulled forward to flatten daily volume.

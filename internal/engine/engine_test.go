@@ -174,6 +174,113 @@ func TestParallelDumpers(t *testing.T) {
 	}
 }
 
+// TestThroughputCapThrottlesDump verifies the acceptance criterion: a configured
+// per-medium throughput cap holds the measured dump rate at/under the limit, and
+// an uncapped run of the same source is faster (so the delay is the cap, not slow
+// tar).
+func TestThroughputCapThrottlesDump(t *testing.T) {
+	src := t.TempDir()
+	// ~3.2 MiB so the transfer dominates the token bucket's initial burst
+	// (xfer.maxBurst = 1 MiB), making the throttle observable in a short test.
+	big := strings.Repeat("nbackup-bandwidth-throttle-test\n", 100_000)
+	write(t, filepath.Join(src, "big.txt"), big)
+
+	run := func(throughput string) (time.Duration, int64) {
+		t.Helper()
+		cfg := &config.Config{
+			Landing: "disk",
+			Media: map[string]config.Media{
+				"disk": {Type: "disk", Throughput: throughput, Params: map[string]string{"path": t.TempDir()}},
+			},
+			Sources: []config.DLE{{Host: "h", Path: src}},
+			Workdir: t.TempDir(),
+		}
+		cfg.Compress.Codec = "none" // bytes on the medium ≈ the tar stream, no compressor binary
+		eng, err := New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+			t.Skipf("GNU tar not available")
+		}
+		start := time.Now()
+		s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+		if err != nil {
+			t.Fatalf("run (throughput=%q): %v", throughput, err)
+		}
+		return time.Since(start), s.TotalBytes
+	}
+
+	const rate = 2 << 20 // 2 MiB/s
+	capped, bytes := run("2MB/s")
+	uncapped, _ := run("")
+
+	// The bucket starts with at most one burst (xfer.maxBurst = 1 MiB) of slack, so
+	// the run can be no faster than (bytes - 1 MiB) / rate. A 10% margin absorbs
+	// scheduling jitter.
+	floor := time.Duration(float64(bytes-(1<<20)) / rate * float64(time.Second) * 0.9)
+	if capped < floor {
+		t.Errorf("capped dump took %v; a 2MB/s cap over %d bytes implies at least %v", capped, bytes, floor)
+	}
+	if capped <= uncapped {
+		t.Errorf("throughput cap had no effect: capped %v <= uncapped %v", capped, uncapped)
+	}
+}
+
+// TestThroughputCapThrottlesRestore verifies the read side honors the cap: a slot
+// dumped uncapped, then restored through an engine whose medium carries a cap, is
+// paced to that cap (the read peer of the dump throttle).
+func TestThroughputCapThrottlesRestore(t *testing.T) {
+	src := t.TempDir()
+	diskDir := t.TempDir()
+	workdir := t.TempDir()
+	big := strings.Repeat("nbackup-bandwidth-throttle-test\n", 100_000) // ~3.2 MiB
+	write(t, filepath.Join(src, "big.txt"), big)
+
+	mk := func(throughput string) *Engine {
+		t.Helper()
+		cfg := &config.Config{
+			Landing: "disk",
+			Media: map[string]config.Media{
+				"disk": {Type: "disk", Throughput: throughput, Params: map[string]string{"path": diskDir}},
+			},
+			Sources: []config.DLE{{Host: "h", Path: src}},
+			Workdir: workdir,
+		}
+		cfg.Compress.Codec = "none"
+		eng, err := New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return eng
+	}
+
+	// Dump uncapped.
+	eng := mk("")
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+
+	// Restore through a capped engine over the same medium/catalog.
+	const rate = 2 << 20 // 2 MiB/s
+	capped := mk("2MB/s")
+	name := config.DLE{Host: "h", Path: src}.Name()
+	start := time.Now()
+	if err := capped.Restore(s.ID, name, t.TempDir(), false, nil); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	floor := time.Duration(float64(s.TotalBytes-(1<<20)) / rate * float64(time.Second) * 0.9)
+	if elapsed < floor {
+		t.Errorf("capped restore took %v; a 2MB/s read cap over %d bytes implies at least %v", elapsed, s.TotalBytes, floor)
+	}
+}
+
 // TestCopyToTapeAndRestore dumps to disk, copies the slot to a (virtual) tape
 // medium, then restores it from the tape alone — exercising CopySlot and a tape
 // Volume end to end.

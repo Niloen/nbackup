@@ -93,6 +93,7 @@ type Writer struct {
 	sink  VolumeSink
 	codec string
 	fopts filter.Options
+	lim   *xfer.Limiter // optional bandwidth cap on the bytes landing on the medium (nil = uncapped)
 
 	mu       sync.Mutex // guards the records below
 	slot     *slot.Slot
@@ -109,12 +110,15 @@ type archiveRecord struct {
 }
 
 // NewWriter begins authoring the given open slot onto sink, compressing archives
-// with the named codec.
-func NewWriter(sink VolumeSink, s *slot.Slot, codec string, fopts filter.Options) (*Writer, error) {
+// with the named codec. lim, when non-nil, caps the rate of bytes written to the
+// medium (network politeness); a nil lim is uncapped. The same lim is shared
+// across concurrent WriteArchive calls on an unbounded sink, so several dumpers to
+// one medium share its budget (Amanda's netusage).
+func NewWriter(sink VolumeSink, s *slot.Slot, codec string, fopts filter.Options, lim *xfer.Limiter) (*Writer, error) {
 	if _, err := filter.Ext(codec); err != nil { // validate the codec name early
 		return nil, err
 	}
-	return &Writer{sink: sink, codec: codec, fopts: fopts, slot: s}, nil
+	return &Writer{sink: sink, codec: codec, fopts: fopts, lim: lim, slot: s}, nil
 }
 
 // WriteArchive appends one archive to the slot, split into as many part files as the
@@ -271,7 +275,10 @@ func (w *Writer) drainParts(base media.Header, src io.Reader) ([]PartPosition, e
 			if max >= 0 {
 				r = io.LimitReader(src, max)
 			}
-			n, e := io.Copy(out, r)
+			// Pace the write to the medium's cap. Throttling here back-pressures the
+			// producer (tar → compress → encrypt) through the pipe, so the one-pass
+			// pipeline slows without buffering. A nil lim leaves out untouched.
+			n, e := io.Copy(w.lim.Writer(out), r)
 			wrote = n
 			return e
 		})

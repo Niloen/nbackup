@@ -207,7 +207,7 @@ func (e *Engine) drillVerify(t drill.Target, medium string, checks VerifyChecks)
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
-	opener := e.partOpener(lib)
+	opener := e.partOpener(lib, medium)
 	for _, step := range t.Steps {
 		s, err := e.cat.ReadSlot(step.SlotID)
 		if err != nil {
@@ -298,7 +298,7 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 	// Fetch the raw (still-encrypted/compressed) payload to a temp file. NBackup is
 	// used only to move bytes off the medium (unavoidable for tape/cloud); the decode
 	// is done entirely by the documented stock tools below.
-	raw := e.reader.OpenRawParts(toSlotioParts(parts), slotio.Expect{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, e.partOpener(lib))
+	raw := e.reader.OpenRawParts(toSlotioParts(parts), slotio.Expect{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, e.partOpener(lib, medium))
 	tmp, err := os.CreateTemp("", "nbackup-drill-raw-*")
 	if err != nil {
 		raw.Close()

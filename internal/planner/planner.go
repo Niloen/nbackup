@@ -14,11 +14,14 @@
 // day is spread over the lighter runs before it. It works from a deadline calendar
 // (each not-yet-due DLE sits on the day its full is due) and repeatedly relieves
 // the heaviest future day by pulling one of its fulls onto today, as long as (a)
-// today is lighter than that peak, (b) the move keeps today below it so the peak
-// strictly drops — which is why a *lone* big DLE is never promoted: moving it only
-// relocates its peak, never lowers it, so it waits for its own deadline rather than
-// being re-fulled early to chase an average — and (c) it fits the per-run room left
-// before pruning would evict a protected slot. With no free capacity, promotion
+// today is lighter than that peak, (b) the move does not overshoot the day it
+// relieves — today's resulting load may not exceed that day's load *after the moved
+// full leaves it* — which is why a DLE that dominates its own deadline day is never
+// promoted: relocating it would make today the new, equally heavy peak, so it waits
+// for its own deadline rather than being re-fulled early to chase an average (and a
+// tiny DLE merely sharing that deadline can no longer inflate the peak enough to
+// unlock the move) — and (c) it fits the per-run room left before pruning would
+// evict a protected slot. With no free capacity, promotion
 // does nothing; with capacity to spare, it spends it to keep backups fresh and
 // balanced — which is exactly what budgeting that capacity is for.
 //
@@ -203,11 +206,13 @@ func runBytes(cands []*cand) int64 {
 // load (the mandatory fulls), then repeatedly relieves the heaviest future day by
 // pulling one of its fulls onto today.
 //
-// Two guards keep it from chasing an average. Each move must keep today strictly
-// below the peak it relieves, so the move lowers the global peak rather than just
-// relocating it — which alone means a *lone* big DLE is never promoted (moving it
-// leaves the same peak, on a different day). And each move must fit the per-run
-// room, so promotion spends only genuinely free capacity. When the heaviest day
+// Two guards keep it from chasing an average. Each move must not overshoot the day
+// it relieves — today's resulting load may not exceed that day's load after the
+// moved full leaves it — so the move lowers the global peak rather than just
+// relocating it. That means a DLE dominating its own deadline day is never promoted
+// (moving it leaves an equal peak on today), and a tiny DLE merely sharing that
+// deadline cannot inflate the peak enough to unlock the big move. And each move must
+// fit the per-run room, so promotion spends only genuinely free capacity. When the heaviest day
 // cannot be relieved (its fulls are too big to drop the peak or to fit room) it is
 // set aside and the next-heaviest is tried; promotion stops once today is no longer
 // lighter than any remaining peak.
@@ -215,7 +220,12 @@ func promote(cands []*cand, cycle int, room int64) {
 	// Deadline calendar: an incremental candidate last fulled `days` ago is due in
 	// `cycle-days` days (offset >= 1). byOffset groups the candidates due on each
 	// day, load is their total full bytes, and todayLoad is today's fixed load.
-	// Never-fulled DLEs are mandatory fulls, not candidates.
+	// Never-fulled DLEs are mandatory fulls, not candidates. A DLE fulled today
+	// (days == 0) is excluded entirely: its full already exists at today's date, so
+	// pulling it "forward" would only re-full it the same day — no stagger, pure
+	// waste — and it would recur on every same-day run. Staggering only buys
+	// anything across distinct days, so such a DLE waits until it is at least a day
+	// old before it can relieve a future peak.
 	byOffset := map[int][]*cand{}
 	load := map[int]int64{}
 	var todayLoad int64
@@ -223,7 +233,7 @@ func promote(cands []*cand, cycle int, room int64) {
 		switch {
 		case c.full:
 			todayLoad += c.estFull
-		case c.days >= 0:
+		case c.days > 0:
 			off := cycle - c.days
 			if off < 1 {
 				off = 1
@@ -251,7 +261,13 @@ func promote(cands []*cand, cycle int, room int64) {
 		var pick *cand
 		var pickIdx int
 		for i, c := range byOffset[peakOff] {
-			if todayLoad+c.estFull >= peakLoad {
+			// The move must not overshoot the day it relieves: today's resulting load
+			// may not exceed the peak day's load *after this full leaves it*. Comparing
+			// against the day's remaining load (peakLoad-c.estFull), not its total, is
+			// what keeps a DLE that dominates its own deadline day from being relocated
+			// for a near-zero gain just because a tiny co-deadline DLE inflated the peak
+			// above it — the case that otherwise re-fulls a big DLE almost every run.
+			if todayLoad+c.estFull > peakLoad-c.estFull {
 				continue
 			}
 			if room >= 0 && total-c.estIncr+c.estFull > room {

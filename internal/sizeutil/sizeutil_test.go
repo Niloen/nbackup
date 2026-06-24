@@ -27,6 +27,30 @@ func TestParseBytes(t *testing.T) {
 	}
 }
 
+func TestParseRate(t *testing.T) {
+	cases := map[string]int64{
+		"50MB/s":  50e6,
+		"500KB/s": 500e3,
+		"1GB/s":   1e9,
+		"50MB":    50e6, // bare size means per second
+		"10MiB/s": 10 << 20,
+	}
+	for in, want := range cases {
+		got, err := ParseRate(in)
+		if err != nil {
+			t.Fatalf("ParseRate(%q): %v", in, err)
+		}
+		if got != want {
+			t.Errorf("ParseRate(%q) = %d, want %d", in, got, want)
+		}
+	}
+	for _, bad := range []string{"fast/s", "-5MB/s", "/s"} {
+		if _, err := ParseRate(bad); err == nil {
+			t.Errorf("ParseRate(%q): expected error", bad)
+		}
+	}
+}
+
 func TestParseDuration(t *testing.T) {
 	cases := map[string]time.Duration{
 		"30d": 30 * 24 * time.Hour,

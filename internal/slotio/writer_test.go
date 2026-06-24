@@ -162,7 +162,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	sink := &memSink{vols: []*memVolume{v1, v2, v3}}
 
 	s := slot.NewSlot("slot-2026-06-21", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
-	w, err := NewWriter(sink, s, "none", filter.Options{})
+	w, err := NewWriter(sink, s, "none", filter.Options{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	sink := &memSink{vols: []*memVolume{v}, partCap: 10 * 1024}
 
 	s := slot.NewSlot("slot-x", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
-	w, _ := NewWriter(sink, s, "none", filter.Options{})
+	w, _ := NewWriter(sink, s, "none", filter.Options{}, nil)
 	body := []byte(strings.Repeat("z", 55*1024)) // 55 KiB / 10 KiB ≈ 6 parts
 	arch := writeOneArchive(t, w, "dle1", body)
 	if arch.Parts < 5 {
@@ -255,7 +255,7 @@ func TestRollFailureNoDeadlock(t *testing.T) {
 	v := newMemVolume("v1", 96*1024) // one small volume, no room to roll
 	sink := &memSink{vols: []*memVolume{v}}
 	s := slot.NewSlot("slot-y", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
-	w, _ := NewWriter(sink, s, "none", filter.Options{})
+	w, _ := NewWriter(sink, s, "none", filter.Options{}, nil)
 
 	body := []byte(strings.Repeat("q", 200*1024)) // far bigger than one volume
 	_, err := w.WriteArchive(ArchiveSpec{DLE: "dle1", Level: 0}, nil,
@@ -285,7 +285,7 @@ func TestEncryptRoundTrip(t *testing.T) {
 	v := newMemVolume("v1", 0) // unbounded
 	sink := &memSink{vols: []*memVolume{v}}
 	s := slot.NewSlot("slot-enc", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
-	w, _ := NewWriter(sink, s, "none", filter.Options{})
+	w, _ := NewWriter(sink, s, "none", filter.Options{}, nil)
 
 	body := []byte(strings.Repeat("top secret payload\n", 3000))
 	arch, err := w.WriteArchive(

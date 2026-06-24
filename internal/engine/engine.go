@@ -30,6 +30,7 @@ import (
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/slot"
 	"github.com/Niloen/nbackup/internal/slotio"
+	"github.com/Niloen/nbackup/internal/xfer"
 
 	// Register the bundled media and method implementations.
 	_ "github.com/Niloen/nbackup/internal/media/cloud"
@@ -64,6 +65,7 @@ type Engine struct {
 	fopts      filter.Options           // codec invocation options (level/threads/nice)
 	dcopts     crypt.Options            // decrypt key reference for restore (from the default encrypt block)
 	op         librarian.Operator       // optional: handles manual tape swaps (nil = unattended)
+	limiters   map[string]*xfer.Limiter // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
 }
 
 // SetOperator attaches an operator so manual single-drive media can prompt for a
@@ -91,10 +93,19 @@ func New(cfg *config.Config) (*Engine, error) {
 	// a typo (e.g. `capcity:`) is a hard error rather than a silently-ignored knob.
 	// Done here, where the media registry is loaded, and over all media (not just
 	// landing) so an offsite tier's typo is caught too.
+	limiters := map[string]*xfer.Limiter{}
 	for mname, def := range cfg.Media {
 		if err := media.ValidateParams(def.Type, def.Params); err != nil {
 			return nil, fmt.Errorf("media %s: %w", mname, err)
 		}
+		// One shared limiter per medium, built once: the same instance throttles a
+		// medium's concurrent dumper writes (shared budget) and its read streams. A
+		// nil entry (the common, uncapped case) leaves the streams untouched.
+		bps, err := def.ThroughputBytes()
+		if err != nil {
+			return nil, fmt.Errorf("media %s: throughput: %w", mname, err)
+		}
+		limiters[mname] = xfer.NewLimiter(bps)
 	}
 	name, err := cfg.LandingName()
 	if err != nil {
@@ -144,6 +155,7 @@ func New(cfg *config.Config) (*Engine, error) {
 		codec:      cfg.CompressCodec(),
 		fopts:      fopts,
 		dcopts:     dcopts,
+		limiters:   limiters,
 	}, nil
 }
 
@@ -358,7 +370,7 @@ func (e *Engine) prepareWriter(medium string, s *slot.Slot, now time.Time, logf 
 		return nil, err
 	}
 	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
-	w, err := slotio.NewWriter(sink, s, e.codec, e.fopts)
+	w, err := slotio.NewWriter(sink, s, e.codec, e.fopts, e.limiters[medium])
 	if err != nil {
 		return nil, err
 	}
@@ -448,7 +460,7 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	}
 	w := wt.w
 	logf.log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
-	srcOpen := e.partOpener(srcLib)
+	srcOpen := e.partOpener(srcLib, fromMedia)
 	for _, a := range s.Archives {
 		parts, ok := srcPlacement.Parts(a.DLE, a.Level)
 		if !ok {
@@ -495,9 +507,17 @@ func (e *Engine) copySource(slotID, fromMedia string) (*librarian.Librarian, cat
 // partOpener builds a slotio.PartOpener over a librarian: it mounts the volume each
 // part lives on (and verifies its identity), then opens the part's file. Reading a
 // spanned archive calls it once per part, in order — a single drive holds one tape.
-func (e *Engine) partOpener(lib *librarian.Librarian) slotio.PartOpener {
+// The part stream is paced to the source medium's bandwidth cap (the read peer of
+// the write throttle), so a restore/un-vault/drill download honors the same uplink
+// budget; an uncapped medium leaves the stream untouched.
+func (e *Engine) partOpener(lib *librarian.Librarian, medium string) slotio.PartOpener {
+	lim := e.limiters[medium]
 	return func(p slotio.PartPosition) (media.Header, io.ReadCloser, error) {
-		return lib.ReadFileAt(p.Volume, p.Epoch, p.Pos)
+		h, rc, err := lib.ReadFileAt(p.Volume, p.Epoch, p.Pos)
+		if err != nil {
+			return h, rc, err
+		}
+		return h, lim.ReadCloser(rc), nil
 	}
 }
 
@@ -1282,7 +1302,7 @@ func (e *Engine) openArchiveFrom(slotID, dle string, level int, codec, encrypt, 
 			lastErr = err
 			continue
 		}
-		rc, err := e.reader.OpenArchiveParts(toSlotioParts(parts), codec, encrypt, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib))
+		rc, err := e.reader.OpenArchiveParts(toSlotioParts(parts), codec, encrypt, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib, p.Medium))
 		if err != nil {
 			lastErr = err
 			continue
