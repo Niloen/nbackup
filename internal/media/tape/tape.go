@@ -299,7 +299,7 @@ func deviceStatus(id string, dev device, capacity int64) media.VolumeStatus {
 	lbl, ok, err := readLabel(dev)
 	switch {
 	case ok:
-		st.Label = lbl.Name
+		st.Label, st.Pool = lbl.Name, lbl.Pool
 	case err == media.ErrForeignVolume:
 		// Foreign data: not blank and not writable until a forced relabel.
 		st.Foreign, st.Blank = true, false

@@ -49,6 +49,10 @@ slots/slot-2026-06-21/
   000002-seal.hdr
 ```
 
+The `NNNNNN` prefix is just the file's position, and the **seal is always the last
+file** — so its number tracks the archive count (here two archives → seal at
+`000002`; a single-archive slot seals at `000001`), it is not fixed.
+
 (On **tape** the header is instead a fixed 32 KB block inline ahead of each
 payload, since a tape has no sidecars.)
 
@@ -115,7 +119,8 @@ This produces a single `nb` binary. The convention: you **inspect** with a noun
 | `nb slot`            | List slots (default)                                     |
 | `nb slot show`       | Show a single slot's archives and copies                |
 | `nb medium`          | List media, or detail one (incl. bays / drive + shelf)    |
-| `nb verify`          | Verify slot checksums (named slots, or `--all`)          |
+| `nb verify`          | Verify slot integrity: checksums, or `--deep` structure  |
+| `nb drill`           | Rehearse recovery: prove backups are restorable          |
 | `nb recover`         | Recover as of a date: browse + pick files, or `--all` for a whole DLE |
 | `nb copy`            | Copy one slot between media (`--from`/`--to`, e.g. disk → tape) |
 | `nb sync`            | Mirror one medium's slots onto another (disk → tape/s3)  |
@@ -316,6 +321,63 @@ snapshot, not in the member index, so a file deleted at a later incremental stil
 shows up in the browse view; recover the *whole* DLE with `--all` when you need
 deletion-accurate state.
 
+### Verifying and recovery drills
+
+Two layers prove your backups are good, weakest to strongest:
+
+- **`nb verify`** is the atomic integrity check. By default it re-hashes each
+  archive's payload against the seal (corruption detection); it is stateless and
+  keyless. `nb verify --deep` adds a **structural** check: it streams the archive
+  through the real read pipeline — decrypt → decompress → `tar -t` (list, not
+  extract) — and asserts the pipeline completes and the members match the seal. That
+  proves the bytes are a valid *restorable stream* and exercises the key + codec,
+  while still writing nothing.
+
+- **`nb drill`** is the recoverability rehearsal layered on `nb verify`. Checksums
+  can't catch a lost key, a codec/tar drift, a broken incremental chain, or an
+  unreadable offsite copy — a drill **actually restores** a risk-biased sample of
+  DLEs (full + incrementals, deletion-faithful) into a scratch dir and discards it.
+  It is NBackup's contribution of the **"0 errors"** digit of [3-2-1-1-0][321].
+
+```bash
+nb drill                       # dry-run: what would be drilled + a posture audit
+nb drill --apply               # drill the riskiest sample on the landing copy
+nb drill --apply --from cloud --tier structural   # routine offsite check (no write)
+nb drill --apply --tier stock  # restore via the documented gpg/zstd/tar one-liner
+nb dump && nb sync --apply && nb drill --apply --unattended   # hands-off cron line
+```
+
+A drill **selects** risk-first: it rotates DLEs so each is drilled within a window,
+prioritizes the longest incremental chains and the oldest fulls still relied upon,
+and drills a **point-in-time** (`--as-of`), not just the latest slot. Each target is
+exercised at a **tier** — `checksum`, `structural`, a real `chain` restore, or
+`stock` (the documented one-liner, proving recovery never requires NBackup) — and
+the outcome is appended to an inspectable **ledger** (`drill-ledger.json`) in the
+workdir: per DLE its last drill, tier, source medium, and pass/fail. A failure is
+**classified** — integrity (corruption), pipeline (key/codec), chain (incremental
+composition), or missing-copy — because each implies a different fix, and the
+command **exits non-zero** so a failed drill can page you.
+
+Two run modes: **attended** (interactive) may prompt to load a tape; **unattended**
+(`--unattended`, the cron mode, auto-detected when stdin is not a terminal) never
+prompts and **skips** any target that would need a tape swap — a skip is a coverage
+warning, not a failure, so a nightly drill stays green while it rotates through the
+fleet.
+
+Every run also prints a **3-2-1-1-0 recoverability posture audit** — copies, media,
+offsite presence, immutability, and 0 errors, plus key-reachable, snapshot-library,
+and capacity checks. The **immutability** line comes from a WORM probe: NBackup
+keeps one fixed probe object on the `--from` medium and checks that deleting it is
+*refused* (S3 Object Lock, LTO WORM). NBackup only **detects** immutability — you
+configure it operator-side on the storage; least privilege keeps NBackup unable to
+turn it off.
+
+> Honest limits: an encrypted+compressed archive is all-or-nothing to read (you must
+> decrypt+decompress the whole stream to reach late members), so a drill costs the
+> full bytes — make routine **offsite** drills the no-write `structural` tier and
+> watch the forecast egress the dry-run prints. Drills restore only to scratch and
+> never touch real data or the tar snapshot library.
+
 ### Pruning (cycle safety)
 
 `nb prune <medium>` is a dry-run by default. **Retention is per-medium**, so the
@@ -401,9 +463,14 @@ compress:
 media:
   disk:
     type: disk
-    path: /var/lib/nbackup/catalog
+    path: /var/lib/nbackup/catalog   # where slots are written
     capacity: 20TB                   # the space NBackup may use here
 landing: disk
+
+# The catalog's own local state (slot cache + tar snapshots) is separate from any
+# medium and defaults to ./nbackup-catalog in the working directory. Set `workdir`
+# to place it deliberately (e.g. alongside the disk medium above).
+# workdir: /var/lib/nbackup/catalog
 
 # Named method+option bundles (Amanda's "dumptype"); a DLE selects one.
 dumptypes:
@@ -563,3 +630,4 @@ make vet      # go vet ./...
 
 [amanda]: https://www.amanda.org/
 [gocloud]: https://gocloud.dev/howto/blob/
+[321]: https://www.veeam.com/blog/321-backup-rule.html

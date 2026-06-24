@@ -129,26 +129,49 @@ func (l *Librarian) ReadFileAt(volume string, epoch, pos int) (media.Header, io.
 // Robotic libraries and unattended runs fall straight through to the underlying
 // error. It returns the accepted volume's identity to record in a placement.
 func (l *Librarian) PrepareWrite(appendable bool, expect string, now time.Time, logf Logf) (string, int, error) {
-	for {
-		name, epoch, err := l.verifyWritable(appendable, now)
-		if err == nil {
-			return name, epoch, nil
+	name, epoch, err := l.verifyWritable(appendable, now)
+	if err == nil {
+		return name, epoch, nil
+	}
+	if !isReloadable(err) {
+		return "", 0, err
+	}
+	// The loaded volume won't do, but loading another might. A robotic library rolls
+	// to its next writable bay on its own (auto-labeling a blank if enabled) — the
+	// same selection Advance does mid-span, applied here so a run can also *start* on
+	// a blank/empty bay (e.g. nothing loaded yet, or the loaded reel already holds a
+	// run on a one-run-per-tape medium) rather than failing with "no tape loaded".
+	if l.isLibrary {
+		name, epoch, _, aerr := l.Advance(appendable, map[string]bool{}, expect, now, logf)
+		if aerr != nil {
+			return "", 0, err // surface the original "why the loaded volume won't do"
 		}
-		if !l.isStation || !isReloadable(err) {
-			return "", 0, err
-		}
-		if l.op == nil {
-			return "", 0, fmt.Errorf("%v (load a writable tape into the drive and retry)", err)
-		}
-		reel, ok := l.promptSwap("", expect, err)
-		if !ok {
-			return "", 0, fmt.Errorf("%v (no tape loaded)", err)
-		}
-		logf.log("loading reel %s into the %q drive", reel, l.medium)
-		if err := l.shelf.Insert(reel); err != nil {
-			return "", 0, err
+		return name, epoch, nil
+	}
+	// A single-drive station prompts the operator to swap in a writable reel.
+	if l.isStation {
+		for {
+			if l.op == nil {
+				return "", 0, fmt.Errorf("%v (load a writable tape into the drive and retry)", err)
+			}
+			reel, ok := l.promptSwap("", expect, err)
+			if !ok {
+				return "", 0, fmt.Errorf("%v (no tape loaded)", err)
+			}
+			logf.log("loading reel %s into the %q drive", reel, l.medium)
+			if err := l.shelf.Insert(reel); err != nil {
+				return "", 0, err
+			}
+			name, epoch, err = l.verifyWritable(appendable, now)
+			if err == nil {
+				return name, epoch, nil
+			}
+			if !isReloadable(err) {
+				return "", 0, err
+			}
 		}
 	}
+	return "", 0, err
 }
 
 // verifyWritable enforces the label protocol before writing to a medium. Address-

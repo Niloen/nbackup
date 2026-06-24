@@ -140,7 +140,7 @@ func runRecoverBatch(eng *engine.Engine, dleName, dateStr string, paths []string
 		}
 		n, ok := tree.Lookup(target)
 		if !ok {
-			return fmt.Errorf("not found: %s", target)
+			return fmt.Errorf("not found: %s%s", target, pathRootHint(target))
 		}
 		fmt.Printf("# %s as of %s (%s)\n", dleName, tree.AsOf, tree.TargetSlot)
 		printListing(n)
@@ -152,14 +152,36 @@ func runRecoverBatch(eng *engine.Engine, dleName, dateStr string, paths []string
 	}
 	steps, err := tree.Collect(paths)
 	if err != nil {
+		if strings.HasPrefix(err.Error(), "not found: ") {
+			return fmt.Errorf("%w%s", err, pathRootHint(strings.TrimPrefix(err.Error(), "not found: ")))
+		}
 		return err
 	}
+	fmt.Println(fileLevelDeletionNote)
 	n, err := eng.ExtractSelection(steps, dest, logf)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("recovered %d entr(ies) from %d archive(s) into %s\n", n, len(steps), dest)
 	return nil
+}
+
+// fileLevelDeletionNote warns that file-level recovery merges the restore chain as a
+// union and so is not deletion-accurate: a file deleted before the as-of date can
+// reappear (GNU tar records deletions in its snapshot, not the member index). A
+// whole-DLE `--all` restore replays the chain with listed-incremental extraction and
+// is deletion-accurate.
+const fileLevelDeletionNote = "note: file-level recovery is not deletion-accurate — a file deleted before the as-of date may reappear; use `nb recover --all` for a deletion-accurate whole-DLE restore."
+
+// pathRootHint reminds a user that recover paths are relative to the DLE's backed-up
+// root, the common reason a real absolute source path is "not found". It fires only
+// for an absolute-looking path (the natural mistake), so a simple relative typo is
+// left with the plain message.
+func pathRootHint(p string) string {
+	if strings.HasPrefix(strings.TrimSpace(p), "/") {
+		return " (paths are relative to the DLE's backed-up root — e.g. /etc, not the source's full absolute path)"
+	}
+	return ""
 }
 
 // recoverDate parses the as-of date, defaulting to today.
@@ -468,6 +490,7 @@ func (sh *recoverShell) extract(args []string) {
 		fmt.Printf("error: %v\n", err)
 		return
 	}
+	fmt.Println(fileLevelDeletionNote)
 	n, err := sh.eng.ExtractSelection(steps, sh.dest, logfStdout)
 	if err != nil {
 		fmt.Printf("error: %v\n", err)

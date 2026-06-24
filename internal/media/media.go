@@ -171,6 +171,7 @@ type Shelf interface {
 type VolumeStatus struct {
 	ID       string // bay id (Library) or reel id (Station shelf); "" for a real drive
 	Label    string
+	Pool     string // the label's pool (the owning medium); "" when blank/foreign/unread
 	Blank    bool
 	Foreign  bool // holds non-NBackup data: not writable without a forced relabel
 	Used     int64

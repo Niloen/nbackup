@@ -99,14 +99,18 @@ func loadConfigRO(cfgPath, catalogOverride string) (*config.Config, error) {
 	return cfg, nil
 }
 
-// applyCatalog applies a -C override (and a default when no media is configured)
-// by defining a disk landing medium pointing at the directory.
+// applyCatalog applies a -C override (and a default when nothing is configured)
+// by defining a disk landing medium pointing at the directory. The default is only
+// synthesized for a truly bare config (no media AND no landing) — the no-config-file
+// case read-only commands use to browse the local catalog. A config that names a
+// `landing:` but omits its media is rejected by config.Validate instead, so its
+// requested landing is never silently replaced by this default.
 func applyCatalog(cfg *config.Config, catalogOverride string) {
 	if catalogOverride != "" {
 		setLocalLanding(cfg, "cli", catalogOverride)
 		return
 	}
-	if len(cfg.Media) == 0 {
+	if len(cfg.Media) == 0 && cfg.Landing == "" {
 		setLocalLanding(cfg, "default", DefaultCatalog)
 	}
 }
@@ -140,7 +144,7 @@ type stdinOperator struct{}
 
 func (stdinOperator) Swap(r librarian.SwapRequest) (string, bool) {
 	fmt.Printf("\nmedium %q needs a tape: %s\n", r.Medium, r.Reason)
-	fmt.Printf("in drive: %s\n", reelDesc(r.Loaded))
+	fmt.Printf("in drive: %s\n", reelDesc(r.Loaded, r.Medium))
 	if r.Expect != "" {
 		fmt.Printf("this run expects tape %q (the oldest reusable volume — load it to recycle, or a fresh tape)\n", r.Expect)
 	}
@@ -150,14 +154,19 @@ func (stdinOperator) Swap(r librarian.SwapRequest) (string, bool) {
 	}
 	fmt.Println("reels in the room (not in the drive):")
 	for _, b := range r.Shelf {
-		fmt.Printf("  %-10s %s\n", b.ID, reelDesc(b))
+		fmt.Printf("  %-10s %s\n", b.ID, reelDesc(b, r.Medium))
 	}
 	def := suggestReel(r)
 	prompt := "load which reel? (id or label"
 	if def != "" {
-		prompt += fmt.Sprintf("; Enter = %s", def)
+		// With a default, a bare Enter takes it; aborting needs EOF (Ctrl-D). Without
+		// one, an empty line aborts. Describe whichever applies — never both, since
+		// "Enter = X" and "empty line aborts" contradict each other.
+		prompt += fmt.Sprintf("; Enter = %s; Ctrl-D aborts", def)
+	} else {
+		prompt += "; empty line aborts"
 	}
-	fmt.Print(prompt + "; empty line aborts): ")
+	fmt.Print(prompt + "): ")
 
 	line, err := stdinReader.ReadString('\n')
 	choice := strings.TrimSpace(line)
@@ -206,11 +215,11 @@ func suggestReel(r librarian.SwapRequest) string {
 
 // reelDesc renders a reel/drive status for the operator prompt, reusing the
 // inventory label/status classifier so the two never diverge.
-func reelDesc(b media.VolumeStatus) string {
+func reelDesc(b media.VolumeStatus, medium string) string {
 	if b.ID == "" && b.Label == "" {
 		return "(empty)"
 	}
-	label, status := volumeLabelStatus(b)
+	label, status := volumeLabelStatus(b, medium)
 	if status == "full" {
 		return fmt.Sprintf("%s (full)", label)
 	}
