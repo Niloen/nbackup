@@ -73,7 +73,10 @@ type DrillReport struct {
 	Worm          WormResult
 	Failures      int      // outcomes that count as failures (Class.IsFailure)
 	Skipped       int      // targets skipped (needs operator, unattended)
-	ForecastBytes int64    // total egress/cost of the selected targets
+	ForecastBytes int64    // total egress (bytes) of the selected targets
+	Priced        bool     // the drill medium has a cost model (cloud); false for local media
+	Provider      string   // the drill medium's rate table (e.g. "aws-s3")
+	ForecastCost  float64  // total egress cost ($) of reading the selected targets off the medium
 	NeverDrilled  []string // configured DLEs never drilled (cold spots)
 	Overdue       int      // DLEs not covered within the window
 }
@@ -112,6 +115,22 @@ func (e *Engine) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 		Apply: opts.Apply, Unattended: opts.Unattended, Ledger: ledger,
 	}
 	rep.NeverDrilled, rep.Overdue = coverage(dles, ledger, opts.Window, opts.Now)
+
+	// Price the egress of reading the selected chains off the drill medium — the
+	// honest cost of an offsite drill (an encrypted+compressed archive is all-or-
+	// nothing, so a structural/chain drill spends the full bytes).
+	if cm := e.costModelFor(medium); cm.Priced() {
+		var refs []archiveRef
+		for _, t := range targets {
+			for _, s := range t.Steps {
+				refs = append(refs, archiveRef{s.SlotID, s.DLE, s.Level})
+			}
+		}
+		est := e.estimateRead(refs, medium)
+		rep.Priced = true
+		rep.Provider = est.Provider
+		rep.ForecastCost = est.Cost
+	}
 
 	if !opts.Apply {
 		// Dry-run: show what would run and its forecast cost; touch no media, write

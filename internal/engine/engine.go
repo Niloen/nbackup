@@ -57,6 +57,7 @@ type Engine struct {
 	vol        media.Volume
 	reader     *slotio.Reader
 	profile    media.Profile
+	cost       media.Cost // landing medium's pricing (dollar peer of profile)
 	minAge     time.Duration
 	cat        *catalog.Catalog
 	methods    map[string]method.Method // by cache key (dumptype or "@method")
@@ -95,6 +96,11 @@ func New(cfg *config.Config) (*Engine, error) {
 		if err := media.ValidateParams(def.Type, def.Params); err != nil {
 			return nil, fmt.Errorf("media %s: %w", mname, err)
 		}
+		// Surface a bad cost override (unknown provider, malformed rate) at load time,
+		// like a param typo, rather than at first cost calculation.
+		if _, err := media.OpenCost(def.Type, media.Options(def.CostOptions())); err != nil {
+			return nil, fmt.Errorf("media %s: %w", mname, err)
+		}
 	}
 	name, err := cfg.LandingName()
 	if err != nil {
@@ -106,6 +112,10 @@ func New(cfg *config.Config) (*Engine, error) {
 		return nil, err
 	}
 	profile, err := media.OpenProfile(mediaDef.Type, media.Options(mediaDef.ProfileOptions()))
+	if err != nil {
+		return nil, err
+	}
+	costModel, err := media.OpenCost(mediaDef.Type, media.Options(mediaDef.CostOptions()))
 	if err != nil {
 		return nil, err
 	}
@@ -138,6 +148,7 @@ func New(cfg *config.Config) (*Engine, error) {
 		vol:        vol,
 		reader:     slotio.NewReader(fopts, dcopts),
 		profile:    profile,
+		cost:       costModel,
 		minAge:     minAge,
 		cat:        cat,
 		methods:    map[string]method.Method{},

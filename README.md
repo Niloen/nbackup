@@ -137,8 +137,8 @@ examples, and `nb completion <shell>` to generate shell completion.
 ```bash
 cp nbackup.example.yaml nbackup.yaml   # edit sources + catalog path
 
-nb plan                # preview today's plan and capacity usage
-nb plan --days 30      # forecast the next 30 daily runs (when fulls land)
+nb plan                # preview today's plan, capacity usage, and $/month cost
+nb plan --days 30      # forecast the next 30 daily runs + the $/month cost curve
 nb dump                # run the backup, producing one sealed slot
 nb dump --dry-run --date 2026-07-15    # plan that day's run; writes nothing
 nb status              # progress of the running (or most recent) dump
@@ -222,6 +222,23 @@ nothing is written.
 `nb dump --dry-run [--date <day>]` is the single-run dry run: it plans the run
 for `--date` against the current catalog — the exact decision a real `nb dump
 --date <day>` would make — and prints it without sealing anything.
+
+#### Cost (what the bill will be)
+
+You reason in dollars per month, not bytes, so `nb plan` also prints the current
+footprint's **storage `$/month`** and the **marginal `$/month`** the next run adds;
+`nb plan --days N` adds a **`$/MONTH` column** projecting the cost curve as fulls
+land and pruning reclaims. A medium **prices itself** — with no config a cloud
+bucket infers its provider from the URL scheme (`s3://` = AWS, `gs://` = GCS,
+`azblob://` = Azure); a local disk/tape has no recurring bill and is shown without a
+cost line. An optional per-medium `cost:` block overrides a rate (a region's egress)
+or names a different provider table. The big surprise — egress on a restore — is
+surfaced where it bites: `nb restore` / `nb recover` estimate **egress `$`** before
+pulling from a cloud store, warning — and, interactively, confirming — when it is
+material; an offsite `nb drill`'s forecast egress carries a `$`. Pricing is a flat
+estimate (storage + egress + request — NBackup does not model Glacier/Deep-Archive
+lifecycle tiers) and **fully offline**: a calculation over the catalog and a rate
+table, no billing API (the provider invoice stays authoritative).
 
 ### Slot naming and multiple runs per day
 

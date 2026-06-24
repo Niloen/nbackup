@@ -89,6 +89,12 @@ func newPlanCmd(a *app) *cobra.Command {
 			} else {
 				fmt.Printf("Capacity: unbounded\n")
 			}
+			if cs := eng.CostSummary(plan); cs.Priced {
+				fmt.Printf("Est. storage cost (%s): %s/month for %s stored\n",
+					cs.Provider, formatUSD(cs.Monthly), sizeutil.FormatBytes(cs.Bytes))
+				fmt.Printf("This run adds: ~%s/month (%s)\n",
+					formatUSD(cs.Marginal), sizeutil.FormatBytes(cs.RunBytes))
+			}
 			if exp, ok := eng.ExpectedVolume(date); ok {
 				fmt.Printf("Tape: %s\n", describeExpectation(exp, date))
 			}
@@ -142,10 +148,20 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 		fmt.Println()
 	}
 
+	// The cost curve overlays the schedule: the projected $/month footprint at the
+	// end of each day as runs land and pruning reclaims. Only shown for a priced
+	// (cloud) landing medium; a local disk has no recurring bill.
+	curve := eng.ForecastCost(start, days)
+	priced := eng.CostSummary(nil).Priced
+
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "DATE\tFULL\tINCR\tEST. SIZE\tFULLS")
+	if priced {
+		fmt.Fprintln(tw, "DATE\tFULL\tINCR\tEST. SIZE\t$/MONTH\tFULLS")
+	} else {
+		fmt.Fprintln(tw, "DATE\tFULL\tINCR\tEST. SIZE\tFULLS")
+	}
 	var windowTotal int64
-	for _, p := range plans {
+	for i, p := range plans {
 		var fulls, incrs int
 		var est int64
 		var fullNames []string
@@ -163,11 +179,22 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 		if names == "" {
 			names = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%d\t%d\t~%s\t%s\n",
-			slot.DateString(p.Date), fulls, incrs, sizeutil.FormatBytes(est), names)
+		if priced {
+			fmt.Fprintf(tw, "%s\t%d\t%d\t~%s\t%s\t%s\n",
+				slot.DateString(p.Date), fulls, incrs, sizeutil.FormatBytes(est),
+				formatUSD(curve[i].Monthly), names)
+		} else {
+			fmt.Fprintf(tw, "%s\t%d\t%d\t~%s\t%s\n",
+				slot.DateString(p.Date), fulls, incrs, sizeutil.FormatBytes(est), names)
+		}
 	}
 	tw.Flush()
 	fmt.Printf("\nWindow total (estimated): ~%s over %d run(s)\n", sizeutil.FormatBytes(windowTotal), days)
+	if priced && len(curve) > 0 {
+		last := curve[len(curve)-1]
+		fmt.Printf("Projected storage cost at end of window: %s/month (%s stored)\n",
+			formatUSD(last.Monthly), sizeutil.FormatBytes(last.Bytes))
+	}
 	return nil
 }
 

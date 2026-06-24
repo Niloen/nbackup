@@ -64,6 +64,19 @@ media:
     # environment (AWS_*, GOOGLE_APPLICATION_CREDENTIALS, AZURE_*), so secrets stay
     # out of the config file. An object store is address-identified: no labels, no
     # swaps, nothing to inventory — it behaves like the disk medium.
+    #
+    # COST (optional). With no `cost:` block a cloud medium prices itself from its URL
+    # scheme (s3:// = AWS, gs:// = GCS, azblob:// = Azure; local disk/tape have no
+    # recurring cloud bill), so `nb plan` already shows $/month and the next run's
+    # marginal cost, and a cloud restore warns about egress first. Pricing is a flat
+    # estimate — storage + egress + request (the provider invoice is authoritative);
+    # NBackup does not model Glacier/Deep-Archive lifecycle tiers. Add a block only to
+    # override a rate (a region's egress) or pick a different provider table:
+    # cost:
+    #   provider: aws-s3            # base rate table (default: inferred from the url)
+    #   storage_per_gb_month: 0.021 # recurring $/GiB-month
+    #   egress_per_gb: 0.05         # $/GiB transferred out (read off the medium)
+    #   get_per_1000: 0.0004        # $ per 1000 read requests
 
 # Which medium slots are created on (the landing).
 landing: fast-disk

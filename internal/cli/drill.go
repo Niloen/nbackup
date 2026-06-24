@@ -176,7 +176,12 @@ func printDrillReport(r *engine.DrillReport) {
 			}
 		}
 		tw.Flush()
-		fmt.Printf("Forecast egress (drilled bytes read off %q): %s\n\n", r.Medium, sizeutil.FormatBytes(r.ForecastBytes))
+		if r.Priced {
+			fmt.Printf("Forecast egress (drilled bytes read off %q): %s — ~%s (%s)\n\n",
+				r.Medium, sizeutil.FormatBytes(r.ForecastBytes), formatUSD(r.ForecastCost), r.Provider)
+		} else {
+			fmt.Printf("Forecast egress (drilled bytes read off %q): %s\n\n", r.Medium, sizeutil.FormatBytes(r.ForecastBytes))
+		}
 	}
 
 	// Coverage / SLO.

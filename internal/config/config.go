@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -160,7 +161,47 @@ type Media struct {
 	Capacity   string            `yaml:"capacity"`    // space NBackup may use here, e.g. "20TB" ("" = unbounded)
 	MinimumAge string            `yaml:"minimum_age"` // retention floor before a slot may be retired here (default: one cycle)
 	Appendable *bool             `yaml:"appendable"`  // tape: pack many runs per tape (default) vs one run per tape
+	Cost       *CostConfig       `yaml:"cost"`        // optional pricing overrides; absent = inferred from type/url
 	Params     map[string]string `yaml:",inline"`     // type-specific connection params (path, bucket, tapes, ...)
+}
+
+// CostConfig overrides a medium's inferred pricing. Every field is optional: an
+// absent cost block (the common case) lets the medium price itself from its type and
+// bucket URL scheme (s3:// = AWS, gs:// = GCS, azblob:// = Azure). A block is only for
+// special cases — a different region's egress rate, or an S3-compatible provider's
+// rates. Pointers distinguish an explicit value from an absent one, so an override of
+// $0 is honored.
+type CostConfig struct {
+	Provider          string   `yaml:"provider"`             // base rate table to use (default: inferred from the url)
+	StoragePerGBMonth *float64 `yaml:"storage_per_gb_month"` // recurring $/GiB-month
+	EgressPerGB       *float64 `yaml:"egress_per_gb"`        // $/GiB transferred out
+	GetPer1000        *float64 `yaml:"get_per_1000"`         // $ per 1000 read requests
+}
+
+// CostOptions flattens the medium's connection params (the bucket url, for scheme
+// inference) and any cost-block overrides into the generic option map a media.Cost
+// factory consumes — the dollar peer of ProfileOptions.
+func (m Media) CostOptions() map[string]string {
+	opts := map[string]string{}
+	for k, v := range m.Params {
+		opts[k] = v
+	}
+	if m.Cost == nil {
+		return opts
+	}
+	if m.Cost.Provider != "" {
+		opts["provider"] = m.Cost.Provider
+	}
+	putRate(opts, "storage_per_gb_month", m.Cost.StoragePerGBMonth)
+	putRate(opts, "egress_per_gb", m.Cost.EgressPerGB)
+	putRate(opts, "get_per_1000", m.Cost.GetPer1000)
+	return opts
+}
+
+func putRate(opts map[string]string, key string, v *float64) {
+	if v != nil {
+		opts[key] = strconv.FormatFloat(*v, 'f', -1, 64)
+	}
 }
 
 // IsAppendable reports whether a tape may accumulate many runs until full

@@ -381,6 +381,50 @@ profile reads the same count key the changer does — `bays` for a library, `ree
 for a manual single-drive station — so the planner's capacity never disagrees with
 the medium it lands on.
 
+**Cost model (`media.Cost`) — a medium prices itself, in dollars, offline.** The
+persona reasons in dollars per month, not bytes, and the bill's surprises are the
+non-storage charges (chiefly egress on a restore). Because NBackup already accounts
+bytes precisely — estimates, forecast, capacity — pricing is a **thin pure
+calculation on top**, the dollar peer of `media.Profile`'s bytes. `media.Cost` is
+one medium's *flat* rate table: a storage `$/GiB-month`, an egress `$/GiB`, and a
+GET `$/1000`. Four decisions carry it:
+- **A medium prices itself, like it sizes itself.** Pricing is a per-medium concern
+  registered exactly like capacity: `media.RegisterCost`/`OpenCost` mirror
+  `RegisterProfile`/`OpenProfile`, and `media/cloud` owns the provider rate tables
+  (`aws-s3`/`gcs`/`azure-blob`/`generic-cloud`) and the URL-scheme inference that
+  picks one. The core never learns provider pricing; the engine just calls
+  `OpenCost` and consumes a dollar number the way it consumes profile bytes. A medium
+  type with no registered cost (disk, tape) is **unpriced** — the zero `Cost`, no
+  recurring cloud bill — and the CLI suppresses its cost output, mirroring how an
+  unregistered profile is unbounded.
+- **Zero-config, with overrides.** With no `cost:` block a cloud medium reads its
+  bucket URL scheme (`s3://` = AWS, `gs://` = GCS, `azblob://` = Azure; anything else
+  → a generic cloud table) so `nb plan` shows a monthly bill out of the box. The
+  optional `cost:` block names a different provider table or overrides individual
+  rates (a region's egress, an S3-compatible provider) — flattened into the factory's
+  options like `ProfileOptions`, validated at load.
+- **No lifecycle tiers, deliberately.** NBackup does **not** model storage-class
+  transitions (Glacier/Deep Archive). Which tier bytes physically sit in is
+  operator-configured bucket-side; a forecast of it would more often be wrong than
+  useful, and the machinery (per-class rates, retrieval fees + latency, minimum-
+  retention floors, an age→class schedule) is complexity for accuracy NBackup can't
+  deliver. Flat pricing is the honest estimate. (Considered and removed.)
+- **Estimation only, fully offline; the overlay reuses the byte machinery.** It is a
+  pure calculation over the catalog and the rate table — **no billing API** — so it
+  runs wherever planning runs and never touches a slow/offline volume (the provider
+  invoice stays authoritative; the tables are list-price estimates). The dollar
+  overlay lives in `engine/cost.go` (`CostSummary`, `ForecastCost`,
+  `RestoreCost`/`SelectionCost`), mirroring the capacity overlay
+  (`StoredBytes`/`CapacityStatus`). `ForecastCost` walks the existing run simulation
+  day by day, growing a footprint with each simulated run and evicting it with the
+  medium's own `Reclaim` + `policy.Protected` (the primitives `nb prune` uses), then
+  reprices the survivors — so the `$/month` curve reflects fulls/incrementals landing
+  and pruning reclaiming. The read paths (`nb restore`/`recover`/`drill`) price the
+  egress of the chain they will read off the chosen copy and, when material, warn —
+  prompting interactively, never blocking a cron read (it prints the estimate and
+  proceeds, like the unattended drill). An offsite drill spends the full bytes
+  (encrypted+compressed is all-or-nothing), so its dry-run egress now carries a `$`.
+
 ## Conventions for working here
 
 - **Commits:** only when the user explicitly says so. **Never push** (no

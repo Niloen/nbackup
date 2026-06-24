@@ -21,7 +21,7 @@ import (
 func newRecoverCmd(a *app) *cobra.Command {
 	var dleName, dateStr, dest string
 	var paths []string
-	var listOnly, all, force bool
+	var listOnly, all, force, yes bool
 	cmd := &cobra.Command{
 		Use:   "recover",
 		Short: "Browse a date and recover selected files, or restore a whole DLE (amrecover-style)",
@@ -54,10 +54,10 @@ func newRecoverCmd(a *app) *cobra.Command {
 				if listOnly || len(paths) > 0 {
 					return fmt.Errorf("--all restores the whole DLE and cannot be combined with --path/--list")
 				}
-				return runRecoverRestore(eng, dleName, dateStr, dest, force, a.logf())
+				return runRecoverRestore(eng, dleName, dateStr, dest, force, yes, a.logf())
 			}
 			if listOnly || len(paths) > 0 {
-				return runRecoverBatch(eng, dleName, dateStr, paths, dest, listOnly, a.logf())
+				return runRecoverBatch(eng, dleName, dateStr, paths, dest, listOnly, yes, a.logf())
 			}
 			return runRecoverShell(eng, dleName, dateStr, dest)
 		},
@@ -69,13 +69,14 @@ func newRecoverCmd(a *app) *cobra.Command {
 	cmd.Flags().BoolVar(&listOnly, "list", false, "print a listing of --path (or the root) and exit")
 	cmd.Flags().BoolVar(&all, "all", false, "restore the whole DLE (deletion-accurate) as of the date into --dest")
 	cmd.Flags().BoolVar(&force, "force", false, "with --all, restore into a non-empty --dest (its contents are pruned to match the backup)")
+	cmd.Flags().BoolVar(&yes, "yes", false, "skip the egress-cost confirmation when reading from a cloud/cold medium")
 	return cmd
 }
 
 // runRecoverRestore performs a whole-DLE, deletion-accurate restore as of a date —
 // the folded-in `nb restore`. With --dle it restores that DLE; without, every DLE
 // in the catalog, each into its own subdirectory of dest.
-func runRecoverRestore(eng *engine.Engine, dleName, dateStr, dest string, force bool, logf engine.Logf) error {
+func runRecoverRestore(eng *engine.Engine, dleName, dateStr, dest string, force, yes bool, logf engine.Logf) error {
 	asOf, err := recoverDate(dateStr)
 	if err != nil {
 		return err
@@ -94,6 +95,9 @@ func runRecoverRestore(eng *engine.Engine, dleName, dateStr, dest string, force 
 		if len(dles) == 0 {
 			return fmt.Errorf("no DLEs in the catalog")
 		}
+	}
+	if !confirmRead(eng.RestoreCost(dles, asOf), yes) {
+		return nil
 	}
 	for _, name := range dles {
 		out := dest
@@ -117,7 +121,7 @@ func runRecoverRestore(eng *engine.Engine, dleName, dateStr, dest string, force 
 
 // runRecoverBatch handles the non-interactive paths: --list prints a listing,
 // otherwise --path selections are extracted into --dest.
-func runRecoverBatch(eng *engine.Engine, dleName, dateStr string, paths []string, dest string, listOnly bool, logf engine.Logf) error {
+func runRecoverBatch(eng *engine.Engine, dleName, dateStr string, paths []string, dest string, listOnly, yes bool, logf engine.Logf) error {
 	asOf, err := recoverDate(dateStr)
 	if err != nil {
 		return err
@@ -156,6 +160,9 @@ func runRecoverBatch(eng *engine.Engine, dleName, dateStr string, paths []string
 			return fmt.Errorf("%w%s", err, pathRootHint(strings.TrimPrefix(err.Error(), "not found: ")))
 		}
 		return err
+	}
+	if !confirmRead(eng.SelectionCost(steps), yes) {
+		return nil
 	}
 	fmt.Println(fileLevelDeletionNote)
 	n, err := eng.ExtractSelection(steps, dest, logf)
@@ -488,6 +495,9 @@ func (sh *recoverShell) extract(args []string) {
 	steps, err := sh.sess.CollectSelection()
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
+		return
+	}
+	if !confirmRead(sh.eng.SelectionCost(steps), false) {
 		return
 	}
 	fmt.Println(fileLevelDeletionNote)
