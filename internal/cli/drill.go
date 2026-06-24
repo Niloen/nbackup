@@ -36,7 +36,12 @@ func newDrillCmd(a *app) *cobra.Command {
 			"for WORM/immutability, and prints a 3-2-1-1-0 posture audit. Dry-run by default; pass " +
 			"--apply to run it. Use --from to drill the offsite copy, and --unattended for cron (it " +
 			"never prompts and skips any target that would need a tape swap). Exits non-zero on any " +
-			"classified drill failure.",
+			"classified drill failure.\n\n" +
+			"Tiers (cheapest → strongest), set with --tier (default structural):\n" +
+			"  checksum    re-hash stored bytes against the seal — integrity only, no decode\n" +
+			"  structural  decrypt+decompress+`tar -t` — proves a valid restorable stream, writes nothing\n" +
+			"  chain       real point-in-time restore (full+incrementals) to scratch — the strong proof\n" +
+			"  stock       restore via the documented gpg/zstd/tar one-liner — proves recovery needs no NBackup",
 		Example: "  nb drill\n  nb drill --apply\n  nb drill --apply --from offsite --tier structural\n  nb dump && nb sync --apply && nb drill --apply --unattended",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -130,7 +135,7 @@ func newDrillCmd(a *app) *cobra.Command {
 	cmd.Flags().StringVar(&window, "window", "", "each DLE should be drilled within this window (e.g. 30d)")
 	cmd.Flags().IntVar(&sample, "sample", 1, "max DLEs to drill this run")
 	cmd.Flags().StringVar(&from, "from", "", "source medium to drill (default: the landing medium)")
-	cmd.Flags().StringVar(&tier, "tier", "", "depth: checksum | structural | chain | stock (default structural)")
+	cmd.Flags().StringVar(&tier, "tier", "", "drill depth (default structural); see Tiers above for each level")
 	return cmd
 }
 

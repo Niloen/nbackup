@@ -574,7 +574,7 @@ type PostureCheck struct {
 // the per-DLE drill outcomes.
 type Posture struct {
 	Checks    []PostureCheck
-	Copies    int // copies of the weakest-covered slot
+	Copies    int // backup copies of the weakest-covered slot (the live source is the implicit +1)
 	Media     int // distinct media holding copies
 	Offsite   bool
 	Immutable bool
@@ -611,13 +611,17 @@ func (e *Engine) posture(worm WormResult, failures int) Posture {
 		p.Checks = append(p.Checks, PostureCheck{Name: name, Status: st, Detail: detail})
 	}
 
+	// The live dump source is copy #1 in the canonical 3-2-1 rule (production data
+	// + 2 backups = 3), so a slot is compliant once it has 2 backup copies. We count
+	// catalog placements — the verifiable backup copies; the source is the implicit
+	// third NBackup can never drill, so it is never enough on its own.
 	switch {
-	case minCopies >= 3:
-		add("3 copies", PostureOK, "every slot has at least 3 copies")
-	case minCopies >= 1:
-		add("3 copies", PostureWarn, fmt.Sprintf("weakest slot has %d cop(ies); 3-2-1 recommends 3", minCopies))
+	case minCopies >= 2:
+		add("3 copies", PostureOK, fmt.Sprintf("source + %d backup copies (3-2-1 satisfied)", minCopies))
+	case minCopies == 1:
+		add("3 copies", PostureWarn, "source + 1 backup copy; 3-2-1 wants 2 backups")
 	default:
-		add("3 copies", PostureFail, "no copies recorded for some slot")
+		add("3 copies", PostureFail, "only the live source — no backup copy recorded for some slot")
 	}
 	if len(mediaSet) >= 2 {
 		add("2 media", PostureOK, fmt.Sprintf("%d media hold copies", len(mediaSet)))
