@@ -8,6 +8,10 @@ import (
 	"github.com/Niloen/nbackup/internal/lock"
 )
 
+// Version is reported by `nb --version`. A single pre-release marker until the
+// build stamps a real tag.
+const Version = "0.1.0-dev"
+
 const rootLong = `NBackup - immutable, slot-based backups.
 
 NBackup produces one immutable slot per run: a directory of self-describing
@@ -31,9 +35,10 @@ type app struct {
 func NewRootCmd() *cobra.Command {
 	a := &app{}
 	root := &cobra.Command{
-		Use:   "nb",
-		Short: "Immutable, slot-based backups inspired by Amanda",
-		Long:  rootLong,
+		Use:     "nb",
+		Short:   "Immutable, slot-based backups inspired by Amanda",
+		Long:    rootLong,
+		Version: Version,
 		// Subcommands return errors that main turns into a non-zero exit via
 		// Fatalf; cobra should not also print them or dump usage on failure.
 		SilenceUsage:  true,
@@ -55,7 +60,6 @@ func NewRootCmd() *cobra.Command {
 		newSlotCmd(a),
 		newMediumCmd(a),
 		newVerifyCmd(a),
-		newRestoreCmd(a),
 		newRecoverCmd(a),
 		newCopyCmd(a),
 		newSyncCmd(a),

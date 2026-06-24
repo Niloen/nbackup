@@ -249,7 +249,14 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	var c Config
-	if err := yaml.Unmarshal(data, &c); err != nil {
+	// KnownFields rejects unknown keys so a typo in a safety-relevant field
+	// (a misspelled `landing`, `cycle`, a nested compress/encrypt key) is a hard
+	// error rather than a silently-ignored default. Type-specific medium and
+	// dumptype params still flow through their inline maps, so connection keys
+	// (path, url, bays, exclude, …) are unaffected.
+	dec := yaml.NewDecoder(strings.NewReader(string(data)))
+	dec.KnownFields(true)
+	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	if err := c.Validate(); err != nil {

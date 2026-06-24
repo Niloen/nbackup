@@ -52,6 +52,19 @@ func errPastPlan(date time.Time) error {
 	return nil
 }
 
+// errPastDump rejects dumping for a date already behind today. Backdating a run
+// is not a supported use case: the planner only consults history strictly before
+// the run date, so a past date would mis-level the new slot (climbing the global
+// incremental level rather than starting that date's own chain) and splice an
+// out-of-order archive into date-ordered restore chains. Today and future are fine.
+func errPastDump(date time.Time) error {
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	if date.Before(today) {
+		return fmt.Errorf("cannot dump for %s: it is in the past, and backdating a run is not supported (the planner builds on history before the run date) — use today's date", date.Format("2006-01-02"))
+	}
+	return nil
+}
+
 // loadConfig loads configuration for commands that need full config (plan/dump),
 // applying a catalog override and a default catalog path.
 func loadConfig(cfgPath, catalogOverride string) (*config.Config, error) {
@@ -196,6 +209,8 @@ func reelDesc(b media.VolumeStatus) string {
 	switch {
 	case b.ID == "" && b.Label == "":
 		return "(empty)"
+	case b.Foreign:
+		return "(foreign)"
 	case b.Blank:
 		return "(blank)"
 	case b.Capacity > 0 && b.Used >= b.Capacity:

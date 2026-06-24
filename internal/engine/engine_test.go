@@ -63,7 +63,7 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 
 	dest := t.TempDir()
 	name := config.DLE{Host: "h", Path: src}.Name()
-	if err := eng.Restore(s2.ID, name, dest, nil); err != nil {
+	if err := eng.Restore(s2.ID, name, dest, false, nil); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "keep.txt"), "v2")
@@ -167,7 +167,7 @@ func TestParallelDumpers(t *testing.T) {
 	// Each DLE restores to its original content.
 	for i, d := range cfg.Sources {
 		dest := t.TempDir()
-		if err := eng.Restore(s.ID, d.Name(), dest, nil); err != nil {
+		if err := eng.Restore(s.ID, d.Name(), dest, false, nil); err != nil {
 			t.Fatalf("restore %s: %v", d.Name(), err)
 		}
 		assertContent(t, filepath.Join(dest, names[i]+".txt"), "content-"+names[i])
@@ -232,7 +232,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 	}
 	dest := t.TempDir()
 	name := config.DLE{Host: "h", Path: src}.Name()
-	if err := teng.Restore(s.ID, name, dest, nil); err != nil {
+	if err := teng.Restore(s.ID, name, dest, false, nil); err != nil {
 		t.Fatalf("restore from tape: %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "f.txt"), "copy me to tape")
@@ -344,7 +344,7 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 	}
 	dest := t.TempDir()
 	name := config.DLE{Host: "h", Path: src}.Name()
-	if err := eng.Restore(s.ID, name, dest, nil); err != nil {
+	if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
 		t.Fatalf("restore (failover to copy): %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "f.txt"), "two homes")
@@ -462,12 +462,12 @@ func TestTapeLibraryRestore(t *testing.T) {
 
 	name := config.DLE{Host: "h", Path: src}.Name()
 	d1 := t.TempDir()
-	if err := eng.Restore(s1.ID, name, d1, nil); err != nil {
+	if err := eng.Restore(s1.ID, name, d1, false, nil); err != nil {
 		t.Fatalf("restore s1 (auto-mount Tape1): %v", err)
 	}
 	assertContent(t, filepath.Join(d1, "f.txt"), "v1")
 	d2 := t.TempDir()
-	if err := eng.Restore(s2.ID, name, d2, nil); err != nil {
+	if err := eng.Restore(s2.ID, name, d2, false, nil); err != nil {
 		t.Fatalf("restore s2 (auto-mount Tape2): %v", err)
 	}
 	assertContent(t, filepath.Join(d2, "f.txt"), "v2")
@@ -673,13 +673,13 @@ func TestManualStationReadSwap(t *testing.T) {
 	name := config.DLE{Host: "h", Path: src}.Name()
 	// The drive holds Reel-B; restoring s1 must prompt to swap in Reel-A.
 	d1 := t.TempDir()
-	if err := eng.Restore(s1.ID, name, d1, logfDiscard); err != nil {
+	if err := eng.Restore(s1.ID, name, d1, false, logfDiscard); err != nil {
 		t.Fatalf("restore s1 (swap in Reel-A): %v", err)
 	}
 	assertContent(t, filepath.Join(d1, "f.txt"), "v1")
 	// And s2 must prompt to swap Reel-B back in.
 	d2 := t.TempDir()
-	if err := eng.Restore(s2.ID, name, d2, logfDiscard); err != nil {
+	if err := eng.Restore(s2.ID, name, d2, false, logfDiscard); err != nil {
 		t.Fatalf("restore s2 (swap in Reel-B): %v", err)
 	}
 	assertContent(t, filepath.Join(d2, "f.txt"), "v2")
@@ -1008,7 +1008,7 @@ func TestDumpSpansArchiveAcrossTapes(t *testing.T) {
 	// Restore must mount each bay in sequence to rebuild the original file.
 	dest := t.TempDir()
 	name := config.DLE{Host: "h", Path: src}.Name()
-	if err := eng.Restore(s.ID, name, dest, nil); err != nil {
+	if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
 		t.Fatalf("restore from spanned tapes: %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "big.txt"), body)
@@ -1072,7 +1072,7 @@ func TestCopySpansArchiveAcrossTapes(t *testing.T) {
 	}
 	dest := t.TempDir()
 	name := config.DLE{Host: "h", Path: src}.Name()
-	if err := eng.Restore(s.ID, name, dest, nil); err != nil {
+	if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
 		t.Fatalf("restore from spanned tape copy: %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "big.txt"), body)
@@ -1123,7 +1123,7 @@ func TestPartSizeSplitsWithinTape(t *testing.T) {
 		t.Fatalf("verify: failures=%d err=%v", failures, err)
 	}
 	dest := t.TempDir()
-	if err := eng.Restore(s.ID, config.DLE{Host: "h", Path: src}.Name(), dest, nil); err != nil {
+	if err := eng.Restore(s.ID, config.DLE{Host: "h", Path: src}.Name(), dest, false, nil); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "big.txt"), body)

@@ -6,11 +6,13 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -86,6 +88,15 @@ func (e *Engine) librarianFor(name string) (lib *librarian.Librarian, def config
 // (refreshing it from the volume the first time it is needed). Dump methods are
 // opened lazily per dumptype.
 func New(cfg *config.Config) (*Engine, error) {
+	// Validate every medium's inline options against the keys its type accepts, so
+	// a typo (e.g. `capcity:`) is a hard error rather than a silently-ignored knob.
+	// Done here, where the media registry is loaded, and over all media (not just
+	// landing) so an offsite tier's typo is caught too.
+	for mname, def := range cfg.Media {
+		if err := media.ValidateParams(def.Type, def.Params); err != nil {
+			return nil, fmt.Errorf("media %s: %w", mname, err)
+		}
+	}
 	name, err := cfg.LandingName()
 	if err != nil {
 		return nil, err
@@ -943,8 +954,14 @@ func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 		if sealed[id] {
 			continue // a sealed slot occupies this id; try the next sequence
 		}
-		// Unsealed leftover from a failed attempt: reclaim it.
+		// Unsealed leftover from a failed attempt: reclaim it. A medium that cannot
+		// remove a single slot (tape — space is reclaimed by relabeling the whole
+		// volume) leaves the orphan in place; a scan ignores it (it has no seal), and
+		// it is reclaimed on the next relabel. Take the next id rather than failing.
 		if err := e.vol.RemoveSlot(id); err != nil {
+			if errors.Is(err, media.ErrNoPerSlotRemoval) {
+				continue
+			}
 			return "", 0, err
 		}
 		return id, seq, nil
@@ -1009,12 +1026,26 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 		return fmt.Errorf("archive %s: %w", item.Name, err)
 	}
 
-	logf.log("  %d file(s), %s compressed", arch.FileCount, sizeutil.FormatBytes(arch.Compressed))
+	sizeLabel := "compressed"
+	if arch.Codec == "none" {
+		sizeLabel = "stored" // no compressor in the pipe; "compressed" would be a lie
+	}
+	logf.log("  %d file(s), %s %s", arch.FileCount, sizeutil.FormatBytes(arch.Compressed), sizeLabel)
 	return nil
 }
 
-// Restore reconstructs a DLE as of a slot into destDir.
-func (e *Engine) Restore(slotID, dleName, destDir string, logf Logf) error {
+// Restore reconstructs a DLE as of a slot into destDir. A whole-DLE restore
+// replays the chain with GNU tar's listed-incremental extraction, which makes
+// each restored directory match the archive's census — deleting anything on disk
+// not in it. Pointed at a populated destDir that prunes unrelated files, so unless
+// force is set Restore refuses a non-empty destination rather than silently
+// destroying its contents.
+func (e *Engine) Restore(slotID, dleName, destDir string, force bool, logf Logf) error {
+	if !force {
+		if err := errNonEmptyDest(destDir); err != nil {
+			return err
+		}
+	}
 	steps, err := restore.Chain(e.cat.Slots(), dleName, slotID)
 	if err != nil {
 		return err
@@ -1028,6 +1059,37 @@ func (e *Engine) Restore(slotID, dleName, destDir string, logf Logf) error {
 	return nil
 }
 
+// RestoreAsOf reconstructs a whole DLE as of a date (YYYY-MM-DD) into destDir —
+// the deletion-accurate, whole-DLE counterpart to file-level recover. It resolves
+// the date to the most recent slot on or before it (the same resolution recover's
+// browse uses), then replays that DLE's chain. So a bare date means the same slot
+// for both the browse view and a full restore.
+func (e *Engine) RestoreAsOf(dle, asOf, destDir string, force bool, logf Logf) error {
+	target, err := recovery.AsOf(e.cat.Slots(), asOf)
+	if err != nil {
+		return err
+	}
+	return e.Restore(target, dle, destDir, force, logf)
+}
+
+// errNonEmptyDest refuses a whole-DLE restore into a destination that already
+// holds files. Listed-incremental extraction prunes the destination to match the
+// backup (that is how deletions are applied), so restoring over an existing tree
+// would delete unrelated files in it. A missing or empty directory is fine.
+func errNonEmptyDest(destDir string) error {
+	entries, err := os.ReadDir(destDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // will be created empty
+		}
+		return err
+	}
+	if len(entries) > 0 {
+		return fmt.Errorf("destination %s is not empty: a whole-DLE restore prunes it to match the backup (GNU tar incremental extraction deletes files not in the archive), which would remove unrelated files — restore into a new/empty directory, or pass --force to restore into this one anyway", destDir)
+	}
+	return nil
+}
+
 func (e *Engine) extractStep(step restore.Step, destDir string) error {
 	m, err := e.methodByName(step.Method)
 	if err != nil {
@@ -1037,8 +1099,24 @@ func (e *Engine) extractStep(step restore.Step, destDir string) error {
 	if err != nil {
 		return err
 	}
-	defer rc.Close()
-	return m.Restore(rc, destDir, nil)
+	rerr := m.Restore(rc, destDir, nil)
+	return joinPipelineErr(rerr, rc.Close())
+}
+
+// joinPipelineErr combines the extractor's error with the decrypt/decompress
+// pipeline's close error. tar sits last in the pipe, so when an upstream child
+// fails (e.g. gpg with the wrong key, or a missing passphrase file) tar only sees
+// truncated input and reports a generic "not a tar archive"; the real cause
+// surfaces on the pipeline's Close. Surfacing both means a key/decrypt failure is
+// no longer hidden behind tar's misleading message.
+func joinPipelineErr(extractErr, closeErr error) error {
+	if extractErr == nil {
+		return closeErr // normal Close returns nil; a late pipeline error still surfaces
+	}
+	if closeErr != nil {
+		return fmt.Errorf("%w\n(decrypt/decompress pipeline: %v)", extractErr, closeErr)
+	}
+	return extractErr
 }
 
 // OpenRecover builds a browsable filesystem of a DLE as of a date (YYYY-MM-DD) —
@@ -1062,8 +1140,7 @@ func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, 
 			return files, err
 		}
 		logf.log("extracting %d file(s) from %s %s L%d", len(st.Members), st.SlotID, st.DLE, st.Level)
-		err = m.Restore(rc, destDir, st.Members)
-		rc.Close()
+		err = joinPipelineErr(m.Restore(rc, destDir, st.Members), rc.Close())
 		if err != nil {
 			return files, fmt.Errorf("extract from %s %s L%d: %w", st.SlotID, st.DLE, st.Level, err)
 		}
@@ -1164,14 +1241,17 @@ func (e *Engine) verifySlot(id string, logf Logf) (bool, error) {
 		logf.log("%s: NO COPIES", id)
 		return false, nil
 	}
-	ok := true
 	// Verify every copy on every medium, so a corrupt copy is caught even when
-	// another is fine.
+	// another is fine. Track which copies passed so a failure can still reassure
+	// the operator that an intact copy remains (redundancy is the point of having
+	// more than one).
+	var goodCopies, badCopies []string
 	for _, p := range placements {
+		copyOK := true
 		lib, _, _, err := e.librarianFor(p.Medium)
 		if err != nil {
 			logf.log("%s [%s]: ERROR %v", id, p.Medium, err)
-			ok = false
+			badCopies = append(badCopies, p.Medium)
 			continue
 		}
 		opener := e.partOpener(lib)
@@ -1179,34 +1259,73 @@ func (e *Engine) verifySlot(id string, logf Logf) (bool, error) {
 			parts, found := p.Parts(a.DLE, a.Level)
 			if !found {
 				logf.log("%s [%s]: %s L%d POSITION MISSING", id, p.Medium, a.DLE, a.Level)
-				ok = false
+				copyOK = false
 				continue
 			}
 			good, verr := e.reader.VerifyParts(toSlotioParts(parts), slotio.Expect{Slot: id, DLE: a.DLE, Level: a.Level}, a.SHA256, opener)
 			if verr != nil {
 				logf.log("%s [%s]: %s L%d ERROR %v", id, p.Medium, a.DLE, a.Level, verr)
-				ok = false
+				copyOK = false
 			} else if !good {
 				logf.log("%s [%s]: %s L%d CHECKSUM MISMATCH", id, p.Medium, a.DLE, a.Level)
-				ok = false
+				copyOK = false
 			}
 		}
+		if copyOK {
+			goodCopies = append(goodCopies, p.Medium)
+		} else {
+			badCopies = append(badCopies, p.Medium)
+		}
 	}
-	if ok {
+	if len(badCopies) == 0 {
 		logf.log("%s: OK (%d archive(s), %d cop(ies))", id, len(s.Archives), len(placements))
+		return true, nil
 	}
-	return ok, nil
+	// At least one copy failed. Surface that an intact copy remains, if any, so the
+	// operator knows the slot is still recoverable (and which medium to re-copy from).
+	if len(goodCopies) > 0 {
+		logf.log("%s: FAILED on %s, but an intact copy remains on %s (re-copy to repair)",
+			id, strings.Join(badCopies, ", "), strings.Join(goodCopies, ", "))
+	} else {
+		logf.log("%s: FAILED on all cop(ies): %s", id, strings.Join(badCopies, ", "))
+	}
+	return false, nil
 }
 
-// Prune reconciles the landing medium to its retention model: it computes the
-// protected slots (cross-cutting safety) and asks the medium's retention
-// strategy which non-protected slots to reclaim to fit capacity.
-func (e *Engine) Prune(now time.Time, apply bool, logf Logf) (eligible int, err error) {
-	slots := e.cat.SlotsOn(e.mediumName)
-	protected := policy.Protected(slots, e.minAge, now)
+// profileFor returns the capacity/reclamation profile for a named medium: the
+// landing medium's cached profile, or one opened on demand for any other medium.
+func (e *Engine) profileFor(name string) (media.Profile, error) {
+	if name == e.mediumName {
+		return e.profile, nil
+	}
+	d, ok := e.cfg.Media[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown medium %q", name)
+	}
+	return media.OpenProfile(d.Type, media.Options(d.ProfileOptions()))
+}
+
+// Prune reconciles a named medium to its own retention model: it computes that
+// medium's protected slots (its own minimum_age and last-recovery-path floor) and
+// asks its retention strategy which non-protected slots to reclaim to fit its
+// capacity. Retention is per-medium, so each store is pruned against its own slots
+// — pruning one medium never touches a copy on another. Any configured medium can
+// be pruned (not only the landing one), so an offsite tier can be trimmed too.
+func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) (eligible int, err error) {
+	def, ok := e.cfg.Media[mediumName]
+	if !ok {
+		return 0, fmt.Errorf("unknown medium %q", mediumName)
+	}
+	profile, err := e.profileFor(mediumName)
+	if err != nil {
+		return 0, err
+	}
+	minAge := e.cfg.MinAgeFor(def)
+	slots := e.cat.SlotsOn(mediumName)
+	protected := policy.Protected(slots, minAge, now)
 
 	reclaim := map[string]media.Reclamation{}
-	for _, r := range e.profile.Reclaim(slots, protected, now) {
+	for _, r := range profile.Reclaim(slots, protected, now) {
 		reclaim[r.SlotID] = r
 	}
 
@@ -1221,6 +1340,13 @@ func (e *Engine) Prune(now time.Time, apply bool, logf Logf) (eligible int, err 
 		}
 	}
 
+	// Open the medium's volume only when there is something to actually delete.
+	var vol media.Volume
+	if apply && len(reclaim) > 0 {
+		if vol, _, _, err = e.mediumVolume(mediumName); err != nil {
+			return eligible, err
+		}
+	}
 	for _, s := range slots {
 		r, ok := reclaim[s.ID]
 		if !ok {
@@ -1230,10 +1356,10 @@ func (e *Engine) Prune(now time.Time, apply bool, logf Logf) (eligible int, err 
 		if apply {
 			// Reclaim the copy on this medium only; the slot survives in the catalog
 			// if it still has a copy elsewhere.
-			if err := e.vol.RemoveSlot(s.ID); err != nil {
+			if err := vol.RemoveSlot(s.ID); err != nil {
 				return eligible, fmt.Errorf("delete %s: %w", s.ID, err)
 			}
-			if _, err := e.cat.RemovePlacement(s.ID, e.mediumName); err != nil {
+			if _, err := e.cat.RemovePlacement(s.ID, mediumName); err != nil {
 				return eligible, fmt.Errorf("update catalog cache: %w", err)
 			}
 			logf.log("DELETE %s  (%s freed, %s)", s.ID, sizeutil.FormatBytes(r.Bytes), r.Note)

@@ -111,12 +111,20 @@ func (c *dirChanger) bays() ([]media.VolumeStatus, error) {
 // it fails mid-stream with media.ErrVolumeFull (end-of-tape), as a real drive
 // signals EOT.
 type dirDevice struct {
-	dir      string
-	capacity int64 // bytes; 0 = unbounded
-	mu       sync.Mutex
-	next     int
-	used     int64 // bytes currently written across all files
+	dir        string
+	capacity   int64 // bytes; 0 = unbounded
+	mu         sync.Mutex
+	next       int
+	used       int64 // bytes currently written across all files
+	hasForeign bool  // dir holds non-NBackup files (foreign media); see foreign()
 }
+
+// foreign reports whether the bay directory holds files that are not NBackup's
+// own NNNNNN-numbered files — non-NBackup data the overwrite guard must refuse,
+// distinct from a genuinely empty (blank) bay. The label protocol consults it so
+// foreign content in a file-backed bay is detected just as a foreign file-0 label
+// is on a real tape, rather than being mistaken for blank.
+func (d *dirDevice) foreign() bool { return d.hasForeign }
 
 func openDir(dir string, capacity int64) (*dirDevice, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -132,9 +140,15 @@ func openDir(dir string, capacity int64) (*dirDevice, error) {
 		if e.IsDir() {
 			continue
 		}
-		if n, err := strconv.Atoi(e.Name()); err != nil {
+		n, err := strconv.Atoi(e.Name())
+		if err != nil {
+			// A file that is not one of our NNNNNN-numbered files: this directory holds
+			// non-NBackup data. Flag it foreign so the label guard refuses to overwrite
+			// it, rather than counting only our files and mistaking the bay for blank.
+			d.hasForeign = true
 			continue
-		} else if n > max {
+		}
+		if n > max {
 			max = n
 		}
 		if info, err := e.Info(); err == nil {
@@ -221,8 +235,11 @@ func (d *dirDevice) readFile(pos int) (io.ReadCloser, error) {
 	return f, nil
 }
 
-// reset deletes every numbered file so the next write starts at file 0 — the
-// directory equivalent of overwriting a tape from BOT.
+// reset deletes every file so the next write starts at file 0 — the directory
+// equivalent of overwriting a tape from BOT. It removes foreign (non-numbered)
+// files too: relabeling overwrites the whole volume, so a forced relabel of a
+// foreign bay leaves a clean tape rather than co-mingling our label with the
+// stranger's files.
 func (d *dirDevice) reset() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -234,14 +251,12 @@ func (d *dirDevice) reset() error {
 		if e.IsDir() {
 			continue
 		}
-		if _, err := strconv.Atoi(e.Name()); err != nil {
-			continue
-		}
 		if err := os.Remove(filepath.Join(d.dir, e.Name())); err != nil {
 			return err
 		}
 	}
 	d.next = 0
 	d.used = 0
+	d.hasForeign = false
 	return nil
 }

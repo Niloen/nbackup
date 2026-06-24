@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -21,19 +22,24 @@ import (
 func newRecoverCmd(a *app) *cobra.Command {
 	var dleName, dateStr, dest string
 	var paths []string
-	var listOnly bool
+	var listOnly, all, force bool
 	cmd := &cobra.Command{
 		Use:   "recover",
-		Short: "Browse backups as of a date and recover selected files (amrecover-style)",
-		Long: "Browse a DLE's filesystem as it stood on a date and recover individual files or" +
-			" directories. The view merges the restore chain (the full plus later incrementals up" +
-			" to the date), so each file is recovered from the archive that last held it.\n\n" +
-			"With no --path/--list it opens an interactive shell: setdate, setdisk, cd, ls, add," +
-			" delete, list, extract. With --path it recovers that selection in one shot; with" +
-			" --list it prints a directory listing and exits. Paths are relative to the DLE root.",
+		Short: "Browse a date and recover selected files, or restore a whole DLE (amrecover-style)",
+		Long: "Recover from backups as they stood on a date. Three modes:\n\n" +
+			"  • interactive (no flags): a shell to browse and pick files — setdate, setdisk," +
+			" disks, cd, ls, add, delete, list, extract.\n" +
+			"  • file-level (--path / --list): recover the named files/dirs in one shot, or just" +
+			" print a listing. Selected-file recovery never deletes.\n" +
+			"  • whole-DLE (--all): rebuild an entire DLE (or every DLE) as of the date into --dest," +
+			" replaying the full plus later incrementals so deletions are applied. This prunes the" +
+			" destination to match the backup, so --dest must be empty unless --force.\n\n" +
+			"Paths are relative to the DLE root. A bare --date resolves to the most recent slot on" +
+			" or before it — the same slot the browse view and --all restore both use.",
 		Example: "  nb recover\n" +
 			"  nb recover --dle app01-home --date 2026-06-20 --list --path /etc\n" +
-			"  nb recover --dle app01-home --date 2026-06-20 --path /etc/hosts --path /etc/nginx --dest /tmp/out",
+			"  nb recover --dle app01-home --date 2026-06-20 --path /etc/hosts --dest /tmp/out\n" +
+			"  nb recover --dle app01-home --date 2026-06-20 --all --dest /tmp/out",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.loadRO()
@@ -45,18 +51,69 @@ func newRecoverCmd(a *app) *cobra.Command {
 				return err
 			}
 			eng.SetOperator(stdinOperator{})
+			if all {
+				if listOnly || len(paths) > 0 {
+					return fmt.Errorf("--all restores the whole DLE and cannot be combined with --path/--list")
+				}
+				return runRecoverRestore(eng, dleName, dateStr, dest, force, a.logf())
+			}
 			if listOnly || len(paths) > 0 {
 				return runRecoverBatch(eng, dleName, dateStr, paths, dest, listOnly, a.logf())
 			}
 			return runRecoverShell(eng, dleName, dateStr, dest)
 		},
 	}
-	cmd.Flags().StringVar(&dleName, "dle", "", "DLE to recover from")
+	cmd.Flags().StringVar(&dleName, "dle", "", "DLE to recover from (with --all, omit to restore every DLE)")
 	cmd.Flags().StringVar(&dateStr, "date", "", "as-of date YYYY-MM-DD (default today)")
 	cmd.Flags().StringArrayVar(&paths, "path", nil, "file/dir to recover (repeatable); non-interactive")
 	cmd.Flags().StringVar(&dest, "dest", "", "destination directory for recovered files")
 	cmd.Flags().BoolVar(&listOnly, "list", false, "print a listing of --path (or the root) and exit")
+	cmd.Flags().BoolVar(&all, "all", false, "restore the whole DLE (deletion-accurate) as of the date into --dest")
+	cmd.Flags().BoolVar(&force, "force", false, "with --all, restore into a non-empty --dest (its contents are pruned to match the backup)")
 	return cmd
+}
+
+// runRecoverRestore performs a whole-DLE, deletion-accurate restore as of a date —
+// the folded-in `nb restore`. With --dle it restores that DLE; without, every DLE
+// in the catalog, each into its own subdirectory of dest.
+func runRecoverRestore(eng *engine.Engine, dleName, dateStr, dest string, force bool, logf engine.Logf) error {
+	asOf, err := recoverDate(dateStr)
+	if err != nil {
+		return err
+	}
+	if dest == "" {
+		return fmt.Errorf("--dest is required for --all (whole-DLE restore)")
+	}
+	var dles []string
+	if dleName != "" {
+		if !slices.Contains(eng.DLENames(), dleName) {
+			return fmt.Errorf("unknown DLE %q; known: %s", dleName, strings.Join(eng.DLENames(), ", "))
+		}
+		dles = []string{dleName}
+	} else {
+		dles = eng.DLENames()
+		if len(dles) == 0 {
+			return fmt.Errorf("no DLEs in the catalog")
+		}
+	}
+	for _, name := range dles {
+		out := dest
+		if len(dles) > 1 {
+			out = path.Join(dest, name)
+		}
+		fmt.Printf("restoring DLE %s as of %s -> %s\n", name, asOf, out)
+		if err := eng.RestoreAsOf(name, asOf, out, force, logf); err != nil {
+			// When restoring every DLE, one that has no backup yet as of the date is
+			// expected; note it and continue rather than aborting the whole restore.
+			if len(dles) > 1 {
+				fmt.Printf("  skipped %s: %v\n", name, err)
+				continue
+			}
+			return err
+		}
+	}
+	fmt.Println("restore complete")
+	return nil
 }
 
 // runRecoverBatch handles the non-interactive paths: --list prints a listing,
@@ -68,6 +125,9 @@ func runRecoverBatch(eng *engine.Engine, dleName, dateStr string, paths []string
 	}
 	if dleName == "" {
 		return fmt.Errorf("--dle is required (known: %s)", strings.Join(eng.DLENames(), ", "))
+	}
+	if !slices.Contains(eng.DLENames(), dleName) {
+		return fmt.Errorf("unknown DLE %q; known: %s", dleName, strings.Join(eng.DLENames(), ", "))
 	}
 	tree, err := eng.OpenRecover(dleName, asOf)
 	if err != nil {
@@ -195,9 +255,23 @@ func (sh *recoverShell) prompt() string {
 func (sh *recoverShell) banner() {
 	if sh.tree != nil {
 		fmt.Printf("disk %q as of %s (resolved to %s)\n", sh.dle, sh.date, sh.tree.TargetSlot)
-	} else {
-		fmt.Printf("as of %s; set a disk with 'setdisk <dle>'. Known DLEs: %s\n",
-			sh.date, strings.Join(sh.eng.DLENames(), ", "))
+		return
+	}
+	fmt.Printf("as of %s — no disk selected. Pick one with 'setdisk <dle>' ('disks' lists them).\n", sh.date)
+	sh.listDisks()
+}
+
+// listDisks prints the DLEs available to recover from, one per line (they are
+// descriptive, often long, so a comma list is unreadable).
+func (sh *recoverShell) listDisks() {
+	names := sh.eng.DLENames()
+	if len(names) == 0 {
+		fmt.Println("  (no disks in the catalog — is the config/catalog correct?)")
+		return
+	}
+	fmt.Println("available disks:")
+	for _, n := range names {
+		fmt.Printf("  %s\n", n)
 	}
 }
 
@@ -212,6 +286,8 @@ func (sh *recoverShell) dispatch(cmd string, args []string) (quit bool) {
 		sh.setDate(args)
 	case "setdisk", "disk", "sethost":
 		sh.setDisk(args)
+	case "disks", "disklist", "lsdisk":
+		sh.listDisks()
 	case "ls", "dir":
 		sh.ls(args)
 	case "cd":
@@ -413,6 +489,7 @@ func (sh *recoverShell) resolve(arg string) string {
 
 func recoverHelp() {
 	fmt.Print(`commands:
+  disks                list the DLEs available to recover from
   setdisk <dle>        choose the DLE to browse (alias: disk)
   setdate <date>       set the as-of date (YYYY-MM-DD), then rebrowse
   ls [path]            list a directory

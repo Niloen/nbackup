@@ -1,6 +1,7 @@
 package slotio
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -187,11 +188,15 @@ type multiCloser struct {
 }
 
 func (m multiCloser) Close() error {
-	var err error
+	// Join every stage's error, not just the first: when the decryptor fails (e.g.
+	// a wrong gpg key) the decompressor downstream of it also fails on the resulting
+	// truncated stream, and the decryptor's message is the real cause — returning
+	// only the first closer's error would hide it behind the decompressor's symptom.
+	var errs []error
 	for _, c := range m.closers {
-		if e := c.Close(); e != nil && err == nil {
-			err = e
+		if e := c.Close(); e != nil {
+			errs = append(errs, e)
 		}
 	}
-	return err
+	return errors.Join(errs...)
 }

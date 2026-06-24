@@ -120,7 +120,11 @@ func applySelection(slots []*slot.Slot, sel SyncSelection) []*slot.Slot {
 	if !sel.Since.IsZero() {
 		kept := slots[:0:0]
 		for _, s := range slots {
-			if !s.CreatedAt.Before(sel.Since) {
+			// Filter on the slot's logical date (the day it backs up), not its
+			// physical CreatedAt seal time — otherwise back-dated or imported slots,
+			// whose CreatedAt is "now", all slip past any --since bound.
+			d, _ := slot.ParseDateField(s.Date)
+			if !d.Before(sel.Since) {
 				kept = append(kept, s)
 			}
 		}

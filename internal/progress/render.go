@@ -38,7 +38,7 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Total:    %s of ~%s  (%.0f%%)\n",
 		sizeutil.FormatBytes(s.TotalDone()), sizeutil.FormatBytes(s.TotalEst()), s.Pct())
-	fmt.Fprintf(w, "Written:  %s compressed\n", sizeutil.FormatBytes(s.TotalOut()))
+	fmt.Fprintf(w, "Written:  %s to volume\n", sizeutil.FormatBytes(s.TotalOut()))
 	if rate := s.Rate(now); rate > 0 {
 		fmt.Fprintf(w, "Rate:     %s/s\n", sizeutil.FormatBytes(int64(rate)))
 	}

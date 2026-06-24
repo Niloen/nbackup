@@ -16,6 +16,7 @@ package crypt
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -111,6 +112,13 @@ func Check(scheme string, o Options) error {
 	}
 	if s.needsKeyHint != "" && o.Recipient == "" && o.PassphraseFile == "" {
 		return fmt.Errorf("encryption scheme %q: %s", scheme, s.needsKeyHint)
+	}
+	// Fail fast on a passphrase file that isn't there: otherwise gpg only fails
+	// once bytes start flowing, surfacing as a broken-pipe mid-dump.
+	if o.PassphraseFile != "" {
+		if _, err := os.Stat(o.PassphraseFile); err != nil {
+			return fmt.Errorf("encryption scheme %q: passphrase_file %q is unreadable: %w", scheme, o.PassphraseFile, err)
+		}
 	}
 	bin := s.encryptArgv(o)[0]
 	if _, err := exec.LookPath(bin); err != nil {

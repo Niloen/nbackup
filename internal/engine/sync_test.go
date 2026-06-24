@@ -184,7 +184,7 @@ func TestSyncFromNonLanding(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := t.TempDir()
-	if err := eng.Restore(s.ID, config.DLE{Host: "h", Path: src}.Name(), dest, nil); err != nil {
+	if err := eng.Restore(s.ID, config.DLE{Host: "h", Path: src}.Name(), dest, false, nil); err != nil {
 		t.Fatalf("restore from cold copy: %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "f.txt"), "tiered")
@@ -287,7 +287,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 	}
 	for _, id := range ids {
 		dest := t.TempDir()
-		if err := eng.Restore(id, name, dest, nil); err != nil {
+		if err := eng.Restore(id, name, dest, false, nil); err != nil {
 			t.Fatalf("restore %s from library: %v", id, err)
 		}
 		assertContent(t, filepath.Join(dest, "f.txt"), payloads[id])

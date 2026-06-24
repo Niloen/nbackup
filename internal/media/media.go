@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -98,6 +99,15 @@ var ErrVolumeFull = fmt.Errorf("volume full: end of volume reached")
 // nothing loaded. The engine wraps this with medium-specific guidance.
 var ErrNoVolume = fmt.Errorf("no volume loaded in the drive")
 
+// ErrNoPerSlotRemoval reports that a medium cannot delete an individual slot:
+// space is reclaimed by reusing a whole volume (relabel), not by removing one
+// slot's files. Object stores (disk, cloud) support per-slot removal; tape does
+// not. Callers test it with errors.Is and fall back to whole-volume reuse — e.g.
+// reclaiming an unsealed leftover means leaving it for the next relabel rather
+// than failing. The engine never reaches it for capacity pruning (tape defers all
+// reclamation to relabel), only when tidying a failed write's partial.
+var ErrNoPerSlotRemoval = fmt.Errorf("per-slot removal unsupported; reuse is whole-volume (relabel)")
+
 // Drive is a medium with one mounted volume at a time: it can report what is loaded.
 // Both a robotic library (the volume the robot has in the drive) and a single-drive
 // station (the loaded reel) are Drives; address-identified media (disk, s3) are not.
@@ -162,6 +172,7 @@ type VolumeStatus struct {
 	ID       string // bay id (Library) or reel id (Station shelf); "" for a real drive
 	Label    string
 	Blank    bool
+	Foreign  bool // holds non-NBackup data: not writable without a forced relabel
 	Used     int64
 	Capacity int64
 	Files    int
@@ -260,6 +271,52 @@ func OpenVolume(typ string, opts Options) (Volume, error) {
 		return nil, fmt.Errorf("unknown medium type %q (known: %v)", typ, VolumeTypes())
 	}
 	return f(opts)
+}
+
+// paramKeys records the inline option keys each medium type accepts. Each medium
+// implementation declares its own (next to RegisterVolume), so the source of truth
+// for a type's options lives with that type — and a typo'd or unknown key is
+// rejected at config load instead of being silently ignored.
+var paramKeys = map[string]map[string]bool{}
+
+// RegisterParams records the inline option keys a medium type accepts. The common
+// fields (type, capacity, minimum_age, appendable) are struct fields, not inline
+// params, so they are not listed here. Keys a type recognizes but rejects (e.g.
+// part_size on an unbounded medium) should still be listed, so the factory's
+// specific error is what the operator sees, not a blanket "unknown option".
+func RegisterParams(typ string, keys ...string) {
+	set := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		set[k] = true
+	}
+	paramKeys[typ] = set
+}
+
+// ValidateParams checks a medium's inline params against the keys its type accepts,
+// returning an error naming the unknown key(s) and the accepted ones. A type with
+// no registered keys is not validated (lenient, like OpenProfile for an unknown type).
+func ValidateParams(typ string, params map[string]string) error {
+	known, ok := paramKeys[typ]
+	if !ok {
+		return nil
+	}
+	var unknown []string
+	for k := range params {
+		if !known[k] {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	allowed := make([]string, 0, len(known))
+	for k := range known {
+		allowed = append(allowed, k)
+	}
+	sort.Strings(allowed)
+	return fmt.Errorf("unknown %s option(s) %s; accepted options: %s",
+		typ, strings.Join(unknown, ", "), strings.Join(allowed, ", "))
 }
 
 // VolumeTypes lists registered medium types.

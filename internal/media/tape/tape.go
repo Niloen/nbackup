@@ -95,6 +95,7 @@ func init() {
 		}
 	})
 	media.RegisterProfile("tape", media.NewVolumeProfile)
+	media.RegisterParams("tape", "dir", "device", "bays", "volume_size", "mode", "reels", "part_size")
 }
 
 // atoiOpt parses an integer option, returning def when the value is empty.
@@ -195,9 +196,10 @@ func (t *tape) Files() ([]media.FileInfo, error) {
 }
 
 // RemoveSlot is unsupported: tape reclaims space by relabeling the whole volume,
-// not by deleting individual files.
+// not by deleting individual files. It returns the shared sentinel so callers can
+// fall back to whole-volume reuse (errors.Is) instead of treating it as fatal.
 func (t *tape) RemoveSlot(string) error {
-	return fmt.Errorf("tape: per-slot removal unsupported; reuse is whole-volume (relabel)")
+	return fmt.Errorf("tape: %w", media.ErrNoPerSlotRemoval)
 }
 
 // ReadLabel reads the mounted bay's file-0 label record. A blank tape (no files)
@@ -294,8 +296,13 @@ func deviceStatus(id string, dev device, capacity int64) media.VolumeStatus {
 	if d, ok := dev.(*dirDevice); ok {
 		st.Used = d.used
 	}
-	if lbl, ok, _ := readLabel(dev); ok {
+	lbl, ok, err := readLabel(dev)
+	switch {
+	case ok:
 		st.Label = lbl.Name
+	case err == media.ErrForeignVolume:
+		// Foreign data: not blank and not writable until a forced relabel.
+		st.Foreign, st.Blank = true, false
 	}
 	return st
 }
@@ -303,6 +310,12 @@ func deviceStatus(id string, dev device, capacity int64) media.VolumeStatus {
 // readLabel decodes a mounted device's file-0 label. ok=false on a blank tape;
 // ErrForeignVolume when file 0 is present but is not one of ours.
 func readLabel(dev device) (media.Label, bool, error) {
+	// A file-backed bay that holds non-NBackup files is foreign, not blank — its own
+	// files are unnumbered so they would not be counted below, and the overwrite
+	// guard must refuse it rather than treat the bay as writable.
+	if f, ok := dev.(interface{ foreign() bool }); ok && f.foreign() {
+		return media.Label{}, false, media.ErrForeignVolume
+	}
 	n, err := dev.count()
 	if err != nil {
 		return media.Label{}, false, err
