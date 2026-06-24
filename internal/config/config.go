@@ -248,6 +248,9 @@ func Load(path string) (*Config, error) {
 		}
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil, fmt.Errorf("config %s is empty — copy nbackup.example.yaml to %s and edit it", path, path)
+	}
 	var c Config
 	// KnownFields rejects unknown keys so a typo in a safety-relevant field
 	// (a misspelled `landing`, `cycle`, a nested compress/encrypt key) is a hard
@@ -265,8 +268,9 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
-// Validate checks required fields and cross-references. It is lenient about a
-// missing media/landing so read-only commands can synthesize defaults.
+// Validate checks required fields and cross-references. A loaded config file must
+// define any medium it names as `landing`; read-only commands with no config file
+// build their default catalog without going through here (see cli.applyCatalog).
 func (c *Config) Validate() error {
 	if len(c.Sources) == 0 {
 		return fmt.Errorf("config has no sources")
@@ -282,14 +286,22 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
-	if c.Landing != "" && len(c.Media) > 0 {
+	// A landing must name a medium that is actually defined. This is checked even
+	// when the media map is empty: a config file that sets `landing:` but omits its
+	// `media:` block is a misconfig, not a cue to silently synthesize a default
+	// medium (which would discard the requested landing and write to ./nbackup-catalog).
+	if c.Landing != "" {
 		if _, ok := c.Media[c.Landing]; !ok {
 			return fmt.Errorf("landing %q is not a defined medium", c.Landing)
 		}
 	}
 	if c.Cycle != "" {
-		if _, err := sizeutil.ParseDuration(c.Cycle); err != nil {
+		d, err := sizeutil.ParseDuration(c.Cycle)
+		if err != nil {
 			return fmt.Errorf("cycle: %w", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("cycle must be positive (e.g. 7d); got %q", c.Cycle)
 		}
 	}
 	for name, m := range c.Media {

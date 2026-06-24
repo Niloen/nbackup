@@ -49,6 +49,10 @@ slots/slot-2026-06-21/
   000002-seal.hdr
 ```
 
+The `NNNNNN` prefix is just the file's position, and the **seal is always the last
+file** — so its number tracks the archive count (here two archives → seal at
+`000002`; a single-archive slot seals at `000001`), it is not fixed.
+
 (On **tape** the header is instead a fixed 32 KB block inline ahead of each
 payload, since a tape has no sidecars.)
 
@@ -401,9 +405,14 @@ compress:
 media:
   disk:
     type: disk
-    path: /var/lib/nbackup/catalog
+    path: /var/lib/nbackup/catalog   # where slots are written
     capacity: 20TB                   # the space NBackup may use here
 landing: disk
+
+# The catalog's own local state (slot cache + tar snapshots) is separate from any
+# medium and defaults to ./nbackup-catalog in the working directory. Set `workdir`
+# to place it deliberately (e.g. alongside the disk medium above).
+# workdir: /var/lib/nbackup/catalog
 
 # Named method+option bundles (Amanda's "dumptype"); a DLE selects one.
 dumptypes:
