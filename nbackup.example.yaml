@@ -228,8 +228,10 @@ dumptypes:
   #     recipient: finance-key@example.com
 
 # The disklist: grouped by dumptype, then host, then the paths to back up.
+# NBackup backs up filesystem trees. For a live database, snapshot or dump it to
+# a file first and back that up — application-consistent dumps are not built in.
 sources:
   default:
     app01: [/home, /etc]
   no-logs:
-    db01: [/var/lib/postgresql, /var/log]
+    web01: [/srv/www, /opt/app]

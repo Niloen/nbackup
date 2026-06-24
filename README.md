@@ -594,7 +594,7 @@ sources:
   default:
     app01: [/home, /etc]
   no-logs:
-    db01: [/var/lib/postgresql, /var/log]
+    web01: [/srv/www, /opt/app]
 ```
 
 - **Media** is a map of named definitions, each with a `type` and type-specific
