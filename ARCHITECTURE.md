@@ -149,7 +149,7 @@ selected by a registered scheme *name* (`gpg`/`none`), with the same proc
 plumbing. Three decisions carry their weight:
 - **Outermost placement is load-bearing.** Because encryption sits *inside* the
   `xfer.Meter`, the seal's `SHA256` covers the *ciphertext* that lands on the
-  volume. So the pre-seal re-read, `nb verify`, and `CopySlot`/`nb sync` all
+  volume. So `nb verify` and `CopySlot`/`nb sync` all
   operate on ciphertext and stay **keyless** — vaulting offsite, verifying
   integrity, and the medium-independent `Entry`/`Placement` identity (one slot,
   N byte-identical copies) are untouched. Only *extraction* needs the key.

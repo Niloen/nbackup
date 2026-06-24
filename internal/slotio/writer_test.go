@@ -124,11 +124,6 @@ func (s *memSink) PlaceSeal(size int64) (media.Volume, string, int, error) {
 	return v, v.name, 1, nil
 }
 
-func (s *memSink) Current() (media.Volume, string, int) {
-	v := s.vols[s.idx]
-	return v, v.name, 1
-}
-
 // partOpener over a fixed set of named volumes — the read side mounts the volume each
 // part names and reads its position.
 func openerOver(vols ...*memVolume) PartOpener {

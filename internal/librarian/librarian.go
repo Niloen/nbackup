@@ -389,11 +389,6 @@ func (s *WriteSink) PlaceSeal(size int64) (media.Volume, string, int, error) {
 	return s.l.vol, s.volume, s.epoch, nil
 }
 
-// Current implements slotio.VolumeSink: the loaded volume and its identity, no roll.
-func (s *WriteSink) Current() (media.Volume, string, int) {
-	return s.l.vol, s.volume, s.epoch
-}
-
 // promptSwap asks the operator (via l.op) to pick a reel to load on a single-drive
 // station. need is the specific volume label wanted (reads) or "" (writes); expect
 // is the volume a write would prefer (the oldest reusable tape) or "".

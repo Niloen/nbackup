@@ -46,9 +46,6 @@ type VolumeSink interface {
 	// PlaceSeal returns the volume to write the slot's seal record (one whole file of
 	// the given payload size) to, rolling first if it will not fit the loaded volume.
 	PlaceSeal(size int64) (vol media.Volume, volume string, epoch int, err error)
-	// Current is the loaded volume and its identity, without rolling — used to decide
-	// which archives are still re-readable for the pre-seal verify.
-	Current() (vol media.Volume, volume string, epoch int)
 }
 
 // Produced reports the raw-stream statistics of one archive, returned by the
@@ -103,12 +100,12 @@ type Writer struct {
 	sealPart PartPosition    // where the seal landed (set by Seal)
 }
 
-// archiveRecord remembers an archive's parts and checksum for the pre-seal verify.
+// archiveRecord remembers an archive's parts so the catalog can index where each
+// archive's bytes landed (see Positions).
 type archiveRecord struct {
-	dle    string
-	level  int
-	sha256 string
-	parts  []PartPosition
+	dle   string
+	level int
+	parts []PartPosition
 }
 
 // NewWriter begins authoring the given open slot onto sink, compressing archives
@@ -230,7 +227,7 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 
 	w.mu.Lock()
 	w.slot.AddArchive(arch)
-	w.written = append(w.written, archiveRecord{dle: spec.DLE, level: spec.Level, sha256: arch.SHA256, parts: parts})
+	w.written = append(w.written, archiveRecord{dle: spec.DLE, level: spec.Level, parts: parts})
 	w.mu.Unlock()
 	return arch, nil
 }
@@ -321,7 +318,7 @@ func (w *Writer) CopyArchive(meta slot.Archive, src io.Reader) (slot.Archive, er
 	arch.Parts = len(parts)
 	w.mu.Lock()
 	w.slot.AddArchive(arch)
-	w.written = append(w.written, archiveRecord{dle: meta.DLE, level: meta.Level, sha256: arch.SHA256, parts: parts})
+	w.written = append(w.written, archiveRecord{dle: meta.DLE, level: meta.Level, parts: parts})
 	w.mu.Unlock()
 	return arch, nil
 }
@@ -352,29 +349,16 @@ func (w *Writer) SealPosition() PartPosition {
 	return w.sealPart
 }
 
-// Seal re-verifies the archives still readable on the loaded volume, seals the slot,
-// and appends the seal record (the slot's metadata) as the final file — the marker
-// that makes the slot complete. The sealed slot is returned.
+// Seal seals the slot and appends the seal record (the slot's metadata) as the final
+// file — the marker that makes the slot complete. The sealed slot is returned.
 //
-// The pre-seal re-read is the belt-and-suspenders catch for a volume that silently
-// mangled a write. It is kept for archives whose every part sits on the volume
-// currently loaded; an archive that spanned onto an earlier, now-swapped-out volume
-// cannot be re-read on a single drive, so it is trusted to its streaming-meter
-// checksum (the bytes were hashed on the way out).
+// Like Amanda's taper, sealing does not read the medium back: each archive was hashed
+// inline as it streamed out (the streaming-meter sha256 recorded in the catalog), so
+// the write path's integrity rests on that checksum, not a re-read. Verifying the bytes
+// actually landed on the medium is the job of the explicit, operator-invoked `nb verify`
+// (the amcheckdump analogue), kept out of the dump path so a single drive never has to
+// re-read — or reload swapped-out volumes — just to close a slot.
 func (w *Writer) Seal(now time.Time) (*slot.Slot, error) {
-	curVol, curName, _ := w.sink.Current()
-	for _, a := range w.written {
-		if !partsAllOn(a.parts, curName) {
-			continue // spanned onto a swapped-out volume; trust the meter checksum
-		}
-		got, err := hashParts(curVol, a.parts)
-		if err != nil {
-			return nil, fmt.Errorf("verify %s L%d before sealing: %w", a.dle, a.level, err)
-		}
-		if got != a.sha256 {
-			return nil, fmt.Errorf("checksum mismatch for %s L%d before sealing", a.dle, a.level)
-		}
-	}
 	if err := w.slot.Seal(now); err != nil {
 		return nil, err
 	}
@@ -398,37 +382,4 @@ func (w *Writer) Seal(now time.Time) (*slot.Slot, error) {
 	w.sealPart = PartPosition{Volume: sealVol, Epoch: sealEpoch, Pos: pos}
 	w.mu.Unlock()
 	return w.slot, nil
-}
-
-// partsAllOn reports whether every part of an archive lives on the named volume.
-func partsAllOn(parts []PartPosition, volume string) bool {
-	for _, p := range parts {
-		if p.Volume != volume {
-			return false
-		}
-	}
-	return true
-}
-
-// hashParts reads an archive's parts in order from one volume and returns the
-// sha256 of their concatenated payloads (the whole compressed stream).
-func hashParts(vol media.Volume, parts []PartPosition) (string, error) {
-	readers := make([]io.Reader, 0, len(parts))
-	var closers []io.Closer
-	for _, p := range parts {
-		_, rc, err := vol.ReadFile(p.Pos)
-		if err != nil {
-			for _, c := range closers {
-				c.Close()
-			}
-			return "", err
-		}
-		readers = append(readers, rc)
-		closers = append(closers, rc)
-	}
-	sha, err := xfer.HashReader(io.MultiReader(readers...))
-	for _, c := range closers {
-		c.Close()
-	}
-	return sha, err
 }
