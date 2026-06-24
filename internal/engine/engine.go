@@ -632,14 +632,29 @@ func (e *Engine) Plan(date time.Time) *planner.Plan {
 
 // ValidatePlan checks each DLE the way a real run would resolve it, so a preview
 // (`nb plan` / `nb dump --dry-run`) surfaces problems the size estimates would
-// otherwise swallow into a misleading ~0 B. It returns a fatal error for an
-// unrunnable config — a dumptype naming an unknown dump method — and a list of
-// non-fatal warnings for a source path that is missing or unreadable right now
-// (which may just be an unmounted volume the real run will mount).
+// otherwise swallow into a misleading ~0 B. It runs the same pre-flight a real run
+// does — the compression codec and every dumptype's method and encryption scheme —
+// returning a fatal error for an unrunnable config (an unknown codec/method/scheme,
+// a missing required key reference, or a codec/gpg binary not on PATH), so a preview
+// no longer gives a green light to a run that `nb dump` will reject. Source paths
+// that are missing or unreadable right now are non-fatal warnings (they may be an
+// unmounted volume the real run will mount).
 func (e *Engine) ValidatePlan() (warnings []string, err error) {
+	if err := filter.Check(e.codec, e.fopts); err != nil {
+		return nil, err
+	}
+	checkedEnc := map[string]bool{}
 	for _, d := range e.cfg.DLEs() {
-		if _, err := e.methodForDumpType(d.DumpTypeName()); err != nil {
-			return nil, fmt.Errorf("dumptype %q: %w", d.DumpTypeName(), err)
+		dt := d.DumpTypeName()
+		if _, err := e.methodForDumpType(dt); err != nil {
+			return nil, fmt.Errorf("dumptype %q: %w", dt, err)
+		}
+		if !checkedEnc[dt] {
+			scheme, opts := e.encryptionFor(dt)
+			if err := crypt.Check(scheme, opts); err != nil {
+				return nil, err
+			}
+			checkedEnc[dt] = true
 		}
 		if _, err := os.Stat(d.Path); err != nil {
 			warnings = append(warnings, fmt.Sprintf("DLE %s: source path %s is missing or unreadable (%v) — the real run will fail unless it becomes available", d.Name(), d.Path, err))
@@ -936,8 +951,20 @@ func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 	if err != nil {
 		return "", 0, err
 	}
-	present := map[string]bool{} // slot id -> has any file
-	sealed := map[string]bool{}  // slot id -> has a seal record
+	present := map[string]bool{} // slot id -> exists (catalog or loaded volume)
+	sealed := map[string]bool{}  // slot id -> sealed (immutable; never reuse the id)
+	// Seed from the catalog, which indexes every sealed slot across the whole pool.
+	// A slot id is pool-global, so a same-day rerun must take the next free .N even
+	// when an earlier run sealed onto a different volume (or medium) than the one now
+	// loaded — scanning only the loaded volume's Files() would miss it and reuse the
+	// id, shadowing that earlier run in the catalog. Catalog slots are sealed by
+	// construction (Record runs only after Seal).
+	for _, s := range e.cat.Slots() {
+		present[s.ID] = true
+		sealed[s.ID] = true
+	}
+	// The loaded volume may also carry an unsealed orphan from a failed attempt that
+	// the catalog never recorded; note it so its id can be reclaimed below.
 	for _, f := range files {
 		present[f.Header.Slot] = true
 		if f.Header.Kind == media.KindSeal {
@@ -1108,7 +1135,19 @@ func (e *Engine) extractStep(step restore.Step, destDir, medium string) error {
 		return err
 	}
 	rerr := m.Restore(rc, destDir, nil)
-	return joinPipelineErr(rerr, rc.Close())
+	return decryptHint(step.Encrypt, joinPipelineErr(rerr, rc.Close()))
+}
+
+// decryptHint augments an extraction failure on an encrypted archive with the
+// actionable cause restore-time decryption needs. gpg's raw "No secret key" is
+// misleading for a symmetric (passphrase) dump — the real fix is to supply the
+// passphrase the run had — so name both possibilities rather than leaving the
+// operator with gpg's message alone. A nil error or a plaintext archive pass through.
+func decryptHint(scheme string, err error) error {
+	if err == nil || scheme == "" {
+		return err
+	}
+	return fmt.Errorf("%w\n(this archive is %s-encrypted, so extraction needs the key: for a passphrase/symmetric dump add an `encrypt:` block with the same passphrase_file; for a public-key dump ensure its private key is in the gpg keyring)", err, scheme)
 }
 
 // joinPipelineErr combines the extractor's error with the decrypt/decompress
@@ -1147,8 +1186,8 @@ func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, 
 		if err != nil {
 			return files, err
 		}
-		logf.log("extracting %d file(s) from %s %s L%d", len(st.Members), st.SlotID, st.DLE, st.Level)
-		err = joinPipelineErr(m.Restore(rc, destDir, st.Members), rc.Close())
+		logf.log("extracting %d entr(ies) from %s %s L%d", len(st.Members), st.SlotID, st.DLE, st.Level)
+		err = decryptHint(st.Encrypt, joinPipelineErr(m.Restore(rc, destDir, st.Members), rc.Close()))
 		if err != nil {
 			return files, fmt.Errorf("extract from %s %s L%d: %w", st.SlotID, st.DLE, st.Level, err)
 		}
@@ -1245,14 +1284,14 @@ func (e *Engine) profileFor(name string) (media.Profile, error) {
 // capacity. Retention is per-medium, so each store is pruned against its own slots
 // — pruning one medium never touches a copy on another. Any configured medium can
 // be pruned (not only the landing one), so an offsite tier can be trimmed too.
-func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) (eligible int, err error) {
+func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) (eligible int, freed int64, err error) {
 	def, ok := e.cfg.Media[mediumName]
 	if !ok {
-		return 0, fmt.Errorf("unknown medium %q", mediumName)
+		return 0, 0, fmt.Errorf("unknown medium %q", mediumName)
 	}
 	profile, err := e.profileFor(mediumName)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	minAge := e.cfg.MinAgeFor(def)
 	slots := e.cat.SlotsOn(mediumName)
@@ -1278,7 +1317,7 @@ func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) 
 	var vol media.Volume
 	if apply && len(reclaim) > 0 {
 		if vol, _, _, err = e.mediumVolume(mediumName); err != nil {
-			return eligible, err
+			return eligible, freed, err
 		}
 	}
 	for _, s := range slots {
@@ -1291,15 +1330,16 @@ func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) 
 			// Reclaim the copy on this medium only; the slot survives in the catalog
 			// if it still has a copy elsewhere.
 			if err := vol.RemoveSlot(s.ID); err != nil {
-				return eligible, fmt.Errorf("delete %s: %w", s.ID, err)
+				return eligible, freed, fmt.Errorf("delete %s: %w", s.ID, err)
 			}
 			if _, err := e.cat.RemovePlacement(s.ID, mediumName); err != nil {
-				return eligible, fmt.Errorf("update catalog cache: %w", err)
+				return eligible, freed, fmt.Errorf("update catalog cache: %w", err)
 			}
+			freed += r.Bytes
 			logf.log("DELETE %s  (%s freed, %s)", s.ID, sizeutil.FormatBytes(r.Bytes), r.Note)
 		} else {
 			logf.log("would delete %s  (%s, %s)", s.ID, sizeutil.FormatBytes(r.Bytes), r.Note)
 		}
 	}
-	return eligible, nil
+	return eligible, freed, nil
 }

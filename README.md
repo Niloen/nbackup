@@ -49,6 +49,10 @@ slots/slot-2026-06-21/
   000002-seal.hdr
 ```
 
+The `NNNNNN` prefix is just the file's position, and the **seal is always the last
+file** — so its number tracks the archive count (here two archives → seal at
+`000002`; a single-archive slot seals at `000001`), it is not fixed.
+
 (On **tape** the header is instead a fixed 32 KB block inline ahead of each
 payload, since a tape has no sidecars.)
 
@@ -336,11 +340,11 @@ Two layers prove your backups are good, weakest to strongest:
   It is NBackup's contribution of the **"0 errors"** digit of [3-2-1-1-0][321].
 
 ```bash
-nb drill                       # dry-run: what would be drilled + a posture audit
-nb drill --apply               # drill the riskiest sample on the landing copy
-nb drill --apply --from cloud --tier structural   # routine offsite check (no write)
-nb drill --apply --tier stock  # restore via the documented gpg/zstd/tar one-liner
-nb dump && nb sync --apply && nb drill --apply --unattended   # hands-off cron line
+nb drill                       # drill the riskiest sample on the landing copy
+nb drill --dry-run             # preview: what would be drilled + a posture audit
+nb drill --from cloud --tier structural   # routine offsite check
+nb drill --tier stock          # restore via the documented gpg/zstd/tar one-liner
+nb dump && nb sync && nb drill --unattended   # hands-off cron line
 ```
 
 A drill **selects** risk-first: it rotates DLEs so each is drilled within a window,
@@ -376,7 +380,8 @@ turn it off.
 
 ### Pruning (cycle safety)
 
-`nb prune <medium>` is a dry-run by default. **Retention is per-medium**, so the
+`nb prune <medium>` deletes by default; pass `--dry-run` (`-n`) to preview.
+**Retention is per-medium**, so the
 medium to prune is named explicitly (`nb prune disk`, `nb prune offsite`): each
 store is pruned against its own slots, capacity, and `minimum_age` — a copy on
 another medium never makes a slot prunable, because double storage exists for
@@ -396,7 +401,7 @@ redundancy. Pruning has two layers:
    when a run needs a volume), so `nb prune` never deletes individual slots from
    a tape.
 
-Add `--apply` to actually delete.
+Add `--dry-run` (`-n`) to preview without deleting.
 
 ### Replication / tiered storage
 
@@ -407,23 +412,23 @@ target medium is missing, **oldest first** (so an interrupted sync makes
 contiguous, replayable progress and a full lands before its incrementals).
 
 ```bash
-nb sync --to lto            # dry-run: what disk has that tape doesn't
-nb sync --to lto --apply    # copy the backlog
-nb sync --to glacier --last 4 --apply   # only the 4 most recent slots
-nb sync --apply             # run every rule in the config's `sync:` block
-nb sync --from lto --to disk --apply    # un-vault: restage tape back to disk
+nb sync --to lto --dry-run  # preview: what disk has that tape doesn't
+nb sync --to lto            # copy the backlog
+nb sync --to glacier --last 4   # only the 4 most recent slots
+nb sync                     # run every rule in the config's `sync:` block
+nb sync --from lto --to disk    # un-vault: restage tape back to disk
 ```
 
 The source defaults to the landing medium; **`--from` overrides it**, so the same
 command both pushes offsite (disk → tape/S3) and pulls back (tape → disk) —
 reading a tape source mounts the volume holding each slot, just like a restore.
 
-It is **dry-run by default** (like `nb prune`) and **idempotent**: each slot
-copies atomically and records a second placement, so re-running resumes where an
-interrupted sync left off and a fully-mirrored target reports "up to date". On a
-hard error (target full or offline) it stops and reports progress. Declare
-recurring targets in the config so a cron line is just `nb dump && nb sync
---apply`:
+It **copies by default** (like `nb prune` deletes by default; pass `--dry-run`/`-n`
+to preview) and is **idempotent**: each slot copies atomically and records a second
+placement, so re-running resumes where an interrupted sync left off and a
+fully-mirrored target reports "up to date". On a hard error (target full or offline)
+it stops and reports progress. Declare recurring targets in the config so a cron line
+is just `nb dump && nb sync`:
 
 ```yaml
 sync:
@@ -459,9 +464,14 @@ compress:
 media:
   disk:
     type: disk
-    path: /var/lib/nbackup/catalog
+    path: /var/lib/nbackup/catalog   # where slots are written
     capacity: 20TB                   # the space NBackup may use here
 landing: disk
+
+# The catalog's own local state (slot cache + tar snapshots) is separate from any
+# medium and defaults to ./nbackup-catalog in the working directory. Set `workdir`
+# to place it deliberately (e.g. alongside the disk medium above).
+# workdir: /var/lib/nbackup/catalog
 
 # Named method+option bundles (Amanda's "dumptype"); a DLE selects one.
 dumptypes:

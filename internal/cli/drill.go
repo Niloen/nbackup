@@ -16,11 +16,11 @@ import (
 // newDrillCmd implements `nb drill`: the recovery-drill orchestration layered on
 // `nb verify`. It selects a risk-biased subset of DLEs, exercises each end-to-end at
 // the chosen tier against a source copy, records a recoverability ledger, probes the
-// medium for WORM/immutability, and prints a 3-2-1-1-0 posture audit. Dry-run by
-// default (like `nb prune`/`nb sync`); `--apply` runs the cost-incurring drill.
+// medium for WORM/immutability, and prints a 3-2-1-1-0 posture audit. Runs by
+// default (like `nb prune`/`nb sync`); `--dry-run` (`-n`) previews without cost.
 func newDrillCmd(a *app) *cobra.Command {
 	var (
-		apply, unattended, worm  bool
+		dryRun, unattended, worm bool
 		asOf, window, from, tier string
 		sample                   int
 	)
@@ -33,8 +33,8 @@ func newDrillCmd(a *app) *cobra.Command {
 			"prioritizing the longest chains and oldest fulls), exercises each at a tier — checksum, " +
 			"structural (decrypt+decompress+`tar -t`), a real point-in-time chain restore to scratch, " +
 			"or the documented stock-tools one-liner — records an inspectable ledger, probes the medium " +
-			"for WORM/immutability, and prints a 3-2-1-1-0 posture audit. Dry-run by default; pass " +
-			"--apply to run it. Use --from to drill the offsite copy, and --unattended for cron (it " +
+			"for WORM/immutability, and prints a 3-2-1-1-0 posture audit. Runs by default; pass " +
+			"--dry-run (-n) to preview without cost. Use --from to drill the offsite copy, and --unattended for cron (it " +
 			"never prompts and skips any target that would need a tape swap). Exits non-zero on any " +
 			"classified drill failure.\n\n" +
 			"Tiers (cheapest → strongest), set with --tier (default structural):\n" +
@@ -42,7 +42,7 @@ func newDrillCmd(a *app) *cobra.Command {
 			"  structural  decrypt+decompress+`tar -t` — proves a valid restorable stream, writes nothing\n" +
 			"  chain       real point-in-time restore (full+incrementals) to scratch — the strong proof\n" +
 			"  stock       restore via the documented gpg/zstd/tar one-liner — proves recovery needs no NBackup",
-		Example: "  nb drill\n  nb drill --apply\n  nb drill --apply --from offsite --tier structural\n  nb dump && nb sync --apply && nb drill --apply --unattended",
+		Example: "  nb drill\n  nb drill --dry-run\n  nb drill --from offsite --tier structural\n  nb dump && nb sync && nb drill --unattended",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.load()
@@ -97,13 +97,13 @@ func newDrillCmd(a *app) *cobra.Command {
 				Tier:       t,
 				Worm:       worm,
 				Unattended: unattended,
-				Apply:      apply,
+				Apply:      !dryRun,
 				Now:        time.Now().UTC(),
 			}
 
-			// Dry-run only reads; --apply writes the ledger + WORM probe, so lock it.
+			// Dry-run only reads; a real run writes the ledger + WORM probe, so lock it.
 			var eng *engine.Engine
-			if apply {
+			if !dryRun {
 				var unlock func()
 				eng, unlock, err = a.lockedEngine(cfg)
 				if err != nil {
@@ -128,9 +128,9 @@ func newDrillCmd(a *app) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&apply, "apply", false, "actually run the drill (default is dry-run)")
+	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "preview the drill without running it")
 	cmd.Flags().BoolVar(&unattended, "unattended", false, "cron mode: never prompt; skip targets needing a tape swap")
-	cmd.Flags().BoolVar(&worm, "worm", false, "probe the medium for WORM/immutability (apply only)")
+	cmd.Flags().BoolVar(&worm, "worm", false, "probe the medium for WORM/immutability (skipped in --dry-run)")
 	cmd.Flags().StringVar(&asOf, "as-of", "", "drill a point-in-time YYYY-MM-DD (default today)")
 	cmd.Flags().StringVar(&window, "window", "", "each DLE should be drilled within this window (e.g. 30d)")
 	cmd.Flags().IntVar(&sample, "sample", 1, "max DLEs to drill this run")
@@ -203,7 +203,7 @@ func printDrillReport(r *engine.DrillReport) {
 	ptw.Flush()
 
 	if !r.Apply {
-		fmt.Println("\nRun with --apply to execute the drill.")
+		fmt.Println("\nDry run — re-run without --dry-run (-n) to execute the drill.")
 	}
 }
 
