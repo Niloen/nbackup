@@ -1001,8 +1001,8 @@ func TestDumpSpansArchiveAcrossTapes(t *testing.T) {
 	}
 
 	// Verify reassembles and re-hashes the spanned archive across its tapes.
-	if failures, err := eng.Verify([]string{s.ID}, nil); err != nil || failures != 0 {
-		t.Fatalf("verify: failures=%d err=%v", failures, err)
+	if rep, err := eng.Verify([]string{s.ID}, VerifyOptions{}, nil); err != nil || rep.Failures != 0 {
+		t.Fatalf("verify: failures=%d err=%v", rep.Failures, err)
 	}
 
 	// Restore must mount each bay in sequence to rebuild the original file.
@@ -1119,8 +1119,8 @@ func TestPartSizeSplitsWithinTape(t *testing.T) {
 	if vols := eng.cat.Placements(s.ID)[0].Volumes(); len(vols) != 1 {
 		t.Fatalf("parts should stay on one tape, got volumes %v", vols)
 	}
-	if failures, err := eng.Verify([]string{s.ID}, nil); err != nil || failures != 0 {
-		t.Fatalf("verify: failures=%d err=%v", failures, err)
+	if rep, err := eng.Verify([]string{s.ID}, VerifyOptions{}, nil); err != nil || rep.Failures != 0 {
+		t.Fatalf("verify: failures=%d err=%v", rep.Failures, err)
 	}
 	dest := t.TempDir()
 	if err := eng.Restore(s.ID, config.DLE{Host: "h", Path: src}.Name(), dest, nil); err != nil {

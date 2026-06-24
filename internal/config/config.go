@@ -83,11 +83,32 @@ type Config struct {
 	// every rule; `nb sync --to X` is the ad-hoc form and needs no rule.
 	Sync []SyncRule `yaml:"sync"`
 
+	// Drill configures recovery drills (`nb drill`): the recoverability rehearsal
+	// layered on `nb verify`. It mirrors the sync block so a cron line can be
+	// `nb dump && nb sync --apply && nb drill --apply --unattended`.
+	Drill DrillConfig `yaml:"drill"`
+
 	// DumpTypes is a map of named method+option bundles (Amanda's dumptype).
 	DumpTypes map[string]DumpType `yaml:"dumptypes"`
 
 	Sources Sources `yaml:"sources"`
 }
+
+// DrillConfig is the `drill:` block: how often each DLE must be drilled, how many to
+// drill per run, which copy to read, and how deeply. CLI flags override these.
+type DrillConfig struct {
+	Window     string `yaml:"window"`      // each DLE drilled within this window (default 30d)
+	Sample     int    `yaml:"sample"`      // DLEs drilled per run (default 1)
+	From       string `yaml:"from"`        // source medium to drill ("" = the landing medium)
+	Tier       string `yaml:"tier"`        // checksum | structural | chain | stock (default structural)
+	StockTools bool   `yaml:"stock_tools"` // drill via the documented stock one-liner (shorthand for tier: stock)
+	Worm       bool   `yaml:"worm"`        // run the WORM/immutability probe
+	Unattended bool   `yaml:"unattended"`  // cron mode: never prompt; skip swap-needing targets
+}
+
+// validDrillTiers is the accepted set for the drill tier token (kept here so config
+// validation needs no dependency on package drill, which depends on no config).
+var validDrillTiers = map[string]bool{"": true, "checksum": true, "structural": true, "chain": true, "stock": true}
 
 // Sources is the disklist. In config it is written grouped by dumptype, then
 // host, then a list of paths:
@@ -318,7 +339,71 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("sync rule %d: `last` must not be negative", i)
 		}
 	}
+	if err := c.validateDrill(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// validateDrill checks the optional `drill:` block.
+func (c *Config) validateDrill() error {
+	d := c.Drill
+	if d.Window != "" {
+		if _, err := sizeutil.ParseDuration(d.Window); err != nil {
+			return fmt.Errorf("drill: window: %w", err)
+		}
+	}
+	if d.Sample < 0 {
+		return fmt.Errorf("drill: sample must not be negative")
+	}
+	if !validDrillTiers[d.Tier] {
+		return fmt.Errorf("drill: unknown tier %q (known: checksum, structural, chain, stock)", d.Tier)
+	}
+	if d.From != "" && len(c.Media) > 0 {
+		if _, ok := c.Media[d.From]; !ok {
+			return fmt.Errorf("drill: source %q is not a defined medium", d.From)
+		}
+	}
+	return nil
+}
+
+// DefaultDrillWindow is the assumed drill coverage window when `drill.window` is
+// unset: every DLE should be drilled at least this often.
+const DefaultDrillWindow = 30 * 24 * time.Hour
+
+// DefaultDrillSample is the number of DLEs drilled per run when `drill.sample` is
+// unset — a small, risk-biased rotation so routine drills stay cheap.
+const DefaultDrillSample = 1
+
+// DrillWindow returns the drill coverage window (default DefaultDrillWindow).
+func (c *Config) DrillWindow() time.Duration {
+	if c.Drill.Window == "" {
+		return DefaultDrillWindow
+	}
+	if d, err := sizeutil.ParseDuration(c.Drill.Window); err == nil && d > 0 {
+		return d
+	}
+	return DefaultDrillWindow
+}
+
+// DrillSample returns the per-run DLE sample size (default DefaultDrillSample).
+func (c *Config) DrillSample() int {
+	if c.Drill.Sample > 0 {
+		return c.Drill.Sample
+	}
+	return DefaultDrillSample
+}
+
+// DrillTierName returns the configured drill tier token, applying the stock_tools
+// shorthand and defaulting to "structural" (the no-write tier fit for routine drills).
+func (c *Config) DrillTierName() string {
+	if c.Drill.StockTools {
+		return "stock"
+	}
+	if c.Drill.Tier != "" {
+		return c.Drill.Tier
+	}
+	return "structural"
 }
 
 // DLEs returns the configured backup sources.

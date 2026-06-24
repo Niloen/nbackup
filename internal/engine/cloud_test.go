@@ -41,8 +41,8 @@ func TestCloudLandingRoundTrip(t *testing.T) {
 		t.Fatalf("dump to cloud: %v", err)
 	}
 
-	if failures, err := eng.Verify([]string{s.ID}, nil); err != nil || failures != 0 {
-		t.Fatalf("verify from cloud: failures=%d err=%v", failures, err)
+	if rep, err := eng.Verify([]string{s.ID}, VerifyOptions{}, nil); err != nil || rep.Failures != 0 {
+		t.Fatalf("verify from cloud: failures=%d err=%v", rep.Failures, err)
 	}
 
 	dest := t.TempDir()

@@ -55,6 +55,7 @@ func NewRootCmd() *cobra.Command {
 		newSlotCmd(a),
 		newMediumCmd(a),
 		newVerifyCmd(a),
+		newDrillCmd(a),
 		newRestoreCmd(a),
 		newRecoverCmd(a),
 		newCopyCmd(a),
