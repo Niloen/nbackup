@@ -45,7 +45,7 @@ reports findings. Cover these areas:
    `load`; `medium` inventory; dump landing on tape; auto_label on/off; **spanning** a
    slot across volumes (tiny `volume_size`) + restore/verify of the spanned slot;
    unattended runs must **error cleanly, never hang**; manual-station swap prompts.
-4. **Replication & pruning:** `copy` (dry-run default + `--apply`), `sync`
+4. **Replication & pruning:** `copy` (copies by default + `--dry-run`/`-n`), `sync`
    (`--to`/`--from`/`--last`/`--since`, config `sync:` rules, idempotency),
    `prune <medium>` (per-medium retention, safety floor, capacity reclamation,
    independence between media).

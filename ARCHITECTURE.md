@@ -162,8 +162,8 @@ source placement and mounts it for reading via the same `Librarian.MountForRead`
 path `readerFor` uses, so a tape/S3 source works (un-vaulting tape→disk, or a
 second offsite tier), and copy-to-landing is now allowed (the old "target is the
 source" guard became a `from == to` guard). The config `sync:` rules are the
-declarative form (`{from, to, last}`) so a cron `nb dump && nb sync
---apply` mirrors offsite hands-off. Sync and pruning are independent, not coupled:
+declarative form (`{from, to, last}`) so a cron `nb dump && nb sync`
+mirrors offsite hands-off. Sync and pruning are independent, not coupled:
 retention is per-medium (`policy.Protected` is judged over one medium's own slots),
 so a copy reaching another medium never makes the original prunable — double storage
 keeps both copies, each retained on its own capacity and cycle. Tiering disk lean
@@ -173,7 +173,7 @@ while a cheap medium holds bulk is just a tighter disk `capacity`/`minimum_age`,
 **One mutating `nb` per config at a time** (`internal/lock`, Amanda's per-config
 amflock). Rather than make the catalog concurrently writable, we serialize the
 whole mutating run: every command that writes the catalog or media (`dump`,
-`copy`, `label`, `load`, `rebuild`, `prune --apply`) takes a
+`copy`, `label`, `load`, `rebuild`, `prune`) takes a
 non-blocking advisory `flock` on `workdir/lock` before opening the engine, and a
 second invocation fails fast (`ErrHeld`). flock is tied to the open fd, so a
 crash releases it — no stale lockfiles. Read-only commands take no lock: catalog

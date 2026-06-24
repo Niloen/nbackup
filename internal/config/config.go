@@ -85,7 +85,7 @@ type Config struct {
 
 	// Drill configures recovery drills (`nb drill`): the recoverability rehearsal
 	// layered on `nb verify`. It mirrors the sync block so a cron line can be
-	// `nb dump && nb sync --apply && nb drill --apply --unattended`.
+	// `nb dump && nb sync && nb drill --unattended`.
 	Drill DrillConfig `yaml:"drill"`
 
 	// DumpTypes is a map of named method+option bundles (Amanda's dumptype).

@@ -250,7 +250,7 @@ func newDumpCmd(a *app) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dateStr, "date", "", "run date YYYY-MM-DD (default today)")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "plan the run for --date and print it without writing anything")
+	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "plan the run for --date and print it without writing anything")
 	return cmd
 }
 
@@ -535,22 +535,22 @@ func newSlotShowCmd(a *app) *cobra.Command {
 
 // newPruneCmd implements `nb prune`: reclaim slots past the cycle/capacity limits.
 func newPruneCmd(a *app) *cobra.Command {
-	var apply bool
+	var dryRun bool
 	var dateStr string
 	cmd := &cobra.Command{
 		Use:     "prune <medium>",
 		Short:   "Delete a medium's slots past its cycle/capacity limits",
-		Long:    "Reclaim slots on the named medium that fall outside its own cycle and capacity limits. Retention is per-medium, so the medium to prune must be named explicitly (pruning one store never touches a copy on another). Dry-run by default; pass --apply to actually delete.",
-		Example: "  nb prune disk\n  nb prune disk --apply\n  nb prune offsite --apply",
+		Long:    "Reclaim slots on the named medium that fall outside its own cycle and capacity limits. Retention is per-medium, so the medium to prune must be named explicitly (pruning one store never touches a copy on another). Deletes by default; pass --dry-run (-n) to preview.",
+		Example: "  nb prune disk\n  nb prune disk --dry-run\n  nb prune offsite",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.load()
 			if err != nil {
 				return err
 			}
-			// Dry-run prune only reads; --apply deletes slots, so lock it.
+			// Dry-run prune only reads; a real run deletes slots, so lock it.
 			var eng *engine.Engine
-			if apply {
+			if !dryRun {
 				var unlock func()
 				eng, unlock, err = a.lockedEngine(cfg)
 				if err != nil {
@@ -564,13 +564,13 @@ func newPruneCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eligible, err := eng.Prune(args[0], now, apply, a.logf())
+			eligible, err := eng.Prune(args[0], now, !dryRun, a.logf())
 			if err != nil {
 				return err
 			}
-			if !apply {
+			if dryRun {
 				if eligible > 0 {
-					fmt.Printf("\n%d slot(s) eligible. Re-run with --apply to delete.\n", eligible)
+					fmt.Printf("\n%d slot(s) eligible. Re-run without --dry-run to delete.\n", eligible)
 				} else {
 					fmt.Printf("\nnothing to reclaim: all slots fit capacity or are protected.\n")
 				}
@@ -578,7 +578,7 @@ func newPruneCmd(a *app) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&apply, "apply", false, "actually delete (default is dry-run)")
+	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "preview without deleting")
 	cmd.Flags().StringVar(&dateStr, "date", "", "reference 'now' date YYYY-MM-DD (default today)")
 	return cmd
 }
@@ -587,12 +587,12 @@ func newPruneCmd(a *app) *cobra.Command {
 // another configured medium (e.g. disk -> tape).
 func newCopyCmd(a *app) *cobra.Command {
 	var from, to string
-	var apply, force bool
+	var dryRun, force bool
 	cmd := &cobra.Command{
 		Use:     "copy <slot-id>",
 		Short:   "Copy a slot from one medium to another (e.g. disk -> tape)",
-		Long:    "Stream a slot from one configured medium to another. The destination is selected with --to; the source defaults to the landing medium and is overridden with --from (e.g. un-vault tape -> disk). Dry-run by default (like `nb sync`/`nb prune`); pass --apply to actually copy.",
-		Example: "  nb copy --to tape slot-2026-06-21\n  nb copy --to tape --apply slot-2026-06-21\n  nb copy --from tape --to disk --apply slot-2026-06-21",
+		Long:    "Stream a slot from one configured medium to another. The destination is selected with --to; the source defaults to the landing medium and is overridden with --from (e.g. un-vault tape -> disk). Copies by default (like `nb sync`/`nb prune`); pass --dry-run (-n) to preview.",
+		Example: "  nb copy --to tape slot-2026-06-21\n  nb copy --to tape --dry-run slot-2026-06-21\n  nb copy --from tape --to disk slot-2026-06-21",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.load()
@@ -600,7 +600,7 @@ func newCopyCmd(a *app) *cobra.Command {
 				return err
 			}
 			slotID := args[0]
-			if !apply {
+			if dryRun {
 				return runCopyDryRun(cfg, slotID, from, to, force)
 			}
 			eng, unlock, err := a.lockedEngine(cfg)
@@ -618,7 +618,7 @@ func newCopyCmd(a *app) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&to, "to", "", "destination medium name (required)")
 	cmd.Flags().StringVar(&from, "from", "", "source medium name (default: the landing medium)")
-	cmd.Flags().BoolVar(&apply, "apply", false, "actually copy (default is dry-run)")
+	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "preview without copying")
 	cmd.Flags().BoolVar(&force, "force", false, "re-copy even if the slot is already recorded on the target medium")
 	cmd.MarkFlagRequired("to")
 	return cmd
@@ -652,7 +652,7 @@ func runCopyDryRun(cfg *config.Config, slotID, from, to string, force bool) erro
 			return nil
 		}
 	}
-	fmt.Printf("%s -> %s: would copy %s (%d archive(s), %s). Re-run with --apply to copy.\n",
+	fmt.Printf("%s -> %s: would copy %s (%d archive(s), %s). Re-run without --dry-run to copy.\n",
 		src, to, slotID, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes))
 	return nil
 }
@@ -660,11 +660,11 @@ func runCopyDryRun(cfg *config.Config, slotID, from, to string, force bool) erro
 // newSyncCmd implements `nb sync`: the batch form of `nb copy`. It mirrors every
 // landing slot a target is missing onto that target (Amanda's vaulting), oldest
 // first. With --to it syncs one ad-hoc target; without --to it runs the rules in
-// the config's `sync:` block. Dry-run by default (like `nb slot prune`).
+// the config's `sync:` block. Copies by default (like `nb slot prune`).
 func newSyncCmd(a *app) *cobra.Command {
 	var from, to, sinceStr string
 	var last int
-	var apply, force bool
+	var dryRun, force bool
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Mirror one medium's slots onto another (e.g. disk -> tape/s3)",
@@ -672,9 +672,9 @@ func newSyncCmd(a *app) *cobra.Command {
 			"first. The batch, idempotent form of `nb copy`: an interrupted or repeated sync " +
 			"resumes, copying only what is not yet on the target. The source defaults to the " +
 			"landing medium and is overridden with --from. With --to it syncs one target; " +
-			"without --to it runs the `sync:` rules from the config. Dry-run by default; pass " +
-			"--apply to actually copy.",
-		Example: "  nb sync\n  nb sync --to lto\n  nb sync --to glacier --last 4 --apply\n  nb sync --from lto --to disk --apply",
+			"without --to it runs the `sync:` rules from the config. Copies by default; pass " +
+			"--dry-run (-n) to preview.",
+		Example: "  nb sync\n  nb sync --to lto\n  nb sync --to glacier --last 4\n  nb sync --from lto --to disk --dry-run",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.load()
@@ -706,9 +706,9 @@ func newSyncCmd(a *app) *cobra.Command {
 				}
 			}
 
-			// Dry-run only reads; --apply writes media + catalog, so lock it.
+			// Dry-run only reads; a real run writes media + catalog, so lock it.
 			var eng *engine.Engine
-			if apply {
+			if !dryRun {
 				var unlock func()
 				eng, unlock, err = a.lockedEngine(cfg)
 				if err != nil {
@@ -721,9 +721,9 @@ func newSyncCmd(a *app) *cobra.Command {
 			}
 
 			for _, t := range targets {
-				report, err := eng.SyncTo(t.from, t.name, t.sel, apply, force, a.logf())
+				report, err := eng.SyncTo(t.from, t.name, t.sel, !dryRun, force, a.logf())
 				if report != nil {
-					printSyncReport(report, apply)
+					printSyncReport(report, !dryRun)
 				}
 				if err != nil {
 					return err
@@ -736,7 +736,7 @@ func newSyncCmd(a *app) *cobra.Command {
 	cmd.Flags().StringVar(&from, "from", "", "source medium (default: the landing medium)")
 	cmd.Flags().IntVar(&last, "last", 0, "copy only the N most recent slots (0 = all)")
 	cmd.Flags().StringVar(&sinceStr, "since", "", "copy only slots created on/after this date YYYY-MM-DD")
-	cmd.Flags().BoolVar(&apply, "apply", false, "actually copy (default is dry-run)")
+	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "preview without copying")
 	cmd.Flags().BoolVar(&force, "force", false, "re-copy slots already recorded on the target")
 	return cmd
 }
@@ -751,7 +751,7 @@ func printSyncReport(r *engine.SyncReport, apply bool) {
 		fmt.Printf("%s -> %s: copied %d slot(s), %s\n", r.From, r.To, r.Copied(), sizeutil.FormatBytes(r.Bytes()))
 		return
 	}
-	fmt.Printf("%s -> %s: %d slot(s) to copy, %s (dry-run; --apply to copy):\n",
+	fmt.Printf("%s -> %s: %d slot(s) to copy, %s (dry-run; re-run without --dry-run to copy):\n",
 		r.From, r.To, len(r.Items), sizeutil.FormatBytes(r.Bytes()))
 	for _, it := range r.Items {
 		fmt.Printf("  %-24s %2d archive(s)  %s\n", it.SlotID, it.Archives, sizeutil.FormatBytes(it.Bytes))
