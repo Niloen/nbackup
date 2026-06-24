@@ -142,6 +142,31 @@ func TestPromotionDoesNotChaseAverage(t *testing.T) {
 	}
 }
 
+// TestPromotionTinyCoDeadlineDoesNotUnlockBigDLE guards the dominating-DLE case:
+// a big DLE that was just fulled must not be re-fulled merely because a tiny DLE
+// shares its deadline day. The tiny co-resident inflates that day's load above the
+// big DLE's own size, but the overshoot guard compares today against the day's load
+// *after the big full leaves it*, so the big move is still blocked. Without the
+// guard the 3.64 GB DLE is re-fulled almost every run.
+func TestPromotionTinyCoDeadlineDoesNotUnlockBigDLE(t *testing.T) {
+	today := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
+	day := func(n int) string { return today.AddDate(0, 0, -n).Format("2006-01-02") }
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{
+		// Big DLE fulled today: 7 days of cycle left, nowhere near its deadline.
+		"big-data": {LastFullDate: day(0), Runs: []catalog.RunRecord{{Date: day(0), Slot: "slot-x", Level: 0}}},
+		// Tiny DLE sharing the same deadline day (also fulled today).
+		"tiny-data": {LastFullDate: day(0), Runs: []catalog.RunRecord{{Date: day(0), Slot: "slot-x", Level: 0}}},
+	}}
+	est := map[string]Estimate{
+		"big-data":  {Full: 3_640_000_000, Incr: 10_000},
+		"tiny-data": {Full: 10_000, Incr: 10_000},
+	}
+	p := Build([]config.DLE{dleNamed("big"), dleNamed("tiny")}, hist, est, Params{CycleDays: 7, RoomBytes: -1}, today)
+	if lvl := levelOf(p, "big-data"); lvl == 0 {
+		t.Errorf("big DLE re-fulled the run after its full because a tiny DLE shared its deadline; want an incremental")
+	}
+}
+
 // TestPromotionDoesNotOverFullBigDLE checks the skew guard over a window: with one
 // big DLE and many small ones, the big DLE is fulled about once per cycle, not
 // repeatedly pulled forward to flatten daily volume.
