@@ -7,7 +7,7 @@
 // renders the recent history as a digest, and the notify layer turns a record into
 // an alert.
 //
-// It is a leaf, like drill/policy: pure record types plus their file persistence
+// It is a leaf, like drill/retention: pure record types plus their file persistence
 // and rendering. It never imports the engine (the engine and the CLI import it),
 // and — like progress.NewFileSink and drill.Ledger — a write error here is a
 // warning the caller logs, never something that fails a backup.

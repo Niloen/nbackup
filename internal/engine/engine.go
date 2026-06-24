@@ -1,6 +1,6 @@
 // Package engine is NBackup's orchestrator, analogous to Amanda's driver. It
 // wires the planner, dump method, transfer pipeline, media store, catalog, and
-// policy together to execute runs, restores, verification, and pruning. It is
+// retention together to execute runs, restores, verification, and pruning. It is
 // the only place that knows about all the abstractions at once; everything below
 // it depends only on interfaces.
 package engine
@@ -24,10 +24,10 @@ import (
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/method"
 	"github.com/Niloen/nbackup/internal/planner"
-	"github.com/Niloen/nbackup/internal/policy"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/restore"
+	"github.com/Niloen/nbackup/internal/retention"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/slotio"
 	"github.com/Niloen/nbackup/internal/xfer"
@@ -699,11 +699,11 @@ func (e *Engine) expectedVolumeFor(medium string, now time.Time) VolumeExpectati
 	// slots. Scoping to e.cat.Slots() (all media) would recycle a tape merely
 	// because a newer full landed on disk — discarding the offsite copy and the
 	// redundancy double storage exists to provide.
-	protected := policy.Protected(e.cat.SlotsOn(medium), minAge, now)
+	floor := retention.Compute(e.cat.SlotsOn(medium), minAge, now)
 	for _, v := range pool {
 		held := e.cat.SlotsOnLabel(v.Label.Name)
-		if _, _, ok := policy.ProtectedOn(protected, held); ok {
-			continue // some slot on this tape is still protected — not reusable
+		if _, _, ok := floor.First(held); ok {
+			continue // some slot on this tape is still kept — not reusable
 		}
 		exp.Label, exp.WrittenAt, exp.Recycles = v.Label.Name, v.Label.WrittenAt, len(held)
 		return exp
@@ -845,14 +845,14 @@ func (e *Engine) poolRoom(now time.Time) int64 {
 		return -1
 	}
 	slots := e.cat.SlotsOn(e.mediumName)
-	protected := policy.Protected(slots, e.minAge, now)
-	var protectedBytes int64
+	floor := retention.Compute(slots, e.minAge, now)
+	var keptBytes int64
 	for _, s := range slots {
-		if _, ok := protected[s.ID]; ok {
-			protectedBytes += s.TotalBytes
+		if floor.Keeps(s.ID) {
+			keptBytes += s.TotalBytes
 		}
 	}
-	if room := capacity - protectedBytes; room > 0 {
+	if room := capacity - keptBytes; room > 0 {
 		return room
 	}
 	return 0
@@ -1377,10 +1377,10 @@ func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) 
 	}
 	minAge := e.cfg.MinAgeFor(def)
 	slots := e.cat.SlotsOn(mediumName)
-	protected := policy.Protected(slots, minAge, now)
+	floor := retention.Compute(slots, minAge, now)
 
 	reclaim := map[string]media.Reclamation{}
-	for _, r := range profile.Reclaim(slots, protected, now) {
+	for _, r := range profile.Reclaim(slots, floor, now) {
 		reclaim[r.SlotID] = r
 	}
 
@@ -1388,7 +1388,7 @@ func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) 
 		if _, ok := reclaim[s.ID]; ok {
 			continue // reported below
 		}
-		if reason := protected[s.ID]; reason != "" {
+		if reason, ok := floor.Reason(s.ID); ok {
 			logf.log("keep   %s  (%s)", s.ID, reason)
 		} else {
 			logf.log("keep   %s  (fits capacity)", s.ID)

@@ -14,7 +14,7 @@
 //
 // The librarian is a shared service: dump, copy/sync, restore, rebuild, label, and
 // load all bottom out in "present the right volume on medium X". It depends only on
-// media, the catalog, and policy — never on the engine — so it is the seam future
+// media, the catalog, and retention — never on the engine — so it is the seam future
 // sub-engines (a dumper, a catalog refresher, a copier) will each consume.
 package librarian
 
@@ -27,7 +27,7 @@ import (
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/policy"
+	"github.com/Niloen/nbackup/internal/retention"
 )
 
 // Operator handles physical actions software cannot perform itself — chiefly
@@ -601,8 +601,8 @@ func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration
 		// the catalog rather than scanning the mounted reel correctly attributes a
 		// spanned slot to every tape it touches — even the head tape, whose seal
 		// record lives only on the last tape of the span.
-		protected := policy.Protected(l.cat.SlotsOn(l.medium), minAge, now)
-		if id, reason, ok := policy.ProtectedOn(protected, l.cat.SlotsOnLabel(cur.Name)); ok && !force {
+		floor := retention.Compute(l.cat.SlotsOn(l.medium), minAge, now)
+		if id, reason, ok := floor.First(l.cat.SlotsOnLabel(cur.Name)); ok && !force {
 			return fmt.Errorf("tape %q still holds protected slot %s (%s); refusing to relabel (use --force)", cur.Name, id, reason)
 		}
 		epoch = cur.Epoch + 1

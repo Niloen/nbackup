@@ -6,9 +6,9 @@ import (
 	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
-	"github.com/Niloen/nbackup/internal/policy"
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/restore"
+	"github.com/Niloen/nbackup/internal/retention"
 )
 
 // This file is the dollar overlay on the engine's byte accounting. The planner and
@@ -55,7 +55,7 @@ type ForecastPoint struct {
 // ForecastCost projects the landing medium's monthly storage cost forward day by day,
 // reusing the planner's run simulation. It maintains a footprint of slots — appending
 // each simulated run and evicting via the medium's own reclamation strategy and
-// protection floor (the same primitives `nb prune` uses) — and reprices the survivors
+// retention floor (the same primitives `nb prune` uses) — and reprices the survivors
 // each day, so the curve reflects fulls/incrementals landing and pruning reclaiming.
 // Pure and offline.
 func (e *Engine) ForecastCost(start time.Time, days int) []ForecastPoint {
@@ -80,10 +80,10 @@ func (e *Engine) ForecastCost(start time.Time, days int) []ForecastPoint {
 			working = append(working, sl)
 		}
 
-		// Reclaim against this medium's capacity, honoring the protection floor.
-		protected := policy.Protected(working, e.minAge, date)
+		// Reclaim against this medium's capacity, honoring the retention floor.
+		floor := retention.Compute(working, e.minAge, date)
 		var reclaimed int64
-		for _, r := range e.profile.Reclaim(working, protected, date) {
+		for _, r := range e.profile.Reclaim(working, floor, date) {
 			reclaimed += r.Bytes
 			working = dropSlot(working, r.SlotID)
 		}
