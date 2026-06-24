@@ -470,9 +470,13 @@ func newSlotShowCmd(a *app) *cobra.Command {
 			fmt.Printf("  sealed:  %s\n", s.SealedAt.Format("2006-01-02 15:04:05 MST"))
 			fmt.Printf("  total:   %s\n\n", sizeutil.FormatBytes(s.TotalBytes))
 			tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-			fmt.Fprintln(tw, "DLE\tLEVEL\tFILES\tSIZE\tCODEC")
+			fmt.Fprintln(tw, "DLE\tLEVEL\tFILES\tSIZE\tCODEC\tENCRYPT")
 			for _, ar := range s.Archives {
-				fmt.Fprintf(tw, "%s\tL%d\t%d\t%s\t%s\n", ar.DLE, ar.Level, ar.FileCount, sizeutil.FormatBytes(ar.Compressed), ar.Codec)
+				enc := ar.Encrypt
+				if enc == "" {
+					enc = "none"
+				}
+				fmt.Fprintf(tw, "%s\tL%d\t%d\t%s\t%s\t%s\n", ar.DLE, ar.Level, ar.FileCount, sizeutil.FormatBytes(ar.Compressed), ar.Codec, enc)
 			}
 			tw.Flush()
 

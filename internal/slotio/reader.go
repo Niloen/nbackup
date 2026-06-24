@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/filter"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/xfer"
@@ -14,12 +15,14 @@ import (
 // and opens each part in turn.
 type Reader struct {
 	fopts filter.Options
+	copts crypt.Options
 }
 
 // NewReader returns a Reader. fopts carries codec settings (e.g. a binary override)
-// used when decompressing archives.
-func NewReader(fopts filter.Options) *Reader {
-	return &Reader{fopts: fopts}
+// used when decompressing archives; copts carries the decryptor's key reference
+// (e.g. a passphrase file) — public-key schemes need none.
+func NewReader(fopts filter.Options, copts crypt.Options) *Reader {
+	return &Reader{fopts: fopts, copts: copts}
 }
 
 // Expect is the identity a caller believes an archive's parts hold, asserted against
@@ -37,28 +40,35 @@ type Expect struct {
 // over the librarian (mount the part's volume, then ReadFile its position).
 type PartOpener func(p PartPosition) (media.Header, io.ReadCloser, error)
 
-// OpenArchiveParts opens the decompressed stream of an archive whose payload is the
+// OpenArchiveParts opens the plaintext stream of an archive whose payload is the
 // ordered concatenation of parts. It reads each part fully before opening the next
 // (a single drive holds only one volume at a time), asserting every part's header
-// against want and its position in the sequence, then reverses the codec over the
-// whole concatenation. The caller closes the returned reader.
-func (r *Reader) OpenArchiveParts(parts []PartPosition, codec string, want Expect, open PartOpener) (io.ReadCloser, error) {
+// against want and its position in the sequence, then reverses the transforms over
+// the whole concatenation in write order's inverse: decrypt, then decompress. The
+// caller closes the returned reader.
+func (r *Reader) OpenArchiveParts(parts []PartPosition, codec, encrypt string, want Expect, open PartOpener) (io.ReadCloser, error) {
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("archive %s %s L%d has no parts", want.Slot, want.DLE, want.Level)
 	}
 	raw := &partsReader{parts: parts, want: want, open: open}
 	// Open the first part eagerly so a missing/wrong volume errors here, letting the
-	// caller fail over to another copy — rather than surfacing only once the codec
-	// child (or a stock reader) pulls bytes, by which point failover is impossible.
+	// caller fail over to another copy — rather than surfacing only once a child
+	// (or a stock reader) pulls bytes, by which point failover is impossible.
 	if err := raw.prime(); err != nil {
 		return nil, err
 	}
-	src, err := filter.Decompress(codec, raw, r.fopts)
+	dec, err := crypt.Decrypt(encrypt, raw, r.copts)
 	if err != nil {
 		raw.Close()
 		return nil, err
 	}
-	return multiCloser{Reader: src, closers: []io.Closer{src, raw}}, nil
+	src, err := filter.Decompress(codec, dec, r.fopts)
+	if err != nil {
+		dec.Close()
+		raw.Close()
+		return nil, err
+	}
+	return multiCloser{Reader: src, closers: []io.Closer{src, dec, raw}}, nil
 }
 
 // OpenRawParts returns the archive's raw (still-compressed) payload as the ordered

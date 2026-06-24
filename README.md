@@ -54,9 +54,10 @@ payload, since a tape has no sidecars.)
 
 Archives are produced by **GNU tar** in listed-incremental format, then piped
 through an external compressor (`zstd` by default; `gzip` or `none` also built
-in). NBackup orchestrates `tar` and the compressor as child processes rather
-than reimplementing them — so the tools that produced an archive are exactly the
-tools that restore it, and **recovery never requires NBackup**:
+in) and, optionally, an external **encryptor** (`gpg`). NBackup orchestrates
+`tar`, the compressor, and gpg as child processes rather than reimplementing
+them — so the tools that produced an archive are exactly the tools that restore
+it, and **recovery never requires NBackup**:
 
 ```bash
 # single full archive (the disk payload is a clean tar.zst — no header to skip):
@@ -66,11 +67,30 @@ zstd -dc 000000-app01-home-L0.tar.zst | tar -xf -
 for a in slots/slot-*/0*-app01-home-L*.tar.zst; do
   zstd -dc "$a" | tar --extract --listed-incremental=/dev/null
 done
+# (an ENCRYPTED archive reverses the same way, decrypting before decompressing:
+#  gpg -d < 000000-app01-home-L0.tar.zst.gpg | zstd -dc | tar -xf -)
 # (from tape, skip the 32 KB inline header first: dd bs=32k skip=1 < file | zstd -dc | …)
 # (a tape archive that SPANNED volumes is split into parts — strip each part's 32 KB
 #  header and concatenate them in order before decompressing:
 #  for p in part0 part1 …; do dd bs=32k skip=1 < "$p"; done | zstd -dc | tar -xf -)
 ```
+
+### Encryption
+
+Set an `encrypt` block (config-wide, or per dumptype) to pipe each archive
+through **gpg** after compression — public-key (`recipient`) or symmetric
+(`passphrase_file`). Encryption is *source-tied*: the dump is encrypted once and
+every copy (disk, tape, offsite) holds the same ciphertext, so vaulting with
+`nb sync` never needs the key. The archive records only the **scheme name**
+(`gpg`), never a key — gpg finds the right key in the operator's keyring from the
+ciphertext itself, so restore works on any host with the key, even with the
+config gone.
+
+Two consequences worth knowing: **lose the key and the data is unrecoverable**
+(NBackup holds no copy by design), and the per-slot **seal stays plaintext** —
+filenames and checksums remain readable on the medium so `nb recover` can browse
+without the key. Integrity (`nb verify`) and copy/sync also stay keyless; only
+extraction needs the key.
 
 ## Install
 

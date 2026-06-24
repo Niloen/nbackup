@@ -52,6 +52,7 @@ registry registration, not a conditional in the core.
 | `media/disk`, `media/tape`, `media/cloud` | Volume impls (disk sidecar headers; tape library; object store via gocloud.dev/blob) | vfs / tape / s3 devices |
 | `method` + `method/gnutar` | dump `Method` interface + registry; GNU tar impl | Application API / amgtar |
 | `filter` | external compressor child processes (zstd/gzip/none) + registry | compress |
+| `crypt` | external encryptor child processes (gpg/none) + registry | amcrypt/amgpgcrypt |
 | `xfer` | in-process stream metering: checksum + byte counting | Xfer API |
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `catalog` | local cache of slot index + volume registry + snapshot library; derives `History` | catalog / curinfo / tapelist |
@@ -63,12 +64,13 @@ registry registration, not a conditional in the core.
 | `cli` | thin command wiring | amdump / amadmin |
 
 Dependencies flow one way: `cli → engine → {planner, policy, method, filter,
-slotio, catalog, config, progress, restore, recovery}` over leaf packages
+crypt, slotio, catalog, config, progress, restore, recovery}` over leaf packages
 `{media, xfer, slot, sizeutil}` (`recovery` builds on `restore`).
-Domain packages stay pure; `method`/`media`/`filter` are pluggable adapters;
+Domain packages stay pure; `method`/`media`/`filter`/`crypt` are pluggable adapters;
 `engine` is the only component aware of all of them. A backup is a pipeline of
 processes: **source** (`tar` via `method.Backup`) → **filter** (compressor child)
-→ **dest** (`media.Volume`), metered by `xfer`, composed by `slotio`.
+→ **crypt** (encryptor child) → **dest** (`media.Volume`), metered by `xfer`,
+composed by `slotio`.
 
 ## Load-bearing decisions (the *why*)
 
@@ -138,6 +140,36 @@ writes land via atomic rename (write-tmp + `os.Rename`), so a reader always sees
 a complete old-or-new cache. (Caveat: flock is unreliable over NFS; a workdir is
 expected to be on a local filesystem. The lock is per *config workdir*, not per
 medium — two configs sharing one physical volume are not yet guarded.)
+
+**Encryption is source-tied and outermost (`package crypt`).** Encryption is the
+peer of compression, one stream transform further out: on write the pipeline is
+**tar → compress → encrypt → meter → volume**; on read it reverses **decrypt →
+decompress**. `package crypt` mirrors `filter` — an external child (`gpg`),
+selected by a registered scheme *name* (`gpg`/`none`), with the same proc
+plumbing. Three decisions carry their weight:
+- **Outermost placement is load-bearing.** Because encryption sits *inside* the
+  `xfer.Meter`, the seal's `SHA256` covers the *ciphertext* that lands on the
+  volume. So the pre-seal re-read, `nb verify`, and `CopySlot`/`nb sync` all
+  operate on ciphertext and stay **keyless** — vaulting offsite, verifying
+  integrity, and the medium-independent `Entry`/`Placement` identity (one slot,
+  N byte-identical copies) are untouched. Only *extraction* needs the key.
+- **Record the scheme name, never the key.** Each archive's header/seal carries
+  `Encrypt: "gpg"` (a compiled-registry primitive, exactly like `Codec`), so
+  restore reverses it from the artifact alone — config-free, the same
+  rebuild-from-media property compression already has. The **key is never
+  stored**: with a gpg public-key recipient the key-id travels inside the
+  ciphertext and gpg resolves the private key from the operator's keyring, so a
+  slot with archives under different keys (per-dumptype) just restores. Selection
+  is config (`encrypt:` block, config-wide default or a whole-block per-dumptype
+  override — no field merge); the *cipher* is a compiled scheme so the artifact
+  never depends on config to be read.
+- **The seal stays plaintext, deliberately.** It holds the member list
+  (filenames) and checksums; keeping it unencrypted is what lets `nb recover` and
+  `nb rebuild` browse without the key (Amanda's plaintext-index property). The
+  cost — filenames are readable on the medium — is a documented trade, not an
+  oversight. (Deferred: per-medium at-rest encryption (S3 SSE / LTO hardware) for
+  the "untrusted destination only" posture; client-side encryption with remote
+  sources; an opt-in encrypted seal.)
 
 **Media model.** A `Volume` is positional, self-describing files; framing differs
 per medium (disk: a `.hdr` sidecar so the payload is a clean `.tar.<codec>`; tape:

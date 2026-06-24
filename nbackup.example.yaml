@@ -102,6 +102,19 @@ compress:
   threads: 0         # compressor worker threads (0 = codec default; zstd: single)
   # program: /usr/bin/zstd   # optional binary override
 
+# Encryption. After compression, archives can be piped through an external
+# encryptor child (gpg), like Amanda's encrypt program. The scheme name is a
+# compiled primitive (gpg | none) recorded per-archive, so restore reverses it
+# from the artifact alone — no config needed. The KEY is never stored: with a
+# public-key recipient, gpg finds the matching private key in the keyring on the
+# restoring host; losing the key loses the data. This block is the config-wide
+# default; a dumptype may set its own `encrypt` block to override it wholesale.
+# encrypt:
+#   scheme: gpg                      # gpg | none (default none)
+#   recipient: backups@example.com   # gpg public-key recipient (asymmetric)
+#   # passphrase_file: /etc/nbackup/secret   # gpg symmetric, instead of a recipient
+#   # program: /usr/bin/gpg                  # optional binary override
+
 # Run several dumps at once (Amanda's inparallel). Keep dumpers x compressor
 # threads <= cores to avoid oversubscribing CPU.
 parallelism:
@@ -119,6 +132,12 @@ dumptypes:
   no-logs:
     method: gnutar
     exclude: "*.log,*.tmp"
+  # A dumptype can override the default encryption wholesale (e.g. a stricter key):
+  # finance:
+  #   method: gnutar
+  #   encrypt:
+  #     scheme: gpg
+  #     recipient: finance-key@example.com
 
 # The disklist: grouped by dumptype, then host, then the paths to back up.
 sources:
