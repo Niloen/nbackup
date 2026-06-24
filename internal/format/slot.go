@@ -1,7 +1,4 @@
-// Package slot defines NBackup's primary artifact format: the metadata of an
-// immutable, self-contained backup run. It is pure data plus (de)serialization;
-// it makes no assumptions about where the bytes live (that is a media concern).
-package slot
+package format
 
 import (
 	"encoding/json"
@@ -18,8 +15,19 @@ const (
 	StatusSealed = "sealed"
 )
 
-// Slot is a run's metadata. It is persisted as the payload of the per-slot seal
-// record (the last file written to a volume); its presence marks the slot sealed.
+// Slot is a run's metadata — NBackup's primary artifact. It is persisted as the
+// payload of the per-slot seal record (the last file written to a volume); its
+// presence marks the slot sealed. It carries a thin authoring lifecycle (NewSlot
+// -> AddArchive -> Seal) so a slot is built up consistently during a run, then is
+// immutable once sealed.
+//
+// The ID is the slot's identity: "slot-" + Date (+ ".Sequence" for the 2nd+ run
+// of a day) — see IDFromParts. The natural key is a date, so the "slot-" tag is
+// what keeps it from reading as a plain date wherever it appears bare: catalog
+// JSON (an id beside an identical date), logs, Archive.BaseSlot references, and
+// the on-disk slots/<id>/ directory. The system's other ids need no such tag
+// because they are already distinctive words (labels "<medium>-<date>", DLEs
+// "<host>-<path>"), not bare dates.
 type Slot struct {
 	ID         string    `json:"id"`          // e.g. "slot-2026-06-21" or "slot-2026-06-21.2"
 	Date       string    `json:"date"`        // run date, YYYY-MM-DD
@@ -47,7 +55,7 @@ type Archive struct {
 	Uncompressed int64    `json:"uncompressed"`      // archive stream size before compression
 	FileCount    int      `json:"file_count"`        // number of member entries archived
 	SHA256       string   `json:"sha256"`            // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
-	Parts        int      `json:"parts,omitempty"`   // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's media.Header.Part
+	Parts        int      `json:"parts,omitempty"`   // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
 	BaseSlot     string   `json:"base_slot"`         // for level>=1, the slot whose state this builds on
 	Members      []string `json:"members"`           // member paths archived: slash-separated, directories with a trailing slash (the archiver-neutral convention recovery browses); the raw token is replayed to the producing archiver on extract (was MANIFEST)
 }
@@ -87,7 +95,9 @@ func (s *Slot) Seal(now time.Time) error {
 // IsSealed reports whether the slot has been sealed.
 func (s *Slot) IsSealed() bool { return s.Status == StatusSealed }
 
-// IDFromParts builds a slot ID from a date string and sequence number.
+// IDFromParts builds a slot ID from a date string and sequence number. The
+// "slot-" prefix tags an otherwise date-shaped key so it never reads as a plain
+// date (see the Slot.ID doc); ParseID strips it back off.
 func IDFromParts(date string, seq int) string {
 	if seq <= 1 {
 		return "slot-" + date

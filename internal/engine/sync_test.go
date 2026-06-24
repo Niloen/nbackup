@@ -261,7 +261,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 		for _, p := range eng.cat.Placements(id) {
 			if p.Medium == "lib" {
 				placed = true
-				for _, v := range p.Volumes() {
+				for _, v := range p.Labels() {
 					vols[v] = true
 				}
 			}
@@ -343,7 +343,7 @@ func TestRelabelRefusesProtectedSpanTape(t *testing.T) {
 	var spanVols []string
 	for _, p := range eng.cat.Placements(s.ID) {
 		if p.Medium == "lib" {
-			spanVols = p.Volumes()
+			spanVols = p.Labels()
 		}
 	}
 	if len(spanVols) < 2 {

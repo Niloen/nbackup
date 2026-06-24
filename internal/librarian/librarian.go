@@ -14,7 +14,7 @@
 //
 // The librarian is a shared service: dump, copy/sync, restore, rebuild, label, and
 // load all bottom out in "present the right volume on medium X". It depends only on
-// media, the catalog, and policy — never on the engine — so it is the seam future
+// media, the catalog, and retention — never on the engine — so it is the seam future
 // sub-engines (a dump run, a catalog refresher, a copier) will each consume.
 package librarian
 
@@ -25,9 +25,9 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/policy"
-	"github.com/Niloen/nbackup/internal/slot"
+	"github.com/Niloen/nbackup/internal/retention"
 )
 
 // Operator handles physical actions software cannot perform itself — chiefly
@@ -117,9 +117,9 @@ func (l *Librarian) Labeled() bool { _, ok := l.vol.(media.Labeled); return ok }
 // ReadFileAt mounts the volume holding a part (verifying its identity) and reads
 // the file at the given position. It keeps the mount-then-read sequence behind the
 // librarian seam so callers never hold the media.Volume to seek it directly.
-func (l *Librarian) ReadFileAt(volume string, epoch, pos int) (media.Header, io.ReadCloser, error) {
+func (l *Librarian) ReadFileAt(volume string, epoch, pos int) (format.Header, io.ReadCloser, error) {
 	if err := l.MountVolume(volume, epoch); err != nil {
-		return media.Header{}, nil, err
+		return format.Header{}, nil, err
 	}
 	return l.vol.ReadFile(pos)
 }
@@ -183,7 +183,7 @@ func (l *Librarian) PrepareWrite(appendable bool, expect string, now time.Time, 
 func (l *Librarian) verifyWritable(appendable bool, now time.Time) (volName string, epoch int, err error) {
 	lv, ok := l.vol.(media.Labeled)
 	if !ok {
-		return l.medium, 0, nil // address-identified: identity is the medium itself
+		return "", 0, nil // address-identified: no label — the medium is its own volume
 	}
 	lbl, labeled, err := lv.ReadLabel()
 	switch {
@@ -197,7 +197,7 @@ func (l *Librarian) verifyWritable(appendable bool, now time.Time) (volName stri
 		if !l.autoLabel {
 			return "", 0, reloadableErr("medium %q is blank/unlabeled; run `nb label %s <name>` first (or set auto_label: true)", l.medium, l.medium)
 		}
-		lbl = media.Label{Name: l.autoLabelName(now), Pool: l.medium, Epoch: 1, WrittenAt: now}
+		lbl = format.Label{Name: l.autoLabelName(now), Pool: l.medium, Epoch: 1, WrittenAt: now}
 		if err := lv.WriteLabel(lbl); err != nil {
 			return "", 0, err
 		}
@@ -213,7 +213,7 @@ func (l *Librarian) verifyWritable(appendable bool, now time.Time) (volName stri
 	}
 	// One-run-per-tape media refuse to append onto a tape that already holds a run.
 	if !appendable {
-		if held := l.cat.SlotsOnVolume(lbl.Name); len(held) > 0 {
+		if held := l.cat.SlotsOnLabel(lbl.Name); len(held) > 0 {
 			return "", 0, reloadableErr("medium %q is not appendable and tape %q already holds %d run(s); load a fresh tape", l.medium, lbl.Name, len(held))
 		}
 	}
@@ -228,7 +228,7 @@ func (l *Librarian) verifyWritable(appendable bool, now time.Time) (volName stri
 // several blank tapes (a filling library) does not stamp every fresh tape with the
 // same name (which would collide in the catalog, keyed by label name).
 func (l *Librarian) autoLabelName(now time.Time) string {
-	base := fmt.Sprintf("%s-%s", l.medium, slot.DateString(now))
+	base := fmt.Sprintf("%s-%s", l.medium, format.DateString(now))
 	name := base
 	for n := 2; ; n++ {
 		if _, ok := l.cat.Volume(name); !ok {
@@ -286,7 +286,7 @@ func (l *Librarian) advanceViaLibrary(appendable bool, tried map[string]bool, no
 			lastErr = verr // wrong pool / holds runs / blank with autoLabel off: try the next bay
 			continue
 		}
-		empty := len(l.cat.SlotsOnVolume(name)) == 0
+		empty := len(l.cat.SlotsOnLabel(name)) == 0
 		logf.log("medium %q: rolled to bay %s (volume %q)", l.medium, b.ID, name)
 		return name, epoch, empty, nil
 	}
@@ -319,7 +319,7 @@ func (l *Librarian) advanceViaShelf(appendable bool, tried map[string]bool, expe
 		}
 		name, epoch, verr := l.verifyWritable(appendable, now)
 		if verr == nil {
-			empty := len(l.cat.SlotsOnVolume(name)) == 0
+			empty := len(l.cat.SlotsOnLabel(name)) == 0
 			return name, epoch, empty, nil
 		}
 		if !isReloadable(verr) {
@@ -391,16 +391,16 @@ func (s *WriteSink) maxPart() int64 {
 	room, known := s.l.Remaining()
 	if !known {
 		if s.partSize > 0 {
-			return s.partSize - media.HeaderBlock
+			return s.partSize - format.HeaderBlock
 		}
 		return -1
 	}
-	avail := room - media.HeaderBlock
+	avail := room - format.HeaderBlock
 	if avail < 0 {
 		avail = 0
 	}
 	if s.partSize > 0 {
-		if cap := s.partSize - media.HeaderBlock; cap < avail {
+		if cap := s.partSize - format.HeaderBlock; cap < avail {
 			avail = cap
 		}
 	}
@@ -430,7 +430,7 @@ func (s *WriteSink) NextPart() (media.Volume, int64, string, int, error) {
 // PlaceSeal implements slotio.VolumeSink: it rolls first if the seal (one whole file
 // of the given payload size) will not fit the loaded volume.
 func (s *WriteSink) PlaceSeal(size int64) (media.Volume, string, int, error) {
-	if room, known := s.l.Remaining(); known && room-media.HeaderBlock < size {
+	if room, known := s.l.Remaining(); known && room-format.HeaderBlock < size {
 		if err := s.advance(); err != nil {
 			return nil, "", 0, err
 		}
@@ -601,15 +601,15 @@ func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration
 		// the catalog rather than scanning the mounted reel correctly attributes a
 		// spanned slot to every tape it touches — even the head tape, whose seal
 		// record lives only on the last tape of the span.
-		protected := policy.Protected(l.cat.SlotsOn(l.medium), minAge, now)
-		if id, reason, ok := policy.ProtectedOn(protected, l.cat.SlotsOnVolume(cur.Name)); ok && !force {
+		floor := retention.Compute(l.cat.SlotsOn(l.medium), minAge, now)
+		if id, reason, ok := floor.First(l.cat.SlotsOnLabel(cur.Name)); ok && !force {
 			return fmt.Errorf("tape %q still holds protected slot %s (%s); refusing to relabel (use --force)", cur.Name, id, reason)
 		}
 		epoch = cur.Epoch + 1
 		wiped = cur.Name
 	}
 
-	lbl := media.Label{Name: name, Pool: l.medium, Epoch: epoch, WrittenAt: now}
+	lbl := format.Label{Name: name, Pool: l.medium, Epoch: epoch, WrittenAt: now}
 	if err := lv.WriteLabel(lbl); err != nil {
 		return err
 	}
@@ -630,9 +630,9 @@ func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration
 // medium, not just the landing one. It then registers the volume's new identity
 // (empty, fresh epoch) so the catalog reflects the relabel immediately rather than
 // learning it lazily at the next write.
-func (l *Librarian) reconcileRelabel(wiped string, lbl media.Label) error {
+func (l *Librarian) reconcileRelabel(wiped string, lbl format.Label) error {
 	if wiped != "" {
-		for _, s := range l.cat.SlotsOnVolume(wiped) {
+		for _, s := range l.cat.SlotsOnLabel(wiped) {
 			if _, err := l.cat.RemovePlacement(s.ID, l.medium); err != nil {
 				return fmt.Errorf("drop placements on relabeled tape %q: %w", wiped, err)
 			}

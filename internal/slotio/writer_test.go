@@ -11,8 +11,8 @@ import (
 
 	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/filter"
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/slot"
 )
 
 // memVolume is a minimal in-memory media.Volume for testing the spanning writer and
@@ -21,44 +21,44 @@ type memVolume struct {
 	name     string
 	capacity int64 // 0 = unbounded
 	used     int64
-	hdrs     map[int]media.Header
+	hdrs     map[int]format.Header
 	data     map[int][]byte
 	next     int
 }
 
 func newMemVolume(name string, capacity int64) *memVolume {
-	return &memVolume{name: name, capacity: capacity, hdrs: map[int]media.Header{}, data: map[int][]byte{}}
+	return &memVolume{name: name, capacity: capacity, hdrs: map[int]format.Header{}, data: map[int][]byte{}}
 }
 
-func (v *memVolume) AppendFile(h media.Header, write func(w io.Writer) error) (int, error) {
+func (v *memVolume) AppendFile(h format.Header, write func(w io.Writer) error) (int, error) {
 	var buf bytes.Buffer
 	if err := write(&buf); err != nil {
 		return 0, err
 	}
-	if v.capacity > 0 && v.used+media.HeaderBlock+int64(buf.Len()) > v.capacity {
+	if v.capacity > 0 && v.used+format.HeaderBlock+int64(buf.Len()) > v.capacity {
 		return 0, media.ErrVolumeFull // backstop: proactive sizing should avoid this
 	}
 	pos := v.next
 	v.next++
 	v.hdrs[pos] = h
 	v.data[pos] = append([]byte(nil), buf.Bytes()...)
-	v.used += media.HeaderBlock + int64(buf.Len())
+	v.used += format.HeaderBlock + int64(buf.Len())
 	return pos, nil
 }
 
-func (v *memVolume) ReadFile(pos int) (media.Header, io.ReadCloser, error) {
+func (v *memVolume) ReadFile(pos int) (format.Header, io.ReadCloser, error) {
 	d, ok := v.data[pos]
 	if !ok {
-		return media.Header{}, nil, fmt.Errorf("no file at %d", pos)
+		return format.Header{}, nil, fmt.Errorf("no file at %d", pos)
 	}
 	return v.hdrs[pos], io.NopCloser(bytes.NewReader(d)), nil
 }
 
-func (v *memVolume) Files() ([]media.FileInfo, error) {
-	out := make([]media.FileInfo, 0, len(v.hdrs))
+func (v *memVolume) Files() ([]format.FileInfo, error) {
+	out := make([]format.FileInfo, 0, len(v.hdrs))
 	for pos := 0; pos < v.next; pos++ {
 		if h, ok := v.hdrs[pos]; ok {
-			out = append(out, media.FileInfo{Pos: pos, Header: h})
+			out = append(out, format.FileInfo{Pos: pos, Header: h})
 		}
 	}
 	return out, nil
@@ -85,7 +85,7 @@ func (s *memSink) room() int64 {
 		}
 		return -1
 	}
-	room := v.capacity - v.used - media.HeaderBlock
+	room := v.capacity - v.used - format.HeaderBlock
 	if room < 0 {
 		room = 0
 	}
@@ -131,16 +131,16 @@ func openerOver(vols ...*memVolume) PartOpener {
 	for _, v := range vols {
 		byName[v.name] = v
 	}
-	return func(p PartPosition) (media.Header, io.ReadCloser, error) {
+	return func(p PartPosition) (format.Header, io.ReadCloser, error) {
 		v, ok := byName[p.Volume]
 		if !ok {
-			return media.Header{}, nil, fmt.Errorf("no volume %q", p.Volume)
+			return format.Header{}, nil, fmt.Errorf("no volume %q", p.Volume)
 		}
 		return v.ReadFile(p.Pos)
 	}
 }
 
-func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) slot.Archive {
+func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) format.Archive {
 	t.Helper()
 	arch, err := w.WriteArchive(ArchiveSpec{DLE: dle, Host: "h", Path: "/p", Archiver: "m", Level: 0}, nil,
 		func(out io.Writer) (Produced, error) {
@@ -161,7 +161,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	v1, v2, v3 := newMemVolume("v1", cap), newMemVolume("v2", cap), newMemVolume("v3", cap)
 	sink := &memSink{vols: []*memVolume{v1, v2, v3}}
 
-	s := slot.NewSlot("slot-2026-06-21", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
+	s := format.NewSlot("slot-2026-06-21", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
 	w, err := NewWriter(sink, s, "none", filter.Options{}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -226,7 +226,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	v := newMemVolume("only", 0) // unbounded
 	sink := &memSink{vols: []*memVolume{v}, partCap: 10 * 1024}
 
-	s := slot.NewSlot("slot-x", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
+	s := format.NewSlot("slot-x", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
 	w, _ := NewWriter(sink, s, "none", filter.Options{}, nil)
 	body := []byte(strings.Repeat("z", 55*1024)) // 55 KiB / 10 KiB ≈ 6 parts
 	arch := writeOneArchive(t, w, "dle1", body)
@@ -254,7 +254,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 func TestRollFailureNoDeadlock(t *testing.T) {
 	v := newMemVolume("v1", 96*1024) // one small volume, no room to roll
 	sink := &memSink{vols: []*memVolume{v}}
-	s := slot.NewSlot("slot-y", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
+	s := format.NewSlot("slot-y", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
 	w, _ := NewWriter(sink, s, "none", filter.Options{}, nil)
 
 	body := []byte(strings.Repeat("q", 200*1024)) // far bigger than one volume
@@ -284,7 +284,7 @@ func TestEncryptRoundTrip(t *testing.T) {
 
 	v := newMemVolume("v1", 0) // unbounded
 	sink := &memSink{vols: []*memVolume{v}}
-	s := slot.NewSlot("slot-enc", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
+	s := format.NewSlot("slot-enc", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
 	w, _ := NewWriter(sink, s, "none", filter.Options{}, nil)
 
 	body := []byte(strings.Repeat("top secret payload\n", 3000))

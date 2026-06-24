@@ -6,7 +6,7 @@ package restore
 import (
 	"fmt"
 
-	"github.com/Niloen/nbackup/internal/slot"
+	"github.com/Niloen/nbackup/internal/format"
 )
 
 // Step is one archive to extract during a restore. It identifies the archive
@@ -24,7 +24,7 @@ type Step struct {
 // run order: the most recent full at or before the target, plus every later
 // backup for that DLE up to the target (inclusive). The input slots must be
 // sorted in run order.
-func Chain(slots []*slot.Slot, dleName, targetSlotID string) ([]Step, error) {
+func Chain(slots []*format.Slot, dleName, targetSlotID string) ([]Step, error) {
 	targetIdx := -1
 	for i, s := range slots {
 		if s.ID == targetSlotID {

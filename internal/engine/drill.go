@@ -11,10 +11,10 @@ import (
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/drill"
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/restore"
 	"github.com/Niloen/nbackup/internal/sizeutil"
-	"github.com/Niloen/nbackup/internal/slot"
 	"github.com/Niloen/nbackup/internal/slotio"
 )
 
@@ -92,7 +92,7 @@ func (e *Engine) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 		opts.Now = time.Now().UTC()
 	}
 	if opts.AsOf == "" {
-		opts.AsOf = slot.DateString(opts.Now)
+		opts.AsOf = format.DateString(opts.Now)
 	}
 	medium := opts.Medium
 	if medium == "" {
@@ -394,7 +394,7 @@ func (e *Engine) unattendedReachable(medium string, steps []restore.Step) (bool,
 	if view.DriveOK {
 		loaded = view.Drive.Label
 	}
-	for _, v := range e.chainVolumes(steps, medium) {
+	for _, v := range e.chainLabels(steps, medium) {
 		if v != loaded {
 			return false, fmt.Sprintf("needs tape %q in the %q drive (a human-only swap); loaded: %s", v, medium, reelOrEmpty(loaded))
 		}
@@ -402,13 +402,14 @@ func (e *Engine) unattendedReachable(medium string, steps []restore.Step) (bool,
 	return true, ""
 }
 
-// chainVolumes is the distinct set of volumes a chain's copies occupy on the medium.
-func (e *Engine) chainVolumes(steps []restore.Step, medium string) []string {
+// chainLabels is the distinct set of volume labels a chain's copies occupy on the
+// medium — the tapes an unattended drill would need mounted.
+func (e *Engine) chainLabels(steps []restore.Step, medium string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, step := range steps {
 		for _, p := range placementsOnMedium(e.placementsFor(step.SlotID), medium) {
-			for _, v := range p.Volumes() {
+			for _, v := range p.Labels() {
 				if !seen[v] {
 					seen[v] = true
 					out = append(out, v)
@@ -435,13 +436,13 @@ func (e *Engine) chainBytes(steps []restore.Step) int64 {
 	return n
 }
 
-func findArchive(s *slot.Slot, dle string, level int) (slot.Archive, bool) {
+func findArchive(s *format.Slot, dle string, level int) (format.Archive, bool) {
 	for _, a := range s.Archives {
 		if a.DLE == dle && a.Level == level {
 			return a, true
 		}
 	}
-	return slot.Archive{}, false
+	return format.Archive{}, false
 }
 
 // classifyOpenErr maps an archive-open failure to a class: a missing copy/position is
@@ -541,7 +542,7 @@ func (e *Engine) ensureWormProbe(vol media.Volume, now time.Time) error {
 			return nil // reuse the existing probe
 		}
 	}
-	h := media.Header{Slot: wormProbeSlot, Kind: media.KindArchive, DLE: "worm-probe", CreatedAt: now}
+	h := format.Header{Slot: wormProbeSlot, Kind: format.KindArchive, DLE: "worm-probe", CreatedAt: now}
 	_, err = vol.AppendFile(h, func(w io.Writer) error {
 		_, werr := io.WriteString(w, "nbackup recovery-drill WORM probe — delete attempts test immutability\n")
 		return werr

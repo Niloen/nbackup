@@ -13,12 +13,12 @@ import (
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/report"
 	"github.com/Niloen/nbackup/internal/sizeutil"
-	"github.com/Niloen/nbackup/internal/slot"
 )
 
 // newPlanCmd implements `nb plan`: show what the next run would do, or — with
@@ -67,7 +67,7 @@ func newPlanCmd(a *app) *cobra.Command {
 
 			plan := eng.Plan(date)
 			fmt.Printf("Plan for run %s  (cycle %dd, landing %q)\n\n",
-				slot.DateString(date), plan.Interval, eng.Landing())
+				format.DateString(date), plan.Interval, eng.Landing())
 			for _, w := range plan.Warnings {
 				fmt.Printf("WARNING: %s\n", w)
 			}
@@ -132,7 +132,7 @@ func fprintPlanItems(w io.Writer, plan *planner.Plan) int64 {
 func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 	plans := eng.Simulate(start, days)
 	fmt.Printf("Forecast: %d daily runs from %s  (cycle %dd, landing %q)\n\n",
-		days, slot.DateString(start), plans[0].Interval, eng.Landing())
+		days, format.DateString(start), plans[0].Interval, eng.Landing())
 
 	// Structural warnings (e.g. a recovery set that won't fit capacity) are
 	// constant across the window; surface each one once, above the schedule.
@@ -182,11 +182,11 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 		}
 		if priced {
 			fmt.Fprintf(tw, "%s\t%d\t%d\t~%s\t%s\t%s\n",
-				slot.DateString(p.Date), fulls, incrs, sizeutil.FormatBytes(est),
+				format.DateString(p.Date), fulls, incrs, sizeutil.FormatBytes(est),
 				formatUSD(curve[i].Monthly), names)
 		} else {
 			fmt.Fprintf(tw, "%s\t%d\t%d\t~%s\t%s\n",
-				slot.DateString(p.Date), fulls, incrs, sizeutil.FormatBytes(est), names)
+				format.DateString(p.Date), fulls, incrs, sizeutil.FormatBytes(est), names)
 		}
 	}
 	tw.Flush()
@@ -223,7 +223,7 @@ func describeExpectation(exp engine.VolumeExpectation, date time.Time) string {
 		detail = "empty, ready to write"
 	}
 	return fmt.Sprintf("expects %q (labeled %s, %dd ago; %s) — or a fresh tape",
-		exp.Label, slot.DateString(exp.WrittenAt), age, detail)
+		exp.Label, format.DateString(exp.WrittenAt), age, detail)
 }
 
 // newDumpCmd implements `nb dump`: execute a run and seal a slot, or — with
@@ -295,7 +295,7 @@ func newDumpCmd(a *app) *cobra.Command {
 // the run-status snapshot the tracker just flushed (the same file `nb status` reads),
 // matched by DLE name and level. When the snapshot is missing or stale, sizes are
 // still recorded and timing is left zero (rendered as a dash).
-func dumpStats(s *slot.Slot, workdir string) []report.DLEStat {
+func dumpStats(s *format.Slot, workdir string) []report.DLEStat {
 	type key struct {
 		name  string
 		level int
@@ -329,7 +329,7 @@ func runDumpDryRun(eng *engine.Engine, date time.Time, validationWarnings []stri
 	plan := eng.Plan(date)
 
 	fmt.Println("DRY RUN — no data is written.")
-	fmt.Printf("This is the run on %s.\n\n", slot.DateString(date))
+	fmt.Printf("This is the run on %s.\n\n", format.DateString(date))
 	warnings := append(validationWarnings, plan.Warnings...)
 	for _, w := range warnings {
 		fmt.Printf("WARNING: %s\n", w)
@@ -340,7 +340,7 @@ func runDumpDryRun(eng *engine.Engine, date time.Time, validationWarnings []stri
 
 	estTotal := fprintPlanItems(os.Stdout, plan)
 	fmt.Printf("\nThis run (estimated): ~%s\n", sizeutil.FormatBytes(estTotal))
-	fmt.Printf("Would seal %s. Run without --dry-run to execute.\n", slot.IDFromParts(slot.DateString(date), 1))
+	fmt.Printf("Would seal %s. Run without --dry-run to execute.\n", format.IDFromParts(format.DateString(date), 1))
 	return nil
 }
 
@@ -524,26 +524,13 @@ func copiesSummary(ps []catalog.Placement) string {
 	}
 	names := make([]string, 0, len(ps))
 	for _, p := range ps {
-		if labeled := placementVolumes(p); len(labeled) > 0 {
-			names = append(names, p.Medium+":"+strings.Join(labeled, "+"))
+		if labels := p.Labels(); len(labels) > 0 {
+			names = append(names, p.Medium+":"+strings.Join(labels, "+"))
 		} else {
 			names = append(names, p.Medium)
 		}
 	}
 	return strings.Join(names, ", ")
-}
-
-// placementVolumes lists a placement's volume labels that differ from the medium
-// name — the labeled tapes a slot's copy spans (empty for address-identified media,
-// whose volume label is just the medium name).
-func placementVolumes(p catalog.Placement) []string {
-	labeled := make([]string, 0, 2)
-	for _, v := range p.Volumes() {
-		if v != "" && v != p.Medium {
-			labeled = append(labeled, v)
-		}
-	}
-	return labeled
 }
 
 func newSlotShowCmd(a *app) *cobra.Command {
@@ -591,8 +578,8 @@ func newSlotShowCmd(a *app) *cobra.Command {
 			fmt.Fprintln(ptw, "  MEDIUM\tVOLUMES\tPOSITIONS")
 			for _, p := range placements {
 				volumes := "-"
-				if labeled := placementVolumes(p); len(labeled) > 0 {
-					volumes = strings.Join(labeled, "+")
+				if labels := p.Labels(); len(labels) > 0 {
+					volumes = strings.Join(labels, "+")
 				}
 				positions := make([]string, 0, len(p.Archives))
 				for _, ar := range p.Archives {

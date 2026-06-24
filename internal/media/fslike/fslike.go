@@ -21,7 +21,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/format"
 )
 
 // Object is one stored file as reported by Store.List: an opaque key the Store can
@@ -81,8 +81,8 @@ func Open(store Store) (*Volume, error) {
 var slug = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
 // stem is the friendly filename base (without extension) for a file.
-func stem(pos int, h media.Header) string {
-	if h.Kind == media.KindSeal {
+func stem(pos int, h format.Header) string {
+	if h.Kind == format.KindSeal {
 		return fmt.Sprintf("%06d-seal", pos)
 	}
 	return fmt.Sprintf("%06d-%s-L%d", pos, slug.ReplaceAllString(h.DLE, "_"), h.Level)
@@ -91,8 +91,8 @@ func stem(pos int, h media.Header) string {
 // payloadExt is the extension for a file's payload, so it is recognizable and
 // directly usable with stock tools. Kept here so the media don't depend on package
 // filter.
-func payloadExt(h media.Header) string {
-	if h.Kind == media.KindSeal {
+func payloadExt(h format.Header) string {
+	if h.Kind == format.KindSeal {
 		return ".json"
 	}
 	switch h.Codec {
@@ -112,7 +112,7 @@ func codecExt(codec string) string {
 	return codec
 }
 
-func (v *Volume) AppendFile(h media.Header, write func(w io.Writer) error) (int, error) {
+func (v *Volume) AppendFile(h format.Header, write func(w io.Writer) error) (int, error) {
 	v.mu.Lock()
 	pos := v.next
 	v.next++
@@ -141,25 +141,25 @@ func (v *Volume) AppendFile(h media.Header, write func(w io.Writer) error) (int,
 	return pos, nil
 }
 
-func (v *Volume) ReadFile(pos int) (media.Header, io.ReadCloser, error) {
+func (v *Volume) ReadFile(pos int) (format.Header, io.ReadCloser, error) {
 	v.mu.Lock()
 	e, ok := v.idx[pos]
 	v.mu.Unlock()
 	if !ok {
-		return media.Header{}, nil, fmt.Errorf("no file at position %d", pos)
+		return format.Header{}, nil, fmt.Errorf("no file at position %d", pos)
 	}
 	h, err := v.readHeader(e.hdr)
 	if err != nil {
-		return media.Header{}, nil, err
+		return format.Header{}, nil, err
 	}
 	r, err := v.store.Open(e.payload)
 	if err != nil {
-		return media.Header{}, nil, err
+		return format.Header{}, nil, err
 	}
 	return h, r, nil
 }
 
-func (v *Volume) Files() ([]media.FileInfo, error) {
+func (v *Volume) Files() ([]format.FileInfo, error) {
 	v.mu.Lock()
 	entries := make(map[int]entry, len(v.idx))
 	for pos, e := range v.idx {
@@ -167,13 +167,13 @@ func (v *Volume) Files() ([]media.FileInfo, error) {
 	}
 	v.mu.Unlock()
 
-	out := make([]media.FileInfo, 0, len(entries))
+	out := make([]format.FileInfo, 0, len(entries))
 	for pos, e := range entries {
 		h, err := v.readHeader(e.hdr)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, media.FileInfo{Pos: pos, Header: h})
+		out = append(out, format.FileInfo{Pos: pos, Header: h})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Pos < out[j].Pos })
 	return out, nil
@@ -223,14 +223,14 @@ func (v *Volume) scan() error {
 	return nil
 }
 
-func (v *Volume) readHeader(key string) (media.Header, error) {
+func (v *Volume) readHeader(key string) (format.Header, error) {
 	data, err := v.store.ReadAll(key)
 	if err != nil {
-		return media.Header{}, fmt.Errorf("read header %s: %w", key, err)
+		return format.Header{}, fmt.Errorf("read header %s: %w", key, err)
 	}
-	var h media.Header
+	var h format.Header
 	if err := json.Unmarshal(data, &h); err != nil {
-		return media.Header{}, fmt.Errorf("parse header %s: %w", key, err)
+		return format.Header{}, fmt.Errorf("parse header %s: %w", key, err)
 	}
 	return h, nil
 }

@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/sizeutil"
-	"github.com/Niloen/nbackup/internal/slot"
 )
 
 // Profile describes a medium's capacity and reclamation strategy, translated
@@ -30,9 +30,18 @@ type Profile interface {
 	// finite reel but an unbounded pool (the operator's shelf is unknowable).
 	VolumeSize() int64
 	// Reclaim chooses the slots to delete to satisfy this medium's capacity,
-	// given the protected set (slots that must never be reclaimed, computed by
-	// policy). It returns the reclamations to perform, in deletion order.
-	Reclaim(slots []*slot.Slot, protected map[string]string, now time.Time) []Reclamation
+	// given the retention floor (the slots that must never be reclaimed, computed
+	// by the retention package). It returns the reclamations to perform, in
+	// deletion order.
+	Reclaim(slots []*format.Slot, keep Retention, now time.Time) []Reclamation
+}
+
+// Retention reports which slots reclamation must never delete — the floor the
+// retention package computes. Reclaim consults it only as a predicate, so media
+// depends on the test rather than on the retention package; retention.Floor
+// satisfies it.
+type Retention interface {
+	Keeps(slotID string) bool
 }
 
 // Reclamation is one slot (or volume) chosen for reclamation.
@@ -79,7 +88,7 @@ func (p sizeProfile) TotalBytes() int64 { return p.capacity }
 func (p sizeProfile) VolumeSize() int64 { return 0 }
 
 // Reclaim deletes the oldest non-protected slots until total <= capacity.
-func (p sizeProfile) Reclaim(slots []*slot.Slot, protected map[string]string, now time.Time) []Reclamation {
+func (p sizeProfile) Reclaim(slots []*format.Slot, keep Retention, now time.Time) []Reclamation {
 	if p.capacity <= 0 {
 		return nil // unbounded: nothing to reclaim
 	}
@@ -90,14 +99,14 @@ func (p sizeProfile) Reclaim(slots []*slot.Slot, protected map[string]string, no
 	if total <= p.capacity {
 		return nil
 	}
-	ordered := append([]*slot.Slot(nil), slots...)
-	sort.Slice(ordered, func(i, j int) bool { return slot.Less(ordered[i], ordered[j]) }) // oldest first
+	ordered := append([]*format.Slot(nil), slots...)
+	sort.Slice(ordered, func(i, j int) bool { return format.Less(ordered[i], ordered[j]) }) // oldest first
 	var out []Reclamation
 	for _, s := range ordered {
 		if total <= p.capacity {
 			break
 		}
-		if _, isProtected := protected[s.ID]; isProtected {
+		if keep.Keeps(s.ID) {
 			continue
 		}
 		out = append(out, Reclamation{SlotID: s.ID, Bytes: s.TotalBytes, Note: "over capacity"})
@@ -157,7 +166,7 @@ func (p volumeProfile) VolumeSize() int64 { return p.volumeSize }
 
 // Reclaim is a placeholder: tape reclamation is whole-volume reuse, which needs
 // a volume catalog and changer (not yet implemented).
-func (p volumeProfile) Reclaim(slots []*slot.Slot, protected map[string]string, now time.Time) []Reclamation {
+func (p volumeProfile) Reclaim(slots []*format.Slot, keep Retention, now time.Time) []Reclamation {
 	return nil
 }
 

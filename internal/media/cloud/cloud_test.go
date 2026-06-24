@@ -10,6 +10,7 @@ import (
 
 	"gocloud.dev/blob"
 
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/media/fslike"
 )
@@ -46,7 +47,7 @@ func TestRejectsPartSize(t *testing.T) {
 func appendArchive(t *testing.T, v media.Volume, slot, dle string, level int, payload string) int {
 	t.Helper()
 	pos, err := v.AppendFile(
-		media.Header{Slot: slot, Kind: media.KindArchive, DLE: dle, Level: level, Codec: "none"},
+		format.Header{Slot: slot, Kind: format.KindArchive, DLE: dle, Level: level, Codec: "none"},
 		func(w io.Writer) error { _, e := w.Write([]byte(payload)); return e },
 	)
 	if err != nil {
@@ -65,7 +66,7 @@ func TestVolumeRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rc.Close()
-	if h.DLE != "h-data" || h.Level != 0 || h.Kind != media.KindArchive {
+	if h.DLE != "h-data" || h.Level != 0 || h.Kind != format.KindArchive {
 		t.Errorf("header round trip wrong: %+v", h)
 	}
 	data, err := io.ReadAll(rc)
@@ -213,7 +214,7 @@ func TestAbortedWriteLeavesNoObject(t *testing.T) {
 	cv := openVol(t)
 	wantErr := fmt.Errorf("boom")
 	_, err := cv.AppendFile(
-		media.Header{Slot: "slot-x", Kind: media.KindArchive, DLE: "h-data", Codec: "none"},
+		format.Header{Slot: "slot-x", Kind: format.KindArchive, DLE: "h-data", Codec: "none"},
 		func(w io.Writer) error { return wantErr },
 	)
 	if err == nil {

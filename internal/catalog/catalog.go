@@ -29,8 +29,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/slot"
+	"github.com/Niloen/nbackup/internal/format"
 )
 
 // CacheFile is the catalog cache stored in the workdir.
@@ -39,8 +38,8 @@ const CacheFile = "catalog.json"
 // Entry is the catalog's per-slot record: one logical slot plus every place a
 // copy of it lives.
 type Entry struct {
-	Slot       *slot.Slot  `json:"slot"`       // medium-independent content (from the seal)
-	Placements []Placement `json:"placements"` // one per medium holding a copy
+	Slot       *format.Slot `json:"slot"`       // medium-independent content (from the seal)
+	Placements []Placement  `json:"placements"` // one per medium holding a copy
 }
 
 // Placement is one copy of a slot on one medium. The copy's archives may span
@@ -48,18 +47,25 @@ type Entry struct {
 // and positions its parts landed on. The seal record (the commit marker, written
 // last) lives at Seal — on the final volume the copy occupies.
 type Placement struct {
-	Medium   string       `json:"medium"`   // config medium name — how to open it
+	// Medium is the pool this copy is accounted to (retention, capacity, cost) and
+	// the changer to open to reach it. It is NOT a device pin: a labeled volume is
+	// located by its label at mount time, so which drive holds a tape is resolved at
+	// runtime, not stored here.
+	Medium   string       `json:"medium"`
 	Archives []ArchivePos `json:"archives"` // each archive and the positions of its parts
 	Seal     FilePos      `json:"seal"`     // where the seal record lives
 }
 
-// FilePos is the location of one file on a volume: a volume (label name, == Medium
-// for unlabeled media) plus a file position on it. It locates both an archive part
-// and a placement's seal record.
+// FilePos is the location of one file on a volume: the label of the volume it is
+// on plus a file position. Label is the volume's global, device-independent
+// identity (the name on the cartridge); it is empty for address-identified media
+// (disk, s3), which carry no label — there the medium is its own sole volume
+// (Placement.Medium), so no per-file volume id is needed. It locates both an
+// archive part and a placement's seal record.
 type FilePos struct {
-	Volume string `json:"volume"`
-	Epoch  int    `json:"epoch,omitempty"` // label epoch when recorded; staleness check on read
-	Pos    int    `json:"pos"`
+	Label string `json:"label,omitempty"` // volume label name; "" for address-identified media
+	Epoch int    `json:"epoch,omitempty"` // label epoch when recorded; staleness check on read
+	Pos   int    `json:"pos"`
 }
 
 // ArchivePos is one archive's identity and the ordered locations of its parts. An
@@ -81,10 +87,12 @@ func (p Placement) Parts(dle string, level int) ([]FilePos, bool) {
 	return nil, false
 }
 
-// Volumes returns the distinct volumes this placement occupies — every archive
-// part's volume plus the seal's — in first-seen order. It is what tells which tapes
-// a copy needs mounted.
-func (p Placement) Volumes() []string {
+// Labels returns the distinct volume labels this placement occupies — every
+// archive part's label plus the seal's — in first-seen order. It is what tells
+// which tapes a copy needs mounted. It is empty for address-identified media,
+// which carry no labels: a disk/s3 copy spans no tapes, and is reached by its
+// medium alone (Placement.Medium), needing no label-based mount.
+func (p Placement) Labels() []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(v string) {
@@ -95,18 +103,18 @@ func (p Placement) Volumes() []string {
 	}
 	for _, a := range p.Archives {
 		for _, pt := range a.Parts {
-			add(pt.Volume)
+			add(pt.Label)
 		}
 	}
-	add(p.Seal.Volume)
+	add(p.Seal.Label)
 	return out
 }
 
-// OnVolume reports whether any part of this placement (or its seal) lives on the
-// named volume.
-func (p Placement) OnVolume(volume string) bool {
-	for _, v := range p.Volumes() {
-		if v == volume {
+// OnLabel reports whether any part of this placement (or its seal) lives on the
+// volume with the given label.
+func (p Placement) OnLabel(label string) bool {
+	for _, v := range p.Labels() {
+		if v == label {
 			return true
 		}
 	}
@@ -117,7 +125,7 @@ func (p Placement) OnVolume(volume string) bool {
 // tapelist entry, medium-neutrally named). "Which slots are on it" and "is it
 // reusable" are derived from placements + retention, not stored here.
 type VolumeRecord struct {
-	Label media.Label `json:"label"`
+	Label format.Label `json:"label"`
 }
 
 // Catalog is a local cache of slot entries plus a registry of labeled volumes. It
@@ -161,7 +169,7 @@ func Open(workdir string) (*Catalog, error) {
 // Record stores a slot's content and adds-or-replaces its placement on
 // p.Medium, then persists. Both dump and copy use this — they differ only in
 // which medium the placement names.
-func (c *Catalog) Record(s *slot.Slot, p Placement) error {
+func (c *Catalog) Record(s *format.Slot, p Placement) error {
 	c.upsert(s, p)
 	c.sortEntries()
 	c.loaded = true
@@ -191,15 +199,15 @@ func (c *Catalog) RemovePlacement(slotID, medium string) (gone bool, err error) 
 
 // RecordVolume upserts a labeled volume's identity in the registry, so a later run
 // can detect a swapped or relabeled volume.
-func (c *Catalog) RecordVolume(lbl media.Label) error {
+func (c *Catalog) RecordVolume(lbl format.Label) error {
 	c.volumes[lbl.Name] = &VolumeRecord{Label: lbl}
 	c.loaded = true
 	return c.persist()
 }
 
 // Slots returns the cached slots in run order.
-func (c *Catalog) Slots() []*slot.Slot {
-	out := make([]*slot.Slot, 0, len(c.entries))
+func (c *Catalog) Slots() []*format.Slot {
+	out := make([]*format.Slot, 0, len(c.entries))
 	for _, e := range c.entries {
 		out = append(out, e.Slot)
 	}
@@ -207,7 +215,7 @@ func (c *Catalog) Slots() []*slot.Slot {
 }
 
 // ReadSlot returns a cached slot by ID.
-func (c *Catalog) ReadSlot(id string) (*slot.Slot, error) {
+func (c *Catalog) ReadSlot(id string) (*format.Slot, error) {
 	if e := c.entryByID(id); e != nil {
 		return e.Slot, nil
 	}
@@ -223,8 +231,8 @@ func (c *Catalog) Placements(slotID string) []Placement {
 }
 
 // SlotsOn returns the slots with a copy on the named medium, in run order.
-func (c *Catalog) SlotsOn(medium string) []*slot.Slot {
-	var out []*slot.Slot
+func (c *Catalog) SlotsOn(medium string) []*format.Slot {
+	var out []*format.Slot
 	for _, e := range c.entries {
 		if e.placedOn(medium) {
 			out = append(out, e.Slot)
@@ -233,13 +241,13 @@ func (c *Catalog) SlotsOn(medium string) []*slot.Slot {
 	return out
 }
 
-// SlotsOnVolume returns the slots with a copy on a specific volume (label), in
-// run order — used to tell whether a tape already holds a run.
-func (c *Catalog) SlotsOnVolume(volume string) []*slot.Slot {
-	var out []*slot.Slot
+// SlotsOnLabel returns the slots with a copy on the volume with the given label,
+// in run order — used to tell whether a tape already holds a run.
+func (c *Catalog) SlotsOnLabel(label string) []*format.Slot {
+	var out []*format.Slot
 	for _, e := range c.entries {
 		for _, p := range e.Placements {
-			if p.OnVolume(volume) {
+			if p.OnLabel(label) {
 				out = append(out, e.Slot)
 				break
 			}
@@ -292,7 +300,7 @@ func (c *Catalog) History() *History {
 // upsert sets a slot's content and adds-or-replaces its placement on p.Medium,
 // without sorting or persisting. It is the in-memory write shared by Record and by
 // the importer's absorb — the single point where a slot+placement enters the store.
-func (c *Catalog) upsert(s *slot.Slot, p Placement) {
+func (c *Catalog) upsert(s *format.Slot, p Placement) {
 	e := c.entryByID(s.ID)
 	if e == nil {
 		e = &Entry{Slot: s}
@@ -343,7 +351,7 @@ func (c *Catalog) removeEntry(id string) {
 }
 
 func (c *Catalog) sortEntries() {
-	sort.Slice(c.entries, func(i, j int) bool { return slot.Less(c.entries[i].Slot, c.entries[j].Slot) })
+	sort.Slice(c.entries, func(i, j int) bool { return format.Less(c.entries[i].Slot, c.entries[j].Slot) })
 }
 
 func (c *Catalog) persist() error {

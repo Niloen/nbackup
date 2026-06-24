@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/slot"
 
 	_ "github.com/Niloen/nbackup/internal/media/disk"
 	_ "github.com/Niloen/nbackup/internal/media/tape"
@@ -23,10 +23,10 @@ func newVolume(t *testing.T, path string) media.Volume {
 
 // putSlot writes a slot's archive files and (if sealed) its seal record onto the
 // volume, the way the writer would.
-func putSlot(t *testing.T, v media.Volume, s *slot.Slot) {
+func putSlot(t *testing.T, v media.Volume, s *format.Slot) {
 	t.Helper()
 	for _, a := range s.Archives {
-		h := media.Header{Slot: s.ID, Kind: media.KindArchive, DLE: a.DLE, Level: a.Level, Codec: a.Codec}
+		h := format.Header{Slot: s.ID, Kind: format.KindArchive, DLE: a.DLE, Level: a.Level, Codec: a.Codec}
 		if _, err := v.AppendFile(h, func(w io.Writer) error {
 			_, e := w.Write([]byte("payload"))
 			return e
@@ -34,14 +34,14 @@ func putSlot(t *testing.T, v media.Volume, s *slot.Slot) {
 			t.Fatal(err)
 		}
 	}
-	if s.Status != slot.StatusSealed {
+	if s.Status != format.StatusSealed {
 		return
 	}
 	data, err := s.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := v.AppendFile(media.Header{Slot: s.ID, Kind: media.KindSeal}, func(w io.Writer) error {
+	if _, err := v.AppendFile(format.Header{Slot: s.ID, Kind: format.KindSeal}, func(w io.Writer) error {
 		_, e := w.Write(data)
 		return e
 	}); err != nil {
@@ -49,8 +49,8 @@ func putSlot(t *testing.T, v media.Volume, s *slot.Slot) {
 	}
 }
 
-func sealed(id, date string, seq int, archives ...slot.Archive) *slot.Slot {
-	return &slot.Slot{ID: id, Date: date, Sequence: seq, Status: slot.StatusSealed,
+func sealed(id, date string, seq int, archives ...format.Archive) *format.Slot {
+	return &format.Slot{ID: id, Date: date, Sequence: seq, Status: format.StatusSealed,
 		SealedAt: time.Unix(0, 0).UTC(), Archives: archives, TotalBytes: 100}
 }
 
@@ -72,12 +72,12 @@ func TestCacheLifecycle(t *testing.T) {
 	vol := newVolume(t, dir)
 
 	putSlot(t, vol, sealed("slot-2026-06-20", "2026-06-20", 1,
-		slot.Archive{DLE: "h-data", Level: 0}))
+		format.Archive{DLE: "h-data", Level: 0}))
 	putSlot(t, vol, sealed("slot-2026-06-21", "2026-06-21", 1,
-		slot.Archive{DLE: "h-data", Level: 1}))
+		format.Archive{DLE: "h-data", Level: 1}))
 	// An unsealed slot (archives but no seal) must be ignored by the cache.
-	putSlot(t, vol, &slot.Slot{ID: "slot-2026-06-22", Date: "2026-06-22", Sequence: 1,
-		Status: slot.StatusOpen, Archives: []slot.Archive{{DLE: "h-data", Level: 1}}})
+	putSlot(t, vol, &format.Slot{ID: "slot-2026-06-22", Date: "2026-06-22", Sequence: 1,
+		Status: format.StatusOpen, Archives: []format.Archive{{DLE: "h-data", Level: 1}}})
 
 	// Cold open: no cache yet, then EnsureFresh populates and persists it.
 	cat, err := Open(dir)
@@ -135,7 +135,7 @@ func TestCacheLifecycle(t *testing.T) {
 // writePart writes one archive part (with its part index) onto the mounted volume.
 func writePart(t *testing.T, v media.Volume, slotID, dle string, level, part int) int {
 	t.Helper()
-	pos, err := v.AppendFile(media.Header{Slot: slotID, Kind: media.KindArchive, DLE: dle, Level: level, Part: part},
+	pos, err := v.AppendFile(format.Header{Slot: slotID, Kind: format.KindArchive, DLE: dle, Level: level, Part: part},
 		func(w io.Writer) error { _, e := w.Write([]byte("part-payload")); return e })
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestRebuildReassemblesSpannedSlot(t *testing.T) {
 	if err := ch.Mount("bay-01"); err != nil {
 		t.Fatal(err)
 	}
-	if err := lv.WriteLabel(media.Label{Name: "vol-a", Pool: "tape", Epoch: 1, WrittenAt: now}); err != nil {
+	if err := lv.WriteLabel(format.Label{Name: "vol-a", Pool: "tape", Epoch: 1, WrittenAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	writePart(t, vol, "slot-2026-06-21", "h-data", 0, 0)
@@ -174,16 +174,16 @@ func TestRebuildReassemblesSpannedSlot(t *testing.T) {
 	if err := ch.Mount("bay-02"); err != nil {
 		t.Fatal(err)
 	}
-	if err := lv.WriteLabel(media.Label{Name: "vol-b", Pool: "tape", Epoch: 1, WrittenAt: now}); err != nil {
+	if err := lv.WriteLabel(format.Label{Name: "vol-b", Pool: "tape", Epoch: 1, WrittenAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	writePart(t, vol, "slot-2026-06-21", "h-data", 0, 1)
-	s := sealed("slot-2026-06-21", "2026-06-21", 1, slot.Archive{DLE: "h-data", Level: 0, Parts: 2})
+	s := sealed("slot-2026-06-21", "2026-06-21", 1, format.Archive{DLE: "h-data", Level: 0, Parts: 2})
 	data, err := s.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := vol.AppendFile(media.Header{Slot: s.ID, Kind: media.KindSeal}, func(w io.Writer) error {
+	if _, err := vol.AppendFile(format.Header{Slot: s.ID, Kind: format.KindSeal}, func(w io.Writer) error {
 		_, e := w.Write(data)
 		return e
 	}); err != nil {
@@ -207,13 +207,13 @@ func TestRebuildReassemblesSpannedSlot(t *testing.T) {
 	if !ok || len(parts) != 2 {
 		t.Fatalf("archive parts = %v (ok=%v), want 2", parts, ok)
 	}
-	if parts[0].Volume != "vol-a" || parts[1].Volume != "vol-b" {
-		t.Fatalf("part volumes = %q,%q, want vol-a,vol-b", parts[0].Volume, parts[1].Volume)
+	if parts[0].Label != "vol-a" || parts[1].Label != "vol-b" {
+		t.Fatalf("part volumes = %q,%q, want vol-a,vol-b", parts[0].Label, parts[1].Label)
 	}
-	if p.Seal.Volume != "vol-b" {
-		t.Fatalf("seal volume = %q, want vol-b", p.Seal.Volume)
+	if p.Seal.Label != "vol-b" {
+		t.Fatalf("seal volume = %q, want vol-b", p.Seal.Label)
 	}
-	if got := p.Volumes(); len(got) != 2 {
+	if got := p.Labels(); len(got) != 2 {
 		t.Fatalf("placement volumes = %v, want 2", got)
 	}
 }

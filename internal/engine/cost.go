@@ -3,12 +3,12 @@ package engine
 import (
 	"time"
 
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
-	"github.com/Niloen/nbackup/internal/policy"
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/restore"
-	"github.com/Niloen/nbackup/internal/slot"
+	"github.com/Niloen/nbackup/internal/retention"
 )
 
 // This file is the dollar overlay on the engine's byte accounting. The planner and
@@ -55,23 +55,23 @@ type ForecastPoint struct {
 // ForecastCost projects the landing medium's monthly storage cost forward day by day,
 // reusing the planner's run simulation. It maintains a footprint of slots — appending
 // each simulated run and evicting via the medium's own reclamation strategy and
-// protection floor (the same primitives `nb prune` uses) — and reprices the survivors
+// retention floor (the same primitives `nb prune` uses) — and reprices the survivors
 // each day, so the curve reflects fulls/incrementals landing and pruning reclaiming.
 // Pure and offline.
 func (e *Engine) ForecastCost(start time.Time, days int) []ForecastPoint {
 	plans := e.Simulate(start, days)
-	working := append([]*slot.Slot(nil), e.cat.SlotsOn(e.mediumName)...)
+	working := append([]*format.Slot(nil), e.cat.SlotsOn(e.mediumName)...)
 	points := make([]ForecastPoint, 0, len(plans))
 	for i, plan := range plans {
 		date := start.AddDate(0, 0, i)
-		ds := slot.DateString(date)
+		ds := format.DateString(date)
 
 		// Synthesize the day's run as a sealed slot (sized from the plan's estimates),
 		// replacing any existing slot of the same id so a re-simulation is idempotent.
-		sl := slot.NewSlot("slot-"+ds, ds, 1, "forecast", date)
+		sl := format.NewSlot("slot-"+ds, ds, 1, "forecast", date)
 		var runBytes int64
 		for _, it := range plan.Items {
-			sl.AddArchive(slot.Archive{DLE: it.Name, Level: it.Level, Compressed: it.EstBytes})
+			sl.AddArchive(format.Archive{DLE: it.Name, Level: it.Level, Compressed: it.EstBytes})
 			runBytes += it.EstBytes
 		}
 		working = dropSlot(working, sl.ID)
@@ -80,10 +80,10 @@ func (e *Engine) ForecastCost(start time.Time, days int) []ForecastPoint {
 			working = append(working, sl)
 		}
 
-		// Reclaim against this medium's capacity, honoring the protection floor.
-		protected := policy.Protected(working, e.minAge, date)
+		// Reclaim against this medium's capacity, honoring the retention floor.
+		floor := retention.Compute(working, e.minAge, date)
 		var reclaimed int64
-		for _, r := range e.profile.Reclaim(working, protected, date) {
+		for _, r := range e.profile.Reclaim(working, floor, date) {
 			reclaimed += r.Bytes
 			working = dropSlot(working, r.SlotID)
 		}
@@ -181,14 +181,14 @@ func (e *Engine) estimateRead(refs []archiveRef, forceMedium string) ReadEstimat
 // locateArchive resolves an archive reference to the medium it will be read from and
 // its catalog record. With forceMedium set it reads that medium's copy; otherwise it
 // picks the copy a restore prefers (landing first).
-func (e *Engine) locateArchive(r archiveRef, forceMedium string) (medium string, a slot.Archive, ok bool) {
+func (e *Engine) locateArchive(r archiveRef, forceMedium string) (medium string, a format.Archive, ok bool) {
 	s, err := e.cat.ReadSlot(r.slotID)
 	if err != nil {
-		return "", slot.Archive{}, false
+		return "", format.Archive{}, false
 	}
 	ar, found := findArchive(s, r.dle, r.level)
 	if !found {
-		return "", slot.Archive{}, false
+		return "", format.Archive{}, false
 	}
 	if forceMedium != "" {
 		return forceMedium, ar, true
@@ -198,7 +198,7 @@ func (e *Engine) locateArchive(r archiveRef, forceMedium string) (medium string,
 			return p.Medium, ar, true
 		}
 	}
-	return "", slot.Archive{}, false
+	return "", format.Archive{}, false
 }
 
 // costModelFor returns a medium's pricing: the landing medium's cached model, or one
@@ -218,14 +218,14 @@ func (e *Engine) costModelFor(name string) media.Cost {
 
 // partCount is an archive's file count for request pricing: its part count when it
 // spanned volumes, else one.
-func partCount(a slot.Archive) int64 {
+func partCount(a format.Archive) int64 {
 	if a.Parts > 1 {
 		return int64(a.Parts)
 	}
 	return 1
 }
 
-func dropSlot(slots []*slot.Slot, id string) []*slot.Slot {
+func dropSlot(slots []*format.Slot, id string) []*format.Slot {
 	out := slots[:0:0]
 	for _, s := range slots {
 		if s.ID != id {

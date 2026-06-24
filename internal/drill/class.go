@@ -10,7 +10,7 @@
 // (class.go), the recoverability ledger and its file persistence (ledger.go), and
 // the risk-biased target selection (select.go). The engine performs the actual I/O
 // (verify, restore, the WORM probe) and consumes these types; this package never
-// imports the engine, so it stays a leaf the way policy/restore are.
+// imports the engine, so it stays a leaf the way retention/restore are.
 package drill
 
 import "fmt"
