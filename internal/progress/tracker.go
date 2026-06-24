@@ -107,9 +107,8 @@ func (t *Tracker) FinishDLE(name string, fileCount int, uncompressed, compressed
 			d.Err = err.Error()
 		} else {
 			d.State = StateDone
-			d.DoneBytes = d.EstBytes // settle the bar to 100% on success
-			if uncompressed > 0 {
-				d.DoneBytes = uncompressed
+			if uncompressed == 0 {
+				d.DoneBytes = d.EstBytes // no measured bytes: settle the bar to 100%
 			}
 		}
 	}

@@ -307,14 +307,8 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
-	// A landing must name a medium that is actually defined. This is checked even
-	// when the media map is empty: a config file that sets `landing:` but omits its
-	// `media:` block is a misconfig, not a cue to silently synthesize a default
-	// medium (which would discard the requested landing and write to ./nbackup-catalog).
-	if c.Landing != "" {
-		if _, ok := c.Media[c.Landing]; !ok {
-			return fmt.Errorf("landing %q is not a defined medium", c.Landing)
-		}
+	if err := c.landingDefined(); err != nil {
+		return err
 	}
 	if c.Cycle != "" {
 		d, err := sizeutil.ParseDuration(c.Cycle)
@@ -428,12 +422,28 @@ func (c *Config) DrillTierName() string {
 // DLEs returns the configured backup sources.
 func (c *Config) DLEs() []DLE { return c.Sources }
 
+// landingDefined reports an error if a non-empty `landing` names a medium that is
+// not defined. This holds even when the media map is empty: a config that sets
+// `landing:` but omits its `media:` block is a misconfig, not a cue to silently
+// synthesize a default medium (which would discard the requested landing and write
+// to ./nbackup-catalog). An empty landing is not an error here — LandingName resolves
+// it via the sole-medium fallback. Shared by Validate and LandingName so the rule
+// lives once.
+func (c *Config) landingDefined() error {
+	if c.Landing != "" {
+		if _, ok := c.Media[c.Landing]; !ok {
+			return fmt.Errorf("landing %q is not a defined medium", c.Landing)
+		}
+	}
+	return nil
+}
+
 // LandingName resolves the name of the medium used for landing: the configured
 // `landing`, or the sole medium when exactly one is defined.
 func (c *Config) LandingName() (string, error) {
 	if c.Landing != "" {
-		if _, ok := c.Media[c.Landing]; !ok && len(c.Media) > 0 {
-			return "", fmt.Errorf("landing %q is not a defined medium", c.Landing)
+		if err := c.landingDefined(); err != nil {
+			return "", err
 		}
 		return c.Landing, nil
 	}

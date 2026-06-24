@@ -17,7 +17,7 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 	active, done, failed, pending := s.Counts()
 
 	fmt.Fprintf(w, "Run %s  [%s]\n", s.SlotID, s.Phase)
-	fmt.Fprintf(w, "  started:  %s  (elapsed %s)\n", s.StartedAt.Local().Format("2006-01-02 15:04:05"), fmtDur(s.Elapsed(now)))
+	fmt.Fprintf(w, "  started:  %s  (elapsed %s)\n", s.StartedAt.Local().Format("2006-01-02 15:04:05"), sizeutil.FormatElapsed(s.Elapsed(now)))
 	fmt.Fprintf(w, "  dumpers:  %d configured, %d active\n", s.Dumpers, active)
 	fmt.Fprintf(w, "  dles:     %d done, %d active, %d pending", done, active, pending)
 	if failed > 0 {
@@ -43,7 +43,7 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 		fmt.Fprintf(w, "Rate:     %s/s\n", sizeutil.FormatBytes(int64(rate)))
 	}
 	if eta, ok := s.ETA(now); ok {
-		fmt.Fprintf(w, "ETA:      %s\n", fmtDur(eta))
+		fmt.Fprintf(w, "ETA:      %s\n", sizeutil.FormatElapsed(eta))
 	}
 	for _, d := range s.DLEs {
 		if d.State == StateFailed {
@@ -78,22 +78,4 @@ func estCell(b int64) string {
 		return "?"
 	}
 	return "~" + sizeutil.FormatBytes(b)
-}
-
-// fmtDur renders a duration as compact h/m/s, dropping leading zero units.
-func fmtDur(d time.Duration) string {
-	d = d.Round(time.Second)
-	h := d / time.Hour
-	d -= h * time.Hour
-	m := d / time.Minute
-	d -= m * time.Minute
-	s := d / time.Second
-	switch {
-	case h > 0:
-		return fmt.Sprintf("%dh%02dm%02ds", h, m, s)
-	case m > 0:
-		return fmt.Sprintf("%dm%02ds", m, s)
-	default:
-		return fmt.Sprintf("%ds", s)
-	}
 }

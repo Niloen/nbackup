@@ -133,76 +133,16 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 	// drains the pipe concurrently into volume parts.
 	pr, pw := io.Pipe()
 	meter := xfer.NewMeter(pw)
-	var (
-		res        Produced
-		produceErr error
-	)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		// Pipeline: tar -> compress -> encrypt -> meter -> volume. Encryption is the
-		// outermost transform, so the meter (and the seal checksum) cover the ciphertext
-		// that lands on the volume — verify, copy, and the pre-seal re-read stay keyless.
-		enc, e := crypt.Encrypt(spec.Encrypt, meter, spec.EncOpts)
-		if e != nil {
-			pw.CloseWithError(e)
-			produceErr = e
-			return
-		}
-		cw, e := filter.Compress(w.codec, enc, w.fopts)
-		if e != nil {
-			enc.Close()
-			pw.CloseWithError(e)
-			produceErr = e
-			return
-		}
-		var src io.Writer = cw
-		if progress != nil {
-			src = xfer.NewCounter(cw, func(total int64) { progress(total, meter.Bytes()) })
-		}
-		r, e := produce(src)
-		if e != nil {
-			cw.Close()
-			enc.Close()
-			pw.CloseWithError(e)
-			produceErr = e
-			return
-		}
-		if e := cw.Close(); e != nil { // waits the compressor child
-			enc.Close()
-			pw.CloseWithError(e)
-			produceErr = e
-			return
-		}
-		if e := enc.Close(); e != nil { // waits the encryptor child; flushes the meter
-			pw.CloseWithError(e)
-			produceErr = e
-			return
-		}
-		res = r
-		pw.Close() // EOF to the consumer
-	}()
+	res, produceErr, done := w.startProducer(meter, pw, spec, progress, produce)
 
-	base := media.Header{
-		Slot:      w.slot.ID,
-		Kind:      media.KindArchive,
-		DLE:       spec.DLE,
-		Host:      spec.Host,
-		Path:      spec.Path,
-		Method:    spec.Method,
-		Codec:     w.codec,
-		Encrypt:   spec.Encrypt,
-		Level:     spec.Level,
-		BaseSlot:  spec.BaseSlot,
-		CreatedAt: w.slot.CreatedAt,
-	}
+	base := w.archiveHeader(spec.DLE, spec.Host, spec.Path, spec.Method, spec.Level, spec.BaseSlot, w.codec, spec.Encrypt)
 	parts, err := w.drainParts(base, pr)
 	if err != nil {
 		pr.CloseWithError(err) // unblock the producer goroutine
 	}
 	<-done // producer finished: meter is complete, res/produceErr are visible
 	if err == nil {
-		err = produceErr
+		err = *produceErr
 	}
 	if err != nil {
 		return slot.Archive{}, err
@@ -230,6 +170,80 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 	w.written = append(w.written, archiveRecord{dle: spec.DLE, level: spec.Level, parts: parts})
 	w.mu.Unlock()
 	return arch, nil
+}
+
+// archiveHeader builds the base media.Header an archive's parts share (drainParts
+// clones it per part with an ascending Part index). The codec is passed explicitly
+// because a fresh dump stamps the writer's codec while a copy preserves the source
+// archive's recorded codec — every other descriptive field comes straight through.
+func (w *Writer) archiveHeader(dle, host, path, method string, level int, baseSlot, codec, encrypt string) media.Header {
+	return media.Header{
+		Slot:      w.slot.ID,
+		Kind:      media.KindArchive,
+		DLE:       dle,
+		Host:      host,
+		Path:      path,
+		Method:    method,
+		Codec:     codec,
+		Encrypt:   encrypt,
+		Level:     level,
+		BaseSlot:  baseSlot,
+		CreatedAt: w.slot.CreatedAt,
+	}
+}
+
+// startProducer runs the tar -> compress -> encrypt -> meter pipeline on a goroutine,
+// draining into the pipe the consumer (drainParts) reads. Encryption is the outermost
+// transform, so the meter — and thus the seal checksum — covers the ciphertext that
+// lands on the volume, keeping verify/copy keyless. It returns the produced stats and
+// an error pointer (both safe to read once done is closed) plus that done channel; a
+// pipeline-build or produce failure is reported via *errp and closes the pipe with it
+// so the consumer unblocks.
+func (w *Writer) startProducer(meter *xfer.Meter, pw *io.PipeWriter, spec ArchiveSpec, progress func(uncompressed, compressed int64), produce func(out io.Writer) (Produced, error)) (res *Produced, errp *error, done <-chan struct{}) {
+	res = &Produced{}
+	errp = new(error)
+	ch := make(chan struct{})
+	go func() {
+		defer close(ch)
+		fail := func(e error) {
+			pw.CloseWithError(e)
+			*errp = e
+		}
+		enc, e := crypt.Encrypt(spec.Encrypt, meter, spec.EncOpts)
+		if e != nil {
+			fail(e)
+			return
+		}
+		cw, e := filter.Compress(w.codec, enc, w.fopts)
+		if e != nil {
+			enc.Close()
+			fail(e)
+			return
+		}
+		var src io.Writer = cw
+		if progress != nil {
+			src = xfer.NewCounter(cw, func(total int64) { progress(total, meter.Bytes()) })
+		}
+		r, e := produce(src)
+		if e != nil {
+			cw.Close()
+			enc.Close()
+			fail(e)
+			return
+		}
+		if e := cw.Close(); e != nil { // waits the compressor child
+			enc.Close()
+			fail(e)
+			return
+		}
+		if e := enc.Close(); e != nil { // waits the encryptor child; flushes the meter
+			fail(e)
+			return
+		}
+		*res = r
+		pw.Close() // EOF to the consumer
+	}()
+	return res, errp, ch
 }
 
 // drainParts reads the payload from src and writes it as one or more part files
@@ -293,19 +307,7 @@ func (w *Writer) drainParts(base media.Header, src io.Reader) ([]PartPosition, e
 // recorded checksum is unchanged — and only the part layout (and Parts count) is new.
 // The header carries the archive's original codec, so restore reverses the right one.
 func (w *Writer) CopyArchive(meta slot.Archive, src io.Reader) (slot.Archive, error) {
-	base := media.Header{
-		Slot:      w.slot.ID,
-		Kind:      media.KindArchive,
-		DLE:       meta.DLE,
-		Host:      meta.Host,
-		Path:      meta.Path,
-		Method:    meta.Method,
-		Codec:     meta.Codec,
-		Encrypt:   meta.Encrypt,
-		Level:     meta.Level,
-		BaseSlot:  meta.BaseSlot,
-		CreatedAt: w.slot.CreatedAt,
-	}
+	base := w.archiveHeader(meta.DLE, meta.Host, meta.Path, meta.Method, meta.Level, meta.BaseSlot, meta.Codec, meta.Encrypt)
 	h := sha256.New()
 	parts, err := w.drainParts(base, io.TeeReader(src, h))
 	if err != nil {

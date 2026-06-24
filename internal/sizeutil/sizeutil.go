@@ -129,3 +129,23 @@ func FormatDuration(d time.Duration) string {
 	}
 	return d.String()
 }
+
+// FormatElapsed renders a wall-clock span (run elapsed time, an ETA) as compact
+// h/m/s, dropping leading zero units: "5s", "3m07s", "1h02m09s". This is the
+// live-progress vocabulary, distinct from FormatDuration's config-facing "Nd".
+func FormatElapsed(d time.Duration) string {
+	d = d.Round(time.Second)
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%dh%02dm%02ds", h, m, s)
+	case m > 0:
+		return fmt.Sprintf("%dm%02ds", m, s)
+	default:
+		return fmt.Sprintf("%ds", s)
+	}
+}

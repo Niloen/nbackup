@@ -144,7 +144,7 @@ type stdinOperator struct{}
 
 func (stdinOperator) Swap(r librarian.SwapRequest) (string, bool) {
 	fmt.Printf("\nmedium %q needs a tape: %s\n", r.Medium, r.Reason)
-	fmt.Printf("in drive: %s\n", reelDesc(r.Loaded))
+	fmt.Printf("in drive: %s\n", reelDesc(r.Loaded, r.Medium))
 	if r.Expect != "" {
 		fmt.Printf("this run expects tape %q (the oldest reusable volume — load it to recycle, or a fresh tape)\n", r.Expect)
 	}
@@ -154,7 +154,7 @@ func (stdinOperator) Swap(r librarian.SwapRequest) (string, bool) {
 	}
 	fmt.Println("reels in the room (not in the drive):")
 	for _, b := range r.Shelf {
-		fmt.Printf("  %-10s %s\n", b.ID, reelDesc(b))
+		fmt.Printf("  %-10s %s\n", b.ID, reelDesc(b, r.Medium))
 	}
 	def := suggestReel(r)
 	prompt := "load which reel? (id or label"
@@ -213,18 +213,15 @@ func suggestReel(r librarian.SwapRequest) string {
 	return ""
 }
 
-// reelDesc renders a reel/drive status for the operator prompt.
-func reelDesc(b media.VolumeStatus) string {
-	switch {
-	case b.ID == "" && b.Label == "":
+// reelDesc renders a reel/drive status for the operator prompt, reusing the
+// inventory label/status classifier so the two never diverge.
+func reelDesc(b media.VolumeStatus, medium string) string {
+	if b.ID == "" && b.Label == "" {
 		return "(empty)"
-	case b.Foreign:
-		return "(foreign)"
-	case b.Blank:
-		return "(blank)"
-	case b.Capacity > 0 && b.Used >= b.Capacity:
-		return fmt.Sprintf("%s (full)", b.Label)
-	default:
-		return b.Label
 	}
+	label, status := volumeLabelStatus(b, medium)
+	if status == "full" {
+		return fmt.Sprintf("%s (full)", label)
+	}
+	return label
 }

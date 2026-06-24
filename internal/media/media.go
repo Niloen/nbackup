@@ -257,6 +257,55 @@ func indexByte(b []byte, c byte) int {
 	return -1
 }
 
+// WalkReadable visits every readable volume reachable from vol in turn, calling fn
+// for each one mounted. It is the medium-shape primitive the catalog rebuild scan
+// needs, kept here next to the shape interfaces it asserts on (Changer/Drive) so the
+// catalog never type-asserts a Volume itself:
+//
+//   - a robotic library (a Changer) mounts each non-blank bay in turn and restores
+//     whatever was loaded when done;
+//   - a single-drive station or bare drive (a Drive that is not a Changer) can only
+//     reach the reel currently in the drive — the rest sit offline in the room and
+//     cannot be mounted unattended — so fn sees that one volume, or nothing when the
+//     drive is empty;
+//   - a plain address-identified volume (disk, s3) is visited directly.
+//
+// It positions only — it never reads labels — so it is a pure shape walk, distinct
+// from the librarian's label-aware advance.
+func WalkReadable(vol Volume, fn func(Volume) error) error {
+	ch, isLibrary := vol.(Changer)
+	if !isLibrary {
+		if d, ok := vol.(Drive); ok {
+			if _, loaded := d.Loaded(); !loaded {
+				return nil // single drive with an empty drive: nothing to scan
+			}
+		}
+		return fn(vol)
+	}
+	prev, hadPrev := ch.Loaded()
+	bays, err := ch.Bays()
+	if err != nil {
+		return err
+	}
+	for _, b := range bays {
+		if b.Blank {
+			continue
+		}
+		if err := ch.Mount(b.ID); err != nil {
+			return err
+		}
+		if err := fn(vol); err != nil {
+			return err
+		}
+	}
+	if hadPrev {
+		if err := ch.Mount(prev.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // VolumeFactory constructs a Volume from options.
 type VolumeFactory func(Options) (Volume, error)
 
@@ -329,6 +378,3 @@ func VolumeTypes() []string {
 	sort.Strings(out)
 	return out
 }
-
-// ErrNotImplemented is returned by registered-but-incomplete media.
-var ErrNotImplemented = fmt.Errorf("not implemented in this version")

@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/Niloen/nbackup/internal/streamproc"
 )
 
 // Options tune a codec invocation.
@@ -124,21 +126,7 @@ func Compress(codec string, dst io.Writer, o Options) (io.WriteCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	if s.compressArgv == nil {
-		return nopWriteCloser{dst}, nil
-	}
-	cmd := command(s.compressArgv(o), o)
-	cmd.Stdout = dst
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start %s: %w", cmd.Path, err)
-	}
-	return &procWriter{cmd: cmd, stdin: stdin, stderr: &stderr}, nil
+	return streamproc.WriteThrough(s.argv(s.compressArgv, o), o.Nice, dst)
 }
 
 // Decompress returns a ReadCloser that yields the decompressed form of src by
@@ -148,64 +136,14 @@ func Decompress(codec string, src io.Reader, o Options) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	if s.decompressArgv == nil {
-		return io.NopCloser(src), nil
-	}
-	cmd := command(s.decompressArgv(o), o)
-	cmd.Stdin = src
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start %s: %w", cmd.Path, err)
-	}
-	return &procReader{cmd: cmd, stdout: stdout, stderr: &stderr}, nil
+	return streamproc.ReadThrough(s.argv(s.decompressArgv, o), o.Nice, src)
 }
 
-// command builds the exec.Cmd, prefixing `nice` for politeness when requested.
-func command(argv []string, o Options) *exec.Cmd {
-	if o.Nice != 0 {
-		argv = append([]string{"nice", "-n", strconv.Itoa(o.Nice)}, argv...)
+// argv applies an argv builder, returning nil for the none codec (no child) so
+// streamproc runs the identity transform.
+func (s Spec) argv(build func(Options) []string, o Options) []string {
+	if build == nil {
+		return nil
 	}
-	return exec.Command(argv[0], argv[1:]...)
+	return build(o)
 }
-
-type procWriter struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stderr *strings.Builder
-}
-
-func (p *procWriter) Write(b []byte) (int, error) { return p.stdin.Write(b) }
-
-func (p *procWriter) Close() error {
-	stdinErr := p.stdin.Close()
-	waitErr := p.cmd.Wait()
-	if waitErr != nil {
-		return fmt.Errorf("%s: %w\n%s", p.cmd.Path, waitErr, strings.TrimSpace(p.stderr.String()))
-	}
-	return stdinErr
-}
-
-type procReader struct {
-	cmd    *exec.Cmd
-	stdout io.ReadCloser
-	stderr *strings.Builder
-}
-
-func (p *procReader) Read(b []byte) (int, error) { return p.stdout.Read(b) }
-
-func (p *procReader) Close() error {
-	p.stdout.Close()
-	if err := p.cmd.Wait(); err != nil {
-		return fmt.Errorf("%s: %w\n%s", p.cmd.Path, err, strings.TrimSpace(p.stderr.String()))
-	}
-	return nil
-}
-
-type nopWriteCloser struct{ io.Writer }
-
-func (nopWriteCloser) Close() error { return nil }

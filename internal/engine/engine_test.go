@@ -772,8 +772,8 @@ func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, byte
 	}
 	p := catalog.Placement{
 		Medium:   "lto",
-		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.PartPos{{Volume: volume, Epoch: 1, Pos: 1}}}},
-		Seal:     catalog.PartPos{Volume: volume, Epoch: 1, Pos: 2},
+		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Volume: volume, Epoch: 1, Pos: 1}}}},
+		Seal:     catalog.FilePos{Volume: volume, Epoch: 1, Pos: 2},
 	}
 	if err := eng.cat.Record(s, p); err != nil {
 		t.Fatal(err)
@@ -792,8 +792,8 @@ func recordFullOnOtherMedium(t *testing.T, eng *Engine, date, dle, medium string
 	}
 	p := catalog.Placement{
 		Medium:   medium,
-		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.PartPos{{Volume: medium, Pos: 1}}}},
-		Seal:     catalog.PartPos{Volume: medium, Pos: 2},
+		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Volume: medium, Pos: 1}}}},
+		Seal:     catalog.FilePos{Volume: medium, Pos: 2},
 	}
 	if err := eng.cat.Record(s, p); err != nil {
 		t.Fatal(err)
@@ -812,11 +812,11 @@ func TestExpectedTapeReusesOldest(t *testing.T) {
 	recordFullOn(t, eng, "2026-06-01", "h", "lto-0001") // old, superseded -> reusable
 	recordFullOn(t, eng, "2026-06-20", "h", "lto-0002") // recent full -> protected
 
-	exp, ok := eng.ExpectedTape(now)
+	exp, ok := eng.ExpectedVolume(now)
 	if !ok {
 		t.Fatal("a labeled medium should yield an expectation")
 	}
-	if exp.NewTape || exp.Label != "lto-0001" {
+	if exp.FreshVolume || exp.Label != "lto-0001" {
 		t.Fatalf("want oldest reusable lto-0001, got %+v", exp)
 	}
 	if exp.Recycles != 1 {
@@ -840,11 +840,11 @@ func TestExpectedTapeRetentionIsPerMedium(t *testing.T) {
 	// per-medium the tape still holds that DLE's last recovery path.
 	recordFullOnOtherMedium(t, eng, "2026-06-20", "h", "disk")
 
-	exp, ok := eng.ExpectedTape(now)
+	exp, ok := eng.ExpectedVolume(now)
 	if !ok {
 		t.Fatal("a labeled medium should yield an expectation")
 	}
-	if !exp.NewTape || exp.Label != "" {
+	if !exp.FreshVolume || exp.Label != "" {
 		t.Fatalf("a disk copy must not recycle the tape; want a fresh tape, got %+v", exp)
 	}
 }
@@ -858,11 +858,11 @@ func TestExpectedTapeNeedsFresh(t *testing.T) {
 	recordVol(t, eng, "lto-0001", time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC))
 	recordFullOn(t, eng, "2026-06-20", "h", "lto-0001") // within minimum age -> protected
 
-	exp, ok := eng.ExpectedTape(now)
+	exp, ok := eng.ExpectedVolume(now)
 	if !ok {
 		t.Fatal("a labeled medium should yield an expectation")
 	}
-	if !exp.NewTape || exp.Label != "" {
+	if !exp.FreshVolume || exp.Label != "" {
 		t.Fatalf("want a fresh tape, got %+v", exp)
 	}
 }
@@ -876,11 +876,11 @@ func TestExpectedTapeAppendsToLatest(t *testing.T) {
 	recordVol(t, eng, "lto-0001", time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
 	recordVol(t, eng, "lto-0002", time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC))
 
-	exp, ok := eng.ExpectedTape(now)
+	exp, ok := eng.ExpectedVolume(now)
 	if !ok {
 		t.Fatal("a labeled medium should yield an expectation")
 	}
-	if exp.NewTape || exp.Label != "lto-0002" {
+	if exp.FreshVolume || exp.Label != "lto-0002" {
 		t.Fatalf("want to append to latest lto-0002, got %+v", exp)
 	}
 }
@@ -912,7 +912,7 @@ func TestExpectedTapeReportsReelFill(t *testing.T) {
 	recordVol(t, eng, "lto-0001", time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC))
 	recordSizedFullOn(t, eng, "2026-06-20", "h", "lto-0001", 600)
 
-	exp, ok := eng.ExpectedTape(now)
+	exp, ok := eng.ExpectedVolume(now)
 	if !ok {
 		t.Fatal("a labeled medium should yield an expectation")
 	}
@@ -937,7 +937,7 @@ func TestExpectedTapeDiskHasNone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := eng.ExpectedTape(time.Now()); ok {
+	if _, ok := eng.ExpectedVolume(time.Now()); ok {
 		t.Fatal("disk medium should not yield a tape expectation")
 	}
 }

@@ -50,9 +50,11 @@ registry registration, not a conditional in the core.
 | `media` | `Volume` + `Labeled` + `Drive`/`Changer` (device) + `Shelf` (environment) + `Profile` + registry | Device API |
 | `librarian` | operates a medium's `Changer`/`Shelf` + label protocol (make-writable, advance, mount, label, load) | changer / amtape |
 | `media/disk`, `media/tape`, `media/cloud` | Volume impls (disk sidecar headers; tape library; object store via gocloud.dev/blob) | vfs / tape / s3 devices |
+| `media/fslike` | the slot layout shared by the address-identified media — clean payloads + `.hdr` sidecars over a small `Store` seam (disk = a directory, cloud = a bucket), so disk↔cloud copies are byte-identical | — |
 | `method` + `method/gnutar` | dump `Method` interface + registry; GNU tar impl | Application API / amgtar |
 | `filter` | external compressor child processes (zstd/gzip/none) + registry | compress |
 | `crypt` | external encryptor child processes (gpg/none) + registry | amcrypt/amgpgcrypt |
+| `streamproc` | the shared "external stream-transform child" plumbing (stdin→stdout, optional `nice`) that `filter` and `crypt` both run on | — |
 | `xfer` | in-process stream metering: checksum + byte counting | Xfer API |
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `catalog` | local cache of slot index + volume registry + snapshot library; derives `History` | catalog / curinfo / tapelist |
@@ -257,8 +259,12 @@ without hardware).
   functionally (its reels are subdirs it enumerates and inserts in-process); a real
   `device:` drive degenerately (empty room, `Insert` errors — only a human loads it).
   Reels are addressed by their own ids (`reel-01…`), never a synthetic "drive"
-  position — `"drive"` is CLI presentation only. All media-shape dispatch is confined
-  to package `librarian`; the rest of the engine stays shape-agnostic.
+  position — `"drive"` is CLI presentation only. Media-shape dispatch lives behind
+  the `media` shape interfaces: the librarian owns *positioning* (mount / advance /
+  swap with the label protocol), and the one read-only *walk* the catalog rebuild
+  needs — "every non-blank bay, else the loaded reel" — is `media.WalkReadable`, kept
+  next to the `Changer`/`Drive` interfaces it asserts on so the catalog never
+  type-asserts a `Volume` itself. The rest of the engine stays shape-agnostic.
 - **Librarian — the operator-facing changer service.** Package `librarian` turns
   intents (make writable, advance, mount-for-read, label, load, inventory) into
   positioning, and runs the label protocol on top. The single unified algorithm —

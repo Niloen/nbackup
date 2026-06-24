@@ -5,7 +5,6 @@ import (
 	"os"
 	"path"
 	"slices"
-	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -216,14 +215,14 @@ func printListing(n *recovery.Node) {
 	tw.Flush()
 }
 
-// recoverShell is the interactive amrecover-style session state.
+// recoverShell is the interactive amrecover-style session: the terminal I/O (prompt,
+// dispatch, printing) wrapped around a pure recovery.Session that holds the browse
+// tree, current directory, and selection.
 type recoverShell struct {
 	eng  *engine.Engine
 	dle  string
 	date string // YYYY-MM-DD
-	tree *recovery.Tree
-	cwd  string          // clean path from the DLE root
-	sel  map[string]bool // selected clean paths
+	sess *recovery.Session
 	dest string
 }
 
@@ -234,7 +233,7 @@ func runRecoverShell(eng *engine.Engine, dleName, dateStr, dest string) error {
 	if err != nil {
 		return err
 	}
-	sh := &recoverShell{eng: eng, dle: dleName, date: date, sel: map[string]bool{}, dest: dest}
+	sh := &recoverShell{eng: eng, dle: dleName, date: date, dest: dest}
 	if dleName != "" {
 		if err := sh.reload(); err != nil {
 			fmt.Printf("note: %v\n", err)
@@ -264,19 +263,19 @@ func runRecoverShell(eng *engine.Engine, dleName, dateStr, dest string) error {
 }
 
 func (sh *recoverShell) prompt() string {
-	loc := "/"
-	if sh.cwd != "" {
-		loc = "/" + sh.cwd
-	}
-	if sh.tree == nil {
+	if sh.sess == nil {
 		return "recover> "
+	}
+	loc := "/"
+	if cwd := sh.sess.Cwd(); cwd != "" {
+		loc = "/" + cwd
 	}
 	return fmt.Sprintf("recover %s:%s> ", sh.dle, loc)
 }
 
 func (sh *recoverShell) banner() {
-	if sh.tree != nil {
-		fmt.Printf("disk %q as of %s (resolved to %s)\n", sh.dle, sh.date, sh.tree.TargetSlot)
+	if sh.sess != nil {
+		fmt.Printf("disk %q as of %s (resolved to %s)\n", sh.dle, sh.date, sh.sess.Tree().TargetSlot)
 		return
 	}
 	fmt.Printf("as of %s — no disk selected. Pick one with 'setdisk <dle>' ('disks' lists them).\n", sh.date)
@@ -315,7 +314,7 @@ func (sh *recoverShell) dispatch(cmd string, args []string) (quit bool) {
 	case "cd":
 		sh.cd(args)
 	case "pwd":
-		fmt.Println("/" + sh.cwd)
+		fmt.Println("/" + sh.cwd())
 	case "add":
 		sh.add(args)
 	case "delete", "rm", "del":
@@ -323,7 +322,7 @@ func (sh *recoverShell) dispatch(cmd string, args []string) (quit bool) {
 	case "list", "selected":
 		sh.listSelected()
 	case "clear":
-		sh.sel = map[string]bool{}
+		sh.sess.Clear()
 		fmt.Println("selection cleared")
 	case "dest", "setdest", "lcd":
 		if len(args) == 1 {
@@ -338,17 +337,24 @@ func (sh *recoverShell) dispatch(cmd string, args []string) (quit bool) {
 	return false
 }
 
+// cwd is the session's current directory, or "" before a disk is set.
+func (sh *recoverShell) cwd() string {
+	if sh.sess == nil {
+		return ""
+	}
+	return sh.sess.Cwd()
+}
+
 func (sh *recoverShell) reload() error {
 	if sh.dle == "" {
 		return fmt.Errorf("no disk set")
 	}
 	tree, err := sh.eng.OpenRecover(sh.dle, sh.date)
 	if err != nil {
-		sh.tree = nil
+		sh.sess = nil
 		return err
 	}
-	sh.tree = tree
-	sh.cwd = ""
+	sh.sess = recovery.NewSession(tree)
 	return nil
 }
 
@@ -378,8 +384,7 @@ func (sh *recoverShell) setDisk(args []string) {
 		return
 	}
 	sh.dle = args[0]
-	sh.sel = map[string]bool{}
-	if err := sh.reload(); err != nil {
+	if err := sh.reload(); err != nil { // a fresh session starts with an empty selection
 		fmt.Printf("note: %v\n", err)
 		return
 	}
@@ -387,46 +392,38 @@ func (sh *recoverShell) setDisk(args []string) {
 }
 
 func (sh *recoverShell) ls(args []string) {
-	if sh.tree == nil {
+	if sh.sess == nil {
 		fmt.Println("set a disk first (setdisk <dle>)")
 		return
 	}
-	target := sh.cwd
+	arg := ""
 	if len(args) == 1 {
-		target = sh.resolve(args[0])
+		arg = args[0]
 	}
-	n, ok := sh.tree.Lookup(target)
+	n, ok := sh.sess.Lookup(arg)
 	if !ok {
-		fmt.Printf("not found: /%s\n", target)
+		fmt.Printf("not found: /%s\n", sh.sess.Resolve(arg))
 		return
 	}
 	printListing(n)
 }
 
 func (sh *recoverShell) cd(args []string) {
-	if sh.tree == nil {
+	if sh.sess == nil {
 		fmt.Println("set a disk first (setdisk <dle>)")
 		return
 	}
-	if len(args) == 0 {
-		sh.cwd = ""
-		return
+	arg := ""
+	if len(args) > 0 {
+		arg = args[0]
 	}
-	target := sh.resolve(args[0])
-	n, ok := sh.tree.Lookup(target)
-	if !ok {
-		fmt.Printf("not found: /%s\n", target)
-		return
+	if err := sh.sess.Cd(arg); err != nil {
+		fmt.Println(err)
 	}
-	if !n.IsDir() {
-		fmt.Printf("not a directory: /%s\n", target)
-		return
-	}
-	sh.cwd = target
 }
 
 func (sh *recoverShell) add(args []string) {
-	if sh.tree == nil {
+	if sh.sess == nil {
 		fmt.Println("set a disk first (setdisk <dle>)")
 		return
 	}
@@ -434,43 +431,45 @@ func (sh *recoverShell) add(args []string) {
 		fmt.Println("usage: add <path>...")
 		return
 	}
-	for _, p := range args {
-		target := sh.resolve(p)
-		if _, ok := sh.tree.Lookup(target); !ok {
-			fmt.Printf("not found: /%s\n", target)
-			continue
-		}
-		sh.sel[target] = true
-		fmt.Printf("added /%s\n", target)
+	added, notFound := sh.sess.Add(args)
+	for _, p := range added {
+		fmt.Printf("added /%s\n", p)
+	}
+	for _, p := range notFound {
+		fmt.Printf("not found: /%s\n", p)
 	}
 }
 
 func (sh *recoverShell) del(args []string) {
-	for _, p := range args {
-		target := sh.resolve(p)
-		if sh.sel[target] {
-			delete(sh.sel, target)
-			fmt.Printf("removed /%s\n", target)
-		}
+	if sh.sess == nil {
+		return
+	}
+	for _, p := range sh.sess.Remove(args) {
+		fmt.Printf("removed /%s\n", p)
 	}
 }
 
 func (sh *recoverShell) listSelected() {
-	if len(sh.sel) == 0 {
+	if sh.sess == nil {
 		fmt.Println("(no files selected)")
 		return
 	}
-	for _, p := range sortedSet(sh.sel) {
+	sel := sh.sess.Selection()
+	if len(sel) == 0 {
+		fmt.Println("(no files selected)")
+		return
+	}
+	for _, p := range sel {
 		fmt.Printf("  /%s\n", p)
 	}
 }
 
 func (sh *recoverShell) extract(args []string) {
-	if sh.tree == nil {
+	if sh.sess == nil {
 		fmt.Println("set a disk first (setdisk <dle>)")
 		return
 	}
-	if len(sh.sel) == 0 {
+	if len(sh.sess.Selection()) == 0 {
 		fmt.Println("nothing selected (use 'add <path>')")
 		return
 	}
@@ -486,7 +485,7 @@ func (sh *recoverShell) extract(args []string) {
 		fmt.Println("no destination; aborted")
 		return
 	}
-	steps, err := sh.tree.Collect(sortedSet(sh.sel))
+	steps, err := sh.sess.CollectSelection()
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
 		return
@@ -498,16 +497,6 @@ func (sh *recoverShell) extract(args []string) {
 		return
 	}
 	fmt.Printf("recovered %d entr(ies) from %d archive(s) into %s\n", n, len(steps), sh.dest)
-}
-
-// resolve turns a user-typed path (absolute "/a/b" or relative to cwd, with "."
-// and "..") into a clean path from the DLE root.
-func (sh *recoverShell) resolve(arg string) string {
-	base := "/" + sh.cwd
-	if strings.HasPrefix(arg, "/") {
-		base = "/"
-	}
-	return strings.TrimPrefix(path.Clean(base+"/"+arg), "/")
 }
 
 func recoverHelp() {
@@ -534,13 +523,4 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
-}
-
-func sortedSet(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
