@@ -564,7 +564,12 @@ func (e *Engine) expectedTapeFor(medium string, now time.Time) TapeExpectation {
 	}
 
 	minAge := e.cfg.MinAgeFor(def)
-	protected := policy.Protected(e.cat.Slots(), minAge, now)
+	// Retention is per-medium: a volume is reusable only when this medium no
+	// longer needs its runs, so protection is computed over this medium's own
+	// slots. Scoping to e.cat.Slots() (all media) would recycle a tape merely
+	// because a newer full landed on disk — discarding the offsite copy and the
+	// redundancy double storage exists to provide.
+	protected := policy.Protected(e.cat.SlotsOn(medium), minAge, now)
 	for _, v := range pool {
 		held := e.cat.SlotsOnVolume(v.Label.Name)
 		reusable := true

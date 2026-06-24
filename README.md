@@ -290,19 +290,25 @@ need deletion-accurate state.
 
 ### Pruning (cycle safety)
 
-`nb prune` is a dry-run by default. Pruning has two layers:
+`nb prune` is a dry-run by default. **Retention is per-medium**: each store is
+pruned against its own slots, capacity, and `minimum_age` — a copy on another
+medium never makes a slot prunable, because double storage exists for
+redundancy. Pruning has two layers:
 
-1. **Safety floor** (shared, medium-agnostic): a slot is *protected* if it is
-   younger than the medium's `minimum_age` (which defaults to one cycle), or if
-   any DLE it holds has no newer full elsewhere (its last recovery path).
-   Protected slots are never reclaimed.
-2. **Capacity reclamation** (per-medium): among non-protected slots, the medium's
-   retention strategy reclaims to fit capacity. For object stores this deletes
-   the **oldest slots until total ≤ capacity**; for tape it will reclaim whole
-   tapes (not yet implemented).
+1. **Safety floor**: a slot is *protected* if it is younger than the medium's
+   `minimum_age` (which defaults to one cycle), or if — among that medium's own
+   slots — no newer full of one of its DLEs exists (so on this medium it is that
+   DLE's last recovery path). Protected slots are never reclaimed. The rule is
+   medium-neutral; the slot set it judges is the medium's own.
+2. **Capacity reclamation**: among non-protected slots, the medium's retention
+   strategy reclaims to fit capacity. Object stores (disk, S3) reclaim
+   **per-slot**, deleting the **oldest slots until total ≤ capacity**. Tape
+   reclaims **whole volumes**, not slots: a reel is reused by relabeling it once
+   all its runs are unprotected (Amanda's oldest-reusable-tape pick, applied
+   when a run needs a volume), so `nb prune` never deletes individual slots from
+   a tape.
 
-Add `--apply` to actually delete. Capacity and `minimum_age` are per-medium, so
-each store is pruned against its own limits.
+Add `--apply` to actually delete.
 
 ### Replication / tiered storage
 
@@ -340,9 +346,13 @@ sync:
     to: deep-archive
 ```
 
-Replication and pruning compose: a slot becomes prunable from disk only once its
-recovery path exists elsewhere (the protected-set floor), so run `nb sync` before
-`nb prune` to tier old slots off local disk safely.
+Replication and pruning are independent: each medium prunes against its own
+retention (above), so a slot leaves disk when **disk's** capacity and cycle say
+so — never merely because a copy reached S3 or tape. That is the point of double
+storage: both copies are kept, each retained on its own terms. To use a cheap
+offsite tier as bulk retention while disk stays lean, give disk a tighter
+`capacity` (or shorter `minimum_age`) than the tier; `nb sync` then mirrors slots
+offsite and `nb prune` independently trims disk back to its budget.
 
 ## Configuration
 

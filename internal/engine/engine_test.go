@@ -703,8 +703,8 @@ func recordFullOn(t *testing.T, eng *Engine, date, dle, volume string) {
 	recordSizedFullOn(t, eng, date, dle, volume, 0)
 }
 
-// recordSizedFullOn records a sealed full of one DLE on a volume with a given
-// payload size, so a reel's fill can be asserted.
+// recordSizedFullOn records a sealed full of one DLE on a given lto volume with a
+// given payload size, so a reel's fill can be asserted.
 func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, bytes int64) {
 	t.Helper()
 	id := slot.IDFromParts(date, 1)
@@ -717,6 +717,26 @@ func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, byte
 		Medium:   "lto",
 		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.PartPos{{Volume: volume, Epoch: 1, Pos: 1}}}},
 		Seal:     catalog.PartPos{Volume: volume, Epoch: 1, Pos: 2},
+	}
+	if err := eng.cat.Record(s, p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// recordFullOnOtherMedium records a sealed full of one DLE whose only copy lives on
+// a medium other than the tape pool — used to prove retention is judged per-medium.
+func recordFullOnOtherMedium(t *testing.T, eng *Engine, date, dle, medium string) {
+	t.Helper()
+	id := slot.IDFromParts(date, 1)
+	s := slot.NewSlot(id, date, 1, "test", time.Now())
+	s.AddArchive(slot.Archive{DLE: dle, Level: 0})
+	if err := s.Seal(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	p := catalog.Placement{
+		Medium:   medium,
+		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.PartPos{{Volume: medium, Pos: 1}}}},
+		Seal:     catalog.PartPos{Volume: medium, Pos: 2},
 	}
 	if err := eng.cat.Record(s, p); err != nil {
 		t.Fatal(err)
@@ -744,6 +764,31 @@ func TestExpectedTapeReusesOldest(t *testing.T) {
 	}
 	if exp.Recycles != 1 {
 		t.Fatalf("want 1 run recycled, got %d", exp.Recycles)
+	}
+}
+
+// TestExpectedTapeRetentionIsPerMedium: a tape's old full stays protected — and the
+// tape is not recycled — when the only newer full of that DLE lives on another
+// medium (disk). Retention is per-medium: a copy elsewhere must never make the
+// offsite tape reusable, or double storage would silently shed its redundancy.
+func TestExpectedTapeRetentionIsPerMedium(t *testing.T) {
+	eng := tapeEngine(t, false, "10d")
+	now := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+
+	recordVol(t, eng, "lto-0001", time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	recordFullOn(t, eng, "2026-06-01", "h", "lto-0001") // old full, only copy is on tape
+
+	// A newer full of the same DLE exists, but only on disk — never on tape. Judged
+	// globally this would supersede the tape's full and recycle lto-0001; judged
+	// per-medium the tape still holds that DLE's last recovery path.
+	recordFullOnOtherMedium(t, eng, "2026-06-20", "h", "disk")
+
+	exp, ok := eng.ExpectedTape(now)
+	if !ok {
+		t.Fatal("a labeled medium should yield an expectation")
+	}
+	if !exp.NewTape || exp.Label != "" {
+		t.Fatalf("a disk copy must not recycle the tape; want a fresh tape, got %+v", exp)
 	}
 }
 

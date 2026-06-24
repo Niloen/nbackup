@@ -120,9 +120,12 @@ path `readerFor` uses, so a tape/S3 source works (un-vaulting tape→disk, or a
 second offsite tier), and copy-to-landing is now allowed (the old "target is the
 source" guard became a `from == to` guard). The config `sync:` rules are the
 declarative form (`{from, to, last}`) so a cron `nb dump && nb sync
---apply` tiers offsite hands-off. Sync composes with pruning rather than driving it:
-the protected-set floor already keeps a slot on disk until its recovery path exists
-elsewhere, so "sync then prune" tiers old slots off local disk safely.
+--apply` mirrors offsite hands-off. Sync and pruning are independent, not coupled:
+retention is per-medium (`policy.Protected` is judged over one medium's own slots),
+so a copy reaching another medium never makes the original prunable — double storage
+keeps both copies, each retained on its own capacity and cycle. Tiering disk lean
+while a cheap medium holds bulk is just a tighter disk `capacity`/`minimum_age`, which
+`nb prune` enforces on disk alone.
 
 **One mutating `nb` per config at a time** (`internal/lock`, Amanda's per-config
 amflock). Rather than make the catalog concurrently writable, we serialize the
@@ -261,10 +264,13 @@ measurement point is an uncompressed `xfer.Counter` on the tar→compressor stre
 in `slotio.WriteArchive`; compressed bytes come from the existing `xfer.Meter`
 (now atomic so it can be polled live).
 
-**Reclamation asymmetry.** Disk reclaims per slot (`RemoveSlot`); tape reclaims a
-whole volume (relabel). Pruning has a shared safety floor (`policy.Protected`:
-younger than `minimum_age`, or the last recovery path for some DLE) plus a
-per-medium capacity strategy.
+**Reclamation asymmetry.** Disk/S3 reclaim per slot (`RemoveSlot`); tape reclaims a
+whole volume (relabel — `tape.RemoveSlot` errors, and `volumeProfile.Reclaim`
+returns nothing, so `nb prune` never deletes a slot from a tape). Pruning has a
+safety floor (`policy.Protected`: younger than `minimum_age`, or the last recovery
+path for some DLE) plus a per-medium capacity strategy. Both are per-medium: the
+floor's rule is shared but is judged over one medium's own slots, so a copy on
+another medium never makes a slot reclaimable.
 
 **Capacity model (`media.Profile`).** A profile exposes two numbers that the
 planner keeps distinct. `TotalBytes` is the **pool** — the retainable capacity

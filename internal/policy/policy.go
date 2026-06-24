@@ -1,8 +1,13 @@
-// Package policy expresses NBackup's cross-cutting retention safety — the rules
-// that hold regardless of which medium a slot lives on. It computes the set of
-// "protected" slots that capacity-driven reclamation (a per-medium concern) must
-// never touch: the last recovery path for any DLE, and slots younger than the
-// medium's minimum age. It is pure and performs no I/O.
+// Package policy expresses NBackup's retention safety floor — the rules that
+// gate capacity-driven reclamation. It computes the set of "protected" slots
+// that reclamation must never touch: the last recovery path for any DLE, and
+// slots younger than the medium's minimum age. It is pure and performs no I/O.
+//
+// Retention is per-medium: callers pass the slots of a single medium, so "last
+// recovery path" is judged within that medium alone. A copy on another medium
+// never makes a slot reclaimable here — double storage exists for redundancy,
+// and each medium retains against its own capacity and cycle. The rule's shape
+// is medium-neutral; only the slot set it is applied to is medium-scoped.
 package policy
 
 import (
@@ -14,8 +19,9 @@ import (
 
 // Protected returns a map of slotID -> reason for slots that must never be
 // reclaimed. A slot is protected if it is younger than minAge, or if any DLE it
-// holds has no newer full backup elsewhere (so it is that DLE's last recovery
-// path).
+// holds has no newer full backup among the given slots (so within this slot set
+// it is that DLE's last recovery path). Pass one medium's slots to get that
+// medium's retention floor.
 //
 // Note: once verification status is tracked, the successor requirement should
 // tighten from "a newer full exists" to "a newer verified full exists".
