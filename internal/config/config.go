@@ -160,6 +160,7 @@ type Media struct {
 	Capacity   string            `yaml:"capacity"`    // space NBackup may use here, e.g. "20TB" ("" = unbounded)
 	MinimumAge string            `yaml:"minimum_age"` // retention floor before a slot may be retired here (default: one cycle)
 	Appendable *bool             `yaml:"appendable"`  // tape: pack many runs per tape (default) vs one run per tape
+	Throughput string            `yaml:"throughput"`  // bandwidth cap to/from this medium, e.g. "50MB/s" ("" = uncapped); network politeness, the read/write peer of nice
 	Params     map[string]string `yaml:",inline"`     // type-specific connection params (path, bucket, tapes, ...)
 }
 
@@ -174,6 +175,18 @@ func (m Media) CapacityBytes() (int64, error) {
 		return 0, nil
 	}
 	return sizeutil.ParseBytes(m.Capacity)
+}
+
+// ThroughputBytes returns this medium's bandwidth cap in bytes per second, or 0
+// if unset (uncapped). It caps both directions — a dump/sync to the medium and a
+// restore/un-vault/drill from it — so the office uplink survives a business-hours
+// backup. Concurrent dumpers to one medium share the single budget (Amanda's
+// netusage), since a run writes a single landing medium.
+func (m Media) ThroughputBytes() (int64, error) {
+	if m.Throughput == "" {
+		return 0, nil
+	}
+	return sizeutil.ParseRate(m.Throughput)
 }
 
 // ProfileOptions flattens the medium's capacity field and connection params into
@@ -325,6 +338,9 @@ func (c *Config) Validate() error {
 		}
 		if _, err := m.MinAge(); err != nil {
 			return fmt.Errorf("media %s: minimum_age: %w", name, err)
+		}
+		if _, err := m.ThroughputBytes(); err != nil {
+			return fmt.Errorf("media %s: throughput: %w", name, err)
 		}
 	}
 	for i, r := range c.Sync {

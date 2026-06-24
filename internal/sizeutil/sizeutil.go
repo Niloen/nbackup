@@ -69,6 +69,23 @@ func ParseBytes(s string) (int64, error) {
 	return int64(num * mult), nil
 }
 
+// ParseRate parses a throughput such as "50MB/s" or "500KB/s" into bytes per
+// second. The "/s" suffix is optional and purely for readability — the value is
+// always bytes per second, reusing ParseBytes for the size, so it is consistent
+// with volume_size/capacity (bytes, not Amanda's kilobits). A bare "50MB" means
+// 50 MB/s.
+func ParseRate(s string) (int64, error) {
+	t := strings.TrimSpace(s)
+	if l := strings.ToLower(t); strings.HasSuffix(l, "/s") {
+		t = strings.TrimSpace(t[:len(t)-len("/s")])
+	}
+	n, err := ParseBytes(t)
+	if err != nil {
+		return 0, fmt.Errorf("invalid rate %q: expected a size per second, e.g. 50MB/s or 500KB/s", s)
+	}
+	return n, nil
+}
+
 // FormatBytes renders a byte count in a compact human-readable form.
 func FormatBytes(b int64) string {
 	const unit = 1000

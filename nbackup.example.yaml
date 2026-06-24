@@ -60,6 +60,11 @@ media:
     # prefix: nbackup/  # optional: confine all keys under this folder in the bucket
     capacity: 50TB      # space NBackup may use here; `nb prune` reclaims oldest to fit
     # minimum_age: 30d  # retention floor before a slot may be retired (default: one cycle)
+    throughput: 50MB/s  # bandwidth cap to/from this medium (default: uncapped). Network
+                        # politeness — the read/write peer of `nice` — so a dump or sync
+                        # doesn't saturate the office uplink, and a restore/drill download
+                        # honors the same budget. Bytes/sec; the `/s` is optional. Several
+                        # concurrent dumpers to one medium share this single cap.
     # Credentials are NOT configured here — they come from each cloud SDK's standard
     # environment (AWS_*, GOOGLE_APPLICATION_CREDENTIALS, AZURE_*), so secrets stay
     # out of the config file. An object store is address-identified: no labels, no
