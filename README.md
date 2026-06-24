@@ -317,6 +317,24 @@ DRILL COVERAGE
 
 `nb report --last 30` widens the window; `nb report --json` emits the raw records.
 
+For the classic per-DLE dump report (Amanda's nightly statistics), `nb report --dump`
+prints the latest dump in detail — each DLE's level, original/output size,
+compression %, files, dump time, and rate, with full/incremental totals:
+
+```text
+DUMP REPORT  slot-2026-06-24  (2026-06-24 02:00)
+DLE         LVL  ORIG       OUT       COMP%  FILES  TIME    RATE
+app01-home  0    21.47 GB   5.37 GB   25%    1240   12m04s  29.66 MB/s
+app01-etc   1    122.88 kB  40.96 kB  33%    9      1s      …
+--
+FULL: 1 dle(s), 21.47 GB -> 5.37 GB (25%)
+INCR: 1 dle(s), 122.88 kB -> 40.96 kB (33%)
+```
+
+`nb report --dump --slot slot-2026-06-21` reports a specific dump. (Sizes come from
+the seal; the per-DLE timing comes from the run history, so a slot dumped before this
+was recorded shows sizes via `nb slot show` instead.)
+
 To push failures to a human, add a `notify:` block (see `nbackup.example.yaml`).
 Backends are pluggable — built-in **email (SMTP)** and a generic **webhook**
 (Slack/Discord/PagerDuty-compatible):
@@ -343,7 +361,9 @@ backend, unless `on_failure` narrows it). A successful **`nb dump`** also notifi
 default — the nightly "backups happened" signal, so a silent inbox means cron didn't
 run, not that all is well. The other commands' success is opt-in: list backends in
 `on_success` to also get success notices for `sync`/`verify`/`drill`/`prune` (that
-list then applies to dump too).
+list then applies to dump too). A **dump notification carries the full per-DLE dump
+report** (the same table as `nb report --dump`), so the nightly email *is* Amanda's
+report — not just "it worked".
 
 Secrets are referenced by environment-variable *name* and resolved at send time, so
 nothing sensitive lives in the config (a literal `password:` is rejected). A

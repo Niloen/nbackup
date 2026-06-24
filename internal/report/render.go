@@ -90,6 +90,80 @@ func RenderRun(w io.Writer, r Run) {
 		fmt.Fprintf(w, "  error [%s]: %s\n", r.ExitClass, r.Error)
 	}
 	renderRecovery(w, &r)
+	// A dump notification carries the full per-DLE report (Amanda's nightly email),
+	// so an operator sees what was backed up and how it compressed — not just totals.
+	if r.Command == CommandDump && len(r.DumpStats) > 0 {
+		fmt.Fprintln(w)
+		renderDumpTable(w, r.DumpStats)
+	}
+}
+
+// RenderDump writes an Amanda-style per-DLE dump report for one run: a header, the
+// per-DLE statistics table, and full/incremental totals. It is what `nb report
+// --dump` prints and shares renderDumpTable with the dump notification body.
+func RenderDump(w io.Writer, r Run) {
+	fmt.Fprintf(w, "DUMP REPORT  %s", r.SlotID)
+	if !r.StartedAt.IsZero() {
+		fmt.Fprintf(w, "  (%s)", r.StartedAt.Local().Format("2006-01-02 15:04"))
+	}
+	fmt.Fprintln(w)
+	if r.Failed() {
+		fmt.Fprintf(w, "run FAILED [%s]: %s\n", r.ExitClass, r.Error)
+	}
+	if len(r.DumpStats) == 0 {
+		fmt.Fprintln(w, "no per-DLE statistics recorded for this run")
+		return
+	}
+	renderDumpTable(w, r.DumpStats)
+}
+
+// renderDumpTable writes the per-DLE statistics table plus full/incremental totals.
+// Rate is uncompressed bytes over dump time (Amanda's dump rate); a row with unknown
+// timing shows a dash for time and rate.
+func renderDumpTable(w io.Writer, stats []DLEStat) {
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "DLE\tLVL\tORIG\tOUT\tCOMP%\tFILES\tTIME\tRATE")
+	var fOrig, fOut, iOrig, iOut int64
+	var fN, iN int
+	for _, d := range stats {
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\t%s\t%s\n",
+			d.DLE, d.Level, sizeutil.FormatBytes(d.Orig), sizeutil.FormatBytes(d.Out),
+			compPct(d.Orig, d.Out), d.Files, dumpTime(d.Seconds), dumpRate(d.Orig, d.Seconds))
+		if d.Level == 0 {
+			fOrig, fOut, fN = fOrig+d.Orig, fOut+d.Out, fN+1
+		} else {
+			iOrig, iOut, iN = iOrig+d.Orig, iOut+d.Out, iN+1
+		}
+	}
+	tw.Flush()
+	fmt.Fprintln(w, "--")
+	fmt.Fprintf(w, "FULL: %d dle(s), %s -> %s (%s)\n", fN, sizeutil.FormatBytes(fOrig), sizeutil.FormatBytes(fOut), compPct(fOrig, fOut))
+	fmt.Fprintf(w, "INCR: %d dle(s), %s -> %s (%s)\n", iN, sizeutil.FormatBytes(iOrig), sizeutil.FormatBytes(iOut), compPct(iOrig, iOut))
+}
+
+// compPct renders the compression ratio (output as a percent of original), or a dash
+// when there is no original size to measure against.
+func compPct(orig, out int64) string {
+	if orig <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.0f%%", float64(out)/float64(orig)*100)
+}
+
+// dumpTime renders a dump duration, or a dash when timing was unavailable.
+func dumpTime(secs float64) string {
+	if secs <= 0 {
+		return "-"
+	}
+	return sizeutil.FormatElapsed(time.Duration(secs * float64(time.Second)))
+}
+
+// dumpRate renders uncompressed throughput (Amanda's dump rate), or a dash without timing.
+func dumpRate(orig int64, secs float64) string {
+	if secs <= 0 || orig <= 0 {
+		return "-"
+	}
+	return sizeutil.FormatBytes(int64(float64(orig)/secs)) + "/s"
 }
 
 // detailCell summarizes a run's per-command outcome for the table/notification: what

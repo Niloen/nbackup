@@ -416,6 +416,14 @@ result reaches someone. Three load-bearing choices, all mirroring existing stanc
   report` (read-only, no engine) renders the recent history plus a live
   drill-ledger recovery audit (failing / degrading / stale / never-drilled DLEs via
   `drill.Ledger.Coverage`); `nb report --notify` mails the same digest.
+- **Per-DLE dump report (Amanda's nightly statistics).** A dump's record carries a
+  per-DLE `DumpStats` row (level, original/output size, files — from the seal — plus
+  dump time read from the just-flushed `run-status.json`), captured by the CLI at seal
+  time so the report is historical, not just the last live run. `nb report --dump`
+  (latest, or `--slot <id>`) renders the Amanda-style table — sizes, compression %,
+  time, rate, full/incremental totals — via the one `report` renderer the dump
+  *notification* also uses, so a configured dump alert *is* the nightly report, not a
+  bare "it worked". (A slot older than the history shows sizes via `nb slot show`.)
 
 **Reclamation asymmetry.** Disk/S3 reclaim per slot (`RemoveSlot`); tape reclaims a
 whole volume (relabel — `tape.RemoveSlot` errors, and `volumeProfile.Reclaim`

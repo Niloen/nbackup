@@ -65,6 +65,23 @@ type Run struct {
 	Skipped      int           `json:"skipped,omitempty"`       // drill: unattended skips
 	Overdue      int           `json:"overdue,omitempty"`       // drill: DLEs not covered within the window
 	NeverDrilled []string      `json:"never_drilled,omitempty"` // drill: DLEs never drilled
+
+	// DumpStats is the per-DLE breakdown of a dump (Amanda's per-disk report rows):
+	// level, original/output size, files, and dump time. Captured at seal time so the
+	// dump report and its notification are historical, not just the last live run.
+	DumpStats []DLEStat `json:"dump_stats,omitempty"`
+}
+
+// DLEStat is one DLE's statistics within a dump — the row of an Amanda-style dump
+// report. Orig is the uncompressed archive stream, Out the compressed payload on the
+// volume; Seconds is the dump duration (0 when timing was unavailable).
+type DLEStat struct {
+	DLE     string  `json:"dle"`
+	Level   int     `json:"level"`
+	Orig    int64   `json:"orig"` // uncompressed bytes
+	Out     int64   `json:"out"`  // compressed bytes on the volume
+	Files   int     `json:"files"`
+	Seconds float64 `json:"seconds,omitempty"` // dump duration; 0 = unknown
 }
 
 // DrillHealth is one DLE's outcome in a drill run alongside its prior ledger state,

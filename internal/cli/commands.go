@@ -280,6 +280,7 @@ func newDumpCmd(a *app) *cobra.Command {
 					SlotID:     s.ID,
 					Archives:   len(s.Archives),
 					BytesMoved: s.TotalBytes,
+					DumpStats:  dumpStats(s, cfg.WorkdirPath()),
 				}, nil
 			})
 		},
@@ -287,6 +288,38 @@ func newDumpCmd(a *app) *cobra.Command {
 	cmd.Flags().StringVar(&dateStr, "date", "", "run date YYYY-MM-DD (default today)")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "plan the run for --date and print it without writing anything")
 	return cmd
+}
+
+// dumpStats builds the per-DLE statistics for a sealed slot's run record: sizes,
+// level, and files come from the seal (authoritative); the dump duration comes from
+// the run-status snapshot the tracker just flushed (the same file `nb status` reads),
+// matched by DLE name and level. When the snapshot is missing or stale, sizes are
+// still recorded and timing is left zero (rendered as a dash).
+func dumpStats(s *slot.Slot, workdir string) []report.DLEStat {
+	type key struct {
+		name  string
+		level int
+	}
+	durations := map[key]float64{}
+	if snap, err := progress.Load(workdir); err == nil && snap.SlotID == s.ID {
+		for _, d := range snap.DLEs {
+			if !d.StartedAt.IsZero() && !d.EndedAt.IsZero() {
+				durations[key{d.Name, d.Level}] = d.EndedAt.Sub(d.StartedAt).Seconds()
+			}
+		}
+	}
+	stats := make([]report.DLEStat, 0, len(s.Archives))
+	for _, a := range s.Archives {
+		stats = append(stats, report.DLEStat{
+			DLE:     a.DLE,
+			Level:   a.Level,
+			Orig:    a.Uncompressed,
+			Out:     a.Compressed,
+			Files:   a.FileCount,
+			Seconds: durations[key{a.DLE, a.Level}],
+		})
+	}
+	return stats
 }
 
 // runDumpDryRun previews the dump on `date` without writing: it plans that run
