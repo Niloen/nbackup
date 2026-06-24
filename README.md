@@ -517,8 +517,11 @@ guessing. A restore reassembles a spanned archive by mounting its tapes in order
 
 Declared in config for forward-compatibility:
 
-- **Capacity-driven retention** — capacity is reported and bounds promotion;
-  pruning is cycle-based, not yet automatically driven to fit capacity.
+- **Tape whole-volume reclamation** — capacity-driven pruning already fits
+  object stores and disk to their `capacity` (reclaiming the oldest
+  non-protected slots first); reclaiming whole *tapes* to fit a library's
+  capacity is not yet automatic — tape reuse is identified by `nb plan` and
+  gated behind a deliberate `nb label --relabel`.
 - **Remote sources** — `host` is metadata; `path` is read from the local
   filesystem (run the agent where the data is, or mount it).
 - **Exclude/include rules** and tar tuning (one-file-system and sparse are on by
