@@ -333,12 +333,17 @@ func renderStatus(dir string) error {
 // (each tape in turn), so the whole-pool scan is gated behind an explicit flag
 // rather than triggered by a bare `nb verify`.
 func newVerifyCmd(a *app) *cobra.Command {
-	var all bool
+	var all, deep bool
 	cmd := &cobra.Command{
-		Use:     "verify [slot-id...]",
-		Short:   "Verify slot checksums",
-		Long:    "Re-check archive checksums against the catalog. Pass slot ids to verify just those; pass --all to verify every slot (which may mount every volume in the pool).",
-		Example: "  nb verify slot-2026-06-21\n  nb verify --all",
+		Use:   "verify [slot-id...]",
+		Short: "Verify slot integrity (checksum, or --deep structural)",
+		Long: "Verify archives against the seal. By default it re-checks payload checksums " +
+			"(integrity). With --deep it also streams each archive through the real read " +
+			"pipeline — decrypt, decompress, then `tar -t` (list, not extract) — and asserts the " +
+			"members match the seal, proving the bytes are a valid restorable stream and " +
+			"exercising the key and codec end-to-end. It writes nothing either way. Pass slot ids " +
+			"to verify just those, or --all for every slot (which may mount every volume in the pool).",
+		Example: "  nb verify slot-2026-06-21\n  nb verify --deep slot-2026-06-21\n  nb verify --all",
 		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if all && len(args) > 0 {
@@ -360,19 +365,28 @@ func newVerifyCmd(a *app) *cobra.Command {
 			// slot) just like restore, rather than failing at the first volume boundary.
 			eng.SetOperator(stdinOperator{})
 			if all && !a.quiet {
-				fmt.Printf("verifying %d slot(s) in the catalog\n", len(eng.Catalog().Slots()))
+				mode := "checksum"
+				if deep {
+					mode = "deep (checksum + structural)"
+				}
+				fmt.Printf("verifying %d slot(s) in the catalog [%s]\n", len(eng.Catalog().Slots()), mode)
 			}
-			failures, err := eng.Verify(args, a.logf())
+			checks := engine.CheckChecksum
+			if deep {
+				checks |= engine.CheckStructural
+			}
+			report, err := eng.Verify(args, engine.VerifyOptions{Checks: checks}, a.logf())
 			if err != nil {
 				return err
 			}
-			if failures > 0 {
-				return fmt.Errorf("%d slot(s) failed verification", failures)
+			if report.Failures > 0 {
+				return fmt.Errorf("%d slot(s) failed verification", report.Failures)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "verify every slot in the catalog")
+	cmd.Flags().BoolVar(&deep, "deep", false, "also validate structure: decrypt+decompress+`tar -t`, members vs seal")
 	return cmd
 }
 

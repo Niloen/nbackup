@@ -182,6 +182,39 @@ func (g *gnutar) Restore(in io.Reader, destDir string, members []string) error {
 	return nil
 }
 
+// List reads a raw tar stream from in and returns its member paths (`tar -t`),
+// without extracting. It is the structural half of a deep verify: the pipeline
+// completing cleanly proves the stream is a valid, listable archive, and the
+// returned members compare directly against the seal (tar lists the same stored
+// names the create-time --index-file recorded). Exit-1 ("some files changed") is a
+// warning, not a failure. The caller owns draining/closing in; List only reads what
+// tar consumes.
+func (g *gnutar) List(in io.Reader) ([]string, error) {
+	if err := g.Check(); err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(g.bin, "--list", "--file=-")
+	cmd.Stdin = in
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start %s: %w", g.bin, err)
+	}
+	members, scanErr := scanMembers(stdout)
+	waitErr := cmd.Wait()
+	if scanErr != nil {
+		return nil, scanErr
+	}
+	if waitErr != nil && !isWarning(waitErr) {
+		return nil, fmt.Errorf("%s list failed: %w\n%s", g.bin, waitErr, strings.TrimSpace(stderr.String()))
+	}
+	return members, nil
+}
+
 // prepareSnapshot seeds OutSnap from BaseSnap for incrementals, or removes it
 // for a full so tar starts a fresh snapshot.
 func (g *gnutar) prepareSnapshot(r method.BackupRequest) error {
@@ -295,8 +328,16 @@ func readIndex(path string) ([]string, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return scanMembers(f)
+}
+
+// scanMembers reads a newline-separated member listing (a tar --index-file, or
+// `tar -t` output) and returns the member tokens, dropping blanks and the bare "./"
+// root entry. Shared by Backup's index read and List so both normalize identically,
+// keeping the seal's members and a deep verify's listing directly comparable.
+func scanMembers(r io.Reader) ([]string, error) {
 	var members []string
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())

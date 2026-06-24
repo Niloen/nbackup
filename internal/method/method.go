@@ -40,6 +40,12 @@ type Method interface {
 	// chain restore); with members it extracts only those named entries and does
 	// not delete (selected-file recovery).
 	Restore(in io.Reader, destDir string, members []string) error
+	// List reads a raw archive stream and returns its member paths without
+	// extracting anything (amverify's `tar -t`). It writes nothing; it proves the
+	// stream is a valid, listable archive end-to-end and yields the members to
+	// compare against the seal. The returned paths use the same convention as
+	// BackupResult.Members.
+	List(in io.Reader) ([]string, error)
 }
 
 // Options are generic key/value parameters from a dumptype (e.g. "tar_path",

@@ -82,6 +82,35 @@ landing: fast-disk
 #   - from: lto           # second tier: tape -> deep archive (source need not be landing)
 #     to: deep-archive
 
+# Recovery drills (`nb drill`). A drill is the recoverability proof checksum
+# verification cannot give: it actually restores a risk-biased sample of DLEs
+# (decrypt + decompress + tar) to scratch, so it catches a lost key, a codec/tar
+# drift, a broken incremental chain, or an unreadable offsite copy — the "0 errors"
+# digit of 3-2-1-1-0. It is dry-run by default; `--apply` runs it, writing only an
+# inspectable ledger (drill-ledger.json) in the workdir. The block below is the cron
+# default, so a hands-off line is `nb dump && nb sync --apply && nb drill --apply
+# --unattended` (unattended never prompts and skips any target needing a tape swap).
+# drill:
+#   window: 30d         # every DLE should be drilled at least this often
+#   sample: 1           # DLEs drilled per run (a risk-biased rotation)
+#   from: cloud         # which copy to drill (default: the landing medium). Point it
+#                       # at the OFFSITE copy periodically — that path (cloud GET +
+#                       # egress + offsite-key decrypt) is the one most likely to be
+#                       # silently misconfigured.
+#   tier: structural    # checksum | structural | chain | stock
+#                       #   checksum   = re-hash payload vs seal (integrity only)
+#                       #   structural = decrypt+decompress+`tar -t`, members vs seal
+#                       #                (no write; exercises the key + codec)
+#                       #   chain      = real point-in-time chain restore to scratch
+#                       #   stock      = restore via the documented gpg/zstd/tar
+#                       #                one-liner (proves recovery needs no NBackup)
+#   stock_tools: false  # shorthand for tier: stock
+#   worm: true          # probe the medium for WORM/immutability (Object Lock / LTO
+#                       # WORM): keeps one fixed probe object and checks that deleting
+#                       # it is refused. NBackup only DETECTS immutability; you
+#                       # configure it operator-side on the storage.
+#   unattended: false   # cron mode: never prompt; skip targets needing a tape swap
+
 # Where the catalog's local state (slot cache + tar snapshots) lives. This is the
 # catalog's own directory, independent of any storage medium — the catalog is a
 # cache over the whole pool, not part of one medium. Defaults to ./nbackup-catalog.

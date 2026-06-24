@@ -59,6 +59,7 @@ registry registration, not a conditional in the core.
 | `policy` | retention safety floor: protected slots (pure) | policy |
 | `restore` | the archive chain to rebuild a DLE as of a slot (pure) | amrestore |
 | `recovery` | as-of-date browse tree + per-archive file selection (pure) | amrecover |
+| `drill` | recovery-drill ledger + risk-biased selection + failure taxonomy (pure) | amverify (orchestrated) |
 | `planner` | multilevel level scheduling (pure) | planner |
 | `engine` | the driver: parallel dumpers, wires planner→method→filter→media→catalog | driver / taper |
 | `cli` | thin command wiring | amdump / amadmin |
@@ -106,6 +107,46 @@ from whole-DLE `restore`: selected-file recovery extracts the named members in
 for), whereas a chain `restore` uses `--listed-incremental` to honor them; and the
 browse tree is a union, so a file deleted at a later incremental still appears
 (the member index records additions, not deletions — that lives in the snapshot).
+
+**Verify is the primitive; drill is the orchestration (`nb drill` = recoverability,
+not just integrity).** `nb verify` stays atomic and **stateless** — it checks
+individual slots/archives against the seal and writes nothing, keeps no ledger, makes
+no selection. It gains one capability, a `--deep` structural mode: stream an archive
+through the real read pipeline (decrypt → decompress → `tar -t`, list not extract) and
+assert the pipeline completes and the members match the seal — proving the bytes are a
+valid *restorable stream* and exercising the key + codec, still side-effect-free. It
+emits a structured per-archive verdict (`engine.VerifyReport`, classified with
+`drill.Class`) the drill layer consumes. `nb drill` is the layer on top: it *selects*
+a risk-biased subset (rotate every DLE within a window; prioritize the longest
+incremental chains and the oldest fulls; drill a point-in-time, not only the latest
+slot), *exercises* each at a tier (checksum → structural → a real point-in-time
+`chain` restore-to-scratch via the deletion-faithful `restore.Chain` path → `stock`,
+the documented gpg/zstd/tar one-liner that proves recovery needs no NBackup), *records*
+an inspectable ledger (`drill-ledger.json`, atomic temp+rename, no daemon — like the
+catalog and run-status files), *classifies* failures (integrity / pipeline-key / chain
+/ missing-copy — each a different remediation), and *exits non-zero* so a failed drill
+is loud. Drill delivers the **"0 errors"** digit of 3-2-1-1-0; it also prints a posture
+audit of the other digits. Pure parts (ledger, selection, taxonomy) live in package
+`drill` (a leaf, like `policy`/`restore`); the I/O — verify, restore-to-scratch, the
+WORM probe — lives in `engine`, which imports `drill`. Two run modes keep cron honest:
+**attended** may prompt for a tape; **unattended** (auto when stdin is not a TTY)
+attaches no operator and *skips* (not fails) any target whose copy would need a human
+to load a reel — a coverage warning, never a non-zero exit, so a sampled nightly drill
+rotates the fleet without paging on a tape that isn't loaded.
+
+**Drill detects immutability; it never sets it (WORM probe).** The 3-2-1-1-0
+"1 immutable" digit is verified, not configured, by NBackup: a drill keeps **one
+fixed probe object** on the drilled medium and, each run, attempts to delete that same
+object — a refused delete proves the storage enforces WORM/Object-Lock (the probe
+persists, which *is* the proof); a successful delete proves it does not (the probe is
+recreated next run, so an immutable medium accumulates exactly one undeletable probe,
+not one per drill). Immutability is configured operator-side (S3 Object Lock, LTO
+WORM) and NBackup runs least-privilege — it only detects and verifies it (see memory
+`nbackup-immutability-cloud-side`). Append-only media (tape) are immutable by
+construction and are reported without writing a probe. Honest cost: an
+encrypted+compressed archive is all-or-nothing to read, so an offsite drill spends the
+full bytes in egress — routine offsite drills default to the no-write `structural`
+tier, and the dry-run forecasts the egress.
 
 **Sync is batch copy, not a new subsystem (`nb sync` = Amanda's vault).** A
 single-slot `CopySlot` already streams a slot from one medium to a target and
@@ -348,7 +389,7 @@ the medium it lands on.
 - **CLI:** flags may appear before or after positionals (`parseArgs`); subcommand
   dispatch (`slot show`) keys on the first arg. The convention is **inspect with a
   noun** (`nb slot`, `nb medium`), **act with a flat verb** (`nb dump`, `nb verify`,
-  `nb prune`, `nb rebuild`, …) — so the nouns carry only read subcommands and every
+  `nb drill`, `nb prune`, `nb rebuild`, …) — so the nouns carry only read subcommands and every
   mutation is a top-level verb. Per-medium status (incl. bays / drive + shelf) lives
   in `nb medium <name>`; `nb load` is the one physical action verb (sibling of
   `nb label`). `--catalog` has no short flag (a case-only `-C`/`-c` pair is too easy

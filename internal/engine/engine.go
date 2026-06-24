@@ -12,7 +12,6 @@ import (
 	"os"
 	"runtime"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -1066,20 +1065,29 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 // each restored directory match the archive's census — deleting anything on disk
 // not in it. Pointed at a populated destDir that prunes unrelated files, so unless
 // force is set Restore refuses a non-empty destination rather than silently
-// destroying its contents.
+// destroying its contents. It reads from any available copy (own medium first).
 func (e *Engine) Restore(slotID, dleName, destDir string, force bool, logf Logf) error {
 	if !force {
 		if err := errNonEmptyDest(destDir); err != nil {
 			return err
 		}
 	}
+	return e.restoreFrom(slotID, dleName, destDir, "", logf)
+}
+
+// restoreFrom is Restore scoped to a source medium: when medium != "" every archive
+// is read from that medium's copy only (a drill against the offsite copy), rather
+// than failing over across copies. medium == "" keeps the fail-over behavior. The
+// non-empty-destination guard lives in the exported Restore; a caller that restores
+// into a fresh scratch dir (a drill) uses this directly.
+func (e *Engine) restoreFrom(slotID, dleName, destDir, medium string, logf Logf) error {
 	steps, err := restore.Chain(e.cat.Slots(), dleName, slotID)
 	if err != nil {
 		return err
 	}
 	for _, step := range steps {
 		logf.log("extracting %s %s L%d -> %s", step.SlotID, step.DLE, step.Level, destDir)
-		if err := e.extractStep(step, destDir); err != nil {
+		if err := e.extractStep(step, destDir, medium); err != nil {
 			return fmt.Errorf("extract %s %s L%d: %w", step.SlotID, step.DLE, step.Level, err)
 		}
 	}
@@ -1117,12 +1125,12 @@ func errNonEmptyDest(destDir string) error {
 	return nil
 }
 
-func (e *Engine) extractStep(step restore.Step, destDir string) error {
+func (e *Engine) extractStep(step restore.Step, destDir, medium string) error {
 	m, err := e.methodByName(step.Method)
 	if err != nil {
 		return err
 	}
-	rc, err := e.openArchive(step.SlotID, step.DLE, step.Level, step.Codec, step.Encrypt)
+	rc, err := e.openArchiveFrom(step.SlotID, step.DLE, step.Level, step.Codec, step.Encrypt, medium)
 	if err != nil {
 		return err
 	}
@@ -1174,7 +1182,7 @@ func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, 
 		if err != nil {
 			return files, err
 		}
-		rc, err := e.openArchive(st.SlotID, st.DLE, st.Level, st.Codec, st.Encrypt)
+		rc, err := e.openArchiveFrom(st.SlotID, st.DLE, st.Level, st.Codec, st.Encrypt, "")
 		if err != nil {
 			return files, err
 		}
@@ -1205,11 +1213,19 @@ func (e *Engine) DLENames() []string {
 	return out
 }
 
-// openArchive opens an archive from any available copy, preferring the engine's
-// own medium, trying each placement until one opens (restore fails over to a copy).
-func (e *Engine) openArchive(slotID, dle string, level int, codec, encrypt string) (io.ReadCloser, error) {
+// openArchiveFrom opens an archive for reading. With medium == "" it tries every
+// copy, preferring the engine's own medium, until one opens (restore fails over to a
+// copy); with medium set it reads only that medium's copy (a medium-scoped drill /
+// restore against the offsite copy), so a fault on that copy is not masked by another.
+func (e *Engine) openArchiveFrom(slotID, dle string, level int, codec, encrypt, medium string) (io.ReadCloser, error) {
 	placements := e.placementsFor(slotID)
+	if medium != "" {
+		placements = placementsOnMedium(placements, medium)
+	}
 	if len(placements) == 0 {
+		if medium != "" {
+			return nil, fmt.Errorf("slot %s has no copy on medium %q", slotID, medium)
+		}
 		return nil, fmt.Errorf("slot %s not in catalog (run `nb rebuild`)", slotID)
 	}
 	var lastErr error
@@ -1247,88 +1263,6 @@ func (e *Engine) DLEsInSlot(s *slot.Slot) []string {
 		}
 	}
 	return out
-}
-
-// Verify checks the checksums of the given slots (all if none given).
-func (e *Engine) Verify(slotIDs []string, logf Logf) (failures int, err error) {
-	if len(slotIDs) == 0 {
-		for _, s := range e.cat.Slots() {
-			slotIDs = append(slotIDs, s.ID)
-		}
-	}
-	for _, id := range slotIDs {
-		ok, verr := e.verifySlot(id, logf)
-		if verr != nil {
-			logf.log("%s: ERROR %v", id, verr)
-			failures++
-			continue
-		}
-		if !ok {
-			failures++
-		}
-	}
-	return failures, nil
-}
-
-func (e *Engine) verifySlot(id string, logf Logf) (bool, error) {
-	s, err := e.cat.ReadSlot(id)
-	if err != nil {
-		return false, err
-	}
-	placements := e.placementsFor(id)
-	if len(placements) == 0 {
-		logf.log("%s: NO COPIES", id)
-		return false, nil
-	}
-	// Verify every copy on every medium, so a corrupt copy is caught even when
-	// another is fine. Track which copies passed so a failure can still reassure
-	// the operator that an intact copy remains (redundancy is the point of having
-	// more than one).
-	var goodCopies, badCopies []string
-	for _, p := range placements {
-		copyOK := true
-		lib, _, _, err := e.librarianFor(p.Medium)
-		if err != nil {
-			logf.log("%s [%s]: ERROR %v", id, p.Medium, err)
-			badCopies = append(badCopies, p.Medium)
-			continue
-		}
-		opener := e.partOpener(lib)
-		for _, a := range s.Archives {
-			parts, found := p.Parts(a.DLE, a.Level)
-			if !found {
-				logf.log("%s [%s]: %s L%d POSITION MISSING", id, p.Medium, a.DLE, a.Level)
-				copyOK = false
-				continue
-			}
-			good, verr := e.reader.VerifyParts(toSlotioParts(parts), slotio.Expect{Slot: id, DLE: a.DLE, Level: a.Level}, a.SHA256, opener)
-			if verr != nil {
-				logf.log("%s [%s]: %s L%d ERROR %v", id, p.Medium, a.DLE, a.Level, verr)
-				copyOK = false
-			} else if !good {
-				logf.log("%s [%s]: %s L%d CHECKSUM MISMATCH", id, p.Medium, a.DLE, a.Level)
-				copyOK = false
-			}
-		}
-		if copyOK {
-			goodCopies = append(goodCopies, p.Medium)
-		} else {
-			badCopies = append(badCopies, p.Medium)
-		}
-	}
-	if len(badCopies) == 0 {
-		logf.log("%s: OK (%d archive(s), %d cop(ies))", id, len(s.Archives), len(placements))
-		return true, nil
-	}
-	// At least one copy failed. Surface that an intact copy remains, if any, so the
-	// operator knows the slot is still recoverable (and which medium to re-copy from).
-	if len(goodCopies) > 0 {
-		logf.log("%s: FAILED on %s, but an intact copy remains on %s (re-copy to repair)",
-			id, strings.Join(badCopies, ", "), strings.Join(goodCopies, ", "))
-	} else {
-		logf.log("%s: FAILED on all cop(ies): %s", id, strings.Join(badCopies, ", "))
-	}
-	return false, nil
 }
 
 // profileFor returns the capacity/reclamation profile for a named medium: the
