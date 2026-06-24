@@ -92,3 +92,44 @@ func (d *DLEState) LastSlot() string {
 	}
 	return d.Runs[len(d.Runs)-1].Slot
 }
+
+// LastLevel returns the level of the most recent run, or -1 if there are none.
+// It is the level a DLE is "sitting at": the next incremental repeats it unless
+// the planner decides climbing to the next level saves enough to be worth it.
+func (d *DLEState) LastLevel() int {
+	if len(d.Runs) == 0 {
+		return -1
+	}
+	return d.Runs[len(d.Runs)-1].Level
+}
+
+// RunsAtCurrentLevel counts the most recent consecutive runs that share the
+// latest run's level — how long the DLE has sat at its current level. It gates
+// bumping to the next level: Amanda's bumpdays keeps a DLE at one level for a few
+// runs so consecutive incrementals overlap and losing one does not break the chain.
+func (d *DLEState) RunsAtCurrentLevel() int {
+	if len(d.Runs) == 0 {
+		return 0
+	}
+	lvl := d.Runs[len(d.Runs)-1].Level
+	n := 0
+	for i := len(d.Runs) - 1; i >= 0; i-- {
+		if d.Runs[i].Level != lvl {
+			break
+		}
+		n++
+	}
+	return n
+}
+
+// SlotAtLevel returns the slot ID of the most recent run at the given level, or
+// "" if none. An incremental at level L builds on the snapshot left by the most
+// recent run at level L-1, so that run's slot is the base it derives from.
+func (d *DLEState) SlotAtLevel(level int) string {
+	for i := len(d.Runs) - 1; i >= 0; i-- {
+		if d.Runs[i].Level == level {
+			return d.Runs[i].Slot
+		}
+	}
+	return ""
+}

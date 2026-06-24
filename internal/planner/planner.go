@@ -3,11 +3,17 @@
 // schedule, but with only two user-facing inputs — the cycle and the medium's
 // capacity — and no balancing knobs.
 //
-// Each run estimates every DLE, then assigns a base level: a DLE that has never
-// been fulled, or whose last full has reached the cycle deadline, gets a full;
-// otherwise it gets the next incremental. The cycle is a *hard* ceiling — a full
-// never ages past it — so there is nothing to "demote": a full is either due or
-// it is not.
+// Each run estimates every DLE, then assigns a level: a DLE that has never been
+// fulled, or whose last full has reached the cycle deadline, gets a full; otherwise
+// it gets an incremental. The cycle is a *hard* ceiling — a full never ages past it
+// — so there is nothing to "demote": a full is either due or it is not.
+//
+// Incrementals follow Amanda's bump scheme (see chooseIncrLevel). A DLE sits at a
+// level, re-dumping everything since the level below, and climbs to the next level
+// only when it has held the current one for a few runs *and* climbing saves a real
+// fraction of the full. So level 1 is the common case — a deeper level is earned by
+// genuine savings, not reached automatically — which keeps restore chains short and
+// consecutive incrementals overlapping for redundancy.
 //
 // The one balancing lever is promotion: pulling a future full forward onto today
 // to level the daily full load across the cycle, so a pile-up of deadlines on one
@@ -44,11 +50,22 @@ import (
 // MaxLevel is the highest incremental level assigned (Amanda uses levels 0-9).
 const MaxLevel = 9
 
-// Estimate is the predicted size of a DLE's full and next-incremental dumps.
+// Estimate is the predicted size of a DLE's dumps at the levels the planner may
+// choose between: a full, the level the DLE currently sits at, and the next level
+// up. Incr and IncrNext let the planner weigh whether climbing a level saves
+// enough to be worth it (see chooseIncrLevel). IncrNext is 0 when the next level
+// is not yet dumpable (no base snapshot) — i.e. the DLE has not sat at the current
+// level long enough to have produced one.
 type Estimate struct {
-	Full int64
-	Incr int64
+	Full     int64 // level 0
+	Incr     int64 // the current sitting level L
+	IncrNext int64 // level L+1 (0 if not yet estimable)
 }
+
+// bumpDays is Amanda's redundancy guard: a DLE stays at one incremental level for
+// at least this many runs before it may climb, so consecutive incrementals overlap
+// and losing one does not break the restore chain.
+const bumpDays = 2
 
 // Params are the planner's tuning inputs, derived from config and the medium.
 type Params struct {
@@ -65,6 +82,11 @@ type Params struct {
 	// remaining room. Promotion never pushes a run past it, so promotion spends
 	// only genuinely free space. Negative means unbounded.
 	RoomBytes int64
+	// BumpPercent is the minimum saving — as a percentage of the full-dump size —
+	// an incremental must show before it climbs to the next level (Amanda's
+	// bumppercent). Higher means levels climb more reluctantly, so level 1 stays
+	// the common case and a deeper level is taken only when it is a real saving.
+	BumpPercent float64
 }
 
 // Plan is the result of a planning run.
@@ -94,7 +116,8 @@ type cand struct {
 	full      bool
 	mandatory bool
 	estFull   int64
-	estIncr   int64
+	estIncr   int64 // estimate of the chosen incremental level (set once it is decided)
+	incrLevel int   // the chosen incremental level (1..MaxLevel)
 	reason    string
 }
 
@@ -121,7 +144,7 @@ func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, p 
 			c.full, c.mandatory = true, true
 			c.reason = fmt.Sprintf("full due (cycle deadline reached: %dd >= %dd)", c.days, cycle)
 		default:
-			c.reason = fmt.Sprintf("incremental (%dd since last full)", c.days)
+			c.incrLevel, c.estIncr, c.reason = chooseIncrLevel(st, e, p.BumpPercent)
 		}
 		cands = append(cands, c)
 	}
@@ -144,28 +167,56 @@ func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, p 
 		if c.full {
 			it.Level, it.EstBytes = 0, c.estFull
 		} else {
-			lvl := c.st.IncrementalsSinceFull() + 1
-			if lvl > MaxLevel {
-				lvl = MaxLevel
-			}
-			it.Level, it.BaseLevel, it.EstBytes, it.BaseSlot = lvl, lvl-1, c.estIncr, c.st.LastSlot()
+			it.Level, it.BaseLevel, it.EstBytes = c.incrLevel, c.incrLevel-1, c.estIncr
+			it.BaseSlot = c.st.SlotAtLevel(c.incrLevel - 1)
 		}
 		plan.Items = append(plan.Items, it)
 	}
 	return plan
 }
 
+// chooseIncrLevel decides the incremental level for a DLE that is not getting a
+// full, returning the level, its estimated size, and a human reason.
+//
+// A DLE *sits* at a level: it repeats that level run after run, each time
+// re-dumping everything changed since the level below — so consecutive
+// incrementals overlap and stay independent of one another. It climbs to the next
+// level only when both Amanda guards pass: it has sat at the current level for at
+// least bumpDays runs (redundancy), and the next level would save at least
+// BumpPercent of the full-dump size (a real saving). Because the saving from a
+// climb shrinks as levels deepen, a percentage threshold naturally keeps level 1
+// the common case and deeper levels rare. The first incremental after a full
+// always starts at level 1.
+func chooseIncrLevel(st *catalog.DLEState, e Estimate, bumpPercent float64) (level int, est int64, reason string) {
+	last := st.LastLevel()
+	if last < 1 {
+		return 1, e.Incr, "incremental L1 (first since last full)"
+	}
+	if last < MaxLevel && e.IncrNext > 0 && st.RunsAtCurrentLevel() >= bumpDays {
+		saving := e.Incr - e.IncrNext
+		thresh := int64(float64(e.Full) * bumpPercent / 100)
+		if saving >= thresh {
+			return last + 1, e.IncrNext, fmt.Sprintf(
+				"bumped to L%d (climbing saves ~%s, over the %.0f%%-of-full threshold)",
+				last+1, sizeutil.FormatBytes(saving), bumpPercent)
+		}
+	}
+	return last, e.Incr, fmt.Sprintf("incremental L%d (held; climbing would not save enough)", last)
+}
+
 // Simulate projects the planner forward over `days` consecutive daily runs from
 // `start`, advancing a cloned history after each simulated run so each day's plan
 // reflects the fulls and incrementals the runs before it would have produced (the
-// next full lands by the cycle deadline, incrementals climb in between, and
+// next full lands by the cycle deadline, incrementals fill the days between, and
 // promotion staggers same-day deadlines apart). It writes nothing — the caller's
 // history is untouched.
 //
 // Estimates and params are sampled once and held constant across the window: this
 // forecasts the *level schedule* from today's sizes, not capacity drift as slots
 // accumulate. The per-day EstBytes therefore tracks the chosen levels, not a
-// reclamation timeline.
+// reclamation timeline. The bump decision likewise weighs today's level sizes, so
+// a forecast past a simulated bump approximates the deeper level's size with the
+// current one's — a schedule sketch, not an exact size projection.
 func Simulate(dles []config.DLE, hist *catalog.History, est map[string]Estimate, p Params, start time.Time, days int) []*Plan {
 	if days < 1 {
 		days = 1
@@ -177,7 +228,7 @@ func Simulate(dles []config.DLE, hist *catalog.History, est map[string]Estimate,
 		plan := Build(dles, h, est, p, date)
 		plans = append(plans, plan)
 		// Advance the cloned history as if this day's run had been sealed, so the
-		// next day's DaysSinceFull / IncrementalsSinceFull see it.
+		// next day's DaysSinceFull / LastLevel / RunsAtCurrentLevel see it.
 		day := date.Format("2006-01-02")
 		slotID := "slot-" + day
 		for _, it := range plan.Items {

@@ -171,15 +171,20 @@ turning tar's two-level primitive into N-level backups.
 
 **What each run decides.** In order:
 
-1. **Estimate** every DLE's full and next-incremental size by running the dump
-   method against `/dev/null` — tar walks metadata without reading file bodies,
-   so it is fast yet exactly honors excludes, one-file-system, and the
-   incremental snapshot. Sizes are uncompressed: an upper bound on the bytes
-   finally stored.
-2. **Pick a base level** per DLE: never-fulled → mandatory L0; at or past the
-   **cycle deadline** → forced L0; otherwise the next incremental level (capped
-   at L9). The cycle is a *hard* ceiling — a full never ages past it — so there
-   is nothing to demote: a full is either due or it isn't.
+1. **Estimate** every DLE's full size and its incremental at the current level and
+   the next, by running the dump method against `/dev/null` — tar walks metadata
+   without reading file bodies, so it is fast yet exactly honors excludes,
+   one-file-system, and the incremental snapshot. Sizes are uncompressed: an upper
+   bound on the bytes finally stored.
+2. **Pick a level** per DLE: never-fulled → mandatory L0; at or past the **cycle
+   deadline** → forced L0; otherwise an incremental. The cycle is a *hard* ceiling
+   — a full never ages past it — so there is nothing to demote: a full is either
+   due or it isn't. Incrementals follow Amanda's **bump** rule rather than climbing
+   a level per run: a DLE sits at level 1 — re-dumping everything since the full —
+   and climbs to a higher level only after holding the current one a couple of runs
+   *and* when climbing would save at least `bump_percent` of the full size (default
+   5%). So L1 is the common case, deep levels are earned by real savings, restore
+   chains stay short, and consecutive incrementals overlap for redundancy.
 3. **Promote** to balance — the *only* balancing lever, automatic (no knob). It
    builds a **deadline calendar** of upcoming fulls and pulls a full from the
    heaviest future day onto a lighter run, spreading deadline pile-ups apart. It
@@ -214,8 +219,8 @@ first; capacity bounds balance.
 
 `nb plan --days N` projects the planner forward over N daily runs, advancing a
 *copy* of the history after each simulated run — so the forecast shows when each
-DLE's next full actually lands and how its incrementals climb in between, not
-just today's decision repeated. Estimates and the capacity ceiling are sampled
+DLE's next full actually lands and how its incrementals sit and bump in between,
+not just today's decision repeated. Estimates and the capacity ceiling are sampled
 once and held constant (a *level-schedule* forecast, not a capacity timeline);
 nothing is written.
 

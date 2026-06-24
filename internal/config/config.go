@@ -39,6 +39,15 @@ type Config struct {
 	// lives per-medium, since each store has its own space and reuse cadence.
 	Cycle string `yaml:"cycle"`
 
+	// BumpPct is the minimum saving — as a percentage of the full-dump size — an
+	// incremental must show before it climbs to the next level (Amanda's
+	// bumppercent). A higher level captures only what changed since the level below,
+	// so it is taken only when that is a real saving; otherwise the DLE stays at its
+	// current level, re-dumping everything since the lower one (which also keeps
+	// consecutive incrementals overlapping, so losing one does not break the chain).
+	// Default DefaultBumpPercent. See package planner.
+	BumpPct float64 `yaml:"bump_percent"`
+
 	// Landing names the media definition where slots are created.
 	Landing string `yaml:"landing"`
 
@@ -668,6 +677,22 @@ func (c *Config) CycleDays() int {
 		days = 1
 	}
 	return days
+}
+
+// DefaultBumpPercent is the level-bump savings threshold assumed when
+// `bump_percent` is unset: an incremental climbs to the next level only when that
+// saves at least this percent of the full-dump size. Five percent is a deliberately
+// real saving — well above Amanda's tiny default — so level 1 stays the common case
+// and deeper levels are earned, not reached automatically.
+const DefaultBumpPercent = 5.0
+
+// BumpPercent returns the level-bump savings threshold in percent (default
+// DefaultBumpPercent). Zero or negative falls back to the default.
+func (c *Config) BumpPercent() float64 {
+	if c.BumpPct <= 0 {
+		return DefaultBumpPercent
+	}
+	return c.BumpPct
 }
 
 // MinAgeFor returns a medium's effective retention floor: its configured

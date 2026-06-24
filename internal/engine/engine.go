@@ -767,13 +767,15 @@ func (e *Engine) plannerParams(date time.Time) planner.Params {
 		CycleDays:     e.cfg.CycleDays(),
 		CapacityBytes: e.profile.TotalBytes(),
 		RoomBytes:     e.capacityRoom(date),
+		BumpPercent:   e.cfg.BumpPercent(),
 	}
 }
 
-// estimates predicts each DLE's full and next-incremental size by asking the dump
-// method (Amanda's "client" estimate). For gnutar this is a fast metadata-only
-// tar pass; see gnutar.Estimate. Sizes are uncompressed — an upper bound on the
-// compressed bytes finally stored.
+// estimates predicts, for each DLE, the size of a full and of the incremental at
+// its current level and the next (the inputs the planner's bump decision needs),
+// by asking the dump method (Amanda's "client" estimate). For gnutar this is a
+// fast metadata-only tar pass; see gnutar.Estimate. Sizes are uncompressed — an
+// upper bound on the compressed bytes finally stored.
 func (e *Engine) estimates(dles []config.DLE) map[string]planner.Estimate {
 	hist := e.cat.History()
 	out := make(map[string]planner.Estimate, len(dles))
@@ -791,18 +793,33 @@ func (e *Engine) estimateDLE(d config.DLE, name string, st *catalog.DLEState) pl
 		return planner.Estimate{} // no estimator available (e.g. tar missing)
 	}
 	full, _ := m.Estimate(method.BackupRequest{SourcePath: d.Path, Level: 0})
+	if st.LastFullDate == "" {
+		return planner.Estimate{Full: full} // never fulled: only a full is possible
+	}
 
-	var incr int64
-	lvl := st.IncrementalsSinceFull() + 1
+	// The DLE sits at level L — 1 right after a full, otherwise its last level. We
+	// estimate that level and the next so the planner can judge whether climbing to
+	// L+1 saves enough to be worth it (see planner.chooseIncrLevel). L+1 is only
+	// estimable once an L dump exists to base it on; until then IncrNext stays 0.
+	lvl := st.LastLevel()
+	if lvl < 1 {
+		lvl = 1
+	}
 	if lvl > planner.MaxLevel {
 		lvl = planner.MaxLevel
 	}
-	if st.LastFullDate != "" && e.cat.SnapshotExists(name, lvl-1) {
-		incr, _ = m.Estimate(method.BackupRequest{
+	est := planner.Estimate{Full: full}
+	if e.cat.SnapshotExists(name, lvl-1) {
+		est.Incr, _ = m.Estimate(method.BackupRequest{
 			SourcePath: d.Path, Level: lvl, BaseSnap: e.cat.SnapshotPath(name, lvl-1),
 		})
 	}
-	return planner.Estimate{Full: full, Incr: incr}
+	if lvl < planner.MaxLevel && e.cat.SnapshotExists(name, lvl) {
+		est.IncrNext, _ = m.Estimate(method.BackupRequest{
+			SourcePath: d.Path, Level: lvl + 1, BaseSnap: e.cat.SnapshotPath(name, lvl),
+		})
+	}
+	return est
 }
 
 // capacityRoom is the hard per-run write ceiling fed to the planner: the most a

@@ -2,11 +2,19 @@
 # Copy to nbackup.yaml and adjust.
 
 # The dump cycle: the target — and hard maximum — time between fulls for every
-# DLE (default 7d). It is the only scheduling knob. Each run fulls the DLEs due
-# by their deadline and climbs incrementals (to L9) in between; light runs are
+# DLE (default 7d). It is the main scheduling knob. Each run fulls the DLEs due
+# by their deadline and takes incrementals in between; light runs are
 # automatically filled by pulling a future full forward, bounded by free
 # capacity. A full never ages past one cycle.
 cycle: 7d
+
+# Incremental level bump threshold (Amanda's bumppercent), default 5. An
+# incremental sits at level 1 — re-dumping everything since the full each run —
+# and only climbs to a higher level when doing so saves at least this percent of
+# the full-dump size. Higher = level 1 stays the common case and deeper levels are
+# rarer (shorter restore chains, more overlap between incrementals); lower = climb
+# more eagerly to shrink each incremental. Tune per how active your data is.
+# bump_percent: 5
 
 # Named storage definitions. Each is a Volume with a `type`, its own capacity and
 # retention, plus type-specific connection parameters. Slots can be copied

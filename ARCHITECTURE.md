@@ -99,6 +99,20 @@ available copy. Run `History` is *derived* from cached slots (no second source t
 drift). The only non-derivable local state is the GNU tar snapshot library
 (`snapshots/…/L<n>.snar`) — precious; losing it forces a full.
 
+**Incrementals sit at a level and climb only on real savings (Amanda's bump).** A
+DLE does not gain a level per run. After a full it sits at level 1, re-dumping
+everything since the full each run, and climbs to the next level only when it has
+held the current one for `bumpDays` runs *and* the next level would save at least
+`bump_percent` of the full size (`planner.chooseIncrLevel`). The threshold is a
+percentage so one knob fits every DLE regardless of size, and because the saving
+from climbing shrinks as levels deepen, level 1 stays the common case and deep
+levels are rare. Two payoffs over a naive per-run climb: restore chains stay short,
+and consecutive same-level incrementals *overlap*, so losing one does not break the
+chain. A level-`L` dump bases on the `L-1` snapshot, so repeating a level just
+re-derives `L`.snar from the unchanged `L-1`.snar; `restore.Chain` replays every
+archive from the full forward, which stays correct under repeated levels (each
+cumulative dump fully reconciles its directories) though not yet minimal.
+
 **Recover is amrecover without an index server.** Amanda runs a separate index
 server holding per-dump gzipped path lists so `amrecover` can browse without
 reading tapes. NBackup needs none: the **member list is already in every seal**

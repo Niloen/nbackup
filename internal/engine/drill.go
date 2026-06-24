@@ -698,7 +698,13 @@ func (e *Engine) postureSnapshots() (string, PostureStatus, string) {
 		if st.LastFullDate == "" {
 			continue // never fulled yet; nothing relied upon
 		}
-		if !e.cat.SnapshotExists(name, st.IncrementalsSinceFull()) {
+		// The next incremental sits at level L (1 right after a full, else the last
+		// level) and builds on the L-1 snapshot; without it the DLE is forced to a full.
+		lvl := st.LastLevel()
+		if lvl < 1 {
+			lvl = 1
+		}
+		if !e.cat.SnapshotExists(name, lvl-1) {
 			missing++
 		}
 	}

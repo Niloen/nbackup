@@ -72,6 +72,82 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 	}
 }
 
+// TestRepeatedLevelRestore exercises the bump scheme's defining behavior: a DLE
+// sits at level 1 across several runs (re-dumping everything since the full) rather
+// than climbing a level per run, and a point-in-time restore replaying the full
+// plus the superseding level-1 dumps reconstructs the correct state — including a
+// deletion that an earlier incremental made. bump_percent is pinned high so no
+// saving ever justifies a climb, isolating the repeat-level path.
+func TestRepeatedLevelRestore(t *testing.T) {
+	src := t.TempDir()
+	catalogDir := t.TempDir()
+
+	write(t, filepath.Join(src, "keep.txt"), "v1")
+	write(t, filepath.Join(src, "gone.txt"), "temp")
+
+	cfg := &config.Config{
+		Landing: "disk",
+		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
+		Sources: []config.DLE{{Host: "h", Path: src}},
+		Workdir: t.TempDir(),
+		BumpPct: 100, // a saving can never reach 100% of the full, so never bump
+	}
+	cfg.Compress.Codec = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	day1 := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	if _, err := eng.Run(day1, nil); err != nil {
+		t.Fatalf("day1 run: %v", err)
+	}
+
+	// Day 2: change keep, delete gone, add new — a first level-1 dump.
+	time.Sleep(1100 * time.Millisecond)
+	write(t, filepath.Join(src, "keep.txt"), "v2")
+	if err := os.Remove(filepath.Join(src, "gone.txt")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(src, "new.txt"), "n1")
+	day2 := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
+	if s, err := eng.Run(day2, nil); err != nil {
+		t.Fatalf("day2 run: %v", err)
+	} else if got := s.Archives[0].Level; got != 1 {
+		t.Fatalf("day2 should be L1, got L%d", got)
+	}
+
+	// Day 3: change keep again, add new2 — must repeat level 1, not climb to L2.
+	time.Sleep(1100 * time.Millisecond)
+	write(t, filepath.Join(src, "keep.txt"), "v3")
+	write(t, filepath.Join(src, "new2.txt"), "n2")
+	day3 := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+	s3, err := eng.Run(day3, nil)
+	if err != nil {
+		t.Fatalf("day3 run: %v", err)
+	}
+	if got := s3.Archives[0].Level; got != 1 {
+		t.Fatalf("day3 should repeat L1, got L%d", got)
+	}
+
+	// Restore as of day 3: keep=v3, gone still deleted, both new files present.
+	dest := t.TempDir()
+	name := config.DLE{Host: "h", Path: src}.Name()
+	if err := eng.Restore(s3.ID, name, dest, false, nil); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	assertContent(t, filepath.Join(dest, "keep.txt"), "v3")
+	assertContent(t, filepath.Join(dest, "new.txt"), "n1")
+	assertContent(t, filepath.Join(dest, "new2.txt"), "n2")
+	if _, err := os.Stat(filepath.Join(dest, "gone.txt")); !os.IsNotExist(err) {
+		t.Errorf("gone.txt should stay deleted after restore, stat err = %v", err)
+	}
+}
+
 // TestValidatePlan checks that a plan preview surfaces the config problems the
 // size estimates would otherwise swallow: an unknown dump method is fatal, a
 // missing source path warns but does not fail, and a clean config is silent.

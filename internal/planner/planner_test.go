@@ -54,20 +54,68 @@ func TestLevelDecisions(t *testing.T) {
 	}
 }
 
-func TestMultilevelClimb(t *testing.T) {
+// TestBumpDecision checks Amanda's bump rule: a DLE that has sat at level 1 for
+// bumpDays runs climbs to L2 only when doing so is a real saving (over the
+// BumpPercent-of-full threshold), and otherwise holds at L1 — never the old
+// "one level per day" climb.
+func TestBumpDecision(t *testing.T) {
+	today := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+	// Full on 06-20, then two level-1 runs: sat at L1 for bumpDays runs, so eligible
+	// to climb if the saving justifies it.
+	mkHist := func() *catalog.History {
+		return &catalog.History{DLEs: map[string]*catalog.DLEState{"h-data": {
+			LastFullDate: "2026-06-20",
+			LastFullSlot: "slot-2026-06-20",
+			Runs: []catalog.RunRecord{
+				{Date: "2026-06-20", Slot: "slot-2026-06-20", Level: 0},
+				{Date: "2026-06-21", Slot: "slot-l1a", Level: 1},
+				{Date: "2026-06-22", Slot: "slot-l1b", Level: 1},
+			},
+		}}}
+	}
+	build := func(e Estimate) *Plan {
+		return Build([]config.DLE{dleNamed("h")}, mkHist(),
+			map[string]Estimate{"h-data": e}, Params{CycleDays: 7, BumpPercent: 5}, today)
+	}
+
+	// Climbing dumps 100 instead of 500 — saves 400, far over the 5%-of-1000 (50)
+	// threshold: bump to L2.
+	if lvl := levelOf(build(Estimate{Full: 1000, Incr: 500, IncrNext: 100}), "h-data"); lvl != 2 {
+		t.Errorf("a 400-byte saving over a 50-byte threshold should bump to L2, got L%d", lvl)
+	}
+	// Climbing saves only 40 (500 -> 460), under the 50 threshold: hold at L1.
+	if lvl := levelOf(build(Estimate{Full: 1000, Incr: 500, IncrNext: 460}), "h-data"); lvl != 1 {
+		t.Errorf("a 40-byte saving under a 50-byte threshold should stay at L1, got L%d", lvl)
+	}
+	// No next-level estimate yet (IncrNext 0): cannot bump.
+	if lvl := levelOf(build(Estimate{Full: 1000, Incr: 500}), "h-data"); lvl != 1 {
+		t.Errorf("with no next-level estimate the DLE must stay at L1, got L%d", lvl)
+	}
+	// A bumped L2 builds on the most recent L1 run's snapshot and slot.
+	p := build(Estimate{Full: 1000, Incr: 500, IncrNext: 100})
+	for _, it := range p.Items {
+		if it.Name == "h-data" && (it.BaseLevel != 1 || it.BaseSlot != "slot-l1b") {
+			t.Errorf("L2 base = L%d slot %q, want L1 slot slot-l1b", it.BaseLevel, it.BaseSlot)
+		}
+	}
+}
+
+// TestBumpDaysGuard checks the redundancy guard: even a huge saving cannot bump a
+// DLE that has sat at the current level for fewer than bumpDays runs.
+func TestBumpDaysGuard(t *testing.T) {
 	today := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
-	d := &catalog.DLEState{
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{"h-data": {
 		LastFullDate: "2026-06-20",
 		LastFullSlot: "slot-2026-06-20",
 		Runs: []catalog.RunRecord{
 			{Date: "2026-06-20", Slot: "slot-2026-06-20", Level: 0},
-			{Date: "2026-06-21", Slot: "slot-2026-06-21", Level: 1},
+			{Date: "2026-06-21", Slot: "slot-l1a", Level: 1},
 		},
-	}
-	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{"h-data": d}}
-	p := Build([]config.DLE{dleNamed("h")}, hist, nil, Params{CycleDays: 7}, today)
-	if lvl := levelOf(p, "h-data"); lvl != 2 {
-		t.Errorf("after L0,L1 the next level should be L2, got L%d", lvl)
+	}}}
+	est := map[string]Estimate{"h-data": {Full: 1000, Incr: 500, IncrNext: 1}}
+	p := Build([]config.DLE{dleNamed("h")}, hist, est, Params{CycleDays: 7, BumpPercent: 5}, today)
+	if lvl := levelOf(p, "h-data"); lvl != 1 {
+		t.Errorf("one run at L1 should hold at L1 despite the saving, got L%d", lvl)
 	}
 }
 
@@ -342,20 +390,21 @@ func TestCycleCapacityWarning(t *testing.T) {
 }
 
 // TestSimulateSchedule checks the forward forecast advances history between days:
-// a fresh DLE fulls on day 0, climbs incrementals through the cycle, and fulls
-// again at the deadline — and the caller's history is left untouched. A lone DLE
-// is never promoted (it cannot reduce its own peak), so the schedule is clean.
+// a fresh DLE fulls on day 0, sits at level 1 through the cycle (no estimate shows
+// climbing would save, so it never bumps), and fulls again at the deadline — and
+// the caller's history is left untouched. A lone DLE is never promoted (it cannot
+// reduce its own peak), so the schedule is clean.
 func TestSimulateSchedule(t *testing.T) {
 	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
 	dles := []config.DLE{dleNamed("h")}
 	est := map[string]Estimate{"h-data": {Full: 100, Incr: 10}}
 
-	plans := Simulate(dles, hist, est, Params{CycleDays: 7, RoomBytes: -1}, start, 15)
+	plans := Simulate(dles, hist, est, Params{CycleDays: 7, RoomBytes: -1, BumpPercent: 5}, start, 15)
 	if len(plans) != 15 {
 		t.Fatalf("want 15 plans, got %d", len(plans))
 	}
-	want := []int{0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6, 0}
+	want := []int{0, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0}
 	for i, p := range plans {
 		if !p.Date.Equal(start.AddDate(0, 0, i)) {
 			t.Errorf("day %d: plan date %s, want %s", i, p.Date, start.AddDate(0, 0, i))
