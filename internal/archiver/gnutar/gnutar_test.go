@@ -83,6 +83,51 @@ func TestExclude(t *testing.T) {
 	}
 }
 
+// TestNewExcludeIsNotADeletion pins a load-bearing GNU tar behavior for the
+// large-DLE split design (docs/design/split-sources-spec.md): newly EXCLUDING a
+// subtree that still exists on disk does NOT record it as a deletion in the
+// incremental dumpdir, so a chain restore keeps the stale copy. This is the exact
+// opposite of removing the subtree from disk, which a chain restore *does* delete
+// (see TestBackupRestoreWithDeletion).
+//
+// Consequence for the design: carving a subtree out of an existing DLE by adding it
+// to a `split:` list is NOT a free, continuous operation — the remainder must be
+// RE-BASELINED (forced to a fresh level-0 full) when its exclude set changes, or a
+// point-in-time restore of the remainder would resurrect the carved subtree (and
+// collide with the new shard's copy). The "only the subtree pays a re-dump" claim is
+// false for GNU tar; the reshard costs a remainder full. This test guards that fact
+// so a future tar/option change that flips the behavior is caught loudly.
+func TestNewExcludeIsNotADeletion(t *testing.T) {
+	m := newArchiver(t, archiver.Options{"state_dir": t.TempDir()})
+	src := t.TempDir()
+	out := t.TempDir()
+	write(t, filepath.Join(src, "datasets", "x.txt"), "x")
+	write(t, filepath.Join(src, "keep.txt"), "keep")
+
+	// L0: full, whole tree (the un-split "remainder" before carving).
+	l0 := filepath.Join(out, "l0.tar")
+	backup(t, m, archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 0, BaseLevel: -1}, l0)
+
+	// L1: incremental that newly excludes datasets/ — but the subtree is STILL on
+	// disk (a carve, not a delete). No file is modified or removed.
+	l1 := filepath.Join(out, "l1.tar")
+	backup(t, m, archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 1, BaseLevel: 0, Exclude: []string{"datasets"}}, l1)
+
+	dest := t.TempDir()
+	restore(t, m, l0, dest)
+	restore(t, m, l1, dest)
+
+	// The pinned behavior: the excluded-but-still-present subtree SURVIVES the chain
+	// restore. If this assertion ever fails, GNU tar started treating exclusion as a
+	// deletion — revisit the spec's reshard story, which currently forces a full.
+	if _, err := os.Stat(filepath.Join(dest, "datasets", "x.txt")); err != nil {
+		t.Errorf("datasets/x.txt should SURVIVE (exclusion is not a deletion in GNU tar); stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "keep.txt")); err != nil {
+		t.Errorf("keep.txt should be present: %v", err)
+	}
+}
+
 // TestEstimate checks the /dev/null client estimate: the full reflects the data
 // size, excludes lower it, and an unchanged incremental is far smaller than a full.
 func TestEstimate(t *testing.T) {
