@@ -434,7 +434,7 @@ func (c *Catalog) ReadSlot(id string) (*slot.Slot, error) {
 	if e := c.entryByID(id); e != nil {
 		return e.Slot, nil
 	}
-	return nil, fmt.Errorf("slot %s not in catalog (run `nb catalog rebuild` if it exists on media)", id)
+	return nil, fmt.Errorf("slot %s not in catalog (run `nb rebuild` if it exists on media)", id)
 }
 
 // Placements returns the copies of a slot, for a reader to choose among.

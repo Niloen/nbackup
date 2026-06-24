@@ -207,7 +207,9 @@ A run writes the archive files, verifies their checksums against what landed on
 the volume, and finally appends the **seal record** — one file carrying the slot
 metadata (identity, sizes, checksums, member listings) with `status: sealed`.
 The seal record is written last, so its presence marks the slot complete; after
-sealing, a slot is immutable — re-running a sealed date is refused.
+sealing, a slot is immutable — a sealed slot is never overwritten. Re-running a
+sealed date does not clobber it; it produces a new sequence-suffixed slot
+(`slot-YYYY-MM-DD.2`, see above).
 
 ### Monitoring a run
 
@@ -445,8 +447,11 @@ When a backup or restore needs a different tape, NBackup **prompts you to swap i
 in and waits** (an unattended run errors instead of hanging). Either way you
 label a blank tape (`nb label`), inventory a medium with `nb medium <name>` (its
 bays, or the drive and shelf), and load a tape with `nb load`. Tapes carry a
-self-describing label that NBackup **verifies before every write**, so a foreign,
-wrong, or still-active reel is never clobbered.
+self-describing label that NBackup **verifies before every write**, so a foreign
+or wrong-pool reel is never clobbered. Relabeling a tape that still holds
+**protected** slots (within `minimum_age`, or a DLE's last recovery path — judged
+from the catalog, so a slot spanned across tapes protects every tape it touches)
+is refused unless you pass `--force`.
 
 `appendable: true` (default) packs many runs per tape; `appendable: false` uses
 one run per tape. Restore mounts (robot) or prompts for (manual) whichever tape

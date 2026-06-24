@@ -33,7 +33,23 @@ func ParseDate(s string) (time.Time, error) {
 	if s == "" {
 		return time.Now().UTC().Truncate(24 * time.Hour), nil
 	}
-	return time.Parse("2006-01-02", s)
+	d, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid date %q: --date must be in YYYY-MM-DD format", s)
+	}
+	return d, nil
+}
+
+// errPastPlan rejects planning a run for a date already behind today. The planner
+// only consults history strictly before the run date, so planning a past date
+// ignores everything that happened since and reports a misleading from-scratch
+// cold start — not a meaningful preview. Today and future dates are fine.
+func errPastPlan(date time.Time) error {
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	if date.Before(today) {
+		return fmt.Errorf("cannot plan a run for %s: it is in the past, and planning only reflects history before the run date (so a past date reports a misleading cold start)", date.Format("2006-01-02"))
+	}
+	return nil
 }
 
 // loadConfig loads configuration for commands that need full config (plan/dump),

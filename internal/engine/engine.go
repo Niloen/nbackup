@@ -8,6 +8,7 @@ package engine
 import (
 	"fmt"
 	"io"
+	"os"
 	"runtime"
 	"sort"
 	"sync"
@@ -453,12 +454,12 @@ func (e *Engine) partSizeFor(medium string) (int64, error) {
 // LabelVolume writes (or rewrites) the identity label of a medium's volume — the
 // deliberate operator act that makes a tape writable.
 func (e *Engine) LabelVolume(mediumName, name string, relabel, force bool, now time.Time, logf Logf) error {
-	lib, def, own, err := e.librarianFor(mediumName)
+	lib, def, _, err := e.librarianFor(mediumName)
 	if err != nil {
 		return err
 	}
 	minAge, _ := def.MinAge()
-	return lib.Label(name, relabel, force, own, minAge, now, librarian.Logf(logf))
+	return lib.Label(name, relabel, force, minAge, now, librarian.Logf(logf))
 }
 
 // ChangerView inventories a changer medium for `nb medium <name>`.
@@ -572,17 +573,11 @@ func (e *Engine) expectedTapeFor(medium string, now time.Time) TapeExpectation {
 	protected := policy.Protected(e.cat.SlotsOn(medium), minAge, now)
 	for _, v := range pool {
 		held := e.cat.SlotsOnVolume(v.Label.Name)
-		reusable := true
-		for _, s := range held {
-			if _, p := protected[s.ID]; p {
-				reusable = false
-				break
-			}
+		if _, _, ok := policy.ProtectedOn(protected, held); ok {
+			continue // some slot on this tape is still protected — not reusable
 		}
-		if reusable {
-			exp.Label, exp.WrittenAt, exp.Recycles = v.Label.Name, v.Label.WrittenAt, len(held)
-			return exp
-		}
+		exp.Label, exp.WrittenAt, exp.Recycles = v.Label.Name, v.Label.WrittenAt, len(held)
+		return exp
 	}
 	exp.NewTape = true // nothing reusable — the run needs a fresh tape
 	return exp
@@ -594,6 +589,24 @@ func (e *Engine) expectedTapeFor(medium string, now time.Time) TapeExpectation {
 func (e *Engine) Plan(date time.Time) *planner.Plan {
 	dles := e.cfg.DLEs()
 	return planner.Build(dles, e.cat.History(), e.estimates(dles), e.plannerParams(date), date)
+}
+
+// ValidatePlan checks each DLE the way a real run would resolve it, so a preview
+// (`nb plan` / `nb dump --dry-run`) surfaces problems the size estimates would
+// otherwise swallow into a misleading ~0 B. It returns a fatal error for an
+// unrunnable config — a dumptype naming an unknown dump method — and a list of
+// non-fatal warnings for a source path that is missing or unreadable right now
+// (which may just be an unmounted volume the real run will mount).
+func (e *Engine) ValidatePlan() (warnings []string, err error) {
+	for _, d := range e.cfg.DLEs() {
+		if _, err := e.methodForDumpType(d.DumpTypeName()); err != nil {
+			return nil, fmt.Errorf("dumptype %q: %w", d.DumpTypeName(), err)
+		}
+		if _, err := os.Stat(d.Path); err != nil {
+			warnings = append(warnings, fmt.Sprintf("DLE %s: source path %s is missing or unreadable (%v) — the real run will fail unless it becomes available", d.Name(), d.Path, err))
+		}
+	}
+	return warnings, nil
 }
 
 // Simulate forecasts the next `days` daily runs from `start` without writing

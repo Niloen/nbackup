@@ -294,6 +294,97 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 	}
 }
 
+// TestRelabelRefusesProtectedSpanTape guards the relabel safety floor for spanned
+// slots. A slot's seal record lives only on the last tape of its span, so the head
+// and middle tapes hold payload parts but no seal. The relabel guard must still
+// refuse them: it judges protection from the catalog (which records a placement on
+// every tape the slot touches), not by scanning the mounted reel — scanning a
+// sealless tape would find nothing and wrongly allow the wipe, destroying the
+// spanned copy. --force remains the deliberate override.
+func TestRelabelRefusesProtectedSpanTape(t *testing.T) {
+	src := t.TempDir()
+	// ~600 KiB across 256 KiB tapes: one slot spans three bays.
+	write(t, filepath.Join(src, "f.txt"), strings.Repeat("x", 600*1024))
+
+	cfg := &config.Config{
+		Landing:   "disk",
+		AutoLabel: true,
+		Cycle:     "1d",
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "6", "volume_size": "262144"}},
+		},
+		Sources: []config.DLE{{Host: "h", Path: src}},
+		Workdir: t.TempDir(),
+	}
+	cfg.Compress.Codec = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	day := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	s, err := eng.Run(day, nil)
+	if err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+	if err := eng.LoadVolume("lib", "bay-01", false, nil); err != nil {
+		t.Fatalf("load bay-01: %v", err)
+	}
+	if _, err := eng.SyncTo("", "lib", SyncSelection{}, true, false, nil); err != nil {
+		t.Fatalf("sync disk->lib: %v", err)
+	}
+
+	// Volumes are recorded span order; index 0 is the head tape (a part, no seal).
+	var spanVols []string
+	for _, p := range eng.cat.Placements(s.ID) {
+		if p.Medium == "lib" {
+			spanVols = p.Volumes()
+		}
+	}
+	if len(spanVols) < 2 {
+		t.Fatalf("slot did not span multiple tapes: %v", spanVols)
+	}
+	head := spanVols[0]
+
+	// now is inside the run's minimum-age window, so the slot is protected. Under the
+	// old reel-scanning guard the head tape looked empty and would be relabeled.
+	if err := eng.LoadVolume("lib", head, true, nil); err != nil {
+		t.Fatalf("load head tape %s: %v", head, err)
+	}
+	err = eng.LabelVolume("lib", head, true, false, day, nil)
+	if err == nil {
+		t.Fatalf("relabel of head span tape %s must be refused while the slot is protected", head)
+	}
+	if !strings.Contains(err.Error(), "protected") {
+		t.Fatalf("want a protected-slot refusal, got: %v", err)
+	}
+
+	// --force is the deliberate escape hatch and still works.
+	if err := eng.LoadVolume("lib", head, true, nil); err != nil {
+		t.Fatalf("reload head tape: %v", err)
+	}
+	if err := eng.LabelVolume("lib", head, true, true, day, nil); err != nil {
+		t.Fatalf("--force relabel should succeed, got: %v", err)
+	}
+
+	// The relabel wiped a tape the span crossed, so the broken library copy must be
+	// dropped from the catalog immediately — without a manual `nb rebuild` — even
+	// though "lib" is not the landing medium. The disk copy is untouched.
+	for _, p := range eng.cat.Placements(s.ID) {
+		if p.Medium == "lib" {
+			t.Fatalf("relabeling a span tape must drop the broken lib copy from the catalog, still have %+v", p)
+		}
+	}
+	if got := eng.cat.Placements(s.ID); len(got) != 1 || got[0].Medium != "disk" {
+		t.Fatalf("only the disk copy should remain, got %+v", got)
+	}
+}
+
 // TestSyncSlotOutOfTapes checks that a slot too big to fit even by spanning every
 // available tape fails with an actionable "no further writable bay" error and is not
 // recorded — the orphaned, unsealed parts left behind are reclaimable by relabel.

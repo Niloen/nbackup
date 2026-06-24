@@ -46,6 +46,19 @@ func newPlanCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := errPastPlan(date); err != nil {
+				return err
+			}
+			warnings, err := eng.ValidatePlan()
+			if err != nil {
+				return err
+			}
+			for _, w := range warnings {
+				fmt.Printf("WARNING: %s\n", w)
+			}
+			if len(warnings) > 0 {
+				fmt.Println()
+			}
 			if days > 1 {
 				return runPlanForecast(eng, date, days)
 			}
@@ -205,11 +218,18 @@ func newDumpCmd(a *app) *cobra.Command {
 				return err
 			}
 			if dryRun {
+				if err := errPastPlan(date); err != nil {
+					return err
+				}
 				eng, err := newEngine(cfg)
 				if err != nil {
 					return err
 				}
-				return runDumpDryRun(eng, date)
+				warnings, err := eng.ValidatePlan()
+				if err != nil {
+					return err
+				}
+				return runDumpDryRun(eng, date, warnings)
 			}
 			eng, unlock, err := a.lockedEngine(cfg)
 			if err != nil {
@@ -233,15 +253,16 @@ func newDumpCmd(a *app) *cobra.Command {
 // runDumpDryRun previews the dump on `date` without writing: it plans that run
 // exactly as `nb dump --date <date>` would — against the current catalog, the same
 // decision logic a real run uses — and prints it. Nothing is sealed.
-func runDumpDryRun(eng *engine.Engine, date time.Time) error {
+func runDumpDryRun(eng *engine.Engine, date time.Time, validationWarnings []string) error {
 	plan := eng.Plan(date)
 
 	fmt.Println("DRY RUN — no data is written.")
 	fmt.Printf("This is the run on %s.\n\n", slot.DateString(date))
-	for _, w := range plan.Warnings {
+	warnings := append(validationWarnings, plan.Warnings...)
+	for _, w := range warnings {
 		fmt.Printf("WARNING: %s\n", w)
 	}
-	if len(plan.Warnings) > 0 {
+	if len(warnings) > 0 {
 		fmt.Println()
 	}
 
@@ -671,13 +692,13 @@ func printSyncReport(r *engine.SyncReport, apply bool) {
 
 // newLabelCmd implements `nb label`: write (or rewrite) a volume's identity
 // label. This is the deliberate act that makes a tape writable; it guards
-// against overwriting foreign data or a still-active volume.
+// against overwriting foreign data or a tape that still holds protected slots.
 func newLabelCmd(a *app) *cobra.Command {
 	var relabel, force bool
 	cmd := &cobra.Command{
 		Use:     "label <medium> <name>",
 		Short:   "Label a volume (required for tape before first dump)",
-		Long:    "Write a volume's identity label, making it writable. Refuses to overwrite foreign data or a still-active volume; --relabel reuses an NBackup-labeled volume and --force overrides safety refusals.",
+		Long:    "Write a volume's identity label, making it writable. Refuses to overwrite foreign data, and (with --relabel) a tape that still holds protected slots — those within minimum_age or holding a DLE's last recovery path, including a slot spanned across tapes. --relabel reuses an NBackup-labeled volume and --force overrides safety refusals.",
 		Example: "  nb label tape DAILY-01\n  nb label --relabel tape DAILY-01",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -694,7 +715,7 @@ func newLabelCmd(a *app) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&relabel, "relabel", false, "reuse a volume already labeled by NBackup")
-	cmd.Flags().BoolVar(&force, "force", false, "override safety refusals (foreign data / still-active volume)")
+	cmd.Flags().BoolVar(&force, "force", false, "override safety refusals (foreign data / protected slots)")
 	return cmd
 }
 

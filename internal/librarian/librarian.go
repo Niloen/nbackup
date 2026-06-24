@@ -512,10 +512,12 @@ func (l *Librarian) mountedMatches(label string) bool {
 
 // Label writes (or rewrites) the identity label of a medium's volume — the
 // deliberate operator act that makes a tape writable. It refuses to overwrite
-// foreign data or a still-active volume unless forced; relabeling our own volume
-// requires relabel and bumps the epoch. When own is set (the engine's landing
-// medium) it rebuilds the catalog from the now-emptied volume.
-func (l *Librarian) Label(name string, relabel, force, own bool, minAge time.Duration, now time.Time, logf Logf) error {
+// foreign data, or (without --force) a tape that still holds protected slots;
+// relabeling an NBackup volume requires relabel and bumps the epoch. A relabel
+// wipes the tape, so it then drops the catalog placements that referenced the old
+// volume — for any medium, landing or offsite — and records the new identity, so
+// the catalog stops reporting a copy that no longer exists.
+func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration, now time.Time, logf Logf) error {
 	lv, ok := l.vol.(media.Labeled)
 	if !ok {
 		return fmt.Errorf("medium %q is address-identified and does not use labels", l.medium)
@@ -537,6 +539,7 @@ func (l *Librarian) Label(name string, relabel, force, own bool, minAge time.Dur
 
 	cur, labeled, err := lv.ReadLabel()
 	epoch := 1
+	wiped := "" // the volume a relabel overwrites; its placements become stale
 	switch {
 	case errors.Is(err, media.ErrForeignVolume):
 		if !force {
@@ -548,14 +551,18 @@ func (l *Librarian) Label(name string, relabel, force, own bool, minAge time.Dur
 		if !relabel {
 			return fmt.Errorf("volume is already labeled %q (epoch %d); use --relabel to reuse it", cur.Name, cur.Epoch)
 		}
-		slots, serr := catalog.ScanSlots(l.vol)
-		if serr != nil {
-			return serr
-		}
-		if protected := policy.Protected(slots, minAge, now); len(protected) > 0 && !force {
-			return fmt.Errorf("volume %q still holds %d protected slot(s); refusing to relabel (use --force)", cur.Name, len(protected))
+		// Reuse the prune/recycle retention test: judge protection over the
+		// medium's own slots (so "a newer full exists" is medium-wide), then
+		// refuse if the tape being relabeled still holds a protected slot. Reading
+		// the catalog rather than scanning the mounted reel correctly attributes a
+		// spanned slot to every tape it touches — even the head tape, whose seal
+		// record lives only on the last tape of the span.
+		protected := policy.Protected(l.cat.SlotsOn(l.medium), minAge, now)
+		if id, reason, ok := policy.ProtectedOn(protected, l.cat.SlotsOnVolume(cur.Name)); ok && !force {
+			return fmt.Errorf("tape %q still holds protected slot %s (%s); refusing to relabel (use --force)", cur.Name, id, reason)
 		}
 		epoch = cur.Epoch + 1
+		wiped = cur.Name
 	}
 
 	lbl := media.Label{Name: name, Pool: l.medium, Epoch: epoch, WrittenAt: now}
@@ -567,12 +574,24 @@ func (l *Librarian) Label(name string, relabel, force, own bool, minAge time.Dur
 	}
 	logf.log("labeled %q as %q (epoch %d)", l.medium, name, epoch)
 
-	// Relabeling the engine's own medium wipes the contents the catalog caches:
-	// rebuild from the now-empty volume so the catalog reflects reality.
-	if own {
-		if _, err := l.cat.Rebuild(map[string]media.Volume{l.medium: l.vol}); err != nil {
-			return fmt.Errorf("rebuild catalog after labeling: %w", err)
+	// A relabel wiped the old volume: drop the catalog placements that pointed at
+	// it so it stops reporting copies that no longer exist. A spanned slot has a
+	// placement on this medium that crosses the wiped tape; the span is now broken,
+	// so the whole medium copy goes (its other parts are orphaned, reclaimable
+	// bytes). This is targeted — unlike a full Rebuild it leaves every other medium
+	// and every intact tape on this one untouched, and it runs for any relabeled
+	// medium, not just the landing one.
+	if wiped != "" {
+		for _, s := range l.cat.SlotsOnVolume(wiped) {
+			if _, err := l.cat.RemovePlacement(s.ID, l.medium); err != nil {
+				return fmt.Errorf("drop placements on relabeled tape %q: %w", wiped, err)
+			}
 		}
+	}
+	// Register the volume's new identity (empty, fresh epoch) so the catalog reflects
+	// the relabel immediately rather than learning it lazily at the next write.
+	if err := l.cat.RecordVolume(lbl); err != nil {
+		return fmt.Errorf("record relabeled volume %q: %w", name, err)
 	}
 	return nil
 }

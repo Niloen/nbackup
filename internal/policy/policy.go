@@ -43,6 +43,24 @@ func Protected(slots []*slot.Slot, minAge time.Duration, now time.Time) map[stri
 	return protected
 }
 
+// ProtectedOn reports the first slot residing on a single volume that is in the
+// protected set, if any, returning its id and reason. The caller computes
+// `protected` over a whole medium (so "a newer full exists" is judged
+// medium-wide), then passes the slots that have a part on the one volume being
+// considered for reclamation — tape recycling or relabel. Because a spanned slot
+// has a placement on every tape it touches, it is reported for each of them:
+// reclaiming any one tape would destroy the slot, even the tapes that hold no
+// seal record. Shared by the prune/recycle path and `nb label --relabel` so both
+// judge a volume's reusability identically.
+func ProtectedOn(protected map[string]string, onVolume []*slot.Slot) (slotID, reason string, ok bool) {
+	for _, s := range onVolume {
+		if r, p := protected[s.ID]; p {
+			return s.ID, r, true
+		}
+	}
+	return "", "", false
+}
+
 func hasNewerFull(slots []*slot.Slot, dle string, target *slot.Slot) bool {
 	for _, s := range slots {
 		if !slot.Less(target, s) {

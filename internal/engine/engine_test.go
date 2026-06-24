@@ -72,6 +72,63 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 	}
 }
 
+// TestValidatePlan checks that a plan preview surfaces the config problems the
+// size estimates would otherwise swallow: an unknown dump method is fatal, a
+// missing source path warns but does not fail, and a clean config is silent.
+func TestValidatePlan(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "v1")
+
+	base := func() *config.Config {
+		c := &config.Config{
+			Landing: "disk",
+			Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
+			Sources: []config.DLE{{Host: "h", Path: src}},
+			Workdir: t.TempDir(),
+		}
+		c.Compress.Codec = "none"
+		return c
+	}
+
+	eng, err := New(base())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	if w, err := eng.ValidatePlan(); err != nil || len(w) != 0 {
+		t.Fatalf("clean config: want no warnings/err, got warnings=%v err=%v", w, err)
+	}
+
+	// A source path that does not exist is a warning, not a hard failure — it may
+	// be an unmounted volume the real run will mount.
+	missing := base()
+	missing.Sources = []config.DLE{{Host: "h", Path: filepath.Join(src, "does-not-exist")}}
+	eng, err = New(missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := eng.ValidatePlan()
+	if err != nil {
+		t.Fatalf("missing source path should warn, not error: %v", err)
+	}
+	if len(w) != 1 || !strings.Contains(w[0], "missing or unreadable") {
+		t.Fatalf("expected one missing-path warning, got %v", w)
+	}
+
+	// An unknown dump method is an unrunnable config: fail the preview.
+	badMethod := base()
+	badMethod.DumpTypes = map[string]config.DumpType{config.DefaultDumpType: {Method: "rsync"}}
+	eng, err = New(badMethod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.ValidatePlan(); err == nil || !strings.Contains(err.Error(), "unknown dump method") {
+		t.Fatalf("unknown method should fail validation, got err=%v", err)
+	}
+}
+
 // TestParallelDumpers runs several DLEs with dumpers > 1, exercising concurrent
 // writes into one slot, and verifies every archive is present and restorable.
 func TestParallelDumpers(t *testing.T) {

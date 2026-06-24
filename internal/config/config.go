@@ -219,6 +219,9 @@ func (d DLE) DumpTypeName() string {
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("no config file at %s — copy nbackup.example.yaml to %s and edit it, or pass -c <path>", path, path)
+		}
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	var c Config

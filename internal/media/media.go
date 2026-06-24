@@ -256,7 +256,7 @@ func RegisterVolume(typ string, f VolumeFactory) { volumeFactories[typ] = f }
 func OpenVolume(typ string, opts Options) (Volume, error) {
 	f, ok := volumeFactories[typ]
 	if !ok {
-		return nil, fmt.Errorf("unknown medium %q (known: %v)", typ, VolumeTypes())
+		return nil, fmt.Errorf("unknown medium type %q (known: %v)", typ, VolumeTypes())
 	}
 	return f(opts)
 }
