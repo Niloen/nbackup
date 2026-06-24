@@ -30,8 +30,8 @@ import (
 	"github.com/Niloen/nbackup/internal/slotio"
 
 	// Register the bundled media and method implementations.
+	_ "github.com/Niloen/nbackup/internal/media/cloud"
 	_ "github.com/Niloen/nbackup/internal/media/disk"
-	_ "github.com/Niloen/nbackup/internal/media/s3"
 	_ "github.com/Niloen/nbackup/internal/media/tape"
 	_ "github.com/Niloen/nbackup/internal/method/gnutar"
 )
