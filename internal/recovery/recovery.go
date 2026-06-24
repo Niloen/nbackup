@@ -29,12 +29,13 @@ import (
 // Source identifies the archive a path's as-of-date content lives in, plus the
 // raw tar member name to hand to the extractor.
 type Source struct {
-	SlotID string
-	DLE    string
-	Level  int
-	Method string
-	Codec  string
-	Member string // the producing method's verbatim member token, replayed to it on extract (e.g. "./etc/hosts")
+	SlotID  string
+	DLE     string
+	Level   int
+	Method  string
+	Codec   string
+	Encrypt string
+	Member  string // the producing method's verbatim member token, replayed to it on extract (e.g. "./etc/hosts")
 }
 
 // Node is a file or directory in the reconstructed virtual filesystem. A node has
@@ -125,7 +126,7 @@ func BuildTree(slots []*slot.Slot, dle, asOf string) (*Tree, error) {
 		for _, m := range ar.Members {
 			t.insert(m, &Source{
 				SlotID: st.SlotID, DLE: dle, Level: st.Level,
-				Method: st.Method, Codec: st.Codec, Member: m,
+				Method: st.Method, Codec: st.Codec, Encrypt: st.Encrypt, Member: m,
 			})
 		}
 	}
@@ -208,6 +209,7 @@ type ExtractStep struct {
 	Level   int
 	Method  string
 	Codec   string
+	Encrypt string
 	Members []string // raw tar member names
 }
 
@@ -248,7 +250,7 @@ func (t *Tree) Collect(paths []string) ([]ExtractStep, error) {
 		k := key{s.SlotID, s.Level}
 		st, ok := steps[k]
 		if !ok {
-			st = &ExtractStep{SlotID: s.SlotID, DLE: s.DLE, Level: s.Level, Method: s.Method, Codec: s.Codec}
+			st = &ExtractStep{SlotID: s.SlotID, DLE: s.DLE, Level: s.Level, Method: s.Method, Codec: s.Codec, Encrypt: s.Encrypt}
 			steps[k] = st
 			order = append(order, k)
 		}

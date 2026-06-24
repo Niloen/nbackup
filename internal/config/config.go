@@ -56,6 +56,11 @@ type Config struct {
 		Program string `yaml:"program"` // optional binary override (name or path)
 	} `yaml:"compress"`
 
+	// Encrypt configures the external encryptor archives are piped through, after
+	// compression. It is the config-wide default; a dumptype may replace it wholesale
+	// with its own `encrypt` block (see DumpType.Encrypt). Unset = no encryption.
+	Encrypt EncryptConfig `yaml:"encrypt"`
+
 	// Nice runs orchestrated child processes under `nice -n Nice` for CPU
 	// politeness; 0 = no nice.
 	Nice int `yaml:"nice"`
@@ -183,8 +188,27 @@ type SyncRule struct {
 
 // DumpType bundles a dump method with its options, referenced by DLEs.
 type DumpType struct {
-	Method string            `yaml:"method"`
-	Params map[string]string `yaml:",inline"`
+	Method  string            `yaml:"method"`
+	Encrypt *EncryptConfig    `yaml:"encrypt"` // nil = inherit the config-wide default; set = replace it wholesale (no field merge)
+	Params  map[string]string `yaml:",inline"`
+}
+
+// EncryptConfig selects an encryption scheme and its key reference. The scheme is
+// a compiled name (gpg|none); the key reference (recipient or passphrase file) is
+// passed to the encryptor but never recorded — gpg owns the key material.
+type EncryptConfig struct {
+	Scheme         string `yaml:"scheme"`          // gpg | none (default none)
+	Recipient      string `yaml:"recipient"`       // gpg public-key recipient (asymmetric)
+	PassphraseFile string `yaml:"passphrase_file"` // gpg symmetric passphrase file
+	Program        string `yaml:"program"`         // optional binary override (name or path)
+}
+
+// SchemeName returns the configured scheme, defaulting to "none".
+func (e EncryptConfig) SchemeName() string {
+	if e.Scheme == "" {
+		return "none"
+	}
+	return e.Scheme
 }
 
 // DLE is a backup source: a path on a host, dumped per a named dumptype.
@@ -338,6 +362,16 @@ func (c *Config) ResolveDumpType(name string) DumpType {
 		dt.Method = DefaultMethod
 	}
 	return dt
+}
+
+// EncryptionFor returns the encryption settings for a dumptype: its own `encrypt`
+// block if it sets one, otherwise the config-wide default. The override replaces
+// the default wholesale — fields are not merged.
+func (c *Config) EncryptionFor(dtName string) EncryptConfig {
+	if dt, ok := c.DumpTypes[dtName]; ok && dt.Encrypt != nil {
+		return *dt.Encrypt
+	}
+	return c.Encrypt
 }
 
 // CompressCodec returns the configured codec, defaulting to zstd.

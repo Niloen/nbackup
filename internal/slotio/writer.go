@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/filter"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/slot"
@@ -59,7 +60,9 @@ type Produced struct {
 }
 
 // ArchiveSpec is the descriptive metadata of an archive, known independently of
-// the bytes the Writer measures while streaming it.
+// the bytes the Writer measures while streaming it. Encrypt/EncOpts select the
+// per-archive encryption (resolved from the DLE's dumptype); the scheme name is
+// recorded, the key reference in EncOpts is used only while writing.
 type ArchiveSpec struct {
 	DLE      string
 	Host     string
@@ -67,6 +70,8 @@ type ArchiveSpec struct {
 	Method   string
 	Level    int
 	BaseSlot string
+	Encrypt  string        // encryption scheme name ("" or "none" = plaintext)
+	EncOpts  crypt.Options // key reference + nice for the encryptor child
 }
 
 // PartPosition is one part's volume and file position, for the catalog to index.
@@ -138,8 +143,18 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		cw, e := filter.Compress(w.codec, meter, w.fopts)
+		// Pipeline: tar -> compress -> encrypt -> meter -> volume. Encryption is the
+		// outermost transform, so the meter (and the seal checksum) cover the ciphertext
+		// that lands on the volume — verify, copy, and the pre-seal re-read stay keyless.
+		enc, e := crypt.Encrypt(spec.Encrypt, meter, spec.EncOpts)
 		if e != nil {
+			pw.CloseWithError(e)
+			produceErr = e
+			return
+		}
+		cw, e := filter.Compress(w.codec, enc, w.fopts)
+		if e != nil {
+			enc.Close()
 			pw.CloseWithError(e)
 			produceErr = e
 			return
@@ -151,11 +166,18 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 		r, e := produce(src)
 		if e != nil {
 			cw.Close()
+			enc.Close()
 			pw.CloseWithError(e)
 			produceErr = e
 			return
 		}
-		if e := cw.Close(); e != nil { // waits the compressor child; flushes the meter
+		if e := cw.Close(); e != nil { // waits the compressor child
+			enc.Close()
+			pw.CloseWithError(e)
+			produceErr = e
+			return
+		}
+		if e := enc.Close(); e != nil { // waits the encryptor child; flushes the meter
 			pw.CloseWithError(e)
 			produceErr = e
 			return
@@ -172,6 +194,7 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 		Path:      spec.Path,
 		Method:    spec.Method,
 		Codec:     w.codec,
+		Encrypt:   spec.Encrypt,
 		Level:     spec.Level,
 		BaseSlot:  spec.BaseSlot,
 		CreatedAt: w.slot.CreatedAt,
@@ -194,6 +217,7 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 		Path:         spec.Path,
 		Method:       spec.Method,
 		Codec:        w.codec,
+		Encrypt:      spec.Encrypt,
 		Level:        spec.Level,
 		Compressed:   meter.Bytes(),
 		Uncompressed: res.Uncompressed,
@@ -280,6 +304,7 @@ func (w *Writer) CopyArchive(meta slot.Archive, src io.Reader) (slot.Archive, er
 		Path:      meta.Path,
 		Method:    meta.Method,
 		Codec:     meta.Codec,
+		Encrypt:   meta.Encrypt,
 		Level:     meta.Level,
 		BaseSlot:  meta.BaseSlot,
 		CreatedAt: w.slot.CreatedAt,

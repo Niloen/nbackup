@@ -35,6 +35,7 @@ type Header struct {
 	Path      string    `json:"path,omitempty"`
 	Method    string    `json:"method,omitempty"`
 	Codec     string    `json:"codec,omitempty"`
+	Encrypt   string    `json:"encrypt,omitempty"` // encryption scheme name (gpg); reversed on restore. "" = plaintext. The key is never recorded — gpg resolves it from the ciphertext + keyring.
 	Level     int       `json:"level,omitempty"`
 	BaseSlot  string    `json:"base_slot,omitempty"`
 	Part      int       `json:"part,omitempty"` // 0-based index of this part within its archive (0 = first/only); the archive's total part count lives in the seal (slot.Archive.Parts), not here

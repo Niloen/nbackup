@@ -16,6 +16,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/filter"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
@@ -60,6 +61,7 @@ type Engine struct {
 	methods    map[string]method.Method // by cache key (dumptype or "@method")
 	codec      string                   // compression codec for new archives
 	fopts      filter.Options           // codec invocation options (level/threads/nice)
+	dcopts     crypt.Options            // decrypt key reference for restore (from the default encrypt block)
 	op         librarian.Operator       // optional: handles manual tape swaps (nil = unattended)
 }
 
@@ -111,19 +113,46 @@ func New(cfg *config.Config) (*Engine, error) {
 		Threads: cfg.Compress.Threads,
 		Nice:    cfg.Nice,
 	}
+	// Decrypt options for restore come from the default encrypt block: the scheme to
+	// reverse is recorded per-archive, but the key reference (passphrase file, binary
+	// override) is supplied by the operator here; public-key schemes need none.
+	dcopts := crypt.Options{
+		Program:        cfg.Encrypt.Program,
+		PassphraseFile: cfg.Encrypt.PassphraseFile,
+		Nice:           cfg.Nice,
+	}
 	return &Engine{
 		cfg:        cfg,
 		mediumName: name,
 		mediumDef:  mediaDef,
 		vol:        vol,
-		reader:     slotio.NewReader(fopts),
+		reader:     slotio.NewReader(fopts, dcopts),
 		profile:    profile,
 		minAge:     minAge,
 		cat:        cat,
 		methods:    map[string]method.Method{},
 		codec:      cfg.CompressCodec(),
 		fopts:      fopts,
+		dcopts:     dcopts,
 	}, nil
+}
+
+// encryptionFor resolves the encryption scheme and encryptor options for a
+// dumptype's dumps: the dumptype's own `encrypt` block, else the config default.
+// A plaintext dump returns "" (not "none") so the scheme is omitted from the
+// recorded header rather than written as noise.
+func (e *Engine) encryptionFor(dtName string) (scheme string, opts crypt.Options) {
+	ec := e.cfg.EncryptionFor(dtName)
+	scheme = ec.Scheme
+	if scheme == "none" {
+		scheme = ""
+	}
+	return scheme, crypt.Options{
+		Program:        ec.Program,
+		Recipient:      ec.Recipient,
+		PassphraseFile: ec.PassphraseFile,
+		Nice:           e.cfg.Nice,
+	}
 }
 
 // mediumVolume returns a Volume for the named medium. For the engine's own
@@ -741,13 +770,22 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 	if err := filter.Check(e.codec, e.fopts); err != nil {
 		return nil, err
 	}
+	checkedEnc := map[string]bool{}
 	for _, item := range plan.Items {
-		m, err := e.methodForDumpType(item.DLE.DumpTypeName())
+		dt := item.DLE.DumpTypeName()
+		m, err := e.methodForDumpType(dt)
 		if err != nil {
 			return nil, err
 		}
 		if err := m.Check(); err != nil {
 			return nil, err
+		}
+		if !checkedEnc[dt] {
+			scheme, opts := e.encryptionFor(dt)
+			if err := crypt.Check(scheme, opts); err != nil {
+				return nil, err
+			}
+			checkedEnc[dt] = true
 		}
 	}
 
@@ -948,6 +986,7 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 
 	logf.log("archiving %s (L%d) from %s", item.Name, item.Level, item.DLE.Path)
 
+	encScheme, encOpts := e.encryptionFor(item.DLE.DumpTypeName())
 	spec := slotio.ArchiveSpec{
 		DLE:      item.Name,
 		Host:     item.DLE.Host,
@@ -955,6 +994,8 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 		Method:   m.Name(),
 		Level:    item.Level,
 		BaseSlot: item.BaseSlot,
+		Encrypt:  encScheme,
+		EncOpts:  encOpts,
 	}
 	progressFn := func(uncompressed, compressed int64) { tr.AddBytes(item.Name, uncompressed, compressed) }
 	arch, err = w.WriteArchive(spec, progressFn, func(out io.Writer) (slotio.Produced, error) {
@@ -992,7 +1033,7 @@ func (e *Engine) extractStep(step restore.Step, destDir string) error {
 	if err != nil {
 		return err
 	}
-	rc, err := e.openArchive(step.SlotID, step.DLE, step.Level, step.Codec)
+	rc, err := e.openArchive(step.SlotID, step.DLE, step.Level, step.Codec, step.Encrypt)
 	if err != nil {
 		return err
 	}
@@ -1016,7 +1057,7 @@ func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, 
 		if err != nil {
 			return files, err
 		}
-		rc, err := e.openArchive(st.SlotID, st.DLE, st.Level, st.Codec)
+		rc, err := e.openArchive(st.SlotID, st.DLE, st.Level, st.Codec, st.Encrypt)
 		if err != nil {
 			return files, err
 		}
@@ -1050,7 +1091,7 @@ func (e *Engine) DLENames() []string {
 
 // openArchive opens an archive from any available copy, preferring the engine's
 // own medium, trying each placement until one opens (restore fails over to a copy).
-func (e *Engine) openArchive(slotID, dle string, level int, codec string) (io.ReadCloser, error) {
+func (e *Engine) openArchive(slotID, dle string, level int, codec, encrypt string) (io.ReadCloser, error) {
 	placements := e.placementsFor(slotID)
 	if len(placements) == 0 {
 		return nil, fmt.Errorf("slot %s not in catalog (run `nb rebuild`)", slotID)
@@ -1066,7 +1107,7 @@ func (e *Engine) openArchive(slotID, dle string, level int, codec string) (io.Re
 			lastErr = err
 			continue
 		}
-		rc, err := e.reader.OpenArchiveParts(toSlotioParts(parts), codec, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib))
+		rc, err := e.reader.OpenArchiveParts(toSlotioParts(parts), codec, encrypt, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib))
 		if err != nil {
 			lastErr = err
 			continue
