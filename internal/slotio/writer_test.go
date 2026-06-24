@@ -161,8 +161,8 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	v1, v2, v3 := newMemVolume("v1", cap), newMemVolume("v2", cap), newMemVolume("v3", cap)
 	sink := &memSink{vols: []*memVolume{v1, v2, v3}}
 
-	s := format.NewSlot("slot-2026-06-21", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
-	w, err := NewWriter(sink, s, "none", filter.Options{}, nil)
+	spec := SlotSpec{ID: "slot-2026-06-21", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
+	w, err := NewWriter(sink, spec, "none", filter.Options{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 
 	// Read the archive back by concatenating its parts; it must equal the input.
 	r := NewReader(filter.Options{}, crypt.Options{})
-	rc, err := r.OpenArchiveParts(parts, "none", "", Expect{Slot: s.ID, DLE: "dle1", Level: 0}, openerOver(v1, v2, v3))
+	rc, err := r.OpenArchiveParts(parts, "none", "", Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v1, v2, v3))
 	if err != nil {
 		t.Fatalf("OpenArchiveParts: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	}
 
 	// VerifyParts must confirm the recorded checksum over the concatenation.
-	ok, err := r.VerifyParts(parts, Expect{Slot: s.ID, DLE: "dle1", Level: 0}, arch.SHA256, openerOver(v1, v2, v3))
+	ok, err := r.VerifyParts(parts, Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, arch.SHA256, openerOver(v1, v2, v3))
 	if err != nil || !ok {
 		t.Fatalf("VerifyParts ok=%v err=%v", ok, err)
 	}
@@ -226,8 +226,8 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	v := newMemVolume("only", 0) // unbounded
 	sink := &memSink{vols: []*memVolume{v}, partCap: 10 * 1024}
 
-	s := format.NewSlot("slot-x", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
-	w, _ := NewWriter(sink, s, "none", filter.Options{}, nil)
+	spec := SlotSpec{ID: "slot-x", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
+	w, _ := NewWriter(sink, spec, "none", filter.Options{}, nil)
 	body := []byte(strings.Repeat("z", 55*1024)) // 55 KiB / 10 KiB ≈ 6 parts
 	arch := writeOneArchive(t, w, "dle1", body)
 	if arch.Parts < 5 {
@@ -237,7 +237,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 		t.Fatalf("Seal: %v", err)
 	}
 	r := NewReader(filter.Options{}, crypt.Options{})
-	rc, err := r.OpenArchiveParts(w.Positions()[0].Parts, "none", "", Expect{Slot: s.ID, DLE: "dle1", Level: 0}, openerOver(v))
+	rc, err := r.OpenArchiveParts(w.Positions()[0].Parts, "none", "", Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,8 +254,8 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 func TestRollFailureNoDeadlock(t *testing.T) {
 	v := newMemVolume("v1", 96*1024) // one small volume, no room to roll
 	sink := &memSink{vols: []*memVolume{v}}
-	s := format.NewSlot("slot-y", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
-	w, _ := NewWriter(sink, s, "none", filter.Options{}, nil)
+	spec := SlotSpec{ID: "slot-y", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
+	w, _ := NewWriter(sink, spec, "none", filter.Options{}, nil)
 
 	body := []byte(strings.Repeat("q", 200*1024)) // far bigger than one volume
 	_, err := w.WriteArchive(ArchiveSpec{DLE: "dle1", Level: 0}, nil,
@@ -284,8 +284,8 @@ func TestEncryptRoundTrip(t *testing.T) {
 
 	v := newMemVolume("v1", 0) // unbounded
 	sink := &memSink{vols: []*memVolume{v}}
-	s := format.NewSlot("slot-enc", "2026-06-21", 1, "test", time.Unix(0, 0).UTC())
-	w, _ := NewWriter(sink, s, "none", filter.Options{}, nil)
+	spec := SlotSpec{ID: "slot-enc", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
+	w, _ := NewWriter(sink, spec, "none", filter.Options{}, nil)
 
 	body := []byte(strings.Repeat("top secret payload\n", 3000))
 	arch, err := w.WriteArchive(
@@ -311,7 +311,7 @@ func TestEncryptRoundTrip(t *testing.T) {
 	}
 
 	r := NewReader(filter.Options{}, opts)
-	rc, err := r.OpenArchiveParts(w.Positions()[0].Parts, "none", "gpg", Expect{Slot: s.ID, DLE: "dle1", Level: 0}, openerOver(v))
+	rc, err := r.OpenArchiveParts(w.Positions()[0].Parts, "none", "gpg", Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v))
 	if err != nil {
 		t.Fatalf("OpenArchiveParts: %v", err)
 	}
