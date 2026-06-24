@@ -362,10 +362,11 @@ type writeTarget struct {
 }
 
 // prepareWriter resolves a medium, enforces the label protocol on its loaded volume
-// (prompting a swap on a manual single drive), and builds a slotio writer that streams
-// s onto it. It is the one place the PrepareWrite -> WriteSink -> NewWriter contract
-// lives, shared by a dump (Run) and a copy/sync (CopySlot).
-func (e *Engine) prepareWriter(medium string, s *format.Slot, now time.Time, logf Logf) (*writeTarget, error) {
+// (prompting a swap on a manual single drive), and builds a slotio writer that
+// authors the slot described by spec onto it. It is the one place the PrepareWrite
+// -> WriteSink -> NewWriter contract lives, shared by a dump (Run) and a copy/sync
+// (CopySlot).
+func (e *Engine) prepareWriter(medium string, spec slotio.SlotSpec, now time.Time, logf Logf) (*writeTarget, error) {
 	lib, def, _, err := e.librarianFor(medium)
 	if err != nil {
 		return nil, err
@@ -381,7 +382,7 @@ func (e *Engine) prepareWriter(medium string, s *format.Slot, now time.Time, log
 		return nil, err
 	}
 	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
-	w, err := slotio.NewWriter(sink, s, e.codec, e.fopts, e.limiters[medium])
+	w, err := slotio.NewWriter(sink, spec, e.codec, e.fopts, e.limiters[medium])
 	if err != nil {
 		return nil, err
 	}
@@ -468,8 +469,10 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	// bytes are unchanged, so checksums and members carry over; only the part layout
 	// is new. The slot's logical content (the source seal) is what the catalog keeps.
 	now := time.Now().UTC()
-	cpy := format.NewSlot(s.ID, s.Date, s.Sequence, s.Generator, s.CreatedAt)
-	wt, err := e.prepareWriter(targetMedia, cpy, now, logf)
+	// Re-author under the source's identity (CreatedAt and all) so the copy's seal
+	// record names the same logical slot; the catalog still keeps the source seal.
+	spec := slotio.SlotSpec{ID: s.ID, Date: s.Date, Sequence: s.Sequence, Generator: s.Generator, CreatedAt: s.CreatedAt}
+	wt, err := e.prepareWriter(targetMedia, spec, now, logf)
 	if err != nil {
 		return err
 	}
@@ -926,8 +929,8 @@ func (e *Engine) Run(date time.Time, logf Logf) (*format.Slot, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := format.NewSlot(slotID, format.DateString(date), seq, "nbdump", time.Now().UTC())
-	wt, err := e.prepareWriter(e.mediumName, s, now, logf)
+	spec := slotio.SlotSpec{ID: slotID, Date: format.DateString(date), Sequence: seq, Generator: "nbdump", CreatedAt: now}
+	wt, err := e.prepareWriter(e.mediumName, spec, now, logf)
 	if err != nil {
 		return nil, err
 	}

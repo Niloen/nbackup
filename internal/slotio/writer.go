@@ -56,6 +56,20 @@ type Produced struct {
 	Members      []string
 }
 
+// SlotSpec is the descriptive identity of a slot to author: what is known before
+// any archive is written, independent of the archives and bytes the Writer
+// assembles while streaming. NewWriter starts the slot from it and Seal returns
+// the finished format.Slot — so, like ArchiveSpec for an archive, the caller
+// describes the slot and slotio produces the artifact, never the reverse. The
+// fields mirror format.NewSlot's parameters.
+type SlotSpec struct {
+	ID        string    // the slot's identity (see format.IDFromParts)
+	Date      string    // run date, YYYY-MM-DD
+	Sequence  int       // 1 for the day's first run, 2+ for later runs
+	Generator string    // tool authoring the slot (e.g. "nbdump")
+	CreatedAt time.Time // when authoring began; a copy preserves the source slot's
+}
+
 // ArchiveSpec is the descriptive metadata of an archive, known independently of
 // the bytes the Writer measures while streaming it. Encrypt/EncOpts select the
 // per-archive encryption (resolved from the DLE's dumptype); the scheme name is
@@ -109,16 +123,19 @@ type archiveRecord struct {
 	parts []PartPosition
 }
 
-// NewWriter begins authoring the given open slot onto sink, compressing archives
-// with the named codec. lim, when non-nil, caps the rate of bytes written to the
-// medium (network politeness); a nil lim is uncapped. The same lim is shared
-// across concurrent WriteArchive calls on an unbounded sink, so several dumpers to
-// one medium share its budget (Amanda's netusage).
-func NewWriter(sink VolumeSink, s *format.Slot, codec string, fopts filter.Options, lim *xfer.Limiter) (*Writer, error) {
+// NewWriter begins authoring a new slot, described by spec, onto sink, compressing
+// archives with the named codec. The Writer builds and owns the format.Slot from
+// spec (the caller never hands one in); Seal returns it sealed. lim, when non-nil,
+// caps the rate of bytes written to the medium (network politeness); a nil lim is
+// uncapped. The same lim is shared across concurrent WriteArchive calls on an
+// unbounded sink, so several dumpers to one medium share its budget (Amanda's
+// netusage).
+func NewWriter(sink VolumeSink, spec SlotSpec, codec string, fopts filter.Options, lim *xfer.Limiter) (*Writer, error) {
 	if _, err := filter.Ext(codec); err != nil { // validate the codec name early
 		return nil, err
 	}
-	return &Writer{sink: sink, codec: codec, fopts: fopts, lim: lim, slot: s}, nil
+	slot := format.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
+	return &Writer{sink: sink, codec: codec, fopts: fopts, lim: lim, slot: slot}, nil
 }
 
 // WriteArchive appends one archive to the slot, split into as many part files as the
