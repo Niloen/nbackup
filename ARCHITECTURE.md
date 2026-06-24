@@ -426,9 +426,9 @@ the medium it lands on.
 
 - **Whole-volume recycle** on EOT. Spanning rolls onto the next *blank / empty
   in-pool* tape; auto-recycling an aged-out tape (vs. relabeling it) is still manual
-  (`nb label --relabel`).
-- **Capacity-driven retention** — capacity is reported and bounds promotion;
-  pruning is cycle-based, not yet automatically driven to fit capacity.
+  (`nb label --relabel`). (Capacity-driven retention is otherwise implemented:
+  `sizeProfile.Reclaim` already prunes object stores and disk to fit `capacity`;
+  only whole-*volume* tape recycle remains.)
 - **Remote sources** — `host` is metadata; `path` is read locally.
 - Real `mtDevice` hardware validation — also the only spanning path not exercised
   (real-drive spanning is proactive-via-`part_size` and structurally complete but
