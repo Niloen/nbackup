@@ -4,8 +4,9 @@ A slot-based backup system in Go. Its design comes from **[Amanda][amanda]** —
 balanced multilevel scheduling, immutable daily artifacts, human-readable
 contents, and cycle-based safety. What NBackup adds is **first-class disk and
 cloud storage**: Amanda is tape-first, while NBackup treats local disk, virtual
-tape, and object stores (S3) as equal targets, and makes the common modern shape
-— land fast on disk, then replicate offsite — a first-class operation.
+tape, and object stores (S3, GCS, Azure Blob) as equal targets, and makes the
+common modern shape — land fast on disk, then replicate offsite — a first-class
+operation.
 
 > A backup administrator should be able to reason about backups by looking at a
 > sequence of immutable daily backup slots rather than a database of chunks.
@@ -23,9 +24,9 @@ calls it out again only where a specific mechanism is worth tracing back.)
 - **Run** — one planner execution, typically daily.
 - **Cycle** — the dump cycle: the target and hard-max time between fulls of each
   DLE, and the window retention protects.
-- **Volume** — where slots live: local disk, a virtual tape, or (stub) S3. Slots
-  stream between volumes (`nb copy` for one, `nb sync` for many) — e.g. land fast
-  on disk, then replicate offsite to tape or S3.
+- **Volume** — where slots live: local disk, a virtual tape, or a cloud object
+  store (S3/GCS/Azure). Slots stream between volumes (`nb copy` for one, `nb sync`
+  for many) — e.g. land fast on disk, then replicate offsite to tape or the cloud.
 
 ## Artifacts you can read
 
@@ -399,7 +400,7 @@ sources:
 ### Capacity and retention are per-medium
 
 Each medium declares its **capacity** — the space NBackup may use there. Disk and
-S3 spell it directly (`capacity: 20TB`); a tape library derives it as
+cloud spell it directly (`capacity: 20TB`); a tape library derives it as
 `bays × volume_size` (`0` = unbounded). Capacity is the headline knob: tell a
 medium how much space you have and the planner uses it — promotion fills free
 space, pruning reclaims to stay within it. `minimum_age` is an optional per-medium
@@ -423,8 +424,9 @@ reclaim a whole tape) lives entirely in the medium's retention strategy.
 
 ## Status & limitations (first version)
 
-Implemented: disk and tape Volumes, **copying slots between media** (`nb copy`,
-e.g. disk → tape) with the copy **recorded as a second placement** so restore and
+Implemented: disk, tape, and cloud (S3/GCS/Azure) Volumes, **copying slots between
+media** (`nb copy`, e.g. disk → tape or disk → cloud) with the copy **recorded as a
+second placement** so restore and
 verify use any available copy, balanced **multilevel (L0–L9)** planning with a GNU
 tar snapshot library, immutable sealed slots with **sequence-suffixed** same-day
 runs, **deletion-aware** incremental restore, checksum verification, point-in-time
@@ -448,6 +450,32 @@ bays, or the drive and shelf), and load a tape with `nb load`. Tapes carry a
 self-describing label that NBackup **verifies before every write**, so a foreign,
 wrong, or still-active reel is never clobbered.
 
+### Cloud (object stores)
+
+The `cloud` medium stores slots in an object store via the Go CDK
+([gocloud.dev/blob][gocloud]). One type covers many backends — the `url` scheme
+selects which:
+
+```yaml
+media:
+  offsite:
+    type: cloud
+    url: s3://company-backups?region=eu-north-1   # or gs://bucket, azblob://container
+    # prefix: nbackup/      # optional: confine keys under a folder in the bucket
+    capacity: 50TB
+```
+
+`s3://` reaches S3 and any S3-compatible store (MinIO, Cloudflare R2, Backblaze
+B2, Wasabi); `gs://` is Google Cloud Storage; `azblob://` is Azure Blob.
+**Credentials are not in the config** — they come from each SDK's standard
+environment (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_*`), so secrets
+stay out of your YAML. An object store is **address-identified** like disk: no
+labels, no swap prompts, nothing to inventory — it just lands and reclaims slots
+within its `capacity`. Each archive is stored as a clean `.tar.<codec>` object (a
+plain GET restores it with stock tools) plus a small header sidecar, so a slot
+streams disk↔cloud unchanged. (Google Drive and other file-API stores are out of
+scope — `gocloud.dev/blob` is an object-store abstraction.)
+
 `appendable: true` (default) packs many runs per tape; `appendable: false` uses
 one run per tape. Restore mounts (robot) or prompts for (manual) whichever tape
 holds the copy it needs. A run that **fills a tape mid-write spans onto the next
@@ -464,7 +492,6 @@ guessing. A restore reassembles a spanned archive by mounting its tapes in order
 
 Declared in config for forward-compatibility:
 
-- **S3 media** — registered as a Volume stub; no S3 client yet.
 - **Capacity-driven retention** — capacity is reported and bounds promotion;
   pruning is cycle-based, not yet automatically driven to fit capacity.
 - **Remote sources** — `host` is metadata; `path` is read from the local
@@ -494,3 +521,4 @@ make vet      # go vet ./...
 ```
 
 [amanda]: https://www.amanda.org/
+[gocloud]: https://gocloud.dev/howto/blob/
