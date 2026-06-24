@@ -9,10 +9,10 @@ import (
 
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/progress"
-	"github.com/Niloen/nbackup/internal/slot"
 )
 
 // TestRunRestoreEndToEnd exercises the full engine over the disk store:
@@ -463,7 +463,7 @@ func TestTapeLabelVerify(t *testing.T) {
 	// catalog stale for it; a dump must refuse until `nb rebuild`. (Loading
 	// a genuinely different tape from the pool is not an error under a changer.)
 	lv := eng.vol.(media.Labeled)
-	if err := lv.WriteLabel(media.Label{Name: "lto-0001", Pool: "lto", Epoch: 2}); err != nil {
+	if err := lv.WriteLabel(format.Label{Name: "lto-0001", Pool: "lto", Epoch: 2}); err != nil {
 		t.Fatal(err)
 	}
 	day2 := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
@@ -932,7 +932,7 @@ func tapeEngine(t *testing.T, appendable bool, minAge string) *Engine {
 // recordVol registers a labeled volume in the catalog at a written-at time.
 func recordVol(t *testing.T, eng *Engine, name string, writtenAt time.Time) {
 	t.Helper()
-	if err := eng.cat.RecordVolume(media.Label{Name: name, Pool: "lto", Epoch: 1, WrittenAt: writtenAt}); err != nil {
+	if err := eng.cat.RecordVolume(format.Label{Name: name, Pool: "lto", Epoch: 1, WrittenAt: writtenAt}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -947,16 +947,16 @@ func recordFullOn(t *testing.T, eng *Engine, date, dle, volume string) {
 // given payload size, so a reel's fill can be asserted.
 func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, bytes int64) {
 	t.Helper()
-	id := slot.IDFromParts(date, 1)
-	s := slot.NewSlot(id, date, 1, "test", time.Now())
-	s.AddArchive(slot.Archive{DLE: dle, Level: 0, Compressed: bytes})
+	id := format.IDFromParts(date, 1)
+	s := format.NewSlot(id, date, 1, "test", time.Now())
+	s.AddArchive(format.Archive{DLE: dle, Level: 0, Compressed: bytes})
 	if err := s.Seal(time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	p := catalog.Placement{
 		Medium:   "lto",
-		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Volume: volume, Epoch: 1, Pos: 1}}}},
-		Seal:     catalog.FilePos{Volume: volume, Epoch: 1, Pos: 2},
+		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: volume, Epoch: 1, Pos: 1}}}},
+		Seal:     catalog.FilePos{Label: volume, Epoch: 1, Pos: 2},
 	}
 	if err := eng.cat.Record(s, p); err != nil {
 		t.Fatal(err)
@@ -967,16 +967,16 @@ func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, byte
 // a medium other than the tape pool — used to prove retention is judged per-medium.
 func recordFullOnOtherMedium(t *testing.T, eng *Engine, date, dle, medium string) {
 	t.Helper()
-	id := slot.IDFromParts(date, 1)
-	s := slot.NewSlot(id, date, 1, "test", time.Now())
-	s.AddArchive(slot.Archive{DLE: dle, Level: 0})
+	id := format.IDFromParts(date, 1)
+	s := format.NewSlot(id, date, 1, "test", time.Now())
+	s.AddArchive(format.Archive{DLE: dle, Level: 0})
 	if err := s.Seal(time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	p := catalog.Placement{
 		Medium:   medium,
-		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Volume: medium, Pos: 1}}}},
-		Seal:     catalog.FilePos{Volume: medium, Pos: 2},
+		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: medium, Pos: 1}}}},
+		Seal:     catalog.FilePos{Label: medium, Pos: 2},
 	}
 	if err := eng.cat.Record(s, p); err != nil {
 		t.Fatal(err)
@@ -1179,7 +1179,7 @@ func TestDumpSpansArchiveAcrossTapes(t *testing.T) {
 	if len(ps) != 1 {
 		t.Fatalf("placements = %d, want 1", len(ps))
 	}
-	if vols := ps[0].Volumes(); len(vols) < 2 {
+	if vols := ps[0].Labels(); len(vols) < 2 {
 		t.Fatalf("placement spans %v, want >= 2 volumes", vols)
 	}
 
@@ -1299,7 +1299,7 @@ func TestPartSizeSplitsWithinTape(t *testing.T) {
 	if s.Archives[0].Parts < 2 {
 		t.Fatalf("archive Parts = %d, want >= 2 (part_size must split it)", s.Archives[0].Parts)
 	}
-	if vols := eng.cat.Placements(s.ID)[0].Volumes(); len(vols) != 1 {
+	if vols := eng.cat.Placements(s.ID)[0].Labels(); len(vols) != 1 {
 		t.Fatalf("parts should stay on one tape, got volumes %v", vols)
 	}
 	if rep, err := eng.Verify([]string{s.ID}, VerifyOptions{}, nil); err != nil || rep.Failures != 0 {

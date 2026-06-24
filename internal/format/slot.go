@@ -1,7 +1,4 @@
-// Package slot defines NBackup's primary artifact format: the metadata of an
-// immutable, self-contained backup run. It is pure data plus (de)serialization;
-// it makes no assumptions about where the bytes live (that is a media concern).
-package slot
+package format
 
 import (
 	"encoding/json"
@@ -18,8 +15,11 @@ const (
 	StatusSealed = "sealed"
 )
 
-// Slot is a run's metadata. It is persisted as the payload of the per-slot seal
-// record (the last file written to a volume); its presence marks the slot sealed.
+// Slot is a run's metadata — NBackup's primary artifact. It is persisted as the
+// payload of the per-slot seal record (the last file written to a volume); its
+// presence marks the slot sealed. It carries a thin authoring lifecycle (NewSlot
+// -> AddArchive -> Seal) so a slot is built up consistently during a run, then is
+// immutable once sealed.
 type Slot struct {
 	ID         string    `json:"id"`          // e.g. "slot-2026-06-21" or "slot-2026-06-21.2"
 	Date       string    `json:"date"`        // run date, YYYY-MM-DD
@@ -47,7 +47,7 @@ type Archive struct {
 	Uncompressed int64    `json:"uncompressed"`      // archive stream size before compression
 	FileCount    int      `json:"file_count"`        // number of member entries archived
 	SHA256       string   `json:"sha256"`            // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
-	Parts        int      `json:"parts,omitempty"`   // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's media.Header.Part
+	Parts        int      `json:"parts,omitempty"`   // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
 	BaseSlot     string   `json:"base_slot"`         // for level>=1, the slot whose state this builds on
 	Members      []string `json:"members"`           // member paths archived: slash-separated, directories with a trailing slash (the method-neutral convention recovery browses); the raw token is replayed to the producing method on extract (was MANIFEST)
 }

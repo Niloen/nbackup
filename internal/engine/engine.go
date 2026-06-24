@@ -19,6 +19,7 @@ import (
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/filter"
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/method"
@@ -28,7 +29,6 @@ import (
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/restore"
 	"github.com/Niloen/nbackup/internal/sizeutil"
-	"github.com/Niloen/nbackup/internal/slot"
 	"github.com/Niloen/nbackup/internal/slotio"
 	"github.com/Niloen/nbackup/internal/xfer"
 
@@ -365,7 +365,7 @@ type writeTarget struct {
 // (prompting a swap on a manual single drive), and builds a slotio writer that streams
 // s onto it. It is the one place the PrepareWrite -> WriteSink -> NewWriter contract
 // lives, shared by a dump (Run) and a copy/sync (CopySlot).
-func (e *Engine) prepareWriter(medium string, s *slot.Slot, now time.Time, logf Logf) (*writeTarget, error) {
+func (e *Engine) prepareWriter(medium string, s *format.Slot, now time.Time, logf Logf) (*writeTarget, error) {
 	lib, def, _, err := e.librarianFor(medium)
 	if err != nil {
 		return nil, err
@@ -397,7 +397,7 @@ type CopyPlan struct {
 	Archives        int      // archives in the slot
 	Bytes           int64    // the slot's total bytes
 	AlreadyOnTarget bool     // a copy already exists on To (skipped unless force)
-	TargetVolumes   []string // the volume(s) the existing target copy occupies
+	TargetLabels    []string // the tape labels the existing target copy spans (empty for address-identified media)
 }
 
 // PlanCopy resolves and validates a copy the way CopySlot would, without writing —
@@ -424,7 +424,7 @@ func (e *Engine) PlanCopy(slotID, fromMedia, targetMedia string, force bool) (Co
 		for _, p := range e.cat.Placements(slotID) {
 			if p.Medium == targetMedia {
 				plan.AlreadyOnTarget = true
-				plan.TargetVolumes = p.Volumes()
+				plan.TargetLabels = p.Labels()
 				break
 			}
 		}
@@ -447,7 +447,11 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		// Idempotency: a slot already recorded on the target is not re-copied. On
 		// append-only media a second copy would orphan the first (unreferenced files,
 		// reclaimable only by relabel); --force overrides for a deliberate re-copy.
-		return fmt.Errorf("slot %s is already on medium %q (volume(s) %v); use --force to copy again", slotID, targetMedia, plan.TargetVolumes)
+		where := ""
+		if len(plan.TargetLabels) > 0 {
+			where = fmt.Sprintf(" (volume(s) %v)", plan.TargetLabels)
+		}
+		return fmt.Errorf("slot %s is already on medium %q%s; use --force to copy again", slotID, targetMedia, where)
 	}
 	fromMedia = plan.From
 	s, err := e.cat.ReadSlot(slotID)
@@ -464,7 +468,7 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	// bytes are unchanged, so checksums and members carry over; only the part layout
 	// is new. The slot's logical content (the source seal) is what the catalog keeps.
 	now := time.Now().UTC()
-	cpy := slot.NewSlot(s.ID, s.Date, s.Sequence, s.Generator, s.CreatedAt)
+	cpy := format.NewSlot(s.ID, s.Date, s.Sequence, s.Generator, s.CreatedAt)
 	wt, err := e.prepareWriter(targetMedia, cpy, now, logf)
 	if err != nil {
 		return err
@@ -523,7 +527,7 @@ func (e *Engine) copySource(slotID, fromMedia string) (*librarian.Librarian, cat
 // budget; an uncapped medium leaves the stream untouched.
 func (e *Engine) partOpener(lib *librarian.Librarian, medium string) slotio.PartOpener {
 	lim := e.limiters[medium]
-	return func(p slotio.PartPosition) (media.Header, io.ReadCloser, error) {
+	return func(p slotio.PartPosition) (format.Header, io.ReadCloser, error) {
 		h, rc, err := lib.ReadFileAt(p.Volume, p.Epoch, p.Pos)
 		if err != nil {
 			return h, rc, err
@@ -536,7 +540,7 @@ func (e *Engine) partOpener(lib *librarian.Librarian, medium string) slotio.Part
 func toSlotioParts(parts []catalog.FilePos) []slotio.PartPosition {
 	out := make([]slotio.PartPosition, len(parts))
 	for i, p := range parts {
-		out[i] = slotio.PartPosition{Volume: p.Volume, Epoch: p.Epoch, Pos: p.Pos}
+		out[i] = slotio.PartPosition{Volume: p.Label, Epoch: p.Epoch, Pos: p.Pos}
 	}
 	return out
 }
@@ -548,12 +552,12 @@ func placementFrom(medium string, w *slotio.Writer) catalog.Placement {
 	for _, ap := range w.Positions() {
 		cp := catalog.ArchivePos{DLE: ap.DLE, Level: ap.Level}
 		for _, pt := range ap.Parts {
-			cp.Parts = append(cp.Parts, catalog.FilePos{Volume: pt.Volume, Epoch: pt.Epoch, Pos: pt.Pos})
+			cp.Parts = append(cp.Parts, catalog.FilePos{Label: pt.Volume, Epoch: pt.Epoch, Pos: pt.Pos})
 		}
 		p.Archives = append(p.Archives, cp)
 	}
 	sp := w.SealPosition()
-	p.Seal = catalog.FilePos{Volume: sp.Volume, Epoch: sp.Epoch, Pos: sp.Pos}
+	p.Seal = catalog.FilePos{Label: sp.Volume, Epoch: sp.Epoch, Pos: sp.Pos}
 	return p
 }
 
@@ -572,8 +576,8 @@ func (e *Engine) partSizeFor(medium string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("medium %q part_size: %w", medium, err)
 	}
-	if n < 2*media.HeaderBlock {
-		return 0, fmt.Errorf("medium %q part_size %s is too small; use at least %s", medium, sizeutil.FormatBytes(n), sizeutil.FormatBytes(2*media.HeaderBlock))
+	if n < 2*format.HeaderBlock {
+		return 0, fmt.Errorf("medium %q part_size %s is too small; use at least %s", medium, sizeutil.FormatBytes(n), sizeutil.FormatBytes(2*format.HeaderBlock))
 	}
 	return n, nil
 }
@@ -658,7 +662,7 @@ func (e *Engine) ExpectedVolume(now time.Time) (VolumeExpectation, bool) {
 	// offers a whole reel (used stays 0).
 	exp.VolumeBytes = e.profile.VolumeSize()
 	if exp.Appendable && !exp.FreshVolume {
-		for _, s := range e.cat.SlotsOnVolume(exp.Label) {
+		for _, s := range e.cat.SlotsOnLabel(exp.Label) {
 			exp.UsedBytes += s.TotalBytes
 		}
 	}
@@ -697,7 +701,7 @@ func (e *Engine) expectedVolumeFor(medium string, now time.Time) VolumeExpectati
 	// redundancy double storage exists to provide.
 	protected := policy.Protected(e.cat.SlotsOn(medium), minAge, now)
 	for _, v := range pool {
-		held := e.cat.SlotsOnVolume(v.Label.Name)
+		held := e.cat.SlotsOnLabel(v.Label.Name)
 		if _, _, ok := policy.ProtectedOn(protected, held); ok {
 			continue // some slot on this tape is still protected — not reusable
 		}
@@ -886,7 +890,7 @@ func minRoom(a, b int64) int64 {
 }
 
 // Run executes the plan for a date, producing one sealed slot.
-func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
+func (e *Engine) Run(date time.Time, logf Logf) (*format.Slot, error) {
 	plan := e.Plan(date)
 	for _, w := range plan.Warnings {
 		logf.log("WARNING: %s", w)
@@ -922,7 +926,7 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := slot.NewSlot(slotID, slot.DateString(date), seq, "nbdump", time.Now().UTC())
+	s := format.NewSlot(slotID, format.DateString(date), seq, "nbdump", time.Now().UTC())
 	wt, err := e.prepareWriter(e.mediumName, s, now, logf)
 	if err != nil {
 		return nil, err
@@ -1058,13 +1062,13 @@ func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 	// the catalog never recorded; note it so its id can be reclaimed below.
 	for _, f := range files {
 		present[f.Header.Slot] = true
-		if f.Header.Kind == media.KindSeal {
+		if f.Header.Kind == format.KindSeal {
 			sealed[f.Header.Slot] = true
 		}
 	}
-	day := slot.DateString(date)
+	day := format.DateString(date)
 	for seq = 1; ; seq++ {
-		id = slot.IDFromParts(day, seq)
+		id = format.IDFromParts(day, seq)
 		if !present[id] {
 			return id, seq, nil
 		}
@@ -1091,7 +1095,7 @@ func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 // the DLE's lifecycle (start, live bytes, finish/fail) to the run tracker.
 func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tracker, logf Logf) (err error) {
 	tr.StartDLE(item.Name)
-	var arch slot.Archive
+	var arch format.Archive
 	defer func() {
 		if err != nil {
 			tr.FinishDLE(item.Name, 0, 0, 0, err)

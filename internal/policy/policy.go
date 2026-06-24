@@ -14,8 +14,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/sizeutil"
-	"github.com/Niloen/nbackup/internal/slot"
 )
 
 // Protected returns a map of slotID -> reason for slots that must never be
@@ -26,10 +26,10 @@ import (
 //
 // Note: once verification status is tracked, the successor requirement should
 // tighten from "a newer full exists" to "a newer verified full exists".
-func Protected(slots []*slot.Slot, minAge time.Duration, now time.Time) map[string]string {
+func Protected(slots []*format.Slot, minAge time.Duration, now time.Time) map[string]string {
 	protected := map[string]string{}
 	for _, s := range slots {
-		date, _ := slot.ParseDateField(s.Date)
+		date, _ := format.ParseDateField(s.Date)
 		if minAge > 0 && now.Sub(date) < minAge {
 			protected[s.ID] = fmt.Sprintf("within minimum age (%s)", sizeutil.FormatDuration(minAge))
 			continue
@@ -58,7 +58,7 @@ func Protected(slots []*slot.Slot, minAge time.Duration, now time.Time) map[stri
 // reclaiming any one tape would destroy the slot, even the tapes that hold no
 // seal record. Shared by the prune/recycle path and `nb label --relabel` so both
 // judge a volume's reusability identically.
-func ProtectedOn(protected map[string]string, onVolume []*slot.Slot) (slotID, reason string, ok bool) {
+func ProtectedOn(protected map[string]string, onVolume []*format.Slot) (slotID, reason string, ok bool) {
 	for _, s := range onVolume {
 		if r, p := protected[s.ID]; p {
 			return s.ID, r, true
@@ -67,9 +67,9 @@ func ProtectedOn(protected map[string]string, onVolume []*slot.Slot) (slotID, re
 	return "", "", false
 }
 
-func hasNewerFull(slots []*slot.Slot, dle string, target *slot.Slot) bool {
+func hasNewerFull(slots []*format.Slot, dle string, target *format.Slot) bool {
 	for _, s := range slots {
-		if !slot.Less(target, s) {
+		if !format.Less(target, s) {
 			continue // s must come strictly after target in run order
 		}
 		for _, a := range s.Archives {

@@ -3,24 +3,24 @@ package recovery
 import (
 	"testing"
 
-	"github.com/Niloen/nbackup/internal/slot"
+	"github.com/Niloen/nbackup/internal/format"
 )
 
 // scenario builds two slots: a full on day 1 and an incremental on day 2 that
 // rewrites etc/hosts and adds etc/new.conf.
-func scenario() []*slot.Slot {
-	full := &slot.Slot{ID: "slot-2026-06-21", Date: "2026-06-21", Archives: []slot.Archive{{
+func scenario() []*format.Slot {
+	full := &format.Slot{ID: "slot-2026-06-21", Date: "2026-06-21", Archives: []format.Archive{{
 		DLE: "app", Level: 0, Method: "gnutar", Codec: "none",
 		Members: []string{
 			"./", "./etc/", "./etc/hosts", "./etc/passwd",
 			"./var/", "./var/log/", "./var/log/a.log",
 		},
 	}}}
-	incr := &slot.Slot{ID: "slot-2026-06-22", Date: "2026-06-22", Archives: []slot.Archive{{
+	incr := &format.Slot{ID: "slot-2026-06-22", Date: "2026-06-22", Archives: []format.Archive{{
 		DLE: "app", Level: 1, Method: "gnutar", Codec: "none",
 		Members: []string{"./", "./etc/", "./etc/hosts", "./etc/new.conf"},
 	}}}
-	return []*slot.Slot{full, incr}
+	return []*format.Slot{full, incr}
 }
 
 func TestAsOf(t *testing.T) {

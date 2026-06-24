@@ -25,8 +25,8 @@ import (
 
 	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/filter"
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/slot"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
@@ -96,7 +96,7 @@ type Writer struct {
 	lim   *xfer.Limiter // optional bandwidth cap on the bytes landing on the medium (nil = uncapped)
 
 	mu       sync.Mutex // guards the records below
-	slot     *slot.Slot
+	slot     *format.Slot
 	written  []archiveRecord // one per archive, in WriteArchive order
 	sealPart PartPosition    // where the seal landed (set by Seal)
 }
@@ -114,7 +114,7 @@ type archiveRecord struct {
 // medium (network politeness); a nil lim is uncapped. The same lim is shared
 // across concurrent WriteArchive calls on an unbounded sink, so several dumpers to
 // one medium share its budget (Amanda's netusage).
-func NewWriter(sink VolumeSink, s *slot.Slot, codec string, fopts filter.Options, lim *xfer.Limiter) (*Writer, error) {
+func NewWriter(sink VolumeSink, s *format.Slot, codec string, fopts filter.Options, lim *xfer.Limiter) (*Writer, error) {
 	if _, err := filter.Ext(codec); err != nil { // validate the codec name early
 		return nil, err
 	}
@@ -131,7 +131,7 @@ func NewWriter(sink VolumeSink, s *slot.Slot, codec string, fopts filter.Options
 // progress, if non-nil, is called as the stream flows with the running
 // (uncompressed, compressed) byte counts — the live signal for `nb status`. It runs
 // on the producing goroutine, so it must be cheap.
-func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, compressed int64), produce func(out io.Writer) (Produced, error)) (slot.Archive, error) {
+func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, compressed int64), produce func(out io.Writer) (Produced, error)) (format.Archive, error) {
 	// Producer: tar|compressor -> meter -> pipe. The meter sits on the whole stream
 	// so the checksum/size cover the concatenation of every part. The consumer below
 	// drains the pipe concurrently into volume parts.
@@ -149,10 +149,10 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 		err = *produceErr
 	}
 	if err != nil {
-		return slot.Archive{}, err
+		return format.Archive{}, err
 	}
 
-	arch := slot.Archive{
+	arch := format.Archive{
 		DLE:          spec.DLE,
 		Host:         spec.Host,
 		Path:         spec.Path,
@@ -176,14 +176,14 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 	return arch, nil
 }
 
-// archiveHeader builds the base media.Header an archive's parts share (drainParts
+// archiveHeader builds the base format.Header an archive's parts share (drainParts
 // clones it per part with an ascending Part index). The codec is passed explicitly
 // because a fresh dump stamps the writer's codec while a copy preserves the source
 // archive's recorded codec — every other descriptive field comes straight through.
-func (w *Writer) archiveHeader(dle, host, path, method string, level int, baseSlot, codec, encrypt string) media.Header {
-	return media.Header{
+func (w *Writer) archiveHeader(dle, host, path, method string, level int, baseSlot, codec, encrypt string) format.Header {
+	return format.Header{
 		Slot:      w.slot.ID,
-		Kind:      media.KindArchive,
+		Kind:      format.KindArchive,
 		DLE:       dle,
 		Host:      host,
 		Path:      path,
@@ -255,7 +255,7 @@ func (w *Writer) startProducer(meter *xfer.Meter, pw *io.PipeWriter, spec Archiv
 // next volume whenever a part fills. It returns the ordered part positions. On error
 // it returns it for the caller to handle (closing the producer); the partial files
 // left behind are unsealed and ignored by a scan.
-func (w *Writer) drainParts(base media.Header, src io.Reader) ([]PartPosition, error) {
+func (w *Writer) drainParts(base format.Header, src io.Reader) ([]PartPosition, error) {
 	var (
 		parts []PartPosition
 		part  int
@@ -313,15 +313,15 @@ func (w *Writer) drainParts(base media.Header, src io.Reader) ([]PartPosition, e
 // It does NOT compress or re-checksum the stream — the same bytes are written, so the
 // recorded checksum is unchanged — and only the part layout (and Parts count) is new.
 // The header carries the archive's original codec, so restore reverses the right one.
-func (w *Writer) CopyArchive(meta slot.Archive, src io.Reader) (slot.Archive, error) {
+func (w *Writer) CopyArchive(meta format.Archive, src io.Reader) (format.Archive, error) {
 	base := w.archiveHeader(meta.DLE, meta.Host, meta.Path, meta.Method, meta.Level, meta.BaseSlot, meta.Codec, meta.Encrypt)
 	h := sha256.New()
 	parts, err := w.drainParts(base, io.TeeReader(src, h))
 	if err != nil {
-		return slot.Archive{}, err
+		return format.Archive{}, err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != meta.SHA256 {
-		return slot.Archive{}, fmt.Errorf("copy of %s L%d checksum mismatch (source corrupt?)", meta.DLE, meta.Level)
+		return format.Archive{}, fmt.Errorf("copy of %s L%d checksum mismatch (source corrupt?)", meta.DLE, meta.Level)
 	}
 	arch := meta
 	arch.Parts = len(parts)
@@ -367,7 +367,7 @@ func (w *Writer) SealPosition() PartPosition {
 // actually landed on the medium is the job of the explicit, operator-invoked `nb verify`
 // (the amcheckdump analogue), kept out of the dump path so a single drive never has to
 // re-read — or reload swapped-out volumes — just to close a slot.
-func (w *Writer) Seal(now time.Time) (*slot.Slot, error) {
+func (w *Writer) Seal(now time.Time) (*format.Slot, error) {
 	if err := w.slot.Seal(now); err != nil {
 		return nil, err
 	}
@@ -379,7 +379,7 @@ func (w *Writer) Seal(now time.Time) (*slot.Slot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("place the seal record: %w", err)
 	}
-	seal := media.Header{Slot: w.slot.ID, Kind: media.KindSeal, CreatedAt: now}
+	seal := format.Header{Slot: w.slot.ID, Kind: format.KindSeal, CreatedAt: now}
 	pos, err := vol.AppendFile(seal, func(out io.Writer) error {
 		_, e := out.Write(data)
 		return e

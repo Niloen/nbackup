@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/sizeutil"
-	"github.com/Niloen/nbackup/internal/slot"
 )
 
 // Profile describes a medium's capacity and reclamation strategy, translated
@@ -32,7 +32,7 @@ type Profile interface {
 	// Reclaim chooses the slots to delete to satisfy this medium's capacity,
 	// given the protected set (slots that must never be reclaimed, computed by
 	// policy). It returns the reclamations to perform, in deletion order.
-	Reclaim(slots []*slot.Slot, protected map[string]string, now time.Time) []Reclamation
+	Reclaim(slots []*format.Slot, protected map[string]string, now time.Time) []Reclamation
 }
 
 // Reclamation is one slot (or volume) chosen for reclamation.
@@ -79,7 +79,7 @@ func (p sizeProfile) TotalBytes() int64 { return p.capacity }
 func (p sizeProfile) VolumeSize() int64 { return 0 }
 
 // Reclaim deletes the oldest non-protected slots until total <= capacity.
-func (p sizeProfile) Reclaim(slots []*slot.Slot, protected map[string]string, now time.Time) []Reclamation {
+func (p sizeProfile) Reclaim(slots []*format.Slot, protected map[string]string, now time.Time) []Reclamation {
 	if p.capacity <= 0 {
 		return nil // unbounded: nothing to reclaim
 	}
@@ -90,8 +90,8 @@ func (p sizeProfile) Reclaim(slots []*slot.Slot, protected map[string]string, no
 	if total <= p.capacity {
 		return nil
 	}
-	ordered := append([]*slot.Slot(nil), slots...)
-	sort.Slice(ordered, func(i, j int) bool { return slot.Less(ordered[i], ordered[j]) }) // oldest first
+	ordered := append([]*format.Slot(nil), slots...)
+	sort.Slice(ordered, func(i, j int) bool { return format.Less(ordered[i], ordered[j]) }) // oldest first
 	var out []Reclamation
 	for _, s := range ordered {
 		if total <= p.capacity {
@@ -157,7 +157,7 @@ func (p volumeProfile) VolumeSize() int64 { return p.volumeSize }
 
 // Reclaim is a placeholder: tape reclamation is whole-volume reuse, which needs
 // a volume catalog and changer (not yet implemented).
-func (p volumeProfile) Reclaim(slots []*slot.Slot, protected map[string]string, now time.Time) []Reclamation {
+func (p volumeProfile) Reclaim(slots []*format.Slot, protected map[string]string, now time.Time) []Reclamation {
 	return nil
 }
 

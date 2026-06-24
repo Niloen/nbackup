@@ -7,7 +7,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/filter"
-	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
@@ -39,7 +39,7 @@ type Expect struct {
 // PartOpener mounts the volume a part lives on and opens its file, returning the
 // file's header and a payload stream the caller closes. The engine implements it
 // over the librarian (mount the part's volume, then ReadFile its position).
-type PartOpener func(p PartPosition) (media.Header, io.ReadCloser, error)
+type PartOpener func(p PartPosition) (format.Header, io.ReadCloser, error)
 
 // OpenArchiveParts opens the plaintext stream of an archive whose payload is the
 // ordered concatenation of parts. It reads each part fully before opening the next
@@ -166,8 +166,8 @@ func (pr *partsReader) Close() error {
 // assertPart confirms a part file's header is the archive part the catalog expected:
 // the right archive identity and the right index in the sequence. A mismatch means
 // the wrong volume is mounted or the catalog is stale.
-func assertPart(h media.Header, want Expect, part int) error {
-	if h.Kind != media.KindArchive {
+func assertPart(h format.Header, want Expect, part int) error {
+	if h.Kind != format.KindArchive {
 		return fmt.Errorf("position holds a %q record, not an archive", h.Kind)
 	}
 	if h.Slot != want.Slot || h.DLE != want.DLE || h.Level != want.Level {

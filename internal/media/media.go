@@ -1,71 +1,22 @@
 // Package media is NBackup's storage abstraction, analogous to Amanda's Device
 // API. A Volume is a linear medium: an ordered sequence of self-describing files,
-// each a Header followed by a payload, addressed by position (file number). This
-// one shape maps to a local directory, an object store, or a tape (file marks +
-// fast-forward). The medium owns its physical layout — callers never construct
-// filenames — so slots can be streamed between volumes (disk <-> tape) uniformly.
-// Implementations register themselves, so selecting a medium is a registry lookup.
+// each a format.Header followed by a payload, addressed by position (file
+// number). This one shape maps to a local directory, an object store, or a tape
+// (file marks + fast-forward). The medium owns its physical layout — callers never
+// construct filenames — so slots can be streamed between volumes (disk <-> tape)
+// uniformly. Implementations register themselves, so selecting a medium is a
+// registry lookup. The on-medium artifact format (headers, labels, seals) lives in
+// package format; this package is the device side that reads and writes it.
 package media
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
-	"time"
+
+	"github.com/Niloen/nbackup/internal/format"
 )
-
-// File kinds carried in a Header.
-const (
-	KindArchive = "archive" // one DLE dump
-	KindSeal    = "seal"    // the per-slot metadata record, written last
-	KindLabel   = "label"   // a volume label (first file); not part of any slot
-)
-
-// Header is the self-describing block at the start of every file on a volume
-// (Amanda's dumpfile_t). It carries only identity — what is known before the
-// payload is streamed. Measured data (sizes, checksum, member listing) lives in
-// the per-slot seal record, not here. A volume is therefore recoverable on its
-// own: scanning headers reconstructs the catalog.
-type Header struct {
-	Slot      string    `json:"slot"`
-	Kind      string    `json:"kind"`
-	DLE       string    `json:"dle,omitempty"`
-	Host      string    `json:"host,omitempty"`
-	Path      string    `json:"path,omitempty"`
-	Method    string    `json:"method,omitempty"`
-	Codec     string    `json:"codec,omitempty"`
-	Encrypt   string    `json:"encrypt,omitempty"` // encryption scheme name (gpg); reversed on restore. "" = plaintext. The key is never recorded — gpg resolves it from the ciphertext + keyring.
-	Level     int       `json:"level,omitempty"`
-	BaseSlot  string    `json:"base_slot,omitempty"`
-	Part      int       `json:"part,omitempty"` // 0-based index of this part within its archive (0 = first/only); the archive's total part count lives in the seal (slot.Archive.Parts), not here
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// FileInfo is a file's position and header, as returned by Files().
-type FileInfo struct {
-	Pos    int
-	Header Header
-}
-
-// LabelMagic marks a label record as NBackup's, so a foreign or blank volume is
-// never mistaken for one of ours (and so never silently overwritten).
-const LabelMagic = "nbackup"
-
-// Label is a volume's self-describing identity, stored as the payload of the
-// file-0 label record. It is to a volume what a seal record is to a slot: the
-// on-medium fact a catalog caches. Only media whose physical mount is ambiguous
-// (tape — the reel behind the drive can be swapped) carry one; address-identified
-// media (disk, s3) do not.
-type Label struct {
-	Magic     string    `json:"magic"`              // LabelMagic — proves the volume is ours
-	Name      string    `json:"name"`               // unique, human-facing (e.g. "lto-0007")
-	Pool      string    `json:"pool"`               // the medium/pool name; blocks cross-pool clobber
-	Sequence  int       `json:"sequence,omitempty"` // ordinal within the pool (optional)
-	Epoch     int       `json:"epoch"`              // bumped on every (re)label; detects a stale catalog
-	WrittenAt time.Time `json:"written_at"`
-}
 
 // Labeled is implemented by media that identify themselves on the medium (tape).
 // The engine type-asserts this to decide whether to run the label-verify protocol
@@ -74,11 +25,11 @@ type Labeled interface {
 	// ReadLabel returns the volume's label. ok is false only when the volume is
 	// blank (no files). A non-empty volume whose file 0 is not a valid NBackup
 	// label is reported as ErrForeignVolume — it must not be silently overwritten.
-	ReadLabel() (lbl Label, ok bool, err error)
+	ReadLabel() (lbl format.Label, ok bool, err error)
 	// WriteLabel resets the volume to empty and writes lbl as file 0. This is the
 	// (re)labeling operation and destroys any existing contents; the caller owns
 	// the policy decision of whether that is allowed.
-	WriteLabel(lbl Label) error
+	WriteLabel(lbl format.Label) error
 }
 
 // ErrForeignVolume reports a non-empty volume whose file 0 is not an NBackup
@@ -197,64 +148,15 @@ type Volume interface {
 	// AppendFile writes h, then the payload produced by write, and returns the
 	// file's position. The Volume owns concurrency and position assignment
 	// (disk allows concurrent appends; tape serializes).
-	AppendFile(h Header, write func(w io.Writer) error) (pos int, err error)
+	AppendFile(h format.Header, write func(w io.Writer) error) (pos int, err error)
 	// ReadFile positions to pos and returns its header and a payload stream the
 	// caller must close.
-	ReadFile(pos int) (Header, io.ReadCloser, error)
+	ReadFile(pos int) (format.Header, io.ReadCloser, error)
 	// Files returns every file's position and header in order — the volume's
 	// self-index, used to rebuild the catalog. May be O(volume) (a full scan).
-	Files() ([]FileInfo, error)
+	Files() ([]format.FileInfo, error)
 	// RemoveSlot reclaims every file belonging to a slot.
 	RemoveSlot(slot string) error
-}
-
-// HeaderBlock is the fixed size of the leading header block on every file. A
-// fixed block (as on Amanda tapes) makes payload extraction uniform across media
-// and keeps stock-tool recovery simple: `dd bs=32k skip=1 < file | zstd -dc`.
-const HeaderBlock = 32 * 1024
-
-// EncodeHeader writes h as a fixed-size, newline-terminated JSON block — the
-// framing every Volume implementation puts at the start of a file.
-func EncodeHeader(w io.Writer, h Header) error {
-	b, err := json.Marshal(h)
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
-	if len(b) > HeaderBlock {
-		return fmt.Errorf("header too large (%d > %d)", len(b), HeaderBlock)
-	}
-	block := make([]byte, HeaderBlock)
-	copy(block, b)
-	_, err = w.Write(block)
-	return err
-}
-
-// DecodeHeader reads the fixed header block from r, leaving r positioned at the
-// payload.
-func DecodeHeader(r io.Reader) (Header, error) {
-	block := make([]byte, HeaderBlock)
-	if _, err := io.ReadFull(r, block); err != nil {
-		return Header{}, err
-	}
-	line := block
-	if i := indexByte(block, '\n'); i >= 0 {
-		line = block[:i]
-	}
-	var h Header
-	if err := json.Unmarshal(line, &h); err != nil {
-		return Header{}, fmt.Errorf("parse file header: %w", err)
-	}
-	return h, nil
-}
-
-func indexByte(b []byte, c byte) int {
-	for i, x := range b {
-		if x == c {
-			return i
-		}
-	}
-	return -1
 }
 
 // WalkReadable visits every readable volume reachable from vol in turn, calling fn

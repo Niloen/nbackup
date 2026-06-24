@@ -4,8 +4,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/restore"
-	"github.com/Niloen/nbackup/internal/slot"
 )
 
 // Target is a selected DLE to drill: the point-in-time slot whose restore chain the
@@ -33,7 +33,7 @@ type candidate struct {
 // or before asOf for each DLE — not only the latest slot. At most `sample` targets
 // are returned (sample <= 0 = every due DLE); a DLE already drilled OK within the
 // window is not reselected. The slots must be in run order (oldest first).
-func Select(dles []string, slots []*slot.Slot, asOf string, ledger *Ledger, window time.Duration, sample int, now time.Time) []Target {
+func Select(dles []string, slots []*format.Slot, asOf string, ledger *Ledger, window time.Duration, sample int, now time.Time) []Target {
 	var due []candidate
 	for _, dle := range dles {
 		targetSlot := newestSlotForDLE(slots, dle, asOf)
@@ -94,7 +94,7 @@ func Select(dles []string, slots []*slot.Slot, asOf string, ledger *Ledger, wind
 // newestSlotForDLE returns the id of the newest slot at or before asOf that holds an
 // archive for the DLE, or "" if none. Slots are in run order (oldest first), so the
 // last match wins.
-func newestSlotForDLE(slots []*slot.Slot, dle, asOf string) string {
+func newestSlotForDLE(slots []*format.Slot, dle, asOf string) string {
 	id := ""
 	for _, s := range slots {
 		if s.Date > asOf {
@@ -112,18 +112,18 @@ func newestSlotForDLE(slots []*slot.Slot, dle, asOf string) string {
 
 // fullAgeDays is the age in days of the full the chain relies on, measured to asOf
 // (the point being drilled). It falls back to now when asOf does not parse.
-func fullAgeDays(slots []*slot.Slot, fullSlotID, asOf string, now time.Time) int {
+func fullAgeDays(slots []*format.Slot, fullSlotID, asOf string, now time.Time) int {
 	var fullDate time.Time
 	for _, s := range slots {
 		if s.ID == fullSlotID {
-			fullDate, _ = slot.ParseDateField(s.Date)
+			fullDate, _ = format.ParseDateField(s.Date)
 			break
 		}
 	}
 	if fullDate.IsZero() {
 		return 0
 	}
-	ref, err := slot.ParseDateField(asOf)
+	ref, err := format.ParseDateField(asOf)
 	if err != nil {
 		ref = now
 	}
