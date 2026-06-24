@@ -20,6 +20,14 @@ const (
 // presence marks the slot sealed. It carries a thin authoring lifecycle (NewSlot
 // -> AddArchive -> Seal) so a slot is built up consistently during a run, then is
 // immutable once sealed.
+//
+// The ID is the slot's identity: "slot-" + Date (+ ".Sequence" for the 2nd+ run
+// of a day) — see IDFromParts. The natural key is a date, so the "slot-" tag is
+// what keeps it from reading as a plain date wherever it appears bare: catalog
+// JSON (an id beside an identical date), logs, Archive.BaseSlot references, and
+// the on-disk slots/<id>/ directory. The system's other ids need no such tag
+// because they are already distinctive words (labels "<medium>-<date>", DLEs
+// "<host>-<path>"), not bare dates.
 type Slot struct {
 	ID         string    `json:"id"`          // e.g. "slot-2026-06-21" or "slot-2026-06-21.2"
 	Date       string    `json:"date"`        // run date, YYYY-MM-DD
@@ -87,7 +95,9 @@ func (s *Slot) Seal(now time.Time) error {
 // IsSealed reports whether the slot has been sealed.
 func (s *Slot) IsSealed() bool { return s.Status == StatusSealed }
 
-// IDFromParts builds a slot ID from a date string and sequence number.
+// IDFromParts builds a slot ID from a date string and sequence number. The
+// "slot-" prefix tags an otherwise date-shaped key so it never reads as a plain
+// date (see the Slot.ID doc); ParseID strips it back off.
 func IDFromParts(date string, seq int) string {
 	if seq <= 1 {
 		return "slot-" + date
