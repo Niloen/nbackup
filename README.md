@@ -747,8 +747,6 @@ Declared in config for forward-compatibility:
   gated behind a deliberate `nb label --relabel`.
 - **Remote sources** — `host` is metadata; `path` is read from the local
   filesystem (run the agent where the data is, or mount it).
-- **Exclude/include rules** and tar tuning (one-file-system and sparse are on by
-  default).
 
 ## Architecture
 
