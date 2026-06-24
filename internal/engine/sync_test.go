@@ -201,6 +201,11 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 	cfg := &config.Config{
 		Landing:   "disk",
 		AutoLabel: true, // let the changer label each fresh tape it rolls onto
+		// A one-day cycle makes every run a fresh full, so each slot carries its own
+		// payload independently. (With incrementals the three same-second writes race
+		// GNU tar's second-granularity change detection: a missed change leaves the
+		// last incremental empty and the restore shows the previous day's contents.)
+		Cycle: "1d",
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			// Small tapes (256 KiB) across 4 bays: one slot fits, two do not.
