@@ -119,12 +119,15 @@ type device interface {
 	// reset truncates the volume to empty (next write becomes file 0). It is the
 	// physical basis of (re)labeling — relabel = reset then write a new file 0.
 	reset() error
+	// bytesUsed reports the bytes written on the mounted volume, or 0 when the
+	// device cannot see its own fill (a real drive only learns it by hitting EOT).
+	bytesUsed() int64
 }
 
 // tape is the I/O core shared by all three medium shapes: it frames files and the
 // label over the single currently-mounted device. The positioning surface (which
-// bay/reel is in the drive) lives in the wrappers — libraryTape, stationTape,
-// shelfStationTape — that embed it.
+// bay/reel is in the drive) lives in the wrappers — roboticChanger, driveChanger,
+// shelfChanger — that embed it.
 type tape struct {
 	dev device // mounted device; nil when the drive is empty
 	bay string // mounted bay/reel id (for display); "" when empty
@@ -292,10 +295,7 @@ func (s *driveChanger) Insert(string) error {
 // deviceStatus inventories one mounted device: its label, fill, and file count.
 func deviceStatus(id string, dev device, capacity int64) media.VolumeStatus {
 	n, _ := dev.count()
-	st := media.VolumeStatus{ID: id, Capacity: capacity, Files: n, Blank: n == 0}
-	if d, ok := dev.(*dirDevice); ok {
-		st.Used = d.used
-	}
+	st := media.VolumeStatus{ID: id, Capacity: capacity, Files: n, Blank: n == 0, Used: dev.bytesUsed()}
 	lbl, ok, err := readLabel(dev)
 	switch {
 	case ok:

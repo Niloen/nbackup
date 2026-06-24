@@ -49,12 +49,13 @@ type Entry struct {
 type Placement struct {
 	Medium   string       `json:"medium"`   // config medium name — how to open it
 	Archives []ArchivePos `json:"archives"` // each archive and the positions of its parts
-	Seal     PartPos      `json:"seal"`     // where the seal record lives
+	Seal     FilePos      `json:"seal"`     // where the seal record lives
 }
 
-// PartPos is one part's location: a volume (label name, == Medium for unlabeled
-// media) plus a file position on it.
-type PartPos struct {
+// FilePos is the location of one file on a volume: a volume (label name, == Medium
+// for unlabeled media) plus a file position on it. It locates both an archive part
+// and a placement's seal record.
+type FilePos struct {
 	Volume string `json:"volume"`
 	Epoch  int    `json:"epoch,omitempty"` // label epoch when recorded; staleness check on read
 	Pos    int    `json:"pos"`
@@ -66,11 +67,11 @@ type PartPos struct {
 type ArchivePos struct {
 	DLE   string    `json:"dle"`
 	Level int       `json:"level"`
-	Parts []PartPos `json:"parts"`
+	Parts []FilePos `json:"parts"`
 }
 
 // Parts returns the ordered part locations of an archive on this placement.
-func (p Placement) Parts(dle string, level int) ([]PartPos, bool) {
+func (p Placement) Parts(dle string, level int) ([]FilePos, bool) {
 	for _, a := range p.Archives {
 		if a.DLE == dle && a.Level == level {
 			return a.Parts, len(a.Parts) > 0

@@ -204,18 +204,15 @@ func suggestReel(r librarian.SwapRequest) string {
 	return ""
 }
 
-// reelDesc renders a reel/drive status for the operator prompt.
+// reelDesc renders a reel/drive status for the operator prompt, reusing the
+// inventory label/status classifier so the two never diverge.
 func reelDesc(b media.VolumeStatus) string {
-	switch {
-	case b.ID == "" && b.Label == "":
+	if b.ID == "" && b.Label == "" {
 		return "(empty)"
-	case b.Foreign:
-		return "(foreign)"
-	case b.Blank:
-		return "(blank)"
-	case b.Capacity > 0 && b.Used >= b.Capacity:
-		return fmt.Sprintf("%s (full)", b.Label)
-	default:
-		return b.Label
 	}
+	label, status := volumeLabelStatus(b)
+	if status == "full" {
+		return fmt.Sprintf("%s (full)", label)
+	}
+	return label
 }

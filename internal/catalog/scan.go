@@ -82,16 +82,13 @@ type slotPlacement struct {
 }
 
 // scanMedium reads every readable volume of one medium and assembles its sealed
-// slots into placements. A robotic library (a media.Changer) scans every non-blank
-// bay in turn, restoring whatever was mounted. A single-drive station (a media.Drive
-// that is not a Changer) can only read the reel currently in the drive — the rest sit
-// offline in the room and cannot be mounted unattended — so it is scanned as just the
-// loaded reel, or skipped when the drive is empty. A plain volume (no drive) is
-// scanned directly.
+// slots into placements. The shape walk — every non-blank bay of a robotic library,
+// or just the loaded reel of a single-drive station — lives in media.WalkReadable,
+// so the catalog never type-asserts a Volume's shape itself.
 func scanMedium(medium string, vol media.Volume) (mediumIndex, error) {
 	acc := newMediumScan()
 	var labels []media.Label
-	scanInto := func(v media.Volume) error {
+	err := media.WalkReadable(vol, func(v media.Volume) error {
 		res, err := scanVolume(medium, v)
 		if err != nil {
 			return err
@@ -101,40 +98,9 @@ func scanMedium(medium string, vol media.Volume) (mediumIndex, error) {
 			labels = append(labels, *res.label)
 		}
 		return nil
-	}
-
-	ch, isLibrary := vol.(media.Changer)
-	if !isLibrary {
-		if d, ok := vol.(media.Drive); ok {
-			if _, loaded := d.Loaded(); !loaded {
-				return mediumIndex{}, nil // single drive with an empty drive: nothing to scan
-			}
-		}
-		if err := scanInto(vol); err != nil {
-			return mediumIndex{}, err
-		}
-		return mediumIndex{placements: assemble(medium, acc), labels: labels}, nil
-	}
-	prev, hadPrev := ch.Loaded()
-	bays, err := ch.Bays()
+	})
 	if err != nil {
 		return mediumIndex{}, err
-	}
-	for _, b := range bays {
-		if b.Blank {
-			continue
-		}
-		if err := ch.Mount(b.ID); err != nil {
-			return mediumIndex{}, err
-		}
-		if err := scanInto(vol); err != nil {
-			return mediumIndex{}, err
-		}
-	}
-	if hadPrev {
-		if err := ch.Mount(prev.ID); err != nil {
-			return mediumIndex{}, err
-		}
 	}
 	return mediumIndex{placements: assemble(medium, acc), labels: labels}, nil
 }
@@ -191,13 +157,13 @@ type partKey struct {
 // lives.
 type scannedSeal struct {
 	meta *slot.Slot
-	loc  PartPos
+	loc  FilePos
 }
 
 // scanResult is one volume's contribution to a medium scan: its archive part files,
 // its seals, and its label (if any).
 type scanResult struct {
-	parts map[partKey]PartPos
+	parts map[partKey]FilePos
 	seals map[string]scannedSeal
 	label *media.Label
 }
@@ -206,12 +172,12 @@ type scanResult struct {
 // placements are assembled (a slot's parts may straddle several volumes, and the seal
 // committing them lives on only one).
 type mediumScan struct {
-	parts map[partKey]PartPos
+	parts map[partKey]FilePos
 	seals map[string]scannedSeal
 }
 
 func newMediumScan() *mediumScan {
-	return &mediumScan{parts: map[partKey]PartPos{}, seals: map[string]scannedSeal{}}
+	return &mediumScan{parts: map[partKey]FilePos{}, seals: map[string]scannedSeal{}}
 }
 
 func (m *mediumScan) add(res scanResult) {
@@ -242,18 +208,18 @@ func scanVolume(medium string, vol media.Volume) (scanResult, error) {
 		}
 	}
 
-	res := scanResult{parts: map[partKey]PartPos{}, seals: map[string]scannedSeal{}, label: label}
+	res := scanResult{parts: map[partKey]FilePos{}, seals: map[string]scannedSeal{}, label: label}
 	for _, f := range files {
 		switch f.Header.Kind {
 		case media.KindArchive:
 			res.parts[partKey{slot: f.Header.Slot, dle: f.Header.DLE, level: f.Header.Level, part: f.Header.Part}] =
-				PartPos{Volume: volName, Epoch: epoch, Pos: f.Pos}
+				FilePos{Volume: volName, Epoch: epoch, Pos: f.Pos}
 		case media.KindSeal:
 			s, serr := readSeal(vol, f.Pos)
 			if serr != nil {
 				continue // unreadable seal: skip
 			}
-			res.seals[f.Header.Slot] = scannedSeal{meta: s, loc: PartPos{Volume: volName, Epoch: epoch, Pos: f.Pos}}
+			res.seals[f.Header.Slot] = scannedSeal{meta: s, loc: FilePos{Volume: volName, Epoch: epoch, Pos: f.Pos}}
 		}
 	}
 	return res, nil

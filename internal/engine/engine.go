@@ -330,6 +330,86 @@ func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
 	return e.cat.Rebuild(vols)
 }
 
+// writeTarget bundles a medium prepared for writing: a librarian whose first volume
+// is mounted and label-verified, the slotio writer streaming the slot onto it, and the
+// medium's part_size (so the caller can decide parallelism via lib.CanSpan).
+type writeTarget struct {
+	lib      *librarian.Librarian
+	w        *slotio.Writer
+	partSize int64
+}
+
+// prepareWriter resolves a medium, enforces the label protocol on its loaded volume
+// (prompting a swap on a manual single drive), and builds a slotio writer that streams
+// s onto it. It is the one place the PrepareWrite -> WriteSink -> NewWriter contract
+// lives, shared by a dump (Run) and a copy/sync (CopySlot).
+func (e *Engine) prepareWriter(medium string, s *slot.Slot, now time.Time, logf Logf) (*writeTarget, error) {
+	lib, def, _, err := e.librarianFor(medium)
+	if err != nil {
+		return nil, err
+	}
+	partSize, err := e.partSizeFor(medium)
+	if err != nil {
+		return nil, err
+	}
+	appendable := def.IsAppendable()
+	expect := e.expectedVolumeFor(medium, now).Label
+	volName, epoch, err := lib.PrepareWrite(appendable, expect, now, librarian.Logf(logf))
+	if err != nil {
+		return nil, err
+	}
+	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
+	w, err := slotio.NewWriter(sink, s, e.codec, e.fopts)
+	if err != nil {
+		return nil, err
+	}
+	return &writeTarget{lib: lib, w: w, partSize: partSize}, nil
+}
+
+// CopyPlan is the resolved, validated outcome of a would-be copy, without writing:
+// the source/target the rules picked and whether the slot is already on the target.
+type CopyPlan struct {
+	SlotID          string
+	From            string   // resolved source medium (landing when --from is unset)
+	To              string   // target medium
+	Archives        int      // archives in the slot
+	Bytes           int64    // the slot's total bytes
+	AlreadyOnTarget bool     // a copy already exists on To (skipped unless force)
+	TargetVolumes   []string // the volume(s) the existing target copy occupies
+}
+
+// PlanCopy resolves and validates a copy the way CopySlot would, without writing —
+// the single source of the copy-eligibility rules, shared by CopySlot and the
+// `nb copy` dry-run so the two never drift. It errors on the same unrunnable cases
+// (unknown slot, unknown target, source == target) and reports whether the slot is
+// already on the target (force plans the re-copy anyway).
+func (e *Engine) PlanCopy(slotID, fromMedia, targetMedia string, force bool) (CopyPlan, error) {
+	s, err := e.cat.ReadSlot(slotID)
+	if err != nil {
+		return CopyPlan{}, err
+	}
+	if fromMedia == "" {
+		fromMedia = e.mediumName
+	}
+	if _, ok := e.cfg.Media[targetMedia]; !ok {
+		return CopyPlan{}, fmt.Errorf("unknown medium %q", targetMedia)
+	}
+	if fromMedia == targetMedia {
+		return CopyPlan{}, fmt.Errorf("copy source and target are the same medium %q", targetMedia)
+	}
+	plan := CopyPlan{SlotID: slotID, From: fromMedia, To: targetMedia, Archives: len(s.Archives), Bytes: s.TotalBytes}
+	if !force {
+		for _, p := range e.cat.Placements(slotID) {
+			if p.Medium == targetMedia {
+				plan.AlreadyOnTarget = true
+				plan.TargetVolumes = p.Volumes()
+				break
+			}
+		}
+	}
+	return plan, nil
+}
+
 // CopySlot streams a sealed slot from one configured medium to another, then
 // records the new copy in the catalog (a second placement). The source defaults to
 // the landing medium when fromMedia is ""; any other medium holding the slot is
@@ -337,58 +417,38 @@ func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
 // that holds the slot (on a changer); the write to the target runs the same label
 // verification as a dump.
 func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, logf Logf) error {
-	s, err := e.cat.ReadSlot(slotID)
+	plan, err := e.PlanCopy(slotID, fromMedia, targetMedia, force)
 	if err != nil {
 		return err
 	}
-	if fromMedia == "" {
-		fromMedia = e.mediumName
+	if plan.AlreadyOnTarget {
+		// Idempotency: a slot already recorded on the target is not re-copied. On
+		// append-only media a second copy would orphan the first (unreferenced files,
+		// reclaimable only by relabel); --force overrides for a deliberate re-copy.
+		return fmt.Errorf("slot %s is already on medium %q (volume(s) %v); use --force to copy again", slotID, targetMedia, plan.TargetVolumes)
 	}
-	if fromMedia == targetMedia {
-		return fmt.Errorf("copy source and target are the same medium %q", targetMedia)
-	}
-	// Idempotency: a slot already recorded on the target is not re-copied. On
-	// append-only media a second copy would orphan the first (unreferenced files,
-	// reclaimable only by relabel); --force overrides for a deliberate re-copy.
-	if !force {
-		for _, p := range e.cat.Placements(slotID) {
-			if p.Medium == targetMedia {
-				return fmt.Errorf("slot %s is already on medium %q (volume(s) %v); use --force to copy again", slotID, targetMedia, p.Volumes())
-			}
-		}
+	fromMedia = plan.From
+	s, err := e.cat.ReadSlot(slotID)
+	if err != nil {
+		return err
 	}
 	srcLib, srcPlacement, err := e.copySource(slotID, fromMedia)
 	if err != nil {
 		return err
 	}
-	lib, def, _, err := e.librarianFor(targetMedia)
-	if err != nil {
-		return err
-	}
-	partSize, err := e.partSizeFor(targetMedia)
-	if err != nil {
-		return err
-	}
-	now := time.Now().UTC()
-	appendable := def.IsAppendable()
-	expect := e.expectedTapeFor(targetMedia, now).Label
-	volName, epoch, err := lib.PrepareWrite(appendable, expect, now, librarian.Logf(logf))
-	if err != nil {
-		return err
-	}
-	logf.log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
-
 	// Re-author the slot onto the target: each archive's already-compressed payload
 	// (the source copy's parts concatenated) is re-split into parts sized to the
 	// target's volumes, rolling onto a fresh volume mid-archive when one fills. The
 	// bytes are unchanged, so checksums and members carry over; only the part layout
 	// is new. The slot's logical content (the source seal) is what the catalog keeps.
-	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
+	now := time.Now().UTC()
 	cpy := slot.NewSlot(s.ID, s.Date, s.Sequence, s.Generator, s.CreatedAt)
-	w, err := slotio.NewWriter(sink, cpy, e.codec, e.fopts)
+	wt, err := e.prepareWriter(targetMedia, cpy, now, logf)
 	if err != nil {
 		return err
 	}
+	w := wt.w
+	logf.log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
 	srcOpen := e.partOpener(srcLib)
 	for _, a := range s.Archives {
 		parts, ok := srcPlacement.Parts(a.DLE, a.Level)
@@ -438,15 +498,12 @@ func (e *Engine) copySource(slotID, fromMedia string) (*librarian.Librarian, cat
 // spanned archive calls it once per part, in order — a single drive holds one tape.
 func (e *Engine) partOpener(lib *librarian.Librarian) slotio.PartOpener {
 	return func(p slotio.PartPosition) (media.Header, io.ReadCloser, error) {
-		if err := lib.MountVolume(p.Volume, p.Epoch); err != nil {
-			return media.Header{}, nil, err
-		}
-		return lib.Volume().ReadFile(p.Pos)
+		return lib.ReadFileAt(p.Volume, p.Epoch, p.Pos)
 	}
 }
 
 // toSlotioParts converts catalog part positions to the slotio reader's form.
-func toSlotioParts(parts []catalog.PartPos) []slotio.PartPosition {
+func toSlotioParts(parts []catalog.FilePos) []slotio.PartPosition {
 	out := make([]slotio.PartPosition, len(parts))
 	for i, p := range parts {
 		out[i] = slotio.PartPosition{Volume: p.Volume, Epoch: p.Epoch, Pos: p.Pos}
@@ -461,12 +518,12 @@ func placementFrom(medium string, w *slotio.Writer) catalog.Placement {
 	for _, ap := range w.Positions() {
 		cp := catalog.ArchivePos{DLE: ap.DLE, Level: ap.Level}
 		for _, pt := range ap.Parts {
-			cp.Parts = append(cp.Parts, catalog.PartPos{Volume: pt.Volume, Epoch: pt.Epoch, Pos: pt.Pos})
+			cp.Parts = append(cp.Parts, catalog.FilePos{Volume: pt.Volume, Epoch: pt.Epoch, Pos: pt.Pos})
 		}
 		p.Archives = append(p.Archives, cp)
 	}
 	sp := w.SealPosition()
-	p.Seal = catalog.PartPos{Volume: sp.Volume, Epoch: sp.Epoch, Pos: sp.Pos}
+	p.Seal = catalog.FilePos{Volume: sp.Volume, Epoch: sp.Epoch, Pos: sp.Pos}
 	return p
 }
 
@@ -540,36 +597,37 @@ func (e *Engine) StoredBytes() int64 { return e.cat.MediumBytes(e.mediumName) }
 // config field it is never empty — it reflects the sole-medium fallback New applied.
 func (e *Engine) Landing() string { return e.mediumName }
 
-// TapeExpectation describes the volume the next run on a labeled medium will
+// VolumeExpectation describes the volume the next run on a labeled medium will
 // write to — NBackup's analogue of Amanda's "amdump will expect tape X". It is
 // derived from the catalog (the tapelist) and the retention policy, never from a
 // physical scan: for a one-run-per-tape (non-appendable) medium it names the
 // oldest reusable volume the run would recycle, or a fresh tape when none is
 // reusable; for an appendable medium it names the current volume the run extends.
-type TapeExpectation struct {
+type VolumeExpectation struct {
 	Medium      string    // the labeled medium this expectation is for
 	Appendable  bool      // true: extend a volume; false: one run per tape (recycle/fresh)
 	Label       string    // the expected volume's label; "" when a fresh tape is expected
 	WrittenAt   time.Time // when that volume was last labeled (zero for a fresh tape)
 	Recycles    int       // runs on it the next run would overwrite (non-appendable reuse)
-	NewTape     bool      // no reusable volume exists — a fresh/blank tape is expected
+	FreshVolume bool      // no reusable volume exists — a fresh/blank tape is expected
 	VolumeBytes int64     // the reel's physical capacity (volume_size); 0 = unknown/unsized
 	UsedBytes   int64     // bytes already on the expected reel (0 for a fresh/recycled reel)
 }
 
-// ExpectedTape reports the tape the next run on the landing medium will write to,
+// ExpectedVolume reports the tape the next run on the landing medium will write to,
 // or ok=false for address-identified media (disk, s3) that carry no label and so
 // have no tape to expect.
-func (e *Engine) ExpectedTape(now time.Time) (TapeExpectation, bool) {
-	if _, ok := e.vol.(media.Labeled); !ok {
-		return TapeExpectation{}, false
+func (e *Engine) ExpectedVolume(now time.Time) (VolumeExpectation, bool) {
+	lib, _, _, err := e.librarianFor(e.mediumName)
+	if err != nil || !lib.Labeled() {
+		return VolumeExpectation{}, false
 	}
-	exp := e.expectedTapeFor(e.mediumName, now)
+	exp := e.expectedVolumeFor(e.mediumName, now)
 	// The reel's capacity and current fill bound this run physically: an appendable
 	// run extends the latest reel (room = size - used), a fresh or recycled reel
 	// offers a whole reel (used stays 0).
 	exp.VolumeBytes = e.profile.VolumeSize()
-	if exp.Appendable && !exp.NewTape {
+	if exp.Appendable && !exp.FreshVolume {
 		for _, s := range e.cat.SlotsOnVolume(exp.Label) {
 			exp.UsedBytes += s.TotalBytes
 		}
@@ -577,29 +635,26 @@ func (e *Engine) ExpectedTape(now time.Time) (TapeExpectation, bool) {
 	return exp, true
 }
 
-// expectedTapeFor computes the expected volume for a labeled medium from the
+// expectedVolumeFor computes the expected volume for a labeled medium from the
 // catalog's volume registry (the tapelist) ordered oldest-written-first. A
 // non-appendable run reuses the oldest volume whose every run is unprotected (the
 // retention safety floor: past minimum age, with a newer recovery path), matching
 // Amanda's taper picking the oldest reusable tape; an appendable run extends the
 // most recently written volume in the pool.
-func (e *Engine) expectedTapeFor(medium string, now time.Time) TapeExpectation {
+func (e *Engine) expectedVolumeFor(medium string, now time.Time) VolumeExpectation {
 	def := e.cfg.Media[medium]
-	exp := TapeExpectation{Medium: medium, Appendable: def.IsAppendable()}
+	exp := VolumeExpectation{Medium: medium, Appendable: def.IsAppendable()}
 
-	var pool []catalog.VolumeRecord
-	for _, v := range e.cat.Volumes() {
-		if v.Label.Pool == medium {
-			pool = append(pool, v)
-		}
-	}
+	// volumesInPool returns the same pool sorted by name; this expectation wants
+	// oldest-written-first, so copy and re-sort rather than duplicate the filter.
+	pool := append([]catalog.VolumeRecord(nil), e.volumesInPool(medium)...)
 	sort.Slice(pool, func(i, j int) bool { return pool[i].Label.WrittenAt.Before(pool[j].Label.WrittenAt) })
 
 	if exp.Appendable {
 		if n := len(pool); n > 0 {
 			exp.Label, exp.WrittenAt = pool[n-1].Label.Name, pool[n-1].Label.WrittenAt
 		} else {
-			exp.NewTape = true
+			exp.FreshVolume = true
 		}
 		return exp
 	}
@@ -619,7 +674,7 @@ func (e *Engine) expectedTapeFor(medium string, now time.Time) TapeExpectation {
 		exp.Label, exp.WrittenAt, exp.Recycles = v.Label.Name, v.Label.WrittenAt, len(held)
 		return exp
 	}
-	exp.NewTape = true // nothing reusable — the run needs a fresh tape
+	exp.FreshVolume = true // nothing reusable — the run needs a fresh tape
 	return exp
 }
 
@@ -742,7 +797,7 @@ func (e *Engine) poolRoom(now time.Time) int64 {
 // room is volume_size minus what is already on it; a fresh or recycled reel
 // offers a whole volume_size. Negative = unbounded (the medium has no reel size).
 func (e *Engine) volumeRoom(now time.Time) int64 {
-	exp, ok := e.ExpectedTape(now)
+	exp, ok := e.ExpectedVolume(now)
 	if !ok || exp.VolumeBytes <= 0 {
 		return -1
 	}
@@ -801,34 +856,22 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 	}
 
 	now := time.Now().UTC()
-	lib := librarian.New(e.vol, e.mediumName, e.cat, e.op, e.cfg.AutoLabel)
-	partSize, err := e.partSizeFor(e.mediumName)
-	if err != nil {
-		return nil, err
-	}
-	appendable := e.mediumDef.IsAppendable()
-	expect := e.expectedTapeFor(e.mediumName, now).Label
-	volName, epoch, err := lib.PrepareWrite(appendable, expect, now, librarian.Logf(logf))
-	if err != nil {
-		return nil, err
-	}
-
 	slotID, seq, err := e.allocSlotID(date)
 	if err != nil {
 		return nil, err
 	}
 	s := slot.NewSlot(slotID, slot.DateString(date), seq, "nbdump", time.Now().UTC())
-	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
-	w, err := slotio.NewWriter(sink, s, e.codec, e.fopts)
+	wt, err := e.prepareWriter(e.mediumName, s, now, logf)
 	if err != nil {
 		return nil, err
 	}
+	w := wt.w
 
 	// A spanning-capable landing (a finite tape changer, or part_size set) writes one
 	// drive serially: it cannot interleave two archives' parts and roll mid-write, so
 	// dumpers are clamped to 1. Disk (unbounded) keeps the configured parallelism.
 	dumpers := e.cfg.Dumpers()
-	if dumpers > 1 && lib.CanSpan(partSize) {
+	if dumpers > 1 && wt.lib.CanSpan(wt.partSize) {
 		logf.log("medium %q can span volumes; running 1 dumper (a single drive writes serially)", e.mediumName)
 		dumpers = 1
 	}
@@ -1195,19 +1238,6 @@ func (e *Engine) openArchive(slotID, dle string, level int, codec, encrypt strin
 		lastErr = fmt.Errorf("no copy of %s %s L%d in the catalog", slotID, dle, level)
 	}
 	return nil, lastErr
-}
-
-// DLEsInSlot returns the distinct DLE names archived in a slot.
-func (e *Engine) DLEsInSlot(s *slot.Slot) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, a := range s.Archives {
-		if !seen[a.DLE] {
-			seen[a.DLE] = true
-			out = append(out, a.DLE)
-		}
-	}
-	return out
 }
 
 // Verify checks the checksums of the given slots (all if none given).

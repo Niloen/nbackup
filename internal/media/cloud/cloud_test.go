@@ -1,13 +1,17 @@
 package cloud
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
 	"sync"
 	"testing"
 
+	"gocloud.dev/blob"
+
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/media/fslike"
 )
 
 // openVol opens a fresh in-memory cloud volume. The mem:// driver needs no
@@ -77,17 +81,43 @@ func TestVolumeRoundTrip(t *testing.T) {
 // to skip) under the expected slots/<slot>/ key, with a separate .hdr sidecar —
 // so a plain GET yields a stock-tool-usable file, exactly as the disk medium does.
 func TestCleanPayloadObject(t *testing.T) {
-	cv := openVol(t).(*volume)
-	pos := appendArchive(t, cv, "slot-2026-06-22", "h-data", 0, "hello world")
+	// Drive the blob store directly so the on-bucket object keys can be inspected.
+	ctx := context.Background()
+	bucket, err := blob.OpenBucket(ctx, "mem://")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bucket.Close()
+	v, err := fslike.Open(blobStore{ctx: ctx, bucket: bucket})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendArchive(t, v, "slot-2026-06-22", "h-data", 0, "hello world")
 
-	e := cv.idx[pos]
-	if !strings.HasPrefix(e.payload, "slots/slot-2026-06-22/") || !strings.HasSuffix(e.payload, ".tar") {
-		t.Errorf("payload key = %q, want slots/slot-2026-06-22/…​.tar", e.payload)
+	var payloadKey, hdrKey string
+	iter := bucket.List(nil)
+	for {
+		obj, err := iter.Next(ctx)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case strings.HasSuffix(obj.Key, ".hdr"):
+			hdrKey = obj.Key
+		case strings.HasSuffix(obj.Key, ".tar"):
+			payloadKey = obj.Key
+		}
 	}
-	if !strings.HasSuffix(e.hdr, ".hdr") {
-		t.Errorf("header key = %q, want a .hdr sidecar", e.hdr)
+	if !strings.HasPrefix(payloadKey, "slots/slot-2026-06-22/") {
+		t.Errorf("payload key = %q, want slots/slot-2026-06-22/…​.tar", payloadKey)
 	}
-	raw, err := cv.bucket.ReadAll(cv.ctx, e.payload)
+	if hdrKey == "" {
+		t.Errorf("no .hdr sidecar object written")
+	}
+	raw, err := bucket.ReadAll(ctx, payloadKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +210,7 @@ func TestRemoveSlot(t *testing.T) {
 // TestAbortedWriteLeavesNoObject confirms a failed payload write does not commit a
 // partial object — the same atomicity the disk and tape media rely on.
 func TestAbortedWriteLeavesNoObject(t *testing.T) {
-	cv := openVol(t).(*volume)
+	cv := openVol(t)
 	wantErr := fmt.Errorf("boom")
 	_, err := cv.AppendFile(
 		media.Header{Slot: "slot-x", Kind: media.KindArchive, DLE: "h-data", Codec: "none"},

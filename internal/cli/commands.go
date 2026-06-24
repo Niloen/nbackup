@@ -89,7 +89,7 @@ func newPlanCmd(a *app) *cobra.Command {
 			} else {
 				fmt.Printf("Capacity: unbounded\n")
 			}
-			if exp, ok := eng.ExpectedTape(date); ok {
+			if exp, ok := eng.ExpectedVolume(date); ok {
 				fmt.Printf("Tape: %s\n", describeExpectation(exp, date))
 			}
 			return nil
@@ -174,9 +174,9 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 // describeExpectation renders the tape the next run will write to (Amanda's
 // "amdump will expect tape X") for `nb plan`, with the volume's age relative to
 // the run date.
-func describeExpectation(exp engine.TapeExpectation, date time.Time) string {
+func describeExpectation(exp engine.VolumeExpectation, date time.Time) string {
 	if exp.Appendable {
-		if exp.NewTape {
+		if exp.FreshVolume {
 			return fmt.Sprintf("expects a fresh tape (pool %q is empty)", exp.Medium)
 		}
 		if exp.VolumeBytes > 0 {
@@ -186,7 +186,7 @@ func describeExpectation(exp engine.TapeExpectation, date time.Time) string {
 		}
 		return fmt.Sprintf("appends to %q", exp.Label)
 	}
-	if exp.NewTape {
+	if exp.FreshVolume {
 		return fmt.Sprintf("expects a fresh tape (no reusable volume in pool %q)", exp.Medium)
 	}
 	age := int(date.Sub(exp.WrittenAt).Hours() / 24)
@@ -439,19 +439,26 @@ func copiesSummary(ps []catalog.Placement) string {
 	}
 	names := make([]string, 0, len(ps))
 	for _, p := range ps {
-		labeled := make([]string, 0, 2)
-		for _, v := range p.Volumes() {
-			if v != "" && v != p.Medium {
-				labeled = append(labeled, v)
-			}
-		}
-		if len(labeled) > 0 {
+		if labeled := placementVolumes(p); len(labeled) > 0 {
 			names = append(names, p.Medium+":"+strings.Join(labeled, "+"))
 		} else {
 			names = append(names, p.Medium)
 		}
 	}
 	return strings.Join(names, ", ")
+}
+
+// placementVolumes lists a placement's volume labels that differ from the medium
+// name — the labeled tapes a slot's copy spans (empty for address-identified media,
+// whose volume label is just the medium name).
+func placementVolumes(p catalog.Placement) []string {
+	labeled := make([]string, 0, 2)
+	for _, v := range p.Volumes() {
+		if v != "" && v != p.Medium {
+			labeled = append(labeled, v)
+		}
+	}
+	return labeled
 }
 
 func newSlotShowCmd(a *app) *cobra.Command {
@@ -494,13 +501,7 @@ func newSlotShowCmd(a *app) *cobra.Command {
 			fmt.Fprintln(ptw, "  MEDIUM\tVOLUMES\tPOSITIONS")
 			for _, p := range placements {
 				volumes := "-"
-				labeled := make([]string, 0, 2)
-				for _, v := range p.Volumes() {
-					if v != "" && v != p.Medium {
-						labeled = append(labeled, v)
-					}
-				}
-				if len(labeled) > 0 {
+				if labeled := placementVolumes(p); len(labeled) > 0 {
 					volumes = strings.Join(labeled, "+")
 				}
 				positions := make([]string, 0, len(p.Archives))
@@ -610,36 +611,24 @@ func newCopyCmd(a *app) *cobra.Command {
 	return cmd
 }
 
-// runCopyDryRun previews `nb copy` without writing: it resolves the source and
-// target, confirms the slot exists, and reports whether a copy would be made or
-// the slot is already on the target — matching the dry-run shape of sync/prune.
+// runCopyDryRun previews `nb copy` without writing, rendering the engine's CopyPlan
+// (the same resolve/validate/already-present rules CopySlot applies) — matching the
+// dry-run shape of sync/prune.
 func runCopyDryRun(cfg *config.Config, slotID, from, to string, force bool) error {
 	eng, err := newEngine(cfg)
 	if err != nil {
 		return err
 	}
-	s, err := eng.Catalog().ReadSlot(slotID)
+	plan, err := eng.PlanCopy(slotID, from, to, force)
 	if err != nil {
 		return err
 	}
-	src := from
-	if src == "" {
-		src = eng.Landing()
-	}
-	if _, ok := eng.Medium(to); !ok {
-		return fmt.Errorf("unknown medium %q", to)
-	}
-	if src == to {
-		return fmt.Errorf("source and target are the same medium %q", to)
-	}
-	for _, p := range eng.Catalog().Placements(slotID) {
-		if p.Medium == to && !force {
-			fmt.Printf("%s -> %s: %s already on target; nothing to copy (use --force to re-copy)\n", src, to, slotID)
-			return nil
-		}
+	if plan.AlreadyOnTarget {
+		fmt.Printf("%s -> %s: %s already on target; nothing to copy (use --force to re-copy)\n", plan.From, plan.To, slotID)
+		return nil
 	}
 	fmt.Printf("%s -> %s: would copy %s (%d archive(s), %s). Re-run with --apply to copy.\n",
-		src, to, slotID, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes))
+		plan.From, plan.To, slotID, plan.Archives, sizeutil.FormatBytes(plan.Bytes))
 	return nil
 }
 

@@ -117,16 +117,23 @@ func (p sizeProfile) Reclaim(slots []*slot.Slot, protected map[string]string, no
 // reels by hand, so only the per-run reel ceiling (VolumeSize) is finite.
 func NewVolumeProfile(opts Options) (Profile, error) {
 	volumeSize, _ := parseBytes(opts.Get("volume_size"))
-	var volumes int64
+	return volumeProfile{volumes: volumeCount(opts), volumeSize: volumeSize}, nil
+}
+
+// volumeCount reads the retainable reel count from the same option key the changer
+// keys on, so the planner's pool capacity can never disagree with the medium it
+// lands on: a manual station (mode: manual) counts "reels", a robotic library counts
+// "bays", and a bare drive ("device") has an unbounded pool (0). This mirrors the
+// tape factory's key choice by convention — they read the same keys for the same shapes.
+func volumeCount(opts Options) int64 {
 	switch {
 	case opts.Get("device") != "":
-		volumes = 0 // bare drive: pool unbounded, only the reel is finite
+		return 0 // bare drive: pool unbounded, only the reel is finite
 	case opts.Get("mode") == "manual":
-		volumes = countOpt(opts.Get("reels"))
+		return countOpt(opts.Get("reels"))
 	default:
-		volumes = countOpt(opts.Get("bays"))
+		return countOpt(opts.Get("bays"))
 	}
-	return volumeProfile{volumes: volumes, volumeSize: volumeSize}, nil
 }
 
 // countOpt parses a volume count, defaulting to 1 (a medium always has at least

@@ -21,6 +21,7 @@ package librarian
 import (
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
@@ -35,10 +36,11 @@ import (
 // nil, so a manual swap degrades to an actionable error instead of blocking forever
 // waiting for a human.
 type Operator interface {
-	// Swap asks the operator to load a reel for the stated need and returns the
-	// chosen reel's id (from req.Shelf), or ok=false to abort (leaving the drive
-	// unchanged).
-	Swap(req SwapRequest) (reel string, ok bool)
+	// Swap asks the operator to load a volume for the stated need and returns the
+	// chosen volume's id (from req.Shelf), or ok=false to abort (leaving the drive
+	// unchanged). (The CLI presents this as a tape/reel swap; the seam itself is
+	// medium-neutral so a future removable medium can reuse it.)
+	Swap(req SwapRequest) (volume string, ok bool)
 }
 
 // SwapRequest describes why a manual tape swap is needed and what is available.
@@ -106,6 +108,21 @@ func New(vol media.Volume, medium string, cat *catalog.Catalog, op Operator, aut
 
 // Volume returns the underlying volume handle.
 func (l *Librarian) Volume() media.Volume { return l.vol }
+
+// Labeled reports whether the medium identifies itself with on-volume labels
+// (tape) rather than by address (disk, s3). It lets callers decide whether a label
+// protocol applies without type-asserting the Volume themselves.
+func (l *Librarian) Labeled() bool { _, ok := l.vol.(media.Labeled); return ok }
+
+// ReadFileAt mounts the volume holding a part (verifying its identity) and reads
+// the file at the given position. It keeps the mount-then-read sequence behind the
+// librarian seam so callers never hold the media.Volume to seek it directly.
+func (l *Librarian) ReadFileAt(volume string, epoch, pos int) (media.Header, io.ReadCloser, error) {
+	if err := l.MountVolume(volume, epoch); err != nil {
+		return media.Header{}, nil, err
+	}
+	return l.vol.ReadFile(pos)
+}
 
 // PrepareWrite enforces the label protocol on the loaded volume before writing,
 // prompting a swap when the medium is a single drive whose loaded reel won't do.
@@ -207,44 +224,53 @@ func (l *Librarian) autoLabelName(now time.Time) string {
 // reports whether the new volume started with no runs (so the caller can tell "slot
 // too big for any volume" from "the previous volume was nearly full").
 func (l *Librarian) Advance(appendable bool, tried map[string]bool, expect string, now time.Time, logf Logf) (volName string, epoch int, wasEmpty bool, err error) {
-	// A robotic library rolls itself onto its next writable bay.
-	if l.isLibrary {
-		// The volume that just filled must not be rolled back to; mark it tried.
-		if st, ok := l.changer.Loaded(); ok {
-			tried[st.ID] = true
+	switch {
+	case l.isLibrary:
+		// A robotic library rolls itself onto its next writable bay.
+		return l.advanceViaLibrary(appendable, tried, now, logf)
+	case l.isStation:
+		// A single-drive station prompts the operator to load another reel.
+		return l.advanceViaShelf(appendable, tried, expect, now, logf)
+	default:
+		return "", 0, false, fmt.Errorf("medium %q is a single volume with no changer; it cannot span volumes", l.medium)
+	}
+}
+
+// advanceViaLibrary rolls a robotic library onto its next writable bay after the
+// loaded one filled: it marks the filled bay tried, then mounts each not-yet-tried
+// bay until one verifies writable (skipping wrong-pool / occupied / blank-without-
+// autoLabel bays), or reports that no further bay can be written.
+func (l *Librarian) advanceViaLibrary(appendable bool, tried map[string]bool, now time.Time, logf Logf) (string, int, bool, error) {
+	// The volume that just filled must not be rolled back to; mark it tried.
+	if st, ok := l.changer.Loaded(); ok {
+		tried[st.ID] = true
+	}
+	bays, err := l.changer.Bays()
+	if err != nil {
+		return "", 0, false, err
+	}
+	var lastErr error
+	for _, b := range bays {
+		if tried[b.ID] {
+			continue
 		}
-		bays, err := l.changer.Bays()
-		if err != nil {
+		tried[b.ID] = true
+		if err := l.changer.Mount(b.ID); err != nil {
 			return "", 0, false, err
 		}
-		var lastErr error
-		for _, b := range bays {
-			if tried[b.ID] {
-				continue
-			}
-			tried[b.ID] = true
-			if err := l.changer.Mount(b.ID); err != nil {
-				return "", 0, false, err
-			}
-			name, epoch, verr := l.verifyWritable(appendable, now)
-			if verr != nil {
-				lastErr = verr // wrong pool / holds runs / blank with autoLabel off: try the next bay
-				continue
-			}
-			empty := len(l.cat.SlotsOnVolume(name)) == 0
-			logf.log("medium %q: rolled to bay %s (volume %q)", l.medium, b.ID, name)
-			return name, epoch, empty, nil
+		name, epoch, verr := l.verifyWritable(appendable, now)
+		if verr != nil {
+			lastErr = verr // wrong pool / holds runs / blank with autoLabel off: try the next bay
+			continue
 		}
-		if lastErr == nil {
-			lastErr = fmt.Errorf("all %d bays are already loaded or tried", len(bays))
-		}
-		return "", 0, false, fmt.Errorf("medium %q has no further writable bay (load or relabel more tapes): %w", l.medium, lastErr)
+		empty := len(l.cat.SlotsOnVolume(name)) == 0
+		logf.log("medium %q: rolled to bay %s (volume %q)", l.medium, b.ID, name)
+		return name, epoch, empty, nil
 	}
-	// A single-drive station prompts the operator to load another reel.
-	if l.isStation {
-		return l.advanceViaShelf(appendable, tried, expect, now, logf)
+	if lastErr == nil {
+		lastErr = fmt.Errorf("all %d bays are already loaded or tried", len(bays))
 	}
-	return "", 0, false, fmt.Errorf("medium %q is a single volume with no changer; it cannot span volumes", l.medium)
+	return "", 0, false, fmt.Errorf("medium %q has no further writable bay (load or relabel more tapes): %w", l.medium, lastErr)
 }
 
 // advanceViaShelf prompts the operator to load another reel into a single-drive
@@ -569,13 +595,19 @@ func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration
 	}
 	logf.log("labeled %q as %q (epoch %d)", l.medium, name, epoch)
 
-	// A relabel wiped the old volume: drop the catalog placements that pointed at
-	// it so it stops reporting copies that no longer exist. A spanned slot has a
-	// placement on this medium that crosses the wiped tape; the span is now broken,
-	// so the whole medium copy goes (its other parts are orphaned, reclaimable
-	// bytes). This is targeted — unlike a full Rebuild it leaves every other medium
-	// and every intact tape on this one untouched, and it runs for any relabeled
-	// medium, not just the landing one.
+	return l.reconcileRelabel(wiped, lbl)
+}
+
+// reconcileRelabel updates the catalog after a (re)label wrote lbl. If wiped names
+// the volume the relabel overwrote, it drops the catalog placements that pointed at
+// it so it stops reporting copies that no longer exist: a spanned slot crossing the
+// wiped tape has its whole medium copy removed (its other parts are now orphaned,
+// reclaimable bytes). This is targeted — unlike a full Rebuild it leaves every other
+// medium and every intact tape on this one untouched, and it runs for any relabeled
+// medium, not just the landing one. It then registers the volume's new identity
+// (empty, fresh epoch) so the catalog reflects the relabel immediately rather than
+// learning it lazily at the next write.
+func (l *Librarian) reconcileRelabel(wiped string, lbl media.Label) error {
 	if wiped != "" {
 		for _, s := range l.cat.SlotsOnVolume(wiped) {
 			if _, err := l.cat.RemovePlacement(s.ID, l.medium); err != nil {
@@ -583,10 +615,8 @@ func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration
 			}
 		}
 	}
-	// Register the volume's new identity (empty, fresh epoch) so the catalog reflects
-	// the relabel immediately rather than learning it lazily at the next write.
 	if err := l.cat.RecordVolume(lbl); err != nil {
-		return fmt.Errorf("record relabeled volume %q: %w", name, err)
+		return fmt.Errorf("record relabeled volume %q: %w", lbl.Name, err)
 	}
 	return nil
 }

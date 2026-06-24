@@ -59,6 +59,10 @@ func (m *mtDevice) count() (int, error) {
 	return m.fileNumber()
 }
 
+// bytesUsed is unknowable for a real drive: software cannot see a tape's fill
+// without hitting EOT, so capacity tracking falls back to the reactive ErrVolumeFull.
+func (m *mtDevice) bytesUsed() int64 { return 0 }
+
 func (m *mtDevice) writeFile(write func(w io.Writer) error) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

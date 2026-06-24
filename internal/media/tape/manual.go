@@ -27,10 +27,10 @@ func reelName(i int) string { return fmt.Sprintf("%s%02d", reelPrefix, i) }
 // fixed "drive" position. It backs a shelfChanger (a robotic library is a
 // dirChanger).
 type manualChanger struct {
-	root      string
-	capacity  int64
-	mu        sync.Mutex
-	loadedBay string // physical reel dir in the drive ("" = drive empty)
+	root       string
+	capacity   int64
+	mu         sync.Mutex
+	loadedReel string // physical reel dir in the drive ("" = drive empty)
 }
 
 func openManualChanger(root string, capacity int64, reels int) (*manualChanger, error) {
@@ -49,7 +49,7 @@ func openManualChanger(root string, capacity int64, reels int) (*manualChanger, 
 	}
 	c := &manualChanger{root: root, capacity: capacity}
 	if b, err := os.ReadFile(filepath.Join(root, loadedMarker)); err == nil {
-		c.loadedBay = strings.TrimSpace(string(b))
+		c.loadedReel = strings.TrimSpace(string(b))
 	}
 	return c, nil
 }
@@ -70,7 +70,7 @@ func (c *manualChanger) mount(reel string) (device, error) {
 	if err := os.WriteFile(filepath.Join(c.root, loadedMarker), []byte(reel), 0o644); err != nil {
 		return nil, err
 	}
-	c.loadedBay = reel
+	c.loadedReel = reel
 	return dev, nil
 }
 
@@ -79,25 +79,25 @@ func (c *manualChanger) mount(reel string) (device, error) {
 func (c *manualChanger) loaded() (device, string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.loadedBay == "" {
+	if c.loadedReel == "" {
 		return nil, "", false
 	}
-	dev, err := openDir(filepath.Join(c.root, c.loadedBay), c.capacity)
+	dev, err := openDir(filepath.Join(c.root, c.loadedReel), c.capacity)
 	if err != nil {
 		return nil, "", false
 	}
-	return dev, c.loadedBay, true
+	return dev, c.loadedReel, true
 }
 
 // loadedStatus inventories the reel currently in the drive; ok is false when empty.
 func (c *manualChanger) loadedStatus() (media.VolumeStatus, bool) {
 	c.mu.Lock()
-	loadedBay := c.loadedBay
+	loadedReel := c.loadedReel
 	c.mu.Unlock()
-	if loadedBay == "" {
+	if loadedReel == "" {
 		return media.VolumeStatus{}, false
 	}
-	st, err := c.reelStatus(loadedBay)
+	st, err := c.reelStatus(loadedReel)
 	if err != nil {
 		return media.VolumeStatus{}, false
 	}
@@ -108,7 +108,7 @@ func (c *manualChanger) loadedStatus() (media.VolumeStatus, bool) {
 // physical reel id (its durable identity; the operator types this or its label).
 func (c *manualChanger) shelf() ([]media.VolumeStatus, error) {
 	c.mu.Lock()
-	loadedBay := c.loadedBay
+	loadedReel := c.loadedReel
 	c.mu.Unlock()
 	entries, err := os.ReadDir(c.root)
 	if err != nil {
@@ -116,7 +116,7 @@ func (c *manualChanger) shelf() ([]media.VolumeStatus, error) {
 	}
 	var out []media.VolumeStatus
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), reelPrefix) || e.Name() == loadedBay {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), reelPrefix) || e.Name() == loadedReel {
 			continue
 		}
 		st, err := c.reelStatus(e.Name())
