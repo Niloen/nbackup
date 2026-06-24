@@ -1,0 +1,86 @@
+// Package report is NBackup's run-history and digest layer — the "did last night
+// work, and is anything trending bad?" answer for an unwatched, cron-driven
+// install. Every run-producing command (dump, sync, prune, verify, drill) records
+// one machine-readable Run when it finishes; the records are appended to an
+// inspectable history file in the catalog workdir (run-log.jsonl), with the latest
+// also written as run-summary.json for a monitoring system to scrape. `nb report`
+// renders the recent history as a digest, and the notify layer turns a record into
+// an alert.
+//
+// It is a leaf, like drill/policy: pure record types plus their file persistence
+// and rendering. It never imports the engine (the engine and the CLI import it),
+// and — like progress.NewFileSink and drill.Ledger — a write error here is a
+// warning the caller logs, never something that fails a backup.
+package report
+
+import "time"
+
+// Command is the run-producing command that emitted a record.
+type Command string
+
+const (
+	CommandDump   Command = "dump"
+	CommandSync   Command = "sync"
+	CommandPrune  Command = "prune"
+	CommandVerify Command = "verify"
+	CommandDrill  Command = "drill"
+)
+
+// Outcome is the coarse success/failure class the notify layer routes on.
+type Outcome string
+
+const (
+	OutcomeSuccess Outcome = "success"
+	OutcomeFailure Outcome = "failure"
+)
+
+// Run is one invocation's machine-readable summary — the uniform record across
+// dump/sync/verify/drill/prune. It is a superset of fields; each command fills the
+// ones it has and leaves the rest zero (so the JSON stays compact via omitempty).
+// A slice of these is the history `nb report` summarizes and the basis of every
+// notification.
+type Run struct {
+	Command   Command   `json:"command"`
+	StartedAt time.Time `json:"started_at"`
+	EndedAt   time.Time `json:"ended_at"`
+	Outcome   Outcome   `json:"outcome"`
+	// ExitClass is a short, stable token for *why* a run failed (e.g. "dump-failed",
+	// "drill-failures", "verify-failures", "sync-error", "prune-error", "error"),
+	// empty on success — the machine-routable analogue of drill.Class for a whole run.
+	ExitClass string `json:"exit_class,omitempty"`
+	// Error is the top-level error message when Outcome is OutcomeFailure.
+	Error string `json:"error,omitempty"`
+
+	// What ran / moved. "Bytes moved" is uniform across commands: bytes sealed
+	// (dump), copied (sync), or freed (prune) by this run.
+	SlotID      string `json:"slot_id,omitempty"`      // dump: the sealed slot
+	Archives    int    `json:"archives,omitempty"`     // dump: archive count
+	BytesMoved  int64  `json:"bytes_moved,omitempty"`  // dump sealed / sync copied / prune freed
+	SlotsCopied int    `json:"slots_copied,omitempty"` // sync
+	SlotsPruned int    `json:"slots_pruned,omitempty"` // prune
+	Failures    int    `json:"failures,omitempty"`     // verify/drill failure count
+
+	// Drill-only coverage + per-DLE health, so a digest can flag trends.
+	DrillHealth  []DrillHealth `json:"drill_health,omitempty"`
+	Skipped      int           `json:"skipped,omitempty"`       // drill: unattended skips
+	Overdue      int           `json:"overdue,omitempty"`       // drill: DLEs not covered within the window
+	NeverDrilled []string      `json:"never_drilled,omitempty"` // drill: DLEs never drilled
+}
+
+// DrillHealth is one DLE's outcome in a drill run alongside its prior ledger state,
+// so a report can say *degrading* (passed before, failing now) versus a first-time
+// failure, or simply confirm a still-healthy DLE.
+type DrillHealth struct {
+	DLE     string `json:"dle"`
+	OK      bool   `json:"ok"`              // this run's outcome
+	Class   string `json:"class,omitempty"` // drill.Class token when !OK
+	WasOK   bool   `json:"was_ok"`          // the prior ledger record passed
+	Drilled bool   `json:"drilled"`         // actually exercised this run (vs skipped)
+}
+
+// Degrading reports a DLE that was passing and is now failing — the trend a digest
+// must surface most loudly.
+func (h DrillHealth) Degrading() bool { return h.Drilled && !h.OK && h.WasOK }
+
+// Failed reports whether the run did not succeed.
+func (r Run) Failed() bool { return r.Outcome == OutcomeFailure }

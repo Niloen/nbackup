@@ -268,6 +268,76 @@ state per DLE (no separate dumper/taper queues). `nb status --watch 2s`
 refreshes until the run finishes; afterwards `nb status` shows the last run's
 final result.
 
+### Reporting & alerting (unattended)
+
+`nb status` shows one live run; for a hands-off install you also want the *history*
+and a way to be told when something breaks. Every mutating command (`dump`, `sync`,
+`prune`, `verify`, `drill`) records a machine-readable summary of its run to the
+catalog workdir — appended to `run-log.jsonl` and mirrored as `run-summary.json`
+(scrape it from a monitoring system) — and exits non-zero on failure.
+
+`nb report` summarizes the recent history — what ran, what failed, bytes moved —
+and a recovery-health audit that flags any DLE whose drills are failing, *degrading*
+(passed before, failing now), stale, or never run:
+
+```text
+NBackup report — 3 run(s) from 2026-06-23 02:00 to 2026-06-23 02:25
+1 run(s) FAILED, 10.74 GB moved
+
+WHEN              COMMAND  OUTCOME  DETAIL
+2026-06-23 02:25  drill    FAILED   1 failure(s), 1 overdue
+2026-06-23 02:13  sync     OK       1 slot(s) copied, 5.37 GB
+2026-06-23 02:00  dump     OK       slot-2026-06-23, 3 archive(s), 5.37 GB
+
+FAILURES
+  2026-06-23 02:25 drill [drill-failures]: 1 drill failure(s) — recovery is at risk
+
+DRILL COVERAGE
+  FAILING DLE  CLASS     LAST DRILL        REMEDY
+  app01-home   pipeline  2026-06-23 02:25  the archive would not decrypt/decompress/untar — …
+  stale (overdue past 30d): app01-etc (84d ago)
+```
+
+`nb report --last 30` widens the window; `nb report --json` emits the raw records.
+
+To push failures to a human, add a `notify:` block (see `nbackup.example.yaml`).
+Backends are pluggable — built-in **email (SMTP)** and a generic **webhook**
+(Slack/Discord/PagerDuty-compatible):
+
+```yaml
+notify:
+  on_failure: [email, slack]   # omit to alert every backend
+  # on_success: [email]        # see below — dump already notifies on success
+  digest: [email]              # for `nb report --notify`
+  backends:
+    email:
+      type: smtp
+      host: smtp.example.com
+      from: nbackup@example.com
+      to: [ops@example.com]
+      password_env: SMTP_PASS        # env var name — never the secret itself
+    slack:
+      type: webhook
+      url_env: SLACK_WEBHOOK_URL
+```
+
+**What notifies, when:** any command **alerts on failure** by default (to every
+backend, unless `on_failure` narrows it). A successful **`nb dump`** also notifies by
+default — the nightly "backups happened" signal, so a silent inbox means cron didn't
+run, not that all is well. The other commands' success is opt-in: list backends in
+`on_success` to also get success notices for `sync`/`verify`/`drill`/`prune` (that
+list then applies to dump too).
+
+Secrets are referenced by environment-variable *name* and resolved at send time, so
+nothing sensitive lives in the config (a literal `password:` is rejected). A
+notification failure — an unreachable mail server, a missing secret, a hung endpoint
+— is only ever a stderr warning: it never fails or blocks the backup. So a complete
+hands-off cron line is:
+
+```sh
+nb dump && nb sync && nb drill --unattended; nb report --notify
+```
+
 ### Recover (restore a whole DLE, or pick files)
 
 `nb recover` recovers from backups **as they stood on a date**, in two modes.
@@ -344,7 +414,7 @@ nb drill                       # drill the riskiest sample on the landing copy
 nb drill --dry-run             # preview: what would be drilled + a posture audit
 nb drill --from cloud --tier structural   # routine offsite check
 nb drill --tier stock          # restore via the documented gpg/zstd/tar one-liner
-nb dump && nb sync && nb drill --unattended   # hands-off cron line
+nb dump && nb sync && nb drill --unattended; nb report --notify   # hands-off cron line
 ```
 
 A drill **selects** risk-first: it rotates DLEs so each is drilled within a window,
@@ -533,7 +603,8 @@ audits *every* copy, reporting that an intact copy remains when one is damaged),
 balanced **multilevel (L0–L9)** planning with a GNU
 tar snapshot library, immutable sealed slots with **sequence-suffixed** same-day
 runs, **deletion-aware** incremental restore, checksum verification, point-in-time
-restore, per-medium capacity reporting, cycle-safe pruning.
+restore, per-medium capacity reporting, cycle-safe pruning, **unattended reporting
+and alerting** (`nb report`, pluggable email/webhook notifications).
 
 ### Tape
 

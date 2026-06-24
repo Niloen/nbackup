@@ -57,6 +57,8 @@ registry registration, not a conditional in the core.
 | `streamproc` | the shared "external stream-transform child" plumbing (stdin→stdout, optional `nice`) that `filter` and `crypt` both run on | — |
 | `xfer` | in-process stream metering: checksum + byte counting | Xfer API |
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
+| `report` | per-run history record + JSONL/summary file I/O + digest render | amreport |
+| `notify` | pluggable alert backends (smtp/webhook) + registry + dispatch | amreport mailto |
 | `catalog` | local cache of slot index + volume registry + snapshot library; derives `History` | catalog / curinfo / tapelist |
 | `policy` | retention safety floor: protected slots (pure) | policy |
 | `restore` | the archive chain to rebuild a DLE as of a slot (pure) | amrestore |
@@ -68,7 +70,9 @@ registry registration, not a conditional in the core.
 
 Dependencies flow one way: `cli → engine → {planner, policy, method, filter,
 crypt, slotio, catalog, config, progress, restore, recovery}` over leaf packages
-`{media, xfer, slot, sizeutil}` (`recovery` builds on `restore`).
+`{media, xfer, slot, sizeutil}` (`recovery` builds on `restore`). The reporting
+layer adds `cli → {report, notify}` with `notify → {report, config}` — `report` is a
+pure leaf (record + render); the engine does **not** depend on either.
 Domain packages stay pure; `method`/`media`/`filter`/`crypt` are pluggable adapters;
 `engine` is the only component aware of all of them. A backup is a pipeline of
 processes: **source** (`tar` via `method.Backup`) → **filter** (compressor child)
@@ -357,6 +361,40 @@ per DLE, metered by uncompressed bytes against the planner estimate. The new
 measurement point is an uncompressed `xfer.Counter` on the tar→compressor stream
 in `slotio.WriteArchive`; compressed bytes come from the existing `xfer.Meter`
 (now atomic so it can be polled live).
+
+**Reporting + alerting make an unwatched failure loud (`nb report`, `notify:`).**
+Where `progress` is the *live* run-status of one in-flight dump, `report` is the
+*historical* record of finished runs across every command, and `notify` pushes a
+failure to a human — the "0 errors" half of 3-2-1-1-0 only matters if a non-zero
+result reaches someone. Three load-bearing choices, all mirroring existing stances:
+- **One seam, not per-command.** Every run-producing command (`dump`, `sync`,
+  `prune`, `verify`, `drill`) runs its body through `cli.runReported`, which stamps
+  the outcome, appends a uniform `report.Run` to `<workdir>/run-log.jsonl` (one
+  compact JSON line; the latest also written as `run-summary.json` for a monitor to
+  scrape), and dispatches notifications. The engine is **unchanged** — it already
+  returns rich reports and already exits non-zero on failure; recording is pure CLR
+  glue over two new leaf packages. Dry-runs record nothing.
+- **Recording is best-effort, exit codes are sacred.** A summary-write or
+  notification error is a stderr warning and never changes — nor suppresses — the
+  run's own exit code (the `progress.NewFileSink` contract). `runReported` returns
+  the body's error verbatim.
+- **Failures are always loud; a successful `dump` is loud too, by default.** Any
+  command alerts on failure (every backend unless `on_failure` narrows it). Routing
+  also notifies on a *successful* `dump` by default — the nightly "backups happened"
+  signal, so a silent inbox reads as "cron didn't run" rather than "all is well";
+  the other commands' success stays opt-in via `on_success` (which, when set, applies
+  to every command). This is the one place routing keys on the command, kept in
+  `notify.routeFor`, not smeared across the seam.
+- **History is append-only JSONL; alerts are a registry; secrets are env-refs.**
+  The log appends (O(1)) and compacts to a bounded tail, and a reader tolerates a
+  torn trailing line (the one unlocked writer, `nb verify`, may race `nb report`).
+  A notify backend is a registered name (`smtp`/`webhook`) like `filter`/`crypt`, so
+  adding a channel is a registration. Secrets (SMTP password, webhook URL) are named
+  environment variables resolved at send time, never stored — and a literal
+  `password:`/`token:` key is rejected structurally by `KnownFields(true)`. `nb
+  report` (read-only, no engine) renders the recent history plus a live
+  drill-ledger recovery audit (failing / degrading / stale / never-drilled DLEs via
+  `drill.Ledger.Coverage`); `nb report --notify` mails the same digest.
 
 **Reclamation asymmetry.** Disk/S3 reclaim per slot (`RemoveSlot`); tape reclaims a
 whole volume (relabel — `tape.RemoveSlot` errors, and `volumeProfile.Reclaim`

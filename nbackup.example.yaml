@@ -111,6 +111,44 @@ landing: fast-disk
 #                       # configure it operator-side on the storage.
 #   unattended: false   # cron mode: never prompt; skip targets needing a tape swap
 
+# Unattended alerting. Every dump/sync/verify/drill/prune writes a machine-readable
+# run record to the workdir (run-log.jsonl + run-summary.json); `nb report`
+# summarizes the recent runs and recovery health. The `notify:` block makes failures
+# loud without a human at the console: a failed run reaches the configured channels,
+# and `nb report --notify` mails the nightly digest. A notification problem is only
+# ever a stderr warning — it never fails or blocks the backup.
+#
+# SECRETS ARE NEVER STORED HERE. An SMTP password or a Slack/Discord/PagerDuty
+# webhook URL is referenced by the NAME of an environment variable (password_env,
+# url_env) and resolved at send time, like cloud credentials. A literal `password:`
+# or `token:` key is rejected as an unknown field — the config never hoards secrets.
+# notify:
+#   on_failure: [email, slack]   # channels to alert on a failed run
+#                                # (omit to alert EVERY backend — failures must be loud)
+#   # on_success: [email]        # A successful `nb dump` notifies EVERY backend by
+#                                # default — the nightly "backups happened" signal, so
+#                                # an empty inbox means cron didn't run, not that all is
+#                                # well. Other commands' success is opt-in: list backends
+#                                # here to also get success notices for sync/verify/drill/
+#                                # prune (the list then applies to dump too).
+#   digest: [email]              # channels for `nb report --notify` (the nightly summary)
+#   backends:
+#     email:
+#       type: smtp
+#       host: smtp.example.com
+#       port: 587                # default 587
+#       from: nbackup@example.com
+#       to: [ops@example.com]    # one or more recipients
+#       username: nbackup        # optional (defaults to `from`)
+#       password_env: SMTP_PASS  # env var holding the password — NOT the password
+#     slack:
+#       type: webhook            # generic JSON POST (Slack/Discord/PagerDuty-compatible)
+#       url_env: SLACK_WEBHOOK_URL   # env var holding the (secret) webhook URL
+#       # url: https://hooks.example.com/non-secret   # only for a non-secret endpoint
+#       # template: text         # payload field for the message (default "text"; Slack/Discord ready)
+#       # headers:               # optional extra HTTP headers
+#       #   Authorization: "Bearer ..."
+
 # Where the catalog's local state (slot cache + tar snapshots) lives. This is the
 # catalog's own directory, independent of any storage medium — the catalog is a
 # cache over the whole pool, not part of one medium. Defaults to ./nbackup-catalog.

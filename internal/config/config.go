@@ -88,6 +88,12 @@ type Config struct {
 	// `nb dump && nb sync && nb drill --unattended`.
 	Drill DrillConfig `yaml:"drill"`
 
+	// Notify configures unattended alerting: which channels fire on a run's
+	// failure/success, and which receive `nb report --notify` digests. It is what
+	// makes a cron-driven backup loud — a failed dump/sync/verify/drill reaches a
+	// human. Secrets are referenced by environment variable, never stored here.
+	Notify NotifyConfig `yaml:"notify"`
+
 	// DumpTypes is a map of named method+option bundles (Amanda's dumptype).
 	DumpTypes map[string]DumpType `yaml:"dumptypes"`
 
@@ -109,6 +115,45 @@ type DrillConfig struct {
 // validDrillTiers is the accepted set for the drill tier token (kept here so config
 // validation needs no dependency on package drill, which depends on no config).
 var validDrillTiers = map[string]bool{"": true, "checksum": true, "structural": true, "chain": true, "stock": true}
+
+// NotifyConfig is the `notify:` block: a set of named backends plus per-outcome
+// routing. Failures must be loud, so when on_failure is omitted every configured
+// backend fires on failure; success and digest notifications are opt-in. It mirrors
+// the declarative shape of the sync/drill blocks.
+type NotifyConfig struct {
+	OnFailure []string `yaml:"on_failure"` // backends to notify on a failed run ("" = all backends)
+	OnSuccess []string `yaml:"on_success"` // backends to notify on a successful run (default: none)
+	Digest    []string `yaml:"digest"`     // backends for `nb report --notify` (default: none)
+
+	Backends map[string]NotifyBackend `yaml:"backends"`
+}
+
+// NotifyBackend is one named notification channel. Connection settings are explicit
+// fields (so `KnownFields(true)` rejects a stray key — including a literal
+// `password:`/`token:`, which structurally enforces the env-reference rule below).
+// Secrets are NEVER stored: they are named environment variables (password_env,
+// url_env) resolved at send time, mirroring crypt's orchestrate-don't-hoard stance.
+type NotifyBackend struct {
+	Type string `yaml:"type"` // smtp | webhook (a registered notifier name)
+
+	// smtp
+	Host        string   `yaml:"host"`
+	Port        int      `yaml:"port"`
+	From        string   `yaml:"from"`
+	To          []string `yaml:"to"`
+	Username    string   `yaml:"username"`
+	PasswordEnv string   `yaml:"password_env"` // env var holding the SMTP password (never the password itself)
+
+	// webhook
+	URL      string            `yaml:"url"`      // a non-secret endpoint; prefer url_env for anything secret
+	URLEnv   string            `yaml:"url_env"`  // env var holding the webhook URL (Slack/Discord/PagerDuty secret)
+	Headers  map[string]string `yaml:"headers"`  // optional extra HTTP headers
+	Template string            `yaml:"template"` // optional payload field name for the message (default "text")
+}
+
+// validNotifyTypes is the accepted set for a backend's type (kept here so config
+// validation needs no dependency on package notify, which depends on config).
+var validNotifyTypes = map[string]bool{"smtp": true, "webhook": true}
 
 // Sources is the disklist. In config it is written grouped by dumptype, then
 // host, then a list of paths:
@@ -354,6 +399,46 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateDrill(); err != nil {
 		return err
+	}
+	if err := c.validateNotify(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateNotify checks the optional `notify:` block: every backend has a known
+// type and its required connection fields, and every routing entry names a defined
+// backend. The env-reference secrets rule is enforced structurally by
+// KnownFields(true) (a literal password/token key is an unknown field).
+func (c *Config) validateNotify() error {
+	n := c.Notify
+	if len(n.Backends) == 0 {
+		if len(n.OnFailure)+len(n.OnSuccess)+len(n.Digest) > 0 {
+			return fmt.Errorf("notify: routing names a backend but no backends are defined")
+		}
+		return nil
+	}
+	for name, b := range n.Backends {
+		if !validNotifyTypes[b.Type] {
+			return fmt.Errorf("notify: backend %q: unknown type %q (known: smtp, webhook)", name, b.Type)
+		}
+		switch b.Type {
+		case "smtp":
+			if b.Host == "" || b.From == "" || len(b.To) == 0 {
+				return fmt.Errorf("notify: smtp backend %q requires host, from, and at least one recipient (to)", name)
+			}
+		case "webhook":
+			if b.URLEnv == "" && b.URL == "" {
+				return fmt.Errorf("notify: webhook backend %q requires url_env (preferred for secret endpoints) or url", name)
+			}
+		}
+	}
+	for _, group := range [][]string{n.OnFailure, n.OnSuccess, n.Digest} {
+		for _, name := range group {
+			if _, ok := n.Backends[name]; !ok {
+				return fmt.Errorf("notify: routing references undefined backend %q", name)
+			}
+		}
 	}
 	return nil
 }

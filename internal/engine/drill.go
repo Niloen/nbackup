@@ -450,20 +450,10 @@ func failureToken(r DrillResult) string {
 }
 
 // coverage reports the configured DLEs that have never been drilled and how many are
-// not covered within the window (never-drilled or last drill too old / failing).
+// not covered within the window. It delegates to drill.Coverage — the pure
+// computation lives in the leaf with the ledger, so `nb report` reuses it too.
 func coverage(dles []string, ledger *drill.Ledger, window time.Duration, now time.Time) (never []string, overdue int) {
-	for _, d := range dles {
-		rec, ok := ledger.Get(d)
-		if !ok || rec.LastDrill.IsZero() {
-			never = append(never, d)
-			overdue++
-			continue
-		}
-		if !ledger.Drilled(d, window, now) {
-			overdue++
-		}
-	}
-	return never, overdue
+	return ledger.Coverage(dles, window, now)
 }
 
 // WormResult is the outcome of the WORM/immutability probe against a medium.

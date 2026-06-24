@@ -1,0 +1,60 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/notify"
+	"github.com/Niloen/nbackup/internal/report"
+)
+
+// dispatchNotify delivers a finished run to the backends routed for its outcome.
+// It is best-effort: nothing here ever fails or blocks the run (the caller has
+// already returned the run's own error); a notification problem is a stderr warning,
+// matching the progress/reporting stance.
+func (a *app) dispatchNotify(cfg *config.Config, rec report.Run) {
+	if len(cfg.Notify.Backends) == 0 {
+		return
+	}
+	notify.DispatchRun(context.Background(), cfg.Notify, a.notifyIdentity(), rec, notifyWarn)
+}
+
+// dispatchDigest sends an `nb report --notify` digest through the config's
+// notify.digest backends. The body is the same digest `nb report` prints.
+func (a *app) dispatchDigest(cfg *config.Config, runs []report.Run) {
+	if len(cfg.Notify.Digest) == 0 {
+		fmt.Fprintln(os.Stderr, "warning: --notify: no notify.digest backends configured")
+		return
+	}
+	var body bytes.Buffer
+	report.Render(&body, runs, time.Now())
+	renderDrillLedger(&body, cfg, time.Now())
+	subject := "nbackup report"
+	if host := hostname(); host != "" {
+		subject += " on " + host
+	}
+	notify.DispatchDigest(context.Background(), cfg.Notify, a.notifyIdentity(), subject, body.String(), notifyWarn)
+}
+
+// notifyIdentity is the host/config context stamped onto every notification subject.
+func (a *app) notifyIdentity() notify.Event {
+	return notify.Event{Host: hostname(), Config: a.cfgPath}
+}
+
+// notifyWarn logs a non-fatal notification problem to stderr.
+func notifyWarn(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "warning: "+format+"\n", args...)
+}
+
+// hostname returns the local host name for notification subjects, or "" if unknown.
+func hostname() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return h
+}

@@ -63,6 +63,26 @@ func (c Class) String() string {
 	}
 }
 
+// ParseClass resolves a Class from its stable token (the inverse of String) — used
+// to recover the failure class recorded in the ledger so a report can print its
+// Remedy. An unknown token (including "ok") yields ClassNone.
+func ParseClass(s string) Class {
+	switch s {
+	case "integrity":
+		return ClassIntegrity
+	case "pipeline":
+		return ClassPipeline
+	case "chain":
+		return ClassChain
+	case "missing":
+		return ClassMissing
+	case "skipped":
+		return ClassSkipped
+	default:
+		return ClassNone
+	}
+}
+
 // IsFailure reports whether the class counts as a drill failure — the outcomes that
 // must fail the run loudly. A skip (needs operator) and a pass do not.
 func (c Class) IsFailure() bool {
