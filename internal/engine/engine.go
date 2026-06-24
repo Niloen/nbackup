@@ -1,5 +1,5 @@
 // Package engine is NBackup's orchestrator, analogous to Amanda's driver. It
-// wires the planner, dump method, transfer pipeline, media store, catalog, and
+// wires the planner, archiver, transfer pipeline, media store, catalog, and
 // policy together to execute runs, restores, verification, and pruning. It is
 // the only place that knows about all the abstractions at once; everything below
 // it depends only on interfaces.
@@ -10,18 +10,19 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/filter"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/method"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/policy"
 	"github.com/Niloen/nbackup/internal/progress"
@@ -32,11 +33,11 @@ import (
 	"github.com/Niloen/nbackup/internal/slotio"
 	"github.com/Niloen/nbackup/internal/xfer"
 
-	// Register the bundled media and method implementations.
+	// Register the bundled media and archiver implementations.
+	_ "github.com/Niloen/nbackup/internal/archiver/gnutar"
 	_ "github.com/Niloen/nbackup/internal/media/cloud"
 	_ "github.com/Niloen/nbackup/internal/media/disk"
 	_ "github.com/Niloen/nbackup/internal/media/tape"
-	_ "github.com/Niloen/nbackup/internal/method/gnutar"
 )
 
 // Logf is an optional progress logger.
@@ -50,7 +51,7 @@ func (l Logf) log(format string, args ...any) {
 
 // Engine holds the wired-up components for one configuration. It owns the media
 // volume; the catalog is a local cache the engine refreshes from the volume.
-// Dump methods are resolved per dumptype and cached.
+// Archivers are resolved per dumptype and cached.
 type Engine struct {
 	cfg        *config.Config
 	mediumName string       // name of the medium new dumps land on
@@ -61,12 +62,12 @@ type Engine struct {
 	cost       media.Cost // landing medium's pricing (dollar peer of profile)
 	minAge     time.Duration
 	cat        *catalog.Catalog
-	methods    map[string]method.Method // by cache key (dumptype or "@method")
-	codec      string                   // compression codec for new archives
-	fopts      filter.Options           // codec invocation options (level/threads/nice)
-	dcopts     crypt.Options            // decrypt key reference for restore (from the default encrypt block)
-	op         librarian.Operator       // optional: handles manual tape swaps (nil = unattended)
-	limiters   map[string]*xfer.Limiter // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
+	archivers  map[string]archiver.Archiver // by cache key (dumptype or "@type")
+	codec      string                       // compression codec for new archives
+	fopts      filter.Options               // codec invocation options (level/threads/nice)
+	dcopts     crypt.Options                // decrypt key reference for restore (from the default encrypt block)
+	op         librarian.Operator           // optional: handles manual tape swaps (nil = unattended)
+	limiters   map[string]*xfer.Limiter     // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
 }
 
 // SetOperator attaches an operator so manual single-drive media can prompt for a
@@ -87,7 +88,7 @@ func (e *Engine) librarianFor(name string) (lib *librarian.Librarian, def config
 
 // New constructs an Engine from configuration: it opens the landing volume and
 // its capacity profile via the media registry, and loads the catalog cache
-// (refreshing it from the volume the first time it is needed). Dump methods are
+// (refreshing it from the volume the first time it is needed). Archivers are
 // opened lazily per dumptype.
 func New(cfg *config.Config) (*Engine, error) {
 	// Validate every medium's inline options against the keys its type accepts, so
@@ -105,7 +106,7 @@ func New(cfg *config.Config) (*Engine, error) {
 			return nil, fmt.Errorf("media %s: %w", mname, err)
 		}
 		// One shared limiter per medium, built once: the same instance throttles a
-		// medium's concurrent dumper writes (shared budget) and its read streams. A
+		// medium's concurrent worker writes (shared budget) and its read streams. A
 		// nil entry (the common, uncapped case) leaves the streams untouched.
 		bps, err := def.ThroughputBytes()
 		if err != nil {
@@ -162,7 +163,7 @@ func New(cfg *config.Config) (*Engine, error) {
 		cost:       costModel,
 		minAge:     minAge,
 		cat:        cat,
-		methods:    map[string]method.Method{},
+		archivers:  map[string]archiver.Archiver{},
 		codec:      cfg.CompressCodec(),
 		fopts:      fopts,
 		dcopts:     dcopts,
@@ -291,44 +292,49 @@ func (e *Engine) volumesInPool(medium string) []catalog.VolumeRecord {
 	return out
 }
 
-// methodForDumpType resolves and caches the dump method for a dumptype,
-// configured with the dumptype's options (plus the global tar path).
-func (e *Engine) methodForDumpType(dtName string) (method.Method, error) {
-	if m, ok := e.methods[dtName]; ok {
-		return m, nil
+// archiverFor resolves and caches the archiver for a dumptype: the dumptype's named
+// archiver definition (its type + options), with the state_dir default injected.
+func (e *Engine) archiverFor(dtName string) (archiver.Archiver, error) {
+	if d, ok := e.archivers[dtName]; ok {
+		return d, nil
 	}
 	dt := e.cfg.ResolveDumpType(dtName)
-	m, err := method.Open(dt.Method, e.methodOptions(dt.Params))
+	def := e.cfg.ResolveArchiver(dt.Archiver)
+	d, err := archiver.Open(def.Type, e.archiverOptions(def.Options))
 	if err != nil {
 		return nil, err
 	}
-	e.methods[dtName] = m
-	return m, nil
+	e.archivers[dtName] = d
+	return d, nil
 }
 
-// methodByName resolves and caches a method by name with only global options
-// (used for restore, where the archive records the producing method).
-func (e *Engine) methodByName(name string) (method.Method, error) {
-	key := "@" + name
-	if m, ok := e.methods[key]; ok {
-		return m, nil
+// archiverByType resolves and caches an archiver by its type name with default options
+// (used for restore, where the archive records the producing archiver's type).
+func (e *Engine) archiverByType(typeName string) (archiver.Archiver, error) {
+	key := "@" + typeName
+	if d, ok := e.archivers[key]; ok {
+		return d, nil
 	}
-	m, err := method.Open(name, e.methodOptions(nil))
+	d, err := archiver.Open(typeName, e.archiverOptions(nil))
 	if err != nil {
 		return nil, err
 	}
-	e.methods[key] = m
-	return m, nil
+	e.archivers[key] = d
+	return d, nil
 }
 
-// methodOptions merges dumptype params with global method configuration.
-func (e *Engine) methodOptions(params map[string]string) method.Options {
-	opts := method.Options{}
-	for k, v := range params {
+// archiverOptions copies an archiver definition's options and injects the state_dir
+// default (the per-DLE/per-level incremental-state library, beneath the workdir)
+// when the definition does not set one. The location is the orchestrator's to
+// default — an archiver cannot know the workdir — which is why it is injected here
+// (Amanda's compile-time GNUTAR-LISTDIR default, set by the caller instead).
+func (e *Engine) archiverOptions(options map[string]string) archiver.Options {
+	opts := archiver.Options{}
+	for k, v := range options {
 		opts[k] = v
 	}
-	if _, ok := opts["tar_path"]; !ok && e.cfg.GnuTarPath != "" {
-		opts["tar_path"] = e.cfg.GnuTarPath
+	if _, ok := opts["state_dir"]; !ok {
+		opts["state_dir"] = filepath.Join(e.cfg.WorkdirPath(), "snapshots")
 	}
 	return opts
 }
@@ -732,7 +738,7 @@ func (e *Engine) ValidatePlan() (warnings []string, err error) {
 	checkedEnc := map[string]bool{}
 	for _, d := range e.cfg.DLEs() {
 		dt := d.DumpTypeName()
-		if _, err := e.methodForDumpType(dt); err != nil {
+		if _, err := e.archiverFor(dt); err != nil {
 			return nil, fmt.Errorf("dumptype %q: %w", dt, err)
 		}
 		if !checkedEnc[dt] {
@@ -773,7 +779,7 @@ func (e *Engine) plannerParams(date time.Time) planner.Params {
 
 // estimates predicts, for each DLE, the size of a full and of the incremental at
 // its current level and the next (the inputs the planner's bump decision needs),
-// by asking the dump method (Amanda's "client" estimate). For gnutar this is a
+// by asking the archiver (Amanda's "client" estimate). For gnutar this is a
 // fast metadata-only tar pass; see gnutar.Estimate. Sizes are uncompressed — an
 // upper bound on the compressed bytes finally stored.
 func (e *Engine) estimates(dles []config.DLE) map[string]planner.Estimate {
@@ -788,11 +794,12 @@ func (e *Engine) estimates(dles []config.DLE) map[string]planner.Estimate {
 }
 
 func (e *Engine) estimateDLE(d config.DLE, name string, st *catalog.DLEState) planner.Estimate {
-	m, err := e.methodForDumpType(d.DumpTypeName())
+	m, err := e.archiverFor(d.DumpTypeName())
 	if err != nil || m.Check() != nil {
 		return planner.Estimate{} // no estimator available (e.g. tar missing)
 	}
-	full, _ := m.Estimate(method.BackupRequest{SourcePath: d.Path, Level: 0})
+	excl := e.cfg.ResolveDumpType(d.DumpTypeName()).Exclude
+	full, _ := m.Estimate(archiver.BackupRequest{DLE: name, SourcePath: d.Path, Level: 0, BaseLevel: -1, Exclude: excl})
 	if st.LastFullDate == "" {
 		return planner.Estimate{Full: full} // never fulled: only a full is possible
 	}
@@ -809,14 +816,14 @@ func (e *Engine) estimateDLE(d config.DLE, name string, st *catalog.DLEState) pl
 		lvl = planner.MaxLevel
 	}
 	est := planner.Estimate{Full: full}
-	if e.cat.SnapshotExists(name, lvl-1) {
-		est.Incr, _ = m.Estimate(method.BackupRequest{
-			SourcePath: d.Path, Level: lvl, BaseSnap: e.cat.SnapshotPath(name, lvl-1),
+	if m.HasBase(name, lvl-1) {
+		est.Incr, _ = m.Estimate(archiver.BackupRequest{
+			DLE: name, SourcePath: d.Path, Level: lvl, BaseLevel: lvl - 1, Exclude: excl,
 		})
 	}
-	if lvl < planner.MaxLevel && e.cat.SnapshotExists(name, lvl) {
-		est.IncrNext, _ = m.Estimate(method.BackupRequest{
-			SourcePath: d.Path, Level: lvl + 1, BaseSnap: e.cat.SnapshotPath(name, lvl),
+	if lvl < planner.MaxLevel && m.HasBase(name, lvl) {
+		est.IncrNext, _ = m.Estimate(archiver.BackupRequest{
+			DLE: name, SourcePath: d.Path, Level: lvl + 1, BaseLevel: lvl, Exclude: excl,
 		})
 	}
 	return est
@@ -892,16 +899,16 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 		logf.log("WARNING: %s", w)
 	}
 
-	// Pre-flight before creating a slot: the codec binary and every dump method.
-	// Resolving every method here also populates the method cache, so the parallel
-	// dumpers below only read it (no concurrent writes).
+	// Pre-flight before creating a slot: the codec binary and every archiver.
+	// Resolving every archiver here also populates the archiver cache, so the parallel
+	// workers below only read it (no concurrent writes).
 	if err := filter.Check(e.codec, e.fopts); err != nil {
 		return nil, err
 	}
 	checkedEnc := map[string]bool{}
 	for _, item := range plan.Items {
 		dt := item.DLE.DumpTypeName()
-		m, err := e.methodForDumpType(dt)
+		m, err := e.archiverFor(dt)
 		if err != nil {
 			return nil, err
 		}
@@ -931,19 +938,19 @@ func (e *Engine) Run(date time.Time, logf Logf) (*slot.Slot, error) {
 
 	// A spanning-capable landing (a finite tape changer, or part_size set) writes one
 	// drive serially: it cannot interleave two archives' parts and roll mid-write, so
-	// dumpers are clamped to 1. Disk (unbounded) keeps the configured parallelism.
-	dumpers := e.cfg.Dumpers()
-	if dumpers > 1 && wt.lib.CanSpan(wt.partSize) {
-		logf.log("medium %q can span volumes; running 1 dumper (a single drive writes serially)", e.mediumName)
-		dumpers = 1
+	// workers are clamped to 1. Disk (unbounded) keeps the configured parallelism.
+	workers := e.cfg.Workers()
+	if workers > 1 && wt.lib.CanSpan(wt.partSize) {
+		logf.log("medium %q can span volumes; running 1 worker (a single drive writes serially)", e.mediumName)
+		workers = 1
 	}
 
 	// Track live progress to the run-status file so `nb status` can watch a
 	// detached run. Progress reporting never blocks or fails the backup.
-	tr := progress.NewTracker(slotID, dumpers, planProgress(plan.Items), time.Now,
+	tr := progress.NewTracker(slotID, workers, planProgress(plan.Items), time.Now,
 		progress.NewFileSink(e.cfg.WorkdirPath(), time.Now))
 
-	if err := e.runDumpers(plan.Items, dumpers, w, tr, logf); err != nil {
+	if err := e.runWorkers(plan.Items, workers, w, tr, logf); err != nil {
 		tr.SetPhase(progress.PhaseFailed)
 		return nil, err
 	}
@@ -973,13 +980,13 @@ func planProgress(items []planner.Item) []progress.Plan {
 	return out
 }
 
-// runDumpers backs up every planned item into the slot. With parallelism.dumpers
-// > 1 it runs that many dumpers concurrently (Amanda's inparallel), bounded by a
+// runWorkers backs up every planned item into the slot. With parallelism.workers
+// > 1 it runs that many workers concurrently (Amanda's inparallel), bounded by a
 // semaphore; the first error stops scheduling further items and is returned. Each
-// dumper writes a distinct object into the slot, which the medium must allow
+// worker writes a distinct object into the slot, which the medium must allow
 // concurrently (disk does) and the slot Writer serializes its bookkeeping.
-func (e *Engine) runDumpers(items []planner.Item, dumpers int, w *slotio.Writer, tr *progress.Tracker, logf Logf) error {
-	if dumpers <= 1 || len(items) <= 1 {
+func (e *Engine) runWorkers(items []planner.Item, workers int, w *slotio.Writer, tr *progress.Tracker, logf Logf) error {
+	if workers <= 1 || len(items) <= 1 {
 		for _, item := range items {
 			if err := e.backupItem(w, item, tr, logf); err != nil {
 				return err
@@ -992,14 +999,14 @@ func (e *Engine) runDumpers(items []planner.Item, dumpers int, w *slotio.Writer,
 	if threads < 1 {
 		threads = 1
 	}
-	if cores := runtime.GOMAXPROCS(0); dumpers*threads > cores {
-		logf.log("WARNING: %d dumpers x %d compressor thread(s) = %d exceeds %d cores; CPU may be oversubscribed",
-			dumpers, threads, dumpers*threads, cores)
+	if cores := runtime.GOMAXPROCS(0); workers*threads > cores {
+		logf.log("WARNING: %d workers x %d compressor thread(s) = %d exceeds %d cores; CPU may be oversubscribed",
+			workers, threads, workers*threads, cores)
 	}
 
 	var (
 		wg       sync.WaitGroup
-		sem      = make(chan struct{}, dumpers)
+		sem      = make(chan struct{}, workers)
 		mu       sync.Mutex
 		firstErr error
 	)
@@ -1086,8 +1093,8 @@ func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 }
 
 // backupItem archives a single DLE into the slot via the writer. It owns the
-// dump-method side (resolving the method, building the request, requiring the
-// base snapshot for incrementals); the writer owns the on-media side. It reports
+// archiver side (resolving the archiver, building the request, requiring the base
+// incremental state for incrementals); the writer owns the on-media side. It reports
 // the DLE's lifecycle (start, live bytes, finish/fail) to the run tracker.
 func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tracker, logf Logf) (err error) {
 	tr.StartDLE(item.Name)
@@ -1100,20 +1107,22 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 		}
 	}()
 
-	m, err := e.methodForDumpType(item.DLE.DumpTypeName())
+	m, err := e.archiverFor(item.DLE.DumpTypeName())
 	if err != nil {
 		return err
 	}
 
-	req := method.BackupRequest{
+	req := archiver.BackupRequest{
+		DLE:        item.Name,
 		SourcePath: item.DLE.Path,
 		Level:      item.Level,
-		OutSnap:    e.cat.SnapshotPath(item.Name, item.Level),
+		BaseLevel:  -1,
+		Exclude:    e.cfg.ResolveDumpType(item.DLE.DumpTypeName()).Exclude,
 	}
 	if item.Level >= 1 {
-		req.BaseSnap = e.cat.SnapshotPath(item.Name, item.BaseLevel)
-		if !e.cat.SnapshotExists(item.Name, item.BaseLevel) {
-			return fmt.Errorf("DLE %s: incremental L%d needs the L%d snapshot but it is missing",
+		req.BaseLevel = item.BaseLevel
+		if !m.HasBase(item.Name, item.BaseLevel) {
+			return fmt.Errorf("DLE %s: incremental L%d needs the L%d incremental state but it is missing",
 				item.Name, item.Level, item.BaseLevel)
 		}
 	}
@@ -1125,7 +1134,7 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 		DLE:      item.Name,
 		Host:     item.DLE.Host,
 		Path:     item.DLE.Path,
-		Method:   m.Name(),
+		Archiver: m.Name(),
 		Level:    item.Level,
 		BaseSlot: item.BaseSlot,
 		Encrypt:  encScheme,
@@ -1217,7 +1226,7 @@ func errNonEmptyDest(destDir string) error {
 }
 
 func (e *Engine) extractStep(step restore.Step, destDir, medium string) error {
-	m, err := e.methodByName(step.Method)
+	m, err := e.archiverByType(step.Archiver)
 	if err != nil {
 		return err
 	}
@@ -1269,7 +1278,7 @@ func (e *Engine) OpenRecover(dle, asOf string) (*recovery.Tree, error) {
 func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, logf Logf) (int, error) {
 	files := 0
 	for _, st := range steps {
-		m, err := e.methodByName(st.Method)
+		m, err := e.archiverByType(st.Archiver)
 		if err != nil {
 			return files, err
 		}

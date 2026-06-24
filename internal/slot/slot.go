@@ -39,7 +39,7 @@ type Archive struct {
 	DLE          string   `json:"dle"`               // DLE name, e.g. "app01-home"
 	Host         string   `json:"host"`              // source host
 	Path         string   `json:"path"`              // source path
-	Method       string   `json:"method"`            // dump method that produced it
+	Archiver     string   `json:"archiver"`          // archiver type that produced it
 	Codec        string   `json:"codec"`             // compression codec (zstd|gzip|none); reversed on restore
 	Encrypt      string   `json:"encrypt,omitempty"` // encryption scheme (gpg); reversed on restore. "" = plaintext. The key is never stored — restore resolves it from the operator's keyring.
 	Level        int      `json:"level"`             // 0 = full, >=1 = incremental
@@ -49,7 +49,7 @@ type Archive struct {
 	SHA256       string   `json:"sha256"`            // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
 	Parts        int      `json:"parts,omitempty"`   // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's media.Header.Part
 	BaseSlot     string   `json:"base_slot"`         // for level>=1, the slot whose state this builds on
-	Members      []string `json:"members"`           // member paths archived: slash-separated, directories with a trailing slash (the method-neutral convention recovery browses); the raw token is replayed to the producing method on extract (was MANIFEST)
+	Members      []string `json:"members"`           // member paths archived: slash-separated, directories with a trailing slash (the archiver-neutral convention recovery browses); the raw token is replayed to the producing archiver on extract (was MANIFEST)
 }
 
 // NewSlot starts a new open slot for a run. Archives are added with AddArchive

@@ -7,12 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/method"
+	"github.com/Niloen/nbackup/internal/archiver"
 )
 
-func newMethod(t *testing.T) method.Method {
+// newArchiver opens a gnutar archiver with the given options (the caller supplies
+// state_dir for tests that produce incrementals) and skips when GNU tar is absent.
+func newArchiver(t *testing.T, opts archiver.Options) archiver.Archiver {
 	t.Helper()
-	m, err := method.Open("gnutar", method.Options{})
+	m, err := archiver.Open("gnutar", opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,19 +27,18 @@ func newMethod(t *testing.T) method.Method {
 // TestBackupRestoreWithDeletion verifies a full + incremental chain reproduces
 // the live tree, including a modified file, a new file, and a DELETED file that
 // GNU tar's listed-incremental restore must remove. The raw tar stream is used
-// directly (no compression) to test the method in isolation.
+// directly (no compression) to test the archiver in isolation.
 func TestBackupRestoreWithDeletion(t *testing.T) {
-	m := newMethod(t)
 	src := t.TempDir()
-	snaps := t.TempDir()
 	out := t.TempDir()
+	m := newArchiver(t, archiver.Options{"state_dir": t.TempDir()})
 
 	write(t, filepath.Join(src, "a.txt"), "alpha")
 	write(t, filepath.Join(src, "b.txt"), "beta")
 	write(t, filepath.Join(src, "sub", "c.txt"), "gamma")
 
 	l0 := filepath.Join(out, "l0.tar")
-	backup(t, m, method.BackupRequest{SourcePath: src, Level: 0, OutSnap: filepath.Join(snaps, "L0.snar")}, l0)
+	backup(t, m, archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 0, BaseLevel: -1}, l0)
 
 	time.Sleep(1100 * time.Millisecond) // 1s mtime granularity
 	write(t, filepath.Join(src, "a.txt"), "alpha-CHANGED")
@@ -47,11 +48,7 @@ func TestBackupRestoreWithDeletion(t *testing.T) {
 	write(t, filepath.Join(src, "d.txt"), "delta")
 
 	l1 := filepath.Join(out, "l1.tar")
-	backup(t, m, method.BackupRequest{
-		SourcePath: src, Level: 1,
-		BaseSnap: filepath.Join(snaps, "L0.snar"),
-		OutSnap:  filepath.Join(snaps, "L1.snar"),
-	}, l1)
+	backup(t, m, archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 1, BaseLevel: 0}, l1)
 
 	dest := t.TempDir()
 	restore(t, m, l0, dest)
@@ -65,26 +62,16 @@ func TestBackupRestoreWithDeletion(t *testing.T) {
 	}
 }
 
-// TestExcludeOption verifies a dumptype option flows through to tar.
-func TestExcludeOption(t *testing.T) {
-	if _, err := method.Open("gnutar", method.Options{}); err != nil {
-		t.Fatal(err)
-	}
-	m, err := method.Open("gnutar", method.Options{"exclude": "*.log"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := m.Check(); err != nil {
-		t.Skipf("GNU tar not available: %v", err)
-	}
+// TestExclude verifies the request's exclude patterns flow through to tar.
+func TestExclude(t *testing.T) {
+	m := newArchiver(t, archiver.Options{"state_dir": t.TempDir()})
 	src := t.TempDir()
-	snaps := t.TempDir()
 	out := t.TempDir()
 	write(t, filepath.Join(src, "keep.txt"), "keep")
 	write(t, filepath.Join(src, "drop.log"), "drop")
 
 	l0 := filepath.Join(out, "l0.tar")
-	backup(t, m, method.BackupRequest{SourcePath: src, Level: 0, OutSnap: filepath.Join(snaps, "L0.snar")}, l0)
+	backup(t, m, archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 0, BaseLevel: -1, Exclude: []string{"*.log"}}, l0)
 
 	dest := t.TempDir()
 	restore(t, m, l0, dest)
@@ -99,14 +86,13 @@ func TestExcludeOption(t *testing.T) {
 // TestEstimate checks the /dev/null client estimate: the full reflects the data
 // size, excludes lower it, and an unchanged incremental is far smaller than a full.
 func TestEstimate(t *testing.T) {
-	m := newMethod(t)
 	src := t.TempDir()
-	snaps := t.TempDir()
+	m := newArchiver(t, archiver.Options{"state_dir": t.TempDir()})
 
 	write(t, filepath.Join(src, "big.bin"), strings.Repeat("x", 200000))
 	write(t, filepath.Join(src, "small.txt"), "hi")
 
-	full, err := m.Estimate(method.BackupRequest{SourcePath: src, Level: 0})
+	full, err := m.Estimate(archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 0, BaseLevel: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,11 +101,7 @@ func TestEstimate(t *testing.T) {
 	}
 
 	// Excluding the big file yields a much smaller estimate.
-	me, err := method.Open("gnutar", method.Options{"exclude": "*.bin"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	excl, err := me.Estimate(method.BackupRequest{SourcePath: src, Level: 0})
+	excl, err := m.Estimate(archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 0, BaseLevel: -1, Exclude: []string{"*.bin"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,9 +111,11 @@ func TestEstimate(t *testing.T) {
 
 	// An unchanged incremental against a real snapshot estimates far below a full.
 	time.Sleep(1100 * time.Millisecond) // snapshot time must beat file mtimes (1s granularity)
-	l0snap := filepath.Join(snaps, "L0.snar")
-	backup(t, m, method.BackupRequest{SourcePath: src, Level: 0, OutSnap: l0snap}, filepath.Join(t.TempDir(), "l0.tar"))
-	incr, err := m.Estimate(method.BackupRequest{SourcePath: src, Level: 1, BaseSnap: l0snap})
+	backup(t, m, archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 0, BaseLevel: -1}, filepath.Join(t.TempDir(), "l0.tar"))
+	if !m.HasBase("app", 0) {
+		t.Fatal("L0 snapshot should exist after a full backup")
+	}
+	incr, err := m.Estimate(archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 1, BaseLevel: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +124,7 @@ func TestEstimate(t *testing.T) {
 	}
 }
 
-func backup(t *testing.T, m method.Method, req method.BackupRequest, outFile string) {
+func backup(t *testing.T, m archiver.Archiver, req archiver.BackupRequest, outFile string) {
 	t.Helper()
 	f, err := os.Create(outFile)
 	if err != nil {
@@ -152,7 +136,7 @@ func backup(t *testing.T, m method.Method, req method.BackupRequest, outFile str
 	}
 }
 
-func restore(t *testing.T, m method.Method, inFile, dest string) {
+func restore(t *testing.T, m archiver.Archiver, inFile, dest string) {
 	t.Helper()
 	f, err := os.Open(inFile)
 	if err != nil {

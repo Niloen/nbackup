@@ -142,7 +142,7 @@ func openerOver(vols ...*memVolume) PartOpener {
 
 func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) slot.Archive {
 	t.Helper()
-	arch, err := w.WriteArchive(ArchiveSpec{DLE: dle, Host: "h", Path: "/p", Method: "m", Level: 0}, nil,
+	arch, err := w.WriteArchive(ArchiveSpec{DLE: dle, Host: "h", Path: "/p", Archiver: "m", Level: 0}, nil,
 		func(out io.Writer) (Produced, error) {
 			n, err := out.Write(body)
 			return Produced{Uncompressed: int64(n), FileCount: 1, Members: []string{dle}}, err
@@ -289,7 +289,7 @@ func TestEncryptRoundTrip(t *testing.T) {
 
 	body := []byte(strings.Repeat("top secret payload\n", 3000))
 	arch, err := w.WriteArchive(
-		ArchiveSpec{DLE: "dle1", Host: "h", Path: "/p", Method: "m", Level: 0, Encrypt: "gpg", EncOpts: opts},
+		ArchiveSpec{DLE: "dle1", Host: "h", Path: "/p", Archiver: "m", Level: 0, Encrypt: "gpg", EncOpts: opts},
 		nil,
 		func(out io.Writer) (Produced, error) {
 			n, e := out.Write(body)

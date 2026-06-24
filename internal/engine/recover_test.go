@@ -32,7 +32,7 @@ func TestRecoverSelectedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skip("GNU tar not available")
 	}
 
@@ -112,7 +112,7 @@ func TestRecoverWholeDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skip("GNU tar not available")
 	}
 	if _, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {

@@ -16,7 +16,7 @@ func mkSlot(id, date string, archives ...slot.Archive) *slot.Slot {
 }
 
 func arch(dle string, level int) slot.Archive {
-	return slot.Archive{DLE: dle, Level: level, Method: "gnutar", Codec: "none"}
+	return slot.Archive{DLE: dle, Level: level, Archiver: "gnutar", Codec: "none"}
 }
 
 // TestLedgerRoundTrip checks the ledger persists and reloads, and that Drilled honors

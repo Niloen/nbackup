@@ -64,7 +64,7 @@ type ArchiveSpec struct {
 	DLE      string
 	Host     string
 	Path     string
-	Method   string
+	Archiver string
 	Level    int
 	BaseSlot string
 	Encrypt  string        // encryption scheme name ("" or "none" = plaintext)
@@ -88,7 +88,7 @@ type ArchivePositions struct {
 // Writer authors a single slot onto a medium via a VolumeSink. Callers create
 // archives with WriteArchive and finalize with Seal. WriteArchive is safe for
 // concurrent use only on an unbounded sink (disk); a bounded, spanning-capable sink
-// rolls one shared volume and must be driven serially (the engine clamps dumpers).
+// rolls one shared volume and must be driven serially (the engine clamps archivers).
 type Writer struct {
 	sink  VolumeSink
 	codec string
@@ -112,7 +112,7 @@ type archiveRecord struct {
 // NewWriter begins authoring the given open slot onto sink, compressing archives
 // with the named codec. lim, when non-nil, caps the rate of bytes written to the
 // medium (network politeness); a nil lim is uncapped. The same lim is shared
-// across concurrent WriteArchive calls on an unbounded sink, so several dumpers to
+// across concurrent WriteArchive calls on an unbounded sink, so several workers to
 // one medium share its budget (Amanda's netusage).
 func NewWriter(sink VolumeSink, s *slot.Slot, codec string, fopts filter.Options, lim *xfer.Limiter) (*Writer, error) {
 	if _, err := filter.Ext(codec); err != nil { // validate the codec name early
@@ -139,7 +139,7 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 	meter := xfer.NewMeter(pw)
 	res, produceErr, done := w.startProducer(meter, pw, spec, progress, produce)
 
-	base := w.archiveHeader(spec.DLE, spec.Host, spec.Path, spec.Method, spec.Level, spec.BaseSlot, w.codec, spec.Encrypt)
+	base := w.archiveHeader(spec.DLE, spec.Host, spec.Path, spec.Archiver, spec.Level, spec.BaseSlot, w.codec, spec.Encrypt)
 	parts, err := w.drainParts(base, pr)
 	if err != nil {
 		pr.CloseWithError(err) // unblock the producer goroutine
@@ -156,7 +156,7 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 		DLE:          spec.DLE,
 		Host:         spec.Host,
 		Path:         spec.Path,
-		Method:       spec.Method,
+		Archiver:     spec.Archiver,
 		Codec:        w.codec,
 		Encrypt:      spec.Encrypt,
 		Level:        spec.Level,
@@ -180,14 +180,14 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 // clones it per part with an ascending Part index). The codec is passed explicitly
 // because a fresh dump stamps the writer's codec while a copy preserves the source
 // archive's recorded codec — every other descriptive field comes straight through.
-func (w *Writer) archiveHeader(dle, host, path, method string, level int, baseSlot, codec, encrypt string) media.Header {
+func (w *Writer) archiveHeader(dle, host, path, archiver string, level int, baseSlot, codec, encrypt string) media.Header {
 	return media.Header{
 		Slot:      w.slot.ID,
 		Kind:      media.KindArchive,
 		DLE:       dle,
 		Host:      host,
 		Path:      path,
-		Method:    method,
+		Archiver:  archiver,
 		Codec:     codec,
 		Encrypt:   encrypt,
 		Level:     level,
@@ -314,7 +314,7 @@ func (w *Writer) drainParts(base media.Header, src io.Reader) ([]PartPosition, e
 // recorded checksum is unchanged — and only the part layout (and Parts count) is new.
 // The header carries the archive's original codec, so restore reverses the right one.
 func (w *Writer) CopyArchive(meta slot.Archive, src io.Reader) (slot.Archive, error) {
-	base := w.archiveHeader(meta.DLE, meta.Host, meta.Path, meta.Method, meta.Level, meta.BaseSlot, meta.Codec, meta.Encrypt)
+	base := w.archiveHeader(meta.DLE, meta.Host, meta.Path, meta.Archiver, meta.Level, meta.BaseSlot, meta.Codec, meta.Encrypt)
 	h := sha256.New()
 	parts, err := w.drainParts(base, io.TeeReader(src, h))
 	if err != nil {

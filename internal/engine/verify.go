@@ -215,7 +215,7 @@ func (e *Engine) verifyArchive(id string, a slot.Archive, p catalog.Placement, o
 // the seal. It returns ClassNone on success, else the failure class and detail. It
 // writes nothing.
 func (e *Engine) structuralCheck(a slot.Archive, parts []slotio.PartPosition, want slotio.Expect, opener slotio.PartOpener) (drill.Class, string) {
-	m, err := e.methodByName(a.Method)
+	m, err := e.archiverByType(a.Archiver)
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}

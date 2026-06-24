@@ -72,7 +72,7 @@ media:
                         # politeness — the read/write peer of `nice` — so a dump or sync
                         # doesn't saturate the office uplink, and a restore/drill download
                         # honors the same budget. Bytes/sec; the `/s` is optional. Several
-                        # concurrent dumpers to one medium share this single cap.
+                        # concurrent workers to one medium share this single cap.
     # Credentials are NOT configured here — they come from each cloud SDK's standard
     # environment (AWS_*, GOOGLE_APPLICATION_CREDENTIALS, AZURE_*), so secrets stay
     # out of the config file. An object store is address-identified: no labels, no
@@ -175,9 +175,10 @@ landing: fast-disk
 #       # headers:               # optional extra HTTP headers
 #       #   Authorization: "Bearer ..."
 
-# Where the catalog's local state (slot cache + tar snapshots) lives. This is the
-# catalog's own directory, independent of any storage medium — the catalog is a
-# cache over the whole pool, not part of one medium. Defaults to ./nbackup-catalog.
+# Where the catalog's local cache lives. This is the catalog's own directory,
+# independent of any storage medium — the catalog is a cache over the whole pool,
+# not part of one medium. An archiver's incremental state (gnutar's .snar library)
+# defaults to a `snapshots/` dir beneath this. Defaults to ./nbackup-catalog.
 # workdir: /var/lib/nbackup/catalog
 
 # Let a dump auto-label a *blank* tape instead of requiring `nb label` first.
@@ -185,9 +186,9 @@ landing: fast-disk
 # It never overwrites foreign or non-blank media.
 # auto_label: false
 
-# Global default GNU tar binary (use "gtar" on macOS/BSD). A dumptype may
-# override it with a "tar_path" option.
-# gnutar_path: tar
+# (The GNU tar binary is a per-archiver option — `tar_path` on a `archivers:` entry
+# below, e.g. "gtar" on macOS/BSD — not a global, mirroring Amanda's per-
+# application GNUTAR-PATH.)
 
 # Compression. Archives are piped through an external compressor child (like
 # Amanda), so the CPU work is in a separate, throttleable process. The codec
@@ -211,26 +212,39 @@ compress:
 #   # passphrase_file: /etc/nbackup/secret   # gpg symmetric, instead of a recipient
 #   # program: /usr/bin/gpg                  # optional binary override
 
-# Run several dumps at once (Amanda's inparallel). Keep dumpers x compressor
+# Run several dumps at once (Amanda's inparallel). Keep workers x compressor
 # threads <= cores to avoid oversubscribing CPU.
 parallelism:
-  dumpers: 1         # concurrent DLE dumps per run
+  workers: 1         # concurrent DLE dumps per run
 
 # Optional CPU politeness: run child processes under `nice -n <value>`.
 # nice: 10
 
-# Named method+option bundles (Amanda's "dumptype"). A DLE selects one.
-dumptypes:
+# Named archiver definitions (Amanda's "application"): a registered archiver type
+# plus its content-independent options (how tar runs, regardless of what you point
+# it at). An undeclared name is treated as a bare type with default options, so
+# `archiver: gnutar` works with no block here. Most setups need just one.
+archivers:
   default:
-    method: gnutar
+    type: gnutar
     one-file-system: "true"
     sparse: "true"
+    # tar_path: gtar     # GNU tar binary (use "gtar" on macOS/BSD)
+    # state_dir: /var/lib/nbackup/snapshots   # incremental-state library (defaults beneath workdir)
+
+# Named dumptypes (Amanda's "dumptype"): an archiver reference plus per-DLE policy —
+# what to skip (exclude) and encryption. Excludes live here, not on the archiver:
+# skipping logs is a decision about *this data*, not about how tar runs, so different
+# DLEs reuse one archiver and differ only by dumptype. A DLE selects one.
+dumptypes:
+  default:
+    archiver: default
   no-logs:
-    method: gnutar
-    exclude: "*.log,*.tmp"
+    archiver: default
+    exclude: ["*.log", "*.tmp"]
   # A dumptype can override the default encryption wholesale (e.g. a stricter key):
   # finance:
-  #   method: gnutar
+  #   archiver: default
   #   encrypt:
   #     scheme: gpg
   #     recipient: finance-key@example.com

@@ -103,7 +103,7 @@ func (c Class) Remedy() string {
 	case ClassPipeline:
 		return "the archive would not decrypt/decompress/untar — verify the gpg key is present and the codec/tar match the recorded scheme"
 	case ClassChain:
-		return "the incremental chain does not compose — force a fresh full for this DLE and check the snapshot library"
+		return "the incremental chain does not compose — force a fresh full for this DLE and check the incremental-state library"
 	case ClassMissing:
 		return "no copy on the drilled medium — fix replication (`nb sync`) so this DLE has the expected copies"
 	case ClassSkipped:

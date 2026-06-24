@@ -10,7 +10,7 @@ type History struct {
 }
 
 // DLEState tracks one DLE's backup history. Sizes are not stored: estimates are
-// computed fresh from the dump method each run (Amanda's client estimate).
+// computed fresh from the archiver each run (Amanda's client estimate).
 type DLEState struct {
 	LastFullDate string      `json:"last_full_date"` // YYYY-MM-DD, empty if never
 	LastFullSlot string      `json:"last_full_slot"`
@@ -123,8 +123,8 @@ func (d *DLEState) RunsAtCurrentLevel() int {
 }
 
 // SlotAtLevel returns the slot ID of the most recent run at the given level, or
-// "" if none. An incremental at level L builds on the snapshot left by the most
-// recent run at level L-1, so that run's slot is the base it derives from.
+// "" if none. An incremental at level L builds on the incremental state left by
+// the most recent run at level L-1, so that run's slot is the base it derives from.
 func (d *DLEState) SlotAtLevel(level int) string {
 	for i := len(d.Runs) - 1; i >= 0; i-- {
 		if d.Runs[i].Level == level {

@@ -16,9 +16,10 @@
 // rebuilds that store from the media (the source of truth); it hands finished
 // placements back through the store's write path and never touches its fields.
 //
-// The only non-derivable local state is the GNU tar snapshot library (.snar
-// files), which lives in the workdir and is precious — losing it forces a full
-// (see snapshots.go).
+// Everything the catalog holds is derivable from the media; it owns no precious
+// state. An archiver's incremental state (gnutar's .snar library) is the one piece of
+// non-derivable local state, and it belongs to the archiver, not here (see package
+// archiver).
 package catalog
 
 import (

@@ -37,7 +37,7 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -98,7 +98,7 @@ func TestRepeatedLevelRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -149,7 +149,7 @@ func TestRepeatedLevelRestore(t *testing.T) {
 }
 
 // TestValidatePlan checks that a plan preview surfaces the config problems the
-// size estimates would otherwise swallow: an unknown dump method is fatal, a
+// size estimates would otherwise swallow: an unknown archiver is fatal, a
 // missing source path warns but does not fail, and a clean config is silent.
 func TestValidatePlan(t *testing.T) {
 	src := t.TempDir()
@@ -170,7 +170,7 @@ func TestValidatePlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	if w, err := eng.ValidatePlan(); err != nil || len(w) != 0 {
@@ -193,21 +193,21 @@ func TestValidatePlan(t *testing.T) {
 		t.Fatalf("expected one missing-path warning, got %v", w)
 	}
 
-	// An unknown dump method is an unrunnable config: fail the preview.
-	badMethod := base()
-	badMethod.DumpTypes = map[string]config.DumpType{config.DefaultDumpType: {Method: "rsync"}}
-	eng, err = New(badMethod)
+	// An unknown archiver is an unrunnable config: fail the preview.
+	badArchiver := base()
+	badArchiver.DumpTypes = map[string]config.DumpType{config.DefaultDumpType: {Archiver: "rsync"}}
+	eng, err = New(badArchiver)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := eng.ValidatePlan(); err == nil || !strings.Contains(err.Error(), "unknown dump method") {
-		t.Fatalf("unknown method should fail validation, got err=%v", err)
+	if _, err := eng.ValidatePlan(); err == nil || !strings.Contains(err.Error(), "unknown archiver") {
+		t.Fatalf("unknown archiver should fail validation, got err=%v", err)
 	}
 }
 
-// TestParallelDumpers runs several DLEs with dumpers > 1, exercising concurrent
+// TestParallelWorkers runs several DLEs with workers > 1, exercising concurrent
 // writes into one slot, and verifies every archive is present and restorable.
-func TestParallelDumpers(t *testing.T) {
+func TestParallelWorkers(t *testing.T) {
 	catalogDir := t.TempDir()
 	cfg := &config.Config{
 		Landing: "disk",
@@ -215,7 +215,7 @@ func TestParallelDumpers(t *testing.T) {
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none" // no compressor-binary dependency in tests
-	cfg.Parallelism.Dumpers = 3
+	cfg.Parallelism.Workers = 3
 
 	names := []string{"alpha", "bravo", "charlie", "delta"}
 	for _, n := range names {
@@ -228,7 +228,7 @@ func TestParallelDumpers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -276,7 +276,7 @@ func TestThroughputCapThrottlesDump(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+		if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 			t.Skipf("GNU tar not available")
 		}
 		start := time.Now()
@@ -333,7 +333,7 @@ func TestThroughputCapThrottlesRestore(t *testing.T) {
 
 	// Dump uncapped.
 	eng := mk("")
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
@@ -381,7 +381,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	day := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
@@ -441,7 +441,7 @@ func TestTapeLabelVerify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	day := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
@@ -494,7 +494,7 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
@@ -552,7 +552,7 @@ func TestRunWritesStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	s, err := eng.Run(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
@@ -602,7 +602,7 @@ func TestTapeLibraryRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -677,7 +677,7 @@ func TestTapeAppendableFalse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	s1, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
@@ -756,7 +756,7 @@ func TestManualStationWriteSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	op := &scriptedOperator{}
@@ -806,7 +806,7 @@ func TestManualStationReadSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -1153,7 +1153,7 @@ func TestDumpSpansArchiveAcrossTapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	// Seed a blank bay in the drive so the run has somewhere to start; it auto-labels
@@ -1222,7 +1222,7 @@ func TestCopySpansArchiveAcrossTapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
@@ -1286,7 +1286,7 @@ func TestPartSizeSplitsWithinTape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.methodForDumpType(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	if err := eng.LoadVolume("lib", "bay-01", false, nil); err != nil {

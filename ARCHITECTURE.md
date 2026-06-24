@@ -39,7 +39,7 @@ restore with stock tools.
 ## Package map
 
 Mechanism lives behind interfaces with named, registered implementations; one
-orchestrator (`engine`) composes them. Adding a medium, method, or codec is a
+orchestrator (`engine`) composes them. Adding a medium, archiver, or codec is a
 registry registration, not a conditional in the core.
 
 | Package | Responsibility | Amanda analogue |
@@ -51,7 +51,7 @@ registry registration, not a conditional in the core.
 | `librarian` | operates a medium's `Changer`/`Shelf` + label protocol (make-writable, advance, mount, label, load) | changer / amtape |
 | `media/disk`, `media/tape`, `media/cloud` | Volume impls (disk sidecar headers; tape library; object store via gocloud.dev/blob) | vfs / tape / s3 devices |
 | `media/fslike` | the slot layout shared by the address-identified media — clean payloads + `.hdr` sidecars over a small `Store` seam (disk = a directory, cloud = a bucket), so disk↔cloud copies are byte-identical | — |
-| `method` + `method/gnutar` | dump `Method` interface + registry; GNU tar impl | Application API / amgtar |
+| `archiver` + `archiver/gnutar` | `Archiver` interface + registry + named definitions; owns its incremental-state library; GNU tar impl | Application API / amgtar |
 | `filter` | external compressor child processes (zstd/gzip/none) + registry | compress |
 | `crypt` | external encryptor child processes (gpg/none) + registry | amcrypt/amgpgcrypt |
 | `streamproc` | the shared "external stream-transform child" plumbing (stdin→stdout, optional `nice`) that `filter` and `crypt` both run on | — |
@@ -59,25 +59,25 @@ registry registration, not a conditional in the core.
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `report` | per-run history record + JSONL/summary file I/O + digest render | amreport |
 | `notify` | pluggable alert backends (smtp/webhook) + registry + dispatch | amreport mailto |
-| `catalog` | local cache of slot index + volume registry + snapshot library; derives `History` | catalog / curinfo / tapelist |
+| `catalog` | local cache of slot index + volume registry; derives `History` | catalog / curinfo / tapelist |
 | `policy` | retention safety floor: protected slots (pure) | policy |
 | `restore` | the archive chain to rebuild a DLE as of a slot (pure) | amrestore |
 | `recovery` | as-of-date browse tree + per-archive file selection (pure) | amrecover |
 | `drill` | recovery-drill ledger + risk-biased selection + failure taxonomy (pure) | amverify (orchestrated) |
 | `planner` | multilevel level scheduling (pure) | planner |
-| `engine` | the driver: parallel dumpers, wires planner→method→filter→media→catalog | driver / taper |
+| `engine` | the driver: parallel workers, wires planner→archiver→filter→media→catalog | driver / taper |
 | `cli` | thin command wiring | amdump / amadmin |
 
-Dependencies flow one way: `cli → engine → {planner, policy, method, filter,
+Dependencies flow one way: `cli → engine → {planner, policy, archiver, filter,
 crypt, slotio, catalog, config, progress, restore, recovery}` over leaf packages
 `{media, xfer, slot, sizeutil}` (`recovery` builds on `restore`). The reporting
 layer adds `cli → {report, notify}` with `notify → {report, config}` — `report` is a
 pure leaf (record + render); the engine does **not** depend on either.
-Domain packages stay pure; `method`/`media`/`filter`/`crypt` are pluggable adapters;
+Domain packages stay pure; `archiver`/`media`/`filter`/`crypt` are pluggable adapters;
 `engine` is the only component aware of all of them. A backup is a pipeline of
-processes: **source** (`tar` via `method.Backup`) → **filter** (compressor child)
-→ **crypt** (encryptor child) → **dest** (`media.Volume`), metered and optionally
-rate-limited by `xfer`, composed by `slotio`.
+processes: **archiver** (`tar` via `archiver.Backup`, for gnutar) → **filter** (compressor
+child) → **crypt** (encryptor child) → **dest** (`media.Volume`), metered and
+optionally rate-limited by `xfer`, composed by `slotio`.
 
 ## Load-bearing decisions (the *why*)
 
@@ -96,8 +96,25 @@ slots, labels → volume registry. The catalog lives in its **own `workdir`**
 whole pool, not part of one medium. The `Entry`/`Placement` model means a slot
 copied disk→tape is one Entry with two Placements; restore/verify pick any
 available copy. Run `History` is *derived* from cached slots (no second source to
-drift). The only non-derivable local state is the GNU tar snapshot library
-(`snapshots/…/L<n>.snar`) — precious; losing it forces a full.
+drift) — the catalog holds **no** precious state, every byte of it rebuildable
+from the media. (The one piece of non-derivable local state — an archiver's
+incremental-state library — belongs to the **archiver**, not the catalog; see the
+next decision.)
+
+**Incremental state belongs to the archiver, not the catalog.** The base data an
+incremental builds on (for gnutar, the listed-incremental `snapshots/…/L<n>.snar`
+library) is the only state that is *neither* on the media *nor* derivable from it.
+It was once parked in the catalog by proximity, which forced the "catalog = pure
+cache" claim to carve out an exception. It is now owned by the `archiver` package: the
+generic `Archiver` interface speaks only `DLE`/`Level`/`BaseLevel`/`HasBase` — never a
+snapshot path — and each archiver resolves its own state under a `state_dir`
+(Amanda's per-application `GNUTAR-LISTDIR`; the engine injects the default beneath
+the workdir, an archiver definition may override). This sharpens the catalog's claim
+to *no exception*, makes the `Archiver` interface genuinely pluggable (a future
+`ampgsql`-style archiver keeps its own state however it likes), and gives **remote
+sources** a seam: when `tar` runs on the client, its `state_dir` is a client path,
+and nothing in catalog/engine/planner changes. The state is precious — losing a
+DLE's base forces its next run to a full (the drill posture warns).
 
 **Incrementals sit at a level and climb only on real savings (Amanda's bump).** A
 DLE does not gain a level per run. After a full it sits at level 1, re-dumping
@@ -342,7 +359,7 @@ without hardware).
   the whole slot; an interrupted span leaves seal-less orphan parts, ignored by
   scan/rebuild and reclaimed by relabel — the same atomicity as a single-volume slot.
   Because a single drive cannot interleave two archives' parts, a spanning-capable
-  landing **clamps dumpers to 1** (a single tape writes serially). Reads
+  landing **clamps workers to 1** (a single tape writes serially). Reads
   **auto-mount** the volume holding each part, in order — `slotio`'s concatenating
   reader drains part *k* fully before mounting *k+1*, then reverses the codec over the
   concatenation. The roll/mount lives in `package librarian` (`WriteSink`,
@@ -367,7 +384,7 @@ one-pass pipeline through its pipe — no holding-disk buffer, and the wait is a
 sleep so it cannot deadlock; on read it paces each part stream the medium hands back
 (wrapped in `engine.partOpener`, the single choke point every restore / un-vault /
 drill / sync-source read flows through). One `Limiter` is built per medium and
-**shared**, so several concurrent dumpers to one medium draw from a single budget —
+**shared**, so several concurrent workers to one medium draw from a single budget —
 Amanda's global *netusage* ceiling, which here collapses into the per-medium cap
 because a run writes a single landing medium (no separate global knob needed). The
 default is uncapped: a nil `Limiter` returns the stream untouched, so a run with no
@@ -381,8 +398,17 @@ stays medium-neutral — it lives in `xfer`/`engine`, never in a medium package.
 Tape specifics (`type: tape`, the `tape` package, `mt`, `vtape`, the `reel`
 vocabulary) stay local, so a future `usb`/removable-disk medium reuses the vocabulary.
 
+**Archiver-neutral vocabulary (the same discipline, one layer up).** The generic
+`archiver`/`catalog`/`engine`/`planner` layer must not say "tar" or "snapshot":
+`Archiver`, `BackupRequest{DLE, Level, BaseLevel}`, `HasBase`, the recorded
+`Archiver`/`archiver:` field, the `archivers:` config block, "incremental state". GNU tar
+specifics (`tar`, `.snar`, the listed-incremental snapshot, `state_dir`,
+`tar_path`) stay inside `archiver/gnutar`, so a future `ampgsql`/`amraw`-style archiver
+reuses the vocabulary. The concurrency unit is a **worker** (`parallelism.workers`),
+not a "archiver" — "archiver" means only the plugin.
+
 **Run monitoring is a status file, not a daemon.** `nb dump` drives a
-`progress.Tracker` whose dumpers report start / live bytes / finish; the tracker
+`progress.Tracker` whose workers report start / live bytes / finish; the tracker
 flushes a single JSON snapshot to `<workdir>/run-status.json` (atomic temp+rename,
 byte updates throttled to 1 s, state changes forced). `nb status` is a *separate*
 process that just reads and renders that file — Amanda's amdump-log + amstatus

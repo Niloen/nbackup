@@ -1,6 +1,7 @@
 // Package config loads and validates NBackup configuration files. It also
 // defines the configured domain entities — DLEs (backup sources), named media
-// definitions, and dumptypes (named method+options bundles, in Amanda's sense).
+// definitions, named archiver definitions (Amanda's applications), and dumptypes
+// (an archiver reference plus per-DLE policy, in Amanda's sense).
 package config
 
 import (
@@ -22,12 +23,13 @@ const DefaultDumpType = "default"
 // DefaultCodec is the compression codec assumed when compress.codec is unset.
 const DefaultCodec = "zstd"
 
-// DefaultMethod is the dump method assumed when a dumptype omits one.
-const DefaultMethod = "gnutar"
+// DefaultArchiver is the archiver assumed when a dumptype names none. It is both the
+// default archiver name and (for an undeclared name) its type.
+const DefaultArchiver = "gnutar"
 
-// DefaultWorkdir is where the catalog cache and snapshot library live when
-// `workdir` is unset. It is deliberately independent of any storage medium: the
-// catalog is a cache over the whole pool, not a thing owned by one medium.
+// DefaultWorkdir is where the catalog cache lives when `workdir` is unset. It is
+// deliberately independent of any storage medium: the catalog is a cache over the
+// whole pool, not a thing owned by one medium.
 const DefaultWorkdir = "nbackup-catalog"
 
 // Config is the top-level NBackup configuration.
@@ -51,11 +53,9 @@ type Config struct {
 	// Landing names the media definition where slots are created.
 	Landing string `yaml:"landing"`
 
-	// GnuTarPath is a global default GNU tar binary for the gnutar method.
-	GnuTarPath string `yaml:"gnutar_path"`
-
-	// Workdir holds the catalog's local state (slot cache + snapshot library),
-	// independent of any storage medium. Defaults to DefaultWorkdir.
+	// Workdir holds the catalog's local cache, independent of any storage medium.
+	// Defaults to DefaultWorkdir. (An archiver's incremental state — gnutar's .snar
+	// library — lives under its own state_dir, defaulting beneath the workdir.)
 	Workdir string `yaml:"workdir"`
 
 	// Compress configures the external compressor archives are piped through.
@@ -82,11 +82,17 @@ type Config struct {
 
 	// Parallelism bounds concurrent work within a run.
 	Parallelism struct {
-		Dumpers int `yaml:"dumpers"` // concurrent DLE dumps per run (default 1)
+		Workers int `yaml:"workers"` // concurrent DLE dumps per run (default 1)
 	} `yaml:"parallelism"`
 
 	// Media is a map of named storage definitions.
 	Media map[string]Media `yaml:"media"`
+
+	// Archivers is a map of named archiver definitions (Amanda's applications): a
+	// registered archiver type plus its options, referenced by a dumptype. An
+	// undeclared name is treated as a bare archiver type with default options, so a
+	// zero-config `archiver: gnutar` needs no block here.
+	Archivers map[string]Archiver `yaml:"archivers"`
 
 	// Sync declares replication rules: each mirrors the landing medium's sealed
 	// slots onto a target medium (Amanda's vaulting). `nb sync` with no --to runs
@@ -104,7 +110,8 @@ type Config struct {
 	// human. Secrets are referenced by environment variable, never stored here.
 	Notify NotifyConfig `yaml:"notify"`
 
-	// DumpTypes is a map of named method+option bundles (Amanda's dumptype).
+	// DumpTypes is a map of named dumptypes: an archiver reference plus per-DLE policy
+	// (encryption), in Amanda's sense.
 	DumpTypes map[string]DumpType `yaml:"dumptypes"`
 
 	Sources Sources `yaml:"sources"`
@@ -275,7 +282,7 @@ func (m Media) CapacityBytes() (int64, error) {
 // ThroughputBytes returns this medium's bandwidth cap in bytes per second, or 0
 // if unset (uncapped). It caps both directions — a dump/sync to the medium and a
 // restore/un-vault/drill from it — so the office uplink survives a business-hours
-// backup. Concurrent dumpers to one medium share the single budget (Amanda's
+// backup. Concurrent workers to one medium share the single budget (Amanda's
 // netusage), since a run writes a single landing medium.
 func (m Media) ThroughputBytes() (int64, error) {
 	if m.Throughput == "" {
@@ -315,11 +322,26 @@ type SyncRule struct {
 	Last int    `yaml:"last"` // copy only the N most recent slots (0 = all)
 }
 
-// DumpType bundles a dump method with its options, referenced by DLEs.
+// DumpType names an archiver and carries per-DLE policy, referenced by DLEs. The
+// archiver (how the stream is produced — program + content-independent options) and
+// the policy here (what to skip and what to do with the stream) are deliberately
+// split, as in Amanda. Excludes live here, not on the archiver: skipping `*.log` is
+// a content decision about the source, not a property of how tar runs (Amanda's
+// dumptype `exclude` directive).
 type DumpType struct {
-	Method  string            `yaml:"method"`
-	Encrypt *EncryptConfig    `yaml:"encrypt"` // nil = inherit the config-wide default; set = replace it wholesale (no field merge)
-	Params  map[string]string `yaml:",inline"`
+	Archiver string         `yaml:"archiver"` // named archiver definition ("" = DefaultArchiver)
+	Exclude  []string       `yaml:"exclude"`  // patterns to skip (passed to the archiver per dump)
+	Encrypt  *EncryptConfig `yaml:"encrypt"`  // nil = inherit the config-wide default; set = replace it wholesale (no field merge)
+}
+
+// Archiver is a named dump-program definition (Amanda's `define application`): a
+// registered archiver type plus its content-independent options, referenced by a
+// dumptype. Options are archiver-specific (gnutar's tar_path, state_dir,
+// one-file-system, …) and flow through the inline map, so KnownFields does not
+// reject them. (Excludes are a dumptype concern, not an archiver option.)
+type Archiver struct {
+	Type    string            `yaml:"type"`    // registered archiver type ("" = the definition's name)
+	Options map[string]string `yaml:",inline"` // archiver-specific options
 }
 
 // EncryptConfig selects an encryption scheme and its key reference. The scheme is
@@ -384,8 +406,8 @@ func Load(path string) (*Config, error) {
 	// KnownFields rejects unknown keys so a typo in a safety-relevant field
 	// (a misspelled `landing`, `cycle`, a nested compress/encrypt key) is a hard
 	// error rather than a silently-ignored default. Type-specific medium and
-	// dumptype params still flow through their inline maps, so connection keys
-	// (path, url, bays, exclude, …) are unaffected.
+	// archiver options still flow through their inline maps, so connection keys
+	// (path, url, bays, tar_path, …) are unaffected.
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil {
@@ -616,17 +638,28 @@ func (c *Config) LandingMedia() (Media, error) {
 	return c.Media[name], nil
 }
 
-// ResolveDumpType returns the named dumptype, applying the default method when
-// unset and falling back to a gnutar default for unknown names.
+// ResolveDumpType returns the named dumptype (the zero value for an unknown name;
+// its empty Archiver resolves to DefaultArchiver via ResolveArchiver).
 func (c *Config) ResolveDumpType(name string) DumpType {
-	dt, ok := c.DumpTypes[name]
-	if !ok {
-		return DumpType{Method: DefaultMethod}
+	return c.DumpTypes[name]
+}
+
+// ResolveArchiver returns the archiver definition for a name: the declared definition
+// (its Type defaulting to the name itself, so a bare `archivers: {gnutar: {}}`
+// works), or — for an undeclared name — a bare definition of that type with no
+// options, so a zero-config `archiver: gnutar` needs no block. An empty name
+// resolves to DefaultArchiver.
+func (c *Config) ResolveArchiver(name string) Archiver {
+	if name == "" {
+		name = DefaultArchiver
 	}
-	if dt.Method == "" {
-		dt.Method = DefaultMethod
+	if d, ok := c.Archivers[name]; ok {
+		if d.Type == "" {
+			d.Type = name
+		}
+		return d
 	}
-	return dt
+	return Archiver{Type: name}
 }
 
 // EncryptionFor returns the encryption settings for a dumptype: its own `encrypt`
@@ -647,10 +680,10 @@ func (c *Config) CompressCodec() string {
 	return DefaultCodec
 }
 
-// Dumpers returns the number of concurrent DLE dumps per run (default 1).
-func (c *Config) Dumpers() int {
-	if c.Parallelism.Dumpers > 1 {
-		return c.Parallelism.Dumpers
+// Workers returns the number of concurrent DLE dumps per run (default 1).
+func (c *Config) Workers() int {
+	if c.Parallelism.Workers > 1 {
+		return c.Parallelism.Workers
 	}
 	return 1
 }
@@ -706,9 +739,9 @@ func (c *Config) MinAgeFor(m Media) time.Duration {
 	return c.CycleDuration()
 }
 
-// WorkdirPath returns the catalog's own operational-state directory (slot cache +
-// snapshot library), independent of any storage medium. It defaults to
-// DefaultWorkdir when `workdir` is unset.
+// WorkdirPath returns the catalog's own operational-state directory (the slot
+// cache), independent of any storage medium. It defaults to DefaultWorkdir when
+// `workdir` is unset.
 func (c *Config) WorkdirPath() string {
 	if c.Workdir != "" {
 		return c.Workdir

@@ -21,8 +21,8 @@ type Plan struct {
 type Sink func(s Snapshot, force bool)
 
 // Tracker maintains the single live Snapshot of a run and pushes it to a sink as
-// dumpers report progress. Its methods are safe for concurrent use by parallel
-// dumpers.
+// workers report progress. Its methods are safe for concurrent use by parallel
+// workers.
 type Tracker struct {
 	now  func() time.Time
 	sink Sink
@@ -34,7 +34,7 @@ type Tracker struct {
 
 // NewTracker seeds a running snapshot from the plan and pushes the initial state
 // to the sink. now supplies timestamps (injectable for tests); sink may be nil.
-func NewTracker(slotID string, dumpers int, plan []Plan, now func() time.Time, sink Sink) *Tracker {
+func NewTracker(slotID string, workers int, plan []Plan, now func() time.Time, sink Sink) *Tracker {
 	if now == nil {
 		now = time.Now
 	}
@@ -56,7 +56,7 @@ func NewTracker(slotID string, dumpers int, plan []Plan, now func() time.Time, s
 		snap: Snapshot{
 			SlotID:    slotID,
 			Phase:     PhaseRunning,
-			Dumpers:   dumpers,
+			Workers:   workers,
 			StartedAt: start,
 			UpdatedAt: start,
 			DLEs:      dles,

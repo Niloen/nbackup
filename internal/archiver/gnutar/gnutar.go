@@ -1,8 +1,10 @@
-// Package gnutar implements method.Method using the system GNU tar binary in
+// Package gnutar implements archiver.Archiver using the system GNU tar binary in
 // listed-incremental mode (the same mechanism Amanda's amgtar uses). It owns all
 // tar-specific concerns — flags, snapshot (.snar) files, and the dumpdir-based
-// deletion semantics — and produces/consumes a raw tar stream. Compression and
-// storage are handled by the caller.
+// deletion semantics — and produces/consumes a raw tar stream. It also owns its
+// incremental-state library: per-DLE, per-level .snar files under state_dir
+// (Amanda's GNUTAR-LISTDIR), so the generic layer never names a snapshot.
+// Compression and storage are handled by the caller.
 package gnutar
 
 import (
@@ -17,40 +19,46 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Niloen/nbackup/internal/method"
+	"github.com/Niloen/nbackup/internal/archiver"
 )
 
 func init() {
-	method.Register("gnutar", func(opts method.Options) (method.Method, error) {
+	archiver.Register("gnutar", func(opts archiver.Options) (archiver.Archiver, error) {
 		bin := opts.Get("tar_path")
 		if bin == "" {
 			bin = "tar"
 		}
-		var exclude []string
-		for _, p := range strings.Split(opts.Get("exclude"), ",") {
-			if p = strings.TrimSpace(p); p != "" {
-				exclude = append(exclude, p)
-			}
-		}
 		return &gnutar{
 			bin:           bin,
+			stateDir:      opts.Get("state_dir"),
 			oneFileSystem: opts.Bool("one-file-system", true),
 			sparse:        opts.Bool("sparse", true),
-			exclude:       exclude,
 		}, nil
 	})
 }
 
 type gnutar struct {
 	bin           string
+	stateDir      string // root of the per-DLE/per-level .snar library (Amanda's GNUTAR-LISTDIR)
 	oneFileSystem bool
 	sparse        bool
-	exclude       []string
 	checkOnce     sync.Once
 	checkErr      error
 }
 
 func (g *gnutar) Name() string { return "gnutar" }
+
+// snapPath is the location of a DLE's snapshot for a level within the library.
+func (g *gnutar) snapPath(dle string, level int) string {
+	return filepath.Join(g.stateDir, dle, fmt.Sprintf("L%d.snar", level))
+}
+
+// HasBase reports whether the snapshot left by a completed dump at the level is
+// present — the base a higher incremental builds on.
+func (g *gnutar) HasBase(dle string, level int) bool {
+	_, err := os.Stat(g.snapPath(dle, level))
+	return err == nil
+}
 
 // Check verifies the configured binary is GNU tar (cached).
 func (g *gnutar) Check() error {
@@ -69,12 +77,14 @@ func (g *gnutar) Check() error {
 
 var totalsRE = regexp.MustCompile(`Total bytes written: (\d+)`)
 
-// Backup writes a raw tar stream to out and updates the snapshot at OutSnap.
-func (g *gnutar) Backup(r method.BackupRequest, out io.Writer) (*method.BackupResult, error) {
+// Backup writes a raw tar stream to out and updates the DLE's snapshot for this
+// level in the library.
+func (g *gnutar) Backup(r archiver.BackupRequest, out io.Writer) (*archiver.BackupResult, error) {
 	if err := g.Check(); err != nil {
 		return nil, err
 	}
-	if err := g.prepareSnapshot(r); err != nil {
+	outSnap := g.snapPath(r.DLE, r.Level)
+	if err := g.seedSnapshot(r, outSnap); err != nil {
 		return nil, err
 	}
 
@@ -86,7 +96,7 @@ func (g *gnutar) Backup(r method.BackupRequest, out io.Writer) (*method.BackupRe
 	indexFile.Close()
 	defer os.Remove(indexPath)
 
-	totals, err := g.runCreate(r, out, r.OutSnap, indexPath)
+	totals, err := g.runCreate(r, out, outSnap, indexPath)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +104,7 @@ func (g *gnutar) Backup(r method.BackupRequest, out io.Writer) (*method.BackupRe
 	if err != nil {
 		return nil, err
 	}
-	return &method.BackupResult{
+	return &archiver.BackupResult{
 		Uncompressed: totals,
 		FileCount:    countFiles(members),
 		Members:      members,
@@ -107,7 +117,7 @@ func (g *gnutar) Backup(r method.BackupRequest, out io.Writer) (*method.BackupRe
 // honors excludes, one-file-system, and the listed-incremental base natively. A
 // throwaway snapshot is used so the real .snar library is untouched. The result
 // is the uncompressed archive size (an upper bound on the bytes finally stored).
-func (g *gnutar) Estimate(r method.BackupRequest) (int64, error) {
+func (g *gnutar) Estimate(r archiver.BackupRequest) (int64, error) {
 	if err := g.Check(); err != nil {
 		return 0, err
 	}
@@ -119,13 +129,11 @@ func (g *gnutar) Estimate(r method.BackupRequest) (int64, error) {
 	tmp.Close()
 	defer os.Remove(tmpSnap)
 
-	est := r
-	est.OutSnap = tmpSnap
-	if err := g.prepareSnapshot(est); err != nil {
+	if err := g.seedSnapshot(r, tmpSnap); err != nil {
 		return 0, err
 	}
 
-	args := g.createArgs(est, "/dev/null", tmpSnap, "")
+	args := g.createArgs(r, "/dev/null", tmpSnap, "")
 	cmd := exec.Command(g.bin, args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -215,28 +223,27 @@ func (g *gnutar) List(in io.Reader) ([]string, error) {
 	return members, nil
 }
 
-// prepareSnapshot seeds OutSnap from BaseSnap for incrementals, or removes it
-// for a full so tar starts a fresh snapshot.
-func (g *gnutar) prepareSnapshot(r method.BackupRequest) error {
-	if r.OutSnap == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(r.OutSnap), 0o755); err != nil {
+// seedSnapshot prepares outSnap as the starting incremental state for the dump:
+// a copy of the base level's snapshot for an incremental (so the real base file
+// is never mutated — tar updates outSnap in place), or an absent file for a full
+// so tar starts fresh.
+func (g *gnutar) seedSnapshot(r archiver.BackupRequest, outSnap string) error {
+	if err := os.MkdirAll(filepath.Dir(outSnap), 0o755); err != nil {
 		return err
 	}
-	if r.Level == 0 || r.BaseSnap == "" {
-		if err := os.Remove(r.OutSnap); err != nil && !os.IsNotExist(err) {
+	if r.Level == 0 || r.BaseLevel < 0 {
+		if err := os.Remove(outSnap); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		return nil
 	}
-	return copyFile(r.BaseSnap, r.OutSnap)
+	return copyFile(g.snapPath(r.DLE, r.BaseLevel), outSnap)
 }
 
 // createArgs builds the shared tar create-mode argument list. fileTarget is "-"
 // for a streamed backup or "/dev/null" for an estimate; indexPath, when set, adds
 // the verbose member index (backup only).
-func (g *gnutar) createArgs(r method.BackupRequest, fileTarget, snapshot, indexPath string) []string {
+func (g *gnutar) createArgs(r archiver.BackupRequest, fileTarget, snapshot, indexPath string) []string {
 	args := []string{
 		"--create", "--file=" + fileTarget,
 		"--directory=" + r.SourcePath,
@@ -249,7 +256,7 @@ func (g *gnutar) createArgs(r method.BackupRequest, fileTarget, snapshot, indexP
 	if g.sparse {
 		args = append(args, "--sparse")
 	}
-	for _, p := range g.exclude {
+	for _, p := range r.Exclude {
 		args = append(args, "--exclude="+p)
 	}
 	if indexPath != "" {
@@ -258,7 +265,7 @@ func (g *gnutar) createArgs(r method.BackupRequest, fileTarget, snapshot, indexP
 	return append(args, ".")
 }
 
-func (g *gnutar) runCreate(r method.BackupRequest, w io.Writer, snapshot, indexPath string) (int64, error) {
+func (g *gnutar) runCreate(r archiver.BackupRequest, w io.Writer, snapshot, indexPath string) (int64, error) {
 	cmd := exec.Command(g.bin, g.createArgs(r, "-", snapshot, indexPath)...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

@@ -259,7 +259,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 	}
 	defer os.RemoveAll(dir)
 	for _, step := range t.Steps {
-		m, err := e.methodByName(step.Method)
+		m, err := e.archiverByType(step.Archiver)
 		if err != nil {
 			return drill.ClassPipeline, err.Error()
 		}
@@ -579,8 +579,8 @@ type PostureCheck struct {
 }
 
 // Posture is the 3-2-1-1-0 recoverability audit derived from the catalog, config,
-// snapshot library, capacity, and the WORM probe — the best-practice framing around
-// the per-DLE drill outcomes.
+// incremental-state library, capacity, and the WORM probe — the best-practice
+// framing around the per-DLE drill outcomes.
 type Posture struct {
 	Checks    []PostureCheck
 	Copies    int // backup copies of the weakest-covered slot (the live source is the implicit +1)
@@ -656,7 +656,7 @@ func (e *Engine) posture(worm WormResult, failures int) Posture {
 
 	// Extras beyond the 3-2-1-1-0 core.
 	add(e.postureKey())
-	add(e.postureSnapshots())
+	add(e.postureIncrementalState())
 	add(e.postureCapacity())
 	return p
 }
@@ -687,9 +687,11 @@ func (e *Engine) postureKey() (string, PostureStatus, string) {
 	return "key reachable", PostureOK, "encryptor + key reference present"
 }
 
-// postureSnapshots checks the precious, non-derivable tar snapshot library: a DLE
-// missing its base snapshot will be forced to a full (recoverable, but a signal).
-func (e *Engine) postureSnapshots() (string, PostureStatus, string) {
+// postureIncrementalState checks the precious, non-derivable incremental-state
+// library each archiver owns: a DLE missing the base state its next incremental
+// builds on will be forced to a full (recoverable, but a signal). The archiver
+// answers whether the base is present (HasBase), so this stays archiver-neutral.
+func (e *Engine) postureIncrementalState() (string, PostureStatus, string) {
 	hist := e.cat.History()
 	missing := 0
 	for _, d := range e.cfg.DLEs() {
@@ -698,20 +700,24 @@ func (e *Engine) postureSnapshots() (string, PostureStatus, string) {
 		if st.LastFullDate == "" {
 			continue // never fulled yet; nothing relied upon
 		}
+		m, err := e.archiverFor(d.DumpTypeName())
+		if err != nil {
+			continue // unresolvable archiver surfaces elsewhere (pre-flight / estimate)
+		}
 		// The next incremental sits at level L (1 right after a full, else the last
-		// level) and builds on the L-1 snapshot; without it the DLE is forced to a full.
+		// level) and builds on the L-1 state; without it the DLE is forced to a full.
 		lvl := st.LastLevel()
 		if lvl < 1 {
 			lvl = 1
 		}
-		if !e.cat.SnapshotExists(name, lvl-1) {
+		if !m.HasBase(name, lvl-1) {
 			missing++
 		}
 	}
 	if missing == 0 {
-		return "snapshots present", PostureOK, "tar snapshot library intact"
+		return "incremental state present", PostureOK, "incremental-state library intact"
 	}
-	return "snapshots present", PostureWarn, fmt.Sprintf("%d DLE(s) missing a base snapshot (next backup forces a full)", missing)
+	return "incremental state present", PostureWarn, fmt.Sprintf("%d DLE(s) missing base incremental state (next backup forces a full)", missing)
 }
 
 // postureCapacity reflects whether the landing medium is within its capacity budget.

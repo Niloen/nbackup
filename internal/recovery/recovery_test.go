@@ -10,14 +10,14 @@ import (
 // rewrites etc/hosts and adds etc/new.conf.
 func scenario() []*slot.Slot {
 	full := &slot.Slot{ID: "slot-2026-06-21", Date: "2026-06-21", Archives: []slot.Archive{{
-		DLE: "app", Level: 0, Method: "gnutar", Codec: "none",
+		DLE: "app", Level: 0, Archiver: "gnutar", Codec: "none",
 		Members: []string{
 			"./", "./etc/", "./etc/hosts", "./etc/passwd",
 			"./var/", "./var/log/", "./var/log/a.log",
 		},
 	}}}
 	incr := &slot.Slot{ID: "slot-2026-06-22", Date: "2026-06-22", Archives: []slot.Archive{{
-		DLE: "app", Level: 1, Method: "gnutar", Codec: "none",
+		DLE: "app", Level: 1, Archiver: "gnutar", Codec: "none",
 		Members: []string{"./", "./etc/", "./etc/hosts", "./etc/new.conf"},
 	}}}
 	return []*slot.Slot{full, incr}

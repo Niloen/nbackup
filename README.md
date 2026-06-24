@@ -270,7 +270,7 @@ that file and prints an at-a-glance report:
 ```text
 Run slot-2026-06-21  [running]
   started:  2026-06-21 02:00:03  (elapsed 4m12s)
-  dumpers:  2 configured, 2 active
+  workers:  2 configured, 2 active
   dles:     1 done, 2 active, 1 pending
 
 DLE          LEVEL  STATE    PROGRESS           DONE       EST        WRITTEN
@@ -477,7 +477,7 @@ warning, not a failure, so a nightly drill stays green while it rotates through 
 fleet.
 
 Every run also prints a **3-2-1-1-0 recoverability posture audit** — copies, media,
-offsite presence, immutability, and 0 errors, plus key-reachable, snapshot-library,
+offsite presence, immutability, and 0 errors, plus key-reachable, incremental-state,
 and capacity checks. The **immutability** line comes from a WORM probe: NBackup
 keeps one fixed probe object on the `--from` medium and checks that deleting it is
 *refused* (S3 Object Lock, LTO WORM). NBackup only **detects** immutability — you
@@ -580,19 +580,29 @@ media:
     capacity: 20TB                   # the space NBackup may use here
 landing: disk
 
-# The catalog's own local state (slot cache + tar snapshots) is separate from any
+# The catalog's own local cache is separate from any
 # medium and defaults to ./nbackup-catalog in the working directory. Set `workdir`
 # to place it deliberately (e.g. alongside the disk medium above).
 # workdir: /var/lib/nbackup/catalog
 
-# Named method+option bundles (Amanda's "dumptype"); a DLE selects one.
+# Named archiver definitions (Amanda's "application"): an archiver type + its
+# content-independent options. An undeclared name is a bare type, so `archiver:
+# gnutar` needs no block; most setups need just one.
+archivers:
+  default:
+    type: gnutar
+    one-file-system: "true"
+    # tar_path: gtar     # GNU tar binary (use "gtar" on macOS/BSD)
+
+# Named dumptypes (Amanda's "dumptype"): an archiver reference + per-DLE policy —
+# what to skip (exclude) and encryption. Excludes are a content decision, so they
+# live here, not on the archiver; a DLE selects one dumptype.
 dumptypes:
   default:
-    method: gnutar
-    one-file-system: "true"
+    archiver: default
   no-logs:
-    method: gnutar
-    exclude: "*.log,*.tmp"
+    archiver: default
+    exclude: ["*.log", "*.tmp"]
 
 # The disklist: grouped by dumptype, then host, then paths.
 sources:
@@ -605,8 +615,14 @@ sources:
 - **Media** is a map of named definitions, each with a `type` and type-specific
   parameters; `landing` names the one slots are written to. Adding a medium type
   is a registry registration — no config struct changes.
-- **Dumptypes** are named `{method + options}` bundles: a dump method (the
-  "Application") plus its options (compression, `exclude`, `one-file-system`, …).
+- **Archivers** are named definitions of the dump program plus its content-
+  independent options — the tar binary, `one-file-system`, the incremental
+  `state_dir` (Amanda's "application"). Most setups need just one; an undeclared
+  name is treated as a bare type, so `archiver: gnutar` needs no block.
+- **Dumptypes** name an archiver and carry per-DLE policy — what to skip
+  (`exclude`) and encryption (Amanda's "dumptype"). Excludes live here, not on the
+  archiver, because skipping logs is a decision about the data, not about how tar
+  runs. Compression is config-wide.
 - **Sources** (the disklist) are grouped by dumptype → host → paths, so each DLE
   is just a path under the dumptype that governs it — all per-DLE tuning lives in
   the dumptype, never on the entry.
@@ -635,7 +651,7 @@ politeness NBackup already applies: it keeps an `nb dump`/`nb sync` from saturat
 the office uplink during business hours, and a restore/drill download from the same
 medium honors the same budget (the cap is symmetric on reads). It is enforced as a
 token bucket on the medium-facing stream, so it back-pressures the one-pass pipeline
-without a holding-disk buffer. When several dumpers write one medium concurrently
+without a holding-disk buffer. When several workers write one medium concurrently
 they **share** the single budget (Amanda's `netusage`), since a run lands on one
 medium. Set it on the medium whose link you must protect — typically the cloud or a
 remote tier.
@@ -643,8 +659,8 @@ remote tier.
 ## Requirements
 
 - **Go 1.25+** to build.
-- **GNU tar** at runtime (`tar` on Linux, `gtar` elsewhere; set `gnutar_path` in
-  config to override). NBackup checks the binary is GNU tar before running.
+- **GNU tar** at runtime (`tar` on Linux, `gtar` elsewhere; set a `tar_path` option
+  on the archiver to override). NBackup checks the binary is GNU tar before running.
 - The configured **compressor** on `PATH`: `zstd` (default) or `gzip`; `none`
   needs nothing. NBackup checks it before running. Optional `nice` is used for
   CPU politeness when configured.

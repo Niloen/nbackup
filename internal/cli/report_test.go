@@ -45,7 +45,7 @@ func TestRunReportedFailurePreservesErrorAndExitClass(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{Workdir: dir}
 	a := &app{quiet: true}
-	sentinel := errors.New("dumpers failed")
+	sentinel := errors.New("archivers failed")
 
 	err := a.runReported(cfg, report.Run{Command: report.CommandDump, ExitClass: "dump-failed"}, func() (report.Run, error) {
 		return report.Run{}, sentinel

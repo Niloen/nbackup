@@ -1,13 +1,13 @@
 // Package progress is NBackup's run-monitoring layer, analogous to Amanda's
 // amdump status file + amstatus reader. A run (`nb dump`) drives a Tracker as its
-// dumpers archive each DLE; the Tracker maintains a single live Snapshot and
+// workers archive each DLE; the Tracker maintains a single live Snapshot and
 // flushes it to a status file. A separate command (`nb status`) loads and renders
 // that file — so an operator can watch a detached run from another shell without
 // any daemon or socket, only an inspectable file (the same philosophy as the
 // catalog: state lives in files).
 //
 // NBackup has no holding disk: each DLE streams source -> compressor -> volume in
-// one pass, so unlike Amanda there is no separate dumper/taper split — one DLE has
+// one pass, so unlike Amanda there is no separate archiver/taper split — one DLE has
 // one "dumping" state, metered by uncompressed bytes against the planner estimate.
 package progress
 
@@ -24,7 +24,7 @@ const StatusFileName = "run-status.json"
 type Phase string
 
 const (
-	PhaseRunning Phase = "running" // dumpers are archiving DLEs
+	PhaseRunning Phase = "running" // workers are archiving DLEs
 	PhaseSealing Phase = "sealing" // all dumps done; verifying + writing the seal
 	PhaseDone    Phase = "done"    // sealed successfully (terminal)
 	PhaseFailed  Phase = "failed"  // a dump or the seal failed (terminal)
@@ -75,7 +75,7 @@ func (d DLE) Pct() float64 {
 type Snapshot struct {
 	SlotID    string    `json:"slot_id"`
 	Phase     Phase     `json:"phase"`
-	Dumpers   int       `json:"dumpers"` // configured parallelism
+	Workers   int       `json:"workers"` // configured parallelism
 	StartedAt time.Time `json:"started_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	EndedAt   time.Time `json:"ended_at,omitempty"`

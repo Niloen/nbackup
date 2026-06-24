@@ -152,7 +152,7 @@ func TestReopenRescans(t *testing.T) {
 	}
 }
 
-// TestConcurrentAppend exercises parallel dumpers: many appends must get unique
+// TestConcurrentAppend exercises parallel workers: many appends must get unique
 // positions and all land. Run under -race.
 func TestConcurrentAppend(t *testing.T) {
 	v := openVol(t)

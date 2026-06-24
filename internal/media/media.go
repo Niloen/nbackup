@@ -34,7 +34,7 @@ type Header struct {
 	DLE       string    `json:"dle,omitempty"`
 	Host      string    `json:"host,omitempty"`
 	Path      string    `json:"path,omitempty"`
-	Method    string    `json:"method,omitempty"`
+	Archiver  string    `json:"archiver,omitempty"`
 	Codec     string    `json:"codec,omitempty"`
 	Encrypt   string    `json:"encrypt,omitempty"` // encryption scheme name (gpg); reversed on restore. "" = plaintext. The key is never recorded — gpg resolves it from the ciphertext + keyring.
 	Level     int       `json:"level,omitempty"`

@@ -31,7 +31,7 @@ func goldenHeader() media.Header {
 		DLE:       "h-data",
 		Host:      "h",
 		Path:      "/data",
-		Method:    "gnutar",
+		Archiver:  "gnutar",
 		Codec:     "none",
 		Level:     1,
 		BaseSlot:  "slot-2026-01-01",

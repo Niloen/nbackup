@@ -20,3 +20,8 @@ user-facing front page; [PRD.md](PRD.md) is the product vision.
 - **Test env has no `zstd`** — use codec `none` in tests (tar/gzip/nice present).
 - Keep the generic media/changer layer **medium-neutral** (`bays`, `volume_size`,
   `nb changer`); tape specifics stay in the `tape` package.
+- Keep the generic `dump`/catalog/engine layer **archiver-neutral** (`Archiver`,
+  `BackupRequest{DLE, Level, BaseLevel}`, `HasBase`, "incremental state"); GNU tar
+  specifics (`.snar`, snapshots, `state_dir`, `tar_path`) stay in `dump/gnutar`. A
+  archiver owns its own incremental state, not the catalog. The concurrency unit is a
+  **worker** (`parallelism.workers`); "archiver" means only the plugin.

@@ -18,7 +18,7 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 
 	fmt.Fprintf(w, "Run %s  [%s]\n", s.SlotID, s.Phase)
 	fmt.Fprintf(w, "  started:  %s  (elapsed %s)\n", s.StartedAt.Local().Format("2006-01-02 15:04:05"), sizeutil.FormatElapsed(s.Elapsed(now)))
-	fmt.Fprintf(w, "  dumpers:  %d configured, %d active\n", s.Dumpers, active)
+	fmt.Fprintf(w, "  workers:  %d configured, %d active\n", s.Workers, active)
 	fmt.Fprintf(w, "  dles:     %d done, %d active, %d pending", done, active, pending)
 	if failed > 0 {
 		fmt.Fprintf(w, ", %d FAILED", failed)

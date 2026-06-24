@@ -12,12 +12,12 @@ import (
 // Step is one archive to extract during a restore. It identifies the archive
 // logically; the engine resolves its volume position via the catalog.
 type Step struct {
-	SlotID  string
-	DLE     string
-	Level   int
-	Method  string // dump method that produced the archive
-	Codec   string // compression codec to reverse before extracting
-	Encrypt string // encryption scheme to reverse before decompressing ("" = plaintext)
+	SlotID   string
+	DLE      string
+	Level    int
+	Archiver string // archiver type that produced the archive
+	Codec    string // compression codec to reverse before extracting
+	Encrypt  string // encryption scheme to reverse before decompressing ("" = plaintext)
 }
 
 // Chain returns the archives needed to restore a DLE as of the target slot, in
@@ -58,7 +58,7 @@ func Chain(slots []*slot.Slot, dleName, targetSlotID string) ([]Step, error) {
 			if i == fullIdx && a.Level != 0 {
 				continue // at the full's slot, take only the full
 			}
-			steps = append(steps, Step{SlotID: s.ID, DLE: a.DLE, Level: a.Level, Method: a.Method, Codec: a.Codec, Encrypt: a.Encrypt})
+			steps = append(steps, Step{SlotID: s.ID, DLE: a.DLE, Level: a.Level, Archiver: a.Archiver, Codec: a.Codec, Encrypt: a.Encrypt})
 		}
 	}
 	return steps, nil

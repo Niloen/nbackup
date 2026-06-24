@@ -15,7 +15,7 @@
 // The librarian is a shared service: dump, copy/sync, restore, rebuild, label, and
 // load all bottom out in "present the right volume on medium X". It depends only on
 // media, the catalog, and policy — never on the engine — so it is the seam future
-// sub-engines (a dumper, a catalog refresher, a copier) will each consume.
+// sub-engines (a dump run, a catalog refresher, a copier) will each consume.
 package librarian
 
 import (
@@ -352,7 +352,7 @@ func (l *Librarian) Remaining() (int64, bool) {
 // needs either a knowable remaining capacity (a finite reel, so the writer can size
 // each part to fit and roll proactively) or a configured part_size. Disk and any
 // medium without a loaded finite volume cannot span. The engine uses this to serialize
-// dumpers when spanning is possible (a single drive cannot interleave two archives'
+// workers when spanning is possible (a single drive cannot interleave two archives'
 // parts).
 func (l *Librarian) CanSpan(partSize int64) bool {
 	if partSize > 0 {
