@@ -22,7 +22,7 @@ restore with stock tools.
 - **Cycle** — the safety/scheduling boundary: every DLE is fulled once per cycle.
 - **Medium** — a named storage definition; opens as a **Volume**.
 - **Volume** — an ordered sequence of header-framed, self-describing files
-  addressed by position (Amanda's Device API). Disk, tape, S3 all map to it.
+  addressed by position (Amanda's Device API). Disk, tape, object stores all map to it.
 - **Catalog Entry / Placement / Part** — the catalog separates *what a slot is* (one
   medium-independent `Entry`, from the seal) from *where its copies live* (N
   `Placement`s, one per medium). A placement holds each archive's ordered **parts**
@@ -49,7 +49,7 @@ registry registration, not a conditional in the core.
 | `slotio` | maps a slot onto a `Volume`'s files (headers, seal, verify, `Expect`) | taper / amrestore |
 | `media` | `Volume` + `Labeled` + `Drive`/`Changer` (device) + `Shelf` (environment) + `Profile` + registry | Device API |
 | `librarian` | operates a medium's `Changer`/`Shelf` + label protocol (make-writable, advance, mount, label, load) | changer / amtape |
-| `media/disk`, `media/tape`, `media/s3` | Volume impls (disk sidecar headers; tape library; s3 stub) | vfs / tape / s3 devices |
+| `media/disk`, `media/tape`, `media/cloud` | Volume impls (disk sidecar headers; tape library; object store via gocloud.dev/blob) | vfs / tape / s3 devices |
 | `method` + `method/gnutar` | dump `Method` interface + registry; GNU tar impl | Application API / amgtar |
 | `filter` | external compressor child processes (zstd/gzip/none) + registry | compress |
 | `xfer` | in-process stream metering: checksum + byte counting | Xfer API |
@@ -141,6 +141,21 @@ per medium (disk: a `.hdr` sidecar so the payload is a clean `.tar.<codec>`; tap
 a fixed 32 KB header block inline, since tape has no sidecars). `Open` is cheap;
 `ReadFile` seeks by position; only `Files()` is a full scan (the rebuild path).
 Normal ops resolve positions from the catalog and never scan.
+
+**Cloud = an object store as a `Volume` (`media/cloud`).** One medium `type: cloud`
+covers S3, GCS, Azure Blob, and any S3-compatible store, via the Go CDK
+(`gocloud.dev/blob`); the backend is chosen by the bucket `url` scheme (`s3://`,
+`gs://`, `azblob://`), with `file://`/`mem://` drivers making it fully testable
+with no network or credentials. It is **address-identified, like disk** — a
+bucket+key names a volume unambiguously, so it implements none of
+`Labeled`/`Drive`/`Changer`/`Shelf` and runs no label/swap/spanning machinery, and
+it registers `NewSizeProfile` (a byte budget reclaimed per slot). The on-store
+layout is the disk medium's verbatim — `slots/<slot>/<NNNNNN>-<dle>-L<n>.tar.<ext>`
+clean payload objects plus a `.hdr` sidecar — so a slot streams disk↔cloud
+unchanged and a plain GET yields a stock-tool-restorable archive. Atomicity is the
+same: payload object first, sidecar last, and a failed upload is aborted (not
+committed), so an interrupted write leaves a sidecar-less orphan that scan/rebuild
+ignores. Credentials come from each SDK's ambient environment, never the config.
 
 **Tape = volumes behind one drive.** The `device` seam (the `mt` analogue, one
 mounted tape) is shared by all shapes; the positioning surface differs and is what
@@ -306,7 +321,6 @@ the medium it lands on.
 - **Whole-volume recycle** on EOT. Spanning rolls onto the next *blank / empty
   in-pool* tape; auto-recycling an aged-out tape (vs. relabeling it) is still manual
   (`nb label --relabel`).
-- **S3** Volume implementation (registered stub today).
 - **Capacity-driven retention** — capacity is reported and bounds promotion;
   pruning is cycle-based, not yet automatically driven to fit capacity.
 - **Remote sources** — `host` is metadata; `path` is read locally.

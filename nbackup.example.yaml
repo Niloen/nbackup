@@ -10,8 +10,7 @@ cycle: 7d
 
 # Named storage definitions. Each is a Volume with a `type`, its own capacity and
 # retention, plus type-specific connection parameters. Slots can be copied
-# between media with `nb copy` (e.g. `nb copy <slot> --to lto`). disk and tape
-# work today; s3 is a stub.
+# between media with `nb copy` (e.g. `nb copy <slot> --to lto`).
 media:
   fast-disk:
     type: disk          # a filesystem directory (local or NFS)
@@ -50,9 +49,18 @@ media:
     #   nb load desk-drive reel-03        # load a reel by id (or --label by name)
     #   nb label desk-drive lto-0001      # label whatever reel is loaded
   cloud:
-    type: s3            # registered stub; no S3 client yet
-    bucket: company-backups
-    capacity: 50TB      # space NBackup may use in the bucket
+    type: cloud         # an OBJECT STORE via the Go CDK (gocloud.dev/blob)
+    url: s3://company-backups?region=eu-north-1   # the backend is the URL scheme:
+                        #   s3://bucket?region=…   S3 (and S3-compatible: MinIO/R2/B2/Wasabi)
+                        #   gs://bucket            Google Cloud Storage
+                        #   azblob://container     Azure Blob
+    # prefix: nbackup/  # optional: confine all keys under this folder in the bucket
+    capacity: 50TB      # space NBackup may use here; `nb prune` reclaims oldest to fit
+    # minimum_age: 30d  # retention floor before a slot may be retired (default: one cycle)
+    # Credentials are NOT configured here — they come from each cloud SDK's standard
+    # environment (AWS_*, GOOGLE_APPLICATION_CREDENTIALS, AZURE_*), so secrets stay
+    # out of the config file. An object store is address-identified: no labels, no
+    # swaps, nothing to inventory — it behaves like the disk medium.
 
 # Which medium slots are created on (the landing).
 landing: fast-disk
