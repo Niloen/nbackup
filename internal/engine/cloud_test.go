@@ -47,7 +47,7 @@ func TestCloudLandingRoundTrip(t *testing.T) {
 
 	dest := t.TempDir()
 	name := config.DLE{Host: "h", Path: src}.Name()
-	if err := eng.Restore(s.ID, name, dest, nil); err != nil {
+	if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
 		t.Fatalf("restore from cloud: %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "f.txt"), "land me in the cloud")

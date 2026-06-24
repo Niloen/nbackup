@@ -67,8 +67,9 @@ zstd -dc 000000-app01-home-L0.tar.zst | tar -xf -
 for a in slots/slot-*/0*-app01-home-L*.tar.zst; do
   zstd -dc "$a" | tar --extract --listed-incremental=/dev/null
 done
-# (an ENCRYPTED archive reverses the same way, decrypting before decompressing:
-#  gpg -d < 000000-app01-home-L0.tar.zst.gpg | zstd -dc | tar -xf -)
+# (an ENCRYPTED archive keeps the same .tar.zst name — the header records the
+#  scheme, the file is not renamed — and reverses the same way, decrypting first:
+#  gpg -d < 000000-app01-home-L0.tar.zst | zstd -dc | tar -xf -)
 # (from tape, skip the 32 KB inline header first: dd bs=32k skip=1 < file | zstd -dc | …)
 # (a tape archive that SPANNED volumes is split into parts — strip each part's 32 KB
 #  header and concatenate them in order before decompressing:
@@ -83,8 +84,10 @@ through **gpg** after compression — public-key (`recipient`) or symmetric
 every copy (disk, tape, offsite) holds the same ciphertext, so vaulting with
 `nb sync` never needs the key. The archive records only the **scheme name**
 (`gpg`), never a key — gpg finds the right key in the operator's keyring from the
-ciphertext itself, so restore works on any host with the key, even with the
-config gone.
+ciphertext itself, so a **public-key** dump restores on any host with the private
+key, even with the config gone. (A **symmetric** `passphrase_file` dump still
+needs the `encrypt` block at restore to point gpg at the passphrase file — there
+is no key-id in the ciphertext to discover it from.)
 
 Two consequences worth knowing: **lose the key and the data is unrecoverable**
 (NBackup holds no copy by design), and the per-slot **seal stays plaintext** —
@@ -101,7 +104,7 @@ go install ./cmd/nb
 ```
 
 This produces a single `nb` binary. The convention: you **inspect** with a noun
-(`nb slot`, `nb medium`) and **act** with a flat verb (`nb dump`, `nb restore`,
+(`nb slot`, `nb medium`) and **act** with a flat verb (`nb dump`, `nb recover`,
 `nb prune`, …).
 
 | Command              | Purpose                                                  |
@@ -114,13 +117,12 @@ This produces a single `nb` binary. The convention: you **inspect** with a noun
 | `nb medium`          | List media, or detail one (incl. bays / drive + shelf)    |
 | `nb verify`          | Verify slot integrity: checksums, or `--deep` structure  |
 | `nb drill`           | Rehearse recovery: prove backups are restorable          |
-| `nb restore`         | Restore a whole DLE from a slot                          |
-| `nb recover`         | Browse a DLE as of a date and recover selected files     |
+| `nb recover`         | Recover as of a date: browse + pick files, or `--all` for a whole DLE |
 | `nb copy`            | Copy one slot between media (`--from`/`--to`, e.g. disk → tape) |
 | `nb sync`            | Mirror one medium's slots onto another (disk → tape/s3)  |
 | `nb label`           | Label a volume (required for tape before its first dump) |
 | `nb load`            | Load a volume into a medium's drive (bay or shelf reel)   |
-| `nb prune`           | Delete slots past the cycle/capacity limits             |
+| `nb prune <medium>`  | Delete a medium's slots past its cycle/capacity limits  |
 | `nb rebuild`         | Rebuild the local slot-index cache from media            |
 
 Run `nb help <command>` (or `nb <command> --help`) for per-command usage and
@@ -141,7 +143,7 @@ nb slot show slot-2026-06-21   # archives + every copy's volume and file positio
 nb medium              # media overview: type, slots, usage / capacity, volume
 nb medium lto          # one medium's volume and the slots it holds
 nb verify --all        # re-check every slot's archive checksums
-nb restore --dle app01-home --dest /tmp/out slot-2026-06-21
+nb recover --dle app01-home --date 2026-06-21 --all --dest /tmp/out   # whole-DLE restore
 ```
 
 These global flags work with every command and may appear anywhere on the
@@ -262,20 +264,23 @@ state per DLE (no separate dumper/taper queues). `nb status --watch 2s`
 refreshes until the run finishes; afterwards `nb status` shows the last run's
 final result.
 
-### Restore
+### Recover (restore a whole DLE, or pick files)
 
-Restoring a DLE as of a slot replays its most recent full at or before that
-slot, then every later incremental up to it, in run order, with GNU tar's
-incremental extraction. Because the incrementals carry directory census data,
-**deletions are applied** — a file removed between the full and the chosen slot
-is absent after restore. You can restore a single DLE (`--dle`) or all DLEs in
-the slot.
+`nb recover` recovers from backups **as they stood on a date**, in two modes.
 
-### Recover (browse a date, pick files)
+**Whole-DLE restore (`--all`).** `nb recover --dle X --date D --all --dest out`
+rebuilds an entire DLE: it replays the most recent full at or before the date,
+then every later incremental up to it, in run order, with GNU tar's incremental
+extraction. Because the incrementals carry directory census data, **deletions are
+applied** — a file removed between the full and the date is absent after restore.
+Omit `--dle` to restore every DLE, each into its own subdirectory of `--dest`.
+That same census means extraction **prunes the destination to match the backup**,
+so `--dest` must be empty (or pass `--force` to restore into a populated one,
+replacing its contents).
 
-`nb recover` is the file-level counterpart to `nb restore`: browse a DLE's
-filesystem **as it stood on a date** and pull back individual files or
-directories instead of the whole DLE. The browse view merges the restore chain
+**File-level recovery (browse + pick).** Without `--all`, recover browses a DLE's
+filesystem and pulls back individual files or directories. The browse view merges
+the restore chain
 (the full plus every later incremental up to the date) so each path shows its
 newest version on or before the date, and each file is recovered from the
 archive that actually holds it. No separate index server is needed — the index
@@ -306,11 +311,11 @@ recovered 12 entr(ies) from 2 archive(s) into /tmp/out
 
 Paths are relative to the DLE's backed-up root. Selecting a directory pulls its
 whole subtree (each file from the archive that last changed it). Unlike a
-whole-DLE `nb restore`, selected-file recovery never deletes — it only writes the
-files you asked for. One fidelity note: GNU tar records deletions in its
+a whole-DLE `--all` restore, selected-file recovery never deletes — it only writes
+the files you asked for. One fidelity note: GNU tar records deletions in its
 snapshot, not in the member index, so a file deleted at a later incremental still
-shows up in the browse view; recover the *whole* DLE with `nb restore` when you
-need deletion-accurate state.
+shows up in the browse view; recover the *whole* DLE with `--all` when you need
+deletion-accurate state.
 
 ### Verifying and recovery drills
 
@@ -371,16 +376,18 @@ turn it off.
 
 ### Pruning (cycle safety)
 
-`nb prune` is a dry-run by default. **Retention is per-medium**: each store is
-pruned against its own slots, capacity, and `minimum_age` — a copy on another
-medium never makes a slot prunable, because double storage exists for
+`nb prune <medium>` is a dry-run by default. **Retention is per-medium**, so the
+medium to prune is named explicitly (`nb prune disk`, `nb prune offsite`): each
+store is pruned against its own slots, capacity, and `minimum_age` — a copy on
+another medium never makes a slot prunable, because double storage exists for
 redundancy. Pruning has two layers:
 
 1. **Safety floor**: a slot is *protected* if it is younger than the medium's
    `minimum_age` (which defaults to one cycle), or if — among that medium's own
-   slots — no newer full of one of its DLEs exists (so on this medium it is that
-   DLE's last recovery path). Protected slots are never reclaimed. The rule is
-   medium-neutral; the slot set it judges is the medium's own.
+   slots — no newer *full* of one of its DLEs exists (so on this medium it is that
+   DLE's last recovery path; an incremental-only slot is never the floor). Protected
+   slots are never reclaimed. The rule is medium-neutral; the slot set it judges is
+   the medium's own.
 2. **Capacity reclamation**: among non-protected slots, the medium's retention
    strategy reclaims to fit capacity. Object stores (disk, S3) reclaim
    **per-slot**, deleting the **oldest slots until total ≤ capacity**. Tape
@@ -441,6 +448,11 @@ See [`nbackup.example.yaml`](nbackup.example.yaml). Minimal example:
 
 ```yaml
 cycle: 7d                            # target & hard-max time between fulls per DLE
+
+# Compression. The default codec is zstd, which must be on PATH; set `none` or
+# `gzip` if zstd is not installed (the codec binary is checked before a dump).
+compress:
+  codec: zstd                        # zstd | gzip | none
 
 # Named storage definitions; `landing` selects which one slots are created on.
 # Capacity is per-medium; minimum_age is optional (defaults to one cycle).
@@ -506,8 +518,9 @@ reclaim a whole tape) lives entirely in the medium's retention strategy.
 
 Implemented: disk, tape, and cloud (S3/GCS/Azure) Volumes, **copying slots between
 media** (`nb copy`, e.g. disk → tape or disk → cloud) with the copy **recorded as a
-second placement** so restore and
-verify use any available copy, balanced **multilevel (L0–L9)** planning with a GNU
+second placement** so a restore reads from any available copy (and `nb verify`
+audits *every* copy, reporting that an intact copy remains when one is damaged),
+balanced **multilevel (L0–L9)** planning with a GNU
 tar snapshot library, immutable sealed slots with **sequence-suffixed** same-day
 runs, **deletion-aware** incremental restore, checksum verification, point-in-time
 restore, per-medium capacity reporting, cycle-safe pruning.
@@ -575,8 +588,11 @@ guessing. A restore reassembles a spanned archive by mounting its tapes in order
 
 Declared in config for forward-compatibility:
 
-- **Capacity-driven retention** — capacity is reported and bounds promotion;
-  pruning is cycle-based, not yet automatically driven to fit capacity.
+- **Tape whole-volume reclamation** — capacity-driven pruning already fits
+  object stores and disk to their `capacity` (reclaiming the oldest
+  non-protected slots first); reclaiming whole *tapes* to fit a library's
+  capacity is not yet automatic — tape reuse is identified by `nb plan` and
+  gated behind a deliberate `nb label --relabel`.
 - **Remote sources** — `host` is metadata; `path` is read from the local
   filesystem (run the agent where the data is, or mount it).
 - **Exclude/include rules** and tar tuning (one-file-system and sparse are on by

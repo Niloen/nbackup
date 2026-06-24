@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
@@ -231,6 +232,9 @@ func newDumpCmd(a *app) *cobra.Command {
 				}
 				return runDumpDryRun(eng, date, warnings)
 			}
+			if err := errPastDump(date); err != nil {
+				return err
+			}
 			eng, unlock, err := a.lockedEngine(cfg)
 			if err != nil {
 				return err
@@ -356,6 +360,10 @@ func newVerifyCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Verifying reads media, so a spanned slot on a single-drive station needs
+			// reel swaps — give it the operator so it prompts (and reassembles a spanned
+			// slot) just like restore, rather than failing at the first volume boundary.
+			eng.SetOperator(stdinOperator{})
 			if all && !a.quiet {
 				mode := "checksum"
 				if deep {
@@ -530,11 +538,11 @@ func newPruneCmd(a *app) *cobra.Command {
 	var apply bool
 	var dateStr string
 	cmd := &cobra.Command{
-		Use:     "prune",
-		Short:   "Delete slots past the cycle/capacity limits",
-		Long:    "Reclaim slots that fall outside the cycle and per-medium capacity limits. Dry-run by default; pass --apply to actually delete.",
-		Example: "  nb prune\n  nb prune --apply",
-		Args:    cobra.NoArgs,
+		Use:     "prune <medium>",
+		Short:   "Delete a medium's slots past its cycle/capacity limits",
+		Long:    "Reclaim slots on the named medium that fall outside its own cycle and capacity limits. Retention is per-medium, so the medium to prune must be named explicitly (pruning one store never touches a copy on another). Dry-run by default; pass --apply to actually delete.",
+		Example: "  nb prune disk\n  nb prune disk --apply\n  nb prune offsite --apply",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.load()
 			if err != nil {
@@ -556,12 +564,16 @@ func newPruneCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eligible, err := eng.Prune(now, apply, a.logf())
+			eligible, err := eng.Prune(args[0], now, apply, a.logf())
 			if err != nil {
 				return err
 			}
-			if !apply && eligible > 0 {
-				fmt.Printf("\n%d slot(s) eligible. Re-run with --apply to delete.\n", eligible)
+			if !apply {
+				if eligible > 0 {
+					fmt.Printf("\n%d slot(s) eligible. Re-run with --apply to delete.\n", eligible)
+				} else {
+					fmt.Printf("\nnothing to reclaim: all slots fit capacity or are protected.\n")
+				}
 			}
 			return nil
 		},
@@ -575,17 +587,21 @@ func newPruneCmd(a *app) *cobra.Command {
 // another configured medium (e.g. disk -> tape).
 func newCopyCmd(a *app) *cobra.Command {
 	var from, to string
-	var force bool
+	var apply, force bool
 	cmd := &cobra.Command{
 		Use:     "copy <slot-id>",
 		Short:   "Copy a slot from one medium to another (e.g. disk -> tape)",
-		Long:    "Stream a slot from one configured medium to another. The destination is selected with --to; the source defaults to the landing medium and is overridden with --from (e.g. un-vault tape -> disk).",
-		Example: "  nb copy --to tape slot-2026-06-21\n  nb copy --from tape --to disk slot-2026-06-21",
+		Long:    "Stream a slot from one configured medium to another. The destination is selected with --to; the source defaults to the landing medium and is overridden with --from (e.g. un-vault tape -> disk). Dry-run by default (like `nb sync`/`nb prune`); pass --apply to actually copy.",
+		Example: "  nb copy --to tape slot-2026-06-21\n  nb copy --to tape --apply slot-2026-06-21\n  nb copy --from tape --to disk --apply slot-2026-06-21",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.load()
 			if err != nil {
 				return err
+			}
+			slotID := args[0]
+			if !apply {
+				return runCopyDryRun(cfg, slotID, from, to, force)
 			}
 			eng, unlock, err := a.lockedEngine(cfg)
 			if err != nil {
@@ -593,7 +609,7 @@ func newCopyCmd(a *app) *cobra.Command {
 			}
 			defer unlock()
 			eng.SetOperator(stdinOperator{})
-			if err := eng.CopySlot(args[0], from, to, force, a.logf()); err != nil {
+			if err := eng.CopySlot(slotID, from, to, force, a.logf()); err != nil {
 				return err
 			}
 			fmt.Println("copy complete")
@@ -602,9 +618,43 @@ func newCopyCmd(a *app) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&to, "to", "", "destination medium name (required)")
 	cmd.Flags().StringVar(&from, "from", "", "source medium name (default: the landing medium)")
+	cmd.Flags().BoolVar(&apply, "apply", false, "actually copy (default is dry-run)")
 	cmd.Flags().BoolVar(&force, "force", false, "re-copy even if the slot is already recorded on the target medium")
 	cmd.MarkFlagRequired("to")
 	return cmd
+}
+
+// runCopyDryRun previews `nb copy` without writing: it resolves the source and
+// target, confirms the slot exists, and reports whether a copy would be made or
+// the slot is already on the target — matching the dry-run shape of sync/prune.
+func runCopyDryRun(cfg *config.Config, slotID, from, to string, force bool) error {
+	eng, err := newEngine(cfg)
+	if err != nil {
+		return err
+	}
+	s, err := eng.Catalog().ReadSlot(slotID)
+	if err != nil {
+		return err
+	}
+	src := from
+	if src == "" {
+		src = eng.Landing()
+	}
+	if _, ok := eng.Medium(to); !ok {
+		return fmt.Errorf("unknown medium %q", to)
+	}
+	if src == to {
+		return fmt.Errorf("source and target are the same medium %q", to)
+	}
+	for _, p := range eng.Catalog().Placements(slotID) {
+		if p.Medium == to && !force {
+			fmt.Printf("%s -> %s: %s already on target; nothing to copy (use --force to re-copy)\n", src, to, slotID)
+			return nil
+		}
+	}
+	fmt.Printf("%s -> %s: would copy %s (%d archive(s), %s). Re-run with --apply to copy.\n",
+		src, to, slotID, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes))
+	return nil
 }
 
 // newSyncCmd implements `nb sync`: the batch form of `nb copy`. It mirrors every
@@ -860,6 +910,8 @@ func capacityStr(c int64) string {
 // listings (a blank volume, a full one, or an appendable labeled one).
 func volumeLabelStatus(b media.VolumeStatus) (label, status string) {
 	switch {
+	case b.Foreign:
+		return "(foreign)", "foreign"
 	case b.Blank:
 		return "(blank)", "blank"
 	case b.Capacity > 0 && b.Used >= b.Capacity:
@@ -934,56 +986,4 @@ func newRebuildCmd(a *app) *cobra.Command {
 			return nil
 		},
 	}
-}
-
-// newRestoreCmd implements `nb restore`: rebuild a DLE (or all DLEs) from a slot.
-func newRestoreCmd(a *app) *cobra.Command {
-	var dleName, dest string
-	cmd := &cobra.Command{
-		Use:     "restore <slot-id>",
-		Short:   "Restore a DLE from a slot",
-		Long:    "Rebuild a DLE as of a slot into a destination directory. With no --dle every DLE in the slot is restored, each into its own subdirectory of --dest.",
-		Example: "  nb restore --dle app01-home --dest /tmp/out slot-2026-06-21",
-		Args:    cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := a.loadRO()
-			if err != nil {
-				return err
-			}
-			eng, err := newEngine(cfg)
-			if err != nil {
-				return err
-			}
-			eng.SetOperator(stdinOperator{})
-			slotID := args[0]
-			s, err := eng.Catalog().ReadSlot(slotID)
-			if err != nil {
-				return err
-			}
-
-			var dles []string
-			if dleName != "" {
-				dles = []string{dleName}
-			} else {
-				dles = eng.DLEsInSlot(s)
-			}
-
-			for _, name := range dles {
-				out := dest
-				if len(dles) > 1 {
-					out = fmt.Sprintf("%s/%s", dest, name)
-				}
-				fmt.Printf("restoring DLE %s as of %s -> %s\n", name, slotID, out)
-				if err := eng.Restore(slotID, name, out, a.logf()); err != nil {
-					return err
-				}
-			}
-			fmt.Println("restore complete")
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&dleName, "dle", "", "DLE name to restore (default: all DLEs in the slot)")
-	cmd.Flags().StringVar(&dest, "dest", "", "destination directory (required)")
-	cmd.MarkFlagRequired("dest")
-	return cmd
 }

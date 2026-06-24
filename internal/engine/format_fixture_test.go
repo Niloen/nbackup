@@ -70,7 +70,7 @@ func TestFormatSurvivesRestore(t *testing.T) {
 
 			for _, rc := range man.Restores {
 				dest := t.TempDir()
-				if err := eng.Restore(rc.Slot, rc.DLE, dest, nil); err != nil {
+				if err := eng.Restore(rc.Slot, rc.DLE, dest, false, nil); err != nil {
 					t.Fatalf("restore %s %s: %v", rc.Slot, rc.DLE, err)
 				}
 				for rel, want := range rc.Files {

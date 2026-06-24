@@ -25,9 +25,12 @@ func ParseBytes(s string) (int64, error) {
 	numPart := strings.TrimSpace(s[:i])
 	unit := strings.TrimSpace(strings.ToLower(s[i:]))
 
+	if numPart == "" {
+		return 0, fmt.Errorf("invalid size %q: expected a number with an optional unit, e.g. 20TB, 500GB, or 1048576", s)
+	}
 	num, err := strconv.ParseFloat(numPart, 64)
 	if err != nil {
-		return 0, fmt.Errorf("invalid size %q: %w", s, err)
+		return 0, fmt.Errorf("invalid size %q: expected a number with an optional unit, e.g. 20TB, 500GB, or 1048576", s)
 	}
 
 	var mult float64 = 1
@@ -95,6 +98,21 @@ func ParseDuration(s string) (time.Duration, error) {
 		}
 		return time.Duration(n * 7 * 24 * float64(time.Hour)), nil
 	default:
-		return time.ParseDuration(s)
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return 0, fmt.Errorf("invalid duration %q: expected a number with a unit, e.g. 7d, 2w, or 24h", s)
+		}
+		return d, nil
 	}
+}
+
+// FormatDuration renders a duration in the day vocabulary the config uses (a
+// whole number of days as "Nd"), falling back to the standard library form for
+// sub-day or non-whole-day durations. So a one-cycle retention floor prints as
+// "7d", matching `cycle: 7d`, rather than "168h0m0s".
+func FormatDuration(d time.Duration) string {
+	if d > 0 && d%(24*time.Hour) == 0 {
+		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+	}
+	return d.String()
 }

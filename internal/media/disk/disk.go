@@ -37,6 +37,7 @@ func init() {
 		return open(filepath.Join(path, "slots"))
 	})
 	media.RegisterProfile("disk", media.NewSizeProfile)
+	media.RegisterParams("disk", "path", "part_size")
 }
 
 // entry pairs a file's header sidecar and payload (paths relative to root).

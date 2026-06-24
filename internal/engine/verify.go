@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/drill"
@@ -130,11 +131,16 @@ func (e *Engine) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerd
 		})
 		return sv, nil
 	}
+	// Track which whole copies passed so a failure can still reassure the operator
+	// that an intact copy remains (redundancy is the point of more than one).
+	var goodCopies, badCopies []string
 	for _, p := range placements {
+		copyOK := true
 		lib, _, _, err := e.librarianFor(p.Medium)
 		if err != nil {
 			logf.log("%s [%s]: ERROR %v", id, p.Medium, err)
 			sv.OK = false
+			badCopies = append(badCopies, p.Medium)
 			sv.Archives = append(sv.Archives, ArchiveVerdict{
 				Slot: id, Medium: p.Medium, OK: false,
 				Class: drill.ClassPipeline, Detail: err.Error(),
@@ -147,11 +153,24 @@ func (e *Engine) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerd
 			sv.Archives = append(sv.Archives, v)
 			if !v.OK {
 				sv.OK = false
+				copyOK = false
 			}
 		}
+		if copyOK {
+			goodCopies = append(goodCopies, p.Medium)
+		} else {
+			badCopies = append(badCopies, p.Medium)
+		}
 	}
-	if sv.OK {
+	switch {
+	case sv.OK:
 		logf.log("%s: OK (%d archive(s), %d cop(ies))", id, len(s.Archives), len(placements))
+	case len(goodCopies) > 0:
+		// Surface that an intact copy remains, and which medium to re-copy from.
+		logf.log("%s: FAILED on %s, but an intact copy remains on %s (re-copy to repair)",
+			id, strings.Join(badCopies, ", "), strings.Join(goodCopies, ", "))
+	default:
+		logf.log("%s: FAILED on all cop(ies): %s", id, strings.Join(badCopies, ", "))
 	}
 	return sv, nil
 }

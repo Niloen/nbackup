@@ -293,6 +293,13 @@ func (g *gnutar) runCreate(r method.BackupRequest, w io.Writer, snapshot, indexP
 	}()
 
 	_, copyErr := io.Copy(w, stdout)
+	if copyErr != nil {
+		// The consumer (a full volume that cannot span, a failed write) stopped
+		// reading, so tar is now blocked writing to its stdout pipe. Kill it so its
+		// stderr closes and the scan goroutine and Wait below return — otherwise this
+		// deadlocks waiting on a child that can never make progress.
+		_ = cmd.Process.Kill()
+	}
 	total := <-totalsCh
 	diag := <-diagCh
 	waitErr := cmd.Wait()
