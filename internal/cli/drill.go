@@ -10,8 +10,33 @@ import (
 
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/report"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
+
+// drillRunRecord maps a DrillReport (plus each DLE's prior ledger outcome) into the
+// uniform run record: failure/skip/overdue counts, the never-drilled list, and a
+// per-DLE health row so a digest can flag a DLE that degraded since its last drill.
+func drillRunRecord(dr *engine.DrillReport, priorOK map[string]bool) report.Run {
+	rec := report.Run{
+		Command:      report.CommandDrill,
+		Failures:     dr.Failures,
+		Skipped:      dr.Skipped,
+		Overdue:      dr.Overdue,
+		NeverDrilled: dr.NeverDrilled,
+	}
+	for _, t := range dr.Targets {
+		was, seen := priorOK[t.DLE]
+		rec.DrillHealth = append(rec.DrillHealth, report.DrillHealth{
+			DLE:     t.DLE,
+			OK:      t.OK,
+			Class:   t.Class.String(),
+			WasOK:   seen && was,
+			Drilled: t.Class != drill.ClassSkipped,
+		})
+	}
+	return rec
+}
 
 // newDrillCmd implements `nb drill`: the recovery-drill orchestration layered on
 // `nb verify`. It selects a risk-biased subset of DLEs, exercises each end-to-end at
@@ -117,15 +142,35 @@ func newDrillCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			report, err := eng.Drill(opts, a.logf())
-			if err != nil {
-				return err
+			if dryRun {
+				dr, err := eng.Drill(opts, a.logf())
+				if err != nil {
+					return err
+				}
+				printDrillReport(dr)
+				return nil
 			}
-			printDrillReport(report)
-			if report.Failures > 0 {
-				return fmt.Errorf("%d drill failure(s) — recovery is at risk", report.Failures)
+
+			// Capture each DLE's prior ledger outcome so the run record can flag a DLE
+			// that *degraded* (passed before, fails now) versus a first-time failure.
+			priorOK := map[string]bool{}
+			if prior, lerr := drill.Load(cfg.WorkdirPath()); lerr == nil {
+				for _, rec := range prior.Records {
+					priorOK[rec.DLE] = rec.OK
+				}
 			}
-			return nil
+			return a.runReported(cfg, report.Run{Command: report.CommandDrill, ExitClass: "drill-failures"}, func() (report.Run, error) {
+				dr, err := eng.Drill(opts, a.logf())
+				if err != nil {
+					return report.Run{}, err
+				}
+				printDrillReport(dr)
+				rec := drillRunRecord(dr, priorOK)
+				if dr.Failures > 0 {
+					return rec, fmt.Errorf("%d drill failure(s) — recovery is at risk", dr.Failures)
+				}
+				return rec, nil
+			})
 		},
 	}
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "preview the drill without running it")

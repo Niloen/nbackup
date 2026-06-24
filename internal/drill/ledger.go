@@ -103,6 +103,26 @@ func (l *Ledger) Drilled(dle string, window time.Duration, now time.Time) bool {
 	return now.Sub(r.LastDrill) < window
 }
 
+// Coverage reports, for a set of configured DLEs, those that have never been
+// drilled and how many are not covered within the window (never-drilled, or whose
+// last drill is too old or failing — anything Drilled rejects). It is the pure
+// coverage computation shared by the engine's drill audit and `nb report`, kept here
+// in the leaf where the ledger lives so neither side reimplements it.
+func (l *Ledger) Coverage(dles []string, window time.Duration, now time.Time) (never []string, overdue int) {
+	for _, d := range dles {
+		rec, ok := l.Records[d]
+		if !ok || rec.LastDrill.IsZero() {
+			never = append(never, d)
+			overdue++
+			continue
+		}
+		if !l.Drilled(d, window, now) {
+			overdue++
+		}
+	}
+	return never, overdue
+}
+
 // Sorted returns the records sorted by DLE name, for stable report rendering.
 func (l *Ledger) Sorted() []Record {
 	out := make([]Record, 0, len(l.Records))

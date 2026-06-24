@@ -226,7 +226,7 @@ func (e *Engine) drillVerify(t drill.Target, medium string, checks VerifyChecks)
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
-	opener := e.partOpener(lib)
+	opener := e.partOpener(lib, medium)
 	for _, step := range t.Steps {
 		s, err := e.cat.ReadSlot(step.SlotID)
 		if err != nil {
@@ -317,7 +317,7 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 	// Fetch the raw (still-encrypted/compressed) payload to a temp file. NBackup is
 	// used only to move bytes off the medium (unavoidable for tape/cloud); the decode
 	// is done entirely by the documented stock tools below.
-	raw := e.reader.OpenRawParts(toSlotioParts(parts), slotio.Expect{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, e.partOpener(lib))
+	raw := e.reader.OpenRawParts(toSlotioParts(parts), slotio.Expect{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, e.partOpener(lib, medium))
 	tmp, err := os.CreateTemp("", "nbackup-drill-raw-*")
 	if err != nil {
 		raw.Close()
@@ -469,20 +469,10 @@ func failureToken(r DrillResult) string {
 }
 
 // coverage reports the configured DLEs that have never been drilled and how many are
-// not covered within the window (never-drilled or last drill too old / failing).
+// not covered within the window. It delegates to drill.Coverage — the pure
+// computation lives in the leaf with the ledger, so `nb report` reuses it too.
 func coverage(dles []string, ledger *drill.Ledger, window time.Duration, now time.Time) (never []string, overdue int) {
-	for _, d := range dles {
-		rec, ok := ledger.Get(d)
-		if !ok || rec.LastDrill.IsZero() {
-			never = append(never, d)
-			overdue++
-			continue
-		}
-		if !ledger.Drilled(d, window, now) {
-			overdue++
-		}
-	}
-	return never, overdue
+	return ledger.Coverage(dles, window, now)
 }
 
 // WormResult is the outcome of the WORM/immutability probe against a medium.

@@ -16,6 +16,7 @@ import (
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
+	"github.com/Niloen/nbackup/internal/report"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/slot"
 )
@@ -268,12 +269,19 @@ func newDumpCmd(a *app) *cobra.Command {
 			}
 			defer unlock()
 			eng.SetOperator(stdinOperator{})
-			s, err := eng.Run(date, a.logf())
-			if err != nil {
-				return err
-			}
-			fmt.Printf("\nSealed %s: %d archive(s), %s total\n", s.ID, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes))
-			return nil
+			return a.runReported(cfg, report.Run{Command: report.CommandDump, ExitClass: "dump-failed"}, func() (report.Run, error) {
+				s, err := eng.Run(date, a.logf())
+				if err != nil {
+					return report.Run{}, err
+				}
+				fmt.Printf("\nSealed %s: %d archive(s), %s total\n", s.ID, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes))
+				return report.Run{
+					Command:    report.CommandDump,
+					SlotID:     s.ID,
+					Archives:   len(s.Archives),
+					BytesMoved: s.TotalBytes,
+				}, nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&dateStr, "date", "", "run date YYYY-MM-DD (default today)")
@@ -402,14 +410,17 @@ func newVerifyCmd(a *app) *cobra.Command {
 			if deep {
 				checks |= engine.CheckStructural
 			}
-			report, err := eng.Verify(args, engine.VerifyOptions{Checks: checks}, a.logf())
-			if err != nil {
-				return err
-			}
-			if report.Failures > 0 {
-				return fmt.Errorf("%d slot(s) failed verification", report.Failures)
-			}
-			return nil
+			return a.runReported(cfg, report.Run{Command: report.CommandVerify, ExitClass: "verify-failures"}, func() (report.Run, error) {
+				vr, err := eng.Verify(args, engine.VerifyOptions{Checks: checks}, a.logf())
+				if err != nil {
+					return report.Run{}, err
+				}
+				rec := report.Run{Command: report.CommandVerify, Failures: vr.Failures}
+				if vr.Failures > 0 {
+					return rec, fmt.Errorf("%d slot(s) failed verification", vr.Failures)
+				}
+				return rec, nil
+			})
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "verify every slot in the catalog")
@@ -597,22 +608,30 @@ func newPruneCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eligible, freed, err := eng.Prune(args[0], now, !dryRun, a.logf())
-			if err != nil {
-				return err
+			if dryRun {
+				eligible, _, err := eng.Prune(args[0], now, false, a.logf())
+				if err != nil {
+					return err
+				}
+				if eligible > 0 {
+					fmt.Printf("\n%d slot(s) eligible. Re-run without --dry-run to delete.\n", eligible)
+				} else {
+					fmt.Printf("\nnothing to reclaim: all slots fit capacity or are protected.\n")
+				}
+				return nil
 			}
-			if !dryRun {
+			return a.runReported(cfg, report.Run{Command: report.CommandPrune, ExitClass: "prune-error"}, func() (report.Run, error) {
+				eligible, freed, err := eng.Prune(args[0], now, true, a.logf())
+				if err != nil {
+					return report.Run{}, err
+				}
 				if eligible > 0 {
 					fmt.Printf("\n%s: deleted %d slot(s), freed %s\n", args[0], eligible, sizeutil.FormatBytes(freed))
 				} else {
 					fmt.Printf("\n%s: nothing to reclaim (all slots fit capacity or are protected)\n", args[0])
 				}
-			} else if eligible > 0 {
-				fmt.Printf("\n%d slot(s) eligible. Re-run without --dry-run to delete.\n", eligible)
-			} else {
-				fmt.Printf("\nnothing to reclaim: all slots fit capacity or are protected.\n")
-			}
-			return nil
+				return report.Run{Command: report.CommandPrune, SlotsPruned: eligible, BytesMoved: freed}, nil
+			})
 		},
 	}
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "preview without deleting")
@@ -745,16 +764,30 @@ func newSyncCmd(a *app) *cobra.Command {
 				return err
 			}
 
-			for _, t := range targets {
-				report, err := eng.SyncTo(t.from, t.name, t.sel, !dryRun, force, a.logf())
-				if report != nil {
-					printSyncReport(report, !dryRun)
+			runSync := func() (report.Run, error) {
+				rec := report.Run{Command: report.CommandSync}
+				for _, t := range targets {
+					sr, err := eng.SyncTo(t.from, t.name, t.sel, !dryRun, force, a.logf())
+					if sr != nil {
+						printSyncReport(sr, !dryRun)
+						rec.SlotsCopied += sr.Copied()
+						for _, it := range sr.Items {
+							if it.Copied {
+								rec.BytesMoved += it.Bytes
+							}
+						}
+					}
+					if err != nil {
+						return rec, err
+					}
 				}
-				if err != nil {
-					return err
-				}
+				return rec, nil
 			}
-			return nil
+			if dryRun {
+				_, err := runSync()
+				return err
+			}
+			return a.runReported(cfg, report.Run{Command: report.CommandSync, ExitClass: "sync-error"}, runSync)
 		},
 	}
 	cmd.Flags().StringVar(&to, "to", "", "target medium (omit to run the config's sync: rules)")
