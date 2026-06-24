@@ -99,14 +99,18 @@ func loadConfigRO(cfgPath, catalogOverride string) (*config.Config, error) {
 	return cfg, nil
 }
 
-// applyCatalog applies a -C override (and a default when no media is configured)
-// by defining a disk landing medium pointing at the directory.
+// applyCatalog applies a -C override (and a default when nothing is configured)
+// by defining a disk landing medium pointing at the directory. The default is only
+// synthesized for a truly bare config (no media AND no landing) — the no-config-file
+// case read-only commands use to browse the local catalog. A config that names a
+// `landing:` but omits its media is rejected by config.Validate instead, so its
+// requested landing is never silently replaced by this default.
 func applyCatalog(cfg *config.Config, catalogOverride string) {
 	if catalogOverride != "" {
 		setLocalLanding(cfg, "cli", catalogOverride)
 		return
 	}
-	if len(cfg.Media) == 0 {
+	if len(cfg.Media) == 0 && cfg.Landing == "" {
 		setLocalLanding(cfg, "default", DefaultCatalog)
 	}
 }
@@ -155,9 +159,14 @@ func (stdinOperator) Swap(r librarian.SwapRequest) (string, bool) {
 	def := suggestReel(r)
 	prompt := "load which reel? (id or label"
 	if def != "" {
-		prompt += fmt.Sprintf("; Enter = %s", def)
+		// With a default, a bare Enter takes it; aborting needs EOF (Ctrl-D). Without
+		// one, an empty line aborts. Describe whichever applies — never both, since
+		// "Enter = X" and "empty line aborts" contradict each other.
+		prompt += fmt.Sprintf("; Enter = %s; Ctrl-D aborts", def)
+	} else {
+		prompt += "; empty line aborts"
 	}
-	fmt.Print(prompt + "; empty line aborts): ")
+	fmt.Print(prompt + "): ")
 
 	line, err := stdinReader.ReadString('\n')
 	choice := strings.TrimSpace(line)

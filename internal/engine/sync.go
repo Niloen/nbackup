@@ -29,6 +29,20 @@ type SyncReport struct {
 	From  string
 	To    string
 	Items []SyncItem // slots on From not yet on To, oldest-first, after selection
+
+	// TargetCapacity is the target medium's retainable capacity (0 = unbounded), and
+	// ProjectedBytes is what the target would hold once this backlog lands (its
+	// current usage plus the backlog). Sync does not prune — retention is a separate
+	// per-medium concern — so it copies even when the projection exceeds capacity, but
+	// surfaces the overshoot so the operator is not left to discover it via `nb plan`.
+	TargetCapacity int64
+	ProjectedBytes int64
+}
+
+// OverCapacity reports whether landing this backlog would push the target past its
+// capacity (false for an unbounded target).
+func (r *SyncReport) OverCapacity() bool {
+	return r.TargetCapacity > 0 && r.ProjectedBytes > r.TargetCapacity
 }
 
 // Bytes is the total size of the backlog.
@@ -88,6 +102,12 @@ func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force boo
 			Bytes:    s.TotalBytes,
 		})
 	}
+	// Capacity projection (sampled before any copy, so it reads the same for dry-run
+	// and apply): current target usage plus the backlog about to land.
+	if prof, perr := e.profileFor(target); perr == nil {
+		report.TargetCapacity = prof.TotalBytes()
+	}
+	report.ProjectedBytes = e.cat.MediumBytes(target) + report.Bytes()
 	if !apply {
 		return report, nil
 	}

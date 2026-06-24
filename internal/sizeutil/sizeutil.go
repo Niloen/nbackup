@@ -32,6 +32,12 @@ func ParseBytes(s string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("invalid size %q: expected a number with an optional unit, e.g. 20TB, 500GB, or 1048576", s)
 	}
+	if num < 0 {
+		// A negative size is almost always a fat-fingered minus; reject it rather than
+		// let it flow through as a negative byte count that downstream reads as
+		// "≤0 = unbounded", silently disabling capacity enforcement.
+		return 0, fmt.Errorf("invalid size %q: must not be negative", s)
+	}
 
 	var mult float64 = 1
 	switch unit {
@@ -84,26 +90,33 @@ func ParseDuration(s string) (time.Duration, error) {
 	if s == "" {
 		return 0, fmt.Errorf("empty duration")
 	}
+	var d time.Duration
 	switch {
 	case strings.HasSuffix(s, "d"):
 		n, err := strconv.ParseFloat(strings.TrimSuffix(s, "d"), 64)
 		if err != nil {
 			return 0, fmt.Errorf("invalid duration %q: %w", s, err)
 		}
-		return time.Duration(n * 24 * float64(time.Hour)), nil
+		d = time.Duration(n * 24 * float64(time.Hour))
 	case strings.HasSuffix(s, "w"):
 		n, err := strconv.ParseFloat(strings.TrimSuffix(s, "w"), 64)
 		if err != nil {
 			return 0, fmt.Errorf("invalid duration %q: %w", s, err)
 		}
-		return time.Duration(n * 7 * 24 * float64(time.Hour)), nil
+		d = time.Duration(n * 7 * 24 * float64(time.Hour))
 	default:
-		d, err := time.ParseDuration(s)
+		var err error
+		d, err = time.ParseDuration(s)
 		if err != nil {
 			return 0, fmt.Errorf("invalid duration %q: expected a number with a unit, e.g. 7d, 2w, or 24h", s)
 		}
-		return d, nil
 	}
+	if d < 0 {
+		// As with sizes, a negative retention/cycle is a typo, not a valid value;
+		// reject it rather than let it be silently coerced to a default downstream.
+		return 0, fmt.Errorf("invalid duration %q: must not be negative", s)
+	}
+	return d, nil
 }
 
 // FormatDuration renders a duration in the day vocabulary the config uses (a

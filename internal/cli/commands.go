@@ -473,7 +473,12 @@ func newSlotShowCmd(a *app) *cobra.Command {
 		Use:     "show <slot-id>",
 		Short:   "Show a single slot's archives and copies",
 		Example: "  nb slot show slot-2026-06-21",
-		Args:    cobra.ExactArgs(1),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("specify exactly one slot id, e.g. `nb slot show slot-2026-06-21` (list them with `nb slot`)")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.loadRO()
 			if err != nil {
@@ -564,16 +569,20 @@ func newPruneCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eligible, err := eng.Prune(args[0], now, !dryRun, a.logf())
+			eligible, freed, err := eng.Prune(args[0], now, !dryRun, a.logf())
 			if err != nil {
 				return err
 			}
-			if dryRun {
+			if !dryRun {
 				if eligible > 0 {
-					fmt.Printf("\n%d slot(s) eligible. Re-run without --dry-run to delete.\n", eligible)
+					fmt.Printf("\n%s: deleted %d slot(s), freed %s\n", args[0], eligible, sizeutil.FormatBytes(freed))
 				} else {
-					fmt.Printf("\nnothing to reclaim: all slots fit capacity or are protected.\n")
+					fmt.Printf("\n%s: nothing to reclaim (all slots fit capacity or are protected)\n", args[0])
 				}
+			} else if eligible > 0 {
+				fmt.Printf("\n%d slot(s) eligible. Re-run without --dry-run to delete.\n", eligible)
+			} else {
+				fmt.Printf("\nnothing to reclaim: all slots fit capacity or are protected.\n")
 			}
 			return nil
 		},
@@ -683,7 +692,7 @@ func newSyncCmd(a *app) *cobra.Command {
 			}
 			since, err := ParseDate(sinceStr)
 			if err != nil {
-				return err
+				return fmt.Errorf("invalid --since date %q: --since must be in YYYY-MM-DD format", sinceStr)
 			}
 			if sinceStr == "" {
 				since = time.Time{} // ParseDate defaults to today; sync wants "no bound"
@@ -749,12 +758,18 @@ func printSyncReport(r *engine.SyncReport, apply bool) {
 	}
 	if apply {
 		fmt.Printf("%s -> %s: copied %d slot(s), %s\n", r.From, r.To, r.Copied(), sizeutil.FormatBytes(r.Bytes()))
-		return
+	} else {
+		fmt.Printf("%s -> %s: %d slot(s) to copy, %s (dry-run; re-run without --dry-run to copy):\n",
+			r.From, r.To, len(r.Items), sizeutil.FormatBytes(r.Bytes()))
+		for _, it := range r.Items {
+			fmt.Printf("  %-24s %2d archive(s)  %s\n", it.SlotID, it.Archives, sizeutil.FormatBytes(it.Bytes))
+		}
 	}
-	fmt.Printf("%s -> %s: %d slot(s) to copy, %s (dry-run; re-run without --dry-run to copy):\n",
-		r.From, r.To, len(r.Items), sizeutil.FormatBytes(r.Bytes()))
-	for _, it := range r.Items {
-		fmt.Printf("  %-24s %2d archive(s)  %s\n", it.SlotID, it.Archives, sizeutil.FormatBytes(it.Bytes))
+	// Sync copies regardless, but a target it pushes past capacity is worth flagging:
+	// otherwise the overshoot only surfaces later, at the next `nb plan`/`nb prune`.
+	if r.OverCapacity() {
+		fmt.Printf("WARNING: %q would hold %s, over its %s capacity — run `nb prune %s` to reclaim, or raise its capacity\n",
+			r.To, sizeutil.FormatBytes(r.ProjectedBytes), sizeutil.FormatBytes(r.TargetCapacity), r.To)
 	}
 }
 
@@ -822,10 +837,20 @@ func mediumList(eng *engine.Engine) error {
 	fmt.Fprintln(tw, "MEDIUM\tTYPE\tSLOTS\tUSED\tCAPACITY\tVOLUME")
 	for _, m := range media {
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", m.Name, m.Type, m.Slots,
-			sizeutil.FormatBytes(m.Used), capacityStr(m.Capacity), volumeStr(m))
+			sizeutil.FormatBytes(m.Used)+overMarker(m.Used, m.Capacity), capacityStr(m.Capacity), volumeStr(m))
 	}
 	tw.Flush()
 	return nil
+}
+
+// overMarker flags usage that has run past a bounded medium's capacity, so an
+// over-capacity medium does not read as healthy in `nb medium` listings (sync/copy
+// can land slots past capacity; pruning reclaims them on its own schedule).
+func overMarker(used, capacity int64) string {
+	if capacity > 0 && used > capacity {
+		return " (over!)"
+	}
+	return ""
 }
 
 func mediumDetail(eng *engine.Engine, name string) error {
@@ -835,7 +860,7 @@ func mediumDetail(eng *engine.Engine, name string) error {
 	}
 	fmt.Printf("Medium %s  (%s)\n", m.Name, m.Type)
 	fmt.Printf("  volume:  %s\n", volumeStr(m))
-	fmt.Printf("  used:    %s / %s\n", sizeutil.FormatBytes(m.Used), capacityStr(m.Capacity))
+	fmt.Printf("  used:    %s / %s%s\n", sizeutil.FormatBytes(m.Used), capacityStr(m.Capacity), overMarker(m.Used, m.Capacity))
 	printInventory(eng, name)
 	fmt.Println()
 	slots := eng.Catalog().SlotsOn(name)
@@ -872,7 +897,7 @@ func printInventory(eng *engine.Engine, name string) {
 			if b.ID == view.Loaded {
 				mark = "*"
 			}
-			label, status := volumeLabelStatus(b)
+			label, status := volumeLabelStatus(b, name)
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\n", mark, b.ID, label, status,
 				sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
 		}
@@ -880,7 +905,7 @@ func printInventory(eng *engine.Engine, name string) {
 		return
 	}
 	if view.DriveOK {
-		label, status := volumeLabelStatus(view.Drive)
+		label, status := volumeLabelStatus(view.Drive, name)
 		fmt.Printf("  drive:   %s (%s, %s used, %d files)\n", label, status,
 			sizeutil.FormatBytes(view.Drive.Used), view.Drive.Files)
 	} else {
@@ -891,7 +916,7 @@ func printInventory(eng *engine.Engine, name string) {
 		rw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 		fmt.Fprintln(rw, "  REEL\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
 		for _, b := range view.Shelf {
-			label, status := volumeLabelStatus(b)
+			label, status := volumeLabelStatus(b, name)
 			fmt.Fprintf(rw, "  %s\t%s\t%s\t%s\t%s\t%d\n", b.ID, label, status,
 				sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
 		}
@@ -907,13 +932,19 @@ func capacityStr(c int64) string {
 }
 
 // volumeLabelStatus renders a volume's display label and fill status for inventory
-// listings (a blank volume, a full one, or an appendable labeled one).
-func volumeLabelStatus(b media.VolumeStatus) (label, status string) {
+// listings (a blank volume, a full one, a wrong-pool reel, or an appendable labeled
+// one). medium is the medium being inventoried, so a reel labeled for a different
+// pool is flagged rather than shown as one of this medium's own volumes.
+func volumeLabelStatus(b media.VolumeStatus, medium string) (label, status string) {
 	switch {
 	case b.Foreign:
 		return "(foreign)", "foreign"
 	case b.Blank:
 		return "(blank)", "blank"
+	case b.Pool != "" && b.Pool != medium:
+		// A valid NBackup label, but for another pool: the write guard would refuse it
+		// (wrong tape), so the inventory must not present it as this medium's own.
+		return b.Label, fmt.Sprintf("wrong-pool:%s", b.Pool)
 	case b.Capacity > 0 && b.Used >= b.Capacity:
 		return b.Label, "full"
 	default:
