@@ -220,7 +220,12 @@ func promote(cands []*cand, cycle int, room int64) {
 	// Deadline calendar: an incremental candidate last fulled `days` ago is due in
 	// `cycle-days` days (offset >= 1). byOffset groups the candidates due on each
 	// day, load is their total full bytes, and todayLoad is today's fixed load.
-	// Never-fulled DLEs are mandatory fulls, not candidates.
+	// Never-fulled DLEs are mandatory fulls, not candidates. A DLE fulled today
+	// (days == 0) is excluded entirely: its full already exists at today's date, so
+	// pulling it "forward" would only re-full it the same day — no stagger, pure
+	// waste — and it would recur on every same-day run. Staggering only buys
+	// anything across distinct days, so such a DLE waits until it is at least a day
+	// old before it can relieve a future peak.
 	byOffset := map[int][]*cand{}
 	load := map[int]int64{}
 	var todayLoad int64
@@ -228,7 +233,7 @@ func promote(cands []*cand, cycle int, room int64) {
 		switch {
 		case c.full:
 			todayLoad += c.estFull
-		case c.days >= 0:
+		case c.days > 0:
 			off := cycle - c.days
 			if off < 1 {
 				off = 1
