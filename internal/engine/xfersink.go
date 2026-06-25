@@ -70,3 +70,17 @@ func localDecode(decrypt, decompress programs.Cmd) xfer.Filters {
 	}
 	return f
 }
+
+// copySink is the xfer.Sink for a copy/sync: it re-splits the source copy's already-
+// compressed bytes onto the target's volumes without recompressing, verifying the stream
+// against the seal's checksum (slotio.Writer.CopyArchive). It is the raw-passthrough peer
+// of mediumSink.
+type copySink struct {
+	w    *slotio.Writer
+	meta record.Archive
+}
+
+func (s *copySink) Drain(in io.Reader, _ func(int64)) (xfer.SinkResult, error) {
+	_, err := s.w.CopyArchive(s.meta, in)
+	return xfer.SinkResult{}, err
+}

@@ -605,8 +605,9 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		if err != nil {
 			return fmt.Errorf("copy %s L%d to %q: %w", a.DLE, a.Level, targetMedia, err)
 		}
-		_, werr := w.CopyArchive(a, raw)
-		raw.Close()
+		// A copy is a transfer with no transform: the same on-medium bytes re-split onto the
+		// target's volumes (copySink re-checksums against the seal, never recompresses).
+		_, werr := xfer.Transfer(xfer.Reader(raw), xfer.NewFilters(), &copySink{w: w, meta: a}, xfer.Opts{})
 		if werr != nil {
 			return fmt.Errorf("copy %s L%d to %q: %w", a.DLE, a.Level, targetMedia, werr)
 		}
