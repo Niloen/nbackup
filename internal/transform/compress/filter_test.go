@@ -10,14 +10,14 @@ import (
 )
 
 // runFilter runs one filter command over src through the live programs path — the same
-// RunGrouped the engine drives — returning its output. An empty command (the none
+// RunPipe the engine drives — returning its output. An empty command (the none
 // identity) passes src through unchanged.
 func runFilter(t *testing.T, cmd programs.Cmd, src []byte) []byte {
 	t.Helper()
 	if cmd.Name == "" {
 		return src
 	}
-	out, wait, err := programs.RunGrouped(bytes.NewReader(src), programs.Stage{Cmd: cmd, Exec: programs.Local()})
+	out, wait, err := programs.Local().RunPipe(bytes.NewReader(src), cmd)
 	if err != nil {
 		t.Fatal(err)
 	}

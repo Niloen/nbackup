@@ -133,14 +133,16 @@ func Transfer(source Source, filters Filters, sink Sink, opts Opts) (Result, err
 	// the source), so its error is folded into that reader's zone. The upstream cause wins:
 	// a source or filter that died makes the sink see truncated input, so we surface the
 	// source/filter error over the sink's symptom.
-	var srcCloseErr, filtCloseErr error
+	var srcCloseErr, filtCloseErr, filtErr error
 	if filtered {
 		filtCloseErr = mid.Close() // the filter chain's output
-		srcCloseErr = out.Close()  // the source's output (a media-read fault lands here)
+		// Reap the filters BEFORE closing the source reader: the filters' stdin-copy
+		// goroutine is still reading `out`, so closing it first would race that read.
+		filtErr = filtReap()
+		srcCloseErr = out.Close() // the source's output (a media-read fault lands here)
 	} else {
-		srcCloseErr = mid.Close() // mid is the source's output
+		srcCloseErr = mid.Close() // mid is the source's output; the sink already reaped its procs
 	}
-	filtErr := filtReap()
 	srcErr := srcReap()
 	produced, finErr := source.Produced()
 	source.Cleanup()

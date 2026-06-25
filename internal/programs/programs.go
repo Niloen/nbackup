@@ -8,11 +8,10 @@
 //
 // The load-bearing primitive is RunPipe: it runs progs[0] | progs[1] | ... as one
 // host-local pipeline, so when a dump's tar+compress+encrypt share one executor the
-// intermediate bytes never leave that host (plaintext stays on the client). A backup is
-// built as an ordered list of program stages, each carrying its executor; a single
-// builder groups adjacent same-executor stages into one RunPipe and crosses the wire only
-// at an executor boundary. The same model runs in reverse for restore (decrypt | decompress
-// | tar).
+// intermediate bytes never leave that host (plaintext stays on the client). The xfer
+// layer composes these single-host pipelines into a source → filters → sink transfer,
+// crossing the wire only between zones; the same model runs in reverse for restore
+// (decrypt | decompress | tar).
 package programs
 
 import (
@@ -120,12 +119,6 @@ func (c *countReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// Stage is one program stage plus the host it runs on, for RunGrouped.
-type Stage struct {
-	Cmd  Cmd
-	Exec Executor
-}
-
 // Filter is a reversible stream transform: a named scheme with a forward (encode) and
 // reverse (decode) child command. A zero Forward/Reverse (Cmd.Name == "") is the
 // identity — the "none" scheme — which contributes no stage to a pipeline. It is the
@@ -135,73 +128,6 @@ type Filter struct {
 	Name    string
 	Forward Cmd
 	Reverse Cmd
-}
-
-// RunGrouped runs the ordered stages, fusing maximal runs of stages that share a host
-// (Exec.Host()) into one host-local pipeline — so intermediate bytes never leave that
-// host — and piping each group's output into the next. It returns the final stdout, a
-// wait() that reaps every group (first error wins), and any startup error. Close the
-// returned reader after draining; it closes every group's reader (sending SIGPIPE
-// upstream if the drain stopped early).
-func RunGrouped(stdin io.Reader, stages ...Stage) (io.ReadCloser, func() error, error) {
-	if len(stages) == 0 {
-		return io.NopCloser(stdin), func() error { return nil }, nil
-	}
-	var groups [][]Stage
-	for i, s := range stages {
-		if i == 0 || s.Exec.Host() != stages[i-1].Exec.Host() {
-			groups = append(groups, nil)
-		}
-		groups[len(groups)-1] = append(groups[len(groups)-1], s)
-	}
-	cur := stdin
-	var waits []func() error
-	var readers []io.ReadCloser
-	for _, g := range groups {
-		cmds := make([]Cmd, len(g))
-		for j, s := range g {
-			cmds[j] = s.Cmd
-		}
-		r, wait, err := g[0].Exec.RunPipe(cur, cmds...)
-		if err != nil {
-			for _, rd := range readers {
-				rd.Close()
-			}
-			for _, wf := range waits {
-				_ = wf()
-			}
-			return nil, nil, err
-		}
-		readers = append(readers, r)
-		waits = append(waits, wait)
-		cur = r
-	}
-	waitAll := func() error {
-		var first error
-		for _, wf := range waits {
-			if e := wf(); e != nil && first == nil {
-				first = e
-			}
-		}
-		return first
-	}
-	return groupedReader{Reader: readers[len(readers)-1], readers: readers}, waitAll, nil
-}
-
-// groupedReader reads the final group's stdout; Close closes every group reader.
-type groupedReader struct {
-	io.Reader
-	readers []io.ReadCloser
-}
-
-func (g groupedReader) Close() error {
-	var first error
-	for _, rd := range g.readers {
-		if e := rd.Close(); e != nil && first == nil {
-			first = e
-		}
-	}
-	return first
 }
 
 // isOK reports whether an exit error is success — exit 0, or a code in okExit.

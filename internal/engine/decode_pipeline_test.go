@@ -11,29 +11,15 @@ import (
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
+	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// runStages runs the stages through RunGrouped and returns the final stdout bytes.
-func runStages(t *testing.T, stdin io.Reader, stages ...programs.Stage) ([]byte, error) {
-	t.Helper()
-	out, wait, err := programs.RunGrouped(stdin, stages...)
-	if err != nil {
-		return nil, err
-	}
-	data, rerr := io.ReadAll(out)
-	out.Close()
-	if werr := wait(); werr != nil {
-		return data, werr
-	}
-	return data, rerr
-}
-
-// TestClientSidePipelineRoundTrip exercises the exact stage composition a fully
-// client-side dump and a `--to` decode-on-client restore run — tar | gzip | gpg-encrypt to
-// produce, then gpg-decrypt | gzip | tar-x to consume — all through programs on the local
-// executor (the stand-in for the client, since CI has no sshd). It proves the encrypt and
-// decode pipelines compose end-to-end and that the key material flows only through the
-// stage that needs it. Uses gpg symmetric + gzip (zstd is absent in CI); skips if absent.
+// TestClientSidePipelineRoundTrip exercises the exact composition a fully client-side dump
+// and a `--to` decode-on-client restore run — tar | gzip | gpg-encrypt to produce, then
+// gpg-decrypt | gzip | tar-x to consume — all on the local executor (the stand-in for the
+// client, since CI has no sshd), through xfer.Transfer. It proves the encrypt and decode
+// pipelines compose end-to-end and that the key material flows only through the stage that
+// needs it. Uses gpg symmetric + gzip (zstd is absent in CI); skips if absent.
 func TestClientSidePipelineRoundTrip(t *testing.T) {
 	pass := filepath.Join(t.TempDir(), "pass")
 	if err := os.WriteFile(pass, []byte("correct horse battery staple\n"), 0o600); err != nil {
@@ -74,20 +60,18 @@ func TestClientSidePipelineRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cipher, err := runStages(t, nil,
-		programs.Stage{Cmd: bs.Stage, Exec: ex},
-		programs.Stage{Cmd: comp, Exec: ex},
-		programs.Stage{Cmd: enc, Exec: ex},
-	)
-	if err != nil {
+	var cipherBuf bytes.Buffer
+	producer := xfer.NewPrograms(ex).Add(bs.Stage).Add(comp).Add(enc).
+		Finishing(func() (xfer.Produced, error) { _, e := bs.Finish(); return xfer.Produced{}, e }).
+		OnCleanup(func() {
+			if bs.Cleanup != nil {
+				bs.Cleanup()
+			}
+		})
+	if _, err := xfer.Transfer(producer, xfer.NewFilters(), xfer.Writer(&cipherBuf), xfer.Opts{}); err != nil {
 		t.Fatalf("produce: %v", err)
 	}
-	if _, err := bs.Finish(); err != nil {
-		t.Fatalf("finish: %v", err)
-	}
-	if bs.Cleanup != nil {
-		bs.Cleanup()
-	}
+	cipher := cipherBuf.Bytes()
 	if bytes.Contains(cipher, []byte("plaintext payload")) {
 		t.Fatal("ciphertext still contains the plaintext — encryption did not run")
 	}
@@ -102,11 +86,8 @@ func TestClientSidePipelineRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := t.TempDir()
-	if _, err := runStages(t, bytes.NewReader(cipher),
-		programs.Stage{Cmd: dec, Exec: ex},
-		programs.Stage{Cmd: decomp, Exec: ex},
-		programs.Stage{Cmd: m.RestoreStage(dest, nil), Exec: ex},
-	); err != nil {
+	sink := xfer.NewPrograms(ex).Add(dec).Add(decomp).Add(m.RestoreStage(dest, nil))
+	if _, err := xfer.Transfer(xfer.Reader(io.NopCloser(bytes.NewReader(cipher))), xfer.NewFilters(), sink, xfer.Opts{}); err != nil {
 		t.Fatalf("decode/extract: %v", err)
 	}
 
