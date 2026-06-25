@@ -210,7 +210,18 @@ func restore(t *testing.T, m archiver.Archiver, inFile, dest string) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if err := m.Restore(f, dest, nil); err != nil {
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, wait, err := hostexec.Local().RunPipe(f, m.RestoreStage(dest, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, out); err != nil {
+		t.Fatal(err)
+	}
+	out.Close()
+	if err := wait(); err != nil {
 		t.Fatalf("restore %s: %v", inFile, err)
 	}
 }

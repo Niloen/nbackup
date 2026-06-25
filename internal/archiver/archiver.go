@@ -69,14 +69,14 @@ type Archiver interface {
 	// forced to a full) and to gate level estimates. It is the archiver-neutral
 	// replacement for "does the base snapshot exist".
 	HasBase(dle string, level int) bool
-	// Restore consumes a raw archive stream and writes into destDir. With no
-	// members it restores the whole archive applying incremental deletions (a
-	// chain restore); with members it extracts only those named entries and does
-	// not delete (selected-file recovery).
-	Restore(in io.Reader, destDir string, members []string) error
-	// RestoreStage returns Restore expressed as a program stage (extract from stdin into
-	// destDir), so a decode→extract pipeline can run entirely on one host — letting a
-	// client-only key decrypt on the client. Same member semantics as Restore.
+	// RestoreStage returns the extractor as a program stage (extract from stdin into
+	// destDir), so a decode→extract pipeline can run entirely on the host where the
+	// bytes should land — letting a client-held key decrypt on the client and a
+	// server-held key ship only compressed plaintext to a remote target. With no members
+	// it restores the whole archive applying incremental deletions (a chain restore);
+	// with members it extracts only those named entries and does not delete (selected-file
+	// recovery). It is the engine's one extraction primitive — the caller composes it
+	// into a hostexec pipeline and runs it; the archiver never streams bytes itself.
 	RestoreStage(destDir string, members []string) hostexec.Cmd
 	// List reads a raw archive stream and returns its member paths without
 	// extracting anything (amverify's `tar -t`). It writes nothing; it proves the

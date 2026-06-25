@@ -589,7 +589,10 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		if !ok {
 			return fmt.Errorf("source copy of %s on %q is missing %s L%d", slotID, fromMedia, a.DLE, a.Level)
 		}
-		raw := e.reader.OpenRawParts(parts, slotio.Expect{Slot: slotID, DLE: a.DLE, Level: a.Level}, srcOpen)
+		raw, err := e.reader.OpenRawParts(parts, slotio.Expect{Slot: slotID, DLE: a.DLE, Level: a.Level}, srcOpen)
+		if err != nil {
+			return fmt.Errorf("copy %s L%d to %q: %w", a.DLE, a.Level, targetMedia, err)
+		}
 		_, werr := w.CopyArchive(a, raw)
 		raw.Close()
 		if werr != nil {
@@ -1353,86 +1356,114 @@ func (e *Engine) restoreFrom(slotID, dleName, destDir, targetHost string, logf L
 	if err != nil {
 		return err
 	}
-	// Decode location: a `--to` restore of a DLE that keeps its key on the client decodes
+	// Decrypt placement: a `--to` restore of a DLE that keeps its key on the client decrypts
 	// on that client — the only way to read an untrusted-server / client-symmetric archive
-	// (the server has no key). Every other restore decodes server-side, which must be
-	// feasible (else fail fast). When decode is on the client there is nothing the server
-	// needs to decrypt, so the feasibility gate is skipped.
-	decodeOnClient, ec := false, config.EncryptConfig{}
-	if targetHost != "" {
-		if d, ok := e.dleByName(dleName); ok {
-			ec = e.cfg.EncryptionFor(d.DumpTypeName())
-			decodeOnClient = ec.At == "client" && ec.SchemeName() != "none"
-		}
+	// (the server has no key). Every other restore decrypts server-side, which must be
+	// feasible (else fail fast). When decrypt is on the client there is nothing the server
+	// needs the key for, so the feasibility gate is skipped.
+	ec := config.EncryptConfig{}
+	if d, ok := e.dleByName(dleName); ok {
+		ec = e.cfg.EncryptionFor(d.DumpTypeName())
 	}
-	if decodeOnClient {
+	decryptOnClient := targetHost != "" && ec.At == "client" && ec.SchemeName() != "none"
+	if decryptOnClient {
 		logf.log("decrypting on %s (encrypt.at: client) — only ciphertext leaves the server", targetHost)
 	} else if err := e.ensureServerCanDecode(steps, logf); err != nil {
 		return err
 	}
 	for _, step := range steps {
 		logf.log("extracting %s %s L%d -> %s", step.SlotID, e.DisplayDLE(step.DLE), step.Level, destDir)
-		var eerr error
-		if decodeOnClient {
-			eerr = e.extractStepOnClient(step, destDir, targetHost, ec)
-		} else {
-			eerr = e.extractStep(step, destDir, targetHost)
-		}
-		if eerr != nil {
-			return fmt.Errorf("extract %s %s L%d: %w", step.SlotID, step.DLE, step.Level, eerr)
+		if err := e.extractStep(step, destDir, targetHost, ec); err != nil {
+			return fmt.Errorf("extract %s %s L%d: %w", step.SlotID, step.DLE, step.Level, err)
 		}
 	}
 	return nil
 }
 
-// extractStepOnClient runs the whole read pipeline — decrypt | decompress | tar -x — on
-// the client (targetHost), fed the raw ciphertext parts streamed from the server's media.
-// Because every stage shares the client executor they fuse into one client-side pipe, so
-// the key never leaves the client and only ciphertext crosses the wire. It is the read-side
-// twin of the dump pipeline. Decrypt uses the DLE's own key reference (a client path for a
-// symmetric passphrase; nothing for a public key, which gpg resolves from the client's
-// keyring).
-func (e *Engine) extractStepOnClient(step restore.Step, destDir, targetHost string, ec config.EncryptConfig) error {
-	arch, err := e.restoreArchiver(step.Archiver, targetHost)
+// extractStep replays one archive step into destDir as a decode→extract pipeline whose
+// stages each run on the host that should run them: decrypt where the key lives (the client
+// for a client-held key reached over `--to`, otherwise the server) and decompress + tar
+// extraction on the target host. RunGrouped fuses the same-host runs and crosses the wire
+// at most once between them — so a client-held key decrypts on the client (only ciphertext
+// leaves the server), while a server-held key decrypts on the server and ships compressed
+// plaintext (never inflated) to a remote target. targetHost "" extracts server-side.
+func (e *Engine) extractStep(step restore.Step, destDir, targetHost string, ec config.EncryptConfig) error {
+	return e.extractInto(step.SlotID, step.DLE, step.Level, step.Codec, step.Encrypt, step.Archiver, destDir, targetHost, ec, nil)
+}
+
+// extractInto streams an archive's raw parts through the decode→extract pipeline into
+// destDir on the target host. With members it extracts only those entries in plain mode
+// (selected-file recovery, which never deletes); without, a whole-archive listed-incremental
+// chain restore. It is the engine's one extraction path — whole-DLE restore, `--to` client
+// restore, and file-level recover all run through it.
+func (e *Engine) extractInto(slotID, dle string, level int, codec, encrypt, archiverType, destDir, targetHost string, ec config.EncryptConfig, members []string) error {
+	target, _ := e.executorFor(targetHost)
+	if err := target.MkdirAll(destDir); err != nil {
+		return err
+	}
+	arch, err := e.restoreArchiver(archiverType, targetHost)
 	if err != nil {
 		return err
 	}
-	ex, _ := e.executorFor(targetHost)
-	if err := ex.MkdirAll(destDir); err != nil {
-		return err
-	}
-	raw, err := e.openRawFrom(step.SlotID, step.DLE, step.Level, "")
+	raw, err := e.openRawFrom(slotID, dle, level, "")
 	if err != nil {
 		return err
+	}
+	stages, err := e.decodeStages(encrypt, codec, ec, targetHost, target)
+	if err != nil {
+		raw.Close()
+		return err
+	}
+	stages = append(stages, hostexec.Stage{Cmd: arch.RestoreStage(destDir, members), Exec: target})
+	return decryptHint(encrypt, runDecodePipeline(raw, stages...))
+}
+
+// decodeStages returns the decrypt and decompress stages of a restore pipeline, each placed
+// on the host that should run it. Decrypt — the only stage that needs the key — runs on the
+// client (with the client's key reference) for a client-held key reached over `--to`, and on
+// the server (with the server's) otherwise. Decompress always runs on the target host, so a
+// remote restore ships compressed bytes over the wire rather than inflating them first.
+func (e *Engine) decodeStages(encrypt, codec string, ec config.EncryptConfig, targetHost string, target hostexec.Executor) ([]hostexec.Stage, error) {
+	decExec, copts := hostexec.Local(), e.dcopts
+	if ec.At == "client" && targetHost != "" {
+		decExec = target
+		copts = crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile}
 	}
 	var stages []hostexec.Stage
-	if cmd, ok, derr := crypt.DecryptCmd(step.Encrypt, crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile}); derr != nil {
-		raw.Close()
-		return derr
+	if cmd, ok, err := crypt.DecryptCmd(encrypt, copts); err != nil {
+		return nil, err
 	} else if ok {
-		stages = append(stages, hostexec.Stage{Cmd: cmd, Exec: ex})
+		stages = append(stages, hostexec.Stage{Cmd: cmd, Exec: decExec})
 	}
-	if cmd, ok, derr := filter.DecompressCmd(step.Codec, e.fopts); derr != nil {
-		raw.Close()
-		return derr
+	if cmd, ok, err := filter.DecompressCmd(codec, e.fopts); err != nil {
+		return nil, err
 	} else if ok {
-		stages = append(stages, hostexec.Stage{Cmd: cmd, Exec: ex})
+		stages = append(stages, hostexec.Stage{Cmd: cmd, Exec: target})
 	}
-	stages = append(stages, hostexec.Stage{Cmd: arch.RestoreStage(destDir, nil), Exec: ex})
+	return stages, nil
+}
 
-	out, wait, rerr := hostexec.RunGrouped(raw, stages...)
-	if rerr != nil {
+// runDecodePipeline runs a restore's decode→extract stages, draining tar's (empty) stdout
+// and reaping every stage. Stages are reaped in pipeline order, so when an upstream child
+// fails (a wrong key, a codec drift) its error — not the downstream "truncated input"
+// symptom it causes in tar — is the one returned.
+func runDecodePipeline(raw io.ReadCloser, stages ...hostexec.Stage) error {
+	out, wait, err := hostexec.RunGrouped(raw, stages...)
+	if err != nil {
 		raw.Close()
-		return rerr
+		return err
 	}
 	_, copyErr := io.Copy(io.Discard, out) // tar -x writes to the fs; its stdout is empty
 	out.Close()
 	werr := wait()
-	raw.Close()
+	cerr := raw.Close() // a media-read fault on the ciphertext parts surfaces here
 	if werr == nil {
 		werr = copyErr
 	}
-	return decryptHint(step.Encrypt, werr)
+	if werr == nil {
+		werr = cerr
+	}
+	return werr
 }
 
 // errMissingCopy marks a read failure where the catalog knows of no available copy of
@@ -1482,12 +1513,12 @@ func (e *Engine) eachPlacement(slotID, dle string, level int, medium string,
 	return nil, lastErr
 }
 
-// openRawFrom opens an archive's raw (undecoded, ciphertext) part stream — the input to a
-// client-side decode pipeline. It mirrors openArchiveFrom's copy selection but skips the
-// server-side decrypt/decompress.
+// openRawFrom opens an archive's raw (undecoded, ciphertext) part stream — the input the
+// restore feeds into its host-placed decode→extract pipeline (extractInto), with the same
+// copy selection and fail-over as openArchiveFrom but without reversing any transform.
 func (e *Engine) openRawFrom(slotID, dle string, level int, medium string) (io.ReadCloser, error) {
 	return e.eachPlacement(slotID, dle, level, medium, func(parts []format.FilePos, lib *librarian.Librarian, p catalog.Placement) (io.ReadCloser, error) {
-		return e.reader.OpenRawParts(parts, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib, p.Medium)), nil
+		return e.reader.OpenRawParts(parts, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib, p.Medium))
 	})
 }
 
@@ -1591,21 +1622,6 @@ func errNonEmptyDest(destDir string) error {
 	return nil
 }
 
-func (e *Engine) extractStep(step restore.Step, destDir, targetHost string) error {
-	// targetHost "" extracts server-side (the default); a `--to host:path` restore sets
-	// it so tar runs on that client and destDir is a client path. Decode stays server-side.
-	arch, err := e.restoreArchiver(step.Archiver, targetHost)
-	if err != nil {
-		return err
-	}
-	rc, err := e.openArchiveFrom(step.SlotID, step.DLE, step.Level, step.Codec, step.Encrypt, "")
-	if err != nil {
-		return err
-	}
-	rerr := arch.Restore(rc, destDir, nil)
-	return decryptHint(step.Encrypt, joinPipelineErr(rerr, rc.Close()))
-}
-
 // decryptHint augments an extraction failure on an encrypted archive with the
 // actionable cause restore-time decryption needs. gpg's raw "No secret key" is
 // misleading for a symmetric (passphrase) dump — the real fix is to supply the
@@ -1618,20 +1634,21 @@ func decryptHint(scheme string, err error) error {
 	return fmt.Errorf("%w\n(this archive is %s-encrypted, so extraction needs the key: for a passphrase/symmetric dump add an `encrypt:` block with the same passphrase_file; for a public-key dump ensure its private key is in the gpg keyring)", err, scheme)
 }
 
-// joinPipelineErr combines the extractor's error with the decrypt/decompress
-// pipeline's close error. tar sits last in the pipe, so when an upstream child
-// fails (e.g. gpg with the wrong key, or a missing passphrase file) tar only sees
-// truncated input and reports a generic "not a tar archive"; the real cause
-// surfaces on the pipeline's Close. Surfacing both means a key/decrypt failure is
-// no longer hidden behind tar's misleading message.
-func joinPipelineErr(extractErr, closeErr error) error {
-	if extractErr == nil {
+// joinPipelineErr combines a reader-side consumer's error with the in-process
+// decrypt/decompress pipeline's Close error — used by the verify (List) path, which reads
+// a server-local decoded stream rather than composing host-placed stages. tar (`-t`) sits
+// last in that pipe, so when an upstream child fails (a wrong key, a missing passphrase,
+// codec drift) tar only sees truncated input and reports a generic "not a tar archive";
+// the real cause surfaces on the pipeline's Close. Surfacing both keeps a key/decrypt
+// failure from hiding behind tar's misleading message.
+func joinPipelineErr(consumeErr, closeErr error) error {
+	if consumeErr == nil {
 		return closeErr // normal Close returns nil; a late pipeline error still surfaces
 	}
 	if closeErr != nil {
-		return fmt.Errorf("%w\n(decrypt/decompress pipeline: %v)", extractErr, closeErr)
+		return fmt.Errorf("%w\n(decrypt/decompress pipeline: %v)", consumeErr, closeErr)
 	}
-	return extractErr
+	return consumeErr
 }
 
 // OpenRecover builds a browsable filesystem of a DLE as of a date (YYYY-MM-DD) —
@@ -1655,17 +1672,14 @@ func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, 
 	}
 	files := 0
 	for _, st := range steps {
-		arch, err := e.restoreArchiver(st.Archiver, "")
-		if err != nil {
-			return files, err
-		}
-		rc, err := e.openArchiveFrom(st.SlotID, st.DLE, st.Level, st.Codec, st.Encrypt, "")
-		if err != nil {
-			return files, err
-		}
 		logf.log("extracting %d file(s) from %s %s L%d", countFiles(st.Members), st.SlotID, e.DisplayDLE(st.DLE), st.Level)
-		err = decryptHint(st.Encrypt, joinPipelineErr(arch.Restore(rc, destDir, st.Members), rc.Close()))
-		if err != nil {
+		ec := config.EncryptConfig{}
+		if d, ok := e.dleByName(st.DLE); ok {
+			ec = e.cfg.EncryptionFor(d.DumpTypeName())
+		}
+		// Recover always extracts server-side (targetHost ""), so decrypt stays on the
+		// server — the client-only-key case was already rejected above.
+		if err := e.extractInto(st.SlotID, st.DLE, st.Level, st.Codec, st.Encrypt, st.Archiver, destDir, "", ec, st.Members); err != nil {
 			return files, fmt.Errorf("extract from %s %s L%d: %w", st.SlotID, st.DLE, st.Level, err)
 		}
 		files += countFiles(st.Members)

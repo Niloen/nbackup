@@ -170,31 +170,6 @@ func (g *gnutar) Estimate(r archiver.BackupRequest) (int64, error) {
 	return parseTotals(stderr.String()), nil
 }
 
-// Restore consumes a raw tar stream and extracts into destDir on the executor's host.
-// With no members it extracts the whole archive in listed-incremental mode, applying the
-// deletions recorded in the archive (a chain restore). With members it extracts only
-// those named entries in plain mode — selected-file recovery, which never deletes.
-func (g *gnutar) Restore(in io.Reader, destDir string, members []string) error {
-	if err := g.Check(); err != nil {
-		return err
-	}
-	if err := g.ex.MkdirAll(destDir); err != nil {
-		return err
-	}
-	stage := g.RestoreStage(destDir, members)
-	cmd := g.ex.Command(stage.Name, stage.Args...)
-	cmd.Stdin = in
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if isWarning(err) {
-			return nil
-		}
-		return fmt.Errorf("%s extract failed: %w\n%s", g.bin, err, strings.TrimSpace(stderr.String()))
-	}
-	return nil
-}
-
 // List reads a raw tar stream from in and returns its member paths (`tar -t`), without
 // extracting. It is the structural half of a deep verify: the pipeline completing cleanly
 // proves the stream is a valid, listable archive, and the returned members compare

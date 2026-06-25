@@ -13,6 +13,7 @@ import (
 	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/restore"
@@ -274,16 +275,30 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 			return classifyOpenErr(err), err.Error()
 		}
 		logf.log("drill-restoring %s %s L%d", step.SlotID, e.DisplayDLE(step.DLE), step.Level)
-		rerr := arch.Restore(rc, dir, nil)
+		// Decode is in-process and server-local (rc), so a decrypt/decompress fault surfaces
+		// on rc.Close (ClassPipeline) and a tar fault on the extract stage's wait (ClassChain)
+		// — the split the drill classifies on. The proof drives the deletion-faithful
+		// listed-incremental extract as a single local stage, fed the decoded stream.
+		out, wait, rerr := hostexec.RunGrouped(rc, hostexec.Stage{Cmd: arch.RestoreStage(dir, nil), Exec: hostexec.Local()})
+		if rerr != nil {
+			rc.Close()
+			return drill.ClassPipeline, rerr.Error()
+		}
+		_, copyErr := io.Copy(io.Discard, out) // tar -x writes to the fs; its stdout is empty
+		out.Close()
+		werr := wait()
 		cerr := rc.Close()
 		if cerr != nil {
 			// A decrypt/decompress child exited non-zero — a lost/wrong key or a codec
 			// drift, surfaced only on Close (the read side saw a truncated stream).
 			return drill.ClassPipeline, cerr.Error()
 		}
-		if rerr != nil {
+		if werr == nil {
+			werr = copyErr
+		}
+		if werr != nil {
 			// The bytes decoded but tar could not apply the listed-incremental chain.
-			return drill.ClassChain, rerr.Error()
+			return drill.ClassChain, werr.Error()
 		}
 	}
 	return drill.ClassNone, ""
@@ -323,7 +338,10 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 	// Fetch the raw (still-encrypted/compressed) payload to a temp file. NBackup is
 	// used only to move bytes off the medium (unavoidable for tape/cloud); the decode
 	// is done entirely by the documented stock tools below.
-	raw := e.reader.OpenRawParts(parts, slotio.Expect{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, e.partOpener(lib, medium))
+	raw, err := e.reader.OpenRawParts(parts, slotio.Expect{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, e.partOpener(lib, medium))
+	if err != nil {
+		return classifyOpenErr(err), err.Error()
+	}
 	tmp, err := os.CreateTemp("", "nbackup-drill-raw-*")
 	if err != nil {
 		raw.Close()

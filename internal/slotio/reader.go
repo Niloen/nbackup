@@ -15,11 +15,13 @@ import (
 // parts may live on several volumes, so the caller supplies a PartOpener that mounts
 // and opens each part in turn.
 //
-// Decode here is deliberately in-process (crypt.Decrypt → filter.Decompress as local
-// children), the one read path that does not go through the host-aware hostexec stage
-// pipeline the write and client-side restore paths use: a slot read is always
-// server-local, so there is no host to cross. Client-side decode (an untrusted-server
-// key) is the engine's extractStepOnClient, which runs the stage pipeline on the client.
+// OpenArchiveParts decodes in-process (crypt.Decrypt → filter.Decompress as local
+// children) for the two server-local readers that want a decoded stream in hand: deep
+// verify (List) and the drill's recoverability proof, where reading the decode fault off
+// the reader's Close is exactly the signal they classify on. The user-facing restore does
+// not decode here — it composes decrypt/decompress as host-placed hostexec stages
+// (engine.extractInto), so decrypt runs where the key lives and decompress runs on the
+// target; only the raw front-end (OpenRawParts) stays in-process there.
 type Reader struct {
 	fopts filter.Options
 	copts crypt.Options
@@ -80,10 +82,20 @@ func (r *Reader) OpenArchiveParts(parts []format.FilePos, codec, encrypt string,
 
 // OpenRawParts returns the archive's raw (still-compressed) payload as the ordered
 // concatenation of its parts, without reversing the codec — the read side of a copy,
-// which re-splits the same bytes onto the target without recompressing. Each part's
-// header is asserted as it is reached. The caller closes the returned reader.
-func (r *Reader) OpenRawParts(parts []format.FilePos, want Expect, open PartOpener) io.ReadCloser {
-	return &partsReader{parts: parts, want: want, open: open}
+// which re-splits the same bytes onto the target without recompressing, and of a restore,
+// which feeds it into a host-placed decode pipeline. It primes the first part eagerly (like
+// OpenArchiveParts) so a missing/wrong volume errors here, letting a copy-selecting caller
+// fail over to another copy rather than discovering the fault only once bytes are pulled.
+// Each part's header is asserted as it is reached. The caller closes the returned reader.
+func (r *Reader) OpenRawParts(parts []format.FilePos, want Expect, open PartOpener) (io.ReadCloser, error) {
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("archive %s %s L%d has no parts", want.Slot, want.DLE, want.Level)
+	}
+	raw := &partsReader{parts: parts, want: want, open: open}
+	if err := raw.prime(); err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 // VerifyParts asserts each part's header against want, then re-hashes the
