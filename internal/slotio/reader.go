@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/Niloen/nbackup/internal/crypt"
-	"github.com/Niloen/nbackup/internal/filter"
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/transform/compress"
+	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
@@ -15,7 +15,7 @@ import (
 // parts may live on several volumes, so the caller supplies a PartOpener that mounts
 // and opens each part in turn.
 //
-// OpenArchiveParts decodes in-process (crypt.Decrypt → filter.Decompress as local
+// OpenArchiveParts decodes in-process (crypt.Decrypt → compress.Decompress as local
 // children) for the two server-local readers that want a decoded stream in hand: deep
 // verify (List) and the drill's recoverability proof, where reading the decode fault off
 // the reader's Close is exactly the signal they classify on. The user-facing restore does
@@ -23,14 +23,14 @@ import (
 // (engine.extractInto), so decrypt runs where the key lives and decompress runs on the
 // target; only the raw front-end (OpenRawParts) stays in-process there.
 type Reader struct {
-	fopts filter.Options
+	fopts compress.Options
 	copts crypt.Options
 }
 
 // NewReader returns a Reader. fopts carries codec settings (e.g. a binary override)
 // used when decompressing archives; copts carries the decryptor's key reference
 // (e.g. a passphrase file) — public-key schemes need none.
-func NewReader(fopts filter.Options, copts crypt.Options) *Reader {
+func NewReader(fopts compress.Options, copts crypt.Options) *Reader {
 	return &Reader{fopts: fopts, copts: copts}
 }
 
@@ -71,7 +71,7 @@ func (r *Reader) OpenArchiveParts(parts []record.FilePos, codec, encrypt string,
 		raw.Close()
 		return nil, err
 	}
-	src, err := filter.Decompress(codec, dec, r.fopts)
+	src, err := compress.Decompress(codec, dec, r.fopts)
 	if err != nil {
 		dec.Close()
 		raw.Close()

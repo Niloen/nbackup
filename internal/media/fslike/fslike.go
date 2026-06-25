@@ -93,7 +93,7 @@ func stem(pos int, h record.Header) string {
 
 // payloadExt is the extension for a file's payload, so it is recognizable and
 // directly usable with stock tools. Kept here so the media don't depend on package
-// filter.
+// compress.
 func payloadExt(h record.Header) string {
 	if h.Kind == record.KindSeal {
 		return ".json"

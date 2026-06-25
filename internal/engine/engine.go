@@ -20,8 +20,6 @@ import (
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
-	"github.com/Niloen/nbackup/internal/crypt"
-	"github.com/Niloen/nbackup/internal/filter"
 	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
@@ -33,6 +31,8 @@ import (
 	"github.com/Niloen/nbackup/internal/retention"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/slotio"
+	"github.com/Niloen/nbackup/internal/transform/compress"
+	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
 
 	// Register the bundled media and archiver implementations.
@@ -66,7 +66,7 @@ type Engine struct {
 	cat         *catalog.Catalog
 	archivers   map[string]archiver.Archiver // by cache key (dumptype or "@type")
 	codec       string                       // compression codec for new archives
-	fopts       filter.Options               // codec invocation options (level/threads/nice)
+	fopts       compress.Options             // codec invocation options (level/threads/nice)
 	dcopts      crypt.Options                // decrypt key reference for restore (from the default encrypt block)
 	op          librarian.Operator           // optional: handles manual tape swaps (nil = unattended)
 	limiters    map[string]*xfer.Limiter     // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
@@ -161,7 +161,7 @@ func New(cfg *config.Config) (*Engine, error) {
 		return nil, fmt.Errorf("cannot reach landing medium %q to index existing backups: %w%s", name, err, hint)
 	}
 	minAge := cfg.MinAgeFor(mediaDef)
-	fopts := filter.Options{
+	fopts := compress.Options{
 		Program: cfg.Compress.Program,
 		Level:   cfg.Compress.Level,
 		Threads: cfg.Compress.Threads,
@@ -789,7 +789,7 @@ func (e *Engine) expectedVolumeFor(medium string, now time.Time) VolumeExpectati
 	exp := VolumeExpectation{Medium: medium, Appendable: def.IsAppendable()}
 
 	// volumesInPool returns the same pool sorted by name; this expectation wants
-	// oldest-written-first, so copy and re-sort rather than duplicate the filter.
+	// oldest-written-first, so copy and re-sort rather than duplicate the compress.
 	pool := append([]catalog.VolumeRecord(nil), e.volumesInPool(medium)...)
 	sort.Slice(pool, func(i, j int) bool { return pool[i].Label.WrittenAt.Before(pool[j].Label.WrittenAt) })
 
@@ -839,7 +839,7 @@ func (e *Engine) Plan(date time.Time) *planner.Plan {
 // that are missing or unreadable right now are non-fatal warnings (they may be an
 // unmounted volume the real run will mount).
 func (e *Engine) ValidatePlan() (warnings []string, err error) {
-	if err := filter.Check(e.codec, e.fopts); err != nil {
+	if err := compress.Check(e.codec, e.fopts); err != nil {
 		return nil, err
 	}
 	checkedEnc := map[string]bool{}
@@ -1022,7 +1022,7 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 	// Pre-flight before creating a slot: the codec binary and every archiver.
 	// Resolving every archiver here also populates the archiver cache, so the parallel
 	// workers below only read it (no concurrent writes).
-	if err := filter.Check(e.codec, e.fopts); err != nil {
+	if err := compress.Check(e.codec, e.fopts); err != nil {
 		return nil, err
 	}
 	checkedEnc := map[string]bool{}
@@ -1492,7 +1492,7 @@ func (e *Engine) decodeStages(encrypt, codec string, ec config.EncryptConfig, ta
 	} else if ok {
 		stages = append(stages, hostexec.Stage{Cmd: cmd, Exec: decExec})
 	}
-	if cmd, ok, err := filter.DecompressCmd(codec, e.fopts); err != nil {
+	if cmd, ok, err := compress.DecompressCmd(codec, e.fopts); err != nil {
 		return nil, err
 	} else if ok {
 		stages = append(stages, hostexec.Stage{Cmd: cmd, Exec: target})

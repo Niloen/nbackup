@@ -8,9 +8,9 @@ import (
 	"testing"
 
 	"github.com/Niloen/nbackup/internal/archiver"
-	"github.com/Niloen/nbackup/internal/crypt"
-	"github.com/Niloen/nbackup/internal/filter"
 	"github.com/Niloen/nbackup/internal/hostexec"
+	"github.com/Niloen/nbackup/internal/transform/compress"
+	"github.com/Niloen/nbackup/internal/transform/crypt"
 )
 
 // runStages runs the stages through RunGrouped and returns the final stdout bytes.
@@ -43,7 +43,7 @@ func TestClientSidePipelineRoundTrip(t *testing.T) {
 	if err := crypt.Check("gpg", eopts); err != nil {
 		t.Skipf("gpg unavailable: %v", err)
 	}
-	if err := filter.Check("gzip", filter.Options{}); err != nil {
+	if err := compress.Check("gzip", compress.Options{}); err != nil {
 		t.Skipf("gzip unavailable: %v", err)
 	}
 
@@ -66,7 +66,7 @@ func TestClientSidePipelineRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	comp, _, err := filter.CompressCmd("gzip", filter.Options{})
+	comp, _, err := compress.CompressCmd("gzip", compress.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestClientSidePipelineRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decomp, _, err := filter.DecompressCmd("gzip", filter.Options{})
+	decomp, _, err := compress.DecompressCmd("gzip", compress.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

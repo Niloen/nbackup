@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 
 	"github.com/Niloen/nbackup/internal/config"
-	"github.com/Niloen/nbackup/internal/crypt"
-	"github.com/Niloen/nbackup/internal/filter"
 	"github.com/Niloen/nbackup/internal/hostexec"
+	"github.com/Niloen/nbackup/internal/transform/compress"
+	"github.com/Niloen/nbackup/internal/transform/crypt"
 )
 
 // CheckReport is the structured result of `nb check` — NBackup's amcheck: server readiness
@@ -68,7 +68,7 @@ func (e *Engine) checkServer(rep *CheckReport) {
 
 	// The codec is needed server-side for a server-side compress and for restore
 	// decompression, so a missing binary is a real problem even with client-side dumps.
-	if err := filter.Check(e.codec, e.fopts); err != nil {
+	if err := compress.Check(e.codec, e.fopts); err != nil {
 		rep.add(&rep.Server, false, false, fmt.Sprintf("codec %q: %v", e.codec, err))
 	} else {
 		rep.add(&rep.Server, true, false, fmt.Sprintf("codec %q available", e.codec))
@@ -164,7 +164,7 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 // the server-side tools are covered in checkServer.
 func (e *Engine) checkClientTools(rep *CheckReport, hc *HostCheck, ex hostexec.Executor, dt string) {
 	if e.cfg.ResolveDumpType(dt).Compress == "client" {
-		if cmd, ok, err := filter.CompressCmd(e.codec, e.fopts); err == nil && ok {
+		if cmd, ok, err := compress.CompressCmd(e.codec, e.fopts); err == nil && ok {
 			e.probeTool(rep, hc, ex, cmd.Name, "compressor")
 		}
 	}

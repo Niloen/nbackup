@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/crypt"
-	"github.com/Niloen/nbackup/internal/filter"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/transform/compress"
+	"github.com/Niloen/nbackup/internal/transform/crypt"
 )
 
 // memVolume is a minimal in-memory media.Volume for testing the spanning writer and
@@ -164,7 +164,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	sink := &memSink{vols: []*memVolume{v1, v2, v3}}
 
 	spec := SlotSpec{ID: "slot-2026-06-21", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
-	w, err := NewWriter(sink, spec, "none", filter.Options{}, nil)
+	w, err := NewWriter(sink, spec, "none", compress.Options{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	}
 
 	// Read the archive back by concatenating its parts; it must equal the input.
-	r := NewReader(filter.Options{}, crypt.Options{})
+	r := NewReader(compress.Options{}, crypt.Options{})
 	rc, err := r.OpenArchiveParts(parts, "none", "", Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v1, v2, v3))
 	if err != nil {
 		t.Fatalf("OpenArchiveParts: %v", err)
@@ -229,7 +229,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	sink := &memSink{vols: []*memVolume{v}, partCap: 10 * 1024}
 
 	spec := SlotSpec{ID: "slot-x", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
-	w, _ := NewWriter(sink, spec, "none", filter.Options{}, nil)
+	w, _ := NewWriter(sink, spec, "none", compress.Options{}, nil)
 	body := []byte(strings.Repeat("z", 55*1024)) // 55 KiB / 10 KiB ≈ 6 parts
 	arch := writeOneArchive(t, w, "dle1", body)
 	if arch.Parts < 5 {
@@ -238,7 +238,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	if _, err := w.Seal(time.Unix(1, 0).UTC()); err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	r := NewReader(filter.Options{}, crypt.Options{})
+	r := NewReader(compress.Options{}, crypt.Options{})
 	rc, err := r.OpenArchiveParts(w.Positions()[0].Parts, "none", "", Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v))
 	if err != nil {
 		t.Fatal(err)
@@ -257,7 +257,7 @@ func TestRollFailureNoDeadlock(t *testing.T) {
 	v := newMemVolume("v1", 96*1024) // one small volume, no room to roll
 	sink := &memSink{vols: []*memVolume{v}}
 	spec := SlotSpec{ID: "slot-y", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
-	w, _ := NewWriter(sink, spec, "none", filter.Options{}, nil)
+	w, _ := NewWriter(sink, spec, "none", compress.Options{}, nil)
 
 	body := []byte(strings.Repeat("q", 200*1024)) // far bigger than one volume
 	_, err := w.WriteArchive(ArchiveSpec{DLE: "dle1", Level: 0}, nil,
@@ -287,7 +287,7 @@ func TestEncryptRoundTrip(t *testing.T) {
 	v := newMemVolume("v1", 0) // unbounded
 	sink := &memSink{vols: []*memVolume{v}}
 	spec := SlotSpec{ID: "slot-enc", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
-	w, _ := NewWriter(sink, spec, "none", filter.Options{}, nil)
+	w, _ := NewWriter(sink, spec, "none", compress.Options{}, nil)
 
 	body := []byte(strings.Repeat("top secret payload\n", 3000))
 	arch, err := w.WriteArchive(
@@ -314,7 +314,7 @@ func TestEncryptRoundTrip(t *testing.T) {
 		}
 	}
 
-	r := NewReader(filter.Options{}, opts)
+	r := NewReader(compress.Options{}, opts)
 	rc, err := r.OpenArchiveParts(w.Positions()[0].Parts, "none", "gpg", Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v))
 	if err != nil {
 		t.Fatalf("OpenArchiveParts: %v", err)

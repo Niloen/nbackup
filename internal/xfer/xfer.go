@@ -1,6 +1,6 @@
 // Package xfer holds the light, in-process pieces of the backup stream pipeline:
 // checksumming and byte counting. The heavy part — compression — is run as an
-// external child process (see package filter), so nb stays a thin orchestrator.
+// external child process (see package compress), so nb stays a thin orchestrator.
 package xfer
 
 import (

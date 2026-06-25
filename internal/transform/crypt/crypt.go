@@ -1,5 +1,5 @@
 // Package crypt runs stream encryptors/decryptors as external child processes,
-// the way package filter orchestrates compressors and the way Amanda drives an
+// the way package compress orchestrates compressors and the way Amanda drives an
 // encrypt program (amgpgcrypt/amcrypt). NBackup stays a thin driver: it pipes
 // bytes through a child and lets a proven tool (gpg) own the cryptography and the
 // key material — NBackup never touches a key.

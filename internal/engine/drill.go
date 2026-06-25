@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/config"
-	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/librarian"
@@ -19,6 +18,7 @@ import (
 	"github.com/Niloen/nbackup/internal/restore"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/slotio"
+	"github.com/Niloen/nbackup/internal/transform/crypt"
 )
 
 // Drill is NBackup's recovery-drill orchestration — the recoverability ("0 errors")

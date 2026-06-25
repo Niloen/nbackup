@@ -2,7 +2,7 @@
 // maps onto a volume's files — one or more part files per archive plus a final seal
 // record carrying the slot's metadata — so the engine supplies only backup streams
 // and descriptive metadata, never positions or filenames. Compression is delegated
-// to package filter (an external child process); slotio meters (checksums + counts)
+// to package compress (an external child process); slotio meters (checksums + counts)
 // the compressed bytes on their way to the volume.
 //
 // An archive may be split into several parts across volumes (tape spanning). The
@@ -23,11 +23,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/crypt"
-	"github.com/Niloen/nbackup/internal/filter"
 	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/transform/compress"
+	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
@@ -114,7 +114,7 @@ type ArchiveSpec struct {
 type Writer struct {
 	sink  VolumeSink
 	codec string
-	fopts filter.Options
+	fopts compress.Options
 	lim   *xfer.Limiter // optional bandwidth cap on the bytes landing on the medium (nil = uncapped)
 
 	mu       sync.Mutex // guards the records below
@@ -138,8 +138,8 @@ type archiveRecord struct {
 // uncapped. The same lim is shared across concurrent WriteArchive calls on an
 // unbounded sink, so several workers to one medium share its budget (Amanda's
 // netusage).
-func NewWriter(sink VolumeSink, spec SlotSpec, codec string, fopts filter.Options, lim *xfer.Limiter) (*Writer, error) {
-	if _, err := filter.Ext(codec); err != nil { // validate the codec name early
+func NewWriter(sink VolumeSink, spec SlotSpec, codec string, fopts compress.Options, lim *xfer.Limiter) (*Writer, error) {
+	if _, err := compress.Ext(codec); err != nil { // validate the codec name early
 		return nil, err
 	}
 	slot := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
@@ -266,7 +266,7 @@ func (w *Writer) pipelineStages(spec ArchiveSpec, src Source, meter *xfer.Meter,
 		}
 	}
 
-	if ccmd, ok, err := filter.CompressCmd(w.codec, w.fopts); err != nil {
+	if ccmd, ok, err := compress.CompressCmd(w.codec, w.fopts); err != nil {
 		return nil, nil, err
 	} else if ok {
 		stages = append(stages, hostexec.Stage{Cmd: ccmd, Exec: execOr(spec.CompressExec)})

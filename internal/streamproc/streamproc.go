@@ -1,10 +1,10 @@
 // Package streamproc runs a stream transform as an external child process: bytes
 // read out (ReadThrough) flow through the child's stdin->stdout. It is the shared
-// plumbing behind package filter (decompressors) and package crypt (decryptors),
+// plumbing behind package compress (decompressors) and package crypt (decryptors),
 // which differ only in the argv they build and the registry they expose — Amanda
 // drives its compress and encrypt programs the same way. A nil argv is the identity
 // transform (the `none` codec/scheme), so callers don't special-case it. The write
-// side is driven separately as a pipeline stage via hostexec (see filter.CompressCmd
+// side is driven separately as a pipeline stage via hostexec (see compress.CompressCmd
 // / crypt.EncryptCmd). The package also hosts the registry helpers shared by both:
 // ProgramOr and SortedNames.
 package streamproc

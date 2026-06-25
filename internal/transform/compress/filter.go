@@ -7,7 +7,7 @@
 // A codec is a registered name (zstd, gzip, none) that knows how to build the
 // argv for compressing and decompressing. The archive records which codec
 // produced it, so restore reverses the exact transform.
-package filter
+package compress
 
 import (
 	"fmt"
