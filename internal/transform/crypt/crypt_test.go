@@ -8,18 +8,18 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Niloen/nbackup/internal/hostexec"
+	"github.com/Niloen/nbackup/internal/programs"
 )
 
-// runFilter runs one filter command over src through the live hostexec path — the same
+// runFilter runs one filter command over src through the live programs path — the same
 // RunGrouped the engine drives — returning its output. An empty command (the none
 // identity) passes src through unchanged.
-func runFilter(t *testing.T, cmd hostexec.Cmd, src []byte) []byte {
+func runFilter(t *testing.T, cmd programs.Cmd, src []byte) []byte {
 	t.Helper()
 	if cmd.Name == "" {
 		return src
 	}
-	out, wait, err := hostexec.RunGrouped(bytes.NewReader(src), hostexec.Stage{Cmd: cmd, Exec: hostexec.Local()})
+	out, wait, err := programs.RunGrouped(bytes.NewReader(src), programs.Stage{Cmd: cmd, Exec: programs.Local()})
 	if err != nil {
 		t.Fatal(err)
 	}

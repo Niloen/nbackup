@@ -8,15 +8,15 @@ import (
 	"testing"
 
 	"github.com/Niloen/nbackup/internal/archiver"
-	"github.com/Niloen/nbackup/internal/hostexec"
+	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 )
 
 // runStages runs the stages through RunGrouped and returns the final stdout bytes.
-func runStages(t *testing.T, stdin io.Reader, stages ...hostexec.Stage) ([]byte, error) {
+func runStages(t *testing.T, stdin io.Reader, stages ...programs.Stage) ([]byte, error) {
 	t.Helper()
-	out, wait, err := hostexec.RunGrouped(stdin, stages...)
+	out, wait, err := programs.RunGrouped(stdin, stages...)
 	if err != nil {
 		return nil, err
 	}
@@ -30,7 +30,7 @@ func runStages(t *testing.T, stdin io.Reader, stages ...hostexec.Stage) ([]byte,
 
 // TestClientSidePipelineRoundTrip exercises the exact stage composition a fully
 // client-side dump and a `--to` decode-on-client restore run — tar | gzip | gpg-encrypt to
-// produce, then gpg-decrypt | gzip | tar-x to consume — all through hostexec on the local
+// produce, then gpg-decrypt | gzip | tar-x to consume — all through programs on the local
 // executor (the stand-in for the client, since CI has no sshd). It proves the encrypt and
 // decode pipelines compose end-to-end and that the key material flows only through the
 // stage that needs it. Uses gpg symmetric + gzip (zstd is absent in CI); skips if absent.
@@ -47,7 +47,7 @@ func TestClientSidePipelineRoundTrip(t *testing.T) {
 		t.Skipf("gzip unavailable: %v", err)
 	}
 
-	ex := hostexec.Local()
+	ex := programs.Local()
 	m, err := archiver.Open("gnutar", archiver.Options{"state_dir": t.TempDir()}, ex)
 	if err != nil {
 		t.Fatal(err)
@@ -75,9 +75,9 @@ func TestClientSidePipelineRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	cipher, err := runStages(t, nil,
-		hostexec.Stage{Cmd: bs.Stage, Exec: ex},
-		hostexec.Stage{Cmd: comp, Exec: ex},
-		hostexec.Stage{Cmd: enc, Exec: ex},
+		programs.Stage{Cmd: bs.Stage, Exec: ex},
+		programs.Stage{Cmd: comp, Exec: ex},
+		programs.Stage{Cmd: enc, Exec: ex},
 	)
 	if err != nil {
 		t.Fatalf("produce: %v", err)
@@ -103,9 +103,9 @@ func TestClientSidePipelineRoundTrip(t *testing.T) {
 	}
 	dest := t.TempDir()
 	if _, err := runStages(t, bytes.NewReader(cipher),
-		hostexec.Stage{Cmd: dec, Exec: ex},
-		hostexec.Stage{Cmd: decomp, Exec: ex},
-		hostexec.Stage{Cmd: m.RestoreStage(dest, nil), Exec: ex},
+		programs.Stage{Cmd: dec, Exec: ex},
+		programs.Stage{Cmd: decomp, Exec: ex},
+		programs.Stage{Cmd: m.RestoreStage(dest, nil), Exec: ex},
 	); err != nil {
 		t.Fatalf("decode/extract: %v", err)
 	}

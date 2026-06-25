@@ -7,7 +7,7 @@
 // Compression and storage are handled by the caller.
 //
 // Every process and every scratch file (the snapshot library, the member-index temp)
-// goes through an injected hostexec.Executor, so gnutar runs identically whether tar is
+// goes through an injected programs.Executor, so gnutar runs identically whether tar is
 // the local binary or a stock tar on a client reached over SSH — gnutar holds no
 // knowledge of where it runs. When the executor is remote, state_dir is a client path
 // (the .snar library lives on the client) and the produced tar stage fuses with the
@@ -26,17 +26,17 @@ import (
 	"sync"
 
 	"github.com/Niloen/nbackup/internal/archiver"
-	"github.com/Niloen/nbackup/internal/hostexec"
+	"github.com/Niloen/nbackup/internal/programs"
 )
 
 func init() {
-	archiver.Register("gnutar", func(opts archiver.Options, ex hostexec.Executor) (archiver.Archiver, error) {
+	archiver.Register("gnutar", func(opts archiver.Options, ex programs.Executor) (archiver.Archiver, error) {
 		bin := opts.Get("tar_path")
 		if bin == "" {
 			bin = "tar"
 		}
 		if ex == nil {
-			ex = hostexec.Local()
+			ex = programs.Local()
 		}
 		return &gnutar{
 			bin:           bin,
@@ -50,7 +50,7 @@ func init() {
 
 type gnutar struct {
 	bin           string
-	ex            hostexec.Executor // host where tar runs and the .snar library / index temp live
+	ex            programs.Executor // host where tar runs and the .snar library / index temp live
 	stateDir      string            // root of the per-DLE/per-level .snar library (Amanda's GNUTAR-LISTDIR)
 	oneFileSystem bool
 	sparse        bool
@@ -119,7 +119,7 @@ func (g *gnutar) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource,
 	}
 	stderr := &bytes.Buffer{}
 	argv := g.createArgs(r, "-", outSnap, indexPath)
-	stage := hostexec.Cmd{
+	stage := programs.Cmd{
 		Name:   argv[0],
 		Args:   argv[1:],
 		Stderr: stderr,
@@ -206,7 +206,7 @@ func (g *gnutar) List(in io.Reader) ([]string, error) {
 // run entirely on one host, so a client-only key decrypts on the client. With members it
 // extracts only those in plain mode (no deletions); without, a whole-archive chain restore
 // that honors the listed-incremental dumpdir. tar exit 1 ("files changed") is a warning.
-func (g *gnutar) RestoreStage(destDir string, members []string) hostexec.Cmd {
+func (g *gnutar) RestoreStage(destDir string, members []string) programs.Cmd {
 	args := []string{
 		"--extract", "--file=-",
 		"--directory=" + destDir,
@@ -218,7 +218,7 @@ func (g *gnutar) RestoreStage(destDir string, members []string) hostexec.Cmd {
 		args = append(args, "--no-recursion")
 		args = append(args, members...)
 	}
-	return hostexec.Cmd{Name: g.bin, Args: args, OKExit: []int{1}}
+	return programs.Cmd{Name: g.bin, Args: args, OKExit: []int{1}}
 }
 
 // seedSnapshot prepares outSnap as the starting incremental state for the dump on the

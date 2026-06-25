@@ -21,10 +21,10 @@ import (
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
-	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
+	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
@@ -393,12 +393,12 @@ func (e *Engine) restoreArchiver(typeName, host string) (archiver.Archiver, erro
 // an empty or unlisted host, or an SSH executor for a host configured in the hosts: map —
 // plus the gnutar option overrides that host implies (a client-side state_dir and
 // tar_path). This is the one place "ssh" enters the engine; the archiver never learns it.
-func (e *Engine) executorFor(host string) (hostexec.Executor, map[string]string) {
+func (e *Engine) executorFor(host string) (programs.Executor, map[string]string) {
 	hc, ok := e.cfg.RemoteHost(host)
 	if !ok {
-		return hostexec.Local(), nil
+		return programs.Local(), nil
 	}
-	ex := hostexec.SSH(hostexec.Params{
+	ex := programs.SSH(programs.Params{
 		User:         hc.User,
 		Host:         host,
 		Port:         hc.Port,
@@ -1280,11 +1280,11 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 	// it; otherwise it runs server-side (Local). The meter that follows is always
 	// server-side, so the seal still covers the bytes that land.
 	hostExec, _ := e.executorFor(item.DLE.Host)
-	compExec := hostexec.Executor(hostexec.Local())
+	compExec := programs.Executor(programs.Local())
 	if e.cfg.ResolveDumpType(item.DLE.DumpTypeName()).Compress == "client" {
 		compExec = hostExec
 	}
-	encExec := hostexec.Executor(hostexec.Local())
+	encExec := programs.Executor(programs.Local())
 	if e.cfg.EncryptionFor(item.DLE.DumpTypeName()).At == "client" {
 		encExec = hostExec
 	}
@@ -1348,13 +1348,13 @@ func (e *Engine) produceArchive(w *slotio.Writer, meta record.Archive, bs *archi
 
 	srcExec := bs.Exec
 	if srcExec == nil {
-		srcExec = hostexec.Local()
+		srcExec = programs.Local()
 	}
 	srcStage := bs.Stage
 	srcStage.Tap = func(n int64) { unc.Store(n); report() }
-	stages := append([]hostexec.Stage{{Cmd: srcStage, Exec: srcExec}}, pipe.Forward()...)
+	stages := append([]programs.Stage{{Cmd: srcStage, Exec: srcExec}}, pipe.Forward()...)
 
-	out, wait, runErr := hostexec.RunGrouped(nil, stages...)
+	out, wait, runErr := programs.RunGrouped(nil, stages...)
 	if runErr != nil {
 		bs.Cleanup()
 		return record.Archive{}, runErr
@@ -1522,7 +1522,7 @@ func (e *Engine) LibrarianFor(medium string) (*librarian.Librarian, error) {
 func (e *Engine) Limiter(medium string) *xfer.Limiter { return e.limiters[medium] }
 
 // Executor returns the transport that runs programs on a host.
-func (e *Engine) Executor(host string) hostexec.Executor {
+func (e *Engine) Executor(host string) programs.Executor {
 	ex, _ := e.executorFor(host)
 	return ex
 }

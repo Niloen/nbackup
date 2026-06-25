@@ -12,7 +12,7 @@ import (
 // an archive's parts may live on several volumes, so the caller supplies a PartOpener that
 // mounts and opens each part in turn. Reading is parts-only — concatenate, assert headers,
 // optionally re-hash. Reversing the payload's transforms (decrypt, decompress) is the
-// engine's job: it composes them as host-placed hostexec stages over Open's raw stream, so
+// engine's job: it composes them as host-placed programs stages over Open's raw stream, so
 // decrypt runs where the key lives and decompress on the target.
 type Reader struct{}
 

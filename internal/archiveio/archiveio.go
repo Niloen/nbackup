@@ -22,8 +22,8 @@ import (
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
-	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/librarian"
+	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/slotio"
 	"github.com/Niloen/nbackup/internal/transform"
@@ -54,7 +54,7 @@ type Deps interface {
 	// Limiter returns the medium's shared bandwidth cap (nil = uncapped).
 	Limiter(medium string) *xfer.Limiter
 	// Executor returns the transport that runs programs on a host (Local or remote).
-	Executor(host string) hostexec.Executor
+	Executor(host string) programs.Executor
 	// RestoreArchiver resolves the archiver plugin that extracts on the given host.
 	RestoreArchiver(typeName, host string) (archiver.Archiver, error)
 	// CompressOpts / DecryptOpts are the config-derived invocation options for the
@@ -133,7 +133,7 @@ func (a *IO) PartOpener(medium string) (slotio.PartOpener, error) {
 // compressed bytes over the wire rather than inflating them first.
 func (a *IO) DecodePipeline(encrypt, codec string, ec config.EncryptConfig, targetHost string) (transform.Pipeline, error) {
 	target := a.deps.Executor(targetHost)
-	decExec := hostexec.Executor(hostexec.Local())
+	decExec := programs.Executor(programs.Local())
 	copts := a.deps.DecryptOpts()
 	if ec.At == "client" && targetHost != "" {
 		decExec = target
@@ -177,7 +177,7 @@ func (a *IO) Extract(ref Ref, codec, encrypt, archiverType, destDir, targetHost 
 		raw.Close()
 		return err
 	}
-	stages := append(pipe.Reverse(), hostexec.Stage{Cmd: arch.RestoreStage(destDir, members), Exec: target})
+	stages := append(pipe.Reverse(), programs.Stage{Cmd: arch.RestoreStage(destDir, members), Exec: target})
 	return RunDecodePipeline(raw, stages...)
 }
 
@@ -185,8 +185,8 @@ func (a *IO) Extract(ref Ref, codec, encrypt, archiverType, destDir, targetHost 
 // stdout and reaping every stage. Stages are reaped in pipeline order, so when an upstream
 // child fails (a wrong key, a codec drift) its error — not the downstream "truncated input"
 // symptom it causes in tar — is the one returned.
-func RunDecodePipeline(raw io.ReadCloser, stages ...hostexec.Stage) error {
-	out, wait, err := hostexec.RunGrouped(raw, stages...)
+func RunDecodePipeline(raw io.ReadCloser, stages ...programs.Stage) error {
+	out, wait, err := programs.RunGrouped(raw, stages...)
 	if err != nil {
 		raw.Close()
 		return err

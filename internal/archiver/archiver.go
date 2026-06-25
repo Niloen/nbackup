@@ -14,7 +14,7 @@ import (
 	"io"
 	"sort"
 
-	"github.com/Niloen/nbackup/internal/hostexec"
+	"github.com/Niloen/nbackup/internal/programs"
 )
 
 // BackupRequest describes one archive to produce. The Archiver resolves any
@@ -44,8 +44,8 @@ type BackupResult struct {
 // tar+compress+encrypt fuse on one host (the client) so plaintext never leaves it.
 // Stage's Stderr is pre-wired by the archiver to capture totals; Cleanup removes scratch.
 type BackupSource struct {
-	Stage   hostexec.Cmd
-	Exec    hostexec.Executor
+	Stage   programs.Cmd
+	Exec    programs.Executor
 	Finish  func() (*BackupResult, error)
 	Cleanup func()
 }
@@ -76,8 +76,8 @@ type Archiver interface {
 	// it restores the whole archive applying incremental deletions (a chain restore);
 	// with members it extracts only those named entries and does not delete (selected-file
 	// recovery). It is the engine's one extraction primitive — the caller composes it
-	// into a hostexec pipeline and runs it; the archiver never streams bytes itself.
-	RestoreStage(destDir string, members []string) hostexec.Cmd
+	// into a programs pipeline and runs it; the archiver never streams bytes itself.
+	RestoreStage(destDir string, members []string) programs.Cmd
 	// List reads a raw archive stream and returns its member paths without
 	// extracting anything (amverify's `tar -t`). It writes nothing; it proves the
 	// stream is a valid, listable archive end-to-end and yields the members to
@@ -110,7 +110,7 @@ func (o Options) Bool(key string, def bool) bool {
 // Factory constructs an Archiver from options and the executor (host) its programs run
 // on. The executor makes remote execution transparent: an archiver runs its tools through
 // it without knowing whether the host is local or a client over SSH.
-type Factory func(Options, hostexec.Executor) (Archiver, error)
+type Factory func(Options, programs.Executor) (Archiver, error)
 
 var factories = map[string]Factory{}
 
@@ -119,7 +119,7 @@ func Register(name string, f Factory) { factories[name] = f }
 
 // Open constructs the Archiver registered under the type name, running its programs
 // through ex (local or a remote client).
-func Open(name string, opts Options, ex hostexec.Executor) (Archiver, error) {
+func Open(name string, opts Options, ex programs.Executor) (Archiver, error) {
 	f, ok := factories[name]
 	if !ok {
 		return nil, fmt.Errorf("unknown archiver %q (known: %v)", name, Names())

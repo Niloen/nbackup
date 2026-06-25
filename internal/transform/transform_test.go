@@ -3,16 +3,16 @@ package transform
 import (
 	"testing"
 
-	"github.com/Niloen/nbackup/internal/hostexec"
+	"github.com/Niloen/nbackup/internal/programs"
 )
 
 // TestForwardReverseOrder proves the chain runs forward in order and reverse in reverse
 // order, and that identity (none) filters drop out of both directions.
 func TestForwardReverseOrder(t *testing.T) {
-	ex := hostexec.Local()
-	gzip := hostexec.Filter{Name: "gzip", Forward: hostexec.Cmd{Name: "gzip"}, Reverse: hostexec.Cmd{Name: "gunzip"}}
-	gpg := hostexec.Filter{Name: "gpg", Forward: hostexec.Cmd{Name: "gpg-e"}, Reverse: hostexec.Cmd{Name: "gpg-d"}}
-	none := hostexec.Filter{Name: "none"} // identity — zero cmds
+	ex := programs.Local()
+	gzip := programs.Filter{Name: "gzip", Forward: programs.Cmd{Name: "gzip"}, Reverse: programs.Cmd{Name: "gunzip"}}
+	gpg := programs.Filter{Name: "gpg", Forward: programs.Cmd{Name: "gpg-e"}, Reverse: programs.Cmd{Name: "gpg-d"}}
+	none := programs.Filter{Name: "none"} // identity — zero cmds
 
 	p := Pipeline{{Filter: gzip, Exec: ex}, {Filter: none, Exec: ex}, {Filter: gpg, Exec: ex}}
 
@@ -26,7 +26,7 @@ func TestForwardReverseOrder(t *testing.T) {
 	}
 }
 
-func names(stages []hostexec.Stage) string {
+func names(stages []programs.Stage) string {
 	out := ""
 	for i, s := range stages {
 		if i > 0 {

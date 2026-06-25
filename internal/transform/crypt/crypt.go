@@ -20,7 +20,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Niloen/nbackup/internal/hostexec"
+	"github.com/Niloen/nbackup/internal/programs"
 )
 
 // Options tune a scheme invocation. They carry a key *reference* (a gpg recipient
@@ -127,42 +127,42 @@ func Check(scheme string, o Options) error {
 // EncryptCmd returns the encryptor as a pipeline stage, or ok=false for the identity
 // (none) scheme. It lets the unified pipeline run encryption through any executor — on
 // the client when the key lives there, so plaintext never leaves it.
-func EncryptCmd(scheme string, o Options) (cmd hostexec.Cmd, ok bool, err error) {
+func EncryptCmd(scheme string, o Options) (cmd programs.Cmd, ok bool, err error) {
 	return stageCmd(scheme, func(s Spec) func(Options) []string { return s.encryptArgv }, o)
 }
 
 // DecryptCmd returns the decryptor as a pipeline stage (the read-side peer of
 // EncryptCmd), or ok=false for none. This is the only stage that needs the key.
-func DecryptCmd(scheme string, o Options) (cmd hostexec.Cmd, ok bool, err error) {
+func DecryptCmd(scheme string, o Options) (cmd programs.Cmd, ok bool, err error) {
 	return stageCmd(scheme, func(s Spec) func(Options) []string { return s.decryptArgv }, o)
 }
 
-// Filter returns the scheme as a reversible hostexec.Filter — Forward encrypts, Reverse
+// Filter returns the scheme as a reversible programs.Filter — Forward encrypts, Reverse
 // decrypts — for the transform layer to place and chain. The none scheme yields a Filter
 // with empty cmds (skipped by the pipeline). It errors only for an unknown scheme.
-func Filter(scheme string, o Options) (hostexec.Filter, error) {
+func Filter(scheme string, o Options) (programs.Filter, error) {
 	fwd, _, err := EncryptCmd(scheme, o)
 	if err != nil {
-		return hostexec.Filter{}, err
+		return programs.Filter{}, err
 	}
 	rev, _, err := DecryptCmd(scheme, o)
 	if err != nil {
-		return hostexec.Filter{}, err
+		return programs.Filter{}, err
 	}
-	return hostexec.Filter{Name: scheme, Forward: fwd, Reverse: rev}, nil
+	return programs.Filter{Name: scheme, Forward: fwd, Reverse: rev}, nil
 }
 
-func stageCmd(scheme string, pick func(Spec) func(Options) []string, o Options) (hostexec.Cmd, bool, error) {
+func stageCmd(scheme string, pick func(Spec) func(Options) []string, o Options) (programs.Cmd, bool, error) {
 	s, err := spec(scheme)
 	if err != nil {
-		return hostexec.Cmd{}, false, err
+		return programs.Cmd{}, false, err
 	}
 	build := pick(s)
 	if build == nil {
-		return hostexec.Cmd{}, false, nil
+		return programs.Cmd{}, false, nil
 	}
 	argv := build(o)
-	return hostexec.Cmd{Name: argv[0], Args: argv[1:], Nice: o.Nice}, true, nil
+	return programs.Cmd{Name: argv[0], Args: argv[1:], Nice: o.Nice}, true, nil
 }
 
 // sortedNames returns a registry map's keys sorted, for stable "known: …" errors.

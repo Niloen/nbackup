@@ -9,14 +9,14 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archiver"
-	"github.com/Niloen/nbackup/internal/hostexec"
+	"github.com/Niloen/nbackup/internal/programs"
 )
 
 // newArchiver opens a gnutar archiver with the given options (the caller supplies
 // state_dir for tests that produce incrementals) and skips when GNU tar is absent.
 func newArchiver(t *testing.T, opts archiver.Options) archiver.Archiver {
 	t.Helper()
-	m, err := archiver.Open("gnutar", opts, hostexec.Local())
+	m, err := archiver.Open("gnutar", opts, programs.Local())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func restore(t *testing.T, m archiver.Archiver, inFile, dest string) {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	out, wait, err := hostexec.Local().RunPipe(f, m.RestoreStage(dest, nil))
+	out, wait, err := programs.Local().RunPipe(f, m.RestoreStage(dest, nil))
 	if err != nil {
 		t.Fatal(err)
 	}

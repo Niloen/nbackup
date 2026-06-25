@@ -10,7 +10,7 @@ import (
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
-	"github.com/Niloen/nbackup/internal/hostexec"
+	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/slotio"
 )
@@ -247,7 +247,7 @@ func (e *Engine) structuralCheck(a record.Archive, parts []record.FilePos, want 
 		raw.Close()
 		return drill.ClassPipeline, err.Error()
 	}
-	decoded, wait, derr := hostexec.RunGrouped(raw, pipe.Reverse()...)
+	decoded, wait, derr := programs.RunGrouped(raw, pipe.Reverse()...)
 	if derr != nil {
 		raw.Close()
 		return drill.ClassPipeline, derr.Error()

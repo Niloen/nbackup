@@ -1,4 +1,4 @@
-// Package hostexec is NBackup's execution transport: it runs external programs —
+// Package programs is NBackup's execution transport: it runs external programs —
 // and stages their scratch files — on a host that is transparently either the local
 // machine (Local) or a remote one over SSH. It is injected into every external-tool
 // stage (archivers, and the compressor/encryptor stages), so "runs here" versus "runs
@@ -13,7 +13,7 @@
 // builder groups adjacent same-executor stages into one RunPipe and crosses the wire only
 // at an executor boundary. The same model runs in reverse for restore (decrypt | decompress
 // | tar).
-package hostexec
+package programs
 
 import (
 	"bytes"

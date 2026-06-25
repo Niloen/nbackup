@@ -16,7 +16,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Niloen/nbackup/internal/hostexec"
+	"github.com/Niloen/nbackup/internal/programs"
 )
 
 // Options tune a codec invocation.
@@ -112,42 +112,42 @@ func Check(codec string, o Options) error {
 // CompressCmd returns the compressor as a pipeline stage, or ok=false for the identity
 // (none) codec, which contributes no stage. It lets the unified pipeline run compression
 // through any executor (local or a remote client).
-func CompressCmd(codec string, o Options) (cmd hostexec.Cmd, ok bool, err error) {
+func CompressCmd(codec string, o Options) (cmd programs.Cmd, ok bool, err error) {
 	return stageCmd(codec, func(s Spec) func(Options) []string { return s.compressArgv }, o)
 }
 
 // DecompressCmd returns the decompressor as a pipeline stage (the read-side peer of
 // CompressCmd), or ok=false for none.
-func DecompressCmd(codec string, o Options) (cmd hostexec.Cmd, ok bool, err error) {
+func DecompressCmd(codec string, o Options) (cmd programs.Cmd, ok bool, err error) {
 	return stageCmd(codec, func(s Spec) func(Options) []string { return s.decompressArgv }, o)
 }
 
-// Filter returns the codec as a reversible hostexec.Filter — Forward compresses, Reverse
+// Filter returns the codec as a reversible programs.Filter — Forward compresses, Reverse
 // decompresses — for the transform layer to place and chain. The none codec yields a
 // Filter with empty cmds (skipped by the pipeline). It errors only for an unknown codec.
-func Filter(codec string, o Options) (hostexec.Filter, error) {
+func Filter(codec string, o Options) (programs.Filter, error) {
 	fwd, _, err := CompressCmd(codec, o)
 	if err != nil {
-		return hostexec.Filter{}, err
+		return programs.Filter{}, err
 	}
 	rev, _, err := DecompressCmd(codec, o)
 	if err != nil {
-		return hostexec.Filter{}, err
+		return programs.Filter{}, err
 	}
-	return hostexec.Filter{Name: codec, Forward: fwd, Reverse: rev}, nil
+	return programs.Filter{Name: codec, Forward: fwd, Reverse: rev}, nil
 }
 
-func stageCmd(codec string, pick func(Spec) func(Options) []string, o Options) (hostexec.Cmd, bool, error) {
+func stageCmd(codec string, pick func(Spec) func(Options) []string, o Options) (programs.Cmd, bool, error) {
 	s, err := spec(codec)
 	if err != nil {
-		return hostexec.Cmd{}, false, err
+		return programs.Cmd{}, false, err
 	}
 	build := pick(s)
 	if build == nil {
-		return hostexec.Cmd{}, false, nil
+		return programs.Cmd{}, false, nil
 	}
 	argv := build(o)
-	return hostexec.Cmd{Name: argv[0], Args: argv[1:], Nice: o.Nice}, true, nil
+	return programs.Cmd{Name: argv[0], Args: argv[1:], Nice: o.Nice}, true, nil
 }
 
 // sortedNames returns a registry map's keys sorted, for stable "known: …" errors.

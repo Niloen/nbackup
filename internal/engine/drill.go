@@ -12,9 +12,9 @@ import (
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
-	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/restore"
 	"github.com/Niloen/nbackup/internal/sizeutil"
@@ -284,12 +284,12 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 			raw.Close()
 			return drill.ClassPipeline, err.Error()
 		}
-		decoded, dwait, derr := hostexec.RunGrouped(raw, pipe.Reverse()...)
+		decoded, dwait, derr := programs.RunGrouped(raw, pipe.Reverse()...)
 		if derr != nil {
 			raw.Close()
 			return drill.ClassPipeline, derr.Error()
 		}
-		out, wait, rerr := hostexec.RunGrouped(decoded, hostexec.Stage{Cmd: arch.RestoreStage(dir, nil), Exec: hostexec.Local()})
+		out, wait, rerr := programs.RunGrouped(decoded, programs.Stage{Cmd: arch.RestoreStage(dir, nil), Exec: programs.Local()})
 		if rerr != nil {
 			decoded.Close()
 			raw.Close()

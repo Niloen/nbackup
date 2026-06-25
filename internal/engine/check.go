@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/Niloen/nbackup/internal/config"
-	"github.com/Niloen/nbackup/internal/hostexec"
+	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 )
@@ -162,7 +162,7 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 // checkClientTools probes the compressor / gpg on the host when a dumptype runs them there
 // (compress/encrypt: client). For a server-side transform there is nothing to check here —
 // the server-side tools are covered in checkServer.
-func (e *Engine) checkClientTools(rep *CheckReport, hc *HostCheck, ex hostexec.Executor, dt string) {
+func (e *Engine) checkClientTools(rep *CheckReport, hc *HostCheck, ex programs.Executor, dt string) {
 	if e.cfg.ResolveDumpType(dt).Compress == "client" {
 		if cmd, ok, err := compress.CompressCmd(e.codec, e.fopts); err == nil && ok {
 			e.probeTool(rep, hc, ex, cmd.Name, "compressor")
@@ -176,7 +176,7 @@ func (e *Engine) checkClientTools(rep *CheckReport, hc *HostCheck, ex hostexec.E
 	}
 }
 
-func (e *Engine) probeTool(rep *CheckReport, hc *HostCheck, ex hostexec.Executor, bin, role string) {
+func (e *Engine) probeTool(rep *CheckReport, hc *HostCheck, ex programs.Executor, bin, role string) {
 	if err := ex.Command(bin, "--version").Run(); err != nil {
 		rep.add(&hc.Lines, false, false, fmt.Sprintf("client %s %q: %v", role, bin, err))
 	} else {
