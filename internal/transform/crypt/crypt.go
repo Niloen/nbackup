@@ -8,7 +8,7 @@
 // encrypting and decrypting. The archive records which scheme produced it (the
 // name only, never a key), so restore reverses the exact transform — resolved
 // from this compiled registry, not from config, so a slot restores even with the
-// config gone. It is the peer of a filter codec, one transform further out: on
+// config gone. It is the peer of a compression codec, one transform further out: on
 // write a payload is compressed and then encrypted; on read it is decrypted and
 // then decompressed.
 package crypt
