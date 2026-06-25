@@ -343,7 +343,7 @@ func runDumpDryRun(eng *engine.Engine, date time.Time, validationWarnings []stri
 
 	estTotal := fprintPlanItems(os.Stdout, plan)
 	fmt.Printf("\nThis run (estimated): ~%s\n", sizeutil.FormatBytes(estTotal))
-	fmt.Printf("Would seal %s. Run without --dry-run to execute.\n", format.IDFromParts(format.DateString(date), 1))
+	fmt.Printf("Would seal %s. Run without --dry-run to execute.\n", eng.PlannedSlotID(date))
 	return nil
 }
 
@@ -423,7 +423,9 @@ func newVerifyCmd(a *app) *cobra.Command {
 			if !all && len(args) == 0 {
 				return fmt.Errorf("specify slot ids to verify, or --all to verify every slot")
 			}
-			cfg, err := a.loadRO()
+			// verify is an assertion (monitors gate on its exit code), so a missing
+			// config is an error — not a green "0 slot(s) verified".
+			cfg, err := a.loadRORequire()
 			if err != nil {
 				return err
 			}
@@ -704,6 +706,20 @@ func newCopyCmd(a *app) *cobra.Command {
 			}
 			defer unlock()
 			attachOperator(eng)
+			// A slot already on the target is an idempotent no-op (exit 0), matching
+			// `nb sync`'s "up to date" — re-running a copy in a script must not fail.
+			plan, err := eng.PlanCopy(slotID, from, to, force)
+			if err != nil {
+				return err
+			}
+			if plan.AlreadyOnTarget {
+				where := ""
+				if len(plan.TargetLabels) > 0 {
+					where = fmt.Sprintf(" (volume(s) %v)", plan.TargetLabels)
+				}
+				fmt.Printf("slot %s is already on medium %q%s; nothing to copy (use --force to copy again)\n", slotID, to, where)
+				return nil
+			}
 			if err := eng.CopySlot(slotID, from, to, force, a.logf()); err != nil {
 				return err
 			}

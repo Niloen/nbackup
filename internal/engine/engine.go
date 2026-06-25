@@ -1161,6 +1161,25 @@ func (e *Engine) latestSlotDate() (string, bool) {
 	return latest, latest != ""
 }
 
+// PlannedSlotID returns the slot id a real dump on date would seal next: the next
+// free same-day sequence given the sealed slots already in the catalog. It is the
+// preview peer of allocSlotID (which additionally reclaims an unsealed orphan on the
+// loaded volume) and exists so `nb dump --dry-run` names the slot a real run would
+// produce — not always `.1` — when the date is already sealed.
+func (e *Engine) PlannedSlotID(date time.Time) string {
+	have := map[string]bool{}
+	for _, s := range e.cat.Slots() {
+		have[s.ID] = true
+	}
+	ds := format.DateString(date)
+	for seq := 1; ; seq++ {
+		id := format.IDFromParts(ds, seq)
+		if !have[id] {
+			return id
+		}
+	}
+}
+
 func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 	files, err := e.vol.Files()
 	if err != nil {

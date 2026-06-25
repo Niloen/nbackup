@@ -287,7 +287,10 @@ func ValidateParams(typ string, params map[string]string) error {
 		allowed = append(allowed, k)
 	}
 	sort.Strings(allowed)
-	return fmt.Errorf("unknown %s option(s) %s; accepted options: %s",
+	// capacity/minimum_age are common struct fields on every medium (not inline
+	// params), so name them too — a typo'd `capacity` otherwise sees a list that
+	// omits the very key it meant.
+	return fmt.Errorf("unknown %s option(s) %s; accepted options: %s (plus the common medium fields capacity, minimum_age)",
 		typ, strings.Join(unknown, ", "), strings.Join(allowed, ", "))
 }
 

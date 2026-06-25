@@ -100,6 +100,12 @@ func Check(scheme string, o Options) error {
 	if s.needsKeyHint != "" && o.Recipient == "" && o.PassphraseFile == "" {
 		return fmt.Errorf("encryption scheme %q: %s", scheme, s.needsKeyHint)
 	}
+	// recipient (public-key) and passphrase_file (symmetric) are mutually exclusive:
+	// at encrypt time recipient silently wins, so accepting both would give asymmetric
+	// encryption to an operator who configured — and safeguarded — a passphrase file.
+	if o.Recipient != "" && o.PassphraseFile != "" {
+		return fmt.Errorf("encryption scheme %q: set exactly one of `recipient` (public-key) or `passphrase_file` (symmetric), not both", scheme)
+	}
 	// Fail fast on a passphrase file that isn't there: otherwise gpg only fails
 	// once bytes start flowing, surfacing as a broken-pipe mid-dump.
 	if o.PassphraseFile != "" {

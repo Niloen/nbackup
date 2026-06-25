@@ -90,6 +90,12 @@ func (a *app) loadRO() (*config.Config, error) {
 	return loadConfigRO(a.cfgPath, a.catalog)
 }
 
+// loadRORequire reads configuration for read-only assertion commands (verify),
+// erroring when no config file exists instead of synthesizing a default catalog.
+func (a *app) loadRORequire() (*config.Config, error) {
+	return loadConfigRORequire(a.cfgPath, a.catalog)
+}
+
 // lockedEngine takes the per-config exclusive lock, then builds the engine —
 // for commands that mutate the catalog or media. The lock is acquired before
 // construction so it also covers the catalog write that New may trigger when it
