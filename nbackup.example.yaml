@@ -248,6 +248,42 @@ dumptypes:
   #   encrypt:
   #     scheme: gpg
   #     recipient: finance-key@example.com
+  # A remote DLE can run compression and/or encryption on the CLIENT (Amanda's
+  # compress/encrypt client), so only compressed ciphertext crosses the wire and
+  # plaintext never leaves the source. encrypt.at: client requires compress: client
+  # (encryption is downstream of compression). With a public-key recipient only the
+  # public key need be on the client; the private key decrypts wherever it lives.
+  # remote-secure:
+  #   archiver: default
+  #   compress: client            # server (default) | client
+  #   encrypt:
+  #     scheme: gpg
+  #     recipient: backups@example.com
+  #     at: client                # server (default) | client
+
+# Remote sources over SSH. ANY source host that is not `localhost` is remote by default:
+# NBackup runs stock tools (tar, and optionally the compressor + gpg) on the client over
+# SSH — no NBackup software on the client, no daemon, no open port beyond SSH. NBackup
+# stores no SSH secret: the key comes from your ssh config/agent. The client's .snar
+# incremental library lives on the client (state_dir) — losing a client only forces its
+# next dump to a full. Run `nb check` to verify each host is reachable and ready.
+#
+# Global SSH defaults applied to every remote host (Amanda's global auth settings):
+# ssh:
+#   user: backup
+#   # port: "22"
+#   identity_file: ~/.ssh/nbackup
+#   options: ["-o", "StrictHostKeyChecking=accept-new"]
+#
+# `hosts:` is OPTIONAL and only OVERRIDES the defaults above for a specific host (it is
+# NOT what makes a host remote). Per-host fields are merged over the global ssh: block.
+# hosts:
+#   app01:
+#     ssh:
+#       user: root                      # override just the user; inherit the rest
+#       tar_path: /usr/bin/tar          # client GNU tar ("" = tar on the client PATH)
+#       # state_dir: /var/lib/nbackup/snar  # optional; default nbackup-catalog/snapshots
+#       #   under the backup user's home
 
 # The disklist: grouped by dumptype, then host, then the paths to back up.
 # NBackup backs up filesystem trees. For a live database, snapshot or dump it to

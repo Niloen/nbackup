@@ -5,14 +5,20 @@
 // incremental-state library: per-DLE, per-level .snar files under state_dir
 // (Amanda's GNUTAR-LISTDIR), so the generic layer never names a snapshot.
 // Compression and storage are handled by the caller.
+//
+// Every process and every scratch file (the snapshot library, the member-index temp)
+// goes through an injected hostexec.Executor, so gnutar runs identically whether tar is
+// the local binary or a stock tar on a client reached over SSH — gnutar holds no
+// knowledge of where it runs. When the executor is remote, state_dir is a client path
+// (the .snar library lives on the client) and the produced tar stage fuses with the
+// compress/encrypt stages on that client.
 package gnutar
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -20,16 +26,21 @@ import (
 	"sync"
 
 	"github.com/Niloen/nbackup/internal/archiver"
+	"github.com/Niloen/nbackup/internal/hostexec"
 )
 
 func init() {
-	archiver.Register("gnutar", func(opts archiver.Options) (archiver.Archiver, error) {
+	archiver.Register("gnutar", func(opts archiver.Options, ex hostexec.Executor) (archiver.Archiver, error) {
 		bin := opts.Get("tar_path")
 		if bin == "" {
 			bin = "tar"
 		}
+		if ex == nil {
+			ex = hostexec.Local()
+		}
 		return &gnutar{
 			bin:           bin,
+			ex:            ex,
 			stateDir:      opts.Get("state_dir"),
 			oneFileSystem: opts.Bool("one-file-system", true),
 			sparse:        opts.Bool("sparse", true),
@@ -39,7 +50,8 @@ func init() {
 
 type gnutar struct {
 	bin           string
-	stateDir      string // root of the per-DLE/per-level .snar library (Amanda's GNUTAR-LISTDIR)
+	ex            hostexec.Executor // host where tar runs and the .snar library / index temp live
+	stateDir      string            // root of the per-DLE/per-level .snar library (Amanda's GNUTAR-LISTDIR)
 	oneFileSystem bool
 	sparse        bool
 	checkOnce     sync.Once
@@ -48,7 +60,8 @@ type gnutar struct {
 
 func (g *gnutar) Name() string { return "gnutar" }
 
-// snapPath is the location of a DLE's snapshot for a level within the library.
+// snapPath is the location of a DLE's snapshot for a level within the library (on the
+// executor's host).
 func (g *gnutar) snapPath(dle string, level int) string {
 	return filepath.Join(g.stateDir, dle, fmt.Sprintf("L%d.snar", level))
 }
@@ -56,14 +69,14 @@ func (g *gnutar) snapPath(dle string, level int) string {
 // HasBase reports whether the snapshot left by a completed dump at the level is
 // present — the base a higher incremental builds on.
 func (g *gnutar) HasBase(dle string, level int) bool {
-	_, err := os.Stat(g.snapPath(dle, level))
-	return err == nil
+	return g.ex.Stat(g.snapPath(dle, level)) == nil
 }
 
-// Check verifies the configured binary is GNU tar (cached).
+// Check verifies the configured binary is GNU tar (cached), running `tar --version` on
+// the executor's host.
 func (g *gnutar) Check() error {
 	g.checkOnce.Do(func() {
-		out, err := exec.Command(g.bin, "--version").Output()
+		out, err := g.ex.Command(g.bin, "--version").Output()
 		if err != nil {
 			g.checkErr = fmt.Errorf("cannot run %q: %w (GNU tar is required)", g.bin, err)
 			return
@@ -77,9 +90,22 @@ func (g *gnutar) Check() error {
 
 var totalsRE = regexp.MustCompile(`Total bytes written: (\d+)`)
 
-// Backup writes a raw tar stream to out and updates the DLE's snapshot for this
-// level in the library.
-func (g *gnutar) Backup(r archiver.BackupRequest, out io.Writer) (*archiver.BackupResult, error) {
+// parseTotals extracts tar's `--totals` byte count from its stderr, or 0 if absent.
+func parseTotals(stderr string) int64 {
+	for _, line := range strings.Split(stderr, "\n") {
+		if m := totalsRE.FindStringSubmatch(line); m != nil {
+			n, _ := strconv.ParseInt(m[1], 10, 64)
+			return n
+		}
+	}
+	return 0
+}
+
+// BackupSource builds the tar-create stage that produces the raw archive stream and a
+// Finish hook that, after the pipeline drains, reads the member index and totals from the
+// host scratch. The snapshot for this level is seeded in place first, so tar updates the
+// real .snar library as it runs.
+func (g *gnutar) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource, error) {
 	if err := g.Check(); err != nil {
 		return nil, err
 	}
@@ -87,97 +113,76 @@ func (g *gnutar) Backup(r archiver.BackupRequest, out io.Writer) (*archiver.Back
 	if err := g.seedSnapshot(r, outSnap); err != nil {
 		return nil, err
 	}
-
-	indexFile, err := os.CreateTemp("", "nbackup-index-*")
+	indexPath, err := g.ex.TempFile("nbackup-index-*")
 	if err != nil {
 		return nil, err
 	}
-	indexPath := indexFile.Name()
-	indexFile.Close()
-	defer os.Remove(indexPath)
-
-	totals, err := g.runCreate(r, out, outSnap, indexPath)
-	if err != nil {
-		return nil, err
+	stderr := &bytes.Buffer{}
+	argv := g.createArgs(r, "-", outSnap, indexPath)
+	stage := hostexec.Cmd{
+		Name:   argv[0],
+		Args:   argv[1:],
+		Stderr: stderr,
+		OKExit: []int{1}, // exit 1 = "some files changed as we read them" — a warning
 	}
-	members, err := readIndex(indexPath)
-	if err != nil {
-		return nil, err
+	finish := func() (*archiver.BackupResult, error) {
+		members, rerr := g.readIndex(indexPath)
+		if rerr != nil {
+			return nil, rerr
+		}
+		return &archiver.BackupResult{
+			Uncompressed: parseTotals(stderr.String()),
+			FileCount:    countFiles(members),
+			Members:      members,
+		}, nil
 	}
-	return &archiver.BackupResult{
-		Uncompressed: totals,
-		FileCount:    countFiles(members),
-		Members:      members,
-	}, nil
+	cleanup := func() { _ = g.ex.Remove(indexPath) }
+	return &archiver.BackupSource{Stage: stage, Exec: g.ex, Finish: finish, Cleanup: cleanup}, nil
 }
 
-// Estimate computes the dump size the way Amanda's client estimate does: it runs
-// tar with the archive targeted at /dev/null. GNU tar detects the null device and
-// walks metadata without reading file bodies, so this is fast yet exact — it
-// honors excludes, one-file-system, and the listed-incremental base natively. A
-// throwaway snapshot is used so the real .snar library is untouched. The result
-// is the uncompressed archive size (an upper bound on the bytes finally stored).
+// Estimate computes the dump size the way Amanda's client estimate does: it runs tar
+// with the archive targeted at /dev/null. GNU tar detects the null device and walks
+// metadata without reading file bodies, so this is fast yet exact — it honors excludes,
+// one-file-system, and the listed-incremental base natively. A throwaway snapshot is
+// used so the real .snar library is untouched. The result is the uncompressed archive
+// size (an upper bound on the bytes finally stored).
 func (g *gnutar) Estimate(r archiver.BackupRequest) (int64, error) {
 	if err := g.Check(); err != nil {
 		return 0, err
 	}
-	tmp, err := os.CreateTemp("", "nbackup-estsnap-*")
+	tmpSnap, err := g.ex.TempFile("nbackup-estsnap-*")
 	if err != nil {
 		return 0, err
 	}
-	tmpSnap := tmp.Name()
-	tmp.Close()
-	defer os.Remove(tmpSnap)
+	defer g.ex.Remove(tmpSnap)
 
 	if err := g.seedSnapshot(r, tmpSnap); err != nil {
 		return 0, err
 	}
 
 	args := g.createArgs(r, "/dev/null", tmpSnap, "")
-	cmd := exec.Command(g.bin, args...)
+	cmd := g.ex.Command(args[0], args[1:]...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil && !isWarning(err) {
 		return 0, fmt.Errorf("%s estimate failed: %w\n%s", g.bin, err, strings.TrimSpace(stderr.String()))
 	}
-	for _, line := range strings.Split(stderr.String(), "\n") {
-		if m := totalsRE.FindStringSubmatch(line); m != nil {
-			n, _ := strconv.ParseInt(m[1], 10, 64)
-			return n, nil
-		}
-	}
-	return 0, nil
+	return parseTotals(stderr.String()), nil
 }
 
-// Restore consumes a raw tar stream and extracts into destDir. With no members it
-// extracts the whole archive in listed-incremental mode, applying the deletions
-// recorded in the archive (a chain restore). With members it extracts only those
-// named entries in plain mode — selected-file recovery, which never deletes.
+// Restore consumes a raw tar stream and extracts into destDir on the executor's host.
+// With no members it extracts the whole archive in listed-incremental mode, applying the
+// deletions recorded in the archive (a chain restore). With members it extracts only
+// those named entries in plain mode — selected-file recovery, which never deletes.
 func (g *gnutar) Restore(in io.Reader, destDir string, members []string) error {
 	if err := g.Check(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	if err := g.ex.MkdirAll(destDir); err != nil {
 		return err
 	}
-	args := []string{
-		"--extract", "--file=-",
-		"--directory=" + destDir,
-		"--numeric-owner",
-	}
-	if len(members) == 0 {
-		// Whole-archive chain restore: honor the incremental dumpdir so deletions
-		// recorded since the base are applied.
-		args = append(args, "--listed-incremental=/dev/null")
-	} else {
-		// Selected files: match the exact members and do not apply deletions.
-		// --no-recursion makes each named member match only itself, so listing a
-		// directory alongside its files (we enumerate every descendant ourselves)
-		// doesn't double-match and spuriously report the files "not found".
-		args = append(args, "--no-recursion")
-		args = append(args, members...)
-	}
-	cmd := exec.Command(g.bin, args...)
+	stage := g.RestoreStage(destDir, members)
+	cmd := g.ex.Command(stage.Name, stage.Args...)
 	cmd.Stdin = in
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -190,18 +195,15 @@ func (g *gnutar) Restore(in io.Reader, destDir string, members []string) error {
 	return nil
 }
 
-// List reads a raw tar stream from in and returns its member paths (`tar -t`),
-// without extracting. It is the structural half of a deep verify: the pipeline
-// completing cleanly proves the stream is a valid, listable archive, and the
-// returned members compare directly against the seal (tar lists the same stored
-// names the create-time --index-file recorded). Exit-1 ("some files changed") is a
-// warning, not a failure. The caller owns draining/closing in; List only reads what
-// tar consumes.
+// List reads a raw tar stream from in and returns its member paths (`tar -t`), without
+// extracting. It is the structural half of a deep verify: the pipeline completing cleanly
+// proves the stream is a valid, listable archive, and the returned members compare
+// directly against the seal. Exit-1 ("some files changed") is a warning, not a failure.
 func (g *gnutar) List(in io.Reader) ([]string, error) {
 	if err := g.Check(); err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(g.bin, "--list", "--file=-")
+	cmd := g.ex.Command(g.bin, "--list", "--file=-")
 	cmd.Stdin = in
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -223,28 +225,47 @@ func (g *gnutar) List(in io.Reader) ([]string, error) {
 	return members, nil
 }
 
-// seedSnapshot prepares outSnap as the starting incremental state for the dump:
-// a copy of the base level's snapshot for an incremental (so the real base file
-// is never mutated — tar updates outSnap in place), or an absent file for a full
-// so tar starts fresh.
+// RestoreStage returns the tar program stage that extracts a raw archive stream into
+// destDir — the read-side peer of BackupSource's source stage. Composing it as a stage
+// (rather than running it) lets a decode→extract pipeline (`gpg -d | zstd -d | tar -x`)
+// run entirely on one host, so a client-only key decrypts on the client. With members it
+// extracts only those in plain mode (no deletions); without, a whole-archive chain restore
+// that honors the listed-incremental dumpdir. tar exit 1 ("files changed") is a warning.
+func (g *gnutar) RestoreStage(destDir string, members []string) hostexec.Cmd {
+	args := []string{
+		"--extract", "--file=-",
+		"--directory=" + destDir,
+		"--numeric-owner",
+	}
+	if len(members) == 0 {
+		args = append(args, "--listed-incremental=/dev/null")
+	} else {
+		args = append(args, "--no-recursion")
+		args = append(args, members...)
+	}
+	return hostexec.Cmd{Name: g.bin, Args: args, OKExit: []int{1}}
+}
+
+// seedSnapshot prepares outSnap as the starting incremental state for the dump on the
+// executor's host: a copy of the base level's snapshot for an incremental (so the real
+// base file is never mutated — tar updates outSnap in place), or an absent file for a
+// full so tar starts fresh.
 func (g *gnutar) seedSnapshot(r archiver.BackupRequest, outSnap string) error {
-	if err := os.MkdirAll(filepath.Dir(outSnap), 0o755); err != nil {
+	if err := g.ex.MkdirAll(filepath.Dir(outSnap)); err != nil {
 		return err
 	}
 	if r.Level == 0 || r.BaseLevel < 0 {
-		if err := os.Remove(outSnap); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
+		return g.ex.Remove(outSnap) // Remove treats an absent file as success
 	}
-	return copyFile(g.snapPath(r.DLE, r.BaseLevel), outSnap)
+	return g.ex.CopyFile(g.snapPath(r.DLE, r.BaseLevel), outSnap)
 }
 
-// createArgs builds the shared tar create-mode argument list. fileTarget is "-"
-// for a streamed backup or "/dev/null" for an estimate; indexPath, when set, adds
-// the verbose member index (backup only).
+// createArgs builds the shared tar create-mode argument list. fileTarget is "-" for a
+// streamed backup or "/dev/null" for an estimate; indexPath, when set, adds the verbose
+// member index (backup only).
 func (g *gnutar) createArgs(r archiver.BackupRequest, fileTarget, snapshot, indexPath string) []string {
 	args := []string{
+		g.bin,
 		"--create", "--file=" + fileTarget,
 		"--directory=" + r.SourcePath,
 		"--listed-incremental=" + snapshot,
@@ -265,83 +286,24 @@ func (g *gnutar) createArgs(r archiver.BackupRequest, fileTarget, snapshot, inde
 	return append(args, ".")
 }
 
-func (g *gnutar) runCreate(r archiver.BackupRequest, w io.Writer, snapshot, indexPath string) (int64, error) {
-	cmd := exec.Command(g.bin, g.createArgs(r, "-", snapshot, indexPath)...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return 0, err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return 0, err
-	}
-	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("start %s: %w", g.bin, err)
-	}
-
-	totalsCh := make(chan int64, 1)
-	diagCh := make(chan string, 1)
-	go func() {
-		var total int64
-		var diag strings.Builder
-		sc := bufio.NewScanner(stderr)
-		sc.Buffer(make([]byte, 64*1024), 1024*1024)
-		for sc.Scan() {
-			line := sc.Text()
-			if m := totalsRE.FindStringSubmatch(line); m != nil {
-				total, _ = strconv.ParseInt(m[1], 10, 64)
-				continue
-			}
-			diag.WriteString(line)
-			diag.WriteByte('\n')
-		}
-		totalsCh <- total
-		diagCh <- diag.String()
-	}()
-
-	_, copyErr := io.Copy(w, stdout)
-	if copyErr != nil {
-		// The consumer (a full volume that cannot span, a failed write) stopped
-		// reading, so tar is now blocked writing to its stdout pipe. Kill it so its
-		// stderr closes and the scan goroutine and Wait below return — otherwise this
-		// deadlocks waiting on a child that can never make progress.
-		_ = cmd.Process.Kill()
-	}
-	total := <-totalsCh
-	diag := <-diagCh
-	waitErr := cmd.Wait()
-	if copyErr != nil {
-		return 0, fmt.Errorf("read tar output: %w", copyErr)
-	}
-	if waitErr != nil {
-		if isWarning(waitErr) {
-			return total, nil
-		}
-		return 0, fmt.Errorf("%s failed: %w\n%s", g.bin, waitErr, strings.TrimSpace(diag))
-	}
-	return total, nil
-}
-
-// isWarning reports whether a tar exit was a non-fatal warning (exit code 1:
-// "some files differ / changed as we read them").
-func isWarning(err error) bool {
-	ee, ok := err.(*exec.ExitError)
-	return ok && ee.ExitCode() == 1
-}
-
-func readIndex(path string) ([]string, error) {
-	f, err := os.Open(path)
+// readIndex reads the member index tar wrote to path on the executor's host.
+func (g *gnutar) readIndex(path string) ([]string, error) {
+	data, err := g.ex.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	return scanMembers(f)
+	return scanMembers(bytes.NewReader(data))
 }
 
-// scanMembers reads a newline-separated member listing (a tar --index-file, or
-// `tar -t` output) and returns the member tokens, dropping blanks and the bare "./"
-// root entry. Shared by Backup's index read and List so both normalize identically,
-// keeping the seal's members and a deep verify's listing directly comparable.
+// isWarning reports whether a tar exit was a non-fatal warning (exit code 1: "some files
+// differ / changed as we read them").
+func isWarning(err error) bool {
+	ee, ok := err.(interface{ ExitCode() int })
+	return ok && ee.ExitCode() == 1
+}
+
+// scanMembers reads a newline-separated member listing (a tar --index-file, or `tar -t`
+// output) and returns the member tokens, dropping blanks and the bare "./" root entry.
 func scanMembers(r io.Reader) ([]string, error) {
 	var members []string
 	sc := bufio.NewScanner(r)
@@ -363,21 +325,4 @@ func countFiles(members []string) int {
 		}
 	}
 	return n
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
 }

@@ -23,7 +23,7 @@ func TestRecoverSelectedFiles(t *testing.T) {
 	cfg := &config.Config{
 		Landing: "disk",
 		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -32,7 +32,7 @@ func TestRecoverSelectedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skip("GNU tar not available")
 	}
 
@@ -50,7 +50,7 @@ func TestRecoverSelectedFiles(t *testing.T) {
 		t.Fatalf("day2: %v", err)
 	}
 
-	name := config.DLE{Host: "h", Path: src}.Name()
+	name := config.DLE{Host: "localhost", Path: src}.Name()
 
 	// As of day 2: recover the changed file (from the incremental), the unchanged
 	// file (from the full), and the added file — into one destination.
@@ -104,7 +104,7 @@ func TestRecoverWholeDirectory(t *testing.T) {
 	cfg := &config.Config{
 		Landing: "disk",
 		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -112,7 +112,7 @@ func TestRecoverWholeDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skip("GNU tar not available")
 	}
 	if _, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
@@ -124,7 +124,7 @@ func TestRecoverWholeDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	name := config.DLE{Host: "h", Path: src}.Name()
+	name := config.DLE{Host: "localhost", Path: src}.Name()
 	tree, err := eng.OpenRecover(name, "2026-06-22")
 	if err != nil {
 		t.Fatal(err)

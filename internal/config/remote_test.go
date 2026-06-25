@@ -1,0 +1,198 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// loadYAML writes cfg to a temp file and loads it, returning the config or the load error.
+func loadYAML(t *testing.T, cfg string) (*Config, error) {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "nbackup.yaml")
+	if err := os.WriteFile(p, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return Load(p)
+}
+
+const baseMedia = `
+landing: disk
+media:
+  disk: { type: disk, path: /tmp/x }
+`
+
+func TestHostsParseAndResolve(t *testing.T) {
+	c, err := loadYAML(t, baseMedia+`
+hosts:
+  app01:
+    ssh:
+      user: backup
+      port: "2222"
+      identity_file: /keys/id
+      options: ["-o", "StrictHostKeyChecking=accept-new"]
+      tar_path: /usr/bin/tar
+      state_dir: /var/lib/nbackup/snar
+sources:
+  default:
+    app01: [/home]
+    localhost: [/etc]
+`)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	ssh, ok := c.RemoteHost("app01")
+	if !ok {
+		t.Fatal("app01 should resolve as remote")
+	}
+	if ssh.User != "backup" || ssh.Port != "2222" || ssh.StateDir != "/var/lib/nbackup/snar" {
+		t.Fatalf("ssh fields wrong: %+v", ssh)
+	}
+	if len(ssh.Options) != 2 {
+		t.Fatalf("options not parsed: %v", ssh.Options)
+	}
+	// An unlisted non-localhost host is remote by default (auto-remote); localhost is local.
+	if _, ok := c.RemoteHost("unlisted"); !ok {
+		t.Fatal("unlisted non-localhost host must be remote by default")
+	}
+	if _, ok := c.RemoteHost("localhost"); ok {
+		t.Fatal("localhost must be local")
+	}
+}
+
+func TestHostStateDirOptional(t *testing.T) {
+	// state_dir is optional; the engine fills the client-side default. The config loads
+	// fine and the host resolves as remote with an empty StateDir.
+	c, err := loadYAML(t, baseMedia+`
+hosts:
+  app01:
+    ssh: { user: backup }
+sources:
+  default:
+    app01: [/home]
+`)
+	if err != nil {
+		t.Fatalf("host without state_dir should load: %v", err)
+	}
+	ssh, ok := c.RemoteHost("app01")
+	if !ok || ssh.StateDir != "" {
+		t.Fatalf("remote app01 should resolve with empty StateDir, got ok=%v dir=%q", ok, ssh.StateDir)
+	}
+}
+
+func TestHostsKnownFieldsRejectsStray(t *testing.T) {
+	_, err := loadYAML(t, baseMedia+`
+hosts:
+  app01:
+    ssh: { user: backup, state_dir: /s, password: hunter2 }
+sources:
+  default:
+    app01: [/home]
+`)
+	if err == nil || !strings.Contains(err.Error(), "password") {
+		t.Fatalf("a literal secret key must be rejected, got %v", err)
+	}
+}
+
+func TestEncryptAtClientRequiresCompressClient(t *testing.T) {
+	_, err := loadYAML(t, baseMedia+`
+hosts:
+  app01: { ssh: { user: b, state_dir: /s } }
+dumptypes:
+  secure:
+    compress: server
+    encrypt: { scheme: gpg, recipient: k@x, at: client }
+sources:
+  secure:
+    app01: [/home]
+`)
+	if err == nil || !strings.Contains(err.Error(), "requires compress: client") {
+		t.Fatalf("want compress:client requirement, got %v", err)
+	}
+}
+
+func TestTransformClientRequiresRemoteHost(t *testing.T) {
+	// compress/encrypt: client on a localhost DLE is rejected — there is no client to run
+	// the transform on. (A non-localhost host is remote by default and is allowed.)
+	_, err := loadYAML(t, baseMedia+`
+dumptypes:
+  secure:
+    compress: client
+sources:
+  secure:
+    localhost: [/home]
+`)
+	if err == nil || !strings.Contains(err.Error(), "requires a remote host") {
+		t.Fatalf("want remote-host requirement, got %v", err)
+	}
+}
+
+func TestNonLocalhostIsRemoteByDefault(t *testing.T) {
+	// No hosts: block at all — a non-localhost source host resolves remote with defaults.
+	c, err := loadYAML(t, baseMedia+`
+sources:
+  default:
+    app01: [/home]
+    localhost: [/etc]
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.RemoteHost("app01"); !ok {
+		t.Fatal("app01 (not localhost, no hosts: entry) must be remote by default")
+	}
+	if _, ok := c.RemoteHost("localhost"); ok {
+		t.Fatal("localhost must be local")
+	}
+}
+
+func TestGlobalSSHDefaultsAndOverride(t *testing.T) {
+	c, err := loadYAML(t, baseMedia+`
+ssh:
+  user: backup
+  identity_file: /keys/global
+  options: ["-o", "StrictHostKeyChecking=accept-new"]
+hosts:
+  app01:
+    ssh: { user: root }
+sources:
+  default:
+    app01: [/home]
+    web01: [/srv]
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// web01: inherits all global defaults (no per-host block).
+	web, _ := c.RemoteHost("web01")
+	if web.User != "backup" || web.IdentityFile != "/keys/global" || len(web.Options) != 2 {
+		t.Fatalf("web01 should inherit global ssh defaults: %+v", web)
+	}
+	// app01: overrides user, inherits identity_file + options.
+	app, _ := c.RemoteHost("app01")
+	if app.User != "root" || app.IdentityFile != "/keys/global" || len(app.Options) != 2 {
+		t.Fatalf("app01 should override user, inherit the rest: %+v", app)
+	}
+}
+
+func TestValidClientSideEncryptionLoads(t *testing.T) {
+	c, err := loadYAML(t, baseMedia+`
+hosts:
+  app01: { ssh: { user: b, state_dir: /s } }
+dumptypes:
+  secure:
+    compress: client
+    encrypt: { scheme: gpg, recipient: k@x, at: client }
+sources:
+  secure:
+    app01: [/home]
+`)
+	if err != nil {
+		t.Fatalf("valid client-side config should load: %v", err)
+	}
+	if c.EncryptionFor("secure").At != "client" || c.ResolveDumpType("secure").Compress != "client" {
+		t.Fatal("client-side placement not parsed")
+	}
+}

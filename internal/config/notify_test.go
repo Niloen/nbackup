@@ -30,7 +30,7 @@ func TestValidateNotify(t *testing.T) {
 		},
 		{
 			name:    "smtp missing recipients",
-			n:       NotifyConfig{Backends: map[string]NotifyBackend{"m": {Type: "smtp", Host: "h", From: "a@x"}}},
+			n:       NotifyConfig{Backends: map[string]NotifyBackend{"m": {Type: "smtp", Host: "localhost", From: "a@x"}}},
 			wantErr: "requires host, from",
 		},
 		{
@@ -40,7 +40,7 @@ func TestValidateNotify(t *testing.T) {
 		},
 		{
 			name:    "routing references undefined backend",
-			n:       NotifyConfig{OnFailure: []string{"ghost"}, Backends: map[string]NotifyBackend{"m": {Type: "smtp", Host: "h", From: "a@x", To: []string{"o@x"}}}},
+			n:       NotifyConfig{OnFailure: []string{"ghost"}, Backends: map[string]NotifyBackend{"m": {Type: "smtp", Host: "localhost", From: "a@x", To: []string{"o@x"}}}},
 			wantErr: "undefined backend",
 		},
 		{

@@ -22,6 +22,7 @@ import (
 	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/filter"
 	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
@@ -292,30 +293,20 @@ func (e *Engine) volumesInPool(medium string) []catalog.VolumeRecord {
 	return out
 }
 
-// archiverFor resolves and caches the archiver for a dumptype: the dumptype's named
-// archiver definition (its type + options), with the state_dir default injected.
-func (e *Engine) archiverFor(dtName string) (archiver.Archiver, error) {
-	if d, ok := e.archivers[dtName]; ok {
+// archiverFor resolves and caches the archiver for a (dumptype, host): the dumptype's
+// named archiver definition (its type + options), with the executor for the DLE's host
+// and the state_dir default injected. A remote host yields an SSH executor (so tar runs
+// on the client) and a client-side state_dir; a local/unlisted host yields the local
+// executor — byte-for-byte today's behavior.
+func (e *Engine) archiverFor(dtName, host string) (archiver.Archiver, error) {
+	key := dtName + "\x00" + host
+	if d, ok := e.archivers[key]; ok {
 		return d, nil
 	}
 	dt := e.cfg.ResolveDumpType(dtName)
 	def := e.cfg.ResolveArchiver(dt.Archiver)
-	d, err := archiver.Open(def.Type, e.archiverOptions(def.Options))
-	if err != nil {
-		return nil, err
-	}
-	e.archivers[dtName] = d
-	return d, nil
-}
-
-// archiverByType resolves and caches an archiver by its type name with default options
-// (used for restore, where the archive records the producing archiver's type).
-func (e *Engine) archiverByType(typeName string) (archiver.Archiver, error) {
-	key := "@" + typeName
-	if d, ok := e.archivers[key]; ok {
-		return d, nil
-	}
-	d, err := archiver.Open(typeName, e.archiverOptions(nil))
+	ex, overrides := e.executorFor(host)
+	d, err := archiver.Open(def.Type, e.archiverOptions(def.Options, overrides), ex)
 	if err != nil {
 		return nil, err
 	}
@@ -323,14 +314,66 @@ func (e *Engine) archiverByType(typeName string) (archiver.Archiver, error) {
 	return d, nil
 }
 
-// archiverOptions copies an archiver definition's options and injects the state_dir
-// default (the per-DLE/per-level incremental-state library, beneath the workdir)
-// when the definition does not set one. The location is the orchestrator's to
-// default — an archiver cannot know the workdir — which is why it is injected here
-// (Amanda's compile-time GNUTAR-LISTDIR default, set by the caller instead).
-func (e *Engine) archiverOptions(options map[string]string) archiver.Options {
+// restoreArchiver resolves and caches an archiver by its type name for reading, built
+// with the executor for the DLE's host: a remote DLE extracts on the client (tar runs
+// there, the destination path is on the client — restore/recover land back where the
+// data came from), a local/unlisted host extracts server-side exactly as before. The
+// archive records its producing archiver's type; restore reverses it.
+func (e *Engine) restoreArchiver(typeName, host string) (archiver.Archiver, error) {
+	key := "@" + typeName + "\x00" + host
+	if d, ok := e.archivers[key]; ok {
+		return d, nil
+	}
+	ex, overrides := e.executorFor(host)
+	d, err := archiver.Open(typeName, e.archiverOptions(nil, overrides), ex)
+	if err != nil {
+		return nil, err
+	}
+	e.archivers[key] = d
+	return d, nil
+}
+
+// executorFor returns the executor a DLE's host runs its tools on — the local machine for
+// an empty or unlisted host, or an SSH executor for a host configured in the hosts: map —
+// plus the gnutar option overrides that host implies (a client-side state_dir and
+// tar_path). This is the one place "ssh" enters the engine; the archiver never learns it.
+func (e *Engine) executorFor(host string) (hostexec.Executor, map[string]string) {
+	hc, ok := e.cfg.RemoteHost(host)
+	if !ok {
+		return hostexec.Local(), nil
+	}
+	ex := hostexec.SSH(hostexec.Params{
+		User:         hc.User,
+		Host:         host,
+		Port:         hc.Port,
+		IdentityFile: hc.IdentityFile,
+		Options:      hc.Options,
+	})
+	// A remote host always gets a client-side state_dir — the configured one, or the
+	// relative default under the backup user's home — so the server's workdir path (the
+	// archiverOptions fallback) never leaks onto a client.
+	stateDir := hc.StateDir
+	if stateDir == "" {
+		stateDir = config.DefaultClientStateDir
+	}
+	over := map[string]string{"state_dir": stateDir}
+	if hc.TarPath != "" {
+		over["tar_path"] = hc.TarPath
+	}
+	return ex, over
+}
+
+// archiverOptions copies an archiver definition's options, applies host overrides (a
+// remote host's client-side state_dir / tar_path), and injects the state_dir default
+// (the per-DLE/per-level incremental-state library, beneath the workdir) when neither
+// set one. The location is the orchestrator's to default — an archiver cannot know the
+// workdir — which is why it is injected here (Amanda's compile-time GNUTAR-LISTDIR).
+func (e *Engine) archiverOptions(options, overrides map[string]string) archiver.Options {
 	opts := archiver.Options{}
 	for k, v := range options {
+		opts[k] = v
+	}
+	for k, v := range overrides {
 		opts[k] = v
 	}
 	if _, ok := opts["state_dir"]; !ok {
@@ -745,7 +788,7 @@ func (e *Engine) ValidatePlan() (warnings []string, err error) {
 	checkedEnc := map[string]bool{}
 	for _, d := range e.cfg.DLEs() {
 		dt := d.DumpTypeName()
-		if _, err := e.archiverFor(dt); err != nil {
+		if _, err := e.archiverFor(dt, d.Host); err != nil {
 			return nil, fmt.Errorf("dumptype %q: %w", dt, err)
 		}
 		if !checkedEnc[dt] {
@@ -755,8 +798,12 @@ func (e *Engine) ValidatePlan() (warnings []string, err error) {
 			}
 			checkedEnc[dt] = true
 		}
-		if _, err := os.Stat(d.Path); err != nil {
-			warnings = append(warnings, fmt.Sprintf("DLE %s: source path %s is missing or unreadable (%v) — the real run will fail unless it becomes available", d.Name(), d.Path, err))
+		// Only a local source can be stat'd here; a remote DLE's path lives on the client
+		// (verified by `nb check` over SSH). Statting it locally would warn spuriously.
+		if _, remote := e.cfg.RemoteHost(d.Host); !remote {
+			if _, err := os.Stat(d.Path); err != nil {
+				warnings = append(warnings, fmt.Sprintf("DLE %s: source path %s is missing or unreadable (%v) — the real run will fail unless it becomes available", d.Name(), d.Path, err))
+			}
 		}
 	}
 	return warnings, nil
@@ -801,7 +848,7 @@ func (e *Engine) estimates(dles []config.DLE) map[string]planner.Estimate {
 }
 
 func (e *Engine) estimateDLE(d config.DLE, name string, st *catalog.DLEState) planner.Estimate {
-	m, err := e.archiverFor(d.DumpTypeName())
+	m, err := e.archiverFor(d.DumpTypeName(), d.Host)
 	if err != nil || m.Check() != nil {
 		return planner.Estimate{} // no estimator available (e.g. tar missing)
 	}
@@ -915,7 +962,7 @@ func (e *Engine) Run(date time.Time, logf Logf) (*format.Slot, error) {
 	checkedEnc := map[string]bool{}
 	for _, item := range plan.Items {
 		dt := item.DLE.DumpTypeName()
-		m, err := e.archiverFor(dt)
+		m, err := e.archiverFor(dt, item.DLE.Host)
 		if err != nil {
 			return nil, err
 		}
@@ -1114,7 +1161,7 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 		}
 	}()
 
-	m, err := e.archiverFor(item.DLE.DumpTypeName())
+	m, err := e.archiverFor(item.DLE.DumpTypeName(), item.DLE.Host)
 	if err != nil {
 		return err
 	}
@@ -1147,14 +1194,36 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 		Encrypt:  encScheme,
 		EncOpts:  encOpts,
 	}
+	// Configurable point: when a transform runs `at: client`, it runs on the DLE's host
+	// executor (the same one tar uses), so it fuses with tar on the client and plaintext
+	// never leaves it. Otherwise it runs server-side (nil = Local). The meter that follows
+	// is always server-side, so the seal still covers the bytes that land.
+	hostExec, _ := e.executorFor(item.DLE.Host)
+	if e.cfg.ResolveDumpType(item.DLE.DumpTypeName()).Compress == "client" {
+		spec.CompressExec = hostExec
+	}
+	if e.cfg.EncryptionFor(item.DLE.DumpTypeName()).At == "client" {
+		spec.EncryptExec = hostExec
+	}
+
+	bs, berr := m.BackupSource(req)
+	if berr != nil {
+		return fmt.Errorf("archive %s: %w", item.Name, berr)
+	}
+	src := slotio.Source{
+		Stage:   bs.Stage,
+		Exec:    bs.Exec,
+		Cleanup: bs.Cleanup,
+		Finish: func() (slotio.Produced, error) {
+			res, ferr := bs.Finish()
+			if ferr != nil {
+				return slotio.Produced{}, ferr
+			}
+			return slotio.Produced{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members}, nil
+		},
+	}
 	progressFn := func(uncompressed, compressed int64) { tr.AddBytes(item.Name, uncompressed, compressed) }
-	arch, err = w.WriteArchive(spec, progressFn, func(out io.Writer) (slotio.Produced, error) {
-		res, berr := m.Backup(req, out)
-		if berr != nil {
-			return slotio.Produced{}, berr
-		}
-		return slotio.Produced{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members}, nil
-	})
+	arch, err = w.WriteArchive(spec, progressFn, src)
 	if err != nil {
 		return fmt.Errorf("archive %s: %w", item.Name, err)
 	}
@@ -1179,7 +1248,21 @@ func (e *Engine) Restore(slotID, dleName, destDir string, force bool, logf Logf)
 			return err
 		}
 	}
-	return e.restoreFrom(slotID, dleName, destDir, "", logf)
+	return e.restoreFrom(slotID, dleName, destDir, "", "", logf)
+}
+
+// RestoreTo restores a DLE onto a remote client (Amanda's recover to a different host):
+// extraction runs on destHost over SSH and destPath is a path on that client, so the
+// data lands back where it came from. Decode stays server-side, covering the server-side
+// and asymmetric (private-key-on-server) postures; an untrusted-server client-only key
+// restores with the documented stock one-liner. destHost must be configured under hosts:.
+// The non-empty-destination guard is the operator's to honor here (the path is remote),
+// so a whole-DLE restore over --to assumes an empty/new client directory.
+func (e *Engine) RestoreTo(slotID, dleName, destHost, destPath string, logf Logf) error {
+	if _, ok := e.cfg.RemoteHost(destHost); !ok {
+		return fmt.Errorf("--to host %q is not configured under hosts:", destHost)
+	}
+	return e.restoreFrom(slotID, dleName, destPath, "", destHost, logf)
 }
 
 // restoreFrom is Restore scoped to a source medium: when medium != "" every archive
@@ -1187,18 +1270,183 @@ func (e *Engine) Restore(slotID, dleName, destDir string, force bool, logf Logf)
 // than failing over across copies. medium == "" keeps the fail-over behavior. The
 // non-empty-destination guard lives in the exported Restore; a caller that restores
 // into a fresh scratch dir (a drill) uses this directly.
-func (e *Engine) restoreFrom(slotID, dleName, destDir, medium string, logf Logf) error {
+func (e *Engine) restoreFrom(slotID, dleName, destDir, medium, targetHost string, logf Logf) error {
 	steps, err := restore.Chain(e.cat.Slots(), dleName, slotID)
 	if err != nil {
 		return err
 	}
+	// Decode location: a `--to` restore of a DLE that keeps its key on the client decodes
+	// on that client — the only way to read an untrusted-server / client-symmetric archive
+	// (the server has no key). Every other restore decodes server-side, which must be
+	// feasible (else fail fast). When decode is on the client there is nothing the server
+	// needs to decrypt, so the feasibility gate is skipped.
+	decodeOnClient, ec := false, config.EncryptConfig{}
+	if targetHost != "" {
+		if d, ok := e.dleByName(dleName); ok {
+			ec = e.cfg.EncryptionFor(d.DumpTypeName())
+			decodeOnClient = ec.At == "client" && ec.SchemeName() != "none"
+		}
+	}
+	if decodeOnClient {
+		logf.log("decrypting on %s (encrypt.at: client) — only ciphertext leaves the server", targetHost)
+	} else if err := e.ensureServerCanDecode(steps, logf); err != nil {
+		return err
+	}
 	for _, step := range steps {
 		logf.log("extracting %s %s L%d -> %s", step.SlotID, step.DLE, step.Level, destDir)
-		if err := e.extractStep(step, destDir, medium); err != nil {
-			return fmt.Errorf("extract %s %s L%d: %w", step.SlotID, step.DLE, step.Level, err)
+		var eerr error
+		if decodeOnClient {
+			eerr = e.extractStepOnClient(step, destDir, medium, targetHost, ec)
+		} else {
+			eerr = e.extractStep(step, destDir, medium, targetHost)
+		}
+		if eerr != nil {
+			return fmt.Errorf("extract %s %s L%d: %w", step.SlotID, step.DLE, step.Level, eerr)
 		}
 	}
 	return nil
+}
+
+// extractStepOnClient runs the whole read pipeline — decrypt | decompress | tar -x — on
+// the client (targetHost), fed the raw ciphertext parts streamed from the server's media.
+// Because every stage shares the client executor they fuse into one client-side pipe, so
+// the key never leaves the client and only ciphertext crosses the wire. It is the read-side
+// twin of the dump pipeline. Decrypt uses the DLE's own key reference (a client path for a
+// symmetric passphrase; nothing for a public key, which gpg resolves from the client's
+// keyring).
+func (e *Engine) extractStepOnClient(step restore.Step, destDir, medium, targetHost string, ec config.EncryptConfig) error {
+	m, err := e.restoreArchiver(step.Archiver, targetHost)
+	if err != nil {
+		return err
+	}
+	ex, _ := e.executorFor(targetHost)
+	if err := ex.MkdirAll(destDir); err != nil {
+		return err
+	}
+	raw, err := e.openRawFrom(step.SlotID, step.DLE, step.Level, medium)
+	if err != nil {
+		return err
+	}
+	var stages []hostexec.Stage
+	if cmd, ok, derr := crypt.DecryptCmd(step.Encrypt, crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile}); derr != nil {
+		raw.Close()
+		return derr
+	} else if ok {
+		stages = append(stages, hostexec.Stage{Cmd: cmd, Exec: ex})
+	}
+	if cmd, ok, derr := filter.DecompressCmd(step.Codec, e.fopts); derr != nil {
+		raw.Close()
+		return derr
+	} else if ok {
+		stages = append(stages, hostexec.Stage{Cmd: cmd, Exec: ex})
+	}
+	stages = append(stages, hostexec.Stage{Cmd: m.RestoreStage(destDir, nil), Exec: ex})
+
+	out, wait, rerr := hostexec.RunGrouped(raw, stages...)
+	if rerr != nil {
+		raw.Close()
+		return rerr
+	}
+	_, copyErr := io.Copy(io.Discard, out) // tar -x writes to the fs; its stdout is empty
+	out.Close()
+	werr := wait()
+	raw.Close()
+	if werr == nil {
+		werr = copyErr
+	}
+	return decryptHint(step.Encrypt, werr)
+}
+
+// openRawFrom opens an archive's raw (undecoded, ciphertext) part stream — the input to a
+// client-side decode pipeline. It mirrors openArchiveFrom's copy selection but skips the
+// server-side decrypt/decompress.
+func (e *Engine) openRawFrom(slotID, dle string, level int, medium string) (io.ReadCloser, error) {
+	placements := e.placementsFor(slotID)
+	if medium != "" {
+		placements = placementsOnMedium(placements, medium)
+	}
+	if len(placements) == 0 {
+		if medium != "" {
+			return nil, fmt.Errorf("slot %s has no copy on medium %q", slotID, medium)
+		}
+		return nil, fmt.Errorf("slot %s not in catalog (run `nb rebuild`)", slotID)
+	}
+	var lastErr error
+	for _, p := range placements {
+		parts, ok := p.Parts(dle, level)
+		if !ok {
+			continue
+		}
+		lib, _, _, err := e.librarianFor(p.Medium)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return e.reader.OpenRawParts(toSlotioParts(parts), slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib, p.Medium)), nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no copy of %s %s L%d in the catalog", slotID, dle, level)
+	}
+	return nil, lastErr
+}
+
+// ensureServerCanDecode fails fast when a restore would have the server decrypt an
+// archive whose key cannot be there. Decode is server-side for both a plain restore and
+// `--to` (only tar extraction moves to the client), so an archive encrypted on the client
+// is the infeasible combination. The only case the engine can decide for certain is a
+// **client-side symmetric** dump (`encrypt.at: client`, a passphrase, no recipient): a
+// symmetric key has no escrow path, so the passphrase stays on the client and the server
+// provably cannot decrypt — that is a hard error pointing at the stock one-liner. A
+// client-side **public-key** dump might have its private key escrowed in this server's
+// keyring (a supported posture), so that is a warning, not a failure; a genuinely missing
+// key still surfaces (with decryptHint) when gpg runs. A DLE no longer in the config is
+// skipped — we cannot know its posture.
+func (e *Engine) ensureServerCanDecode(steps []restore.Step, logf Logf) error {
+	warned := map[string]bool{}
+	for _, s := range steps {
+		if s.Encrypt == "" || s.Encrypt == "none" {
+			continue
+		}
+		d, ok := e.dleByName(s.DLE)
+		if !ok {
+			continue
+		}
+		hardErr, warn := clientSideKeyRestore(e.cfg.EncryptionFor(d.DumpTypeName()), s.DLE)
+		if hardErr != nil {
+			return hardErr
+		}
+		if warn && !warned[s.DLE] {
+			warned[s.DLE] = true
+			logf.log("WARNING: DLE %s is encrypted on the client (encrypt.at: client); a server-side restore can only decrypt it if its private key is escrowed in this server's gpg keyring — otherwise restore it on the client", s.DLE)
+		}
+	}
+	return nil
+}
+
+// clientSideKeyRestore classifies a server-side decode of an archive by the DLE's
+// configured encryption posture (pure, so it is unit-tested without a live SSH dump): a
+// hard error for client-side **symmetric** (a passphrase has no escrow path, so the server
+// provably cannot decrypt), warn=true for client-side **public-key** (the private key may
+// be escrowed on the server), or neither for server-side / plaintext.
+func clientSideKeyRestore(ec config.EncryptConfig, dleName string) (hardErr error, warn bool) {
+	if ec.At != "client" || ec.SchemeName() == "none" {
+		return nil, false
+	}
+	if ec.Recipient == "" && ec.PassphraseFile != "" { // symmetric: no escrow path
+		return fmt.Errorf("DLE %s is encrypted on the client with a passphrase (encrypt.at: client, symmetric): the passphrase never leaves the client, so a server-side restore cannot decrypt it — restore onto the client with `nb recover --all --to <client>:<path>` (decryption then runs there), or use the stock one-liner on the client", dleName), false
+	}
+	return nil, true
+}
+
+// dleByName returns the configured DLE with the given catalog name, if it is still in the
+// config (an old slot's DLE may have been removed).
+func (e *Engine) dleByName(name string) (config.DLE, bool) {
+	for _, d := range e.cfg.DLEs() {
+		if d.Name() == name {
+			return d, true
+		}
+	}
+	return config.DLE{}, false
 }
 
 // RestoreAsOf reconstructs a whole DLE as of a date (YYYY-MM-DD) into destDir —
@@ -1212,6 +1460,16 @@ func (e *Engine) RestoreAsOf(dle, asOf, destDir string, force bool, logf Logf) e
 		return err
 	}
 	return e.Restore(target, dle, destDir, force, logf)
+}
+
+// RestoreAsOfTo is RestoreAsOf onto a remote client: it resolves the date to a slot and
+// restores the DLE's chain to destPath on destHost over SSH (see RestoreTo).
+func (e *Engine) RestoreAsOfTo(dle, asOf, destHost, destPath string, logf Logf) error {
+	target, err := recovery.AsOf(e.cat.Slots(), asOf)
+	if err != nil {
+		return err
+	}
+	return e.RestoreTo(target, dle, destHost, destPath, logf)
 }
 
 // errNonEmptyDest refuses a whole-DLE restore into a destination that already
@@ -1232,8 +1490,10 @@ func errNonEmptyDest(destDir string) error {
 	return nil
 }
 
-func (e *Engine) extractStep(step restore.Step, destDir, medium string) error {
-	m, err := e.archiverByType(step.Archiver)
+func (e *Engine) extractStep(step restore.Step, destDir, medium, targetHost string) error {
+	// targetHost "" extracts server-side (the default); a `--to host:path` restore sets
+	// it so tar runs on that client and destDir is a client path. Decode stays server-side.
+	m, err := e.restoreArchiver(step.Archiver, targetHost)
 	if err != nil {
 		return err
 	}
@@ -1283,9 +1543,18 @@ func (e *Engine) OpenRecover(dle, asOf string) (*recovery.Tree, error) {
 // ExtractSelection extracts a selected set of files, grouped by their source
 // archive, into destDir. It returns the number of member entries extracted.
 func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, logf Logf) (int, error) {
+	// File-level recover decodes server-side, so a client-only key is infeasible here —
+	// fail fast (browse stays keyless; only extraction needs the key).
+	for _, st := range steps {
+		if d, ok := e.dleByName(st.DLE); ok {
+			if hardErr, _ := clientSideKeyRestore(e.cfg.EncryptionFor(d.DumpTypeName()), st.DLE); hardErr != nil {
+				return 0, hardErr
+			}
+		}
+	}
 	files := 0
 	for _, st := range steps {
-		m, err := e.archiverByType(st.Archiver)
+		m, err := e.restoreArchiver(st.Archiver, "")
 		if err != nil {
 			return files, err
 		}

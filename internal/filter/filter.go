@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/streamproc"
 )
 
@@ -137,6 +138,32 @@ func Decompress(codec string, src io.Reader, o Options) (io.ReadCloser, error) {
 		return nil, err
 	}
 	return streamproc.ReadThrough(s.argv(s.decompressArgv, o), o.Nice, src)
+}
+
+// CompressCmd returns the compressor as a pipeline stage, or ok=false for the identity
+// (none) codec, which contributes no stage. It lets the unified pipeline run compression
+// through any executor (local or a remote client).
+func CompressCmd(codec string, o Options) (cmd hostexec.Cmd, ok bool, err error) {
+	return stageCmd(codec, func(s Spec) func(Options) []string { return s.compressArgv }, o)
+}
+
+// DecompressCmd returns the decompressor as a pipeline stage (the read-side peer of
+// CompressCmd), or ok=false for none.
+func DecompressCmd(codec string, o Options) (cmd hostexec.Cmd, ok bool, err error) {
+	return stageCmd(codec, func(s Spec) func(Options) []string { return s.decompressArgv }, o)
+}
+
+func stageCmd(codec string, pick func(Spec) func(Options) []string, o Options) (hostexec.Cmd, bool, error) {
+	s, err := spec(codec)
+	if err != nil {
+		return hostexec.Cmd{}, false, err
+	}
+	build := pick(s)
+	if build == nil {
+		return hostexec.Cmd{}, false, nil
+	}
+	argv := build(o)
+	return hostexec.Cmd{Name: argv[0], Args: argv[1:], Nice: o.Nice}, true, nil
 }
 
 // argv applies an argv builder, returning nil for the none codec (no child) so

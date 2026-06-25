@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"io"
 	"sort"
+
+	"github.com/Niloen/nbackup/internal/hostexec"
 )
 
 // BackupRequest describes one archive to produce. The Archiver resolves any
@@ -33,6 +35,21 @@ type BackupResult struct {
 	Members      []string // member paths
 }
 
+// BackupSource is the producing side of one archive as a pipeline source: the program
+// stage that emits the raw archive stream (e.g. `tar --create`) plus the executor (host)
+// it runs on, and a Finish hook the runner calls after the pipeline has drained to gather
+// the result (member list, sizes) from the host's scratch. The caller assembles the full
+// pipeline — appending the compress and encrypt stages and metering the tail — and runs
+// it; the archiver does not stream the bytes itself. This is what lets a dump's
+// tar+compress+encrypt fuse on one host (the client) so plaintext never leaves it.
+// Stage's Stderr is pre-wired by the archiver to capture totals; Cleanup removes scratch.
+type BackupSource struct {
+	Stage   hostexec.Cmd
+	Exec    hostexec.Executor
+	Finish  func() (*BackupResult, error)
+	Cleanup func()
+}
+
 // Archiver is a pluggable archive-format program (Amanda's application): it backs
 // up (produces a stream) and restores (consumes one), both directions.
 type Archiver interface {
@@ -41,9 +58,11 @@ type Archiver interface {
 	Check() error
 	// Estimate returns the uncompressed bytes the request would archive.
 	Estimate(r BackupRequest) (int64, error)
-	// Backup writes the raw archive stream to out, updating the archiver's own
-	// incremental state for (DLE, Level).
-	Backup(r BackupRequest, out io.Writer) (*BackupResult, error)
+	// BackupSource returns the producing pipeline source for one archive (see
+	// BackupSource): the program stage that emits the raw stream and a Finish hook to
+	// gather the result. It also updates the archiver's own incremental state for
+	// (DLE, Level) when the pipeline completes. The caller runs the pipeline.
+	BackupSource(r BackupRequest) (*BackupSource, error)
 	// HasBase reports whether the incremental state a dump at level+1 would build
 	// on — the state left by a completed dump at the given level — is present. The
 	// engine uses it to decide whether an incremental is dumpable (else the DLE is
@@ -55,6 +74,10 @@ type Archiver interface {
 	// chain restore); with members it extracts only those named entries and does
 	// not delete (selected-file recovery).
 	Restore(in io.Reader, destDir string, members []string) error
+	// RestoreStage returns Restore expressed as a program stage (extract from stdin into
+	// destDir), so a decode→extract pipeline can run entirely on one host — letting a
+	// client-only key decrypt on the client. Same member semantics as Restore.
+	RestoreStage(destDir string, members []string) hostexec.Cmd
 	// List reads a raw archive stream and returns its member paths without
 	// extracting anything (amverify's `tar -t`). It writes nothing; it proves the
 	// stream is a valid, listable archive end-to-end and yields the members to
@@ -84,21 +107,24 @@ func (o Options) Bool(key string, def bool) bool {
 	}
 }
 
-// Factory constructs an Archiver from options.
-type Factory func(Options) (Archiver, error)
+// Factory constructs an Archiver from options and the executor (host) its programs run
+// on. The executor makes remote execution transparent: an archiver runs its tools through
+// it without knowing whether the host is local or a client over SSH.
+type Factory func(Options, hostexec.Executor) (Archiver, error)
 
 var factories = map[string]Factory{}
 
 // Register registers an Archiver implementation under a type name.
 func Register(name string, f Factory) { factories[name] = f }
 
-// Open constructs the Archiver registered under the type name.
-func Open(name string, opts Options) (Archiver, error) {
+// Open constructs the Archiver registered under the type name, running its programs
+// through ex (local or a remote client).
+func Open(name string, opts Options, ex hostexec.Executor) (Archiver, error) {
 	f, ok := factories[name]
 	if !ok {
 		return nil, fmt.Errorf("unknown archiver %q (known: %v)", name, Names())
 	}
-	return f(opts)
+	return f(opts, ex)
 }
 
 // Names lists registered archiver type names.

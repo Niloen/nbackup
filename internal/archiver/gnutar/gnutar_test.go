@@ -1,6 +1,7 @@
 package gnutar
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,13 +9,14 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archiver"
+	"github.com/Niloen/nbackup/internal/hostexec"
 )
 
 // newArchiver opens a gnutar archiver with the given options (the caller supplies
 // state_dir for tests that produce incrementals) and skips when GNU tar is absent.
 func newArchiver(t *testing.T, opts archiver.Options) archiver.Archiver {
 	t.Helper()
-	m, err := archiver.Open("gnutar", opts)
+	m, err := archiver.Open("gnutar", opts, hostexec.Local())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,6 +171,8 @@ func TestEstimate(t *testing.T) {
 	}
 }
 
+// backup runs the archiver's backup pipeline source to outFile, the way the writer does
+// (run the tar stage, drain its stdout, finish), exercising the new BackupSource API.
 func backup(t *testing.T, m archiver.Archiver, req archiver.BackupRequest, outFile string) {
 	t.Helper()
 	f, err := os.Create(outFile)
@@ -176,8 +180,26 @@ func backup(t *testing.T, m archiver.Archiver, req archiver.BackupRequest, outFi
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if _, err := m.Backup(req, f); err != nil {
+	bs, err := m.BackupSource(req)
+	if err != nil {
+		t.Fatalf("backup source L%d: %v", req.Level, err)
+	}
+	out, wait, err := bs.Exec.RunPipe(nil, bs.Stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(f, out); err != nil {
+		t.Fatal(err)
+	}
+	out.Close()
+	if err := wait(); err != nil {
 		t.Fatalf("backup L%d: %v", req.Level, err)
+	}
+	if _, err := bs.Finish(); err != nil {
+		t.Fatalf("finish L%d: %v", req.Level, err)
+	}
+	if bs.Cleanup != nil {
+		bs.Cleanup()
 	}
 }
 

@@ -32,6 +32,11 @@ const DefaultArchiver = "gnutar"
 // whole pool, not a thing owned by one medium.
 const DefaultWorkdir = "nbackup-catalog"
 
+// DefaultClientStateDir is the per-client .snar library path used when a remote host
+// does not set ssh.state_dir. It mirrors the server's default (`<workdir>/snapshots`)
+// but is relative, so it resolves under the backup user's home on the client.
+const DefaultClientStateDir = DefaultWorkdir + "/snapshots"
+
 // Config is the top-level NBackup configuration.
 type Config struct {
 	// Cycle is the dump cycle: the target — and hard maximum — time between fulls
@@ -114,7 +119,79 @@ type Config struct {
 	// (encryption), in Amanda's sense.
 	DumpTypes map[string]DumpType `yaml:"dumptypes"`
 
+	// SSH holds the default SSH connection settings applied to every remote host
+	// (Amanda's global auth defaults). A per-host `hosts.<name>.ssh` block overrides
+	// individual fields; an undeclared remote host uses these as-is.
+	SSH SSHConfig `yaml:"ssh"`
+
+	// Hosts overrides the SSH defaults for specific source hosts. It is NOT what makes a
+	// host remote — any source host that is not `localhost` is remote by default and runs
+	// stock tools (tar, and optionally the compressor + gpg) on the client over SSH, with
+	// no NBackup software on the client. List a host here only to override its defaults.
+	Hosts map[string]HostConfig `yaml:"hosts"`
+
 	Sources Sources `yaml:"sources"`
+}
+
+// HostConfig describes a remote source host (Amanda's amanda-client.conf): just how to
+// reach it over SSH. Connection settings are an explicit sub-block so KnownFields rejects
+// a stray key and a literal private key.
+type HostConfig struct {
+	SSH SSHConfig `yaml:"ssh"`
+}
+
+// SSHConfig is the SSH connection to a client. NBackup stores no secret: the key comes
+// from the operator's ssh config/agent (IdentityFile is a path, not a key), exactly as
+// cloud and gpg credentials are handled. TarPath/StateDir are the client-side gnutar
+// paths (the .snar library lives on the client — the stateful-client design).
+type SSHConfig struct {
+	User         string   `yaml:"user"`
+	Port         string   `yaml:"port"`
+	IdentityFile string   `yaml:"identity_file"`
+	Options      []string `yaml:"options"`   // extra raw ssh options, e.g. ["-o","StrictHostKeyChecking=accept-new"]
+	TarPath      string   `yaml:"tar_path"`  // client GNU tar path ("" = "tar" on the client PATH)
+	StateDir     string   `yaml:"state_dir"` // client .snar library root (default DefaultClientStateDir, under the backup user's home)
+}
+
+// RemoteHost returns the effective SSH connection for a host and true when it is remote.
+// A DLE is remote by default: anything but `localhost` (or an empty host) is backed up
+// over SSH — `hosts:` is needed only to override the defaults for a specific host, not to
+// make it remote. The effective config is the top-level `ssh:` defaults with any per-host
+// `hosts.<name>.ssh` block field-merged over them.
+func (c *Config) RemoteHost(host string) (SSHConfig, bool) {
+	if host == "" || host == "localhost" {
+		return SSHConfig{}, false // localhost is the only local marker
+	}
+	eff := c.SSH
+	if h, ok := c.Hosts[host]; ok {
+		eff = mergeSSH(eff, h.SSH)
+	}
+	return eff, true
+}
+
+// mergeSSH overlays over onto base: each set field in over wins, unset fields inherit
+// base. So a per-host block can override just the user while inheriting the global
+// identity_file/options.
+func mergeSSH(base, over SSHConfig) SSHConfig {
+	if over.User != "" {
+		base.User = over.User
+	}
+	if over.Port != "" {
+		base.Port = over.Port
+	}
+	if over.IdentityFile != "" {
+		base.IdentityFile = over.IdentityFile
+	}
+	if over.Options != nil {
+		base.Options = over.Options
+	}
+	if over.TarPath != "" {
+		base.TarPath = over.TarPath
+	}
+	if over.StateDir != "" {
+		base.StateDir = over.StateDir
+	}
+	return base
 }
 
 // DrillConfig is the `drill:` block: how often each DLE must be drilled, how many to
@@ -332,6 +409,12 @@ type DumpType struct {
 	Archiver string         `yaml:"archiver"` // named archiver definition ("" = DefaultArchiver)
 	Exclude  []string       `yaml:"exclude"`  // patterns to skip (passed to the archiver per dump)
 	Encrypt  *EncryptConfig `yaml:"encrypt"`  // nil = inherit the config-wide default; set = replace it wholesale (no field merge)
+
+	// Compress selects where compression runs (Amanda's compress directive), for a
+	// remote DLE: "server" (default — on the NBackup host) or "client" (on the source
+	// client, so only compressed bytes cross the wire). The codec/algorithm is the
+	// config-wide compress block; this is only the location. Local DLEs ignore it.
+	Compress string `yaml:"compress"`
 }
 
 // Archiver is a named dump-program definition (Amanda's `define application`): a
@@ -352,6 +435,15 @@ type EncryptConfig struct {
 	Recipient      string `yaml:"recipient"`       // gpg public-key recipient (asymmetric)
 	PassphraseFile string `yaml:"passphrase_file"` // gpg symmetric passphrase file
 	Program        string `yaml:"program"`         // optional binary override (name or path)
+
+	// At selects where encryption runs (Amanda's encrypt client/server), for a remote
+	// DLE: "server" (default — on the NBackup host) or "client" (on the source client,
+	// so only ciphertext crosses the wire and plaintext never leaves the client). Since
+	// encryption is downstream of compression, At=="client" requires the dumptype's
+	// Compress=="client" (validated at load). With a public-key recipient only the
+	// public key need be on the client; the private key resolves the ciphertext wherever
+	// it lives (the asymmetric/untrusted-server postures).
+	At string `yaml:"at"`
 }
 
 // SchemeName returns the configured scheme, defaulting to "none".
@@ -435,6 +527,9 @@ func (c *Config) Validate() error {
 			if _, ok := c.DumpTypes[dt]; !ok {
 				return fmt.Errorf("source %s: unknown dumptype %q", s.Name(), dt)
 			}
+		}
+		if err := c.validateTransformPlacement(s); err != nil {
+			return err
 		}
 	}
 	if err := c.landingDefined(); err != nil {
@@ -660,6 +755,29 @@ func (c *Config) ResolveArchiver(name string) Archiver {
 		return d
 	}
 	return Archiver{Type: name}
+}
+
+// validateTransformPlacement checks a source's compress/encrypt location settings: the
+// values are server|client, encrypt.at: client requires compress: client (encryption is
+// downstream of compression — otherwise plaintext would cross the wire), and either
+// "client" requires the host to be configured under hosts: (a local DLE has nowhere else
+// to run the transform).
+func (c *Config) validateTransformPlacement(s DLE) error {
+	dt := s.DumpTypeName()
+	compressAt := c.ResolveDumpType(dt).Compress
+	encAt := c.EncryptionFor(dt).At
+	for what, v := range map[string]string{"compress": compressAt, "encrypt.at": encAt} {
+		if v != "" && v != "server" && v != "client" {
+			return fmt.Errorf("source %s: %s must be \"server\" or \"client\", got %q", s.Name(), what, v)
+		}
+	}
+	if encAt == "client" && compressAt != "client" {
+		return fmt.Errorf("source %s: encrypt.at: client requires compress: client (encryption is downstream of compression)", s.Name())
+	}
+	if _, remote := c.RemoteHost(s.Host); !remote && (compressAt == "client" || encAt == "client") {
+		return fmt.Errorf("source %s: compress/encrypt \"client\" requires a remote host, but %q is local", s.Name(), s.Host)
+	}
+	return nil
 }
 
 // EncryptionFor returns the encryption settings for a dumptype: its own `encrypt`

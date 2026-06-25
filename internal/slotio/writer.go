@@ -26,6 +26,7 @@ import (
 	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/filter"
 	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
@@ -48,12 +49,26 @@ type VolumeSink interface {
 	PlaceSeal(size int64) (vol media.Volume, volume string, epoch int, err error)
 }
 
-// Produced reports the raw-stream statistics of one archive, returned by the
-// produce callback passed to Writer.WriteArchive.
+// Produced reports the raw-stream statistics of one archive, returned by the source's
+// Finish hook after the pipeline drains.
 type Produced struct {
 	Uncompressed int64
 	FileCount    int
 	Members      []string
+}
+
+// Source is the producing side of one archive: either a program stage (the archiver's
+// `tar --create`, run on Exec) or, when Stage is empty, an in-process byte stream (Stdin,
+// used by tests and raw injectors). Finish gathers the raw-stream stats after the
+// pipeline has drained; Cleanup releases any scratch the source created. The Writer
+// appends the compress and encrypt stages and groups them with the source by host, so a
+// fully client-side dump keeps plaintext on the client.
+type Source struct {
+	Stage   hostexec.Cmd
+	Exec    hostexec.Executor
+	Stdin   io.Reader
+	Finish  func() (Produced, error)
+	Cleanup func()
 }
 
 // SlotSpec is the descriptive identity of a slot to author: what is known before
@@ -83,6 +98,13 @@ type ArchiveSpec struct {
 	BaseSlot string
 	Encrypt  string        // encryption scheme name ("" or "none" = plaintext)
 	EncOpts  crypt.Options // key reference + nice for the encryptor child
+
+	// CompressExec/EncryptExec choose the host each transform runs on (nil = Local).
+	// Setting them to the source's client executor keeps plaintext on the client
+	// (compress/encrypt fuse with tar there); the meter that follows is always
+	// server-side, so the seal covers the bytes that land.
+	CompressExec hostexec.Executor
+	EncryptExec  hostexec.Executor
 }
 
 // PartPosition is one part's volume and file position, for the catalog to index.
@@ -148,25 +170,65 @@ func NewWriter(sink VolumeSink, spec SlotSpec, codec string, fopts filter.Option
 // progress, if non-nil, is called as the stream flows with the running
 // (uncompressed, compressed) byte counts — the live signal for `nb status`. It runs
 // on the producing goroutine, so it must be cheap.
-func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, compressed int64), produce func(out io.Writer) (Produced, error)) (format.Archive, error) {
-	// Producer: tar|compressor -> meter -> pipe. The meter sits on the whole stream
-	// so the checksum/size cover the concatenation of every part. The consumer below
-	// drains the pipe concurrently into volume parts.
+func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, compressed int64), src Source) (format.Archive, error) {
+	// One pipeline: source -> compress -> encrypt, each a program stage carrying its
+	// host; adjacent same-host stages fuse so intermediate bytes never leave that host.
+	// The grouped pipeline's final reader is metered (the checksum/size cover the
+	// ciphertext that lands) and drained into volume parts.
 	pr, pw := io.Pipe()
 	meter := xfer.NewMeter(pw)
-	res, produceErr, done := w.startProducer(meter, pw, spec, progress, produce)
 
-	base := w.archiveHeader(spec.DLE, spec.Host, spec.Path, spec.Archiver, spec.Level, spec.BaseSlot, w.codec, spec.Encrypt)
-	parts, err := w.drainParts(base, pr)
-	if err != nil {
-		pr.CloseWithError(err) // unblock the producer goroutine
-	}
-	<-done // producer finished: meter is complete, res/produceErr are visible
-	if err == nil {
-		err = *produceErr
-	}
+	stages, stdin, err := w.pipelineStages(spec, src, meter, progress)
 	if err != nil {
 		return format.Archive{}, err
+	}
+
+	base := w.archiveHeader(spec.DLE, spec.Host, spec.Path, spec.Archiver, spec.Level, spec.BaseSlot, w.codec, spec.Encrypt)
+
+	var produced Produced
+	var produceErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		final, wait, runErr := hostexec.RunGrouped(stdin, stages...)
+		if runErr != nil {
+			produceErr = runErr
+			pw.CloseWithError(runErr)
+			return
+		}
+		_, copyErr := io.Copy(meter, final)
+		final.Close()     // drains; SIGPIPEs the producers if the consumer stopped early
+		waitErr := wait() // reap every group, first failure wins
+		// A pipeline failure is the producer's own error; copyErr only when the consumer
+		// (drainParts) closed the pipe early, which the drain-error path already reports.
+		e := waitErr
+		if e == nil {
+			e = copyErr
+		}
+		if e == nil && src.Finish != nil {
+			produced, e = src.Finish() // reads scratch (the member index) — before Cleanup
+		}
+		if src.Cleanup != nil {
+			src.Cleanup() // remove scratch after Finish, even on error
+		}
+		if e != nil {
+			produceErr = e
+			pw.CloseWithError(e)
+			return
+		}
+		pw.Close() // EOF to the consumer
+	}()
+
+	parts, drainErr := w.drainParts(base, pr)
+	if drainErr != nil {
+		pr.CloseWithError(drainErr) // unblock the producer goroutine
+	}
+	<-done // producer finished: meter is complete, produced/produceErr are visible
+	if drainErr != nil {
+		return format.Archive{}, drainErr
+	}
+	if produceErr != nil {
+		return format.Archive{}, produceErr
 	}
 
 	arch := format.Archive{
@@ -178,12 +240,12 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 		Encrypt:      spec.Encrypt,
 		Level:        spec.Level,
 		Compressed:   meter.Bytes(),
-		Uncompressed: res.Uncompressed,
-		FileCount:    res.FileCount,
+		Uncompressed: produced.Uncompressed,
+		FileCount:    produced.FileCount,
 		SHA256:       meter.SHA256(),
 		Parts:        len(parts),
 		BaseSlot:     spec.BaseSlot,
-		Members:      res.Members,
+		Members:      produced.Members,
 	}
 
 	w.mu.Lock()
@@ -191,6 +253,69 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 	w.written = append(w.written, archiveRecord{dle: spec.DLE, level: spec.Level, parts: parts})
 	w.mu.Unlock()
 	return arch, nil
+}
+
+// pipelineStages assembles the producing stages (source, then the codec compressor, then
+// the encryptor) with their executors, plus the in-process stdin when the source is not a
+// program. The source stage is tapped for the live uncompressed byte count (honored only
+// when it runs locally; a remote source falls back to compressed-against-estimate).
+func (w *Writer) pipelineStages(spec ArchiveSpec, src Source, meter *xfer.Meter, progress func(uncompressed, compressed int64)) ([]hostexec.Stage, io.Reader, error) {
+	tap := func(n int64) {}
+	if progress != nil {
+		tap = func(n int64) { progress(n, meter.Bytes()) }
+	}
+
+	var stages []hostexec.Stage
+	var stdin io.Reader
+	if src.Stage.Name != "" {
+		s := src.Stage
+		if progress != nil {
+			s.Tap = tap
+		}
+		stages = append(stages, hostexec.Stage{Cmd: s, Exec: execOr(src.Exec)})
+	} else {
+		stdin = src.Stdin
+		if progress != nil && stdin != nil {
+			stdin = &countingReader{r: stdin, f: tap}
+		}
+	}
+
+	if ccmd, ok, err := filter.CompressCmd(w.codec, w.fopts); err != nil {
+		return nil, nil, err
+	} else if ok {
+		stages = append(stages, hostexec.Stage{Cmd: ccmd, Exec: execOr(spec.CompressExec)})
+	}
+	if ecmd, ok, err := crypt.EncryptCmd(spec.Encrypt, spec.EncOpts); err != nil {
+		return nil, nil, err
+	} else if ok {
+		stages = append(stages, hostexec.Stage{Cmd: ecmd, Exec: execOr(spec.EncryptExec)})
+	}
+	return stages, stdin, nil
+}
+
+// execOr returns ex, or the local executor when ex is nil (the default, all-local case).
+func execOr(ex hostexec.Executor) hostexec.Executor {
+	if ex == nil {
+		return hostexec.Local()
+	}
+	return ex
+}
+
+// countingReader counts bytes read and reports the running total — the uncompressed
+// progress signal when the source is an in-process stream rather than a program stage.
+type countingReader struct {
+	r io.Reader
+	n int64
+	f func(int64)
+}
+
+func (c *countingReader) Read(b []byte) (int, error) {
+	n, err := c.r.Read(b)
+	if n > 0 {
+		c.n += int64(n)
+		c.f(c.n)
+	}
+	return n, err
 }
 
 // archiveHeader builds the base format.Header an archive's parts share (drainParts
@@ -211,60 +336,6 @@ func (w *Writer) archiveHeader(dle, host, path, archiver string, level int, base
 		BaseSlot:  baseSlot,
 		CreatedAt: w.slot.CreatedAt,
 	}
-}
-
-// startProducer runs the tar -> compress -> encrypt -> meter pipeline on a goroutine,
-// draining into the pipe the consumer (drainParts) reads. Encryption is the outermost
-// transform, so the meter — and thus the seal checksum — covers the ciphertext that
-// lands on the volume, keeping verify/copy keyless. It returns the produced stats and
-// an error pointer (both safe to read once done is closed) plus that done channel; a
-// pipeline-build or produce failure is reported via *errp and closes the pipe with it
-// so the consumer unblocks.
-func (w *Writer) startProducer(meter *xfer.Meter, pw *io.PipeWriter, spec ArchiveSpec, progress func(uncompressed, compressed int64), produce func(out io.Writer) (Produced, error)) (res *Produced, errp *error, done <-chan struct{}) {
-	res = &Produced{}
-	errp = new(error)
-	ch := make(chan struct{})
-	go func() {
-		defer close(ch)
-		fail := func(e error) {
-			pw.CloseWithError(e)
-			*errp = e
-		}
-		enc, e := crypt.Encrypt(spec.Encrypt, meter, spec.EncOpts)
-		if e != nil {
-			fail(e)
-			return
-		}
-		cw, e := filter.Compress(w.codec, enc, w.fopts)
-		if e != nil {
-			enc.Close()
-			fail(e)
-			return
-		}
-		var src io.Writer = cw
-		if progress != nil {
-			src = xfer.NewCounter(cw, func(total int64) { progress(total, meter.Bytes()) })
-		}
-		r, e := produce(src)
-		if e != nil {
-			cw.Close()
-			enc.Close()
-			fail(e)
-			return
-		}
-		if e := cw.Close(); e != nil { // waits the compressor child
-			enc.Close()
-			fail(e)
-			return
-		}
-		if e := enc.Close(); e != nil { // waits the encryptor child; flushes the meter
-			fail(e)
-			return
-		}
-		*res = r
-		pw.Close() // EOF to the consumer
-	}()
-	return res, errp, ch
 }
 
 // drainParts reads the payload from src and writes it as one or more part files

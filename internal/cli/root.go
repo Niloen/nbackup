@@ -55,6 +55,7 @@ func NewRootCmd() *cobra.Command {
 	// Convention: inspect with a noun (`slot`, `medium`), act with a flat verb.
 	root.AddCommand(
 		newPlanCmd(a),
+		newCheckCmd(a),
 		newDumpCmd(a),
 		newStatusCmd(a),
 		newSlotCmd(a),

@@ -24,7 +24,7 @@ func TestSyncMirrorsLandingToTarget(t *testing.T) {
 			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 		},
 		Sync:    []config.SyncRule{{To: "archive"}},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -33,7 +33,7 @@ func TestSyncMirrorsLandingToTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -100,7 +100,7 @@ func TestSyncSelectionLast(t *testing.T) {
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -109,7 +109,7 @@ func TestSyncSelectionLast(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	for d := 21; d <= 23; d++ {
@@ -144,7 +144,7 @@ func TestSyncFromNonLanding(t *testing.T) {
 			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"cold":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -153,7 +153,7 @@ func TestSyncFromNonLanding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
@@ -184,7 +184,7 @@ func TestSyncFromNonLanding(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := t.TempDir()
-	if err := eng.Restore(s.ID, config.DLE{Host: "h", Path: src}.Name(), dest, false, nil); err != nil {
+	if err := eng.Restore(s.ID, config.DLE{Host: "localhost", Path: src}.Name(), dest, false, nil); err != nil {
 		t.Fatalf("restore from cold copy: %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "f.txt"), "tiered")
@@ -211,7 +211,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 			// Small tapes (256 KiB) across 4 bays: one slot fits, two do not.
 			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "4", "volume_size": "262144"}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -220,7 +220,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -276,7 +276,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 
 	// Drop the disk copies so restore must read from the library, exercising the
 	// changer auto-mounting the right bay for each slot.
-	name := config.DLE{Host: "h", Path: src}.Name()
+	name := config.DLE{Host: "localhost", Path: src}.Name()
 	for _, id := range ids {
 		if err := eng.vol.RemoveSlot(id); err != nil {
 			t.Fatal(err)
@@ -314,7 +314,7 @@ func TestRelabelRefusesProtectedSpanTape(t *testing.T) {
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "6", "volume_size": "262144"}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -323,7 +323,7 @@ func TestRelabelRefusesProtectedSpanTape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -401,7 +401,7 @@ func TestSyncSlotOutOfTapes(t *testing.T) {
 			// span onto.
 			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "1", "volume_size": "65536"}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -410,7 +410,7 @@ func TestSyncSlotOutOfTapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
@@ -438,7 +438,7 @@ func TestSyncTargetIsLanding(t *testing.T) {
 	cfg := &config.Config{
 		Landing: "disk",
 		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
-		Sources: []config.DLE{{Host: "h", Path: t.TempDir()}},
+		Sources: []config.DLE{{Host: "localhost", Path: t.TempDir()}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"

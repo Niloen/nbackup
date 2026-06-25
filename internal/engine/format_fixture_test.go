@@ -52,8 +52,8 @@ func TestFormatSurvivesRestore(t *testing.T) {
 			cfg := &config.Config{
 				Landing: man.Landing,
 				Media:   map[string]config.Media{man.Landing: {Type: man.MediumType, Params: map[string]string{man.ParamKey: volDir}}},
-				Sources: []config.DLE{{Host: "h", Path: "data"}}, // unused by restore; satisfies a non-empty config
-				Workdir: t.TempDir(),                             // a fresh catalog, forcing a rebuild from the volume
+				Sources: []config.DLE{{Host: "localhost", Path: "data"}}, // unused by restore; satisfies a non-empty config
+				Workdir: t.TempDir(),                                     // a fresh catalog, forcing a rebuild from the volume
 			}
 			cfg.Compress.Codec = man.Codec
 
@@ -61,7 +61,7 @@ func TestFormatSurvivesRestore(t *testing.T) {
 			if err != nil {
 				t.Fatalf("open engine on fixture: %v", err)
 			}
-			if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+			if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 				t.Skipf("GNU tar not available")
 			}
 			if _, err := eng.RebuildCatalog(nil); err != nil {

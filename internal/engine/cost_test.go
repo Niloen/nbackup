@@ -21,7 +21,7 @@ func cloudCostEngine(t *testing.T, runDate time.Time, costCfg *config.CostConfig
 		Media: map[string]config.Media{
 			"cloud": {Type: "cloud", Cost: costCfg, Params: map[string]string{"url": "file://" + t.TempDir()}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -30,13 +30,13 @@ func cloudCostEngine(t *testing.T, runDate time.Time, costCfg *config.CostConfig
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	if _, err := eng.Run(runDate, nil); err != nil {
 		t.Fatalf("dump: %v", err)
 	}
-	return eng, config.DLE{Host: "h", Path: src}.Name()
+	return eng, config.DLE{Host: "localhost", Path: src}.Name()
 }
 
 // TestCostSummaryCloud prices the footprint and the marginal next run on a cloud
@@ -68,7 +68,7 @@ func TestCostSummaryDiskUnpriced(t *testing.T) {
 	cfg := &config.Config{
 		Landing: "disk",
 		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"

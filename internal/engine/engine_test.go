@@ -28,7 +28,7 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 	cfg := &config.Config{
 		Landing: "disk",
 		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(), // catalog state lives separately from the storage medium
 	}
 	cfg.Compress.Codec = "none" // exercise the pipeline without depending on a compressor binary
@@ -37,7 +37,7 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -62,7 +62,7 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 	}
 
 	dest := t.TempDir()
-	name := config.DLE{Host: "h", Path: src}.Name()
+	name := config.DLE{Host: "localhost", Path: src}.Name()
 	if err := eng.Restore(s2.ID, name, dest, false, nil); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestRepeatedLevelRestore(t *testing.T) {
 	cfg := &config.Config{
 		Landing: "disk",
 		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 		BumpPct: 100, // a saving can never reach 100% of the full, so never bump
 	}
@@ -98,7 +98,7 @@ func TestRepeatedLevelRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -136,7 +136,7 @@ func TestRepeatedLevelRestore(t *testing.T) {
 
 	// Restore as of day 3: keep=v3, gone still deleted, both new files present.
 	dest := t.TempDir()
-	name := config.DLE{Host: "h", Path: src}.Name()
+	name := config.DLE{Host: "localhost", Path: src}.Name()
 	if err := eng.Restore(s3.ID, name, dest, false, nil); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestValidatePlan(t *testing.T) {
 		c := &config.Config{
 			Landing: "disk",
 			Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
-			Sources: []config.DLE{{Host: "h", Path: src}},
+			Sources: []config.DLE{{Host: "localhost", Path: src}},
 			Workdir: t.TempDir(),
 		}
 		c.Compress.Codec = "none"
@@ -170,7 +170,7 @@ func TestValidatePlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	if w, err := eng.ValidatePlan(); err != nil || len(w) != 0 {
@@ -180,7 +180,7 @@ func TestValidatePlan(t *testing.T) {
 	// A source path that does not exist is a warning, not a hard failure — it may
 	// be an unmounted volume the real run will mount.
 	missing := base()
-	missing.Sources = []config.DLE{{Host: "h", Path: filepath.Join(src, "does-not-exist")}}
+	missing.Sources = []config.DLE{{Host: "localhost", Path: filepath.Join(src, "does-not-exist")}}
 	eng, err = New(missing)
 	if err != nil {
 		t.Fatal(err)
@@ -221,14 +221,14 @@ func TestParallelWorkers(t *testing.T) {
 	for _, n := range names {
 		dir := t.TempDir()
 		write(t, filepath.Join(dir, n+".txt"), "content-"+n)
-		cfg.Sources = append(cfg.Sources, config.DLE{Host: "h", Path: dir})
+		cfg.Sources = append(cfg.Sources, config.DLE{Host: "localhost", Path: dir})
 	}
 
 	eng, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -268,7 +268,7 @@ func TestThroughputCapThrottlesDump(t *testing.T) {
 			Media: map[string]config.Media{
 				"disk": {Type: "disk", Throughput: throughput, Params: map[string]string{"path": t.TempDir()}},
 			},
-			Sources: []config.DLE{{Host: "h", Path: src}},
+			Sources: []config.DLE{{Host: "localhost", Path: src}},
 			Workdir: t.TempDir(),
 		}
 		cfg.Compress.Codec = "none" // bytes on the medium ≈ the tar stream, no compressor binary
@@ -276,7 +276,7 @@ func TestThroughputCapThrottlesDump(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+		if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 			t.Skipf("GNU tar not available")
 		}
 		start := time.Now()
@@ -320,7 +320,7 @@ func TestThroughputCapThrottlesRestore(t *testing.T) {
 			Media: map[string]config.Media{
 				"disk": {Type: "disk", Throughput: throughput, Params: map[string]string{"path": diskDir}},
 			},
-			Sources: []config.DLE{{Host: "h", Path: src}},
+			Sources: []config.DLE{{Host: "localhost", Path: src}},
 			Workdir: workdir,
 		}
 		cfg.Compress.Codec = "none"
@@ -333,7 +333,7 @@ func TestThroughputCapThrottlesRestore(t *testing.T) {
 
 	// Dump uncapped.
 	eng := mk("")
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
@@ -344,7 +344,7 @@ func TestThroughputCapThrottlesRestore(t *testing.T) {
 	// Restore through a capped engine over the same medium/catalog.
 	const rate = 2 << 20 // 2 MiB/s
 	capped := mk("2MB/s")
-	name := config.DLE{Host: "h", Path: src}.Name()
+	name := config.DLE{Host: "localhost", Path: src}.Name()
 	start := time.Now()
 	if err := capped.Restore(s.ID, name, t.TempDir(), false, nil); err != nil {
 		t.Fatalf("restore: %v", err)
@@ -372,7 +372,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 			"disk": {Type: "disk", Params: map[string]string{"path": diskDir}},
 			"tape": {Type: "tape", Params: map[string]string{"dir": tapeDir}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -381,7 +381,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	day := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
@@ -402,7 +402,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 	tcfg := &config.Config{
 		Landing: "tape",
 		Media:   map[string]config.Media{"tape": {Type: "tape", Params: map[string]string{"dir": tapeDir}}},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(), // separate catalog cache, forcing a rebuild from tape
 	}
 	tcfg.Compress.Codec = "none"
@@ -414,7 +414,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 		t.Fatalf("rebuild from tape: n=%d err=%v", n, err)
 	}
 	dest := t.TempDir()
-	name := config.DLE{Host: "h", Path: src}.Name()
+	name := config.DLE{Host: "localhost", Path: src}.Name()
 	if err := teng.Restore(s.ID, name, dest, false, nil); err != nil {
 		t.Fatalf("restore from tape: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestTapeLabelVerify(t *testing.T) {
 	cfg := &config.Config{
 		Landing: "lto",
 		Media:   map[string]config.Media{"lto": {Type: "tape", Params: map[string]string{"dir": tapeDir}}},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -441,7 +441,7 @@ func TestTapeLabelVerify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	day := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
@@ -485,7 +485,7 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -494,7 +494,7 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
@@ -526,7 +526,7 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := t.TempDir()
-	name := config.DLE{Host: "h", Path: src}.Name()
+	name := config.DLE{Host: "localhost", Path: src}.Name()
 	if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
 		t.Fatalf("restore (failover to copy): %v", err)
 	}
@@ -543,7 +543,7 @@ func TestRunWritesStatus(t *testing.T) {
 	cfg := &config.Config{
 		Landing: "disk",
 		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: workdir,
 	}
 	cfg.Compress.Codec = "none"
@@ -552,7 +552,7 @@ func TestRunWritesStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	s, err := eng.Run(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
@@ -593,7 +593,7 @@ func TestTapeLibraryRestore(t *testing.T) {
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -602,7 +602,7 @@ func TestTapeLibraryRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -643,7 +643,7 @@ func TestTapeLibraryRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	name := config.DLE{Host: "h", Path: src}.Name()
+	name := config.DLE{Host: "localhost", Path: src}.Name()
 	d1 := t.TempDir()
 	if err := eng.Restore(s1.ID, name, d1, false, nil); err != nil {
 		t.Fatalf("restore s1 (auto-mount Tape1): %v", err)
@@ -668,7 +668,7 @@ func TestTapeAppendableFalse(t *testing.T) {
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"lib":  {Type: "tape", Appendable: boolp(false), Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -677,7 +677,7 @@ func TestTapeAppendableFalse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	s1, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
@@ -746,7 +746,7 @@ func TestManualStationWriteSwap(t *testing.T) {
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"lto":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "1"}},
 		},
-		Sources:   []config.DLE{{Host: "h", Path: src}},
+		Sources:   []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:   t.TempDir(),
 		AutoLabel: true,
 	}
@@ -756,7 +756,7 @@ func TestManualStationWriteSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	op := &scriptedOperator{}
@@ -797,7 +797,7 @@ func TestManualStationReadSwap(t *testing.T) {
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"lto":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "2"}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -806,7 +806,7 @@ func TestManualStationReadSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -853,7 +853,7 @@ func TestManualStationReadSwap(t *testing.T) {
 	op := &scriptedOperator{}
 	eng.SetOperator(op)
 
-	name := config.DLE{Host: "h", Path: src}.Name()
+	name := config.DLE{Host: "localhost", Path: src}.Name()
 	// The drive holds Reel-B; restoring s1 must prompt to swap in Reel-A.
 	d1 := t.TempDir()
 	if err := eng.Restore(s1.ID, name, d1, false, logfDiscard); err != nil {
@@ -882,7 +882,7 @@ func TestManualStationLandingLabel(t *testing.T) {
 		Media: map[string]config.Media{
 			"vtape": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "3"}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: t.TempDir()}},
+		Sources: []config.DLE{{Host: "localhost", Path: t.TempDir()}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -1144,7 +1144,7 @@ func TestDumpSpansArchiveAcrossTapes(t *testing.T) {
 		Media: map[string]config.Media{
 			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "6", "volume_size": "163840"}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -1153,7 +1153,7 @@ func TestDumpSpansArchiveAcrossTapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	// Seed a blank bay in the drive so the run has somewhere to start; it auto-labels
@@ -1190,7 +1190,7 @@ func TestDumpSpansArchiveAcrossTapes(t *testing.T) {
 
 	// Restore must mount each bay in sequence to rebuild the original file.
 	dest := t.TempDir()
-	name := config.DLE{Host: "h", Path: src}.Name()
+	name := config.DLE{Host: "localhost", Path: src}.Name()
 	if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
 		t.Fatalf("restore from spanned tapes: %v", err)
 	}
@@ -1213,7 +1213,7 @@ func TestCopySpansArchiveAcrossTapes(t *testing.T) {
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "6", "volume_size": "163840"}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -1222,7 +1222,7 @@ func TestCopySpansArchiveAcrossTapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
@@ -1242,7 +1242,7 @@ func TestCopySpansArchiveAcrossTapes(t *testing.T) {
 			tape = p
 		}
 	}
-	if parts, _ := tape.Parts(config.DLE{Host: "h", Path: src}.Name(), 0); len(parts) < 2 {
+	if parts, _ := tape.Parts(config.DLE{Host: "localhost", Path: src}.Name(), 0); len(parts) < 2 {
 		t.Fatalf("copied archive parts = %d, want >= 2 (must span)", len(parts))
 	}
 
@@ -1254,7 +1254,7 @@ func TestCopySpansArchiveAcrossTapes(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := t.TempDir()
-	name := config.DLE{Host: "h", Path: src}.Name()
+	name := config.DLE{Host: "localhost", Path: src}.Name()
 	if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
 		t.Fatalf("restore from spanned tape copy: %v", err)
 	}
@@ -1277,7 +1277,7 @@ func TestPartSizeSplitsWithinTape(t *testing.T) {
 			// One roomy 4 MiB bay, but part_size caps each part at 64 KiB.
 			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "1", "volume_size": "4194304", "part_size": "65536"}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -1286,7 +1286,7 @@ func TestPartSizeSplitsWithinTape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	if err := eng.LoadVolume("lib", "bay-01", false, nil); err != nil {
@@ -1306,7 +1306,7 @@ func TestPartSizeSplitsWithinTape(t *testing.T) {
 		t.Fatalf("verify: failures=%d err=%v", rep.Failures, err)
 	}
 	dest := t.TempDir()
-	if err := eng.Restore(s.ID, config.DLE{Host: "h", Path: src}.Name(), dest, false, nil); err != nil {
+	if err := eng.Restore(s.ID, config.DLE{Host: "localhost", Path: src}.Name(), dest, false, nil); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "big.txt"), body)

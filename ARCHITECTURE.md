@@ -54,7 +54,8 @@ registry registration, not a conditional in the core.
 | `archiver` + `archiver/gnutar` | `Archiver` interface + registry + named definitions; owns its incremental-state library; GNU tar impl | Application API / amgtar |
 | `filter` | external compressor child processes (zstd/gzip/none) + registry | compress |
 | `crypt` | external encryptor child processes (gpg/none) + registry | amcrypt/amgpgcrypt |
-| `streamproc` | the shared "external stream-transform child" plumbing (stdin→stdout, optional `nice`) that `filter` and `crypt` both run on | — |
+| `streamproc` | the shared "external stream-transform child" plumbing (stdin→stdout, optional `nice`) that `filter` and `crypt` read-side run on | — |
+| `hostexec` | the execution transport: run external programs + stage scratch files on a host that is transparently `Local` or `SSH`; `RunPipe` fuses same-host stages; injected into archivers and the compress/encrypt stages so remote sources need no client agent | amandad (replaced by stock sshd) |
 | `xfer` | in-process stream pieces: checksum + byte counting, and the per-medium bandwidth cap (`Limiter`) | Xfer API / netusage |
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `report` | per-run history record + JSONL/summary file I/O + digest render | amreport |
@@ -408,6 +409,24 @@ specifics (`tar`, `.snar`, the listed-incremental snapshot, `state_dir`,
 reuses the vocabulary. The concurrency unit is a **worker** (`parallelism.workers`),
 not a "archiver" — "archiver" means only the plugin.
 
+**Execution is an injected transport; the pipeline is one path (`package hostexec`).**
+A backup is a chain of external programs — `tar → compress → encrypt` — then the in-process
+server-side `meter → drainParts → volume → seal`. The compressor and encryptor are *just
+programs*, like `tar`, so there is **one** pipeline path, not a server-side-wrapping path
+plus a separate client-side one. Each program stage carries an **`Executor`** (the host it
+runs on — `Local` or `SSH`), and `slotio.Writer.WriteArchive` groups maximal runs of
+adjacent same-host stages into one host-local pipe (`Executor.RunPipe`), crossing the wire
+only at an executor boundary. So a local dump (every stage `Local`), a thin client (tar on
+`SSH`, transforms `Local`), and a fully client-side dump (all on `SSH` — only ciphertext
+crosses to the server meter) are the *same* code with different per-stage executors. The
+transport lives in one neutral package and is injected into archivers via
+`archiver.Open(name, opts, ex)` — SSH is part of **no** archiver, so a new archiver gets
+remote execution for free as long as its binaries are on the client. The meter stays
+server-side, so the seal still covers the bytes that land (verify/copy/sync stay keyless).
+This is the source-side peer of the medium-neutral discipline; see
+[docs/design/remote-sources.md](docs/design/remote-sources.md) for the configurable
+`compress`/`encrypt.at` point and the three key-trust postures.
+
 **Run monitoring is a status file, not a daemon.** `nb dump` drives a
 `progress.Tracker` whose workers report start / live bytes / finish; the tracker
 flushes a single JSON snapshot to `<workdir>/run-status.json` (atomic temp+rename,
@@ -546,7 +565,7 @@ GET `$/1000`. Four decisions carry it:
   `tar`, `gzip`, `nice` are present. Tests that need GNU tar `t.Skip` when absent.
 - **CLI:** flags may appear before or after positionals (`parseArgs`); subcommand
   dispatch (`slot show`) keys on the first arg. The convention is **inspect with a
-  noun** (`nb slot`, `nb medium`), **act with a flat verb** (`nb dump`, `nb verify`,
+  noun** (`nb slot`, `nb medium`), **act with a flat verb** (`nb dump`, `nb check`, `nb verify`,
   `nb drill`, `nb prune`, `nb rebuild`, …) — so the nouns carry only read subcommands and every
   mutation is a top-level verb. Per-medium status (incl. bays / drive + shelf) lives
   in `nb medium <name>`; `nb load` is the one physical action verb (sibling of
@@ -560,7 +579,19 @@ GET `$/1000`. Four decisions carry it:
   (`nb label --relabel`). (Capacity-driven retention is otherwise implemented:
   `sizeProfile.Reclaim` already prunes object stores and disk to fit `capacity`;
   only whole-*volume* tape recycle remains.)
-- **Remote sources** — `host` is metadata; `path` is read locally.
+- **Remote sources over SSH** — the dump path is implemented (see below and
+  [docs/design/remote-sources.md](docs/design/remote-sources.md)); a remote DLE dumps over
+  SSH with no NBackup software on the client. A source host is remote **by default** (local
+  means exactly `localhost`); a top-level `ssh:` block sets global SSH defaults that a
+  per-host `hosts:` entry overrides. **`nb check`** is the amcheck analogue — it verifies
+  the server and every host (connecting to remote clients by default, `--offline` to skip),
+  every probe running through the host's executor so local and remote checks share one code
+  path. Whole-DLE restore is opt-in onto a client (`nb recover --all --to host:path`), and
+  for an `encrypt.at: client` DLE the decode runs on the client (the key never leaves it); a
+  server-side restore of a client-only symmetric key fails fast. The remaining follow-on is
+  the drill recoverability tiers and file-level recover on the client. SSH paths are untested
+  in CI (no sshd; the client-side encrypt+decode round-trip is covered locally with real
+  gpg/gzip/tar).
 - Real `mtDevice` hardware validation — also the only spanning path not exercised
   (real-drive spanning is proactive-via-`part_size` and structurally complete but
   untested; the `dir:` emulator spans and is tested).

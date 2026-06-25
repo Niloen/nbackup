@@ -215,7 +215,10 @@ func (e *Engine) verifyArchive(id string, a format.Archive, p catalog.Placement,
 // the seal. It returns ClassNone on success, else the failure class and detail. It
 // writes nothing.
 func (e *Engine) structuralCheck(a format.Archive, parts []slotio.PartPosition, want slotio.Expect, opener slotio.PartOpener) (drill.Class, string) {
-	m, err := e.archiverByType(a.Archiver)
+	// Verify is the keyless, server-side integrity primitive: structural decode runs on
+	// the server (host ""). The client-side recoverability proof (running the read
+	// pipeline on the client for a client-only key) is drill's job — see the design note.
+	m, err := e.restoreArchiver(a.Archiver, "")
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}

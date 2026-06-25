@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/streamproc"
 )
 
@@ -148,6 +149,32 @@ func Decrypt(scheme string, src io.Reader, o Options) (io.ReadCloser, error) {
 		return nil, err
 	}
 	return streamproc.ReadThrough(s.argv(s.decryptArgv, o), o.Nice, src)
+}
+
+// EncryptCmd returns the encryptor as a pipeline stage, or ok=false for the identity
+// (none) scheme. It lets the unified pipeline run encryption through any executor — on
+// the client when the key lives there, so plaintext never leaves it.
+func EncryptCmd(scheme string, o Options) (cmd hostexec.Cmd, ok bool, err error) {
+	return stageCmd(scheme, func(s Spec) func(Options) []string { return s.encryptArgv }, o)
+}
+
+// DecryptCmd returns the decryptor as a pipeline stage (the read-side peer of
+// EncryptCmd), or ok=false for none. This is the only stage that needs the key.
+func DecryptCmd(scheme string, o Options) (cmd hostexec.Cmd, ok bool, err error) {
+	return stageCmd(scheme, func(s Spec) func(Options) []string { return s.decryptArgv }, o)
+}
+
+func stageCmd(scheme string, pick func(Spec) func(Options) []string, o Options) (hostexec.Cmd, bool, error) {
+	s, err := spec(scheme)
+	if err != nil {
+		return hostexec.Cmd{}, false, err
+	}
+	build := pick(s)
+	if build == nil {
+		return hostexec.Cmd{}, false, nil
+	}
+	argv := build(o)
+	return hostexec.Cmd{Name: argv[0], Args: argv[1:], Nice: o.Nice}, true, nil
 }
 
 // argv applies an argv builder, returning nil for the none scheme (no child) so

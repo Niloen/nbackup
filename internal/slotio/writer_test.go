@@ -142,10 +142,12 @@ func openerOver(vols ...*memVolume) PartOpener {
 
 func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) format.Archive {
 	t.Helper()
-	arch, err := w.WriteArchive(ArchiveSpec{DLE: dle, Host: "h", Path: "/p", Archiver: "m", Level: 0}, nil,
-		func(out io.Writer) (Produced, error) {
-			n, err := out.Write(body)
-			return Produced{Uncompressed: int64(n), FileCount: 1, Members: []string{dle}}, err
+	arch, err := w.WriteArchive(ArchiveSpec{DLE: dle, Host: "localhost", Path: "/p", Archiver: "m", Level: 0}, nil,
+		Source{
+			Stdin: bytes.NewReader(body),
+			Finish: func() (Produced, error) {
+				return Produced{Uncompressed: int64(len(body)), FileCount: 1, Members: []string{dle}}, nil
+			},
 		})
 	if err != nil {
 		t.Fatalf("WriteArchive: %v", err)
@@ -259,9 +261,9 @@ func TestRollFailureNoDeadlock(t *testing.T) {
 
 	body := []byte(strings.Repeat("q", 200*1024)) // far bigger than one volume
 	_, err := w.WriteArchive(ArchiveSpec{DLE: "dle1", Level: 0}, nil,
-		func(out io.Writer) (Produced, error) {
-			n, e := out.Write(body)
-			return Produced{Uncompressed: int64(n)}, e
+		Source{
+			Stdin:  bytes.NewReader(body),
+			Finish: func() (Produced, error) { return Produced{Uncompressed: int64(len(body))}, nil },
 		})
 	if err == nil {
 		t.Fatal("expected an error when the sink cannot roll")
@@ -289,11 +291,13 @@ func TestEncryptRoundTrip(t *testing.T) {
 
 	body := []byte(strings.Repeat("top secret payload\n", 3000))
 	arch, err := w.WriteArchive(
-		ArchiveSpec{DLE: "dle1", Host: "h", Path: "/p", Archiver: "m", Level: 0, Encrypt: "gpg", EncOpts: opts},
+		ArchiveSpec{DLE: "dle1", Host: "localhost", Path: "/p", Archiver: "m", Level: 0, Encrypt: "gpg", EncOpts: opts},
 		nil,
-		func(out io.Writer) (Produced, error) {
-			n, e := out.Write(body)
-			return Produced{Uncompressed: int64(n), FileCount: 1, Members: []string{"dle1"}}, e
+		Source{
+			Stdin: bytes.NewReader(body),
+			Finish: func() (Produced, error) {
+				return Produced{Uncompressed: int64(len(body)), FileCount: 1, Members: []string{"dle1"}}, nil
+			},
 		})
 	if err != nil {
 		t.Fatalf("WriteArchive: %v", err)

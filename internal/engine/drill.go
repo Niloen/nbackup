@@ -259,7 +259,10 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 	}
 	defer os.RemoveAll(dir)
 	for _, step := range t.Steps {
-		m, err := e.archiverByType(step.Archiver)
+		// The chain restores to a server-side scratch dir (decode + extract server-side),
+		// so the archiver runs locally (host ""). Driving the recoverability proof on the
+		// client for a client-only key is the documented follow-on — see the design note.
+		m, err := e.restoreArchiver(step.Archiver, "")
 		if err != nil {
 			return drill.ClassPipeline, err.Error()
 		}
@@ -701,7 +704,7 @@ func (e *Engine) postureIncrementalState() (string, PostureStatus, string) {
 		if st.LastFullDate == "" {
 			continue // never fulled yet; nothing relied upon
 		}
-		m, err := e.archiverFor(d.DumpTypeName())
+		m, err := e.archiverFor(d.DumpTypeName(), d.Host)
 		if err != nil {
 			continue // unresolvable archiver surfaces elsewhere (pre-flight / estimate)
 		}

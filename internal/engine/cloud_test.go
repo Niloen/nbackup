@@ -23,7 +23,7 @@ func TestCloudLandingRoundTrip(t *testing.T) {
 		Media: map[string]config.Media{
 			"cloud": {Type: "cloud", Params: map[string]string{"url": "file://" + t.TempDir()}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -32,7 +32,7 @@ func TestCloudLandingRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -46,7 +46,7 @@ func TestCloudLandingRoundTrip(t *testing.T) {
 	}
 
 	dest := t.TempDir()
-	name := config.DLE{Host: "h", Path: src}.Name()
+	name := config.DLE{Host: "localhost", Path: src}.Name()
 	if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
 		t.Fatalf("restore from cloud: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestSyncDiskToCloud(t *testing.T) {
 			"cloud": {Type: "cloud", Params: map[string]string{"url": "file://" + t.TempDir()}},
 		},
 		Sync:    []config.SyncRule{{To: "cloud"}},
-		Sources: []config.DLE{{Host: "h", Path: src}},
+		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
 	cfg.Compress.Codec = "none"
@@ -76,7 +76,7 @@ func TestSyncDiskToCloud(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType); err != nil || m.Check() != nil {
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
