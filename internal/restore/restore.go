@@ -16,7 +16,7 @@ type Step struct {
 	DLE      string
 	Level    int
 	Archiver string // archiver type that produced the archive
-	Codec    string // compression codec to reverse before extracting
+	Compress string // compression codec to reverse before extracting
 	Encrypt  string // encryption scheme to reverse before decompressing ("" = plaintext)
 }
 
@@ -63,7 +63,7 @@ func Chain(slots []*record.Slot, dleName, targetSlotID string) ([]Step, error) {
 	var steps []Step
 	for {
 		s, a := slots[curIdx], archiveFor(slots[curIdx], dleName)
-		steps = append(steps, Step{SlotID: s.ID, DLE: a.DLE, Level: a.Level, Archiver: a.Archiver, Codec: a.Codec, Encrypt: a.Encrypt})
+		steps = append(steps, Step{SlotID: s.ID, DLE: a.DLE, Level: a.Level, Archiver: a.Archiver, Compress: a.Compress, Encrypt: a.Encrypt})
 		if a.Level == 0 {
 			break
 		}

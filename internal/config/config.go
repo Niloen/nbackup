@@ -21,8 +21,8 @@ import (
 // DefaultDumpType is used by DLEs that do not name one.
 const DefaultDumpType = "default"
 
-// DefaultCodec is the compression codec assumed when compress.codec is unset.
-const DefaultCodec = "zstd"
+// DefaultCompress is the compression scheme assumed when compress.scheme is unset.
+const DefaultCompress = "zstd"
 
 // DefaultArchiver is the archiver assumed when a dumptype names none. It is both the
 // default archiver name and (for an undeclared name) its type.
@@ -66,9 +66,9 @@ type Config struct {
 
 	// Compress configures the external compressor archives are piped through.
 	Compress struct {
-		Codec   string `yaml:"codec"`   // zstd|gzip|none (default zstd)
-		Level   int    `yaml:"level"`   // codec level; 0 = codec default
-		Threads int    `yaml:"threads"` // worker threads where supported; 0 = codec default
+		Scheme  string `yaml:"scheme"`  // zstd|gzip|none (default zstd)
+		Level   int    `yaml:"level"`   // compression level; 0 = scheme default
+		Threads int    `yaml:"threads"` // worker threads where supported; 0 = scheme default
 		Program string `yaml:"program"` // optional binary override (name or path)
 	} `yaml:"compress"`
 
@@ -838,12 +838,12 @@ func (c *Config) EncryptionFor(dtName string) EncryptConfig {
 	return c.Encrypt
 }
 
-// CompressCodec returns the configured codec, defaulting to zstd.
-func (c *Config) CompressCodec() string {
-	if c.Compress.Codec != "" {
-		return c.Compress.Codec
+// CompressScheme returns the configured compression scheme, defaulting to zstd.
+func (c *Config) CompressScheme() string {
+	if c.Compress.Scheme != "" {
+		return c.Compress.Scheme
 	}
-	return DefaultCodec
+	return DefaultCompress
 }
 
 // Workers returns the number of concurrent DLE dumps per run (default 1).

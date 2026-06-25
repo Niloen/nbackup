@@ -31,7 +31,7 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(), // catalog state lives separately from the storage medium
 	}
-	cfg.Compress.Codec = "none" // exercise the pipeline without depending on a compressor binary
+	cfg.Compress.Scheme = "none" // exercise the pipeline without depending on a compressor binary
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -92,7 +92,7 @@ func TestRepeatedLevelRestore(t *testing.T) {
 		Workdir: t.TempDir(),
 		BumpPct: 100, // a saving can never reach 100% of the full, so never bump
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -162,7 +162,7 @@ func TestValidatePlan(t *testing.T) {
 			Sources: []config.DLE{{Host: "localhost", Path: src}},
 			Workdir: t.TempDir(),
 		}
-		c.Compress.Codec = "none"
+		c.Compress.Scheme = "none"
 		return c
 	}
 
@@ -214,7 +214,7 @@ func TestParallelWorkers(t *testing.T) {
 		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none" // no compressor-binary dependency in tests
+	cfg.Compress.Scheme = "none" // no compressor-binary dependency in tests
 	cfg.Parallelism.Workers = 3
 
 	names := []string{"alpha", "bravo", "charlie", "delta"}
@@ -271,7 +271,7 @@ func TestThroughputCapThrottlesDump(t *testing.T) {
 			Sources: []config.DLE{{Host: "localhost", Path: src}},
 			Workdir: t.TempDir(),
 		}
-		cfg.Compress.Codec = "none" // bytes on the medium ≈ the tar stream, no compressor binary
+		cfg.Compress.Scheme = "none" // bytes on the medium ≈ the tar stream, no compressor binary
 		eng, err := New(cfg)
 		if err != nil {
 			t.Fatal(err)
@@ -323,7 +323,7 @@ func TestThroughputCapThrottlesRestore(t *testing.T) {
 			Sources: []config.DLE{{Host: "localhost", Path: src}},
 			Workdir: workdir,
 		}
-		cfg.Compress.Codec = "none"
+		cfg.Compress.Scheme = "none"
 		eng, err := New(cfg)
 		if err != nil {
 			t.Fatal(err)
@@ -375,7 +375,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -405,7 +405,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(), // separate catalog cache, forcing a rebuild from tape
 	}
-	tcfg.Compress.Codec = "none"
+	tcfg.Compress.Scheme = "none"
 	teng, err := New(tcfg)
 	if err != nil {
 		t.Fatal(err)
@@ -435,7 +435,7 @@ func TestTapeLabelVerify(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -488,7 +488,7 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -546,7 +546,7 @@ func TestRunWritesStatus(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: workdir,
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -596,7 +596,7 @@ func TestTapeLibraryRestore(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -675,7 +675,7 @@ func TestTapeAppendableFalse(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -756,7 +756,7 @@ func TestManualStationWriteSwap(t *testing.T) {
 		Workdir:   t.TempDir(),
 		AutoLabel: true,
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -806,7 +806,7 @@ func TestManualStationReadSwap(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -895,7 +895,7 @@ func TestManualStationLandingLabel(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: t.TempDir()}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -931,7 +931,7 @@ func tapeEngine(t *testing.T, appendable bool, minAge string) *Engine {
 		},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 	eng, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -1095,7 +1095,7 @@ func TestExpectedTapeReportsReelFill(t *testing.T) {
 		},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 	eng, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -1125,7 +1125,7 @@ func TestExpectedTapeDiskHasNone(t *testing.T) {
 		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 	eng, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -1157,7 +1157,7 @@ func TestDumpSpansArchiveAcrossTapes(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -1226,7 +1226,7 @@ func TestCopySpansArchiveAcrossTapes(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -1290,7 +1290,7 @@ func TestPartSizeSplitsWithinTape(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {

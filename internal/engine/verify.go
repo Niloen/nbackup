@@ -234,7 +234,7 @@ func (e *Engine) structuralCheck(a record.Archive, parts []record.FilePos, want 
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
-	rc, err := e.reader.OpenArchiveParts(parts, a.Codec, a.Encrypt, want, opener)
+	rc, err := e.reader.OpenArchiveParts(parts, a.Compress, a.Encrypt, want, opener)
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}

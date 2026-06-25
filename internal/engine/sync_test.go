@@ -27,7 +27,7 @@ func TestSyncMirrorsLandingToTarget(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -103,7 +103,7 @@ func TestSyncSelectionLast(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -147,7 +147,7 @@ func TestSyncFromNonLanding(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -214,7 +214,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -317,7 +317,7 @@ func TestRelabelRefusesProtectedSpanTape(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -404,7 +404,7 @@ func TestSyncSlotOutOfTapes(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -441,7 +441,7 @@ func TestSyncTargetIsLanding(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: t.TempDir()}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 	eng, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)

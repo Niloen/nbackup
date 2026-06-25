@@ -3,7 +3,7 @@
   "medium_type": "tape",
   "landing": "tape",
   "param_key": "dir",
-  "codec": "none",
+  "compress": "none",
   "restores": [
     {
       "slot": "slot-2026-06-21",

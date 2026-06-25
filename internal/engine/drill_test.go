@@ -38,7 +38,7 @@ func newDrillFixture(t *testing.T, codec string) *drillFixture {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = codec
+	cfg.Compress.Scheme = codec
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -254,7 +254,7 @@ func TestDrillUnattendedSkipsSwap(t *testing.T) {
 		Sources: []config.DLE{{Host: "localhost", Path: src}},
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	eng, err := New(cfg)
 	if err != nil {

@@ -10,7 +10,7 @@
 //
 //	go run ./internal/tools/mkfixture
 //
-// GNU tar must be on PATH. Codec is always "none" (no compressor-binary dependency).
+// GNU tar must be on PATH. Compress is always "none" (no compressor-binary dependency).
 package main
 
 import (
@@ -38,7 +38,7 @@ type manifest struct {
 	MediumType string        `json:"medium_type"`
 	Landing    string        `json:"landing"`
 	ParamKey   string        `json:"param_key"` // medium option pointing at the unpacked dir: "path" (disk) or "dir" (tape)
-	Codec      string        `json:"codec"`
+	Compress   string        `json:"compress"`
 	Restores   []restoreCase `json:"restores"`
 }
 
@@ -89,7 +89,7 @@ func makeDiskFixture() error {
 		Sources: []config.DLE{{Host: "h", Path: "data"}},
 		Workdir: work,
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	dle := config.DLE{Host: "h", Path: "data"}.Name()
 	var s1id, s2id string
@@ -123,7 +123,7 @@ func makeDiskFixture() error {
 	}
 
 	man := manifest{
-		Name: "disk-none-v1", MediumType: "disk", Landing: "disk", ParamKey: "path", Codec: "none",
+		Name: "disk-none-v1", MediumType: "disk", Landing: "disk", ParamKey: "path", Compress: "none",
 		Restores: []restoreCase{
 			{Slot: s1id, DLE: dle, Files: map[string]string{"keep.txt": "v1", "gone.txt": "temp", "sub/nested.txt": "hi"}},
 			{Slot: s2id, DLE: dle, Files: map[string]string{"keep.txt": "v2", "sub/nested.txt": "hi"}, Absent: []string{"gone.txt"}},
@@ -158,7 +158,7 @@ func makeTapeFixture() error {
 		Sources: []config.DLE{{Host: "h", Path: "data"}},
 		Workdir: work,
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 
 	dle := config.DLE{Host: "h", Path: "data"}.Name()
 	var sid string
@@ -185,7 +185,7 @@ func makeTapeFixture() error {
 	}
 
 	man := manifest{
-		Name: "tape-none-v1", MediumType: "tape", Landing: "tape", ParamKey: "dir", Codec: "none",
+		Name: "tape-none-v1", MediumType: "tape", Landing: "tape", ParamKey: "dir", Compress: "none",
 		Restores: []restoreCase{
 			{Slot: sid, DLE: dle, Files: map[string]string{"keep.txt": "v1", "sub/nested.txt": "hi"}},
 		},

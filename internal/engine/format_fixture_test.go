@@ -19,7 +19,7 @@ type fixtureManifest struct {
 	MediumType string `json:"medium_type"`
 	Landing    string `json:"landing"`
 	ParamKey   string `json:"param_key"`
-	Codec      string `json:"codec"`
+	Compress   string `json:"compress"`
 	Restores   []struct {
 		Slot   string            `json:"slot"`
 		DLE    string            `json:"dle"`
@@ -55,7 +55,7 @@ func TestFormatSurvivesRestore(t *testing.T) {
 				Sources: []config.DLE{{Host: "localhost", Path: "data"}}, // unused by restore; satisfies a non-empty config
 				Workdir: t.TempDir(),                                     // a fresh catalog, forcing a rebuild from the volume
 			}
-			cfg.Compress.Codec = man.Codec
+			cfg.Compress.Scheme = man.Compress
 
 			eng, err := New(cfg)
 			if err != nil {

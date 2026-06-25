@@ -9,7 +9,7 @@ import (
 // arch builds an archive for dleName at a level, recording the base slot an
 // incremental derives from (BaseSlot is empty for a full).
 func arch(dle string, level int, base string) record.Archive {
-	return record.Archive{DLE: dle, Level: level, Archiver: "gnutar", Codec: "none", BaseSlot: base}
+	return record.Archive{DLE: dle, Level: level, Archiver: "gnutar", Compress: "none", BaseSlot: base}
 }
 
 func slot(id string, archives ...record.Archive) *record.Slot {

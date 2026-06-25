@@ -69,7 +69,7 @@ type Archive struct {
 	Host         string   `json:"host"`              // source host
 	Path         string   `json:"path"`              // source path
 	Archiver     string   `json:"archiver"`          // archiver type that produced it
-	Codec        string   `json:"codec"`             // compression codec (zstd|gzip|none); reversed on restore
+	Compress     string   `json:"compress"`          // compression scheme (zstd|gzip|none); reversed on restore
 	Encrypt      string   `json:"encrypt,omitempty"` // encryption scheme (gpg); reversed on restore. "" = plaintext. The key is never stored — restore resolves it from the operator's keyring.
 	Level        int      `json:"level"`             // 0 = full, >=1 = incremental
 	Compressed   int64    `json:"compressed"`        // payload size on the volume

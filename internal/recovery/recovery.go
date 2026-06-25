@@ -33,7 +33,7 @@ type Source struct {
 	DLE      string
 	Level    int
 	Archiver string
-	Codec    string
+	Compress string
 	Encrypt  string
 	Member   string // the producing archiver's verbatim member token, replayed to it on extract (e.g. "./etc/hosts")
 }
@@ -126,7 +126,7 @@ func BuildTree(slots []*record.Slot, dle, asOf string) (*Tree, error) {
 		for _, m := range ar.Members {
 			t.insert(m, &Source{
 				SlotID: st.SlotID, DLE: dle, Level: st.Level,
-				Archiver: st.Archiver, Codec: st.Codec, Encrypt: st.Encrypt, Member: m,
+				Archiver: st.Archiver, Compress: st.Compress, Encrypt: st.Encrypt, Member: m,
 			})
 		}
 	}
@@ -208,7 +208,7 @@ type ExtractStep struct {
 	DLE      string
 	Level    int
 	Archiver string
-	Codec    string
+	Compress string
 	Encrypt  string
 	Members  []string // raw tar member names
 }
@@ -250,7 +250,7 @@ func (t *Tree) Collect(paths []string) ([]ExtractStep, error) {
 		k := key{s.SlotID, s.Level}
 		st, ok := steps[k]
 		if !ok {
-			st = &ExtractStep{SlotID: s.SlotID, DLE: s.DLE, Level: s.Level, Archiver: s.Archiver, Codec: s.Codec, Encrypt: s.Encrypt}
+			st = &ExtractStep{SlotID: s.SlotID, DLE: s.DLE, Level: s.Level, Archiver: s.Archiver, Compress: s.Compress, Encrypt: s.Encrypt}
 			steps[k] = st
 			order = append(order, k)
 		}

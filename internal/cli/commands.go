@@ -587,7 +587,7 @@ func newSlotShowCmd(a *app) *cobra.Command {
 				if enc == "" {
 					enc = "none"
 				}
-				fmt.Fprintf(tw, "%s\tL%d\t%d\t%s\t%s\t%s\n", ar.DLEID(), ar.Level, ar.FileCount, sizeutil.FormatBytes(ar.Compressed), ar.Codec, enc)
+				fmt.Fprintf(tw, "%s\tL%d\t%d\t%s\t%s\t%s\n", ar.DLEID(), ar.Level, ar.FileCount, sizeutil.FormatBytes(ar.Compressed), ar.Compress, enc)
 			}
 			tw.Flush()
 

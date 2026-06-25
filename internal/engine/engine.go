@@ -186,7 +186,7 @@ func New(cfg *config.Config) (*Engine, error) {
 		minAge:      minAge,
 		cat:         cat,
 		archivers:   map[string]archiver.Archiver{},
-		codec:       cfg.CompressCodec(),
+		codec:       cfg.CompressScheme(),
 		fopts:       fopts,
 		dcopts:      dcopts,
 		limiters:    limiters,
@@ -1332,7 +1332,7 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 	}
 
 	sizeLabel := "compressed"
-	if arch.Codec == "none" {
+	if arch.Compress == "none" {
 		sizeLabel = "stored" // no compressor in the pipe; "compressed" would be a lie
 	}
 	if arch.FileCount == 0 {
@@ -1445,7 +1445,7 @@ func clearDirContents(dir string) error {
 // leaves the server), while a server-held key decrypts on the server and ships compressed
 // plaintext (never inflated) to a remote target. targetHost "" extracts server-side.
 func (e *Engine) extractStep(step restore.Step, destDir, targetHost string, ec config.EncryptConfig) error {
-	return e.extractInto(step.SlotID, step.DLE, step.Level, step.Codec, step.Encrypt, step.Archiver, destDir, targetHost, ec, nil)
+	return e.extractInto(step.SlotID, step.DLE, step.Level, step.Compress, step.Encrypt, step.Archiver, destDir, targetHost, ec, nil)
 }
 
 // extractInto streams an archive's raw parts through the decode→extract pipeline into
@@ -1736,7 +1736,7 @@ func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, 
 		}
 		// Recover always extracts server-side (targetHost ""), so decrypt stays on the
 		// server — the client-only-key case was already rejected above.
-		if err := e.extractInto(st.SlotID, st.DLE, st.Level, st.Codec, st.Encrypt, st.Archiver, destDir, "", ec, st.Members); err != nil {
+		if err := e.extractInto(st.SlotID, st.DLE, st.Level, st.Compress, st.Encrypt, st.Archiver, destDir, "", ec, st.Members); err != nil {
 			return files, fmt.Errorf("extract from %s %s L%d: %w", st.SlotID, st.DLE, st.Level, err)
 		}
 		files += countFiles(st.Members)

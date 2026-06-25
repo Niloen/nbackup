@@ -222,7 +222,7 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 		Host:         spec.Host,
 		Path:         spec.Path,
 		Archiver:     spec.Archiver,
-		Codec:        w.codec,
+		Compress:     w.codec,
 		Encrypt:      spec.Encrypt,
 		Level:        spec.Level,
 		Compressed:   meter.Bytes(),
@@ -316,7 +316,7 @@ func (w *Writer) archiveHeader(dle, host, path, archiver string, level int, base
 		Host:      host,
 		Path:      path,
 		Archiver:  archiver,
-		Codec:     codec,
+		Compress:  codec,
 		Encrypt:   encrypt,
 		Level:     level,
 		BaseSlot:  baseSlot,
@@ -388,7 +388,7 @@ func (w *Writer) drainParts(base record.Header, src io.Reader) ([]record.FilePos
 // recorded checksum is unchanged — and only the part layout (and Parts count) is new.
 // The header carries the archive's original codec, so restore reverses the right one.
 func (w *Writer) CopyArchive(meta record.Archive, src io.Reader) (record.Archive, error) {
-	base := w.archiveHeader(meta.DLE, meta.Host, meta.Path, meta.Archiver, meta.Level, meta.BaseSlot, meta.Codec, meta.Encrypt)
+	base := w.archiveHeader(meta.DLE, meta.Host, meta.Path, meta.Archiver, meta.Level, meta.BaseSlot, meta.Compress, meta.Encrypt)
 	h := sha256.New()
 	parts, err := w.drainParts(base, io.TeeReader(src, h))
 	if err != nil {

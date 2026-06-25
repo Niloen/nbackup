@@ -98,13 +98,13 @@ func payloadExt(h record.Header) string {
 	if h.Kind == record.KindSeal {
 		return ".json"
 	}
-	switch h.Codec {
+	switch h.Compress {
 	case "gzip":
 		return ".tar.gz"
 	case "none", "":
 		return ".tar"
 	default: // zstd and any future codec named after its extension
-		return ".tar." + codecExt(h.Codec)
+		return ".tar." + codecExt(h.Compress)
 	}
 }
 

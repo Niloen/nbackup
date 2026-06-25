@@ -32,7 +32,7 @@ func goldenHeader() record.Header {
 		Host:      "h",
 		Path:      "/data",
 		Archiver:  "gnutar",
-		Codec:     "none",
+		Compress:  "none",
 		Level:     1,
 		BaseSlot:  "slot-2026-01-01",
 		CreatedAt: goldenTime,

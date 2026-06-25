@@ -3,7 +3,7 @@
   "medium_type": "disk",
   "landing": "disk",
   "param_key": "path",
-  "codec": "none",
+  "compress": "none",
   "restores": [
     {
       "slot": "slot-2026-06-21",

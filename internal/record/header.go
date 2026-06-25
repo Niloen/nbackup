@@ -34,7 +34,7 @@ type Header struct {
 	Host      string    `json:"host,omitempty"`
 	Path      string    `json:"path,omitempty"`
 	Archiver  string    `json:"archiver,omitempty"`
-	Codec     string    `json:"codec,omitempty"`
+	Compress  string    `json:"compress,omitempty"`
 	Encrypt   string    `json:"encrypt,omitempty"` // encryption scheme name (gpg); reversed on restore. "" = plaintext. The key is never recorded — gpg resolves it from the ciphertext + keyring.
 	Level     int       `json:"level,omitempty"`
 	BaseSlot  string    `json:"base_slot,omitempty"`

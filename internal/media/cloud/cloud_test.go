@@ -47,7 +47,7 @@ func TestRejectsPartSize(t *testing.T) {
 func appendArchive(t *testing.T, v media.Volume, slot, dle string, level int, payload string) int {
 	t.Helper()
 	pos, err := v.AppendFile(
-		record.Header{Slot: slot, Kind: record.KindArchive, DLE: dle, Level: level, Codec: "none"},
+		record.Header{Slot: slot, Kind: record.KindArchive, DLE: dle, Level: level, Compress: "none"},
 		func(w io.Writer) error { _, e := w.Write([]byte(payload)); return e },
 	)
 	if err != nil {
@@ -214,7 +214,7 @@ func TestAbortedWriteLeavesNoObject(t *testing.T) {
 	cv := openVol(t)
 	wantErr := fmt.Errorf("boom")
 	_, err := cv.AppendFile(
-		record.Header{Slot: "slot-x", Kind: record.KindArchive, DLE: "h-data", Codec: "none"},
+		record.Header{Slot: "slot-x", Kind: record.KindArchive, DLE: "h-data", Compress: "none"},
 		func(w io.Writer) error { return wantErr },
 	)
 	if err == nil {

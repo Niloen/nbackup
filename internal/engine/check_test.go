@@ -17,7 +17,7 @@ func newCheckEngine(t *testing.T, sources []config.DLE) *Engine {
 		Sources: sources,
 		Workdir: t.TempDir(),
 	}
-	cfg.Compress.Codec = "none"
+	cfg.Compress.Scheme = "none"
 	eng, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)

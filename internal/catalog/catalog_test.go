@@ -26,7 +26,7 @@ func newVolume(t *testing.T, path string) media.Volume {
 func putSlot(t *testing.T, v media.Volume, s *record.Slot) {
 	t.Helper()
 	for _, a := range s.Archives {
-		h := record.Header{Slot: s.ID, Kind: record.KindArchive, DLE: a.DLE, Level: a.Level, Codec: a.Codec}
+		h := record.Header{Slot: s.ID, Kind: record.KindArchive, DLE: a.DLE, Level: a.Level, Compress: a.Compress}
 		if _, err := v.AppendFile(h, func(w io.Writer) error {
 			_, e := w.Write([]byte("payload"))
 			return e
