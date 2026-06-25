@@ -617,8 +617,12 @@ func TestTapeLibraryRestore(t *testing.T) {
 		t.Fatalf("copy s1: %v", err)
 	}
 
-	write(t, filepath.Join(src, "f.txt"), "v2")
+	// Sleep BEFORE writing v2 so its mtime is strictly newer than the L0 dump's
+	// snapshot timestamp — GNU tar's listed-incremental only captures a file
+	// modified after the base, so a v2 written in the same instant as the L0 dump
+	// could be missed by the L1 and the restore would see v1 (a flaky failure).
 	time.Sleep(1100 * time.Millisecond)
+	write(t, filepath.Join(src, "f.txt"), "v2")
 	s2, err := eng.Run(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump 2: %v", err)
@@ -684,8 +688,10 @@ func TestTapeAppendableFalse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dump 1: %v", err)
 	}
-	write(t, filepath.Join(src, "f.txt"), "data2")
+	// Sleep BEFORE writing data2 so its mtime is strictly newer than the L0 dump's
+	// snapshot timestamp — otherwise the L1 could miss a same-instant change.
 	time.Sleep(1100 * time.Millisecond)
+	write(t, filepath.Join(src, "f.txt"), "data2")
 	s2, err := eng.Run(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump 2: %v", err)
@@ -825,8 +831,12 @@ func TestManualStationReadSwap(t *testing.T) {
 		t.Fatalf("copy s1: %v", err)
 	}
 
-	write(t, filepath.Join(src, "f.txt"), "v2")
+	// Sleep BEFORE writing v2 so its mtime is strictly newer than the L0 dump's
+	// snapshot timestamp — GNU tar's listed-incremental only captures a file
+	// modified after the base, so a v2 written in the same instant as the L0 dump
+	// could be missed by the L1 and the restore would see v1 (a flaky failure).
 	time.Sleep(1100 * time.Millisecond)
+	write(t, filepath.Join(src, "f.txt"), "v2")
 	s2, err := eng.Run(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump 2: %v", err)
