@@ -67,14 +67,22 @@ it, and **recovery never requires NBackup**:
 # single full archive (the disk payload is a clean tar.zst — no header to skip):
 zstd -dc 000000-app01-home-L0.tar.zst | tar -xf -
 
-# a full + incrementals, replayed in slot order — date then same-day sequence,
-# which is also NBackup's restore order (a plain glob mis-sorts a `.2` rerun
-# before its own date, since '.' < '/', so order the dirs explicitly):
-for d in $(ls -d slots/slot-* | sed -E 's#(/slot-[0-9-]+)$#\1.1#' \
-            | sort -t. -k1,1 -k2,2n | sed -E 's#\.1$##'); do
-  for a in "$d"/0*-app01-home-L*.tar.zst; do
-    zstd -dc "$a" | tar --extract --listed-incremental=/dev/null
-  done
+# a full + incrementals, replayed as NBackup does: ONE archive per level — the
+# newest of each, from the last full forward — in level order. Each level is
+# cumulative since the level below, so only the newest dump of a level is needed;
+# replaying an older same-level rerun would re-apply GNU tar's rename/delete
+# directives and abort ("Cannot rename …"). First order slots by date then
+# same-day sequence (a plain glob mis-sorts a `.2` rerun before its own date,
+# since '.' < '/', so order the dirs explicitly):
+dle=app01-home
+slots=$(ls -d slots/slot-* | sed -E 's#(/slot-[0-9-]+)$#\1.1#' \
+          | sort -t. -k1,1 -k2,2n | sed -E 's#\.1$##')
+# keep only the slots from this DLE's most recent full onward:
+full=$(for d in $slots; do ls "$d"/0*-"$dle"-L0.tar* 2>/dev/null; done | tail -1)
+chain=$(printf '%s\n' "$slots" | sed -n "\#^$(dirname "$full")\$#,\$p")
+for lvl in $(seq 0 9); do
+  a=$(for d in $chain; do ls "$d"/0*-"$dle"-L"$lvl".tar* 2>/dev/null; done | tail -1)
+  [ -n "$a" ] && zstd -dc "$a" | tar --extract --listed-incremental=/dev/null
 done
 # (an ENCRYPTED archive keeps the same .tar.zst name — the header records the
 #  scheme, the file is not renamed — and reverses the same way, decrypting first:

@@ -144,9 +144,19 @@ from climbing shrinks as levels deepen, level 1 stays the common case and deep
 levels are rare. Two payoffs over a naive per-run climb: restore chains stay short,
 and consecutive same-level incrementals *overlap*, so losing one does not break the
 chain. A level-`L` dump bases on the `L-1` snapshot, so repeating a level just
-re-derives `L`.snar from the unchanged `L-1`.snar; `restore.Chain` replays every
-archive from the full forward, which stays correct under repeated levels (each
-cumulative dump fully reconciles its directories) though not yet minimal.
+re-derives `L`.snar from the unchanged `L-1`.snar. `restore.Chain` is **Amanda's
+per-level restore**: it replays exactly one archive per level — the tip (the most
+recent dump at or before the target) walked back along each incremental's recorded
+`BaseSlot` to the full — so a redundant same-level repeat is skipped, not replayed.
+Replaying every same-level dump is not merely non-minimal: GNU tar's directory
+directives (rename, delete) are *not* idempotent across independent incremental
+extractions, so a second cumulative `L1` carrying the same `rename old → new` would
+abort the chain (`tar: Cannot rename …`). Walking `BaseSlot` also keeps the chain
+*consistent* — each step's base is the exact dump it derives from, never an unrelated
+same-level dump — and a `BaseSlot` whose slot has been pruned is a **broken-chain
+error**, never a silent partial restore. The overlap-redundancy property (fall back
+to an earlier cumulative incremental when the tip's copy is unreadable) is a deferred
+recovery feature, not the normal restore path.
 
 **Recover is amrecover without an index server.** Amanda runs a separate index
 server holding per-dump gzipped path lists so `amrecover` can browse without
