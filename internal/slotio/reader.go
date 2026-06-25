@@ -14,6 +14,12 @@ import (
 // Reader reads slot contents back from media. It holds no volume — an archive's
 // parts may live on several volumes, so the caller supplies a PartOpener that mounts
 // and opens each part in turn.
+//
+// Decode here is deliberately in-process (crypt.Decrypt → filter.Decompress as local
+// children), the one read path that does not go through the host-aware hostexec stage
+// pipeline the write and client-side restore paths use: a slot read is always
+// server-local, so there is no host to cross. Client-side decode (an untrusted-server
+// key) is the engine's extractStepOnClient, which runs the stage pipeline on the client.
 type Reader struct {
 	fopts filter.Options
 	copts crypt.Options
@@ -39,7 +45,7 @@ type Expect struct {
 // PartOpener mounts the volume a part lives on and opens its file, returning the
 // file's header and a payload stream the caller closes. The engine implements it
 // over the librarian (mount the part's volume, then ReadFile its position).
-type PartOpener func(p PartPosition) (format.Header, io.ReadCloser, error)
+type PartOpener func(p format.FilePos) (format.Header, io.ReadCloser, error)
 
 // OpenArchiveParts opens the plaintext stream of an archive whose payload is the
 // ordered concatenation of parts. It reads each part fully before opening the next
@@ -47,7 +53,7 @@ type PartOpener func(p PartPosition) (format.Header, io.ReadCloser, error)
 // against want and its position in the sequence, then reverses the transforms over
 // the whole concatenation in write order's inverse: decrypt, then decompress. The
 // caller closes the returned reader.
-func (r *Reader) OpenArchiveParts(parts []PartPosition, codec, encrypt string, want Expect, open PartOpener) (io.ReadCloser, error) {
+func (r *Reader) OpenArchiveParts(parts []format.FilePos, codec, encrypt string, want Expect, open PartOpener) (io.ReadCloser, error) {
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("archive %s %s L%d has no parts", want.Slot, want.DLE, want.Level)
 	}
@@ -76,13 +82,13 @@ func (r *Reader) OpenArchiveParts(parts []PartPosition, codec, encrypt string, w
 // concatenation of its parts, without reversing the codec — the read side of a copy,
 // which re-splits the same bytes onto the target without recompressing. Each part's
 // header is asserted as it is reached. The caller closes the returned reader.
-func (r *Reader) OpenRawParts(parts []PartPosition, want Expect, open PartOpener) io.ReadCloser {
+func (r *Reader) OpenRawParts(parts []format.FilePos, want Expect, open PartOpener) io.ReadCloser {
 	return &partsReader{parts: parts, want: want, open: open}
 }
 
 // VerifyParts asserts each part's header against want, then re-hashes the
 // concatenated raw payloads and compares to sha.
-func (r *Reader) VerifyParts(parts []PartPosition, want Expect, sha string, open PartOpener) (bool, error) {
+func (r *Reader) VerifyParts(parts []format.FilePos, want Expect, sha string, open PartOpener) (bool, error) {
 	raw := &partsReader{parts: parts, want: want, open: open}
 	defer raw.Close()
 	got, err := xfer.HashReader(raw)
@@ -96,7 +102,7 @@ func (r *Reader) VerifyParts(parts []PartPosition, want Expect, sha string, open
 // the previous one is exhausted so that only one volume is mounted at a time. It
 // asserts each part's header (identity + ascending part index) before its bytes flow.
 type partsReader struct {
-	parts []PartPosition
+	parts []format.FilePos
 	want  Expect
 	open  PartOpener
 	idx   int

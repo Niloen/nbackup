@@ -12,6 +12,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
 )
@@ -28,10 +29,16 @@ func Fatalf(format string, args ...any) {
 	os.Exit(1)
 }
 
+// todayUTC is today's date at UTC midnight — the run-date default and the
+// past/future boundary the plan/dump guards compare against.
+func todayUTC() time.Time {
+	return time.Now().UTC().Truncate(24 * time.Hour)
+}
+
 // ParseDate parses a YYYY-MM-DD date, or returns today (UTC) when empty.
 func ParseDate(s string) (time.Time, error) {
 	if s == "" {
-		return time.Now().UTC().Truncate(24 * time.Hour), nil
+		return todayUTC(), nil
 	}
 	d, err := time.Parse("2006-01-02", s)
 	if err != nil {
@@ -45,9 +52,8 @@ func ParseDate(s string) (time.Time, error) {
 // ignores everything that happened since and reports a misleading from-scratch
 // cold start — not a meaningful preview. Today and future dates are fine.
 func errPastPlan(date time.Time) error {
-	today := time.Now().UTC().Truncate(24 * time.Hour)
-	if date.Before(today) {
-		return fmt.Errorf("cannot plan a run for %s: it is in the past, and planning only reflects history before the run date (so a past date reports a misleading cold start)", date.Format("2006-01-02"))
+	if date.Before(todayUTC()) {
+		return fmt.Errorf("cannot plan a run for %s: it is in the past, and planning only reflects history before the run date (so a past date reports a misleading cold start)", format.DateString(date))
 	}
 	return nil
 }
@@ -58,9 +64,8 @@ func errPastPlan(date time.Time) error {
 // incremental level rather than starting that date's own chain) and splice an
 // out-of-order archive into date-ordered restore chains. Today and future are fine.
 func errPastDump(date time.Time) error {
-	today := time.Now().UTC().Truncate(24 * time.Hour)
-	if date.Before(today) {
-		return fmt.Errorf("cannot dump for %s: it is in the past, and backdating a run is not supported (the planner builds on history before the run date) — use today's date", date.Format("2006-01-02"))
+	if date.Before(todayUTC()) {
+		return fmt.Errorf("cannot dump for %s: it is in the past, and backdating a run is not supported (the planner builds on history before the run date) — use today's date", format.DateString(date))
 	}
 	return nil
 }

@@ -7,7 +7,32 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Niloen/nbackup/internal/streamproc"
 )
+
+// encrypt runs the scheme's encryptor over src using the read-side plumbing, the
+// peer of the live EncryptCmd path; it lets the round-trip tests produce real
+// ciphertext without the deleted streaming Encrypt write-helper.
+func encrypt(t *testing.T, scheme string, o Options, src []byte) []byte {
+	t.Helper()
+	s, err := spec(scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := streamproc.ReadThrough(s.argv(s.encryptArgv, o), o.Nice, bytes.NewReader(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
 
 // register a deterministic, non-identity scheme backed by gzip so the
 // encrypt->decrypt plumbing is exercised without a real cipher in CI (the test
@@ -32,19 +57,9 @@ func TestRoundTrip(t *testing.T) {
 				t.Skipf("scheme unavailable: %v", err)
 			}
 
-			var ciphertext bytes.Buffer
-			ew, err := Encrypt(scheme, &ciphertext, Options{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := ew.Write(payload); err != nil {
-				t.Fatal(err)
-			}
-			if err := ew.Close(); err != nil {
-				t.Fatal(err)
-			}
+			ciphertext := encrypt(t, scheme, Options{}, payload)
 
-			rc, err := Decrypt(scheme, bytes.NewReader(ciphertext.Bytes()), Options{})
+			rc, err := Decrypt(scheme, bytes.NewReader(ciphertext), Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -59,7 +74,7 @@ func TestRoundTrip(t *testing.T) {
 				t.Errorf("round trip mismatch: got %d bytes, want %d", len(got), len(payload))
 			}
 			// A real transform must not leave the payload in the clear.
-			if scheme == "gztest" && bytes.Contains(ciphertext.Bytes(), []byte("secrets")) {
+			if scheme == "gztest" && bytes.Contains(ciphertext, []byte("secrets")) {
 				t.Error("ciphertext still contains the plaintext")
 			}
 		})
@@ -77,21 +92,11 @@ func TestGPGRoundTrip(t *testing.T) {
 		t.Skipf("gpg unavailable: %v", err)
 	}
 	payload := []byte("the launch codes are 0000")
-	var ciphertext bytes.Buffer
-	ew, err := Encrypt("gpg", &ciphertext, o)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ew.Write(payload); err != nil {
-		t.Fatal(err)
-	}
-	if err := ew.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(ciphertext.Bytes(), []byte("launch codes")) {
+	ciphertext := encrypt(t, "gpg", o, payload)
+	if bytes.Contains(ciphertext, []byte("launch codes")) {
 		t.Fatal("ciphertext still contains the plaintext")
 	}
-	rc, err := Decrypt("gpg", bytes.NewReader(ciphertext.Bytes()), o)
+	rc, err := Decrypt("gpg", bytes.NewReader(ciphertext), o)
 	if err != nil {
 		t.Fatal(err)
 	}

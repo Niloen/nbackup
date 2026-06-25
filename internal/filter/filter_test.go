@@ -5,7 +5,32 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/Niloen/nbackup/internal/streamproc"
 )
+
+// compress runs the codec's compressor over src using the read-side plumbing, the
+// peer of the live CompressCmd path; it lets the round-trip test produce real
+// compressed bytes without the deleted streaming Compress write-helper.
+func compress(t *testing.T, codec string, o Options, src []byte) []byte {
+	t.Helper()
+	s, err := spec(codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := streamproc.ReadThrough(s.argv(s.compressArgv, o), o.Nice, bytes.NewReader(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
 
 // TestRoundTrip checks compress -> decompress reproduces the input for every
 // built-in codec whose binary is available (none always is).
@@ -18,19 +43,9 @@ func TestRoundTrip(t *testing.T) {
 				t.Skipf("codec unavailable: %v", err)
 			}
 
-			var compressed bytes.Buffer
-			cw, err := Compress(codec, &compressed, Options{Level: 3})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := cw.Write(payload); err != nil {
-				t.Fatal(err)
-			}
-			if err := cw.Close(); err != nil {
-				t.Fatal(err)
-			}
+			compressed := compress(t, codec, Options{Level: 3}, payload)
 
-			rc, err := Decompress(codec, bytes.NewReader(compressed.Bytes()), Options{})
+			rc, err := Decompress(codec, bytes.NewReader(compressed), Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -45,8 +60,8 @@ func TestRoundTrip(t *testing.T) {
 				t.Errorf("round trip mismatch: got %d bytes, want %d", len(got), len(payload))
 			}
 			// A real compressor should shrink this very compressible payload.
-			if codec != "none" && compressed.Len() >= len(payload) {
-				t.Errorf("%s did not compress: %d >= %d", codec, compressed.Len(), len(payload))
+			if codec != "none" && len(compressed) >= len(payload) {
+				t.Errorf("%s did not compress: %d >= %d", codec, len(compressed), len(payload))
 			}
 		})
 	}

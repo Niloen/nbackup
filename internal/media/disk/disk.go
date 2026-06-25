@@ -23,8 +23,8 @@ func init() {
 		// Disk is unbounded, so an archive is always a single part; part_size (the
 		// tape-spanning chunk bound) is meaningless here and refused to avoid a
 		// silently ignored knob.
-		if opts.Get("part_size") != "" {
-			return nil, fmt.Errorf("disk medium does not support part_size (it is unbounded and never splits archives)")
+		if err := media.RejectPartSize(opts, "disk"); err != nil {
+			return nil, err
 		}
 		return fslike.Open(fsStore{root: filepath.Join(path, "slots")})
 	})

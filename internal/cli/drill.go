@@ -10,6 +10,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/report"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
@@ -115,7 +116,7 @@ func newDrillCmd(a *app) *cobra.Command {
 			}
 
 			opts := engine.DrillOptions{
-				AsOf:       date.Format("2006-01-02"),
+				AsOf:       format.DateString(date),
 				Window:     win,
 				Sample:     sample,
 				Medium:     from,
@@ -127,19 +128,13 @@ func newDrillCmd(a *app) *cobra.Command {
 			}
 
 			// Dry-run only reads; a real run writes the ledger + WORM probe, so lock it.
-			var eng *engine.Engine
-			if !dryRun {
-				var unlock func()
-				eng, unlock, err = a.lockedEngine(cfg)
-				if err != nil {
-					return err
-				}
-				defer unlock()
-				if !unattended {
-					eng.SetOperator(stdinOperator{}) // attended: may prompt for a tape swap
-				}
-			} else if eng, err = newEngine(cfg); err != nil {
+			eng, release, err := a.engineFor(cfg, !dryRun)
+			if err != nil {
 				return err
+			}
+			defer release()
+			if !dryRun && !unattended {
+				eng.SetOperator(stdinOperator{}) // attended: may prompt for a tape swap
 			}
 
 			if dryRun {
@@ -195,13 +190,13 @@ func printDrillReport(r *engine.DrillReport) {
 		mode, r.AsOf, r.Medium, r.Tier, unattendedTag(r.Unattended))
 
 	if len(r.Targets) == 0 {
-		fmt.Printf("No DLEs due to drill (every DLE drilled within %s).\n\n", humanDur(r.Window))
+		fmt.Printf("No DLEs due to drill (every DLE drilled within %s).\n\n", sizeutil.FormatDuration(r.Window))
 	} else {
 		verb := "Would drill"
 		if r.Apply {
 			verb = "Drilled"
 		}
-		fmt.Printf("%s %d DLE(s) (window %s, sample of the riskiest):\n", verb, len(r.Targets), humanDur(r.Window))
+		fmt.Printf("%s %d DLE(s) (window %s, sample of the riskiest):\n", verb, len(r.Targets), sizeutil.FormatDuration(r.Window))
 		tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 		if r.Apply {
 			fmt.Fprintln(tw, "  DLE\tAS-OF\tSLOT\tEGRESS\tRESULT")
@@ -230,7 +225,7 @@ func printDrillReport(r *engine.DrillReport) {
 	}
 
 	// Coverage / SLO.
-	fmt.Printf("Coverage: %d DLE(s) not yet covered within %s", r.Overdue, humanDur(r.Window))
+	fmt.Printf("Coverage: %d DLE(s) not yet covered within %s", r.Overdue, sizeutil.FormatDuration(r.Window))
 	if n := len(r.NeverDrilled); n > 0 {
 		fmt.Printf(" (%d never drilled)", n)
 	}
@@ -262,14 +257,6 @@ func unattendedTag(unattended bool) string {
 		return ", unattended"
 	}
 	return ""
-}
-
-// humanDur renders a coverage window as whole days when it divides evenly.
-func humanDur(d time.Duration) string {
-	if d%(24*time.Hour) == 0 {
-		return fmt.Sprintf("%dd", int(d.Hours()/24))
-	}
-	return d.String()
 }
 
 // stdinIsTerminal reports whether stdin is an interactive terminal (vs a pipe/cron),

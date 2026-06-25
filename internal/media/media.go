@@ -137,6 +137,17 @@ type Options map[string]string
 // Get returns the value for a parameter key, or "".
 func (o Options) Get(key string) string { return o[key] }
 
+// RejectPartSize returns an error when opts sets part_size on an unbounded,
+// address-identified medium (disk, cloud) that never splits an archive into parts — so
+// the knob is refused with one shared message rather than silently ignored. Spanning
+// media (tape) accept and honor part_size instead.
+func RejectPartSize(opts Options, mediumType string) error {
+	if opts.Get("part_size") != "" {
+		return fmt.Errorf("%s medium does not support part_size (it is unbounded and never splits archives)", mediumType)
+	}
+	return nil
+}
+
 // Volume is a medium holding an ordered sequence of header-framed files.
 //
 // Contract: opening a Volume must be cheap (no reading every file), and

@@ -15,6 +15,27 @@ const (
 	StatusSealed = "sealed"
 )
 
+// FilePos is the location of one file on a volume: the label of the volume it is on
+// plus a file position. Label is the volume's global, device-independent identity (the
+// name on the cartridge); it is empty for address-identified media (disk, s3), which
+// carry no label — there the medium is its own sole volume, so no per-file volume id is
+// needed. It locates both an archive part (as the slotio writer emits it) and a
+// placement's seal record (as the catalog persists it) — one type both layers share.
+type FilePos struct {
+	Label string `json:"label,omitempty"` // volume label name; "" for address-identified media
+	Epoch int    `json:"epoch,omitempty"` // label epoch when recorded; staleness check on read
+	Pos   int    `json:"pos"`
+}
+
+// ArchivePos is one archive's identity and the ordered locations of its parts. An
+// archive that fits one volume has a single part; a spanned archive has its compressed
+// payload split into several parts across volumes, in order.
+type ArchivePos struct {
+	DLE   string    `json:"dle"`
+	Level int       `json:"level"`
+	Parts []FilePos `json:"parts"`
+}
+
 // Slot is a run's metadata — NBackup's primary artifact. It is persisted as the
 // payload of the per-slot seal record (the last file written to a volume); its
 // presence marks the slot sealed. It carries a thin authoring lifecycle (NewSlot

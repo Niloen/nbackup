@@ -45,36 +45,6 @@ func (m *Meter) SHA256() string { return hex.EncodeToString(m.h.Sum(nil)) }
 // with Write.
 func (m *Meter) Bytes() int64 { return m.n.Load() }
 
-// Counter is a write filter that passes bytes through while counting them and
-// invoking an optional callback with the running total — used to meter the
-// uncompressed source stream for live progress. The callback runs inline on the
-// writing goroutine, so it must be cheap.
-type Counter struct {
-	dst    io.Writer
-	n      int64
-	report func(total int64)
-}
-
-// NewCounter wraps dst, calling report (if non-nil) with the cumulative byte
-// count after each successful write.
-func NewCounter(dst io.Writer, report func(total int64)) *Counter {
-	return &Counter{dst: dst, report: report}
-}
-
-func (c *Counter) Write(p []byte) (int, error) {
-	n, err := c.dst.Write(p)
-	if n > 0 {
-		c.n += int64(n)
-		if c.report != nil {
-			c.report(c.n)
-		}
-	}
-	return n, err
-}
-
-// Bytes returns the number of bytes written so far.
-func (c *Counter) Bytes() int64 { return c.n }
-
 // HashReader returns the hex sha256 of everything read from r.
 func HashReader(r io.Reader) (string, error) {
 	h := sha256.New()

@@ -69,8 +69,14 @@ func writeSummary(path string, r Run) error {
 		return err
 	}
 	data = append(data, '\n')
+	return writeFileAtomic(path, data, 0o644)
+}
+
+// writeFileAtomic writes data to a sibling temp file and renames it over path,
+// so a concurrent reader never observes a half-written file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, perm); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
@@ -151,9 +157,5 @@ func compactIfLarge(path string) error {
 		buf.Write(line)
 		buf.WriteByte('\n')
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeFileAtomic(path, buf.Bytes(), 0o644)
 }

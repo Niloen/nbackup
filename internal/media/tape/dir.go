@@ -5,104 +5,37 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/Niloen/nbackup/internal/media"
 )
 
-// loadedMarker records which bay is currently in the drive, persisted so the
-// mounted tape survives across CLI invocations (each opens a fresh handle).
-const loadedMarker = ".loaded"
+// bayPrefix names a library's physical positions: bay-01, bay-02, …
+const bayPrefix = "bay-"
 
 // bayName is the directory name of physical position i (1-based): bay-01, bay-02…
-func bayName(i int) string { return fmt.Sprintf("bay-%02d", i) }
+func bayName(i int) string { return fmt.Sprintf("%s%02d", bayPrefix, i) }
 
 // dirChanger emulates a tape library as a directory of bays (subdirectories),
 // each holding one cartridge (a dirDevice). It is label-agnostic: it mounts bays
 // by name and reports a bay's label only as a convenience inventory (a stand-in
-// for a barcode reader), exactly the seam a real autochanger exposes.
-type dirChanger struct {
-	root      string
-	capacity  int64
-	mu        sync.Mutex
-	loadedBay string
-}
+// for a barcode reader), exactly the seam a real autochanger exposes. It is a thin
+// wrapper over the shared dirLibrary core, exposing every bay as inventory.
+type dirChanger struct{ *dirLibrary }
 
 func openDirChanger(root string, capacity int64, tapes int) (*dirChanger, error) {
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return nil, err
-	}
-	if tapes < 1 {
-		tapes = 1
-	}
-	// Stock the library with the configured number of (initially blank) bays.
-	for i := 1; i <= tapes; i++ {
-		if err := os.MkdirAll(filepath.Join(root, bayName(i)), 0o755); err != nil {
-			return nil, err
-		}
-	}
-	c := &dirChanger{root: root, capacity: capacity}
-	if b, err := os.ReadFile(filepath.Join(root, loadedMarker)); err == nil {
-		c.loadedBay = strings.TrimSpace(string(b))
-	}
-	return c, nil
-}
-
-func (c *dirChanger) mount(bay string) (device, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	dir := filepath.Join(c.root, bay)
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		return nil, fmt.Errorf("no such bay %q in library %s", bay, c.root)
-	}
-	dev, err := openDir(dir, c.capacity)
+	lib, err := openDirLibrary(root, capacity, bayPrefix, tapes)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(c.root, loadedMarker), []byte(bay), 0o644); err != nil {
-		return nil, err
-	}
-	c.loadedBay = bay
-	return dev, nil
+	return &dirChanger{lib}, nil
 }
 
-func (c *dirChanger) loaded() (device, string, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.loadedBay == "" {
-		return nil, "", false
-	}
-	dev, err := openDir(filepath.Join(c.root, c.loadedBay), c.capacity)
-	if err != nil {
-		return nil, "", false
-	}
-	return dev, c.loadedBay, true
-}
+func (c *dirChanger) loaded() (device, string, bool) { return c.loadedDevice() }
 
-func (c *dirChanger) bays() ([]media.VolumeStatus, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	entries, err := os.ReadDir(c.root)
-	if err != nil {
-		return nil, err
-	}
-	var out []media.VolumeStatus
-	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), "bay-") {
-			continue
-		}
-		dev, err := openDir(filepath.Join(c.root, e.Name()), c.capacity)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, deviceStatus(e.Name(), dev, c.capacity))
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, nil
-}
+// bays inventories every bay in the library.
+func (c *dirChanger) bays() ([]media.VolumeStatus, error) { return c.entries(false) }
 
 // dirDevice emulates a tape with a directory of numbered files (Amanda's file:
 // device). It is the fully-testable backend and the default for setups without a

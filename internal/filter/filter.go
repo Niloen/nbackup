@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -71,28 +70,14 @@ func init() {
 	register(Spec{Name: "none", Ext: ""}) // identity: no child process
 }
 
-func prog(o Options, def string) string {
-	if o.Program != "" {
-		return o.Program
-	}
-	return def
-}
+func prog(o Options, def string) string { return streamproc.ProgramOr(o.Program, def) }
 
 func spec(codec string) (Spec, error) {
 	s, ok := registry[codec]
 	if !ok {
-		return Spec{}, fmt.Errorf("unknown codec %q (known: %s)", codec, strings.Join(names(), ", "))
+		return Spec{}, fmt.Errorf("unknown codec %q (known: %s)", codec, strings.Join(streamproc.SortedNames(registry), ", "))
 	}
 	return s, nil
-}
-
-func names() []string {
-	out := make([]string, 0, len(registry))
-	for k := range registry {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // Ext returns the archive file extension for a codec ("" for none).
@@ -118,16 +103,6 @@ func Check(codec string, o Options) error {
 		return fmt.Errorf("codec %q needs %q on PATH: %w", codec, bin, err)
 	}
 	return nil
-}
-
-// Compress returns a WriteCloser that pipes everything written to it through the
-// codec's compressor child and on to dst. Close finishes and waits the child.
-func Compress(codec string, dst io.Writer, o Options) (io.WriteCloser, error) {
-	s, err := spec(codec)
-	if err != nil {
-		return nil, err
-	}
-	return streamproc.WriteThrough(s.argv(s.compressArgv, o), o.Nice, dst)
 }
 
 // Decompress returns a ReadCloser that yields the decompressed form of src by
