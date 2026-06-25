@@ -4,19 +4,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
-func mkSlot(id, date string, archives ...format.Archive) *format.Slot {
-	s := &format.Slot{ID: id, Date: date, Sequence: 1, Status: format.StatusSealed, Archives: archives}
+func mkSlot(id, date string, archives ...record.Archive) *record.Slot {
+	s := &record.Slot{ID: id, Date: date, Sequence: 1, Status: record.StatusSealed, Archives: archives}
 	for _, a := range archives {
 		s.TotalBytes += a.Compressed
 	}
 	return s
 }
 
-func arch(dle string, level int) format.Archive {
-	return format.Archive{DLE: dle, Level: level, Archiver: "gnutar", Codec: "none"}
+func arch(dle string, level int) record.Archive {
+	return record.Archive{DLE: dle, Level: level, Archiver: "gnutar", Codec: "none"}
 }
 
 // TestLedgerRoundTrip checks the ledger persists and reloads, and that Drilled honors
@@ -62,7 +62,7 @@ func TestLedgerRoundTrip(t *testing.T) {
 func TestSelectRotatesAndRanks(t *testing.T) {
 	now := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
 	// a: full only (chain 1). b: full + 2 incrementals (chain 3). c: full only.
-	slots := []*format.Slot{
+	slots := []*record.Slot{
 		mkSlot("slot-2026-06-20", "2026-06-20", arch("a", 0), arch("b", 0), arch("c", 0)),
 		mkSlot("slot-2026-06-21", "2026-06-21", arch("b", 1)),
 		mkSlot("slot-2026-06-22", "2026-06-22", arch("b", 2)),
@@ -101,7 +101,7 @@ func TestSelectRotatesAndRanks(t *testing.T) {
 // the as-of date, not the latest overall.
 func TestSelectPointInTime(t *testing.T) {
 	now := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
-	slots := []*format.Slot{
+	slots := []*record.Slot{
 		mkSlot("slot-2026-06-20", "2026-06-20", arch("a", 0)),
 		mkSlot("slot-2026-06-22", "2026-06-22", arch("a", 1)),
 		mkSlot("slot-2026-06-24", "2026-06-24", arch("a", 1)),

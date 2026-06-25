@@ -12,9 +12,9 @@ import (
 
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/engine"
-	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // DefaultConfigPath is used when -c is not given.
@@ -53,7 +53,7 @@ func ParseDate(s string) (time.Time, error) {
 // cold start — not a meaningful preview. Today and future dates are fine.
 func errPastPlan(date time.Time) error {
 	if date.Before(todayUTC()) {
-		return fmt.Errorf("cannot plan a run for %s: it is in the past, and planning only reflects history before the run date (so a past date reports a misleading cold start)", format.DateString(date))
+		return fmt.Errorf("cannot plan a run for %s: it is in the past, and planning only reflects history before the run date (so a past date reports a misleading cold start)", record.DateString(date))
 	}
 	return nil
 }
@@ -65,7 +65,7 @@ func errPastPlan(date time.Time) error {
 // out-of-order archive into date-ordered restore chains. Today and future are fine.
 func errPastDump(date time.Time) error {
 	if date.Before(todayUTC()) {
-		return fmt.Errorf("cannot dump for %s: it is in the past, and backdating a run is not supported (the planner builds on history before the run date) — use today's date", format.DateString(date))
+		return fmt.Errorf("cannot dump for %s: it is in the past, and backdating a run is not supported (the planner builds on history before the run date) — use today's date", record.DateString(date))
 	}
 	return nil
 }

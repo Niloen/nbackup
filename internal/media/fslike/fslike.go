@@ -21,7 +21,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // Object is one stored file as reported by Store.List: an opaque key the Store can
@@ -84,8 +84,8 @@ func Open(store Store) (*Volume, error) {
 var slug = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
 // stem is the friendly filename base (without extension) for a file.
-func stem(pos int, h format.Header) string {
-	if h.Kind == format.KindSeal {
+func stem(pos int, h record.Header) string {
+	if h.Kind == record.KindSeal {
 		return fmt.Sprintf("%06d-seal", pos)
 	}
 	return fmt.Sprintf("%06d-%s-L%d", pos, slug.ReplaceAllString(h.DLE, "_"), h.Level)
@@ -94,8 +94,8 @@ func stem(pos int, h format.Header) string {
 // payloadExt is the extension for a file's payload, so it is recognizable and
 // directly usable with stock tools. Kept here so the media don't depend on package
 // filter.
-func payloadExt(h format.Header) string {
-	if h.Kind == format.KindSeal {
+func payloadExt(h record.Header) string {
+	if h.Kind == record.KindSeal {
 		return ".json"
 	}
 	switch h.Codec {
@@ -115,7 +115,7 @@ func codecExt(codec string) string {
 	return codec
 }
 
-func (v *Volume) AppendFile(h format.Header, write func(w io.Writer) error) (int, error) {
+func (v *Volume) AppendFile(h record.Header, write func(w io.Writer) error) (int, error) {
 	v.mu.Lock()
 	pos := v.next
 	v.next++
@@ -144,28 +144,28 @@ func (v *Volume) AppendFile(h format.Header, write func(w io.Writer) error) (int
 	return pos, nil
 }
 
-func (v *Volume) ReadFile(pos int) (format.Header, io.ReadCloser, error) {
+func (v *Volume) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
 	v.mu.Lock()
 	e, ok := v.idx[pos]
 	v.mu.Unlock()
 	if !ok {
-		return format.Header{}, nil, fmt.Errorf("no file at position %d", pos)
+		return record.Header{}, nil, fmt.Errorf("no file at position %d", pos)
 	}
 	if e.incomplete {
-		return format.Header{}, nil, fmt.Errorf("file at position %d is incomplete (interrupted append)", pos)
+		return record.Header{}, nil, fmt.Errorf("file at position %d is incomplete (interrupted append)", pos)
 	}
 	h, err := v.readHeader(e.hdr)
 	if err != nil {
-		return format.Header{}, nil, err
+		return record.Header{}, nil, err
 	}
 	r, err := v.store.Open(e.payload)
 	if err != nil {
-		return format.Header{}, nil, err
+		return record.Header{}, nil, err
 	}
 	return h, r, nil
 }
 
-func (v *Volume) Files() ([]format.FileInfo, error) {
+func (v *Volume) Files() ([]record.FileInfo, error) {
 	v.mu.Lock()
 	entries := make(map[int]entry, len(v.idx))
 	for pos, e := range v.idx {
@@ -173,7 +173,7 @@ func (v *Volume) Files() ([]format.FileInfo, error) {
 	}
 	v.mu.Unlock()
 
-	out := make([]format.FileInfo, 0, len(entries))
+	out := make([]record.FileInfo, 0, len(entries))
 	for pos, e := range entries {
 		if e.incomplete {
 			continue // orphan from an interrupted append; not a usable file
@@ -187,7 +187,7 @@ func (v *Volume) Files() ([]format.FileInfo, error) {
 			// best-effort, integrity is verify's job.
 			continue
 		}
-		out = append(out, format.FileInfo{Pos: pos, Header: h})
+		out = append(out, record.FileInfo{Pos: pos, Header: h})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Pos < out[j].Pos })
 	return out, nil
@@ -248,14 +248,14 @@ func (v *Volume) scan() error {
 	return nil
 }
 
-func (v *Volume) readHeader(key string) (format.Header, error) {
+func (v *Volume) readHeader(key string) (record.Header, error) {
 	data, err := v.store.ReadAll(key)
 	if err != nil {
-		return format.Header{}, fmt.Errorf("read header %s: %w", key, err)
+		return record.Header{}, fmt.Errorf("read header %s: %w", key, err)
 	}
-	var h format.Header
+	var h record.Header
 	if err := json.Unmarshal(data, &h); err != nil {
-		return format.Header{}, fmt.Errorf("parse header %s: %w", key, err)
+		return record.Header{}, fmt.Errorf("parse header %s: %w", key, err)
 	}
 	return h, nil
 }

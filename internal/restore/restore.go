@@ -6,7 +6,7 @@ package restore
 import (
 	"fmt"
 
-	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // Step is one archive to extract during a restore. It identifies the archive
@@ -35,7 +35,7 @@ type Step struct {
 // from, never an unrelated same-level dump. A missing base is a broken chain and
 // is an error (a deliberate failure, not a partial restore). The input slots
 // must be sorted in run order.
-func Chain(slots []*format.Slot, dleName, targetSlotID string) ([]Step, error) {
+func Chain(slots []*record.Slot, dleName, targetSlotID string) ([]Step, error) {
 	targetIdx := -1
 	for i, s := range slots {
 		if s.ID == targetSlotID {
@@ -87,7 +87,7 @@ func Chain(slots []*format.Slot, dleName, targetSlotID string) ([]Step, error) {
 // substitution. When BaseSlot was not recorded it derives the base as the most
 // recent dump one level down before curIdx (what the planner would have
 // recorded). A missing base either way is an error, not a partial restore.
-func baseIndex(slots []*format.Slot, curIdx int, dleName string, a format.Archive) (int, error) {
+func baseIndex(slots []*record.Slot, curIdx int, dleName string, a record.Archive) (int, error) {
 	if a.BaseSlot != "" {
 		for i := curIdx - 1; i >= 0; i-- {
 			if slots[i].ID == a.BaseSlot {
@@ -108,7 +108,7 @@ func baseIndex(slots []*format.Slot, curIdx int, dleName string, a format.Archiv
 }
 
 // archiveFor returns the slot's archive for the named DLE, or nil if absent.
-func archiveFor(s *format.Slot, dleName string) *format.Archive {
+func archiveFor(s *record.Slot, dleName string) *record.Archive {
 	for i := range s.Archives {
 		if s.Archives[i].DLE == dleName {
 			return &s.Archives[i]

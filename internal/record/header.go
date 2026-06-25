@@ -1,11 +1,11 @@
-// Package format defines NBackup's self-describing on-medium artifact format:
+// Package record defines NBackup's self-describing on-medium artifact records:
 // the framing header at the start of every file, the volume label record, and the
 // per-slot seal metadata (Slot/Archive) — plus their (de)serialization. It is pure
 // data and codec; it makes no assumptions about where the bytes live (that is a
 // media concern) or how a run is driven (that is the engine's). A volume is
 // recoverable on its own because every file leads with one of these records:
 // scanning them reconstructs the catalog. Amanda analogue: dumpfile_t + amar.
-package format
+package record
 
 import (
 	"bytes"

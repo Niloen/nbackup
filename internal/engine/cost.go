@@ -3,9 +3,9 @@ package engine
 import (
 	"time"
 
-	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/restore"
 	"github.com/Niloen/nbackup/internal/retention"
@@ -60,18 +60,18 @@ type ForecastPoint struct {
 // Pure and offline.
 func (e *Engine) ForecastCost(start time.Time, days int) []ForecastPoint {
 	plans := e.Simulate(start, days)
-	working := append([]*format.Slot(nil), e.cat.SlotsOn(e.mediumName)...)
+	working := append([]*record.Slot(nil), e.cat.SlotsOn(e.mediumName)...)
 	points := make([]ForecastPoint, 0, len(plans))
 	for i, plan := range plans {
 		date := start.AddDate(0, 0, i)
-		ds := format.DateString(date)
+		ds := record.DateString(date)
 
 		// Synthesize the day's run as a sealed slot (sized from the plan's estimates),
 		// replacing any existing slot of the same id so a re-simulation is idempotent.
-		sl := format.NewSlot("slot-"+ds, ds, 1, "forecast", date)
+		sl := record.NewSlot("slot-"+ds, ds, 1, "forecast", date)
 		var runBytes int64
 		for _, it := range plan.Items {
-			sl.AddArchive(format.Archive{DLE: it.Name, Level: it.Level, Compressed: it.EstBytes})
+			sl.AddArchive(record.Archive{DLE: it.Name, Level: it.Level, Compressed: it.EstBytes})
 			runBytes += it.EstBytes
 		}
 		working = dropSlot(working, sl.ID)
@@ -181,14 +181,14 @@ func (e *Engine) estimateRead(refs []archiveRef, forceMedium string) ReadEstimat
 // locateArchive resolves an archive reference to the medium it will be read from and
 // its catalog record. With forceMedium set it reads that medium's copy; otherwise it
 // picks the copy a restore prefers (landing first).
-func (e *Engine) locateArchive(r archiveRef, forceMedium string) (medium string, a format.Archive, ok bool) {
+func (e *Engine) locateArchive(r archiveRef, forceMedium string) (medium string, a record.Archive, ok bool) {
 	s, err := e.cat.ReadSlot(r.slotID)
 	if err != nil {
-		return "", format.Archive{}, false
+		return "", record.Archive{}, false
 	}
 	ar, found := findArchive(s, r.dle, r.level)
 	if !found {
-		return "", format.Archive{}, false
+		return "", record.Archive{}, false
 	}
 	if forceMedium != "" {
 		return forceMedium, ar, true
@@ -198,7 +198,7 @@ func (e *Engine) locateArchive(r archiveRef, forceMedium string) (medium string,
 			return p.Medium, ar, true
 		}
 	}
-	return "", format.Archive{}, false
+	return "", record.Archive{}, false
 }
 
 // costModelFor returns a medium's pricing: the landing medium's cached model, or one
@@ -218,14 +218,14 @@ func (e *Engine) costModelFor(name string) media.Cost {
 
 // partCount is an archive's file count for request pricing: its part count when it
 // spanned volumes, else one.
-func partCount(a format.Archive) int64 {
+func partCount(a record.Archive) int64 {
 	if a.Parts > 1 {
 		return int64(a.Parts)
 	}
 	return 1
 }
 
-func dropSlot(slots []*format.Slot, id string) []*format.Slot {
+func dropSlot(slots []*record.Slot, id string) []*record.Slot {
 	out := slots[:0:0]
 	for _, s := range slots {
 		if s.ID != id {

@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
@@ -33,7 +33,7 @@ type Profile interface {
 	// given the retention floor (the slots that must never be reclaimed, computed
 	// by the retention package). It returns the reclamations to perform, in
 	// deletion order.
-	Reclaim(slots []*format.Slot, keep Retention, now time.Time) []Reclamation
+	Reclaim(slots []*record.Slot, keep Retention, now time.Time) []Reclamation
 }
 
 // Retention reports which slots reclamation must never delete — the floor the
@@ -88,7 +88,7 @@ func (p sizeProfile) TotalBytes() int64 { return p.capacity }
 func (p sizeProfile) VolumeSize() int64 { return 0 }
 
 // Reclaim deletes the oldest non-protected slots until total <= capacity.
-func (p sizeProfile) Reclaim(slots []*format.Slot, keep Retention, now time.Time) []Reclamation {
+func (p sizeProfile) Reclaim(slots []*record.Slot, keep Retention, now time.Time) []Reclamation {
 	if p.capacity <= 0 {
 		return nil // unbounded: nothing to reclaim
 	}
@@ -99,8 +99,8 @@ func (p sizeProfile) Reclaim(slots []*format.Slot, keep Retention, now time.Time
 	if total <= p.capacity {
 		return nil
 	}
-	ordered := append([]*format.Slot(nil), slots...)
-	sort.Slice(ordered, func(i, j int) bool { return format.Less(ordered[i], ordered[j]) }) // oldest first
+	ordered := append([]*record.Slot(nil), slots...)
+	sort.Slice(ordered, func(i, j int) bool { return record.Less(ordered[i], ordered[j]) }) // oldest first
 	var out []Reclamation
 	for _, s := range ordered {
 		if total <= p.capacity {
@@ -166,7 +166,7 @@ func (p volumeProfile) VolumeSize() int64 { return p.volumeSize }
 
 // Reclaim is a placeholder: tape reclamation is whole-volume reuse, which needs
 // a volume catalog and changer (not yet implemented).
-func (p volumeProfile) Reclaim(slots []*format.Slot, keep Retention, now time.Time) []Reclamation {
+func (p volumeProfile) Reclaim(slots []*record.Slot, keep Retention, now time.Time) []Reclamation {
 	return nil
 }
 

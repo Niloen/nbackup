@@ -5,7 +5,7 @@
 // performs the I/O.
 //
 // The "index" amrecover keeps in a separate index server is, here, already in the
-// catalog: every format.Archive carries its tar member list. A recovery tree merges
+// catalog: every record.Archive carries its tar member list. A recovery tree merges
 // the member lists of the restore chain (the full plus every later incremental up
 // to the target) so that each path resolves to the most recent archive that holds
 // it — exactly the file content as of the target date.
@@ -22,7 +22,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/restore"
 )
 
@@ -83,7 +83,7 @@ type Tree struct {
 
 // AsOf resolves an as-of date to the target slot: the most recent slot whose run
 // date is on or before the date. Slots must be in run order.
-func AsOf(slots []*format.Slot, asOf string) (string, error) {
+func AsOf(slots []*record.Slot, asOf string) (string, error) {
 	target := ""
 	for _, s := range slots {
 		if s.Date <= asOf {
@@ -99,7 +99,7 @@ func AsOf(slots []*format.Slot, asOf string) (string, error) {
 // BuildTree reconstructs the filesystem of dle as of asOf (YYYY-MM-DD) by merging
 // the member lists of the restore chain in run order, so each path resolves to the
 // most recent archive that holds it.
-func BuildTree(slots []*format.Slot, dle, asOf string) (*Tree, error) {
+func BuildTree(slots []*record.Slot, dle, asOf string) (*Tree, error) {
 	target, err := AsOf(slots, asOf)
 	if err != nil {
 		return nil, err
@@ -108,7 +108,7 @@ func BuildTree(slots []*format.Slot, dle, asOf string) (*Tree, error) {
 	if err != nil {
 		return nil, err
 	}
-	byID := make(map[string]*format.Slot, len(slots))
+	byID := make(map[string]*record.Slot, len(slots))
 	for _, s := range slots {
 		byID[s.ID] = s
 	}
@@ -133,7 +133,7 @@ func BuildTree(slots []*format.Slot, dle, asOf string) (*Tree, error) {
 	return t, nil
 }
 
-func findArchive(s *format.Slot, dle string, level int) *format.Archive {
+func findArchive(s *record.Slot, dle string, level int) *record.Archive {
 	if s == nil {
 		return nil
 	}

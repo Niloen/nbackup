@@ -1,12 +1,12 @@
 // Package media is NBackup's storage abstraction, analogous to Amanda's Device
 // API. A Volume is a linear medium: an ordered sequence of self-describing files,
-// each a format.Header followed by a payload, addressed by position (file
+// each a record.Header followed by a payload, addressed by position (file
 // number). This one shape maps to a local directory, an object store, or a tape
 // (file marks + fast-forward). The medium owns its physical layout — callers never
 // construct filenames — so slots can be streamed between volumes (disk <-> tape)
 // uniformly. Implementations register themselves, so selecting a medium is a
 // registry lookup. The on-medium artifact format (headers, labels, seals) lives in
-// package format; this package is the device side that reads and writes it.
+// package record; this package is the device side that reads and writes it.
 package media
 
 import (
@@ -15,7 +15,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // Labeled is implemented by media that identify themselves on the medium (tape).
@@ -25,11 +25,11 @@ type Labeled interface {
 	// ReadLabel returns the volume's label. ok is false only when the volume is
 	// blank (no files). A non-empty volume whose file 0 is not a valid NBackup
 	// label is reported as ErrForeignVolume — it must not be silently overwritten.
-	ReadLabel() (lbl format.Label, ok bool, err error)
+	ReadLabel() (lbl record.Label, ok bool, err error)
 	// WriteLabel resets the volume to empty and writes lbl as file 0. This is the
 	// (re)labeling operation and destroys any existing contents; the caller owns
 	// the policy decision of whether that is allowed.
-	WriteLabel(lbl format.Label) error
+	WriteLabel(lbl record.Label) error
 }
 
 // ErrForeignVolume reports a non-empty volume whose file 0 is not an NBackup
@@ -159,10 +159,10 @@ type Volume interface {
 	// AppendFile writes h, then the payload produced by write, and returns the
 	// file's position. The Volume owns concurrency and position assignment
 	// (disk allows concurrent appends; tape serializes).
-	AppendFile(h format.Header, write func(w io.Writer) error) (pos int, err error)
+	AppendFile(h record.Header, write func(w io.Writer) error) (pos int, err error)
 	// ReadFile positions to pos and returns its header and a payload stream the
 	// caller must close.
-	ReadFile(pos int) (format.Header, io.ReadCloser, error)
+	ReadFile(pos int) (record.Header, io.ReadCloser, error)
 	// Files returns every file's position and header in order — the volume's
 	// self-index, used to rebuild the catalog. May be O(volume) (a full scan).
 	//
@@ -174,7 +174,7 @@ type Volume interface {
 	// later-written header sidecar; tape: a fully-framed, decodable record); slot-
 	// level commit is the seal above this. Integrity of files the seal *does* commit
 	// (bit-rot) is verify's job, not enumeration's — Files never asserts it.
-	Files() ([]format.FileInfo, error)
+	Files() ([]record.FileInfo, error)
 	// RemoveSlot reclaims every file belonging to a slot.
 	RemoveSlot(slot string) error
 }

@@ -9,7 +9,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/drill"
-	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/slotio"
 )
 
@@ -189,7 +189,7 @@ func (e *Engine) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerd
 }
 
 // verifyArchive runs the requested checks against one archive on one placement.
-func (e *Engine) verifyArchive(id string, a format.Archive, p catalog.Placement, opts VerifyOptions, opener slotio.PartOpener, logf Logf) ArchiveVerdict {
+func (e *Engine) verifyArchive(id string, a record.Archive, p catalog.Placement, opts VerifyOptions, opener slotio.PartOpener, logf Logf) ArchiveVerdict {
 	v := ArchiveVerdict{Slot: id, DLE: a.DLE, Level: a.Level, Medium: p.Medium, OK: true}
 	parts, found := p.Parts(a.DLE, a.Level)
 	if !found {
@@ -226,7 +226,7 @@ func (e *Engine) verifyArchive(id string, a format.Archive, p catalog.Placement,
 // members (`tar -t`), asserting the pipeline completes cleanly and the members match
 // the seal. It returns ClassNone on success, else the failure class and detail. It
 // writes nothing.
-func (e *Engine) structuralCheck(a format.Archive, parts []format.FilePos, want slotio.Expect, opener slotio.PartOpener) (drill.Class, string) {
+func (e *Engine) structuralCheck(a record.Archive, parts []record.FilePos, want slotio.Expect, opener slotio.PartOpener) (drill.Class, string) {
 	// Verify is the keyless, server-side integrity primitive: structural decode runs on
 	// the server (host ""). The client-side recoverability proof (running the read
 	// pipeline on the client for a client-only key) is drill's job — see the design note.

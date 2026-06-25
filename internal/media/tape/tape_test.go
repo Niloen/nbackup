@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 func openTape(t *testing.T, dir string) media.Volume {
@@ -40,12 +40,12 @@ func TestTapeSequential(t *testing.T) {
 		t.Fatalf("fresh tape should be blank, got %+v", files)
 	}
 
-	p0, err := v.AppendFile(format.Header{Slot: "slot-x", Kind: format.KindArchive, DLE: "h-data"},
+	p0, err := v.AppendFile(record.Header{Slot: "slot-x", Kind: record.KindArchive, DLE: "h-data"},
 		func(w io.Writer) error { _, e := w.Write([]byte("one")); return e })
 	if err != nil {
 		t.Fatal(err)
 	}
-	p1, err := v.AppendFile(format.Header{Slot: "slot-x", Kind: format.KindSeal},
+	p1, err := v.AppendFile(record.Header{Slot: "slot-x", Kind: record.KindSeal},
 		func(w io.Writer) error { _, e := w.Write([]byte("seal")); return e })
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestTapeSequential(t *testing.T) {
 	if len(files2) != 2 {
 		t.Fatalf("after reopen expected 2 files, got %d", len(files2))
 	}
-	p2, _ := v2.AppendFile(format.Header{Slot: "slot-y", Kind: format.KindSeal},
+	p2, _ := v2.AppendFile(record.Header{Slot: "slot-y", Kind: record.KindSeal},
 		func(w io.Writer) error { return nil })
 	if p2 != 2 {
 		t.Errorf("append after reopen got file %d, want 2", p2)
@@ -96,7 +96,7 @@ func TestTapeLabel(t *testing.T) {
 	}
 
 	// Write a label; it lands at file 0 and reads back.
-	want := format.Label{Name: "lto-0007", Pool: "lto", Epoch: 1}
+	want := record.Label{Name: "lto-0007", Pool: "lto", Epoch: 1}
 	if err := lv.WriteLabel(want); err != nil {
 		t.Fatal(err)
 	}
@@ -104,21 +104,21 @@ func TestTapeLabel(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("read label: ok=%v err=%v", ok, err)
 	}
-	if got.Name != "lto-0007" || got.Pool != "lto" || got.Magic != format.LabelMagic {
+	if got.Name != "lto-0007" || got.Pool != "lto" || got.Magic != record.LabelMagic {
 		t.Fatalf("label round trip wrong: %+v", got)
 	}
 
 	// Append an archive after the label (file 1), then relabel: reset must discard
 	// it, leaving only the new label at file 0.
-	if _, err := v.AppendFile(format.Header{Slot: "s", Kind: format.KindArchive, DLE: "d"},
+	if _, err := v.AppendFile(record.Header{Slot: "s", Kind: record.KindArchive, DLE: "d"},
 		func(w io.Writer) error { _, e := w.Write([]byte("x")); return e }); err != nil {
 		t.Fatal(err)
 	}
-	if err := lv.WriteLabel(format.Label{Name: "lto-0007", Pool: "lto", Epoch: 2}); err != nil {
+	if err := lv.WriteLabel(record.Label{Name: "lto-0007", Pool: "lto", Epoch: 2}); err != nil {
 		t.Fatal(err)
 	}
 	files, _ := v.Files()
-	if len(files) != 1 || files[0].Header.Kind != format.KindLabel {
+	if len(files) != 1 || files[0].Header.Kind != record.KindLabel {
 		t.Fatalf("after relabel expected only a label, got %+v", files)
 	}
 	if got, _, _ := lv.ReadLabel(); got.Epoch != 2 {
@@ -133,7 +133,7 @@ func TestTapeFull(t *testing.T) {
 	dir := t.TempDir()
 	// Each file carries a 32 KiB header block; size the tape to hold a label and
 	// one small archive, so a second archive's header overflows it.
-	capacity := int64(3 * format.HeaderBlock)
+	capacity := int64(3 * record.HeaderBlock)
 	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "volume_size": fmt.Sprintf("%d", capacity)})
 	if err != nil {
 		t.Fatal(err)
@@ -142,17 +142,17 @@ func TestTapeFull(t *testing.T) {
 		t.Fatal(err)
 	}
 	lv := v.(media.Labeled)
-	if err := lv.WriteLabel(format.Label{Name: "t1", Pool: "p", Epoch: 1}); err != nil {
+	if err := lv.WriteLabel(record.Label{Name: "t1", Pool: "p", Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := v.AppendFile(format.Header{Slot: "s", Kind: format.KindArchive, DLE: "d1"},
+	if _, err := v.AppendFile(record.Header{Slot: "s", Kind: record.KindArchive, DLE: "d1"},
 		func(w io.Writer) error { _, e := w.Write([]byte("x")); return e }); err != nil {
 		t.Fatalf("first archive should fit: %v", err)
 	}
 
 	before, _ := v.Files()
-	_, err = v.AppendFile(format.Header{Slot: "s", Kind: format.KindArchive, DLE: "d2"},
-		func(w io.Writer) error { _, e := w.Write(make([]byte, format.HeaderBlock)); return e })
+	_, err = v.AppendFile(record.Header{Slot: "s", Kind: record.KindArchive, DLE: "d2"},
+		func(w io.Writer) error { _, e := w.Write(make([]byte, record.HeaderBlock)); return e })
 	if !errors.Is(err, media.ErrVolumeFull) {
 		t.Fatalf("write past capacity: err=%v, want ErrVolumeFull", err)
 	}
@@ -162,10 +162,10 @@ func TestTapeFull(t *testing.T) {
 	}
 
 	// Relabel resets the volume; capacity is free again, so writes succeed.
-	if err := lv.WriteLabel(format.Label{Name: "t1", Pool: "p", Epoch: 2}); err != nil {
+	if err := lv.WriteLabel(record.Label{Name: "t1", Pool: "p", Epoch: 2}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := v.AppendFile(format.Header{Slot: "s2", Kind: format.KindArchive, DLE: "d1"},
+	if _, err := v.AppendFile(record.Header{Slot: "s2", Kind: record.KindArchive, DLE: "d1"},
 		func(w io.Writer) error { _, e := w.Write([]byte("y")); return e }); err != nil {
 		t.Fatalf("relabeled tape should accept writes again: %v", err)
 	}
@@ -202,14 +202,14 @@ func TestTapeLibrary(t *testing.T) {
 	if err := ch.Mount("bay-01"); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.(media.Labeled).WriteLabel(format.Label{Name: "VOL-A", Pool: "p", Epoch: 1}); err != nil {
+	if err := v.(media.Labeled).WriteLabel(record.Label{Name: "VOL-A", Pool: "p", Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
 	// Mount bay-02 and label it differently — bays are independent cartridges.
 	if err := ch.Mount("bay-02"); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.(media.Labeled).WriteLabel(format.Label{Name: "VOL-B", Pool: "p", Epoch: 1}); err != nil {
+	if err := v.(media.Labeled).WriteLabel(record.Label{Name: "VOL-B", Pool: "p", Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -266,7 +266,7 @@ func TestManualStation(t *testing.T) {
 	if err := mc.Insert("reel-01"); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.(media.Labeled).WriteLabel(format.Label{Name: "VOL-A", Pool: "p", Epoch: 1}); err != nil {
+	if err := v.(media.Labeled).WriteLabel(record.Label{Name: "VOL-A", Pool: "p", Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if st, ok := drv.Loaded(); !ok || st.ID != "reel-01" || st.Label != "VOL-A" {
@@ -287,7 +287,7 @@ func TestManualStation(t *testing.T) {
 	if err := mc.Insert("reel-02"); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.(media.Labeled).WriteLabel(format.Label{Name: "VOL-B", Pool: "p", Epoch: 1}); err != nil {
+	if err := v.(media.Labeled).WriteLabel(record.Label{Name: "VOL-B", Pool: "p", Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if st, ok := drv.Loaded(); !ok || st.ID != "reel-02" || st.Label != "VOL-B" {
@@ -326,7 +326,7 @@ func TestTapeForeignVolume(t *testing.T) {
 	v := openTape(t, dir)
 
 	// File 0 is an archive, not a label.
-	if _, err := v.AppendFile(format.Header{Slot: "s", Kind: format.KindArchive, DLE: "d"},
+	if _, err := v.AppendFile(record.Header{Slot: "s", Kind: record.KindArchive, DLE: "d"},
 		func(w io.Writer) error { _, e := w.Write([]byte("data")); return e }); err != nil {
 		t.Fatal(err)
 	}
@@ -342,11 +342,11 @@ func TestTapeForeignVolume(t *testing.T) {
 func TestTapeTornTailSkipped(t *testing.T) {
 	dir := t.TempDir()
 	v := openTape(t, dir)
-	if _, err := v.AppendFile(format.Header{Slot: "s", Kind: format.KindArchive, DLE: "d"},
+	if _, err := v.AppendFile(record.Header{Slot: "s", Kind: record.KindArchive, DLE: "d"},
 		func(w io.Writer) error { _, e := w.Write([]byte("one")); return e }); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := v.AppendFile(format.Header{Slot: "s", Kind: format.KindSeal},
+	if _, err := v.AppendFile(record.Header{Slot: "s", Kind: record.KindSeal},
 		func(w io.Writer) error { _, e := w.Write([]byte("seal")); return e }); err != nil {
 		t.Fatal(err)
 	}

@@ -12,10 +12,10 @@ import (
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/drill"
-	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/restore"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/slotio"
@@ -96,7 +96,7 @@ func (e *Engine) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 		opts.Now = time.Now().UTC()
 	}
 	if opts.AsOf == "" {
-		opts.AsOf = format.DateString(opts.Now)
+		opts.AsOf = record.DateString(opts.Now)
 	}
 	medium := opts.Medium
 	if medium == "" {
@@ -460,13 +460,13 @@ func (e *Engine) chainBytes(steps []restore.Step) int64 {
 	return n
 }
 
-func findArchive(s *format.Slot, dle string, level int) (format.Archive, bool) {
+func findArchive(s *record.Slot, dle string, level int) (record.Archive, bool) {
 	for _, a := range s.Archives {
 		if a.DLE == dle && a.Level == level {
 			return a, true
 		}
 	}
-	return format.Archive{}, false
+	return record.Archive{}, false
 }
 
 // classifyOpenErr maps an archive-open failure to a class: a missing copy or an
@@ -563,7 +563,7 @@ func (e *Engine) ensureWormProbe(vol media.Volume, now time.Time) error {
 			return nil // reuse the existing probe
 		}
 	}
-	h := format.Header{Slot: wormProbeSlot, Kind: format.KindArchive, DLE: "worm-probe", CreatedAt: now}
+	h := record.Header{Slot: wormProbeSlot, Kind: record.KindArchive, DLE: "worm-probe", CreatedAt: now}
 	_, err = vol.AppendFile(h, func(w io.Writer) error {
 		_, werr := io.WriteString(w, "nbackup recovery-drill WORM probe — delete attempts test immutability\n")
 		return werr

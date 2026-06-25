@@ -45,9 +45,9 @@ registry registration, not a conditional in the core.
 | Package | Responsibility | Amanda analogue |
 |---|---|---|
 | `config` | config + domain entities: `DLE`, `Media`, `DumpType` | disklist / dumptype / storage |
-| `format` | the self-describing on-medium artifact format: `Header` framing + `Label` (volume id record) + `Slot`/`Archive` (seal metadata + lifecycle `NewSlot`/`AddArchive`/`Seal`) + their (de)serialization | dumpfile_t / amar |
+| `record` | the self-describing on-medium artifact records: `Header` framing + `Label` (volume id record) + `Slot`/`Archive` (seal metadata + lifecycle `NewSlot`/`AddArchive`/`Seal`) + their (de)serialization | dumpfile_t / amar |
 | `slotio` | maps a slot onto a `Volume`'s files (headers, seal, verify, `Expect`) | taper / amrestore |
-| `media` | `Volume` + `Labeled` + `Drive`/`Changer` (device) + `Shelf` (environment) + `Profile` + registry; reads/writes `format` records | Device API |
+| `media` | `Volume` + `Labeled` + `Drive`/`Changer` (device) + `Shelf` (environment) + `Profile` + registry; reads/writes `record` artifacts | Device API |
 | `librarian` | operates a medium's `Changer`/`Shelf` + label protocol (make-writable, advance, mount, label, load) | changer / amtape |
 | `media/disk`, `media/tape`, `media/cloud` | Volume impls (disk sidecar headers; tape library; object store via gocloud.dev/blob) | vfs / tape / s3 devices |
 | `media/fslike` | the slot layout shared by the address-identified media — clean payloads + `.hdr` sidecars over a small `Store` seam (disk = a directory, cloud = a bucket), so disk↔cloud copies are byte-identical | — |
@@ -71,7 +71,7 @@ registry registration, not a conditional in the core.
 
 Dependencies flow one way: `cli → engine → {planner, retention, archiver, filter,
 crypt, slotio, catalog, config, progress, restore, recovery}` over leaf packages
-`{media, xfer, sizeutil}`, all bottoming out on `format` (the on-medium artifact
+`{media, xfer, sizeutil}`, all bottoming out on `record` (the on-medium artifact
 format that `media`, `slotio`, and `catalog` read and write) (`recovery` builds on `restore`). The reporting
 layer adds `cli → {report, notify}` with `notify → {report, config}` — `report` is a
 pure leaf (record + render); the engine does **not** depend on either.

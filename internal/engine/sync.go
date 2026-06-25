@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/config"
-	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // SyncSelection bounds which landing slots a sync considers. The zero value
@@ -144,14 +144,14 @@ func (e *Engine) placedOn(slotID, medium string) bool {
 }
 
 // applySelection narrows landing slots (oldest-first) to the selection window.
-func applySelection(slots []*format.Slot, sel SyncSelection) []*format.Slot {
+func applySelection(slots []*record.Slot, sel SyncSelection) []*record.Slot {
 	if !sel.Since.IsZero() {
 		kept := slots[:0:0]
 		for _, s := range slots {
 			// Filter on the slot's logical date (the day it backs up), not its
 			// physical CreatedAt seal time — otherwise back-dated or imported slots,
 			// whose CreatedAt is "now", all slip past any --since bound.
-			d, _ := format.ParseDateField(s.Date)
+			d, _ := record.ParseDateField(s.Date)
 			if !d.Before(sel.Since) {
 				kept = append(kept, s)
 			}

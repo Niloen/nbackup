@@ -11,8 +11,8 @@ import (
 
 	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/filter"
-	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // memVolume is a minimal in-memory media.Volume for testing the spanning writer and
@@ -21,44 +21,44 @@ type memVolume struct {
 	name     string
 	capacity int64 // 0 = unbounded
 	used     int64
-	hdrs     map[int]format.Header
+	hdrs     map[int]record.Header
 	data     map[int][]byte
 	next     int
 }
 
 func newMemVolume(name string, capacity int64) *memVolume {
-	return &memVolume{name: name, capacity: capacity, hdrs: map[int]format.Header{}, data: map[int][]byte{}}
+	return &memVolume{name: name, capacity: capacity, hdrs: map[int]record.Header{}, data: map[int][]byte{}}
 }
 
-func (v *memVolume) AppendFile(h format.Header, write func(w io.Writer) error) (int, error) {
+func (v *memVolume) AppendFile(h record.Header, write func(w io.Writer) error) (int, error) {
 	var buf bytes.Buffer
 	if err := write(&buf); err != nil {
 		return 0, err
 	}
-	if v.capacity > 0 && v.used+format.HeaderBlock+int64(buf.Len()) > v.capacity {
+	if v.capacity > 0 && v.used+record.HeaderBlock+int64(buf.Len()) > v.capacity {
 		return 0, media.ErrVolumeFull // backstop: proactive sizing should avoid this
 	}
 	pos := v.next
 	v.next++
 	v.hdrs[pos] = h
 	v.data[pos] = append([]byte(nil), buf.Bytes()...)
-	v.used += format.HeaderBlock + int64(buf.Len())
+	v.used += record.HeaderBlock + int64(buf.Len())
 	return pos, nil
 }
 
-func (v *memVolume) ReadFile(pos int) (format.Header, io.ReadCloser, error) {
+func (v *memVolume) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
 	d, ok := v.data[pos]
 	if !ok {
-		return format.Header{}, nil, fmt.Errorf("no file at %d", pos)
+		return record.Header{}, nil, fmt.Errorf("no file at %d", pos)
 	}
 	return v.hdrs[pos], io.NopCloser(bytes.NewReader(d)), nil
 }
 
-func (v *memVolume) Files() ([]format.FileInfo, error) {
-	out := make([]format.FileInfo, 0, len(v.hdrs))
+func (v *memVolume) Files() ([]record.FileInfo, error) {
+	out := make([]record.FileInfo, 0, len(v.hdrs))
 	for pos := 0; pos < v.next; pos++ {
 		if h, ok := v.hdrs[pos]; ok {
-			out = append(out, format.FileInfo{Pos: pos, Header: h})
+			out = append(out, record.FileInfo{Pos: pos, Header: h})
 		}
 	}
 	return out, nil
@@ -85,7 +85,7 @@ func (s *memSink) room() int64 {
 		}
 		return -1
 	}
-	room := v.capacity - v.used - format.HeaderBlock
+	room := v.capacity - v.used - record.HeaderBlock
 	if room < 0 {
 		room = 0
 	}
@@ -131,16 +131,16 @@ func openerOver(vols ...*memVolume) PartOpener {
 	for _, v := range vols {
 		byName[v.name] = v
 	}
-	return func(p format.FilePos) (format.Header, io.ReadCloser, error) {
+	return func(p record.FilePos) (record.Header, io.ReadCloser, error) {
 		v, ok := byName[p.Label]
 		if !ok {
-			return format.Header{}, nil, fmt.Errorf("no volume %q", p.Label)
+			return record.Header{}, nil, fmt.Errorf("no volume %q", p.Label)
 		}
 		return v.ReadFile(p.Pos)
 	}
 }
 
-func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) format.Archive {
+func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) record.Archive {
 	t.Helper()
 	arch, err := w.WriteArchive(ArchiveSpec{DLE: dle, Host: "localhost", Path: "/p", Archiver: "m", Level: 0}, nil,
 		Source{

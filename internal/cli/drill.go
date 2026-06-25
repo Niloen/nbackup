@@ -10,7 +10,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
-	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/report"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
@@ -116,7 +116,7 @@ func newDrillCmd(a *app) *cobra.Command {
 			}
 
 			opts := engine.DrillOptions{
-				AsOf:       format.DateString(date),
+				AsOf:       record.DateString(date),
 				Window:     win,
 				Sample:     sample,
 				Medium:     from,

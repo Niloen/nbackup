@@ -3,8 +3,8 @@ package catalog
 import (
 	"io"
 
-	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // scan.go is the catalog's importer: it reads the media (the source of truth) and
@@ -71,13 +71,13 @@ func (c *Catalog) absorb(idx mediumIndex) {
 // with its placement on that medium, plus the labels of the volumes seen.
 type mediumIndex struct {
 	placements []slotPlacement
-	labels     []format.Label
+	labels     []record.Label
 }
 
 // slotPlacement pairs a sealed slot's content with its placement on the scanned
 // medium, ready for the store to absorb.
 type slotPlacement struct {
-	slot *format.Slot
+	slot *record.Slot
 	p    Placement
 }
 
@@ -87,7 +87,7 @@ type slotPlacement struct {
 // so the catalog never type-asserts a Volume's shape itself.
 func scanMedium(medium string, vol media.Volume) (mediumIndex, error) {
 	acc := newMediumScan()
-	var labels []format.Label
+	var labels []record.Label
 	err := media.WalkReadable(vol, func(v media.Volume) error {
 		res, err := scanVolume(medium, v)
 		if err != nil {
@@ -135,12 +135,12 @@ func assemble(medium string, acc *mediumScan) []slotPlacement {
 // ScanSlots reads a volume's sealed slots without touching the cache — used to
 // check a volume's current contents (e.g. whether a tape is still active before
 // relabel).
-func ScanSlots(vol media.Volume) ([]*format.Slot, error) {
+func ScanSlots(vol media.Volume) ([]*record.Slot, error) {
 	res, err := scanVolume("", vol)
 	if err != nil {
 		return nil, err
 	}
-	slots := make([]*format.Slot, 0, len(res.seals))
+	slots := make([]*record.Slot, 0, len(res.seals))
 	for _, s := range res.seals {
 		slots = append(slots, s.meta)
 	}
@@ -156,7 +156,7 @@ type partKey struct {
 // scannedSeal is a seal record found during a scan: the slot it commits and where it
 // lives.
 type scannedSeal struct {
-	meta *format.Slot
+	meta *record.Slot
 	loc  FilePos
 }
 
@@ -165,7 +165,7 @@ type scannedSeal struct {
 type scanResult struct {
 	parts map[partKey]FilePos
 	seals map[string]scannedSeal
-	label *format.Label
+	label *record.Label
 }
 
 // mediumScan accumulates a whole medium's parts and seals across its volumes before
@@ -203,7 +203,7 @@ func scanVolume(medium string, vol media.Volume) (scanResult, error) {
 	// volume, so the part's label stays empty. Labeled (tape) media record the label
 	// name + epoch read off the cartridge.
 	labelName, epoch := "", 0
-	var label *format.Label
+	var label *record.Label
 	if lv, ok := vol.(media.Labeled); ok {
 		if lbl, labeled, lerr := lv.ReadLabel(); lerr == nil && labeled {
 			label = &lbl
@@ -214,10 +214,10 @@ func scanVolume(medium string, vol media.Volume) (scanResult, error) {
 	res := scanResult{parts: map[partKey]FilePos{}, seals: map[string]scannedSeal{}, label: label}
 	for _, f := range files {
 		switch f.Header.Kind {
-		case format.KindArchive:
+		case record.KindArchive:
 			res.parts[partKey{slot: f.Header.Slot, dle: f.Header.DLE, level: f.Header.Level, part: f.Header.Part}] =
 				FilePos{Label: labelName, Epoch: epoch, Pos: f.Pos}
-		case format.KindSeal:
+		case record.KindSeal:
 			s, serr := readSeal(vol, f.Pos)
 			if serr != nil {
 				continue // unreadable seal: skip
@@ -229,7 +229,7 @@ func scanVolume(medium string, vol media.Volume) (scanResult, error) {
 }
 
 // readSeal reads and parses a slot's seal-record payload from the volume.
-func readSeal(vol media.Volume, pos int) (*format.Slot, error) {
+func readSeal(vol media.Volume, pos int) (*record.Slot, error) {
 	_, rc, err := vol.ReadFile(pos)
 	if err != nil {
 		return nil, err
@@ -239,5 +239,5 @@ func readSeal(vol media.Volume, pos int) (*format.Slot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return format.ParseSlot(data)
+	return record.ParseSlot(data)
 }

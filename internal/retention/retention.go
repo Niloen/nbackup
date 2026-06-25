@@ -19,7 +19,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
@@ -49,13 +49,13 @@ type Floor struct {
 //
 // Note: once verification status is tracked, the successor requirement should
 // tighten from "a newer full exists" to "a newer verified full exists".
-func Compute(slots []*format.Slot, minAge time.Duration, now time.Time) Floor {
+func Compute(slots []*record.Slot, minAge time.Duration, now time.Time) Floor {
 	reasons := map[string]string{}
-	young := func(s *format.Slot) bool {
+	young := func(s *record.Slot) bool {
 		if minAge <= 0 {
 			return false
 		}
-		date, _ := format.ParseDateField(s.Date)
+		date, _ := record.ParseDateField(s.Date)
 		return now.Sub(date) < minAge
 	}
 	// 1) Age floor.
@@ -110,7 +110,7 @@ func Compute(slots []*format.Slot, minAge time.Duration, now time.Time) Floor {
 }
 
 // dleNames returns the distinct DLEs across the slots, sorted for determinism.
-func dleNames(slots []*format.Slot) []string {
+func dleNames(slots []*record.Slot) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, s := range slots {
@@ -126,18 +126,18 @@ func dleNames(slots []*format.Slot) []string {
 }
 
 // slotsWith returns the slots holding an archive of dle, in run order.
-func slotsWith(slots []*format.Slot, dle string) []*format.Slot {
-	var out []*format.Slot
+func slotsWith(slots []*record.Slot, dle string) []*record.Slot {
+	var out []*record.Slot
 	for _, s := range slots {
 		if hasArchive(s, dle) {
 			out = append(out, s)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return format.Less(out[i], out[j]) })
+	sort.Slice(out, func(i, j int) bool { return record.Less(out[i], out[j]) })
 	return out
 }
 
-func hasArchive(s *format.Slot, dle string) bool {
+func hasArchive(s *record.Slot, dle string) bool {
 	for _, a := range s.Archives {
 		if a.DLE == dle {
 			return true
@@ -146,7 +146,7 @@ func hasArchive(s *format.Slot, dle string) bool {
 	return false
 }
 
-func hasFull(s *format.Slot, dle string) bool {
+func hasFull(s *record.Slot, dle string) bool {
 	for _, a := range s.Archives {
 		if a.DLE == dle && a.Level == 0 {
 			return true
@@ -178,7 +178,7 @@ func (f Floor) Reason(id string) (reason string, ok bool) {
 // tape would destroy the slot, even the tapes that hold no seal record. Shared by
 // the prune/recycle path and `nb label --relabel` so both judge a volume's
 // reusability identically.
-func (f Floor) First(slots []*format.Slot) (slotID, reason string, ok bool) {
+func (f Floor) First(slots []*record.Slot) (slotID, reason string, ok bool) {
 	for _, sl := range slots {
 		if r, p := f.reasons[sl.ID]; p {
 			return sl.ID, r, true
@@ -187,9 +187,9 @@ func (f Floor) First(slots []*format.Slot) (slotID, reason string, ok bool) {
 	return "", "", false
 }
 
-func hasNewerFull(slots []*format.Slot, dle string, target *format.Slot) bool {
+func hasNewerFull(slots []*record.Slot, dle string, target *record.Slot) bool {
 	for _, s := range slots {
-		if !format.Less(target, s) {
+		if !record.Less(target, s) {
 			continue // s must come strictly after target in run order
 		}
 		for _, a := range s.Archives {

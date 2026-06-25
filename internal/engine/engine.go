@@ -22,12 +22,12 @@ import (
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/filter"
-	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/restore"
 	"github.com/Niloen/nbackup/internal/retention"
@@ -642,7 +642,7 @@ func (e *Engine) copySource(slotID, fromMedia string) (*librarian.Librarian, cat
 // budget; an uncapped medium leaves the stream untouched.
 func (e *Engine) partOpener(lib *librarian.Librarian, medium string) slotio.PartOpener {
 	lim := e.limiters[medium]
-	return func(p format.FilePos) (format.Header, io.ReadCloser, error) {
+	return func(p record.FilePos) (record.Header, io.ReadCloser, error) {
 		h, rc, err := lib.ReadFileAt(p.Label, p.Epoch, p.Pos)
 		if err != nil {
 			return h, rc, err
@@ -652,7 +652,7 @@ func (e *Engine) partOpener(lib *librarian.Librarian, medium string) slotio.Part
 }
 
 // placementFrom builds a catalog placement from a sealed writer's recorded part
-// positions and seal location. The writer emits the same format.FilePos/ArchivePos the
+// positions and seal location. The writer emits the same record.FilePos/ArchivePos the
 // catalog persists, so a placement is the positions verbatim — no field conversion.
 func placementFrom(medium string, w *slotio.Writer) catalog.Placement {
 	return catalog.Placement{Medium: medium, Archives: w.Positions(), Seal: w.SealPosition()}
@@ -673,8 +673,8 @@ func (e *Engine) partSizeFor(medium string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("medium %q part_size: %w", medium, err)
 	}
-	if n < 2*format.HeaderBlock {
-		return 0, fmt.Errorf("medium %q part_size %s is too small; use at least %s", medium, sizeutil.FormatBytes(n), sizeutil.FormatBytes(2*format.HeaderBlock))
+	if n < 2*record.HeaderBlock {
+		return 0, fmt.Errorf("medium %q part_size %s is too small; use at least %s", medium, sizeutil.FormatBytes(n), sizeutil.FormatBytes(2*record.HeaderBlock))
 	}
 	return n, nil
 }
@@ -1004,15 +1004,15 @@ func minRoom(a, b int64) int64 {
 }
 
 // Run executes the plan for a date, producing one sealed slot.
-func (e *Engine) Run(date time.Time, logf Logf) (*format.Slot, error) {
+func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 	// Guard the restore-order invariant: restore replays a DLE's slots in date order,
 	// but the archiver's incremental snapshots advance in dump (wall-clock) order. A
 	// run dated earlier than a slot already sealed would splice an out-of-order
 	// archive into the chain whose snapshot has already moved past it — silently
 	// dropping files at restore. Reject it (a same-day rerun, equal date, is fine and
 	// takes the next .N). Backdating before today is already caught at the CLI.
-	if latest, ok := e.latestSlotDate(); ok && format.DateString(date) < latest {
-		return nil, fmt.Errorf("cannot dump for %s: slot(s) dated %s already exist; an earlier-dated run would corrupt the incremental restore order (snapshots have advanced past it) — dump on or after %s", format.DateString(date), latest, latest)
+	if latest, ok := e.latestSlotDate(); ok && record.DateString(date) < latest {
+		return nil, fmt.Errorf("cannot dump for %s: slot(s) dated %s already exist; an earlier-dated run would corrupt the incremental restore order (snapshots have advanced past it) — dump on or after %s", record.DateString(date), latest, latest)
 	}
 	plan := e.Plan(date)
 	for _, w := range plan.Warnings {
@@ -1044,7 +1044,7 @@ func (e *Engine) Run(date time.Time, logf Logf) (*format.Slot, error) {
 	if err != nil {
 		return nil, err
 	}
-	spec := slotio.SlotSpec{ID: slotID, Date: format.DateString(date), Sequence: seq, Generator: "nbdump", CreatedAt: now}
+	spec := slotio.SlotSpec{ID: slotID, Date: record.DateString(date), Sequence: seq, Generator: "nbdump", CreatedAt: now}
 	wt, err := e.prepareWriter(e.mediumName, spec, now, logf)
 	if err != nil {
 		return nil, err
@@ -1181,9 +1181,9 @@ func (e *Engine) PlannedSlotID(date time.Time) string {
 	for _, s := range e.cat.Slots() {
 		have[s.ID] = true
 	}
-	ds := format.DateString(date)
+	ds := record.DateString(date)
 	for seq := 1; ; seq++ {
-		id := format.IDFromParts(ds, seq)
+		id := record.IDFromParts(ds, seq)
 		if !have[id] {
 			return id
 		}
@@ -1219,13 +1219,13 @@ func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 	// the catalog never recorded; note it so its id can be reclaimed below.
 	for _, f := range files {
 		present[f.Header.Slot] = true
-		if f.Header.Kind == format.KindSeal {
+		if f.Header.Kind == record.KindSeal {
 			sealed[f.Header.Slot] = true
 		}
 	}
-	day := format.DateString(date)
+	day := record.DateString(date)
 	for seq = 1; ; seq++ {
-		id = format.IDFromParts(day, seq)
+		id = record.IDFromParts(day, seq)
 		if !present[id] {
 			return id, seq, nil
 		}
@@ -1255,7 +1255,7 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 	// seal and filenames keep the internal slug (spec.DLE below).
 	pname := item.DLE.ID()
 	tr.StartDLE(pname)
-	var arch format.Archive
+	var arch record.Archive
 	defer func() {
 		if err != nil {
 			tr.FinishDLE(pname, 0, 0, 0, err)
@@ -1535,7 +1535,7 @@ var errMissingCopy = errors.New("no available copy")
 // one place the raw and decoded read paths share: the copy selection, the missing-copy
 // errors (errMissingCopy), and the fail-over loop.
 func (e *Engine) eachPlacement(slotID, dle string, level int, medium string,
-	open func(parts []format.FilePos, lib *librarian.Librarian, p catalog.Placement) (io.ReadCloser, error)) (io.ReadCloser, error) {
+	open func(parts []record.FilePos, lib *librarian.Librarian, p catalog.Placement) (io.ReadCloser, error)) (io.ReadCloser, error) {
 	placements := e.placementsFor(slotID)
 	if medium != "" {
 		placements = placementsOnMedium(placements, medium)
@@ -1574,7 +1574,7 @@ func (e *Engine) eachPlacement(slotID, dle string, level int, medium string,
 // restore feeds into its host-placed decode→extract pipeline (extractInto), with the same
 // copy selection and fail-over as openArchiveFrom but without reversing any transform.
 func (e *Engine) openRawFrom(slotID, dle string, level int, medium string) (io.ReadCloser, error) {
-	return e.eachPlacement(slotID, dle, level, medium, func(parts []format.FilePos, lib *librarian.Librarian, p catalog.Placement) (io.ReadCloser, error) {
+	return e.eachPlacement(slotID, dle, level, medium, func(parts []record.FilePos, lib *librarian.Librarian, p catalog.Placement) (io.ReadCloser, error) {
 		return e.reader.OpenRawParts(parts, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib, p.Medium))
 	})
 }
@@ -1839,7 +1839,7 @@ func (e *Engine) ResolveDLE(arg string) (string, bool) {
 // copy); with medium set it reads only that medium's copy (a medium-scoped drill /
 // restore against the offsite copy), so a fault on that copy is not masked by another.
 func (e *Engine) openArchiveFrom(slotID, dle string, level int, codec, encrypt, medium string) (io.ReadCloser, error) {
-	return e.eachPlacement(slotID, dle, level, medium, func(parts []format.FilePos, lib *librarian.Librarian, p catalog.Placement) (io.ReadCloser, error) {
+	return e.eachPlacement(slotID, dle, level, medium, func(parts []record.FilePos, lib *librarian.Librarian, p catalog.Placement) (io.ReadCloser, error) {
 		return e.reader.OpenArchiveParts(parts, codec, encrypt, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib, p.Medium))
 	})
 }

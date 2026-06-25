@@ -1,4 +1,4 @@
-package format_test
+package record_test
 
 import (
 	"bytes"
@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // updateGolden regenerates the committed golden JSON instead of asserting
-// against it: `go test ./internal/format -run Golden -update`. The goldens are the
+// against it: `go test ./internal/record -run Golden -update`. The goldens are the
 // on-medium wire shape of a Header and a Label for a fixed input; refresh them
 // only when the format is changed on purpose, and review the diff.
 var updateGolden = flag.Bool("update", false, "rewrite golden files")
@@ -22,12 +22,12 @@ var updateGolden = flag.Bool("update", false, "rewrite golden files")
 var goldenTime = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
 // goldenHeader is one archive header carrying every identity field, so a renamed,
-// dropped, or retyped field on format.Header changes the committed golden and the
-// test fails — a tripwire on the self-describing file header's wire format.
-func goldenHeader() format.Header {
-	return format.Header{
+// dropped, or retyped field on record.Header changes the committed golden and the
+// test fails — a tripwire on the self-describing file header's wire record.
+func goldenHeader() record.Header {
+	return record.Header{
 		Slot:      "slot-2026-01-02",
-		Kind:      format.KindArchive,
+		Kind:      record.KindArchive,
 		DLE:       "h-data",
 		Host:      "h",
 		Path:      "/data",
@@ -40,9 +40,9 @@ func goldenHeader() format.Header {
 }
 
 // goldenLabel is one volume label carrying every field, the tape's file-0 identity.
-func goldenLabel() format.Label {
-	return format.Label{
-		Magic:     format.LabelMagic,
+func goldenLabel() record.Label {
+	return record.Label{
+		Magic:     record.LabelMagic,
 		Name:      "lto-0007",
 		Pool:      "lto",
 		Sequence:  7,
@@ -51,14 +51,14 @@ func goldenLabel() format.Label {
 	}
 }
 
-// TestHeaderGolden pins the JSON wire encoding of format.Header. The encoding is
+// TestHeaderGolden pins the JSON wire encoding of record.Header. The encoding is
 // what every Volume implementation frames a file with (disk sidecar, tape inline
 // block), so a silent change to it would make older volumes unreadable.
 func TestHeaderGolden(t *testing.T) {
 	assertGolden(t, "header.golden.json", goldenHeader())
 }
 
-// TestLabelGolden pins the JSON wire encoding of format.Label.
+// TestLabelGolden pins the JSON wire encoding of record.Label.
 func TestLabelGolden(t *testing.T) {
 	assertGolden(t, "label.golden.json", goldenLabel())
 }
@@ -102,11 +102,11 @@ func TestHeaderBlockFraming(t *testing.T) {
 
 	// EncodeHeader emits exactly one HeaderBlock, JSON then a newline then zero pad.
 	var buf bytes.Buffer
-	if err := format.EncodeHeader(&buf, h); err != nil {
+	if err := record.EncodeHeader(&buf, h); err != nil {
 		t.Fatal(err)
 	}
-	if buf.Len() != format.HeaderBlock {
-		t.Fatalf("encoded header = %d bytes, want a fixed %d-byte block", buf.Len(), format.HeaderBlock)
+	if buf.Len() != record.HeaderBlock {
+		t.Fatalf("encoded header = %d bytes, want a fixed %d-byte block", buf.Len(), record.HeaderBlock)
 	}
 	block := buf.Bytes()
 	nl := bytes.IndexByte(block, '\n')
@@ -130,9 +130,9 @@ func TestHeaderBlockFraming(t *testing.T) {
 
 	// Reconstruct a block from the golden line alone — padding in code, never on
 	// disk — and decode it back: the read path older volumes depend on.
-	rebuilt := make([]byte, format.HeaderBlock)
+	rebuilt := make([]byte, record.HeaderBlock)
 	copy(rebuilt, append(bytes.TrimRight(want, "\n"), '\n'))
-	got, err := format.DecodeHeader(bytes.NewReader(rebuilt))
+	got, err := record.DecodeHeader(bytes.NewReader(rebuilt))
 	if err != nil {
 		t.Fatal(err)
 	}

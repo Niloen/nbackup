@@ -25,9 +25,9 @@ import (
 
 	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/filter"
-	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
@@ -74,11 +74,11 @@ type Source struct {
 // SlotSpec is the descriptive identity of a slot to author: what is known before
 // any archive is written, independent of the archives and bytes the Writer
 // assembles while streaming. NewWriter starts the slot from it and Seal returns
-// the finished format.Slot — so, like ArchiveSpec for an archive, the caller
+// the finished record.Slot — so, like ArchiveSpec for an archive, the caller
 // describes the slot and slotio produces the artifact, never the reverse. The
-// fields mirror format.NewSlot's parameters.
+// fields mirror record.NewSlot's parameters.
 type SlotSpec struct {
-	ID        string    // the slot's identity (see format.IDFromParts)
+	ID        string    // the slot's identity (see record.IDFromParts)
 	Date      string    // run date, YYYY-MM-DD
 	Sequence  int       // 1 for the day's first run, 2+ for later runs
 	Generator string    // tool authoring the slot (e.g. "nbdump")
@@ -118,9 +118,9 @@ type Writer struct {
 	lim   *xfer.Limiter // optional bandwidth cap on the bytes landing on the medium (nil = uncapped)
 
 	mu       sync.Mutex // guards the records below
-	slot     *format.Slot
+	slot     *record.Slot
 	written  []archiveRecord // one per archive, in WriteArchive order
-	sealPart format.FilePos  // where the seal landed (set by Seal)
+	sealPart record.FilePos  // where the seal landed (set by Seal)
 }
 
 // archiveRecord remembers an archive's parts so the catalog can index where each
@@ -128,11 +128,11 @@ type Writer struct {
 type archiveRecord struct {
 	dle   string
 	level int
-	parts []format.FilePos
+	parts []record.FilePos
 }
 
 // NewWriter begins authoring a new slot, described by spec, onto sink, compressing
-// archives with the named codec. The Writer builds and owns the format.Slot from
+// archives with the named codec. The Writer builds and owns the record.Slot from
 // spec (the caller never hands one in); Seal returns it sealed. lim, when non-nil,
 // caps the rate of bytes written to the medium (network politeness); a nil lim is
 // uncapped. The same lim is shared across concurrent WriteArchive calls on an
@@ -142,7 +142,7 @@ func NewWriter(sink VolumeSink, spec SlotSpec, codec string, fopts filter.Option
 	if _, err := filter.Ext(codec); err != nil { // validate the codec name early
 		return nil, err
 	}
-	slot := format.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
+	slot := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
 	return &Writer{sink: sink, codec: codec, fopts: fopts, lim: lim, slot: slot}, nil
 }
 
@@ -156,7 +156,7 @@ func NewWriter(sink VolumeSink, spec SlotSpec, codec string, fopts filter.Option
 // progress, if non-nil, is called as the stream flows with the running
 // (uncompressed, compressed) byte counts — the live signal for `nb status`. It runs
 // on the producing goroutine, so it must be cheap.
-func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, compressed int64), src Source) (format.Archive, error) {
+func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, compressed int64), src Source) (record.Archive, error) {
 	// One pipeline: source -> compress -> encrypt, each a program stage carrying its
 	// host; adjacent same-host stages fuse so intermediate bytes never leave that host.
 	// The grouped pipeline's final reader is metered (the checksum/size cover the
@@ -166,7 +166,7 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 
 	stages, stdin, err := w.pipelineStages(spec, src, meter, progress)
 	if err != nil {
-		return format.Archive{}, err
+		return record.Archive{}, err
 	}
 
 	base := w.archiveHeader(spec.DLE, spec.Host, spec.Path, spec.Archiver, spec.Level, spec.BaseSlot, w.codec, spec.Encrypt)
@@ -211,13 +211,13 @@ func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, comp
 	}
 	<-done // producer finished: meter is complete, produced/produceErr are visible
 	if drainErr != nil {
-		return format.Archive{}, drainErr
+		return record.Archive{}, drainErr
 	}
 	if produceErr != nil {
-		return format.Archive{}, produceErr
+		return record.Archive{}, produceErr
 	}
 
-	arch := format.Archive{
+	arch := record.Archive{
 		DLE:          spec.DLE,
 		Host:         spec.Host,
 		Path:         spec.Path,
@@ -304,14 +304,14 @@ func (c *countingReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// archiveHeader builds the base format.Header an archive's parts share (drainParts
+// archiveHeader builds the base record.Header an archive's parts share (drainParts
 // clones it per part with an ascending Part index). The codec is passed explicitly
 // because a fresh dump stamps the writer's codec while a copy preserves the source
 // archive's recorded codec — every other descriptive field comes straight through.
-func (w *Writer) archiveHeader(dle, host, path, archiver string, level int, baseSlot, codec, encrypt string) format.Header {
-	return format.Header{
+func (w *Writer) archiveHeader(dle, host, path, archiver string, level int, baseSlot, codec, encrypt string) record.Header {
+	return record.Header{
 		Slot:      w.slot.ID,
-		Kind:      format.KindArchive,
+		Kind:      record.KindArchive,
 		DLE:       dle,
 		Host:      host,
 		Path:      path,
@@ -329,9 +329,9 @@ func (w *Writer) archiveHeader(dle, host, path, archiver string, level int, base
 // next volume whenever a part fills. It returns the ordered part positions. On error
 // it returns it for the caller to handle (closing the producer); the partial files
 // left behind are unsealed and ignored by a scan.
-func (w *Writer) drainParts(base format.Header, src io.Reader) ([]format.FilePos, error) {
+func (w *Writer) drainParts(base record.Header, src io.Reader) ([]record.FilePos, error) {
 	var (
-		parts []format.FilePos
+		parts []record.FilePos
 		part  int
 	)
 	for {
@@ -359,7 +359,7 @@ func (w *Writer) drainParts(base format.Header, src io.Reader) ([]format.FilePos
 		if err != nil {
 			return nil, err
 		}
-		parts = append(parts, format.FilePos{Label: volName, Epoch: epoch, Pos: pos})
+		parts = append(parts, record.FilePos{Label: volName, Epoch: epoch, Pos: pos})
 		part++
 
 		// Producer exhausted within this part (or the sink is unbounded): done.
@@ -387,15 +387,15 @@ func (w *Writer) drainParts(base format.Header, src io.Reader) ([]format.FilePos
 // It does NOT compress or re-checksum the stream — the same bytes are written, so the
 // recorded checksum is unchanged — and only the part layout (and Parts count) is new.
 // The header carries the archive's original codec, so restore reverses the right one.
-func (w *Writer) CopyArchive(meta format.Archive, src io.Reader) (format.Archive, error) {
+func (w *Writer) CopyArchive(meta record.Archive, src io.Reader) (record.Archive, error) {
 	base := w.archiveHeader(meta.DLE, meta.Host, meta.Path, meta.Archiver, meta.Level, meta.BaseSlot, meta.Codec, meta.Encrypt)
 	h := sha256.New()
 	parts, err := w.drainParts(base, io.TeeReader(src, h))
 	if err != nil {
-		return format.Archive{}, err
+		return record.Archive{}, err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != meta.SHA256 {
-		return format.Archive{}, fmt.Errorf("copy of %s L%d checksum mismatch (source corrupt?)", meta.DLE, meta.Level)
+		return record.Archive{}, fmt.Errorf("copy of %s L%d checksum mismatch (source corrupt?)", meta.DLE, meta.Level)
 	}
 	arch := meta
 	arch.Parts = len(parts)
@@ -415,18 +415,18 @@ func (w *Writer) ArchiveCount() int {
 
 // Positions returns the part positions of every archive written, for the catalog to
 // index. Call after all WriteArchive calls have completed.
-func (w *Writer) Positions() []format.ArchivePos {
+func (w *Writer) Positions() []record.ArchivePos {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	out := make([]format.ArchivePos, len(w.written))
+	out := make([]record.ArchivePos, len(w.written))
 	for i, a := range w.written {
-		out[i] = format.ArchivePos{DLE: a.dle, Level: a.level, Parts: append([]format.FilePos(nil), a.parts...)}
+		out[i] = record.ArchivePos{DLE: a.dle, Level: a.level, Parts: append([]record.FilePos(nil), a.parts...)}
 	}
 	return out
 }
 
 // SealPosition returns where the seal record landed (its volume and position).
-func (w *Writer) SealPosition() format.FilePos {
+func (w *Writer) SealPosition() record.FilePos {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.sealPart
@@ -441,7 +441,7 @@ func (w *Writer) SealPosition() format.FilePos {
 // actually landed on the medium is the job of the explicit, operator-invoked `nb verify`
 // (the amcheckdump analogue), kept out of the dump path so a single drive never has to
 // re-read — or reload swapped-out volumes — just to close a slot.
-func (w *Writer) Seal(now time.Time) (*format.Slot, error) {
+func (w *Writer) Seal(now time.Time) (*record.Slot, error) {
 	if err := w.slot.Seal(now); err != nil {
 		return nil, err
 	}
@@ -453,7 +453,7 @@ func (w *Writer) Seal(now time.Time) (*format.Slot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("place the seal record: %w", err)
 	}
-	seal := format.Header{Slot: w.slot.ID, Kind: format.KindSeal, CreatedAt: now}
+	seal := record.Header{Slot: w.slot.ID, Kind: record.KindSeal, CreatedAt: now}
 	pos, err := vol.AppendFile(seal, func(out io.Writer) error {
 		_, e := out.Write(data)
 		return e
@@ -462,7 +462,7 @@ func (w *Writer) Seal(now time.Time) (*format.Slot, error) {
 		return nil, err
 	}
 	w.mu.Lock()
-	w.sealPart = format.FilePos{Label: sealVol, Epoch: sealEpoch, Pos: pos}
+	w.sealPart = record.FilePos{Label: sealVol, Epoch: sealEpoch, Pos: pos}
 	w.mu.Unlock()
 	return w.slot, nil
 }

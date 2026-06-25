@@ -14,10 +14,10 @@ import (
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/engine"
-	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/report"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
@@ -68,7 +68,7 @@ func newPlanCmd(a *app) *cobra.Command {
 
 			plan := eng.Plan(date)
 			fmt.Printf("Plan for run %s  (cycle %dd, landing %q)\n\n",
-				format.DateString(date), plan.Interval, eng.Landing())
+				record.DateString(date), plan.Interval, eng.Landing())
 			for _, w := range plan.Warnings {
 				fmt.Printf("WARNING: %s\n", w)
 			}
@@ -139,7 +139,7 @@ func fprintPlanItems(w io.Writer, plan *planner.Plan) int64 {
 func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 	plans := eng.Simulate(start, days)
 	fmt.Printf("Forecast: %d daily runs from %s  (cycle %dd, landing %q)\n\n",
-		days, format.DateString(start), plans[0].Interval, eng.Landing())
+		days, record.DateString(start), plans[0].Interval, eng.Landing())
 
 	// Structural warnings (e.g. a recovery set that won't fit capacity) are
 	// constant across the window; surface each one once, above the schedule.
@@ -189,11 +189,11 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 		}
 		if priced {
 			fmt.Fprintf(tw, "%s\t%d\t%d\t~%s\t%s\t%s\n",
-				format.DateString(p.Date), fulls, incrs, sizeutil.FormatBytes(est),
+				record.DateString(p.Date), fulls, incrs, sizeutil.FormatBytes(est),
 				formatUSD(curve[i].Monthly), names)
 		} else {
 			fmt.Fprintf(tw, "%s\t%d\t%d\t~%s\t%s\n",
-				format.DateString(p.Date), fulls, incrs, sizeutil.FormatBytes(est), names)
+				record.DateString(p.Date), fulls, incrs, sizeutil.FormatBytes(est), names)
 		}
 	}
 	tw.Flush()
@@ -230,7 +230,7 @@ func describeExpectation(exp engine.VolumeExpectation, date time.Time) string {
 		detail = "empty, ready to write"
 	}
 	return fmt.Sprintf("expects %q (labeled %s, %dd ago; %s) — or a fresh tape",
-		exp.Label, format.DateString(exp.WrittenAt), age, detail)
+		exp.Label, record.DateString(exp.WrittenAt), age, detail)
 }
 
 // newDumpCmd implements `nb dump`: execute a run and seal a slot, or — with
@@ -302,7 +302,7 @@ func newDumpCmd(a *app) *cobra.Command {
 // the run-status snapshot the tracker just flushed (the same file `nb status` reads),
 // matched by DLE name and level. When the snapshot is missing or stale, sizes are
 // still recorded and timing is left zero (rendered as a dash).
-func dumpStats(s *format.Slot, workdir string) []report.DLEStat {
+func dumpStats(s *record.Slot, workdir string) []report.DLEStat {
 	type key struct {
 		name  string
 		level int
@@ -338,7 +338,7 @@ func runDumpDryRun(eng *engine.Engine, date time.Time, validationWarnings []stri
 	plan := eng.Plan(date)
 
 	fmt.Println("DRY RUN — no data is written.")
-	fmt.Printf("This is the run on %s.\n\n", format.DateString(date))
+	fmt.Printf("This is the run on %s.\n\n", record.DateString(date))
 	warnings := append(validationWarnings, plan.Warnings...)
 	for _, w := range warnings {
 		fmt.Printf("WARNING: %s\n", w)

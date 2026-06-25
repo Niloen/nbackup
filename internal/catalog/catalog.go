@@ -29,7 +29,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // CacheFile is the catalog cache stored in the workdir.
@@ -38,7 +38,7 @@ const CacheFile = "catalog.json"
 // Entry is the catalog's per-slot record: one logical slot plus every place a
 // copy of it lives.
 type Entry struct {
-	Slot       *format.Slot `json:"slot"`       // medium-independent content (from the seal)
+	Slot       *record.Slot `json:"slot"`       // medium-independent content (from the seal)
 	Placements []Placement  `json:"placements"` // one per medium holding a copy
 }
 
@@ -58,13 +58,13 @@ type Placement struct {
 
 // FilePos and ArchivePos are the file-location types the catalog persists. They are
 // the very types the slotio writer emits and the reader consumes, defined once in
-// package format (the shared on-medium artifact vocabulary) so a writer's recorded
+// package record (the shared on-medium artifact vocabulary) so a writer's recorded
 // positions become a placement with no field-by-field conversion. FilePos.Label is the
 // volume's global, device-independent identity ("" for address-identified media, which
 // carry no label); ArchivePos lists an archive's ordered parts (one unless it spanned).
 type (
-	FilePos    = format.FilePos
-	ArchivePos = format.ArchivePos
+	FilePos    = record.FilePos
+	ArchivePos = record.ArchivePos
 )
 
 // Parts returns the ordered part locations of an archive on this placement.
@@ -115,7 +115,7 @@ func (p Placement) OnLabel(label string) bool {
 // tapelist entry, medium-neutrally named). "Which slots are on it" and "is it
 // reusable" are derived from placements + retention, not stored here.
 type VolumeRecord struct {
-	Label format.Label `json:"label"`
+	Label record.Label `json:"label"`
 }
 
 // Catalog is a local cache of slot entries plus a registry of labeled volumes. It
@@ -159,7 +159,7 @@ func Open(workdir string) (*Catalog, error) {
 // Record stores a slot's content and adds-or-replaces its placement on
 // p.Medium, then persists. Both dump and copy use this — they differ only in
 // which medium the placement names.
-func (c *Catalog) Record(s *format.Slot, p Placement) error {
+func (c *Catalog) Record(s *record.Slot, p Placement) error {
 	c.upsert(s, p)
 	c.sortEntries()
 	c.loaded = true
@@ -189,15 +189,15 @@ func (c *Catalog) RemovePlacement(slotID, medium string) (gone bool, err error) 
 
 // RecordVolume upserts a labeled volume's identity in the registry, so a later run
 // can detect a swapped or relabeled volume.
-func (c *Catalog) RecordVolume(lbl format.Label) error {
+func (c *Catalog) RecordVolume(lbl record.Label) error {
 	c.volumes[lbl.Name] = &VolumeRecord{Label: lbl}
 	c.loaded = true
 	return c.persist()
 }
 
 // Slots returns the cached slots in run order.
-func (c *Catalog) Slots() []*format.Slot {
-	out := make([]*format.Slot, 0, len(c.entries))
+func (c *Catalog) Slots() []*record.Slot {
+	out := make([]*record.Slot, 0, len(c.entries))
 	for _, e := range c.entries {
 		out = append(out, e.Slot)
 	}
@@ -205,7 +205,7 @@ func (c *Catalog) Slots() []*format.Slot {
 }
 
 // ReadSlot returns a cached slot by ID.
-func (c *Catalog) ReadSlot(id string) (*format.Slot, error) {
+func (c *Catalog) ReadSlot(id string) (*record.Slot, error) {
 	if e := c.entryByID(id); e != nil {
 		return e.Slot, nil
 	}
@@ -221,8 +221,8 @@ func (c *Catalog) Placements(slotID string) []Placement {
 }
 
 // SlotsOn returns the slots with a copy on the named medium, in run order.
-func (c *Catalog) SlotsOn(medium string) []*format.Slot {
-	var out []*format.Slot
+func (c *Catalog) SlotsOn(medium string) []*record.Slot {
+	var out []*record.Slot
 	for _, e := range c.entries {
 		if e.placedOn(medium) {
 			out = append(out, e.Slot)
@@ -233,8 +233,8 @@ func (c *Catalog) SlotsOn(medium string) []*format.Slot {
 
 // SlotsOnLabel returns the slots with a copy on the volume with the given label,
 // in run order — used to tell whether a tape already holds a run.
-func (c *Catalog) SlotsOnLabel(label string) []*format.Slot {
-	var out []*format.Slot
+func (c *Catalog) SlotsOnLabel(label string) []*record.Slot {
+	var out []*record.Slot
 	for _, e := range c.entries {
 		for _, p := range e.Placements {
 			if p.OnLabel(label) {
@@ -290,7 +290,7 @@ func (c *Catalog) History() *History {
 // upsert sets a slot's content and adds-or-replaces its placement on p.Medium,
 // without sorting or persisting. It is the in-memory write shared by Record and by
 // the importer's absorb — the single point where a slot+placement enters the store.
-func (c *Catalog) upsert(s *format.Slot, p Placement) {
+func (c *Catalog) upsert(s *record.Slot, p Placement) {
 	e := c.entryByID(s.ID)
 	if e == nil {
 		e = &Entry{Slot: s}
@@ -341,7 +341,7 @@ func (c *Catalog) removeEntry(id string) {
 }
 
 func (c *Catalog) sortEntries() {
-	sort.Slice(c.entries, func(i, j int) bool { return format.Less(c.entries[i].Slot, c.entries[j].Slot) })
+	sort.Slice(c.entries, func(i, j int) bool { return record.Less(c.entries[i].Slot, c.entries[j].Slot) })
 }
 
 func (c *Catalog) persist() error {

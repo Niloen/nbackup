@@ -17,8 +17,8 @@ import (
 	"io"
 	"strconv"
 
-	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
@@ -143,13 +143,13 @@ func (t *tape) requireDev() (device, error) {
 
 // AppendFile frames an inline header block ahead of the payload (a tape cannot
 // carry a sidecar) and appends it as the next file on the mounted bay.
-func (t *tape) AppendFile(h format.Header, write func(w io.Writer) error) (int, error) {
+func (t *tape) AppendFile(h record.Header, write func(w io.Writer) error) (int, error) {
 	dev, err := t.requireDev()
 	if err != nil {
 		return 0, err
 	}
 	return dev.writeFile(func(w io.Writer) error {
-		if err := format.EncodeHeader(w, h); err != nil {
+		if err := record.EncodeHeader(w, h); err != nil {
 			return err
 		}
 		return write(w)
@@ -158,19 +158,19 @@ func (t *tape) AppendFile(h format.Header, write func(w io.Writer) error) (int, 
 
 // ReadFile fast-forwards to a file number on the mounted bay and decodes its
 // leading header; the returned stream is positioned at the payload.
-func (t *tape) ReadFile(pos int) (format.Header, io.ReadCloser, error) {
+func (t *tape) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
 	dev, err := t.requireDev()
 	if err != nil {
-		return format.Header{}, nil, err
+		return record.Header{}, nil, err
 	}
 	rc, err := dev.readFile(pos)
 	if err != nil {
-		return format.Header{}, nil, err
+		return record.Header{}, nil, err
 	}
-	h, err := format.DecodeHeader(rc)
+	h, err := record.DecodeHeader(rc)
 	if err != nil {
 		rc.Close()
-		return format.Header{}, nil, err
+		return record.Header{}, nil, err
 	}
 	return h, rc, nil
 }
@@ -178,7 +178,7 @@ func (t *tape) ReadFile(pos int) (format.Header, io.ReadCloser, error) {
 // Files scans the whole mounted bay reading each header. This is the catalog-
 // rebuild path for one tape (a full pass, as Amanda re-reads a tape); normal
 // reads seek by file number from the catalog and never call this.
-func (t *tape) Files() ([]format.FileInfo, error) {
+func (t *tape) Files() ([]record.FileInfo, error) {
 	dev, err := t.requireDev()
 	if err != nil {
 		return nil, err
@@ -187,7 +187,7 @@ func (t *tape) Files() ([]format.FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]format.FileInfo, 0, n)
+	out := make([]record.FileInfo, 0, n)
 	for pos := 0; pos < n; pos++ {
 		h, rc, err := t.ReadFile(pos)
 		if err != nil {
@@ -198,7 +198,7 @@ func (t *tape) Files() ([]format.FileInfo, error) {
 			continue
 		}
 		rc.Close()
-		out = append(out, format.FileInfo{Pos: pos, Header: h})
+		out = append(out, record.FileInfo{Pos: pos, Header: h})
 	}
 	return out, nil
 }
@@ -212,17 +212,17 @@ func (t *tape) RemoveSlot(string) error {
 
 // ReadLabel reads the mounted bay's file-0 label record. A blank tape (no files)
 // reports ok=false; a non-empty tape whose file 0 is not our label is foreign.
-func (t *tape) ReadLabel() (format.Label, bool, error) {
+func (t *tape) ReadLabel() (record.Label, bool, error) {
 	dev, err := t.requireDev()
 	if err != nil {
-		return format.Label{}, false, err
+		return record.Label{}, false, err
 	}
 	return readLabel(dev)
 }
 
 // WriteLabel resets the mounted bay and writes lbl as file 0, destroying any
 // prior contents. The caller is responsible for deciding this is allowed.
-func (t *tape) WriteLabel(lbl format.Label) error {
+func (t *tape) WriteLabel(lbl record.Label) error {
 	dev, err := t.requireDev()
 	if err != nil {
 		return err
@@ -230,12 +230,12 @@ func (t *tape) WriteLabel(lbl format.Label) error {
 	if err := dev.reset(); err != nil {
 		return err
 	}
-	lbl.Magic = format.LabelMagic
+	lbl.Magic = record.LabelMagic
 	data, err := json.Marshal(lbl)
 	if err != nil {
 		return err
 	}
-	_, err = t.AppendFile(format.Header{Kind: format.KindLabel, CreatedAt: lbl.WrittenAt},
+	_, err = t.AppendFile(record.Header{Kind: record.KindLabel, CreatedAt: lbl.WrittenAt},
 		func(w io.Writer) error { _, e := w.Write(data); return e })
 	return err
 }
@@ -314,39 +314,39 @@ func deviceStatus(id string, dev device, capacity int64) media.VolumeStatus {
 
 // readLabel decodes a mounted device's file-0 label. ok=false on a blank tape;
 // ErrForeignVolume when file 0 is present but is not one of ours.
-func readLabel(dev device) (format.Label, bool, error) {
+func readLabel(dev device) (record.Label, bool, error) {
 	// A file-backed bay that holds non-NBackup files is foreign, not blank — its own
 	// files are unnumbered so they would not be counted below, and the overwrite
 	// guard must refuse it rather than treat the bay as writable.
 	if f, ok := dev.(interface{ foreign() bool }); ok && f.foreign() {
-		return format.Label{}, false, media.ErrForeignVolume
+		return record.Label{}, false, media.ErrForeignVolume
 	}
 	n, err := dev.count()
 	if err != nil {
-		return format.Label{}, false, err
+		return record.Label{}, false, err
 	}
 	if n == 0 {
-		return format.Label{}, false, nil // blank
+		return record.Label{}, false, nil // blank
 	}
 	rc, err := dev.readFile(0)
 	if err != nil {
-		return format.Label{}, false, err
+		return record.Label{}, false, err
 	}
 	defer rc.Close()
-	h, err := format.DecodeHeader(rc)
+	h, err := record.DecodeHeader(rc)
 	if err != nil {
-		return format.Label{}, false, err
+		return record.Label{}, false, err
 	}
-	if h.Kind != format.KindLabel {
-		return format.Label{}, false, media.ErrForeignVolume
+	if h.Kind != record.KindLabel {
+		return record.Label{}, false, media.ErrForeignVolume
 	}
 	data, err := io.ReadAll(rc)
 	if err != nil {
-		return format.Label{}, false, err
+		return record.Label{}, false, err
 	}
-	var lbl format.Label
-	if err := json.Unmarshal(data, &lbl); err != nil || lbl.Magic != format.LabelMagic {
-		return format.Label{}, false, media.ErrForeignVolume
+	var lbl record.Label
+	if err := json.Unmarshal(data, &lbl); err != nil || lbl.Magic != record.LabelMagic {
+		return record.Label{}, false, media.ErrForeignVolume
 	}
 	return lbl, true, nil
 }

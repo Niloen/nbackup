@@ -3,17 +3,17 @@ package restore
 import (
 	"testing"
 
-	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // arch builds an archive for dleName at a level, recording the base slot an
 // incremental derives from (BaseSlot is empty for a full).
-func arch(dle string, level int, base string) format.Archive {
-	return format.Archive{DLE: dle, Level: level, Archiver: "gnutar", Codec: "none", BaseSlot: base}
+func arch(dle string, level int, base string) record.Archive {
+	return record.Archive{DLE: dle, Level: level, Archiver: "gnutar", Codec: "none", BaseSlot: base}
 }
 
-func slot(id string, archives ...format.Archive) *format.Slot {
-	return &format.Slot{ID: id, Status: format.StatusSealed, Archives: archives}
+func slot(id string, archives ...record.Archive) *record.Slot {
+	return &record.Slot{ID: id, Status: record.StatusSealed, Archives: archives}
 }
 
 // levels returns the per-step level sequence of a chain, for compact assertions.
@@ -46,7 +46,7 @@ func eq[T comparable](a, b []T) bool {
 }
 
 func TestChainFullOnly(t *testing.T) {
-	slots := []*format.Slot{slot("s0", arch("a", 0, ""))}
+	slots := []*record.Slot{slot("s0", arch("a", 0, ""))}
 	steps, err := Chain(slots, "a", "s0")
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestChainFullOnly(t *testing.T) {
 // incrementals are cumulative since the full, so only the newest L1 is replayed
 // and the redundant middle one is skipped.
 func TestChainSkipsRedundantSameLevel(t *testing.T) {
-	slots := []*format.Slot{
+	slots := []*record.Slot{
 		slot("s0", arch("a", 0, "")),
 		slot("s1", arch("a", 1, "s0")),
 		slot("s2", arch("a", 1, "s0")),
@@ -76,7 +76,7 @@ func TestChainSkipsRedundantSameLevel(t *testing.T) {
 
 // A real multilevel chain replays exactly one archive per level, in run order.
 func TestChainOnePerLevel(t *testing.T) {
-	slots := []*format.Slot{
+	slots := []*record.Slot{
 		slot("s0", arch("a", 0, "")),
 		slot("s1", arch("a", 1, "s0")),
 		slot("s2", arch("a", 1, "s0")),
@@ -97,7 +97,7 @@ func TestChainOnePerLevel(t *testing.T) {
 
 // A target before the tip restores the point-in-time subchain.
 func TestChainPointInTime(t *testing.T) {
-	slots := []*format.Slot{
+	slots := []*record.Slot{
 		slot("s0", arch("a", 0, "")),
 		slot("s1", arch("a", 1, "s0")),
 		slot("s2", arch("a", 1, "s0")),
@@ -113,7 +113,7 @@ func TestChainPointInTime(t *testing.T) {
 
 // When BaseSlot was never recorded, the base is derived from level ordering.
 func TestChainDerivesBaseWithoutBaseSlot(t *testing.T) {
-	slots := []*format.Slot{
+	slots := []*record.Slot{
 		slot("s0", arch("a", 0, "")),
 		slot("s1", arch("a", 1, "")),
 		slot("s2", arch("a", 2, "")),
@@ -130,7 +130,7 @@ func TestChainDerivesBaseWithoutBaseSlot(t *testing.T) {
 // A recorded base that is no longer in the catalog is a broken chain, not a
 // silent substitution — the restore fails rather than producing a partial tree.
 func TestChainBrokenWhenBaseSlotMissing(t *testing.T) {
-	slots := []*format.Slot{
+	slots := []*record.Slot{
 		slot("s0", arch("a", 0, "")),
 		slot("s2", arch("a", 1, "s1")), // s1 pruned away
 	}
@@ -140,14 +140,14 @@ func TestChainBrokenWhenBaseSlotMissing(t *testing.T) {
 }
 
 func TestChainNoBackupForDLE(t *testing.T) {
-	slots := []*format.Slot{slot("s0", arch("a", 0, ""))}
+	slots := []*record.Slot{slot("s0", arch("a", 0, ""))}
 	if _, err := Chain(slots, "b", "s0"); err == nil {
 		t.Fatal("expected error for a DLE with no backup")
 	}
 }
 
 func TestChainUnknownTarget(t *testing.T) {
-	slots := []*format.Slot{slot("s0", arch("a", 0, ""))}
+	slots := []*record.Slot{slot("s0", arch("a", 0, ""))}
 	if _, err := Chain(slots, "a", "nope"); err == nil {
 		t.Fatal("expected error for an unknown target slot")
 	}
@@ -155,7 +155,7 @@ func TestChainUnknownTarget(t *testing.T) {
 
 // Multiple DLEs in shared slots: each DLE's chain is independent.
 func TestChainIgnoresOtherDLEs(t *testing.T) {
-	slots := []*format.Slot{
+	slots := []*record.Slot{
 		slot("s0", arch("a", 0, ""), arch("b", 0, "")),
 		slot("s1", arch("b", 1, "s0")),
 		slot("s2", arch("a", 1, "s0")),

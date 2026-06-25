@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 func openVol(t *testing.T, path string) media.Volume {
@@ -33,7 +33,7 @@ func TestRejectsPartSize(t *testing.T) {
 func appendArchive(t *testing.T, v media.Volume, slot, dle string, level int, payload string) int {
 	t.Helper()
 	pos, err := v.AppendFile(
-		format.Header{Slot: slot, Kind: format.KindArchive, DLE: dle, Level: level, Codec: "none"},
+		record.Header{Slot: slot, Kind: record.KindArchive, DLE: dle, Level: level, Codec: "none"},
 		func(w io.Writer) error { _, e := w.Write([]byte(payload)); return e },
 	)
 	if err != nil {
@@ -53,7 +53,7 @@ func TestVolumeRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rc.Close()
-	if h.DLE != "h-data" || h.Level != 0 || h.Kind != format.KindArchive {
+	if h.DLE != "h-data" || h.Level != 0 || h.Kind != record.KindArchive {
 		t.Errorf("header round trip wrong: %+v", h)
 	}
 	data, err := io.ReadAll(rc)
