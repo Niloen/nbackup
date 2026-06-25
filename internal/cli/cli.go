@@ -258,7 +258,9 @@ func reelDesc(b media.VolumeStatus, medium string) string {
 	if b.ID == "" && b.Label == "" {
 		return "(empty)"
 	}
-	label, status := volumeLabelStatus(b, medium)
+	// reelDesc only surfaces the "full" case (decided before appendability matters),
+	// so the appendable flag is immaterial here; pass the common default.
+	label, status := volumeLabelStatus(b, medium, true)
 	if status == "full" {
 		return fmt.Sprintf("%s (full)", label)
 	}

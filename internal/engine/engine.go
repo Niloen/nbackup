@@ -242,6 +242,16 @@ func (e *Engine) CapacityStatus(current int64) (over bool, pct float64) {
 	return current > c, float64(current) / float64(c) * 100
 }
 
+// MediumAppendable reports whether a medium packs many runs per volume (the
+// default) rather than one run per volume — so inventory can label a written
+// non-appendable reel "used" instead of "append".
+func (e *Engine) MediumAppendable(name string) bool {
+	if m, ok := e.cfg.Media[name]; ok {
+		return m.IsAppendable()
+	}
+	return true
+}
+
 // MediumInfo is a per-medium summary for catalog visibility (`nb medium`): what
 // the medium is, how much it holds against its capacity, and (for labeled media)
 // the volume currently associated with it in the catalog.

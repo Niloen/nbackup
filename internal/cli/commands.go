@@ -1012,6 +1012,7 @@ func printInventory(eng *engine.Engine, name string) {
 	if err != nil {
 		return // address-identified medium: nothing physical to inventory
 	}
+	appendable := eng.MediumAppendable(name)
 	if view.Library {
 		tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 		fmt.Fprintln(tw, "\n\tBAY\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
@@ -1020,7 +1021,7 @@ func printInventory(eng *engine.Engine, name string) {
 			if b.ID == view.Loaded {
 				mark = "*"
 			}
-			label, status := volumeLabelStatus(b, name)
+			label, status := volumeLabelStatus(b, name, appendable)
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\n", mark, b.ID, label, status,
 				sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
 		}
@@ -1028,7 +1029,7 @@ func printInventory(eng *engine.Engine, name string) {
 		return
 	}
 	if view.DriveOK {
-		label, status := volumeLabelStatus(view.Drive, name)
+		label, status := volumeLabelStatus(view.Drive, name, appendable)
 		fmt.Printf("  drive:   %s (%s, %s used, %d files)\n", label, status,
 			sizeutil.FormatBytes(view.Drive.Used), view.Drive.Files)
 	} else {
@@ -1039,7 +1040,7 @@ func printInventory(eng *engine.Engine, name string) {
 		rw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 		fmt.Fprintln(rw, "  REEL\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
 		for _, b := range view.Shelf {
-			label, status := volumeLabelStatus(b, name)
+			label, status := volumeLabelStatus(b, name, appendable)
 			fmt.Fprintf(rw, "  %s\t%s\t%s\t%s\t%s\t%d\n", b.ID, label, status,
 				sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
 		}
@@ -1058,7 +1059,7 @@ func capacityStr(c int64) string {
 // listings (a blank volume, a full one, a wrong-pool reel, or an appendable labeled
 // one). medium is the medium being inventoried, so a reel labeled for a different
 // pool is flagged rather than shown as one of this medium's own volumes.
-func volumeLabelStatus(b media.VolumeStatus, medium string) (label, status string) {
+func volumeLabelStatus(b media.VolumeStatus, medium string, appendable bool) (label, status string) {
 	switch {
 	case b.Foreign:
 		return "(foreign)", "foreign"
@@ -1070,6 +1071,14 @@ func volumeLabelStatus(b media.VolumeStatus, medium string) (label, status strin
 		return b.Label, fmt.Sprintf("wrong-pool:%s", b.Pool)
 	case b.Capacity > 0 && b.Used >= b.Capacity:
 		return b.Label, "full"
+	case !appendable:
+		// One run per volume: a reel that already holds a run cannot be appended, so
+		// "append" would misrepresent it. b.Files counts the file-0 label plus any run
+		// files, so >1 means it holds a run.
+		if b.Files > 1 {
+			return b.Label, "used"
+		}
+		return b.Label, "writable"
 	default:
 		return b.Label, "append"
 	}

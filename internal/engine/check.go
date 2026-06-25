@@ -89,6 +89,11 @@ func (e *Engine) checkServer(rep *CheckReport) {
 			rep.add(&rep.Server, false, false, fmt.Sprintf("dumptype %q encryption: %v", dt, err))
 		} else {
 			rep.add(&rep.Server, true, false, fmt.Sprintf("dumptype %q encryption %q configured", dt, scheme))
+			if pf := opts.PassphraseFile; pf != "" {
+				if info, statErr := os.Stat(pf); statErr == nil && info.Mode().Perm()&0o077 != 0 {
+					rep.add(&rep.Server, false, true, fmt.Sprintf("passphrase_file %q is group/world-readable (%#o) — chmod 600 to protect the symmetric key", pf, info.Mode().Perm()))
+				}
+			}
 		}
 	}
 }
