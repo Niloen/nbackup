@@ -15,7 +15,6 @@ package crypt
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -120,17 +119,6 @@ func Check(scheme string, o Options) error {
 	return nil
 }
 
-// Decrypt returns a ReadCloser that yields the plaintext form of src by piping it
-// through the scheme's decryptor child. Close waits the child. This is the only
-// step that needs the key; verify, copy, and browse all operate on ciphertext.
-func Decrypt(scheme string, src io.Reader, o Options) (io.ReadCloser, error) {
-	s, err := spec(scheme)
-	if err != nil {
-		return nil, err
-	}
-	return streamproc.ReadThrough(s.argv(s.decryptArgv, o), o.Nice, src)
-}
-
 // EncryptCmd returns the encryptor as a pipeline stage, or ok=false for the identity
 // (none) scheme. It lets the unified pipeline run encryption through any executor — on
 // the client when the key lives there, so plaintext never leaves it.
@@ -170,13 +158,4 @@ func stageCmd(scheme string, pick func(Spec) func(Options) []string, o Options) 
 	}
 	argv := build(o)
 	return hostexec.Cmd{Name: argv[0], Args: argv[1:], Nice: o.Nice}, true, nil
-}
-
-// argv applies an argv builder, returning nil for the none scheme (no child) so
-// streamproc runs the identity transform.
-func (s Spec) argv(build func(Options) []string, o Options) []string {
-	if build == nil {
-		return nil
-	}
-	return build(o)
 }

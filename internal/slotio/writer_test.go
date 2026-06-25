@@ -10,8 +10,6 @@ import (
 
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/transform/compress"
-	"github.com/Niloen/nbackup/internal/transform/crypt"
 )
 
 // memVolume is a minimal in-memory media.Volume for testing the spanning writer and
@@ -195,10 +193,10 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	}
 
 	// Read the archive back by concatenating its parts; it must equal the input.
-	r := NewReader(compress.Options{}, crypt.Options{})
-	rc, err := r.OpenArchiveParts(parts, "none", "", Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v1, v2, v3))
+	r := NewReader()
+	rc, err := r.Open(parts, Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v1, v2, v3))
 	if err != nil {
-		t.Fatalf("OpenArchiveParts: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	got, err := io.ReadAll(rc)
 	rc.Close()
@@ -233,8 +231,8 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	if _, err := w.Seal(time.Unix(1, 0).UTC()); err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	r := NewReader(compress.Options{}, crypt.Options{})
-	rc, err := r.OpenArchiveParts(w.Positions()[0].Parts, "none", "", Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v))
+	r := NewReader()
+	rc, err := r.Open(w.Positions()[0].Parts, Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,34 +6,37 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Niloen/nbackup/internal/streamproc"
+	"github.com/Niloen/nbackup/internal/hostexec"
 )
 
-// compress runs the codec's compressor over src using the read-side plumbing, the
-// peer of the live CompressCmd path; it lets the round-trip test produce real
-// compressed bytes without the deleted streaming Compress write-helper.
-func compress(t *testing.T, codec string, o Options, src []byte) []byte {
+// runFilter runs one filter command over src through the live hostexec path — the same
+// RunGrouped the engine drives — returning its output. An empty command (the none
+// identity) passes src through unchanged.
+func runFilter(t *testing.T, cmd hostexec.Cmd, src []byte) []byte {
 	t.Helper()
-	s, err := spec(codec)
+	if cmd.Name == "" {
+		return src
+	}
+	out, wait, err := hostexec.RunGrouped(bytes.NewReader(src), hostexec.Stage{Cmd: cmd, Exec: hostexec.Local()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rc, err := streamproc.ReadThrough(s.argv(s.compressArgv, o), o.Nice, bytes.NewReader(src))
+	got, err := io.ReadAll(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := io.ReadAll(rc)
-	if err != nil {
+	if err := out.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := rc.Close(); err != nil {
+	if err := wait(); err != nil {
 		t.Fatal(err)
 	}
-	return out
+	return got
 }
 
-// TestRoundTrip checks compress -> decompress reproduces the input for every
-// built-in codec whose binary is available (none always is).
+// TestRoundTrip checks Forward (compress) -> Reverse (decompress) reproduces the input
+// for every built-in codec whose binary is available (none always is), driving the same
+// Filter the engine uses.
 func TestRoundTrip(t *testing.T) {
 	payload := []byte(strings.Repeat("the quick brown fox\n", 5000))
 	for _, codec := range []string{"none", "gzip", "zstd"} {
@@ -42,20 +45,12 @@ func TestRoundTrip(t *testing.T) {
 			if err := Check(codec, Options{}); err != nil {
 				t.Skipf("codec unavailable: %v", err)
 			}
-
-			compressed := compress(t, codec, Options{Level: 3}, payload)
-
-			rc, err := Decompress(codec, bytes.NewReader(compressed), Options{})
+			f, err := Filter(codec, Options{Level: 3})
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := io.ReadAll(rc)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := rc.Close(); err != nil {
-				t.Fatal(err)
-			}
+			compressed := runFilter(t, f.Forward, payload)
+			got := runFilter(t, f.Reverse, compressed)
 			if !bytes.Equal(got, payload) {
 				t.Errorf("round trip mismatch: got %d bytes, want %d", len(got), len(payload))
 			}

@@ -182,7 +182,7 @@ func New(cfg *config.Config) (*Engine, error) {
 		mediumName:  name,
 		mediumDef:   mediaDef,
 		vol:         vol,
-		reader:      slotio.NewReader(fopts, dcopts),
+		reader:      slotio.NewReader(),
 		profile:     profile,
 		landingCost: costModel,
 		minAge:      minAge,
@@ -598,7 +598,7 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		if !ok {
 			return fmt.Errorf("source copy of %s on %q is missing %s L%d", slotID, fromMedia, a.DLE, a.Level)
 		}
-		raw, err := e.reader.OpenRawParts(parts, slotio.Expect{Slot: slotID, DLE: a.DLE, Level: a.Level}, srcOpen)
+		raw, err := e.reader.Open(parts, slotio.Expect{Slot: slotID, DLE: a.DLE, Level: a.Level}, srcOpen)
 		if err != nil {
 			return fmt.Errorf("copy %s L%d to %q: %w", a.DLE, a.Level, targetMedia, err)
 		}
@@ -1525,38 +1525,42 @@ func (e *Engine) extractInto(slotID, dle string, level int, codec, encrypt, arch
 	if err != nil {
 		return err
 	}
-	stages, err := e.decodeStages(encrypt, codec, ec, targetHost, target)
+	pipe, err := e.decodePipeline(encrypt, codec, ec, targetHost, target)
 	if err != nil {
 		raw.Close()
 		return err
 	}
-	stages = append(stages, hostexec.Stage{Cmd: arch.RestoreStage(destDir, members), Exec: target})
+	stages := append(pipe.Reverse(), hostexec.Stage{Cmd: arch.RestoreStage(destDir, members), Exec: target})
 	return decryptHint(encrypt, runDecodePipeline(raw, stages...))
 }
 
-// decodeStages returns the decrypt and decompress stages of a restore pipeline, each placed
-// on the host that should run it. Decrypt — the only stage that needs the key — runs on the
-// client (with the client's key reference) for a client-held key reached over `--to`, and on
-// the server (with the server's) otherwise. Decompress always runs on the target host, so a
-// remote restore ships compressed bytes over the wire rather than inflating them first.
-func (e *Engine) decodeStages(encrypt, codec string, ec config.EncryptConfig, targetHost string, target hostexec.Executor) ([]hostexec.Stage, error) {
-	decExec, copts := hostexec.Local(), e.dcopts
+// decodePipeline builds the archive payload's transform pipeline placed for the decode
+// direction: the same compress+encrypt chain a dump applied, so Pipeline.Reverse() yields
+// the decrypt-then-decompress stages. Decrypt — the only stage that needs the key — runs on
+// the client (with the client's key reference) for a client-held key reached over `--to`,
+// and on the server otherwise. Decompress always runs on the target host, so a remote
+// restore ships compressed bytes over the wire rather than inflating them first.
+func (e *Engine) decodePipeline(encrypt, codec string, ec config.EncryptConfig, targetHost string, target hostexec.Executor) (transform.Pipeline, error) {
+	decExec := hostexec.Executor(hostexec.Local())
+	copts := e.dcopts
 	if ec.At == "client" && targetHost != "" {
 		decExec = target
 		copts = crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile}
 	}
-	var stages []hostexec.Stage
-	if cmd, ok, err := crypt.DecryptCmd(encrypt, copts); err != nil {
+	compF, err := compress.Filter(codec, e.fopts)
+	if err != nil {
 		return nil, err
-	} else if ok {
-		stages = append(stages, hostexec.Stage{Cmd: cmd, Exec: decExec})
 	}
-	if cmd, ok, err := compress.DecompressCmd(codec, e.fopts); err != nil {
+	encF, err := crypt.Filter(encrypt, copts)
+	if err != nil {
 		return nil, err
-	} else if ok {
-		stages = append(stages, hostexec.Stage{Cmd: cmd, Exec: target})
 	}
-	return stages, nil
+	// Encode order is compress then encrypt; Reverse() undoes it (decrypt, then decompress),
+	// with decompress on the target host and decrypt where the key lives.
+	return transform.Pipeline{
+		{Filter: compF, Exec: target},
+		{Filter: encF, Exec: decExec},
+	}, nil
 }
 
 // runDecodePipeline runs a restore's decode→extract stages, draining tar's (empty) stdout
@@ -1630,11 +1634,12 @@ func (e *Engine) eachPlacement(slotID, dle string, level int, medium string,
 }
 
 // openRawFrom opens an archive's raw (undecoded, ciphertext) part stream — the input the
-// restore feeds into its host-placed decode→extract pipeline (extractInto), with the same
-// copy selection and fail-over as openArchiveFrom but without reversing any transform.
+// restore, deep verify, and the drill feed into a host-placed decode pipeline. It applies
+// eachPlacement's copy selection and fail-over without reversing any transform: medium ""
+// tries every copy (preferring the engine's own), a set medium reads only that copy.
 func (e *Engine) openRawFrom(slotID, dle string, level int, medium string) (io.ReadCloser, error) {
 	return e.eachPlacement(slotID, dle, level, medium, func(parts []record.FilePos, lib *librarian.Librarian, p catalog.Placement) (io.ReadCloser, error) {
-		return e.reader.OpenRawParts(parts, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib, p.Medium))
+		return e.reader.Open(parts, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib, p.Medium))
 	})
 }
 
@@ -1891,16 +1896,6 @@ func (e *Engine) ResolveDLE(arg string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// openArchiveFrom opens an archive for reading. With medium == "" it tries every
-// copy, preferring the engine's own medium, until one opens (restore fails over to a
-// copy); with medium set it reads only that medium's copy (a medium-scoped drill /
-// restore against the offsite copy), so a fault on that copy is not masked by another.
-func (e *Engine) openArchiveFrom(slotID, dle string, level int, codec, encrypt, medium string) (io.ReadCloser, error) {
-	return e.eachPlacement(slotID, dle, level, medium, func(parts []record.FilePos, lib *librarian.Librarian, p catalog.Placement) (io.ReadCloser, error) {
-		return e.reader.OpenArchiveParts(parts, codec, encrypt, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib, p.Medium))
-	})
 }
 
 // profileFor returns the capacity/reclamation profile for a named medium: the

@@ -1,4 +1,4 @@
-// Package filter runs stream compressors/decompressors as external child
+// Package compress runs stream compressors/decompressors as external child
 // processes, the way Amanda orchestrates gzip/custom compress. NBackup stays a
 // thin driver: it pipes bytes through a child and lets the proven tool do the
 // CPU-heavy work, so compression can be threaded and niced independently of nb
@@ -11,7 +11,6 @@ package compress
 
 import (
 	"fmt"
-	"io"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -105,16 +104,6 @@ func Check(codec string, o Options) error {
 	return nil
 }
 
-// Decompress returns a ReadCloser that yields the decompressed form of src by
-// piping it through the codec's decompressor child. Close waits the child.
-func Decompress(codec string, src io.Reader, o Options) (io.ReadCloser, error) {
-	s, err := spec(codec)
-	if err != nil {
-		return nil, err
-	}
-	return streamproc.ReadThrough(s.argv(s.decompressArgv, o), o.Nice, src)
-}
-
 // CompressCmd returns the compressor as a pipeline stage, or ok=false for the identity
 // (none) codec, which contributes no stage. It lets the unified pipeline run compression
 // through any executor (local or a remote client).
@@ -154,13 +143,4 @@ func stageCmd(codec string, pick func(Spec) func(Options) []string, o Options) (
 	}
 	argv := build(o)
 	return hostexec.Cmd{Name: argv[0], Args: argv[1:], Nice: o.Nice}, true, nil
-}
-
-// argv applies an argv builder, returning nil for the none codec (no child) so
-// streamproc runs the identity transform.
-func (s Spec) argv(build func(Options) []string, o Options) []string {
-	if build == nil {
-		return nil
-	}
-	return build(o)
 }

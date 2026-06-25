@@ -151,7 +151,7 @@ type archiveRef struct {
 
 // estimateRead prices reading the referenced archives off a medium. With forceMedium
 // set (a medium-scoped drill) it prices on that medium; otherwise it discovers the
-// medium a restore would read from (the copy openArchiveFrom prefers, landing first),
+// medium a restore would read from (the copy a restore prefers, landing first),
 // so the estimate matches what a restore will actually pay. Payload bytes are
 // medium-independent (the same ciphertext lands on every copy), so they come from the
 // catalog regardless of which copy is read.

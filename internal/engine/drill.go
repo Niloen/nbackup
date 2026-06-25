@@ -270,28 +270,40 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		if err != nil {
 			return drill.ClassPipeline, err.Error()
 		}
-		rc, err := e.openArchiveFrom(step.SlotID, step.DLE, step.Level, step.Compress, step.Encrypt, medium)
+		raw, err := e.openRawFrom(step.SlotID, step.DLE, step.Level, medium)
 		if err != nil {
 			return classifyOpenErr(err), err.Error()
 		}
 		logf.log("drill-restoring %s %s L%d", step.SlotID, e.DisplayDLE(step.DLE), step.Level)
-		// Decode is in-process and server-local (rc), so a decrypt/decompress fault surfaces
-		// on rc.Close (ClassPipeline) and a tar fault on the extract stage's wait (ClassChain)
-		// — the split the drill classifies on. The proof drives the deletion-faithful
-		// listed-incremental extract as a single local stage, fed the decoded stream.
-		out, wait, rerr := hostexec.RunGrouped(rc, hostexec.Stage{Cmd: arch.RestoreStage(dir, nil), Exec: hostexec.Local()})
+		// Decode server-side as a SEPARATE pipeline from the extract, so a decrypt/decompress
+		// fault surfaces on the decode reap (ClassPipeline) and a tar composition fault on the
+		// extract reap (ClassChain) — the split the drill classifies on. Driving the proof on
+		// the client for a client-only key is the documented follow-on — see the design note.
+		pipe, err := e.decodePipeline(step.Encrypt, step.Compress, config.EncryptConfig{}, "", hostexec.Local())
+		if err != nil {
+			raw.Close()
+			return drill.ClassPipeline, err.Error()
+		}
+		decoded, dwait, derr := hostexec.RunGrouped(raw, pipe.Reverse()...)
+		if derr != nil {
+			raw.Close()
+			return drill.ClassPipeline, derr.Error()
+		}
+		out, wait, rerr := hostexec.RunGrouped(decoded, hostexec.Stage{Cmd: arch.RestoreStage(dir, nil), Exec: hostexec.Local()})
 		if rerr != nil {
-			rc.Close()
+			decoded.Close()
+			raw.Close()
 			return drill.ClassPipeline, rerr.Error()
 		}
 		_, copyErr := io.Copy(io.Discard, out) // tar -x writes to the fs; its stdout is empty
 		out.Close()
-		werr := wait()
-		cerr := rc.Close()
-		if cerr != nil {
-			// A decrypt/decompress child exited non-zero — a lost/wrong key or a codec
-			// drift, surfaced only on Close (the read side saw a truncated stream).
-			return drill.ClassPipeline, cerr.Error()
+		werr := wait() // tar — a chain composition fault
+		decoded.Close()
+		dErr := dwait()       // decrypt/decompress children — a decode fault
+		rawErr := raw.Close() // a media-read fault on the ciphertext parts
+		if dErr != nil || rawErr != nil {
+			// A lost/wrong key, codec drift, or unreadable parts — surfaced on the decode reap.
+			return drill.ClassPipeline, decryptHint(step.Encrypt, errors.Join(dErr, rawErr)).Error()
 		}
 		if werr == nil {
 			werr = copyErr
@@ -338,7 +350,7 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 	// Fetch the raw (still-encrypted/compressed) payload to a temp file. NBackup is
 	// used only to move bytes off the medium (unavoidable for tape/cloud); the decode
 	// is done entirely by the documented stock tools below.
-	raw, err := e.reader.OpenRawParts(parts, slotio.Expect{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, e.partOpener(lib, medium))
+	raw, err := e.reader.Open(parts, slotio.Expect{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, e.partOpener(lib, medium))
 	if err != nil {
 		return classifyOpenErr(err), err.Error()
 	}

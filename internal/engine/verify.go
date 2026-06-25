@@ -8,7 +8,9 @@ import (
 	"strings"
 
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
+	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/slotio"
 )
@@ -234,24 +236,38 @@ func (e *Engine) structuralCheck(a record.Archive, parts []record.FilePos, want 
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
-	rc, err := e.reader.OpenArchiveParts(parts, a.Compress, a.Encrypt, want, opener)
+	raw, err := e.reader.Open(parts, want, opener)
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
-	members, lerr := arch.List(rc)
+	// Decode server-side (host ""), then list. Keeping decode (the parts pipeline) separate
+	// from tar lets a decode fault surface on the pipeline reap and a tar fault on List — the
+	// split the classification rests on.
+	pipe, err := e.decodePipeline(a.Encrypt, a.Compress, config.EncryptConfig{}, "", hostexec.Local())
+	if err != nil {
+		raw.Close()
+		return drill.ClassPipeline, err.Error()
+	}
+	decoded, wait, derr := hostexec.RunGrouped(raw, pipe.Reverse()...)
+	if derr != nil {
+		raw.Close()
+		return drill.ClassPipeline, derr.Error()
+	}
+	members, lerr := arch.List(decoded)
 	// Drain any bytes tar left unread (it stops at the archive's EOF marker) so the
-	// decrypt/decompress children see EOF and exit cleanly, then close — this is what
-	// makes "the pipeline completes cleanly" a reliable signal rather than a spurious
-	// broken-pipe error on Close.
-	_, _ = io.Copy(io.Discard, rc)
-	cerr := rc.Close()
+	// decrypt/decompress children see EOF and exit cleanly, then reap — this is what makes
+	// "the pipeline completes cleanly" a reliable signal rather than a spurious broken-pipe.
+	_, _ = io.Copy(io.Discard, decoded)
+	decoded.Close()
+	werr := wait()        // the decrypt/decompress children — the real cause of a decode fault
+	rawErr := raw.Close() // a media-read fault on the ciphertext parts
 	// tar sits last in the pipe, so an upstream failure (a missing key, wrong
 	// passphrase, codec drift) reaches tar only as truncated input and reports a
-	// generic "not a tar archive"; the real cause surfaces on Close. Join both and
+	// generic "not a tar archive"; the real cause surfaces on the pipeline reap. Join and
 	// add the decrypt hint — the same surfacing the recover path uses — so a
 	// lost-key failure is not mislabeled as corruption.
-	if lerr != nil || cerr != nil {
-		return drill.ClassPipeline, decryptHint(a.Encrypt, joinPipelineErr(lerr, cerr)).Error()
+	if lerr != nil || werr != nil || rawErr != nil {
+		return drill.ClassPipeline, decryptHint(a.Encrypt, joinPipelineErr(lerr, errors.Join(werr, rawErr))).Error()
 	}
 	if diff := membersDiff(a.Members, members); diff != "" {
 		return drill.ClassIntegrity, diff

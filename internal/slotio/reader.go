@@ -1,38 +1,23 @@
 package slotio
 
 import (
-	"errors"
 	"fmt"
 	"io"
 
 	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/transform/compress"
-	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// Reader reads slot contents back from media. It holds no volume — an archive's
-// parts may live on several volumes, so the caller supplies a PartOpener that mounts
-// and opens each part in turn.
-//
-// OpenArchiveParts decodes in-process (crypt.Decrypt → compress.Decompress as local
-// children) for the two server-local readers that want a decoded stream in hand: deep
-// verify (List) and the drill's recoverability proof, where reading the decode fault off
-// the reader's Close is exactly the signal they classify on. The user-facing restore does
-// not decode here — it composes decrypt/decompress as host-placed hostexec stages
-// (engine.extractInto), so decrypt runs where the key lives and decompress runs on the
-// target; only the raw front-end (OpenRawParts) stays in-process there.
-type Reader struct {
-	fopts compress.Options
-	copts crypt.Options
-}
+// Reader reads an archive's part stream back from media. It holds no state and no volume:
+// an archive's parts may live on several volumes, so the caller supplies a PartOpener that
+// mounts and opens each part in turn. Reading is parts-only — concatenate, assert headers,
+// optionally re-hash. Reversing the payload's transforms (decrypt, decompress) is the
+// engine's job: it composes them as host-placed hostexec stages over Open's raw stream, so
+// decrypt runs where the key lives and decompress on the target.
+type Reader struct{}
 
-// NewReader returns a Reader. fopts carries codec settings (e.g. a binary override)
-// used when decompressing archives; copts carries the decryptor's key reference
-// (e.g. a passphrase file) — public-key schemes need none.
-func NewReader(fopts compress.Options, copts crypt.Options) *Reader {
-	return &Reader{fopts: fopts, copts: copts}
-}
+// NewReader returns a Reader.
+func NewReader() *Reader { return &Reader{} }
 
 // Expect is the identity a caller believes an archive's parts hold, asserted against
 // each part file's actual header before its bytes are trusted. It is the cheap
@@ -49,45 +34,14 @@ type Expect struct {
 // over the librarian (mount the part's volume, then ReadFile its position).
 type PartOpener func(p record.FilePos) (record.Header, io.ReadCloser, error)
 
-// OpenArchiveParts opens the plaintext stream of an archive whose payload is the
-// ordered concatenation of parts. It reads each part fully before opening the next
-// (a single drive holds only one volume at a time), asserting every part's header
-// against want and its position in the sequence, then reverses the transforms over
-// the whole concatenation in write order's inverse: decrypt, then decompress. The
-// caller closes the returned reader.
-func (r *Reader) OpenArchiveParts(parts []record.FilePos, codec, encrypt string, want Expect, open PartOpener) (io.ReadCloser, error) {
-	if len(parts) == 0 {
-		return nil, fmt.Errorf("archive %s %s L%d has no parts", want.Slot, want.DLE, want.Level)
-	}
-	raw := &partsReader{parts: parts, want: want, open: open}
-	// Open the first part eagerly so a missing/wrong volume errors here, letting the
-	// caller fail over to another copy — rather than surfacing only once a child
-	// (or a stock reader) pulls bytes, by which point failover is impossible.
-	if err := raw.prime(); err != nil {
-		return nil, err
-	}
-	dec, err := crypt.Decrypt(encrypt, raw, r.copts)
-	if err != nil {
-		raw.Close()
-		return nil, err
-	}
-	src, err := compress.Decompress(codec, dec, r.fopts)
-	if err != nil {
-		dec.Close()
-		raw.Close()
-		return nil, err
-	}
-	return multiCloser{Reader: src, closers: []io.Closer{src, dec, raw}}, nil
-}
-
-// OpenRawParts returns the archive's raw (still-compressed) payload as the ordered
-// concatenation of its parts, without reversing the codec — the read side of a copy,
-// which re-splits the same bytes onto the target without recompressing, and of a restore,
-// which feeds it into a host-placed decode pipeline. It primes the first part eagerly (like
-// OpenArchiveParts) so a missing/wrong volume errors here, letting a copy-selecting caller
+// Open returns an archive's payload as the ordered concatenation of its part files —
+// still in on-medium form (compressed/encrypted), untransformed. It is the single read
+// primitive: a copy re-splits these bytes onto a target without recompressing; a restore,
+// deep verify, and the drill feed them into a host-placed decode pipeline. It primes the
+// first part eagerly so a missing/wrong volume errors here, letting a copy-selecting caller
 // fail over to another copy rather than discovering the fault only once bytes are pulled.
 // Each part's header is asserted as it is reached. The caller closes the returned reader.
-func (r *Reader) OpenRawParts(parts []record.FilePos, want Expect, open PartOpener) (io.ReadCloser, error) {
+func (r *Reader) Open(parts []record.FilePos, want Expect, open PartOpener) (io.ReadCloser, error) {
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("archive %s %s L%d has no parts", want.Slot, want.DLE, want.Level)
 	}
@@ -197,24 +151,4 @@ func assertPart(h record.Header, want Expect, part int) error {
 			h.Slot, h.DLE, h.Level, h.Part, part)
 	}
 	return nil
-}
-
-// multiCloser adapts a reader plus the closers backing it into one ReadCloser.
-type multiCloser struct {
-	io.Reader
-	closers []io.Closer
-}
-
-func (m multiCloser) Close() error {
-	// Join every stage's error, not just the first: when the decryptor fails (e.g.
-	// a wrong gpg key) the decompressor downstream of it also fails on the resulting
-	// truncated stream, and the decryptor's message is the real cause — returning
-	// only the first closer's error would hide it behind the decompressor's symptom.
-	var errs []error
-	for _, c := range m.closers {
-		if e := c.Close(); e != nil {
-			errs = append(errs, e)
-		}
-	}
-	return errors.Join(errs...)
 }

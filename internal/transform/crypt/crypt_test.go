@@ -8,30 +8,32 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Niloen/nbackup/internal/streamproc"
+	"github.com/Niloen/nbackup/internal/hostexec"
 )
 
-// encrypt runs the scheme's encryptor over src using the read-side plumbing, the
-// peer of the live EncryptCmd path; it lets the round-trip tests produce real
-// ciphertext without the deleted streaming Encrypt write-helper.
-func encrypt(t *testing.T, scheme string, o Options, src []byte) []byte {
+// runFilter runs one filter command over src through the live hostexec path — the same
+// RunGrouped the engine drives — returning its output. An empty command (the none
+// identity) passes src through unchanged.
+func runFilter(t *testing.T, cmd hostexec.Cmd, src []byte) []byte {
 	t.Helper()
-	s, err := spec(scheme)
+	if cmd.Name == "" {
+		return src
+	}
+	out, wait, err := hostexec.RunGrouped(bytes.NewReader(src), hostexec.Stage{Cmd: cmd, Exec: hostexec.Local()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rc, err := streamproc.ReadThrough(s.argv(s.encryptArgv, o), o.Nice, bytes.NewReader(src))
+	got, err := io.ReadAll(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := io.ReadAll(rc)
-	if err != nil {
+	if err := out.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := rc.Close(); err != nil {
+	if err := wait(); err != nil {
 		t.Fatal(err)
 	}
-	return out
+	return got
 }
 
 // register a deterministic, non-identity scheme backed by gzip so the
@@ -46,8 +48,9 @@ func init() {
 	})
 }
 
-// TestRoundTrip checks encrypt -> decrypt reproduces the input for every scheme
-// whose binary is available (none always is; gztest needs gzip).
+// TestRoundTrip checks Forward (encrypt) -> Reverse (decrypt) reproduces the input for
+// every scheme whose binary is available (none always is; gztest needs gzip), driving the
+// same Filter the engine uses.
 func TestRoundTrip(t *testing.T) {
 	payload := []byte(strings.Repeat("secrets and lies\n", 4000))
 	for _, scheme := range []string{"none", "", "gztest"} {
@@ -56,20 +59,12 @@ func TestRoundTrip(t *testing.T) {
 			if err := Check(scheme, Options{}); err != nil {
 				t.Skipf("scheme unavailable: %v", err)
 			}
-
-			ciphertext := encrypt(t, scheme, Options{}, payload)
-
-			rc, err := Decrypt(scheme, bytes.NewReader(ciphertext), Options{})
+			f, err := Filter(scheme, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := io.ReadAll(rc)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := rc.Close(); err != nil {
-				t.Fatal(err)
-			}
+			ciphertext := runFilter(t, f.Forward, payload)
+			got := runFilter(t, f.Reverse, ciphertext)
 			if !bytes.Equal(got, payload) {
 				t.Errorf("round trip mismatch: got %d bytes, want %d", len(got), len(payload))
 			}
@@ -91,22 +86,16 @@ func TestGPGRoundTrip(t *testing.T) {
 	if err := Check("gpg", o); err != nil {
 		t.Skipf("gpg unavailable: %v", err)
 	}
+	f, err := Filter("gpg", o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	payload := []byte("the launch codes are 0000")
-	ciphertext := encrypt(t, "gpg", o, payload)
+	ciphertext := runFilter(t, f.Forward, payload)
 	if bytes.Contains(ciphertext, []byte("launch codes")) {
 		t.Fatal("ciphertext still contains the plaintext")
 	}
-	rc, err := Decrypt("gpg", bytes.NewReader(ciphertext), o)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := io.ReadAll(rc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := rc.Close(); err != nil {
-		t.Fatal(err)
-	}
+	got := runFilter(t, f.Reverse, ciphertext)
 	if !bytes.Equal(got, payload) {
 		t.Errorf("gpg round trip mismatch: got %q", got)
 	}
