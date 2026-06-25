@@ -139,7 +139,7 @@ func (e *Engine) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerd
 	var goodCopies, badCopies, skippedCopies []string
 	for _, p := range placements {
 		copyOK := true
-		lib, _, _, err := e.librarianFor(p.Medium)
+		opener, err := e.aio.PartOpener(p.Medium)
 		if err != nil {
 			// A copy on a medium this config does not define is out of scope, not
 			// damaged: skip it (with a note) rather than reporting a false integrity
@@ -158,7 +158,6 @@ func (e *Engine) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerd
 			})
 			continue
 		}
-		opener := e.partOpener(lib, p.Medium)
 		for _, a := range s.Archives {
 			v := e.verifyArchive(id, a, p, opts, opener, logf)
 			sv.Archives = append(sv.Archives, v)
@@ -202,7 +201,7 @@ func (e *Engine) verifyArchive(id string, a record.Archive, p catalog.Placement,
 	want := slotio.Expect{Slot: id, DLE: a.DLE, Level: a.Level}
 
 	if opts.Checks.has(CheckChecksum) {
-		good, err := e.reader.VerifyParts(parts, want, a.SHA256, opener)
+		good, err := e.aio.VerifyParts(parts, want, a.SHA256, opener)
 		if err != nil {
 			logf.log("%s [%s]: %s L%d ERROR %v", id, p.Medium, a.DLEID(), a.Level, err)
 			v.OK, v.Class, v.Detail = false, drill.ClassPipeline, err.Error()
@@ -236,14 +235,14 @@ func (e *Engine) structuralCheck(a record.Archive, parts []record.FilePos, want 
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
-	raw, err := e.reader.Open(parts, want, opener)
+	raw, err := e.aio.OpenParts(parts, want, opener)
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
 	// Decode server-side (host ""), then list. Keeping decode (the parts pipeline) separate
 	// from tar lets a decode fault surface on the pipeline reap and a tar fault on List — the
 	// split the classification rests on.
-	pipe, err := e.decodePipeline(a.Encrypt, a.Compress, config.EncryptConfig{}, "", hostexec.Local())
+	pipe, err := e.aio.DecodePipeline(a.Encrypt, a.Compress, config.EncryptConfig{}, "")
 	if err != nil {
 		raw.Close()
 		return drill.ClassPipeline, err.Error()

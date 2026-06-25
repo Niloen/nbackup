@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/hostexec"
@@ -226,11 +227,10 @@ func (e *Engine) drillTarget(t drill.Target, medium string, opts DrillOptions, l
 // drillVerify exercises a target's chain archives with the verify primitive on the
 // chosen medium (checksum, or checksum+structural). It stops at the first fault.
 func (e *Engine) drillVerify(t drill.Target, medium string, checks VerifyChecks) (drill.Class, string) {
-	lib, _, _, err := e.librarianFor(medium)
+	opener, err := e.aio.PartOpener(medium)
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
-	opener := e.partOpener(lib, medium)
 	for _, step := range t.Steps {
 		s, err := e.cat.ReadSlot(step.SlotID)
 		if err != nil {
@@ -270,7 +270,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		if err != nil {
 			return drill.ClassPipeline, err.Error()
 		}
-		raw, err := e.openRawFrom(step.SlotID, step.DLE, step.Level, medium)
+		raw, err := e.aio.OpenRaw(archiveio.Ref{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, medium)
 		if err != nil {
 			return classifyOpenErr(err), err.Error()
 		}
@@ -279,7 +279,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		// fault surfaces on the decode reap (ClassPipeline) and a tar composition fault on the
 		// extract reap (ClassChain) — the split the drill classifies on. Driving the proof on
 		// the client for a client-only key is the documented follow-on — see the design note.
-		pipe, err := e.decodePipeline(step.Encrypt, step.Compress, config.EncryptConfig{}, "", hostexec.Local())
+		pipe, err := e.aio.DecodePipeline(step.Encrypt, step.Compress, config.EncryptConfig{}, "")
 		if err != nil {
 			raw.Close()
 			return drill.ClassPipeline, err.Error()
@@ -343,14 +343,10 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 	if !ok {
 		return drill.ClassMissing, fmt.Sprintf("%s %s L%d position missing on %q", step.SlotID, step.DLE, step.Level, medium)
 	}
-	lib, _, _, err := e.librarianFor(medium)
-	if err != nil {
-		return drill.ClassPipeline, err.Error()
-	}
 	// Fetch the raw (still-encrypted/compressed) payload to a temp file. NBackup is
 	// used only to move bytes off the medium (unavoidable for tape/cloud); the decode
 	// is done entirely by the documented stock tools below.
-	raw, err := e.reader.Open(parts, slotio.Expect{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, e.partOpener(lib, medium))
+	raw, err := e.aio.OpenPartsOn(parts, slotio.Expect{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, medium)
 	if err != nil {
 		return classifyOpenErr(err), err.Error()
 	}
@@ -487,7 +483,7 @@ func findArchive(s *record.Slot, dle string, level int) (record.Archive, bool) {
 // catalog read path, librarian.ErrVolumeUnavailable from the mount path) via errors.Is,
 // so reclassification does not silently follow a reworded message.
 func classifyOpenErr(err error) drill.Class {
-	if errors.Is(err, errMissingCopy) || errors.Is(err, librarian.ErrVolumeUnavailable) {
+	if errors.Is(err, archiveio.ErrMissingCopy) || errors.Is(err, librarian.ErrVolumeUnavailable) {
 		return drill.ClassMissing
 	}
 	return drill.ClassPipeline

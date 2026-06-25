@@ -8,7 +8,6 @@ package engine
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
@@ -61,7 +61,7 @@ type Engine struct {
 	mediumName  string       // name of the medium new dumps land on
 	mediumDef   config.Media // its definition
 	vol         media.Volume
-	reader      *slotio.Reader
+	aio         *archiveio.IO // the archive data path (read); the engine implements its Deps
 	profile     media.Profile
 	landingCost media.Cost // landing medium's pricing (dollar peer of profile)
 	minAge      time.Duration
@@ -177,12 +177,11 @@ func New(cfg *config.Config) (*Engine, error) {
 		PassphraseFile: cfg.Encrypt.PassphraseFile,
 		Nice:           cfg.Nice,
 	}
-	return &Engine{
+	e := &Engine{
 		cfg:         cfg,
 		mediumName:  name,
 		mediumDef:   mediaDef,
 		vol:         vol,
-		reader:      slotio.NewReader(),
 		profile:     profile,
 		landingCost: costModel,
 		minAge:      minAge,
@@ -192,7 +191,9 @@ func New(cfg *config.Config) (*Engine, error) {
 		fopts:       fopts,
 		dcopts:      dcopts,
 		limiters:    limiters,
-	}, nil
+	}
+	e.aio = archiveio.New(e)
+	return e, nil
 }
 
 // encryptionFor resolves the encryption scheme and encryptor options for a
@@ -573,7 +574,7 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	if err != nil {
 		return err
 	}
-	srcLib, srcPlacement, err := e.copySource(slotID, fromMedia)
+	_, srcPlacement, err := e.copySource(slotID, fromMedia)
 	if err != nil {
 		return err
 	}
@@ -592,13 +593,16 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	}
 	w := wt.w
 	logf.log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
-	srcOpen := e.partOpener(srcLib, fromMedia)
+	srcOpen, err := e.aio.PartOpener(fromMedia)
+	if err != nil {
+		return err
+	}
 	for _, a := range s.Archives {
 		parts, ok := srcPlacement.Parts(a.DLE, a.Level)
 		if !ok {
 			return fmt.Errorf("source copy of %s on %q is missing %s L%d", slotID, fromMedia, a.DLE, a.Level)
 		}
-		raw, err := e.reader.Open(parts, slotio.Expect{Slot: slotID, DLE: a.DLE, Level: a.Level}, srcOpen)
+		raw, err := e.aio.OpenParts(parts, slotio.Expect{Slot: slotID, DLE: a.DLE, Level: a.Level}, srcOpen)
 		if err != nil {
 			return fmt.Errorf("copy %s L%d to %q: %w", a.DLE, a.Level, targetMedia, err)
 		}
@@ -631,23 +635,6 @@ func (e *Engine) copySource(slotID, fromMedia string) (*librarian.Librarian, cat
 		return nil, catalog.Placement{}, err
 	}
 	return lib, src, nil
-}
-
-// partOpener builds a slotio.PartOpener over a librarian: it mounts the volume each
-// part lives on (and verifies its identity), then opens the part's file. Reading a
-// spanned archive calls it once per part, in order — a single drive holds one tape.
-// The part stream is paced to the source medium's bandwidth cap (the read peer of
-// the write throttle), so a restore/un-vault/drill download honors the same uplink
-// budget; an uncapped medium leaves the stream untouched.
-func (e *Engine) partOpener(lib *librarian.Librarian, medium string) slotio.PartOpener {
-	lim := e.limiters[medium]
-	return func(p record.FilePos) (record.Header, io.ReadCloser, error) {
-		h, rc, err := lib.ReadFileAt(p.Label, p.Epoch, p.Pos)
-		if err != nil {
-			return h, rc, err
-		}
-		return h, lim.ReadCloser(rc), nil
-	}
 }
 
 // placementFrom builds a catalog placement from a sealed writer's recorded part
@@ -1508,140 +1495,46 @@ func (e *Engine) extractStep(step restore.Step, destDir, targetHost string, ec c
 }
 
 // extractInto streams an archive's raw parts through the decode→extract pipeline into
-// destDir on the target host. With members it extracts only those entries in plain mode
-// (selected-file recovery, which never deletes); without, a whole-archive listed-incremental
-// chain restore. It is the engine's one extraction path — whole-DLE restore, `--to` client
-// restore, and file-level recover all run through it.
+// destDir on the target host, via the data path. With members it extracts only those
+// entries in plain mode (selected-file recovery, which never deletes); without, a
+// whole-archive listed-incremental chain restore. It is the engine's one extraction path —
+// whole-DLE restore, `--to` client restore, and file-level recover all run through it; it
+// adds the decrypt hint to whatever the data path surfaces.
 func (e *Engine) extractInto(slotID, dle string, level int, codec, encrypt, archiverType, destDir, targetHost string, ec config.EncryptConfig, members []string) error {
-	target, _ := e.executorFor(targetHost)
-	if err := target.MkdirAll(destDir); err != nil {
-		return err
-	}
-	arch, err := e.restoreArchiver(archiverType, targetHost)
-	if err != nil {
-		return err
-	}
-	raw, err := e.openRawFrom(slotID, dle, level, "")
-	if err != nil {
-		return err
-	}
-	pipe, err := e.decodePipeline(encrypt, codec, ec, targetHost, target)
-	if err != nil {
-		raw.Close()
-		return err
-	}
-	stages := append(pipe.Reverse(), hostexec.Stage{Cmd: arch.RestoreStage(destDir, members), Exec: target})
-	return decryptHint(encrypt, runDecodePipeline(raw, stages...))
+	ref := archiveio.Ref{Slot: slotID, DLE: dle, Level: level}
+	return decryptHint(encrypt, e.aio.Extract(ref, codec, encrypt, archiverType, destDir, targetHost, ec, members))
 }
 
-// decodePipeline builds the archive payload's transform pipeline placed for the decode
-// direction: the same compress+encrypt chain a dump applied, so Pipeline.Reverse() yields
-// the decrypt-then-decompress stages. Decrypt — the only stage that needs the key — runs on
-// the client (with the client's key reference) for a client-held key reached over `--to`,
-// and on the server otherwise. Decompress always runs on the target host, so a remote
-// restore ships compressed bytes over the wire rather than inflating them first.
-func (e *Engine) decodePipeline(encrypt, codec string, ec config.EncryptConfig, targetHost string, target hostexec.Executor) (transform.Pipeline, error) {
-	decExec := hostexec.Executor(hostexec.Local())
-	copts := e.dcopts
-	if ec.At == "client" && targetHost != "" {
-		decExec = target
-		copts = crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile}
-	}
-	compF, err := compress.Filter(codec, e.fopts)
-	if err != nil {
-		return nil, err
-	}
-	encF, err := crypt.Filter(encrypt, copts)
-	if err != nil {
-		return nil, err
-	}
-	// Encode order is compress then encrypt; Reverse() undoes it (decrypt, then decompress),
-	// with decompress on the target host and decrypt where the key lives.
-	return transform.Pipeline{
-		{Filter: compF, Exec: target},
-		{Filter: encF, Exec: decExec},
-	}, nil
+// The engine implements archiveio.Deps: the data path's view of the orchestrator's
+// services (catalog placement, librarian mounting, executor/archiver resolution, and the
+// config-derived transform options).
+
+// PlacementsFor returns a slot's copies in read-preference order (own medium first).
+func (e *Engine) PlacementsFor(slotID string) []catalog.Placement { return e.placementsFor(slotID) }
+
+// LibrarianFor returns a librarian that can mount and read a medium's volumes.
+func (e *Engine) LibrarianFor(medium string) (*librarian.Librarian, error) {
+	lib, _, _, err := e.librarianFor(medium)
+	return lib, err
 }
 
-// runDecodePipeline runs a restore's decode→extract stages, draining tar's (empty) stdout
-// and reaping every stage. Stages are reaped in pipeline order, so when an upstream child
-// fails (a wrong key, a codec drift) its error — not the downstream "truncated input"
-// symptom it causes in tar — is the one returned.
-func runDecodePipeline(raw io.ReadCloser, stages ...hostexec.Stage) error {
-	out, wait, err := hostexec.RunGrouped(raw, stages...)
-	if err != nil {
-		raw.Close()
-		return err
-	}
-	_, copyErr := io.Copy(io.Discard, out) // tar -x writes to the fs; its stdout is empty
-	out.Close()
-	werr := wait()
-	cerr := raw.Close() // a media-read fault on the ciphertext parts surfaces here
-	if werr == nil {
-		werr = copyErr
-	}
-	if werr == nil {
-		werr = cerr
-	}
-	return werr
+// Limiter returns a medium's shared bandwidth cap (nil = uncapped).
+func (e *Engine) Limiter(medium string) *xfer.Limiter { return e.limiters[medium] }
+
+// Executor returns the transport that runs programs on a host.
+func (e *Engine) Executor(host string) hostexec.Executor {
+	ex, _ := e.executorFor(host)
+	return ex
 }
 
-// errMissingCopy marks a read failure where the catalog knows of no available copy of
-// the requested slot/archive (a missing slot, a missing copy on the named medium, or a
-// placement that does not carry the archive). The drill classifies it as ClassMissing
-// via errors.Is, so the classification does not depend on the message wording.
-var errMissingCopy = errors.New("no available copy")
-
-// eachPlacement resolves the placements holding a slot (all copies, or only those on
-// `medium` when set), then tries each that carries the requested archive — opening its
-// parts via open — until one succeeds, so a read fails over to another copy. It is the
-// one place the raw and decoded read paths share: the copy selection, the missing-copy
-// errors (errMissingCopy), and the fail-over loop.
-func (e *Engine) eachPlacement(slotID, dle string, level int, medium string,
-	open func(parts []record.FilePos, lib *librarian.Librarian, p catalog.Placement) (io.ReadCloser, error)) (io.ReadCloser, error) {
-	placements := e.placementsFor(slotID)
-	if medium != "" {
-		placements = placementsOnMedium(placements, medium)
-	}
-	if len(placements) == 0 {
-		if medium != "" {
-			return nil, fmt.Errorf("%w: slot %s has no copy on medium %q", errMissingCopy, slotID, medium)
-		}
-		return nil, fmt.Errorf("%w: slot %s not in catalog (run `nb rebuild`)", errMissingCopy, slotID)
-	}
-	var lastErr error
-	for _, p := range placements {
-		parts, ok := p.Parts(dle, level)
-		if !ok {
-			continue
-		}
-		lib, _, _, err := e.librarianFor(p.Medium)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		rc, err := open(parts, lib, p)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		return rc, nil
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("%w of %s %s L%d in the catalog", errMissingCopy, slotID, dle, level)
-	}
-	return nil, lastErr
+// RestoreArchiver resolves the archiver plugin that extracts on the given host.
+func (e *Engine) RestoreArchiver(typeName, host string) (archiver.Archiver, error) {
+	return e.restoreArchiver(typeName, host)
 }
 
-// openRawFrom opens an archive's raw (undecoded, ciphertext) part stream — the input the
-// restore, deep verify, and the drill feed into a host-placed decode pipeline. It applies
-// eachPlacement's copy selection and fail-over without reversing any transform: medium ""
-// tries every copy (preferring the engine's own), a set medium reads only that copy.
-func (e *Engine) openRawFrom(slotID, dle string, level int, medium string) (io.ReadCloser, error) {
-	return e.eachPlacement(slotID, dle, level, medium, func(parts []record.FilePos, lib *librarian.Librarian, p catalog.Placement) (io.ReadCloser, error) {
-		return e.reader.Open(parts, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib, p.Medium))
-	})
-}
+// CompressOpts / DecryptOpts are the config-derived decode-pipeline invocation options.
+func (e *Engine) CompressOpts() compress.Options { return e.fopts }
+func (e *Engine) DecryptOpts() crypt.Options     { return e.dcopts }
 
 // ensureServerCanDecode fails fast when a restore would have the server decrypt an
 // archive whose key cannot be there. Decode is server-side for both a plain restore and
