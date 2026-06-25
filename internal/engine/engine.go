@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archiver"
@@ -31,6 +32,7 @@ import (
 	"github.com/Niloen/nbackup/internal/retention"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/slotio"
+	"github.com/Niloen/nbackup/internal/transform"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
@@ -500,10 +502,7 @@ func (e *Engine) prepareWriter(medium string, spec slotio.SlotSpec, now time.Tim
 		return nil, err
 	}
 	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
-	w, err := slotio.NewWriter(sink, spec, e.codec, e.fopts, e.limiters[medium])
-	if err != nil {
-		return nil, err
-	}
+	w := slotio.NewWriter(sink, spec, e.limiters[medium])
 	return &writeTarget{lib: lib, w: w, partSize: partSize}, nil
 }
 
@@ -1287,46 +1286,49 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 	logf.log("archiving %s (L%d)", item.DLE.ID(), item.Level)
 
 	encScheme, encOpts := e.encryptionFor(item.DLE.DumpTypeName())
-	spec := slotio.ArchiveSpec{
-		DLE:      item.Name,
-		Host:     item.DLE.Host,
-		Path:     item.DLE.Path,
-		Archiver: ar.Name(),
-		Level:    item.Level,
-		BaseSlot: item.BaseSlot,
-		Encrypt:  encScheme,
-		EncOpts:  encOpts,
-	}
-	// Configurable point: when a transform runs `at: client`, it runs on the DLE's host
-	// executor (the same one tar uses), so it fuses with tar on the client and plaintext
-	// never leaves it. Otherwise it runs server-side (nil = Local). The meter that follows
-	// is always server-side, so the seal still covers the bytes that land.
+
+	// Build the payload's forward transform pipeline: compress, then encrypt. Placement
+	// is policy: a transform configured `at: client` runs on the DLE's host executor (the
+	// same one tar uses), so it fuses with tar on the client and plaintext never leaves
+	// it; otherwise it runs server-side (Local). The meter that follows is always
+	// server-side, so the seal still covers the bytes that land.
 	hostExec, _ := e.executorFor(item.DLE.Host)
+	compExec := hostexec.Executor(hostexec.Local())
 	if e.cfg.ResolveDumpType(item.DLE.DumpTypeName()).Compress == "client" {
-		spec.CompressExec = hostExec
+		compExec = hostExec
 	}
+	encExec := hostexec.Executor(hostexec.Local())
 	if e.cfg.EncryptionFor(item.DLE.DumpTypeName()).At == "client" {
-		spec.EncryptExec = hostExec
+		encExec = hostExec
+	}
+	compFilter, err := compress.Filter(e.codec, e.fopts)
+	if err != nil {
+		return fmt.Errorf("archive %s: %w", item.Name, err)
+	}
+	encFilter, err := crypt.Filter(encScheme, encOpts)
+	if err != nil {
+		return fmt.Errorf("archive %s: %w", item.Name, err)
+	}
+	pipe := transform.Pipeline{
+		{Filter: compFilter, Exec: compExec},
+		{Filter: encFilter, Exec: encExec},
 	}
 
 	bs, berr := ar.BackupSource(req)
 	if berr != nil {
 		return fmt.Errorf("archive %s: %w", item.Name, berr)
 	}
-	src := slotio.Source{
-		Stage:   bs.Stage,
-		Exec:    bs.Exec,
-		Cleanup: bs.Cleanup,
-		Finish: func() (slotio.Produced, error) {
-			res, ferr := bs.Finish()
-			if ferr != nil {
-				return slotio.Produced{}, ferr
-			}
-			return slotio.Produced{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members}, nil
-		},
+	meta := record.Archive{
+		DLE:      item.Name,
+		Host:     item.DLE.Host,
+		Path:     item.DLE.Path,
+		Archiver: ar.Name(),
+		Compress: e.codec,
+		Encrypt:  encScheme,
+		Level:    item.Level,
+		BaseSlot: item.BaseSlot,
 	}
-	progressFn := func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) }
-	arch, err = w.WriteArchive(spec, progressFn, src)
+	arch, err = e.produceArchive(w, meta, bs, pipe, tr, pname)
 	if err != nil {
 		return fmt.Errorf("archive %s: %w", item.Name, err)
 	}
@@ -1344,6 +1346,63 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 		logf.log("  %d file(s), %s %s", arch.FileCount, sizeutil.FormatBytes(arch.Compressed), sizeLabel)
 	}
 	return nil
+}
+
+// produceArchive runs the dump producer pipeline — the archiver's source stage fused with
+// the payload's forward transforms (compress, encrypt) — and drains its output into the
+// slot via the writer, then reaps the pipeline and the source's Finish hook. It is the
+// write-path peer of the engine's decode pipeline: transform supplies the placed forward
+// stages, slotio meters and splits the bytes that land, and the source owns the raw-stream
+// stats. Live progress is the source stage's tap (uncompressed) plus slotio's meter
+// (compressed), feeding the same per-DLE counters.
+func (e *Engine) produceArchive(w *slotio.Writer, meta record.Archive, bs *archiver.BackupSource, pipe transform.Pipeline, tr *progress.Tracker, pname string) (record.Archive, error) {
+	var unc, comp atomic.Int64
+	report := func() { tr.AddBytes(pname, unc.Load(), comp.Load()) }
+
+	srcExec := bs.Exec
+	if srcExec == nil {
+		srcExec = hostexec.Local()
+	}
+	srcStage := bs.Stage
+	srcStage.Tap = func(n int64) { unc.Store(n); report() }
+	stages := append([]hostexec.Stage{{Cmd: srcStage, Exec: srcExec}}, pipe.Forward()...)
+
+	out, wait, runErr := hostexec.RunGrouped(nil, stages...)
+	if runErr != nil {
+		bs.Cleanup()
+		return record.Archive{}, runErr
+	}
+	arch, parts, drainErr := w.WriteArchive(meta, out, func(n int64) { comp.Store(n); report() })
+	out.Close()       // drains/reaps the reader; SIGPIPEs producers if drainParts stopped early
+	waitErr := wait() // reap the pipeline, first failure wins
+
+	// The producer's raw-stream stats are read from scratch only on a clean run, before
+	// Cleanup removes it. Error precedence: a drain fault (consumer) wins over a pipeline
+	// fault (producer), which wins over a Finish fault — the deepest cause first.
+	var prod archiver.BackupResult
+	var finErr error
+	if drainErr == nil && waitErr == nil {
+		if res, err := bs.Finish(); err != nil {
+			finErr = err
+		} else if res != nil {
+			prod = *res
+		}
+	}
+	bs.Cleanup()
+	switch {
+	case drainErr != nil:
+		return record.Archive{}, drainErr
+	case waitErr != nil:
+		return record.Archive{}, waitErr
+	case finErr != nil:
+		return record.Archive{}, finErr
+	}
+
+	arch.Uncompressed = prod.Uncompressed
+	arch.FileCount = prod.FileCount
+	arch.Members = prod.Members
+	w.Record(arch, parts)
+	return arch, nil
 }
 
 // Restore reconstructs a DLE as of a slot into destDir. A whole-DLE restore

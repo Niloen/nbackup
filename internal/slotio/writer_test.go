@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -142,16 +141,15 @@ func openerOver(vols ...*memVolume) PartOpener {
 
 func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) record.Archive {
 	t.Helper()
-	arch, err := w.WriteArchive(ArchiveSpec{DLE: dle, Host: "localhost", Path: "/p", Archiver: "m", Level: 0}, nil,
-		Source{
-			Stdin: bytes.NewReader(body),
-			Finish: func() (Produced, error) {
-				return Produced{Uncompressed: int64(len(body)), FileCount: 1, Members: []string{dle}}, nil
-			},
-		})
+	meta := record.Archive{
+		DLE: dle, Host: "localhost", Path: "/p", Archiver: "m", Level: 0, Compress: "none",
+		Uncompressed: int64(len(body)), FileCount: 1, Members: []string{dle},
+	}
+	arch, parts, err := w.WriteArchive(meta, bytes.NewReader(body), nil)
 	if err != nil {
 		t.Fatalf("WriteArchive: %v", err)
 	}
+	w.Record(arch, parts)
 	return arch
 }
 
@@ -164,10 +162,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	sink := &memSink{vols: []*memVolume{v1, v2, v3}}
 
 	spec := SlotSpec{ID: "slot-2026-06-21", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
-	w, err := NewWriter(sink, spec, "none", compress.Options{}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	w := NewWriter(sink, spec, nil)
 
 	body := []byte(strings.Repeat("abcdefgh", 25*1024/8*4)) // 100 KiB → spans v1+v2, seal on v3
 	arch := writeOneArchive(t, w, "dle1", body)
@@ -229,7 +224,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	sink := &memSink{vols: []*memVolume{v}, partCap: 10 * 1024}
 
 	spec := SlotSpec{ID: "slot-x", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
-	w, _ := NewWriter(sink, spec, "none", compress.Options{}, nil)
+	w := NewWriter(sink, spec, nil)
 	body := []byte(strings.Repeat("z", 55*1024)) // 55 KiB / 10 KiB ≈ 6 parts
 	arch := writeOneArchive(t, w, "dle1", body)
 	if arch.Parts < 5 {
@@ -251,89 +246,20 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 }
 
 // TestRollFailureNoDeadlock confirms that when the sink cannot Advance mid-archive,
-// WriteArchive returns the error and the producer goroutine unwinds (no deadlock or
-// leak — the test must finish, especially under -race).
+// WriteArchive surfaces the error (rather than hanging) — the writer no longer runs a
+// producer goroutine, so it must simply return the sink's roll failure.
 func TestRollFailureNoDeadlock(t *testing.T) {
 	v := newMemVolume("v1", 96*1024) // one small volume, no room to roll
 	sink := &memSink{vols: []*memVolume{v}}
 	spec := SlotSpec{ID: "slot-y", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
-	w, _ := NewWriter(sink, spec, "none", compress.Options{}, nil)
+	w := NewWriter(sink, spec, nil)
 
 	body := []byte(strings.Repeat("q", 200*1024)) // far bigger than one volume
-	_, err := w.WriteArchive(ArchiveSpec{DLE: "dle1", Level: 0}, nil,
-		Source{
-			Stdin:  bytes.NewReader(body),
-			Finish: func() (Produced, error) { return Produced{Uncompressed: int64(len(body))}, nil },
-		})
+	_, _, err := w.WriteArchive(record.Archive{DLE: "dle1", Level: 0}, bytes.NewReader(body), nil)
 	if err == nil {
 		t.Fatal("expected an error when the sink cannot roll")
 	}
 	if !strings.Contains(err.Error(), "no further volume") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-}
-
-// TestEncryptRoundTrip writes an encrypted archive and reads it back, exercising the
-// full compress->encrypt->meter->decrypt->decompress pipeline through the writer and
-// reader. It uses gpg symmetric and skips when gpg is absent (as in the CI env); the
-// cipher plumbing itself is covered deterministically in package crypt.
-func TestEncryptRoundTrip(t *testing.T) {
-	pass := writeTempPass(t)
-	opts := crypt.Options{PassphraseFile: pass}
-	if err := crypt.Check("gpg", opts); err != nil {
-		t.Skipf("gpg unavailable: %v", err)
-	}
-
-	v := newMemVolume("v1", 0) // unbounded
-	sink := &memSink{vols: []*memVolume{v}}
-	spec := SlotSpec{ID: "slot-enc", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
-	w, _ := NewWriter(sink, spec, "none", compress.Options{}, nil)
-
-	body := []byte(strings.Repeat("top secret payload\n", 3000))
-	arch, err := w.WriteArchive(
-		ArchiveSpec{DLE: "dle1", Host: "localhost", Path: "/p", Archiver: "m", Level: 0, Encrypt: "gpg", EncOpts: opts},
-		nil,
-		Source{
-			Stdin: bytes.NewReader(body),
-			Finish: func() (Produced, error) {
-				return Produced{Uncompressed: int64(len(body)), FileCount: 1, Members: []string{"dle1"}}, nil
-			},
-		})
-	if err != nil {
-		t.Fatalf("WriteArchive: %v", err)
-	}
-	if arch.Encrypt != "gpg" {
-		t.Fatalf("archive scheme = %q, want gpg", arch.Encrypt)
-	}
-	// The bytes on the volume must be ciphertext, not the plaintext payload.
-	if _, raw, _ := v.ReadFile(w.Positions()[0].Parts[0].Pos); raw != nil {
-		got, _ := io.ReadAll(raw)
-		raw.Close()
-		if bytes.Contains(got, []byte("top secret")) {
-			t.Fatal("plaintext found on the volume; payload was not encrypted")
-		}
-	}
-
-	r := NewReader(compress.Options{}, opts)
-	rc, err := r.OpenArchiveParts(w.Positions()[0].Parts, "none", "gpg", Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v))
-	if err != nil {
-		t.Fatalf("OpenArchiveParts: %v", err)
-	}
-	got, err := io.ReadAll(rc)
-	rc.Close()
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !bytes.Equal(got, body) {
-		t.Fatalf("read back %d bytes, want %d", len(got), len(body))
-	}
-}
-
-func writeTempPass(t *testing.T) string {
-	t.Helper()
-	p := t.TempDir() + "/pass"
-	if err := os.WriteFile(p, []byte("hunter2\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return p
 }

@@ -1,17 +1,17 @@
-// Package slotio authors and reads slots on a media.Volume. It owns how a slot
-// maps onto a volume's files — one or more part files per archive plus a final seal
-// record carrying the slot's metadata — so the engine supplies only backup streams
-// and descriptive metadata, never positions or filenames. Compression is delegated
-// to package compress (an external child process); slotio meters (checksums + counts)
-// the compressed bytes on their way to the volume.
+// Package slotio authors and reads slots on a media.Volume. It owns how a slot maps
+// onto a volume's files — one or more part files per archive plus a final seal record
+// carrying the slot's metadata — so the engine supplies only an already-transformed
+// payload stream and descriptive metadata, never positions or filenames. slotio knows
+// nothing of compression or encryption: it meters (checksum + size) the bytes that land
+// and splits them into parts. The transform pipeline (compress/encrypt) is the engine's
+// to compose and run; slotio drains its output.
 //
-// An archive may be split into several parts across volumes (tape spanning). The
-// writer streams the compressed payload through a pipe and drains it into parts
-// sized to fit each volume's known remaining capacity, rolling to the next volume
-// (via a VolumeSink) between parts. The split is PROACTIVE — each part is bounded
-// before it is written — so a volume is never overfilled in the normal path; the
-// media.ErrVolumeFull backstop only fires when an estimate came up short, and then
-// the write fails rather than recovering.
+// An archive may be split into several parts across volumes (tape spanning). The writer
+// drains the payload into parts sized to fit each volume's known remaining capacity,
+// rolling to the next volume (via a VolumeSink) between parts. The split is PROACTIVE —
+// each part is bounded before it is written — so a volume is never overfilled in the
+// normal path; the media.ErrVolumeFull backstop only fires when an estimate came up short,
+// and then the write fails rather than recovering.
 package slotio
 
 import (
@@ -19,15 +19,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"sync"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/hostexec"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/transform/compress"
-	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
@@ -49,34 +47,11 @@ type VolumeSink interface {
 	PlaceSeal(size int64) (vol media.Volume, volume string, epoch int, err error)
 }
 
-// Produced reports the raw-stream statistics of one archive, returned by the source's
-// Finish hook after the pipeline drains.
-type Produced struct {
-	Uncompressed int64
-	FileCount    int
-	Members      []string
-}
-
-// Source is the producing side of one archive: either a program stage (the archiver's
-// `tar --create`, run on Exec) or, when Stage is empty, an in-process byte stream (Stdin,
-// used by tests and raw injectors). Finish gathers the raw-stream stats after the
-// pipeline has drained; Cleanup releases any scratch the source created. The Writer
-// appends the compress and encrypt stages and groups them with the source by host, so a
-// fully client-side dump keeps plaintext on the client.
-type Source struct {
-	Stage   hostexec.Cmd
-	Exec    hostexec.Executor
-	Stdin   io.Reader
-	Finish  func() (Produced, error)
-	Cleanup func()
-}
-
 // SlotSpec is the descriptive identity of a slot to author: what is known before
 // any archive is written, independent of the archives and bytes the Writer
 // assembles while streaming. NewWriter starts the slot from it and Seal returns
-// the finished record.Slot — so, like ArchiveSpec for an archive, the caller
-// describes the slot and slotio produces the artifact, never the reverse. The
-// fields mirror record.NewSlot's parameters.
+// the finished record.Slot — so the caller describes the slot and slotio produces the
+// artifact, never the reverse. The fields mirror record.NewSlot's parameters.
 type SlotSpec struct {
 	ID        string    // the slot's identity (see record.IDFromParts)
 	Date      string    // run date, YYYY-MM-DD
@@ -85,41 +60,18 @@ type SlotSpec struct {
 	CreatedAt time.Time // when authoring began; a copy preserves the source slot's
 }
 
-// ArchiveSpec is the descriptive metadata of an archive, known independently of
-// the bytes the Writer measures while streaming it. Encrypt/EncOpts select the
-// per-archive encryption (resolved from the DLE's dumptype); the scheme name is
-// recorded, the key reference in EncOpts is used only while writing.
-type ArchiveSpec struct {
-	DLE      string
-	Host     string
-	Path     string
-	Archiver string
-	Level    int
-	BaseSlot string
-	Encrypt  string        // encryption scheme name ("" or "none" = plaintext)
-	EncOpts  crypt.Options // key reference + nice for the encryptor child
-
-	// CompressExec/EncryptExec choose the host each transform runs on (nil = Local).
-	// Setting them to the source's client executor keeps plaintext on the client
-	// (compress/encrypt fuse with tar there); the meter that follows is always
-	// server-side, so the seal covers the bytes that land.
-	CompressExec hostexec.Executor
-	EncryptExec  hostexec.Executor
-}
-
-// Writer authors a single slot onto a medium via a VolumeSink. Callers create
-// archives with WriteArchive and finalize with Seal. WriteArchive is safe for
-// concurrent use only on an unbounded sink (disk); a bounded, spanning-capable sink
-// rolls one shared volume and must be driven serially (the engine clamps archivers).
+// Writer authors a single slot onto a medium via a VolumeSink. Callers write archive
+// payloads with WriteArchive (recording each with Record) and finalize with Seal.
+// WriteArchive is safe for concurrent use only on an unbounded sink (disk); a bounded,
+// spanning-capable sink rolls one shared volume and must be driven serially (the engine
+// clamps archivers).
 type Writer struct {
-	sink  VolumeSink
-	codec string
-	fopts compress.Options
-	lim   *xfer.Limiter // optional bandwidth cap on the bytes landing on the medium (nil = uncapped)
+	sink VolumeSink
+	lim  *xfer.Limiter // optional bandwidth cap on the bytes landing on the medium (nil = uncapped)
 
 	mu       sync.Mutex // guards the records below
 	slot     *record.Slot
-	written  []archiveRecord // one per archive, in WriteArchive order
+	written  []archiveRecord // one per recorded archive, in Record order
 	sealPart record.FilePos  // where the seal landed (set by Seal)
 }
 
@@ -131,195 +83,90 @@ type archiveRecord struct {
 	parts []record.FilePos
 }
 
-// NewWriter begins authoring a new slot, described by spec, onto sink, compressing
-// archives with the named codec. The Writer builds and owns the record.Slot from
-// spec (the caller never hands one in); Seal returns it sealed. lim, when non-nil,
-// caps the rate of bytes written to the medium (network politeness); a nil lim is
-// uncapped. The same lim is shared across concurrent WriteArchive calls on an
-// unbounded sink, so several workers to one medium share its budget (Amanda's
-// netusage).
-func NewWriter(sink VolumeSink, spec SlotSpec, codec string, fopts compress.Options, lim *xfer.Limiter) (*Writer, error) {
-	if _, err := compress.Ext(codec); err != nil { // validate the codec name early
-		return nil, err
-	}
+// NewWriter begins authoring a new slot, described by spec, onto sink. The Writer builds
+// and owns the record.Slot from spec (the caller never hands one in); Seal returns it
+// sealed. lim, when non-nil, caps the rate of bytes written to the medium (network
+// politeness); a nil lim is uncapped. The same lim is shared across concurrent
+// WriteArchive calls on an unbounded sink, so several workers to one medium share its
+// budget (Amanda's netusage).
+func NewWriter(sink VolumeSink, spec SlotSpec, lim *xfer.Limiter) *Writer {
 	slot := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
-	return &Writer{sink: sink, codec: codec, fopts: fopts, lim: lim, slot: slot}, nil
+	return &Writer{sink: sink, lim: lim, slot: slot}
 }
 
-// WriteArchive appends one archive to the slot, split into as many part files as the
-// loaded volumes' capacities require. It pipes the produced raw stream through the
-// codec's compressor child, metering (checksum + size) the whole compressed stream,
-// and drains that stream into parts: each part is bounded by the current volume's
-// Room, and when a part fills the sink rolls to the next volume. It records the
-// archive (with its part count) in the slot and returns the recorded metadata.
+// WriteArchive drains the archive payload — already compressed and encrypted by the
+// caller's transform pipeline — into the slot, split into as many part files as the
+// loaded volumes' capacities require. It meters the bytes that land (sha256 + size) and
+// returns the archive with its measured fields filled (Compressed, SHA256, Parts) plus
+// the ordered part positions. It does NOT record the archive in the slot: the producer's
+// raw-stream stats (Uncompressed/FileCount/Members) arrive only after the pipeline
+// drains, so the caller merges those and calls Record. The descriptive fields of meta
+// (DLE/Host/Path/Archiver/Compress/Encrypt/Level/BaseSlot) are taken as-is.
 //
-// progress, if non-nil, is called as the stream flows with the running
-// (uncompressed, compressed) byte counts — the live signal for `nb status`. It runs
-// on the producing goroutine, so it must be cheap.
-func (w *Writer) WriteArchive(spec ArchiveSpec, progress func(uncompressed, compressed int64), src Source) (record.Archive, error) {
-	// One pipeline: source -> compress -> encrypt, each a program stage carrying its
-	// host; adjacent same-host stages fuse so intermediate bytes never leave that host.
-	// The grouped pipeline's final reader is metered (the checksum/size cover the
-	// ciphertext that lands) and drained into volume parts.
-	pr, pw := io.Pipe()
-	meter := xfer.NewMeter(pw)
-
-	stages, stdin, err := w.pipelineStages(spec, src, meter, progress)
+// progress, if non-nil, is called with the running compressed byte count as the payload
+// drains — the live signal for `nb status`. It runs on the draining goroutine, so it
+// must be cheap.
+func (w *Writer) WriteArchive(meta record.Archive, payload io.Reader, progress func(compressed int64)) (record.Archive, []record.FilePos, error) {
+	mr := &meteredReader{r: payload, h: sha256.New(), progress: progress}
+	parts, err := w.drainParts(w.archiveHeader(meta), mr)
 	if err != nil {
-		return record.Archive{}, err
+		return record.Archive{}, nil, err
 	}
+	arch := meta
+	arch.Compressed = mr.n
+	arch.SHA256 = hex.EncodeToString(mr.h.Sum(nil))
+	arch.Parts = len(parts)
+	return arch, parts, nil
+}
 
-	base := w.archiveHeader(spec.DLE, spec.Host, spec.Path, spec.Archiver, spec.Level, spec.BaseSlot, w.codec, spec.Encrypt)
-
-	var produced Produced
-	var produceErr error
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		final, wait, runErr := hostexec.RunGrouped(stdin, stages...)
-		if runErr != nil {
-			produceErr = runErr
-			pw.CloseWithError(runErr)
-			return
-		}
-		_, copyErr := io.Copy(meter, final)
-		final.Close()     // drains; SIGPIPEs the producers if the consumer stopped early
-		waitErr := wait() // reap every group, first failure wins
-		// A pipeline failure is the producer's own error; copyErr only when the consumer
-		// (drainParts) closed the pipe early, which the drain-error path already reports.
-		e := waitErr
-		if e == nil {
-			e = copyErr
-		}
-		if e == nil && src.Finish != nil {
-			produced, e = src.Finish() // reads scratch (the member index) — before Cleanup
-		}
-		if src.Cleanup != nil {
-			src.Cleanup() // remove scratch after Finish, even on error
-		}
-		if e != nil {
-			produceErr = e
-			pw.CloseWithError(e)
-			return
-		}
-		pw.Close() // EOF to the consumer
-	}()
-
-	parts, drainErr := w.drainParts(base, pr)
-	if drainErr != nil {
-		pr.CloseWithError(drainErr) // unblock the producer goroutine
-	}
-	<-done // producer finished: meter is complete, produced/produceErr are visible
-	if drainErr != nil {
-		return record.Archive{}, drainErr
-	}
-	if produceErr != nil {
-		return record.Archive{}, produceErr
-	}
-
-	arch := record.Archive{
-		DLE:          spec.DLE,
-		Host:         spec.Host,
-		Path:         spec.Path,
-		Archiver:     spec.Archiver,
-		Compress:     w.codec,
-		Encrypt:      spec.Encrypt,
-		Level:        spec.Level,
-		Compressed:   meter.Bytes(),
-		Uncompressed: produced.Uncompressed,
-		FileCount:    produced.FileCount,
-		SHA256:       meter.SHA256(),
-		Parts:        len(parts),
-		BaseSlot:     spec.BaseSlot,
-		Members:      produced.Members,
-	}
-
+// Record adds a completed archive (all fields final) to the slot under its part
+// positions, keeping the running total and the catalog index in sync. Call it once the
+// caller has merged the producer's stats into the archive WriteArchive returned.
+func (w *Writer) Record(arch record.Archive, parts []record.FilePos) {
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.slot.AddArchive(arch)
-	w.written = append(w.written, archiveRecord{dle: spec.DLE, level: spec.Level, parts: parts})
-	w.mu.Unlock()
-	return arch, nil
+	w.written = append(w.written, archiveRecord{dle: arch.DLE, level: arch.Level, parts: parts})
 }
 
-// pipelineStages assembles the producing stages (source, then the codec compressor, then
-// the encryptor) with their executors, plus the in-process stdin when the source is not a
-// program. The source stage is tapped for the live uncompressed byte count (honored only
-// when it runs locally; a remote source falls back to compressed-against-estimate).
-func (w *Writer) pipelineStages(spec ArchiveSpec, src Source, meter *xfer.Meter, progress func(uncompressed, compressed int64)) ([]hostexec.Stage, io.Reader, error) {
-	tap := func(n int64) {}
-	if progress != nil {
-		tap = func(n int64) { progress(n, meter.Bytes()) }
-	}
+// meteredReader counts and hashes the bytes read through it — the streaming sha256 and
+// size of the payload that lands on the medium — and reports the running total. It is
+// robust to drainParts re-prepending a peeked byte: the re-prepended byte comes from a
+// separate reader, so it is never hashed twice.
+type meteredReader struct {
+	r        io.Reader
+	h        hash.Hash
+	n        int64
+	progress func(int64)
+}
 
-	var stages []hostexec.Stage
-	var stdin io.Reader
-	if src.Stage.Name != "" {
-		s := src.Stage
-		if progress != nil {
-			s.Tap = tap
-		}
-		stages = append(stages, hostexec.Stage{Cmd: s, Exec: execOr(src.Exec)})
-	} else {
-		stdin = src.Stdin
-		if progress != nil && stdin != nil {
-			stdin = &countingReader{r: stdin, f: tap}
+func (m *meteredReader) Read(p []byte) (int, error) {
+	k, err := m.r.Read(p)
+	if k > 0 {
+		m.h.Write(p[:k])
+		m.n += int64(k)
+		if m.progress != nil {
+			m.progress(m.n)
 		}
 	}
-
-	if ccmd, ok, err := compress.CompressCmd(w.codec, w.fopts); err != nil {
-		return nil, nil, err
-	} else if ok {
-		stages = append(stages, hostexec.Stage{Cmd: ccmd, Exec: execOr(spec.CompressExec)})
-	}
-	if ecmd, ok, err := crypt.EncryptCmd(spec.Encrypt, spec.EncOpts); err != nil {
-		return nil, nil, err
-	} else if ok {
-		stages = append(stages, hostexec.Stage{Cmd: ecmd, Exec: execOr(spec.EncryptExec)})
-	}
-	return stages, stdin, nil
-}
-
-// execOr returns ex, or the local executor when ex is nil (the default, all-local case).
-func execOr(ex hostexec.Executor) hostexec.Executor {
-	if ex == nil {
-		return hostexec.Local()
-	}
-	return ex
-}
-
-// countingReader counts bytes read and reports the running total — the uncompressed
-// progress signal when the source is an in-process stream rather than a program stage.
-type countingReader struct {
-	r io.Reader
-	n int64
-	f func(int64)
-}
-
-func (c *countingReader) Read(b []byte) (int, error) {
-	n, err := c.r.Read(b)
-	if n > 0 {
-		c.n += int64(n)
-		c.f(c.n)
-	}
-	return n, err
+	return k, err
 }
 
 // archiveHeader builds the base record.Header an archive's parts share (drainParts
-// clones it per part with an ascending Part index). The codec is passed explicitly
-// because a fresh dump stamps the writer's codec while a copy preserves the source
-// archive's recorded codec — every other descriptive field comes straight through.
-func (w *Writer) archiveHeader(dle, host, path, archiver string, level int, baseSlot, codec, encrypt string) record.Header {
+// clones it per part with an ascending Part index). Every framing field comes straight
+// from the archive's descriptive metadata.
+func (w *Writer) archiveHeader(a record.Archive) record.Header {
 	return record.Header{
 		Slot:      w.slot.ID,
 		Kind:      record.KindArchive,
-		DLE:       dle,
-		Host:      host,
-		Path:      path,
-		Archiver:  archiver,
-		Compress:  codec,
-		Encrypt:   encrypt,
-		Level:     level,
-		BaseSlot:  baseSlot,
+		DLE:       a.DLE,
+		Host:      a.Host,
+		Path:      a.Path,
+		Archiver:  a.Archiver,
+		Compress:  a.Compress,
+		Encrypt:   a.Encrypt,
+		Level:     a.Level,
+		BaseSlot:  a.BaseSlot,
 		CreatedAt: w.slot.CreatedAt,
 	}
 }
@@ -388,9 +235,8 @@ func (w *Writer) drainParts(base record.Header, src io.Reader) ([]record.FilePos
 // recorded checksum is unchanged — and only the part layout (and Parts count) is new.
 // The header carries the archive's original codec, so restore reverses the right one.
 func (w *Writer) CopyArchive(meta record.Archive, src io.Reader) (record.Archive, error) {
-	base := w.archiveHeader(meta.DLE, meta.Host, meta.Path, meta.Archiver, meta.Level, meta.BaseSlot, meta.Compress, meta.Encrypt)
 	h := sha256.New()
-	parts, err := w.drainParts(base, io.TeeReader(src, h))
+	parts, err := w.drainParts(w.archiveHeader(meta), io.TeeReader(src, h))
 	if err != nil {
 		return record.Archive{}, err
 	}
@@ -399,22 +245,19 @@ func (w *Writer) CopyArchive(meta record.Archive, src io.Reader) (record.Archive
 	}
 	arch := meta
 	arch.Parts = len(parts)
-	w.mu.Lock()
-	w.slot.AddArchive(arch)
-	w.written = append(w.written, archiveRecord{dle: meta.DLE, level: meta.Level, parts: parts})
-	w.mu.Unlock()
+	w.Record(arch, parts)
 	return arch, nil
 }
 
-// ArchiveCount reports how many archives have been written so far.
+// ArchiveCount reports how many archives have been recorded so far.
 func (w *Writer) ArchiveCount() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return len(w.slot.Archives)
 }
 
-// Positions returns the part positions of every archive written, for the catalog to
-// index. Call after all WriteArchive calls have completed.
+// Positions returns the part positions of every archive recorded, for the catalog to
+// index. Call after all WriteArchive/Record calls have completed.
 func (w *Writer) Positions() []record.ArchivePos {
 	w.mu.Lock()
 	defer w.mu.Unlock()
