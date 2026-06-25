@@ -40,7 +40,7 @@ func TestRenderDrillLedger(t *testing.T) {
 		"decrypt/decompress", // remedy text for pipeline class
 		"app01-etc",          // stale
 		"stale",
-		"never drilled: web01-srv",
+		"never drilled: web01:/srv", // displayed as Amanda host:path, not the internal slug
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("ledger render missing %q\n---\n%s", want, out)

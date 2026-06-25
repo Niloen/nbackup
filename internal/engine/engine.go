@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -79,6 +80,11 @@ func (e *Engine) SetOperator(op librarian.Operator) { e.op = op }
 // engine's own medium it wraps the already-open landing handle (own=true), so its
 // cached state stays coherent and the catalog — which caches exactly this medium —
 // can be rebuilt against it.
+// ErrUnknownMedium marks a medium name absent from the current config — a copy
+// recorded in the catalog on a medium this config does not define. It is a scoping
+// condition, not corruption: verify skips such a copy rather than failing it.
+var ErrUnknownMedium = errors.New("unknown medium")
+
 func (e *Engine) librarianFor(name string) (lib *librarian.Librarian, def config.Media, own bool, err error) {
 	vol, d, own, err := e.mediumVolume(name)
 	if err != nil {
@@ -122,7 +128,13 @@ func New(cfg *config.Config) (*Engine, error) {
 	mediaDef := cfg.Media[name]
 	vol, err := media.OpenVolume(mediaDef.Type, media.Options(mediaDef.Params))
 	if err != nil {
-		return nil, err
+		// Opening a cloud volume lists the bucket, so this is where absent SDK
+		// credentials or an unreachable store first surface. Name the medium and
+		// point at the credential source rather than leaking the raw provider error.
+		if mediaDef.Type == "cloud" {
+			return nil, fmt.Errorf("cannot reach landing medium %q: %w\n(a cloud store reads its credentials from the SDK environment: AWS_*, GOOGLE_APPLICATION_CREDENTIALS, or AZURE_*)", name, err)
+		}
+		return nil, fmt.Errorf("cannot open landing medium %q: %w", name, err)
 	}
 	profile, err := media.OpenProfile(mediaDef.Type, media.Options(mediaDef.ProfileOptions()))
 	if err != nil {
@@ -137,7 +149,16 @@ func New(cfg *config.Config) (*Engine, error) {
 		return nil, err
 	}
 	if err := cat.EnsureFresh(name, vol); err != nil {
-		return nil, err
+		// The one-time bootstrap scan indexes whatever the landing medium already
+		// holds; once the local catalog cache exists, planning/listing is fully
+		// offline. A cloud store fails here only when its SDK credentials are absent
+		// or it is unreachable — surface that legibly with the medium named, rather
+		// than the raw provider SDK error.
+		hint := ""
+		if mediaDef.Type == "cloud" {
+			hint = " — a cloud store reads its credentials from the SDK environment (AWS_*, GOOGLE_APPLICATION_CREDENTIALS, or AZURE_*); set them, or run where the catalog cache already exists"
+		}
+		return nil, fmt.Errorf("cannot reach landing medium %q to index existing backups: %w%s", name, err, hint)
 	}
 	minAge := cfg.MinAgeFor(mediaDef)
 	fopts := filter.Options{
@@ -202,7 +223,7 @@ func (e *Engine) mediumVolume(name string) (vol media.Volume, def config.Media, 
 	}
 	d, ok := e.cfg.Media[name]
 	if !ok {
-		return nil, config.Media{}, false, fmt.Errorf("unknown medium %q", name)
+		return nil, config.Media{}, false, fmt.Errorf("%w %q", ErrUnknownMedium, name)
 	}
 	v, err := media.OpenVolume(d.Type, media.Options(d.Params))
 	return v, d, false, err
@@ -361,6 +382,22 @@ func (e *Engine) executorFor(host string) (hostexec.Executor, map[string]string)
 		over["tar_path"] = hc.TarPath
 	}
 	return ex, over
+}
+
+// probeReachable verifies a remote source host answers over SSH before a dump
+// touches it, so an unreachable client surfaces as a transport error (as `nb check`
+// reports it) rather than the misleading "GNU tar is required" the tar probe would
+// emit when it runs over the dead connection. Local hosts are always reachable.
+func (e *Engine) probeReachable(host string) error {
+	ssh, remote := e.cfg.RemoteHost(host)
+	if !remote {
+		return nil
+	}
+	ex, _ := e.executorFor(host)
+	if err := ex.Command("true").Run(); err != nil {
+		return fmt.Errorf("source host %q unreachable over SSH (%s): %w — run `nb check` to diagnose", host, sshTarget(host, ssh), err)
+	}
+	return nil
 }
 
 // archiverOptions copies an archiver definition's options, applies host overrides (a
@@ -786,6 +823,7 @@ func (e *Engine) ValidatePlan() (warnings []string, err error) {
 		return nil, err
 	}
 	checkedEnc := map[string]bool{}
+	hostProbed := map[string]bool{}
 	for _, d := range e.cfg.DLEs() {
 		dt := d.DumpTypeName()
 		if _, err := e.archiverFor(dt, d.Host); err != nil {
@@ -798,11 +836,18 @@ func (e *Engine) ValidatePlan() (warnings []string, err error) {
 			}
 			checkedEnc[dt] = true
 		}
-		// Only a local source can be stat'd here; a remote DLE's path lives on the client
-		// (verified by `nb check` over SSH). Statting it locally would warn spuriously.
+		// Only a local source can be stat'd here; a remote DLE's path lives on the
+		// client. A remote host is probed over SSH (once per host) so an unreachable
+		// client warns here rather than silently estimating ~0 B — the misleading
+		// "healthy" plan `nb check` would otherwise be the only thing to catch.
 		if _, remote := e.cfg.RemoteHost(d.Host); !remote {
 			if _, err := os.Stat(d.Path); err != nil {
-				warnings = append(warnings, fmt.Sprintf("DLE %s: source path %s is missing or unreadable (%v) — the real run will fail unless it becomes available", d.Name(), d.Path, err))
+				warnings = append(warnings, fmt.Sprintf("DLE %s: source path %s is missing or unreadable (%v) — the real run will fail unless it becomes available", d.ID(), d.Path, err))
+			}
+		} else if !hostProbed[d.Host] {
+			hostProbed[d.Host] = true
+			if err := e.probeReachable(d.Host); err != nil {
+				warnings = append(warnings, fmt.Sprintf("%v — its DLEs cannot be estimated until it is reachable (shown as ~0 B)", err))
 			}
 		}
 	}
@@ -948,6 +993,15 @@ func minRoom(a, b int64) int64 {
 
 // Run executes the plan for a date, producing one sealed slot.
 func (e *Engine) Run(date time.Time, logf Logf) (*format.Slot, error) {
+	// Guard the restore-order invariant: restore replays a DLE's slots in date order,
+	// but the archiver's incremental snapshots advance in dump (wall-clock) order. A
+	// run dated earlier than a slot already sealed would splice an out-of-order
+	// archive into the chain whose snapshot has already moved past it — silently
+	// dropping files at restore. Reject it (a same-day rerun, equal date, is fine and
+	// takes the next .N). Backdating before today is already caught at the CLI.
+	if latest, ok := e.latestSlotDate(); ok && format.DateString(date) < latest {
+		return nil, fmt.Errorf("cannot dump for %s: slot(s) dated %s already exist; an earlier-dated run would corrupt the incremental restore order (snapshots have advanced past it) — dump on or after %s", format.DateString(date), latest, latest)
+	}
 	plan := e.Plan(date)
 	for _, w := range plan.Warnings {
 		logf.log("WARNING: %s", w)
@@ -960,8 +1014,15 @@ func (e *Engine) Run(date time.Time, logf Logf) (*format.Slot, error) {
 		return nil, err
 	}
 	checkedEnc := map[string]bool{}
+	checkedHost := map[string]bool{}
 	for _, item := range plan.Items {
 		dt := item.DLE.DumpTypeName()
+		if !checkedHost[item.DLE.Host] {
+			if err := e.probeReachable(item.DLE.Host); err != nil {
+				return nil, err
+			}
+			checkedHost[item.DLE.Host] = true
+		}
 		m, err := e.archiverFor(dt, item.DLE.Host)
 		if err != nil {
 			return nil, err
@@ -1029,7 +1090,7 @@ func (e *Engine) Run(date time.Time, logf Logf) (*format.Slot, error) {
 func planProgress(items []planner.Item) []progress.Plan {
 	out := make([]progress.Plan, len(items))
 	for i, it := range items {
-		out[i] = progress.Plan{Name: it.Name, Level: it.Level, EstBytes: it.EstBytes}
+		out[i] = progress.Plan{Name: it.DLE.ID(), Level: it.Level, EstBytes: it.EstBytes}
 	}
 	return out
 }
@@ -1098,10 +1159,30 @@ func (e *Engine) runWorkers(items []planner.Item, workers int, w *slotio.Writer,
 // the day is "slot-DATE", later runs get the next free ".N". A leftover unsealed
 // slot from a failed attempt is reclaimed. This consults the volume (the write
 // path may touch media) so it is robust to a stale cache.
+// latestSlotDate returns the most recent slot date (YYYY-MM-DD) across the whole
+// catalog, or ("", false) when no slots exist. Dates are lexically comparable.
+func (e *Engine) latestSlotDate() (string, bool) {
+	latest := ""
+	for _, s := range e.cat.Slots() {
+		if s.Date > latest {
+			latest = s.Date
+		}
+	}
+	return latest, latest != ""
+}
+
 func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 	files, err := e.vol.Files()
 	if err != nil {
-		return "", 0, err
+		// A changer with nothing loaded yet (a fresh library before its first mount,
+		// e.g. auto_label on a blank pool) has no files to scan for orphans. The
+		// catalog still seeds every known slot id pool-globally below, so treat an
+		// empty drive as "no extra files" rather than a hard failure — letting a
+		// first dump proceed to PrepareWrite, which mounts and auto-labels a bay.
+		if !errors.Is(err, media.ErrNoVolume) {
+			return "", 0, err
+		}
+		files = nil
 	}
 	present := map[string]bool{} // slot id -> exists (catalog or loaded volume)
 	sealed := map[string]bool{}  // slot id -> sealed (immutable; never reuse the id)
@@ -1151,13 +1232,16 @@ func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 // incremental state for incrementals); the writer owns the on-media side. It reports
 // the DLE's lifecycle (start, live bytes, finish/fail) to the run tracker.
 func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tracker, logf Logf) (err error) {
-	tr.StartDLE(item.Name)
+	// The progress tracker keys and displays DLEs by their host:path identity; the
+	// seal and filenames keep the internal slug (spec.DLE below).
+	pname := item.DLE.ID()
+	tr.StartDLE(pname)
 	var arch format.Archive
 	defer func() {
 		if err != nil {
-			tr.FinishDLE(item.Name, 0, 0, 0, err)
+			tr.FinishDLE(pname, 0, 0, 0, err)
 		} else {
-			tr.FinishDLE(item.Name, arch.FileCount, arch.Uncompressed, arch.Compressed, nil)
+			tr.FinishDLE(pname, arch.FileCount, arch.Uncompressed, arch.Compressed, nil)
 		}
 	}()
 
@@ -1181,7 +1265,7 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 		}
 	}
 
-	logf.log("archiving %s (L%d) from %s", item.Name, item.Level, item.DLE.Path)
+	logf.log("archiving %s (L%d)", item.DLE.ID(), item.Level)
 
 	encScheme, encOpts := e.encryptionFor(item.DLE.DumpTypeName())
 	spec := slotio.ArchiveSpec{
@@ -1222,7 +1306,7 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 			return slotio.Produced{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members}, nil
 		},
 	}
-	progressFn := func(uncompressed, compressed int64) { tr.AddBytes(item.Name, uncompressed, compressed) }
+	progressFn := func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) }
 	arch, err = w.WriteArchive(spec, progressFn, src)
 	if err != nil {
 		return fmt.Errorf("archive %s: %w", item.Name, err)
@@ -1232,7 +1316,14 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 	if arch.Codec == "none" {
 		sizeLabel = "stored" // no compressor in the pipe; "compressed" would be a lie
 	}
-	logf.log("  %d file(s), %s %s", arch.FileCount, sizeutil.FormatBytes(arch.Compressed), sizeLabel)
+	if arch.FileCount == 0 {
+		// An incremental with nothing changed still writes tar's structural overhead
+		// (archive header/footer + directory census); say so rather than the puzzling
+		// "0 file(s), 10.24 kB stored".
+		logf.log("  no changed files (%s of tar metadata)", sizeutil.FormatBytes(arch.Compressed))
+	} else {
+		logf.log("  %d file(s), %s %s", arch.FileCount, sizeutil.FormatBytes(arch.Compressed), sizeLabel)
+	}
 	return nil
 }
 
@@ -1293,7 +1384,7 @@ func (e *Engine) restoreFrom(slotID, dleName, destDir, medium, targetHost string
 		return err
 	}
 	for _, step := range steps {
-		logf.log("extracting %s %s L%d -> %s", step.SlotID, step.DLE, step.Level, destDir)
+		logf.log("extracting %s %s L%d -> %s", step.SlotID, e.DisplayDLE(step.DLE), step.Level, destDir)
 		var eerr error
 		if decodeOnClient {
 			eerr = e.extractStepOnClient(step, destDir, medium, targetHost, ec)
@@ -1562,14 +1653,28 @@ func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, 
 		if err != nil {
 			return files, err
 		}
-		logf.log("extracting %d entr(ies) from %s %s L%d", len(st.Members), st.SlotID, st.DLE, st.Level)
+		logf.log("extracting %d file(s) from %s %s L%d", countFiles(st.Members), st.SlotID, e.DisplayDLE(st.DLE), st.Level)
 		err = decryptHint(st.Encrypt, joinPipelineErr(m.Restore(rc, destDir, st.Members), rc.Close()))
 		if err != nil {
 			return files, fmt.Errorf("extract from %s %s L%d: %w", st.SlotID, st.DLE, st.Level, err)
 		}
-		files += len(st.Members)
+		files += countFiles(st.Members)
 	}
 	return files, nil
+}
+
+// countFiles counts the file members in a selection, excluding the parent
+// directories the extractor recreates to hold them (the archiver-neutral member
+// convention marks directories with a trailing slash). So recovering one nested
+// file reports 1, not "2 entries" once its parent dir is counted.
+func countFiles(members []string) int {
+	n := 0
+	for _, m := range members {
+		if !strings.HasSuffix(m, "/") {
+			n++
+		}
+	}
+	return n
 }
 
 // DLENames returns the distinct DLE names recorded across all catalog slots,
@@ -1587,6 +1692,65 @@ func (e *Engine) DLENames() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// dleDisplayMap maps each internal DLE slug to its Amanda-style host:path identity,
+// drawing on both the config and the catalog (so a DLE no longer in the config still
+// shows its real identity from the seal). The slug stays the internal key; host:path
+// is the user-facing form.
+func (e *Engine) dleDisplayMap() map[string]string {
+	m := map[string]string{}
+	for _, d := range e.cfg.DLEs() {
+		m[d.Name()] = d.ID()
+	}
+	for _, s := range e.cat.Slots() {
+		for _, a := range s.Archives {
+			if a.Host == "" && a.Path == "" {
+				continue
+			}
+			if _, ok := m[a.DLE]; !ok {
+				m[a.DLE] = a.Host + ":" + a.Path
+			}
+		}
+	}
+	return m
+}
+
+// DisplayDLE maps an internal DLE slug to its host:path identity for messages,
+// falling back to the slug when host/path are unknown.
+func (e *Engine) DisplayDLE(slug string) string {
+	if id, ok := e.dleDisplayMap()[slug]; ok {
+		return id
+	}
+	return slug
+}
+
+// DLEDisplay returns the host:path identities of the DLEs a recovery session can
+// choose from, sorted — the user-facing peer of DLENames.
+func (e *Engine) DLEDisplay() []string {
+	disp := e.dleDisplayMap()
+	var out []string
+	for _, slug := range e.DLENames() {
+		if id, ok := disp[slug]; ok {
+			out = append(out, id)
+		} else {
+			out = append(out, slug)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ResolveDLE maps a user-supplied DLE reference — a host:path identity or the raw
+// internal slug — to the internal slug, or ("", false) if no catalog DLE matches.
+func (e *Engine) ResolveDLE(arg string) (string, bool) {
+	disp := e.dleDisplayMap()
+	for _, slug := range e.DLENames() {
+		if slug == arg || disp[slug] == arg {
+			return slug, true
+		}
+	}
+	return "", false
 }
 
 // openArchiveFrom opens an archive for reading. With medium == "" it tries every

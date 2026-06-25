@@ -76,12 +76,23 @@ type Run struct {
 // report. Orig is the uncompressed archive stream, Out the compressed payload on the
 // volume; Seconds is the dump duration (0 when timing was unavailable).
 type DLEStat struct {
-	DLE     string  `json:"dle"`
+	DLE     string  `json:"dle"`            // internal slug (stable key)
+	Host    string  `json:"host,omitempty"` // source host, for host:path display
+	Path    string  `json:"path,omitempty"` // source path, for host:path display
 	Level   int     `json:"level"`
 	Orig    int64   `json:"orig"` // uncompressed bytes
 	Out     int64   `json:"out"`  // compressed bytes on the volume
 	Files   int     `json:"files"`
 	Seconds float64 `json:"seconds,omitempty"` // dump duration; 0 = unknown
+}
+
+// ID returns the Amanda-style host:path identity for display, falling back to the
+// internal slug when host/path were not recorded.
+func (d DLEStat) ID() string {
+	if d.Host == "" && d.Path == "" {
+		return d.DLE
+	}
+	return d.Host + ":" + d.Path
 }
 
 // DrillHealth is one DLE's outcome in a drill run alongside its prior ledger state,

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -133,11 +134,19 @@ func (e *Engine) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerd
 	}
 	// Track which whole copies passed so a failure can still reassure the operator
 	// that an intact copy remains (redundancy is the point of more than one).
-	var goodCopies, badCopies []string
+	var goodCopies, badCopies, skippedCopies []string
 	for _, p := range placements {
 		copyOK := true
 		lib, _, _, err := e.librarianFor(p.Medium)
 		if err != nil {
+			// A copy on a medium this config does not define is out of scope, not
+			// damaged: skip it (with a note) rather than reporting a false integrity
+			// failure. Other errors (a configured medium that won't open) still fail.
+			if errors.Is(err, ErrUnknownMedium) {
+				logf.log("%s [%s]: skipped — medium not defined in this config", id, p.Medium)
+				skippedCopies = append(skippedCopies, p.Medium)
+				continue
+			}
 			logf.log("%s [%s]: ERROR %v", id, p.Medium, err)
 			sv.OK = false
 			badCopies = append(badCopies, p.Medium)
@@ -163,8 +172,12 @@ func (e *Engine) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerd
 		}
 	}
 	switch {
+	case sv.OK && len(goodCopies) == 0 && len(skippedCopies) > 0:
+		// Every copy lives on a medium this config does not define — nothing was
+		// actually checked, so say so rather than reporting a misleading "OK".
+		logf.log("%s: SKIPPED — copies only on media not in this config: %s", id, strings.Join(skippedCopies, ", "))
 	case sv.OK:
-		logf.log("%s: OK (%d archive(s), %d cop(ies))", id, len(s.Archives), len(placements))
+		logf.log("%s: OK (%d archive(s), %d cop(ies))", id, len(s.Archives), len(goodCopies))
 	case len(goodCopies) > 0:
 		// Surface that an intact copy remains, and which medium to re-copy from.
 		logf.log("%s: FAILED on %s, but an intact copy remains on %s (re-copy to repair)",
@@ -180,7 +193,7 @@ func (e *Engine) verifyArchive(id string, a format.Archive, p catalog.Placement,
 	v := ArchiveVerdict{Slot: id, DLE: a.DLE, Level: a.Level, Medium: p.Medium, OK: true}
 	parts, found := p.Parts(a.DLE, a.Level)
 	if !found {
-		logf.log("%s [%s]: %s L%d POSITION MISSING", id, p.Medium, a.DLE, a.Level)
+		logf.log("%s [%s]: %s L%d POSITION MISSING", id, p.Medium, a.DLEID(), a.Level)
 		v.OK, v.Class, v.Detail = false, drill.ClassMissing, "archive position missing on this copy"
 		return v
 	}
@@ -190,19 +203,19 @@ func (e *Engine) verifyArchive(id string, a format.Archive, p catalog.Placement,
 	if opts.Checks.has(CheckChecksum) {
 		good, err := e.reader.VerifyParts(sParts, want, a.SHA256, opener)
 		if err != nil {
-			logf.log("%s [%s]: %s L%d ERROR %v", id, p.Medium, a.DLE, a.Level, err)
+			logf.log("%s [%s]: %s L%d ERROR %v", id, p.Medium, a.DLEID(), a.Level, err)
 			v.OK, v.Class, v.Detail = false, drill.ClassPipeline, err.Error()
 			return v
 		}
 		if !good {
-			logf.log("%s [%s]: %s L%d CHECKSUM MISMATCH", id, p.Medium, a.DLE, a.Level)
+			logf.log("%s [%s]: %s L%d CHECKSUM MISMATCH", id, p.Medium, a.DLEID(), a.Level)
 			v.OK, v.Class, v.Detail = false, drill.ClassIntegrity, "checksum mismatch vs seal"
 			return v
 		}
 	}
 	if opts.Checks.has(CheckStructural) {
 		if cls, detail := e.structuralCheck(a, sParts, want, opener); cls != drill.ClassNone {
-			logf.log("%s [%s]: %s L%d STRUCTURAL %s: %s", id, p.Medium, a.DLE, a.Level, cls, detail)
+			logf.log("%s [%s]: %s L%d STRUCTURAL %s: %s", id, p.Medium, a.DLEID(), a.Level, cls, detail)
 			v.OK, v.Class, v.Detail = false, cls, detail
 			return v
 		}
@@ -233,11 +246,13 @@ func (e *Engine) structuralCheck(a format.Archive, parts []slotio.PartPosition, 
 	// broken-pipe error on Close.
 	_, _ = io.Copy(io.Discard, rc)
 	cerr := rc.Close()
-	if lerr != nil {
-		return drill.ClassPipeline, lerr.Error()
-	}
-	if cerr != nil {
-		return drill.ClassPipeline, cerr.Error()
+	// tar sits last in the pipe, so an upstream failure (a missing key, wrong
+	// passphrase, codec drift) reaches tar only as truncated input and reports a
+	// generic "not a tar archive"; the real cause surfaces on Close. Join both and
+	// add the decrypt hint — the same surfacing the recover path uses — so a
+	// lost-key failure is not mislabeled as corruption.
+	if lerr != nil || cerr != nil {
+		return drill.ClassPipeline, decryptHint(a.Encrypt, joinPipelineErr(lerr, cerr)).Error()
 	}
 	if diff := membersDiff(a.Members, members); diff != "" {
 		return drill.ClassIntegrity, diff

@@ -136,6 +136,18 @@ func logfStdout(format string, args ...any) {
 // input rather than dropping it between reads.
 var stdinReader = bufio.NewReader(os.Stdin)
 
+// attachOperator gives the engine an interactive tape-swap operator only when
+// stdin is a real terminal. With a pipe or cron stdin (not a terminal) no operator
+// is attached, so a run that needs a tape swap errors cleanly instead of blocking
+// forever — the same auto-detected unattended behavior `nb drill` uses. (A bare
+// /dev/null stdin already aborted at EOF; this also covers a pipe that never sends
+// the expected reply.)
+func attachOperator(eng *engine.Engine) {
+	if stdinIsTerminal() {
+		eng.SetOperator(stdinOperator{})
+	}
+}
+
 // stdinOperator drives single-drive (manual) tape swaps interactively: it shows
 // what the drive holds and the reels in the room, then asks which to load. On a
 // non-interactive run stdin is at EOF, so it aborts and the engine falls back to

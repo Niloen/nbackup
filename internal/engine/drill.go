@@ -47,15 +47,16 @@ type DrillOptions struct {
 
 // DrillResult is one target's outcome (or, in a dry-run, what would run).
 type DrillResult struct {
-	DLE    string
-	SlotID string
-	AsOf   string
-	Medium string
-	Tier   drill.Tier
-	OK     bool
-	Class  drill.Class
-	Detail string
-	Bytes  int64 // chain payload bytes — the egress/cost of drilling this target
+	DLE        string // internal slug (ledger key)
+	DLEDisplay string // host:path identity for display
+	SlotID     string
+	AsOf       string
+	Medium     string
+	Tier       drill.Tier
+	OK         bool
+	Class      drill.Class
+	Detail     string
+	Bytes      int64 // chain payload bytes — the egress/cost of drilling this target
 }
 
 // DrillReport is the structured outcome of a drill, rendered by the CLI and the
@@ -138,7 +139,7 @@ func (e *Engine) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 		for _, t := range targets {
 			b := e.chainBytes(t.Steps)
 			rep.Targets = append(rep.Targets, DrillResult{
-				DLE: t.DLE, SlotID: t.SlotID, AsOf: t.AsOf, Medium: medium, Tier: opts.Tier, Bytes: b,
+				DLE: t.DLE, DLEDisplay: e.DisplayDLE(t.DLE), SlotID: t.SlotID, AsOf: t.AsOf, Medium: medium, Tier: opts.Tier, Bytes: b,
 			})
 			rep.ForecastBytes += b
 		}
@@ -186,11 +187,11 @@ func (e *Engine) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 // In unattended mode it first skips any target whose source copy a human would have
 // to load.
 func (e *Engine) drillTarget(t drill.Target, medium string, opts DrillOptions, logf Logf) DrillResult {
-	res := DrillResult{DLE: t.DLE, SlotID: t.SlotID, AsOf: t.AsOf, Medium: medium, Tier: opts.Tier, Bytes: e.chainBytes(t.Steps)}
+	res := DrillResult{DLE: t.DLE, DLEDisplay: e.DisplayDLE(t.DLE), SlotID: t.SlotID, AsOf: t.AsOf, Medium: medium, Tier: opts.Tier, Bytes: e.chainBytes(t.Steps)}
 	if opts.Unattended {
 		if ok, reason := e.unattendedReachable(medium, t.Steps); !ok {
 			res.Class, res.Detail = drill.ClassSkipped, reason
-			logf.log("drill %s: SKIPPED — %s", t.DLE, reason)
+			logf.log("drill %s: SKIPPED — %s", res.DLEDisplay, reason)
 			return res
 		}
 	}
@@ -212,9 +213,9 @@ func (e *Engine) drillTarget(t drill.Target, medium string, opts DrillOptions, l
 	res.Class, res.Detail = cls, detail
 	res.OK = cls == drill.ClassNone
 	if res.OK {
-		logf.log("drill %s [%s] as of %s on %q: OK (%s)", t.DLE, opts.Tier, t.AsOf, medium, sizeutil.FormatBytes(res.Bytes))
+		logf.log("drill %s [%s] as of %s on %q: OK (%s)", res.DLEDisplay, opts.Tier, t.AsOf, medium, sizeutil.FormatBytes(res.Bytes))
 	} else {
-		logf.log("drill %s [%s] as of %s on %q: FAIL [%s] %s", t.DLE, opts.Tier, t.AsOf, medium, cls, detail)
+		logf.log("drill %s [%s] as of %s on %q: FAIL [%s] %s", res.DLEDisplay, opts.Tier, t.AsOf, medium, cls, detail)
 	}
 	return res
 }
@@ -270,7 +271,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		if err != nil {
 			return classifyOpenErr(err), err.Error()
 		}
-		logf.log("drill-restoring %s %s L%d", step.SlotID, step.DLE, step.Level)
+		logf.log("drill-restoring %s %s L%d", step.SlotID, e.DisplayDLE(step.DLE), step.Level)
 		rerr := m.Restore(rc, dir, nil)
 		cerr := rc.Close()
 		if cerr != nil {

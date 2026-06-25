@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -119,7 +120,7 @@ func fprintPlanItems(w io.Writer, plan *planner.Plan) int64 {
 		if item.Level >= 1 {
 			levelStr = fmt.Sprintf("L%d (incr)", item.Level)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t~%s\t%s\n", item.Name, levelStr, sizeutil.FormatBytes(item.EstBytes), item.Reason)
+		fmt.Fprintf(tw, "%s\t%s\t~%s\t%s\n", item.DLE.ID(), levelStr, sizeutil.FormatBytes(item.EstBytes), item.Reason)
 		estTotal += item.EstBytes
 	}
 	tw.Flush()
@@ -170,7 +171,7 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 			est += it.EstBytes
 			if it.Level == 0 {
 				fulls++
-				fullNames = append(fullNames, it.Name)
+				fullNames = append(fullNames, it.DLE.ID())
 			} else {
 				incrs++
 			}
@@ -268,7 +269,7 @@ func newDumpCmd(a *app) *cobra.Command {
 				return err
 			}
 			defer unlock()
-			eng.SetOperator(stdinOperator{})
+			attachOperator(eng)
 			return a.runReported(cfg, report.Run{Command: report.CommandDump, ExitClass: "dump-failed"}, func() (report.Run, error) {
 				s, err := eng.Run(date, a.logf())
 				if err != nil {
@@ -312,11 +313,13 @@ func dumpStats(s *format.Slot, workdir string) []report.DLEStat {
 	for _, a := range s.Archives {
 		stats = append(stats, report.DLEStat{
 			DLE:     a.DLE,
+			Host:    a.Host,
+			Path:    a.Path,
 			Level:   a.Level,
 			Orig:    a.Uncompressed,
 			Out:     a.Compressed,
 			Files:   a.FileCount,
-			Seconds: durations[key{a.DLE, a.Level}],
+			Seconds: durations[key{a.DLEID(), a.Level}], // progress is keyed by host:path
 		})
 	}
 	return stats
@@ -431,7 +434,7 @@ func newVerifyCmd(a *app) *cobra.Command {
 			// Verifying reads media, so a spanned slot on a single-drive station needs
 			// reel swaps — give it the operator so it prompts (and reassembles a spanned
 			// slot) just like restore, rather than failing at the first volume boundary.
-			eng.SetOperator(stdinOperator{})
+			attachOperator(eng)
 			if all && !a.quiet {
 				mode := "checksum"
 				if deep {
@@ -457,7 +460,7 @@ func newVerifyCmd(a *app) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "verify every slot in the catalog")
-	cmd.Flags().BoolVar(&deep, "deep", false, "also validate structure: decrypt+decompress+`tar -t`, members vs seal")
+	cmd.Flags().BoolVar(&deep, "deep", false, "also validate structure: decrypt+decompress+tar-list, members vs seal")
 	return cmd
 }
 
@@ -499,7 +502,15 @@ func runSlotList(a *app) error {
 	}
 	slots := eng.Catalog().Slots()
 	if len(slots) == 0 {
-		fmt.Println("no slots in catalog")
+		// A bare config (no sources) means no backup config was found — read-only
+		// commands fall back to the default local catalog, so distinguish "configured
+		// but nothing dumped yet" from "no config at all" to spare a newcomer the
+		// false impression that an unconfigured `nb slot` succeeded meaningfully.
+		if len(cfg.Sources) == 0 {
+			fmt.Println("no slots in catalog (no backup config found — copy nbackup.example.yaml to nbackup.yaml and run `nb dump`, or pass -c <config>)")
+		} else {
+			fmt.Println("no slots in catalog")
+		}
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
@@ -568,7 +579,7 @@ func newSlotShowCmd(a *app) *cobra.Command {
 				if enc == "" {
 					enc = "none"
 				}
-				fmt.Fprintf(tw, "%s\tL%d\t%d\t%s\t%s\t%s\n", ar.DLE, ar.Level, ar.FileCount, sizeutil.FormatBytes(ar.Compressed), ar.Codec, enc)
+				fmt.Fprintf(tw, "%s\tL%d\t%d\t%s\t%s\t%s\n", ar.DLEID(), ar.Level, ar.FileCount, sizeutil.FormatBytes(ar.Compressed), ar.Codec, enc)
 			}
 			tw.Flush()
 
@@ -587,7 +598,7 @@ func newSlotShowCmd(a *app) *cobra.Command {
 					for _, pt := range ar.Parts {
 						locs = append(locs, fmt.Sprintf("%d", pt.Pos))
 					}
-					positions = append(positions, fmt.Sprintf("%s/L%d@%s", ar.DLE, ar.Level, strings.Join(locs, ",")))
+					positions = append(positions, fmt.Sprintf("%s/L%d@%s", eng.DisplayDLE(ar.DLE), ar.Level, strings.Join(locs, ",")))
 				}
 				fmt.Fprintf(ptw, "  %s\t%s\t%s\n", p.Medium, volumes, strings.Join(positions, " "))
 			}
@@ -606,7 +617,21 @@ func newPruneCmd(a *app) *cobra.Command {
 		Short:   "Delete a medium's slots past its cycle/capacity limits",
 		Long:    "Reclaim slots on the named medium that fall outside its own cycle and capacity limits. Retention is per-medium, so the medium to prune must be named explicitly (pruning one store never touches a copy on another). Deletes by default; pass --dry-run (-n) to preview.",
 		Example: "  nb prune disk\n  nb prune disk --dry-run\n  nb prune offsite",
-		Args:    cobra.ExactArgs(1),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				return nil
+			}
+			msg := "prune requires exactly one medium name, e.g. `nb prune disk` (retention is per-medium)"
+			if cfg, err := a.load(); err == nil && len(cfg.Media) > 0 {
+				names := make([]string, 0, len(cfg.Media))
+				for name := range cfg.Media {
+					names = append(names, name)
+				}
+				sort.Strings(names)
+				msg += " — media: " + strings.Join(names, ", ")
+			}
+			return fmt.Errorf("%s", msg)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.load()
 			if err != nil {
@@ -636,7 +661,7 @@ func newPruneCmd(a *app) *cobra.Command {
 				if eligible > 0 {
 					fmt.Printf("\n%d slot(s) eligible. Re-run without --dry-run to delete.\n", eligible)
 				} else {
-					fmt.Printf("\nnothing to reclaim: all slots fit capacity or are protected.\n")
+					fmt.Printf("\n%s: nothing to reclaim (all slots fit capacity or are protected)\n", args[0])
 				}
 				return nil
 			}
@@ -684,7 +709,7 @@ func newCopyCmd(a *app) *cobra.Command {
 				return err
 			}
 			defer unlock()
-			eng.SetOperator(stdinOperator{})
+			attachOperator(eng)
 			if err := eng.CopySlot(slotID, from, to, force, a.logf()); err != nil {
 				return err
 			}
@@ -752,6 +777,9 @@ func newSyncCmd(a *app) *cobra.Command {
 			if sinceStr == "" {
 				since = time.Time{} // ParseDate defaults to today; sync wants "no bound"
 			}
+			if last < 0 {
+				return fmt.Errorf("--last must be 0 (all) or a positive count, got %d", last)
+			}
 
 			// Resolve the targets: an explicit --to (ad-hoc), or every configured rule.
 			type target struct {
@@ -779,7 +807,7 @@ func newSyncCmd(a *app) *cobra.Command {
 					return err
 				}
 				defer unlock()
-				eng.SetOperator(stdinOperator{})
+				attachOperator(eng)
 			} else if eng, err = newEngine(cfg); err != nil {
 				return err
 			}
@@ -850,8 +878,8 @@ func newLabelCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "label <medium> <name>",
 		Short:   "Label a volume (required for tape before first dump)",
-		Long:    "Write a volume's identity label, making it writable. Refuses to overwrite foreign data, and (with --relabel) a tape that still holds protected slots — those within minimum_age or holding a DLE's last recovery path, including a slot spanned across tapes. --relabel reuses an NBackup-labeled volume and --force overrides safety refusals.",
-		Example: "  nb label tape DAILY-01\n  nb label --relabel tape DAILY-01",
+		Long:    "Write a volume's identity label, making it writable. Refuses to overwrite foreign data, and (with --relabel) a tape that still holds protected slots — those within minimum_age or holding a DLE's last recovery path, including a slot spanned across tapes. --relabel reuses an NBackup-labeled volume and --force overrides safety refusals.\n\nOn a robotic library, a new label takes a blank bay; to recycle a specific tape to a new name, `nb load <bay>` it first, then `nb label --relabel <name>` — the relabel acts on the loaded bay. A single-drive station always labels whatever reel is in the drive.",
+		Example: "  nb label tape DAILY-01\n  nb load lto bay-02\n  nb label --relabel lto DAILY-42   # recycle the loaded tape to a new name",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.load()

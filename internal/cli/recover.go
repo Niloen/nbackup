@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -36,9 +35,9 @@ func newRecoverCmd(a *app) *cobra.Command {
 			"Paths are relative to the DLE root. A bare --date resolves to the most recent slot on" +
 			" or before it — the same slot the browse view and --all restore both use.",
 		Example: "  nb recover\n" +
-			"  nb recover --dle app01-home --date 2026-06-20 --list --path /etc\n" +
-			"  nb recover --dle app01-home --date 2026-06-20 --path /etc/hosts --dest /tmp/out\n" +
-			"  nb recover --dle app01-home --date 2026-06-20 --all --dest /tmp/out",
+			"  nb recover --dle app01:/home --date 2026-06-20 --list --path /etc\n" +
+			"  nb recover --dle app01:/home --date 2026-06-20 --path /etc/hosts --dest /tmp/out\n" +
+			"  nb recover --dle app01:/home --date 2026-06-20 --all --dest /tmp/out",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.loadRO()
@@ -49,7 +48,7 @@ func newRecoverCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eng.SetOperator(stdinOperator{})
+			attachOperator(eng)
 			if all {
 				if listOnly || len(paths) > 0 {
 					return fmt.Errorf("--all restores the whole DLE and cannot be combined with --path/--list")
@@ -94,15 +93,23 @@ func runRecoverRestore(eng *engine.Engine, dleName, dateStr, dest, to string, fo
 			return fmt.Errorf("--to must be host:path (e.g. app01:/restore)")
 		}
 		toHost, toPath = h, p
+		// localhost is this machine, not a remote client, so `--to localhost:/path` is
+		// just a local restore to that path — route it through --dest (same empty-dest
+		// guard and --force) rather than demanding localhost be under hosts:.
+		if toHost == "localhost" {
+			dest, toHost, toPath = toPath, "", ""
+		}
 	} else if dest == "" {
 		return fmt.Errorf("--dest (or --to host:path) is required for --all (whole-DLE restore)")
 	}
 	var dles []string
-	if dleName != "" {
-		if !slices.Contains(eng.DLENames(), dleName) {
-			return fmt.Errorf("unknown DLE %q; known: %s", dleName, strings.Join(eng.DLENames(), ", "))
+	specified := dleName != ""
+	if specified {
+		slug, ok := eng.ResolveDLE(dleName)
+		if !ok {
+			return fmt.Errorf("unknown DLE %q; known: %s", dleName, strings.Join(eng.DLEDisplay(), ", "))
 		}
-		dles = []string{dleName}
+		dles = []string{slug}
 	} else {
 		dles = eng.DLENames()
 		if len(dles) == 0 {
@@ -118,14 +125,17 @@ func runRecoverRestore(eng *engine.Engine, dleName, dateStr, dest, to string, fo
 			base = toPath
 		}
 		out := base
-		if len(dles) > 1 {
+		// When --dle is omitted we restore every DLE, each into its own
+		// subdirectory of dest — unconditionally, so a script reading dest/<dle>/…
+		// behaves the same whether the catalog holds one DLE or many.
+		if !specified {
 			out = path.Join(base, name)
 		}
 		dst := out
 		if toHost != "" {
 			dst = toHost + ":" + out
 		}
-		fmt.Printf("restoring DLE %s as of %s -> %s\n", name, asOf, dst)
+		fmt.Printf("restoring DLE %s as of %s -> %s\n", eng.DisplayDLE(name), asOf, dst)
 		restoreOne := func() error {
 			if toHost != "" {
 				return eng.RestoreAsOfTo(name, asOf, toHost, out, logf)
@@ -154,12 +164,13 @@ func runRecoverBatch(eng *engine.Engine, dleName, dateStr string, paths []string
 		return err
 	}
 	if dleName == "" {
-		return fmt.Errorf("--dle is required (known: %s)", strings.Join(eng.DLENames(), ", "))
+		return fmt.Errorf("--dle is required (known: %s)", strings.Join(eng.DLEDisplay(), ", "))
 	}
-	if !slices.Contains(eng.DLENames(), dleName) {
-		return fmt.Errorf("unknown DLE %q; known: %s", dleName, strings.Join(eng.DLENames(), ", "))
+	slug, ok := eng.ResolveDLE(dleName)
+	if !ok {
+		return fmt.Errorf("unknown DLE %q; known: %s", dleName, strings.Join(eng.DLEDisplay(), ", "))
 	}
-	tree, err := eng.OpenRecover(dleName, asOf)
+	tree, err := eng.OpenRecover(slug, asOf)
 	if err != nil {
 		return err
 	}
@@ -173,7 +184,7 @@ func runRecoverBatch(eng *engine.Engine, dleName, dateStr string, paths []string
 		if !ok {
 			return fmt.Errorf("not found: %s%s", target, pathRootHint(target))
 		}
-		fmt.Printf("# %s as of %s (%s)\n", dleName, tree.AsOf, tree.TargetSlot)
+		fmt.Printf("# %s as of %s (%s)\n", eng.DisplayDLE(slug), tree.AsOf, tree.TargetSlot)
 		printListing(n)
 		return nil
 	}
@@ -196,7 +207,7 @@ func runRecoverBatch(eng *engine.Engine, dleName, dateStr string, paths []string
 	if err != nil {
 		return err
 	}
-	fmt.Printf("recovered %d entr(ies) from %d archive(s) into %s\n", n, len(steps), dest)
+	fmt.Printf("recovered %d file(s) from %d archive(s) into %s\n", n, len(steps), dest)
 	return nil
 }
 
@@ -267,16 +278,24 @@ func runRecoverShell(eng *engine.Engine, dleName, dateStr, dest string) error {
 	if err != nil {
 		return err
 	}
-	sh := &recoverShell{eng: eng, dle: dleName, date: date, dest: dest}
+	sh := &recoverShell{eng: eng, date: date, dest: dest}
 	if dleName != "" {
-		if err := sh.reload(); err != nil {
-			fmt.Printf("note: %v\n", err)
+		if slug, ok := eng.ResolveDLE(dleName); ok {
+			sh.dle = slug
+			if err := sh.reload(); err != nil {
+				fmt.Printf("note: %v\n", err)
+			}
+		} else {
+			fmt.Printf("note: unknown DLE %q — pick one with 'setdisk <dle>'\n", dleName)
 		}
 	}
 	fmt.Println("nb recover — type 'help' for commands, 'quit' to exit.")
 	sh.banner()
+	tty := stdinIsTerminal() // suppress the prompt when stdin is piped (avoids interleaved echo)
 	for {
-		fmt.Print(sh.prompt())
+		if tty {
+			fmt.Print(sh.prompt())
+		}
 		line, rerr := stdinReader.ReadString('\n')
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -304,12 +323,12 @@ func (sh *recoverShell) prompt() string {
 	if cwd := sh.sess.Cwd(); cwd != "" {
 		loc = "/" + cwd
 	}
-	return fmt.Sprintf("recover %s:%s> ", sh.dle, loc)
+	return fmt.Sprintf("recover %s:%s> ", sh.eng.DisplayDLE(sh.dle), loc)
 }
 
 func (sh *recoverShell) banner() {
 	if sh.sess != nil {
-		fmt.Printf("disk %q as of %s (resolved to %s)\n", sh.dle, sh.date, sh.sess.Tree().TargetSlot)
+		fmt.Printf("disk %q as of %s (resolved to %s)\n", sh.eng.DisplayDLE(sh.dle), sh.date, sh.sess.Tree().TargetSlot)
 		return
 	}
 	fmt.Printf("as of %s — no disk selected. Pick one with 'setdisk <dle>' ('disks' lists them).\n", sh.date)
@@ -319,7 +338,7 @@ func (sh *recoverShell) banner() {
 // listDisks prints the DLEs available to recover from, one per line (they are
 // descriptive, often long, so a comma list is unreadable).
 func (sh *recoverShell) listDisks() {
-	names := sh.eng.DLENames()
+	names := sh.eng.DLEDisplay()
 	if len(names) == 0 {
 		fmt.Println("  (no disks in the catalog — is the config/catalog correct?)")
 		return
@@ -414,10 +433,15 @@ func (sh *recoverShell) setDate(args []string) {
 
 func (sh *recoverShell) setDisk(args []string) {
 	if len(args) != 1 {
-		fmt.Printf("usage: setdisk <dle>; known: %s\n", strings.Join(sh.eng.DLENames(), ", "))
+		fmt.Printf("usage: setdisk <dle>; known: %s\n", strings.Join(sh.eng.DLEDisplay(), ", "))
 		return
 	}
-	sh.dle = args[0]
+	slug, ok := sh.eng.ResolveDLE(args[0])
+	if !ok {
+		fmt.Printf("unknown disk %q; known: %s\n", args[0], strings.Join(sh.eng.DLEDisplay(), ", "))
+		return
+	}
+	sh.dle = slug
 	if err := sh.reload(); err != nil { // a fresh session starts with an empty selection
 		fmt.Printf("note: %v\n", err)
 		return
@@ -533,7 +557,7 @@ func (sh *recoverShell) extract(args []string) {
 		fmt.Printf("error: %v\n", err)
 		return
 	}
-	fmt.Printf("recovered %d entr(ies) from %d archive(s) into %s\n", n, len(steps), sh.dest)
+	fmt.Printf("recovered %d file(s) from %d archive(s) into %s\n", n, len(steps), sh.dest)
 }
 
 func recoverHelp() {

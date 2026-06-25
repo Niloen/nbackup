@@ -128,9 +128,18 @@ func renderDrillLedger(w io.Writer, cfg *config.Config, now time.Time) {
 	}
 	window := cfg.DrillWindow()
 
+	// The ledger keys DLEs by their internal slug; display them as host:path.
+	idOf := map[string]string{}
 	var dleNames []string
 	for _, d := range cfg.DLEs() {
 		dleNames = append(dleNames, d.Name())
+		idOf[d.Name()] = d.ID()
+	}
+	disp := func(slug string) string {
+		if id, ok := idOf[slug]; ok {
+			return id
+		}
+		return slug
 	}
 	never, _ := ledger.Coverage(dleNames, window, now)
 
@@ -153,20 +162,24 @@ func renderDrillLedger(w io.Writer, cfg *config.Config, now time.Time) {
 		tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 		fmt.Fprintln(tw, "  FAILING DLE\tCLASS\tLAST DRILL\tREMEDY")
 		for _, r := range failing {
-			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", r.DLE, r.Class, drillWhen(r.LastDrill), drill.ParseClass(r.Class).Remedy())
+			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", disp(r.DLE), r.Class, drillWhen(r.LastDrill), drill.ParseClass(r.Class).Remedy())
 		}
 		tw.Flush()
 	}
 	if len(stale) > 0 {
 		names := make([]string, 0, len(stale))
 		for _, r := range stale {
-			names = append(names, fmt.Sprintf("%s (%s ago)", r.DLE, ageString(now.Sub(r.LastDrill))))
+			names = append(names, fmt.Sprintf("%s (%s ago)", disp(r.DLE), ageString(now.Sub(r.LastDrill))))
 		}
 		fmt.Fprintf(w, "  stale (overdue past %s): %s\n", humanDur(window), strings.Join(names, ", "))
 	}
 	if len(never) > 0 {
-		sort.Strings(never)
-		fmt.Fprintf(w, "  never drilled: %s\n", strings.Join(never, ", "))
+		neverIDs := make([]string, len(never))
+		for i, n := range never {
+			neverIDs[i] = disp(n)
+		}
+		sort.Strings(neverIDs)
+		fmt.Fprintf(w, "  never drilled: %s\n", strings.Join(neverIDs, ", "))
 	}
 }
 

@@ -67,17 +67,24 @@ it, and **recovery never requires NBackup**:
 # single full archive (the disk payload is a clean tar.zst — no header to skip):
 zstd -dc 000000-app01-home-L0.tar.zst | tar -xf -
 
-# a full + incrementals, replayed in order (applies deletions):
-for a in slots/slot-*/0*-app01-home-L*.tar.zst; do
-  zstd -dc "$a" | tar --extract --listed-incremental=/dev/null
+# a full + incrementals, replayed in slot order — date then same-day sequence,
+# which is also NBackup's restore order (a plain glob mis-sorts a `.2` rerun
+# before its own date, since '.' < '/', so order the dirs explicitly):
+for d in $(ls -d slots/slot-* | sed -E 's#(/slot-[0-9-]+)$#\1.1#' \
+            | sort -t. -k1,1 -k2,2n | sed -E 's#\.1$##'); do
+  for a in "$d"/0*-app01-home-L*.tar.zst; do
+    zstd -dc "$a" | tar --extract --listed-incremental=/dev/null
+  done
 done
 # (an ENCRYPTED archive keeps the same .tar.zst name — the header records the
 #  scheme, the file is not renamed — and reverses the same way, decrypting first:
 #  gpg -d < 000000-app01-home-L0.tar.zst | zstd -dc | tar -xf -)
 # (from tape, skip the 32 KB inline header first: dd bs=32k skip=1 < file | zstd -dc | …)
-# (a tape archive that SPANNED volumes is split into parts — strip each part's 32 KB
-#  header and concatenate them in order before decompressing:
-#  for p in part0 part1 …; do dd bs=32k skip=1 < "$p"; done | zstd -dc | tar -xf -)
+# (a tape archive that SPANNED volumes is split into parts — `nb slot show <slot>`
+#  lists the volume chain and each part's position. The parts are the file at that
+#  position on each volume in order (e.g. bay-NN/000001); strip each part's 32 KB
+#  header and concatenate them before decompressing:
+#  for p in bay-01/000001 bay-02/000001 …; do dd bs=32k skip=1 < "$p"; done | zstd -dc | tar -xf -)
 ```
 
 ### Encryption
@@ -113,9 +120,11 @@ This produces a single `nb` binary. The convention: you **inspect** with a noun
 
 | Command              | Purpose                                                  |
 |----------------------|----------------------------------------------------------|
+| `nb check`           | Verify the config and reach every source host (amcheck)  |
 | `nb plan`            | Show what the next run would do                          |
 | `nb dump`            | Execute a run and seal a slot                            |
 | `nb status`          | Show progress of the current (or most recent) run        |
+| `nb report`          | Summarize recent runs, or print one dump's per-DLE report |
 | `nb slot`            | List slots (default)                                     |
 | `nb slot show`       | Show a single slot's archives and copies                |
 | `nb medium`          | List media, or detail one (incl. bays / drive + shelf)    |
@@ -137,8 +146,8 @@ examples, and `nb completion <shell>` to generate shell completion.
 ```bash
 cp nbackup.example.yaml nbackup.yaml   # edit sources + catalog path
 
-nb plan                # preview today's plan, capacity usage, and $/month cost
-nb plan --days 30      # forecast the next 30 daily runs + the $/month cost curve
+nb plan                # preview today's plan, capacity usage, and $/month cost (cloud media)
+nb plan --days 30      # forecast the next 30 daily runs + the $/month cost curve (cloud media)
 nb dump                # run the backup, producing one sealed slot
 nb dump --dry-run --date 2026-07-15    # plan that day's run; writes nothing
 nb status              # progress of the running (or most recent) dump
@@ -147,7 +156,7 @@ nb slot show slot-2026-06-21   # archives + every copy's volume and file positio
 nb medium              # media overview: type, slots, usage / capacity, volume
 nb medium lto          # one medium's volume and the slots it holds
 nb verify --all        # re-check every slot's archive checksums
-nb recover --dle app01-home --date 2026-06-21 --all --dest /tmp/out   # whole-DLE restore
+nb recover --dle app01:/home --date 2026-06-21 --all --dest /tmp/out   # whole-DLE restore
 ```
 
 These global flags work with every command and may appear anywhere on the
@@ -238,7 +247,7 @@ bucket infers its provider from the URL scheme (`s3://` = AWS, `gs://` = GCS,
 `azblob://` = Azure); a local disk/tape has no recurring bill and is shown without a
 cost line. An optional per-medium `cost:` block overrides a rate (a region's egress)
 or names a different provider table. The big surprise — egress on a restore — is
-surfaced where it bites: `nb restore` / `nb recover` estimate **egress `$`** before
+surfaced where it bites: `nb recover` estimates **egress `$`** before
 pulling from a cloud store, warning — and, interactively, confirming — when it is
 material; an offsite `nb drill`'s forecast egress carries a `$`. Pricing is a flat
 estimate (storage + egress + request — NBackup does not model Glacier/Deep-Archive
@@ -273,11 +282,11 @@ Run slot-2026-06-21  [running]
   workers:  2 configured, 2 active
   dles:     1 done, 2 active, 1 pending
 
-DLE          LEVEL  STATE    PROGRESS           DONE       EST        WRITTEN
-app01-etc    L1     done     [##########] 100%  120.00 kB  ~118.0 kB  41.00 kB
-app01-home   L0     dumping  [####......]  42%  8.40 GB    ~20.0 GB   3.10 GB
-db01-pg      L0     dumping  [##........]  18%  3.60 GB    ~20.0 GB   1.40 GB
-app01-var    L1     pending  -                  0 B        ~2.0 GB    0 B
+DLE            LEVEL  STATE    PROGRESS           DONE       EST        WRITTEN
+app01:/etc     L1     done     [##########] 100%  120.00 kB  ~118.0 kB  41.00 kB
+app01:/home    L0     dumping  [####......]  42%  8.40 GB    ~20.0 GB   3.10 GB
+db01:/pg       L0     dumping  [##........]  18%  3.60 GB    ~20.0 GB   1.40 GB
+app01:/var     L1     pending  -                  0 B        ~2.0 GB    0 B
 
 Total:    12.12 GB of ~62.12 GB  (20%)
 Rate:     48.10 MB/s
@@ -316,8 +325,8 @@ FAILURES
 
 DRILL COVERAGE
   FAILING DLE  CLASS     LAST DRILL        REMEDY
-  app01-home   pipeline  2026-06-23 02:25  the archive would not decrypt/decompress/untar — …
-  stale (overdue past 30d): app01-etc (84d ago)
+  app01:/home  pipeline  2026-06-23 02:25  the archive would not decrypt/decompress/untar — …
+  stale (overdue past 30d): app01:/etc (84d ago)
 ```
 
 `nb report --last 30` widens the window; `nb report --json` emits the raw records.
@@ -328,9 +337,9 @@ compression %, files, dump time, and rate, with full/incremental totals:
 
 ```text
 DUMP REPORT  slot-2026-06-24  (2026-06-24 02:00)
-DLE         LVL  ORIG       OUT       COMP%  FILES  TIME    RATE
-app01-home  0    21.47 GB   5.37 GB   25%    1240   12m04s  29.66 MB/s
-app01-etc   1    122.88 kB  40.96 kB  33%    9      1s      …
+DLE          LVL  ORIG       OUT       COMP%  FILES  TIME    RATE
+app01:/home  0    21.47 GB   5.37 GB   25%    1240   12m04s  29.66 MB/s
+app01:/etc   1    122.88 kB  40.96 kB  33%    9      1s      …
 --
 FULL: 1 dle(s), 21.47 GB -> 5.37 GB (25%)
 INCR: 1 dle(s), 122.88 kB -> 40.96 kB (33%)
@@ -407,21 +416,23 @@ catalog and touches media only when you extract.
 nb recover                                   # interactive shell (below)
 
 # one-shot, scriptable:
-nb recover --dle app01-home --date 2026-06-20 --list --path /etc
-nb recover --dle app01-home --date 2026-06-20 \
+nb recover --dle app01:/home --date 2026-06-20 --list --path /etc
+nb recover --dle app01:/home --date 2026-06-20 \
     --path /etc/hosts --path /etc/nginx --dest /tmp/out
 ```
 
-The interactive shell tracks a current DLE and date, then navigate and select:
+A DLE is identified Amanda-style by `host:path` (`app01:/home`); that is what the
+tables show and what `--dle`/`setdisk` accept. The interactive shell tracks a
+current DLE and date, then navigate and select:
 
 ```
-recover> setdisk app01-home
+recover> setdisk app01:/home
 recover> setdate 2026-06-20
-recover app01-home:/> cd etc
-recover app01-home:/etc> ls
+recover app01:/home:/> cd etc
+recover app01:/home:/etc> ls
   hosts   nginx/   passwd
-recover app01-home:/etc> add hosts nginx
-recover app01-home:/etc> extract /tmp/out
+recover app01:/home:/etc> add hosts nginx
+recover app01:/home:/etc> extract /tmp/out
 recovered 12 entr(ies) from 2 archive(s) into /tmp/out
 ```
 
@@ -500,9 +511,12 @@ another medium never makes a slot prunable, because double storage exists for
 redundancy. Pruning has two layers:
 
 1. **Safety floor**: a slot is *protected* if it is younger than the medium's
-   `minimum_age` (which defaults to one cycle), or if — among that medium's own
-   slots — no newer *full* of one of its DLEs exists (so on this medium it is that
-   DLE's last recovery path; an incremental-only slot is never the floor). Protected
+   `minimum_age` (which defaults to one cycle), or if it belongs to a DLE's **live
+   recovery chain** — its last full and *every later incremental* (a whole-DLE
+   restore replays the full plus each incremental in order, so dropping the tip
+   would lose the latest state and dropping a middle incremental would break a
+   climbing-level chain). A recent slot likewise pins the older base its own restore
+   needs. Only a chain **superseded by a newer full** becomes reclaimable. Protected
    slots are never reclaimed. The rule is medium-neutral; the slot set it judges is
    the medium's own.
 2. **Capacity reclamation**: among non-protected slots, the medium's retention

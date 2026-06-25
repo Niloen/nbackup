@@ -645,31 +645,55 @@ func (l *Librarian) reconcileRelabel(wiped string, lbl format.Label) error {
 }
 
 // chooseBay selects which physical bay a label operation targets on a robotic
-// library: for relabel, the bay already holding that label; for a new label, a blank
-// bay (preferring one already in the drive). It refuses to reuse an existing label
-// without relabel, or to label when no blank bay is free.
+// library. A bay explicitly loaded (`nb load <bay>`) is the target — label and
+// relabel act on it, just as a single-drive station labels whatever reel is in the
+// drive — so loading a bay then labeling it does what it says, and `--relabel` on a
+// loaded tape recycles it to the new name. With nothing loaded, a relabel finds the
+// tape by its current name (an in-place re-stamp) and a new label grabs a blank bay.
+// Label() enforces the safety rules on the chosen bay (blank for a new label,
+// --relabel + protected-slot guard for a reuse); chooseBay only refuses to create a
+// duplicate label on a second bay.
 func (l *Librarian) chooseBay(name string, relabel bool) (string, error) {
 	bays, err := l.changer.Bays()
 	if err != nil {
 		return "", err
 	}
+	loaded := ""
+	if cur, ok := l.changer.Loaded(); ok {
+		loaded = cur.ID
+	}
+	// Refuse to stamp a name another bay already carries (a duplicate label). For a
+	// relabel, the loaded bay is exempt — re-stamping it (same name, fresh epoch) is
+	// allowed — and a name held by a *different* bay is reachable by loading it.
+	for _, b := range bays {
+		if b.Label == name && !(relabel && b.ID == loaded) {
+			if relabel {
+				return "", fmt.Errorf("a tape labeled %q already exists on bay %s; load it to relabel it, or pick a different name", name, b.ID)
+			}
+			return "", fmt.Errorf("a tape labeled %q already exists; use --relabel to reuse it", name)
+		}
+	}
 	if relabel {
+		// A loaded bay is the explicit recycle target (`nb load <bay>` picked it), so
+		// --relabel can rename/recycle whatever it holds; with nothing loaded, re-stamp
+		// the tape currently named `name` in place.
+		if loaded != "" {
+			return loaded, nil
+		}
 		for _, b := range bays {
 			if b.Label == name {
 				return b.ID, nil
 			}
 		}
-		return "", fmt.Errorf("no tape labeled %q in the library to relabel", name)
+		return "", fmt.Errorf("no tape loaded and none labeled %q; run `nb load %s <bay>` to pick the tape to recycle", name, l.medium)
 	}
-	for _, b := range bays {
-		if b.Label == name {
-			return "", fmt.Errorf("a tape labeled %q already exists; use --relabel to reuse it", name)
-		}
-	}
-	if cur, ok := l.changer.Loaded(); ok {
+	// A new label takes a blank bay, preferring one already loaded so `nb load <blank>`
+	// then `nb label` directs it; a loaded but non-blank bay is left alone (recycle it
+	// with --relabel) and the next free blank is used instead.
+	if loaded != "" {
 		for _, b := range bays {
-			if b.ID == cur.ID && b.Blank {
-				return cur.ID, nil // label the blank already in the drive
+			if b.ID == loaded && b.Blank {
+				return loaded, nil
 			}
 		}
 	}
@@ -678,7 +702,7 @@ func (l *Librarian) chooseBay(name string, relabel bool) (string, error) {
 			return b.ID, nil
 		}
 	}
-	return "", fmt.Errorf("no blank bay available; all %d are in use — relabel an aged-out tape with `nb label --relabel`", len(bays))
+	return "", fmt.Errorf("no blank bay available; all %d are in use — load a bay to recycle and relabel it with `nb label --relabel`", len(bays))
 }
 
 // View is a medium's physical inventory for `nb medium <name>`: a robotic library's
@@ -750,9 +774,13 @@ func (l *Librarian) Load(target string, byLabel bool, logf Logf) error {
 	if err := l.changer.Mount(bay); err != nil {
 		return err
 	}
-	if name, labeled, _ := l.readVolumeLabel(); labeled {
+	name, labeled, lerr := l.readVolumeLabel()
+	switch {
+	case labeled:
 		logf.log("loaded %q: bay %s holds %q", l.medium, bay, name)
-	} else {
+	case errors.Is(lerr, media.ErrForeignVolume):
+		logf.log("loaded %q: bay %s (foreign — non-NBackup data; `nb label --relabel --force` to overwrite)", l.medium, bay)
+	default:
 		logf.log("loaded %q: bay %s (blank)", l.medium, bay)
 	}
 	return nil
@@ -782,9 +810,13 @@ func (l *Librarian) insertFromShelf(target string, byLabel bool, logf Logf) erro
 	if err := l.shelf.Insert(reel); err != nil {
 		return err
 	}
-	if name, labeled, _ := l.readVolumeLabel(); labeled {
+	name, labeled, lerr := l.readVolumeLabel()
+	switch {
+	case labeled:
 		logf.log("loaded %q: reel %s holds %q", l.medium, reel, name)
-	} else {
+	case errors.Is(lerr, media.ErrForeignVolume):
+		logf.log("loaded %q: reel %s (foreign — non-NBackup data; `nb label --relabel --force` to overwrite)", l.medium, reel)
+	default:
 		logf.log("loaded %q: reel %s (blank)", l.medium, reel)
 	}
 	return nil

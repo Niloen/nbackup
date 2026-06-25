@@ -463,6 +463,20 @@ type DLE struct {
 
 var slugStrip = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
+// yamlUnknownField rewrites go-yaml's "field X not found in type pkg.Type" — which
+// leaks an internal Go type name — into a user-facing "unknown key X".
+var yamlUnknownField = regexp.MustCompile(`field (\S+) not found in type \S+`)
+
+// cleanYAMLError turns go-yaml's decode error into a config-author-facing message:
+// it drops the "yaml: unmarshal errors:" banner and the internal Go type name,
+// leaving the line number and the offending key (e.g. `line 1: unknown key "cyle"`).
+func cleanYAMLError(err error) string {
+	s := err.Error()
+	s = strings.ReplaceAll(s, "yaml: unmarshal errors:\n", "")
+	s = yamlUnknownField.ReplaceAllString(s, `unknown key "$1"`)
+	return strings.TrimSpace(s)
+}
+
 // Name returns a stable, filesystem-safe identifier for the DLE, e.g.
 // host "app01" + path "/home" -> "app01-home".
 func (d DLE) Name() string {
@@ -472,6 +486,13 @@ func (d DLE) Name() string {
 		p = "root"
 	}
 	return slugStrip.ReplaceAllString(d.Host+"-"+p, "_")
+}
+
+// ID returns the Amanda-style host:path identity of a DLE, e.g. "app01:/home".
+// This is what users see in reports and type for `--dle`/`setdisk`; the slug from
+// Name() stays internal (filenames, snapshot state, catalog keys).
+func (d DLE) ID() string {
+	return d.Host + ":" + d.Path
 }
 
 // DumpTypeName returns the DLE's dumptype, defaulting to "default".
@@ -503,7 +524,7 @@ func Load(path string) (*Config, error) {
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil {
-		return nil, fmt.Errorf("parse config %s: %w", path, err)
+		return nil, fmt.Errorf("parse config %s: %s", path, cleanYAMLError(err))
 	}
 	if err := c.Validate(); err != nil {
 		return nil, err
@@ -525,7 +546,14 @@ func (c *Config) Validate() error {
 		dt := s.DumpTypeName()
 		if dt != DefaultDumpType {
 			if _, ok := c.DumpTypes[dt]; !ok {
-				return fmt.Errorf("source %s: unknown dumptype %q", s.Name(), dt)
+				known := []string{DefaultDumpType}
+				for name := range c.DumpTypes {
+					if name != DefaultDumpType {
+						known = append(known, name)
+					}
+				}
+				sort.Strings(known)
+				return fmt.Errorf("source %s: unknown dumptype %q (known: %s)", s.Name(), dt, strings.Join(known, ", "))
 			}
 		}
 		if err := c.validateTransformPlacement(s); err != nil {

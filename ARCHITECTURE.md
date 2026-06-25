@@ -488,10 +488,12 @@ result reaches someone. Three load-bearing choices, all mirroring existing stanc
 **Reclamation asymmetry.** Disk/S3 reclaim per slot (`RemoveSlot`); tape reclaims a
 whole volume (relabel — `tape.RemoveSlot` errors, and `volumeProfile.Reclaim`
 returns nothing, so `nb prune` never deletes a slot from a tape). Pruning has a
-safety floor (`policy.Protected`: younger than `minimum_age`, or the last recovery
-path for some DLE) plus a per-medium capacity strategy. Both are per-medium: the
-floor's rule is shared but is judged over one medium's own slots, so a copy on
-another medium never makes a slot reclaimable.
+safety floor (`retention.Compute`: younger than `minimum_age`, or part of a DLE's
+**live recovery chain** — its last full plus every later incremental, since
+`restore.Chain` replays them all; a recent slot also pins the older base its restore
+needs, so reclamation never breaks a chain it leaves restorable) plus a per-medium
+capacity strategy. Both are per-medium: the floor's rule is shared but is judged over
+one medium's own slots, so a copy on another medium never makes a slot reclaimable.
 
 **Capacity model (`media.Profile`).** A profile exposes two numbers that the
 planner keeps distinct. `TotalBytes` is the **pool** — the retainable capacity

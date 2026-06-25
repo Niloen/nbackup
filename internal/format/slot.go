@@ -60,6 +60,15 @@ type Archive struct {
 	Members      []string `json:"members"`           // member paths archived: slash-separated, directories with a trailing slash (the archiver-neutral convention recovery browses); the raw token is replayed to the producing archiver on extract (was MANIFEST)
 }
 
+// DLEID returns the Amanda-style host:path identity for display, falling back to
+// the internal DLE slug when host/path were not recorded.
+func (a Archive) DLEID() string {
+	if a.Host == "" && a.Path == "" {
+		return a.DLE
+	}
+	return a.Host + ":" + a.Path
+}
+
 // NewSlot starts a new open slot for a run. Archives are added with AddArchive
 // and the slot is finalized with Seal; callers should not set the lifecycle
 // fields (Status, timestamps, TotalBytes) directly.

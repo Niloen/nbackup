@@ -127,7 +127,7 @@ func renderDumpTable(w io.Writer, stats []DLEStat) {
 	var fN, iN int
 	for _, d := range stats {
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\t%s\t%s\n",
-			d.DLE, d.Level, sizeutil.FormatBytes(d.Orig), sizeutil.FormatBytes(d.Out),
+			d.ID(), d.Level, sizeutil.FormatBytes(d.Orig), sizeutil.FormatBytes(d.Out),
 			compPct(d.Orig, d.Out), d.Files, dumpTime(d.Seconds), dumpRate(d.Orig, d.Seconds))
 		if d.Level == 0 {
 			fOrig, fOut, fN = fOrig+d.Orig, fOut+d.Out, fN+1
