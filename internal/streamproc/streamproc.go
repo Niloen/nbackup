@@ -1,19 +1,42 @@
 // Package streamproc runs a stream transform as an external child process: bytes
-// written in (WriteThrough) or read out (ReadThrough) flow through the child's
-// stdin->stdout. It is the shared plumbing behind package filter (compressors) and
-// package crypt (encryptors), which differ only in the argv they build and the
-// registry they expose — Amanda drives its compress and encrypt programs the same
-// way. A nil argv is the identity transform (the `none` codec/scheme), so callers
-// don't special-case it.
+// read out (ReadThrough) flow through the child's stdin->stdout. It is the shared
+// plumbing behind package filter (decompressors) and package crypt (decryptors),
+// which differ only in the argv they build and the registry they expose — Amanda
+// drives its compress and encrypt programs the same way. A nil argv is the identity
+// transform (the `none` codec/scheme), so callers don't special-case it. The write
+// side is driven separately as a pipeline stage via hostexec (see filter.CompressCmd
+// / crypt.EncryptCmd). The package also hosts the registry helpers shared by both:
+// ProgramOr and SortedNames.
 package streamproc
 
 import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 )
+
+// ProgramOr returns program when it is non-empty, else def. It backs the codec /
+// scheme "override the default binary" Option shared by filter and crypt.
+func ProgramOr(program, def string) string {
+	if program != "" {
+		return program
+	}
+	return def
+}
+
+// SortedNames returns the keys of a registry map sorted, for stable "known: …"
+// error messages. Shared by the filter codec and crypt scheme registries.
+func SortedNames[V any](registry map[string]V) []string {
+	out := make([]string, 0, len(registry))
+	for k := range registry {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // Command builds the exec.Cmd for argv, prefixing `nice -n N` for CPU politeness
 // when nice != 0.
@@ -22,27 +45,6 @@ func Command(argv []string, nice int) *exec.Cmd {
 		argv = append([]string{"nice", "-n", strconv.Itoa(nice)}, argv...)
 	}
 	return exec.Command(argv[0], argv[1:]...)
-}
-
-// WriteThrough returns a WriteCloser that pipes everything written to it through the
-// child built from argv and on to dst; Close finishes and waits the child. A nil argv
-// is the identity transform: dst is returned with a no-op Close.
-func WriteThrough(argv []string, nice int, dst io.Writer) (io.WriteCloser, error) {
-	if argv == nil {
-		return nopWriteCloser{dst}, nil
-	}
-	cmd := Command(argv, nice)
-	cmd.Stdout = dst
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start %s: %w", cmd.Path, err)
-	}
-	return &procWriter{cmd: cmd, stdin: stdin, stderr: &stderr}, nil
 }
 
 // ReadThrough returns a ReadCloser that yields src piped through the child built from
@@ -66,23 +68,6 @@ func ReadThrough(argv []string, nice int, src io.Reader) (io.ReadCloser, error) 
 	return &procReader{cmd: cmd, stdout: stdout, stderr: &stderr}, nil
 }
 
-type procWriter struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stderr *strings.Builder
-}
-
-func (p *procWriter) Write(b []byte) (int, error) { return p.stdin.Write(b) }
-
-func (p *procWriter) Close() error {
-	stdinErr := p.stdin.Close()
-	waitErr := p.cmd.Wait()
-	if waitErr != nil {
-		return fmt.Errorf("%s: %w\n%s", p.cmd.Path, waitErr, strings.TrimSpace(p.stderr.String()))
-	}
-	return stdinErr
-}
-
 type procReader struct {
 	cmd    *exec.Cmd
 	stdout io.ReadCloser
@@ -98,7 +83,3 @@ func (p *procReader) Close() error {
 	}
 	return nil
 }
-
-type nopWriteCloser struct{ io.Writer }
-
-func (nopWriteCloser) Close() error { return nil }

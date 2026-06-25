@@ -613,17 +613,11 @@ func newPruneCmd(a *app) *cobra.Command {
 				return err
 			}
 			// Dry-run prune only reads; a real run deletes slots, so lock it.
-			var eng *engine.Engine
-			if !dryRun {
-				var unlock func()
-				eng, unlock, err = a.lockedEngine(cfg)
-				if err != nil {
-					return err
-				}
-				defer unlock()
-			} else if eng, err = newEngine(cfg); err != nil {
+			eng, release, err := a.engineFor(cfg, !dryRun)
+			if err != nil {
 				return err
 			}
+			defer release()
 			now, err := ParseDate(dateStr)
 			if err != nil {
 				return err
@@ -771,17 +765,13 @@ func newSyncCmd(a *app) *cobra.Command {
 			}
 
 			// Dry-run only reads; a real run writes media + catalog, so lock it.
-			var eng *engine.Engine
-			if !dryRun {
-				var unlock func()
-				eng, unlock, err = a.lockedEngine(cfg)
-				if err != nil {
-					return err
-				}
-				defer unlock()
-				eng.SetOperator(stdinOperator{})
-			} else if eng, err = newEngine(cfg); err != nil {
+			eng, release, err := a.engineFor(cfg, !dryRun)
+			if err != nil {
 				return err
+			}
+			defer release()
+			if !dryRun {
+				eng.SetOperator(stdinOperator{})
 			}
 
 			runSync := func() (report.Run, error) {
@@ -791,11 +781,7 @@ func newSyncCmd(a *app) *cobra.Command {
 					if sr != nil {
 						printSyncReport(sr, !dryRun)
 						rec.SlotsCopied += sr.Copied()
-						for _, it := range sr.Items {
-							if it.Copied {
-								rec.BytesMoved += it.Bytes
-							}
-						}
+						rec.BytesMoved += sr.CopiedBytes()
 					}
 					if err != nil {
 						return rec, err

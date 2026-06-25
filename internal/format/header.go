@@ -8,6 +8,7 @@
 package format
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -97,7 +98,7 @@ func DecodeHeader(r io.Reader) (Header, error) {
 		return Header{}, err
 	}
 	line := block
-	if i := indexByte(block, '\n'); i >= 0 {
+	if i := bytes.IndexByte(block, '\n'); i >= 0 {
 		line = block[:i]
 	}
 	var h Header
@@ -105,13 +106,4 @@ func DecodeHeader(r io.Reader) (Header, error) {
 		return Header{}, fmt.Errorf("parse file header: %w", err)
 	}
 	return h, nil
-}
-
-func indexByte(b []byte, c byte) int {
-	for i, x := range b {
-		if x == c {
-			return i
-		}
-	}
-	return -1
 }

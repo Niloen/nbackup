@@ -65,6 +65,18 @@ func (r *SyncReport) Copied() int {
 	return n
 }
 
+// CopiedBytes is the total bytes of the slots actually copied this run (Bytes() is the
+// whole backlog, copied or not), for the run record's BytesMoved.
+func (r *SyncReport) CopiedBytes() int64 {
+	var n int64
+	for _, it := range r.Items {
+		if it.Copied {
+			n += it.Bytes
+		}
+	}
+	return n
+}
+
 // SyncTo mirrors a source medium's sealed slots onto target: every slot with a
 // copy on the source but not yet recorded on target, oldest-first. Oldest first
 // means an interrupted sync makes contiguous, replayable progress and a slot's
@@ -127,12 +139,8 @@ func (e *Engine) SyncRules() []config.SyncRule { return e.cfg.Sync }
 
 // placedOn reports whether a slot already has a copy recorded on the medium.
 func (e *Engine) placedOn(slotID, medium string) bool {
-	for _, p := range e.cat.Placements(slotID) {
-		if p.Medium == medium {
-			return true
-		}
-	}
-	return false
+	_, ok := e.placementOn(slotID, medium)
+	return ok
 }
 
 // applySelection narrows landing slots (oldest-first) to the selection window.

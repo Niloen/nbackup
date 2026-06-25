@@ -51,6 +51,22 @@ func TestParseRate(t *testing.T) {
 	}
 }
 
+func TestFormatDaysHours(t *testing.T) {
+	cases := map[time.Duration]string{
+		0:                   "0h",
+		5 * time.Hour:       "5h",
+		23 * time.Hour:      "23h",
+		24 * time.Hour:      "1d",
+		36 * time.Hour:      "1d",
+		30 * 24 * time.Hour: "30d",
+	}
+	for in, want := range cases {
+		if got := FormatDaysHours(in); got != want {
+			t.Errorf("FormatDaysHours(%v) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestParseDuration(t *testing.T) {
 	cases := map[string]time.Duration{
 		"30d": 30 * 24 * time.Hour,

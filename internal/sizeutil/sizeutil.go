@@ -147,6 +147,17 @@ func FormatDuration(d time.Duration) string {
 	return d.String()
 }
 
+// FormatDaysHours renders a coarse age as whole days when it is at least a day,
+// else whole hours ("5d", "7h"). Unlike FormatDuration (config-facing "Nd" with a
+// standard-library fallback), the sub-day fallback is hours, for human-readable
+// "how long ago" framing.
+func FormatDaysHours(d time.Duration) string {
+	if d >= 24*time.Hour {
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+	return fmt.Sprintf("%dh", int(d.Hours()))
+}
+
 // FormatElapsed renders a wall-clock span (run elapsed time, an ETA) as compact
 // h/m/s, dropping leading zero units: "5s", "3m07s", "1h02m09s". This is the
 // live-progress vocabulary, distinct from FormatDuration's config-facing "Nd".

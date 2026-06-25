@@ -54,21 +54,21 @@ func (l Logf) log(format string, args ...any) {
 // volume; the catalog is a local cache the engine refreshes from the volume.
 // Archivers are resolved per dumptype and cached.
 type Engine struct {
-	cfg        *config.Config
-	mediumName string       // name of the medium new dumps land on
-	mediumDef  config.Media // its definition
-	vol        media.Volume
-	reader     *slotio.Reader
-	profile    media.Profile
-	cost       media.Cost // landing medium's pricing (dollar peer of profile)
-	minAge     time.Duration
-	cat        *catalog.Catalog
-	archivers  map[string]archiver.Archiver // by cache key (dumptype or "@type")
-	codec      string                       // compression codec for new archives
-	fopts      filter.Options               // codec invocation options (level/threads/nice)
-	dcopts     crypt.Options                // decrypt key reference for restore (from the default encrypt block)
-	op         librarian.Operator           // optional: handles manual tape swaps (nil = unattended)
-	limiters   map[string]*xfer.Limiter     // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
+	cfg         *config.Config
+	mediumName  string       // name of the medium new dumps land on
+	mediumDef   config.Media // its definition
+	vol         media.Volume
+	reader      *slotio.Reader
+	profile     media.Profile
+	landingCost media.Cost // landing medium's pricing (dollar peer of profile)
+	minAge      time.Duration
+	cat         *catalog.Catalog
+	archivers   map[string]archiver.Archiver // by cache key (dumptype or "@type")
+	codec       string                       // compression codec for new archives
+	fopts       filter.Options               // codec invocation options (level/threads/nice)
+	dcopts      crypt.Options                // decrypt key reference for restore (from the default encrypt block)
+	op          librarian.Operator           // optional: handles manual tape swaps (nil = unattended)
+	limiters    map[string]*xfer.Limiter     // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
 }
 
 // SetOperator attaches an operator so manual single-drive media can prompt for a
@@ -155,20 +155,20 @@ func New(cfg *config.Config) (*Engine, error) {
 		Nice:           cfg.Nice,
 	}
 	return &Engine{
-		cfg:        cfg,
-		mediumName: name,
-		mediumDef:  mediaDef,
-		vol:        vol,
-		reader:     slotio.NewReader(fopts, dcopts),
-		profile:    profile,
-		cost:       costModel,
-		minAge:     minAge,
-		cat:        cat,
-		archivers:  map[string]archiver.Archiver{},
-		codec:      cfg.CompressCodec(),
-		fopts:      fopts,
-		dcopts:     dcopts,
-		limiters:   limiters,
+		cfg:         cfg,
+		mediumName:  name,
+		mediumDef:   mediaDef,
+		vol:         vol,
+		reader:      slotio.NewReader(fopts, dcopts),
+		profile:     profile,
+		landingCost: costModel,
+		minAge:      minAge,
+		cat:         cat,
+		archivers:   map[string]archiver.Archiver{},
+		codec:       cfg.CompressCodec(),
+		fopts:       fopts,
+		dcopts:      dcopts,
+		limiters:    limiters,
 	}, nil
 }
 
@@ -299,19 +299,51 @@ func (e *Engine) volumesInPool(medium string) []catalog.VolumeRecord {
 // on the client) and a client-side state_dir; a local/unlisted host yields the local
 // executor — byte-for-byte today's behavior.
 func (e *Engine) archiverFor(dtName, host string) (archiver.Archiver, error) {
-	key := dtName + "\x00" + host
+	dt := e.cfg.ResolveDumpType(dtName)
+	def := e.cfg.ResolveArchiver(dt.Archiver)
+	return e.openArchiver(dtName+"\x00"+host, def.Type, def.Options, host)
+}
+
+// openArchiver returns the cached archiver for key, or opens one of typeName for the host
+// (injecting that host's executor + state_dir overrides) and caches it. It is the shared
+// get-or-open the dump-side archiverFor and read-side restoreArchiver both use; they
+// differ only in the cache key and whether a definition's options apply.
+func (e *Engine) openArchiver(key, typeName string, options map[string]string, host string) (archiver.Archiver, error) {
 	if d, ok := e.archivers[key]; ok {
 		return d, nil
 	}
-	dt := e.cfg.ResolveDumpType(dtName)
-	def := e.cfg.ResolveArchiver(dt.Archiver)
 	ex, overrides := e.executorFor(host)
-	d, err := archiver.Open(def.Type, e.archiverOptions(def.Options, overrides), ex)
+	d, err := archiver.Open(typeName, e.archiverOptions(options, overrides), ex)
 	if err != nil {
 		return nil, err
 	}
 	e.archivers[key] = d
 	return d, nil
+}
+
+// preflightDumptype validates one dumptype's pipeline tools before a dump: it resolves
+// the archiver for (dumptype, host) — and runs its readiness Check when checkArchiver is
+// set (the real dump does; plan validation only resolves) — and validates the dumptype's
+// encryptor once. checked memoizes the per-dumptype encryption check across a plan's many
+// DLEs. It is the shared pre-flight Run and ValidatePlan both run.
+func (e *Engine) preflightDumptype(dt, host string, checkArchiver bool, checked map[string]bool) error {
+	arch, err := e.archiverFor(dt, host)
+	if err != nil {
+		return fmt.Errorf("dumptype %q: %w", dt, err)
+	}
+	if checkArchiver {
+		if err := arch.Check(); err != nil {
+			return err
+		}
+	}
+	if !checked[dt] {
+		scheme, opts := e.encryptionFor(dt)
+		if err := crypt.Check(scheme, opts); err != nil {
+			return err
+		}
+		checked[dt] = true
+	}
+	return nil
 }
 
 // restoreArchiver resolves and caches an archiver by its type name for reading, built
@@ -320,17 +352,7 @@ func (e *Engine) archiverFor(dtName, host string) (archiver.Archiver, error) {
 // data came from), a local/unlisted host extracts server-side exactly as before. The
 // archive records its producing archiver's type; restore reverses it.
 func (e *Engine) restoreArchiver(typeName, host string) (archiver.Archiver, error) {
-	key := "@" + typeName + "\x00" + host
-	if d, ok := e.archivers[key]; ok {
-		return d, nil
-	}
-	ex, overrides := e.executorFor(host)
-	d, err := archiver.Open(typeName, e.archiverOptions(nil, overrides), ex)
-	if err != nil {
-		return nil, err
-	}
-	e.archivers[key] = d
-	return d, nil
+	return e.openArchiver("@"+typeName+"\x00"+host, typeName, nil, host)
 }
 
 // executorFor returns the executor a DLE's host runs its tools on — the local machine for
@@ -471,12 +493,9 @@ func (e *Engine) PlanCopy(slotID, fromMedia, targetMedia string, force bool) (Co
 	}
 	plan := CopyPlan{SlotID: slotID, From: fromMedia, To: targetMedia, Archives: len(s.Archives), Bytes: s.TotalBytes}
 	if !force {
-		for _, p := range e.cat.Placements(slotID) {
-			if p.Medium == targetMedia {
-				plan.AlreadyOnTarget = true
-				plan.TargetLabels = p.Labels()
-				break
-			}
+		if p, ok := e.placementOn(slotID, targetMedia); ok {
+			plan.AlreadyOnTarget = true
+			plan.TargetLabels = p.Labels()
 		}
 	}
 	return plan, nil
@@ -533,7 +552,7 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		if !ok {
 			return fmt.Errorf("source copy of %s on %q is missing %s L%d", slotID, fromMedia, a.DLE, a.Level)
 		}
-		raw := e.reader.OpenRawParts(toSlotioParts(parts), slotio.Expect{Slot: slotID, DLE: a.DLE, Level: a.Level}, srcOpen)
+		raw := e.reader.OpenRawParts(parts, slotio.Expect{Slot: slotID, DLE: a.DLE, Level: a.Level}, srcOpen)
 		_, werr := w.CopyArchive(a, raw)
 		raw.Close()
 		if werr != nil {
@@ -554,14 +573,8 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 // librarian over that medium, for the read side of a copy. It errors if the slot has
 // no copy on fromMedia (the catalog knows of none to read).
 func (e *Engine) copySource(slotID, fromMedia string) (*librarian.Librarian, catalog.Placement, error) {
-	var src catalog.Placement
-	for _, p := range e.cat.Placements(slotID) {
-		if p.Medium == fromMedia {
-			src = p
-			break
-		}
-	}
-	if src.Medium == "" {
+	src, ok := e.placementOn(slotID, fromMedia)
+	if !ok {
 		return nil, catalog.Placement{}, fmt.Errorf("slot %s has no copy on source medium %q", slotID, fromMedia)
 	}
 	lib, _, _, err := e.librarianFor(fromMedia)
@@ -579,8 +592,8 @@ func (e *Engine) copySource(slotID, fromMedia string) (*librarian.Librarian, cat
 // budget; an uncapped medium leaves the stream untouched.
 func (e *Engine) partOpener(lib *librarian.Librarian, medium string) slotio.PartOpener {
 	lim := e.limiters[medium]
-	return func(p slotio.PartPosition) (format.Header, io.ReadCloser, error) {
-		h, rc, err := lib.ReadFileAt(p.Volume, p.Epoch, p.Pos)
+	return func(p format.FilePos) (format.Header, io.ReadCloser, error) {
+		h, rc, err := lib.ReadFileAt(p.Label, p.Epoch, p.Pos)
 		if err != nil {
 			return h, rc, err
 		}
@@ -588,29 +601,11 @@ func (e *Engine) partOpener(lib *librarian.Librarian, medium string) slotio.Part
 	}
 }
 
-// toSlotioParts converts catalog part positions to the slotio reader's form.
-func toSlotioParts(parts []catalog.FilePos) []slotio.PartPosition {
-	out := make([]slotio.PartPosition, len(parts))
-	for i, p := range parts {
-		out[i] = slotio.PartPosition{Volume: p.Label, Epoch: p.Epoch, Pos: p.Pos}
-	}
-	return out
-}
-
 // placementFrom builds a catalog placement from a sealed writer's recorded part
-// positions and seal location.
+// positions and seal location. The writer emits the same format.FilePos/ArchivePos the
+// catalog persists, so a placement is the positions verbatim — no field conversion.
 func placementFrom(medium string, w *slotio.Writer) catalog.Placement {
-	p := catalog.Placement{Medium: medium}
-	for _, ap := range w.Positions() {
-		cp := catalog.ArchivePos{DLE: ap.DLE, Level: ap.Level}
-		for _, pt := range ap.Parts {
-			cp.Parts = append(cp.Parts, catalog.FilePos{Label: pt.Volume, Epoch: pt.Epoch, Pos: pt.Pos})
-		}
-		p.Archives = append(p.Archives, cp)
-	}
-	sp := w.SealPosition()
-	p.Seal = catalog.FilePos{Label: sp.Volume, Epoch: sp.Epoch, Pos: sp.Pos}
-	return p
+	return catalog.Placement{Medium: medium, Archives: w.Positions(), Seal: w.SealPosition()}
 }
 
 // partSizeFor reads a medium's optional part_size parameter (the deliberate per-part
@@ -665,6 +660,18 @@ func (e *Engine) LoadVolume(mediumName, target string, byLabel bool, logf Logf) 
 
 // Catalog exposes the catalog for read-only commands.
 func (e *Engine) Catalog() *catalog.Catalog { return e.cat }
+
+// placementOn returns the slot's copy on the named medium, if any. It is the single
+// "does this slot have a copy here, and where" lookup shared by copy planning, the copy
+// read side, and sync's skip check.
+func (e *Engine) placementOn(slotID, medium string) (catalog.Placement, bool) {
+	for _, p := range e.cat.Placements(slotID) {
+		if p.Medium == medium {
+			return p, true
+		}
+	}
+	return catalog.Placement{}, false
+}
 
 // placementsFor returns a slot's copies ordered for reading: the engine's own
 // medium first (online/fast), then the rest.
@@ -787,16 +794,8 @@ func (e *Engine) ValidatePlan() (warnings []string, err error) {
 	}
 	checkedEnc := map[string]bool{}
 	for _, d := range e.cfg.DLEs() {
-		dt := d.DumpTypeName()
-		if _, err := e.archiverFor(dt, d.Host); err != nil {
-			return nil, fmt.Errorf("dumptype %q: %w", dt, err)
-		}
-		if !checkedEnc[dt] {
-			scheme, opts := e.encryptionFor(dt)
-			if err := crypt.Check(scheme, opts); err != nil {
-				return nil, err
-			}
-			checkedEnc[dt] = true
+		if err := e.preflightDumptype(d.DumpTypeName(), d.Host, false, checkedEnc); err != nil {
+			return nil, err
 		}
 		// Only a local source can be stat'd here; a remote DLE's path lives on the client
 		// (verified by `nb check` over SSH). Statting it locally would warn spuriously.
@@ -848,12 +847,12 @@ func (e *Engine) estimates(dles []config.DLE) map[string]planner.Estimate {
 }
 
 func (e *Engine) estimateDLE(d config.DLE, name string, st *catalog.DLEState) planner.Estimate {
-	m, err := e.archiverFor(d.DumpTypeName(), d.Host)
-	if err != nil || m.Check() != nil {
+	arch, err := e.archiverFor(d.DumpTypeName(), d.Host)
+	if err != nil || arch.Check() != nil {
 		return planner.Estimate{} // no estimator available (e.g. tar missing)
 	}
 	excl := e.cfg.ResolveDumpType(d.DumpTypeName()).Exclude
-	full, _ := m.Estimate(archiver.BackupRequest{DLE: name, SourcePath: d.Path, Level: 0, BaseLevel: -1, Exclude: excl})
+	full, _ := arch.Estimate(archiver.BackupRequest{DLE: name, SourcePath: d.Path, Level: 0, BaseLevel: -1, Exclude: excl})
 	if st.LastFullDate == "" {
 		return planner.Estimate{Full: full} // never fulled: only a full is possible
 	}
@@ -870,13 +869,13 @@ func (e *Engine) estimateDLE(d config.DLE, name string, st *catalog.DLEState) pl
 		lvl = planner.MaxLevel
 	}
 	est := planner.Estimate{Full: full}
-	if m.HasBase(name, lvl-1) {
-		est.Incr, _ = m.Estimate(archiver.BackupRequest{
+	if arch.HasBase(name, lvl-1) {
+		est.Incr, _ = arch.Estimate(archiver.BackupRequest{
 			DLE: name, SourcePath: d.Path, Level: lvl, BaseLevel: lvl - 1, Exclude: excl,
 		})
 	}
-	if lvl < planner.MaxLevel && m.HasBase(name, lvl) {
-		est.IncrNext, _ = m.Estimate(archiver.BackupRequest{
+	if lvl < planner.MaxLevel && arch.HasBase(name, lvl) {
+		est.IncrNext, _ = arch.Estimate(archiver.BackupRequest{
 			DLE: name, SourcePath: d.Path, Level: lvl + 1, BaseLevel: lvl, Exclude: excl,
 		})
 	}
@@ -961,20 +960,8 @@ func (e *Engine) Run(date time.Time, logf Logf) (*format.Slot, error) {
 	}
 	checkedEnc := map[string]bool{}
 	for _, item := range plan.Items {
-		dt := item.DLE.DumpTypeName()
-		m, err := e.archiverFor(dt, item.DLE.Host)
-		if err != nil {
+		if err := e.preflightDumptype(item.DLE.DumpTypeName(), item.DLE.Host, true, checkedEnc); err != nil {
 			return nil, err
-		}
-		if err := m.Check(); err != nil {
-			return nil, err
-		}
-		if !checkedEnc[dt] {
-			scheme, opts := e.encryptionFor(dt)
-			if err := crypt.Check(scheme, opts); err != nil {
-				return nil, err
-			}
-			checkedEnc[dt] = true
 		}
 	}
 
@@ -1161,7 +1148,7 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 		}
 	}()
 
-	m, err := e.archiverFor(item.DLE.DumpTypeName(), item.DLE.Host)
+	ar, err := e.archiverFor(item.DLE.DumpTypeName(), item.DLE.Host)
 	if err != nil {
 		return err
 	}
@@ -1175,7 +1162,7 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 	}
 	if item.Level >= 1 {
 		req.BaseLevel = item.BaseLevel
-		if !m.HasBase(item.Name, item.BaseLevel) {
+		if !ar.HasBase(item.Name, item.BaseLevel) {
 			return fmt.Errorf("DLE %s: incremental L%d needs the L%d incremental state but it is missing",
 				item.Name, item.Level, item.BaseLevel)
 		}
@@ -1188,7 +1175,7 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 		DLE:      item.Name,
 		Host:     item.DLE.Host,
 		Path:     item.DLE.Path,
-		Archiver: m.Name(),
+		Archiver: ar.Name(),
 		Level:    item.Level,
 		BaseSlot: item.BaseSlot,
 		Encrypt:  encScheme,
@@ -1206,7 +1193,7 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 		spec.EncryptExec = hostExec
 	}
 
-	bs, berr := m.BackupSource(req)
+	bs, berr := ar.BackupSource(req)
 	if berr != nil {
 		return fmt.Errorf("archive %s: %w", item.Name, berr)
 	}
@@ -1248,7 +1235,7 @@ func (e *Engine) Restore(slotID, dleName, destDir string, force bool, logf Logf)
 			return err
 		}
 	}
-	return e.restoreFrom(slotID, dleName, destDir, "", "", logf)
+	return e.restoreFrom(slotID, dleName, destDir, "", logf)
 }
 
 // RestoreTo restores a DLE onto a remote client (Amanda's recover to a different host):
@@ -1262,15 +1249,15 @@ func (e *Engine) RestoreTo(slotID, dleName, destHost, destPath string, logf Logf
 	if _, ok := e.cfg.RemoteHost(destHost); !ok {
 		return fmt.Errorf("--to host %q is not configured under hosts:", destHost)
 	}
-	return e.restoreFrom(slotID, dleName, destPath, "", destHost, logf)
+	return e.restoreFrom(slotID, dleName, destPath, destHost, logf)
 }
 
-// restoreFrom is Restore scoped to a source medium: when medium != "" every archive
-// is read from that medium's copy only (a drill against the offsite copy), rather
-// than failing over across copies. medium == "" keeps the fail-over behavior. The
-// non-empty-destination guard lives in the exported Restore; a caller that restores
-// into a fresh scratch dir (a drill) uses this directly.
-func (e *Engine) restoreFrom(slotID, dleName, destDir, medium, targetHost string, logf Logf) error {
+// restoreFrom replays a DLE's restore chain into destDir. targetHost "" extracts
+// server-side (the default); a `--to host:path` restore sets it so tar runs on that
+// client and destDir is a client path — and, for a client-held key, decode runs there
+// too. The exported Restore/RestoreTo are thin wrappers; reads fail over across copies
+// (medium-scoped reads are the drill's own path, drillChain).
+func (e *Engine) restoreFrom(slotID, dleName, destDir, targetHost string, logf Logf) error {
 	steps, err := restore.Chain(e.cat.Slots(), dleName, slotID)
 	if err != nil {
 		return err
@@ -1296,9 +1283,9 @@ func (e *Engine) restoreFrom(slotID, dleName, destDir, medium, targetHost string
 		logf.log("extracting %s %s L%d -> %s", step.SlotID, step.DLE, step.Level, destDir)
 		var eerr error
 		if decodeOnClient {
-			eerr = e.extractStepOnClient(step, destDir, medium, targetHost, ec)
+			eerr = e.extractStepOnClient(step, destDir, targetHost, ec)
 		} else {
-			eerr = e.extractStep(step, destDir, medium, targetHost)
+			eerr = e.extractStep(step, destDir, targetHost)
 		}
 		if eerr != nil {
 			return fmt.Errorf("extract %s %s L%d: %w", step.SlotID, step.DLE, step.Level, eerr)
@@ -1314,8 +1301,8 @@ func (e *Engine) restoreFrom(slotID, dleName, destDir, medium, targetHost string
 // twin of the dump pipeline. Decrypt uses the DLE's own key reference (a client path for a
 // symmetric passphrase; nothing for a public key, which gpg resolves from the client's
 // keyring).
-func (e *Engine) extractStepOnClient(step restore.Step, destDir, medium, targetHost string, ec config.EncryptConfig) error {
-	m, err := e.restoreArchiver(step.Archiver, targetHost)
+func (e *Engine) extractStepOnClient(step restore.Step, destDir, targetHost string, ec config.EncryptConfig) error {
+	arch, err := e.restoreArchiver(step.Archiver, targetHost)
 	if err != nil {
 		return err
 	}
@@ -1323,7 +1310,7 @@ func (e *Engine) extractStepOnClient(step restore.Step, destDir, medium, targetH
 	if err := ex.MkdirAll(destDir); err != nil {
 		return err
 	}
-	raw, err := e.openRawFrom(step.SlotID, step.DLE, step.Level, medium)
+	raw, err := e.openRawFrom(step.SlotID, step.DLE, step.Level, "")
 	if err != nil {
 		return err
 	}
@@ -1340,7 +1327,7 @@ func (e *Engine) extractStepOnClient(step restore.Step, destDir, medium, targetH
 	} else if ok {
 		stages = append(stages, hostexec.Stage{Cmd: cmd, Exec: ex})
 	}
-	stages = append(stages, hostexec.Stage{Cmd: m.RestoreStage(destDir, nil), Exec: ex})
+	stages = append(stages, hostexec.Stage{Cmd: arch.RestoreStage(destDir, nil), Exec: ex})
 
 	out, wait, rerr := hostexec.RunGrouped(raw, stages...)
 	if rerr != nil {
@@ -1357,19 +1344,28 @@ func (e *Engine) extractStepOnClient(step restore.Step, destDir, medium, targetH
 	return decryptHint(step.Encrypt, werr)
 }
 
-// openRawFrom opens an archive's raw (undecoded, ciphertext) part stream — the input to a
-// client-side decode pipeline. It mirrors openArchiveFrom's copy selection but skips the
-// server-side decrypt/decompress.
-func (e *Engine) openRawFrom(slotID, dle string, level int, medium string) (io.ReadCloser, error) {
+// errMissingCopy marks a read failure where the catalog knows of no available copy of
+// the requested slot/archive (a missing slot, a missing copy on the named medium, or a
+// placement that does not carry the archive). The drill classifies it as ClassMissing
+// via errors.Is, so the classification does not depend on the message wording.
+var errMissingCopy = errors.New("no available copy")
+
+// eachPlacement resolves the placements holding a slot (all copies, or only those on
+// `medium` when set), then tries each that carries the requested archive — opening its
+// parts via open — until one succeeds, so a read fails over to another copy. It is the
+// one place the raw and decoded read paths share: the copy selection, the missing-copy
+// errors (errMissingCopy), and the fail-over loop.
+func (e *Engine) eachPlacement(slotID, dle string, level int, medium string,
+	open func(parts []format.FilePos, lib *librarian.Librarian, p catalog.Placement) (io.ReadCloser, error)) (io.ReadCloser, error) {
 	placements := e.placementsFor(slotID)
 	if medium != "" {
 		placements = placementsOnMedium(placements, medium)
 	}
 	if len(placements) == 0 {
 		if medium != "" {
-			return nil, fmt.Errorf("slot %s has no copy on medium %q", slotID, medium)
+			return nil, fmt.Errorf("%w: slot %s has no copy on medium %q", errMissingCopy, slotID, medium)
 		}
-		return nil, fmt.Errorf("slot %s not in catalog (run `nb rebuild`)", slotID)
+		return nil, fmt.Errorf("%w: slot %s not in catalog (run `nb rebuild`)", errMissingCopy, slotID)
 	}
 	var lastErr error
 	for _, p := range placements {
@@ -1382,12 +1378,26 @@ func (e *Engine) openRawFrom(slotID, dle string, level int, medium string) (io.R
 			lastErr = err
 			continue
 		}
-		return e.reader.OpenRawParts(toSlotioParts(parts), slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib, p.Medium)), nil
+		rc, err := open(parts, lib, p)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return rc, nil
 	}
 	if lastErr == nil {
-		lastErr = fmt.Errorf("no copy of %s %s L%d in the catalog", slotID, dle, level)
+		lastErr = fmt.Errorf("%w of %s %s L%d in the catalog", errMissingCopy, slotID, dle, level)
 	}
 	return nil, lastErr
+}
+
+// openRawFrom opens an archive's raw (undecoded, ciphertext) part stream — the input to a
+// client-side decode pipeline. It mirrors openArchiveFrom's copy selection but skips the
+// server-side decrypt/decompress.
+func (e *Engine) openRawFrom(slotID, dle string, level int, medium string) (io.ReadCloser, error) {
+	return e.eachPlacement(slotID, dle, level, medium, func(parts []format.FilePos, lib *librarian.Librarian, p catalog.Placement) (io.ReadCloser, error) {
+		return e.reader.OpenRawParts(parts, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib, p.Medium)), nil
+	})
 }
 
 // ensureServerCanDecode fails fast when a restore would have the server decrypt an
@@ -1490,18 +1500,18 @@ func errNonEmptyDest(destDir string) error {
 	return nil
 }
 
-func (e *Engine) extractStep(step restore.Step, destDir, medium, targetHost string) error {
+func (e *Engine) extractStep(step restore.Step, destDir, targetHost string) error {
 	// targetHost "" extracts server-side (the default); a `--to host:path` restore sets
 	// it so tar runs on that client and destDir is a client path. Decode stays server-side.
-	m, err := e.restoreArchiver(step.Archiver, targetHost)
+	arch, err := e.restoreArchiver(step.Archiver, targetHost)
 	if err != nil {
 		return err
 	}
-	rc, err := e.openArchiveFrom(step.SlotID, step.DLE, step.Level, step.Codec, step.Encrypt, medium)
+	rc, err := e.openArchiveFrom(step.SlotID, step.DLE, step.Level, step.Codec, step.Encrypt, "")
 	if err != nil {
 		return err
 	}
-	rerr := m.Restore(rc, destDir, nil)
+	rerr := arch.Restore(rc, destDir, nil)
 	return decryptHint(step.Encrypt, joinPipelineErr(rerr, rc.Close()))
 }
 
@@ -1554,7 +1564,7 @@ func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, 
 	}
 	files := 0
 	for _, st := range steps {
-		m, err := e.restoreArchiver(st.Archiver, "")
+		arch, err := e.restoreArchiver(st.Archiver, "")
 		if err != nil {
 			return files, err
 		}
@@ -1563,7 +1573,7 @@ func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, 
 			return files, err
 		}
 		logf.log("extracting %d entr(ies) from %s %s L%d", len(st.Members), st.SlotID, st.DLE, st.Level)
-		err = decryptHint(st.Encrypt, joinPipelineErr(m.Restore(rc, destDir, st.Members), rc.Close()))
+		err = decryptHint(st.Encrypt, joinPipelineErr(arch.Restore(rc, destDir, st.Members), rc.Close()))
 		if err != nil {
 			return files, fmt.Errorf("extract from %s %s L%d: %w", st.SlotID, st.DLE, st.Level, err)
 		}
@@ -1594,38 +1604,9 @@ func (e *Engine) DLENames() []string {
 // copy); with medium set it reads only that medium's copy (a medium-scoped drill /
 // restore against the offsite copy), so a fault on that copy is not masked by another.
 func (e *Engine) openArchiveFrom(slotID, dle string, level int, codec, encrypt, medium string) (io.ReadCloser, error) {
-	placements := e.placementsFor(slotID)
-	if medium != "" {
-		placements = placementsOnMedium(placements, medium)
-	}
-	if len(placements) == 0 {
-		if medium != "" {
-			return nil, fmt.Errorf("slot %s has no copy on medium %q", slotID, medium)
-		}
-		return nil, fmt.Errorf("slot %s not in catalog (run `nb rebuild`)", slotID)
-	}
-	var lastErr error
-	for _, p := range placements {
-		parts, ok := p.Parts(dle, level)
-		if !ok {
-			continue
-		}
-		lib, _, _, err := e.librarianFor(p.Medium)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		rc, err := e.reader.OpenArchiveParts(toSlotioParts(parts), codec, encrypt, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib, p.Medium))
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		return rc, nil
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no copy of %s %s L%d in the catalog", slotID, dle, level)
-	}
-	return nil, lastErr
+	return e.eachPlacement(slotID, dle, level, medium, func(parts []format.FilePos, lib *librarian.Librarian, p catalog.Placement) (io.ReadCloser, error) {
+		return e.reader.OpenArchiveParts(parts, codec, encrypt, slotio.Expect{Slot: slotID, DLE: dle, Level: level}, e.partOpener(lib, p.Medium))
+	})
 }
 
 // profileFor returns the capacity/reclamation profile for a named medium: the

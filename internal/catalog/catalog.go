@@ -56,26 +56,16 @@ type Placement struct {
 	Seal     FilePos      `json:"seal"`     // where the seal record lives
 }
 
-// FilePos is the location of one file on a volume: the label of the volume it is
-// on plus a file position. Label is the volume's global, device-independent
-// identity (the name on the cartridge); it is empty for address-identified media
-// (disk, s3), which carry no label — there the medium is its own sole volume
-// (Placement.Medium), so no per-file volume id is needed. It locates both an
-// archive part and a placement's seal record.
-type FilePos struct {
-	Label string `json:"label,omitempty"` // volume label name; "" for address-identified media
-	Epoch int    `json:"epoch,omitempty"` // label epoch when recorded; staleness check on read
-	Pos   int    `json:"pos"`
-}
-
-// ArchivePos is one archive's identity and the ordered locations of its parts. An
-// archive that fits one volume has a single part; a spanned archive has its
-// compressed payload split into several parts across volumes, in order.
-type ArchivePos struct {
-	DLE   string    `json:"dle"`
-	Level int       `json:"level"`
-	Parts []FilePos `json:"parts"`
-}
+// FilePos and ArchivePos are the file-location types the catalog persists. They are
+// the very types the slotio writer emits and the reader consumes, defined once in
+// package format (the shared on-medium artifact vocabulary) so a writer's recorded
+// positions become a placement with no field-by-field conversion. FilePos.Label is the
+// volume's global, device-independent identity ("" for address-identified media, which
+// carry no label); ArchivePos lists an archive's ordered parts (one unless it spanned).
+type (
+	FilePos    = format.FilePos
+	ArchivePos = format.ArchivePos
+)
 
 // Parts returns the ordered part locations of an archive on this placement.
 func (p Placement) Parts(dle string, level int) ([]FilePos, bool) {

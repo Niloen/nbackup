@@ -108,6 +108,22 @@ func (a *app) lockedEngine(cfg *config.Config) (*engine.Engine, func(), error) {
 	return eng, func() { lk.Release() }, nil
 }
 
+// engineFor builds the engine for a command that is read-only on a dry run but
+// mutating on a real run. When mutating it takes the exclusive lock (so the
+// returned release unlocks); when not, it builds a plain engine and returns a
+// no-op release. Callers defer release() and attach the operator themselves
+// (which differs per command), keeping that decision at the call site.
+func (a *app) engineFor(cfg *config.Config, mutating bool) (eng *engine.Engine, release func(), err error) {
+	if mutating {
+		return a.lockedEngine(cfg)
+	}
+	eng, err = newEngine(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return eng, func() {}, nil
+}
+
 // logf returns the progress logger, or nil when --quiet is set.
 func (a *app) logf() engine.Logf {
 	if a.quiet {

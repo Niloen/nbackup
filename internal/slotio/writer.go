@@ -107,20 +107,6 @@ type ArchiveSpec struct {
 	EncryptExec  hostexec.Executor
 }
 
-// PartPosition is one part's volume and file position, for the catalog to index.
-type PartPosition struct {
-	Volume string
-	Epoch  int
-	Pos    int
-}
-
-// ArchivePositions is one archive's identity and the ordered positions of its parts.
-type ArchivePositions struct {
-	DLE   string
-	Level int
-	Parts []PartPosition
-}
-
 // Writer authors a single slot onto a medium via a VolumeSink. Callers create
 // archives with WriteArchive and finalize with Seal. WriteArchive is safe for
 // concurrent use only on an unbounded sink (disk); a bounded, spanning-capable sink
@@ -134,7 +120,7 @@ type Writer struct {
 	mu       sync.Mutex // guards the records below
 	slot     *format.Slot
 	written  []archiveRecord // one per archive, in WriteArchive order
-	sealPart PartPosition    // where the seal landed (set by Seal)
+	sealPart format.FilePos  // where the seal landed (set by Seal)
 }
 
 // archiveRecord remembers an archive's parts so the catalog can index where each
@@ -142,7 +128,7 @@ type Writer struct {
 type archiveRecord struct {
 	dle   string
 	level int
-	parts []PartPosition
+	parts []format.FilePos
 }
 
 // NewWriter begins authoring a new slot, described by spec, onto sink, compressing
@@ -343,9 +329,9 @@ func (w *Writer) archiveHeader(dle, host, path, archiver string, level int, base
 // next volume whenever a part fills. It returns the ordered part positions. On error
 // it returns it for the caller to handle (closing the producer); the partial files
 // left behind are unsealed and ignored by a scan.
-func (w *Writer) drainParts(base format.Header, src io.Reader) ([]PartPosition, error) {
+func (w *Writer) drainParts(base format.Header, src io.Reader) ([]format.FilePos, error) {
 	var (
-		parts []PartPosition
+		parts []format.FilePos
 		part  int
 	)
 	for {
@@ -373,7 +359,7 @@ func (w *Writer) drainParts(base format.Header, src io.Reader) ([]PartPosition, 
 		if err != nil {
 			return nil, err
 		}
-		parts = append(parts, PartPosition{Volume: volName, Epoch: epoch, Pos: pos})
+		parts = append(parts, format.FilePos{Label: volName, Epoch: epoch, Pos: pos})
 		part++
 
 		// Producer exhausted within this part (or the sink is unbounded): done.
@@ -429,18 +415,18 @@ func (w *Writer) ArchiveCount() int {
 
 // Positions returns the part positions of every archive written, for the catalog to
 // index. Call after all WriteArchive calls have completed.
-func (w *Writer) Positions() []ArchivePositions {
+func (w *Writer) Positions() []format.ArchivePos {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	out := make([]ArchivePositions, len(w.written))
+	out := make([]format.ArchivePos, len(w.written))
 	for i, a := range w.written {
-		out[i] = ArchivePositions{DLE: a.dle, Level: a.level, Parts: append([]PartPosition(nil), a.parts...)}
+		out[i] = format.ArchivePos{DLE: a.dle, Level: a.level, Parts: append([]format.FilePos(nil), a.parts...)}
 	}
 	return out
 }
 
 // SealPosition returns where the seal record landed (its volume and position).
-func (w *Writer) SealPosition() PartPosition {
+func (w *Writer) SealPosition() format.FilePos {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.sealPart
@@ -476,7 +462,7 @@ func (w *Writer) Seal(now time.Time) (*format.Slot, error) {
 		return nil, err
 	}
 	w.mu.Lock()
-	w.sealPart = PartPosition{Volume: sealVol, Epoch: sealEpoch, Pos: pos}
+	w.sealPart = format.FilePos{Label: sealVol, Epoch: sealEpoch, Pos: pos}
 	w.mu.Unlock()
 	return w.slot, nil
 }
