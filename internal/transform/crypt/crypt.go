@@ -17,10 +17,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/Niloen/nbackup/internal/hostexec"
-	"github.com/Niloen/nbackup/internal/streamproc"
 )
 
 // Options tune a scheme invocation. They carry a key *reference* (a gpg recipient
@@ -72,7 +72,12 @@ func init() {
 	register(Spec{Name: "none"}) // identity: no child process
 }
 
-func prog(o Options, def string) string { return streamproc.ProgramOr(o.Program, def) }
+func prog(o Options, def string) string {
+	if o.Program != "" {
+		return o.Program
+	}
+	return def
+}
 
 func spec(scheme string) (Spec, error) {
 	if scheme == "" {
@@ -80,7 +85,7 @@ func spec(scheme string) (Spec, error) {
 	}
 	s, ok := registry[scheme]
 	if !ok {
-		return Spec{}, fmt.Errorf("unknown encryption scheme %q (known: %s)", scheme, strings.Join(streamproc.SortedNames(registry), ", "))
+		return Spec{}, fmt.Errorf("unknown encryption scheme %q (known: %s)", scheme, strings.Join(sortedNames(registry), ", "))
 	}
 	return s, nil
 }
@@ -158,4 +163,14 @@ func stageCmd(scheme string, pick func(Spec) func(Options) []string, o Options) 
 	}
 	argv := build(o)
 	return hostexec.Cmd{Name: argv[0], Args: argv[1:], Nice: o.Nice}, true, nil
+}
+
+// sortedNames returns a registry map's keys sorted, for stable "known: …" errors.
+func sortedNames[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

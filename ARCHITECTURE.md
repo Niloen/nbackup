@@ -46,15 +46,15 @@ registry registration, not a conditional in the core.
 |---|---|---|
 | `config` | config + domain entities: `DLE`, `Media`, `DumpType` | disklist / dumptype / storage |
 | `record` | the self-describing on-medium artifact records: `Header` framing + `Label` (volume id record) + `Slot`/`Archive` (seal metadata + lifecycle `NewSlot`/`AddArchive`/`Seal`) + their (de)serialization | dumpfile_t / amar |
-| `slotio` | maps a slot onto a `Volume`'s files (headers, seal, verify, `Expect`) | taper / amrestore |
+| `slotio` | maps a slot onto a `Volume`'s files — meter + split a payload into parts on write, concatenate + assert parts on read (headers, seal, verify, `Expect`); knows nothing of compress/encrypt | taper / amrestore |
 | `media` | `Volume` + `Labeled` + `Drive`/`Changer` (device) + `Shelf` (environment) + `Profile` + registry; reads/writes `record` artifacts | Device API |
 | `librarian` | operates a medium's `Changer`/`Shelf` + label protocol (make-writable, advance, mount, label, load) | changer / amtape |
 | `media/disk`, `media/tape`, `media/cloud` | Volume impls (disk sidecar headers; tape library; object store via gocloud.dev/blob) | vfs / tape / s3 devices |
 | `media/fslike` | the slot layout shared by the address-identified media — clean payloads + `.hdr` sidecars over a small `Store` seam (disk = a directory, cloud = a bucket), so disk↔cloud copies are byte-identical | — |
 | `archiver` + `archiver/gnutar` | `Archiver` interface + registry + named definitions; owns its incremental-state library; GNU tar impl | Application API / amgtar |
-| `filter` | external compressor child processes (zstd/gzip/none) + registry | compress |
-| `crypt` | external encryptor child processes (gpg/none) + registry | amcrypt/amgpgcrypt |
-| `streamproc` | the shared "external stream-transform child" plumbing (stdin→stdout, optional `nice`) that `filter` and `crypt` read-side run on | — |
+| `transform` | composes the payload's codec/cipher `Filter`s into one reversible host-placed `Pipeline` — owns the chain ORDER (compress, then encrypt) and the `Forward`/`Reverse` duality; running/fusing is the caller's | — |
+| `transform/compress` | external compressor child processes (zstd/gzip/none) + registry; `Filter(scheme)` | compress |
+| `transform/crypt` | external encryptor child processes (gpg/none) + registry; `Filter(scheme)` | amcrypt/amgpgcrypt |
 | `hostexec` | the execution transport: run external programs + stage scratch files on a host that is transparently `Local` or `SSH`; `RunPipe` fuses same-host stages; injected into archivers and the compress/encrypt stages so remote sources need no client agent | amandad (replaced by stock sshd) |
 | `xfer` | in-process stream pieces: checksum + byte counting, and the per-medium bandwidth cap (`Limiter`) | Xfer API / netusage |
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
@@ -66,20 +66,21 @@ registry registration, not a conditional in the core.
 | `recovery` | as-of-date browse tree + per-archive file selection (pure) | amrecover |
 | `drill` | recovery-drill ledger + risk-biased selection + failure taxonomy (pure) | amverify (orchestrated) |
 | `planner` | multilevel level scheduling (pure) | planner |
-| `engine` | the driver: parallel workers, wires planner→archiver→filter→media→catalog | driver / taper |
+| `engine` | the driver: parallel workers, wires planner→archiver→transform→media→catalog; composes and places the encode/decode pipelines | driver / taper |
 | `cli` | thin command wiring | amdump / amadmin |
 
-Dependencies flow one way: `cli → engine → {planner, retention, archiver, filter,
-crypt, slotio, catalog, config, progress, restore, recovery}` over leaf packages
+Dependencies flow one way: `cli → engine → {planner, retention, archiver, transform,
+slotio, catalog, config, progress, restore, recovery}` over leaf packages
 `{media, xfer, sizeutil}`, all bottoming out on `record` (the on-medium artifact
 format that `media`, `slotio`, and `catalog` read and write) (`recovery` builds on `restore`). The reporting
 layer adds `cli → {report, notify}` with `notify → {report, config}` — `report` is a
 pure leaf (record + render); the engine does **not** depend on either.
-Domain packages stay pure; `archiver`/`media`/`filter`/`crypt` are pluggable adapters;
-`engine` is the only component aware of all of them. A backup is a pipeline of
-processes: **archiver** (`tar` via `archiver.Backup`, for gnutar) → **filter** (compressor
-child) → **crypt** (encryptor child) → **dest** (`media.Volume`), metered and
-optionally rate-limited by `xfer`, composed by `slotio`.
+Domain packages stay pure; `archiver`/`media`/`transform/compress`/`transform/crypt` are
+pluggable adapters; `engine` is the only component aware of all of them. A backup is a
+pipeline of processes the engine composes: **archiver** (`tar` via `archiver.Backup`, for
+gnutar) → **compress** child → **encrypt** child (the `transform.Pipeline`'s forward
+stages) → **dest** (`media.Volume`), metered and optionally rate-limited by `xfer`,
+split into parts by `slotio`.
 
 ## Load-bearing decisions (the *why*)
 
@@ -247,12 +248,12 @@ a complete old-or-new cache. (Caveat: flock is unreliable over NFS; a workdir is
 expected to be on a local filesystem. The lock is per *config workdir*, not per
 medium — two configs sharing one physical volume are not yet guarded.)
 
-**Encryption is source-tied and outermost (`package crypt`).** Encryption is the
+**Encryption is source-tied and outermost (`package transform/crypt`).** Encryption is the
 peer of compression, one stream transform further out: on write the pipeline is
 **tar → compress → encrypt → meter → volume**; on read it reverses **decrypt →
-decompress**. `package crypt` mirrors `filter` — an external child (`gpg`),
-selected by a registered scheme *name* (`gpg`/`none`), with the same proc
-plumbing. Three decisions carry their weight:
+decompress**. `transform/crypt` mirrors `transform/compress` — an external child (`gpg`),
+selected by a registered scheme *name* (`gpg`/`none`), exposing the same reversible
+`Filter` the `transform.Pipeline` chains. Three decisions carry their weight:
 - **Outermost placement is load-bearing.** Because encryption sits *inside* the
   `xfer.Meter`, the seal's `SHA256` covers the *ciphertext* that lands on the
   volume. So `nb verify` and `CopySlot`/`nb sync` all
@@ -260,7 +261,7 @@ plumbing. Three decisions carry their weight:
   integrity, and the medium-independent `Entry`/`Placement` identity (one slot,
   N byte-identical copies) are untouched. Only *extraction* needs the key.
 - **Record the scheme name, never the key.** Each archive's header/seal carries
-  `Encrypt: "gpg"` (a compiled-registry primitive, exactly like `Codec`), so
+  `Encrypt: "gpg"` (a compiled-registry primitive, exactly like `Compress`), so
   restore reverses it from the artifact alone — config-free, the same
   rebuild-from-media property compression already has. The **key is never
   stored**: with a gpg public-key recipient the key-id travels inside the
@@ -440,9 +441,10 @@ A backup is a chain of external programs — `tar → compress → encrypt` — 
 server-side `meter → drainParts → volume → seal`. The compressor and encryptor are *just
 programs*, like `tar`, so there is **one** pipeline path, not a server-side-wrapping path
 plus a separate client-side one. Each program stage carries an **`Executor`** (the host it
-runs on — `Local` or `SSH`), and `slotio.Writer.WriteArchive` groups maximal runs of
-adjacent same-host stages into one host-local pipe (`Executor.RunPipe`), crossing the wire
-only at an executor boundary. So a local dump (every stage `Local`), a thin client (tar on
+runs on — `Local` or `SSH`), and the engine (`produceArchive`) runs the forward stages
+through `hostexec.RunGrouped`, which groups maximal runs of adjacent same-host stages into
+one host-local pipe (`Executor.RunPipe`), crossing the wire only at an executor boundary;
+`slotio` then meters and splits the pipeline's output. So a local dump (every stage `Local`), a thin client (tar on
 `SSH`, transforms `Local`), and a fully client-side dump (all on `SSH` — only ciphertext
 crosses to the server meter) are the *same* code with different per-stage executors. The
 transport lives in one neutral package and is injected into archivers via
@@ -465,10 +467,10 @@ or fails a backup (a write error is a stderr warning). **Faithful adaptation:**
 NBackup has no holding disk — each DLE streams source→compressor→volume in one
 pass — so Amanda's separate dumper/taper queues collapse to one `dumping` state
 per DLE, metered by uncompressed bytes against the planner estimate. The
-measurement point is the source stage's byte tap (`hostexec.Cmd.Tap`, or a
-`countingReader` for an in-process source) on the tar→compressor stream in
-`slotio.WriteArchive`; compressed bytes come from the existing `xfer.Meter`
-(now atomic so it can be polled live).
+measurement point is the source stage's byte tap (`hostexec.Cmd.Tap`) on the
+tar→compressor stream, wired in the engine's `produceArchive`; compressed bytes come
+from `slotio`'s streaming meter as the payload drains into parts (both feed the same
+per-DLE counters, throttled so they can be polled live).
 
 **Reporting + alerting make an unwatched failure loud (`nb report`, `notify:`).**
 Where `progress` is the *live* run-status of one in-flight dump, `report` is the
@@ -496,7 +498,7 @@ result reaches someone. Three load-bearing choices, all mirroring existing stanc
 - **History is append-only JSONL; alerts are a registry; secrets are env-refs.**
   The log appends (O(1)) and compacts to a bounded tail, and a reader tolerates a
   torn trailing line (the one unlocked writer, `nb verify`, may race `nb report`).
-  A notify backend is a registered name (`smtp`/`webhook`) like `filter`/`crypt`, so
+  A notify backend is a registered name (`smtp`/`webhook`) like `transform/compress`/`crypt`, so
   adding a channel is a registration. Secrets (SMTP password, webhook URL) are named
   environment variables resolved at send time, never stored — and a literal
   `password:`/`token:` key is rejected structurally by `KnownFields(true)`. `nb
