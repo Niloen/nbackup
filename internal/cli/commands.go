@@ -87,6 +87,12 @@ func newPlanCmd(a *app) *cobra.Command {
 				fmt.Printf("Capacity: %s (%.1f%% used)\n", sizeutil.FormatBytes(capacity), pct)
 				if over {
 					fmt.Printf("WARNING: over capacity; run `nb prune` to reclaim oldest slots\n")
+				} else if current+estTotal > capacity {
+					// "% used" counts only what is already stored, so a run far larger
+					// than capacity can still show a small percentage — call out that
+					// this run would not fit rather than leaving the reader to compare.
+					fmt.Printf("WARNING: this run (~%s) would exceed the %s capacity — grow capacity or lengthen the cycle\n",
+						sizeutil.FormatBytes(estTotal), sizeutil.FormatBytes(capacity))
 				}
 			} else {
 				fmt.Printf("Capacity: unbounded\n")
@@ -657,7 +663,7 @@ func newPruneCmd(a *app) *cobra.Command {
 				if eligible > 0 {
 					fmt.Printf("\n%d slot(s) eligible. Re-run without --dry-run to delete.\n", eligible)
 				} else {
-					fmt.Printf("\n%s: nothing to reclaim (all slots fit capacity or are protected)\n", args[0])
+					printNothingToReclaim(eng, args[0])
 				}
 				return nil
 			}
@@ -669,7 +675,7 @@ func newPruneCmd(a *app) *cobra.Command {
 				if eligible > 0 {
 					fmt.Printf("\n%s: deleted %d slot(s), freed %s\n", args[0], eligible, sizeutil.FormatBytes(freed))
 				} else {
-					fmt.Printf("\n%s: nothing to reclaim (all slots fit capacity or are protected)\n", args[0])
+					printNothingToReclaim(eng, args[0])
 				}
 				return report.Run{Command: report.CommandPrune, SlotsPruned: eligible, BytesMoved: freed}, nil
 			})
@@ -678,6 +684,24 @@ func newPruneCmd(a *app) *cobra.Command {
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "preview without deleting")
 	cmd.Flags().StringVar(&dateStr, "date", "", "reference 'now' date YYYY-MM-DD (default today)")
 	return cmd
+}
+
+// printNothingToReclaim explains a zero-reclaim prune. Tape reclaims whole volumes
+// (relabel), never individual slots, so "fits capacity" would be misleading there —
+// it is a no-op by design even when the library is over capacity. Say so, and point
+// at the deliberate recycle path, so a user lowering tape capacity isn't told the
+// slots "fit" when per-slot pruning simply does not apply to tape.
+func printNothingToReclaim(eng *engine.Engine, name string) {
+	if info, ok := eng.Medium(name); ok && info.Type == "tape" {
+		if info.Capacity > 0 && info.Used > info.Capacity {
+			fmt.Printf("\n%s: over capacity (%s of %s), but tape reclaims whole volumes, not slots — recycle an aged-out tape with `nb label --relabel` (per-slot pruning does not apply to tape)\n",
+				name, sizeutil.FormatBytes(info.Used), sizeutil.FormatBytes(info.Capacity))
+		} else {
+			fmt.Printf("\n%s: nothing to reclaim — tape reclaims whole volumes, not slots (recycle an aged-out tape with `nb label --relabel`)\n", name)
+		}
+		return
+	}
+	fmt.Printf("\n%s: nothing to reclaim (all slots fit capacity or are protected)\n", name)
 }
 
 // newCopyCmd implements `nb copy`: stream a slot from the landing medium to

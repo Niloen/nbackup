@@ -104,7 +104,8 @@ landing: fast-disk
 # sync:
 #   - to: cloud           # mirror landing -> object store
 #   - to: lto
-#     last: 4             # keep only the 4 most recent slots on tape
+#     last: 4             # copy only the 4 most recent slots (does NOT remove older
+#                         # ones already on tape — use `nb prune` to trim)
 #   - from: lto           # second tier: tape -> deep archive (source need not be landing)
 #     to: deep-archive
 
@@ -288,8 +289,14 @@ dumptypes:
 # The disklist: grouped by dumptype, then host, then the paths to back up.
 # NBackup backs up filesystem trees. For a live database, snapshot or dump it to
 # a file first and back that up — application-consistent dumps are not built in.
+#
+# IMPORTANT: the host `localhost` is backed up LOCALLY; ANY other host name is a
+# REMOTE SSH client (see the `ssh:`/`hosts:` section above) and `nb check`/`nb dump`
+# will try to connect to it. For a single machine, keep the host as `localhost`.
 sources:
   default:
-    app01: [/home, /etc]
-  no-logs:
-    web01: [/srv/www, /opt/app]
+    localhost: [/home, /etc]
+  # A second host (any name but `localhost`) is dumped over SSH — uncomment once
+  # the `ssh:`/`hosts:` section is set up:
+  # no-logs:
+  #   web01: [/srv/www, /opt/app]

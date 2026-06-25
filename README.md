@@ -568,7 +568,8 @@ is just `nb dump && nb sync`:
 sync:
   - to: glacier        # mirror everything to the object store
   - to: lto
-    last: 4            # keep only the 4 most recent slots on tape
+    last: 4            # copy only the 4 most recent slots (does not remove older
+                       # ones already on tape — `nb prune` trims)
   - from: lto          # second tier: tape -> deep-archive (source need not be landing)
     to: deep-archive
 ```
@@ -626,12 +627,14 @@ dumptypes:
     archiver: default
     exclude: ["*.log", "*.tmp"]
 
-# The disklist: grouped by dumptype, then host, then paths.
+# The disklist: grouped by dumptype, then host, then paths. The host `localhost`
+# is backed up locally; any OTHER host name is a remote SSH client (see the
+# `ssh:`/`hosts:` config), so keep it `localhost` on a single machine.
 sources:
   default:
-    app01: [/home, /etc]
+    localhost: [/home, /etc]
   no-logs:
-    web01: [/srv/www, /opt/app]
+    localhost: [/srv/www, /opt/app]
 ```
 
 - **Media** is a map of named definitions, each with a `type` and type-specific
