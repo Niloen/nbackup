@@ -41,8 +41,8 @@ func init() {
 		// An object store is unbounded per object, so an archive is always a single
 		// part; part_size (the tape-spanning chunk bound) is meaningless here and is
 		// refused so the knob is never silently ignored — mirroring the disk medium.
-		if opts.Get("part_size") != "" {
-			return nil, fmt.Errorf("cloud medium does not support part_size (it is unbounded and never splits archives)")
+		if err := media.RejectPartSize(opts, "cloud"); err != nil {
+			return nil, err
 		}
 		return open(url, opts.Get("prefix"))
 	})

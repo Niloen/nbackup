@@ -131,10 +131,10 @@ func openerOver(vols ...*memVolume) PartOpener {
 	for _, v := range vols {
 		byName[v.name] = v
 	}
-	return func(p PartPosition) (format.Header, io.ReadCloser, error) {
-		v, ok := byName[p.Volume]
+	return func(p format.FilePos) (format.Header, io.ReadCloser, error) {
+		v, ok := byName[p.Label]
 		if !ok {
-			return format.Header{}, nil, fmt.Errorf("no volume %q", p.Volume)
+			return format.Header{}, nil, fmt.Errorf("no volume %q", p.Label)
 		}
 		return v.ReadFile(p.Pos)
 	}
@@ -185,7 +185,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	}
 	vols := map[string]bool{}
 	for _, p := range parts {
-		vols[p.Volume] = true
+		vols[p.Label] = true
 	}
 	if len(vols) < 2 {
 		t.Fatalf("parts landed on a single volume %v; did not span", vols)

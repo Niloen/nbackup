@@ -138,6 +138,65 @@ func TestConcurrentAppend(t *testing.T) {
 	}
 }
 
+// TestOrphanPayloadIgnored simulates an interrupted dump: the payload is written
+// but the process dies before the .hdr sidecar. A later reopen must ignore the
+// orphan rather than index a header-less position — otherwise Files() reads an
+// empty header key and fails with "is a directory" on the slots root.
+func TestOrphanPayloadIgnored(t *testing.T) {
+	dir := t.TempDir()
+	v := openVol(t, dir)
+	pos := appendArchive(t, v, "slot-2026-06-22", "h-data", 0, "good")
+
+	// Drop a bare payload (no sidecar) into a fresh slot, as an aborted Write would.
+	orphanSlot := filepath.Join(dir, "slots", "slot-2026-06-25")
+	if err := os.MkdirAll(orphanSlot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphanSlot, "000000-h_data-L0.tar"), []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	v2 := openVol(t, dir)
+	files, err := v2.Files()
+	if err != nil {
+		t.Fatalf("Files() after reopen with orphan: %v", err)
+	}
+	if len(files) != 1 || files[0].Pos != pos {
+		t.Fatalf("orphan not ignored: files = %+v", files)
+	}
+}
+
+// TestTornHeaderSkipped covers the present-but-corrupt case: the .hdr sidecar
+// exists (so the position is not "incomplete") but its bytes are not valid JSON, as
+// a power-loss or reordered write could leave. Files() must skip it like an absent
+// file, never abort the whole catalog rebuild.
+func TestTornHeaderSkipped(t *testing.T) {
+	dir := t.TempDir()
+	v := openVol(t, dir)
+	pos := appendArchive(t, v, "slot-2026-06-22", "h-data", 0, "good")
+
+	// A complete-looking pair (payload + .hdr) whose .hdr is garbage JSON.
+	slot := filepath.Join(dir, "slots", "slot-2026-06-25")
+	if err := os.MkdirAll(slot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(slot, "000001-h_data-L0.tar"), []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(slot, "000001-h_data-L0.hdr"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	v2 := openVol(t, dir)
+	files, err := v2.Files()
+	if err != nil {
+		t.Fatalf("Files() with a torn header: %v", err)
+	}
+	if len(files) != 1 || files[0].Pos != pos {
+		t.Fatalf("torn header not skipped: files = %+v", files)
+	}
+}
+
 func TestRemoveSlot(t *testing.T) {
 	dir := t.TempDir()
 	v := openVol(t, dir)

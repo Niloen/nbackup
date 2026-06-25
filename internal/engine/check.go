@@ -121,9 +121,9 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 			continue
 		}
 		seen[dt] = true
-		m, err := e.archiverFor(dt, host)
+		arch, err := e.archiverFor(dt, host)
 		if err == nil {
-			err = m.Check()
+			err = arch.Check()
 		}
 		if err != nil {
 			rep.add(&hc.Lines, false, false, fmt.Sprintf("GNU tar (dumptype %q): %v", dt, err))

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/Niloen/nbackup/internal/crypt"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/format"
+	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/restore"
 	"github.com/Niloen/nbackup/internal/sizeutil"
@@ -263,7 +265,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		// The chain restores to a server-side scratch dir (decode + extract server-side),
 		// so the archiver runs locally (host ""). Driving the recoverability proof on the
 		// client for a client-only key is the documented follow-on — see the design note.
-		m, err := e.restoreArchiver(step.Archiver, "")
+		arch, err := e.restoreArchiver(step.Archiver, "")
 		if err != nil {
 			return drill.ClassPipeline, err.Error()
 		}
@@ -272,7 +274,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 			return classifyOpenErr(err), err.Error()
 		}
 		logf.log("drill-restoring %s %s L%d", step.SlotID, e.DisplayDLE(step.DLE), step.Level)
-		rerr := m.Restore(rc, dir, nil)
+		rerr := arch.Restore(rc, dir, nil)
 		cerr := rc.Close()
 		if cerr != nil {
 			// A decrypt/decompress child exited non-zero — a lost/wrong key or a codec
@@ -321,7 +323,7 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 	// Fetch the raw (still-encrypted/compressed) payload to a temp file. NBackup is
 	// used only to move bytes off the medium (unavoidable for tape/cloud); the decode
 	// is done entirely by the documented stock tools below.
-	raw := e.reader.OpenRawParts(toSlotioParts(parts), slotio.Expect{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, e.partOpener(lib, medium))
+	raw := e.reader.OpenRawParts(parts, slotio.Expect{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, e.partOpener(lib, medium))
 	tmp, err := os.CreateTemp("", "nbackup-drill-raw-*")
 	if err != nil {
 		raw.Close()
@@ -449,20 +451,16 @@ func findArchive(s *format.Slot, dle string, level int) (format.Archive, bool) {
 	return format.Archive{}, false
 }
 
-// classifyOpenErr maps an archive-open failure to a class: a missing copy/position is
-// ClassMissing, anything else (decrypt setup, read error) is ClassPipeline.
+// classifyOpenErr maps an archive-open failure to a class: a missing copy or an
+// unavailable volume is ClassMissing, anything else (decrypt setup, read error) is
+// ClassPipeline. It matches the producers' sentinel errors (errMissingCopy from the
+// catalog read path, librarian.ErrVolumeUnavailable from the mount path) via errors.Is,
+// so reclassification does not silently follow a reworded message.
 func classifyOpenErr(err error) drill.Class {
-	s := err.Error()
-	switch {
-	case strings.Contains(s, "no copy"),
-		strings.Contains(s, "not in catalog"),
-		strings.Contains(s, "position missing"),
-		strings.Contains(s, "is not in the library"),
-		strings.Contains(s, "needs tape"):
+	if errors.Is(err, errMissingCopy) || errors.Is(err, librarian.ErrVolumeUnavailable) {
 		return drill.ClassMissing
-	default:
-		return drill.ClassPipeline
 	}
+	return drill.ClassPipeline
 }
 
 // failureToken is the ledger's class token for a result: empty when it passed.
@@ -502,12 +500,12 @@ const wormProbeSlot = "drill-worm-probe"
 // without writing a probe. The active probe is skipped in --dry-run.
 func (e *Engine) wormProbe(medium string, apply bool, now time.Time) WormResult {
 	res := WormResult{Medium: medium}
-	vol, _, _, err := e.mediumVolume(medium)
+	lib, _, _, err := e.librarianFor(medium)
 	if err != nil {
 		res.Detail = err.Error()
 		return res
 	}
-	if _, ok := vol.(media.Labeled); ok {
+	if lib.AppendOnly() {
 		// Tape and other labeled media are append-only: a file once written cannot be
 		// rewritten or individually deleted, so the medium is immutable by construction.
 		// Writing a probe would advance/relabel the reel, so report rather than write.
@@ -515,6 +513,7 @@ func (e *Engine) wormProbe(medium string, apply bool, now time.Time) WormResult 
 		res.Detail = "append-only medium: written files are not individually rewritable"
 		return res
 	}
+	vol := lib.Volume()
 	if !apply {
 		res.Detail = "not probed (dry-run / --worm off); pass --worm (without --dry-run) to test immutability"
 		return res
@@ -705,7 +704,7 @@ func (e *Engine) postureIncrementalState() (string, PostureStatus, string) {
 		if st.LastFullDate == "" {
 			continue // never fulled yet; nothing relied upon
 		}
-		m, err := e.archiverFor(d.DumpTypeName(), d.Host)
+		arch, err := e.archiverFor(d.DumpTypeName(), d.Host)
 		if err != nil {
 			continue // unresolvable archiver surfaces elsewhere (pre-flight / estimate)
 		}
@@ -715,7 +714,7 @@ func (e *Engine) postureIncrementalState() (string, PostureStatus, string) {
 		if lvl < 1 {
 			lvl = 1
 		}
-		if !m.HasBase(name, lvl-1) {
+		if !arch.HasBase(name, lvl-1) {
 			missing++
 		}
 	}

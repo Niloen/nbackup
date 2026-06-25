@@ -197,11 +197,10 @@ func (e *Engine) verifyArchive(id string, a format.Archive, p catalog.Placement,
 		v.OK, v.Class, v.Detail = false, drill.ClassMissing, "archive position missing on this copy"
 		return v
 	}
-	sParts := toSlotioParts(parts)
 	want := slotio.Expect{Slot: id, DLE: a.DLE, Level: a.Level}
 
 	if opts.Checks.has(CheckChecksum) {
-		good, err := e.reader.VerifyParts(sParts, want, a.SHA256, opener)
+		good, err := e.reader.VerifyParts(parts, want, a.SHA256, opener)
 		if err != nil {
 			logf.log("%s [%s]: %s L%d ERROR %v", id, p.Medium, a.DLEID(), a.Level, err)
 			v.OK, v.Class, v.Detail = false, drill.ClassPipeline, err.Error()
@@ -214,7 +213,7 @@ func (e *Engine) verifyArchive(id string, a format.Archive, p catalog.Placement,
 		}
 	}
 	if opts.Checks.has(CheckStructural) {
-		if cls, detail := e.structuralCheck(a, sParts, want, opener); cls != drill.ClassNone {
+		if cls, detail := e.structuralCheck(a, parts, want, opener); cls != drill.ClassNone {
 			logf.log("%s [%s]: %s L%d STRUCTURAL %s: %s", id, p.Medium, a.DLEID(), a.Level, cls, detail)
 			v.OK, v.Class, v.Detail = false, cls, detail
 			return v
@@ -227,11 +226,11 @@ func (e *Engine) verifyArchive(id string, a format.Archive, p catalog.Placement,
 // members (`tar -t`), asserting the pipeline completes cleanly and the members match
 // the seal. It returns ClassNone on success, else the failure class and detail. It
 // writes nothing.
-func (e *Engine) structuralCheck(a format.Archive, parts []slotio.PartPosition, want slotio.Expect, opener slotio.PartOpener) (drill.Class, string) {
+func (e *Engine) structuralCheck(a format.Archive, parts []format.FilePos, want slotio.Expect, opener slotio.PartOpener) (drill.Class, string) {
 	// Verify is the keyless, server-side integrity primitive: structural decode runs on
 	// the server (host ""). The client-side recoverability proof (running the read
 	// pipeline on the client for a client-only key) is drill's job — see the design note.
-	m, err := e.restoreArchiver(a.Archiver, "")
+	arch, err := e.restoreArchiver(a.Archiver, "")
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
@@ -239,7 +238,7 @@ func (e *Engine) structuralCheck(a format.Archive, parts []slotio.PartPosition, 
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
-	members, lerr := m.List(rc)
+	members, lerr := arch.List(rc)
 	// Drain any bytes tar left unread (it stops at the archive's EOF marker) so the
 	// decrypt/decompress children see EOF and exit cleanly, then close — this is what
 	// makes "the pipeline completes cleanly" a reliable signal rather than a spurious

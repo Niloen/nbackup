@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Niloen/nbackup/internal/format"
@@ -330,5 +332,37 @@ func TestTapeForeignVolume(t *testing.T) {
 	}
 	if _, ok, err := v.(media.Labeled).ReadLabel(); ok || err != media.ErrForeignVolume {
 		t.Fatalf("foreign volume: ok=%v err=%v, want ok=false err=ErrForeignVolume", ok, err)
+	}
+}
+
+// TestTapeTornTailSkipped simulates a hard kill mid-append: a numbered record
+// exists but its header block was never fully written, so it cannot decode. Writes
+// are serialized, so a partial is always the tail; Files() must skip it and still
+// enumerate the committed records, never abort the scan.
+func TestTapeTornTailSkipped(t *testing.T) {
+	dir := t.TempDir()
+	v := openTape(t, dir)
+	if _, err := v.AppendFile(format.Header{Slot: "s", Kind: format.KindArchive, DLE: "d"},
+		func(w io.Writer) error { _, e := w.Write([]byte("one")); return e }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.AppendFile(format.Header{Slot: "s", Kind: format.KindSeal},
+		func(w io.Writer) error { _, e := w.Write([]byte("seal")); return e }); err != nil {
+		t.Fatal(err)
+	}
+
+	// Plant a torn trailing record: a numbered file too short to hold a header block.
+	torn := filepath.Join(dir, "bay-01", "000002")
+	if err := os.WriteFile(torn, []byte("torn"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	v2 := openTape(t, dir)
+	files, err := v2.Files()
+	if err != nil {
+		t.Fatalf("Files() with a torn tail: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("torn tail not skipped: got %d files, want 2", len(files))
 	}
 }

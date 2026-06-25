@@ -18,7 +18,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"sort"
 	"strings"
 
 	"github.com/Niloen/nbackup/internal/hostexec"
@@ -74,12 +73,7 @@ func init() {
 	register(Spec{Name: "none"}) // identity: no child process
 }
 
-func prog(o Options, def string) string {
-	if o.Program != "" {
-		return o.Program
-	}
-	return def
-}
+func prog(o Options, def string) string { return streamproc.ProgramOr(o.Program, def) }
 
 func spec(scheme string) (Spec, error) {
 	if scheme == "" {
@@ -87,18 +81,9 @@ func spec(scheme string) (Spec, error) {
 	}
 	s, ok := registry[scheme]
 	if !ok {
-		return Spec{}, fmt.Errorf("unknown encryption scheme %q (known: %s)", scheme, strings.Join(names(), ", "))
+		return Spec{}, fmt.Errorf("unknown encryption scheme %q (known: %s)", scheme, strings.Join(streamproc.SortedNames(registry), ", "))
 	}
 	return s, nil
-}
-
-func names() []string {
-	out := make([]string, 0, len(registry))
-	for k := range registry {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // Check verifies the scheme is known, its binary is available on PATH, and any
@@ -127,17 +112,6 @@ func Check(scheme string, o Options) error {
 		return fmt.Errorf("encryption scheme %q needs %q on PATH: %w", scheme, bin, err)
 	}
 	return nil
-}
-
-// Encrypt returns a WriteCloser that pipes everything written to it through the
-// scheme's encryptor child and on to dst (the bytes that land on the volume).
-// Close finishes and waits the child.
-func Encrypt(scheme string, dst io.Writer, o Options) (io.WriteCloser, error) {
-	s, err := spec(scheme)
-	if err != nil {
-		return nil, err
-	}
-	return streamproc.WriteThrough(s.argv(s.encryptArgv, o), o.Nice, dst)
 }
 
 // Decrypt returns a ReadCloser that yields the plaintext form of src by piping it

@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/format"
 	"github.com/Niloen/nbackup/internal/recovery"
 )
 
@@ -235,7 +236,7 @@ func recoverDate(s string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return d.Format("2006-01-02"), nil
+	return format.DateString(d), nil
 }
 
 // printListing renders one directory's entries, directories suffixed with "/".

@@ -31,14 +31,14 @@ type CostSummary struct {
 // CostSummary prices the current footprint and the next run on the landing medium.
 // plan may be nil (footprint only).
 func (e *Engine) CostSummary(plan *planner.Plan) CostSummary {
-	cs := CostSummary{Priced: e.cost.Priced(), Provider: e.cost.Provider}
+	cs := CostSummary{Priced: e.landingCost.Priced(), Provider: e.landingCost.Provider}
 	cs.Bytes = e.StoredBytes()
-	cs.Monthly = e.cost.MonthlyStorage(cs.Bytes)
+	cs.Monthly = e.landingCost.MonthlyStorage(cs.Bytes)
 	if plan != nil {
 		for _, it := range plan.Items {
 			cs.RunBytes += it.EstBytes
 		}
-		cs.Marginal = e.cost.MonthlyStorage(cs.RunBytes)
+		cs.Marginal = e.landingCost.MonthlyStorage(cs.RunBytes)
 	}
 	return cs
 }
@@ -93,7 +93,7 @@ func (e *Engine) ForecastCost(start time.Time, days int) []ForecastPoint {
 			bytes += s.TotalBytes
 		}
 		points = append(points, ForecastPoint{
-			Date: ds, Bytes: bytes, Monthly: e.cost.MonthlyStorage(bytes),
+			Date: ds, Bytes: bytes, Monthly: e.landingCost.MonthlyStorage(bytes),
 			RunBytes: runBytes, Reclaimed: reclaimed,
 		})
 	}
@@ -117,7 +117,7 @@ type ReadEstimate struct {
 func (e *Engine) RestoreCost(dles []string, asOf string) ReadEstimate {
 	target, err := recovery.AsOf(e.cat.Slots(), asOf)
 	if err != nil {
-		return ReadEstimate{Priced: e.cost.Priced(), Provider: e.cost.Provider}
+		return ReadEstimate{Priced: e.landingCost.Priced(), Provider: e.landingCost.Provider}
 	}
 	var refs []archiveRef
 	for _, dle := range dles {
@@ -206,14 +206,14 @@ func (e *Engine) locateArchive(r archiveRef, forceMedium string) (medium string,
 // here falls back to the landing model rather than failing a read.
 func (e *Engine) costModelFor(name string) media.Cost {
 	if name == "" || name == e.mediumName {
-		return e.cost
+		return e.landingCost
 	}
 	if d, ok := e.cfg.Media[name]; ok {
 		if c, err := media.OpenCost(d.Type, media.Options(d.CostOptions())); err == nil {
 			return c
 		}
 	}
-	return e.cost
+	return e.landingCost
 }
 
 // partCount is an archive's file count for request pricing: its part count when it

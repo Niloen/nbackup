@@ -6,6 +6,7 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"regexp"
 	"sort"
@@ -298,7 +299,7 @@ type Media struct {
 	Type       string            `yaml:"type"`
 	Capacity   string            `yaml:"capacity"`    // space NBackup may use here, e.g. "20TB" ("" = unbounded)
 	MinimumAge string            `yaml:"minimum_age"` // retention floor before a slot may be retired here (default: one cycle)
-	Appendable *bool             `yaml:"appendable"`  // tape: pack many runs per tape (default) vs one run per tape
+	Appendable *bool             `yaml:"appendable"`  // pack many runs per volume (default) vs one run per volume
 	Throughput string            `yaml:"throughput"`  // bandwidth cap to/from this medium, e.g. "50MB/s" ("" = uncapped); network politeness, the read/write peer of nice
 	Cost       *CostConfig       `yaml:"cost"`        // optional pricing overrides; absent = inferred from type/url
 	Params     map[string]string `yaml:",inline"`     // type-specific connection params (path, bucket, tapes, ...)
@@ -321,10 +322,7 @@ type CostConfig struct {
 // inference) and any cost-block overrides into the generic option map a media.Cost
 // factory consumes — the dollar peer of ProfileOptions.
 func (m Media) CostOptions() map[string]string {
-	opts := map[string]string{}
-	for k, v := range m.Params {
-		opts[k] = v
-	}
+	opts := m.paramsCopy()
 	if m.Cost == nil {
 		return opts
 	}
@@ -337,14 +335,25 @@ func (m Media) CostOptions() map[string]string {
 	return opts
 }
 
+// paramsCopy returns a fresh, always-non-nil copy of the medium's inline
+// connection params, the base map the ProfileOptions/CostOptions factories
+// flatten further fields onto.
+func (m Media) paramsCopy() map[string]string {
+	opts := maps.Clone(m.Params)
+	if opts == nil {
+		opts = map[string]string{}
+	}
+	return opts
+}
+
 func putRate(opts map[string]string, key string, v *float64) {
 	if v != nil {
 		opts[key] = strconv.FormatFloat(*v, 'f', -1, 64)
 	}
 }
 
-// IsAppendable reports whether a tape may accumulate many runs until full
-// (Bacula-style, the default). When false, a tape holds a single run before it
+// IsAppendable reports whether a volume may accumulate many runs until full
+// (Bacula-style, the default). When false, a volume holds a single run before it
 // must be changed (Amanda-style). Address-identified media ignore it.
 func (m Media) IsAppendable() bool { return m.Appendable == nil || *m.Appendable }
 
@@ -371,10 +380,7 @@ func (m Media) ThroughputBytes() (int64, error) {
 // ProfileOptions flattens the medium's capacity field and connection params into
 // the generic option map a media.Profile factory consumes.
 func (m Media) ProfileOptions() map[string]string {
-	opts := map[string]string{}
-	for k, v := range m.Params {
-		opts[k] = v
-	}
+	opts := m.paramsCopy()
 	opts["capacity"] = m.Capacity
 	return opts
 }
@@ -583,30 +589,8 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("media %s: throughput: %w", name, err)
 		}
 	}
-	for i, r := range c.Sync {
-		if r.To == "" {
-			return fmt.Errorf("sync rule %d: `to` is required", i)
-		}
-		if len(c.Media) > 0 {
-			if _, ok := c.Media[r.To]; !ok {
-				return fmt.Errorf("sync rule %d: target %q is not a defined medium", i, r.To)
-			}
-			if r.From != "" {
-				if _, ok := c.Media[r.From]; !ok {
-					return fmt.Errorf("sync rule %d: source %q is not a defined medium", i, r.From)
-				}
-			}
-		}
-		from := r.From
-		if from == "" {
-			from = c.Landing
-		}
-		if from == r.To {
-			return fmt.Errorf("sync rule %d: source and target are the same medium %q", i, r.To)
-		}
-		if r.Last < 0 {
-			return fmt.Errorf("sync rule %d: `last` must not be negative", i)
-		}
+	if err := c.validateSync(); err != nil {
+		return err
 	}
 	if err := c.validateDrill(); err != nil {
 		return err
@@ -654,6 +638,38 @@ func (c *Config) validateNotify() error {
 	return nil
 }
 
+// validateSync checks the optional `sync:` rules: each names a defined target
+// medium (and source, when given), a source distinct from the target (the
+// source defaulting to the landing medium), and a non-negative `last` window.
+func (c *Config) validateSync() error {
+	for i, r := range c.Sync {
+		if r.To == "" {
+			return fmt.Errorf("sync rule %d: `to` is required", i)
+		}
+		if len(c.Media) > 0 {
+			if _, ok := c.Media[r.To]; !ok {
+				return fmt.Errorf("sync rule %d: target %q is not a defined medium", i, r.To)
+			}
+			if r.From != "" {
+				if _, ok := c.Media[r.From]; !ok {
+					return fmt.Errorf("sync rule %d: source %q is not a defined medium", i, r.From)
+				}
+			}
+		}
+		from := r.From
+		if from == "" {
+			from = c.Landing
+		}
+		if from == r.To {
+			return fmt.Errorf("sync rule %d: source and target are the same medium %q", i, r.To)
+		}
+		if r.Last < 0 {
+			return fmt.Errorf("sync rule %d: `last` must not be negative", i)
+		}
+	}
+	return nil
+}
+
 // validateDrill checks the optional `drill:` block.
 func (c *Config) validateDrill() error {
 	d := c.Drill
@@ -685,11 +701,15 @@ const DefaultDrillWindow = 30 * 24 * time.Hour
 const DefaultDrillSample = 1
 
 // DrillWindow returns the drill coverage window (default DefaultDrillWindow).
+// Validate (via validateDrill) already parsed and accepted any non-empty
+// Drill.Window, so the parse here cannot fail; a non-positive window is not
+// rejected up-front, though, so it still falls back to the default.
 func (c *Config) DrillWindow() time.Duration {
 	if c.Drill.Window == "" {
 		return DefaultDrillWindow
 	}
-	if d, err := sizeutil.ParseDuration(c.Drill.Window); err == nil && d > 0 {
+	d, _ := sizeutil.ParseDuration(c.Drill.Window)
+	if d > 0 {
 		return d
 	}
 	return DefaultDrillWindow
@@ -838,14 +858,13 @@ func (c *Config) Workers() int {
 const DefaultCycle = 7 * 24 * time.Hour
 
 // CycleDuration returns the dump cycle as a duration (default DefaultCycle).
+// Validate already parsed any non-empty Cycle and rejected a non-positive one,
+// so the parse here cannot fail and the result is always positive.
 func (c *Config) CycleDuration() time.Duration {
 	if c.Cycle == "" {
 		return DefaultCycle
 	}
-	d, err := sizeutil.ParseDuration(c.Cycle)
-	if err != nil || d <= 0 {
-		return DefaultCycle
-	}
+	d, _ := sizeutil.ParseDuration(c.Cycle)
 	return d
 }
 
@@ -879,7 +898,11 @@ func (c *Config) BumpPercent() float64 {
 // "yesterday must not overwrite last month" safety without a knob — a slot stays
 // retainable for at least the window in which it is still a recovery base.
 func (c *Config) MinAgeFor(m Media) time.Duration {
-	if age, err := m.MinAge(); err == nil && age > 0 {
+	// Validate already parsed and accepted m.MinimumAge, so MinAge cannot fail
+	// here; a non-positive floor is not rejected up-front, so it falls through
+	// to the one-cycle default.
+	age, _ := m.MinAge()
+	if age > 0 {
 		return age
 	}
 	return c.CycleDuration()

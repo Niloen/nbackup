@@ -15,6 +15,7 @@ import (
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/report"
+	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
 // newReportCmd implements `nb report`: the run digest. It reads the run history
@@ -169,9 +170,9 @@ func renderDrillLedger(w io.Writer, cfg *config.Config, now time.Time) {
 	if len(stale) > 0 {
 		names := make([]string, 0, len(stale))
 		for _, r := range stale {
-			names = append(names, fmt.Sprintf("%s (%s ago)", disp(r.DLE), ageString(now.Sub(r.LastDrill))))
+			names = append(names, fmt.Sprintf("%s (%s ago)", disp(r.DLE), sizeutil.FormatDaysHours(now.Sub(r.LastDrill))))
 		}
-		fmt.Fprintf(w, "  stale (overdue past %s): %s\n", humanDur(window), strings.Join(names, ", "))
+		fmt.Fprintf(w, "  stale (overdue past %s): %s\n", sizeutil.FormatDuration(window), strings.Join(names, ", "))
 	}
 	if len(never) > 0 {
 		neverIDs := make([]string, len(never))
@@ -189,14 +190,6 @@ func drillWhen(t time.Time) string {
 		return "-"
 	}
 	return t.Local().Format("2006-01-02 15:04")
-}
-
-// ageString renders a duration as whole days when it is at least a day, else hours.
-func ageString(d time.Duration) string {
-	if d >= 24*time.Hour {
-		return fmt.Sprintf("%dd", int(d.Hours()/24))
-	}
-	return fmt.Sprintf("%dh", int(d.Hours()))
 }
 
 // runReported executes a run-producing command body, records its outcome to the run

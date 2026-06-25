@@ -137,6 +137,17 @@ type Options map[string]string
 // Get returns the value for a parameter key, or "".
 func (o Options) Get(key string) string { return o[key] }
 
+// RejectPartSize returns an error when opts sets part_size on an unbounded,
+// address-identified medium (disk, cloud) that never splits an archive into parts — so
+// the knob is refused with one shared message rather than silently ignored. Spanning
+// media (tape) accept and honor part_size instead.
+func RejectPartSize(opts Options, mediumType string) error {
+	if opts.Get("part_size") != "" {
+		return fmt.Errorf("%s medium does not support part_size (it is unbounded and never splits archives)", mediumType)
+	}
+	return nil
+}
+
 // Volume is a medium holding an ordered sequence of header-framed files.
 //
 // Contract: opening a Volume must be cheap (no reading every file), and
@@ -154,6 +165,15 @@ type Volume interface {
 	ReadFile(pos int) (format.Header, io.ReadCloser, error)
 	// Files returns every file's position and header in order — the volume's
 	// self-index, used to rebuild the catalog. May be O(volume) (a full scan).
+	//
+	// Files enumerates only committed files and must NOT fail on a partial artifact
+	// left by an interrupted append (a hard kill or power loss mid-write). An
+	// artifact that is absent, truncated, or whose header will not parse is treated
+	// as uncommitted and skipped, so the rebuild always completes. What "committed"
+	// means at the file layer is medium-specific (fslike: a payload paired with its
+	// later-written header sidecar; tape: a fully-framed, decodable record); slot-
+	// level commit is the seal above this. Integrity of files the seal *does* commit
+	// (bit-rot) is verify's job, not enumeration's — Files never asserts it.
 	Files() ([]format.FileInfo, error)
 	// RemoveSlot reclaims every file belonging to a slot.
 	RemoveSlot(slot string) error

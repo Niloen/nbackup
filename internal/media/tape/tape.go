@@ -5,7 +5,7 @@
 // (roboticChanger, a dirChanger) is a media.Changer. The two single-drive shapes —
 // a real drive an operator loads by hand (driveChanger) and the disk-emulated station
 // whose reels are directories the software can enumerate and load (shelfChanger, a
-// manualChanger) — are NOT changers: they are a media.Drive (the one loaded volume)
+// manualStation) — are NOT changers: they are a media.Drive (the one loaded volume)
 // plus a media.Shelf (the operator-managed room), the emulator functional and the
 // real drive degenerate. All reuse the same I/O core (the `tape` struct) over a
 // mounted `device` — the mt analogue (positioning + block I/O of one mounted tape).
@@ -49,7 +49,7 @@ func init() {
 				if err != nil {
 					return nil, fmt.Errorf("reels: %w", err)
 				}
-				mc, err := openManualChanger(opts.Get("dir"), capacity, reels)
+				mc, err := openManualStation(opts.Get("dir"), capacity, reels)
 				if err != nil {
 					return nil, err
 				}
@@ -191,7 +191,11 @@ func (t *tape) Files() ([]format.FileInfo, error) {
 	for pos := 0; pos < n; pos++ {
 		h, rc, err := t.ReadFile(pos)
 		if err != nil {
-			return nil, err
+			// A record whose header will not decode is a partial tail left by an
+			// interrupted append (writes are serialized, so a partial is always last):
+			// not a committed file, so skip it rather than abort the rebuild. As with
+			// fslike, bit-rot on a committed record is verify's job, not enumeration's.
+			continue
 		}
 		rc.Close()
 		out = append(out, format.FileInfo{Pos: pos, Header: h})

@@ -61,7 +61,7 @@ registry registration, not a conditional in the core.
 | `report` | per-run history record + JSONL/summary file I/O + digest render | amreport |
 | `notify` | pluggable alert backends (smtp/webhook) + registry + dispatch | amreport mailto |
 | `catalog` | local cache of slot index + volume registry; derives `History` | catalog / curinfo / tapelist |
-| `policy` | retention safety floor: protected slots (pure) | policy |
+| `retention` | retention safety floor: protected slots — `Compute` returns a `Floor` (`.Keeps(id)`) (pure) | policy |
 | `restore` | the archive chain to rebuild a DLE as of a slot (pure) | amrestore |
 | `recovery` | as-of-date browse tree + per-archive file selection (pure) | amrecover |
 | `drill` | recovery-drill ledger + risk-biased selection + failure taxonomy (pure) | amverify (orchestrated) |
@@ -69,7 +69,7 @@ registry registration, not a conditional in the core.
 | `engine` | the driver: parallel workers, wires planner→archiver→filter→media→catalog | driver / taper |
 | `cli` | thin command wiring | amdump / amadmin |
 
-Dependencies flow one way: `cli → engine → {planner, policy, archiver, filter,
+Dependencies flow one way: `cli → engine → {planner, retention, archiver, filter,
 crypt, slotio, catalog, config, progress, restore, recovery}` over leaf packages
 `{media, xfer, sizeutil}`, all bottoming out on `format` (the on-medium artifact
 format that `media`, `slotio`, and `catalog` read and write) (`recovery` builds on `restore`). The reporting
@@ -89,6 +89,22 @@ archive headers: it holds the per-archive **integrity and content** that the
 on-volume framing headers deliberately omit — `SHA256`, member list, sizes. So a
 slot's *shape* is reindexable from headers, but its *trust* and *contents* are not;
 the manifest stays. (Slot earns its keep; we considered and rejected dropping it.)
+
+**Partial writes are tolerated, never repaired.** A hard kill or power loss
+mid-write can leave uncommitted bytes on a volume: a payload with no header
+sidecar, a torn sidecar, a half-framed tape record, a half-written seal. Two
+layers absorb this, neither by deleting anything (delete is impossible on WORM):
+the **seal** is the slot's commit marker — an unsealed slot is never assembled
+into the catalog (`assemble` iterates seals; a torn seal is skipped, demoting its
+slot to uncommitted), so its orphan parts are simply unreferenced. Beneath it,
+each medium's `Files()` enumeration treats *any* artifact it cannot read or parse
+as uncommitted and **skips it** — enumeration must always complete, so a single
+torn file can never abort `nb rebuild`. The commit test differs per medium
+(fslike: payload paired with its later-written sidecar; tape: a decodable framed
+record), so it lives in each medium, not in a shared layer. Orphans are reclaimed
+only when their slot/volume is, via prune/relabel — we never reap on read.
+Integrity of files the seal *does* commit (bit-rot) is verify's job, not the
+rebuild's.
 
 **The catalog is a cache; the media are the source of truth.** Every file is
 self-describing (header), every slot sealed, every labeled volume carries its
@@ -166,7 +182,7 @@ catalog and run-status files), *classifies* failures (integrity / pipeline-key /
 / missing-copy — each a different remediation), and *exits non-zero* so a failed drill
 is loud. Drill delivers the **"0 errors"** digit of 3-2-1-1-0; it also prints a posture
 audit of the other digits. Pure parts (ledger, selection, taxonomy) live in package
-`drill` (a leaf, like `policy`/`restore`); the I/O — verify, restore-to-scratch, the
+`drill` (a leaf, like `retention`/`restore`); the I/O — verify, restore-to-scratch, the
 WORM probe — lives in `engine`, which imports `drill`. Two run modes keep cron honest:
 **attended** may prompt for a tape; **unattended** (auto when stdin is not a TTY)
 attaches no operator and *skips* (not fails) any target whose copy would need a human
@@ -203,7 +219,7 @@ second offsite tier), and copy-to-landing is now allowed (the old "target is the
 source" guard became a `from == to` guard). The config `sync:` rules are the
 declarative form (`{from, to, last}`) so a cron `nb dump && nb sync`
 mirrors offsite hands-off. Sync and pruning are independent, not coupled:
-retention is per-medium (`policy.Protected` is judged over one medium's own slots),
+retention is per-medium (`retention.Compute`'s floor is judged over one medium's own slots),
 so a copy reaching another medium never makes the original prunable — double storage
 keeps both copies, each retained on its own capacity and cycle. Tiering disk lean
 while a cheap medium holds bulk is just a tighter disk `capacity`/`minimum_age`, which
@@ -319,7 +335,7 @@ without hardware).
   the cases a swap can fix (vs a stale catalog, which a swap can't).
 - **Expected tape (Amanda's "amdump will expect tape X").** `Engine.ExpectedTape`
   names the volume the next run will write to, derived from the catalog (the
-  tapelist) and `policy.Protected`, never from a physical scan: a one-run-per-tape
+  tapelist) and `retention.Compute`, never from a physical scan: a one-run-per-tape
   (non-appendable) run reuses the **oldest volume whose every run is unprotected**
   (past `minimum_age`, with a newer recovery path) — exactly Amanda's taper picking
   the oldest reusable tape — or a *fresh tape* when none is reusable; an appendable
@@ -365,7 +381,7 @@ without hardware).
   **auto-mount** the volume holding each part, in order — `slotio`'s concatenating
   reader drains part *k* fully before mounting *k+1*, then reverses the codec over the
   concatenation. The roll/mount lives in `package librarian` (`WriteSink`,
-  `Advance`, `MountVolume`), the one place that dispatches on medium shape.
+  `Advance`, `MountForRead`), the one place that dispatches on medium shape.
   Real-drive (`device:`) spanning is proactive-via-`part_size` only and structurally
   complete but untested; the `dir:`-emulated library/station spans and is tested.
 
@@ -438,9 +454,10 @@ snapshot is left in place as the last-run record. Progress reporting never block
 or fails a backup (a write error is a stderr warning). **Faithful adaptation:**
 NBackup has no holding disk — each DLE streams source→compressor→volume in one
 pass — so Amanda's separate dumper/taper queues collapse to one `dumping` state
-per DLE, metered by uncompressed bytes against the planner estimate. The new
-measurement point is an uncompressed `xfer.Counter` on the tar→compressor stream
-in `slotio.WriteArchive`; compressed bytes come from the existing `xfer.Meter`
+per DLE, metered by uncompressed bytes against the planner estimate. The
+measurement point is the source stage's byte tap (`hostexec.Cmd.Tap`, or a
+`countingReader` for an in-process source) on the tar→compressor stream in
+`slotio.WriteArchive`; compressed bytes come from the existing `xfer.Meter`
 (now atomic so it can be polled live).
 
 **Reporting + alerting make an unwatched failure loud (`nb report`, `notify:`).**
@@ -546,7 +563,7 @@ GET `$/1000`. Four decisions carry it:
   `RestoreCost`/`SelectionCost`), mirroring the capacity overlay
   (`StoredBytes`/`CapacityStatus`). `ForecastCost` walks the existing run simulation
   day by day, growing a footprint with each simulated run and evicting it with the
-  medium's own `Reclaim` + `policy.Protected` (the primitives `nb prune` uses), then
+  medium's own `Reclaim` + `retention.Compute` (the primitives `nb prune` uses), then
   reprices the survivors — so the `$/month` curve reflects fulls/incrementals landing
   and pruning reclaiming. The read paths (`nb restore`/`recover`/`drill`) price the
   egress of the chain they will read off the chosen copy and, when material, warn —
