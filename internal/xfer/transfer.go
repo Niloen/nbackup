@@ -129,16 +129,27 @@ func Transfer(source Source, filters Filters, sink Sink, opts Opts) (Result, err
 	sinkRes, sinkErr := sink.Drain(mid, opts.Progress)
 
 	// Reap from the consumer back to the producer, closing each reader to push EOF/SIGPIPE
-	// upstream. The upstream cause wins: a source or filter that died makes the sink see
-	// truncated input, so we surface the source/filter error over the sink's symptom.
-	mid.Close()
-	filtErr := filtReap()
+	// upstream. A reader's Close surfaces a media/process fault (e.g. an unreadable part on
+	// the source), so its error is folded into that reader's zone. The upstream cause wins:
+	// a source or filter that died makes the sink see truncated input, so we surface the
+	// source/filter error over the sink's symptom.
+	var srcCloseErr, filtCloseErr error
 	if filtered {
-		out.Close()
+		filtCloseErr = mid.Close() // the filter chain's output
+		srcCloseErr = out.Close()  // the source's output (a media-read fault lands here)
+	} else {
+		srcCloseErr = mid.Close() // mid is the source's output
 	}
+	filtErr := filtReap()
 	srcErr := srcReap()
 	produced, finErr := source.Produced()
 	source.Cleanup()
+	if srcErr == nil {
+		srcErr = srcCloseErr
+	}
+	if filtErr == nil {
+		filtErr = filtCloseErr
+	}
 
 	switch {
 	case srcErr != nil:

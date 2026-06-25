@@ -172,13 +172,43 @@ func (a *IO) Extract(ref Ref, codec, encrypt, archiverType, destDir, targetHost 
 	if err != nil {
 		return err
 	}
-	pipe, err := a.DecodePipeline(encrypt, codec, ec, targetHost)
+
+	// The transfer: read the medium → decode → extract. Decrypt is the only stage that
+	// needs the key — it runs on the target (sink) when the key is client-held and reached
+	// over `--to`, otherwise on the local server (Filters). Decompress runs on the target,
+	// fused with tar, so a remote restore ships compressed bytes over the wire.
+	copts := a.deps.DecryptOpts()
+	decryptInSink := ec.At == "client" && targetHost != ""
+	if decryptInSink {
+		copts = crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile}
+	}
+	encF, err := crypt.Filter(encrypt, copts)
 	if err != nil {
 		raw.Close()
 		return err
 	}
-	stages := append(pipe.Reverse(), programs.Stage{Cmd: arch.RestoreStage(destDir, members), Exec: target})
-	return RunDecodePipeline(raw, stages...)
+	compF, err := compress.Filter(codec, a.deps.CompressOpts())
+	if err != nil {
+		raw.Close()
+		return err
+	}
+
+	sink := xfer.NewPrograms(target)
+	if decryptInSink && encF.Reverse.Name != "" {
+		sink.Add(encF.Reverse)
+	}
+	if compF.Reverse.Name != "" {
+		sink.Add(compF.Reverse)
+	}
+	sink.Add(arch.RestoreStage(destDir, members))
+
+	var filterCmds []programs.Cmd
+	if !decryptInSink && encF.Reverse.Name != "" {
+		filterCmds = append(filterCmds, encF.Reverse)
+	}
+
+	_, err = xfer.Transfer(xfer.Reader(raw), xfer.NewFilters(filterCmds...), sink, xfer.Opts{})
+	return err
 }
 
 // RunDecodePipeline runs a decode→extract stage chain, draining the (empty) extractor
