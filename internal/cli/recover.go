@@ -187,6 +187,7 @@ func runRecoverBatch(eng *engine.Engine, dleName, dateStr string, paths []string
 		}
 		fmt.Printf("# %s as of %s (%s)\n", eng.DisplayDLE(slug), tree.AsOf, tree.TargetSlot)
 		printListing(n)
+		fmt.Println(fileLevelDeletionNote)
 		return nil
 	}
 
@@ -306,6 +307,12 @@ func runRecoverShell(eng *engine.Engine, dleName, dateStr, dest string) error {
 			}
 			continue
 		}
+		if !tty {
+			// Piped/scripted input isn't echoed by a terminal, so a transcript would
+			// show output with no commands. Echo the prompt + command ourselves so a
+			// scripted session reads top-to-bottom.
+			fmt.Printf("%s%s\n", sh.prompt(), line)
+		}
 		fields := strings.Fields(line)
 		if sh.dispatch(fields[0], fields[1:]) {
 			return nil
@@ -330,6 +337,7 @@ func (sh *recoverShell) prompt() string {
 func (sh *recoverShell) banner() {
 	if sh.sess != nil {
 		fmt.Printf("disk %q as of %s (resolved to %s)\n", sh.eng.DisplayDLE(sh.dle), sh.date, sh.sess.Tree().TargetSlot)
+		fmt.Println(fileLevelDeletionNote)
 		return
 	}
 	fmt.Printf("as of %s — no disk selected. Pick one with 'setdisk <dle>' ('disks' lists them).\n", sh.date)

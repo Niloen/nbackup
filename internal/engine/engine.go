@@ -1348,7 +1348,10 @@ func (e *Engine) Restore(slotID, dleName, destDir string, force bool, logf Logf)
 			return err
 		}
 	}
-	return e.restoreFrom(slotID, dleName, destDir, "", logf)
+	// When the guard ensured an empty dest, a failed chain leaves only files this
+	// restore wrote — so it can be rolled back to leave no half-restored tree. With
+	// --force the dest held the operator's own content, so never auto-delete it.
+	return e.restoreFrom(slotID, dleName, destDir, "", !force, logf)
 }
 
 // RestoreTo restores a DLE onto a remote client (Amanda's recover to a different host):
@@ -1362,7 +1365,7 @@ func (e *Engine) RestoreTo(slotID, dleName, destHost, destPath string, logf Logf
 	if _, ok := e.cfg.RemoteHost(destHost); !ok {
 		return fmt.Errorf("--to host %q is not configured under hosts:", destHost)
 	}
-	return e.restoreFrom(slotID, dleName, destPath, destHost, logf)
+	return e.restoreFrom(slotID, dleName, destPath, destHost, false, logf)
 }
 
 // restoreFrom replays a DLE's restore chain into destDir. targetHost "" extracts
@@ -1370,7 +1373,7 @@ func (e *Engine) RestoreTo(slotID, dleName, destHost, destPath string, logf Logf
 // client and destDir is a client path — and, for a client-held key, decode runs there
 // too. The exported Restore/RestoreTo are thin wrappers; reads fail over across copies
 // (medium-scoped reads are the drill's own path, drillChain).
-func (e *Engine) restoreFrom(slotID, dleName, destDir, targetHost string, logf Logf) error {
+func (e *Engine) restoreFrom(slotID, dleName, destDir, targetHost string, rollbackOnFail bool, logf Logf) error {
 	steps, err := restore.Chain(e.cat.Slots(), dleName, slotID)
 	if err != nil {
 		return err
@@ -1393,7 +1396,32 @@ func (e *Engine) restoreFrom(slotID, dleName, destDir, targetHost string, logf L
 	for _, step := range steps {
 		logf.log("extracting %s %s L%d -> %s", step.SlotID, e.DisplayDLE(step.DLE), step.Level, destDir)
 		if err := e.extractStep(step, destDir, targetHost, ec); err != nil {
-			return fmt.Errorf("extract %s %s L%d: %w", step.SlotID, step.DLE, step.Level, err)
+			wrapped := fmt.Errorf("extract %s %s L%d: %w", step.SlotID, step.DLE, step.Level, err)
+			// A chain that fails partway leaves an incomplete tree. If the dest was
+			// empty when we started (no --force, local), every file in it is ours, so
+			// clear it — a failed whole-DLE restore must not leave a half-restored
+			// tree a user could mistake for complete. Otherwise warn loudly instead.
+			if rollbackOnFail && targetHost == "" {
+				if cerr := clearDirContents(destDir); cerr != nil {
+					return fmt.Errorf("%w (and could not clean partial restore in %s: %v)", wrapped, destDir, cerr)
+				}
+				return fmt.Errorf("%w — the chain is broken; %s was cleared (no partial tree left)", wrapped, destDir)
+			}
+			return fmt.Errorf("%w — WARNING: %s now holds a PARTIAL, incomplete restore; discard it before use", wrapped, destDir)
+		}
+	}
+	return nil
+}
+
+// clearDirContents removes everything inside dir, leaving the (empty) dir itself.
+func clearDirContents(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return err
 		}
 	}
 	return nil
