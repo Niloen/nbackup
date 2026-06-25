@@ -126,6 +126,17 @@ type Stage struct {
 	Exec Executor
 }
 
+// Filter is a reversible stream transform: a named scheme with a forward (encode) and
+// reverse (decode) child command. A zero Forward/Reverse (Cmd.Name == "") is the
+// identity — the "none" scheme — which contributes no stage to a pipeline. It is the
+// shared shape compress and crypt expose so the transform layer can chain and reverse
+// them uniformly.
+type Filter struct {
+	Name    string
+	Forward Cmd
+	Reverse Cmd
+}
+
 // RunGrouped runs the ordered stages, fusing maximal runs of stages that share a host
 // (Exec.Host()) into one host-local pipeline — so intermediate bytes never leave that
 // host — and piping each group's output into the next. It returns the final stdout, a

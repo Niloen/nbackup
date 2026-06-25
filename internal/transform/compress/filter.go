@@ -128,6 +128,21 @@ func DecompressCmd(codec string, o Options) (cmd hostexec.Cmd, ok bool, err erro
 	return stageCmd(codec, func(s Spec) func(Options) []string { return s.decompressArgv }, o)
 }
 
+// Filter returns the codec as a reversible hostexec.Filter — Forward compresses, Reverse
+// decompresses — for the transform layer to place and chain. The none codec yields a
+// Filter with empty cmds (skipped by the pipeline). It errors only for an unknown codec.
+func Filter(codec string, o Options) (hostexec.Filter, error) {
+	fwd, _, err := CompressCmd(codec, o)
+	if err != nil {
+		return hostexec.Filter{}, err
+	}
+	rev, _, err := DecompressCmd(codec, o)
+	if err != nil {
+		return hostexec.Filter{}, err
+	}
+	return hostexec.Filter{Name: codec, Forward: fwd, Reverse: rev}, nil
+}
+
 func stageCmd(codec string, pick func(Spec) func(Options) []string, o Options) (hostexec.Cmd, bool, error) {
 	s, err := spec(codec)
 	if err != nil {

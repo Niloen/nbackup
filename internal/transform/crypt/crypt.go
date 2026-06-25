@@ -144,6 +144,21 @@ func DecryptCmd(scheme string, o Options) (cmd hostexec.Cmd, ok bool, err error)
 	return stageCmd(scheme, func(s Spec) func(Options) []string { return s.decryptArgv }, o)
 }
 
+// Filter returns the scheme as a reversible hostexec.Filter — Forward encrypts, Reverse
+// decrypts — for the transform layer to place and chain. The none scheme yields a Filter
+// with empty cmds (skipped by the pipeline). It errors only for an unknown scheme.
+func Filter(scheme string, o Options) (hostexec.Filter, error) {
+	fwd, _, err := EncryptCmd(scheme, o)
+	if err != nil {
+		return hostexec.Filter{}, err
+	}
+	rev, _, err := DecryptCmd(scheme, o)
+	if err != nil {
+		return hostexec.Filter{}, err
+	}
+	return hostexec.Filter{Name: scheme, Forward: fwd, Reverse: rev}, nil
+}
+
 func stageCmd(scheme string, pick func(Spec) func(Options) []string, o Options) (hostexec.Cmd, bool, error) {
 	s, err := spec(scheme)
 	if err != nil {
