@@ -154,6 +154,15 @@ type Volume interface {
 	ReadFile(pos int) (format.Header, io.ReadCloser, error)
 	// Files returns every file's position and header in order — the volume's
 	// self-index, used to rebuild the catalog. May be O(volume) (a full scan).
+	//
+	// Files enumerates only committed files and must NOT fail on a partial artifact
+	// left by an interrupted append (a hard kill or power loss mid-write). An
+	// artifact that is absent, truncated, or whose header will not parse is treated
+	// as uncommitted and skipped, so the rebuild always completes. What "committed"
+	// means at the file layer is medium-specific (fslike: a payload paired with its
+	// later-written header sidecar; tape: a fully-framed, decodable record); slot-
+	// level commit is the seal above this. Integrity of files the seal *does* commit
+	// (bit-rot) is verify's job, not enumeration's — Files never asserts it.
 	Files() ([]format.FileInfo, error)
 	// RemoveSlot reclaims every file belonging to a slot.
 	RemoveSlot(slot string) error

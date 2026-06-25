@@ -90,6 +90,22 @@ on-volume framing headers deliberately omit — `SHA256`, member list, sizes. So
 slot's *shape* is reindexable from headers, but its *trust* and *contents* are not;
 the manifest stays. (Slot earns its keep; we considered and rejected dropping it.)
 
+**Partial writes are tolerated, never repaired.** A hard kill or power loss
+mid-write can leave uncommitted bytes on a volume: a payload with no header
+sidecar, a torn sidecar, a half-framed tape record, a half-written seal. Two
+layers absorb this, neither by deleting anything (delete is impossible on WORM):
+the **seal** is the slot's commit marker — an unsealed slot is never assembled
+into the catalog (`assemble` iterates seals; a torn seal is skipped, demoting its
+slot to uncommitted), so its orphan parts are simply unreferenced. Beneath it,
+each medium's `Files()` enumeration treats *any* artifact it cannot read or parse
+as uncommitted and **skips it** — enumeration must always complete, so a single
+torn file can never abort `nb rebuild`. The commit test differs per medium
+(fslike: payload paired with its later-written sidecar; tape: a decodable framed
+record), so it lives in each medium, not in a shared layer. Orphans are reclaimed
+only when their slot/volume is, via prune/relabel — we never reap on read.
+Integrity of files the seal *does* commit (bit-rot) is verify's job, not the
+rebuild's.
+
 **The catalog is a cache; the media are the source of truth.** Every file is
 self-describing (header), every slot sealed, every labeled volume carries its
 label — so one `Files()` scan rebuilds everything (`nb rebuild`): seals →

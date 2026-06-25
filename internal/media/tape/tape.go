@@ -191,7 +191,11 @@ func (t *tape) Files() ([]format.FileInfo, error) {
 	for pos := 0; pos < n; pos++ {
 		h, rc, err := t.ReadFile(pos)
 		if err != nil {
-			return nil, err
+			// A record whose header will not decode is a partial tail left by an
+			// interrupted append (writes are serialized, so a partial is always last):
+			// not a committed file, so skip it rather than abort the rebuild. As with
+			// fslike, bit-rot on a committed record is verify's job, not enumeration's.
+			continue
 		}
 		rc.Close()
 		out = append(out, format.FileInfo{Pos: pos, Header: h})

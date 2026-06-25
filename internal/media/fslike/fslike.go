@@ -54,11 +54,14 @@ type Store interface {
 	RemoveTree(slot string) error
 }
 
-// entry pairs a file's header sidecar and payload keys with its slot.
+// entry pairs a file's header sidecar and payload keys with its slot. incomplete
+// marks a position missing one of the two — an interrupted append leaves a payload
+// with no header sidecar; such an orphan is indexed but skipped, never read.
 type entry struct {
-	hdr     string
-	payload string
-	slot    string
+	hdr        string
+	payload    string
+	slot       string
+	incomplete bool
 }
 
 // Volume is the shared media.Volume implementation over a Store.
@@ -148,6 +151,9 @@ func (v *Volume) ReadFile(pos int) (format.Header, io.ReadCloser, error) {
 	if !ok {
 		return format.Header{}, nil, fmt.Errorf("no file at position %d", pos)
 	}
+	if e.incomplete {
+		return format.Header{}, nil, fmt.Errorf("file at position %d is incomplete (interrupted append)", pos)
+	}
 	h, err := v.readHeader(e.hdr)
 	if err != nil {
 		return format.Header{}, nil, err
@@ -169,9 +175,17 @@ func (v *Volume) Files() ([]format.FileInfo, error) {
 
 	out := make([]format.FileInfo, 0, len(entries))
 	for pos, e := range entries {
+		if e.incomplete {
+			continue // orphan from an interrupted append; not a usable file
+		}
 		h, err := v.readHeader(e.hdr)
 		if err != nil {
-			return nil, err
+			// A present-but-unreadable header (a torn sidecar from a power-loss or
+			// reordered write) is treated like a missing one: the file is not committed,
+			// so skip it rather than abort the whole rebuild. Bit-rot on a file the seal
+			// *does* commit is caught later by verify against the seal — enumeration is
+			// best-effort, integrity is verify's job.
+			continue
 		}
 		out = append(out, format.FileInfo{Pos: pos, Header: h})
 	}
@@ -217,6 +231,17 @@ func (v *Volume) scan() error {
 		v.idx[pos] = e
 		if pos > max {
 			max = pos
+		}
+	}
+	// Mark incomplete positions: an interrupted append leaves a payload with no
+	// header sidecar (or, rarer, a sidecar with no payload). Such an orphan is not a
+	// usable file — it must never be read (readHeader on an empty key fails) — but it
+	// stays indexed so pruning can reap it later. next still advances past max so a
+	// new append never collides with an orphan payload still on disk.
+	for pos, e := range v.idx {
+		if e.hdr == "" || e.payload == "" {
+			e.incomplete = true
+			v.idx[pos] = e
 		}
 	}
 	v.next = max + 1
