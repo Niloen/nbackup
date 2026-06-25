@@ -1622,23 +1622,6 @@ func decryptHint(scheme string, err error) error {
 	return fmt.Errorf("%w\n(this archive is %s-encrypted, so extraction needs the key: for a passphrase/symmetric dump add an `encrypt:` block with the same passphrase_file; for a public-key dump ensure its private key is in the gpg keyring)", err, scheme)
 }
 
-// joinPipelineErr combines a reader-side consumer's error with the in-process
-// decrypt/decompress pipeline's Close error — used by the verify (List) path, which reads
-// a server-local decoded stream rather than composing host-placed stages. tar (`-t`) sits
-// last in that pipe, so when an upstream child fails (a wrong key, a missing passphrase,
-// codec drift) tar only sees truncated input and reports a generic "not a tar archive";
-// the real cause surfaces on the pipeline's Close. Surfacing both keeps a key/decrypt
-// failure from hiding behind tar's misleading message.
-func joinPipelineErr(consumeErr, closeErr error) error {
-	if consumeErr == nil {
-		return closeErr // normal Close returns nil; a late pipeline error still surfaces
-	}
-	if closeErr != nil {
-		return fmt.Errorf("%w\n(decrypt/decompress pipeline: %v)", consumeErr, closeErr)
-	}
-	return consumeErr
-}
-
 // OpenRecover builds a browsable filesystem of a DLE as of a date (YYYY-MM-DD) —
 // the amrecover entry point. It reads only the catalog (the member index lives in
 // the seals), so no media is touched until files are extracted.

@@ -20,6 +20,7 @@ import (
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/slotio"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
+	"github.com/Niloen/nbackup/internal/xfer"
 )
 
 // Drill is NBackup's recovery-drill orchestration — the recoverability ("0 errors")
@@ -275,42 +276,24 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 			return classifyOpenErr(err), err.Error()
 		}
 		logf.log("drill-restoring %s %s L%d", step.SlotID, e.DisplayDLE(step.DLE), step.Level)
-		// Decode server-side as a SEPARATE pipeline from the extract, so a decrypt/decompress
-		// fault surfaces on the decode reap (ClassPipeline) and a tar composition fault on the
-		// extract reap (ClassChain) — the split the drill classifies on. Driving the proof on
-		// the client for a client-only key is the documented follow-on — see the design note.
-		pipe, err := e.aio.DecodePipeline(step.Encrypt, step.Compress, config.EncryptConfig{}, "")
-		if err != nil {
-			raw.Close()
-			return drill.ClassPipeline, err.Error()
-		}
-		decoded, dwait, derr := programs.RunGrouped(raw, pipe.Reverse()...)
+		// The transfer: read → decode (server-side Filters) → tar -x extract. The transfer's
+		// role tags the fault: a Sink (tar) fault is a chain-composition failure (Chain); a
+		// Source/Filters fault — an unreadable part or a decrypt/decompress child — is a decode
+		// failure (Pipeline). Driving the proof on the client for a client-only key is the
+		// documented follow-on — see the design note.
+		decrypt, decompress, derr := e.decodeFilters(step.Compress, step.Encrypt)
 		if derr != nil {
 			raw.Close()
 			return drill.ClassPipeline, derr.Error()
 		}
-		out, wait, rerr := programs.RunGrouped(decoded, programs.Stage{Cmd: arch.RestoreStage(dir, nil), Exec: programs.Local()})
-		if rerr != nil {
-			decoded.Close()
-			raw.Close()
-			return drill.ClassPipeline, rerr.Error()
-		}
-		_, copyErr := io.Copy(io.Discard, out) // tar -x writes to the fs; its stdout is empty
-		out.Close()
-		werr := wait() // tar — a chain composition fault
-		decoded.Close()
-		dErr := dwait()       // decrypt/decompress children — a decode fault
-		rawErr := raw.Close() // a media-read fault on the ciphertext parts
-		if dErr != nil || rawErr != nil {
-			// A lost/wrong key, codec drift, or unreadable parts — surfaced on the decode reap.
-			return drill.ClassPipeline, decryptHint(step.Encrypt, errors.Join(dErr, rawErr)).Error()
-		}
-		if werr == nil {
-			werr = copyErr
-		}
-		if werr != nil {
-			// The bytes decoded but tar could not apply the listed-incremental chain.
-			return drill.ClassChain, werr.Error()
+		sink := xfer.NewPrograms(programs.Local()).Add(arch.RestoreStage(dir, nil))
+		_, terr := xfer.Transfer(xfer.Reader(raw), localDecode(decrypt, decompress), sink, xfer.Opts{})
+		if terr != nil {
+			var xe *xfer.Error
+			if errors.As(terr, &xe) && xe.Role == xfer.RoleSink {
+				return drill.ClassChain, terr.Error()
+			}
+			return drill.ClassPipeline, decryptHint(step.Encrypt, terr).Error()
 		}
 	}
 	return drill.ClassNone, ""

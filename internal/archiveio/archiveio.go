@@ -26,7 +26,6 @@ import (
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/slotio"
-	"github.com/Niloen/nbackup/internal/transform"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
@@ -125,36 +124,6 @@ func (a *IO) PartOpener(medium string) (slotio.PartOpener, error) {
 	}, nil
 }
 
-// DecodePipeline builds the archive payload's transform pipeline placed for the decode
-// direction: the same compress+encrypt chain a dump applied, so Pipeline.Reverse() yields
-// the decrypt-then-decompress stages. Decrypt — the only stage that needs the key — runs on
-// the target host for a client-held key reached over `--to`, and on the server (Local)
-// otherwise. Decompress always runs on the target host, so a remote restore ships
-// compressed bytes over the wire rather than inflating them first.
-func (a *IO) DecodePipeline(encrypt, codec string, ec config.EncryptConfig, targetHost string) (transform.Pipeline, error) {
-	target := a.deps.Executor(targetHost)
-	decExec := programs.Executor(programs.Local())
-	copts := a.deps.DecryptOpts()
-	if ec.At == "client" && targetHost != "" {
-		decExec = target
-		copts = crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile}
-	}
-	compF, err := compress.Filter(codec, a.deps.CompressOpts())
-	if err != nil {
-		return nil, err
-	}
-	encF, err := crypt.Filter(encrypt, copts)
-	if err != nil {
-		return nil, err
-	}
-	// Encode order is compress then encrypt; Reverse() undoes it (decrypt, then decompress),
-	// with decompress on the target host and decrypt where the key lives.
-	return transform.Pipeline{
-		{Filter: compF, Exec: target},
-		{Filter: encF, Exec: decExec},
-	}, nil
-}
-
 // Extract streams an archive's raw parts through the decode→extract pipeline into destDir
 // on targetHost (members nil = a whole-archive listed-incremental chain restore; members
 // set = selected-file recovery, no deletions). It returns the raw pipeline error; the
@@ -209,29 +178,6 @@ func (a *IO) Extract(ref Ref, codec, encrypt, archiverType, destDir, targetHost 
 
 	_, err = xfer.Transfer(xfer.Reader(raw), xfer.NewFilters(filterCmds...), sink, xfer.Opts{})
 	return err
-}
-
-// RunDecodePipeline runs a decode→extract stage chain, draining the (empty) extractor
-// stdout and reaping every stage. Stages are reaped in pipeline order, so when an upstream
-// child fails (a wrong key, a codec drift) its error — not the downstream "truncated input"
-// symptom it causes in tar — is the one returned.
-func RunDecodePipeline(raw io.ReadCloser, stages ...programs.Stage) error {
-	out, wait, err := programs.RunGrouped(raw, stages...)
-	if err != nil {
-		raw.Close()
-		return err
-	}
-	_, copyErr := io.Copy(io.Discard, out) // tar -x writes to the fs; its stdout is empty
-	out.Close()
-	werr := wait()
-	cerr := raw.Close() // a media-read fault on the ciphertext parts surfaces here
-	if werr == nil {
-		werr = copyErr
-	}
-	if werr == nil {
-		werr = cerr
-	}
-	return werr
 }
 
 // eachPlacement resolves the placements holding ref's slot (all copies, or only those on
