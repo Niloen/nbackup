@@ -26,7 +26,6 @@ import (
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
-	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
@@ -61,20 +60,15 @@ type Mounter interface {
 	ReadFileAt(volume string, epoch, pos int) (record.Header, io.ReadCloser, error)
 }
 
-// Deps is the rest of what the data path needs from the orchestrator — services beside the
-// map: volume mounting, host transport, archiver resolution, transform options. The engine
-// implements it; this interface is the explicit boundary between deciding and doing.
+// Deps is the rest of what the data path needs from the orchestrator beside the map: just the
+// medium's volume mount and its bandwidth cap. (The transforms, the tar endpoints, and the
+// archiver/executor resolution all moved up to the operations.) The engine implements it; this
+// interface is the explicit boundary between deciding and doing.
 type Deps interface {
 	// MounterFor returns a read-mount onto a medium's volumes.
 	MounterFor(medium string) (Mounter, error)
 	// Limiter returns the medium's shared bandwidth cap (nil = uncapped).
 	Limiter(medium string) *xfer.Limiter
-	// Executor returns the transport that runs programs on a host (Local or remote) — the
-	// write side still fuses client-side encode stages onto the source host.
-	Executor(host string) programs.Executor
-	// EncodePlacement is the per-dumptype compress/encrypt invocation options plus where each
-	// transform runs (client vs the local server). (Write side; moves out with the Dumper.)
-	EncodePlacement(dumpType string) EncodePlacement
 }
 
 // ErrMissingCopy marks a read failure where the catalog knows of no available copy of the

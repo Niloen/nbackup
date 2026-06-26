@@ -614,7 +614,11 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		if serr != nil {
 			return fmt.Errorf("copy %s L%d to %q: %w", j.Ref.DLE, j.Ref.Level, targetMedia, serr)
 		}
-		if werr := session.Copy(src, j.Ref, metaByRef[j.Ref]); werr != nil {
+		// Re-author the archive raw (no transform) onto the target's volumes. Load the members
+		// so the target writes a real member index (keeping that copy self-describing).
+		meta := metaByRef[j.Ref]
+		meta.Members, _ = e.clerk.Members(j.Ref)
+		if _, werr := xfer.Transfer(src, xfer.NewFilters(), session.CopySink(meta), xfer.Opts{}); werr != nil {
 			return fmt.Errorf("copy %s L%d to %q: %w", j.Ref.DLE, j.Ref.Level, targetMedia, werr)
 		}
 	}
@@ -1250,7 +1254,7 @@ func (e *Engine) backupItem(session *clerk.Session, item planner.Item, tr *progr
 	}
 
 	logf.log("archiving %s (L%d)", item.DLE.ID(), item.Level)
-	sum, err = session.Backup(spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
+	sum, err = e.dumpArchive(session, spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
 	if err != nil {
 		return fmt.Errorf("archive %s: %w", item.Name, err)
 	}
@@ -1274,10 +1278,10 @@ func (e *Engine) backupItem(session *clerk.Session, item planner.Item, tr *progr
 // the request (with the dumptype's excludes), and for an incremental requires the base
 // incremental state to be present. It is pure intent — the schemes, transform placement, and
 // storage record are the session's to derive.
-func (e *Engine) backupSpec(item planner.Item) (clerk.BackupSpec, error) {
+func (e *Engine) backupSpec(item planner.Item) (BackupSpec, error) {
 	ar, err := e.archiverFor(item.DLE.DumpTypeName(), item.DLE.Host)
 	if err != nil {
-		return clerk.BackupSpec{}, err
+		return BackupSpec{}, err
 	}
 	req := archiver.BackupRequest{
 		DLE:        item.Name,
@@ -1289,11 +1293,11 @@ func (e *Engine) backupSpec(item planner.Item) (clerk.BackupSpec, error) {
 	if item.Level >= 1 {
 		req.BaseLevel = item.BaseLevel
 		if !ar.HasBase(item.Name, item.BaseLevel) {
-			return clerk.BackupSpec{}, fmt.Errorf("DLE %s: incremental L%d needs the L%d incremental state but it is missing",
+			return BackupSpec{}, fmt.Errorf("DLE %s: incremental L%d needs the L%d incremental state but it is missing",
 				item.Name, item.Level, item.BaseLevel)
 		}
 	}
-	return clerk.BackupSpec{
+	return BackupSpec{
 		Archiver: ar,
 		Request:  req,
 		Host:     item.DLE.Host,
@@ -1465,22 +1469,6 @@ func (e *Engine) RestoreArchiver(typeName, host string) (archiver.Archiver, erro
 // CompressOpts / DecryptOpts are the config-derived decode-pipeline invocation options.
 func (e *Engine) CompressOpts() compress.Options { return e.fopts }
 func (e *Engine) DecryptOpts() crypt.Options     { return e.dcopts }
-
-// EncodePlacement is the write-side peer: the per-dumptype compress/encrypt invocation
-// options plus where each transform runs. Compression placement comes from the dumptype's
-// `compress` field, encryption from its `encrypt.at`; the schemes themselves ride in the
-// record the clerk is writing.
-func (e *Engine) EncodePlacement(dumpType string) clerk.EncodePlacement {
-	encScheme, encOpts := e.encryptionFor(dumpType)
-	return clerk.EncodePlacement{
-		Codec:          e.codec,
-		CompressOpts:   e.fopts,
-		CompressClient: e.cfg.ResolveDumpType(dumpType).Compress == "client",
-		EncryptScheme:  encScheme,
-		EncryptOpts:    encOpts,
-		EncryptClient:  e.cfg.EncryptionFor(dumpType).At == "client",
-	}
-}
 
 // ensureServerCanDecode fails fast when a restore would have the server decrypt an
 // archive whose key cannot be there. Decode is server-side for both a plain restore and
