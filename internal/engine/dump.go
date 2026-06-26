@@ -13,10 +13,20 @@ import (
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// dump.go is the engine's write-side transfer composition (the Dumper): it builds the tar
-// source and the encode filters, places each transform on the client or the server, and runs
-// the transfer into a clerk-provided medium sink — then the clerk commits + records. The codec
-// and tar live here, in the operation; the clerk only lands and records bytes.
+// dump.go is NBackup's write-side codec operation (the Dumper), the mirror of decode.go: it
+// builds the tar source and the encode filters, places each transform on the client or the
+// server, and runs the transfer into a clerk-provided medium sink — then the clerk commits +
+// records. The codec and tar live here, in the operation; the clerk only lands and records
+// bytes. The encoder depends on just one slice of the orchestrator — how to resolve a
+// dumptype's encode recipe — not the whole engine.
+type encoder struct {
+	placement func(dumpType string) EncodePlacement // a dumptype's resolved encode recipe
+}
+
+// newEncoder wires an encoder to the engine's dumptype-recipe resolution.
+func (e *Engine) newEncoder() *encoder {
+	return &encoder{placement: e.encodePlacement}
+}
 
 // BackupSpec describes one archive to back up: the resolved archiver and its request, plus the
 // identity bits not in the request (the DLE's host, the base slot for an incremental, and the
@@ -60,8 +70,8 @@ func (e *Engine) encodePlacement(dumpType string) EncodePlacement {
 // host) → the encode filters placed per the dumptype (client-side fused into the source,
 // server-side as local Filters) → the slot's medium sink — then commits the archive. prog, if
 // non-nil, receives running (uncompressed, compressed) counts. It returns a Summary.
-func (e *Engine) dumpArchive(session *clerk.Session, spec BackupSpec, prog func(uncompressed, compressed int64)) (clerk.Summary, error) {
-	pl := e.encodePlacement(spec.DumpType)
+func (enc *encoder) dumpArchive(session *clerk.Session, spec BackupSpec, prog func(uncompressed, compressed int64)) (clerk.Summary, error) {
+	pl := enc.placement(spec.DumpType)
 	compF, err := compress.Filter(pl.Codec, pl.CompressOpts)
 	if err != nil {
 		return clerk.Summary{}, err

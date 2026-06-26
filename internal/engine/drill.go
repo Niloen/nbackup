@@ -287,7 +287,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		// Build the decode filters first (a bad scheme fails before any media is opened), then
 		// open the copy-selected source — an open fault (missing copy/volume) is classifiable
 		// here, before bytes flow.
-		decrypt, decompress, derr := e.decodeFilters(step.Compress, step.Encrypt)
+		decrypt, decompress, derr := e.dec.decodeFilters(step.Compress, step.Encrypt)
 		if derr != nil {
 			return drill.ClassPipeline, derr.Error()
 		}

@@ -72,6 +72,8 @@ type Engine struct {
 	dcopts      crypt.Options                 // decrypt key reference for restore (from the default encrypt block)
 	op          librarian.Operator            // optional: handles manual tape swaps (nil = unattended)
 	limiters    map[string]*ratelimit.Limiter // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
+	dec         *decoder                      // the read-side codec operation (restore/verify/list); shares the engine's resolution + decode opts
+	enc         *encoder                      // the write-side codec operation (dump); shares the engine's dumptype-recipe resolution
 }
 
 // SetOperator attaches an operator so manual single-drive media can prompt for a
@@ -193,6 +195,8 @@ func New(cfg *config.Config) (*Engine, error) {
 		limiters:    limiters,
 	}
 	e.clerk = clerk.New(e, e, catalog.OpenMemberIndex(cfg.WorkdirPath()))
+	e.dec = e.newDecoder()
+	e.enc = e.newEncoder()
 	return e, nil
 }
 
@@ -1256,7 +1260,7 @@ func (e *Engine) backupItem(session *clerk.Session, item planner.Item, tr *progr
 	}
 
 	logf.log("archiving %s (L%d)", item.DLE.ID(), item.Level)
-	sum, err = e.dumpArchive(session, spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
+	sum, err = e.enc.dumpArchive(session, spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
 	if err != nil {
 		return fmt.Errorf("archive %s: %w", item.Name, err)
 	}
@@ -1422,7 +1426,7 @@ func (e *Engine) extractInto(slotID, dle string, level int, codec, encrypt, arch
 		return decryptHint(encrypt, err)
 	}
 	plan := e.decodePlan(codec, encrypt, ec, targetHost)
-	return decryptHint(encrypt, e.restoreArchive(src, plan, archiverType, destDir, targetHost, members))
+	return decryptHint(encrypt, e.dec.restoreArchive(src, plan, archiverType, destDir, targetHost, members))
 }
 
 // decodePlan resolves the decode placement (engine policy): decrypt runs on the target (the
@@ -1617,7 +1621,7 @@ func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, 
 			return serr
 		}
 		plan := e.decodePlan(st.Compress, st.Encrypt, config.EncryptConfig{}, "")
-		if err := decryptHint(st.Encrypt, e.restoreArchive(rc, plan, st.Archiver, destDir, "", st.Members)); err != nil {
+		if err := decryptHint(st.Encrypt, e.dec.restoreArchive(rc, plan, st.Archiver, destDir, "", st.Members)); err != nil {
 			return err
 		}
 		files += countFiles(st.Members)
