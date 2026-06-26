@@ -227,10 +227,8 @@ func (e *Engine) drillTarget(t drill.Target, medium string, opts DrillOptions, l
 // drillVerify exercises a target's chain archives with the verify primitive on the
 // chosen medium (checksum, or checksum+structural). It stops at the first fault.
 func (e *Engine) drillVerify(t drill.Target, medium string, checks VerifyChecks) (drill.Class, string) {
-	opener, err := e.clerk.PartOpener(medium)
-	if err != nil {
-		return drill.ClassPipeline, err.Error()
-	}
+	refs := make([]clerk.Ref, 0, len(t.Steps))
+	archByRef := make(map[clerk.Ref]record.Archive, len(t.Steps))
 	for _, step := range t.Steps {
 		s, err := e.cat.ReadSlot(step.SlotID)
 		if err != nil {
@@ -240,11 +238,19 @@ func (e *Engine) drillVerify(t drill.Target, medium string, checks VerifyChecks)
 		if !ok {
 			return drill.ClassMissing, fmt.Sprintf("%s %s L%d missing from seal", step.SlotID, step.DLE, step.Level)
 		}
-		ps := placementsOnMedium(e.placementsFor(step.SlotID), medium)
-		if len(ps) == 0 {
-			return drill.ClassMissing, fmt.Sprintf("no copy of %s on medium %q", step.SlotID, medium)
-		}
-		v := e.verifyArchive(step.SlotID, a, ps[0], VerifyOptions{Checks: checks, Medium: medium}, opener, nil)
+		ref := clerk.Ref{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}
+		refs = append(refs, ref)
+		archByRef[ref] = a
+	}
+	jobs, err := e.clerk.OpenArchives(refs, medium)
+	if err != nil {
+		return drill.ClassPipeline, err.Error()
+	}
+	if len(jobs) != len(refs) {
+		return drill.ClassMissing, fmt.Sprintf("no copy on medium %q", medium)
+	}
+	for _, j := range jobs {
+		v := e.verifyArchive(archByRef[j.Ref], j, medium, VerifyOptions{Checks: checks, Medium: medium}, nil)
 		if !v.OK {
 			return v.Class, v.Detail
 		}

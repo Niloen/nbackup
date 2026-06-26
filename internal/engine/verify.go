@@ -6,7 +6,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/drill"
@@ -137,7 +136,11 @@ func (e *Engine) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerd
 	var goodCopies, badCopies, skippedCopies []string
 	for _, p := range placements {
 		copyOK := true
-		opener, err := e.clerk.PartOpener(p.Medium)
+		refs := make([]clerk.Ref, len(s.Archives))
+		for i, a := range s.Archives {
+			refs[i] = clerk.Ref{Slot: id, DLE: a.DLE, Level: a.Level}
+		}
+		jobs, err := e.clerk.OpenArchives(refs, p.Medium)
 		if err != nil {
 			// A copy on a medium this config does not define is out of scope, not
 			// damaged: skip it (with a note) rather than reporting a false integrity
@@ -156,8 +159,19 @@ func (e *Engine) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerd
 			})
 			continue
 		}
+		jobByRef := make(map[clerk.Ref]clerk.ReadJob, len(jobs))
+		for _, j := range jobs {
+			jobByRef[j.Ref] = j
+		}
 		for _, a := range s.Archives {
-			v := e.verifyArchive(id, a, p, opts, opener, logf)
+			var v ArchiveVerdict
+			if j, ok := jobByRef[(clerk.Ref{Slot: id, DLE: a.DLE, Level: a.Level})]; ok {
+				v = e.verifyArchive(a, j, p.Medium, opts, logf)
+			} else {
+				logf.log("%s [%s]: %s L%d POSITION MISSING", id, p.Medium, a.DLEID(), a.Level)
+				v = ArchiveVerdict{Slot: id, DLE: a.DLE, Level: a.Level, Medium: p.Medium, OK: false,
+					Class: drill.ClassMissing, Detail: "archive position missing on this copy"}
+			}
 			sv.Archives = append(sv.Archives, v)
 			if !v.OK {
 				sv.OK = false
@@ -187,39 +201,33 @@ func (e *Engine) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerd
 	return sv, nil
 }
 
-// verifyArchive runs the requested checks against one archive on one placement.
-func (e *Engine) verifyArchive(id string, a record.Archive, p catalog.Placement, opts VerifyOptions, opener archiveio.PartOpener, logf Logf) ArchiveVerdict {
-	v := ArchiveVerdict{Slot: id, DLE: a.DLE, Level: a.Level, Medium: p.Medium, OK: true}
-	parts, found := p.Parts(a.DLE, a.Level)
-	if !found {
-		logf.log("%s [%s]: %s L%d POSITION MISSING", id, p.Medium, a.DLEID(), a.Level)
-		v.OK, v.Class, v.Detail = false, drill.ClassMissing, "archive position missing on this copy"
-		return v
-	}
-	want := archiveio.Expect{Slot: id, DLE: a.DLE, Level: a.Level}
+// verifyArchive runs the requested checks against one archive, read via a plan job.
+func (e *Engine) verifyArchive(a record.Archive, job clerk.ReadJob, medium string, opts VerifyOptions, logf Logf) ArchiveVerdict {
+	id := job.Ref.Slot
+	v := ArchiveVerdict{Slot: id, DLE: a.DLE, Level: a.Level, Medium: medium, OK: true}
 
 	if opts.Checks.has(CheckChecksum) {
-		src, serr := e.clerk.PartsSource(parts, want, opener)
+		src, serr := job.Source()
 		if serr != nil {
-			logf.log("%s [%s]: %s L%d ERROR %v", id, p.Medium, a.DLEID(), a.Level, serr)
+			logf.log("%s [%s]: %s L%d ERROR %v", id, medium, a.DLEID(), a.Level, serr)
 			v.OK, v.Class, v.Detail = false, drill.ClassPipeline, serr.Error()
 			return v
 		}
 		good, err := e.clerk.VerifyChecksum(src, a.SHA256)
 		if err != nil {
-			logf.log("%s [%s]: %s L%d ERROR %v", id, p.Medium, a.DLEID(), a.Level, err)
+			logf.log("%s [%s]: %s L%d ERROR %v", id, medium, a.DLEID(), a.Level, err)
 			v.OK, v.Class, v.Detail = false, drill.ClassPipeline, err.Error()
 			return v
 		}
 		if !good {
-			logf.log("%s [%s]: %s L%d CHECKSUM MISMATCH", id, p.Medium, a.DLEID(), a.Level)
+			logf.log("%s [%s]: %s L%d CHECKSUM MISMATCH", id, medium, a.DLEID(), a.Level)
 			v.OK, v.Class, v.Detail = false, drill.ClassIntegrity, "checksum mismatch vs seal"
 			return v
 		}
 	}
 	if opts.Checks.has(CheckStructural) {
-		if cls, detail := e.structuralCheck(id, a, parts, want, opener); cls != drill.ClassNone {
-			logf.log("%s [%s]: %s L%d STRUCTURAL %s: %s", id, p.Medium, a.DLEID(), a.Level, cls, detail)
+		if cls, detail := e.structuralCheck(id, a, job); cls != drill.ClassNone {
+			logf.log("%s [%s]: %s L%d STRUCTURAL %s: %s", id, medium, a.DLEID(), a.Level, cls, detail)
 			v.OK, v.Class, v.Detail = false, cls, detail
 			return v
 		}
@@ -229,9 +237,8 @@ func (e *Engine) verifyArchive(id string, a record.Archive, p catalog.Placement,
 
 // structuralCheck streams the archive through the real read pipeline and lists its
 // members (`tar -t`), asserting the pipeline completes cleanly and the members match
-// the seal. It returns ClassNone on success, else the failure class and detail. It
-// writes nothing.
-func (e *Engine) structuralCheck(id string, a record.Archive, parts []record.FilePos, want archiveio.Expect, opener archiveio.PartOpener) (drill.Class, string) {
+// the recorded list. It returns ClassNone on success, else the failure class and detail.
+func (e *Engine) structuralCheck(id string, a record.Archive, job clerk.ReadJob) (drill.Class, string) {
 	// Verify is the keyless, server-side integrity primitive: structural decode runs on
 	// the server (host ""). The client-side recoverability proof (running the read
 	// pipeline on the client for a client-only key) is drill's job — see the design note.
@@ -239,7 +246,7 @@ func (e *Engine) structuralCheck(id string, a record.Archive, parts []record.Fil
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
-	src, err := e.clerk.PartsSource(parts, want, opener)
+	src, err := job.Source()
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
