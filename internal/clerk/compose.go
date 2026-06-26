@@ -32,9 +32,9 @@ func (c *Clerk) OpenSlot(w *archiveio.Writer, medium string) *Session {
 // WriteArchive writes a fresh archive's already-encoded payload onto the slot's volumes,
 // metering (sha256 + size) and splitting it into parts. It returns the measured archive (sha,
 // compressed size, part count) and the part positions; the operation merges the producer's raw
-// stats and calls Commit. progress, if non-nil, receives the running compressed byte count.
-func (s *Session) WriteArchive(meta record.Archive, payload io.Reader, progress func(int64)) (record.Archive, []record.FilePos, error) {
-	return s.w.WriteArchive(meta, payload, progress)
+// stats and calls Commit. tap, if non-nil, receives the running count of landed bytes.
+func (s *Session) WriteArchive(meta record.Archive, payload io.Reader, tap func(int64)) (record.Archive, []record.FilePos, error) {
+	return s.w.WriteArchive(meta, payload, tap)
 }
 
 // CopyArchive re-writes an existing archive's raw payload (no transform) onto this slot's

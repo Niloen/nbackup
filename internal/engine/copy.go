@@ -150,7 +150,7 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		// so the target writes a real member index (keeping that copy self-describing).
 		meta := metaByRef[ref]
 		meta.Members, _ = c.clerk.Members(ref)
-		if _, werr := xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(), &copySink{session: session, meta: meta}, xfer.Opts{}); werr != nil {
+		if _, werr := xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(), &copySink{session: session, meta: meta}); werr != nil {
 			return fmt.Errorf("copy %s L%d to %q: %w", ref.DLE, ref.Level, targetMedia, werr)
 		}
 		return nil
