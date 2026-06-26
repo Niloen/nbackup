@@ -121,7 +121,7 @@ func (c *Clerk) OpenArchives(refs []Ref, medium string) ([]ReadJob, error) {
 // the first placement in read-preference order (the engine's own copy first) that has the
 // archive's parts.
 func (c *Clerk) locate(ref Ref, medium string) (string, []record.FilePos, bool) {
-	for _, p := range c.deps.PlacementsFor(ref.Slot) {
+	for _, p := range c.cat.PlacementsFor(ref.Slot) {
 		if medium != "" && p.Medium != medium {
 			continue
 		}

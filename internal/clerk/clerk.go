@@ -47,13 +47,20 @@ func (r Ref) expect() archiveio.Expect {
 	return archiveio.Expect{Slot: r.Slot, DLE: r.DLE, Level: r.Level}
 }
 
-// Deps is what the data path needs from the orchestrator. The engine implements it; this
-// interface is the explicit boundary between the control plane (deciding) and the data
-// plane (doing).
-type Deps interface {
-	// PlacementsFor returns the copies of a slot, in read-preference order (the engine's
-	// own medium first).
+// Map is the clerk's slice of the catalog — the archive map (the inode/extent table). The
+// clerk resolves it on read (which copies of a slot, and where each archive's parts live) and
+// records it on write (where a run's archives landed). It is the one role through which the
+// clerk owns map I/O; the engine implements it (and keeps the directory/retention/volume
+// slices). PlacementsFor returns copies in read-preference order (the engine's own first).
+type Map interface {
 	PlacementsFor(slotID string) []catalog.Placement
+	Record(slot *record.Slot, p catalog.Placement) error
+}
+
+// Deps is the rest of what the data path needs from the orchestrator — services beside the
+// map: librarian mounting, host transport, archiver resolution, transform options. The engine
+// implements it; this interface is the explicit boundary between deciding and doing.
+type Deps interface {
 	// LibrarianFor returns a librarian that can mount and read a medium's volumes.
 	LibrarianFor(medium string) (*librarian.Librarian, error)
 	// Limiter returns the medium's shared bandwidth cap (nil = uncapped).
@@ -82,13 +89,15 @@ var ErrMissingCopy = errors.New("no available copy")
 // regardless of which operation needs it.
 type Clerk struct {
 	deps   Deps
+	cat    Map
 	reader *archiveio.Reader
 	mindex *catalog.MemberIndex
 }
 
-// New returns a data path backed by deps, using mindex as the server-side member cache.
-func New(deps Deps, mindex *catalog.MemberIndex) *Clerk {
-	return &Clerk{deps: deps, reader: archiveio.NewReader(), mindex: mindex}
+// New returns a data path over the archive map and the orchestrator's services, using mindex
+// as the server-side member cache.
+func New(cat Map, deps Deps, mindex *catalog.MemberIndex) *Clerk {
+	return &Clerk{deps: deps, cat: cat, reader: archiveio.NewReader(), mindex: mindex}
 }
 
 // Members returns an archive's member list, lazily: from the member-index cache, else by
@@ -100,7 +109,7 @@ func (c *Clerk) Members(ref Ref) ([]string, error) {
 	} else if ok {
 		return members, nil
 	}
-	for _, p := range c.deps.PlacementsFor(ref.Slot) {
+	for _, p := range c.cat.PlacementsFor(ref.Slot) {
 		pos, ok := indexPosOf(p, ref.DLE, ref.Level)
 		if !ok {
 			continue
@@ -256,7 +265,7 @@ func (c *Clerk) Restore(src xfer.Source, plan DecodePlan, archiverType, destDir,
 // one succeeds, so a read fails over to another copy. It is the one place the raw read paths
 // share copy selection and the missing-copy errors (ErrMissingCopy).
 func (c *Clerk) eachPlacement(ref Ref, medium string, open func(parts []record.FilePos, p catalog.Placement) (io.ReadCloser, error)) (io.ReadCloser, error) {
-	placements := c.deps.PlacementsFor(ref.Slot)
+	placements := c.cat.PlacementsFor(ref.Slot)
 	if medium != "" {
 		placements = onMedium(placements, medium)
 	}

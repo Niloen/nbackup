@@ -4,9 +4,11 @@ import (
 	"errors"
 	"io"
 	"sync/atomic"
+	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
+	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/transform/compress"
@@ -106,17 +108,37 @@ func LocalDecode(decrypt, decompress programs.Cmd) xfer.Filters {
 
 // --- the write-side slot session ---
 
-// Session authors one slot: the engine opens it over a archiveio.Writer, backs up (or copies)
-// each archive into it, and seals via the writer. It is the write peer of the read verbs —
-// the single place a record.Archive and its parts are assembled, so the engine describes a
-// backup (intent) and the session produces the artifact, never the reverse.
+// Session authors one slot onto medium: the engine opens it over an archiveio.Writer, backs up
+// (or copies) each archive into it, and Finishes — which records the run in the map. It is the
+// write peer of the read verbs — the single place a record.Archive, its parts, and its
+// placement are assembled, so the engine describes a backup (intent) and the session produces
+// (and records) the artifact, never the reverse.
 type Session struct {
-	clerk *Clerk
-	w     *archiveio.Writer
+	clerk  *Clerk
+	w      *archiveio.Writer
+	medium string
 }
 
-// OpenSlot starts a write session over an open slot writer.
-func (c *Clerk) OpenSlot(w *archiveio.Writer) *Session { return &Session{clerk: c, w: w} }
+// OpenSlot starts a write session over an open slot writer landing on medium.
+func (c *Clerk) OpenSlot(w *archiveio.Writer, medium string) *Session {
+	return &Session{clerk: c, w: w, medium: medium}
+}
+
+// Finish closes the slot and records the run in the map: it seals the in-memory slot and
+// records its placement (the archives' on-medium positions) under the session's medium. The
+// clerk owns this map write, so every caller that authors a slot gets it recorded the same
+// way. It returns the sealed slot.
+func (s *Session) Finish(now time.Time) (*record.Slot, error) {
+	sealed, err := s.w.Finish(now)
+	if err != nil {
+		return nil, err
+	}
+	placement := catalog.Placement{Medium: s.medium, Archives: s.w.Positions()}
+	if err := s.clerk.cat.Record(sealed, placement); err != nil {
+		return nil, err
+	}
+	return sealed, nil
+}
 
 // BackupSpec describes one archive to back up: the resolved archiver and its request, plus
 // the bits of identity not in the request (the DLE's host, the base slot for an incremental,

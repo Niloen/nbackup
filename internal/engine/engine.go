@@ -190,7 +190,7 @@ func New(cfg *config.Config) (*Engine, error) {
 		dcopts:      dcopts,
 		limiters:    limiters,
 	}
-	e.clerk = clerk.New(e, catalog.OpenMemberIndex(cfg.WorkdirPath()))
+	e.clerk = clerk.New(e, e, catalog.OpenMemberIndex(cfg.WorkdirPath()))
 	return e, nil
 }
 
@@ -608,7 +608,7 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	if len(jobs) != len(refs) {
 		return fmt.Errorf("source copy of %s on %q is missing one or more archives", slotID, fromMedia)
 	}
-	session := e.clerk.OpenSlot(w)
+	session := e.clerk.OpenSlot(w, targetMedia)
 	for _, j := range jobs {
 		src, serr := j.Source()
 		if serr != nil {
@@ -618,11 +618,8 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 			return fmt.Errorf("copy %s L%d to %q: %w", j.Ref.DLE, j.Ref.Level, targetMedia, werr)
 		}
 	}
-	if _, err := w.Finish(now); err != nil {
+	if _, err := session.Finish(now); err != nil {
 		return fmt.Errorf("finish copy on %q: %w", targetMedia, err)
-	}
-	if err := e.cat.Record(s, placementFrom(targetMedia, w)); err != nil {
-		return fmt.Errorf("record copy in catalog: %w", err)
 	}
 	logf.log("copied %s (%d archive(s)) to %q", slotID, len(s.Archives), targetMedia)
 	return nil
@@ -641,13 +638,6 @@ func (e *Engine) copySource(slotID, fromMedia string) (*librarian.Librarian, cat
 		return nil, catalog.Placement{}, err
 	}
 	return lib, src, nil
-}
-
-// placementFrom builds a catalog placement from a sealed writer's recorded part
-// positions and seal location. The writer emits the same record.FilePos/ArchivePos the
-// catalog persists, so a placement is the positions verbatim — no field conversion.
-func placementFrom(medium string, w *archiveio.Writer) catalog.Placement {
-	return catalog.Placement{Medium: medium, Archives: w.Positions()}
 }
 
 // partSizeFor reads a medium's optional part_size parameter (the deliberate per-part
@@ -1057,20 +1047,17 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 	tr := progress.NewTracker(slotID, workers, planProgress(plan.Items), time.Now,
 		progress.NewFileSink(e.cfg.WorkdirPath(), time.Now))
 
-	if err := e.runWorkers(plan.Items, workers, e.clerk.OpenSlot(w), tr, logf); err != nil {
+	session := e.clerk.OpenSlot(w, e.mediumName)
+	if err := e.runWorkers(plan.Items, workers, session, tr, logf); err != nil {
 		tr.SetPhase(progress.PhaseFailed)
 		return nil, err
 	}
 
 	tr.SetPhase(progress.PhaseSealing)
-	sealed, err := w.Finish(time.Now().UTC())
+	sealed, err := session.Finish(time.Now().UTC())
 	if err != nil {
 		tr.SetPhase(progress.PhaseFailed)
 		return nil, err
-	}
-	if err := e.cat.Record(sealed, placementFrom(e.mediumName, w)); err != nil {
-		tr.SetPhase(progress.PhaseFailed)
-		return nil, fmt.Errorf("update catalog cache: %w", err)
 	}
 	tr.SetPhase(progress.PhaseDone)
 	return sealed, nil
@@ -1448,8 +1435,11 @@ func (e *Engine) decodePlan(codec, encrypt string, ec config.EncryptConfig, targ
 // services (catalog placement, librarian mounting, executor/archiver resolution, and the
 // config-derived transform options/placement).
 
-// PlacementsFor returns a slot's copies in read-preference order (own medium first).
-func (e *Engine) PlacementsFor(slotID string) []catalog.Placement { return e.placementsFor(slotID) }
+// PlacementsFor returns a slot's copies in read-preference order (own medium first), and
+// Record records a run's placement — together they are the clerk's Map role (the engine keeps
+// the catalog store + the directory/retention slices).
+func (e *Engine) PlacementsFor(slotID string) []catalog.Placement     { return e.placementsFor(slotID) }
+func (e *Engine) Record(slot *record.Slot, p catalog.Placement) error { return e.cat.Record(slot, p) }
 
 // LibrarianFor returns a librarian that can mount and read a medium's volumes.
 func (e *Engine) LibrarianFor(medium string) (*librarian.Librarian, error) {
