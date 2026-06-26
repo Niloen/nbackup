@@ -16,15 +16,12 @@ func sha(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:
 
 func reader(b []byte) Source { return Reader(io.NopCloser(bytes.NewReader(b))) }
 
-// TestHashSinkMatch: a plain reader → no filters → Hash matches.
+// TestHashSinkMatch: a plain reader → no filters → Hash matches (a mismatch is the
+// Sink-role error TestHashSinkMismatch covers).
 func TestHashSinkMatch(t *testing.T) {
 	data := []byte(strings.Repeat("the quick brown fox\n", 500))
-	res, err := Transfer(reader(data), NewFilters(), Hash(sha(data)), Opts{})
-	if err != nil {
+	if _, err := Transfer(reader(data), NewFilters(), Hash(sha(data)), Opts{}); err != nil {
 		t.Fatalf("Transfer: %v", err)
-	}
-	if res.SHA256 != sha(data) {
-		t.Fatalf("SHA256 = %q", res.SHA256)
 	}
 }
 

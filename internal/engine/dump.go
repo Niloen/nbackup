@@ -128,12 +128,12 @@ func (enc *encoder) dumpArchive(session *clerk.Session, spec BackupSpec, prog fu
 	}).OnCleanup(bs.Cleanup)
 
 	sink := &mediumSink{session: session, meta: meta}
-	res, terr := xfer.Transfer(src, filters, sink,
+	produced, terr := xfer.Transfer(src, filters, sink,
 		xfer.Opts{Progress: func(n int64) { comp.Store(n); report() }})
 	if terr != nil {
 		return clerk.Summary{}, terr
 	}
-	return session.Commit(sink.measured, sink.parts, res.Produced.FileCount, res.Produced.Uncompressed, res.Produced.Members)
+	return session.Commit(sink.measured, sink.parts, produced.FileCount, produced.Uncompressed, produced.Members)
 }
 
 // mediumSink is the operation's xfer.Sink bridge to the clerk's write endpoint: it drains the
@@ -146,13 +146,13 @@ type mediumSink struct {
 	parts    []record.FilePos
 }
 
-func (m *mediumSink) Drain(in io.Reader, progress func(int64)) (xfer.SinkResult, error) {
+func (m *mediumSink) Drain(in io.Reader, progress func(int64)) error {
 	arch, parts, err := m.session.WriteArchive(m.meta, in, progress)
 	if err != nil {
-		return xfer.SinkResult{}, err
+		return err
 	}
 	m.measured, m.parts = arch, parts
-	return xfer.SinkResult{Compressed: arch.Compressed, SHA256: arch.SHA256}, nil
+	return nil
 }
 
 // copySink is the operation's xfer.Sink bridge for a copy: it drains the source's raw bytes
@@ -162,6 +162,6 @@ type copySink struct {
 	meta    record.Archive
 }
 
-func (s *copySink) Drain(in io.Reader, _ func(int64)) (xfer.SinkResult, error) {
-	return xfer.SinkResult{}, s.session.CopyArchive(s.meta, in)
+func (s *copySink) Drain(in io.Reader, _ func(int64)) error {
+	return s.session.CopyArchive(s.meta, in)
 }

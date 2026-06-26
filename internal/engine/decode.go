@@ -111,8 +111,9 @@ func (d *decoder) listMembers(rc io.ReadCloser, codec, encrypt string, arch arch
 	}
 	// A local list runs both transforms server-side (nothing fuses with a far tar).
 	_, filters := splitTransforms(transform{cmd: decrypt}, transform{cmd: decompress})
-	res, terr := xfer.Transfer(xfer.Reader(rc), filters, listSink{arch: arch}, xfer.Opts{})
-	return res.SinkResult.Members, terr
+	ls := &listSink{arch: arch}
+	_, terr := xfer.Transfer(xfer.Reader(rc), filters, ls, xfer.Opts{})
+	return ls.members, terr
 }
 
 // decodeFilters returns the decrypt and decompress commands that reverse an archive's recorded
@@ -130,11 +131,16 @@ func (d *decoder) decodeFilters(codec, encrypt string) (decrypt, decompress prog
 	return ef.Reverse, cf.Reverse, nil
 }
 
-// listSink consumes a decoded stream by listing its members (`tar -t`). A bad stream
-// (truncated decode, not-a-tar) fails the archiver's List; the members feed the comparison.
-type listSink struct{ arch archiver.Archiver }
+// listSink consumes a decoded stream by listing its members (`tar -t`), keeping them on
+// itself for the caller to read after the transfer. A bad stream (truncated decode,
+// not-a-tar) fails the archiver's List; the members feed the comparison.
+type listSink struct {
+	arch    archiver.Archiver
+	members []string
+}
 
-func (s listSink) Drain(in io.Reader, _ func(int64)) (xfer.SinkResult, error) {
+func (s *listSink) Drain(in io.Reader, _ func(int64)) error {
 	members, err := s.arch.List(in)
-	return xfer.SinkResult{Members: members}, err
+	s.members = members
+	return err
 }
