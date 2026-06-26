@@ -56,7 +56,7 @@ registry registration, not a conditional in the core.
 | `transform/crypt` | external encryptor child processes (gpg/none) + registry; `Filter(scheme)` returns the forward/reverse `programs.Cmd` | amcrypt/amgpgcrypt |
 | `programs` | the base: a `Cmd` (external program to run) + an `Execution` transport that runs a pipe of commands on one host, transparently `Local` or `SSH`; the command/execution concept compress, crypt, and the archiver all build on | amandad (replaced by stock sshd) |
 | `xfer` | the data-movement primitive: `Transfer(source, filters, sink)` moves one stream through three zones — a `Source` (a client's tar, or a medium read), local `Filters` (compress/encrypt or decrypt/decompress), and a `Sink` (a medium, a target's tar, a hash) — tagging faults by zone; plus the `Meter`/`Limiter` byte pieces | Amanda Xfer / netusage |
-| `archiveio` | the read data path: copy selection + fail-over, mounting volumes via the librarian, building the decode transfer from the record (`Extract`); the read peer of the engine's dump | Recovery::Clerk |
+| `clerk` | the archive data path (both directions): composes each operation as one `xfer.Transfer` — `Backup`/`Copy` (write: archiver tar source → encode filters → medium sink), `Extract`/`ListMembers`/`VerifyChecksum` (read: copy selection + fail-over, mounting volumes via the librarian, decode from the record), and the shared `DecodeFilters` builder used by drill. Owns the two slotio-coupled endpoints (archive `Source`, medium `Sink`) | Scribe + Recovery::Clerk |
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `report` | per-run history record + JSONL/summary file I/O + digest render | amreport |
 | `notify` | pluggable alert backends (smtp/webhook) + registry + dispatch | amreport mailto |
@@ -66,22 +66,24 @@ registry registration, not a conditional in the core.
 | `recovery` | as-of-date browse tree + per-archive file selection (pure) | amrecover |
 | `drill` | recovery-drill ledger + risk-biased selection + failure taxonomy (pure) | amverify (orchestrated) |
 | `planner` | multilevel level scheduling (pure) | planner |
-| `engine` | the driver: parallel workers, wires planner→archiver→xfer→media→catalog; builds and runs each backup/restore as an `xfer.Transfer` | driver / taper |
+| `engine` | the driver: parallel workers, retention, the slot session (open/seal/placement), drill selection; wires planner→`clerk`→media→catalog and delegates each operation's data movement to the `clerk` | driver |
 | `cli` | thin command wiring | amdump / amadmin |
 
 Dependencies flow one way: `cli → engine → {planner, retention, archiver, xfer,
-archiveio, slotio, catalog, config, progress, restore, recovery}` over leaf packages
+clerk, slotio, catalog, config, progress, restore, recovery}` over leaf packages
 `{media, programs, sizeutil}`, all bottoming out on `record` (the on-medium artifact
 format that `media`, `slotio`, and `catalog` read and write) (`recovery` builds on `restore`). The reporting
 layer adds `cli → {report, notify}` with `notify → {report, config}` — `report` is a
 pure leaf (record + render); the engine does **not** depend on either.
 Domain packages stay pure; `archiver`/`media`/`transform/compress`/`transform/crypt` are
 pluggable adapters; `engine` is the only component aware of all of them. A backup is an
-**`xfer.Transfer`** the engine composes: a **Source** (`tar` via `archiver.Backup` on the
-DLE's host, fused with any client-side compress/encrypt) → local **Filters** (server-side
-compress/encrypt) → a **Sink** (the medium, via `slotio` meter + split into parts).
-Restore is the same in reverse (a medium-read Source → decrypt/decompress Filters → a
-target's `tar -x` Sink), and copy/verify/drill are Transfers with different endpoints.
+**`xfer.Transfer`** the **`clerk`** composes (the engine orchestrates, the clerk moves the
+bytes): a **Source** (`tar` via `archiver.Backup` on the DLE's host, fused with any
+client-side compress/encrypt) → local **Filters** (server-side compress/encrypt) → a
+**Sink** (the medium, via `slotio` meter + split into parts). Restore is the same in reverse
+(a medium-read Source → decrypt/decompress Filters → a target's `tar -x` Sink), and
+copy/verify/drill are Transfers with different endpoints — all composed by the `clerk` from
+the same two slotio-coupled endpoints and the one `DecodeFilters` builder.
 
 ## Load-bearing decisions (the *why*)
 

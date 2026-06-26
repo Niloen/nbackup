@@ -14,12 +14,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
@@ -60,7 +59,7 @@ type Engine struct {
 	mediumName  string       // name of the medium new dumps land on
 	mediumDef   config.Media // its definition
 	vol         media.Volume
-	aio         *archiveio.IO // the archive data path (read); the engine implements its Deps
+	clerk       *clerk.Clerk // the archive data path (read+write composer); the engine implements its Deps
 	profile     media.Profile
 	landingCost media.Cost // landing medium's pricing (dollar peer of profile)
 	minAge      time.Duration
@@ -191,7 +190,7 @@ func New(cfg *config.Config) (*Engine, error) {
 		dcopts:      dcopts,
 		limiters:    limiters,
 	}
-	e.aio = archiveio.New(e)
+	e.clerk = clerk.New(e)
 	return e, nil
 }
 
@@ -592,7 +591,7 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	}
 	w := wt.w
 	logf.log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
-	srcOpen, err := e.aio.PartOpener(fromMedia)
+	srcOpen, err := e.clerk.PartOpener(fromMedia)
 	if err != nil {
 		return err
 	}
@@ -601,14 +600,8 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		if !ok {
 			return fmt.Errorf("source copy of %s on %q is missing %s L%d", slotID, fromMedia, a.DLE, a.Level)
 		}
-		raw, err := e.aio.OpenParts(parts, slotio.Expect{Slot: slotID, DLE: a.DLE, Level: a.Level}, srcOpen)
-		if err != nil {
-			return fmt.Errorf("copy %s L%d to %q: %w", a.DLE, a.Level, targetMedia, err)
-		}
-		// A copy is a transfer with no transform: the same on-medium bytes re-split onto the
-		// target's volumes (copySink re-checksums against the seal, never recompresses).
-		_, werr := xfer.Transfer(xfer.Reader(raw), xfer.NewFilters(), &copySink{w: w, meta: a}, xfer.Opts{})
-		if werr != nil {
+		want := slotio.Expect{Slot: slotID, DLE: a.DLE, Level: a.Level}
+		if werr := e.clerk.Copy(w, parts, want, srcOpen, a); werr != nil {
 			return fmt.Errorf("copy %s L%d to %q: %w", a.DLE, a.Level, targetMedia, werr)
 		}
 	}
@@ -1272,15 +1265,7 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 
 	logf.log("archiving %s (L%d)", item.DLE.ID(), item.Level)
 
-	encScheme, encOpts := e.encryptionFor(item.DLE.DumpTypeName())
-	compFilter, err := compress.Filter(e.codec, e.fopts)
-	if err != nil {
-		return fmt.Errorf("archive %s: %w", item.Name, err)
-	}
-	encFilter, err := crypt.Filter(encScheme, encOpts)
-	if err != nil {
-		return fmt.Errorf("archive %s: %w", item.Name, err)
-	}
+	encScheme, _ := e.encryptionFor(item.DLE.DumpTypeName())
 
 	bs, berr := ar.BackupSource(req)
 	if berr != nil {
@@ -1297,60 +1282,15 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 		BaseSlot: item.BaseSlot,
 	}
 
-	// Place each transform into a transfer zone. A transform configured `at: client` rides
-	// in the SOURCE (fused with tar on the client, so plaintext never leaves it); otherwise
-	// it is a local Filter (server-side). Encryption is downstream of compression and may
-	// only be client-side when compression is too (config validates), so this preserves
-	// order. The medium sink meters the bytes that land, server-side.
-	compressOnClient := e.cfg.ResolveDumpType(item.DLE.DumpTypeName()).Compress == "client"
-	encryptOnClient := e.cfg.EncryptionFor(item.DLE.DumpTypeName()).At == "client"
-
-	var unc, comp atomic.Int64
-	report := func() { tr.AddBytes(pname, unc.Load(), comp.Load()) }
-
-	tarCmd := bs.Stage
-	tarCmd.Tap = func(n int64) { unc.Store(n); report() } // uncompressed (honored when tar runs locally)
-	srcExec := bs.Exec
-	if srcExec == nil {
-		srcExec = programs.Local()
-	}
-	src := xfer.NewPrograms(srcExec).Add(tarCmd)
-	if compressOnClient && compFilter.Forward.Name != "" {
-		src.Add(compFilter.Forward)
-	}
-	if encryptOnClient && encFilter.Forward.Name != "" {
-		src.Add(encFilter.Forward)
-	}
-	src.Finishing(func() (xfer.Produced, error) {
-		res, ferr := bs.Finish()
-		if ferr != nil {
-			return xfer.Produced{}, ferr
-		}
-		if res == nil {
-			return xfer.Produced{}, nil
-		}
-		return xfer.Produced{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members}, nil
-	}).OnCleanup(bs.Cleanup)
-
-	var filterCmds []programs.Cmd
-	if !compressOnClient && compFilter.Forward.Name != "" {
-		filterCmds = append(filterCmds, compFilter.Forward)
-	}
-	if !encryptOnClient && encFilter.Forward.Name != "" {
-		filterCmds = append(filterCmds, encFilter.Forward)
-	}
-
-	sink := &mediumSink{w: w, meta: meta}
-	res, terr := xfer.Transfer(src, xfer.NewFilters(filterCmds...), sink,
-		xfer.Opts{Progress: func(n int64) { comp.Store(n); report() }})
+	// The clerk composes the dump transfer (tar source → encode filters → medium sink),
+	// placing each transform on the client or the server per the dumptype. The engine owns
+	// only the slot session: record the measured archive and its parts into the open writer.
+	arch, parts, terr := e.clerk.Backup(w, bs, meta, item.DLE.DumpTypeName(),
+		func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
 	if terr != nil {
 		return fmt.Errorf("archive %s: %w", item.Name, terr)
 	}
-	arch = sink.arch
-	arch.Uncompressed = res.Uncompressed
-	arch.FileCount = res.FileCount
-	arch.Members = res.Produced.Members
-	w.Record(arch, sink.parts)
+	w.Record(arch, parts)
 
 	sizeLabel := "compressed"
 	if arch.Compress == "none" {
@@ -1476,13 +1416,13 @@ func (e *Engine) extractStep(step restore.Step, destDir, targetHost string, ec c
 // whole-DLE restore, `--to` client restore, and file-level recover all run through it; it
 // adds the decrypt hint to whatever the data path surfaces.
 func (e *Engine) extractInto(slotID, dle string, level int, codec, encrypt, archiverType, destDir, targetHost string, ec config.EncryptConfig, members []string) error {
-	ref := archiveio.Ref{Slot: slotID, DLE: dle, Level: level}
-	return decryptHint(encrypt, e.aio.Extract(ref, codec, encrypt, archiverType, destDir, targetHost, ec, members))
+	ref := clerk.Ref{Slot: slotID, DLE: dle, Level: level}
+	return decryptHint(encrypt, e.clerk.Extract(ref, codec, encrypt, archiverType, destDir, targetHost, ec, members))
 }
 
-// The engine implements archiveio.Deps: the data path's view of the orchestrator's
+// The engine implements clerk.Deps: the data path's view of the orchestrator's
 // services (catalog placement, librarian mounting, executor/archiver resolution, and the
-// config-derived transform options).
+// config-derived transform options/placement).
 
 // PlacementsFor returns a slot's copies in read-preference order (own medium first).
 func (e *Engine) PlacementsFor(slotID string) []catalog.Placement { return e.placementsFor(slotID) }
@@ -1510,6 +1450,20 @@ func (e *Engine) RestoreArchiver(typeName, host string) (archiver.Archiver, erro
 // CompressOpts / DecryptOpts are the config-derived decode-pipeline invocation options.
 func (e *Engine) CompressOpts() compress.Options { return e.fopts }
 func (e *Engine) DecryptOpts() crypt.Options     { return e.dcopts }
+
+// EncodePlacement is the write-side peer: the per-dumptype compress/encrypt invocation
+// options plus where each transform runs. Compression placement comes from the dumptype's
+// `compress` field, encryption from its `encrypt.at`; the schemes themselves ride in the
+// record the clerk is writing.
+func (e *Engine) EncodePlacement(dumpType string) clerk.EncodePlacement {
+	_, encOpts := e.encryptionFor(dumpType)
+	return clerk.EncodePlacement{
+		CompressOpts:   e.fopts,
+		CompressClient: e.cfg.ResolveDumpType(dumpType).Compress == "client",
+		EncryptOpts:    encOpts,
+		EncryptClient:  e.cfg.EncryptionFor(dumpType).At == "client",
+	}
+}
 
 // ensureServerCanDecode fails fast when a restore would have the server decrypt an
 // archive whose key cannot be there. Decode is server-side for both a plain restore and

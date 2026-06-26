@@ -10,7 +10,6 @@ import (
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/slotio"
-	"github.com/Niloen/nbackup/internal/xfer"
 )
 
 // Verify is NBackup's atomic verification primitive (Amanda's amverify): it checks
@@ -137,7 +136,7 @@ func (e *Engine) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerd
 	var goodCopies, badCopies, skippedCopies []string
 	for _, p := range placements {
 		copyOK := true
-		opener, err := e.aio.PartOpener(p.Medium)
+		opener, err := e.clerk.PartOpener(p.Medium)
 		if err != nil {
 			// A copy on a medium this config does not define is out of scope, not
 			// damaged: skip it (with a note) rather than reporting a false integrity
@@ -199,7 +198,7 @@ func (e *Engine) verifyArchive(id string, a record.Archive, p catalog.Placement,
 	want := slotio.Expect{Slot: id, DLE: a.DLE, Level: a.Level}
 
 	if opts.Checks.has(CheckChecksum) {
-		good, err := e.aio.VerifyParts(parts, want, a.SHA256, opener)
+		good, err := e.clerk.VerifyChecksum(parts, want, a.SHA256, opener)
 		if err != nil {
 			logf.log("%s [%s]: %s L%d ERROR %v", id, p.Medium, a.DLEID(), a.Level, err)
 			v.OK, v.Class, v.Detail = false, drill.ClassPipeline, err.Error()
@@ -233,24 +232,15 @@ func (e *Engine) structuralCheck(a record.Archive, parts []record.FilePos, want 
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
-	raw, err := e.aio.OpenParts(parts, want, opener)
-	if err != nil {
-		return drill.ClassPipeline, err.Error()
-	}
-	// The transfer: read the parts → decode (server-side Filters) → list (`tar -t`). Any
-	// fault — a media read, a decode child, or a not-a-tar List — is a Pipeline failure; a
+	// The clerk reads the parts → decodes (server-side Filters) → lists members (`tar -t`).
+	// Any fault — a media read, a decode child, or a not-a-tar List — is a Pipeline failure; a
 	// clean stream whose members differ from the seal is an Integrity failure. The decrypt
 	// hint keeps a lost-key failure from being mislabeled as corruption.
-	decrypt, decompress, err := e.decodeFilters(a.Compress, a.Encrypt)
-	if err != nil {
-		raw.Close()
-		return drill.ClassPipeline, err.Error()
-	}
-	res, terr := xfer.Transfer(xfer.Reader(raw), localDecode(decrypt, decompress), listSink{arch: arch}, xfer.Opts{})
+	members, terr := e.clerk.ListMembers(parts, want, a.Compress, a.Encrypt, opener, arch)
 	if terr != nil {
 		return drill.ClassPipeline, decryptHint(a.Encrypt, terr).Error()
 	}
-	if diff := membersDiff(a.Members, res.SinkResult.Members); diff != "" {
+	if diff := membersDiff(a.Members, members); diff != "" {
 		return drill.ClassIntegrity, diff
 	}
 	return drill.ClassNone, ""

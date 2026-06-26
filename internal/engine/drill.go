@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/librarian"
@@ -18,7 +18,6 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/restore"
 	"github.com/Niloen/nbackup/internal/sizeutil"
-	"github.com/Niloen/nbackup/internal/slotio"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
@@ -228,7 +227,7 @@ func (e *Engine) drillTarget(t drill.Target, medium string, opts DrillOptions, l
 // drillVerify exercises a target's chain archives with the verify primitive on the
 // chosen medium (checksum, or checksum+structural). It stops at the first fault.
 func (e *Engine) drillVerify(t drill.Target, medium string, checks VerifyChecks) (drill.Class, string) {
-	opener, err := e.aio.PartOpener(medium)
+	opener, err := e.clerk.PartOpener(medium)
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
@@ -271,7 +270,14 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		if err != nil {
 			return drill.ClassPipeline, err.Error()
 		}
-		raw, err := e.aio.OpenRaw(archiveio.Ref{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, medium)
+		// Build the decode filters first (a bad scheme fails before any media is opened), then
+		// open the copy-selected source — an open fault (missing copy/volume) is classifiable
+		// here, before bytes flow.
+		decrypt, decompress, derr := e.clerk.DecodeFilters(step.Compress, step.Encrypt)
+		if derr != nil {
+			return drill.ClassPipeline, derr.Error()
+		}
+		src, err := e.clerk.ArchiveSource(clerk.Ref{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, medium)
 		if err != nil {
 			return classifyOpenErr(err), err.Error()
 		}
@@ -281,13 +287,8 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		// Source/Filters fault — an unreadable part or a decrypt/decompress child — is a decode
 		// failure (Pipeline). Driving the proof on the client for a client-only key is the
 		// documented follow-on — see the design note.
-		decrypt, decompress, derr := e.decodeFilters(step.Compress, step.Encrypt)
-		if derr != nil {
-			raw.Close()
-			return drill.ClassPipeline, derr.Error()
-		}
 		sink := xfer.NewPrograms(programs.Local()).Add(arch.RestoreStage(dir, nil))
-		_, terr := xfer.Transfer(xfer.Reader(raw), localDecode(decrypt, decompress), sink, xfer.Opts{})
+		_, terr := xfer.Transfer(src, clerk.LocalDecode(decrypt, decompress), sink, xfer.Opts{})
 		if terr != nil {
 			var xe *xfer.Error
 			if errors.As(terr, &xe) && xe.Role == xfer.RoleSink {
@@ -318,32 +319,23 @@ func (e *Engine) drillStock(t drill.Target, medium string, logf Logf) (drill.Cla
 }
 
 func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf Logf) (drill.Class, string) {
-	ps := placementsOnMedium(e.placementsFor(step.SlotID), medium)
-	if len(ps) == 0 {
-		return drill.ClassMissing, fmt.Sprintf("no copy of %s on medium %q", step.SlotID, medium)
-	}
-	parts, ok := ps[0].Parts(step.DLE, step.Level)
-	if !ok {
-		return drill.ClassMissing, fmt.Sprintf("%s %s L%d position missing on %q", step.SlotID, step.DLE, step.Level, medium)
-	}
-	// Fetch the raw (still-encrypted/compressed) payload to a temp file. NBackup is
-	// used only to move bytes off the medium (unavoidable for tape/cloud); the decode
-	// is done entirely by the documented stock tools below.
-	raw, err := e.aio.OpenPartsOn(parts, slotio.Expect{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, medium)
-	if err != nil {
-		return classifyOpenErr(err), err.Error()
-	}
+	// Fetch the raw (still-encrypted/compressed) payload to a temp file as a transfer whose
+	// sink is just the file — NBackup is used only to move bytes off the medium (unavoidable
+	// for tape/cloud); the decode is done entirely by the documented stock tools below.
 	tmp, err := os.CreateTemp("", "nbackup-drill-raw-*")
 	if err != nil {
-		raw.Close()
 		return drill.ClassPipeline, err.Error()
 	}
-	_, copyErr := io.Copy(tmp, raw)
-	raw.Close()
-	tmp.Close()
 	defer os.Remove(tmp.Name())
-	if copyErr != nil {
-		return classifyOpenErr(copyErr), copyErr.Error()
+	src, err := e.clerk.ArchiveSource(clerk.Ref{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, medium)
+	if err != nil {
+		tmp.Close()
+		return classifyOpenErr(err), err.Error()
+	}
+	_, terr := xfer.Transfer(src, xfer.NewFilters(), xfer.Writer(tmp), xfer.Opts{})
+	tmp.Close()
+	if terr != nil {
+		return classifyOpenErr(terr), terr.Error()
 	}
 
 	script, err := stockPipeline(step.Encrypt, step.Compress)
@@ -466,7 +458,7 @@ func findArchive(s *record.Slot, dle string, level int) (record.Archive, bool) {
 // catalog read path, librarian.ErrVolumeUnavailable from the mount path) via errors.Is,
 // so reclassification does not silently follow a reworded message.
 func classifyOpenErr(err error) drill.Class {
-	if errors.Is(err, archiveio.ErrMissingCopy) || errors.Is(err, librarian.ErrVolumeUnavailable) {
+	if errors.Is(err, clerk.ErrMissingCopy) || errors.Is(err, librarian.ErrVolumeUnavailable) {
 		return drill.ClassMissing
 	}
 	return drill.ClassPipeline
