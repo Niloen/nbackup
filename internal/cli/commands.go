@@ -66,7 +66,7 @@ func newPlanCmd(a *app) *cobra.Command {
 				return runPlanForecast(eng, date, days)
 			}
 
-			plan := eng.Plan(date)
+			plan := eng.PlanWithProgress(date, estimateProgress(a.quiet))
 			fmt.Printf("Plan for run %s  (cycle %dd, landing %q)\n\n",
 				record.DateString(date), plan.Interval, eng.Landing())
 			for _, w := range plan.Warnings {
@@ -276,6 +276,7 @@ func newDumpCmd(a *app) *cobra.Command {
 			}
 			defer unlock()
 			attachOperator(eng)
+			eng.SetRunProgress(runProgress(a.quiet))
 			return a.runReported(cfg, report.Run{Command: report.CommandDump, ExitClass: "dump-failed"}, func() (report.Run, error) {
 				s, err := eng.Run(date, a.logf())
 				if err != nil {

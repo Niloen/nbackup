@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -247,6 +248,71 @@ func TestParallelWorkers(t *testing.T) {
 			t.Fatalf("restore %s: %v", d.Name(), err)
 		}
 		assertContent(t, filepath.Join(dest, names[i]+".txt"), "content-"+names[i])
+	}
+}
+
+// TestPlanWithProgress verifies the estimate phase reports progress: the sink sees
+// every DLE start and finish and a terminal snapshot, and the plan still estimates
+// each source's size (the parallel estimate produces the same result as serial).
+func TestPlanWithProgress(t *testing.T) {
+	cfg := &config.Config{
+		Landing: "disk",
+		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
+		Workdir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	cfg.Parallelism.Workers = 3
+	names := []string{"alpha", "bravo", "charlie", "delta"}
+	for _, n := range names {
+		dir := t.TempDir()
+		write(t, filepath.Join(dir, n+".txt"), "content-"+n)
+		cfg.Sources = append(cfg.Sources, config.DLE{Host: "localhost", Path: dir})
+	}
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	var mu sync.Mutex
+	var terminal bool
+	started, finished := map[string]bool{}, map[string]bool{}
+	sink := func(s progress.Snapshot, _ bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		if s.Phase.Terminal() {
+			terminal = true
+		}
+		for _, d := range s.DLEs {
+			switch d.State {
+			case progress.StateDumping:
+				started[d.Name] = true
+			case progress.StateDone:
+				finished[d.Name] = true
+			}
+		}
+	}
+
+	plan := eng.PlanWithProgress(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), sink)
+
+	if !terminal {
+		t.Error("sink never saw a terminal snapshot")
+	}
+	for _, d := range cfg.Sources {
+		if !started[d.Name()] || !finished[d.Name()] {
+			t.Errorf("DLE %s: started=%v finished=%v, want both", d.Name(), started[d.Name()], finished[d.Name()])
+		}
+	}
+	if len(plan.Items) != len(cfg.Sources) {
+		t.Fatalf("expected %d planned items, got %d", len(cfg.Sources), len(plan.Items))
+	}
+	for _, it := range plan.Items {
+		if it.EstBytes <= 0 {
+			t.Errorf("DLE %s estimated %d bytes, want > 0", it.Name, it.EstBytes)
+		}
 	}
 }
 
