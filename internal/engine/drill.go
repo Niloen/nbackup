@@ -283,7 +283,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		if derr != nil {
 			return drill.ClassPipeline, derr.Error()
 		}
-		src, err := e.clerk.ArchiveSource(clerk.Ref{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, medium)
+		src, err := e.clerk.Open(clerk.Ref{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, medium)
 		if err != nil {
 			return classifyOpenErr(err), err.Error()
 		}
@@ -333,7 +333,7 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 		return drill.ClassPipeline, err.Error()
 	}
 	defer os.Remove(tmp.Name())
-	src, err := e.clerk.ArchiveSource(clerk.Ref{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, medium)
+	src, err := e.clerk.Open(clerk.Ref{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, medium)
 	if err != nil {
 		tmp.Close()
 		return classifyOpenErr(err), err.Error()

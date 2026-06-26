@@ -69,7 +69,7 @@ type ReadJob struct {
 // across consecutive same-volume jobs — one pass).
 func (j ReadJob) Source() (xfer.Source, error) {
 	want := archiveio.Expect{Slot: j.Ref.Slot, DLE: j.Ref.DLE, Level: j.Ref.Level}
-	return j.clerk.PartsSource(j.parts, want, j.opener)
+	return j.clerk.partsSource(j.parts, want, j.opener)
 }
 
 // OpenArchives is the clerk's "open a set of archives" door: given logical refs, it locates
@@ -107,7 +107,7 @@ func (c *Clerk) OpenArchives(refs []Ref, medium string) ([]ReadJob, error) {
 		op, ok := openers[l.medium]
 		if !ok {
 			var err error
-			if op, err = c.PartOpener(l.medium); err != nil {
+			if op, err = c.partOpener(l.medium); err != nil {
 				return nil, err
 			}
 			openers[l.medium] = op

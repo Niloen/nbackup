@@ -1415,7 +1415,7 @@ func (e *Engine) extractStep(step restore.Step, destDir, targetHost string, ec c
 // whole-DLE restore, `--to` client restore, and file-level recover all run through it; it
 // adds the decrypt hint to whatever the data path surfaces.
 func (e *Engine) extractInto(slotID, dle string, level int, codec, encrypt, archiverType, destDir, targetHost string, ec config.EncryptConfig, members []string) error {
-	src, err := e.clerk.ArchiveSource(clerk.Ref{Slot: slotID, DLE: dle, Level: level}, "")
+	src, err := e.clerk.Open(clerk.Ref{Slot: slotID, DLE: dle, Level: level}, "")
 	if err != nil {
 		return decryptHint(encrypt, err)
 	}

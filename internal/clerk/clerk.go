@@ -106,7 +106,7 @@ func (c *Clerk) Members(ref Ref) ([]string, error) {
 		if !ok {
 			continue
 		}
-		members, err := c.ReadIndex(p.Medium, pos)
+		members, err := c.readIndex(p.Medium, pos)
 		if err != nil {
 			continue // try another copy
 		}
@@ -127,14 +127,14 @@ func indexPosOf(p catalog.Placement, dle string, level int) (record.FilePos, boo
 	return record.FilePos{}, false
 }
 
-// ArchiveSource opens an archive's raw (undecoded, on-medium) part stream as an xfer.Source,
+// Open opens an archive's raw (undecoded, on-medium) part stream as an xfer.Source,
 // with copy selection and fail-over: medium "" tries every copy (preferring the engine's
 // own), a set medium reads only that copy so a fault on it is not masked by another. It is
 // the read peer of the medium sink — the one archiveio-coupled Source. The open (and thus the
 // copy-selection fail-over) happens here, eagerly, so a missing copy is reported before bytes
 // flow and stays classifiable (errors.Is); a volume lost mid-stream is a Source-role fault
 // inside the transfer.
-func (c *Clerk) ArchiveSource(ref Ref, medium string) (xfer.Source, error) {
+func (c *Clerk) Open(ref Ref, medium string) (xfer.Source, error) {
 	rc, err := c.openRaw(ref, medium)
 	if err != nil {
 		return nil, err
@@ -142,10 +142,10 @@ func (c *Clerk) ArchiveSource(ref Ref, medium string) (xfer.Source, error) {
 	return xfer.Reader(rc), nil
 }
 
-// PartsSource opens a specific copy's parts via a caller-held opener (no copy selection) as
+// partsSource opens a specific copy's parts via a caller-held opener (no copy selection) as
 // an xfer.Source — for loops that thread one mounted opener across all of a copy's archives
 // (verify, copy).
-func (c *Clerk) PartsSource(parts []record.FilePos, want archiveio.Expect, opener archiveio.PartOpener) (xfer.Source, error) {
+func (c *Clerk) partsSource(parts []record.FilePos, want archiveio.Expect, opener archiveio.PartOpener) (xfer.Source, error) {
 	rc, err := c.reader.Open(parts, want, opener)
 	if err != nil {
 		return nil, err
@@ -156,7 +156,7 @@ func (c *Clerk) PartsSource(parts []record.FilePos, want archiveio.Expect, opene
 // openRaw opens an archive's raw on-medium part stream with copy selection and fail-over.
 func (c *Clerk) openRaw(ref Ref, medium string) (io.ReadCloser, error) {
 	return c.eachPlacement(ref, medium, func(parts []record.FilePos, p catalog.Placement) (io.ReadCloser, error) {
-		opener, err := c.PartOpener(p.Medium)
+		opener, err := c.partOpener(p.Medium)
 		if err != nil {
 			return nil, err
 		}
@@ -164,10 +164,10 @@ func (c *Clerk) openRaw(ref Ref, medium string) (io.ReadCloser, error) {
 	})
 }
 
-// PartOpener returns a mounting opener for a medium's volumes (rate-limited by its shared
+// partOpener returns a mounting opener for a medium's volumes (rate-limited by its shared
 // cap), for callers that drive the read loop themselves — threading one opener across all of
 // a copy's archives (verify, copy).
-func (c *Clerk) PartOpener(medium string) (archiveio.PartOpener, error) {
+func (c *Clerk) partOpener(medium string) (archiveio.PartOpener, error) {
 	mounter, err := c.deps.MounterFor(medium)
 	if err != nil {
 		return nil, err
@@ -182,10 +182,10 @@ func (c *Clerk) PartOpener(medium string) (archiveio.PartOpener, error) {
 	}, nil
 }
 
-// ReadIndex reads an archive's member index off a medium — the lazy fallback when the
+// readIndex reads an archive's member index off a medium — the lazy fallback when the
 // server-side member cache misses (a rebuilt slot not yet browsed). It mounts the volume the
 // index lives on and decodes it.
-func (c *Clerk) ReadIndex(medium string, pos record.FilePos) ([]string, error) {
+func (c *Clerk) readIndex(medium string, pos record.FilePos) ([]string, error) {
 	mounter, err := c.deps.MounterFor(medium)
 	if err != nil {
 		return nil, err
