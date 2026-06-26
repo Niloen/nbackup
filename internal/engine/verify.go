@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/drill"
@@ -76,20 +77,49 @@ type VerifyReport struct {
 	Failures int // slots with at least one failed archive
 }
 
+// verifier is NBackup's verification operation (Amanda's amverify): the stateless integrity
+// primitive that checks slots/archives against the seal and writes nothing. It depends on a
+// narrow slice of the orchestrator — the catalog (slot list + metadata), the clerk (byte
+// endpoints + recorded member list), the decoder (checksum + structural decode), the
+// read-preference placement order, and structural-archiver resolution — not the whole engine,
+// so the same path serves `nb verify` and a drill's per-archive check.
+type verifier struct {
+	cat         *catalog.Catalog                                       // slot list + metadata
+	clerk       *clerk.Clerk                                           // byte endpoints + member index
+	dec         *decoder                                               // checksum + structural decode
+	placements  func(slotID string) []catalog.Placement                // copies in read-preference order
+	archiverFor func(typeName, host string) (archiver.Archiver, error) // archiver for the structural list
+}
+
+// newVerifier wires a verifier to the engine's catalog, data path, decoder, and resolution.
+func (e *Engine) newVerifier() *verifier {
+	return &verifier{
+		cat:         e.cat,
+		clerk:       e.clerk,
+		dec:         e.dec,
+		placements:  e.placementsFor,
+		archiverFor: e.restoreArchiver,
+	}
+}
+
 // Verify checks the given slots (all cached slots when none are given) under opts,
 // returning a structured report. It never writes.
 func (e *Engine) Verify(slotIDs []string, opts VerifyOptions, logf Logf) (*VerifyReport, error) {
+	return e.ver.verify(slotIDs, opts, logf)
+}
+
+func (v *verifier) verify(slotIDs []string, opts VerifyOptions, logf Logf) (*VerifyReport, error) {
 	if opts.Checks == 0 {
 		opts.Checks = CheckChecksum
 	}
 	if len(slotIDs) == 0 {
-		for _, s := range e.cat.Slots() {
+		for _, s := range v.cat.Slots() {
 			slotIDs = append(slotIDs, s.ID)
 		}
 	}
 	rep := &VerifyReport{}
 	for _, id := range slotIDs {
-		sv, err := e.verifySlot(id, opts, logf)
+		sv, err := v.verifySlot(id, opts, logf)
 		if err != nil {
 			// Slot metadata unreadable (not in catalog): a failed slot verdict rather
 			// than aborting the whole pass, so one bad id doesn't mask the rest.
@@ -109,12 +139,12 @@ func (e *Engine) Verify(slotIDs []string, opts VerifyOptions, logf Logf) (*Verif
 	return rep, nil
 }
 
-func (e *Engine) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerdict, error) {
-	s, err := e.cat.ReadSlot(id)
+func (v *verifier) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerdict, error) {
+	s, err := v.cat.ReadSlot(id)
 	if err != nil {
 		return nil, err
 	}
-	placements := e.placementsFor(id)
+	placements := v.placements(id)
 	if opts.Medium != "" {
 		placements = placementsOnMedium(placements, opts.Medium)
 	}
@@ -147,8 +177,8 @@ func (e *Engine) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerd
 		// The clerk drives the one-pass read of this copy, calling back per archive; verify
 		// every one (never stop early), collecting verdicts.
 		verdicts := make(map[clerk.Ref]ArchiveVerdict, len(refs))
-		_, err := e.clerk.ReadArchives(refs, p.Medium, func(ref clerk.Ref, open func() (io.ReadCloser, error)) error {
-			verdicts[ref] = e.verifyArchive(archByRef[ref], ref, p.Medium, opts, open, logf)
+		_, err := v.clerk.ReadArchives(refs, p.Medium, func(ref clerk.Ref, open func() (io.ReadCloser, error)) error {
+			verdicts[ref] = v.verifyArchive(archByRef[ref], ref, p.Medium, opts, open, logf)
 			return nil
 		})
 		if err != nil {
@@ -207,47 +237,47 @@ func (e *Engine) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVerd
 
 // verifyArchive runs the requested checks against one archive, opening its stream via open
 // (each check reads it afresh).
-func (e *Engine) verifyArchive(a record.Archive, ref clerk.Ref, medium string, opts VerifyOptions, open func() (io.ReadCloser, error), logf Logf) ArchiveVerdict {
+func (v *verifier) verifyArchive(a record.Archive, ref clerk.Ref, medium string, opts VerifyOptions, open func() (io.ReadCloser, error), logf Logf) ArchiveVerdict {
 	id := ref.Slot
-	v := ArchiveVerdict{Slot: id, DLE: a.DLE, Level: a.Level, Medium: medium, OK: true}
+	vd := ArchiveVerdict{Slot: id, DLE: a.DLE, Level: a.Level, Medium: medium, OK: true}
 
 	if opts.Checks.has(CheckChecksum) {
 		rc, serr := open()
 		if serr != nil {
 			logf.log("%s [%s]: %s L%d ERROR %v", id, medium, a.DLEID(), a.Level, serr)
-			v.OK, v.Class, v.Detail = false, drill.ClassPipeline, serr.Error()
-			return v
+			vd.OK, vd.Class, vd.Detail = false, drill.ClassPipeline, serr.Error()
+			return vd
 		}
-		good, err := e.dec.verifyChecksum(rc, a.SHA256)
+		good, err := v.dec.verifyChecksum(rc, a.SHA256)
 		if err != nil {
 			logf.log("%s [%s]: %s L%d ERROR %v", id, medium, a.DLEID(), a.Level, err)
-			v.OK, v.Class, v.Detail = false, drill.ClassPipeline, err.Error()
-			return v
+			vd.OK, vd.Class, vd.Detail = false, drill.ClassPipeline, err.Error()
+			return vd
 		}
 		if !good {
 			logf.log("%s [%s]: %s L%d CHECKSUM MISMATCH", id, medium, a.DLEID(), a.Level)
-			v.OK, v.Class, v.Detail = false, drill.ClassIntegrity, "checksum mismatch vs seal"
-			return v
+			vd.OK, vd.Class, vd.Detail = false, drill.ClassIntegrity, "checksum mismatch vs seal"
+			return vd
 		}
 	}
 	if opts.Checks.has(CheckStructural) {
-		if cls, detail := e.structuralCheck(id, a, open); cls != drill.ClassNone {
+		if cls, detail := v.structuralCheck(id, a, open); cls != drill.ClassNone {
 			logf.log("%s [%s]: %s L%d STRUCTURAL %s: %s", id, medium, a.DLEID(), a.Level, cls, detail)
-			v.OK, v.Class, v.Detail = false, cls, detail
-			return v
+			vd.OK, vd.Class, vd.Detail = false, cls, detail
+			return vd
 		}
 	}
-	return v
+	return vd
 }
 
 // structuralCheck streams the archive through the real read pipeline and lists its
 // members (`tar -t`), asserting the pipeline completes cleanly and the members match
 // the recorded list. It returns ClassNone on success, else the failure class and detail.
-func (e *Engine) structuralCheck(id string, a record.Archive, open func() (io.ReadCloser, error)) (drill.Class, string) {
+func (v *verifier) structuralCheck(id string, a record.Archive, open func() (io.ReadCloser, error)) (drill.Class, string) {
 	// Verify is the keyless, server-side integrity primitive: structural decode runs on
 	// the server (host ""). The client-side recoverability proof (running the read
 	// pipeline on the client for a client-only key) is drill's job — see the design note.
-	arch, err := e.restoreArchiver(a.Archiver, "")
+	arch, err := v.archiverFor(a.Archiver, "")
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
@@ -259,12 +289,12 @@ func (e *Engine) structuralCheck(id string, a record.Archive, open func() (io.Re
 	// Any fault — a media read, a decode child, or a not-a-tar List — is a Pipeline failure; a
 	// clean stream whose members differ from the seal is an Integrity failure. The decrypt
 	// hint keeps a lost-key failure from being mislabeled as corruption.
-	members, terr := e.dec.listMembers(rc, a.Compress, a.Encrypt, arch)
+	members, terr := v.dec.listMembers(rc, a.Compress, a.Encrypt, arch)
 	if terr != nil {
 		return drill.ClassPipeline, decryptHint(a.Encrypt, terr).Error()
 	}
 	// The recorded member list (the catalog is member-free) is loaded via the clerk.
-	recorded, err := e.clerk.Members(clerk.Ref{Slot: id, DLE: a.DLE, Level: a.Level})
+	recorded, err := v.clerk.Members(clerk.Ref{Slot: id, DLE: a.DLE, Level: a.Level})
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}

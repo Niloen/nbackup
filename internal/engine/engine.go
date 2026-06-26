@@ -74,6 +74,7 @@ type Engine struct {
 	limiters    map[string]*ratelimit.Limiter // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
 	dec         *decoder                      // the read-side codec operation (restore/verify/list); shares the engine's resolution + decode opts
 	enc         *encoder                      // the write-side codec operation (dump); shares the engine's dumptype-recipe resolution
+	ver         *verifier                     // the verification operation (verify/drill checks); shares catalog + data path + decoder
 }
 
 // SetOperator attaches an operator so manual single-drive media can prompt for a
@@ -197,6 +198,7 @@ func New(cfg *config.Config) (*Engine, error) {
 	e.clerk = clerk.New(e, e, catalog.OpenMemberIndex(cfg.WorkdirPath()))
 	e.dec = e.newDecoder()
 	e.enc = e.newEncoder()
+	e.ver = e.newVerifier()
 	return e, nil
 }
 

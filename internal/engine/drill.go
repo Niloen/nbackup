@@ -247,7 +247,7 @@ func (e *Engine) drillVerify(t drill.Target, medium string, checks VerifyChecks)
 	var bad ArchiveVerdict
 	errStop := errors.New("drill: archive failed")
 	missing, err := e.clerk.ReadArchives(refs, medium, func(ref clerk.Ref, open func() (io.ReadCloser, error)) error {
-		v := e.verifyArchive(archByRef[ref], ref, medium, VerifyOptions{Checks: checks, Medium: medium}, open, nil)
+		v := e.ver.verifyArchive(archByRef[ref], ref, medium, VerifyOptions{Checks: checks, Medium: medium}, open, nil)
 		if !v.OK {
 			bad = v
 			return errStop
