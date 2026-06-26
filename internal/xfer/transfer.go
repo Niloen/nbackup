@@ -182,14 +182,13 @@ func (s *readerSource) Produced() (Produced, error) { return Produced{}, nil }
 func (s *readerSource) Cleanup()                    {}
 
 // Programs is a chain of programs on one executor. As a Source its first command produces
-// (tar -c, no stdin); as a Sink it consumes the incoming stream as stdin (tar -x/-t). It
+// (tar -c, no stdin); as a Sink it consumes the incoming stream as stdin (tar -x). It
 // satisfies both Source and Sink, so it serves whichever end the operation places it in.
 type Programs struct {
 	exec    programs.Executor
 	cmds    []programs.Cmd
 	finish  func() (Produced, error) // source: producer totals (e.g. tar --totals)
 	cleanup func()
-	scan    func(io.Reader) ([]string, error) // sink: parse stdout (e.g. tar -t members)
 }
 
 // NewPrograms starts a program chain on ex.
@@ -203,9 +202,6 @@ func (p *Programs) Finishing(fn func() (Produced, error)) *Programs { p.finish =
 
 // OnCleanup sets a scratch-cleanup hook (source use).
 func (p *Programs) OnCleanup(fn func()) *Programs { p.cleanup = fn; return p }
-
-// Scanning sets a stdout parser (sink use, e.g. tar -t → members).
-func (p *Programs) Scanning(fn func(io.Reader) ([]string, error)) *Programs { p.scan = fn; return p }
 
 // Source side.
 func (p *Programs) Open() (io.ReadCloser, func() error, error) { return p.exec.RunPipe(nil, p.cmds...) }
@@ -221,27 +217,19 @@ func (p *Programs) Cleanup() {
 	}
 }
 
-// Sink side: feed `in` as stdin to the chain, then drain (or scan) its output.
+// Sink side: feed `in` as stdin to the chain, then drain its (empty, for tar -x) output.
 func (p *Programs) Drain(in io.Reader, progress func(int64)) (SinkResult, error) {
 	out, wait, err := p.exec.RunPipe(meterReader(in, progress), p.cmds...)
 	if err != nil {
 		return SinkResult{}, err
 	}
-	var members []string
-	var scanErr error
-	if p.scan != nil {
-		members, scanErr = p.scan(out)
-	}
 	_, copyErr := io.Copy(io.Discard, out) // a program sink (tar -x) writes the fs; drain the rest
 	out.Close()
 	werr := wait()
 	if werr == nil {
-		werr = scanErr
-	}
-	if werr == nil {
 		werr = copyErr
 	}
-	return SinkResult{Members: members}, werr
+	return SinkResult{}, werr
 }
 
 // --- generic sinks ---
