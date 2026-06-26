@@ -78,13 +78,54 @@ type Deps interface {
 var ErrMissingCopy = errors.New("no available copy")
 
 // Clerk is the archive data path. Construct one with New, sharing the orchestrator's Deps.
+// It owns the member-index part of the catalog: it writes each archive's member list (cache +
+// on-medium index) as it commits, and serves it on read, so member I/O lives in one place
+// regardless of which operation needs it.
 type Clerk struct {
 	deps   Deps
 	reader *archiveio.Reader
+	mindex *catalog.MemberIndex
 }
 
-// New returns a data path backed by deps.
-func New(deps Deps) *Clerk { return &Clerk{deps: deps, reader: archiveio.NewReader()} }
+// New returns a data path backed by deps, using mindex as the server-side member cache.
+func New(deps Deps, mindex *catalog.MemberIndex) *Clerk {
+	return &Clerk{deps: deps, reader: archiveio.NewReader(), mindex: mindex}
+}
+
+// Members returns an archive's member list, lazily: from the member-index cache, else by
+// reading the on-medium index (via a copy's recorded index position) and re-caching it. A nil
+// list is a valid "no members" answer (an archive with no files records no index).
+func (c *Clerk) Members(ref Ref) ([]string, error) {
+	if members, ok, err := c.mindex.Load(ref.Slot, ref.DLE, ref.Level); err != nil {
+		return nil, err
+	} else if ok {
+		return members, nil
+	}
+	for _, p := range c.deps.PlacementsFor(ref.Slot) {
+		pos, ok := indexPosOf(p, ref.DLE, ref.Level)
+		if !ok {
+			continue
+		}
+		members, err := c.ReadIndex(p.Medium, pos)
+		if err != nil {
+			continue // try another copy
+		}
+		_ = c.mindex.Store(ref.Slot, ref.DLE, ref.Level, members)
+		return members, nil
+	}
+	return nil, nil
+}
+
+// indexPosOf finds an archive's recorded member-index position on a placement (the zero
+// position means the archive recorded no index — it had no members).
+func indexPosOf(p catalog.Placement, dle string, level int) (record.FilePos, bool) {
+	for _, a := range p.Archives {
+		if a.DLE == dle && a.Level == level {
+			return a.Index, a.Index != (record.FilePos{})
+		}
+	}
+	return record.FilePos{}, false
+}
 
 // ArchiveSource opens an archive's raw (undecoded, on-medium) part stream as an xfer.Source,
 // with copy selection and fail-over: medium "" tries every copy (preferring the engine's
@@ -139,6 +180,22 @@ func (c *Clerk) PartOpener(medium string) (archiveio.PartOpener, error) {
 		}
 		return h, lim.ReadCloser(rc), nil
 	}, nil
+}
+
+// ReadIndex reads an archive's member index off a medium — the lazy fallback when the
+// server-side member cache misses (a rebuilt slot not yet browsed). It mounts the volume the
+// index lives on and decodes it.
+func (c *Clerk) ReadIndex(medium string, pos record.FilePos) ([]string, error) {
+	lib, err := c.deps.LibrarianFor(medium)
+	if err != nil {
+		return nil, err
+	}
+	_, rc, err := lib.ReadFileAt(pos.Label, pos.Epoch, pos.Pos)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return record.DecodeIndex(rc)
 }
 
 // Extract streams an archive's raw parts through the decode→extract pipeline into destDir

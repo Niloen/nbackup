@@ -1,14 +1,14 @@
 // Package recovery reconstructs a browsable virtual filesystem of a DLE as of a
 // given date and resolves a file selection into the minimal set of per-archive
-// extractions — NBackup's amrecover. It is pure: it works over slot metadata
-// (the member index each seal records) and returns what to extract; the engine
-// performs the I/O.
+// extractions — NBackup's amrecover. It is pure: it works over slot metadata and a
+// member-list loader, and returns what to extract; the engine performs the I/O.
 //
-// The "index" amrecover keeps in a separate index server is, here, already in the
-// catalog: every record.Archive carries its tar member list. A recovery tree merges
-// the member lists of the restore chain (the full plus every later incremental up
-// to the target) so that each path resolves to the most recent archive that holds
-// it — exactly the file content as of the target date.
+// The "index" amrecover keeps in a separate index server is, here, each archive's
+// per-archive member index (a gzip file on the medium, cached server-side and loaded
+// lazily by the clerk — the catalog cache itself stays member-free). BuildTree takes a
+// loader for it and merges the member lists of the restore chain (the full plus every
+// later incremental up to the target) so each path resolves to the most recent archive
+// that holds it — exactly the file content as of the target date.
 //
 // Fidelity caveat: GNU tar records deletions in its snapshot, not in the member
 // index, so the merged tree is a union (most-recent-wins per path). A file deleted
@@ -98,8 +98,9 @@ func AsOf(slots []*record.Slot, asOf string) (string, error) {
 
 // BuildTree reconstructs the filesystem of dle as of asOf (YYYY-MM-DD) by merging
 // the member lists of the restore chain in run order, so each path resolves to the
-// most recent archive that holds it.
-func BuildTree(slots []*record.Slot, dle, asOf string) (*Tree, error) {
+// most recent archive that holds it. The member lists are loaded via members (the
+// catalog cache holds the slot index, not the member lists — those are loaded lazily).
+func BuildTree(slots []*record.Slot, dle, asOf string, members func(slotID string, level int) ([]string, error)) (*Tree, error) {
 	target, err := AsOf(slots, asOf)
 	if err != nil {
 		return nil, err
@@ -108,10 +109,6 @@ func BuildTree(slots []*record.Slot, dle, asOf string) (*Tree, error) {
 	if err != nil {
 		return nil, err
 	}
-	byID := make(map[string]*record.Slot, len(slots))
-	for _, s := range slots {
-		byID[s.ID] = s
-	}
 	t := &Tree{
 		DLE:        dle,
 		TargetSlot: target,
@@ -119,11 +116,11 @@ func BuildTree(slots []*record.Slot, dle, asOf string) (*Tree, error) {
 		root:       &Node{dir: true, children: map[string]*Node{}},
 	}
 	for _, st := range steps {
-		ar := findArchive(byID[st.SlotID], dle, st.Level)
-		if ar == nil {
-			continue
+		ms, err := members(st.SlotID, st.Level)
+		if err != nil {
+			return nil, err
 		}
-		for _, m := range ar.Members {
+		for _, m := range ms {
 			t.insert(m, &Source{
 				SlotID: st.SlotID, DLE: dle, Level: st.Level,
 				Archiver: st.Archiver, Compress: st.Compress, Encrypt: st.Encrypt, Member: m,
@@ -131,18 +128,6 @@ func BuildTree(slots []*record.Slot, dle, asOf string) (*Tree, error) {
 		}
 	}
 	return t, nil
-}
-
-func findArchive(s *record.Slot, dle string, level int) *record.Archive {
-	if s == nil {
-		return nil
-	}
-	for i := range s.Archives {
-		if s.Archives[i].DLE == dle && s.Archives[i].Level == level {
-			return &s.Archives[i]
-		}
-	}
-	return nil
 }
 
 // insert adds a tar member to the tree, creating parent directories as needed.

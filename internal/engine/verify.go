@@ -8,6 +8,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/record"
 )
@@ -240,7 +241,12 @@ func (e *Engine) structuralCheck(a record.Archive, parts []record.FilePos, want 
 	if terr != nil {
 		return drill.ClassPipeline, decryptHint(a.Encrypt, terr).Error()
 	}
-	if diff := membersDiff(a.Members, members); diff != "" {
+	// The recorded member list (the catalog is member-free) is loaded via the clerk.
+	recorded, err := e.clerk.Members(clerk.Ref{Slot: want.Slot, DLE: a.DLE, Level: a.Level})
+	if err != nil {
+		return drill.ClassPipeline, err.Error()
+	}
+	if diff := membersDiff(recorded, members); diff != "" {
 		return drill.ClassIntegrity, diff
 	}
 	return drill.ClassNone, ""

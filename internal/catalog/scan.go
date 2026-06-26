@@ -157,12 +157,10 @@ func assemble(medium string, acc *mediumScan) []slotPlacement {
 				ap.Parts = append(ap.Parts, loc)
 			}
 		}
-		arch := *sc.arch
-		if ix, ok := acc.indexes[key]; ok {
-			ap.Index = ix.loc
-			arch.Members = ix.members
+		if ixLoc, ok := acc.indexes[key]; ok {
+			ap.Index = ixLoc // note where the member index lives; members load lazily (browse/verify)
 		}
-		sa.slot.AddArchive(arch)
+		sa.slot.AddArchive(*sc.arch)
 		sa.p.Archives = append(sa.p.Archives, ap)
 	}
 
@@ -211,36 +209,29 @@ type scannedCommit struct {
 	createdAt time.Time
 }
 
-// scannedIndex is an archive's member index found during a scan: where it landed and (read
-// eagerly) its member list.
-type scannedIndex struct {
-	loc     FilePos
-	members []string
-}
-
 // scanResult is one volume's contribution to a medium scan: its archive parts, commit
-// footers, member indexes, and label (if any).
+// footers, member-index locations (the members are not read — that is lazy), and label.
 type scanResult struct {
 	parts   map[partKey]FilePos
 	commits map[archiveKey]scannedCommit
-	indexes map[archiveKey]scannedIndex
+	indexes map[archiveKey]FilePos
 	label   *record.Label
 }
 
-// mediumScan accumulates a whole medium's parts, commits, and indexes across its volumes
-// before placements are assembled (an archive's parts — and its commit/index — may straddle
-// several volumes).
+// mediumScan accumulates a whole medium's parts, commits, and index locations across its
+// volumes before placements are assembled (an archive's parts — and its commit/index — may
+// straddle several volumes).
 type mediumScan struct {
 	parts   map[partKey]FilePos
 	commits map[archiveKey]scannedCommit
-	indexes map[archiveKey]scannedIndex
+	indexes map[archiveKey]FilePos
 }
 
 func newMediumScan() *mediumScan {
 	return &mediumScan{
 		parts:   map[partKey]FilePos{},
 		commits: map[archiveKey]scannedCommit{},
-		indexes: map[archiveKey]scannedIndex{},
+		indexes: map[archiveKey]FilePos{},
 	}
 }
 
@@ -251,8 +242,8 @@ func (m *mediumScan) add(res scanResult) {
 	for k, c := range res.commits {
 		m.commits[k] = c
 	}
-	for k, ix := range res.indexes {
-		m.indexes[k] = ix
+	for k, loc := range res.indexes {
+		m.indexes[k] = loc
 	}
 }
 
@@ -281,7 +272,7 @@ func scanVolume(medium string, vol media.Volume) (scanResult, error) {
 	res := scanResult{
 		parts:   map[partKey]FilePos{},
 		commits: map[archiveKey]scannedCommit{},
-		indexes: map[archiveKey]scannedIndex{},
+		indexes: map[archiveKey]FilePos{},
 		label:   label,
 	}
 	for _, f := range files {
@@ -297,12 +288,9 @@ func scanVolume(medium string, vol media.Volume) (scanResult, error) {
 			res.commits[archiveKey{slot: f.Header.Slot, dle: f.Header.DLE, level: f.Header.Level}] =
 				scannedCommit{arch: a, loc: loc, createdAt: f.Header.CreatedAt}
 		case record.KindIndex:
-			members, ierr := readIndex(vol, f.Pos)
-			if ierr != nil {
-				continue // unreadable index: browse loses this archive's members, reads still work
-			}
-			res.indexes[archiveKey{slot: f.Header.Slot, dle: f.Header.DLE, level: f.Header.Level}] =
-				scannedIndex{loc: loc, members: members}
+			// Note where the member index lives, but do NOT read it — members load lazily
+			// (browse / structural verify), so a rebuild reads only small commit footers.
+			res.indexes[archiveKey{slot: f.Header.Slot, dle: f.Header.DLE, level: f.Header.Level}] = loc
 		}
 	}
 	return res, nil
@@ -320,14 +308,4 @@ func readCommit(vol media.Volume, pos int) (*record.Archive, error) {
 		return nil, err
 	}
 	return record.ParseCommit(data)
-}
-
-// readIndex reads and decodes an archive's member index payload from the volume.
-func readIndex(vol media.Volume, pos int) ([]string, error) {
-	_, rc, err := vol.ReadFile(pos)
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
-	return record.DecodeIndex(rc)
 }

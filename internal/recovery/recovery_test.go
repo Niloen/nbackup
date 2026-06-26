@@ -8,6 +8,25 @@ import (
 
 // scenario builds two slots: a full on day 1 and an incremental on day 2 that
 // rewrites etc/hosts and adds etc/new.conf.
+// membersOf is a test member loader: it returns each archive's inline Members from the
+// scenario slots, standing in for the engine's lazy clerk-backed loader.
+func membersOf(slots []*record.Slot, dle string) func(string, int) ([]string, error) {
+	byID := map[string]*record.Slot{}
+	for _, s := range slots {
+		byID[s.ID] = s
+	}
+	return func(slotID string, level int) ([]string, error) {
+		if s := byID[slotID]; s != nil {
+			for i := range s.Archives {
+				if s.Archives[i].DLE == dle && s.Archives[i].Level == level {
+					return s.Archives[i].Members, nil
+				}
+			}
+		}
+		return nil, nil
+	}
+}
+
 func scenario() []*record.Slot {
 	full := &record.Slot{ID: "slot-2026-06-21", Date: "2026-06-21", Archives: []record.Archive{{
 		DLE: "app", Level: 0, Archiver: "gnutar", Compress: "none",
@@ -48,7 +67,7 @@ func TestAsOf(t *testing.T) {
 }
 
 func TestBuildTreeMostRecentWins(t *testing.T) {
-	tree, err := BuildTree(scenario(), "app", "2026-06-22")
+	tree, err := BuildTree(scenario(), "app", "2026-06-22", membersOf(scenario(), "app"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +96,7 @@ func TestBuildTreeMostRecentWins(t *testing.T) {
 }
 
 func TestBuildTreeAsOfEarlierDate(t *testing.T) {
-	tree, err := BuildTree(scenario(), "app", "2026-06-21")
+	tree, err := BuildTree(scenario(), "app", "2026-06-21", membersOf(scenario(), "app"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,13 +111,13 @@ func TestBuildTreeAsOfEarlierDate(t *testing.T) {
 }
 
 func TestBuildTreeNoFull(t *testing.T) {
-	if _, err := BuildTree(scenario(), "other", "2026-06-22"); err == nil {
+	if _, err := BuildTree(scenario(), "other", "2026-06-22", membersOf(scenario(), "other")); err == nil {
 		t.Fatal("expected error for a DLE with no backup")
 	}
 }
 
 func TestChildrenSortedDirsFirst(t *testing.T) {
-	tree, _ := BuildTree(scenario(), "app", "2026-06-22")
+	tree, _ := BuildTree(scenario(), "app", "2026-06-22", membersOf(scenario(), "app"))
 	root, _ := tree.Lookup("/")
 	kids := root.Children()
 	if len(kids) != 2 || !kids[0].IsDir() || kids[0].Name() != "etc" || kids[1].Name() != "var" {
@@ -111,7 +130,7 @@ func TestChildrenSortedDirsFirst(t *testing.T) {
 }
 
 func TestCollectDirectoryGroupsByArchive(t *testing.T) {
-	tree, _ := BuildTree(scenario(), "app", "2026-06-22")
+	tree, _ := BuildTree(scenario(), "app", "2026-06-22", membersOf(scenario(), "app"))
 	steps, err := tree.Collect([]string{"etc"})
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +153,7 @@ func TestCollectDirectoryGroupsByArchive(t *testing.T) {
 }
 
 func TestCollectSingleFilePullsAncestors(t *testing.T) {
-	tree, _ := BuildTree(scenario(), "app", "2026-06-22")
+	tree, _ := BuildTree(scenario(), "app", "2026-06-22", membersOf(scenario(), "app"))
 	steps, err := tree.Collect([]string{"/var/log/a.log"})
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +172,7 @@ func TestCollectSingleFilePullsAncestors(t *testing.T) {
 }
 
 func TestCollectNotFound(t *testing.T) {
-	tree, _ := BuildTree(scenario(), "app", "2026-06-22")
+	tree, _ := BuildTree(scenario(), "app", "2026-06-22", membersOf(scenario(), "app"))
 	if _, err := tree.Collect([]string{"nope"}); err == nil {
 		t.Fatal("expected not-found error")
 	}

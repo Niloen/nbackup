@@ -160,10 +160,24 @@ func Open(workdir string) (*Catalog, error) {
 // p.Medium, then persists. Both dump and copy use this — they differ only in
 // which medium the placement names.
 func (c *Catalog) Record(s *record.Slot, p Placement) error {
-	c.upsert(s, p)
+	c.upsert(stripMembers(s), p)
 	c.sortEntries()
 	c.loaded = true
 	return c.persist()
+}
+
+// stripMembers returns a shallow copy of s with each archive's member list cleared. The
+// catalog cache is the slot index, not the member store: member lists live in the workdir
+// member-index cache and the on-medium index, loaded on demand. Keeping them out of the
+// cache keeps it small (read on every command) regardless of how many files were backed up.
+func stripMembers(s *record.Slot) *record.Slot {
+	cp := *s
+	cp.Archives = make([]record.Archive, len(s.Archives))
+	for i, a := range s.Archives {
+		a.Members = nil
+		cp.Archives[i] = a
+	}
+	return &cp
 }
 
 // RemovePlacement drops the copy of a slot on one medium. When the last copy is

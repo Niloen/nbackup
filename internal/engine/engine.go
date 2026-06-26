@@ -190,7 +190,7 @@ func New(cfg *config.Config) (*Engine, error) {
 		dcopts:      dcopts,
 		limiters:    limiters,
 	}
-	e.clerk = clerk.New(e)
+	e.clerk = clerk.New(e, catalog.OpenMemberIndex(cfg.WorkdirPath()))
 	return e, nil
 }
 
@@ -1589,10 +1589,12 @@ func decryptHint(scheme string, err error) error {
 }
 
 // OpenRecover builds a browsable filesystem of a DLE as of a date (YYYY-MM-DD) —
-// the amrecover entry point. It reads only the catalog (the member index lives in
-// the seals), so no media is touched until files are extracted.
+// the amrecover entry point. Member lists are loaded lazily via the clerk (cache, or the
+// on-medium index on a miss), so a fully-cached browse touches no media until extract.
 func (e *Engine) OpenRecover(dle, asOf string) (*recovery.Tree, error) {
-	return recovery.BuildTree(e.cat.Slots(), dle, asOf)
+	return recovery.BuildTree(e.cat.Slots(), dle, asOf, func(slotID string, level int) ([]string, error) {
+		return e.clerk.Members(clerk.Ref{Slot: slotID, DLE: dle, Level: level})
+	})
 }
 
 // ExtractSelection extracts a selected set of files, grouped by their source

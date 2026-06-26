@@ -222,19 +222,25 @@ func (s *Session) Backup(spec BackupSpec, prog func(uncompressed, compressed int
 	if err := s.w.Commit(arch, sink.parts); err != nil {
 		return Summary{}, err
 	}
+	// Cache the member list server-side so browse/structural-verify read it without media.
+	if len(arch.Members) > 0 {
+		_ = s.clerk.mindex.Store(s.w.SlotID(), arch.DLE, arch.Level, arch.Members)
+	}
 	return Summary{FileCount: arch.FileCount, Uncompressed: arch.Uncompressed, Compressed: arch.Compressed, Codec: arch.Compress}, nil
 }
 
 // Copy re-authors one already-stored archive onto this slot's volumes: the same on-medium
-// bytes re-split with no transform (copySink re-checksums against the seal, never
-// recompresses). meta is the source archive's existing record; the source parts are read via
-// the caller's opener (threaded across a copy's archives). It records the archive into the
-// slot itself (CopyArchive does), so the engine only seals.
+// bytes re-split with no transform (copySink re-checksums against the recorded sha, never
+// recompresses). meta is the source archive's record (member-free, as the catalog holds it);
+// the source parts are read via the caller's opener. Copy loads the members itself so the
+// target writes a real member index (keeping the target copy self-describing). It commits the
+// archive into the slot (CopyArchive does), so the engine only finishes.
 func (s *Session) Copy(parts []record.FilePos, want archiveio.Expect, opener archiveio.PartOpener, meta record.Archive) error {
 	src, err := s.clerk.partsSource(parts, want, opener)
 	if err != nil {
 		return err
 	}
+	meta.Members, _ = s.clerk.Members(Ref{Slot: want.Slot, DLE: want.DLE, Level: want.Level})
 	_, err = xfer.Transfer(src, xfer.NewFilters(), &copySink{w: s.w, meta: meta}, xfer.Opts{})
 	return err
 }

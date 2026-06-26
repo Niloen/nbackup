@@ -300,6 +300,9 @@ func (w *Writer) CopyArchive(meta record.Archive, src io.Reader) (record.Archive
 	return arch, nil
 }
 
+// SlotID returns the id of the slot being authored.
+func (w *Writer) SlotID() string { return w.slot.ID }
+
 // ArchiveCount reports how many archives have been recorded so far.
 func (w *Writer) ArchiveCount() int {
 	w.mu.Lock()
