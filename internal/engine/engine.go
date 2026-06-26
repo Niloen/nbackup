@@ -1441,8 +1441,9 @@ func (e *Engine) decodePlan(codec, encrypt string, ec config.EncryptConfig, targ
 func (e *Engine) PlacementsFor(slotID string) []catalog.Placement     { return e.placementsFor(slotID) }
 func (e *Engine) Record(slot *record.Slot, p catalog.Placement) error { return e.cat.Record(slot, p) }
 
-// LibrarianFor returns a librarian that can mount and read a medium's volumes.
-func (e *Engine) LibrarianFor(medium string) (*librarian.Librarian, error) {
+// MounterFor returns a read-mount onto a medium's volumes — the clerk's Mounter role, served
+// by the medium's librarian (whose admin face stays with the label/load operations).
+func (e *Engine) MounterFor(medium string) (clerk.Mounter, error) {
 	lib, _, _, err := e.librarianFor(medium)
 	return lib, err
 }

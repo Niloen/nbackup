@@ -27,7 +27,6 @@ import (
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
-	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/transform/compress"
@@ -57,12 +56,20 @@ type Map interface {
 	Record(slot *record.Slot, p catalog.Placement) error
 }
 
+// Mounter is the clerk's data-path slice of the librarian (the volume manager): mount the
+// volume a part names and read it. The clerk owns this read-mount role; the librarian's
+// admin/operator face (label, load, inventory) stays with the engine and the label/load
+// operations. The clerk depends on the role, not the librarian package.
+type Mounter interface {
+	ReadFileAt(volume string, epoch, pos int) (record.Header, io.ReadCloser, error)
+}
+
 // Deps is the rest of what the data path needs from the orchestrator — services beside the
-// map: librarian mounting, host transport, archiver resolution, transform options. The engine
+// map: volume mounting, host transport, archiver resolution, transform options. The engine
 // implements it; this interface is the explicit boundary between deciding and doing.
 type Deps interface {
-	// LibrarianFor returns a librarian that can mount and read a medium's volumes.
-	LibrarianFor(medium string) (*librarian.Librarian, error)
+	// MounterFor returns a read-mount onto a medium's volumes.
+	MounterFor(medium string) (Mounter, error)
 	// Limiter returns the medium's shared bandwidth cap (nil = uncapped).
 	Limiter(medium string) *xfer.Limiter
 	// Executor returns the transport that runs programs on a host (Local or remote).
@@ -176,13 +183,13 @@ func (c *Clerk) openRaw(ref Ref, medium string) (io.ReadCloser, error) {
 // cap), for callers that drive the read loop themselves — threading one opener across all of
 // a copy's archives (verify, copy).
 func (c *Clerk) PartOpener(medium string) (archiveio.PartOpener, error) {
-	lib, err := c.deps.LibrarianFor(medium)
+	mounter, err := c.deps.MounterFor(medium)
 	if err != nil {
 		return nil, err
 	}
 	lim := c.deps.Limiter(medium)
 	return func(p record.FilePos) (record.Header, io.ReadCloser, error) {
-		h, rc, err := lib.ReadFileAt(p.Label, p.Epoch, p.Pos)
+		h, rc, err := mounter.ReadFileAt(p.Label, p.Epoch, p.Pos)
 		if err != nil {
 			return h, rc, err
 		}
@@ -194,11 +201,11 @@ func (c *Clerk) PartOpener(medium string) (archiveio.PartOpener, error) {
 // server-side member cache misses (a rebuilt slot not yet browsed). It mounts the volume the
 // index lives on and decodes it.
 func (c *Clerk) ReadIndex(medium string, pos record.FilePos) ([]string, error) {
-	lib, err := c.deps.LibrarianFor(medium)
+	mounter, err := c.deps.MounterFor(medium)
 	if err != nil {
 		return nil, err
 	}
-	_, rc, err := lib.ReadFileAt(pos.Label, pos.Epoch, pos.Pos)
+	_, rc, err := mounter.ReadFileAt(pos.Label, pos.Epoch, pos.Pos)
 	if err != nil {
 		return nil, err
 	}
