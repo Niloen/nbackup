@@ -76,6 +76,34 @@ func TestLiveSinkPaintsAndErases(t *testing.T) {
 	}
 }
 
+// TestLiveSinkSingleLineFrameNeverMovesUp guards the prompt-eating bug: a one-line
+// frame (above == 0) must never emit ESC[0A, which a real terminal treats as ESC[1A
+// — moving the cursor up onto and erasing the row above (the shell prompt).
+func TestLiveSinkSingleLineFrameNeverMovesUp(t *testing.T) {
+	t.Setenv("COLUMNS", "80")
+	var buf strings.Builder
+	sink := LiveSink(&buf, func(s Snapshot) []string { return []string{"only one line " + s.SlotID} })
+
+	sink(Snapshot{SlotID: "a", Phase: PhaseRunning}, true) // first paint of a 1-line frame
+	buf.Reset()
+	sink(Snapshot{SlotID: "b", Phase: PhaseRunning}, true) // repaint over the 1-line frame
+	if strings.Contains(buf.String(), "\033[0A") {
+		t.Fatalf("single-line repaint must not emit ESC[0A: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "row b") && !strings.Contains(buf.String(), "line b") {
+		t.Fatalf("repaint missing new content: %q", buf.String())
+	}
+
+	buf.Reset()
+	sink(Snapshot{SlotID: "b", Phase: PhaseDone}, true) // terminal erase of the 1-line frame
+	if strings.Contains(buf.String(), "\033[0A") {
+		t.Fatalf("single-line terminal erase must not emit ESC[0A: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "\033[J") {
+		t.Fatalf("terminal erase should still clear the region: %q", buf.String())
+	}
+}
+
 // TestLiveSinkThrottle confirms a non-forced update inside the throttle window is
 // dropped, while a forced one always paints.
 func TestLiveSinkThrottle(t *testing.T) {
