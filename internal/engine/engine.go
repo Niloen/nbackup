@@ -1458,13 +1458,13 @@ func clearDirContents(dir string) error {
 	return nil
 }
 
-// extractStep replays one archive step into destDir as a decode→extract pipeline whose
-// stages each run on the host that should run them: decrypt where the key lives (the client
-// for a client-held key reached over `--to`, otherwise the server) and decompress + tar
-// extraction on the target host. RunGrouped fuses the same-host runs and crosses the wire
-// at most once between them — so a client-held key decrypts on the client (only ciphertext
-// leaves the server), while a server-held key decrypts on the server and ships compressed
-// plaintext (never inflated) to a remote target. targetHost "" extracts server-side.
+// extractStep replays one archive step into destDir as a decode→extract transfer whose
+// zones each run where they should: decrypt where the key lives (the target for a
+// client-held key reached over `--to`, otherwise the local server Filters) and decompress +
+// tar extraction on the target Sink. The transfer crosses the wire at most once between
+// zones — so a client-held key decrypts on the target (only ciphertext leaves the server),
+// while a server-held key decrypts on the server and ships compressed plaintext (never
+// inflated) to a remote target. targetHost "" extracts server-side.
 func (e *Engine) extractStep(step restore.Step, destDir, targetHost string, ec config.EncryptConfig) error {
 	return e.extractInto(step.SlotID, step.DLE, step.Level, step.Compress, step.Encrypt, step.Archiver, destDir, targetHost, ec, nil)
 }
