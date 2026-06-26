@@ -35,7 +35,6 @@ import (
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
-	"github.com/Niloen/nbackup/internal/xfer"
 
 	// Register the bundled media and archiver implementations.
 	_ "github.com/Niloen/nbackup/internal/archiver/gnutar"
@@ -75,6 +74,7 @@ type Engine struct {
 	dec         *decoder                      // the read-side codec operation (restore/verify/list); shares the engine's resolution + decode opts
 	enc         *encoder                      // the write-side codec operation (dump); shares the engine's dumptype-recipe resolution
 	ver         *verifier                     // the verification operation (verify/drill checks); shares catalog + data path + decoder
+	cop         *copier                       // the copy operation (PlanCopy/CopySlot); shares catalog + data path + write machinery
 }
 
 // SetOperator attaches an operator so manual single-drive media can prompt for a
@@ -199,6 +199,7 @@ func New(cfg *config.Config) (*Engine, error) {
 	e.dec = e.newDecoder()
 	e.enc = e.newEncoder()
 	e.ver = e.newVerifier()
+	e.cop = e.newCopier()
 	return e, nil
 }
 
@@ -513,143 +514,14 @@ func (e *Engine) prepareWriter(medium string, spec archiveio.SlotSpec, now time.
 	return &writeTarget{lib: lib, w: w, partSize: partSize}, nil
 }
 
-// CopyPlan is the resolved, validated outcome of a would-be copy, without writing:
-// the source/target the rules picked and whether the slot is already on the target.
-type CopyPlan struct {
-	SlotID          string
-	From            string   // resolved source medium (landing when --from is unset)
-	To              string   // target medium
-	Archives        int      // archives in the slot
-	Bytes           int64    // the slot's total bytes
-	AlreadyOnTarget bool     // a copy already exists on To (skipped unless force)
-	TargetLabels    []string // the tape labels the existing target copy spans (empty for address-identified media)
-}
-
-// PlanCopy resolves and validates a copy the way CopySlot would, without writing —
-// the single source of the copy-eligibility rules, shared by CopySlot and the
-// `nb copy` dry-run so the two never drift. It errors on the same unrunnable cases
-// (unknown slot, unknown target, source == target) and reports whether the slot is
-// already on the target (force plans the re-copy anyway).
+// PlanCopy resolves and validates a copy without writing (the `nb copy` dry-run); see copier.
 func (e *Engine) PlanCopy(slotID, fromMedia, targetMedia string, force bool) (CopyPlan, error) {
-	s, err := e.cat.ReadSlot(slotID)
-	if err != nil {
-		return CopyPlan{}, err
-	}
-	if fromMedia == "" {
-		fromMedia = e.mediumName
-	}
-	if _, ok := e.cfg.Media[targetMedia]; !ok {
-		return CopyPlan{}, fmt.Errorf("unknown medium %q", targetMedia)
-	}
-	if fromMedia == targetMedia {
-		return CopyPlan{}, fmt.Errorf("copy source and target are the same medium %q", targetMedia)
-	}
-	plan := CopyPlan{SlotID: slotID, From: fromMedia, To: targetMedia, Archives: len(s.Archives), Bytes: s.TotalBytes}
-	if !force {
-		if p, ok := e.placementOn(slotID, targetMedia); ok {
-			plan.AlreadyOnTarget = true
-			plan.TargetLabels = p.Labels()
-		}
-	}
-	return plan, nil
+	return e.cop.PlanCopy(slotID, fromMedia, targetMedia, force)
 }
 
-// CopySlot streams a sealed slot from one configured medium to another, then
-// records the new copy in the catalog (a second placement). The source defaults to
-// the landing medium when fromMedia is ""; any other medium holding the slot is
-// allowed (e.g. un-vaulting tape -> disk). Reading the source mounts the volume
-// that holds the slot (on a changer); the write to the target runs the same label
-// verification as a dump.
+// CopySlot streams a sealed slot from one configured medium to another; see copier.
 func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, logf Logf) error {
-	plan, err := e.PlanCopy(slotID, fromMedia, targetMedia, force)
-	if err != nil {
-		return err
-	}
-	if plan.AlreadyOnTarget {
-		// Idempotency: a slot already recorded on the target is not re-copied. On
-		// append-only media a second copy would orphan the first (unreferenced files,
-		// reclaimable only by relabel); --force overrides for a deliberate re-copy.
-		where := ""
-		if len(plan.TargetLabels) > 0 {
-			where = fmt.Sprintf(" (volume(s) %v)", plan.TargetLabels)
-		}
-		return fmt.Errorf("slot %s is already on medium %q%s; use --force to copy again", slotID, targetMedia, where)
-	}
-	fromMedia = plan.From
-	s, err := e.cat.ReadSlot(slotID)
-	if err != nil {
-		return err
-	}
-	// Validate the source copy exists on fromMedia up front (a clear error before reading).
-	if _, _, err := e.copySource(slotID, fromMedia); err != nil {
-		return err
-	}
-	// Re-author the slot onto the target: each archive's already-compressed payload
-	// (the source copy's parts concatenated) is re-split into parts sized to the
-	// target's volumes, rolling onto a fresh volume mid-archive when one fills. The
-	// bytes are unchanged, so checksums and members carry over; only the part layout
-	// is new. The slot's logical content (the source seal) is what the catalog keeps.
-	now := time.Now().UTC()
-	// Re-author under the source's identity (CreatedAt and all) so the copy's seal
-	// record names the same logical slot; the catalog still keeps the source seal.
-	spec := archiveio.SlotSpec{ID: s.ID, Date: s.Date, Sequence: s.Sequence, Generator: s.Generator, CreatedAt: s.CreatedAt}
-	wt, err := e.prepareWriter(targetMedia, spec, now, logf)
-	if err != nil {
-		return err
-	}
-	w := wt.w
-	logf.log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
-	// Open the source copy's archives as a one-pass read (the clerk resolves their positions),
-	// then re-author each onto the target. Copy order is immaterial — archives are keyed by
-	// (dle, level) — so the physical ordering is a free win.
-	refs := make([]clerk.Ref, 0, len(s.Archives))
-	metaByRef := map[clerk.Ref]record.Archive{}
-	for _, a := range s.Archives {
-		ref := clerk.Ref{Slot: slotID, DLE: a.DLE, Level: a.Level}
-		refs = append(refs, ref)
-		metaByRef[ref] = a
-	}
-	session := e.clerk.OpenSlot(w, targetMedia)
-	missing, err := e.clerk.ReadArchives(refs, fromMedia, func(ref clerk.Ref, open func() (io.ReadCloser, error)) error {
-		rc, serr := open()
-		if serr != nil {
-			return fmt.Errorf("copy %s L%d to %q: %w", ref.DLE, ref.Level, targetMedia, serr)
-		}
-		// Re-author the archive raw (no transform) onto the target's volumes. Load the members
-		// so the target writes a real member index (keeping that copy self-describing).
-		meta := metaByRef[ref]
-		meta.Members, _ = e.clerk.Members(ref)
-		if _, werr := xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(), &copySink{session: session, meta: meta}, xfer.Opts{}); werr != nil {
-			return fmt.Errorf("copy %s L%d to %q: %w", ref.DLE, ref.Level, targetMedia, werr)
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("source copy of %s on %q is missing one or more archives", slotID, fromMedia)
-	}
-	if _, err := session.Finish(now); err != nil {
-		return fmt.Errorf("finish copy on %q: %w", targetMedia, err)
-	}
-	logf.log("copied %s (%d archive(s)) to %q", slotID, len(s.Archives), targetMedia)
-	return nil
-}
-
-// copySource resolves the placement that holds a slot on the source medium and a
-// librarian over that medium, for the read side of a copy. It errors if the slot has
-// no copy on fromMedia (the catalog knows of none to read).
-func (e *Engine) copySource(slotID, fromMedia string) (*librarian.Librarian, catalog.Placement, error) {
-	src, ok := e.placementOn(slotID, fromMedia)
-	if !ok {
-		return nil, catalog.Placement{}, fmt.Errorf("slot %s has no copy on source medium %q", slotID, fromMedia)
-	}
-	lib, _, _, err := e.librarianFor(fromMedia)
-	if err != nil {
-		return nil, catalog.Placement{}, err
-	}
-	return lib, src, nil
+	return e.cop.CopySlot(slotID, fromMedia, targetMedia, force, logf)
 }
 
 // partSizeFor reads a medium's optional part_size parameter (the deliberate per-part
