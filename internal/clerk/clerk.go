@@ -1,22 +1,21 @@
-// Package clerk is NBackup's archive data path — the composer that moves an archive's bytes
-// between a DLE on a host and the media, in both directions. It is Amanda's Scribe and Clerk
-// in one object: on the WRITE side it composes a dump (the archiver's tar source → encode
-// filters → the slot writer's medium sink) and a copy; on the READ side it selects a copy
-// (with fail-over), mounts the volumes via the librarian, opens the raw part stream, and
-// composes the decode (Reader → decrypt/decompress → tar). Every operation is one
-// xfer.Transfer; the filter builders here are the single home for "how the record's
-// transforms become a pipeline," shared by the dump/restore/copy/verify verbs and by drill.
+// Package clerk is NBackup's archive filesystem — the medium layer that turns a logical
+// archive ref into a byte endpoint and back, and nothing more. It is Amanda's Scribe +
+// Recovery::Clerk and the FS's open(): it owns the archive map (resolve a copy's positions on
+// read, record a run's placement on write — the Map role), the member index, and read-mounting
+// via the librarian (the Mounter role). It exposes endpoints, not operations:
 //
-// It owns only data-movement mechanics; policy — which archiver, retention, the slot session
-// (open/seal/placement), classifying a fault into a drill verdict — stays in the engine.
-// Everything it needs from the orchestrator — catalog placement, librarian mounting,
-// executor/archiver resolution, and the config-derived transform options/placement — comes
-// through Deps. That interface IS the boundary between deciding and doing.
+//   - read:  Open / OpenArchives → an xfer.Source over an archive's raw on-medium bytes,
+//     copy-selected and one-pass ordered.
+//   - write: a Session over a slot writer → Sink (metering, for a dump) / CopySink
+//     (passthrough, for a copy), then Commit (footer + index) and Finish (placement).
+//   - Members(ref) → the archive's member list (cache → on-medium index).
 //
-// The two archiveio-coupled endpoints — the archive Source (read) and the medium Sink (write) —
-// are the only bespoke pieces; xfer stays a generic leaf (it must, since archiveio imports
-// xfer.Limiter). Part concatenation lives in archiveio; clerk wraps it with copy-selection and
-// volume mounting to make a Source.
+// What it deliberately does NOT do: codecs, tar, or composing transfers. The decode/encode and
+// the far-end tar live in the *operations* (the Dumper, Restorer, Verifier, …), which compose
+// xfer.Transfer with a clerk endpoint at one end — exactly as cp/gzip compose over a
+// filesystem's open(), and amrestore decodes what the Recovery::Clerk merely reads. So the
+// clerk knows nothing of config, archivers, compress/encrypt, or the librarian package; its
+// only deps are the Map, the Mounter, a bandwidth Limiter, and its own member-index cache.
 package clerk
 
 import (

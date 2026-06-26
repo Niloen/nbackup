@@ -1455,20 +1455,12 @@ func (e *Engine) MounterFor(medium string) (clerk.Mounter, error) {
 // Limiter returns a medium's shared bandwidth cap (nil = uncapped).
 func (e *Engine) Limiter(medium string) *xfer.Limiter { return e.limiters[medium] }
 
-// Executor returns the transport that runs programs on a host.
+// Executor returns the transport that runs programs on a host — used by the engine's own
+// restore composition (transfer.go).
 func (e *Engine) Executor(host string) programs.Executor {
 	ex, _ := e.executorFor(host)
 	return ex
 }
-
-// RestoreArchiver resolves the archiver plugin that extracts on the given host.
-func (e *Engine) RestoreArchiver(typeName, host string) (archiver.Archiver, error) {
-	return e.restoreArchiver(typeName, host)
-}
-
-// CompressOpts / DecryptOpts are the config-derived decode-pipeline invocation options.
-func (e *Engine) CompressOpts() compress.Options { return e.fopts }
-func (e *Engine) DecryptOpts() crypt.Options     { return e.dcopts }
 
 // ensureServerCanDecode fails fast when a restore would have the server decrypt an
 // archive whose key cannot be there. Decode is server-side for both a plain restore and
