@@ -99,13 +99,13 @@ func (e *Engine) dumpArchive(session *clerk.Session, spec BackupSpec, prog func(
 	}
 	tarCmd := bs.Stage
 	tarCmd.Tap = func(n int64) { unc.Store(n); report() } // uncompressed (honored when tar runs locally)
-	src := xfer.NewPrograms(srcExec).Add(tarCmd)
-	if pl.CompressClient && compF.Forward.Name != "" {
-		src.Add(compF.Forward)
-	}
-	if pl.EncryptClient && encF.Forward.Name != "" {
-		src.Add(encF.Forward)
-	}
+	// Place each encode step: a client-side transform fuses with tar in the source (plaintext
+	// never leaves the client); a server-side one lands in the local filters.
+	fused, filters := splitTransforms(
+		transform{cmd: compF.Forward, fused: pl.CompressClient},
+		transform{cmd: encF.Forward, fused: pl.EncryptClient},
+	)
+	src := xfer.NewPrograms(srcExec).Add(tarCmd).Add(fused...)
 	src.Finishing(func() (xfer.Produced, error) {
 		res, ferr := bs.Finish()
 		if ferr != nil {
@@ -117,16 +117,8 @@ func (e *Engine) dumpArchive(session *clerk.Session, spec BackupSpec, prog func(
 		return xfer.Produced{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members}, nil
 	}).OnCleanup(bs.Cleanup)
 
-	var filterCmds []programs.Cmd
-	if !pl.CompressClient && compF.Forward.Name != "" {
-		filterCmds = append(filterCmds, compF.Forward)
-	}
-	if !pl.EncryptClient && encF.Forward.Name != "" {
-		filterCmds = append(filterCmds, encF.Forward)
-	}
-
 	sink := &mediumSink{session: session, meta: meta}
-	res, terr := xfer.Transfer(src, xfer.NewFilters(filterCmds...), sink,
+	res, terr := xfer.Transfer(src, filters, sink,
 		xfer.Opts{Progress: func(n int64) { comp.Store(n); report() }})
 	if terr != nil {
 		return clerk.Summary{}, terr

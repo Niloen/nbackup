@@ -93,8 +93,12 @@ type Filters struct{ cmds []programs.Cmd }
 // NewFilters builds a local filter chain.
 func NewFilters(cmds ...programs.Cmd) Filters { return Filters{cmds: cmds} }
 
-// Add appends a filter command, returning a new chain.
+// Add appends a filter command, returning a new chain. An identity command (empty Name, e.g.
+// codec "none") is dropped: a chain never carries a stage that is not a real program.
 func (f Filters) Add(c programs.Cmd) Filters {
+	if c.Name == "" {
+		return f
+	}
 	return Filters{cmds: append(f.cmds[:len(f.cmds):len(f.cmds)], c)}
 }
 
@@ -194,8 +198,16 @@ type Programs struct {
 // NewPrograms starts a program chain on ex.
 func NewPrograms(ex programs.Executor) *Programs { return &Programs{exec: ex} }
 
-// Add appends a command to the chain.
-func (p *Programs) Add(c programs.Cmd) *Programs { p.cmds = append(p.cmds, c); return p }
+// Add appends commands to the chain, dropping identity commands (empty Name) so a "none"
+// codec or scheme leaves no stage behind. Variadic so a caller can splice in a placed slice.
+func (p *Programs) Add(cmds ...programs.Cmd) *Programs {
+	for _, c := range cmds {
+		if c.Name != "" {
+			p.cmds = append(p.cmds, c)
+		}
+	}
+	return p
+}
 
 // Finishing sets the producer's stat hook (source use).
 func (p *Programs) Finishing(fn func() (Produced, error)) *Programs { p.finish = fn; return p }

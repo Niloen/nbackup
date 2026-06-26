@@ -53,21 +53,16 @@ func (e *Engine) restoreArchive(rc io.ReadCloser, plan DecodePlan, archiverType,
 		return err
 	}
 
-	sink := xfer.NewPrograms(target)
-	if plan.DecryptInSink && encF.Reverse.Name != "" {
-		sink.Add(encF.Reverse)
-	}
-	if compF.Reverse.Name != "" {
-		sink.Add(compF.Reverse)
-	}
-	sink.Add(arch.RestoreStage(destDir, members))
+	// Place each decode step: decrypt lands in the sink (on the target) when the key is
+	// client-held, else in the local filters; decompress always fuses with tar on the target so
+	// a remote restore ships compressed bytes. The sink chain is decrypt → decompress → tar.
+	fused, filters := splitTransforms(
+		transform{cmd: encF.Reverse, fused: plan.DecryptInSink},
+		transform{cmd: compF.Reverse, fused: true},
+	)
+	sink := xfer.NewPrograms(target).Add(fused...).Add(arch.RestoreStage(destDir, members))
 
-	var filterCmds []programs.Cmd
-	if !plan.DecryptInSink && encF.Reverse.Name != "" {
-		filterCmds = append(filterCmds, encF.Reverse)
-	}
-
-	_, err = xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(filterCmds...), sink, xfer.Opts{})
+	_, err = xfer.Transfer(xfer.Reader(rc), filters, sink, xfer.Opts{})
 	return err
 }
 
@@ -94,7 +89,9 @@ func (e *Engine) listMembers(rc io.ReadCloser, codec, encrypt string, arch archi
 	if err != nil {
 		return nil, err
 	}
-	res, terr := xfer.Transfer(xfer.Reader(rc), localDecode(decrypt, decompress), listSink{arch: arch}, xfer.Opts{})
+	// A local list runs both transforms server-side (nothing fuses with a far tar).
+	_, filters := splitTransforms(transform{cmd: decrypt}, transform{cmd: decompress})
+	res, terr := xfer.Transfer(xfer.Reader(rc), filters, listSink{arch: arch}, xfer.Opts{})
 	return res.SinkResult.Members, terr
 }
 
@@ -111,18 +108,6 @@ func (e *Engine) decodeFilters(codec, encrypt string) (decrypt, decompress progr
 		return programs.Cmd{}, programs.Cmd{}, err
 	}
 	return ef.Reverse, cf.Reverse, nil
-}
-
-// localDecode builds a local Filters chain (decrypt then decompress), skipping identities.
-func localDecode(decrypt, decompress programs.Cmd) xfer.Filters {
-	f := xfer.NewFilters()
-	if decrypt.Name != "" {
-		f = f.Add(decrypt)
-	}
-	if decompress.Name != "" {
-		f = f.Add(decompress)
-	}
-	return f
 }
 
 // listSink consumes a decoded stream by listing its members (`tar -t`). A bad stream

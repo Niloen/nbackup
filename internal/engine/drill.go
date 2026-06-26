@@ -302,7 +302,8 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		// failure (Pipeline). Driving the proof on the client for a client-only key is the
 		// documented follow-on — see the design note.
 		sink := xfer.NewPrograms(programs.Local()).Add(arch.RestoreStage(dir, nil))
-		_, terr := xfer.Transfer(xfer.Reader(src), localDecode(decrypt, decompress), sink, xfer.Opts{})
+		_, filters := splitTransforms(transform{cmd: decrypt}, transform{cmd: decompress})
+		_, terr := xfer.Transfer(xfer.Reader(src), filters, sink, xfer.Opts{})
 		if terr != nil {
 			var xe *xfer.Error
 			if errors.As(terr, &xe) && xe.Role == xfer.RoleSink {
