@@ -1,17 +1,13 @@
-// Package archiveio is NBackup's archive data path — the nuts and bolts of moving an
-// archive's bytes between the catalog/media and a destination. It selects a copy, mounts
-// the volumes (via the librarian), composes the payload's decode pipeline from config +
-// the record, places each stage on an executor, and drives slotio. The engine above it
-// orchestrates (what to back up, when, retention, drill selection); archiveio does the
-// byte-moving — the Amanda driver-vs-dumper/taper split.
+// Package archiveio is NBackup's archive READ data path — the nuts and bolts of getting an
+// archive's bytes off the media. It selects a copy (with fail-over), mounts the volumes via
+// the librarian, and opens the raw part stream; Extract builds the decode xfer.Transfer
+// (Reader → decrypt/decompress → tar) from the record. It is the read peer of the engine's
+// dump (which composes its own xfer.Transfer for the write side) — the Amanda
+// Recovery::Clerk to the engine's taper.
 //
 // It owns only mechanics. Everything it needs from the orchestrator — catalog placement,
 // librarian mounting, executor/archiver resolution, and the config-derived transform
-// options — comes through Deps. That interface IS the boundary between deciding and doing;
-// where it should sit (engine-owned, as now, or relocated into the data path) is the open
-// question this layer is meant to make visible.
-//
-// Read verbs only for now; the write path (Produce) follows once the read shape settles.
+// options — comes through Deps. That interface IS the boundary between deciding and doing.
 package archiveio
 
 import (

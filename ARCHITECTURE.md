@@ -52,11 +52,11 @@ registry registration, not a conditional in the core.
 | `media/disk`, `media/tape`, `media/cloud` | Volume impls (disk sidecar headers; tape library; object store via gocloud.dev/blob) | vfs / tape / s3 devices |
 | `media/fslike` | the slot layout shared by the address-identified media — clean payloads + `.hdr` sidecars over a small `Store` seam (disk = a directory, cloud = a bucket), so disk↔cloud copies are byte-identical | — |
 | `archiver` + `archiver/gnutar` | `Archiver` interface + registry + named definitions; owns its incremental-state library; GNU tar impl | Application API / amgtar |
-| `transform` | composes the payload's codec/cipher `Filter`s into one reversible host-placed `Pipeline` — owns the chain ORDER (compress, then encrypt) and the `Forward`/`Reverse` duality; running/fusing is the caller's | — |
-| `transform/compress` | external compressor child processes (zstd/gzip/none) + registry; `Filter(scheme)` | compress |
-| `transform/crypt` | external encryptor child processes (gpg/none) + registry; `Filter(scheme)` | amcrypt/amgpgcrypt |
-| `hostexec` | the execution transport: run external programs + stage scratch files on a host that is transparently `Local` or `SSH`; `RunPipe` fuses same-host stages; injected into archivers and the compress/encrypt stages so remote sources need no client agent | amandad (replaced by stock sshd) |
-| `xfer` | in-process stream pieces: checksum + byte counting, and the per-medium bandwidth cap (`Limiter`) | Xfer API / netusage |
+| `transform/compress` | external compressor child processes (zstd/gzip/none) + registry; `Filter(scheme)` returns the forward/reverse `programs.Cmd` | compress |
+| `transform/crypt` | external encryptor child processes (gpg/none) + registry; `Filter(scheme)` returns the forward/reverse `programs.Cmd` | amcrypt/amgpgcrypt |
+| `programs` | the base: a `Cmd` (external program to run) + an `Execution` transport that runs a pipe of commands on one host, transparently `Local` or `SSH`; the command/execution concept compress, crypt, and the archiver all build on | amandad (replaced by stock sshd) |
+| `xfer` | the data-movement primitive: `Transfer(source, filters, sink)` moves one stream through three zones — a `Source` (a client's tar, or a medium read), local `Filters` (compress/encrypt or decrypt/decompress), and a `Sink` (a medium, a target's tar, a hash) — tagging faults by zone; plus the `Meter`/`Limiter` byte pieces | Amanda Xfer / netusage |
+| `archiveio` | the read data path: copy selection + fail-over, mounting volumes via the librarian, building the decode transfer from the record (`Extract`); the read peer of the engine's dump | Recovery::Clerk |
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `report` | per-run history record + JSONL/summary file I/O + digest render | amreport |
 | `notify` | pluggable alert backends (smtp/webhook) + registry + dispatch | amreport mailto |
@@ -66,21 +66,22 @@ registry registration, not a conditional in the core.
 | `recovery` | as-of-date browse tree + per-archive file selection (pure) | amrecover |
 | `drill` | recovery-drill ledger + risk-biased selection + failure taxonomy (pure) | amverify (orchestrated) |
 | `planner` | multilevel level scheduling (pure) | planner |
-| `engine` | the driver: parallel workers, wires planner→archiver→transform→media→catalog; composes and places the encode/decode pipelines | driver / taper |
+| `engine` | the driver: parallel workers, wires planner→archiver→xfer→media→catalog; builds and runs each backup/restore as an `xfer.Transfer` | driver / taper |
 | `cli` | thin command wiring | amdump / amadmin |
 
-Dependencies flow one way: `cli → engine → {planner, retention, archiver, transform,
-slotio, catalog, config, progress, restore, recovery}` over leaf packages
-`{media, xfer, sizeutil}`, all bottoming out on `record` (the on-medium artifact
+Dependencies flow one way: `cli → engine → {planner, retention, archiver, xfer,
+archiveio, slotio, catalog, config, progress, restore, recovery}` over leaf packages
+`{media, programs, sizeutil}`, all bottoming out on `record` (the on-medium artifact
 format that `media`, `slotio`, and `catalog` read and write) (`recovery` builds on `restore`). The reporting
 layer adds `cli → {report, notify}` with `notify → {report, config}` — `report` is a
 pure leaf (record + render); the engine does **not** depend on either.
 Domain packages stay pure; `archiver`/`media`/`transform/compress`/`transform/crypt` are
-pluggable adapters; `engine` is the only component aware of all of them. A backup is a
-pipeline of processes the engine composes: **archiver** (`tar` via `archiver.Backup`, for
-gnutar) → **compress** child → **encrypt** child (the `transform.Pipeline`'s forward
-stages) → **dest** (`media.Volume`), metered and optionally rate-limited by `xfer`,
-split into parts by `slotio`.
+pluggable adapters; `engine` is the only component aware of all of them. A backup is an
+**`xfer.Transfer`** the engine composes: a **Source** (`tar` via `archiver.Backup` on the
+DLE's host, fused with any client-side compress/encrypt) → local **Filters** (server-side
+compress/encrypt) → a **Sink** (the medium, via `slotio` meter + split into parts).
+Restore is the same in reverse (a medium-read Source → decrypt/decompress Filters → a
+target's `tar -x` Sink), and copy/verify/drill are Transfers with different endpoints.
 
 ## Load-bearing decisions (the *why*)
 
@@ -253,7 +254,7 @@ peer of compression, one stream transform further out: on write the pipeline is
 **tar → compress → encrypt → meter → volume**; on read it reverses **decrypt →
 decompress**. `transform/crypt` mirrors `transform/compress` — an external child (`gpg`),
 selected by a registered scheme *name* (`gpg`/`none`), exposing the same reversible
-`Filter` the `transform.Pipeline` chains. Three decisions carry their weight:
+`Filter` (a forward/reverse `programs.Cmd`) the engine places into a transfer. Three decisions carry their weight:
 - **Outermost placement is load-bearing.** Because encryption sits *inside* the
   `xfer.Meter`, the seal's `SHA256` covers the *ciphertext* that lands on the
   volume. So `nb verify` and `CopySlot`/`nb sync` all
@@ -436,17 +437,20 @@ specifics (`tar`, `.snar`, the listed-incremental snapshot, `state_dir`,
 reuses the vocabulary. The concurrency unit is a **worker** (`parallelism.workers`),
 not a "archiver" — "archiver" means only the plugin.
 
-**Execution is an injected transport; the pipeline is one path (`package hostexec`).**
+**Execution is an injected transport; a backup/restore is one `xfer.Transfer` (`programs` + `xfer`).**
 A backup is a chain of external programs — `tar → compress → encrypt` — then the in-process
 server-side `meter → drainParts → volume → seal`. The compressor and encryptor are *just
-programs*, like `tar`, so there is **one** pipeline path, not a server-side-wrapping path
-plus a separate client-side one. Each program stage carries an **`Executor`** (the host it
-runs on — `Local` or `SSH`), and the engine (`produceArchive`) runs the forward stages
-through `hostexec.RunGrouped`, which groups maximal runs of adjacent same-host stages into
-one host-local pipe (`Executor.RunPipe`), crossing the wire only at an executor boundary;
-`slotio` then meters and splits the pipeline's output. So a local dump (every stage `Local`), a thin client (tar on
-`SSH`, transforms `Local`), and a fully client-side dump (all on `SSH` — only ciphertext
-crosses to the server meter) are the *same* code with different per-stage executors. The
+programs*, like `tar`, so there is **one** path. `package programs` is the base: a `Cmd`
+plus an `Execution` (the host it runs on — `Local` or `SSH`) whose `RunPipe` runs a pipe of
+commands on that one host. `package xfer` composes those single-host pipes into a
+`Transfer(source, filters, sink)`: each transform lands in the **Source** zone (a client's
+host, fused with tar), the local **Filters** zone (the server), or the **Sink** zone (the
+medium, or a target's host) — so a transform never runs on a third *remote* host, and the
+wire is crossed only between zones. A fault is tagged with its zone, which is exactly the
+Pipeline-vs-Chain/Structural split the drill and verify layers classify on. So a local dump
+(everything `Local`), a thin client (tar on `SSH`, transforms in local Filters), and a fully
+client-side dump (tar+compress+encrypt all in the `SSH` Source — only ciphertext crosses to
+the server Sink) are the *same* code with different zone placement. The
 transport lives in one neutral package and is injected into archivers via
 `archiver.Open(name, opts, ex)` — SSH is part of **no** archiver, so a new archiver gets
 remote execution for free as long as its binaries are on the client. The meter stays
@@ -467,8 +471,8 @@ or fails a backup (a write error is a stderr warning). **Faithful adaptation:**
 NBackup has no holding disk — each DLE streams source→compressor→volume in one
 pass — so Amanda's separate dumper/taper queues collapse to one `dumping` state
 per DLE, metered by uncompressed bytes against the planner estimate. The
-measurement point is the source stage's byte tap (`hostexec.Cmd.Tap`) on the
-tar→compressor stream, wired in the engine's `produceArchive`; compressed bytes come
+measurement point is the source stage's byte tap (`programs.Cmd.Tap`) on the
+tar→compressor stream, wired in the engine's `backupItem`; compressed bytes come
 from `slotio`'s streaming meter as the payload drains into parts (both feed the same
 per-DLE counters, throttled so they can be polled live).
 
