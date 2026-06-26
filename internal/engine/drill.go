@@ -279,7 +279,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		// Build the decode filters first (a bad scheme fails before any media is opened), then
 		// open the copy-selected source — an open fault (missing copy/volume) is classifiable
 		// here, before bytes flow.
-		decrypt, decompress, derr := e.clerk.DecodeFilters(step.Compress, step.Encrypt)
+		decrypt, decompress, derr := e.decodeFilters(step.Compress, step.Encrypt)
 		if derr != nil {
 			return drill.ClassPipeline, derr.Error()
 		}
@@ -294,7 +294,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		// failure (Pipeline). Driving the proof on the client for a client-only key is the
 		// documented follow-on — see the design note.
 		sink := xfer.NewPrograms(programs.Local()).Add(arch.RestoreStage(dir, nil))
-		_, terr := xfer.Transfer(src, clerk.LocalDecode(decrypt, decompress), sink, xfer.Opts{})
+		_, terr := xfer.Transfer(src, localDecode(decrypt, decompress), sink, xfer.Opts{})
 		if terr != nil {
 			var xe *xfer.Error
 			if errors.As(terr, &xe) && xe.Role == xfer.RoleSink {

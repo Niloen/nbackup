@@ -1,7 +1,6 @@
 package clerk
 
 import (
-	"errors"
 	"io"
 	"sync/atomic"
 	"time"
@@ -64,46 +63,6 @@ type copySink struct {
 func (s *copySink) Drain(in io.Reader, _ func(int64)) (xfer.SinkResult, error) {
 	_, err := s.w.CopyArchive(s.meta, in)
 	return xfer.SinkResult{}, err
-}
-
-// listSink consumes the decoded stream by listing its members (`tar -t`) — the verify path's
-// structural check. A bad stream (truncated decode, not-a-tar) fails the archiver's List; the
-// members feed the seal comparison.
-type listSink struct{ arch archiver.Archiver }
-
-func (s listSink) Drain(in io.Reader, _ func(int64)) (xfer.SinkResult, error) {
-	members, err := s.arch.List(in)
-	return xfer.SinkResult{Members: members}, err
-}
-
-// --- shared filter builders (the one home for record-transforms → pipeline) ---
-
-// DecodeFilters returns the decrypt and decompress commands that reverse an archive's
-// recorded transforms, keyed by the engine's default decode options. A none scheme yields an
-// empty Cmd, which a transfer skips. Shared by the restore/verify verbs and by drill.
-func (c *Clerk) DecodeFilters(codec, encrypt string) (decrypt, decompress programs.Cmd, err error) {
-	cf, err := compress.Filter(codec, c.deps.CompressOpts())
-	if err != nil {
-		return programs.Cmd{}, programs.Cmd{}, err
-	}
-	ef, err := crypt.Filter(encrypt, c.deps.DecryptOpts())
-	if err != nil {
-		return programs.Cmd{}, programs.Cmd{}, err
-	}
-	return ef.Reverse, cf.Reverse, nil
-}
-
-// LocalDecode builds a local Filters chain (decrypt then decompress) from DecodeFilters'
-// commands, skipping the none/identity ones.
-func LocalDecode(decrypt, decompress programs.Cmd) xfer.Filters {
-	f := xfer.NewFilters()
-	if decrypt.Name != "" {
-		f = f.Add(decrypt)
-	}
-	if decompress.Name != "" {
-		f = f.Add(decompress)
-	}
-	return f
 }
 
 // --- the write-side slot session ---
@@ -260,32 +219,4 @@ func (s *Session) Copy(src xfer.Source, ref Ref, meta record.Archive) error {
 	meta.Members, _ = s.clerk.Members(ref)
 	_, err := xfer.Transfer(src, xfer.NewFilters(), &copySink{w: s.w, meta: meta}, xfer.Opts{})
 	return err
-}
-
-// VerifyChecksum hashes an archive's raw stream (from a plan job's Source) and reports whether
-// it matches the recorded sha. It is a transfer with no decode: source → Hash sink. A clean
-// read whose hash differs returns (false, nil); a read fault returns (false, err).
-func (c *Clerk) VerifyChecksum(src xfer.Source, sha string) (bool, error) {
-	_, terr := xfer.Transfer(src, xfer.NewFilters(), xfer.Hash(sha), xfer.Opts{})
-	if terr != nil {
-		// A mismatch is the Hash sink's (clean-read) failure; anything else is a read fault.
-		var xe *xfer.Error
-		if errors.As(terr, &xe) && xe.Role == xfer.RoleSink {
-			return false, nil
-		}
-		return false, terr
-	}
-	return true, nil
-}
-
-// ListMembers decodes an archive's stream (from a plan job's Source, server-side Filters) and
-// lists the members (`tar -t`) — the verify path's structural check. It returns the listed
-// members and the raw transfer error (role-tagged) for the caller to classify and hint.
-func (c *Clerk) ListMembers(src xfer.Source, codec, encrypt string, arch archiver.Archiver) ([]string, error) {
-	decrypt, decompress, err := c.DecodeFilters(codec, encrypt)
-	if err != nil {
-		return nil, err
-	}
-	res, terr := xfer.Transfer(src, LocalDecode(decrypt, decompress), listSink{arch: arch}, xfer.Opts{})
-	return res.SinkResult.Members, terr
 }

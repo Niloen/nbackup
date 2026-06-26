@@ -1416,19 +1416,19 @@ func (e *Engine) extractInto(slotID, dle string, level int, codec, encrypt, arch
 		return decryptHint(encrypt, err)
 	}
 	plan := e.decodePlan(codec, encrypt, ec, targetHost)
-	return decryptHint(encrypt, e.clerk.Restore(src, plan, archiverType, destDir, targetHost, members))
+	return decryptHint(encrypt, e.restoreArchive(src, plan, archiverType, destDir, targetHost, members))
 }
 
 // decodePlan resolves the decode placement (engine policy): decrypt runs on the target (the
 // sink) only when the key is client-held and reached over `--to`; otherwise on the local
 // server, with the server's default decrypt opts. The clerk just places the resolved plan.
-func (e *Engine) decodePlan(codec, encrypt string, ec config.EncryptConfig, targetHost string) clerk.DecodePlan {
+func (e *Engine) decodePlan(codec, encrypt string, ec config.EncryptConfig, targetHost string) DecodePlan {
 	opts := e.dcopts
 	inSink := ec.At == "client" && targetHost != ""
 	if inSink {
 		opts = crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile}
 	}
-	return clerk.DecodePlan{Codec: codec, CompressOpts: e.fopts, Encrypt: encrypt, DecryptOpts: opts, DecryptInSink: inSink}
+	return DecodePlan{Codec: codec, CompressOpts: e.fopts, Encrypt: encrypt, DecryptOpts: opts, DecryptInSink: inSink}
 }
 
 // The engine implements clerk.Deps: the data path's view of the orchestrator's
@@ -1642,7 +1642,7 @@ func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, 
 			return files, fmt.Errorf("extract from %s %s L%d: %w", st.SlotID, st.DLE, st.Level, serr)
 		}
 		plan := e.decodePlan(st.Compress, st.Encrypt, config.EncryptConfig{}, "")
-		if err := decryptHint(st.Encrypt, e.clerk.Restore(src, plan, st.Archiver, destDir, "", st.Members)); err != nil {
+		if err := decryptHint(st.Encrypt, e.restoreArchive(src, plan, st.Archiver, destDir, "", st.Members)); err != nil {
 			return files, fmt.Errorf("extract from %s %s L%d: %w", st.SlotID, st.DLE, st.Level, err)
 		}
 		files += countFiles(st.Members)

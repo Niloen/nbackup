@@ -213,7 +213,7 @@ func (e *Engine) verifyArchive(a record.Archive, job clerk.ReadJob, medium strin
 			v.OK, v.Class, v.Detail = false, drill.ClassPipeline, serr.Error()
 			return v
 		}
-		good, err := e.clerk.VerifyChecksum(src, a.SHA256)
+		good, err := e.verifyChecksum(src, a.SHA256)
 		if err != nil {
 			logf.log("%s [%s]: %s L%d ERROR %v", id, medium, a.DLEID(), a.Level, err)
 			v.OK, v.Class, v.Detail = false, drill.ClassPipeline, err.Error()
@@ -254,7 +254,7 @@ func (e *Engine) structuralCheck(id string, a record.Archive, job clerk.ReadJob)
 	// Any fault — a media read, a decode child, or a not-a-tar List — is a Pipeline failure; a
 	// clean stream whose members differ from the seal is an Integrity failure. The decrypt
 	// hint keeps a lost-key failure from being mislabeled as corruption.
-	members, terr := e.clerk.ListMembers(src, a.Compress, a.Encrypt, arch)
+	members, terr := e.listMembers(src, a.Compress, a.Encrypt, arch)
 	if terr != nil {
 		return drill.ClassPipeline, decryptHint(a.Encrypt, terr).Error()
 	}

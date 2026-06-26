@@ -25,12 +25,9 @@ import (
 	"io"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
-	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/transform/compress"
-	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
@@ -72,16 +69,11 @@ type Deps interface {
 	MounterFor(medium string) (Mounter, error)
 	// Limiter returns the medium's shared bandwidth cap (nil = uncapped).
 	Limiter(medium string) *xfer.Limiter
-	// Executor returns the transport that runs programs on a host (Local or remote).
+	// Executor returns the transport that runs programs on a host (Local or remote) — the
+	// write side still fuses client-side encode stages onto the source host.
 	Executor(host string) programs.Executor
-	// RestoreArchiver resolves the archiver plugin that extracts on the given host.
-	RestoreArchiver(typeName, host string) (archiver.Archiver, error)
-	// CompressOpts / DecryptOpts are the config-derived invocation options for the
-	// decode pipeline's decompress and decrypt stages.
-	CompressOpts() compress.Options
-	DecryptOpts() crypt.Options
-	// EncodePlacement is the write-side peer: the per-dumptype compress/encrypt invocation
-	// options plus where each transform runs (client vs the local server).
+	// EncodePlacement is the per-dumptype compress/encrypt invocation options plus where each
+	// transform runs (client vs the local server). (Write side; moves out with the Dumper.)
 	EncodePlacement(dumpType string) EncodePlacement
 }
 
@@ -211,60 +203,6 @@ func (c *Clerk) ReadIndex(medium string, pos record.FilePos) ([]string, error) {
 	}
 	defer rc.Close()
 	return record.DecodeIndex(rc)
-}
-
-// DecodePlan is the engine-resolved recipe for reversing an archive's transforms on restore:
-// the schemes and their invocation opts, plus where decrypt runs. DecryptInSink is resolved by
-// the engine (policy) — true when the key is client-held and reached over `--to`, so decrypt
-// runs on the target; otherwise it runs in the local server filters. The clerk only places
-// the resolved plan onto zones; it reads no config.
-type DecodePlan struct {
-	Codec         string
-	CompressOpts  compress.Options
-	Encrypt       string
-	DecryptOpts   crypt.Options
-	DecryptInSink bool
-}
-
-// Restore streams an archive (from a Source) through the decode→extract pipeline into destDir
-// on targetHost (members nil = whole-archive listed-incremental restore; members set =
-// selected-file recovery, no deletions). Decrypt lands in the sink or the local filters per
-// plan.DecryptInSink; decompress fuses with tar on the target so a remote restore ships
-// compressed bytes. It returns the raw pipeline error; the caller adds any decrypt hint.
-func (c *Clerk) Restore(src xfer.Source, plan DecodePlan, archiverType, destDir, targetHost string, members []string) error {
-	target := c.deps.Executor(targetHost)
-	if err := target.MkdirAll(destDir); err != nil {
-		return err
-	}
-	arch, err := c.deps.RestoreArchiver(archiverType, targetHost)
-	if err != nil {
-		return err
-	}
-	encF, err := crypt.Filter(plan.Encrypt, plan.DecryptOpts)
-	if err != nil {
-		return err
-	}
-	compF, err := compress.Filter(plan.Codec, plan.CompressOpts)
-	if err != nil {
-		return err
-	}
-
-	sink := xfer.NewPrograms(target)
-	if plan.DecryptInSink && encF.Reverse.Name != "" {
-		sink.Add(encF.Reverse)
-	}
-	if compF.Reverse.Name != "" {
-		sink.Add(compF.Reverse)
-	}
-	sink.Add(arch.RestoreStage(destDir, members))
-
-	var filterCmds []programs.Cmd
-	if !plan.DecryptInSink && encF.Reverse.Name != "" {
-		filterCmds = append(filterCmds, encF.Reverse)
-	}
-
-	_, err = xfer.Transfer(src, xfer.NewFilters(filterCmds...), sink, xfer.Opts{})
-	return err
 }
 
 // eachPlacement resolves the placements holding ref's slot (all copies, or only those on
