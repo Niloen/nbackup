@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"io"
 	"sync/atomic"
 
 	"github.com/Niloen/nbackup/internal/archiver"
@@ -124,11 +125,41 @@ func (e *Engine) dumpArchive(session *clerk.Session, spec BackupSpec, prog func(
 		filterCmds = append(filterCmds, encF.Forward)
 	}
 
-	sink := session.Sink(meta)
+	sink := &mediumSink{session: session, meta: meta}
 	res, terr := xfer.Transfer(src, xfer.NewFilters(filterCmds...), sink,
 		xfer.Opts{Progress: func(n int64) { comp.Store(n); report() }})
 	if terr != nil {
 		return clerk.Summary{}, terr
 	}
-	return session.Commit(sink, res.Produced)
+	return session.Commit(sink.measured, sink.parts, res.Produced.FileCount, res.Produced.Uncompressed, res.Produced.Members)
+}
+
+// mediumSink is the operation's xfer.Sink bridge to the clerk's write endpoint: it drains the
+// encoded stream into the slot writer (metering + splitting) and keeps the measured archive +
+// parts for the dumpArchive's Commit. A fresh dump uses this; a copy uses copySink.
+type mediumSink struct {
+	session  *clerk.Session
+	meta     record.Archive
+	measured record.Archive
+	parts    []record.FilePos
+}
+
+func (m *mediumSink) Drain(in io.Reader, progress func(int64)) (xfer.SinkResult, error) {
+	arch, parts, err := m.session.WriteArchive(m.meta, in, progress)
+	if err != nil {
+		return xfer.SinkResult{}, err
+	}
+	m.measured, m.parts = arch, parts
+	return xfer.SinkResult{Compressed: arch.Compressed, SHA256: arch.SHA256}, nil
+}
+
+// copySink is the operation's xfer.Sink bridge for a copy: it drains the source's raw bytes
+// into the clerk's passthrough CopyArchive (verify + commit on the spot).
+type copySink struct {
+	session *clerk.Session
+	meta    record.Archive
+}
+
+func (s *copySink) Drain(in io.Reader, _ func(int64)) (xfer.SinkResult, error) {
+	return xfer.SinkResult{}, s.session.CopyArchive(s.meta, in)
 }

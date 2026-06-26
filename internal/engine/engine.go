@@ -27,6 +27,7 @@ import (
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/progress"
+	"github.com/Niloen/nbackup/internal/ratelimit"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/restore"
@@ -65,12 +66,12 @@ type Engine struct {
 	landingCost media.Cost // landing medium's pricing (dollar peer of profile)
 	minAge      time.Duration
 	cat         *catalog.Catalog
-	archivers   map[string]archiver.Archiver // by cache key (dumptype or "@type")
-	codec       string                       // compression codec for new archives
-	fopts       compress.Options             // codec invocation options (level/threads/nice)
-	dcopts      crypt.Options                // decrypt key reference for restore (from the default encrypt block)
-	op          librarian.Operator           // optional: handles manual tape swaps (nil = unattended)
-	limiters    map[string]*xfer.Limiter     // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
+	archivers   map[string]archiver.Archiver  // by cache key (dumptype or "@type")
+	codec       string                        // compression codec for new archives
+	fopts       compress.Options              // codec invocation options (level/threads/nice)
+	dcopts      crypt.Options                 // decrypt key reference for restore (from the default encrypt block)
+	op          librarian.Operator            // optional: handles manual tape swaps (nil = unattended)
+	limiters    map[string]*ratelimit.Limiter // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
 }
 
 // SetOperator attaches an operator so manual single-drive media can prompt for a
@@ -103,7 +104,7 @@ func New(cfg *config.Config) (*Engine, error) {
 	// a typo (e.g. `capcity:`) is a hard error rather than a silently-ignored knob.
 	// Done here, where the media registry is loaded, and over all media (not just
 	// landing) so an offsite tier's typo is caught too.
-	limiters := map[string]*xfer.Limiter{}
+	limiters := map[string]*ratelimit.Limiter{}
 	for mname, def := range cfg.Media {
 		if err := media.ValidateParams(def.Type, def.Params); err != nil {
 			return nil, fmt.Errorf("media %s: %w", mname, err)
@@ -120,7 +121,7 @@ func New(cfg *config.Config) (*Engine, error) {
 		if err != nil {
 			return nil, fmt.Errorf("media %s: throughput: %w", mname, err)
 		}
-		limiters[mname] = xfer.NewLimiter(bps)
+		limiters[mname] = ratelimit.NewLimiter(bps)
 	}
 	name, err := cfg.LandingName()
 	if err != nil {
@@ -612,7 +613,7 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		// so the target writes a real member index (keeping that copy self-describing).
 		meta := metaByRef[ref]
 		meta.Members, _ = e.clerk.Members(ref)
-		if _, werr := xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(), session.CopySink(meta), xfer.Opts{}); werr != nil {
+		if _, werr := xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(), &copySink{session: session, meta: meta}, xfer.Opts{}); werr != nil {
 			return fmt.Errorf("copy %s L%d to %q: %w", ref.DLE, ref.Level, targetMedia, werr)
 		}
 		return nil
@@ -1454,7 +1455,7 @@ func (e *Engine) MounterFor(medium string) (clerk.Mounter, error) {
 }
 
 // Limiter returns a medium's shared bandwidth cap (nil = uncapped).
-func (e *Engine) Limiter(medium string) *xfer.Limiter { return e.limiters[medium] }
+func (e *Engine) Limiter(medium string) *ratelimit.Limiter { return e.limiters[medium] }
 
 // Executor returns the transport that runs programs on a host — used by the engine's own
 // restore composition (transfer.go).

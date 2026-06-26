@@ -25,8 +25,8 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/ratelimit"
 	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/xfer"
 )
 
 // VolumeSink is the writer's view of a medium's changer: where the next part goes,
@@ -70,7 +70,7 @@ type SlotSpec struct {
 // volume and must be driven serially (the engine clamps archivers).
 type Writer struct {
 	sink VolumeSink
-	lim  *xfer.Limiter // optional bandwidth cap on the bytes landing on the medium (nil = uncapped)
+	lim  *ratelimit.Limiter // optional bandwidth cap on the bytes landing on the medium (nil = uncapped)
 
 	mu      sync.Mutex // guards the records below
 	slot    *record.Slot
@@ -93,7 +93,7 @@ type archiveRecord struct {
 // politeness); a nil lim is uncapped. The same lim is shared across concurrent
 // WriteArchive calls on an unbounded sink, so several workers to one medium share its
 // budget (Amanda's netusage).
-func NewWriter(sink VolumeSink, spec SlotSpec, lim *xfer.Limiter) *Writer {
+func NewWriter(sink VolumeSink, spec SlotSpec, lim *ratelimit.Limiter) *Writer {
 	slot := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
 	return &Writer{sink: sink, lim: lim, slot: slot}
 }

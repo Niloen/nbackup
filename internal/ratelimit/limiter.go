@@ -1,4 +1,4 @@
-package xfer
+package ratelimit
 
 import (
 	"context"

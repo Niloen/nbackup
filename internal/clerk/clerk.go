@@ -2,20 +2,23 @@
 // archive ref into a byte endpoint and back, and nothing more. It is Amanda's Scribe +
 // Recovery::Clerk and the FS's open(): it owns the archive map (resolve a copy's positions on
 // read, record a run's placement on write — the Map role), the member index, and read-mounting
-// via the librarian (the Mounter role). It exposes endpoints, not operations:
+// via the librarian (the Mounter role). It speaks only io.* — plain byte endpoints, never a
+// transfer — and exposes endpoints, not operations:
 //
-//   - read:  Open / OpenArchives → an xfer.Source over an archive's raw on-medium bytes,
-//     copy-selected and one-pass ordered.
-//   - write: a Session over a slot writer → Sink (metering, for a dump) / CopySink
-//     (passthrough, for a copy), then Commit (footer + index) and Finish (placement).
+//   - read:  Open → an io.ReadCloser over one archive's raw on-medium bytes (copy-selected);
+//     ReadArchives → the same, but the clerk drives an ordered one-pass read and calls back
+//     per archive.
+//   - write: a Session over a slot writer takes an io.Reader of already-encoded bytes
+//     (WriteArchive for a dump, CopyArchive for a copy), then Commit (footer + index) and
+//     Finish (placement).
 //   - Members(ref) → the archive's member list (cache → on-medium index).
 //
 // What it deliberately does NOT do: codecs, tar, or composing transfers. The decode/encode and
-// the far-end tar live in the *operations* (the Dumper, Restorer, Verifier, …), which compose
-// xfer.Transfer with a clerk endpoint at one end — exactly as cp/gzip compose over a
-// filesystem's open(), and amrestore decodes what the Recovery::Clerk merely reads. So the
-// clerk knows nothing of config, archivers, compress/encrypt, or the librarian package; its
-// only deps are the Map, the Mounter, a bandwidth Limiter, and its own member-index cache.
+// the far-end tar live in the *operations* (the Dumper, Restorer, Verifier, …), which wrap a
+// clerk endpoint in an xfer.Transfer — exactly as cp/gzip compose over a filesystem's open(),
+// and amrestore decodes what the Recovery::Clerk merely reads. So the clerk knows nothing of
+// xfer, config, archivers, compress/encrypt, or the librarian package; its only deps are the
+// Map, the Mounter, a bandwidth Limiter, and its own member-index cache.
 package clerk
 
 import (
@@ -25,8 +28,8 @@ import (
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/ratelimit"
 	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/xfer"
 )
 
 // Ref is the logical identity of one archive: which slot, DLE, and level. The data path
@@ -67,7 +70,7 @@ type Deps interface {
 	// MounterFor returns a read-mount onto a medium's volumes.
 	MounterFor(medium string) (Mounter, error)
 	// Limiter returns the medium's shared bandwidth cap (nil = uncapped).
-	Limiter(medium string) *xfer.Limiter
+	Limiter(medium string) *ratelimit.Limiter
 }
 
 // ErrMissingCopy marks a read failure where the catalog knows of no available copy of the
