@@ -56,13 +56,6 @@ func OrderForOnePass(items []ReadItem) []ReadItem {
 	return out
 }
 
-// ArchiveLoc is one archive's physical location on a copy: the parts to stream and where the
-// first one lies (for ordering). The caller supplies it from a catalog placement.
-type ArchiveLoc struct {
-	Ref   Ref
-	Parts []record.FilePos
-}
-
 // ReadJob is one archive in a planned read — its identity and a Source over its parts opened
 // on the plan's shared opener.
 type ReadJob struct {
@@ -79,30 +72,64 @@ func (j ReadJob) Source() (xfer.Source, error) {
 	return j.clerk.PartsSource(j.parts, want, j.opener)
 }
 
-// PlanPinned builds a one-pass read over a set of archives on one medium (verify, copy): it
-// orders them physically (OrderForOnePass) and threads one shared mounting opener, so a
-// multi-archive read walks the volume forward instead of remounting per archive. The order of
-// the returned jobs is the read order.
-func (c *Clerk) PlanPinned(medium string, locs []ArchiveLoc) ([]ReadJob, error) {
-	opener, err := c.PartOpener(medium)
-	if err != nil {
-		return nil, err
+// OpenArchives is the clerk's "open a set of archives" door: given logical refs, it locates
+// each one's copy and positions itself (the caller supplies no positions), orders them into a
+// one-pass read (OrderForOnePass), and threads one shared mounting opener per medium. medium
+// "" copy-selects per ref (prefer the engine's own copy); a set medium pins to that copy
+// (verify a specific copy, read a copy source). Refs with no available copy are skipped — the
+// caller compares the returned jobs to its refs to detect them (a broken chain, a
+// position-missing verdict). An opener that cannot be acquired (medium not in this config) is
+// returned as the error.
+func (c *Clerk) OpenArchives(refs []Ref, medium string) ([]ReadJob, error) {
+	type loc struct {
+		medium string
+		parts  []record.FilePos
 	}
-	items := make([]ReadItem, len(locs))
-	parts := make(map[Ref][]record.FilePos, len(locs))
-	for i, l := range locs {
-		first := record.FilePos{}
-		if len(l.Parts) > 0 {
-			first = l.Parts[0]
+	locs := map[Ref]loc{}
+	items := make([]ReadItem, 0, len(refs))
+	for _, ref := range refs {
+		m, parts, ok := c.locate(ref, medium)
+		if !ok {
+			continue // no copy of this archive here; the caller detects the gap
 		}
-		items[i] = ReadItem{Ref: l.Ref, Medium: medium, FirstPos: first}
-		parts[l.Ref] = l.Parts
+		locs[ref] = loc{medium: m, parts: parts}
+		first := record.FilePos{}
+		if len(parts) > 0 {
+			first = parts[0]
+		}
+		items = append(items, ReadItem{Ref: ref, Medium: m, FirstPos: first})
 	}
+
+	openers := map[string]archiveio.PartOpener{}
 	jobs := make([]ReadJob, 0, len(items))
 	for _, it := range OrderForOnePass(items) {
-		jobs = append(jobs, ReadJob{Ref: it.Ref, parts: parts[it.Ref], opener: opener, clerk: c})
+		l := locs[it.Ref]
+		op, ok := openers[l.medium]
+		if !ok {
+			var err error
+			if op, err = c.PartOpener(l.medium); err != nil {
+				return nil, err
+			}
+			openers[l.medium] = op
+		}
+		jobs = append(jobs, ReadJob{Ref: it.Ref, parts: l.parts, opener: op, clerk: c})
 	}
 	return jobs, nil
+}
+
+// locate resolves a ref to the copy that holds it: a set medium pins to that copy; "" takes
+// the first placement in read-preference order (the engine's own copy first) that has the
+// archive's parts.
+func (c *Clerk) locate(ref Ref, medium string) (string, []record.FilePos, bool) {
+	for _, p := range c.deps.PlacementsFor(ref.Slot) {
+		if medium != "" && p.Medium != medium {
+			continue
+		}
+		if parts, ok := p.Parts(ref.DLE, ref.Level); ok {
+			return p.Medium, parts, true
+		}
+	}
+	return "", nil, false
 }
 
 // physicallyBefore orders two archives by where their first part lies: medium, then the

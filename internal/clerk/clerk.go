@@ -27,7 +27,6 @@ import (
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
-	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
@@ -198,11 +197,25 @@ func (c *Clerk) ReadIndex(medium string, pos record.FilePos) ([]string, error) {
 	return record.DecodeIndex(rc)
 }
 
-// Extract streams an archive's raw parts through the decode→extract pipeline into destDir
-// on targetHost (members nil = a whole-archive listed-incremental chain restore; members
-// set = selected-file recovery, no deletions). It returns the raw pipeline error; the
-// caller adds any decrypt hint. targetHost "" extracts server-side.
-func (c *Clerk) Extract(ref Ref, codec, encrypt, archiverType, destDir, targetHost string, ec config.EncryptConfig, members []string) error {
+// DecodePlan is the engine-resolved recipe for reversing an archive's transforms on restore:
+// the schemes and their invocation opts, plus where decrypt runs. DecryptInSink is resolved by
+// the engine (policy) — true when the key is client-held and reached over `--to`, so decrypt
+// runs on the target; otherwise it runs in the local server filters. The clerk only places
+// the resolved plan onto zones; it reads no config.
+type DecodePlan struct {
+	Codec         string
+	CompressOpts  compress.Options
+	Encrypt       string
+	DecryptOpts   crypt.Options
+	DecryptInSink bool
+}
+
+// Restore streams an archive (from a Source) through the decode→extract pipeline into destDir
+// on targetHost (members nil = whole-archive listed-incremental restore; members set =
+// selected-file recovery, no deletions). Decrypt lands in the sink or the local filters per
+// plan.DecryptInSink; decompress fuses with tar on the target so a remote restore ships
+// compressed bytes. It returns the raw pipeline error; the caller adds any decrypt hint.
+func (c *Clerk) Restore(src xfer.Source, plan DecodePlan, archiverType, destDir, targetHost string, members []string) error {
 	target := c.deps.Executor(targetHost)
 	if err := target.MkdirAll(destDir); err != nil {
 		return err
@@ -211,32 +224,17 @@ func (c *Clerk) Extract(ref Ref, codec, encrypt, archiverType, destDir, targetHo
 	if err != nil {
 		return err
 	}
-
-	// Build the decode filters first (a bad scheme fails before any media is opened). Decrypt
-	// is the only stage that needs the key — it runs on the target (sink) when the key is
-	// client-held and reached over `--to`, otherwise on the local server (Filters). Decompress
-	// runs on the target, fused with tar, so a remote restore ships compressed bytes.
-	copts := c.deps.DecryptOpts()
-	decryptInSink := ec.At == "client" && targetHost != ""
-	if decryptInSink {
-		copts = crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile}
-	}
-	encF, err := crypt.Filter(encrypt, copts)
+	encF, err := crypt.Filter(plan.Encrypt, plan.DecryptOpts)
 	if err != nil {
 		return err
 	}
-	compF, err := compress.Filter(codec, c.deps.CompressOpts())
-	if err != nil {
-		return err
-	}
-
-	src, err := c.ArchiveSource(ref, "")
+	compF, err := compress.Filter(plan.Codec, plan.CompressOpts)
 	if err != nil {
 		return err
 	}
 
 	sink := xfer.NewPrograms(target)
-	if decryptInSink && encF.Reverse.Name != "" {
+	if plan.DecryptInSink && encF.Reverse.Name != "" {
 		sink.Add(encF.Reverse)
 	}
 	if compF.Reverse.Name != "" {
@@ -245,7 +243,7 @@ func (c *Clerk) Extract(ref Ref, codec, encrypt, archiverType, destDir, targetHo
 	sink.Add(arch.RestoreStage(destDir, members))
 
 	var filterCmds []programs.Cmd
-	if !decryptInSink && encF.Reverse.Name != "" {
+	if !plan.DecryptInSink && encF.Reverse.Name != "" {
 		filterCmds = append(filterCmds, encF.Reverse)
 	}
 

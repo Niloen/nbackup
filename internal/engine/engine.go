@@ -572,8 +572,8 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	if err != nil {
 		return err
 	}
-	_, srcPlacement, err := e.copySource(slotID, fromMedia)
-	if err != nil {
+	// Validate the source copy exists on fromMedia up front (a clear error before reading).
+	if _, _, err := e.copySource(slotID, fromMedia); err != nil {
 		return err
 	}
 	// Re-author the slot onto the target: each archive's already-compressed payload
@@ -591,23 +591,22 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	}
 	w := wt.w
 	logf.log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
-	// Plan a one-pass read of the source copy's archives (ordered, one shared opener), then
-	// re-author each onto the target. Copy order is immaterial — archives are keyed by
+	// Open the source copy's archives as a one-pass read (the clerk resolves their positions),
+	// then re-author each onto the target. Copy order is immaterial — archives are keyed by
 	// (dle, level) — so the physical ordering is a free win.
-	var locs []clerk.ArchiveLoc
+	refs := make([]clerk.Ref, 0, len(s.Archives))
 	metaByRef := map[clerk.Ref]record.Archive{}
 	for _, a := range s.Archives {
-		parts, ok := srcPlacement.Parts(a.DLE, a.Level)
-		if !ok {
-			return fmt.Errorf("source copy of %s on %q is missing %s L%d", slotID, fromMedia, a.DLE, a.Level)
-		}
 		ref := clerk.Ref{Slot: slotID, DLE: a.DLE, Level: a.Level}
-		locs = append(locs, clerk.ArchiveLoc{Ref: ref, Parts: parts})
+		refs = append(refs, ref)
 		metaByRef[ref] = a
 	}
-	jobs, err := e.clerk.PlanPinned(fromMedia, locs)
+	jobs, err := e.clerk.OpenArchives(refs, fromMedia)
 	if err != nil {
 		return err
+	}
+	if len(jobs) != len(refs) {
+		return fmt.Errorf("source copy of %s on %q is missing one or more archives", slotID, fromMedia)
 	}
 	session := e.clerk.OpenSlot(w)
 	for _, j := range jobs {
@@ -1425,21 +1424,24 @@ func (e *Engine) extractStep(step restore.Step, destDir, targetHost string, ec c
 // whole-DLE restore, `--to` client restore, and file-level recover all run through it; it
 // adds the decrypt hint to whatever the data path surfaces.
 func (e *Engine) extractInto(slotID, dle string, level int, codec, encrypt, archiverType, destDir, targetHost string, ec config.EncryptConfig, members []string) error {
-	ref := clerk.Ref{Slot: slotID, DLE: dle, Level: level}
-	return decryptHint(encrypt, e.clerk.Extract(ref, codec, encrypt, archiverType, destDir, targetHost, ec, members))
+	src, err := e.clerk.ArchiveSource(clerk.Ref{Slot: slotID, DLE: dle, Level: level}, "")
+	if err != nil {
+		return decryptHint(encrypt, err)
+	}
+	plan := e.decodePlan(codec, encrypt, ec, targetHost)
+	return decryptHint(encrypt, e.clerk.Restore(src, plan, archiverType, destDir, targetHost, members))
 }
 
-// firstPartOf resolves an archive ref to the medium and first-part position of its
-// preferred copy (placementsFor is landing-first), for read-ordering a selection. A ref with
-// no copy yields the zero position, which sorts first and lets the extract surface the
-// missing-copy error in place.
-func (e *Engine) firstPartOf(ref clerk.Ref) (medium string, pos record.FilePos) {
-	for _, p := range e.placementsFor(ref.Slot) {
-		if parts, ok := p.Parts(ref.DLE, ref.Level); ok {
-			return p.Medium, parts[0]
-		}
+// decodePlan resolves the decode placement (engine policy): decrypt runs on the target (the
+// sink) only when the key is client-held and reached over `--to`; otherwise on the local
+// server, with the server's default decrypt opts. The clerk just places the resolved plan.
+func (e *Engine) decodePlan(codec, encrypt string, ec config.EncryptConfig, targetHost string) clerk.DecodePlan {
+	opts := e.dcopts
+	inSink := ec.At == "client" && targetHost != ""
+	if inSink {
+		opts = crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile}
 	}
-	return "", record.FilePos{}
+	return clerk.DecodePlan{Codec: codec, CompressOpts: e.fopts, Encrypt: encrypt, DecryptOpts: opts, DecryptInSink: inSink}
 }
 
 // The engine implements clerk.Deps: the data path's view of the orchestrator's
@@ -1622,31 +1624,34 @@ func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, 
 			}
 		}
 	}
-	// Sequence the selected archives into a one-pass read: order by physical layout
-	// (medium, then volume, then position) while keeping each DLE's levels ascending, so a
-	// multi-archive recover walks each volume forward instead of bouncing between reels (the
-	// librarian keeps a volume mounted across consecutive same-volume reads). The extraction
-	// of each archive is unchanged.
+	// Open the selected archives as one ordered, one-pass read (the clerk resolves and mounts;
+	// the librarian keeps a volume loaded across consecutive same-volume reads), then extract
+	// each. Recover always extracts server-side, so decrypt stays on the server.
 	stepByRef := make(map[clerk.Ref]recovery.ExtractStep, len(steps))
-	items := make([]clerk.ReadItem, 0, len(steps))
+	refs := make([]clerk.Ref, 0, len(steps))
 	for _, st := range steps {
 		ref := clerk.Ref{Slot: st.SlotID, DLE: st.DLE, Level: st.Level}
 		stepByRef[ref] = st
-		medium, pos := e.firstPartOf(ref)
-		items = append(items, clerk.ReadItem{Ref: ref, Medium: medium, FirstPos: pos})
+		refs = append(refs, ref)
+	}
+	jobs, err := e.clerk.OpenArchives(refs, "")
+	if err != nil {
+		return 0, err
+	}
+	if len(jobs) != len(refs) {
+		return 0, fmt.Errorf("recover: one or more selected archives have no available copy")
 	}
 
 	files := 0
-	for _, it := range clerk.OrderForOnePass(items) {
-		st := stepByRef[it.Ref]
+	for _, j := range jobs {
+		st := stepByRef[j.Ref]
 		logf.log("extracting %d file(s) from %s %s L%d", countFiles(st.Members), st.SlotID, e.DisplayDLE(st.DLE), st.Level)
-		ec := config.EncryptConfig{}
-		if d, ok := e.dleByName(st.DLE); ok {
-			ec = e.cfg.EncryptionFor(d.DumpTypeName())
+		src, serr := j.Source()
+		if serr != nil {
+			return files, fmt.Errorf("extract from %s %s L%d: %w", st.SlotID, st.DLE, st.Level, serr)
 		}
-		// Recover always extracts server-side (targetHost ""), so decrypt stays on the
-		// server — the client-only-key case was already rejected above.
-		if err := e.extractInto(st.SlotID, st.DLE, st.Level, st.Compress, st.Encrypt, st.Archiver, destDir, "", ec, st.Members); err != nil {
+		plan := e.decodePlan(st.Compress, st.Encrypt, config.EncryptConfig{}, "")
+		if err := decryptHint(st.Encrypt, e.clerk.Restore(src, plan, st.Archiver, destDir, "", st.Members)); err != nil {
 			return files, fmt.Errorf("extract from %s %s L%d: %w", st.SlotID, st.DLE, st.Level, err)
 		}
 		files += countFiles(st.Members)
