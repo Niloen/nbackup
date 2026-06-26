@@ -67,6 +67,7 @@ type Engine struct {
 	fopts       compress.Options              // codec invocation options (level/threads/nice)
 	dcopts      crypt.Options                 // decrypt key reference for restore (from the default encrypt block)
 	op          librarian.Operator            // optional: handles manual tape swaps (nil = unattended)
+	runSink     progress.Sink                 // optional: live run-progress sink (nil = status file only)
 	limiters    map[string]*ratelimit.Limiter // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
 	dec         *decoder                      // the read-side codec operation (restore/verify/list); shares the engine's resolution + decode opts
 	enc         *encoder                      // the write-side codec operation (dump); shares the engine's dumptype-recipe resolution
@@ -78,6 +79,11 @@ type Engine struct {
 // SetOperator attaches an operator so manual single-drive media can prompt for a
 // reel swap mid-command. Without one, manual swaps degrade to an actionable error.
 func (e *Engine) SetOperator(op librarian.Operator) { e.op = op }
+
+// SetRunProgress attaches a live progress sink that receives run snapshots alongside
+// the run-status file, so `nb dump` can paint progress to the terminal without an
+// operator running `nb status`. Nil (the default) keeps the file-only behaviour.
+func (e *Engine) SetRunProgress(sink progress.Sink) { e.runSink = sink }
 
 // librarianFor builds a librarian for a configured medium's open volume. For the
 // engine's own medium it wraps the already-open landing handle (own=true), so its
@@ -690,8 +696,20 @@ func (e *Engine) expectedVolumeFor(medium string, now time.Time) VolumeExpectati
 // due by the cycle deadline, and promotes future fulls forward to level light
 // runs (bounded by the per-run capacity room).
 func (e *Engine) Plan(date time.Time) *planner.Plan {
+	return e.planWith(date, nil)
+}
+
+// PlanWithProgress is Plan with a live sink for the estimate phase, which can be
+// slow: every DLE is sized by an archiver pass, so a long preview is otherwise
+// silent. sink (nil to disable) receives a snapshot as each DLE's estimate starts
+// and finishes.
+func (e *Engine) PlanWithProgress(date time.Time, sink progress.Sink) *planner.Plan {
+	return e.planWith(date, sink)
+}
+
+func (e *Engine) planWith(date time.Time, sink progress.Sink) *planner.Plan {
 	dles := e.cfg.DLEs()
-	return planner.Build(dles, e.cat.History(), e.estimates(dles), e.plannerParams(date), date)
+	return planner.Build(dles, e.cat.History(), e.estimates(dles, sink), e.plannerParams(date), date)
 }
 
 // ValidatePlan checks each DLE the way a real run would resolve it, so a preview
@@ -738,7 +756,7 @@ func (e *Engine) ValidatePlan() (warnings []string, err error) {
 // and held constant, so this is a schedule forecast, not a capacity timeline.
 func (e *Engine) Simulate(start time.Time, days int) []*planner.Plan {
 	dles := e.cfg.DLEs()
-	return planner.Simulate(dles, e.cat.History(), e.estimates(dles), e.plannerParams(start), start, days)
+	return planner.Simulate(dles, e.cat.History(), e.estimates(dles, nil), e.plannerParams(start), start, days)
 }
 
 // plannerParams derives the planner's tuning inputs from config and the medium for
@@ -758,13 +776,57 @@ func (e *Engine) plannerParams(date time.Time) planner.Params {
 // by asking the archiver (Amanda's "client" estimate). For gnutar this is a
 // fast metadata-only tar pass; see gnutar.Estimate. Sizes are uncompressed — an
 // upper bound on the compressed bytes finally stored.
-func (e *Engine) estimates(dles []config.DLE) map[string]planner.Estimate {
+// Estimates run in parallel, bounded by parallelism.workers (Amanda's inparallel):
+// each DLE's estimate is an independent archiver pass, and on a host with many DLEs
+// the serial sum dominates a preview. When sink is non-nil the work is tracked so a
+// caller can paint live progress. Archivers are resolved serially first because
+// archiverFor writes a shared cache the workers must only read.
+func (e *Engine) estimates(dles []config.DLE, sink progress.Sink) map[string]planner.Estimate {
 	hist := e.cat.History()
 	out := make(map[string]planner.Estimate, len(dles))
-	for _, d := range dles {
-		name := d.Name()
-		st := hist.DLE(name)
-		out[name] = e.estimateDLE(d, name, st)
+	states := make([]*catalog.DLEState, len(dles))
+	for i, d := range dles {
+		_, _ = e.archiverFor(d.DumpTypeName(), d.Host) // warm the cache; errors resurface per-DLE below
+		states[i] = hist.DLE(d.Name())                 // History.DLE memoizes; resolve serially before the workers read it
+	}
+
+	workers := e.cfg.Workers()
+	var tr *progress.Tracker
+	if sink != nil {
+		rows := make([]progress.Plan, len(dles))
+		for i, d := range dles {
+			rows[i] = progress.Plan{Name: d.Name()}
+		}
+		tr = progress.NewTracker("estimate", workers, rows, time.Now, sink)
+	}
+
+	var (
+		wg  sync.WaitGroup
+		sem = make(chan struct{}, workers)
+		mu  sync.Mutex
+	)
+	for i, d := range dles {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(d config.DLE, st *catalog.DLEState) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			name := d.Name()
+			if tr != nil {
+				tr.StartDLE(name)
+			}
+			est := e.estimateDLE(d, name, st)
+			mu.Lock()
+			out[name] = est
+			mu.Unlock()
+			if tr != nil {
+				tr.FinishDLE(name, 0, est.Full, 0, nil)
+			}
+		}(d, states[i])
+	}
+	wg.Wait()
+	if tr != nil {
+		tr.SetPhase(progress.PhaseDone)
 	}
 	return out
 }
@@ -926,12 +988,20 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 	}
 
 	// Track live progress to the run-status file so `nb status` can watch a
-	// detached run. Progress reporting never blocks or fails the backup.
-	tr := progress.NewTracker(slotID, workers, planProgress(plan.Items), time.Now,
-		progress.NewFileSink(e.cfg.WorkdirPath(), time.Now))
+	// detached run. Progress reporting never blocks or fails the backup. A live
+	// sink (when attached) paints the same snapshots to the terminal; in that mode
+	// the per-DLE log lines are suppressed so they don't scribble over the in-place
+	// region (warnings above were already printed before the region opened).
+	sink := progress.Sink(progress.NewFileSink(e.cfg.WorkdirPath(), time.Now))
+	runLogf := logf
+	if e.runSink != nil {
+		sink = progress.MultiSink(sink, e.runSink)
+		runLogf = nil
+	}
+	tr := progress.NewTracker(slotID, workers, planProgress(plan.Items), time.Now, sink)
 
 	session := e.clerk.OpenSlot(w, e.mediumName)
-	if err := e.runWorkers(plan.Items, workers, session, tr, logf); err != nil {
+	if err := e.runWorkers(plan.Items, workers, session, tr, runLogf); err != nil {
 		tr.SetPhase(progress.PhaseFailed)
 		return nil, err
 	}

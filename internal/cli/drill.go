@@ -268,3 +268,14 @@ func stdinIsTerminal() bool {
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
 }
+
+// stderrIsTerminal reports whether stderr is an interactive terminal, so live
+// in-place progress is only painted when someone is watching (not into a pipe,
+// file, or cron log).
+func stderrIsTerminal() bool {
+	fi, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
