@@ -35,7 +35,7 @@ type DecodePlan struct {
 // set = selected-file recovery, no deletions). Decrypt lands in the sink or the local filters
 // per plan.DecryptInSink; decompress fuses with tar on the target so a remote restore ships
 // compressed bytes.
-func (e *Engine) restoreArchive(src xfer.Source, plan DecodePlan, archiverType, destDir, targetHost string, members []string) error {
+func (e *Engine) restoreArchive(rc io.ReadCloser, plan DecodePlan, archiverType, destDir, targetHost string, members []string) error {
 	target := e.Executor(targetHost)
 	if err := target.MkdirAll(destDir); err != nil {
 		return err
@@ -67,15 +67,15 @@ func (e *Engine) restoreArchive(src xfer.Source, plan DecodePlan, archiverType, 
 		filterCmds = append(filterCmds, encF.Reverse)
 	}
 
-	_, err = xfer.Transfer(src, xfer.NewFilters(filterCmds...), sink, xfer.Opts{})
+	_, err = xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(filterCmds...), sink, xfer.Opts{})
 	return err
 }
 
 // verifyChecksum hashes an archive's raw stream (a clerk Source) and reports whether it matches
 // the recorded sha — a transfer with no decode (source → Hash sink). A clean read whose hash
 // differs returns (false, nil); a read fault returns (false, err).
-func (e *Engine) verifyChecksum(src xfer.Source, sha string) (bool, error) {
-	_, terr := xfer.Transfer(src, xfer.NewFilters(), xfer.Hash(sha), xfer.Opts{})
+func (e *Engine) verifyChecksum(rc io.ReadCloser, sha string) (bool, error) {
+	_, terr := xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(), xfer.Hash(sha), xfer.Opts{})
 	if terr != nil {
 		var xe *xfer.Error
 		if errors.As(terr, &xe) && xe.Role == xfer.RoleSink {
@@ -89,12 +89,12 @@ func (e *Engine) verifyChecksum(src xfer.Source, sha string) (bool, error) {
 // listMembers decodes an archive's stream (a clerk Source, server-side filters) and lists its
 // members (`tar -t`) — the verify path's structural check. It returns the listed members and
 // the raw, role-tagged transfer error for the caller to classify and hint.
-func (e *Engine) listMembers(src xfer.Source, codec, encrypt string, arch archiver.Archiver) ([]string, error) {
+func (e *Engine) listMembers(rc io.ReadCloser, codec, encrypt string, arch archiver.Archiver) ([]string, error) {
 	decrypt, decompress, err := e.decodeFilters(codec, encrypt)
 	if err != nil {
 		return nil, err
 	}
-	res, terr := xfer.Transfer(src, localDecode(decrypt, decompress), listSink{arch: arch}, xfer.Opts{})
+	res, terr := xfer.Transfer(xfer.Reader(rc), localDecode(decrypt, decompress), listSink{arch: arch}, xfer.Opts{})
 	return res.SinkResult.Members, terr
 }
 

@@ -242,18 +242,26 @@ func (e *Engine) drillVerify(t drill.Target, medium string, checks VerifyChecks)
 		refs = append(refs, ref)
 		archByRef[ref] = a
 	}
-	jobs, err := e.clerk.OpenArchives(refs, medium)
+	// Drive the one-pass read of the chain; stop at the first failing archive (a drill fails
+	// whole). A failing verdict is carried out via a sentinel error.
+	var bad ArchiveVerdict
+	errStop := errors.New("drill: archive failed")
+	missing, err := e.clerk.ReadArchives(refs, medium, func(ref clerk.Ref, open func() (io.ReadCloser, error)) error {
+		v := e.verifyArchive(archByRef[ref], ref, medium, VerifyOptions{Checks: checks, Medium: medium}, open, nil)
+		if !v.OK {
+			bad = v
+			return errStop
+		}
+		return nil
+	})
 	if err != nil {
+		if errors.Is(err, errStop) {
+			return bad.Class, bad.Detail
+		}
 		return drill.ClassPipeline, err.Error()
 	}
-	if len(jobs) != len(refs) {
+	if len(missing) > 0 {
 		return drill.ClassMissing, fmt.Sprintf("no copy on medium %q", medium)
-	}
-	for _, j := range jobs {
-		v := e.verifyArchive(archByRef[j.Ref], j, medium, VerifyOptions{Checks: checks, Medium: medium}, nil)
-		if !v.OK {
-			return v.Class, v.Detail
-		}
 	}
 	return drill.ClassNone, ""
 }
@@ -294,7 +302,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		// failure (Pipeline). Driving the proof on the client for a client-only key is the
 		// documented follow-on — see the design note.
 		sink := xfer.NewPrograms(programs.Local()).Add(arch.RestoreStage(dir, nil))
-		_, terr := xfer.Transfer(src, localDecode(decrypt, decompress), sink, xfer.Opts{})
+		_, terr := xfer.Transfer(xfer.Reader(src), localDecode(decrypt, decompress), sink, xfer.Opts{})
 		if terr != nil {
 			var xe *xfer.Error
 			if errors.As(terr, &xe) && xe.Role == xfer.RoleSink {
@@ -338,7 +346,7 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 		tmp.Close()
 		return classifyOpenErr(err), err.Error()
 	}
-	_, terr := xfer.Transfer(src, xfer.NewFilters(), xfer.Writer(tmp), xfer.Opts{})
+	_, terr := xfer.Transfer(xfer.Reader(src), xfer.NewFilters(), xfer.Writer(tmp), xfer.Opts{})
 	tmp.Close()
 	if terr != nil {
 		return classifyOpenErr(terr), terr.Error()

@@ -1,9 +1,10 @@
 package clerk
 
 import (
+	"io"
+
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/xfer"
 )
 
 // ReadItem is one archive in a multi-archive read selection: its logical identity plus the
@@ -56,31 +57,18 @@ func OrderForOnePass(items []ReadItem) []ReadItem {
 	return out
 }
 
-// ReadJob is one archive in a planned read — its identity and a Source over its parts opened
-// on the plan's shared opener.
-type ReadJob struct {
-	Ref    Ref
-	parts  []record.FilePos
-	opener archiveio.PartOpener
-	clerk  *Clerk
-}
-
-// Source opens the job's parts on the plan's shared opener (the mounted volume is reused
-// across consecutive same-volume jobs — one pass).
-func (j ReadJob) Source() (xfer.Source, error) {
-	want := archiveio.Expect{Slot: j.Ref.Slot, DLE: j.Ref.DLE, Level: j.Ref.Level}
-	return j.clerk.partsSource(j.parts, want, j.opener)
-}
-
-// OpenArchives is the clerk's "open a set of archives" door: given logical refs, it locates
-// each one's copy and positions itself (the caller supplies no positions), orders them into a
-// one-pass read (OrderForOnePass), and threads one shared mounting opener per medium. medium
-// "" copy-selects per ref (prefer the engine's own copy); a set medium pins to that copy
-// (verify a specific copy, read a copy source). Refs with no available copy are skipped — the
-// caller compares the returned jobs to its refs to detect them (a broken chain, a
-// position-missing verdict). An opener that cannot be acquired (medium not in this config) is
-// returned as the error.
-func (c *Clerk) OpenArchives(refs []Ref, medium string) ([]ReadJob, error) {
+// ReadArchives reads a selection of archives in one ordered pass and drives the read itself —
+// the Recovery::Clerk. It resolves each ref to a copy and positions, orders them physically
+// (OrderForOnePass), then reads them one at a time on a shared mounting opener (consecutive
+// same-volume archives reuse the mount) — calling fn for each, in read order, with the
+// archive's ref and an open func for a Source over its bytes. fn composes the per-archive
+// transfer (decode → sink) and may open more than once (verify reads twice). Reading stops at
+// the first error fn returns. medium "" copy-selects per ref; a set medium pins to that copy.
+//
+// Refs with no available copy are not read; they are returned as missing for the caller to
+// handle (a broken chain, a position-missing verdict). An opener that cannot be acquired
+// (medium not in this config) is the error.
+func (c *Clerk) ReadArchives(refs []Ref, medium string, fn func(ref Ref, open func() (io.ReadCloser, error)) error) (missing []Ref, err error) {
 	type loc struct {
 		medium string
 		parts  []record.FilePos
@@ -90,7 +78,8 @@ func (c *Clerk) OpenArchives(refs []Ref, medium string) ([]ReadJob, error) {
 	for _, ref := range refs {
 		m, parts, ok := c.locate(ref, medium)
 		if !ok {
-			continue // no copy of this archive here; the caller detects the gap
+			missing = append(missing, ref)
+			continue
 		}
 		locs[ref] = loc{medium: m, parts: parts}
 		first := record.FilePos{}
@@ -101,20 +90,34 @@ func (c *Clerk) OpenArchives(refs []Ref, medium string) ([]ReadJob, error) {
 	}
 
 	openers := map[string]archiveio.PartOpener{}
-	jobs := make([]ReadJob, 0, len(items))
+	opener := func(m string) (archiveio.PartOpener, error) {
+		if op, ok := openers[m]; ok {
+			return op, nil
+		}
+		op, e := c.partOpener(m)
+		if e != nil {
+			return nil, e
+		}
+		openers[m] = op
+		return op, nil
+	}
+
 	for _, it := range OrderForOnePass(items) {
 		l := locs[it.Ref]
-		op, ok := openers[l.medium]
-		if !ok {
-			var err error
-			if op, err = c.partOpener(l.medium); err != nil {
-				return nil, err
-			}
-			openers[l.medium] = op
+		op, e := opener(l.medium)
+		if e != nil {
+			return missing, e
 		}
-		jobs = append(jobs, ReadJob{Ref: it.Ref, parts: l.parts, opener: op, clerk: c})
+		ref := it.Ref
+		open := func() (io.ReadCloser, error) {
+			want := archiveio.Expect{Slot: ref.Slot, DLE: ref.DLE, Level: ref.Level}
+			return c.reader.Open(l.parts, want, op)
+		}
+		if e := fn(ref, open); e != nil {
+			return missing, e
+		}
 	}
-	return jobs, nil
+	return missing, nil
 }
 
 // locate resolves a ref to the copy that holds it: a set medium pins to that copy; "" takes

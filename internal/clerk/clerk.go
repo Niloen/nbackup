@@ -127,30 +127,13 @@ func indexPosOf(p catalog.Placement, dle string, level int) (record.FilePos, boo
 	return record.FilePos{}, false
 }
 
-// Open opens an archive's raw (undecoded, on-medium) part stream as an xfer.Source,
-// with copy selection and fail-over: medium "" tries every copy (preferring the engine's
-// own), a set medium reads only that copy so a fault on it is not masked by another. It is
-// the read peer of the medium sink — the one archiveio-coupled Source. The open (and thus the
-// copy-selection fail-over) happens here, eagerly, so a missing copy is reported before bytes
-// flow and stays classifiable (errors.Is); a volume lost mid-stream is a Source-role fault
-// inside the transfer.
-func (c *Clerk) Open(ref Ref, medium string) (xfer.Source, error) {
-	rc, err := c.openRaw(ref, medium)
-	if err != nil {
-		return nil, err
-	}
-	return xfer.Reader(rc), nil
-}
-
-// partsSource opens a specific copy's parts via a caller-held opener (no copy selection) as
-// an xfer.Source — for loops that thread one mounted opener across all of a copy's archives
-// (verify, copy).
-func (c *Clerk) partsSource(parts []record.FilePos, want archiveio.Expect, opener archiveio.PartOpener) (xfer.Source, error) {
-	rc, err := c.reader.Open(parts, want, opener)
-	if err != nil {
-		return nil, err
-	}
-	return xfer.Reader(rc), nil
+// Open opens an archive's raw (undecoded, on-medium) part stream as an io.ReadCloser, with
+// copy selection and fail-over: medium "" tries every copy (preferring the engine's own), a set
+// medium reads only that copy so a fault on it is not masked by another. The open (and thus the
+// copy-selection fail-over) happens eagerly, so a missing copy is reported before bytes flow.
+// The caller wraps it for a transfer (xfer.Reader); the clerk only hands back bytes.
+func (c *Clerk) Open(ref Ref, medium string) (io.ReadCloser, error) {
+	return c.openRaw(ref, medium)
 }
 
 // openRaw opens an archive's raw on-medium part stream with copy selection and fail-over.

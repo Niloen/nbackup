@@ -8,6 +8,7 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -601,26 +602,26 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		refs = append(refs, ref)
 		metaByRef[ref] = a
 	}
-	jobs, err := e.clerk.OpenArchives(refs, fromMedia)
-	if err != nil {
-		return err
-	}
-	if len(jobs) != len(refs) {
-		return fmt.Errorf("source copy of %s on %q is missing one or more archives", slotID, fromMedia)
-	}
 	session := e.clerk.OpenSlot(w, targetMedia)
-	for _, j := range jobs {
-		src, serr := j.Source()
+	missing, err := e.clerk.ReadArchives(refs, fromMedia, func(ref clerk.Ref, open func() (io.ReadCloser, error)) error {
+		rc, serr := open()
 		if serr != nil {
-			return fmt.Errorf("copy %s L%d to %q: %w", j.Ref.DLE, j.Ref.Level, targetMedia, serr)
+			return fmt.Errorf("copy %s L%d to %q: %w", ref.DLE, ref.Level, targetMedia, serr)
 		}
 		// Re-author the archive raw (no transform) onto the target's volumes. Load the members
 		// so the target writes a real member index (keeping that copy self-describing).
-		meta := metaByRef[j.Ref]
-		meta.Members, _ = e.clerk.Members(j.Ref)
-		if _, werr := xfer.Transfer(src, xfer.NewFilters(), session.CopySink(meta), xfer.Opts{}); werr != nil {
-			return fmt.Errorf("copy %s L%d to %q: %w", j.Ref.DLE, j.Ref.Level, targetMedia, werr)
+		meta := metaByRef[ref]
+		meta.Members, _ = e.clerk.Members(ref)
+		if _, werr := xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(), session.CopySink(meta), xfer.Opts{}); werr != nil {
+			return fmt.Errorf("copy %s L%d to %q: %w", ref.DLE, ref.Level, targetMedia, werr)
 		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("source copy of %s on %q is missing one or more archives", slotID, fromMedia)
 	}
 	if _, err := session.Finish(now); err != nil {
 		return fmt.Errorf("finish copy on %q: %w", targetMedia, err)
@@ -1605,27 +1606,27 @@ func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, 
 		stepByRef[ref] = st
 		refs = append(refs, ref)
 	}
-	jobs, err := e.clerk.OpenArchives(refs, "")
-	if err != nil {
-		return 0, err
-	}
-	if len(jobs) != len(refs) {
-		return 0, fmt.Errorf("recover: one or more selected archives have no available copy")
-	}
 
 	files := 0
-	for _, j := range jobs {
-		st := stepByRef[j.Ref]
+	missing, err := e.clerk.ReadArchives(refs, "", func(ref clerk.Ref, open func() (io.ReadCloser, error)) error {
+		st := stepByRef[ref]
 		logf.log("extracting %d file(s) from %s %s L%d", countFiles(st.Members), st.SlotID, e.DisplayDLE(st.DLE), st.Level)
-		src, serr := j.Source()
+		rc, serr := open()
 		if serr != nil {
-			return files, fmt.Errorf("extract from %s %s L%d: %w", st.SlotID, st.DLE, st.Level, serr)
+			return serr
 		}
 		plan := e.decodePlan(st.Compress, st.Encrypt, config.EncryptConfig{}, "")
-		if err := decryptHint(st.Encrypt, e.restoreArchive(src, plan, st.Archiver, destDir, "", st.Members)); err != nil {
-			return files, fmt.Errorf("extract from %s %s L%d: %w", st.SlotID, st.DLE, st.Level, err)
+		if err := decryptHint(st.Encrypt, e.restoreArchive(rc, plan, st.Archiver, destDir, "", st.Members)); err != nil {
+			return err
 		}
 		files += countFiles(st.Members)
+		return nil
+	})
+	if err != nil {
+		return files, fmt.Errorf("recover: %w", err)
+	}
+	if len(missing) > 0 {
+		return files, fmt.Errorf("recover: one or more selected archives have no available copy")
 	}
 	return files, nil
 }
