@@ -229,30 +229,21 @@ func (s *Session) Backup(spec BackupSpec, prog func(uncompressed, compressed int
 	return Summary{FileCount: arch.FileCount, Uncompressed: arch.Uncompressed, Compressed: arch.Compressed, Codec: arch.Compress}, nil
 }
 
-// Copy re-authors one already-stored archive onto this slot's volumes: the same on-medium
-// bytes re-split with no transform (copySink re-checksums against the recorded sha, never
-// recompresses). meta is the source archive's record (member-free, as the catalog holds it);
-// the source parts are read via the caller's opener. Copy loads the members itself so the
-// target writes a real member index (keeping the target copy self-describing). It commits the
-// archive into the slot (CopyArchive does), so the engine only finishes.
-func (s *Session) Copy(parts []record.FilePos, want archiveio.Expect, opener archiveio.PartOpener, meta record.Archive) error {
-	src, err := s.clerk.partsSource(parts, want, opener)
-	if err != nil {
-		return err
-	}
-	meta.Members, _ = s.clerk.Members(Ref{Slot: want.Slot, DLE: want.DLE, Level: want.Level})
-	_, err = xfer.Transfer(src, xfer.NewFilters(), &copySink{w: s.w, meta: meta}, xfer.Opts{})
+// Copy re-authors one already-stored archive (read from a plan job's Source) onto this slot's
+// volumes: the same on-medium bytes re-split with no transform (copySink re-checksums against
+// the recorded sha, never recompresses). meta is the source archive's record (member-free, as
+// the catalog holds it); Copy loads the members itself (keyed by ref) so the target writes a
+// real member index. It commits the archive into the slot (CopyArchive does).
+func (s *Session) Copy(src xfer.Source, ref Ref, meta record.Archive) error {
+	meta.Members, _ = s.clerk.Members(ref)
+	_, err := xfer.Transfer(src, xfer.NewFilters(), &copySink{w: s.w, meta: meta}, xfer.Opts{})
 	return err
 }
 
-// VerifyChecksum re-reads an archive's raw parts and hashes them, reporting whether the hash
-// matches the seal's sha. It is a transfer with no decode: source → Hash sink. A clean read
-// whose hash differs returns (false, nil); a read fault returns (false, err).
-func (c *Clerk) VerifyChecksum(parts []record.FilePos, want archiveio.Expect, sha string, opener archiveio.PartOpener) (bool, error) {
-	src, err := c.partsSource(parts, want, opener)
-	if err != nil {
-		return false, err
-	}
+// VerifyChecksum hashes an archive's raw stream (from a plan job's Source) and reports whether
+// it matches the recorded sha. It is a transfer with no decode: source → Hash sink. A clean
+// read whose hash differs returns (false, nil); a read fault returns (false, err).
+func (c *Clerk) VerifyChecksum(src xfer.Source, sha string) (bool, error) {
 	_, terr := xfer.Transfer(src, xfer.NewFilters(), xfer.Hash(sha), xfer.Opts{})
 	if terr != nil {
 		// A mismatch is the Hash sink's (clean-read) failure; anything else is a read fault.
@@ -265,15 +256,11 @@ func (c *Clerk) VerifyChecksum(parts []record.FilePos, want archiveio.Expect, sh
 	return true, nil
 }
 
-// ListMembers reads an archive's parts, decodes them (server-side Filters), and lists the
-// members (`tar -t`) — the verify path's structural check. It returns the listed members and
-// the raw transfer error (role-tagged) for the caller to classify and hint.
-func (c *Clerk) ListMembers(parts []record.FilePos, want archiveio.Expect, codec, encrypt string, opener archiveio.PartOpener, arch archiver.Archiver) ([]string, error) {
+// ListMembers decodes an archive's stream (from a plan job's Source, server-side Filters) and
+// lists the members (`tar -t`) — the verify path's structural check. It returns the listed
+// members and the raw transfer error (role-tagged) for the caller to classify and hint.
+func (c *Clerk) ListMembers(src xfer.Source, codec, encrypt string, arch archiver.Archiver) ([]string, error) {
 	decrypt, decompress, err := c.DecodeFilters(codec, encrypt)
-	if err != nil {
-		return nil, err
-	}
-	src, err := c.partsSource(parts, want, opener)
 	if err != nil {
 		return nil, err
 	}

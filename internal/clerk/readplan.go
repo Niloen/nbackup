@@ -1,6 +1,10 @@
 package clerk
 
-import "github.com/Niloen/nbackup/internal/record"
+import (
+	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/xfer"
+)
 
 // ReadItem is one archive in a multi-archive read selection: its logical identity plus the
 // physical place of its first part (the copy's medium and the first part's position). It is
@@ -50,6 +54,55 @@ func OrderForOnePass(items []ReadItem) []ReadItem {
 		remaining = append(remaining[:best], remaining[best+1:]...)
 	}
 	return out
+}
+
+// ArchiveLoc is one archive's physical location on a copy: the parts to stream and where the
+// first one lies (for ordering). The caller supplies it from a catalog placement.
+type ArchiveLoc struct {
+	Ref   Ref
+	Parts []record.FilePos
+}
+
+// ReadJob is one archive in a planned read — its identity and a Source over its parts opened
+// on the plan's shared opener.
+type ReadJob struct {
+	Ref    Ref
+	parts  []record.FilePos
+	opener archiveio.PartOpener
+	clerk  *Clerk
+}
+
+// Source opens the job's parts on the plan's shared opener (the mounted volume is reused
+// across consecutive same-volume jobs — one pass).
+func (j ReadJob) Source() (xfer.Source, error) {
+	want := archiveio.Expect{Slot: j.Ref.Slot, DLE: j.Ref.DLE, Level: j.Ref.Level}
+	return j.clerk.PartsSource(j.parts, want, j.opener)
+}
+
+// PlanPinned builds a one-pass read over a set of archives on one medium (verify, copy): it
+// orders them physically (OrderForOnePass) and threads one shared mounting opener, so a
+// multi-archive read walks the volume forward instead of remounting per archive. The order of
+// the returned jobs is the read order.
+func (c *Clerk) PlanPinned(medium string, locs []ArchiveLoc) ([]ReadJob, error) {
+	opener, err := c.PartOpener(medium)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]ReadItem, len(locs))
+	parts := make(map[Ref][]record.FilePos, len(locs))
+	for i, l := range locs {
+		first := record.FilePos{}
+		if len(l.Parts) > 0 {
+			first = l.Parts[0]
+		}
+		items[i] = ReadItem{Ref: l.Ref, Medium: medium, FirstPos: first}
+		parts[l.Ref] = l.Parts
+	}
+	jobs := make([]ReadJob, 0, len(items))
+	for _, it := range OrderForOnePass(items) {
+		jobs = append(jobs, ReadJob{Ref: it.Ref, parts: parts[it.Ref], opener: opener, clerk: c})
+	}
+	return jobs, nil
 }
 
 // physicallyBefore orders two archives by where their first part lies: medium, then the

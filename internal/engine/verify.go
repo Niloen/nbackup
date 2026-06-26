@@ -199,7 +199,13 @@ func (e *Engine) verifyArchive(id string, a record.Archive, p catalog.Placement,
 	want := archiveio.Expect{Slot: id, DLE: a.DLE, Level: a.Level}
 
 	if opts.Checks.has(CheckChecksum) {
-		good, err := e.clerk.VerifyChecksum(parts, want, a.SHA256, opener)
+		src, serr := e.clerk.PartsSource(parts, want, opener)
+		if serr != nil {
+			logf.log("%s [%s]: %s L%d ERROR %v", id, p.Medium, a.DLEID(), a.Level, serr)
+			v.OK, v.Class, v.Detail = false, drill.ClassPipeline, serr.Error()
+			return v
+		}
+		good, err := e.clerk.VerifyChecksum(src, a.SHA256)
 		if err != nil {
 			logf.log("%s [%s]: %s L%d ERROR %v", id, p.Medium, a.DLEID(), a.Level, err)
 			v.OK, v.Class, v.Detail = false, drill.ClassPipeline, err.Error()
@@ -212,7 +218,7 @@ func (e *Engine) verifyArchive(id string, a record.Archive, p catalog.Placement,
 		}
 	}
 	if opts.Checks.has(CheckStructural) {
-		if cls, detail := e.structuralCheck(a, parts, want, opener); cls != drill.ClassNone {
+		if cls, detail := e.structuralCheck(id, a, parts, want, opener); cls != drill.ClassNone {
 			logf.log("%s [%s]: %s L%d STRUCTURAL %s: %s", id, p.Medium, a.DLEID(), a.Level, cls, detail)
 			v.OK, v.Class, v.Detail = false, cls, detail
 			return v
@@ -225,7 +231,7 @@ func (e *Engine) verifyArchive(id string, a record.Archive, p catalog.Placement,
 // members (`tar -t`), asserting the pipeline completes cleanly and the members match
 // the seal. It returns ClassNone on success, else the failure class and detail. It
 // writes nothing.
-func (e *Engine) structuralCheck(a record.Archive, parts []record.FilePos, want archiveio.Expect, opener archiveio.PartOpener) (drill.Class, string) {
+func (e *Engine) structuralCheck(id string, a record.Archive, parts []record.FilePos, want archiveio.Expect, opener archiveio.PartOpener) (drill.Class, string) {
 	// Verify is the keyless, server-side integrity primitive: structural decode runs on
 	// the server (host ""). The client-side recoverability proof (running the read
 	// pipeline on the client for a client-only key) is drill's job — see the design note.
@@ -233,16 +239,20 @@ func (e *Engine) structuralCheck(a record.Archive, parts []record.FilePos, want 
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
+	src, err := e.clerk.PartsSource(parts, want, opener)
+	if err != nil {
+		return drill.ClassPipeline, err.Error()
+	}
 	// The clerk reads the parts → decodes (server-side Filters) → lists members (`tar -t`).
 	// Any fault — a media read, a decode child, or a not-a-tar List — is a Pipeline failure; a
 	// clean stream whose members differ from the seal is an Integrity failure. The decrypt
 	// hint keeps a lost-key failure from being mislabeled as corruption.
-	members, terr := e.clerk.ListMembers(parts, want, a.Compress, a.Encrypt, opener, arch)
+	members, terr := e.clerk.ListMembers(src, a.Compress, a.Encrypt, arch)
 	if terr != nil {
 		return drill.ClassPipeline, decryptHint(a.Encrypt, terr).Error()
 	}
 	// The recorded member list (the catalog is member-free) is loaded via the clerk.
-	recorded, err := e.clerk.Members(clerk.Ref{Slot: want.Slot, DLE: a.DLE, Level: a.Level})
+	recorded, err := e.clerk.Members(clerk.Ref{Slot: id, DLE: a.DLE, Level: a.Level})
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}

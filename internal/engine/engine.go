@@ -591,19 +591,32 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	}
 	w := wt.w
 	logf.log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
-	srcOpen, err := e.clerk.PartOpener(fromMedia)
-	if err != nil {
-		return err
-	}
-	session := e.clerk.OpenSlot(w)
+	// Plan a one-pass read of the source copy's archives (ordered, one shared opener), then
+	// re-author each onto the target. Copy order is immaterial — archives are keyed by
+	// (dle, level) — so the physical ordering is a free win.
+	var locs []clerk.ArchiveLoc
+	metaByRef := map[clerk.Ref]record.Archive{}
 	for _, a := range s.Archives {
 		parts, ok := srcPlacement.Parts(a.DLE, a.Level)
 		if !ok {
 			return fmt.Errorf("source copy of %s on %q is missing %s L%d", slotID, fromMedia, a.DLE, a.Level)
 		}
-		want := archiveio.Expect{Slot: slotID, DLE: a.DLE, Level: a.Level}
-		if werr := session.Copy(parts, want, srcOpen, a); werr != nil {
-			return fmt.Errorf("copy %s L%d to %q: %w", a.DLE, a.Level, targetMedia, werr)
+		ref := clerk.Ref{Slot: slotID, DLE: a.DLE, Level: a.Level}
+		locs = append(locs, clerk.ArchiveLoc{Ref: ref, Parts: parts})
+		metaByRef[ref] = a
+	}
+	jobs, err := e.clerk.PlanPinned(fromMedia, locs)
+	if err != nil {
+		return err
+	}
+	session := e.clerk.OpenSlot(w)
+	for _, j := range jobs {
+		src, serr := j.Source()
+		if serr != nil {
+			return fmt.Errorf("copy %s L%d to %q: %w", j.Ref.DLE, j.Ref.Level, targetMedia, serr)
+		}
+		if werr := session.Copy(src, j.Ref, metaByRef[j.Ref]); werr != nil {
+			return fmt.Errorf("copy %s L%d to %q: %w", j.Ref.DLE, j.Ref.Level, targetMedia, werr)
 		}
 	}
 	if _, err := w.Finish(now); err != nil {

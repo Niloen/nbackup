@@ -142,10 +142,10 @@ func (c *Clerk) ArchiveSource(ref Ref, medium string) (xfer.Source, error) {
 	return xfer.Reader(rc), nil
 }
 
-// partsSource opens a specific copy's parts via a caller-held opener (no copy selection) as
+// PartsSource opens a specific copy's parts via a caller-held opener (no copy selection) as
 // an xfer.Source — for loops that thread one mounted opener across all of a copy's archives
 // (verify, copy).
-func (c *Clerk) partsSource(parts []record.FilePos, want archiveio.Expect, opener archiveio.PartOpener) (xfer.Source, error) {
+func (c *Clerk) PartsSource(parts []record.FilePos, want archiveio.Expect, opener archiveio.PartOpener) (xfer.Source, error) {
 	rc, err := c.reader.Open(parts, want, opener)
 	if err != nil {
 		return nil, err
