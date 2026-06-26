@@ -5,34 +5,37 @@ import (
 	"io"
 	"sync/atomic"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/slotio"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// EncodePlacement is the write-side transform recipe for one dumptype: the compress/encrypt
-// invocation options plus where each runs. A transform `at: client` rides in the SOURCE
-// (fused with tar on the client, so plaintext never leaves it); otherwise it is a local
-// Filter (server-side). The schemes themselves come from the record being written.
+// EncodePlacement is the write-side transform recipe for one dumptype: which compress/encrypt
+// schemes to apply, their invocation options, and where each runs. A transform `at: client`
+// rides in the SOURCE (fused with tar on the client, so plaintext never leaves it); otherwise
+// it is a local Filter (server-side). The clerk records the schemes onto the archive and
+// builds the filters from the options — so the engine never assembles the storage record.
 type EncodePlacement struct {
+	Codec          string // compression scheme name ("none", "gzip", "zstd", ...)
 	CompressOpts   compress.Options
 	CompressClient bool
+	EncryptScheme  string // encryption scheme name ("" = plaintext)
 	EncryptOpts    crypt.Options
 	EncryptClient  bool
 }
 
-// --- the two slotio-coupled endpoints ---
+// --- the two archiveio-coupled endpoints ---
 
 // mediumSink is the xfer.Sink that lands an archive's bytes onto a slot's volumes via the
-// open slotio.Writer: it meters (sha256 + size) and splits the stream into parts, keeping
+// open archiveio.Writer: it meters (sha256 + size) and splits the stream into parts, keeping
 // the measured archive + part positions for the caller to record once the producer's stats
 // are merged in. It is the write peer of the archive Source.
 type mediumSink struct {
-	w    *slotio.Writer
+	w    *archiveio.Writer
 	meta record.Archive
 
 	arch  record.Archive // measured (Compressed/SHA256/Parts), filled by Drain
@@ -50,9 +53,9 @@ func (m *mediumSink) Drain(in io.Reader, progress func(int64)) (xfer.SinkResult,
 
 // copySink re-splits a source copy's already-compressed bytes onto the target's volumes
 // without recompressing, verifying the stream against the seal's checksum
-// (slotio.Writer.CopyArchive). It is the raw-passthrough peer of mediumSink.
+// (archiveio.Writer.CopyArchive). It is the raw-passthrough peer of mediumSink.
 type copySink struct {
-	w    *slotio.Writer
+	w    *archiveio.Writer
 	meta record.Archive
 }
 
@@ -101,24 +104,70 @@ func LocalDecode(decrypt, decompress programs.Cmd) xfer.Filters {
 	return f
 }
 
-// --- operation verbs ---
+// --- the write-side slot session ---
 
-// Backup composes a dump as one transfer: the archiver's tar source (on its host), the
-// encode filters placed per the dumptype's EncodePlacement (client-side ones fused into the
-// source, server-side ones as local Filters), into the slot writer's medium sink. It returns
-// the fully measured archive (producer + sink stats merged) and its part positions for the
-// caller to record; prog, if non-nil, receives running (uncompressed, compressed) counts.
-func (c *Clerk) Backup(w *slotio.Writer, bs *archiver.BackupSource, meta record.Archive, dumpType string, prog func(uncompressed, compressed int64)) (record.Archive, []record.FilePos, error) {
-	pl := c.deps.EncodePlacement(dumpType)
-	compF, err := compress.Filter(meta.Compress, pl.CompressOpts)
+// Session authors one slot: the engine opens it over a archiveio.Writer, backs up (or copies)
+// each archive into it, and seals via the writer. It is the write peer of the read verbs —
+// the single place a record.Archive and its parts are assembled, so the engine describes a
+// backup (intent) and the session produces the artifact, never the reverse.
+type Session struct {
+	clerk *Clerk
+	w     *archiveio.Writer
+}
+
+// OpenSlot starts a write session over an open slot writer.
+func (c *Clerk) OpenSlot(w *archiveio.Writer) *Session { return &Session{clerk: c, w: w} }
+
+// BackupSpec describes one archive to back up: the resolved archiver and its request, plus
+// the bits of identity not in the request (the DLE's host, the base slot for an incremental,
+// and the dumptype that selects the transform placement). The schemes and options come from
+// the clerk's EncodePlacement, so this is pure intent — no storage record.
+type BackupSpec struct {
+	Archiver archiver.Archiver
+	Request  archiver.BackupRequest
+	Host     string
+	BaseSlot string
+	DumpType string
+}
+
+// Summary is what the engine needs back to track and log a finished archive — never its
+// parts or storage record.
+type Summary struct {
+	FileCount    int
+	Uncompressed int64
+	Compressed   int64
+	Codec        string // the compression scheme applied ("none" => stored, not compressed)
+}
+
+// Backup composes a dump as one transfer — the archiver's tar source (on its host) → the
+// encode filters placed per the dumptype (client-side ones fused into the source, server-side
+// ones as local Filters) → the slot's medium sink — then records the measured archive (the
+// producer's and the sink's stats merged) into the slot. prog, if non-nil, receives running
+// (uncompressed, compressed) counts. It returns a Summary for the engine to track and log.
+func (s *Session) Backup(spec BackupSpec, prog func(uncompressed, compressed int64)) (Summary, error) {
+	pl := s.clerk.deps.EncodePlacement(spec.DumpType)
+	compF, err := compress.Filter(pl.Codec, pl.CompressOpts)
 	if err != nil {
-		cleanup(bs)
-		return record.Archive{}, nil, err
+		return Summary{}, err
 	}
-	encF, err := crypt.Filter(meta.Encrypt, pl.EncryptOpts)
+	encF, err := crypt.Filter(pl.EncryptScheme, pl.EncryptOpts)
 	if err != nil {
-		cleanup(bs)
-		return record.Archive{}, nil, err
+		return Summary{}, err
+	}
+
+	bs, err := spec.Archiver.BackupSource(spec.Request)
+	if err != nil {
+		return Summary{}, err
+	}
+	meta := record.Archive{
+		DLE:      spec.Request.DLE,
+		Host:     spec.Host,
+		Path:     spec.Request.SourcePath,
+		Archiver: spec.Archiver.Name(),
+		Compress: pl.Codec,
+		Encrypt:  pl.EncryptScheme,
+		Level:    spec.Request.Level,
+		BaseSlot: spec.BaseSlot,
 	}
 
 	var unc, comp atomic.Int64
@@ -160,43 +209,40 @@ func (c *Clerk) Backup(w *slotio.Writer, bs *archiver.BackupSource, meta record.
 		filterCmds = append(filterCmds, encF.Forward)
 	}
 
-	sink := &mediumSink{w: w, meta: meta}
+	sink := &mediumSink{w: s.w, meta: meta}
 	res, terr := xfer.Transfer(src, xfer.NewFilters(filterCmds...), sink,
 		xfer.Opts{Progress: func(n int64) { comp.Store(n); report() }})
 	if terr != nil {
-		return record.Archive{}, nil, terr
+		return Summary{}, terr
 	}
 	arch := sink.arch
 	arch.Uncompressed = res.Uncompressed
 	arch.FileCount = res.FileCount
 	arch.Members = res.Produced.Members
-	return arch, sink.parts, nil
-}
-
-// cleanup runs a BackupSource's scratch cleanup if it has one (for Backup's pre-transfer
-// error paths, before the transfer would own the cleanup).
-func cleanup(bs *archiver.BackupSource) {
-	if bs.Cleanup != nil {
-		bs.Cleanup()
+	if err := s.w.Commit(arch, sink.parts); err != nil {
+		return Summary{}, err
 	}
+	return Summary{FileCount: arch.FileCount, Uncompressed: arch.Uncompressed, Compressed: arch.Compressed, Codec: arch.Compress}, nil
 }
 
-// Copy re-authors one archive onto the target writer's volumes: the same on-medium bytes
-// re-split with no transform (copySink re-checksums against the seal, never recompresses).
-// The source is built from the caller's opener (threaded across a copy's archives).
-func (c *Clerk) Copy(w *slotio.Writer, parts []record.FilePos, want slotio.Expect, opener slotio.PartOpener, meta record.Archive) error {
-	src, err := c.partsSource(parts, want, opener)
+// Copy re-authors one already-stored archive onto this slot's volumes: the same on-medium
+// bytes re-split with no transform (copySink re-checksums against the seal, never
+// recompresses). meta is the source archive's existing record; the source parts are read via
+// the caller's opener (threaded across a copy's archives). It records the archive into the
+// slot itself (CopyArchive does), so the engine only seals.
+func (s *Session) Copy(parts []record.FilePos, want archiveio.Expect, opener archiveio.PartOpener, meta record.Archive) error {
+	src, err := s.clerk.partsSource(parts, want, opener)
 	if err != nil {
 		return err
 	}
-	_, err = xfer.Transfer(src, xfer.NewFilters(), &copySink{w: w, meta: meta}, xfer.Opts{})
+	_, err = xfer.Transfer(src, xfer.NewFilters(), &copySink{w: s.w, meta: meta}, xfer.Opts{})
 	return err
 }
 
 // VerifyChecksum re-reads an archive's raw parts and hashes them, reporting whether the hash
 // matches the seal's sha. It is a transfer with no decode: source → Hash sink. A clean read
 // whose hash differs returns (false, nil); a read fault returns (false, err).
-func (c *Clerk) VerifyChecksum(parts []record.FilePos, want slotio.Expect, sha string, opener slotio.PartOpener) (bool, error) {
+func (c *Clerk) VerifyChecksum(parts []record.FilePos, want archiveio.Expect, sha string, opener archiveio.PartOpener) (bool, error) {
 	src, err := c.partsSource(parts, want, opener)
 	if err != nil {
 		return false, err
@@ -216,7 +262,7 @@ func (c *Clerk) VerifyChecksum(parts []record.FilePos, want slotio.Expect, sha s
 // ListMembers reads an archive's parts, decodes them (server-side Filters), and lists the
 // members (`tar -t`) — the verify path's structural check. It returns the listed members and
 // the raw transfer error (role-tagged) for the caller to classify and hint.
-func (c *Clerk) ListMembers(parts []record.FilePos, want slotio.Expect, codec, encrypt string, opener slotio.PartOpener, arch archiver.Archiver) ([]string, error) {
+func (c *Clerk) ListMembers(parts []record.FilePos, want archiveio.Expect, codec, encrypt string, opener archiveio.PartOpener, arch archiver.Archiver) ([]string, error) {
 	decrypt, decompress, err := c.DecodeFilters(codec, encrypt)
 	if err != nil {
 		return nil, err

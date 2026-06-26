@@ -2,6 +2,8 @@ package catalog
 
 import (
 	"io"
+	"sort"
+	"time"
 
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
@@ -105,44 +107,86 @@ func scanMedium(medium string, vol media.Volume) (mediumIndex, error) {
 	return mediumIndex{placements: assemble(medium, acc), labels: labels}, nil
 }
 
-// assemble turns one medium's accumulated part files and seals into placements: each
-// sealed slot becomes one placement whose archives gather their parts (ordered by
-// part index) from across the medium's volumes. A part missing from the scan (a tape
-// not present) leaves a short part list — verify/restore reports the gap and fails
-// over to another copy.
+// assemble turns one medium's accumulated parts, commit footers, and member indexes into
+// placements: each committed archive (one with a commit footer) gathers its parts (ordered by
+// part index) from across the medium's volumes, and the committed archives are grouped by
+// slot id into the in-memory slot. Parts with no commit footer are orphans (a crashed run) —
+// skipped. A part missing from the scan (a tape not present) leaves a short part list —
+// verify/restore reports the gap and fails over to another copy. Archives are ordered by
+// (dle, level) so a rebuild is deterministic.
 func assemble(medium string, acc *mediumScan) []slotPlacement {
-	var out []slotPlacement
-	for slotID, sl := range acc.seals {
-		p := Placement{Medium: medium, Seal: sl.loc}
-		for _, a := range sl.meta.Archives {
-			n := a.Parts
-			if n < 1 {
-				n = 1 // a single whole archive records Parts as 0 or 1
-			}
-			ap := ArchivePos{DLE: a.DLE, Level: a.Level}
-			for part := 0; part < n; part++ {
-				if loc, ok := acc.parts[partKey{slot: slotID, dle: a.DLE, level: a.Level, part: part}]; ok {
-					ap.Parts = append(ap.Parts, loc)
-				}
-			}
-			p.Archives = append(p.Archives, ap)
+	keys := make([]archiveKey, 0, len(acc.commits))
+	for k := range acc.commits {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].slot != keys[j].slot {
+			return keys[i].slot < keys[j].slot
 		}
-		out = append(out, slotPlacement{slot: sl.meta, p: p})
+		if keys[i].dle != keys[j].dle {
+			return keys[i].dle < keys[j].dle
+		}
+		return keys[i].level < keys[j].level
+	})
+
+	type slotAcc struct {
+		slot *record.Slot
+		p    Placement
+	}
+	slots := map[string]*slotAcc{}
+	var order []string // slot ids in first-seen order
+	for _, key := range keys {
+		sc := acc.commits[key]
+		sa := slots[key.slot]
+		if sa == nil {
+			date, seq, _ := record.ParseID(key.slot)
+			sa = &slotAcc{
+				slot: &record.Slot{ID: key.slot, Date: date, Sequence: seq, Status: record.StatusSealed, CreatedAt: sc.createdAt, SealedAt: sc.createdAt},
+				p:    Placement{Medium: medium},
+			}
+			slots[key.slot] = sa
+			order = append(order, key.slot)
+		}
+		n := sc.arch.Parts
+		if n < 1 {
+			n = 1 // a single whole archive records Parts as 0 or 1
+		}
+		ap := ArchivePos{DLE: key.dle, Level: key.level, Commit: sc.loc}
+		for part := 0; part < n; part++ {
+			if loc, ok := acc.parts[partKey{slot: key.slot, dle: key.dle, level: key.level, part: part}]; ok {
+				ap.Parts = append(ap.Parts, loc)
+			}
+		}
+		arch := *sc.arch
+		if ix, ok := acc.indexes[key]; ok {
+			ap.Index = ix.loc
+			arch.Members = ix.members
+		}
+		sa.slot.AddArchive(arch)
+		sa.p.Archives = append(sa.p.Archives, ap)
+	}
+
+	out := make([]slotPlacement, 0, len(order))
+	for _, id := range order {
+		sa := slots[id]
+		out = append(out, slotPlacement{slot: sa.slot, p: sa.p})
 	}
 	return out
 }
 
-// ScanSlots reads a volume's sealed slots without touching the cache — used to
-// check a volume's current contents (e.g. whether a tape is still active before
-// relabel).
+// ScanSlots reads a volume's committed slots without touching the cache — used to check a
+// volume's current contents (e.g. whether a tape is still active before relabel).
 func ScanSlots(vol media.Volume) ([]*record.Slot, error) {
 	res, err := scanVolume("", vol)
 	if err != nil {
 		return nil, err
 	}
-	slots := make([]*record.Slot, 0, len(res.seals))
-	for _, s := range res.seals {
-		slots = append(slots, s.meta)
+	acc := newMediumScan()
+	acc.add(res)
+	sps := assemble("", acc)
+	slots := make([]*record.Slot, 0, len(sps))
+	for _, sp := range sps {
+		slots = append(slots, sp.slot)
 	}
 	return slots, nil
 }
@@ -153,46 +197,69 @@ type partKey struct {
 	level, part int
 }
 
-// scannedSeal is a seal record found during a scan: the slot it commits and where it
-// lives.
-type scannedSeal struct {
-	meta *record.Slot
-	loc  FilePos
+// archiveKey identifies one committed archive within a slot across a medium's volumes.
+type archiveKey struct {
+	slot, dle string
+	level     int
 }
 
-// scanResult is one volume's contribution to a medium scan: its archive part files,
-// its seals, and its label (if any).
+// scannedCommit is a committed archive found during a scan: its footer metadata (without
+// members), where the footer landed, and the slot's creation time (carried in the header).
+type scannedCommit struct {
+	arch      *record.Archive
+	loc       FilePos
+	createdAt time.Time
+}
+
+// scannedIndex is an archive's member index found during a scan: where it landed and (read
+// eagerly) its member list.
+type scannedIndex struct {
+	loc     FilePos
+	members []string
+}
+
+// scanResult is one volume's contribution to a medium scan: its archive parts, commit
+// footers, member indexes, and label (if any).
 type scanResult struct {
-	parts map[partKey]FilePos
-	seals map[string]scannedSeal
-	label *record.Label
+	parts   map[partKey]FilePos
+	commits map[archiveKey]scannedCommit
+	indexes map[archiveKey]scannedIndex
+	label   *record.Label
 }
 
-// mediumScan accumulates a whole medium's parts and seals across its volumes before
-// placements are assembled (a slot's parts may straddle several volumes, and the seal
-// committing them lives on only one).
+// mediumScan accumulates a whole medium's parts, commits, and indexes across its volumes
+// before placements are assembled (an archive's parts — and its commit/index — may straddle
+// several volumes).
 type mediumScan struct {
-	parts map[partKey]FilePos
-	seals map[string]scannedSeal
+	parts   map[partKey]FilePos
+	commits map[archiveKey]scannedCommit
+	indexes map[archiveKey]scannedIndex
 }
 
 func newMediumScan() *mediumScan {
-	return &mediumScan{parts: map[partKey]FilePos{}, seals: map[string]scannedSeal{}}
+	return &mediumScan{
+		parts:   map[partKey]FilePos{},
+		commits: map[archiveKey]scannedCommit{},
+		indexes: map[archiveKey]scannedIndex{},
+	}
 }
 
 func (m *mediumScan) add(res scanResult) {
 	for k, loc := range res.parts {
 		m.parts[k] = loc // last-seen wins (an orphaned re-copy is harmless to reads)
 	}
-	for slotID, s := range res.seals {
-		m.seals[slotID] = s
+	for k, c := range res.commits {
+		m.commits[k] = c
+	}
+	for k, ix := range res.indexes {
+		m.indexes[k] = ix
 	}
 }
 
-// scanVolume reads one volume's files into raw part-file and seal records, plus the
-// volume's label. It does not assemble placements — that happens per medium, after
-// every volume is scanned, because a slot's parts (and its committing seal) may sit
-// on different volumes.
+// scanVolume reads one volume's files into raw parts, commit footers, and member indexes,
+// plus the volume's label. It does not assemble placements — that happens per medium, after
+// every volume is scanned, because an archive's parts (and its commit/index) may sit on
+// different volumes.
 func scanVolume(medium string, vol media.Volume) (scanResult, error) {
 	files, err := vol.Files()
 	if err != nil {
@@ -211,25 +278,38 @@ func scanVolume(medium string, vol media.Volume) (scanResult, error) {
 		}
 	}
 
-	res := scanResult{parts: map[partKey]FilePos{}, seals: map[string]scannedSeal{}, label: label}
+	res := scanResult{
+		parts:   map[partKey]FilePos{},
+		commits: map[archiveKey]scannedCommit{},
+		indexes: map[archiveKey]scannedIndex{},
+		label:   label,
+	}
 	for _, f := range files {
+		loc := FilePos{Label: labelName, Epoch: epoch, Pos: f.Pos}
 		switch f.Header.Kind {
 		case record.KindArchive:
-			res.parts[partKey{slot: f.Header.Slot, dle: f.Header.DLE, level: f.Header.Level, part: f.Header.Part}] =
-				FilePos{Label: labelName, Epoch: epoch, Pos: f.Pos}
-		case record.KindSeal:
-			s, serr := readSeal(vol, f.Pos)
-			if serr != nil {
-				continue // unreadable seal: skip
+			res.parts[partKey{slot: f.Header.Slot, dle: f.Header.DLE, level: f.Header.Level, part: f.Header.Part}] = loc
+		case record.KindCommit:
+			a, cerr := readCommit(vol, f.Pos)
+			if cerr != nil {
+				continue // unreadable footer: skip (the archive reads as uncommitted)
 			}
-			res.seals[f.Header.Slot] = scannedSeal{meta: s, loc: FilePos{Label: labelName, Epoch: epoch, Pos: f.Pos}}
+			res.commits[archiveKey{slot: f.Header.Slot, dle: f.Header.DLE, level: f.Header.Level}] =
+				scannedCommit{arch: a, loc: loc, createdAt: f.Header.CreatedAt}
+		case record.KindIndex:
+			members, ierr := readIndex(vol, f.Pos)
+			if ierr != nil {
+				continue // unreadable index: browse loses this archive's members, reads still work
+			}
+			res.indexes[archiveKey{slot: f.Header.Slot, dle: f.Header.DLE, level: f.Header.Level}] =
+				scannedIndex{loc: loc, members: members}
 		}
 	}
 	return res, nil
 }
 
-// readSeal reads and parses a slot's seal-record payload from the volume.
-func readSeal(vol media.Volume, pos int) (*record.Slot, error) {
+// readCommit reads and parses an archive's commit footer payload from the volume.
+func readCommit(vol media.Volume, pos int) (*record.Archive, error) {
 	_, rc, err := vol.ReadFile(pos)
 	if err != nil {
 		return nil, err
@@ -239,5 +319,15 @@ func readSeal(vol media.Volume, pos int) (*record.Slot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return record.ParseSlot(data)
+	return record.ParseCommit(data)
+}
+
+// readIndex reads and decodes an archive's member index payload from the volume.
+func readIndex(vol media.Volume, pos int) ([]string, error) {
+	_, rc, err := vol.ReadFile(pos)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return record.DecodeIndex(rc)
 }

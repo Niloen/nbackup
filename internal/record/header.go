@@ -1,10 +1,12 @@
 // Package record defines NBackup's self-describing on-medium artifact records:
-// the framing header at the start of every file, the volume label record, and the
-// per-slot seal metadata (Slot/Archive) — plus their (de)serialization. It is pure
-// data and codec; it makes no assumptions about where the bytes live (that is a
-// media concern) or how a run is driven (that is the engine's). A volume is
-// recoverable on its own because every file leads with one of these records:
-// scanning them reconstructs the catalog. Amanda analogue: dumpfile_t + amar.
+// the framing header at the start of every file, the volume label record, the
+// per-archive commit footer (Archive) that marks an archive complete, and the
+// per-archive member index — plus their (de)serialization. It is pure data and
+// codec; it makes no assumptions about where the bytes live (that is a media
+// concern) or how a run is driven (that is the engine's). A volume is recoverable
+// on its own because every file leads with one of these records: scanning them
+// reconstructs the catalog. There is no per-slot seal — a slot is the grouping its
+// archives carry in their headers. Amanda analogue: dumpfile_t + amar.
 package record
 
 import (
@@ -17,16 +19,17 @@ import (
 
 // File kinds carried in a Header.
 const (
-	KindArchive = "archive" // one DLE dump
-	KindSeal    = "seal"    // the per-slot metadata record, written last
+	KindArchive = "archive" // one DLE dump (one or more part files)
+	KindCommit  = "commit"  // a per-archive commit footer, written last — the archive's marker
+	KindIndex   = "index"   // a per-archive member index (gzip), written before the commit
 	KindLabel   = "label"   // a volume label (first file); not part of any slot
 )
 
 // Header is the self-describing block at the start of every file on a volume
 // (Amanda's dumpfile_t). It carries only identity — what is known before the
-// payload is streamed. Measured data (sizes, checksum, member listing) lives in
-// the per-slot seal record, not here. A volume is therefore recoverable on its
-// own: scanning headers reconstructs the catalog.
+// payload is streamed. Measured data (sizes, checksum) lives in the archive's
+// commit footer and its member listing in the per-archive index, not here. A
+// volume is therefore recoverable on its own: scanning headers reconstructs the catalog.
 type Header struct {
 	Slot      string    `json:"slot"`
 	Kind      string    `json:"kind"`
@@ -38,7 +41,7 @@ type Header struct {
 	Encrypt   string    `json:"encrypt,omitempty"` // encryption scheme name (gpg); reversed on restore. "" = plaintext. The key is never recorded — gpg resolves it from the ciphertext + keyring.
 	Level     int       `json:"level,omitempty"`
 	BaseSlot  string    `json:"base_slot,omitempty"`
-	Part      int       `json:"part,omitempty"` // 0-based index of this part within its archive (0 = first/only); the archive's total part count lives in the seal (Archive.Parts), not here
+	Part      int       `json:"part,omitempty"` // 0-based index of this part within its archive (0 = first/only); the archive's total part count lives in its commit footer (Archive.Parts), not here
 	CreatedAt time.Time `json:"created_at"`
 }
 

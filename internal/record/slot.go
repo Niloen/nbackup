@@ -19,7 +19,7 @@ const (
 // plus a file position. Label is the volume's global, device-independent identity (the
 // name on the cartridge); it is empty for address-identified media (disk, s3), which
 // carry no label — there the medium is its own sole volume, so no per-file volume id is
-// needed. It locates both an archive part (as the slotio writer emits it) and a
+// needed. It locates both an archive part (as the archiveio writer emits it) and a
 // placement's seal record (as the catalog persists it) — one type both layers share.
 type FilePos struct {
 	Label string `json:"label,omitempty"` // volume label name; "" for address-identified media
@@ -27,20 +27,25 @@ type FilePos struct {
 	Pos   int    `json:"pos"`
 }
 
-// ArchivePos is one archive's identity and the ordered locations of its parts. An
-// archive that fits one volume has a single part; a spanned archive has its compressed
-// payload split into several parts across volumes, in order.
+// ArchivePos is one archive's identity and the ordered locations of its parts, plus
+// where its commit footer and member index landed. An archive that fits one volume has a
+// single part; a spanned archive has its compressed payload split into several parts across
+// volumes, in order. Commit is the per-archive marker (written last, after the index);
+// Index locates the gzip'd member list, read lazily for browse.
 type ArchivePos struct {
-	DLE   string    `json:"dle"`
-	Level int       `json:"level"`
-	Parts []FilePos `json:"parts"`
+	DLE    string    `json:"dle"`
+	Level  int       `json:"level"`
+	Parts  []FilePos `json:"parts"`
+	Commit FilePos   `json:"commit"`          // the commit footer's location (the archive's marker)
+	Index  FilePos   `json:"index,omitempty"` // the member index's location ("" position = no members)
 }
 
-// Slot is a run's metadata — NBackup's primary artifact. It is persisted as the
-// payload of the per-slot seal record (the last file written to a volume); its
-// presence marks the slot sealed. It carries a thin authoring lifecycle (NewSlot
-// -> AddArchive -> Seal) so a slot is built up consistently during a run, then is
-// immutable once sealed.
+// Slot is a run's grouping of archives — the in-memory unit retention and display work on.
+// It is NOT a record on the medium: each archive carries the slot id in its header and is
+// made durable by its own commit footer, so a slot is reconstructed by grouping committed
+// archives (a crashed run keeps its committed archives; uncommitted parts are orphans). The
+// writer builds one up during a run (NewSlot -> AddArchive via Commit -> Finish) and the
+// catalog assembles one from a scan; "sealed" now means only "the run finished" (in memory).
 //
 // The ID is the slot's identity: "slot-" + Date (+ ".Sequence" for the 2nd+ run
 // of a day) — see IDFromParts. The natural key is a date, so the "slot-" tag is
@@ -78,7 +83,7 @@ type Archive struct {
 	SHA256       string   `json:"sha256"`            // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
 	Parts        int      `json:"parts,omitempty"`   // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
 	BaseSlot     string   `json:"base_slot"`         // for level>=1, the slot whose state this builds on
-	Members      []string `json:"members"`           // member paths archived: slash-separated, directories with a trailing slash (the archiver-neutral convention recovery browses); the raw token is replayed to the producing archiver on extract (was MANIFEST)
+	Members      []string `json:"members,omitempty"` // member paths archived: slash-separated, directories with a trailing slash (the archiver-neutral convention recovery browses); the raw token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
 }
 
 // DLEID returns the Amanda-style host:path identity for display, falling back to
@@ -172,19 +177,17 @@ func Less(a, b *Slot) bool {
 	return a.Sequence < b.Sequence
 }
 
-// Marshal serializes the slot metadata as indented JSON.
-func (s *Slot) Marshal() ([]byte, error) { return marshalJSON(s) }
+// MarshalCommit serializes an archive's commit footer — its metadata (Members omitempty, so
+// clear it first since the member list rides in the separate per-archive index).
+func MarshalCommit(a Archive) ([]byte, error) { return marshalJSON(a) }
 
-// ParseSlot deserializes a slot's seal-record payload.
-func ParseSlot(data []byte) (*Slot, error) {
-	var s Slot
-	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, fmt.Errorf("parse slot metadata: %w", err)
+// ParseCommit deserializes an archive commit footer's payload.
+func ParseCommit(data []byte) (*Archive, error) {
+	var a Archive
+	if err := json.Unmarshal(data, &a); err != nil {
+		return nil, fmt.Errorf("parse archive commit: %w", err)
 	}
-	if s.Sequence == 0 {
-		s.Sequence = 1
-	}
-	return &s, nil
+	return &a, nil
 }
 
 func marshalJSON(v any) ([]byte, error) {

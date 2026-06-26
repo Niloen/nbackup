@@ -1,10 +1,10 @@
-// Package slotio authors and reads slots on a media.Volume. It owns how a slot maps
+// Package archiveio authors and reads slots on a media.Volume. It owns how a slot maps
 // onto a volume's files — one or more part files per archive plus a final seal record
 // carrying the slot's metadata — so the engine supplies only an already-transformed
-// payload stream and descriptive metadata, never positions or filenames. slotio knows
+// payload stream and descriptive metadata, never positions or filenames. archiveio knows
 // nothing of compression or encryption: it meters (checksum + size) the bytes that land
 // and splits them into parts. The transform pipeline (compress/encrypt) is the engine's
-// to compose and run; slotio drains its output.
+// to compose and run; archiveio drains its output.
 //
 // An archive may be split into several parts across volumes (tape spanning). The writer
 // drains the payload into parts sized to fit each volume's known remaining capacity,
@@ -12,7 +12,7 @@
 // each part is bounded before it is written — so a volume is never overfilled in the
 // normal path; the media.ErrVolumeFull backstop only fires when an estimate came up short,
 // and then the write fails rather than recovering.
-package slotio
+package archiveio
 
 import (
 	"bytes"
@@ -42,15 +42,16 @@ type VolumeSink interface {
 	// unbounded — write the whole remaining stream as a single part. It errors when a
 	// roll is needed but no further writable volume is available.
 	NextPart() (vol media.Volume, max int64, volume string, epoch int, err error)
-	// PlaceSeal returns the volume to write the slot's seal record (one whole file of
-	// the given payload size) to, rolling first if it will not fit the loaded volume.
-	PlaceSeal(size int64) (vol media.Volume, volume string, epoch int, err error)
+	// PlaceRecord returns the volume to write a small whole record (an archive's member
+	// index or its commit footer) of the given payload size to, rolling first if it will
+	// not fit the loaded volume.
+	PlaceRecord(size int64) (vol media.Volume, volume string, epoch int, err error)
 }
 
 // SlotSpec is the descriptive identity of a slot to author: what is known before
 // any archive is written, independent of the archives and bytes the Writer
-// assembles while streaming. NewWriter starts the slot from it and Seal returns
-// the finished record.Slot — so the caller describes the slot and slotio produces the
+// assembles while streaming. NewWriter starts the slot from it and Finish returns
+// the finished record.Slot — so the caller describes the slot and archiveio produces the
 // artifact, never the reverse. The fields mirror record.NewSlot's parameters.
 type SlotSpec struct {
 	ID        string    // the slot's identity (see record.IDFromParts)
@@ -60,27 +61,30 @@ type SlotSpec struct {
 	CreatedAt time.Time // when authoring began; a copy preserves the source slot's
 }
 
-// Writer authors a single slot onto a medium via a VolumeSink. Callers write archive
-// payloads with WriteArchive (recording each with Record) and finalize with Seal.
-// WriteArchive is safe for concurrent use only on an unbounded sink (disk); a bounded,
-// spanning-capable sink rolls one shared volume and must be driven serially (the engine
-// clamps archivers).
+// Writer authors a single slot onto a medium via a VolumeSink. Callers stream each archive's
+// payload with WriteArchive and finalize it with Commit (which writes the archive's member
+// index and its commit footer — the per-archive marker). There is no slot-level seal: a slot
+// is the grouping its archives carry in their headers, and a crashed run's committed archives
+// survive (uncommitted parts are orphans a scan ignores). WriteArchive is safe for concurrent
+// use only on an unbounded sink (disk); a bounded, spanning-capable sink rolls one shared
+// volume and must be driven serially (the engine clamps archivers).
 type Writer struct {
 	sink VolumeSink
 	lim  *xfer.Limiter // optional bandwidth cap on the bytes landing on the medium (nil = uncapped)
 
-	mu       sync.Mutex // guards the records below
-	slot     *record.Slot
-	written  []archiveRecord // one per recorded archive, in Record order
-	sealPart record.FilePos  // where the seal landed (set by Seal)
+	mu      sync.Mutex // guards the records below
+	slot    *record.Slot
+	written []archiveRecord // one per committed archive, in Commit order
 }
 
-// archiveRecord remembers an archive's parts so the catalog can index where each
-// archive's bytes landed (see Positions).
+// archiveRecord remembers where an archive's parts, member index, and commit footer landed,
+// so the catalog can index it (see Positions).
 type archiveRecord struct {
-	dle   string
-	level int
-	parts []record.FilePos
+	dle    string
+	level  int
+	parts  []record.FilePos
+	commit record.FilePos
+	index  record.FilePos
 }
 
 // NewWriter begins authoring a new slot, described by spec, onto sink. The Writer builds
@@ -119,14 +123,59 @@ func (w *Writer) WriteArchive(meta record.Archive, payload io.Reader, progress f
 	return arch, parts, nil
 }
 
-// Record adds a completed archive (all fields final) to the slot under its part
-// positions, keeping the running total and the catalog index in sync. Call it once the
-// caller has merged the producer's stats into the archive WriteArchive returned.
-func (w *Writer) Record(arch record.Archive, parts []record.FilePos) {
+// Commit durably finalizes an archive (all fields final): it writes the member index (the
+// gzip'd Members) then the commit footer (the metadata without members) — the footer last,
+// so a crash before it leaves orphan parts a scan ignores. It then records the archive in the
+// in-memory slot and its on-medium positions. Call it once the caller has merged the
+// producer's stats (FileCount/Uncompressed/Members) into the archive WriteArchive returned.
+func (w *Writer) Commit(arch record.Archive, parts []record.FilePos) error {
+	var index record.FilePos
+	if len(arch.Members) > 0 {
+		var buf bytes.Buffer
+		if err := record.EncodeIndex(&buf, arch.Members); err != nil {
+			return err
+		}
+		pos, err := w.writeRecord(record.KindIndex, arch, buf.Bytes())
+		if err != nil {
+			return err
+		}
+		index = pos
+	}
+	// The footer omits the member list (it rides in the index); marshal a memberless copy.
+	footer := arch
+	footer.Members = nil
+	data, err := record.MarshalCommit(footer)
+	if err != nil {
+		return err
+	}
+	commit, err := w.writeRecord(record.KindCommit, arch, data)
+	if err != nil {
+		return err
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.slot.AddArchive(arch)
-	w.written = append(w.written, archiveRecord{dle: arch.DLE, level: arch.Level, parts: parts})
+	w.written = append(w.written, archiveRecord{dle: arch.DLE, level: arch.Level, parts: parts, commit: commit, index: index})
+	return nil
+}
+
+// writeRecord places and writes one small whole record (an index or a commit footer) for an
+// archive, returning where it landed. The header identifies the archive it belongs to so a
+// scan can correlate it with the archive's parts (which may be on other volumes).
+func (w *Writer) writeRecord(kind string, a record.Archive, payload []byte) (record.FilePos, error) {
+	vol, volName, epoch, err := w.sink.PlaceRecord(int64(len(payload)))
+	if err != nil {
+		return record.FilePos{}, fmt.Errorf("place %s record: %w", kind, err)
+	}
+	h := record.Header{Slot: w.slot.ID, Kind: kind, DLE: a.DLE, Level: a.Level, CreatedAt: w.slot.CreatedAt}
+	pos, err := vol.AppendFile(h, func(out io.Writer) error {
+		_, e := out.Write(payload)
+		return e
+	})
+	if err != nil {
+		return record.FilePos{}, err
+	}
+	return record.FilePos{Label: volName, Epoch: epoch, Pos: pos}, nil
 }
 
 // meteredReader counts and hashes the bytes read through it — the streaming sha256 and
@@ -245,7 +294,9 @@ func (w *Writer) CopyArchive(meta record.Archive, src io.Reader) (record.Archive
 	}
 	arch := meta
 	arch.Parts = len(parts)
-	w.Record(arch, parts)
+	if err := w.Commit(arch, parts); err != nil {
+		return record.Archive{}, err
+	}
 	return arch, nil
 }
 
@@ -256,56 +307,37 @@ func (w *Writer) ArchiveCount() int {
 	return len(w.slot.Archives)
 }
 
-// Positions returns the part positions of every archive recorded, for the catalog to
-// index. Call after all WriteArchive/Record calls have completed.
+// Positions returns the on-medium positions of every committed archive — its parts, its
+// commit footer, and its member index — for the catalog to index. Call after all
+// WriteArchive/Commit calls have completed.
 func (w *Writer) Positions() []record.ArchivePos {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	out := make([]record.ArchivePos, len(w.written))
 	for i, a := range w.written {
-		out[i] = record.ArchivePos{DLE: a.dle, Level: a.level, Parts: append([]record.FilePos(nil), a.parts...)}
+		out[i] = record.ArchivePos{
+			DLE:    a.dle,
+			Level:  a.level,
+			Parts:  append([]record.FilePos(nil), a.parts...),
+			Commit: a.commit,
+			Index:  a.index,
+		}
 	}
 	return out
 }
 
-// SealPosition returns where the seal record landed (its volume and position).
-func (w *Writer) SealPosition() record.FilePos {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.sealPart
-}
-
-// Seal seals the slot and appends the seal record (the slot's metadata) as the final
-// file — the marker that makes the slot complete. The sealed slot is returned.
+// Finish closes the slot in memory and returns it — the run's grouping of committed
+// archives. There is no slot-level record on the medium: each archive is already durable via
+// its own commit footer (written inline as it finished), so Finish only stamps the in-memory
+// slot's completion (for the catalog and the run summary) and never touches the volume.
 //
-// Like Amanda's taper, sealing does not read the medium back: each archive was hashed
-// inline as it streamed out (the streaming-meter sha256 recorded in the catalog), so
-// the write path's integrity rests on that checksum, not a re-read. Verifying the bytes
-// actually landed on the medium is the job of the explicit, operator-invoked `nb verify`
-// (the amcheckdump analogue), kept out of the dump path so a single drive never has to
-// re-read — or reload swapped-out volumes — just to close a slot.
-func (w *Writer) Seal(now time.Time) (*record.Slot, error) {
+// Like Amanda's taper, the write path reads nothing back: each archive was hashed inline as
+// it streamed out (the streaming-meter sha256 recorded in the catalog), so integrity rests on
+// that checksum, not a re-read. Verifying the bytes actually landed is the job of the
+// explicit, operator-invoked `nb verify` (the amcheckdump analogue).
+func (w *Writer) Finish(now time.Time) (*record.Slot, error) {
 	if err := w.slot.Seal(now); err != nil {
 		return nil, err
 	}
-	data, err := w.slot.Marshal()
-	if err != nil {
-		return nil, err
-	}
-	vol, sealVol, sealEpoch, err := w.sink.PlaceSeal(int64(len(data)))
-	if err != nil {
-		return nil, fmt.Errorf("place the seal record: %w", err)
-	}
-	seal := record.Header{Slot: w.slot.ID, Kind: record.KindSeal, CreatedAt: now}
-	pos, err := vol.AppendFile(seal, func(out io.Writer) error {
-		_, e := out.Write(data)
-		return e
-	})
-	if err != nil {
-		return nil, err
-	}
-	w.mu.Lock()
-	w.sealPart = record.FilePos{Label: sealVol, Epoch: sealEpoch, Pos: pos}
-	w.mu.Unlock()
 	return w.slot, nil
 }

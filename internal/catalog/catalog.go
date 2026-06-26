@@ -44,20 +44,19 @@ type Entry struct {
 
 // Placement is one copy of a slot on one medium. The copy's archives may span
 // several of the medium's volumes (tape spanning): each archive names the volumes
-// and positions its parts landed on. The seal record (the commit marker, written
-// last) lives at Seal — on the final volume the copy occupies.
+// and positions its parts landed on, plus where its per-archive commit footer and
+// member index live (the commit footer is the marker, written last).
 type Placement struct {
 	// Medium is the pool this copy is accounted to (retention, capacity, cost) and
 	// the changer to open to reach it. It is NOT a device pin: a labeled volume is
 	// located by its label at mount time, so which drive holds a tape is resolved at
 	// runtime, not stored here.
 	Medium   string       `json:"medium"`
-	Archives []ArchivePos `json:"archives"` // each archive and the positions of its parts
-	Seal     FilePos      `json:"seal"`     // where the seal record lives
+	Archives []ArchivePos `json:"archives"` // each archive and the positions of its parts, commit, and index
 }
 
 // FilePos and ArchivePos are the file-location types the catalog persists. They are
-// the very types the slotio writer emits and the reader consumes, defined once in
+// the very types the archiveio writer emits and the reader consumes, defined once in
 // package record (the shared on-medium artifact vocabulary) so a writer's recorded
 // positions become a placement with no field-by-field conversion. FilePos.Label is the
 // volume's global, device-independent identity ("" for address-identified media, which
@@ -95,8 +94,9 @@ func (p Placement) Labels() []string {
 		for _, pt := range a.Parts {
 			add(pt.Label)
 		}
+		add(a.Commit.Label)
+		add(a.Index.Label)
 	}
-	add(p.Seal.Label)
 	return out
 }
 

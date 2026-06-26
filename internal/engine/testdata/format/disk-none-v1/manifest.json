@@ -7,7 +7,7 @@
   "restores": [
     {
       "slot": "slot-2026-06-21",
-      "dle": "h-data",
+      "dle": "localhost-data",
       "files": {
         "gone.txt": "temp",
         "keep.txt": "v1",
@@ -16,7 +16,7 @@
     },
     {
       "slot": "slot-2026-06-22",
-      "dle": "h-data",
+      "dle": "localhost-data",
       "files": {
         "keep.txt": "v2",
         "sub/nested.txt": "hi"

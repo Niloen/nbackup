@@ -965,8 +965,7 @@ func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, byte
 	}
 	p := catalog.Placement{
 		Medium:   "lto",
-		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: volume, Epoch: 1, Pos: 1}}}},
-		Seal:     catalog.FilePos{Label: volume, Epoch: 1, Pos: 2},
+		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: volume, Epoch: 1, Pos: 1}}, Commit: catalog.FilePos{Label: volume, Epoch: 1, Pos: 2}}},
 	}
 	if err := eng.cat.Record(s, p); err != nil {
 		t.Fatal(err)
@@ -985,8 +984,7 @@ func recordFullOnOtherMedium(t *testing.T, eng *Engine, date, dle, medium string
 	}
 	p := catalog.Placement{
 		Medium:   medium,
-		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: medium, Pos: 1}}}},
-		Seal:     catalog.FilePos{Label: medium, Pos: 2},
+		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: medium, Pos: 1}}, Commit: catalog.FilePos{Label: medium, Pos: 2}}},
 	}
 	if err := eng.cat.Record(s, p); err != nil {
 		t.Fatal(err)

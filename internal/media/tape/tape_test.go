@@ -45,7 +45,7 @@ func TestTapeSequential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p1, err := v.AppendFile(record.Header{Slot: "slot-x", Kind: record.KindSeal},
+	p1, err := v.AppendFile(record.Header{Slot: "slot-x", Kind: record.KindCommit},
 		func(w io.Writer) error { _, e := w.Write([]byte("seal")); return e })
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestTapeSequential(t *testing.T) {
 	if len(files2) != 2 {
 		t.Fatalf("after reopen expected 2 files, got %d", len(files2))
 	}
-	p2, _ := v2.AppendFile(record.Header{Slot: "slot-y", Kind: record.KindSeal},
+	p2, _ := v2.AppendFile(record.Header{Slot: "slot-y", Kind: record.KindCommit},
 		func(w io.Writer) error { return nil })
 	if p2 != 2 {
 		t.Errorf("append after reopen got file %d, want 2", p2)
@@ -346,7 +346,7 @@ func TestTapeTornTailSkipped(t *testing.T) {
 		func(w io.Writer) error { _, e := w.Write([]byte("one")); return e }); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := v.AppendFile(record.Header{Slot: "s", Kind: record.KindSeal},
+	if _, err := v.AppendFile(record.Header{Slot: "s", Kind: record.KindCommit},
 		func(w io.Writer) error { _, e := w.Write([]byte("seal")); return e }); err != nil {
 		t.Fatal(err)
 	}

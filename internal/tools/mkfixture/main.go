@@ -86,12 +86,12 @@ func makeDiskFixture() error {
 	cfg := &config.Config{
 		Landing: "disk",
 		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": mediumDir}}},
-		Sources: []config.DLE{{Host: "h", Path: "data"}},
+		Sources: []config.DLE{{Host: "localhost", Path: "data"}},
 		Workdir: work,
 	}
 	cfg.Compress.Scheme = "none"
 
-	dle := config.DLE{Host: "h", Path: "data"}.Name()
+	dle := config.DLE{Host: "localhost", Path: "data"}.Name()
 	var s1id, s2id string
 	err = inDir(src, func() error {
 		eng, err := engine.New(cfg)
@@ -155,12 +155,12 @@ func makeTapeFixture() error {
 			"disk": {Type: "disk", Params: map[string]string{"path": diskDir}},
 			"tape": {Type: "tape", Params: map[string]string{"dir": tapeDir}},
 		},
-		Sources: []config.DLE{{Host: "h", Path: "data"}},
+		Sources: []config.DLE{{Host: "localhost", Path: "data"}},
 		Workdir: work,
 	}
 	cfg.Compress.Scheme = "none"
 
-	dle := config.DLE{Host: "h", Path: "data"}.Name()
+	dle := config.DLE{Host: "localhost", Path: "data"}.Name()
 	var sid string
 	err = inDir(src, func() error {
 		eng, err := engine.New(cfg)
@@ -278,7 +278,8 @@ func tarGz(srcDir, outPath string) error {
 
 // inDir runs fn with the process working directory set to dir, restoring it after.
 // The DLE source path is given relative ("data") so the DLE name is a clean,
-// machine-independent "h-data" rather than embedding a temp path.
+// machine-independent "localhost-data" rather than embedding a temp path. The host is
+// "localhost" so the fixture dumps locally — fixtures guard the on-disk format, not SSH.
 func inDir(dir string, fn func() error) error {
 	prev, err := os.Getwd()
 	if err != nil {

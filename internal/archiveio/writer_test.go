@@ -1,4 +1,4 @@
-package slotio
+package archiveio
 
 import (
 	"bytes"
@@ -111,7 +111,7 @@ func (s *memSink) NextPart() (media.Volume, int64, string, int, error) {
 	return v, s.room(), v.name, 1, nil
 }
 
-func (s *memSink) PlaceSeal(size int64) (media.Volume, string, int, error) {
+func (s *memSink) PlaceRecord(size int64) (media.Volume, string, int, error) {
 	if r := s.room(); r >= 0 && size > r {
 		if err := s.advance(); err != nil {
 			return nil, "", 0, err
@@ -147,7 +147,9 @@ func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) record.Ar
 	if err != nil {
 		t.Fatalf("WriteArchive: %v", err)
 	}
-	w.Record(arch, parts)
+	if err := w.Commit(arch, parts); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
 	return arch
 }
 
@@ -184,9 +186,9 @@ func TestSpanAcrossVolumes(t *testing.T) {
 		t.Fatalf("parts landed on a single volume %v; did not span", vols)
 	}
 
-	sealed, err := w.Seal(time.Unix(1, 0).UTC())
+	sealed, err := w.Finish(time.Unix(1, 0).UTC())
 	if err != nil {
-		t.Fatalf("Seal: %v", err)
+		t.Fatalf("Finish: %v", err)
 	}
 	if !sealed.IsSealed() {
 		t.Fatal("slot not sealed")
@@ -228,8 +230,8 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	if arch.Parts < 5 {
 		t.Fatalf("Parts = %d, want >= 5", arch.Parts)
 	}
-	if _, err := w.Seal(time.Unix(1, 0).UTC()); err != nil {
-		t.Fatalf("Seal: %v", err)
+	if _, err := w.Finish(time.Unix(1, 0).UTC()); err != nil {
+		t.Fatalf("Finish: %v", err)
 	}
 	r := NewReader()
 	rc, err := r.Open(w.Positions()[0].Parts, Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v))

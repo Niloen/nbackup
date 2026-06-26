@@ -85,8 +85,11 @@ var slug = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
 // stem is the friendly filename base (without extension) for a file.
 func stem(pos int, h record.Header) string {
-	if h.Kind == record.KindSeal {
-		return fmt.Sprintf("%06d-seal", pos)
+	switch h.Kind {
+	case record.KindCommit:
+		return fmt.Sprintf("%06d-%s-L%d-commit", pos, slug.ReplaceAllString(h.DLE, "_"), h.Level)
+	case record.KindIndex:
+		return fmt.Sprintf("%06d-%s-L%d-index", pos, slug.ReplaceAllString(h.DLE, "_"), h.Level)
 	}
 	return fmt.Sprintf("%06d-%s-L%d", pos, slug.ReplaceAllString(h.DLE, "_"), h.Level)
 }
@@ -95,8 +98,11 @@ func stem(pos int, h record.Header) string {
 // directly usable with stock tools. Kept here so the media don't depend on package
 // compress.
 func payloadExt(h record.Header) string {
-	if h.Kind == record.KindSeal {
+	switch h.Kind {
+	case record.KindCommit:
 		return ".json"
+	case record.KindIndex:
+		return ".json.gz"
 	}
 	switch h.Compress {
 	case "gzip":

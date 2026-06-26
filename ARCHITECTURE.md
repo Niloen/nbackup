@@ -45,8 +45,8 @@ registry registration, not a conditional in the core.
 | Package | Responsibility | Amanda analogue |
 |---|---|---|
 | `config` | config + domain entities: `DLE`, `Media`, `DumpType` | disklist / dumptype / storage |
-| `record` | the self-describing on-medium artifact records: `Header` framing + `Label` (volume id record) + `Slot`/`Archive` (seal metadata + lifecycle `NewSlot`/`AddArchive`/`Seal`) + their (de)serialization | dumpfile_t / amar |
-| `slotio` | maps a slot onto a `Volume`'s files — meter + split a payload into parts on write, concatenate + assert parts on read (headers, seal, verify, `Expect`); knows nothing of compress/encrypt | taper / amrestore |
+| `record` | the self-describing on-medium artifact records: `Header` framing + `Label` (volume id record) + `Archive` (commit-footer metadata + the in-memory `Slot` grouping/lifecycle) + the per-archive member index (`EncodeIndex`) + their (de)serialization | dumpfile_t / amar |
+| `archiveio` | maps a slot's archives onto a `Volume`'s files — meter + split a payload into parts then write its index + commit footer (`WriteArchive`/`Commit`/`Finish`); concatenate + assert parts on read (`Expect`); knows nothing of compress/encrypt | taper / amrestore |
 | `media` | `Volume` + `Labeled` + `Drive`/`Changer` (device) + `Shelf` (environment) + `Profile` + registry; reads/writes `record` artifacts | Device API |
 | `librarian` | operates a medium's `Changer`/`Shelf` + label protocol (make-writable, advance, mount, label, load) | changer / amtape |
 | `media/disk`, `media/tape`, `media/cloud` | Volume impls (disk sidecar headers; tape library; object store via gocloud.dev/blob) | vfs / tape / s3 devices |
@@ -56,7 +56,7 @@ registry registration, not a conditional in the core.
 | `transform/crypt` | external encryptor child processes (gpg/none) + registry; `Filter(scheme)` returns the forward/reverse `programs.Cmd` | amcrypt/amgpgcrypt |
 | `programs` | the base: a `Cmd` (external program to run) + an `Execution` transport that runs a pipe of commands on one host, transparently `Local` or `SSH`; the command/execution concept compress, crypt, and the archiver all build on | amandad (replaced by stock sshd) |
 | `xfer` | the data-movement primitive: `Transfer(source, filters, sink)` moves one stream through three zones — a `Source` (a client's tar, or a medium read), local `Filters` (compress/encrypt or decrypt/decompress), and a `Sink` (a medium, a target's tar, a hash) — tagging faults by zone; plus the `Meter`/`Limiter` byte pieces | Amanda Xfer / netusage |
-| `clerk` | the archive data path (both directions): composes each operation as one `xfer.Transfer` — `Backup`/`Copy` (write: archiver tar source → encode filters → medium sink), `Extract`/`ListMembers`/`VerifyChecksum` (read: copy selection + fail-over, mounting volumes via the librarian, decode from the record), and the shared `DecodeFilters` builder used by drill. Owns the two slotio-coupled endpoints (archive `Source`, medium `Sink`) | Scribe + Recovery::Clerk |
+| `clerk` | the archive data path (both directions): composes each operation as one `xfer.Transfer` — `Backup`/`Copy` (write: archiver tar source → encode filters → medium sink), `Extract`/`ListMembers`/`VerifyChecksum` (read: copy selection + fail-over, mounting volumes via the librarian, decode from the record), and the shared `DecodeFilters` builder used by drill. Owns the two archiveio-coupled endpoints (archive `Source`, medium `Sink`) | Scribe + Recovery::Clerk |
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `report` | per-run history record + JSONL/summary file I/O + digest render | amreport |
 | `notify` | pluggable alert backends (smtp/webhook) + registry + dispatch | amreport mailto |
@@ -66,13 +66,13 @@ registry registration, not a conditional in the core.
 | `recovery` | as-of-date browse tree + per-archive file selection (pure) | amrecover |
 | `drill` | recovery-drill ledger + risk-biased selection + failure taxonomy (pure) | amverify (orchestrated) |
 | `planner` | multilevel level scheduling (pure) | planner |
-| `engine` | the driver: parallel workers, retention, the slot session (open/seal/placement), drill selection; wires planner→`clerk`→media→catalog and delegates each operation's data movement to the `clerk` | driver |
+| `engine` | the driver: parallel workers, retention, the slot session (open/finish/placement), drill selection; wires planner→`clerk`→media→catalog and delegates each operation's data movement to the `clerk` | driver |
 | `cli` | thin command wiring | amdump / amadmin |
 
 Dependencies flow one way: `cli → engine → {planner, retention, archiver, xfer,
-clerk, slotio, catalog, config, progress, restore, recovery}` over leaf packages
+clerk, archiveio, catalog, config, progress, restore, recovery}` over leaf packages
 `{media, programs, sizeutil}`, all bottoming out on `record` (the on-medium artifact
-format that `media`, `slotio`, and `catalog` read and write) (`recovery` builds on `restore`). The reporting
+format that `media`, `archiveio`, and `catalog` read and write) (`recovery` builds on `restore`). The reporting
 layer adds `cli → {report, notify}` with `notify → {report, config}` — `report` is a
 pure leaf (record + render); the engine does **not** depend on either.
 Domain packages stay pure; `archiver`/`media`/`transform/compress`/`transform/crypt` are
@@ -80,40 +80,45 @@ pluggable adapters; `engine` is the only component aware of all of them. A backu
 **`xfer.Transfer`** the **`clerk`** composes (the engine orchestrates, the clerk moves the
 bytes): a **Source** (`tar` via `archiver.Backup` on the DLE's host, fused with any
 client-side compress/encrypt) → local **Filters** (server-side compress/encrypt) → a
-**Sink** (the medium, via `slotio` meter + split into parts). Restore is the same in reverse
+**Sink** (the medium, via `archiveio` meter + split into parts). Restore is the same in reverse
 (a medium-read Source → decrypt/decompress Filters → a target's `tar -x` Sink), and
 copy/verify/drill are Transfers with different endpoints — all composed by the `clerk` from
-the same two slotio-coupled endpoints and the one `DecodeFilters` builder.
+the same two archiveio-coupled endpoints and the one `DecodeFilters` builder.
 
 ## Load-bearing decisions (the *why*)
 
-**Slot is the addressable run + commit boundary.** The seal record (written last)
-is the atomic "this run completed" marker. It is *not* merely a cache of the
-archive headers: it holds the per-archive **integrity and content** that the
-on-volume framing headers deliberately omit — `SHA256`, member list, sizes. So a
-slot's *shape* is reindexable from headers, but its *trust* and *contents* are not;
-the manifest stays. (Slot earns its keep; we considered and rejected dropping it.)
+**The archive is the commit unit; the slot is a grouping.** Each archive is made
+durable by its own **commit footer** (`KindCommit`), written last — after its parts
+and its member index — so the footer's presence proves the whole archive landed.
+The footer holds the per-archive **integrity** the framing headers omit (`SHA256`,
+sizes, part count); the member list rides in a separate per-archive **index**
+(`KindIndex`, gzip), kept out of the footer so a scan reads only small footers. There
+is **no per-slot seal**: a slot is just the run-id its archives carry in their
+headers, reconstructed by grouping committed archives. This deliberately drops
+all-or-nothing run atomicity (we considered and rejected keeping the seal): a crashed
+run keeps every *committed* archive, and a rerun fills in the rest — "run complete?"
+is a derivation (did every planned DLE commit?), not a stored bit.
 
 **Partial writes are tolerated, never repaired.** A hard kill or power loss
 mid-write can leave uncommitted bytes on a volume: a payload with no header
-sidecar, a torn sidecar, a half-framed tape record, a half-written seal. Two
-layers absorb this, neither by deleting anything (delete is impossible on WORM):
-the **seal** is the slot's commit marker — an unsealed slot is never assembled
-into the catalog (`assemble` iterates seals; a torn seal is skipped, demoting its
-slot to uncommitted), so its orphan parts are simply unreferenced. Beneath it,
+sidecar, a torn sidecar, a half-framed tape record, an archive's parts with no
+commit footer. Two layers absorb this, neither by deleting anything (delete is
+impossible on WORM): the **commit footer** is the archive's marker — an archive
+with no footer is never assembled into the catalog (`assemble` iterates commits;
+parts without one are orphans), so its parts are simply unreferenced. Beneath it,
 each medium's `Files()` enumeration treats *any* artifact it cannot read or parse
 as uncommitted and **skips it** — enumeration must always complete, so a single
 torn file can never abort `nb rebuild`. The commit test differs per medium
 (fslike: payload paired with its later-written sidecar; tape: a decodable framed
 record), so it lives in each medium, not in a shared layer. Orphans are reclaimed
 only when their slot/volume is, via prune/relabel — we never reap on read.
-Integrity of files the seal *does* commit (bit-rot) is verify's job, not the
+Integrity of files a footer *does* commit (bit-rot) is verify's job, not the
 rebuild's.
 
 **The catalog is a cache; the media are the source of truth.** Every file is
-self-describing (header), every slot sealed, every labeled volume carries its
-label — so one `Files()` scan rebuilds everything (`nb rebuild`): seals →
-slots, labels → volume registry. The catalog lives in its **own `workdir`**
+self-describing (header), every archive carries its own commit footer, every labeled
+volume carries its label — so one `Files()` scan rebuilds everything (`nb rebuild`):
+commit footers + indexes → archives grouped into slots, labels → volume registry. The catalog lives in its **own `workdir`**
 (default `nbackup-catalog`), *independent of any medium* — it is a cache over the
 whole pool, not part of one medium. The `Entry`/`Placement` model means a slot
 copied disk→tape is one Entry with two Placements; restore/verify pick any
@@ -164,9 +169,11 @@ recovery feature, not the normal restore path.
 
 **Recover is amrecover without an index server.** Amanda runs a separate index
 server holding per-dump gzipped path lists so `amrecover` can browse without
-reading tapes. NBackup needs none: the **member list is already in every seal**
-(`slot.Archive.Members`), which the catalog caches, so `nb recover` browses by
-reading the catalog alone — media is touched only on extract. `recovery.BuildTree`
+reading tapes. NBackup keeps the equivalent: each archive's **member list is its own
+gzipped index** (`KindIndex`) on the medium, which the catalog caches into
+`Archive.Members` (read eagerly on scan today; a lazy server-side index cache is the
+planned optimization), so `nb recover` browses by reading the catalog alone — media is
+touched only on extract. `recovery.BuildTree`
 merges the restore chain's member lists in run order (most-recent-wins), giving an
 as-of-date filesystem where each path resolves to the archive that last held it;
 `Collect` turns a selection into the fewest per-archive extractions (one tar run
@@ -273,13 +280,13 @@ selected by a registered scheme *name* (`gpg`/`none`), exposing the same reversi
   is config (`encrypt:` block, config-wide default or a whole-block per-dumptype
   override — no field merge); the *cipher* is a compiled scheme so the artifact
   never depends on config to be read.
-- **The seal stays plaintext, deliberately.** It holds the member list
-  (filenames) and checksums; keeping it unencrypted is what lets `nb recover` and
-  `nb rebuild` browse without the key (Amanda's plaintext-index property). The
-  cost — filenames are readable on the medium — is a documented trade, not an
+- **The member index stays plaintext, deliberately.** Each archive's commit footer
+  (checksums) and member index (filenames) are unencrypted, which is what lets `nb
+  recover` and `nb rebuild` browse without the key (Amanda's plaintext-index property).
+  The cost — filenames are readable on the medium — is a documented trade, not an
   oversight. (Deferred: per-medium at-rest encryption (S3 SSE / LTO hardware) for
   the "untrusted destination only" posture; client-side encryption with remote
-  sources; an opt-in encrypted seal.)
+  sources; an opt-in encrypted index for client-side-encrypted archives.)
 
 **Media model.** A `Volume` is positional, self-describing files; framing differs
 per medium (disk: a `.hdr` sidecar so the payload is a clean `.tar.<codec>`; tape:
@@ -374,9 +381,9 @@ without hardware).
   **dump** and a **copy/sync** split work across tapes mid-archive — one DLE's
   compressed byte stream may itself span several tapes (Amanda's part/chunk model).
   The unit is the **part**: a contiguous byte-range of an archive's payload, its own
-  self-describing file (header carries the part *index*; the seal carries the part
-  *count*). An archive is always a list of parts (one in the common case). Splitting
-  is **proactive**: the operator sets `volume_size`, so the writer (`slotio.Writer`
+  self-describing file (header carries the part *index*; the archive's commit footer
+  carries the part *count*). An archive is always a list of parts (one in the common case). Splitting
+  is **proactive**: the operator sets `volume_size`, so the writer (`archiveio.Writer`
   via a `librarian.WriteSink`) sizes each part to the loaded volume's known remaining
   capacity (optionally capped by `part_size`) and rolls onto the next writable volume
   *between* parts — a robotic library mounts the next writable bay (blank →
@@ -387,12 +394,13 @@ without hardware).
   cannot be re-read to rewrite it). If a sized part *still* overflows (a wrong
   estimate, or a real drive whose remaining capacity software cannot see),
   `media.ErrVolumeFull` discards the partial and the run **fails** with an actionable
-  message — we do not recover. The seal (written last, on the final volume) commits
-  the whole slot; an interrupted span leaves seal-less orphan parts, ignored by
-  scan/rebuild and reclaimed by relabel — the same atomicity as a single-volume slot.
+  message — we do not recover. The commit footer (written last, after the archive's
+  parts and index) commits that archive; an interrupted span leaves an
+  uncommitted, orphan set of parts, ignored by scan/rebuild and reclaimed by relabel —
+  the same per-archive atomicity as a single-volume archive.
   Because a single drive cannot interleave two archives' parts, a spanning-capable
   landing **clamps workers to 1** (a single tape writes serially). Reads
-  **auto-mount** the volume holding each part, in order — `slotio`'s concatenating
+  **auto-mount** the volume holding each part, in order — `archiveio`'s concatenating
   reader drains part *k* fully before mounting *k+1*, then reverses the codec over the
   concatenation. The roll/mount lives in `package librarian` (`WriteSink`,
   `Advance`, `MountForRead`), the one place that dispatches on medium shape.
@@ -411,7 +419,7 @@ the read side will too). The cap is a medium config knob — `throughput: 50MB/s
 (bytes/sec, `/s` optional) — because the thing being protected is the uplink *to a
 given medium*. It is enforced by a token-bucket `xfer.Limiter`, a new in-process
 stream stage that wraps the **medium-facing** stream: on write it paces the bytes
-landing on the volume (inside `slotio.Writer.drainParts`), which back-pressures the
+landing on the volume (inside `archiveio.Writer.drainParts`), which back-pressures the
 one-pass pipeline through its pipe — no holding-disk buffer, and the wait is a timer
 sleep so it cannot deadlock; on read it paces each part stream the medium hands back
 (wrapped in `engine.partOpener`, the single choke point every restore / un-vault /
@@ -441,7 +449,7 @@ not a "archiver" — "archiver" means only the plugin.
 
 **Execution is an injected transport; a backup/restore is one `xfer.Transfer` (`programs` + `xfer`).**
 A backup is a chain of external programs — `tar → compress → encrypt` — then the in-process
-server-side `meter → drainParts → volume → seal`. The compressor and encryptor are *just
+server-side `meter → drainParts → volume`, then each archive's index + commit footer. The compressor and encryptor are *just
 programs*, like `tar`, so there is **one** path. `package programs` is the base: a `Cmd`
 plus an `Execution` (the host it runs on — `Local` or `SSH`) whose `RunPipe` runs a pipe of
 commands on that one host. `package xfer` composes those single-host pipes into a
@@ -456,7 +464,7 @@ the server Sink) are the *same* code with different zone placement. The
 transport lives in one neutral package and is injected into archivers via
 `archiver.Open(name, opts, ex)` — SSH is part of **no** archiver, so a new archiver gets
 remote execution for free as long as its binaries are on the client. The meter stays
-server-side, so the seal still covers the bytes that land (verify/copy/sync stay keyless).
+server-side, so each archive's commit footer still covers the bytes that land (verify/copy/sync stay keyless).
 This is the source-side peer of the medium-neutral discipline; see
 [docs/design/remote-sources.md](docs/design/remote-sources.md) for the configurable
 `compress`/`encrypt.at` point and the three key-trust postures.
@@ -475,7 +483,7 @@ pass — so Amanda's separate dumper/taper queues collapse to one `dumping` stat
 per DLE, metered by uncompressed bytes against the planner estimate. The
 measurement point is the source stage's byte tap (`programs.Cmd.Tap`) on the
 tar→compressor stream, wired in the engine's `backupItem`; compressed bytes come
-from `slotio`'s streaming meter as the payload drains into parts (both feed the same
+from `archiveio`'s streaming meter as the payload drains into parts (both feed the same
 per-DLE counters, throttled so they can be polled live).
 
 **Reporting + alerting make an unwatched failure loud (`nb report`, `notify:`).**

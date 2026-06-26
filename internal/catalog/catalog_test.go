@@ -21,8 +21,9 @@ func newVolume(t *testing.T, path string) media.Volume {
 	return v
 }
 
-// putSlot writes a slot's archive files and (if sealed) its seal record onto the
-// volume, the way the writer would.
+// putSlot writes a slot's archive files the way the writer would: each archive's part(s),
+// then (for a sealed slot) its member index and commit footer — the per-archive marker. An
+// unsealed slot's archives are written without a commit, so they read as orphan parts.
 func putSlot(t *testing.T, v media.Volume, s *record.Slot) {
 	t.Helper()
 	for _, a := range s.Archives {
@@ -33,15 +34,30 @@ func putSlot(t *testing.T, v media.Volume, s *record.Slot) {
 		}); err != nil {
 			t.Fatal(err)
 		}
+		if s.Status != record.StatusSealed {
+			continue // uncommitted parts (a crashed run) — no index/commit
+		}
+		putCommit(t, v, s.ID, a)
 	}
-	if s.Status != record.StatusSealed {
-		return
+}
+
+// putCommit writes an archive's member index (if any) then its commit footer, as Commit does.
+func putCommit(t *testing.T, v media.Volume, slotID string, a record.Archive) {
+	t.Helper()
+	if len(a.Members) > 0 {
+		if _, err := v.AppendFile(record.Header{Slot: slotID, Kind: record.KindIndex, DLE: a.DLE, Level: a.Level}, func(w io.Writer) error {
+			return record.EncodeIndex(w, a.Members)
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	data, err := s.Marshal()
+	footer := a
+	footer.Members = nil
+	data, err := record.MarshalCommit(footer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := v.AppendFile(record.Header{Slot: s.ID, Kind: record.KindSeal}, func(w io.Writer) error {
+	if _, err := v.AppendFile(record.Header{Slot: slotID, Kind: record.KindCommit, DLE: a.DLE, Level: a.Level}, func(w io.Writer) error {
 		_, e := w.Write(data)
 		return e
 	}); err != nil {
@@ -72,9 +88,9 @@ func TestCacheLifecycle(t *testing.T) {
 	vol := newVolume(t, dir)
 
 	putSlot(t, vol, sealed("slot-2026-06-20", "2026-06-20", 1,
-		record.Archive{DLE: "h-data", Level: 0}))
+		record.Archive{DLE: "h-data", Level: 0, Compressed: 100}))
 	putSlot(t, vol, sealed("slot-2026-06-21", "2026-06-21", 1,
-		record.Archive{DLE: "h-data", Level: 1}))
+		record.Archive{DLE: "h-data", Level: 1, Compressed: 100}))
 	// An unsealed slot (archives but no seal) must be ignored by the cache.
 	putSlot(t, vol, &record.Slot{ID: "slot-2026-06-22", Date: "2026-06-22", Sequence: 1,
 		Status: record.StatusOpen, Archives: []record.Archive{{DLE: "h-data", Level: 1}}})
@@ -170,7 +186,7 @@ func TestRebuildReassemblesSpannedSlot(t *testing.T) {
 	}
 	writePart(t, vol, "slot-2026-06-21", "h-data", 0, 0)
 
-	// Bay 2 holds part 1 and the seal that commits the (2-part) archive.
+	// Bay 2 holds part 1 and the commit footer that marks the (2-part) archive complete.
 	if err := ch.Mount("bay-02"); err != nil {
 		t.Fatal(err)
 	}
@@ -178,17 +194,7 @@ func TestRebuildReassemblesSpannedSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	writePart(t, vol, "slot-2026-06-21", "h-data", 0, 1)
-	s := sealed("slot-2026-06-21", "2026-06-21", 1, record.Archive{DLE: "h-data", Level: 0, Parts: 2})
-	data, err := s.Marshal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := vol.AppendFile(record.Header{Slot: s.ID, Kind: record.KindSeal}, func(w io.Writer) error {
-		_, e := w.Write(data)
-		return e
-	}); err != nil {
-		t.Fatal(err)
-	}
+	putCommit(t, vol, "slot-2026-06-21", record.Archive{DLE: "h-data", Level: 0, Parts: 2})
 
 	cat, err := Open(t.TempDir())
 	if err != nil {
@@ -210,8 +216,8 @@ func TestRebuildReassemblesSpannedSlot(t *testing.T) {
 	if parts[0].Label != "vol-a" || parts[1].Label != "vol-b" {
 		t.Fatalf("part volumes = %q,%q, want vol-a,vol-b", parts[0].Label, parts[1].Label)
 	}
-	if p.Seal.Label != "vol-b" {
-		t.Fatalf("seal volume = %q, want vol-b", p.Seal.Label)
+	if p.Archives[0].Commit.Label != "vol-b" {
+		t.Fatalf("commit volume = %q, want vol-b", p.Archives[0].Commit.Label)
 	}
 	if got := p.Labels(); len(got) != 2 {
 		t.Fatalf("placement volumes = %v, want 2", got)

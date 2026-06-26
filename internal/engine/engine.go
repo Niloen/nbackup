@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/clerk"
@@ -30,7 +31,6 @@ import (
 	"github.com/Niloen/nbackup/internal/restore"
 	"github.com/Niloen/nbackup/internal/retention"
 	"github.com/Niloen/nbackup/internal/sizeutil"
-	"github.com/Niloen/nbackup/internal/slotio"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
@@ -472,20 +472,20 @@ func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
 }
 
 // writeTarget bundles a medium prepared for writing: a librarian whose first volume
-// is mounted and label-verified, the slotio writer streaming the slot onto it, and the
+// is mounted and label-verified, the archiveio writer streaming the slot onto it, and the
 // medium's part_size (so the caller can decide parallelism via lib.CanSpan).
 type writeTarget struct {
 	lib      *librarian.Librarian
-	w        *slotio.Writer
+	w        *archiveio.Writer
 	partSize int64
 }
 
 // prepareWriter resolves a medium, enforces the label protocol on its loaded volume
-// (prompting a swap on a manual single drive), and builds a slotio writer that
+// (prompting a swap on a manual single drive), and builds a archiveio writer that
 // authors the slot described by spec onto it. It is the one place the PrepareWrite
 // -> WriteSink -> NewWriter contract lives, shared by a dump (Run) and a copy/sync
 // (CopySlot).
-func (e *Engine) prepareWriter(medium string, spec slotio.SlotSpec, now time.Time, logf Logf) (*writeTarget, error) {
+func (e *Engine) prepareWriter(medium string, spec archiveio.SlotSpec, now time.Time, logf Logf) (*writeTarget, error) {
 	lib, def, _, err := e.librarianFor(medium)
 	if err != nil {
 		return nil, err
@@ -501,7 +501,7 @@ func (e *Engine) prepareWriter(medium string, spec slotio.SlotSpec, now time.Tim
 		return nil, err
 	}
 	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
-	w := slotio.NewWriter(sink, spec, e.limiters[medium])
+	w := archiveio.NewWriter(sink, spec, e.limiters[medium])
 	return &writeTarget{lib: lib, w: w, partSize: partSize}, nil
 }
 
@@ -584,7 +584,7 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	now := time.Now().UTC()
 	// Re-author under the source's identity (CreatedAt and all) so the copy's seal
 	// record names the same logical slot; the catalog still keeps the source seal.
-	spec := slotio.SlotSpec{ID: s.ID, Date: s.Date, Sequence: s.Sequence, Generator: s.Generator, CreatedAt: s.CreatedAt}
+	spec := archiveio.SlotSpec{ID: s.ID, Date: s.Date, Sequence: s.Sequence, Generator: s.Generator, CreatedAt: s.CreatedAt}
 	wt, err := e.prepareWriter(targetMedia, spec, now, logf)
 	if err != nil {
 		return err
@@ -595,18 +595,19 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	if err != nil {
 		return err
 	}
+	session := e.clerk.OpenSlot(w)
 	for _, a := range s.Archives {
 		parts, ok := srcPlacement.Parts(a.DLE, a.Level)
 		if !ok {
 			return fmt.Errorf("source copy of %s on %q is missing %s L%d", slotID, fromMedia, a.DLE, a.Level)
 		}
-		want := slotio.Expect{Slot: slotID, DLE: a.DLE, Level: a.Level}
-		if werr := e.clerk.Copy(w, parts, want, srcOpen, a); werr != nil {
+		want := archiveio.Expect{Slot: slotID, DLE: a.DLE, Level: a.Level}
+		if werr := session.Copy(parts, want, srcOpen, a); werr != nil {
 			return fmt.Errorf("copy %s L%d to %q: %w", a.DLE, a.Level, targetMedia, werr)
 		}
 	}
-	if _, err := w.Seal(now); err != nil {
-		return fmt.Errorf("seal copy on %q: %w", targetMedia, err)
+	if _, err := w.Finish(now); err != nil {
+		return fmt.Errorf("finish copy on %q: %w", targetMedia, err)
 	}
 	if err := e.cat.Record(s, placementFrom(targetMedia, w)); err != nil {
 		return fmt.Errorf("record copy in catalog: %w", err)
@@ -633,8 +634,8 @@ func (e *Engine) copySource(slotID, fromMedia string) (*librarian.Librarian, cat
 // placementFrom builds a catalog placement from a sealed writer's recorded part
 // positions and seal location. The writer emits the same record.FilePos/ArchivePos the
 // catalog persists, so a placement is the positions verbatim — no field conversion.
-func placementFrom(medium string, w *slotio.Writer) catalog.Placement {
-	return catalog.Placement{Medium: medium, Archives: w.Positions(), Seal: w.SealPosition()}
+func placementFrom(medium string, w *archiveio.Writer) catalog.Placement {
+	return catalog.Placement{Medium: medium, Archives: w.Positions()}
 }
 
 // partSizeFor reads a medium's optional part_size parameter (the deliberate per-part
@@ -1023,7 +1024,7 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 	if err != nil {
 		return nil, err
 	}
-	spec := slotio.SlotSpec{ID: slotID, Date: record.DateString(date), Sequence: seq, Generator: "nbdump", CreatedAt: now}
+	spec := archiveio.SlotSpec{ID: slotID, Date: record.DateString(date), Sequence: seq, Generator: "nbdump", CreatedAt: now}
 	wt, err := e.prepareWriter(e.mediumName, spec, now, logf)
 	if err != nil {
 		return nil, err
@@ -1044,14 +1045,13 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 	tr := progress.NewTracker(slotID, workers, planProgress(plan.Items), time.Now,
 		progress.NewFileSink(e.cfg.WorkdirPath(), time.Now))
 
-	if err := e.runWorkers(plan.Items, workers, w, tr, logf); err != nil {
+	if err := e.runWorkers(plan.Items, workers, e.clerk.OpenSlot(w), tr, logf); err != nil {
 		tr.SetPhase(progress.PhaseFailed)
 		return nil, err
 	}
 
 	tr.SetPhase(progress.PhaseSealing)
-	logf.log("verifying archive checksum(s)")
-	sealed, err := w.Seal(time.Now().UTC())
+	sealed, err := w.Finish(time.Now().UTC())
 	if err != nil {
 		tr.SetPhase(progress.PhaseFailed)
 		return nil, err
@@ -1079,10 +1079,10 @@ func planProgress(items []planner.Item) []progress.Plan {
 // semaphore; the first error stops scheduling further items and is returned. Each
 // worker writes a distinct object into the slot, which the medium must allow
 // concurrently (disk does) and the slot Writer serializes its bookkeeping.
-func (e *Engine) runWorkers(items []planner.Item, workers int, w *slotio.Writer, tr *progress.Tracker, logf Logf) error {
+func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Session, tr *progress.Tracker, logf Logf) error {
 	if workers <= 1 || len(items) <= 1 {
 		for _, item := range items {
-			if err := e.backupItem(w, item, tr, logf); err != nil {
+			if err := e.backupItem(session, item, tr, logf); err != nil {
 				return err
 			}
 		}
@@ -1121,7 +1121,7 @@ func (e *Engine) runWorkers(items []planner.Item, workers int, w *slotio.Writer,
 			if failed() {
 				return
 			}
-			if err := e.backupItem(w, it, tr, logf); err != nil {
+			if err := e.backupItem(session, it, tr, logf); err != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
@@ -1194,11 +1194,13 @@ func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 		present[s.ID] = true
 		sealed[s.ID] = true
 	}
-	// The loaded volume may also carry an unsealed orphan from a failed attempt that
-	// the catalog never recorded; note it so its id can be reclaimed below.
+	// The loaded volume may also carry an orphan from a failed attempt that the catalog
+	// never recorded; note it so its id can be reclaimed below. A slot with any committed
+	// archive (a commit footer) is a real recovery point — its id is never reused; one with
+	// only uncommitted parts is a reclaimable orphan.
 	for _, f := range files {
 		present[f.Header.Slot] = true
-		if f.Header.Kind == record.KindSeal {
+		if f.Header.Kind == record.KindCommit {
 			sealed[f.Header.Slot] = true
 		}
 	}
@@ -1225,29 +1227,59 @@ func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 	}
 }
 
-// backupItem archives a single DLE into the slot via the writer. It owns the
-// archiver side (resolving the archiver, building the request, requiring the base
-// incremental state for incrementals); the writer owns the on-media side. It reports
-// the DLE's lifecycle (start, live bytes, finish/fail) to the run tracker.
-func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tracker, logf Logf) (err error) {
+// backupItem archives a single DLE into the open slot session. The engine owns
+// orchestration — the run tracker lifecycle, resolving the archiver and describing the
+// backup (the request + incremental base requirement) — and the session moves and records
+// the bytes; the engine never sees the storage record or its parts.
+func (e *Engine) backupItem(session *clerk.Session, item planner.Item, tr *progress.Tracker, logf Logf) (err error) {
 	// The progress tracker keys and displays DLEs by their host:path identity; the
-	// seal and filenames keep the internal slug (spec.DLE below).
+	// seal and filenames keep the internal slug.
 	pname := item.DLE.ID()
 	tr.StartDLE(pname)
-	var arch record.Archive
+	var sum clerk.Summary
 	defer func() {
 		if err != nil {
 			tr.FinishDLE(pname, 0, 0, 0, err)
 		} else {
-			tr.FinishDLE(pname, arch.FileCount, arch.Uncompressed, arch.Compressed, nil)
+			tr.FinishDLE(pname, sum.FileCount, sum.Uncompressed, sum.Compressed, nil)
 		}
 	}()
 
-	ar, err := e.archiverFor(item.DLE.DumpTypeName(), item.DLE.Host)
+	spec, err := e.backupSpec(item)
 	if err != nil {
 		return err
 	}
 
+	logf.log("archiving %s (L%d)", item.DLE.ID(), item.Level)
+	sum, err = session.Backup(spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
+	if err != nil {
+		return fmt.Errorf("archive %s: %w", item.Name, err)
+	}
+
+	sizeLabel := "compressed"
+	if sum.Codec == "none" {
+		sizeLabel = "stored" // no compressor in the pipe; "compressed" would be a lie
+	}
+	if sum.FileCount == 0 {
+		// An incremental with nothing changed still writes tar's structural overhead
+		// (archive header/footer + directory census); say so rather than the puzzling
+		// "0 file(s), 10.24 kB stored".
+		logf.log("  no changed files (%s of tar metadata)", sizeutil.FormatBytes(sum.Compressed))
+	} else {
+		logf.log("  %d file(s), %s %s", sum.FileCount, sizeutil.FormatBytes(sum.Compressed), sizeLabel)
+	}
+	return nil
+}
+
+// backupSpec describes the backup of one planned item: it resolves the archiver and builds
+// the request (with the dumptype's excludes), and for an incremental requires the base
+// incremental state to be present. It is pure intent — the schemes, transform placement, and
+// storage record are the session's to derive.
+func (e *Engine) backupSpec(item planner.Item) (clerk.BackupSpec, error) {
+	ar, err := e.archiverFor(item.DLE.DumpTypeName(), item.DLE.Host)
+	if err != nil {
+		return clerk.BackupSpec{}, err
+	}
 	req := archiver.BackupRequest{
 		DLE:        item.Name,
 		SourcePath: item.DLE.Path,
@@ -1258,53 +1290,17 @@ func (e *Engine) backupItem(w *slotio.Writer, item planner.Item, tr *progress.Tr
 	if item.Level >= 1 {
 		req.BaseLevel = item.BaseLevel
 		if !ar.HasBase(item.Name, item.BaseLevel) {
-			return fmt.Errorf("DLE %s: incremental L%d needs the L%d incremental state but it is missing",
+			return clerk.BackupSpec{}, fmt.Errorf("DLE %s: incremental L%d needs the L%d incremental state but it is missing",
 				item.Name, item.Level, item.BaseLevel)
 		}
 	}
-
-	logf.log("archiving %s (L%d)", item.DLE.ID(), item.Level)
-
-	encScheme, _ := e.encryptionFor(item.DLE.DumpTypeName())
-
-	bs, berr := ar.BackupSource(req)
-	if berr != nil {
-		return fmt.Errorf("archive %s: %w", item.Name, berr)
-	}
-	meta := record.Archive{
-		DLE:      item.Name,
+	return clerk.BackupSpec{
+		Archiver: ar,
+		Request:  req,
 		Host:     item.DLE.Host,
-		Path:     item.DLE.Path,
-		Archiver: ar.Name(),
-		Compress: e.codec,
-		Encrypt:  encScheme,
-		Level:    item.Level,
 		BaseSlot: item.BaseSlot,
-	}
-
-	// The clerk composes the dump transfer (tar source → encode filters → medium sink),
-	// placing each transform on the client or the server per the dumptype. The engine owns
-	// only the slot session: record the measured archive and its parts into the open writer.
-	arch, parts, terr := e.clerk.Backup(w, bs, meta, item.DLE.DumpTypeName(),
-		func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
-	if terr != nil {
-		return fmt.Errorf("archive %s: %w", item.Name, terr)
-	}
-	w.Record(arch, parts)
-
-	sizeLabel := "compressed"
-	if arch.Compress == "none" {
-		sizeLabel = "stored" // no compressor in the pipe; "compressed" would be a lie
-	}
-	if arch.FileCount == 0 {
-		// An incremental with nothing changed still writes tar's structural overhead
-		// (archive header/footer + directory census); say so rather than the puzzling
-		// "0 file(s), 10.24 kB stored".
-		logf.log("  no changed files (%s of tar metadata)", sizeutil.FormatBytes(arch.Compressed))
-	} else {
-		logf.log("  %d file(s), %s %s", arch.FileCount, sizeutil.FormatBytes(arch.Compressed), sizeLabel)
-	}
-	return nil
+		DumpType: item.DLE.DumpTypeName(),
+	}, nil
 }
 
 // Restore reconstructs a DLE as of a slot into destDir. A whole-DLE restore
@@ -1420,6 +1416,19 @@ func (e *Engine) extractInto(slotID, dle string, level int, codec, encrypt, arch
 	return decryptHint(encrypt, e.clerk.Extract(ref, codec, encrypt, archiverType, destDir, targetHost, ec, members))
 }
 
+// firstPartOf resolves an archive ref to the medium and first-part position of its
+// preferred copy (placementsFor is landing-first), for read-ordering a selection. A ref with
+// no copy yields the zero position, which sorts first and lets the extract surface the
+// missing-copy error in place.
+func (e *Engine) firstPartOf(ref clerk.Ref) (medium string, pos record.FilePos) {
+	for _, p := range e.placementsFor(ref.Slot) {
+		if parts, ok := p.Parts(ref.DLE, ref.Level); ok {
+			return p.Medium, parts[0]
+		}
+	}
+	return "", record.FilePos{}
+}
+
 // The engine implements clerk.Deps: the data path's view of the orchestrator's
 // services (catalog placement, librarian mounting, executor/archiver resolution, and the
 // config-derived transform options/placement).
@@ -1456,10 +1465,12 @@ func (e *Engine) DecryptOpts() crypt.Options     { return e.dcopts }
 // `compress` field, encryption from its `encrypt.at`; the schemes themselves ride in the
 // record the clerk is writing.
 func (e *Engine) EncodePlacement(dumpType string) clerk.EncodePlacement {
-	_, encOpts := e.encryptionFor(dumpType)
+	encScheme, encOpts := e.encryptionFor(dumpType)
 	return clerk.EncodePlacement{
+		Codec:          e.codec,
 		CompressOpts:   e.fopts,
 		CompressClient: e.cfg.ResolveDumpType(dumpType).Compress == "client",
+		EncryptScheme:  encScheme,
 		EncryptOpts:    encOpts,
 		EncryptClient:  e.cfg.EncryptionFor(dumpType).At == "client",
 	}
@@ -1596,8 +1607,23 @@ func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, 
 			}
 		}
 	}
-	files := 0
+	// Sequence the selected archives into a one-pass read: order by physical layout
+	// (medium, then volume, then position) while keeping each DLE's levels ascending, so a
+	// multi-archive recover walks each volume forward instead of bouncing between reels (the
+	// librarian keeps a volume mounted across consecutive same-volume reads). The extraction
+	// of each archive is unchanged.
+	stepByRef := make(map[clerk.Ref]recovery.ExtractStep, len(steps))
+	items := make([]clerk.ReadItem, 0, len(steps))
 	for _, st := range steps {
+		ref := clerk.Ref{Slot: st.SlotID, DLE: st.DLE, Level: st.Level}
+		stepByRef[ref] = st
+		medium, pos := e.firstPartOf(ref)
+		items = append(items, clerk.ReadItem{Ref: ref, Medium: medium, FirstPos: pos})
+	}
+
+	files := 0
+	for _, it := range clerk.OrderForOnePass(items) {
+		st := stepByRef[it.Ref]
 		logf.log("extracting %d file(s) from %s %s L%d", countFiles(st.Members), st.SlotID, e.DisplayDLE(st.DLE), st.Level)
 		ec := config.EncryptConfig{}
 		if d, ok := e.dleByName(st.DLE); ok {

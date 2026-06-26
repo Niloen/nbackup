@@ -382,7 +382,7 @@ func (l *Librarian) CanSpan(partSize int64) bool {
 	return known
 }
 
-// WriteSink drives a multi-part, possibly multi-volume write for the slotio writer:
+// WriteSink drives a multi-part, possibly multi-volume write for the archiveio writer:
 // it sizes each part to the loaded volume's remaining capacity (capped by part_size),
 // rolls onto a fresh volume when the loaded one fills, and places the seal record. It
 // is created after PrepareWrite has mounted and accepted the first volume.
@@ -436,7 +436,7 @@ func (s *WriteSink) advance() error {
 	return nil
 }
 
-// NextPart implements slotio.VolumeSink: it rolls onto a fresh volume if the loaded
+// NextPart implements archiveio.VolumeSink: it rolls onto a fresh volume if the loaded
 // one cannot hold a header plus a byte, then returns the volume and the part's byte cap.
 func (s *WriteSink) NextPart() (media.Volume, int64, string, int, error) {
 	for max := s.maxPart(); max >= 0 && max < 1; max = s.maxPart() {
@@ -447,9 +447,10 @@ func (s *WriteSink) NextPart() (media.Volume, int64, string, int, error) {
 	return s.l.vol, s.maxPart(), s.volume, s.epoch, nil
 }
 
-// PlaceSeal implements slotio.VolumeSink: it rolls first if the seal (one whole file
-// of the given payload size) will not fit the loaded volume.
-func (s *WriteSink) PlaceSeal(size int64) (media.Volume, string, int, error) {
+// PlaceRecord implements archiveio.VolumeSink: it rolls first if the record (one whole file
+// of the given payload size — an archive's index or commit footer) will not fit the loaded
+// volume.
+func (s *WriteSink) PlaceRecord(size int64) (media.Volume, string, int, error) {
 	if room, known := s.l.Remaining(); known && room-record.HeaderBlock < size {
 		if err := s.advance(); err != nil {
 			return nil, "", 0, err

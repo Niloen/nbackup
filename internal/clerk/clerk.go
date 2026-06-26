@@ -13,9 +13,9 @@
 // executor/archiver resolution, and the config-derived transform options/placement — comes
 // through Deps. That interface IS the boundary between deciding and doing.
 //
-// The two slotio-coupled endpoints — the archive Source (read) and the medium Sink (write) —
-// are the only bespoke pieces; xfer stays a generic leaf (it must, since slotio imports
-// xfer.Limiter). Part concatenation lives in slotio; clerk wraps it with copy-selection and
+// The two archiveio-coupled endpoints — the archive Source (read) and the medium Sink (write) —
+// are the only bespoke pieces; xfer stays a generic leaf (it must, since archiveio imports
+// xfer.Limiter). Part concatenation lives in archiveio; clerk wraps it with copy-selection and
 // volume mounting to make a Source.
 package clerk
 
@@ -24,13 +24,13 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/slotio"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
@@ -44,7 +44,9 @@ type Ref struct {
 	Level int
 }
 
-func (r Ref) expect() slotio.Expect { return slotio.Expect{Slot: r.Slot, DLE: r.DLE, Level: r.Level} }
+func (r Ref) expect() archiveio.Expect {
+	return archiveio.Expect{Slot: r.Slot, DLE: r.DLE, Level: r.Level}
+}
 
 // Deps is what the data path needs from the orchestrator. The engine implements it; this
 // interface is the explicit boundary between the control plane (deciding) and the data
@@ -78,16 +80,16 @@ var ErrMissingCopy = errors.New("no available copy")
 // Clerk is the archive data path. Construct one with New, sharing the orchestrator's Deps.
 type Clerk struct {
 	deps   Deps
-	reader *slotio.Reader
+	reader *archiveio.Reader
 }
 
 // New returns a data path backed by deps.
-func New(deps Deps) *Clerk { return &Clerk{deps: deps, reader: slotio.NewReader()} }
+func New(deps Deps) *Clerk { return &Clerk{deps: deps, reader: archiveio.NewReader()} }
 
 // ArchiveSource opens an archive's raw (undecoded, on-medium) part stream as an xfer.Source,
 // with copy selection and fail-over: medium "" tries every copy (preferring the engine's
 // own), a set medium reads only that copy so a fault on it is not masked by another. It is
-// the read peer of the medium sink — the one slotio-coupled Source. The open (and thus the
+// the read peer of the medium sink — the one archiveio-coupled Source. The open (and thus the
 // copy-selection fail-over) happens here, eagerly, so a missing copy is reported before bytes
 // flow and stays classifiable (errors.Is); a volume lost mid-stream is a Source-role fault
 // inside the transfer.
@@ -102,7 +104,7 @@ func (c *Clerk) ArchiveSource(ref Ref, medium string) (xfer.Source, error) {
 // partsSource opens a specific copy's parts via a caller-held opener (no copy selection) as
 // an xfer.Source — for loops that thread one mounted opener across all of a copy's archives
 // (verify, copy).
-func (c *Clerk) partsSource(parts []record.FilePos, want slotio.Expect, opener slotio.PartOpener) (xfer.Source, error) {
+func (c *Clerk) partsSource(parts []record.FilePos, want archiveio.Expect, opener archiveio.PartOpener) (xfer.Source, error) {
 	rc, err := c.reader.Open(parts, want, opener)
 	if err != nil {
 		return nil, err
@@ -124,7 +126,7 @@ func (c *Clerk) openRaw(ref Ref, medium string) (io.ReadCloser, error) {
 // PartOpener returns a mounting opener for a medium's volumes (rate-limited by its shared
 // cap), for callers that drive the read loop themselves — threading one opener across all of
 // a copy's archives (verify, copy).
-func (c *Clerk) PartOpener(medium string) (slotio.PartOpener, error) {
+func (c *Clerk) PartOpener(medium string) (archiveio.PartOpener, error) {
 	lib, err := c.deps.LibrarianFor(medium)
 	if err != nil {
 		return nil, err

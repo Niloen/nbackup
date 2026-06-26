@@ -1,4 +1,4 @@
-package slotio
+package archiveio
 
 import (
 	"fmt"
