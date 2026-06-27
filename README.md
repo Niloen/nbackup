@@ -793,6 +793,13 @@ make test     # go test ./...
 make vet      # go vet ./...
 ```
 
+## License
+
+Copyright © 2026 Niloen AB.
+
+NBackup is free software, licensed under the **GNU General Public License v3.0**.
+See [LICENSE](LICENSE) for the full text.
+
 [amanda]: https://www.amanda.org/
 [gocloud]: https://gocloud.dev/howto/blob/
 [321]: https://www.veeam.com/blog/321-backup-rule.html
