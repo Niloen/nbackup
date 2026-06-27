@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,6 +69,7 @@ type Engine struct {
 	dcopts         crypt.Options                 // decrypt key reference for restore (from the default encrypt block)
 	op             librarian.Operator            // optional: handles manual tape swaps (nil = unattended)
 	runSink        progress.Sink                 // optional: live run-progress sink (nil = status file only)
+	estimateSink   progress.Sink                 // optional: live estimate-progress sink (nil = status file only)
 	limiters       map[string]*ratelimit.Limiter // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
 	dec            *decoder                      // the read-side scheme operation (restore/verify/list); shares the engine's resolution + decode opts
 	enc            *encoder                      // the write-side scheme operation (dump); shares the engine's dumptype-recipe resolution
@@ -85,6 +87,13 @@ func (e *Engine) SetOperator(op librarian.Operator) { e.op = op }
 // operator running `nb status`. Nil (the default) keeps the file-only behaviour.
 func (e *Engine) SetRunProgress(sink progress.Sink) { e.runSink = sink }
 
+// SetEstimateProgress attaches a live progress sink for a run's estimate phase —
+// the size-everything prelude that precedes any dumping. Painted alongside the
+// run-status file, it lets `nb dump` show "Estimating sizes…" before "Dumping…"
+// instead of sitting silent while a slow sizing pass runs. Nil (the default) keeps
+// the estimate phase file-only.
+func (e *Engine) SetEstimateProgress(sink progress.Sink) { e.estimateSink = sink }
+
 // librarianFor builds a librarian for a configured medium's open volume. For the
 // engine's own medium it wraps the already-open landing handle (own=true), so its
 // cached state stays coherent and the catalog — which caches exactly this medium —
@@ -99,7 +108,7 @@ func (e *Engine) librarianFor(name string) (lib *librarian.Librarian, def config
 	if err != nil {
 		return nil, config.Media{}, false, err
 	}
-	return librarian.New(vol, name, e.cat, e.op, e.cfg.AutoLabel), d, own, nil
+	return librarian.New(vol, name, e.cat, e.op, e.cfg.AutoLabel, e.cfg.MinAgeFor(d)), d, own, nil
 }
 
 // New constructs an Engine from configuration: it opens the landing volume and
@@ -508,14 +517,32 @@ func (e *Engine) prepareWriter(medium string, spec archiveio.SlotSpec, now time.
 		return nil, err
 	}
 	appendable := def.IsAppendable()
-	expect := e.expectedVolumeFor(medium, now).Label
-	volName, epoch, err := lib.PrepareWrite(appendable, expect, now, librarian.Logf(logf))
+	exp := e.expectedVolumeFor(medium, now)
+	announceExpectation(medium, exp, logf)
+	volName, epoch, err := lib.PrepareWrite(appendable, exp.Label, now, librarian.Logf(logf))
 	if err != nil {
 		return nil, err
 	}
 	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
 	w := archiveio.NewWriter(sink, spec, e.limiters[medium])
 	return &writeTarget{lib: lib, w: w, partSize: partSize}, nil
+}
+
+// announceExpectation logs which labeled volume a write will use before it starts —
+// the Amanda "amdump will expect tape X" cue, so an operator sees the named tape in run
+// output, not only in `nb plan`. It is operator-facing identity (the Label name only)
+// and a no-op for an appendable medium or an address-identified one (nothing to expect).
+func announceExpectation(medium string, exp VolumeExpectation, logf Logf) {
+	switch {
+	case exp.Appendable || (exp.Label == "" && !exp.FreshVolume):
+		// appendable extends in place; address-identified media carry no label.
+	case exp.FreshVolume:
+		logf.log("medium %q: this run needs a fresh/blank volume (no reusable tape in the pool)", medium)
+	case exp.Recycles > 0:
+		logf.log("medium %q: this run expects volume %q — recycling %d aged-out run(s) past retention", medium, exp.Label, exp.Recycles)
+	default:
+		logf.log("medium %q: this run expects volume %q", medium, exp.Label)
+	}
 }
 
 // PlanCopy resolves and validates a copy without writing (the `nb copy` dry-run); see copier.
@@ -794,7 +821,7 @@ func (e *Engine) estimates(dles []config.DLE, sink progress.Sink) map[string]pla
 		for i, d := range dles {
 			rows[i] = progress.Plan{Name: d.ID()}
 		}
-		tr = progress.NewTracker("estimate", workers, rows, time.Now, sink)
+		tr = progress.NewTracker("estimate", progress.PhaseEstimating, workers, rows, time.Now, sink)
 	}
 
 	var (
@@ -834,9 +861,14 @@ func (e *Engine) estimateDLE(d config.DLE, name string, st *catalog.DLEState) pl
 		return planner.Estimate{} // no estimator available (e.g. tar missing)
 	}
 	excl := e.cfg.ResolveDumpType(d.DumpTypeName()).Exclude
-	full, _ := arch.Estimate(archiver.BackupRequest{DLE: name, SourcePath: d.Path, Level: 0, BaseLevel: -1, Exclude: excl})
+	full, ferr := arch.Estimate(archiver.BackupRequest{DLE: name, SourcePath: d.Path, Level: 0, BaseLevel: -1, Exclude: excl})
+	// A non-nil error with a non-zero floor means tar walked a partially-readable
+	// source (an unreadable member): the size is a floor, not exact. A zero floor is
+	// a total failure (e.g. a missing path) that ValidatePlan already reports, so we
+	// don't double-warn for it here.
+	incomplete := ferr != nil && full > 0
 	if st.LastFullDate == "" {
-		return planner.Estimate{Full: full} // never fulled: only a full is possible
+		return planner.Estimate{Full: full, Incomplete: incomplete} // never fulled: only a full is possible
 	}
 
 	// The DLE sits at level L — 1 right after a full, otherwise its last level. We
@@ -850,7 +882,7 @@ func (e *Engine) estimateDLE(d config.DLE, name string, st *catalog.DLEState) pl
 	if lvl > planner.MaxLevel {
 		lvl = planner.MaxLevel
 	}
-	est := planner.Estimate{Full: full}
+	est := planner.Estimate{Full: full, Incomplete: incomplete}
 	if arch.HasBase(name, lvl-1) {
 		est.Incr, _ = arch.Estimate(archiver.BackupRequest{
 			DLE: name, SourcePath: d.Path, Level: lvl, BaseLevel: lvl - 1, Exclude: excl,
@@ -946,7 +978,17 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 	} else if n > 0 {
 		logf.log("flushed %d leftover holding-disk archive(s) from a previous run", n)
 	}
-	plan := e.Plan(date)
+	// Write the run-status file from the first phase — sizing every DLE, which can be
+	// slow — so `nb status` reflects the whole dump cycle, not dead air until the first
+	// byte is archived. The estimate phase keeps the file non-terminal (the dump is
+	// still to come); a live estimate display, when attached, still erases its region
+	// when sizing completes.
+	fileSink := progress.NewFileSink(e.cfg.WorkdirPath(), time.Now)
+	estSink := keepEstimating(fileSink)
+	if e.estimateSink != nil {
+		estSink = progress.MultiSink(estSink, e.estimateSink)
+	}
+	plan := e.planWith(date, estSink)
 	for _, w := range plan.Warnings {
 		logf.log("WARNING: %s", w)
 	}
@@ -1003,22 +1045,38 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 		workers = 1
 	}
 
-	tr, runLogf := e.progressTracker(slotID, workers, plan.Items, logf)
+	tr, runLogf := e.progressTracker(slotID, workers, plan.Items, fileSink, logf)
 	return e.runOrchestrated(plan, workers, spec, dumpMedium, dumpWT, buffering, tr, now, runLogf)
 }
 
-// progressTracker builds the run's progress tracker and the log function to use under it.
-// Progress flushes to the run-status file so `nb status` can watch a detached run; a live
-// terminal sink (when attached) paints the same snapshots and suppresses the per-DLE log
-// lines (runLogf becomes nil) so they don't scribble over the in-place region.
-func (e *Engine) progressTracker(slotID string, workers int, items []planner.Item, logf Logf) (*progress.Tracker, Logf) {
-	sink := progress.Sink(progress.NewFileSink(e.cfg.WorkdirPath(), time.Now))
+// progressTracker builds the run's dump-phase tracker and the log function to use under it. It
+// takes over fileSink — the run-status file the estimate phase opened — so `nb status` sees one
+// continuous dump cycle, now under the real slot ID. A live terminal sink (when attached) paints
+// the same snapshots and suppresses the per-DLE log lines (runLogf becomes nil) so they don't
+// scribble over the in-place region. Progress reporting never blocks or fails the backup.
+func (e *Engine) progressTracker(slotID string, workers int, items []planner.Item, fileSink progress.Sink, logf Logf) (*progress.Tracker, Logf) {
+	sink := fileSink
 	runLogf := logf
 	if e.runSink != nil {
-		sink = progress.MultiSink(sink, e.runSink)
+		sink = progress.MultiSink(fileSink, e.runSink)
 		runLogf = nil
 	}
-	return progress.NewTracker(slotID, workers, planProgress(items), time.Now, sink), runLogf
+	return progress.NewTracker(slotID, progress.PhaseRunning, workers, planProgress(items), time.Now, sink), runLogf
+}
+
+// keepEstimating adapts the estimate phase's status-file sink so the file stays
+// non-terminal across the gap between sizing and the first dumped byte. The estimate
+// tracker signals completion with a terminal PhaseDone — which a live display uses to
+// erase its region — but to the file that would read as a finished run, stopping a
+// `nb status --watch` before the dump it is waiting for has even started. Rewriting it
+// to PhaseEstimating holds the file open until the dump phase claims it.
+func keepEstimating(file progress.Sink) progress.Sink {
+	return func(s progress.Snapshot, force bool) {
+		if s.Phase.Terminal() {
+			s.Phase = progress.PhaseEstimating
+		}
+		file(s, force)
+	}
 }
 
 // planProgress projects planner items onto the progress package's seed type,
@@ -1386,6 +1444,12 @@ func (e *Engine) backupItem(session *clerk.Session, item planner.Item, tr *progr
 	logf.log("archiving %s (L%d)", item.DLE.ID(), item.Level)
 	sum, arch, pos, err = e.enc.dumpArchive(session, spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
 	if err != nil {
+		// An unreadable file makes tar exit fatally (it never silently ships a partial
+		// archive — that would betray recoverability), so name the likely cause and fix
+		// rather than leaving the operator with a bare "exit status 2".
+		if strings.Contains(err.Error(), "Permission denied") {
+			return record.Archive{}, record.ArchivePos{}, fmt.Errorf("archive %s: %w\n(a source file is unreadable — run nb as a user that can read every file under %s, e.g. via sudo/root, or exclude it in the dumptype)", item.DLE.ID(), err, item.DLE.Path)
+		}
 		return record.Archive{}, record.ArchivePos{}, fmt.Errorf("archive %s: %w", item.DLE.ID(), err)
 	}
 
@@ -1600,6 +1664,56 @@ func (e *Engine) MediumOverCapacity(name string) (over bool, used, capacity int6
 	capacity = prof.TotalBytes()
 	used = e.cat.MediumBytes(name)
 	return capacity > 0 && used > capacity, used, capacity, nil
+}
+
+// MediumProtectedOverCapacity reports whether the bytes a prune *cannot* reclaim —
+// the protected recovery set — still exceed the medium's capacity. It subtracts
+// everything Reclaim would free from the current total, so the answer is the same
+// whether or not a real prune has run: a dry-run still sees the would-delete archives
+// in the catalog while a completed prune has already removed them, but
+// `residual = current − reclaimable` is identical either way (after a real prune the
+// reclaimable set is empty and the current total is already the residual). This is
+// what `nb prune` warns on, so its preview and its real run agree.
+func (e *Engine) MediumProtectedOverCapacity(name string, now time.Time) (over bool, residual, capacity int64, err error) {
+	prof, err := e.profileFor(name)
+	if err != nil {
+		return false, 0, 0, err
+	}
+	def, ok := e.cfg.Media[name]
+	if !ok {
+		return false, 0, 0, fmt.Errorf("unknown medium %q", name)
+	}
+	capacity = prof.TotalBytes()
+	slots := e.cat.SlotsOn(name)
+	floor := retention.Compute(slots, e.cfg.MinAgeFor(def), now)
+	var reclaimable int64
+	for _, r := range prof.Reclaim(slots, floor, now) {
+		reclaimable += r.Bytes
+	}
+	residual = e.cat.MediumBytes(name) - reclaimable
+	return capacity > 0 && residual > capacity, residual, capacity, nil
+}
+
+// MediumProtectionIsAgeBound reports whether every archive pinning the medium over
+// capacity is held by the minimum_age floor (vs a live recovery chain). When false,
+// advising the operator to shorten minimum_age is useless — a DLE's last full and its
+// later incrementals are pinned regardless of age — so the remedy text drops it.
+func (e *Engine) MediumProtectionIsAgeBound(name string, now time.Time) bool {
+	def, ok := e.cfg.Media[name]
+	if !ok {
+		return true
+	}
+	slots := e.cat.SlotsOn(name)
+	floor := retention.Compute(slots, e.cfg.MinAgeFor(def), now)
+	for _, s := range slots {
+		for _, a := range s.Archives {
+			reason, ok := floor.ReasonArchive(s.ID, a.DLE)
+			if ok && !strings.Contains(reason, "minimum age") {
+				return false // a recovery-chain pin that shortening minimum_age can't release
+			}
+		}
+	}
+	return true
 }
 
 // ProjectedOverCapacity reports whether the named medium would exceed its capacity

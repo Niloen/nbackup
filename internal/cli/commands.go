@@ -280,6 +280,7 @@ func newDumpCmd(a *app) *cobra.Command {
 			}
 			defer unlock()
 			attachOperator(eng)
+			eng.SetEstimateProgress(estimateProgress(a.quiet))
 			eng.SetRunProgress(runProgress(a.quiet))
 			return a.runReported(cfg, report.Run{Command: report.CommandDump, ExitClass: "dump-failed"}, func() (report.Run, error) {
 				s, err := eng.Run(date, a.logf())
@@ -807,11 +808,11 @@ func newPruneCmd(a *app) *cobra.Command {
 					return err
 				}
 				if eligible > 0 {
-					fmt.Printf("\n%d slot(s) eligible. Re-run without --dry-run to delete.\n", eligible)
+					fmt.Printf("\n%d archive(s) eligible. Re-run without --dry-run to delete.\n", eligible)
 				} else {
 					printNothingToReclaim(eng, args[0])
 				}
-				warnIfOverCapacity(eng, args[0])
+				warnIfOverCapacity(eng, args[0], now)
 				return nil
 			}
 			return a.runReported(cfg, report.Run{Command: report.CommandPrune, ExitClass: "prune-error"}, func() (report.Run, error) {
@@ -820,11 +821,11 @@ func newPruneCmd(a *app) *cobra.Command {
 					return report.Run{}, err
 				}
 				if eligible > 0 {
-					fmt.Printf("\n%s: deleted %d slot(s), freed %s\n", args[0], eligible, sizeutil.FormatBytes(freed))
+					fmt.Printf("\n%s: deleted %d archive(s), freed %s\n", args[0], eligible, sizeutil.FormatBytes(freed))
 				} else {
 					printNothingToReclaim(eng, args[0])
 				}
-				warnIfOverCapacity(eng, args[0])
+				warnIfOverCapacity(eng, args[0], now)
 				return report.Run{Command: report.CommandPrune, SlotsPruned: eligible, BytesMoved: freed}, nil
 			})
 		},
@@ -904,14 +905,25 @@ func printNothingToReclaim(eng *engine.Engine, name string) {
 // say so rather than reporting "freed N" and silently leaving the medium over budget.
 // Tape is excluded — its whole-volume over-capacity case is covered by
 // printNothingToReclaim's recycle hint.
-func warnIfOverCapacity(eng *engine.Engine, medium string) {
+func warnIfOverCapacity(eng *engine.Engine, medium string, now time.Time) {
 	if info, ok := eng.Medium(medium); ok && info.Type == "tape" {
 		return
 	}
-	if over, used, capacity, err := eng.MediumOverCapacity(medium); err == nil && over {
-		fmt.Printf("WARNING: %q still holds %s, over its %s capacity — reclaiming every dead archive was not enough; the protected recovery set exceeds capacity, so raise its capacity or shorten minimum_age\n",
-			medium, sizeutil.FormatBytes(used), sizeutil.FormatBytes(capacity))
+	// Use the post-reclamation residual (the protected set), not the raw catalog
+	// total, so the dry-run preview and the real run report the same thing — a
+	// dry-run still has the would-delete archives in the catalog.
+	over, residual, capacity, err := eng.MediumProtectedOverCapacity(medium, now)
+	if err != nil || !over {
+		return
 	}
+	remedy := "raise its capacity or shorten minimum_age"
+	if !eng.MediumProtectionIsAgeBound(medium, now) {
+		// The binding pins are live recovery chains, which shortening minimum_age
+		// cannot release — only more capacity or a longer cycle helps.
+		remedy = "raise its capacity or lengthen the cycle"
+	}
+	fmt.Printf("WARNING: %q still holds %s, over its %s capacity — reclaiming every dead archive was not enough; the protected recovery set exceeds capacity, so %s\n",
+		medium, sizeutil.FormatBytes(residual), sizeutil.FormatBytes(capacity), remedy)
 }
 
 // newCopyCmd implements `nb copy`: stream a slot from the landing medium to
@@ -1351,7 +1363,22 @@ func newLoadCmd(a *app) *cobra.Command {
 		Short:   "Load a volume into a medium's drive",
 		Long:    "Load a volume into the medium's drive: a bay on a robotic library, or a reel from a single-drive station's shelf. By default the argument is a bay/reel id; with --label it is matched against volume labels instead. Inventory the medium with `nb medium <name>`.",
 		Example: "  nb load lto bay-03\n  nb load --label lto DAILY-01\n  nb load vtape reel-02",
-		Args:    cobra.ExactArgs(2),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				return nil
+			}
+			// The natural mistake `nb load <medium>` (one arg) should explain that an
+			// address-identified medium has nothing to load, rather than fall back to
+			// cobra's bare "accepts 2 arg(s)".
+			if len(args) == 1 {
+				if cfg, err := a.load(); err == nil {
+					if d, ok := cfg.Media[args[0]]; ok && d.Type != "tape" {
+						return fmt.Errorf("medium %q is addressed directly, not by loading volumes (`nb load` applies only to a tape library or single-drive station)", args[0])
+					}
+				}
+			}
+			return fmt.Errorf("load requires a medium and a bay/reel/label, e.g. `nb load lto bay-03`")
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.load()
 			if err != nil {

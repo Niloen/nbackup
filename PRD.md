@@ -1,14 +1,23 @@
-# PRD: NBackup(Working Title)
+# PRD: NBackup (Working Title)
+
+This is the product vision: the goals and their priority order. *How* NBackup
+realizes them — the slot format, the planner, media, drills — lives in the
+[README](README.md) (user-facing) and [ARCHITECTURE.md](ARCHITECTURE.md)
+(internal). This document deliberately avoids that detail.
 
 ## Vision
 
-Create a modern backup system inspired by Amanda that preserves its strongest operational properties while embracing cloud and object storage.
+A modern backup system inspired by Amanda that preserves its strongest
+operational properties while embracing disk and object storage.
 
-The system should be understandable without specialized knowledge, produce portable backup artifacts, support both S3 and tape, and automatically adapt backup planning to a storage budget rather than a fixed tape rotation.
+It should be understandable without specialized knowledge, produce portable
+backup artifacts, treat disk, cloud, and tape as equal targets, and adapt
+backup planning to a storage capacity rather than a fixed rotation.
 
 Core philosophy:
 
-> A backup administrator should be able to reason about backups by looking at a sequence of immutable daily backup slots rather than a database of chunks.
+> A backup administrator should be able to reason about backups by looking at a
+> sequence of immutable daily backup artifacts rather than a database of chunks.
 
 ---
 
@@ -16,51 +25,40 @@ Core philosophy:
 
 ## Preserve Amanda's strengths
 
-### Balanced backup scheduling
+- **Balanced scheduling.** Distribute full and incremental backups across days
+  to avoid backup spikes. Users should not manually schedule fulls.
+- **Immutable daily artifacts.** Each run produces one immutable artifact for
+  that day; once written, a day's backup is never overwritten.
+- **Human-readable contents.** Backups are stored as normal tar archives a user
+  can restore with standard tools. No proprietary chunk store is required for
+  recovery.
+- **Cycle safety.** Preserve the operational safety of Amanda's tape cycle:
+  yesterday's backup must never be able to immediately overwrite a backup still
+  inside the recovery window.
 
-The planner should distribute full and incremental backups across days to avoid backup spikes.
+## Embrace modern storage
 
-Users should not need to manually schedule full backups.
+- **Disk, cloud, and tape are equal targets.** None is legacy; none is special.
+  Tape remains first-class, and object storage (S3 and compatible, GCS, Azure)
+  is a first-class deployment model, not a bolt-on.
+- **Land fast, replicate offsite.** The common modern shape — land a backup
+  quickly on local disk, then mirror it to an offsite tier — is a first-class
+  operation, not something the user has to assemble.
+- **The same artifact everywhere.** A backup keeps its format whether it lives
+  on disk, in the cloud, or on tape, so copies are interchangeable.
 
-### Immutable daily backup artifacts
+## Prove recoverability
 
-Each backup run produces exactly one immutable slot.
+- **Backups that are tested, not assumed.** The system should be able to prove a
+  backup is actually restorable — exercising real recovery, not just checksums —
+  and make an unattended failure loud. This is its contribution of the "tested"
+  guarantee of modern backup practice (3-2-1-1-0).
 
-Example:
+## Protect the data
 
-```text
-slot-2026-06-20/
-slot-2026-06-21/
-slot-2026-06-22/
-```
-
-Once sealed, a slot is never modified.
-
-### Human-readable backup contents
-
-Backups should be stored as normal tar archives.
-
-A user must be able to restore data using standard tools.
-
-Example:
-
-```bash
-tar -xf app-home-L0.tar
-```
-
-No proprietary chunk store is required for recovery.
-
-### Tape-cycle safety
-
-The system should preserve the psychological and operational safety of Amanda's tape cycle.
-
-Users should never feel that yesterday's backup can immediately overwrite last month's backup.
-
-### Tape support
-
-Tape remains a first-class storage medium.
-
-Tape should not be treated as legacy functionality.
+- **Optional encryption** that keeps copies interchangeable: a backup is
+  encrypted once at the source, and verifying or replicating it offsite never
+  needs the key.
 
 ---
 
@@ -68,261 +66,27 @@ Tape should not be treated as legacy functionality.
 
 ## Global deduplication
 
-The system is not optimized for maximum storage efficiency.
-
-Operational simplicity is preferred over extreme deduplication.
+The system is not optimized for maximum storage efficiency. Operational
+simplicity is preferred over extreme deduplication.
 
 ## Chunk-store architecture
 
-The system is not based on content-addressed chunk databases.
+The system is not based on content-addressed chunk databases. Intentionally
+avoided: Veeam-style block stores, Restic-style chunk repositories, Borg-style
+deduplicated archives.
 
-Examples of intentionally avoided designs:
+## Storage-class lifecycle modeling
 
-* Veeam-style block stores
-* Restic-style chunk repositories
-* Borg-style deduplicated archives
-
----
-
-# Core Concepts
-
-## DLE
-
-A backup source.
-
-Examples:
-
-```yaml
-sources:
-  - host: app01
-    path: /home
-
-  - host: db01
-    path: /var/lib/postgresql
-```
+The system does not model cloud storage-class transitions (Glacier / Deep
+Archive). Which tier bytes physically sit in is configured operator-side; a flat
+cost estimate is the honest one NBackup can deliver.
 
 ---
 
-## Run
+# Priorities
 
-A single planner execution.
-
-Typically daily.
-
-Example:
-
-```text
-2026-06-20
-```
-
----
-
-## Slot
-
-The primary backup artifact.
-
-A run produces exactly one slot.
-
-Example:
-
-```text
-slot-2026-06-20/
-```
-
-A slot is immutable after sealing.
-
-A slot represents the complete output of a run.
-
----
-
-## Cycle
-
-A safety boundary controlling deletion and tape reuse.
-
-Examples:
-
-```yaml
-cycle:
-  minimum_age: 30d
-  require_verified_successor: true
-```
-
-A slot cannot be deleted until:
-
-* it is outside the cycle
-* a newer valid recovery path exists
-
----
-
-## Media
-
-Storage locations for slot copies.
-
-Examples:
-
-```yaml
-media:
-  - s3-hot
-  - glacier
-  - tape
-  - local-disk
-```
-
----
-
-# Slot Format
-
-A slot is represented as a normal directory.
-
-Example:
-
-```text
-slot-2026-06-20/
-  SLOT.json
-  MANIFEST.json
-  CHECKSUMS.sha256
-
-  archives/
-    app-home-L0.tar.zst
-    db-var-L1.tar.zst
-```
-
-Properties:
-
-* self-contained
-* immutable
-* copyable
-* inspectable
-* understandable without backup software
-
----
-
-# Landing Medium
-
-Every slot is first written to a landing medium.
-
-Examples:
-
-```yaml
-landing:
-  media: s3
-```
-
-or
-
-```yaml
-landing:
-  media: local-disk
-```
-
-The landing medium becomes the authoritative location for slot creation.
-
-A local holding disk is not required.
-
----
-
-# S3 Operation
-
-Direct-to-S3 is a first-class deployment model.
-
-Example:
-
-```text
-client
-   ↓
-slot creation
-   ↓
-S3
-```
-
-Workflow:
-
-1. Upload archive files
-2. Upload manifests
-3. Verify checksums
-4. Write SLOT.json
-5. Mark slot sealed
-
-After sealing, the slot becomes immutable.
-
----
-
-# Tape Operation
-
-Tape stores copies of sealed slots.
-
-Workflow:
-
-```text
-sealed slot
-     ↓
-tar stream
-     ↓
-tape
-```
-
-The slot format does not change.
-
-Tape acts as a transport and storage medium.
-
----
-
-# Tape Format
-
-Each slot is serialized as a tar stream.
-
-Example:
-
-```bash
-tar -cf - slot-2026-06-20/
-```
-
-The tar stream is written to tape.
-
-A slot may span multiple tapes.
-
-Example:
-
-```text
-slot-2026-06-20
-
-TAPE-0042
-  part 1
-
-TAPE-0043
-  part 2
-```
-
-This is a media concern, not a slot concern.
-
-The slot remains a single logical artifact.
-
----
-
-# Planning Model
-
-Users specify storage budgets rather than tape counts.
-
-Example:
-
-```yaml
-storage:
-  budget: 20TB
-```
-
-The planner automatically chooses:
-
-* backup levels
-* full backup frequency
-* retention depth
-
-while remaining inside the budget.
-
----
-
-# Planner Objectives
-
-Priority order:
+When goals conflict, this order is immovable. Scheduling and retention bend to
+it, never the reverse.
 
 ## 1. Preserve recoverability
 
@@ -330,106 +94,39 @@ Never delete the last valid recovery path.
 
 ## 2. Respect cycle safety
 
-Never retire slots too aggressively.
+Never retire backups too aggressively; honor the safety window.
 
-## 3. Stay within storage budget
+## 3. Stay within storage capacity
 
-Adapt scheduling and retention automatically.
+Adapt scheduling and retention to the capacity the user gives each medium —
+warning, rather than silently dropping recovery points, when a complete recovery
+set will not fit.
 
 ## 4. Balance daily backup volume
 
-Avoid large backup spikes.
-
----
-
-# Example Configuration
-
-```yaml
-storage:
-  budget: 20TB
-
-cycle:
-  minimum_age: 30d
-  require_verified_successor: true
-
-landing:
-  media: s3
-
-media:
-  s3:
-    bucket: company-backups
-
-  tape:
-    enabled: true
-    retention: 180d
-
-sources:
-  - host: app01
-    path: /home
-
-  - host: db01
-    path: /var/lib/postgresql
-```
+Avoid large backup spikes — the last concern, bounded by the three above.
 
 ---
 
 # Design Principles
 
-## Slots are the primary abstraction
+## Backups are the primary abstraction
 
-Not tapes.
+Not tapes. Not chunks. Not databases. A user reasons in terms of a sequence of
+daily backups, and can answer "what happened on June 20?" by inspecting that
+day's artifact — without a running backup server or metadata database.
 
-Not chunks.
+## Storage is secondary
 
-Not databases.
+The same backup may live on disk, in the cloud, or on tape without changing its
+format. Media are a placement detail, not the unit of thought.
 
-A user should think in terms of:
+## Capacity, not counts
 
-```text
-slot-2026-06-20
-slot-2026-06-21
-slot-2026-06-22
-```
-
-## Media are secondary
-
-The same slot may exist on:
-
-* S3
-* Glacier
-* Tape
-* Disk
-
-without changing its format.
+Users give a medium a storage capacity, not a tape count or rotation schedule.
+The system chooses backup levels, full frequency, and retention to fit it.
 
 ## Simplicity over optimization
 
-Prefer:
-
-```text
-normal tar archives
-immutable slots
-simple retention
-```
-
-over:
-
-```text
-global chunk stores
-cross-backup deduplication
-opaque repositories
-```
-
-## Operational understandability
-
-A backup administrator should be able to answer:
-
-> What happened on June 20?
-
-by inspecting:
-
-```text
-slot-2026-06-20/
-```
-
-without requiring a running backup server or metadata database.
+Prefer normal tar archives, immutable artifacts, and simple retention over
+global chunk stores, cross-backup deduplication, and opaque repositories.

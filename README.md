@@ -290,7 +290,19 @@ ETA:      17m18s
 
 Each DLE's percentage is uncompressed bytes against the planner estimate; the run
 streams source→compressor→volume in one pass, so there is a single `dumping` state
-per DLE (no separate dumper/taper queues). `nb status --watch 2s` refreshes until the
+per DLE (no separate dumper/taper queues). The report covers the whole cycle: a run
+opens in an `estimating` phase while it sizes every DLE (a pass that can take a while on
+a large source), so `nb status` shows that the dump is underway rather than nothing at
+all:
+
+```text
+Run estimate  [estimating]
+  started:  2026-06-21 02:00:01  (elapsed 0m38s)
+  sizing:   2 of 4 DLEs measured
+  estimate: ~22.1 GB so far
+```
+
+It then switches to the dumping view above. `nb status --watch 2s` refreshes until the
 run finishes; afterwards `nb status` shows the last run's final result.
 
 ### Reporting & alerting (unattended)
@@ -510,9 +522,14 @@ two layers:
 2. **Capacity reclamation**: among non-protected archives, the medium's retention
    strategy reclaims to fit capacity. Object stores (disk, S3) reclaim **per-archive**,
    deleting the **oldest dead archives until total ≤ capacity**. Tape reclaims **whole
-   volumes**: a reel is reused by relabeling it once all its runs are unprotected
-   (the oldest-reusable-tape pick, applied when a run needs a volume), so `nb prune`
-   never deletes individual archives from a tape.
+   volumes** by **label rotation** (Amanda's *tapecycle*): when a run needs a fresh
+   volume and no blank is loaded, NBackup automatically reuses the **oldest tape whose
+   every run is unprotected** — keeping the same label name and advancing only its epoch
+   (a reuse, not a rename) — and **announces** which tape it wants (`nb plan`, run
+   output, and the swap prompt). The retention floor is the safety gate: if every tape
+   still holds a protected run, the run **fails loudly** rather than overwriting one
+   (recoverability outranks capacity). `nb prune` never deletes individual archives from
+   a tape, and `nb label --relabel` remains the manual early-recycle override.
 
 ### Replication / tiered storage
 
@@ -734,7 +751,26 @@ media:
 ```
 
 `s3://` reaches S3 and any S3-compatible store (MinIO, Cloudflare R2, Backblaze
-B2, Wasabi); `gs://` is Google Cloud Storage; `azblob://` is Azure Blob.
+B2, Wasabi, Synology C2); `gs://` is Google Cloud Storage; `azblob://` is Azure
+Blob.
+
+**S3-compatible endpoints.** For stores that speak the S3 protocol but run at a
+custom URL (MinIO, Wasabi, Synology C2, etc.), add `endpoint` to the URL query:
+
+```yaml
+media:
+  offsite:
+    type: cloud
+    url: s3://my-bucket?region=eu-005&endpoint=https://s3.example.com
+    capacity: 500GB
+```
+
+The `endpoint` parameter (and `region`) are passed through to the AWS SDK v2;
+all [V2ConfigFromURLParams][v2params] query options are supported. Credentials
+still come from the standard AWS SDK environment — `~/.aws/credentials`,
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` env vars, or an IAM role — never
+from the config file.
+
 **Credentials are not in the config** — they come from each SDK's standard
 environment (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_*`). An object store
 is **address-identified** like disk: no labels, no swap prompts, nothing to
@@ -749,7 +785,8 @@ one run per tape. Restore mounts (robot) or prompts for (manual) whichever tape
 holds the copy it needs. A run that **fills a tape mid-write spans onto the next
 automatically** — for both `nb dump` and `nb copy`/`nb sync`, splitting even a
 single large archive: a robotic library mounts the next writable bay (auto-labeling
-a blank), a manual drive prompts for a swap. Spanning is **proactive** — set
+a blank, or — when no blank is left — recycling the oldest tape past retention), a
+manual drive prompts for a swap. Spanning is **proactive** — set
 `volume_size` so NBackup sizes each chunk to fit *before* writing it (a real drive
 with no readable capacity can instead set `part_size`); if a chunk still overflows,
 the run fails with a clear message rather than guessing. A restore reassembles a
@@ -790,14 +827,6 @@ host under `hosts:` is **only** to override the `ssh:` defaults — it is *not* 
 makes a host remote; any non-`localhost` source is remote by default. `nb check`
 reaches every source host so you can confirm connectivity before a run.
 
-### Not yet implemented
-
-- **Tape whole-volume reclamation** — capacity-driven pruning already fits
-  object stores and disk to their `capacity` (reclaiming the oldest
-  non-protected slots first); reclaiming whole *tapes* to fit a library's
-  capacity is not yet automatic — tape reuse is identified by `nb plan` and
-  gated behind a deliberate `nb label --relabel`.
-
 ## Architecture
 
 NBackup's internals are built on a pluggable-API structure: mechanism lives behind
@@ -828,3 +857,4 @@ See [LICENSE](LICENSE) for the full text.
 [amanda]: https://www.amanda.org/
 [gocloud]: https://gocloud.dev/howto/blob/
 [321]: https://www.veeam.com/blog/321-backup-rule.html
+[v2params]: https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/aws#V2ConfigFromURLParams

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -318,6 +319,73 @@ func TestPlanWithProgress(t *testing.T) {
 		if it.EstBytes <= 0 {
 			t.Errorf("DLE %s estimated %d bytes, want > 0", it.Name, it.EstBytes)
 		}
+	}
+}
+
+// TestRunStatusSpansEstimatePhase verifies `nb status` sees the whole dump cycle:
+// the run-status file is written during the estimate prelude (phase "estimating")
+// and — crucially — never reads terminal there, so a `nb status --watch` does not
+// stop before the dump it is waiting for begins. The file ends terminal only once
+// the slot is sealed.
+func TestRunStatusSpansEstimatePhase(t *testing.T) {
+	workdir := t.TempDir()
+	cfg := &config.Config{
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
+		Workdir:  workdir,
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	cfg.Parallelism.Workers = 2
+	for _, n := range []string{"alpha", "bravo"} {
+		dir := t.TempDir()
+		write(t, filepath.Join(dir, n+".txt"), "content-"+n)
+		cfg.Sources = append(cfg.Sources, config.DLE{Host: "localhost", Path: dir})
+	}
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	// The estimate sink fires for every estimate-phase snapshot. The status file is
+	// written first (MultiSink order), so by the time we observe it here it already
+	// reflects this snapshot — and must read "estimating", never terminal.
+	var sawEstimating bool
+	eng.SetEstimateProgress(func(progress.Snapshot, bool) {
+		snap, err := progress.Load(workdir)
+		if err != nil {
+			t.Errorf("load run-status during estimate: %v", err)
+			return
+		}
+		if snap.Phase == progress.PhaseEstimating {
+			sawEstimating = true
+		}
+		if snap.Phase.Terminal() {
+			t.Errorf("run-status reached terminal phase %q during the estimate phase", snap.Phase)
+		}
+	})
+
+	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !sawEstimating {
+		t.Error("run-status file never showed the estimating phase")
+	}
+
+	snap, err := progress.Load(workdir)
+	if err != nil {
+		t.Fatalf("load final run-status: %v", err)
+	}
+	if snap.Phase != progress.PhaseDone {
+		t.Errorf("final phase = %q, want done", snap.Phase)
+	}
+	if snap.SlotID != s.ID {
+		t.Errorf("final slot = %q, want %q", snap.SlotID, s.ID)
 	}
 }
 
@@ -1458,6 +1526,246 @@ func TestExpectedTapeDiskHasNone(t *testing.T) {
 }
 
 func logfDiscard(string, ...any) {}
+
+// labelOnMedium returns the (first) volume label a slot's copy on a medium occupies.
+func labelOnMedium(t *testing.T, eng *Engine, slotID, medium string) string {
+	t.Helper()
+	for _, p := range eng.cat.Placements(slotID) {
+		if p.Medium == medium {
+			if ls := p.Labels(); len(ls) > 0 {
+				return ls[0]
+			}
+		}
+	}
+	t.Fatalf("slot %s has no labeled copy on %q", slotID, medium)
+	return ""
+}
+
+// TestTapeRecyclesOldestOnWrite: a non-appendable tape library whose pool is full
+// (every bay holds a run) reuses the oldest Label the retention Floor clears on the
+// next run — same Name, epoch+1 — rather than refusing. The recycled run's placement
+// goes dead and, being that slot's only copy, the slot leaves the catalog. The run
+// announces the Label it recycles, and a rebuild from the media reflects the new epoch
+// only. This is the closed gap: hands-off whole-volume tape rotation (Amanda tapecycle).
+func TestTapeRecyclesOldestOnWrite(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "v1")
+
+	cfg := &config.Config{
+		Landing:   "lib",
+		AutoLabel: true,
+		Cycle:     "1d", // full every run, so each run supersedes the prior — no live chain pins the old tape
+		Media: map[string]config.Media{
+			"lib": {Type: "tape", Appendable: boolp(false), Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	// Two runs fill the two-bay pool (one run per tape). Run dates sit well in the past
+	// so the default one-cycle age floor never pins them — only last-recovery / chain.
+	s1, err := eng.Run(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	s2, err := eng.Run(time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	l1 := labelOnMedium(t, eng, s1.ID, "lib")
+	l2 := labelOnMedium(t, eng, s2.ID, "lib")
+	if l1 == l2 {
+		t.Fatalf("the two runs should land on distinct tapes, both %q", l1)
+	}
+
+	// Third run: no blank bay left. It must recycle the oldest Floor-cleared tape (l1,
+	// superseded by s2's full) rather than refuse.
+	var logs []string
+	logf := func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	s3, err := eng.Run(time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC), logf)
+	if err != nil {
+		t.Fatalf("run 3 (should recycle %q): %v", l1, err)
+	}
+
+	// Reuse keeps the same Label name, advancing the epoch.
+	if got := labelOnMedium(t, eng, s3.ID, "lib"); got != l1 {
+		t.Fatalf("run 3 should reuse the oldest Label %q, landed on %q", l1, got)
+	}
+	if v, ok := eng.cat.Volume(l1); !ok || v.Label.Epoch != 2 {
+		t.Fatalf("recycled volume %q should be at epoch 2, got %+v (ok=%v)", l1, v, ok)
+	}
+	// The recycled run's only copy was on l1; the slot leaves the catalog.
+	if _, err := eng.cat.ReadSlot(s1.ID); err == nil {
+		t.Fatalf("recycled slot %s should no longer be in the catalog", s1.ID)
+	}
+	// The run announced the Label it wanted.
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, l1) || !strings.Contains(joined, "recycl") {
+		t.Fatalf("run should announce recycling %q; logs:\n%s", l1, joined)
+	}
+
+	// A rebuild from the media (source of truth) reflects the current epoch only: the
+	// recycled tape physically holds s3 at epoch 2, and s1 is gone (its tape was wiped).
+	freshCfg := *cfg
+	freshCfg.Workdir = t.TempDir() // a fresh cache forces a scan of the media
+	freshEng, err := New(&freshCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := freshEng.RebuildCatalog(logfDiscard); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	if v, ok := freshEng.cat.Volume(l1); !ok || v.Label.Epoch != 2 {
+		t.Fatalf("rebuilt volume %q should be epoch 2, got %+v (ok=%v)", l1, v, ok)
+	}
+	if _, err := freshEng.cat.ReadSlot(s1.ID); err == nil {
+		t.Fatalf("rebuilt catalog should not contain the wiped slot %s", s1.ID)
+	}
+	if _, err := freshEng.cat.ReadSlot(s3.ID); err != nil {
+		t.Fatalf("rebuilt catalog should contain the recycled-tape slot %s: %v", s3.ID, err)
+	}
+	if _, err := freshEng.cat.ReadSlot(s2.ID); err != nil {
+		t.Fatalf("rebuilt catalog should still contain %s: %v", s2.ID, err)
+	}
+}
+
+// TestTapeRecycleRefusedWhenAllKept: when every tape in a full pool still holds a
+// protected run, a run needing a fresh tape fails loud rather than overwriting one —
+// recoverability outranks capacity. Nothing is recorded.
+func TestTapeRecycleRefusedWhenAllKept(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "v1")
+
+	cfg := &config.Config{
+		Landing:   "lib",
+		AutoLabel: true,
+		Cycle:     "30d", // incrementals between fulls — the first full stays a recovery base
+		Media: map[string]config.Media{
+			"lib": {Type: "tape", Appendable: boolp(false), MinimumAge: "365d", Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	// Both bays hold runs well within the 365d age floor — every tape is protected.
+	if _, err := eng.Run(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if _, err := eng.Run(time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+
+	// Third run: no blank, nothing reusable — it must fail loud, never overwrite.
+	_, err = eng.Run(time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC), nil)
+	if err == nil {
+		t.Fatal("expected a run with a full pool of protected tapes to fail, not overwrite")
+	}
+	if !strings.Contains(err.Error(), "within retention") {
+		t.Fatalf("error should explain every tape is still within retention; got: %v", err)
+	}
+	if _, rerr := eng.cat.ReadSlot("slot-2026-06-03"); rerr == nil {
+		t.Fatal("the refused run must not be recorded")
+	}
+}
+
+// TestDumpSpanRecyclesReusableTape: a dump that spans more tapes than the pool has
+// blanks rolls onto the oldest Floor-cleared Label (recycling it, ++epoch) once the
+// blanks are exhausted — the deferred "whole-volume recycle on EOT".
+func TestDumpSpanRecyclesReusableTape(t *testing.T) {
+	src := t.TempDir()
+
+	cfg := &config.Config{
+		Landing:   "lib",
+		AutoLabel: true,
+		Cycle:     "1d", // full every run, so older fulls clear the Floor
+		Media: map[string]config.Media{
+			// Three bays, each a small reel: two fill with superseded runs, one starts blank.
+			"lib": {Type: "tape", Appendable: boolp(false), Params: map[string]string{"dir": t.TempDir(), "bays": "3", "volume_size": "262144"}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	// Two small runs fill bay-01 and bay-02 (each a full superseding the last).
+	write(t, filepath.Join(src, "f.txt"), "small-1")
+	s1, err := eng.Run(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	write(t, filepath.Join(src, "f.txt"), "small-2")
+	if _, err := eng.Run(time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	l1 := labelOnMedium(t, eng, s1.ID, "lib") // oldest, now Floor-cleared
+
+	// A run too big for one reel: it starts on the one remaining blank bay, then — with
+	// no blank left — recycles the oldest Floor-cleared tape (l1) to finish the span.
+	write(t, filepath.Join(src, "big.txt"), strings.Repeat("x", 250*1024))
+	s3, err := eng.Run(time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("spanning run should recycle %q to finish, got: %v", l1, err)
+	}
+
+	var tape catalog.Placement
+	for _, p := range eng.cat.Placements(s3.ID) {
+		if p.Medium == "lib" {
+			tape = p
+		}
+	}
+	labels := tape.Labels()
+	if len(labels) < 2 {
+		t.Fatalf("spanning run should cross >= 2 tapes, crossed %v", labels)
+	}
+	if !contains(labels, l1) {
+		t.Fatalf("spanning run should roll onto the recycled tape %q, crossed %v", l1, labels)
+	}
+	if v, ok := eng.cat.Volume(l1); !ok || v.Label.Epoch != 2 {
+		t.Fatalf("recycled span tape %q should be epoch 2, got %+v (ok=%v)", l1, v, ok)
+	}
+	// Verify reassembles the spanned archive across the blank and recycled tapes.
+	if rep, err := eng.Verify([]string{s3.ID}, VerifyOptions{}, nil); err != nil || rep.Failures != 0 {
+		t.Fatalf("verify spanned-onto-recycled: failures=%d err=%v", rep.Failures, err)
+	}
+}
+
+func contains(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
 
 // TestDumpSpansArchiveAcrossTapes dumps a source larger than one tape directly onto
 // a tape library, so a single DLE's archive must split into parts across several

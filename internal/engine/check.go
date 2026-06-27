@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
@@ -18,6 +19,7 @@ type CheckReport struct {
 	Server   []CheckLine
 	Hosts    []HostCheck
 	Failures int
+	Warnings int
 }
 
 // CheckLine is one assertion: OK, a soft Warn, or (neither) a hard failure.
@@ -52,8 +54,11 @@ func (e *Engine) Check(connect bool) *CheckReport {
 // add appends a line and counts a hard failure (not OK and not a warning).
 func (rep *CheckReport) add(lines *[]CheckLine, ok, warn bool, msg string) {
 	*lines = append(*lines, CheckLine{OK: ok, Warn: warn, Msg: msg})
-	if !ok && !warn {
+	switch {
+	case !ok && !warn:
 		rep.Failures++
+	case warn:
+		rep.Warnings++
 	}
 }
 
@@ -117,6 +122,13 @@ func (e *Engine) checkMedia(rep *CheckReport) {
 		label := fmt.Sprintf("medium %q", name)
 		if isLanding {
 			label = fmt.Sprintf("landing medium %q", name)
+		}
+		// An unknown medium type is a config error, not a transient readiness issue,
+		// so it is a hard failure even for a non-landing medium — otherwise `nb check`
+		// green-lights a config whose sync/copy target can never be constructed.
+		if !media.KnownVolumeType(e.cfg.Media[name].Type) {
+			rep.add(&rep.Server, false, false, fmt.Sprintf("%s has unknown type %q (known: %v)", label, e.cfg.Media[name].Type, media.VolumeTypes()))
+			continue
 		}
 		if e.cfg.Media[name].Type == "cloud" {
 			rep.add(&rep.Server, false, true, fmt.Sprintf("%s (cloud) configured — reachability checked at first use, not here", label))

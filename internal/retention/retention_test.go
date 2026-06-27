@@ -30,12 +30,12 @@ func TestFloor_LiveChainKept(t *testing.T) {
 
 	if reason, ok := got.Reason("slot-2026-01-01"); !ok {
 		t.Errorf("base full slot must be kept as the last recovery path; got %v", got)
-	} else if want := "last recovery path for DLE app"; reason != want {
+	} else if want := "last recovery path"; reason != want {
 		t.Errorf("full reason = %q, want %q", reason, want)
 	}
 	if reason, ok := got.Reason("slot-2026-01-02"); !ok {
 		t.Errorf("tip incremental must be kept as part of the live recovery chain; got %v", got)
-	} else if want := "in DLE app's recovery chain"; reason != want {
+	} else if want := "in this DLE's recovery chain"; reason != want {
 		t.Errorf("tip reason = %q, want %q", reason, want)
 	}
 }
@@ -72,7 +72,7 @@ func TestFloor_ReasonNamesTheProtectingFull(t *testing.T) {
 	}
 	got := Compute(slots, 0, now)
 
-	if reason, _ := got.Reason("slot-2026-01-02"); reason != "last recovery path for DLE home" {
+	if reason, _ := got.Reason("slot-2026-01-02"); reason != "last recovery path" {
 		t.Errorf("reason = %q, want it to name home (its full), not etc (a mere incremental)", reason)
 	}
 }

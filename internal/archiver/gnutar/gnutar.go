@@ -164,10 +164,16 @@ func (g *gnutar) Estimate(r archiver.BackupRequest) (int64, error) {
 	cmd := g.ex.Command(args[0], args[1:]...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil && !isWarning(err) {
-		return 0, fmt.Errorf("%s estimate failed: %w\n%s", g.bin, err, strings.TrimSpace(stderr.String()))
+	runErr := cmd.Run()
+	total := parseTotals(stderr.String())
+	if runErr != nil && !isWarning(runErr) {
+		// tar hit an unreadable member (exit 2) but still walked the rest and
+		// reported a running total. Surface that total as a *floor* alongside the
+		// error so the caller can warn rather than silently estimating ~0 B — a
+		// silent 0 would let capacity planning undercount.
+		return total, fmt.Errorf("%s estimate incomplete — source not fully readable: %w\n%s", g.bin, runErr, strings.TrimSpace(stderr.String()))
 	}
-	return parseTotals(stderr.String()), nil
+	return total, nil
 }
 
 // List reads a raw tar stream from in and returns its member paths (`tar -t`), without

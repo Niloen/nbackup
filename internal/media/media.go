@@ -316,6 +316,14 @@ func ValidateParams(typ string, params map[string]string) error {
 		typ, strings.Join(unknown, ", "), strings.Join(allowed, ", "))
 }
 
+// KnownVolumeType reports whether a medium type is registered — a config-validity
+// check distinct from runtime readiness, so `nb check` can fail an unknown type
+// (a config error) rather than treating it as a transient reachability warning.
+func KnownVolumeType(typ string) bool {
+	_, ok := volumeFactories[typ]
+	return ok
+}
+
 // VolumeTypes lists registered medium types.
 func VolumeTypes() []string {
 	out := make([]string, 0, len(volumeFactories))

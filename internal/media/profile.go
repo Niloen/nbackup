@@ -178,8 +178,12 @@ func (p volumeProfile) TotalBytes() int64 { return p.volumes * p.volumeSize }
 
 func (p volumeProfile) VolumeSize() int64 { return p.volumeSize }
 
-// Reclaim is a placeholder: tape reclamation is whole-volume reuse, which needs
-// a volume catalog and changer (not yet implemented).
+// Reclaim is intentionally a no-op: tape space is not reclaimed by a prune pass.
+// Whole-volume reuse is label rotation done on the *write* path — when a run needs a
+// fresh volume the librarian recycles the oldest tape the retention Floor clears
+// (`librarian.Advance` / `acceptOrRecycle`), keeping the same label and advancing its
+// epoch. Tape capacity is structural (the depth of the label pool is the retention), so
+// there is nothing for a capacity-driven prune to delete here.
 func (p volumeProfile) Reclaim(slots []*record.Slot, keep Retention, now time.Time) []Reclamation {
 	return nil
 }

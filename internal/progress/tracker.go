@@ -32,9 +32,11 @@ type Tracker struct {
 	snap Snapshot
 }
 
-// NewTracker seeds a running snapshot from the plan and pushes the initial state
-// to the sink. now supplies timestamps (injectable for tests); sink may be nil.
-func NewTracker(slotID string, workers int, plan []Plan, now func() time.Time, sink Sink) *Tracker {
+// NewTracker seeds a snapshot in phase from the plan and pushes the initial state
+// to the sink. phase is the run's starting stage (PhaseEstimating for the sizing
+// prelude, PhaseRunning once workers archive). now supplies timestamps (injectable
+// for tests); sink may be nil.
+func NewTracker(slotID string, phase Phase, workers int, plan []Plan, now func() time.Time, sink Sink) *Tracker {
 	if now == nil {
 		now = time.Now
 	}
@@ -55,7 +57,7 @@ func NewTracker(slotID string, workers int, plan []Plan, now func() time.Time, s
 		idx:  idx,
 		snap: Snapshot{
 			SlotID:    slotID,
-			Phase:     PhaseRunning,
+			Phase:     phase,
 			Workers:   workers,
 			StartedAt: start,
 			UpdatedAt: start,

@@ -14,6 +14,10 @@ import (
 // the reference instant for elapsed/rate/ETA of an in-flight run (ignored once the
 // run is terminal, which uses its recorded end time).
 func Render(w io.Writer, s Snapshot, now time.Time) {
+	if s.Phase == PhaseEstimating {
+		renderEstimating(w, s, now)
+		return
+	}
 	active, done, failed, pending := s.Counts()
 
 	fmt.Fprintf(w, "Run %s  [%s]\n", s.SlotID, s.Phase)
@@ -50,6 +54,23 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 			fmt.Fprintf(w, "FAILED %s: %s\n", d.Name, d.Err)
 		}
 	}
+}
+
+// renderEstimating reports the sizing prelude of a run: how many DLEs have been
+// measured and the size accumulated so far. No bytes are dumped yet, so the dump
+// table (progress against estimate) would be a wall of zeroes — this shows the
+// estimate filling in instead. The per-DLE size lands in DoneBytes as each is sized.
+func renderEstimating(w io.Writer, s Snapshot, now time.Time) {
+	var sized int
+	for _, d := range s.DLEs {
+		if d.State == StateDone || d.State == StateFailed {
+			sized++
+		}
+	}
+	fmt.Fprintf(w, "Run %s  [%s]\n", s.SlotID, s.Phase)
+	fmt.Fprintf(w, "  started:  %s  (elapsed %s)\n", s.StartedAt.Local().Format("2006-01-02 15:04:05"), sizeutil.FormatElapsed(s.Elapsed(now)))
+	fmt.Fprintf(w, "  sizing:   %d of %d DLEs measured\n", sized, len(s.DLEs))
+	fmt.Fprintf(w, "  estimate: ~%s so far\n", sizeutil.FormatBytes(s.TotalDone()))
 }
 
 // progressCell renders a small text bar plus percent against the estimate, or a

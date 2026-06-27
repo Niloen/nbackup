@@ -1,9 +1,10 @@
 // Package progress is NBackup's run-monitoring layer. A run (`nb dump`) drives a
-// Tracker as its workers archive each DLE; the Tracker maintains a single live
-// Snapshot and flushes it to a status file. A separate command (`nb status`)
-// loads and renders that file — so an operator can watch a detached run from
-// another shell without any daemon or socket, only an inspectable file (the same
-// philosophy as the catalog: state lives in files).
+// Tracker through the whole cycle — first sizing every DLE (the estimate phase),
+// then archiving each one — and the Tracker maintains a single live Snapshot and
+// flushes it to a status file. A separate command (`nb status`) loads and renders
+// that file — so an operator can watch a detached run from another shell without
+// any daemon or socket, only an inspectable file (the same philosophy as the
+// catalog: state lives in files).
 //
 // NBackup has no holding disk: each DLE streams source -> compressor -> volume in
 // one pass, so there is no separate archiver/taper split — one DLE has one
@@ -23,13 +24,15 @@ const StatusFileName = "run-status.json"
 type Phase string
 
 const (
-	PhaseRunning Phase = "running" // workers are archiving DLEs
-	PhaseSealing Phase = "sealing" // all dumps done; verifying + writing the seal
-	PhaseDone    Phase = "done"    // sealed successfully (terminal)
-	PhaseFailed  Phase = "failed"  // a dump or the seal failed (terminal)
+	PhaseEstimating Phase = "estimating" // sizing every DLE before any dumping starts
+	PhaseRunning    Phase = "running"    // workers are archiving DLEs
+	PhaseSealing    Phase = "sealing"    // all dumps done; verifying + writing the seal
+	PhaseDone       Phase = "done"       // sealed successfully (terminal)
+	PhaseFailed     Phase = "failed"     // a dump or the seal failed (terminal)
 )
 
-// Terminal reports whether the run has finished (succeeded or failed).
+// Terminal reports whether the run has finished (succeeded or failed). The
+// estimate phase is non-terminal: it is the prelude to the dump, not its end.
 func (p Phase) Terminal() bool { return p == PhaseDone || p == PhaseFailed }
 
 // State is one DLE's progress within the run.
