@@ -11,12 +11,12 @@ import (
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// decode.go is NBackup's read-side codec operation — Amanda's amrestore. A decoder reverses an
+// decode.go is NBackup's read-side codec operation. A decoder reverses an
 // archive's transforms: given a raw byte stream a clerk endpoint already opened, it composes the
 // decode pipeline (decrypt → decompress → tar, each placed per the plan) into a sink (tar, hash,
 // or list). The clerk supplies only the bytes; the codec and the far-end tar live here, in the
-// operation — as in Amanda (amrestore decodes, the Recovery::Clerk only reads dumpfile bytes)
-// and a filesystem (cp/gzip compose the transform, the FS just reads/writes).
+// operation — as in a filesystem (cp/gzip compose the transform, the FS just
+// reads/writes).
 //
 // It depends on a narrow slice of the orchestrator — how to reach a host (exec), how to resolve
 // the archiver that reverses a recorded type (archiverFor), and the decode option sets — not the

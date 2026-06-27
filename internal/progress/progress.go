@@ -1,14 +1,13 @@
-// Package progress is NBackup's run-monitoring layer, analogous to Amanda's
-// amdump status file + amstatus reader. A run (`nb dump`) drives a Tracker as its
-// workers archive each DLE; the Tracker maintains a single live Snapshot and
-// flushes it to a status file. A separate command (`nb status`) loads and renders
-// that file — so an operator can watch a detached run from another shell without
-// any daemon or socket, only an inspectable file (the same philosophy as the
-// catalog: state lives in files).
+// Package progress is NBackup's run-monitoring layer. A run (`nb dump`) drives a
+// Tracker as its workers archive each DLE; the Tracker maintains a single live
+// Snapshot and flushes it to a status file. A separate command (`nb status`)
+// loads and renders that file — so an operator can watch a detached run from
+// another shell without any daemon or socket, only an inspectable file (the same
+// philosophy as the catalog: state lives in files).
 //
 // NBackup has no holding disk: each DLE streams source -> compressor -> volume in
-// one pass, so unlike Amanda there is no separate archiver/taper split — one DLE has
-// one "dumping" state, metered by uncompressed bytes against the planner estimate.
+// one pass, so there is no separate archiver/taper split — one DLE has one
+// "dumping" state, metered by uncompressed bytes against the planner estimate.
 package progress
 
 import (

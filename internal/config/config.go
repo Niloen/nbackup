@@ -1,7 +1,7 @@
 // Package config loads and validates NBackup configuration files. It also
 // defines the configured domain entities — DLEs (backup sources), named media
-// definitions, named archiver definitions (Amanda's applications), and dumptypes
-// (an archiver reference plus per-DLE policy, in Amanda's sense).
+// definitions, named archiver definitions, and dumptypes
+// (an archiver reference plus per-DLE policy).
 package config
 
 import (
@@ -48,8 +48,8 @@ type Config struct {
 	Cycle string `yaml:"cycle"`
 
 	// BumpPct is the minimum saving — as a percentage of the full-dump size — an
-	// incremental must show before it climbs to the next level (Amanda's
-	// bumppercent). A higher level captures only what changed since the level below,
+	// incremental must show before it climbs to the next level. A higher level
+	// captures only what changed since the level below,
 	// so it is taken only when that is a real saving; otherwise the DLE stays at its
 	// current level, re-dumping everything since the lower one (which also keeps
 	// consecutive incrementals overlapping, so losing one does not break the chain).
@@ -94,14 +94,14 @@ type Config struct {
 	// Media is a map of named storage definitions.
 	Media map[string]Media `yaml:"media"`
 
-	// Archivers is a map of named archiver definitions (Amanda's applications): a
+	// Archivers is a map of named archiver definitions: a
 	// registered archiver type plus its options, referenced by a dumptype. An
 	// undeclared name is treated as a bare archiver type with default options, so a
 	// zero-config `archiver: gnutar` needs no block here.
 	Archivers map[string]Archiver `yaml:"archivers"`
 
 	// Sync declares replication rules: each mirrors the landing medium's sealed
-	// slots onto a target medium (Amanda's vaulting). `nb sync` with no --to runs
+	// slots onto a target medium. `nb sync` with no --to runs
 	// every rule; `nb sync --to X` is the ad-hoc form and needs no rule.
 	Sync []SyncRule `yaml:"sync"`
 
@@ -117,11 +117,11 @@ type Config struct {
 	Notify NotifyConfig `yaml:"notify"`
 
 	// DumpTypes is a map of named dumptypes: an archiver reference plus per-DLE policy
-	// (encryption), in Amanda's sense.
+	// (encryption).
 	DumpTypes map[string]DumpType `yaml:"dumptypes"`
 
-	// SSH holds the default SSH connection settings applied to every remote host
-	// (Amanda's global auth defaults). A per-host `hosts.<name>.ssh` block overrides
+	// SSH holds the default SSH connection settings applied to every remote host.
+	// A per-host `hosts.<name>.ssh` block overrides
 	// individual fields; an undeclared remote host uses these as-is.
 	SSH SSHConfig `yaml:"ssh"`
 
@@ -134,7 +134,7 @@ type Config struct {
 	Sources Sources `yaml:"sources"`
 }
 
-// HostConfig describes a remote source host (Amanda's amanda-client.conf): just how to
+// HostConfig describes a remote source host: just how to
 // reach it over SSH. Connection settings are an explicit sub-block so KnownFields rejects
 // a stray key and a literal private key.
 type HostConfig struct {
@@ -260,7 +260,7 @@ var validNotifyTypes = map[string]bool{"smtp": true, "webhook": true}
 //	    db01: [/var/lib/postgresql]
 //
 // It flattens to a sorted list of DLEs. Per-DLE behavior lives in the named
-// dumptype, not the entry (as in Amanda).
+// dumptype, not the entry.
 type Sources []DLE
 
 // UnmarshalYAML decodes the grouped form into a flat, sorted []DLE.
@@ -293,8 +293,7 @@ func (s *Sources) UnmarshalYAML(node *yaml.Node) error {
 // Media is one named storage definition: a type, capacity/retention policy for
 // this medium, and type-specific connection parameters (e.g. disk has
 // "path", s3 has "bucket"). Capacity and retention are per-medium because each
-// store has its own space and reuse cadence (as in Amanda's per-storage
-// retention).
+// store has its own space and reuse cadence.
 type Media struct {
 	Type       string            `yaml:"type"`
 	Capacity   string            `yaml:"capacity"`    // space NBackup may use here, e.g. "20TB" ("" = unbounded)
@@ -354,7 +353,7 @@ func putRate(opts map[string]string, key string, v *float64) {
 
 // IsAppendable reports whether a volume may accumulate many runs until full
 // (Bacula-style, the default). When false, a volume holds a single run before it
-// must be changed (Amanda-style). Address-identified media ignore it.
+// must be changed. Address-identified media ignore it.
 func (m Media) IsAppendable() bool { return m.Appendable == nil || *m.Appendable }
 
 // CapacityBytes returns this medium's capacity in bytes, or 0 if unset (unbounded).
@@ -368,8 +367,8 @@ func (m Media) CapacityBytes() (int64, error) {
 // ThroughputBytes returns this medium's bandwidth cap in bytes per second, or 0
 // if unset (uncapped). It caps both directions — a dump/sync to the medium and a
 // restore/un-vault/drill from it — so the office uplink survives a business-hours
-// backup. Concurrent workers to one medium share the single budget (Amanda's
-// netusage), since a run writes a single landing medium.
+// backup. Concurrent workers to one medium share the single budget,
+// since a run writes a single landing medium.
 func (m Media) ThroughputBytes() (int64, error) {
 	if m.Throughput == "" {
 		return 0, nil
@@ -408,22 +407,21 @@ type SyncRule struct {
 // DumpType names an archiver and carries per-DLE policy, referenced by DLEs. The
 // archiver (how the stream is produced — program + content-independent options) and
 // the policy here (what to skip and what to do with the stream) are deliberately
-// split, as in Amanda. Excludes live here, not on the archiver: skipping `*.log` is
-// a content decision about the source, not a property of how tar runs (Amanda's
-// dumptype `exclude` directive).
+// split. Excludes live here, not on the archiver: skipping `*.log` is
+// a content decision about the source, not a property of how tar runs.
 type DumpType struct {
 	Archiver string         `yaml:"archiver"` // named archiver definition ("" = DefaultArchiver)
 	Exclude  []string       `yaml:"exclude"`  // patterns to skip (passed to the archiver per dump)
 	Encrypt  *EncryptConfig `yaml:"encrypt"`  // nil = inherit the config-wide default; set = replace it wholesale (no field merge)
 
-	// Compress selects where compression runs (Amanda's compress directive), for a
+	// Compress selects where compression runs, for a
 	// remote DLE: "server" (default — on the NBackup host) or "client" (on the source
 	// client, so only compressed bytes cross the wire). The codec/algorithm is the
 	// config-wide compress block; this is only the location. Local DLEs ignore it.
 	Compress string `yaml:"compress"`
 }
 
-// Archiver is a named dump-program definition (Amanda's `define application`): a
+// Archiver is a named dump-program definition: a
 // registered archiver type plus its content-independent options, referenced by a
 // dumptype. Options are archiver-specific (gnutar's tar_path, state_dir,
 // one-file-system, …) and flow through the inline map, so KnownFields does not
@@ -442,7 +440,7 @@ type EncryptConfig struct {
 	PassphraseFile string `yaml:"passphrase_file"` // gpg symmetric passphrase file
 	Program        string `yaml:"program"`         // optional binary override (name or path)
 
-	// At selects where encryption runs (Amanda's encrypt client/server), for a remote
+	// At selects where encryption runs, for a remote
 	// DLE: "server" (default — on the NBackup host) or "client" (on the source client,
 	// so only ciphertext crosses the wire and plaintext never leaves the client). Since
 	// encryption is downstream of compression, At=="client" requires the dumptype's
@@ -494,7 +492,7 @@ func (d DLE) Name() string {
 	return slugStrip.ReplaceAllString(d.Host+"-"+p, "_")
 }
 
-// ID returns the Amanda-style host:path identity of a DLE, e.g. "app01:/home".
+// ID returns the host:path identity of a DLE, e.g. "app01:/home".
 // This is what users see in reports and type for `--dle`/`setdisk`; the slug from
 // Name() stays internal (filenames, snapshot state, catalog keys).
 func (d DLE) ID() string {
@@ -880,7 +878,7 @@ func (c *Config) CycleDays() int {
 // DefaultBumpPercent is the level-bump savings threshold assumed when
 // `bump_percent` is unset: an incremental climbs to the next level only when that
 // saves at least this percent of the full-dump size. Five percent is a deliberately
-// real saving — well above Amanda's tiny default — so level 1 stays the common case
+// real saving — so level 1 stays the common case
 // and deeper levels are earned, not reached automatically.
 const DefaultBumpPercent = 5.0
 

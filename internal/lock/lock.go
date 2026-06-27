@@ -1,8 +1,7 @@
 // Package lock provides a per-config exclusive lock so that only one mutating
 // nb process operates on a catalog workdir (and the media it lands on) at a
-// time. It is NBackup's analogue of Amanda's per-config amflock: rather than
-// making the catalog concurrently writable, it serializes the whole mutating
-// run.
+// time. Rather than making the catalog concurrently writable, it serializes the
+// whole mutating run.
 //
 // The lock is an advisory flock(2) on a `lock` file in the workdir. flock is
 // tied to the open file description, so the kernel releases it automatically if

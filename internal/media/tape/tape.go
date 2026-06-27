@@ -176,8 +176,8 @@ func (t *tape) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
 }
 
 // Files scans the whole mounted bay reading each header. This is the catalog-
-// rebuild path for one tape (a full pass, as Amanda re-reads a tape); normal
-// reads seek by file number from the catalog and never call this.
+// rebuild path for one tape (a full pass); normal reads seek by file number from
+// the catalog and never call this.
 func (t *tape) Files() ([]record.FileInfo, error) {
 	dev, err := t.requireDev()
 	if err != nil {

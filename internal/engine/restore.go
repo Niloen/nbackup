@@ -16,7 +16,7 @@ import (
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 )
 
-// restore.go is NBackup's restore/recover operation (Amanda's amrestore + amrecover): it
+// restore.go is NBackup's restore/recover operation: it
 // reconstructs a DLE from its backup chain — whole-DLE (deletion-accurate, listed-incremental),
 // `--to` client restore, and file-level recover all run through one extraction path. It resolves
 // the decode placement (engine policy: where the key may live) and feasibility, opens archives
@@ -64,7 +64,7 @@ func (r *restorer) Restore(slotID, dleName, destDir string, force bool, logf Log
 	return r.restoreFrom(slotID, dleName, destDir, "", !force, logf)
 }
 
-// RestoreTo restores a DLE onto a remote client (Amanda's recover to a different host):
+// RestoreTo restores a DLE onto a remote client:
 // extraction runs on destHost over SSH and destPath is a path on that client, so the
 // data lands back where it came from. Decode stays server-side, covering the server-side
 // and asymmetric (private-key-on-server) postures; an untrusted-server client-only key
@@ -276,7 +276,7 @@ func errNonEmptyDest(destDir string) error {
 }
 
 // OpenRecover builds a browsable filesystem of a DLE as of a date (YYYY-MM-DD) —
-// the amrecover entry point. Member lists are loaded lazily via the clerk (cache, or the
+// the recover entry point. Member lists are loaded lazily via the clerk (cache, or the
 // on-medium index on a miss), so a fully-cached browse touches no media until extract.
 func (r *restorer) OpenRecover(dle, asOf string) (*recovery.Tree, error) {
 	return recovery.BuildTree(r.cat.Slots(), dle, asOf, func(slotID string, level int) ([]string, error) {

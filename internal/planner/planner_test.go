@@ -54,7 +54,7 @@ func TestLevelDecisions(t *testing.T) {
 	}
 }
 
-// TestBumpDecision checks Amanda's bump rule: a DLE that has sat at level 1 for
+// TestBumpDecision checks the bump rule: a DLE that has sat at level 1 for
 // bumpDays runs climbs to L2 only when doing so is a real saving (over the
 // BumpPercent-of-full threshold), and otherwise holds at L1 — never the old
 // "one level per day" climb.

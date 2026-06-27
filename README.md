@@ -49,9 +49,9 @@ slots/slot-2026-06-21/
   000002-seal.hdr
 ```
 
-The `NNNNNN` prefix is just the file's position, and the **seal is always the last
+The `NNNNNN` prefix is the file's position, and the **seal is always the last
 file** — so its number tracks the archive count (here two archives → seal at
-`000002`; a single-archive slot seals at `000001`), it is not fixed.
+`000002`; a single-archive slot seals at `000001`).
 
 (On **tape** the header is instead a fixed 32 KB block inline ahead of each
 payload, since a tape has no sidecars.)
@@ -60,8 +60,8 @@ Archives are produced by **GNU tar** in listed-incremental format, then piped
 through an external compressor (`zstd` by default; `gzip` or `none` also built
 in) and, optionally, an external **encryptor** (`gpg`). NBackup orchestrates
 `tar`, the compressor, and gpg as child processes rather than reimplementing
-them — so the tools that produced an archive are exactly the tools that restore
-it, and **recovery never requires NBackup**:
+them, so the tools that produced an archive are the tools that restore it, and
+**recovery never requires NBackup**:
 
 ```bash
 # single full archive (the disk payload is a clean tar.zst — no header to skip):
@@ -69,11 +69,10 @@ zstd -dc 000000-app01-home-L0.tar.zst | tar -xf -
 
 # a full + incrementals, replayed as NBackup does: ONE archive per level — the
 # newest of each, from the last full forward — in level order. Each level is
-# cumulative since the level below, so only the newest dump of a level is needed;
-# replaying an older same-level rerun would re-apply GNU tar's rename/delete
-# directives and abort ("Cannot rename …"). First order slots by date then
-# same-day sequence (a plain glob mis-sorts a `.2` rerun before its own date,
-# since '.' < '/', so order the dirs explicitly):
+# cumulative since the one below, so only its newest dump is needed; replaying an
+# older same-level rerun re-applies GNU tar's rename/delete directives and aborts
+# ("Cannot rename …"). Order slots by date then same-day sequence (a plain glob
+# mis-sorts a `.2` rerun before its own date, since '.' < '/'):
 dle=app01-home
 slots=$(ls -d slots/slot-* | sed -E 's#(/slot-[0-9-]+)$#\1.1#' \
           | sort -t. -k1,1 -k2,2n | sed -E 's#\.1$##')
@@ -84,14 +83,12 @@ for lvl in $(seq 0 9); do
   a=$(for d in $chain; do ls "$d"/0*-"$dle"-L"$lvl".tar* 2>/dev/null; done | tail -1)
   [ -n "$a" ] && zstd -dc "$a" | tar --extract --listed-incremental=/dev/null
 done
-# (an ENCRYPTED archive keeps the same .tar.zst name — the header records the
-#  scheme, the file is not renamed — and reverses the same way, decrypting first:
-#  gpg -d < 000000-app01-home-L0.tar.zst | zstd -dc | tar -xf -)
+# (an ENCRYPTED archive keeps the same .tar.zst name and reverses the same way,
+#  decrypting first: gpg -d < 000000-app01-home-L0.tar.zst | zstd -dc | tar -xf -)
 # (from tape, skip the 32 KB inline header first: dd bs=32k skip=1 < file | zstd -dc | …)
-# (a tape archive that SPANNED volumes is split into parts — `nb slot show <slot>`
-#  lists the volume chain and each part's position. The parts are the file at that
-#  position on each volume in order (e.g. bay-NN/000001); strip each part's 32 KB
-#  header and concatenate them before decompressing:
+# (a SPANNED tape archive is split into parts — `nb slot show <slot>` lists the
+#  volume chain and each part's position (e.g. bay-NN/000001). Strip each part's
+#  32 KB header and concatenate before decompressing:
 #  for p in bay-01/000001 bay-02/000001 …; do dd bs=32k skip=1 < "$p"; done | zstd -dc | tar -xf -)
 ```
 
@@ -100,19 +97,17 @@ done
 Set an `encrypt` block (config-wide, or per dumptype) to pipe each archive
 through **gpg** after compression — public-key (`recipient`) or symmetric
 (`passphrase_file`). Encryption is *source-tied*: the dump is encrypted once and
-every copy (disk, tape, offsite) holds the same ciphertext, so vaulting with
-`nb sync` never needs the key. The archive records only the **scheme name**
-(`gpg`), never a key — gpg finds the right key in the operator's keyring from the
-ciphertext itself, so a **public-key** dump restores on any host with the private
-key, even with the config gone. (A **symmetric** `passphrase_file` dump still
-needs the `encrypt` block at restore to point gpg at the passphrase file — there
-is no key-id in the ciphertext to discover it from.)
+every copy holds the same ciphertext, so vaulting with `nb sync` never needs the
+key. The archive records only the **scheme name** (`gpg`), never a key — gpg finds
+the right key in the operator's keyring from the ciphertext itself, so a
+**public-key** dump restores on any host with the private key, even with the config
+gone. (A **symmetric** `passphrase_file` dump still needs the `encrypt` block at
+restore to point gpg at the passphrase file — there is no key-id in the ciphertext.)
 
-Two consequences worth knowing: **lose the key and the data is unrecoverable**
-(NBackup holds no copy by design), and the per-slot **seal stays plaintext** —
-filenames and checksums remain readable on the medium so `nb recover` can browse
-without the key. Integrity (`nb verify`) and copy/sync also stay keyless; only
-extraction needs the key.
+Two consequences: **lose the key and the data is unrecoverable** (NBackup holds
+no copy by design), and the per-slot **seal stays plaintext** — filenames and
+checksums remain readable so `nb recover` can browse without the key. Integrity
+(`nb verify`) and copy/sync also stay keyless; only extraction needs the key.
 
 ## Install
 
@@ -128,7 +123,7 @@ This produces a single `nb` binary. The convention: you **inspect** with a noun
 
 | Command              | Purpose                                                  |
 |----------------------|----------------------------------------------------------|
-| `nb check`           | Verify the config and reach every source host (amcheck)  |
+| `nb check`           | Verify the config and reach every source host           |
 | `nb plan`            | Show what the next run would do                          |
 | `nb dump`            | Execute a run and seal a slot                            |
 | `nb status`          | Show progress of the current (or most recent) run        |
@@ -167,8 +162,8 @@ nb verify --all        # re-check every slot's archive checksums
 nb recover --dle app01:/home --date 2026-06-21 --all --dest /tmp/out   # whole-DLE restore
 ```
 
-These global flags work with every command and may appear anywhere on the
-command line — before or after the subcommand and its positional arguments:
+These global flags work with every command and may appear anywhere on the command
+line — before or after the subcommand and its arguments:
 
 | Flag              | Purpose                                  |
 |-------------------|------------------------------------------|
@@ -180,11 +175,11 @@ command line — before or after the subcommand and its positional arguments:
 
 ### Planning
 
-NBackup uses a **multilevel** scheme (levels 0–9) with a dynamic,
-estimate-driven schedule and only two inputs — the **cycle** and the medium's
-**capacity**, no balancing knobs. Levels are realized with GNU tar's
-listed-incremental **snapshot library** under `<catalog>/snapshots/<dle>/L<n>.snar`,
-turning tar's two-level primitive into N-level backups.
+NBackup uses a **multilevel** scheme (levels 0–9) with a dynamic, estimate-driven
+schedule and only two inputs — the **cycle** and the medium's **capacity**, no
+balancing knobs. Levels are realized with GNU tar's listed-incremental **snapshot
+library** under `<catalog>/snapshots/<dle>/L<n>.snar`, turning tar's two-level
+primitive into N-level backups.
 
 **What each run decides.** In order:
 
@@ -192,34 +187,32 @@ turning tar's two-level primitive into N-level backups.
    the next, by running the dump method against `/dev/null` — tar walks metadata
    without reading file bodies, so it is fast yet exactly honors excludes,
    one-file-system, and the incremental snapshot. Sizes are uncompressed: an upper
-   bound on the bytes finally stored.
+   bound on bytes stored.
 2. **Pick a level** per DLE: never-fulled → mandatory L0; at or past the **cycle
    deadline** → forced L0; otherwise an incremental. The cycle is a *hard* ceiling
-   — a full never ages past it — so there is nothing to demote: a full is either
-   due or it isn't. Incrementals follow Amanda's **bump** rule rather than climbing
-   a level per run: a DLE sits at level 1 — re-dumping everything since the full —
-   and climbs to a higher level only after holding the current one a couple of runs
-   *and* when climbing would save at least `bump_percent` of the full size (default
-   5%). So L1 is the common case, deep levels are earned by real savings, restore
-   chains stay short, and consecutive incrementals overlap for redundancy.
+   — a full never ages past it, so a full is either due or it isn't. Incrementals
+   follow a **bump** rule rather than climbing a level per run: a DLE sits at level
+   1 — re-dumping everything since the full — and climbs higher only after holding
+   the current level a couple of runs *and* when climbing would save at least
+   `bump_percent` of the full size (default 5%). So L1 is the common case, deep
+   levels are earned by real savings, restore chains stay short, and consecutive
+   incrementals overlap for redundancy.
 3. **Promote** to balance — the *only* balancing lever, automatic (no knob). It
    builds a **deadline calendar** of upcoming fulls and pulls a full from the
-   heaviest future day onto a lighter run, spreading deadline pile-ups apart. It
-   promotes a DLE onto today only while (a) today is lighter than that future
-   peak, (b) the move strictly lowers the peak — so a *lone* big DLE is never
-   re-fulled early, since moving it would just relocate the peak — and (c) it
-   fits the per-run room. With no free capacity promotion does nothing; with room
-   to spare it spends it to keep backups fresh.
+   heaviest future day onto a lighter run. It promotes a DLE onto today only while
+   (a) today is lighter than that future peak, (b) the move strictly lowers the
+   peak — so a *lone* big DLE is never re-fulled early, since moving it would just
+   relocate the peak — and (c) it fits the per-run room. With no free capacity it
+   does nothing; with room to spare it keeps backups fresh.
 
-This **de-clumps the cold start**: day one fulls everything (recoverability
-first), and promotion staggers the resulting lock-step apart over the next cycle
-or two. The planner consumes only bytes — it never knows whether the medium is
-tape or an object store.
+This **de-clumps the cold start**: day one fulls everything (recoverability first),
+and promotion staggers the resulting lock-step apart over the next cycle or two. The
+planner consumes only bytes — it never knows whether the medium is tape or an object
+store.
 
 #### Two capacity limits
 
-Capacity is the one number you give a medium, and it binds at two different
-scopes:
+Capacity is the one number you give a medium, and it binds at two scopes:
 
 | Scope | What must fit | How it's bounded |
 |-------|---------------|------------------|
@@ -227,40 +220,38 @@ scopes:
 | **Per cycle** | A **complete recovery set**: one full of every DLE — they coexist when `minimum_age ≥ cycle`, so `Σ full_est` must fit capacity. | Structural — no scheduling can change the cycle's fixed full demand. |
 
 When `Σ full_est` exceeds capacity the plan carries a **warning** —
-recoverability is at risk, backups still run — the honest signal to grow capacity
-or lengthen the cycle, rather than silently pruning the oldest recovery points
-away. The priority order is immovable: recoverability and cycle safety come
-first; capacity bounds balance.
+recoverability is at risk, backups still run — the signal to grow capacity or
+lengthen the cycle, rather than silently pruning the oldest recovery points away.
+The priority order is immovable: recoverability and cycle safety come first;
+capacity bounds balance.
 
 #### Forecasting
 
 `nb plan --days N` projects the planner forward over N daily runs, advancing a
 *copy* of the history after each simulated run — so the forecast shows when each
-DLE's next full actually lands and how its incrementals sit and bump in between,
-not just today's decision repeated. Estimates and the capacity ceiling are sampled
-once and held constant (a *level-schedule* forecast, not a capacity timeline);
-nothing is written.
+DLE's next full lands and how its incrementals bump in between, not just today's
+decision repeated. Estimates and the capacity ceiling are sampled once and held
+constant (a *level-schedule* forecast, not a capacity timeline); nothing is written.
 
-`nb dump --dry-run [--date <day>]` is the single-run dry run: it plans the run
-for `--date` against the current catalog — the exact decision a real `nb dump
---date <day>` would make — and prints it without sealing anything.
+`nb dump --dry-run [--date <day>]` is the single-run dry run: it plans the run for
+`--date` against the current catalog — the exact decision a real `nb dump --date
+<day>` would make — and prints it without sealing.
 
 #### Cost (what the bill will be)
 
-You reason in dollars per month, not bytes, so `nb plan` also prints the current
-footprint's **storage `$/month`** and the **marginal `$/month`** the next run adds;
-`nb plan --days N` adds a **`$/MONTH` column** projecting the cost curve as fulls
-land and pruning reclaims. A medium **prices itself** — with no config a cloud
-bucket infers its provider from the URL scheme (`s3://` = AWS, `gs://` = GCS,
-`azblob://` = Azure); a local disk/tape has no recurring bill and is shown without a
-cost line. An optional per-medium `cost:` block overrides a rate (a region's egress)
-or names a different provider table. The big surprise — egress on a restore — is
-surfaced where it bites: `nb recover` estimates **egress `$`** before
-pulling from a cloud store, warning — and, interactively, confirming — when it is
-material; an offsite `nb drill`'s forecast egress carries a `$`. Pricing is a flat
-estimate (storage + egress + request — NBackup does not model Glacier/Deep-Archive
-lifecycle tiers) and **fully offline**: a calculation over the catalog and a rate
-table, no billing API (the provider invoice stays authoritative).
+You reason in dollars per month, not bytes: `nb plan` prints the current footprint's
+**storage `$/month`** and the **marginal `$/month`** the next run adds; `nb plan
+--days N` adds a **`$/MONTH` column** projecting the cost curve as fulls land and
+pruning reclaims. A medium **prices itself** — with no config a cloud bucket infers
+its provider from the URL scheme (`s3://` = AWS, `gs://` = GCS, `azblob://` = Azure);
+local disk/tape has no recurring bill and shows no cost line.
+An optional per-medium `cost:` block overrides a rate (a region's egress) or names a
+different provider table. Egress on a restore is surfaced where it bites: `nb recover`
+estimates **egress `$`** before pulling from a cloud store, warning — and,
+interactively, confirming — when it is material; an offsite `nb drill`'s forecast
+egress carries a `$`. Pricing is a flat estimate (storage + egress + request —
+NBackup does not model Glacier/Deep-Archive lifecycle tiers) and **fully offline**:
+a calculation over the catalog and a rate table, no billing API.
 
 ### Slot naming and multiple runs per day
 
@@ -273,16 +264,13 @@ overwritten. Restores and pruning order slots by date **then** sequence.
 A run writes the archive files, verifies their checksums against what landed on
 the volume, and finally appends the **seal record** — one file carrying the slot
 metadata (identity, sizes, checksums, member listings) with `status: sealed`.
-The seal record is written last, so its presence marks the slot complete; after
-sealing, a slot is immutable — a sealed slot is never overwritten. Re-running a
-sealed date does not clobber it; it produces a new sequence-suffixed slot
-(`slot-YYYY-MM-DD.2`, see above).
+Written last, its presence marks the slot complete and immutable.
 
 ### Monitoring a run
 
-A long `nb dump` (run detached, e.g. from cron) reports progress to a status
-file in the catalog workdir as it goes. From any other shell, `nb status` reads
-that file and prints an at-a-glance report:
+A long `nb dump` (run detached, e.g. from cron) reports progress to a status file
+in the catalog workdir. From any other shell, `nb status` reads it and prints an
+at-a-glance report:
 
 ```text
 Run slot-2026-06-21  [running]
@@ -301,19 +289,18 @@ Rate:     48.10 MB/s
 ETA:      17m18s
 ```
 
-Each DLE's percentage is uncompressed bytes against the planner estimate; the
-run streams source→compressor→volume in one pass, so there is a single `dumping`
-state per DLE (no separate dumper/taper queues). `nb status --watch 2s`
-refreshes until the run finishes; afterwards `nb status` shows the last run's
-final result.
+Each DLE's percentage is uncompressed bytes against the planner estimate; the run
+streams source→compressor→volume in one pass, so there is a single `dumping` state
+per DLE (no separate dumper/taper queues). `nb status --watch 2s` refreshes until the
+run finishes; afterwards `nb status` shows the last run's final result.
 
 ### Reporting & alerting (unattended)
 
-`nb status` shows one live run; for a hands-off install you also want the *history*
-and a way to be told when something breaks. Every mutating command (`dump`, `sync`,
-`prune`, `verify`, `drill`) records a machine-readable summary of its run to the
-catalog workdir — appended to `run-log.jsonl` and mirrored as `run-summary.json`
-(scrape it from a monitoring system) — and exits non-zero on failure.
+`nb status` shows one live run; a hands-off install also wants the *history* and a
+way to be told when something breaks. Every mutating command (`dump`, `sync`,
+`prune`, `verify`, `drill`) records a machine-readable summary to the catalog
+workdir — appended to `run-log.jsonl` and mirrored as `run-summary.json` (scrape it
+from a monitoring system) — and exits non-zero on failure.
 
 `nb report` summarizes the recent history — what ran, what failed, bytes moved —
 and a recovery-health audit that flags any DLE whose drills are failing, *degrading*
@@ -339,7 +326,7 @@ DRILL COVERAGE
 
 `nb report --last 30` widens the window; `nb report --json` emits the raw records.
 
-For the classic per-DLE dump report (Amanda's nightly statistics), `nb report --dump`
+For the classic per-DLE dump report, `nb report --dump`
 prints the latest dump in detail — each DLE's level, original/output size,
 compression %, files, dump time, and rate, with full/incremental totals:
 
@@ -378,19 +365,18 @@ notify:
       url_env: SLACK_WEBHOOK_URL
 ```
 
-**What notifies, when:** any command **alerts on failure** by default (to every
-backend, unless `on_failure` narrows it). A successful **`nb dump`** also notifies by
-default — the nightly "backups happened" signal, so a silent inbox means cron didn't
-run, not that all is well. The other commands' success is opt-in: list backends in
-`on_success` to also get success notices for `sync`/`verify`/`drill`/`prune` (that
-list then applies to dump too). A **dump notification carries the full per-DLE dump
-report** (the same table as `nb report --dump`), so the nightly email *is* Amanda's
-report — not just "it worked".
+**What notifies, when:** any command **alerts on failure** by default (every backend,
+unless `on_failure` narrows it). A successful **`nb dump`** also notifies by default —
+the nightly "backups happened" signal, so a silent inbox means cron didn't run, not
+that all is well. Other commands' success is opt-in: list backends in `on_success`
+for `sync`/`verify`/`drill`/`prune` (that list then applies to dump too). A dump
+notification carries the **full per-DLE dump report** (the `nb report --dump` table),
+so the nightly email *is* the full report — not just "it worked".
 
 Secrets are referenced by environment-variable *name* and resolved at send time, so
 nothing sensitive lives in the config (a literal `password:` is rejected). A
-notification failure — an unreachable mail server, a missing secret, a hung endpoint
-— is only ever a stderr warning: it never fails or blocks the backup. So a complete
+notification failure — unreachable mail server, missing secret, hung endpoint — is
+only ever a stderr warning: it never fails or blocks the backup. So a complete
 hands-off cron line is:
 
 ```sh
@@ -402,23 +388,21 @@ nb dump && nb sync && nb drill --unattended; nb report --notify
 `nb recover` recovers from backups **as they stood on a date**, in two modes.
 
 **Whole-DLE restore (`--all`).** `nb recover --dle X --date D --all --dest out`
-rebuilds an entire DLE: it replays the most recent full at or before the date,
-then every later incremental up to it, in run order, with GNU tar's incremental
+rebuilds an entire DLE: it replays the most recent full at or before the date, then
+every later incremental up to it, in run order, with GNU tar's incremental
 extraction. Because the incrementals carry directory census data, **deletions are
-applied** — a file removed between the full and the date is absent after restore.
+applied** — a file removed between the full and the date is absent after restore —
+and extraction **prunes the destination to match the backup**, so `--dest` must be
+empty (or pass `--force` to restore into a populated one, replacing its contents).
 Omit `--dle` to restore every DLE, each into its own subdirectory of `--dest`.
-That same census means extraction **prunes the destination to match the backup**,
-so `--dest` must be empty (or pass `--force` to restore into a populated one,
-replacing its contents).
 
 **File-level recovery (browse + pick).** Without `--all`, recover browses a DLE's
 filesystem and pulls back individual files or directories. The browse view merges
-the restore chain
-(the full plus every later incremental up to the date) so each path shows its
-newest version on or before the date, and each file is recovered from the
-archive that actually holds it. No separate index server is needed — the index
-is the member list every seal already records, so browsing reads only the
-catalog and touches media only when you extract.
+the restore chain (the full plus every later incremental up to the date) so each
+path shows its newest version on or before the date, recovered from the archive
+that holds it. No separate index server is needed — the index is the member list
+every seal already records, so browsing reads only the catalog and touches media
+only when you extract.
 
 ```bash
 nb recover                                   # interactive shell (below)
@@ -429,7 +413,7 @@ nb recover --dle app01:/home --date 2026-06-20 \
     --path /etc/hosts --path /etc/nginx --dest /tmp/out
 ```
 
-A DLE is identified Amanda-style by `host:path` (`app01:/home`); that is what the
+A DLE is identified by `host:path` (`app01:/home`); that is what the
 tables show and what `--dle`/`setdisk` accept. The interactive shell tracks a
 current DLE and date, then navigate and select:
 
@@ -445,12 +429,11 @@ recovered 12 entr(ies) from 2 archive(s) into /tmp/out
 ```
 
 Paths are relative to the DLE's backed-up root. Selecting a directory pulls its
-whole subtree (each file from the archive that last changed it). Unlike a
-a whole-DLE `--all` restore, selected-file recovery never deletes — it only writes
-the files you asked for. One fidelity note: GNU tar records deletions in its
-snapshot, not in the member index, so a file deleted at a later incremental still
-shows up in the browse view; recover the *whole* DLE with `--all` when you need
-deletion-accurate state.
+whole subtree (each file from the archive that last changed it). Unlike a whole-DLE
+`--all` restore, selected-file recovery never deletes — it only writes the files you
+asked for. One fidelity note: GNU tar records deletions in its snapshot, not the
+member index, so a file deleted at a later incremental still shows in the browse
+view; recover the *whole* DLE with `--all` when you need deletion-accurate state.
 
 ### Verifying and recovery drills
 
@@ -460,12 +443,12 @@ Two layers prove your backups are good, weakest to strongest:
   archive's payload against the seal (corruption detection); it is stateless and
   keyless. `nb verify --deep` adds a **structural** check: it streams the archive
   through the real read pipeline — decrypt → decompress → `tar -t` (list, not
-  extract) — and asserts the pipeline completes and the members match the seal. That
-  proves the bytes are a valid *restorable stream* and exercises the key + codec,
+  extract) — and asserts the pipeline completes and the members match the seal,
+  proving the bytes are a valid *restorable stream* and exercising the key + codec,
   while still writing nothing.
 
 - **`nb drill`** is the recoverability rehearsal layered on `nb verify`. Checksums
-  can't catch a lost key, a codec/tar drift, a broken incremental chain, or an
+  can't catch a lost key, codec/tar drift, a broken incremental chain, or an
   unreadable offsite copy — a drill **actually restores** a risk-biased sample of
   DLEs (full + incrementals, deletion-faithful) into a scratch dir and discards it.
   It is NBackup's contribution of the **"0 errors"** digit of [3-2-1-1-0][321].
@@ -482,26 +465,23 @@ A drill **selects** risk-first: it rotates DLEs so each is drilled within a wind
 prioritizes the longest incremental chains and the oldest fulls still relied upon,
 and drills a **point-in-time** (`--as-of`), not just the latest slot. Each target is
 exercised at a **tier** — `checksum`, `structural`, a real `chain` restore, or
-`stock` (the documented one-liner, proving recovery never requires NBackup) — and
-the outcome is appended to an inspectable **ledger** (`drill-ledger.json`) in the
-workdir: per DLE its last drill, tier, source medium, and pass/fail. A failure is
-**classified** — integrity (corruption), pipeline (key/codec), chain (incremental
-composition), or missing-copy — because each implies a different fix, and the
-command **exits non-zero** so a failed drill can page you.
+`stock` (the documented one-liner) — and the outcome is appended to an inspectable
+**ledger** (`drill-ledger.json`) in the workdir: per DLE its last drill, tier,
+source medium, and pass/fail. A failure is **classified** — integrity (corruption),
+pipeline (key/codec), chain (incremental composition), or missing-copy — because
+each implies a different fix, and the command **exits non-zero** so it can page you.
 
 Two run modes: **attended** (interactive) may prompt to load a tape; **unattended**
 (`--unattended`, the cron mode, auto-detected when stdin is not a terminal) never
-prompts and **skips** any target that would need a tape swap — a skip is a coverage
-warning, not a failure, so a nightly drill stays green while it rotates through the
-fleet.
+prompts and **skips** any target needing a tape swap — a skip is a coverage warning,
+not a failure, so a nightly drill stays green while it rotates through the fleet.
 
 Every run also prints a **3-2-1-1-0 recoverability posture audit** — copies, media,
 offsite presence, immutability, and 0 errors, plus key-reachable, incremental-state,
-and capacity checks. The **immutability** line comes from a WORM probe: NBackup
-keeps one fixed probe object on the `--from` medium and checks that deleting it is
-*refused* (S3 Object Lock, LTO WORM). NBackup only **detects** immutability — you
-configure it operator-side on the storage; least privilege keeps NBackup unable to
-turn it off.
+and capacity checks. The **immutability** line comes from a WORM probe: NBackup keeps
+one fixed probe object on the `--from` medium and checks that deleting it is *refused*
+(S3 Object Lock, LTO WORM). NBackup only **detects** immutability — you configure it
+operator-side on the storage; least privilege keeps NBackup unable to turn it off.
 
 > Honest limits: an encrypted+compressed archive is all-or-nothing to read (you must
 > decrypt+decompress the whole stream to reach late members), so a drill costs the
@@ -512,30 +492,25 @@ turn it off.
 ### Pruning (cycle safety)
 
 `nb prune <medium>` deletes by default; pass `--dry-run` (`-n`) to preview.
-**Retention is per-medium**, so the
-medium to prune is named explicitly (`nb prune disk`, `nb prune offsite`): each
-store is pruned against its own slots, capacity, and `minimum_age` — a copy on
-another medium never makes a slot prunable, because double storage exists for
-redundancy. Pruning has two layers:
+**Retention is per-medium**, so the medium is named explicitly (`nb prune disk`,
+`nb prune offsite`): each store is pruned against its own slots, capacity, and
+`minimum_age` — a copy on another medium never makes a slot prunable, because
+double storage exists for redundancy. Pruning has two layers:
 
 1. **Safety floor**: a slot is *protected* if it is younger than the medium's
-   `minimum_age` (which defaults to one cycle), or if it belongs to a DLE's **live
-   recovery chain** — its last full and *every later incremental* (a whole-DLE
-   restore replays the full plus each incremental in order, so dropping the tip
-   would lose the latest state and dropping a middle incremental would break a
-   climbing-level chain). A recent slot likewise pins the older base its own restore
-   needs. Only a chain **superseded by a newer full** becomes reclaimable. Protected
-   slots are never reclaimed. The rule is medium-neutral; the slot set it judges is
-   the medium's own.
+   `minimum_age` (defaults to one cycle), or belongs to a DLE's **live recovery
+   chain** — its last full and *every later incremental* (a whole-DLE restore
+   replays them in order, so dropping the tip loses the latest state and dropping a
+   middle incremental breaks a climbing-level chain). A recent slot likewise pins the
+   older base its restore needs. Only a chain **superseded by a newer full** becomes
+   reclaimable; protected slots are never reclaimed. The rule is medium-neutral; the
+   slot set it judges is the medium's own.
 2. **Capacity reclamation**: among non-protected slots, the medium's retention
-   strategy reclaims to fit capacity. Object stores (disk, S3) reclaim
-   **per-slot**, deleting the **oldest slots until total ≤ capacity**. Tape
-   reclaims **whole volumes**, not slots: a reel is reused by relabeling it once
-   all its runs are unprotected (Amanda's oldest-reusable-tape pick, applied
-   when a run needs a volume), so `nb prune` never deletes individual slots from
-   a tape.
-
-Add `--dry-run` (`-n`) to preview without deleting.
+   strategy reclaims to fit capacity. Object stores (disk, S3) reclaim **per-slot**,
+   deleting the **oldest slots until total ≤ capacity**. Tape reclaims **whole
+   volumes**: a reel is reused by relabeling it once all its runs are unprotected
+   (the oldest-reusable-tape pick, applied when a run needs a volume), so `nb prune`
+   never deletes individual slots from a tape.
 
 ### Replication / tiered storage
 
@@ -557,12 +532,11 @@ The source defaults to the landing medium; **`--from` overrides it**, so the sam
 command both pushes offsite (disk → tape/S3) and pulls back (tape → disk) —
 reading a tape source mounts the volume holding each slot, just like a restore.
 
-It **copies by default** (like `nb prune` deletes by default; pass `--dry-run`/`-n`
-to preview) and is **idempotent**: each slot copies atomically and records a second
-placement, so re-running resumes where an interrupted sync left off and a
-fully-mirrored target reports "up to date". On a hard error (target full or offline)
-it stops and reports progress. Declare recurring targets in the config so a cron line
-is just `nb dump && nb sync`:
+It **copies by default** (pass `--dry-run`/`-n` to preview) and is **idempotent**:
+each slot copies atomically and records a second placement, so re-running resumes
+where an interrupted sync left off and a fully-mirrored target reports "up to date".
+On a hard error (target full or offline) it stops and reports progress. Declare
+recurring targets in the config so a cron line is just `nb dump && nb sync`:
 
 ```yaml
 sync:
@@ -575,12 +549,11 @@ sync:
 ```
 
 Replication and pruning are independent: each medium prunes against its own
-retention (above), so a slot leaves disk when **disk's** capacity and cycle say
-so — never merely because a copy reached S3 or tape. That is the point of double
-storage: both copies are kept, each retained on its own terms. To use a cheap
-offsite tier as bulk retention while disk stays lean, give disk a tighter
-`capacity` (or shorter `minimum_age`) than the tier; `nb sync` then mirrors slots
-offsite and `nb prune` independently trims disk back to its budget.
+retention, so a slot leaves disk when **disk's** capacity and cycle say so — never
+merely because a copy reached S3 or tape. Both copies are kept, each retained on its
+own terms. To use a cheap offsite tier as bulk retention while disk stays lean, give
+disk a tighter `capacity` (or shorter `minimum_age`) than the tier; `nb sync` mirrors
+slots offsite and `nb prune` independently trims disk back to its budget.
 
 ## Configuration
 
@@ -608,7 +581,7 @@ landing: disk
 # to place it deliberately (e.g. alongside the disk medium above).
 # workdir: /var/lib/nbackup/catalog
 
-# Named archiver definitions (Amanda's "application"): an archiver type + its
+# Named archiver definitions: an archiver type + its
 # content-independent options. An undeclared name is a bare type, so `archiver:
 # gnutar` needs no block; most setups need just one.
 archivers:
@@ -617,7 +590,7 @@ archivers:
     one-file-system: "true"
     # tar_path: gtar     # GNU tar binary (use "gtar" on macOS/BSD)
 
-# Named dumptypes (Amanda's "dumptype"): an archiver reference + per-DLE policy —
+# Named dumptypes: an archiver reference + per-DLE policy —
 # what to skip (exclude) and encryption. Excludes are a content decision, so they
 # live here, not on the archiver; a DLE selects one dumptype.
 dumptypes:
@@ -638,48 +611,44 @@ sources:
 ```
 
 - **Media** is a map of named definitions, each with a `type` and type-specific
-  parameters; `landing` names the one slots are written to. Adding a medium type
-  is a registry registration — no config struct changes.
+  parameters; `landing` names the one slots are written to. Adding a medium type is
+  a registry registration — no config struct changes.
 - **Archivers** are named definitions of the dump program plus its content-
   independent options — the tar binary, `one-file-system`, the incremental
-  `state_dir` (Amanda's "application"). Most setups need just one; an undeclared
-  name is treated as a bare type, so `archiver: gnutar` needs no block.
-- **Dumptypes** name an archiver and carry per-DLE policy — what to skip
-  (`exclude`) and encryption (Amanda's "dumptype"). Excludes live here, not on the
-  archiver, because skipping logs is a decision about the data, not about how tar
-  runs. Compression is config-wide.
-- **Sources** (the disklist) are grouped by dumptype → host → paths, so each DLE
-  is just a path under the dumptype that governs it — all per-DLE tuning lives in
-  the dumptype, never on the entry.
+  `state_dir`. Most setups need just one; an undeclared name is a bare type, so
+  `archiver: gnutar` needs no block.
+- **Dumptypes** name an archiver and carry per-DLE policy — what to skip (`exclude`)
+  and encryption. Excludes live here, not on the archiver, because skipping logs is a
+  decision about the data, not how tar runs. Compression is config-wide.
+- **Sources** (the disklist) are grouped by dumptype → host → paths, so each DLE is
+  just a path under the dumptype that governs it — all per-DLE tuning lives in the
+  dumptype, never on the entry.
 
 ### Capacity and retention are per-medium
 
 Each medium declares its **capacity** — the space NBackup may use there. Disk and
 cloud spell it directly (`capacity: 20TB`); a tape library derives it as
-`bays × volume_size` (`0` = unbounded). Capacity is the headline knob: tell a
-medium how much space you have and the planner uses it — promotion fills free
-space, pruning reclaims to stay within it. `minimum_age` is an optional per-medium
-safety floor that defaults to one cycle — long enough that yesterday's run never
-overwrites a slot still inside the recovery window.
+`bays × volume_size` (`0` = unbounded). Capacity is the headline knob: the planner
+uses it — promotion fills free space, pruning reclaims to stay within it.
+`minimum_age` is an optional per-medium safety floor (defaults to one cycle) — long
+enough that yesterday's run never overwrites a slot still inside the recovery window.
 
 Balancing dumps over time is **not** a medium property — it's a global, temporal
-planning concern (an S3 bucket has no meaningful per-run size). So the planner
-spreads fulls across the global cycle on its own (see [Planning](#planning)).
-Pruning consumes only capacity; the reclamation difference (delete a slot vs
-reclaim a whole tape) lives entirely in the medium's retention strategy.
+planning concern (an S3 bucket has no meaningful per-run size), so the planner
+spreads fulls across the cycle on its own (see [Planning](#planning)). Pruning
+consumes only capacity; the reclamation difference (delete a slot vs reclaim a whole
+tape) lives in the medium's retention strategy.
 
 ### Bandwidth politeness is per-medium
 
 A medium may declare a **throughput** cap — `throughput: 50MB/s` (bytes/sec, the
-`/s` is optional; default uncapped). It is the network analogue of the `nice` CPU
-politeness NBackup already applies: it keeps an `nb dump`/`nb sync` from saturating
-the office uplink during business hours, and a restore/drill download from the same
-medium honors the same budget (the cap is symmetric on reads). It is enforced as a
-token bucket on the medium-facing stream, so it back-pressures the one-pass pipeline
-without a holding-disk buffer. When several workers write one medium concurrently
-they **share** the single budget (Amanda's `netusage`), since a run lands on one
-medium. Set it on the medium whose link you must protect — typically the cloud or a
-remote tier.
+`/s` is optional; default uncapped). The network analogue of the `nice` CPU
+politeness NBackup already applies, it keeps an `nb dump`/`nb sync` from saturating
+the office uplink, and a restore/drill download from the same medium honors the same
+budget (the cap is symmetric on reads). It is enforced as a token bucket on the
+medium-facing stream, back-pressuring the one-pass pipeline without a holding-disk
+buffer. Workers writing one medium concurrently **share** the single budget. Set it
+on the medium whose link you must protect — typically the cloud or a remote tier.
 
 ## Requirements
 
@@ -694,13 +663,13 @@ remote tier.
 
 Implemented: disk, tape, and cloud (S3/GCS/Azure) Volumes, **copying slots between
 media** (`nb copy`, e.g. disk → tape or disk → cloud) with the copy **recorded as a
-second placement** so a restore reads from any available copy (and `nb verify`
-audits *every* copy, reporting that an intact copy remains when one is damaged),
-balanced **multilevel (L0–L9)** planning with a GNU
-tar snapshot library, immutable sealed slots with **sequence-suffixed** same-day
-runs, **deletion-aware** incremental restore, checksum verification, point-in-time
-restore, per-medium capacity reporting, cycle-safe pruning, **unattended reporting
-and alerting** (`nb report`, pluggable email/webhook notifications).
+second placement** so a restore reads from any available copy (and `nb verify` audits
+*every* copy, reporting that an intact copy remains when one is damaged), balanced
+**multilevel (L0–L9)** planning with a GNU tar snapshot library, immutable sealed
+slots with **sequence-suffixed** same-day runs, **deletion-aware** incremental
+restore, checksum verification, point-in-time restore, per-medium capacity reporting,
+cycle-safe pruning, and **unattended reporting and alerting** (`nb report`, pluggable
+email/webhook notifications).
 
 ### Tape
 
@@ -714,14 +683,13 @@ The `tape` medium comes in shapes that differ in *who changes the tape*:
   can load.
 
 When a backup or restore needs a different tape, NBackup **prompts you to swap it
-in and waits** (an unattended run errors instead of hanging). Either way you
-label a blank tape (`nb label`), inventory a medium with `nb medium <name>` (its
-bays, or the drive and shelf), and load a tape with `nb load`. Tapes carry a
-self-describing label that NBackup **verifies before every write**, so a foreign
-or wrong-pool reel is never clobbered. Relabeling a tape that still holds
-**protected** slots (within `minimum_age`, or a DLE's last recovery path — judged
-from the catalog, so a slot spanned across tapes protects every tape it touches)
-is refused unless you pass `--force`.
+in and waits** (an unattended run errors instead of hanging). Either way you label
+a blank tape (`nb label`), inventory a medium with `nb medium <name>` (its bays, or
+the drive and shelf), and load a tape with `nb load`. Tapes carry a self-describing
+label that NBackup **verifies before every write**, so a foreign or wrong-pool reel
+is never clobbered. Relabeling a tape that still holds **protected** slots (within
+`minimum_age`, or a DLE's last recovery path — so a slot spanned across tapes
+protects every tape it touches) is refused unless you pass `--force`.
 
 ### Cloud (object stores)
 
@@ -741,25 +709,25 @@ media:
 `s3://` reaches S3 and any S3-compatible store (MinIO, Cloudflare R2, Backblaze
 B2, Wasabi); `gs://` is Google Cloud Storage; `azblob://` is Azure Blob.
 **Credentials are not in the config** — they come from each SDK's standard
-environment (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_*`), so secrets
-stay out of your YAML. An object store is **address-identified** like disk: no
-labels, no swap prompts, nothing to inventory — it just lands and reclaims slots
-within its `capacity`. Each archive is stored as a clean `.tar.<codec>` object (a
-plain GET restores it with stock tools) plus a small header sidecar, so a slot
-streams disk↔cloud unchanged. (Google Drive and other file-API stores are out of
-scope — `gocloud.dev/blob` is an object-store abstraction.)
+environment (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_*`). An object store
+is **address-identified** like disk: no labels, no swap prompts, nothing to
+inventory — it just lands and reclaims slots within its `capacity`. Each archive is
+stored as a clean `.tar.<codec>` object (a plain GET restores it with stock tools)
+plus a small header sidecar, so a slot streams disk↔cloud unchanged. (Google Drive
+and other file-API stores are out of scope — `gocloud.dev/blob` is an object-store
+abstraction.)
 
 `appendable: true` (default) packs many runs per tape; `appendable: false` uses
 one run per tape. Restore mounts (robot) or prompts for (manual) whichever tape
 holds the copy it needs. A run that **fills a tape mid-write spans onto the next
-one automatically** — for both `nb dump` and `nb copy`/`nb sync`, splitting even a
-single large archive across tapes: a robotic library mounts the next writable bay
-(auto-labeling a blank), a manual drive prompts for a swap. Spanning is
-**proactive** — set `volume_size` so NBackup sizes each chunk to fit *before*
-writing it (a real drive with no readable capacity can instead set `part_size`);
-if a chunk still overflows, the run fails with a clear message rather than
-guessing. A restore reassembles a spanned archive by mounting its tapes in order.
-(Internals: [ARCHITECTURE.md](ARCHITECTURE.md).)
+automatically** — for both `nb dump` and `nb copy`/`nb sync`, splitting even a
+single large archive: a robotic library mounts the next writable bay (auto-labeling
+a blank), a manual drive prompts for a swap. Spanning is **proactive** — set
+`volume_size` so NBackup sizes each chunk to fit *before* writing it (a real drive
+with no readable capacity can instead set `part_size`); if a chunk still overflows,
+the run fails with a clear message rather than guessing. A restore reassembles a
+spanned archive by mounting its tapes in order. (Internals:
+[ARCHITECTURE.md](ARCHITECTURE.md).)
 
 ### Not yet implemented
 
@@ -775,13 +743,12 @@ Declared in config for forward-compatibility:
 
 ## Architecture
 
-NBackup's internals mirror Amanda's pluggable-API structure: mechanism lives
-behind interfaces with named, registered implementations, and one orchestrator
-(`engine`) composes them. The **media are the source of truth** (every file
-self-describing, every slot sealed, every labeled volume identified); the
-**catalog is a local cache** with its own directory, so planning, listing,
-restore-location, and pruning never touch a slow or offline volume, and a single
-scan rebuilds it (`nb rebuild`).
+NBackup's internals are built on a pluggable-API structure: mechanism lives behind
+interfaces with named, registered implementations, and one orchestrator (`engine`)
+composes them. The **media are the source of truth** (every file self-describing,
+every slot sealed, every labeled volume identified); the **catalog is a local cache**
+with its own directory, so planning, listing, restore-location, and pruning never
+touch a slow or offline volume, and a single scan rebuilds it (`nb rebuild`).
 
 Contributors and agents: see **[ARCHITECTURE.md](ARCHITECTURE.md)** for the
 package map, the catalog `Entry`/`Placement` model, the design decisions and

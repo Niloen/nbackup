@@ -92,7 +92,7 @@ type archiveRecord struct {
 // sealed. lim, when non-nil, caps the rate of bytes written to the medium (network
 // politeness); a nil lim is uncapped. The same lim is shared across concurrent
 // WriteArchive calls on an unbounded sink, so several workers to one medium share its
-// budget (Amanda's netusage).
+// budget.
 func NewWriter(sink VolumeSink, spec SlotSpec, lim *ratelimit.Limiter) *Writer {
 	slot := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
 	return &Writer{sink: sink, lim: lim, slot: slot}
@@ -334,10 +334,10 @@ func (w *Writer) Positions() []record.ArchivePos {
 // its own commit footer (written inline as it finished), so Finish only stamps the in-memory
 // slot's completion (for the catalog and the run summary) and never touches the volume.
 //
-// Like Amanda's taper, the write path reads nothing back: each archive was hashed inline as
-// it streamed out (the streaming-meter sha256 recorded in the catalog), so integrity rests on
-// that checksum, not a re-read. Verifying the bytes actually landed is the job of the
-// explicit, operator-invoked `nb verify` (the amcheckdump analogue).
+// The write path reads nothing back: each archive was hashed inline as it streamed out
+// (the streaming-meter sha256 recorded in the catalog), so integrity rests on that
+// checksum, not a re-read. Verifying the bytes actually landed is the job of the
+// explicit, operator-invoked `nb verify`.
 func (w *Writer) Finish(now time.Time) (*record.Slot, error) {
 	if err := w.slot.Seal(now); err != nil {
 		return nil, err

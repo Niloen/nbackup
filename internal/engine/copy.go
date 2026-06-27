@@ -12,7 +12,7 @@ import (
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// copy.go is NBackup's copy operation (Amanda's amflush/vaulting): it re-authors a sealed slot
+// copy.go is NBackup's copy operation: it re-authors a sealed slot
 // from one configured medium onto another, recording the new copy as a second placement. The
 // bytes are carried raw — no transform — so checksums and members carry over; only the part
 // layout changes to fit the target's volumes. It depends on a narrow slice of the orchestrator:

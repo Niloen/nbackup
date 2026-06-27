@@ -36,7 +36,7 @@ func NewRootCmd() *cobra.Command {
 	a := &app{}
 	root := &cobra.Command{
 		Use:     "nb",
-		Short:   "Immutable, slot-based backups inspired by Amanda",
+		Short:   "Immutable, slot-based backups",
 		Long:    rootLong,
 		Version: Version,
 		// Subcommands return errors that main turns into a non-zero exit via

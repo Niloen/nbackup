@@ -1,5 +1,5 @@
-// Package planner decides, for each DLE, which backup level to run. It uses an
-// Amanda-style multilevel scheme (levels 0-9) with a dynamic, estimate-driven
+// Package planner decides, for each DLE, which backup level to run. It uses a
+// multilevel scheme (levels 0-9) with a dynamic, estimate-driven
 // schedule, but with only two user-facing inputs — the cycle and the medium's
 // capacity — and no balancing knobs.
 //
@@ -8,7 +8,7 @@
 // it gets an incremental. The cycle is a *hard* ceiling — a full never ages past it
 // — so there is nothing to "demote": a full is either due or it is not.
 //
-// Incrementals follow Amanda's bump scheme (see chooseIncrLevel). A DLE sits at a
+// Incrementals follow a bump scheme (see chooseIncrLevel). A DLE sits at a
 // level, re-dumping everything since the level below, and climbs to the next level
 // only when it has held the current one for a few runs *and* climbing saves a real
 // fraction of the full. So level 1 is the common case — a deeper level is earned by
@@ -47,7 +47,7 @@ import (
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
-// MaxLevel is the highest incremental level assigned (Amanda uses levels 0-9).
+// MaxLevel is the highest incremental level assigned.
 const MaxLevel = 9
 
 // Estimate is the predicted size of a DLE's dumps at the levels the planner may
@@ -62,7 +62,7 @@ type Estimate struct {
 	IncrNext int64 // level L+1 (0 if not yet estimable)
 }
 
-// bumpDays is Amanda's redundancy guard: a DLE stays at one incremental level for
+// bumpDays is the redundancy guard: a DLE stays at one incremental level for
 // at least this many runs before it may climb, so consecutive incrementals overlap
 // and losing one does not break the restore chain.
 const bumpDays = 2
@@ -83,9 +83,9 @@ type Params struct {
 	// only genuinely free space. Negative means unbounded.
 	RoomBytes int64
 	// BumpPercent is the minimum saving — as a percentage of the full-dump size —
-	// an incremental must show before it climbs to the next level (Amanda's
-	// bumppercent). Higher means levels climb more reluctantly, so level 1 stays
-	// the common case and a deeper level is taken only when it is a real saving.
+	// an incremental must show before it climbs to the next level. Higher means
+	// levels climb more reluctantly, so level 1 stays the common case and a
+	// deeper level is taken only when it is a real saving.
 	BumpPercent float64
 }
 
@@ -181,7 +181,7 @@ func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, p 
 // A DLE *sits* at a level: it repeats that level run after run, each time
 // re-dumping everything changed since the level below — so consecutive
 // incrementals overlap and stay independent of one another. It climbs to the next
-// level only when both Amanda guards pass: it has sat at the current level for at
+// level only when both guards pass: it has sat at the current level for at
 // least bumpDays runs (redundancy), and the next level would save at least
 // BumpPercent of the full-dump size (a real saving). Because the saving from a
 // climb shrinks as levels deepen, a percentage threshold naturally keeps level 1

@@ -8,7 +8,7 @@ import (
 )
 
 // A Transfer moves one byte stream from a Source, through a local Filters chain, to a
-// Sink — NBackup's data-movement primitive (Amanda's Xfer). The three zones map onto the
+// Sink — NBackup's data-movement primitive. The three zones map onto the
 // three hosts that can ever be involved: the source's host (a client's tar), the local
 // server (the compress/encrypt or decrypt/decompress filters), and the sink's host (the
 // medium, or a target's tar). Filters are pinned to the local server on purpose: a

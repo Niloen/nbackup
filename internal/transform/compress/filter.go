@@ -1,6 +1,6 @@
 // Package compress runs stream compressors/decompressors as external child
-// processes, the way Amanda orchestrates gzip/custom compress. NBackup stays a
-// thin driver: it pipes bytes through a child and lets the proven tool do the
+// processes. NBackup stays a thin driver: it pipes bytes through a child and lets
+// the proven tool do the
 // CPU-heavy work, so compression can be threaded and niced independently of nb
 // (in-process compression previously pinned every core).
 //

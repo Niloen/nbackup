@@ -1059,7 +1059,7 @@ func recordFullOnOtherMedium(t *testing.T, eng *Engine, date, dle, medium string
 
 // TestExpectedTapeReusesOldest: on a one-run-per-tape medium the next run expects
 // the oldest volume whose runs are all reusable (past minimum age with a newer
-// recovery path) — Amanda's taper picking the oldest reusable tape.
+// recovery path).
 func TestExpectedTapeReusesOldest(t *testing.T) {
 	eng := tapeEngine(t, false, "10d")
 	now := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)

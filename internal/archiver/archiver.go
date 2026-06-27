@@ -1,7 +1,7 @@
-// Package archiver is NBackup's archive-format abstraction, analogous to Amanda's
-// Application API (amgtar, amstar, ampgsql, ...). An Archiver both produces a raw
-// backup stream and consumes one for restore — it is the bidirectional handler for
-// one archive format, knowing nothing about compression, checksums, where bytes are
+// Package archiver is NBackup's archive-format abstraction. An Archiver both
+// produces a raw backup stream and consumes one for restore — it is the
+// bidirectional handler for one archive format, knowing nothing about
+// compression, checksums, where bytes are
 // stored, or configuration. It operates on a source path and is configured with
 // generic options (supplied by a named archiver definition). It also owns its own
 // incremental state — the non-derivable, per-DLE/per-level base data an incremental
@@ -50,7 +50,7 @@ type BackupSource struct {
 	Cleanup func()
 }
 
-// Archiver is a pluggable archive-format program (Amanda's application): it backs
+// Archiver is a pluggable archive-format program: it backs
 // up (produces a stream) and restores (consumes one), both directions.
 type Archiver interface {
 	Name() string
@@ -79,7 +79,7 @@ type Archiver interface {
 	// into a programs pipeline and runs it; the archiver never streams bytes itself.
 	RestoreStage(destDir string, members []string) programs.Cmd
 	// List reads a raw archive stream and returns its member paths without
-	// extracting anything (amverify's `tar -t`). It writes nothing; it proves the
+	// extracting anything (`tar -t`). It writes nothing; it proves the
 	// stream is a valid, listable archive end-to-end and yields the members to
 	// compare against the seal. The returned paths use the same convention as
 	// BackupResult.Members.

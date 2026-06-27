@@ -20,7 +20,7 @@ import (
 
 // newReportCmd implements `nb report`: the run digest. It reads the run history
 // (run-log.jsonl) and the drill ledger (drill-ledger.json) the other commands write
-// and renders an Amanda-amreport-style summary — what ran, what failed, and which
+// and renders a summary — what ran, what failed, and which
 // DLEs' recovery health is degrading or stale. It needs no engine and takes no lock
 // (read-only, like `nb status`), so it is cheap to run from cron after the nightly
 // `nb dump && nb sync && nb drill`. With --notify it also sends the digest through
@@ -35,7 +35,7 @@ func newReportCmd(a *app) *cobra.Command {
 		Long: "Render a digest of recent runs from the run history every dump/sync/verify/drill/prune " +
 			"writes: a per-run table, a failure summary, and a recovery-health section flagging DLEs whose " +
 			"drills are failing, degrading (passed before, failing now), stale, or never run. With --dump it " +
-			"instead prints an Amanda-style per-DLE report for one dump (the latest, or --slot <id>): each DLE's " +
+			"instead prints a per-DLE report for one dump (the latest, or --slot <id>): each DLE's " +
 			"level, original/output size, compression %, files, dump time, and rate, with full/incremental " +
 			"totals. Reads only — no engine, no lock — so it is cheap to run from cron. With --notify it sends " +
 			"the digest through the config's `notify.digest` backends (e.g. a nightly email); with --json it " +
@@ -71,14 +71,14 @@ func newReportCmd(a *app) *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVar(&last, "last", 10, "summarize the last N runs (0 = all)")
-	cmd.Flags().BoolVar(&dump, "dump", false, "print the per-DLE dump report for the latest dump (Amanda-style)")
+	cmd.Flags().BoolVar(&dump, "dump", false, "print the per-DLE dump report for the latest dump")
 	cmd.Flags().StringVar(&slotID, "slot", "", "with --dump, report on this slot id instead of the latest")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the raw run records as JSON instead of a text report")
 	cmd.Flags().BoolVar(&notify, "notify", false, "also send the digest through the config's notify.digest backends")
 	return cmd
 }
 
-// runDumpReport prints the Amanda-style per-DLE report for one dump from the run
+// runDumpReport prints the per-DLE report for one dump from the run
 // history: the latest dump when slotID is empty, else the named slot. The per-DLE
 // timing it shows is only in the run history (not the seal), so a slot that predates
 // the history — or was compacted out — points the operator at `nb slot show`.

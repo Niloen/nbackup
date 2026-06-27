@@ -14,7 +14,7 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-// Verify is NBackup's atomic verification primitive (Amanda's amverify): it checks
+// Verify is NBackup's atomic verification primitive: it checks
 // individual slots/archives against the seal and is **stateless** — it writes
 // nothing, keeps no ledger, and makes no selection or scheduling decision. Those
 // belong to the drill layer, which consumes the structured VerifyReport this
@@ -77,7 +77,7 @@ type VerifyReport struct {
 	Failures int // slots with at least one failed archive
 }
 
-// verifier is NBackup's verification operation (Amanda's amverify): the stateless integrity
+// verifier is NBackup's verification operation: the stateless integrity
 // primitive that checks slots/archives against the seal and writes nothing. It depends on a
 // narrow slice of the orchestrator — the catalog (slot list + metadata), the clerk (byte
 // endpoints + recorded member list), the decoder (checksum + structural decode), the
