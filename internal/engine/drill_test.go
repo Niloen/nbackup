@@ -35,8 +35,9 @@ func newDrillFixture(t *testing.T, codec string) *drillFixture {
 			"disk":    {Type: "disk", Params: map[string]string{"path": diskDir}},
 			"offsite": {Type: "disk", Params: map[string]string{"path": offsiteDir}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = codec
 
@@ -251,8 +252,9 @@ func TestDrillUnattendedSkipsSwap(t *testing.T) {
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"station": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "3", "volume_size": "1048576"}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 

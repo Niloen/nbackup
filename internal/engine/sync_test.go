@@ -23,9 +23,10 @@ func TestSyncMirrorsLandingToTarget(t *testing.T) {
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 		},
-		Sync:    []config.SyncRule{{To: "archive"}},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sync:     []config.SyncRule{{To: "archive"}},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -100,8 +101,9 @@ func TestSyncSelectionLast(t *testing.T) {
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -144,8 +146,9 @@ func TestSyncFromNonLanding(t *testing.T) {
 			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"cold":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -211,8 +214,9 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 			// Small tapes (256 KiB) across 4 bays: one slot fits, two do not.
 			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "4", "volume_size": "262144"}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -312,8 +316,9 @@ func TestRelabelRefusesProtectedSpanTape(t *testing.T) {
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "6", "volume_size": "262144"}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -399,8 +404,9 @@ func TestSyncSlotOutOfTapes(t *testing.T) {
 			// span onto.
 			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "1", "volume_size": "65536"}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -434,10 +440,11 @@ func TestSyncSlotOutOfTapes(t *testing.T) {
 // TestSyncTargetIsLanding rejects syncing a medium to itself.
 func TestSyncTargetIsLanding(t *testing.T) {
 	cfg := &config.Config{
-		Landing: "disk",
-		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
-		Sources: []config.DLE{{Host: "localhost", Path: t.TempDir()}},
-		Workdir: t.TempDir(),
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
+		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 	eng, err := New(cfg)

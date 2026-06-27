@@ -109,7 +109,7 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 		}
 	}
 
-	ex, overrides := e.executorFor(host) // Local() for a local host, SSH for a remote one
+	ex := e.executorFor(host) // Local() for a local host, SSH for a remote one
 	if remote {
 		if err := ex.Command("true").Run(); err != nil {
 			rep.add(&hc.Lines, false, false, fmt.Sprintf("unreachable over SSH: %v", err))
@@ -146,15 +146,14 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 		}
 	}
 
-	// The .snar library only lives on a remote client; a local DLE uses the server
-	// workdir checked above.
-	if remote {
-		stateDir := overrides["state_dir"]
-		if err := ex.MkdirAll(stateDir); err != nil {
-			rep.add(&hc.Lines, false, false, fmt.Sprintf("state_dir %s not creatable: %v", stateDir, err))
-		} else {
-			rep.add(&hc.Lines, true, false, fmt.Sprintf("state_dir %s writable", stateDir))
-		}
+	// The incremental-state library lives on the host where the archiver runs (the client
+	// for a remote DLE, the server for a local one) and is now distinct from the catalog
+	// workdir, so verify it for every host.
+	stateDir := e.cfg.StateDirFor(host)
+	if err := ex.MkdirAll(stateDir); err != nil {
+		rep.add(&hc.Lines, false, false, fmt.Sprintf("state_dir %s not creatable: %v", stateDir, err))
+	} else {
+		rep.add(&hc.Lines, true, false, fmt.Sprintf("state_dir %s writable", stateDir))
 	}
 	return hc
 }

@@ -12,10 +12,11 @@ import (
 func newCheckEngine(t *testing.T, sources []config.DLE) *Engine {
 	t.Helper()
 	cfg := &config.Config{
-		Landing: "disk",
-		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
-		Sources: sources,
-		Workdir: t.TempDir(),
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
+		Sources:  sources,
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 	eng, err := New(cfg)

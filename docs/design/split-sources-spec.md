@@ -43,7 +43,8 @@ tokens are load-bearing for correctness: a shard *cannot* be expressed outside i
 > **Reconciled with main (post-merge).** The config grew a layer and renamed packages;
 > this spec adapts cleanly:
 > - Config is now **three layers** — `archivers:` (dump programs; `gnutar` owns
->   `one-file-system`/`tar_path`/`state_dir`) → `dumptypes:` (an `archiver:` ref +
+>   `one-file-system`/`tar_path`; the incremental-state root is the host's `state_dir`,
+>   not an archiver option) → `dumptypes:` (an `archiver:` ref +
 >   per-DLE policy, incl. `exclude: ["*.log"]` as a **`[]string`**) → `sources:`. This
 >   spec touches **only `sources:` and `DLE`**, so the three-layer split is orthogonal.
 > - The per-dump exclude channel **already exists**: `archiver.BackupRequest.Exclude

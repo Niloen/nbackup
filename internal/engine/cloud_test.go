@@ -23,8 +23,9 @@ func TestCloudLandingRoundTrip(t *testing.T) {
 		Media: map[string]config.Media{
 			"cloud": {Type: "cloud", Params: map[string]string{"url": "file://" + t.TempDir()}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -66,9 +67,10 @@ func TestSyncDiskToCloud(t *testing.T) {
 			"disk":  {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"cloud": {Type: "cloud", Params: map[string]string{"url": "file://" + t.TempDir()}},
 		},
-		Sync:    []config.SyncRule{{To: "cloud"}},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sync:     []config.SyncRule{{To: "cloud"}},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 

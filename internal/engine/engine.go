@@ -341,9 +341,9 @@ func (e *Engine) volumesInPool(medium string) []catalog.VolumeRecord {
 
 // archiverFor resolves and caches the archiver for a (dumptype, host): the dumptype's
 // named archiver definition (its type + options), with the executor for the DLE's host
-// and the state_dir default injected. A remote host yields an SSH executor (so tar runs
-// on the client) and a client-side state_dir; a local/unlisted host yields the local
-// executor — byte-for-byte today's behavior.
+// and that host's incremental-state root. A remote host yields an SSH executor (so tar
+// runs on the client) and a client-side state root; a local/unlisted host yields the
+// local executor and the server-side state root.
 func (e *Engine) archiverFor(dtName, host string) (archiver.Archiver, error) {
 	dt := e.cfg.ResolveDumpType(dtName)
 	def := e.cfg.ResolveArchiver(dt.Archiver)
@@ -351,15 +351,20 @@ func (e *Engine) archiverFor(dtName, host string) (archiver.Archiver, error) {
 }
 
 // openArchiver returns the cached archiver for key, or opens one of typeName for the host
-// (injecting that host's executor + state_dir overrides) and caches it. It is the shared
-// get-or-open the dump-side archiverFor and read-side restoreArchiver both use; they
-// differ only in the cache key and whether a definition's options apply.
+// (with that host's executor, per-type option overrides, and incremental-state root) and
+// caches it. It is the shared get-or-open the dump-side archiverFor and read-side
+// restoreArchiver both use; they differ only in the cache key and whether a definition's
+// options apply.
 func (e *Engine) openArchiver(key, typeName string, options map[string]string, host string) (archiver.Archiver, error) {
 	if d, ok := e.archivers[key]; ok {
 		return d, nil
 	}
-	ex, overrides := e.executorFor(host)
-	d, err := archiver.Open(typeName, e.archiverOptions(options, overrides), ex)
+	ex := e.executorFor(host)
+	opts := e.archiverOptions(typeName, options, host)
+	// The host's state_dir is shared by every archiver on it; give this one a private
+	// subtree named by its type (e.g. <state_dir>/gnutar) so two archivers can't collide.
+	stateRoot := filepath.Join(e.cfg.StateDirFor(host), typeName)
+	d, err := archiver.Open(typeName, opts, ex, stateRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -402,33 +407,22 @@ func (e *Engine) restoreArchiver(typeName, host string) (archiver.Archiver, erro
 }
 
 // executorFor returns the executor a DLE's host runs its tools on — the local machine for
-// an empty or unlisted host, or an SSH executor for a host configured in the hosts: map —
-// plus the gnutar option overrides that host implies (a client-side state_dir and
-// tar_path). This is the one place "ssh" enters the engine; the archiver never learns it.
-func (e *Engine) executorFor(host string) (programs.Executor, map[string]string) {
+// an empty or unlisted host, or an SSH executor for a host configured in the hosts: map.
+// This is the one place "ssh" enters the engine; the archiver never learns it. Per-host
+// state_dir and archiver-option overrides are resolved separately (see openArchiver), so
+// a client's tar path and .snar root no longer ride on the executor.
+func (e *Engine) executorFor(host string) programs.Executor {
 	hc, ok := e.cfg.RemoteHost(host)
 	if !ok {
-		return programs.Local(), nil
+		return programs.Local()
 	}
-	ex := programs.SSH(programs.Params{
+	return programs.SSH(programs.Params{
 		User:         hc.User,
 		Host:         host,
 		Port:         hc.Port,
 		IdentityFile: hc.IdentityFile,
 		Options:      hc.Options,
 	})
-	// A remote host always gets a client-side state_dir — the configured one, or the
-	// relative default under the backup user's home — so the server's workdir path (the
-	// archiverOptions fallback) never leaks onto a client.
-	stateDir := hc.StateDir
-	if stateDir == "" {
-		stateDir = config.DefaultClientStateDir
-	}
-	over := map[string]string{"state_dir": stateDir}
-	if hc.TarPath != "" {
-		over["tar_path"] = hc.TarPath
-	}
-	return ex, over
 }
 
 // probeReachable verifies a remote source host answers over SSH before a dump
@@ -440,28 +434,24 @@ func (e *Engine) probeReachable(host string) error {
 	if !remote {
 		return nil
 	}
-	ex, _ := e.executorFor(host)
+	ex := e.executorFor(host)
 	if err := ex.Command("true").Run(); err != nil {
 		return fmt.Errorf("source host %q unreachable over SSH (%s): %w — run `nb check` to diagnose", host, sshTarget(host, ssh), err)
 	}
 	return nil
 }
 
-// archiverOptions copies an archiver definition's options, applies host overrides (a
-// remote host's client-side state_dir / tar_path), and injects the state_dir default
-// (the per-DLE/per-level incremental-state library, beneath the workdir) when neither
-// set one. The location is the orchestrator's to default — an archiver cannot know the
-// workdir — which is why it is injected here.
-func (e *Engine) archiverOptions(options, overrides map[string]string) archiver.Options {
+// archiverOptions copies an archiver definition's options and merges this host's per-type
+// overrides (`hosts.<host>.archivers.<typeName>`) over them — a client whose tar binary
+// lives off the default PATH sets it there. The incremental-state root is not here: it is
+// a host-level location passed to archiver.Open as stateRoot (see openArchiver).
+func (e *Engine) archiverOptions(typeName string, options map[string]string, host string) archiver.Options {
 	opts := archiver.Options{}
 	for k, v := range options {
 		opts[k] = v
 	}
-	for k, v := range overrides {
+	for k, v := range e.cfg.ArchiverOverrides(host, typeName) {
 		opts[k] = v
-	}
-	if _, ok := opts["state_dir"]; !ok {
-		opts["state_dir"] = filepath.Join(e.cfg.WorkdirPath(), "snapshots")
 	}
 	return opts
 }
@@ -1296,8 +1286,7 @@ func (e *Engine) Limiter(medium string) *ratelimit.Limiter { return e.limiters[m
 // Executor returns the transport that runs programs on a host — used by the engine's own
 // restore composition (transfer.go).
 func (e *Engine) Executor(host string) programs.Executor {
-	ex, _ := e.executorFor(host)
-	return ex
+	return e.executorFor(host)
 }
 
 // RestoreAsOf reconstructs a whole DLE as of a date into destDir; see restorer.
