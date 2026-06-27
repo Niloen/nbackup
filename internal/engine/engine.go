@@ -1039,7 +1039,7 @@ func planProgress(items []planner.Item) []progress.Plan {
 // serializes its bookkeeping. gate (nil for a direct dump) is the holding disk's capacity
 // back-pressure: a worker charges its archive's bytes and blocks while the disk is over capacity,
 // and a taper failure aborts the gate so the workers stop and the run fails.
-func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Session, commitCh chan<- flushItem, gate *byteGate, tr *progress.Tracker, logf Logf) error {
+func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Session, commitCh chan<- handoff, gate *byteGate, tr *progress.Tracker, logf Logf) error {
 	if workers <= 1 || len(items) <= 1 {
 		for _, item := range items {
 			if gate != nil && gate.err() != nil {
@@ -1101,7 +1101,7 @@ func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Se
 // orchestrator over commitCh. When a holding gate is set, it charges the archive's bytes before
 // the handoff and then blocks while the disk is over capacity (back-pressure) — returning the
 // gate's abort error so the worker stops if the taper has failed.
-func (e *Engine) dumpAndHandoff(session *clerk.Session, item planner.Item, commitCh chan<- flushItem, gate *byteGate, tr *progress.Tracker, logf Logf) error {
+func (e *Engine) dumpAndHandoff(session *clerk.Session, item planner.Item, commitCh chan<- handoff, gate *byteGate, tr *progress.Tracker, logf Logf) error {
 	arch, pos, err := e.backupItem(session, item, tr, logf)
 	if err != nil {
 		return err
@@ -1109,9 +1109,148 @@ func (e *Engine) dumpAndHandoff(session *clerk.Session, item planner.Item, commi
 	if gate != nil {
 		gate.charge(arch.Compressed)
 	}
-	commitCh <- flushItem{arch: arch, pos: pos, dleID: item.DLE.ID()}
+	commitCh <- handoff{arch: arch, pos: pos, dleID: item.DLE.ID()}
 	if gate != nil {
 		return gate.waitUnderCapacity()
+	}
+	return nil
+}
+
+// handoff is one committed archive passed from a worker to the orchestrator: the committed
+// archive (full metadata + member list, so the orchestrator needs no catalog read), its
+// positions on the dump medium, and the DLE's display id for progress/logging.
+type handoff struct {
+	arch  record.Archive
+	pos   record.ArchivePos
+	dleID string
+}
+
+// runOrchestrated executes a dump: the workers dump to the dump medium as background goroutines,
+// handing each committed archive to the orchestrator on this goroutine, which records its
+// placement (and, when buffering, drains it to the landing). It is the one path Run takes for
+// every dump — direct (dump medium == landing) or buffered (dump medium == a holding disk). The
+// orchestrator is the sole catalog writer, so the catalog needs no lock.
+func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio.SlotSpec, dumpMedium string, dumpWT *writeTarget, buffering bool, tr *progress.Tracker, now time.Time, logf Logf) (*record.Slot, error) {
+	dumpSession := e.clerk.OpenSlot(dumpWT.w, dumpMedium)
+
+	// Workers hand each committed archive over commitCh; the buffer holds the whole plan so a
+	// worker never blocks on the orchestrator (a holding disk back-pressures via the gate instead).
+	commitCh := make(chan handoff, len(plan.Items))
+
+	var (
+		gate        *byteGate
+		landSession *clerk.Session
+		holdVol     media.Volume
+	)
+	if buffering {
+		// Landing writer + session for the drain (this goroutine drives the spanning landing
+		// serially). The holding disk's capacity back-pressures the dumpers through the gate.
+		landWT, err := e.prepareWriter(e.mediumName, spec, now, logf)
+		if err != nil {
+			tr.SetPhase(progress.PhaseFailed)
+			return nil, fmt.Errorf("open landing %q: %w", e.mediumName, err)
+		}
+		landSession = e.clerk.OpenSlot(landWT.w, e.mediumName)
+		holdVol = dumpWT.lib.Volume()
+		capBytes, _ := e.cfg.Media[dumpMedium].CapacityBytes()
+		gate = newByteGate(capBytes)
+	}
+
+	// Dumpers in the background; close the queue when they finish (the orchestrator's exit signal).
+	var dumpErr error
+	go func() {
+		dumpErr = e.runWorkers(plan.Items, workers, dumpSession, commitCh, gate, tr, logf)
+		close(commitCh)
+	}()
+
+	slotMeta := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
+	orchErr := e.orchestrate(commitCh, dumpMedium, slotMeta, buffering, landSession, holdVol, gate, tr, logf)
+
+	if err := firstErr(orchErr, dumpErr); err != nil {
+		tr.SetPhase(progress.PhaseFailed)
+		return nil, err
+	}
+	tr.SetPhase(progress.PhaseSealing)
+	// Seal the authoritative slot: the landing when buffering (the holding copies were drained
+	// and reclaimed), else the dump medium itself.
+	sealSession := dumpSession
+	if buffering {
+		sealSession = landSession
+	}
+	sealed, err := sealSession.Finish(time.Now().UTC())
+	if err != nil {
+		tr.SetPhase(progress.PhaseFailed)
+		return nil, err
+	}
+	tr.SetPhase(progress.PhaseDone)
+	return sealed, nil
+}
+
+// orchestrate records each committed archive's dump-medium placement as it arrives and, when
+// buffering, drains it to the landing. Each loop it first records every commit available right
+// now (so the catalog reflects the dump medium's contents promptly — the live view), then, when
+// buffering, flushes one staged archive to the landing. A direct dump never stages, so it just
+// records each placement as it arrives. The drain itself (flushOne) lives in flush.go with the
+// rest of the holding-disk taper.
+func (e *Engine) orchestrate(commitCh <-chan handoff, dumpMedium string, slotMeta *record.Slot, buffering bool, landSession *clerk.Session, holdVol media.Volume, gate *byteGate, tr *progress.Tracker, logf Logf) error {
+	var pending []handoff
+	open := true
+	for open || len(pending) > 0 {
+		if open {
+			// Record every immediately-available commit's dump-medium placement.
+		drain:
+			for {
+				select {
+				case it, ok := <-commitCh:
+					if !ok {
+						open = false
+						break drain
+					}
+					if err := e.cat.AddArchive(slotMeta, dumpMedium, it.arch, it.pos); err != nil {
+						return err
+					}
+					if buffering {
+						pending = append(pending, it)
+					}
+				default:
+					break drain
+				}
+			}
+		}
+		if len(pending) > 0 {
+			it := pending[0]
+			pending = pending[1:]
+			if err := e.flushOne(landSession, slotMeta, dumpMedium, holdVol, it, gate, tr, logf); err != nil {
+				gate.abort(err)
+				return err
+			}
+			continue
+		}
+		if !open {
+			break
+		}
+		// Nothing pending (or not buffering) and the dumpers are still going: block for the next.
+		it, ok := <-commitCh
+		if !ok {
+			open = false
+			continue
+		}
+		if err := e.cat.AddArchive(slotMeta, dumpMedium, it.arch, it.pos); err != nil {
+			return err
+		}
+		if buffering {
+			pending = append(pending, it)
+		}
+	}
+	return nil
+}
+
+// firstErr returns the first non-nil error, in order.
+func firstErr(errs ...error) error {
+	for _, e := range errs {
+		if e != nil {
+			return e
+		}
 	}
 	return nil
 }

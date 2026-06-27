@@ -9,22 +9,18 @@ import (
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-// flush.go is the dump's orchestrator and the holding disk's taper. Every dump runs the same
-// shape: the workers dump to the dump medium as background goroutines and hand each committed
-// archive over a channel to the orchestrator, which runs on the MAIN goroutine and is the run's
-// sole catalog writer (so the catalog needs no lock). The orchestrator records each archive's
-// placement on the dump medium as it arrives. When the dump medium is a holding disk it is also
-// the taper: it copies each archive to the authoritative landing, then reclaims the holding copy.
-// A byteGate sized to the holding disk's capacity back-pressures the dumpers; a landing failure
-// aborts it so the dumpers stop and the run fails — never dropping data. The dumpers write an
-// unbounded disk/cloud sink (parallel-safe); the taper drives the spanning landing serially (the
-// two combinations the writer already documents). Flush (below) is the amflush analogue, draining
-// a crashed run's leftover holding archives on the next dump.
+// flush.go is the holding disk's taper. The dump orchestrator (engine.go) drives every run; when
+// the dump medium is a holding disk it hands each committed archive here to be drained: copied to
+// the authoritative landing, then reclaimed off the disk (flushOne). A byteGate sized to the
+// holding disk's capacity back-pressures the dumpers; a landing failure aborts it so the dumpers
+// stop and the run fails — never dropping data. The dumpers write an unbounded disk/cloud sink
+// (parallel-safe); the taper drives the spanning landing serially (the two combinations the
+// writer already documents). Flush is the amflush analogue, draining a crashed run's leftover
+// holding archives on the next dump.
 
 // byteGate is the holding disk's capacity back-pressure. A dumper charges an archive's bytes
 // when it commits, then waits while the disk is over capacity; the taper releases the bytes
@@ -93,139 +89,11 @@ func (g *byteGate) err() error {
 	return g.aborted
 }
 
-// flushItem is one committed archive handed from a worker to the orchestrator: the committed
-// archive (full metadata + member list, so the orchestrator needs no catalog read), its
-// positions on the dump medium, and the DLE's display id for progress/logging.
-type flushItem struct {
-	arch  record.Archive
-	pos   record.ArchivePos
-	dleID string
-}
-
-// runOrchestrated executes a dump: the workers dump to the dump medium as background goroutines,
-// handing each committed archive to the orchestrator on this goroutine, which records its
-// placement (and, when buffering, drains it to the landing). It is the one path Run takes for
-// every dump — direct (dump medium == landing) or buffered (dump medium == a holding disk). The
-// orchestrator is the sole catalog writer, so the catalog needs no lock.
-func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio.SlotSpec, dumpMedium string, dumpWT *writeTarget, buffering bool, tr *progress.Tracker, now time.Time, logf Logf) (*record.Slot, error) {
-	dumpSession := e.clerk.OpenSlot(dumpWT.w, dumpMedium)
-
-	// Workers hand each committed archive over commitCh; the buffer holds the whole plan so a
-	// worker never blocks on the orchestrator (a holding disk back-pressures via the gate instead).
-	commitCh := make(chan flushItem, len(plan.Items))
-
-	var (
-		gate        *byteGate
-		landSession *clerk.Session
-		holdVol     media.Volume
-	)
-	if buffering {
-		// Landing writer + session for the drain (this goroutine drives the spanning landing
-		// serially). The holding disk's capacity back-pressures the dumpers through the gate.
-		landWT, err := e.prepareWriter(e.mediumName, spec, now, logf)
-		if err != nil {
-			tr.SetPhase(progress.PhaseFailed)
-			return nil, fmt.Errorf("open landing %q: %w", e.mediumName, err)
-		}
-		landSession = e.clerk.OpenSlot(landWT.w, e.mediumName)
-		holdVol = dumpWT.lib.Volume()
-		capBytes, _ := e.cfg.Media[dumpMedium].CapacityBytes()
-		gate = newByteGate(capBytes)
-	}
-
-	// Dumpers in the background; close the queue when they finish (the orchestrator's exit signal).
-	var dumpErr error
-	go func() {
-		dumpErr = e.runWorkers(plan.Items, workers, dumpSession, commitCh, gate, tr, logf)
-		close(commitCh)
-	}()
-
-	slotMeta := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
-	orchErr := e.orchestrate(commitCh, dumpMedium, slotMeta, buffering, landSession, holdVol, gate, tr, logf)
-
-	if err := firstErr(orchErr, dumpErr); err != nil {
-		tr.SetPhase(progress.PhaseFailed)
-		return nil, err
-	}
-	tr.SetPhase(progress.PhaseSealing)
-	// Seal the authoritative slot: the landing when buffering (the holding copies were drained
-	// and reclaimed), else the dump medium itself.
-	sealSession := dumpSession
-	if buffering {
-		sealSession = landSession
-	}
-	sealed, err := sealSession.Finish(time.Now().UTC())
-	if err != nil {
-		tr.SetPhase(progress.PhaseFailed)
-		return nil, err
-	}
-	tr.SetPhase(progress.PhaseDone)
-	return sealed, nil
-}
-
-// orchestrate records each committed archive's dump-medium placement as it arrives and, when
-// buffering, drains it to the landing. Each loop it first records every commit available right
-// now (so the catalog reflects the dump medium's contents promptly — the live view), then, when
-// buffering, flushes one staged archive to the landing. A direct dump never stages, so it just
-// records each placement as it arrives.
-func (e *Engine) orchestrate(commitCh <-chan flushItem, dumpMedium string, slotMeta *record.Slot, buffering bool, landSession *clerk.Session, holdVol media.Volume, gate *byteGate, tr *progress.Tracker, logf Logf) error {
-	var pending []flushItem
-	open := true
-	for open || len(pending) > 0 {
-		if open {
-			// Record every immediately-available commit's dump-medium placement.
-		drain:
-			for {
-				select {
-				case it, ok := <-commitCh:
-					if !ok {
-						open = false
-						break drain
-					}
-					if err := e.cat.AddArchive(slotMeta, dumpMedium, it.arch, it.pos); err != nil {
-						return err
-					}
-					if buffering {
-						pending = append(pending, it)
-					}
-				default:
-					break drain
-				}
-			}
-		}
-		if len(pending) > 0 {
-			it := pending[0]
-			pending = pending[1:]
-			if err := e.flushOne(landSession, slotMeta, dumpMedium, holdVol, it, gate, tr, logf); err != nil {
-				gate.abort(err)
-				return err
-			}
-			continue
-		}
-		if !open {
-			break
-		}
-		// Nothing pending (or not buffering) and the dumpers are still going: block for the next.
-		it, ok := <-commitCh
-		if !ok {
-			open = false
-			continue
-		}
-		if err := e.cat.AddArchive(slotMeta, dumpMedium, it.arch, it.pos); err != nil {
-			return err
-		}
-		if buffering {
-			pending = append(pending, it)
-		}
-	}
-	return nil
-}
-
 // flushOne copies one archive from the holding disk to the landing, then reclaims the holding
 // copy (files + placement) and releases its back-pressure. CopyArchive records the landing
 // placement inline (single-threaded here), so the archive is on the landing in the catalog
 // before its holding copy is dropped — never absent.
-func (e *Engine) flushOne(landSession *clerk.Session, slotMeta *record.Slot, holding string, holdVol media.Volume, it flushItem, gate *byteGate, tr *progress.Tracker, logf Logf) error {
+func (e *Engine) flushOne(landSession *clerk.Session, slotMeta *record.Slot, holding string, holdVol media.Volume, it handoff, gate *byteGate, tr *progress.Tracker, logf Logf) error {
 	if tr != nil {
 		tr.StartFlush(it.dleID)
 	}
@@ -376,14 +244,4 @@ func (e *Engine) archiveOnLanding(slotID, dle string, level int) bool {
 		}
 	}
 	return false
-}
-
-// firstErr returns the first non-nil error, in order.
-func firstErr(errs ...error) error {
-	for _, e := range errs {
-		if e != nil {
-			return e
-		}
-	}
-	return nil
 }
