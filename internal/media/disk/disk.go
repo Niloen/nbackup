@@ -70,6 +70,13 @@ func (s fsStore) Open(key string) (io.ReadCloser, error) { return os.Open(s.full
 
 func (s fsStore) RemoveTree(slot string) error { return os.RemoveAll(filepath.Join(s.root, slot)) }
 
+func (s fsStore) Remove(key string) error {
+	if err := os.Remove(s.full(key)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func (s fsStore) List() ([]fslike.Object, error) {
 	slots, err := os.ReadDir(s.root)
 	if err != nil {

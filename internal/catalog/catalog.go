@@ -201,6 +201,48 @@ func (c *Catalog) RemovePlacement(slotID, medium string) (gone bool, err error) 
 	return gone, c.persist()
 }
 
+// RemoveArchive drops one archive (a DLE's image) from the copy of a slot on one
+// medium — the per-archive peer of RemovePlacement. It removes that DLE's ArchivePos
+// from the medium's placement; when the placement keeps no archives the whole
+// placement goes (placementGone), and when that was the slot's last copy the entry
+// goes too (entryGone) — the slot no longer exists anywhere. The slot's
+// medium-independent content (Entry.Slot.Archives) is left intact while any copy
+// survives: it describes what the slot is, not what any one medium still holds.
+func (c *Catalog) RemoveArchive(slotID, medium, dle string) (placementGone, entryGone bool, err error) {
+	e := c.entryByID(slotID)
+	if e == nil {
+		return false, false, nil
+	}
+	for i := range e.Placements {
+		p := &e.Placements[i]
+		if p.Medium != medium {
+			continue
+		}
+		kept := p.Archives[:0:0]
+		for _, a := range p.Archives {
+			if a.DLE != dle {
+				kept = append(kept, a)
+			}
+		}
+		p.Archives = kept
+		break
+	}
+	kept := e.Placements[:0:0]
+	for _, p := range e.Placements {
+		if len(p.Archives) > 0 {
+			kept = append(kept, p)
+		} else {
+			placementGone = true
+		}
+	}
+	e.Placements = kept
+	if len(e.Placements) == 0 {
+		c.removeEntry(slotID)
+		entryGone = true
+	}
+	return placementGone, entryGone, c.persist()
+}
+
 // RecordVolume upserts a labeled volume's identity in the registry, so a later run
 // can detect a swapped or relabeled volume.
 func (c *Catalog) RecordVolume(lbl record.Label) error {

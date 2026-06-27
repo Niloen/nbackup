@@ -588,9 +588,7 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 
 	// Physically remove the primary copy but leave its placement recorded: restore
 	// must try it, fail, and fall over to the archive copy.
-	if err := eng.vol.RemoveSlot(s.ID); err != nil {
-		t.Fatal(err)
-	}
+	removeSlotFiles(t, eng, s.ID)
 	dest := t.TempDir()
 	name := config.DLE{Host: "localhost", Path: src}.Name()
 	if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
@@ -645,6 +643,57 @@ func TestRunWritesStatus(t *testing.T) {
 }
 
 func boolp(b bool) *bool { return &b }
+
+// TestArchivePositionsCommitFirst pins the crash-safe removal order: the commit
+// footer (the archive's marker) is reclaimed FIRST, then the index, then the parts —
+// so a crash mid-prune leaves footer-less orphans a rebuild ignores, never a footer
+// whose parts are already gone (which would rebuild into a phantom committed archive).
+func TestArchivePositionsCommitFirst(t *testing.T) {
+	ps := []catalog.Placement{{
+		Medium: "disk",
+		Archives: []catalog.ArchivePos{{
+			DLE:    "app",
+			Level:  0,
+			Parts:  []record.FilePos{{Pos: 0}, {Pos: 1}},
+			Index:  record.FilePos{Pos: 2},
+			Commit: record.FilePos{Pos: 3},
+		}},
+	}}
+	got := archivePositions(ps, "disk", "app")
+	want := []int{3, 2, 0, 1} // commit, index, parts
+	if len(got) != len(want) {
+		t.Fatalf("positions = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("position[%d] = %d, want %d (full order %v, want %v)", i, got[i], want[i], got, want)
+		}
+	}
+	// An archive with no member index omits that slot, still commit-first.
+	ps[0].Archives[0].Index = record.FilePos{}
+	if got := archivePositions(ps, "disk", "app"); len(got) != 3 || got[0] != 3 {
+		t.Fatalf("without index, order = %v, want [3 0 1] (commit first)", got)
+	}
+}
+
+// removeSlotFiles deletes every file of a slot from the landing volume by position —
+// the test peer of a whole-slot reclamation now that the Volume seam is per-file. Used
+// to simulate a copy going missing from one medium.
+func removeSlotFiles(t *testing.T, eng *Engine, slotID string) {
+	t.Helper()
+	files, err := eng.vol.Files()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if f.Header.Slot != slotID {
+			continue
+		}
+		if err := eng.vol.RemoveFile(f.Pos); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 // TestTapeLibraryRestore copies two slots onto two different tapes in a library,
 // removes the disk copies, then restores both — proving the changer auto-mounts
@@ -706,12 +755,8 @@ func TestTapeLibraryRestore(t *testing.T) {
 	}
 
 	// Drop the disk copies so restore must fall over to the tapes (different bays).
-	if err := eng.vol.RemoveSlot(s1.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := eng.vol.RemoveSlot(s2.ID); err != nil {
-		t.Fatal(err)
-	}
+	removeSlotFiles(t, eng, s1.ID)
+	removeSlotFiles(t, eng, s2.ID)
 
 	name := config.DLE{Host: "localhost", Path: src}.Name()
 	d1 := t.TempDir()
@@ -919,12 +964,8 @@ func TestManualStationReadSwap(t *testing.T) {
 	}
 
 	// Drop the disk copies so restore must read from the reels.
-	if err := eng.vol.RemoveSlot(s1.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := eng.vol.RemoveSlot(s2.ID); err != nil {
-		t.Fatal(err)
-	}
+	removeSlotFiles(t, eng, s1.ID)
+	removeSlotFiles(t, eng, s2.ID)
 
 	op := &scriptedOperator{}
 	eng.SetOperator(op)
@@ -1321,9 +1362,7 @@ func TestCopySpansArchiveAcrossTapes(t *testing.T) {
 	}
 
 	// Drop the disk copy so restore must read the spanned tape copy.
-	if err := eng.vol.RemoveSlot(s.ID); err != nil {
-		t.Fatal(err)
-	}
+	removeSlotFiles(t, eng, s.ID)
 	if _, err := eng.cat.RemovePlacement(s.ID, "disk"); err != nil {
 		t.Fatal(err)
 	}

@@ -85,7 +85,7 @@ func (e *Engine) ForecastCost(start time.Time, days int) []ForecastPoint {
 		var reclaimed int64
 		for _, r := range e.profile.Reclaim(working, floor, date) {
 			reclaimed += r.Bytes
-			working = dropSlot(working, r.SlotID)
+			working = dropArchive(working, r.SlotID, r.DLE)
 		}
 
 		var bytes int64
@@ -229,6 +229,33 @@ func dropSlot(slots []*record.Slot, id string) []*record.Slot {
 	out := slots[:0:0]
 	for _, s := range slots {
 		if s.ID != id {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// dropArchive removes one DLE's archive from a slot in the working set (the
+// per-archive peer of dropSlot), so the cost forecast mirrors per-archive
+// reclamation: it shrinks the slot's TotalBytes by the archive's size and drops the
+// slot entirely once its last archive is gone.
+func dropArchive(slots []*record.Slot, id, dle string) []*record.Slot {
+	out := slots[:0:0]
+	for _, s := range slots {
+		if s.ID != id {
+			out = append(out, s)
+			continue
+		}
+		kept := s.Archives[:0:0]
+		for _, a := range s.Archives {
+			if a.DLE == dle {
+				s.TotalBytes -= a.Compressed
+			} else {
+				kept = append(kept, a)
+			}
+		}
+		s.Archives = kept
+		if len(s.Archives) > 0 {
 			out = append(out, s)
 		}
 	}

@@ -52,6 +52,9 @@ type Store interface {
 	List() ([]Object, error)
 	// RemoveTree deletes every file belonging to slot.
 	RemoveTree(slot string) error
+	// Remove deletes a single file by key (one archive's payload or sidecar). A
+	// missing key is not an error (idempotent reclamation).
+	Remove(key string) error
 }
 
 // entry pairs a file's header sidecar and payload keys with its slot. incomplete
@@ -199,18 +202,34 @@ func (v *Volume) Files() ([]record.FileInfo, error) {
 	return out, nil
 }
 
-func (v *Volume) RemoveSlot(slot string) error {
-	if err := v.store.RemoveTree(slot); err != nil {
-		return err
-	}
+// RemoveFile deletes the payload and header sidecar at pos and drops them from the
+// index. The slot is read from the index entry; when removing this file empties the
+// slot's subtree, the now-empty directory is reclaimed too, leaving no stray
+// directory behind. A position already gone is a no-op (idempotent).
+func (v *Volume) RemoveFile(pos int) error {
 	v.mu.Lock()
-	for pos, e := range v.idx {
-		if e.slot == slot {
-			delete(v.idx, pos)
+	defer v.mu.Unlock()
+	e, ok := v.idx[pos]
+	if !ok {
+		return nil // already gone (idempotent)
+	}
+	if e.payload != "" {
+		if err := v.store.Remove(e.payload); err != nil {
+			return err
 		}
 	}
-	v.mu.Unlock()
-	return nil
+	if e.hdr != "" {
+		if err := v.store.Remove(e.hdr); err != nil {
+			return err
+		}
+	}
+	delete(v.idx, pos)
+	for _, other := range v.idx {
+		if other.slot == e.slot {
+			return nil // the slot still has files; keep its subtree
+		}
+	}
+	return v.store.RemoveTree(e.slot) // last file in the slot: reclaim the empty directory
 }
 
 // scan builds the position index from the Store's file listing only — it does not

@@ -191,12 +191,12 @@ func TestConcurrentAppend(t *testing.T) {
 	}
 }
 
-func TestRemoveSlot(t *testing.T) {
+func TestRemoveFile(t *testing.T) {
 	v := openVol(t)
-	appendArchive(t, v, "slot-a", "h-data", 0, "a")
+	posA := appendArchive(t, v, "slot-a", "h-data", 0, "a")
 	appendArchive(t, v, "slot-b", "h-data", 0, "b")
 
-	if err := v.RemoveSlot("slot-a"); err != nil {
+	if err := v.RemoveFile(posA); err != nil {
 		t.Fatal(err)
 	}
 	files, err := v.Files()
@@ -204,7 +204,11 @@ func TestRemoveSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(files) != 1 || files[0].Header.Slot != "slot-b" {
-		t.Fatalf("after RemoveSlot(slot-a), files = %+v", files)
+		t.Fatalf("after RemoveFile(slot-a), files = %+v", files)
+	}
+	// Removing a position again is a no-op (idempotent).
+	if err := v.RemoveFile(posA); err != nil {
+		t.Fatalf("second RemoveFile should be a no-op: %v", err)
 	}
 }
 

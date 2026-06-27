@@ -539,10 +539,21 @@ func (e *Engine) wormProbe(medium string, apply bool, now time.Time) WormResult 
 		return res
 	}
 	res.Tested = true
-	if err := vol.RemoveSlot(wormProbeSlot); err != nil {
-		res.Enforced = true
-		res.Detail = fmt.Sprintf("delete of probe refused (%v) — immutability ENFORCED", err)
+	// Delete the probe's file(s) by position — a refused delete proves WORM/Object-Lock.
+	files, err := vol.Files()
+	if err != nil {
+		res.Detail = fmt.Sprintf("could not enumerate probe: %v", err)
 		return res
+	}
+	for _, f := range files {
+		if f.Header.Slot != wormProbeSlot {
+			continue
+		}
+		if err := vol.RemoveFile(f.Pos); err != nil {
+			res.Enforced = true
+			res.Detail = fmt.Sprintf("delete of probe refused (%v) — immutability ENFORCED", err)
+			return res
+		}
 	}
 	res.Detail = "delete of probe succeeded — storage is MUTABLE (no WORM/Object-Lock)"
 	return res

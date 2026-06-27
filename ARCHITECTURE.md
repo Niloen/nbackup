@@ -16,9 +16,12 @@ restore with stock tools.
 - **DLE** — a backup source (`host` + `path`). Amanda's disklist entry.
 - **Run** — one planner execution (typically daily).
 - **Slot** — the primary artifact: one **Run** produces exactly one Slot, an
-  immutable, sealed set of archives. Addressable unit for copy / restore / list /
-  retention. (`slot-YYYY-MM-DD`, `.2`/`.3` for same-day reruns.)
-- **Archive** — one **DLE** image at one level inside a Slot (Amanda's "dump").
+  immutable, sealed set of archives. Addressable unit for copy / restore / list.
+  (`slot-YYYY-MM-DD`, `.2`/`.3` for same-day reruns.)
+- **Archive** — one **DLE** image at one level inside a Slot (Amanda's "dump"). The
+  unit of **retention/pruning**: the floor and disk/cloud reclamation are per-archive,
+  so an old slot can shed one DLE's image while keeping a slot-mate the chain needs.
+  Browse the per-DLE timeline with `nb dle`.
 - **Cycle** — the safety/scheduling boundary: every DLE is fulled once per cycle.
 - **Medium** — a named storage definition; opens as a **Volume**.
 - **Volume** — an ordered sequence of header-framed, self-describing files
@@ -61,7 +64,7 @@ registry registration, not a conditional in the core.
 | `report` | per-run history record + JSONL/summary file I/O + digest render | amreport |
 | `notify` | pluggable alert backends (smtp/webhook) + registry + dispatch | amreport mailto |
 | `catalog` | local cache of slot index + volume registry; derives `History` | catalog / curinfo / tapelist |
-| `retention` | retention safety floor: protected slots — `Compute` returns a `Floor` (`.Keeps(id)`) (pure) | policy |
+| `retention` | retention safety floor: protected archives — `Compute` returns a per-`(slot,DLE)` `Floor` (`.KeepsArchive`, plus slot-level `.Keeps`/`.First`) (pure) | policy |
 | `restore` | the archive chain to rebuild a DLE as of a slot (pure) | amrestore |
 | `recovery` | as-of-date browse tree + per-archive file selection (pure) | amrecover |
 | `drill` | recovery-drill ledger + risk-biased selection + failure taxonomy (pure) | amverify (orchestrated) |
@@ -528,15 +531,28 @@ result reaches someone. Three load-bearing choices, all mirroring existing stanc
   *notification* also uses, so a configured dump alert *is* the nightly report, not a
   bare "it worked". (A slot older than the history shows sizes via `nb slot show`.)
 
-**Reclamation asymmetry.** Disk/S3 reclaim per slot (`RemoveSlot`); tape reclaims a
-whole volume (relabel — `tape.RemoveSlot` errors, and `volumeProfile.Reclaim`
-returns nothing, so `nb prune` never deletes a slot from a tape). Pruning has a
-safety floor (`retention.Compute`: younger than `minimum_age`, or part of a DLE's
-**live recovery chain** — its last full plus every later incremental, since
-`restore.Chain` replays them all; a recent slot also pins the older base its restore
-needs, so reclamation never breaks a chain it leaves restorable) plus a per-medium
-capacity strategy. Both are per-medium: the floor's rule is shared but is judged over
-one medium's own slots, so a copy on another medium never makes a slot reclaimable.
+**Reclamation asymmetry, and it is per-archive.** Disk/S3 reclaim per **archive**
+(a DLE's image within a slot), not per slot; tape reclaims a whole volume (relabel —
+`tape.RemoveFile` errors, and `volumeProfile.Reclaim` returns nothing, so `nb prune`
+never deletes from a tape). Per-archive is the granularity the **floor already uses**:
+`retention.Compute` returns a floor keyed by `(slot, DLE)` (younger than `minimum_age`,
+or part of a DLE's **live recovery chain** — its last full plus every later incremental,
+since `restore.Chain` replays them all; a recent slot also pins the older base its
+restore needs, so reclamation never breaks a chain it leaves restorable). Because a
+DLE's chain is independent of its slot-mates', an old slot routinely holds one DLE
+whose chain has moved past it (reclaimable) beside another the chain still needs —
+walking archives oldest-first (`sizeProfile.Reclaim`) frees exactly the dead ones,
+where a slot-granular pass would strand them behind a single still-pinned DLE. The
+floor still answers slot-level queries (`Keeps`/`First` = "is *any* archive pinned")
+for the whole-volume reclaimers (tape relabel, `ExpectedTape`) and the cost forecast.
+Both floor and capacity strategy are per-medium: the rule is shared but judged over one
+medium's own slots, so a copy on another medium never makes an archive reclaimable.
+The `Volume` seam stays purely positional — one `RemoveFile(pos)` (the peer of
+`ReadFile`); the engine resolves an archive's positions from the catalog and removes
+them one by one, and fslike reclaims an emptied slot directory itself, so the medium
+interface never names "slot" or "archive". `nb dle` browses the same catalog grouped by
+DLE (one row per source, then its archive timeline across slots) — the per-DLE view of
+what `nb slot` groups by run.
 
 **Capacity model (`media.Profile`).** A profile exposes two numbers that the
 planner keeps distinct. `TotalBytes` is the **pool** — the retainable capacity
@@ -610,7 +626,7 @@ GET `$/1000`. Four decisions carry it:
   `tar`, `gzip`, `nice` are present. Tests that need GNU tar `t.Skip` when absent.
 - **CLI:** flags may appear before or after positionals (`parseArgs`); subcommand
   dispatch (`slot show`) keys on the first arg. The convention is **inspect with a
-  noun** (`nb slot`, `nb medium`), **act with a flat verb** (`nb dump`, `nb check`, `nb verify`,
+  noun** (`nb slot`, `nb dle`, `nb medium`), **act with a flat verb** (`nb dump`, `nb check`, `nb verify`,
   `nb drill`, `nb prune`, `nb rebuild`, …) — so the nouns carry only read subcommands and every
   mutation is a top-level verb. Per-medium status (incl. bays / drive + shelf) lives
   in `nb medium <name>`; `nb load` is the one physical action verb (sibling of

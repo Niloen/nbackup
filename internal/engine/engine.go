@@ -1165,15 +1165,25 @@ func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 		if sealed[id] {
 			continue // a sealed slot occupies this id; try the next sequence
 		}
-		// Unsealed leftover from a failed attempt: reclaim it. A medium that cannot
-		// remove a single slot (tape — space is reclaimed by relabeling the whole
-		// volume) leaves the orphan in place; a scan ignores it (it has no seal), and
-		// it is reclaimed on the next relabel. Take the next id rather than failing.
-		if err := e.vol.RemoveSlot(id); err != nil {
-			if errors.Is(err, media.ErrNoPerSlotRemoval) {
+		// Unsealed leftover from a failed attempt: reclaim its files. A medium that
+		// cannot remove individual files (tape — space is reclaimed by relabeling the
+		// whole volume) leaves the orphan in place; a scan ignores it (it has no seal),
+		// and it is reclaimed on the next relabel. Take the next id rather than failing.
+		removed := true
+		for _, f := range files {
+			if f.Header.Slot != id {
 				continue
 			}
-			return "", 0, err
+			if err := e.vol.RemoveFile(f.Pos); err != nil {
+				if errors.Is(err, media.ErrNoFileRemoval) {
+					removed = false
+					break
+				}
+				return "", 0, err
+			}
+		}
+		if !removed {
+			continue
 		}
 		return id, seq, nil
 	}
@@ -1432,19 +1442,25 @@ func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) 
 	slots := e.cat.SlotsOn(mediumName)
 	floor := retention.Compute(slots, minAge, now)
 
-	reclaim := map[string]media.Reclamation{}
+	// Reclamation is per archive (slot+DLE): a medium's Reclaim walks the oldest
+	// non-protected archives, so an old slot can lose one DLE's image while keeping
+	// another the chain still needs.
+	type archiveRef struct{ slot, dle string }
+	reclaim := map[archiveRef]media.Reclamation{}
 	for _, r := range profile.Reclaim(slots, floor, now) {
-		reclaim[r.SlotID] = r
+		reclaim[archiveRef{r.SlotID, r.DLE}] = r
 	}
 
 	for _, s := range slots {
-		if _, ok := reclaim[s.ID]; ok {
-			continue // reported below
-		}
-		if reason, ok := floor.Reason(s.ID); ok {
-			logf.log("keep   %s  (%s)", s.ID, reason)
-		} else {
-			logf.log("keep   %s  (fits capacity)", s.ID)
+		for _, a := range s.Archives {
+			if _, ok := reclaim[archiveRef{s.ID, a.DLE}]; ok {
+				continue // reported below
+			}
+			if reason, ok := floor.ReasonArchive(s.ID, a.DLE); ok {
+				logf.log("keep   %s %s  (%s)", s.ID, e.DisplayDLE(a.DLE), reason)
+			} else {
+				logf.log("keep   %s %s  (fits capacity)", s.ID, e.DisplayDLE(a.DLE))
+			}
 		}
 	}
 
@@ -1456,25 +1472,68 @@ func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) 
 		}
 	}
 	for _, s := range slots {
-		r, ok := reclaim[s.ID]
-		if !ok {
-			continue
-		}
-		eligible++
-		if apply {
-			// Reclaim the copy on this medium only; the slot survives in the catalog
-			// if it still has a copy elsewhere.
-			if err := vol.RemoveSlot(s.ID); err != nil {
-				return eligible, freed, fmt.Errorf("delete %s: %w", s.ID, err)
+		for _, a := range s.Archives {
+			r, ok := reclaim[archiveRef{s.ID, a.DLE}]
+			if !ok {
+				continue
 			}
-			if _, err := e.cat.RemovePlacement(s.ID, mediumName); err != nil {
-				return eligible, freed, fmt.Errorf("update catalog cache: %w", err)
+			eligible++
+			if apply {
+				// Reclaim this archive's copy on this medium only — its files, one
+				// position at a time; the slot (and the archive's copies elsewhere)
+				// survives in the catalog.
+				for _, pos := range archivePositions(e.cat.Placements(s.ID), mediumName, a.DLE) {
+					if err := vol.RemoveFile(pos); err != nil {
+						return eligible, freed, fmt.Errorf("delete %s %s: %w", s.ID, a.DLE, err)
+					}
+				}
+				if _, _, err := e.cat.RemoveArchive(s.ID, mediumName, a.DLE); err != nil {
+					return eligible, freed, fmt.Errorf("update catalog cache: %w", err)
+				}
+				freed += r.Bytes
+				logf.log("DELETE %s %s  (%s freed, %s)", s.ID, e.DisplayDLE(a.DLE), sizeutil.FormatBytes(r.Bytes), r.Note)
+			} else {
+				logf.log("would delete %s %s  (%s, %s)", s.ID, e.DisplayDLE(a.DLE), sizeutil.FormatBytes(r.Bytes), r.Note)
 			}
-			freed += r.Bytes
-			logf.log("DELETE %s  (%s freed, %s)", s.ID, sizeutil.FormatBytes(r.Bytes), r.Note)
-		} else {
-			logf.log("would delete %s  (%s, %s)", s.ID, sizeutil.FormatBytes(r.Bytes), r.Note)
 		}
 	}
 	return eligible, freed, nil
+}
+
+// archivePositions gathers the volume file positions of one archive (a DLE's image)
+// in the copy of a slot on medium, in safe removal order: commit footer first, then
+// the member index, then the parts.
+//
+// The order is crash-safety-critical and mirrors the write order in reverse. An
+// archive is made durable by its commit footer, written LAST (after its parts and
+// index); the footer's presence is what proves the whole archive landed, and a
+// catalog rebuild assembles only archives that have a footer (assemble iterates the
+// commits — parts without one are orphans it ignores). So removing the footer FIRST
+// "un-commits" the archive: a crash mid-prune then leaves parts/index as orphans with
+// no footer, which a rebuild skips. Removing parts first would leave a footer whose
+// parts are gone — which a rebuild would resurrect into the catalog as a committed-
+// but-unreadable archive (the exact "we think it's committed but it's only partly
+// there" hazard). Removal is one os.Remove per file, so the ordering holds at the same
+// level the write path relies on (no fsync either side).
+func archivePositions(ps []catalog.Placement, medium, dle string) []int {
+	for _, p := range ps {
+		if p.Medium != medium {
+			continue
+		}
+		for _, a := range p.Archives {
+			if a.DLE != dle {
+				continue
+			}
+			pos := make([]int, 0, len(a.Parts)+2)
+			pos = append(pos, a.Commit.Pos) // the marker: un-commit first
+			if a.Index != (record.FilePos{}) {
+				pos = append(pos, a.Index.Pos)
+			}
+			for _, pt := range a.Parts {
+				pos = append(pos, pt.Pos)
+			}
+			return pos
+		}
+	}
+	return nil
 }

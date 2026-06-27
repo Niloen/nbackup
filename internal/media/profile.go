@@ -29,24 +29,28 @@ type Profile interface {
 	// operator (or robot) swap. Distinct from TotalBytes because a bare drive has a
 	// finite reel but an unbounded pool (the operator's shelf is unknowable).
 	VolumeSize() int64
-	// Reclaim chooses the slots to delete to satisfy this medium's capacity,
-	// given the retention floor (the slots that must never be reclaimed, computed
-	// by the retention package). It returns the reclamations to perform, in
-	// deletion order.
+	// Reclaim chooses what to delete to satisfy this medium's capacity, given the
+	// retention floor (what must never be reclaimed, computed by the retention
+	// package). It returns the reclamations to perform, in deletion order. The
+	// granularity is the medium's own: an object store reclaims per archive
+	// (slot+DLE); a whole-volume medium (tape) reclaims nothing here.
 	Reclaim(slots []*record.Slot, keep Retention, now time.Time) []Reclamation
 }
 
-// Retention reports which slots reclamation must never delete — the floor the
+// Retention reports which archives reclamation must never delete — the floor the
 // retention package computes. Reclaim consults it only as a predicate, so media
 // depends on the test rather than on the retention package; retention.Floor
 // satisfies it.
 type Retention interface {
-	Keeps(slotID string) bool
+	KeepsArchive(slot, dle string) bool
 }
 
-// Reclamation is one slot (or volume) chosen for reclamation.
+// Reclamation is one archive (slot+DLE) chosen for reclamation. (A whole-volume
+// medium would name a volume instead, but tape reclamation is deferred — only the
+// per-archive object-store path is live.)
 type Reclamation struct {
 	SlotID string
+	DLE    string
 	Bytes  int64
 	Note   string
 }
@@ -87,7 +91,12 @@ func (p sizeProfile) TotalBytes() int64 { return p.capacity }
 // only by the pool budget, never by a per-volume reel size.
 func (p sizeProfile) VolumeSize() int64 { return 0 }
 
-// Reclaim deletes the oldest non-protected slots until total <= capacity.
+// Reclaim deletes the oldest non-protected archives until total <= capacity.
+// Reclamation is per archive (slot+DLE), not per slot: because the retention floor
+// is per-archive (a DLE's chain is independent of its slot-mates'), an old slot
+// often holds one DLE whose chain has moved on — reclaimable — beside another the
+// chain still needs. Walking archives oldest-first reclaims exactly the dead ones,
+// freeing space a slot-granular pass would strand behind a single still-pinned DLE.
 func (p sizeProfile) Reclaim(slots []*record.Slot, keep Retention, now time.Time) []Reclamation {
 	if p.capacity <= 0 {
 		return nil // unbounded: nothing to reclaim
@@ -103,14 +112,19 @@ func (p sizeProfile) Reclaim(slots []*record.Slot, keep Retention, now time.Time
 	sort.Slice(ordered, func(i, j int) bool { return record.Less(ordered[i], ordered[j]) }) // oldest first
 	var out []Reclamation
 	for _, s := range ordered {
-		if total <= p.capacity {
-			break
+		// Within a slot, walk archives in DLE order for a deterministic plan.
+		archives := append([]record.Archive(nil), s.Archives...)
+		sort.Slice(archives, func(i, j int) bool { return archives[i].DLE < archives[j].DLE })
+		for _, a := range archives {
+			if total <= p.capacity {
+				return out
+			}
+			if keep.KeepsArchive(s.ID, a.DLE) {
+				continue
+			}
+			out = append(out, Reclamation{SlotID: s.ID, DLE: a.DLE, Bytes: a.Compressed, Note: "over capacity"})
+			total -= a.Compressed
 		}
-		if keep.Keeps(s.ID) {
-			continue
-		}
-		out = append(out, Reclamation{SlotID: s.ID, Bytes: s.TotalBytes, Note: "over capacity"})
-		total -= s.TotalBytes
 	}
 	return out
 }

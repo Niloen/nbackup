@@ -278,9 +278,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 	// changer auto-mounting the right bay for each slot.
 	name := config.DLE{Host: "localhost", Path: src}.Name()
 	for _, id := range ids {
-		if err := eng.vol.RemoveSlot(id); err != nil {
-			t.Fatal(err)
-		}
+		removeSlotFiles(t, eng, id)
 		if _, err := eng.cat.RemovePlacement(id, "disk"); err != nil {
 			t.Fatal(err)
 		}

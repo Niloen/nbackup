@@ -17,18 +17,31 @@ package retention
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
-// Floor is the retention floor computed for one medium's slots: the slots
+// archiveRef identifies one archive within the floor: a slot and the DLE whose
+// image it holds. A run dumps each DLE once at one level, so (slot, DLE) names an
+// archive uniquely — the floor pins protection at this granularity, finer than the
+// slot, so an old slot may keep one DLE's archive while another DLE's is reclaimed.
+type archiveRef struct{ slot, dle string }
+
+// Floor is the retention floor computed for one medium's slots: the archives
 // reclamation must never delete, each with the reason it is pinned. Build it once
-// with Compute, then query it — by slot (Keeps, Reason) or by "is any of these
+// with Compute, then query it — per archive (KeepsArchive, ReasonArchive), per slot
+// (Keeps, Reason — "is any archive of the slot pinned"), or by "is any of these
 // slots pinned" (First). The zero Floor keeps nothing.
+//
+// The floor is per-archive because reclamation on address-identified media (disk,
+// cloud) is per-archive; the slot-level queries report a slot as kept when any of
+// its archives is pinned, which is what the whole-volume reclaimers (tape relabel,
+// ExpectedTape) and the cost forecast still reason in.
 type Floor struct {
-	reasons map[string]string // slotID -> reason; absent ⇒ reclaimable
+	reasons map[archiveRef]string // (slot,DLE) -> reason; absent ⇒ reclaimable
 }
 
 // Compute applies a medium's retention rules to its slots and returns the floor —
@@ -50,7 +63,12 @@ type Floor struct {
 // Note: once verification status is tracked, the successor requirement should
 // tighten from "a newer full exists" to "a newer verified full exists".
 func Compute(slots []*record.Slot, minAge time.Duration, now time.Time) Floor {
-	reasons := map[string]string{}
+	reasons := map[archiveRef]string{}
+	pin := func(slot, dle, reason string) {
+		if _, ok := reasons[archiveRef{slot, dle}]; !ok {
+			reasons[archiveRef{slot, dle}] = reason
+		}
+	}
 	young := func(s *record.Slot) bool {
 		if minAge <= 0 {
 			return false
@@ -58,22 +76,20 @@ func Compute(slots []*record.Slot, minAge time.Duration, now time.Time) Floor {
 		date, _ := record.ParseDateField(s.Date)
 		return now.Sub(date) < minAge
 	}
-	// 1) Age floor.
+	// 1) Age floor: a young slot pins every archive it carries.
 	for _, s := range slots {
 		if young(s) {
-			reasons[s.ID] = fmt.Sprintf("within minimum age (%s)", sizeutil.FormatDuration(minAge))
+			for _, a := range s.Archives {
+				pin(s.ID, a.DLE, fmt.Sprintf("within minimum age (%s)", sizeutil.FormatDuration(minAge)))
+			}
 		}
 	}
-	// 2) Last-recovery floor (kept distinct so a slot that holds a DLE's last full
-	// is reported by that full, not a mere incremental it also carries).
+	// 2) Last-recovery floor (kept distinct so an archive that is a DLE's last full
+	// is reported by that full, not a mere incremental the slot also carries).
 	for _, s := range slots {
-		if _, ok := reasons[s.ID]; ok {
-			continue
-		}
 		for _, a := range s.Archives {
 			if a.Level == 0 && !hasNewerFull(slots, a.DLE, s) {
-				reasons[s.ID] = fmt.Sprintf("last recovery path for DLE %s", a.DLE)
-				break
+				pin(s.ID, a.DLE, fmt.Sprintf("last recovery path for DLE %s", a.DLE))
 			}
 		}
 	}
@@ -100,9 +116,7 @@ func Compute(slots []*record.Slot, minAge time.Duration, now time.Time) Floor {
 				continue // no full at or before the anchor (cannot happen for a real chain)
 			}
 			for j := full; j <= ai; j++ {
-				if _, ok := reasons[ds[j].ID]; !ok {
-					reasons[ds[j].ID] = fmt.Sprintf("in DLE %s's recovery chain", dle)
-				}
+				pin(ds[j].ID, dle, fmt.Sprintf("in DLE %s's recovery chain", dle))
 			}
 		}
 	}
@@ -155,18 +169,58 @@ func hasFull(s *record.Slot, dle string) bool {
 	return false
 }
 
-// Keeps reports whether the floor pins slot id (so reclamation must not delete
-// it). It is the predicate a medium's Reclaim consults; callers that also want
-// the message use Reason instead.
-func (f Floor) Keeps(id string) bool {
-	_, ok := f.reasons[id]
+// KeepsArchive reports whether the floor pins one archive (slot+DLE), so per-archive
+// reclamation must not delete it. It is the predicate a medium's Reclaim consults.
+func (f Floor) KeepsArchive(slot, dle string) bool {
+	_, ok := f.reasons[archiveRef{slot, dle}]
 	return ok
 }
 
-// Reason returns why the floor pins slot id, and whether it pins it at all.
-func (f Floor) Reason(id string) (reason string, ok bool) {
-	r, ok := f.reasons[id]
+// ReasonArchive returns why the floor pins one archive, and whether it pins it.
+func (f Floor) ReasonArchive(slot, dle string) (reason string, ok bool) {
+	r, ok := f.reasons[archiveRef{slot, dle}]
 	return r, ok
+}
+
+// Keeps reports whether the floor pins any archive of slot id — the slot-level view
+// the whole-volume reclaimers (tape relabel, ExpectedTape) and the cost forecast
+// reason in: a slot is kept if reclaiming it would destroy any pinned archive.
+func (f Floor) Keeps(id string) bool {
+	_, ok := f.Reason(id)
+	return ok
+}
+
+// Reason returns why the floor pins slot id, and whether it pins any archive at all.
+// When several archives pin the slot it reports the strongest reason — age, then a
+// DLE's last recovery path (its full), then a recovery chain — so a slot that holds a
+// DLE's last full is reported by that full, not by a mere incremental it also carries
+// (the precedence Compute applies per archive, projected to the slot). Ties within a
+// rank break by DLE for a stable message.
+func (f Floor) Reason(id string) (reason string, ok bool) {
+	bestRank, bestDLE := 0, ""
+	for ref, r := range f.reasons {
+		if ref.slot != id {
+			continue
+		}
+		rk := reasonRank(r)
+		if !ok || rk < bestRank || (rk == bestRank && ref.dle < bestDLE) {
+			bestRank, bestDLE, reason, ok = rk, ref.dle, r, true
+		}
+	}
+	return reason, ok
+}
+
+// reasonRank orders the floor's reason kinds by strength (lower = stronger), so the
+// slot-level Reason reports the same precedence Compute uses per archive.
+func reasonRank(reason string) int {
+	switch {
+	case strings.HasPrefix(reason, "within minimum age"):
+		return 0
+	case strings.HasPrefix(reason, "last recovery path"):
+		return 1
+	default: // recovery chain
+		return 2
+	}
 }
 
 // First returns the first of slots that the floor pins, with the reason — the
@@ -180,7 +234,7 @@ func (f Floor) Reason(id string) (reason string, ok bool) {
 // reusability identically.
 func (f Floor) First(slots []*record.Slot) (slotID, reason string, ok bool) {
 	for _, sl := range slots {
-		if r, p := f.reasons[sl.ID]; p {
+		if r, p := f.Reason(sl.ID); p {
 			return sl.ID, r, true
 		}
 	}

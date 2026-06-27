@@ -61,7 +61,11 @@ func (v *memVolume) Files() ([]record.FileInfo, error) {
 	return out, nil
 }
 
-func (v *memVolume) RemoveSlot(string) error { return nil }
+func (v *memVolume) RemoveFile(pos int) error {
+	delete(v.hdrs, pos)
+	delete(v.data, pos)
+	return nil
+}
 
 // memSink rolls a writer across a list of memVolumes, sizing each part to the loaded
 // volume's remaining capacity (optionally capped by partCap to force intra-volume

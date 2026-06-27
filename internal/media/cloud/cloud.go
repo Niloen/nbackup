@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"gocloud.dev/blob"
+	"gocloud.dev/gcerrors"
 	// Object-store drivers (URL schemes). Blank imports register them with gocloud.
 	_ "gocloud.dev/blob/azureblob" // azblob://
 	_ "gocloud.dev/blob/fileblob"  // file://  (local dir; also used in tests)
@@ -131,6 +132,13 @@ func (s blobStore) RemoveTree(slot string) error {
 		if err := s.bucket.Delete(s.ctx, obj.Key); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (s blobStore) Remove(key string) error {
+	if err := s.bucket.Delete(s.ctx, key); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
+		return err
 	}
 	return nil
 }

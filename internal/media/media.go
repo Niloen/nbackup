@@ -50,14 +50,14 @@ var ErrVolumeFull = fmt.Errorf("volume full: end of volume reached")
 // nothing loaded. The engine wraps this with medium-specific guidance.
 var ErrNoVolume = fmt.Errorf("no volume loaded in the drive")
 
-// ErrNoPerSlotRemoval reports that a medium cannot delete an individual slot:
-// space is reclaimed by reusing a whole volume (relabel), not by removing one
-// slot's files. Object stores (disk, cloud) support per-slot removal; tape does
-// not. Callers test it with errors.Is and fall back to whole-volume reuse — e.g.
-// reclaiming an unsealed leftover means leaving it for the next relabel rather
-// than failing. The engine never reaches it for capacity pruning (tape defers all
-// reclamation to relabel), only when tidying a failed write's partial.
-var ErrNoPerSlotRemoval = fmt.Errorf("per-slot removal unsupported; reuse is whole-volume (relabel)")
+// ErrNoFileRemoval reports that a medium cannot delete an individual file: space
+// is reclaimed by reusing a whole volume (relabel), not by removing files. Object
+// stores (disk, cloud) support per-file removal; tape does not. Callers test it
+// with errors.Is and fall back to whole-volume reuse — e.g. reclaiming an unsealed
+// leftover means leaving it for the next relabel rather than failing. The engine
+// never reaches it for capacity pruning (tape defers all reclamation to relabel),
+// only when tidying a failed write's partial.
+var ErrNoFileRemoval = fmt.Errorf("per-file removal unsupported; reuse is whole-volume (relabel)")
 
 // Drive is a medium with one mounted volume at a time: it can report what is loaded.
 // Both a robotic library (the volume the robot has in the drive) and a single-drive
@@ -175,8 +175,15 @@ type Volume interface {
 	// level commit is the seal above this. Integrity of files the seal *does* commit
 	// (bit-rot) is verify's job, not enumeration's — Files never asserts it.
 	Files() ([]record.FileInfo, error)
-	// RemoveSlot reclaims every file belonging to a slot.
-	RemoveSlot(slot string) error
+	// RemoveFile reclaims the file at pos — the positional peer of ReadFile. It is how
+	// every reclaimer (per-archive pruning, orphan tidy-up, the drill WORM probe)
+	// deletes: callers resolve the positions they want gone (from the catalog or a
+	// Files() scan) and remove them one by one, so the Volume seam stays purely
+	// positional and never names a higher-level grouping. Removing a missing position
+	// is a no-op (idempotent). A medium grouping files on disk (fslike's per-slot
+	// directory) reclaims an emptied group itself. Whole-volume media (tape) that
+	// cannot delete an individual file return ErrNoFileRemoval.
+	RemoveFile(pos int) error
 }
 
 // WalkReadable visits every readable volume reachable from vol in turn, calling fn

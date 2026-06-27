@@ -1,6 +1,50 @@
 package media
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/Niloen/nbackup/internal/record"
+)
+
+// keepSet is a fake Retention floor keyed by "slot|dle".
+type keepSet map[string]bool
+
+func (k keepSet) KeepsArchive(slot, dle string) bool { return k[slot+"|"+dle] }
+
+// TestSizeProfileReclaimsPerArchive: reclamation walks archives (slot+DLE), not whole
+// slots — oldest-first, skipping protected archives, stopping once under capacity. So
+// an old slot loses its reclaimable DLE while a protected slot-mate stays.
+func TestSizeProfileReclaimsPerArchive(t *testing.T) {
+	slots := []*record.Slot{
+		{ID: "slot-2026-01-01", Date: "2026-01-01", TotalBytes: 200, Archives: []record.Archive{
+			{DLE: "app", Level: 0, Compressed: 100},
+			{DLE: "db", Level: 0, Compressed: 100},
+		}},
+		{ID: "slot-2026-02-01", Date: "2026-02-01", TotalBytes: 200, Archives: []record.Archive{
+			{DLE: "app", Level: 1, Compressed: 100},
+			{DLE: "db", Level: 1, Compressed: 100},
+		}},
+	}
+	// db is protected in both slots (its live chain); app's archives are reclaimable.
+	keep := keepSet{"slot-2026-01-01|db": true, "slot-2026-02-01|db": true}
+	p := sizeProfile{capacity: 250} // total 400 → free 150 (two archives)
+
+	got := p.Reclaim(slots, keep, time.Time{})
+	if len(got) != 2 {
+		t.Fatalf("reclaimed %d archives, want 2: %+v", len(got), got)
+	}
+	// Oldest first, by slot then DLE; db skipped as protected.
+	want := []Reclamation{
+		{SlotID: "slot-2026-01-01", DLE: "app", Bytes: 100, Note: "over capacity"},
+		{SlotID: "slot-2026-02-01", DLE: "app", Bytes: 100, Note: "over capacity"},
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("reclaim[%d] = %+v, want %+v", i, got[i], w)
+		}
+	}
+}
 
 // TestVolumeProfileShapeAware: the volume profile reads the same keys the tape
 // changer does, so the planner's capacity never disagrees with the medium. A

@@ -65,9 +65,9 @@ func TestTapeSequential(t *testing.T) {
 		t.Errorf("read file 0: header %+v data %q", h, data)
 	}
 
-	// Per-slot removal is unsupported on tape.
-	if err := v.RemoveSlot("slot-x"); err == nil {
-		t.Error("expected RemoveSlot to be unsupported on tape")
+	// Per-file removal is unsupported on tape.
+	if err := v.RemoveFile(0); err == nil {
+		t.Error("expected RemoveFile to be unsupported on tape")
 	}
 
 	// Reopen: scan recovers the file numbers.

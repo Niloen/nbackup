@@ -617,6 +617,189 @@ func newSlotShowCmd(a *app) *cobra.Command {
 	}
 }
 
+// newDleCmd implements `nb dle`: inspect the catalog grouped by DLE (backup source)
+// rather than by slot. The same archives the slot view groups by run, browsed instead
+// by what was backed up — one row per DLE, then its archive timeline across slots.
+func newDleCmd(a *app) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "dle",
+		Short: "List or show DLEs (backup sources)",
+		Long:  "Inspect the catalog grouped by DLE (a host:path backup source). With no subcommand it lists each DLE and its backup history; `nb dle show <dle>` shows one DLE's archive timeline across slots. (Reclaim with `nb prune`, which is per-DLE on disk/cloud.)",
+		Args:  cobra.NoArgs,
+		// Bare `nb dle` lists DLEs, mirroring `nb slot`.
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDleList(a)
+		},
+	}
+	cmd.AddCommand(newDleListCmd(a), newDleShowCmd(a))
+	return cmd
+}
+
+func newDleListCmd(a *app) *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List DLEs and their backup history",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDleList(a)
+		},
+	}
+}
+
+func runDleList(a *app) error {
+	cfg, err := a.loadRO()
+	if err != nil {
+		return err
+	}
+	eng, err := newEngine(cfg)
+	if err != nil {
+		return err
+	}
+	slots := eng.Catalog().Slots()
+	if len(slots) == 0 {
+		if len(cfg.Sources) == 0 {
+			fmt.Println("no DLEs in catalog (no backup config found — copy nbackup.example.yaml to nbackup.yaml and run `nb dump`, or pass -c <config>)")
+		} else {
+			fmt.Println("no DLEs in catalog")
+		}
+		return nil
+	}
+
+	// Aggregate per DLE across slots. Slots come in run order, so the last archive
+	// seen for a DLE is its most recent run.
+	type agg struct {
+		display   string
+		runs      int
+		lastLevel int
+		lastFull  string
+		bytes     int64
+		media     map[string]bool
+	}
+	aggs := map[string]*agg{}
+	var order []string
+	for _, s := range slots {
+		ps := eng.Catalog().Placements(s.ID)
+		for _, ar := range s.Archives {
+			g := aggs[ar.DLE]
+			if g == nil {
+				g = &agg{display: ar.DLEID(), media: map[string]bool{}}
+				aggs[ar.DLE] = g
+				order = append(order, ar.DLE)
+			}
+			g.runs++
+			g.bytes += ar.Compressed
+			g.lastLevel = ar.Level
+			if ar.Level == 0 {
+				g.lastFull = s.Date
+			}
+			for _, p := range ps {
+				for _, pa := range p.Archives {
+					if pa.DLE == ar.DLE {
+						g.media[p.Medium] = true
+					}
+				}
+			}
+		}
+	}
+	sort.Slice(order, func(i, j int) bool { return aggs[order[i]].display < aggs[order[j]].display })
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "DLE\tRUNS\tLAST FULL\tLAST\tSIZE\tCOPIES")
+	for _, slug := range order {
+		g := aggs[slug]
+		lastFull := g.lastFull
+		if lastFull == "" {
+			lastFull = "never"
+		}
+		fmt.Fprintf(tw, "%s\t%d\t%s\tL%d\t%s\t%s\n", g.display, g.runs, lastFull, g.lastLevel,
+			sizeutil.FormatBytes(g.bytes), strings.Join(sortedKeys(g.media), ", "))
+	}
+	tw.Flush()
+	return nil
+}
+
+func newDleShowCmd(a *app) *cobra.Command {
+	return &cobra.Command{
+		Use:     "show <dle>",
+		Short:   "Show one DLE's archive timeline across slots",
+		Example: "  nb dle show localhost:/home",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("specify exactly one DLE, e.g. `nb dle show localhost:/home` (list them with `nb dle`)")
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := a.loadRO()
+			if err != nil {
+				return err
+			}
+			eng, err := newEngine(cfg)
+			if err != nil {
+				return err
+			}
+			slots := eng.Catalog().Slots()
+			slug, display, ok := resolveDLE(slots, args[0])
+			if !ok {
+				return fmt.Errorf("no DLE %q in catalog (list them with `nb dle`)", args[0])
+			}
+			fmt.Printf("DLE %s\n\n", display)
+			tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+			fmt.Fprintln(tw, "SLOT\tDATE\tLEVEL\tSIZE\tBASE\tCOPIES")
+			for _, s := range slots {
+				for _, ar := range s.Archives {
+					if ar.DLE != slug {
+						continue
+					}
+					base := ar.BaseSlot
+					if base == "" {
+						base = "-"
+					}
+					var media []string
+					for _, p := range eng.Catalog().Placements(s.ID) {
+						for _, pa := range p.Archives {
+							if pa.DLE == slug {
+								media = append(media, p.Medium)
+								break
+							}
+						}
+					}
+					sort.Strings(media)
+					fmt.Fprintf(tw, "%s\t%s\tL%d\t%s\t%s\t%s\n", s.ID, s.Date, ar.Level,
+						sizeutil.FormatBytes(ar.Compressed), base, strings.Join(media, ", "))
+				}
+			}
+			tw.Flush()
+			return nil
+		},
+	}
+}
+
+// resolveDLE matches a user-typed DLE identifier against the catalog's archives,
+// accepting either the internal slug or the host:path display id, and returns the
+// slug plus a display string. Archives carry their own host/path, so the match needs
+// no config — a DLE that was dumped but later removed from config still resolves.
+func resolveDLE(slots []*record.Slot, arg string) (slug, display string, ok bool) {
+	for _, s := range slots {
+		for _, ar := range s.Archives {
+			if ar.DLE == arg || ar.DLEID() == arg {
+				return ar.DLE, ar.DLEID(), true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// sortedKeys returns a set's keys sorted, for a stable rendering.
+func sortedKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // newPruneCmd implements `nb prune`: reclaim slots past the cycle/capacity limits.
 func newPruneCmd(a *app) *cobra.Command {
 	var dryRun bool

@@ -203,11 +203,11 @@ func (t *tape) Files() ([]record.FileInfo, error) {
 	return out, nil
 }
 
-// RemoveSlot is unsupported: tape reclaims space by relabeling the whole volume,
+// RemoveFile is unsupported: tape reclaims space by relabeling the whole volume,
 // not by deleting individual files. It returns the shared sentinel so callers can
 // fall back to whole-volume reuse (errors.Is) instead of treating it as fatal.
-func (t *tape) RemoveSlot(string) error {
-	return fmt.Errorf("tape: %w", media.ErrNoPerSlotRemoval)
+func (t *tape) RemoveFile(int) error {
+	return fmt.Errorf("tape: %w", media.ErrNoFileRemoval)
 }
 
 // ReadLabel reads the mounted bay's file-0 label record. A blank tape (no files)
