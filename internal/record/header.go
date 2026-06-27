@@ -2,7 +2,7 @@
 // the framing header at the start of every file, the volume label record, the
 // per-archive commit footer (Archive) that marks an archive complete, and the
 // per-archive member index — plus their (de)serialization. It is pure data and
-// codec; it makes no assumptions about where the bytes live (that is a media
+// scheme; it makes no assumptions about where the bytes live (that is a media
 // concern) or how a run is driven (that is the engine's). A volume is recoverable
 // on its own because every file leads with one of these records: scanning them
 // reconstructs the catalog. There is no per-slot seal — a slot is the grouping its

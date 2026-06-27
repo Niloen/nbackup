@@ -28,7 +28,7 @@ const (
 	// member list that no longer matches what was sealed — i.e. corruption.
 	ClassIntegrity
 	// ClassPipeline is a read-pipeline/key fault: decrypt, decompress, or tar failed
-	// to turn the stored bytes back into a valid stream — a lost/wrong key, a codec
+	// to turn the stored bytes back into a valid stream — a lost/wrong key, a scheme
 	// or tar drift, a truncated object.
 	ClassPipeline
 	// ClassChain is an incremental-composition fault: the individual archives read
@@ -101,7 +101,7 @@ func (c Class) Remedy() string {
 	case ClassIntegrity:
 		return "data is corrupt on this copy — restore/re-replicate it from a known-good copy, and check the storage medium"
 	case ClassPipeline:
-		return "the archive would not decrypt/decompress/untar — verify the gpg key is present and the codec/tar match the recorded scheme"
+		return "the archive would not decrypt/decompress/untar — verify the gpg key is present and the compressor/tar match the recorded scheme"
 	case ClassChain:
 		return "the incremental chain does not compose — force a fresh full for this DLE and check the incremental-state library"
 	case ClassMissing:
@@ -126,7 +126,7 @@ const (
 	// TierStructural streams the archive through the real read pipeline
 	// (decrypt → decompress → `tar -t`) and asserts the members match the seal —
 	// proving the bytes are a *valid restorable stream* and exercising the key and
-	// codec, while writing nothing.
+	// scheme, while writing nothing.
 	TierStructural
 	// TierChain performs a real point-in-time chain restore (full + incrementals,
 	// deletion-faithful) into a scratch dir, then discards it — the strong proof.

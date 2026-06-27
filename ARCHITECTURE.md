@@ -44,7 +44,7 @@ of this document otherwise describes NBackup in its own terms.
 ## Package map
 
 Mechanism lives behind interfaces with named, registered implementations; one
-orchestrator (`engine`) composes them. Adding a medium, archiver, or codec is a
+orchestrator (`engine`) composes them. Adding a medium, archiver, or compression scheme is a
 registry registration, not a conditional in the core.
 
 | Package | Responsibility | Amanda analogue |
@@ -202,7 +202,7 @@ individual slots/archives against the seal and writes nothing, keeps no ledger, 
 no selection. Its one `--deep` structural mode streams an archive through the real read
 pipeline (decrypt → decompress → `tar -t`, list not extract) and asserts the pipeline
 completes and the members match the seal — proving the bytes are a valid *restorable
-stream* and exercising the key + codec, still side-effect-free. It emits a structured
+stream* and exercising the key + scheme, still side-effect-free. It emits a structured
 per-archive verdict (`engine.VerifyReport`, classified with `drill.Class`) the drill
 layer consumes. `nb drill` is the layer on top: it *selects* a risk-biased subset,
 *exercises* each at a tier (the `chain` tier restores to scratch via the
@@ -289,7 +289,7 @@ transfer. Three decisions carry their weight:
   sources; an opt-in encrypted index for client-side-encrypted archives.)
 
 **Media model.** A `Volume` is positional, self-describing files; framing differs
-per medium (disk: a `.hdr` sidecar so the payload is a clean `.tar.<codec>`; tape:
+per medium (disk: a `.hdr` sidecar so the payload is a clean `.tar.<scheme>`; tape:
 a fixed 32 KB header block inline, since tape has no sidecars). `Open` is cheap;
 `ReadFile` seeks by position; only `Files()` is a full scan (the rebuild path).
 Normal ops resolve positions from the catalog and never scan.
@@ -396,7 +396,7 @@ without hardware).
   (orphan parts ignored by scan/rebuild, reclaimed by relabel). Because a single drive
   cannot interleave two archives' parts, a spanning-capable landing **clamps workers to
   1**. Reads **auto-mount** the volume holding each part, in order — `archiveio`'s
-  concatenating reader drains part *k* before mounting *k+1*, then reverses the codec
+  concatenating reader drains part *k* before mounting *k+1*, then reverses the scheme
   over the concatenation. The roll/mount lives in `package librarian` (`WriteSink`,
   `Advance`, `MountForRead`), the one place that dispatches on medium shape. Real-drive
   (`device:`) spanning is proactive-via-`part_size` only and structurally complete but
@@ -611,7 +611,7 @@ decisions carry it:
 - **Greenfield, pre-release:** no back-compat shims, no migrations; don't add
   concepts or layers speculatively. See memory `nbackup-greenfield`.
 - **Verify** every change: `gofmt -l`, `go vet ./...`, `go test -race ./...`.
-- **Test environment:** `zstd` is **not** installed — tests use codec `none`;
+- **Test environment:** `zstd` is **not** installed — tests use scheme `none`;
   `tar`, `gzip`, `nice` are present. Tests that need GNU tar `t.Skip` when absent.
 - **CLI:** flags may appear before or after positionals (`parseArgs`); subcommand
   dispatch (`slot show`) keys on the first arg. The convention is **inspect with a noun**

@@ -23,7 +23,7 @@ type drillFixture struct {
 	offsiteDir string
 }
 
-func newDrillFixture(t *testing.T, codec string) *drillFixture {
+func newDrillFixture(t *testing.T, scheme string) *drillFixture {
 	t.Helper()
 	src := t.TempDir()
 	write(t, filepath.Join(src, "a.txt"), "full content")
@@ -39,7 +39,7 @@ func newDrillFixture(t *testing.T, codec string) *drillFixture {
 		Workdir:  t.TempDir(),
 		StateDir: t.TempDir(),
 	}
-	cfg.Compress.Scheme = codec
+	cfg.Compress.Scheme = scheme
 
 	eng, err := New(cfg)
 	if err != nil {
@@ -80,7 +80,7 @@ func payloadFile(t *testing.T, mediumDir, slotID string, level int) string {
 // TestVerifyDeepStructural exercises the structural (`--deep`) verify primitive: it
 // passes on a healthy slot (the pipeline completes and members match the seal), and a
 // payload corruption is caught — as an integrity fault at the checksum check, and as a
-// pipeline fault at the structural check when the codec can no longer decode it.
+// pipeline fault at the structural check when the scheme can no longer decode it.
 func TestVerifyDeepStructural(t *testing.T) {
 	f := newDrillFixture(t, "none")
 	eng := f.eng
@@ -117,8 +117,8 @@ func TestVerifyDeepStructural(t *testing.T) {
 	}
 }
 
-// TestVerifyStructuralPipelineFault confirms that, with a real codec, a payload that
-// no longer decompresses is classified as a pipeline fault (key/codec drift) by the
+// TestVerifyStructuralPipelineFault confirms that, with a real scheme, a payload that
+// no longer decompresses is classified as a pipeline fault (key/scheme drift) by the
 // structural check — the failure mode checksum-only verify reports merely as integrity.
 func TestVerifyStructuralPipelineFault(t *testing.T) {
 	if _, err := exec.LookPath("gzip"); err != nil {
@@ -137,7 +137,7 @@ func TestVerifyStructuralPipelineFault(t *testing.T) {
 		t.Fatalf("structural failures = %d, want 1", rep.Failures)
 	}
 	if cls := firstFailClass(rep); cls != drill.ClassPipeline {
-		t.Fatalf("garbled-codec class = %s, want pipeline", cls)
+		t.Fatalf("garbled-scheme class = %s, want pipeline", cls)
 	}
 }
 
@@ -317,7 +317,7 @@ func TestDrillPostureAudit(t *testing.T) {
 }
 
 // corrupt overwrites a payload with garbage of the same length, so its checksum
-// fails and neither the codec nor tar can decode it (a fatal error, not a warning).
+// fails and neither the scheme nor tar can decode it (a fatal error, not a warning).
 func corrupt(t *testing.T, path string) {
 	t.Helper()
 	info, err := os.Stat(path)

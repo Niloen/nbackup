@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/spf13/cobra"
 
 	"github.com/Niloen/nbackup/internal/config"
@@ -71,13 +74,38 @@ func NewRootCmd() *cobra.Command {
 		newLoadCmd(a),
 		newPruneCmd(a),
 		newRebuildCmd(a),
+		newVersionCmd(),
 	)
 	return root
 }
 
-// Execute runs the nb command tree. Errors are returned for main to report.
+// newVersionCmd prints the version — a discoverable sibling of `nb --version`, since
+// `nb version` is a natural thing to type.
+func newVersionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print the nb version",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Fprintf(cmd.OutOrStdout(), "nb version %s\n", Version)
+			return nil
+		},
+	}
+}
+
+// Execute runs the nb command tree. Errors are returned for main to report. A
+// usage-shaped error (unknown command/flag) gets a pointer to --help, since
+// SilenceUsage suppresses cobra's own hint to keep operational failures terse.
 func Execute() error {
-	return NewRootCmd().Execute()
+	err := NewRootCmd().Execute()
+	if err != nil {
+		m := err.Error()
+		if strings.HasPrefix(m, "unknown command") || strings.HasPrefix(m, "unknown flag") ||
+			strings.HasPrefix(m, "unknown shorthand flag") {
+			return fmt.Errorf("%w\nRun 'nb --help' for usage", err)
+		}
+	}
+	return err
 }
 
 // load reads full configuration (for commands that may write), applying the

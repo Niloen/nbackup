@@ -1,11 +1,27 @@
 package xfer
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"syscall"
 
 	"github.com/Niloen/nbackup/internal/programs"
 )
+
+// isBrokenPipe reports whether err is a SIGPIPE/EPIPE — the symptom a producer shows
+// when its consumer stops reading and closes the pipe (e.g. tar killed by SIGPIPE
+// because the medium sink failed first). It is a downstream symptom, never a root cause.
+func isBrokenPipe(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	return strings.Contains(err.Error(), "broken pipe") // covers "signal: broken pipe"
+}
 
 // A Transfer moves one byte stream from a Source, through a local Filters chain, to a
 // Sink — NBackup's data-movement primitive. The three zones map onto the
@@ -86,7 +102,7 @@ type Filters struct{ cmds []programs.Cmd }
 func NewFilters(cmds ...programs.Cmd) Filters { return Filters{cmds: cmds} }
 
 // Add appends a filter command, returning a new chain. An identity command (empty Name, e.g.
-// codec "none") is dropped: a chain never carries a stage that is not a real program.
+// scheme "none") is dropped: a chain never carries a stage that is not a real program.
 func (f Filters) Add(c programs.Cmd) Filters {
 	if c.Name == "" {
 		return f
@@ -144,6 +160,21 @@ func Transfer(source Source, filters Filters, sink Sink) (Produced, error) {
 		filtErr = filtCloseErr
 	}
 
+	// When the SINK fails first it stops reading, so the source (and filters) get
+	// SIGPIPE/EPIPE writing into the now-closed pipe — a downstream symptom, not the
+	// cause. Drop those broken-pipe symptoms so the sink's real error (e.g. "medium is
+	// full; load a fresh volume") surfaces instead of a baffling "tar: broken pipe". A
+	// genuine, non-pipe source/filter fault (e.g. a media-read error) is not a broken
+	// pipe, so it still wins as the upstream cause.
+	if sinkErr != nil {
+		if isBrokenPipe(finErr) {
+			finErr = nil
+		}
+		if isBrokenPipe(filtErr) {
+			filtErr = nil
+		}
+	}
+
 	switch {
 	case finErr != nil:
 		return Produced{}, &Error{RoleSource, finErr}
@@ -182,7 +213,7 @@ type Programs struct {
 func NewPrograms(ex programs.Executor) *Programs { return &Programs{exec: ex} }
 
 // Add appends commands to the chain, dropping identity commands (empty Name) so a "none"
-// codec or scheme leaves no stage behind. Variadic so a caller can splice in a placed slice.
+// compress or encrypt scheme leaves no stage behind. Variadic so a caller can splice in a placed slice.
 func (p *Programs) Add(cmds ...programs.Cmd) *Programs {
 	for _, c := range cmds {
 		if c.Name != "" {

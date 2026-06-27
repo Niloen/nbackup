@@ -27,7 +27,7 @@ import (
 //     the real read pipeline — decrypt → decompress → `tar -t` (LIST, not extract) —
 //     and assert both that the pipeline completes cleanly and that the listed members
 //     match the seal's recorded member list. It proves the bytes are a valid
-//     *restorable stream* and exercises the key + codec end-to-end, while writing
+//     *restorable stream* and exercises the key + compression end-to-end, while writing
 //     nothing.
 //
 // VerifyChecks is a bitmask so a deep verify can request both. VerifyOptions.Medium,

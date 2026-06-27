@@ -54,7 +54,7 @@ func newDrillCmd(a *app) *cobra.Command {
 		Use:   "drill",
 		Short: "Rehearse recovery: prove backups are restorable, not just intact",
 		Long: "Run a recovery drill — the recoverability proof checksum verification cannot give " +
-			"(a lost key, a codec/tar drift, a broken incremental chain, an unreadable offsite copy). " +
+			"(a lost key, a compression/tar drift, a broken incremental chain, an unreadable offsite copy). " +
 			"It selects a risk-biased subset of DLEs (rotating so each is drilled within a window, " +
 			"prioritizing the longest chains and oldest fulls), exercises each at a tier — checksum, " +
 			"structural (decrypt+decompress+`tar -t`), a real point-in-time chain restore to scratch, " +

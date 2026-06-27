@@ -13,7 +13,7 @@
 //     Finish (placement).
 //   - Members(ref) → the archive's member list (cache → on-medium index).
 //
-// What it deliberately does NOT do: codecs, tar, or composing transfers. The decode/encode and
+// What it deliberately does NOT do: schemes, tar, or composing transfers. The decode/encode and
 // the far-end tar live in the *operations* (the Dumper, Restorer, Verifier, …), which wrap a
 // clerk endpoint in an xfer.Transfer — exactly as cp/gzip compose over a filesystem's open().
 // So the clerk knows nothing of

@@ -111,7 +111,7 @@ landing: fast-disk
 
 # Recovery drills (`nb drill`). A drill is the recoverability proof checksum
 # verification cannot give: it actually restores a risk-biased sample of DLEs
-# (decrypt + decompress + tar) to scratch, so it catches a lost key, a codec/tar
+# (decrypt + decompress + tar) to scratch, so it catches a lost key, a scheme/tar
 # drift, a broken incremental chain, or an unreadable offsite copy — the "0 errors"
 # digit of 3-2-1-1-0. It runs by default (writing only an inspectable ledger,
 # drill-ledger.json, in the workdir); `--dry-run` (-n) previews it. The block below is
@@ -127,7 +127,7 @@ landing: fast-disk
 #   tier: structural    # checksum | structural | chain | stock
 #                       #   checksum   = re-hash payload vs seal (integrity only)
 #                       #   structural = decrypt+decompress+`tar -t`, members vs seal
-#                       #                (no write; exercises the key + codec)
+#                       #                (no write; exercises the key + scheme)
 #                       #   chain      = real point-in-time chain restore to scratch
 #                       #   stock      = restore via the documented gpg/zstd/tar
 #                       #                one-liner (proves recovery needs no NBackup)
@@ -183,9 +183,18 @@ landing: fast-disk
 
 # Where the catalog's local cache lives. This is the catalog's own directory,
 # independent of any storage medium — the catalog is a cache over the whole pool,
-# not part of one medium. An archiver's incremental state (gnutar's .snar library)
-# defaults to a `snapshots/` dir beneath this. Defaults to ./nbackup-catalog.
+# not part of one medium. Defaults to ./nbackup-catalog.
 # workdir: /var/lib/nbackup/catalog
+
+# Where archivers keep their incremental state (for gnutar, the .snar listed-
+# incremental library). This is a HOST property, not an archiver option, and is a
+# dedicated location BESIDE the workdir — never beneath it: the workdir is the
+# disposable rebuild-from-media cache, while this state is precious (losing a DLE's
+# base forces its next run to a full). Defaults to ./nbackup-state. Both default
+# RELATIVE TO THE WORKING DIRECTORY, so a cron job that runs `nb` from elsewhere
+# must set an ABSOLUTE path here (and for workdir) or it will silently re-full.
+# state_dir: /var/lib/nbackup/state
+# A per-host override (e.g. for a remote client's own path) lives under hosts:.
 
 # Let a dump auto-label a *blank* tape instead of requiring `nb label` first.
 # Off by default: explicit labeling is what makes the overwrite guard meaningful.
@@ -197,12 +206,12 @@ landing: fast-disk
 # application GNUTAR-PATH.)
 
 # Compression. Archives are piped through an external compressor child (like
-# Amanda), so the CPU work is in a separate, throttleable process. The codec
+# Amanda), so the CPU work is in a separate, throttleable process. The scheme
 # binary must be on PATH (zstd by default; gzip; or "none" for no compression).
 compress:
-  codec: zstd        # zstd | gzip | none
-  level: 3           # codec level (0 = codec default)
-  threads: 0         # compressor worker threads (0 = codec default; zstd: single)
+  scheme: zstd        # zstd | gzip | none
+  level: 3           # compression level (0 = scheme default)
+  threads: 0         # compressor worker threads (0 = scheme default; zstd: single)
   # program: /usr/bin/zstd   # optional binary override
 
 # Encryption. After compression, archives can be piped through an external
@@ -236,7 +245,8 @@ archivers:
     one-file-system: "true"
     sparse: "true"
     # tar_path: gtar     # GNU tar binary (use "gtar" on macOS/BSD)
-    # state_dir: /var/lib/nbackup/snapshots   # incremental-state library (defaults beneath workdir)
+    # (Incremental state is NOT an archiver option — its location is the host-level
+    #  `state_dir:` above; the archiver only owns its format knobs like tar_path.)
 
 # Named dumptypes (Amanda's "dumptype"): an archiver reference plus per-DLE policy —
 # what to skip (exclude) and encryption. Excludes live here, not on the archiver:
@@ -287,9 +297,11 @@ dumptypes:
 #   app01:
 #     ssh:
 #       user: root                      # override just the user; inherit the rest
-#       tar_path: /usr/bin/tar          # client GNU tar ("" = tar on the client PATH)
-#       # state_dir: /var/lib/nbackup/snar  # optional; default nbackup-catalog/snapshots
-#       #   under the backup user's home
+#     # state_dir: /var/lib/nbackup/state   # this host's incremental-state root (host-
+#     #                                     # level, sibling of ssh:; default ./nbackup-state)
+#     archivers:
+#       gnutar:
+#         tar_path: /usr/bin/tar        # client GNU tar ("" = tar on the client PATH)
 
 # The disklist: grouped by dumptype, then host, then the paths to back up.
 # NBackup backs up filesystem trees. For a live database, snapshot or dump it to

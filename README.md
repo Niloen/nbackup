@@ -31,27 +31,39 @@ calls it out again only where a specific mechanism is worth tracing back.)
 ## Artifacts you can read
 
 A **volume** is an ordered sequence of self-describing files, each carrying an
-identity **header** (slot, DLE, level, codec, …) and addressed by position. A
-**slot** is a run of archive files plus a final **seal record** (the slot's
-metadata) that marks it complete. The same shape maps to disk, an object store,
-or tape; each medium frames the header its own way.
+identity **header** (slot, DLE, level, compression, …) and addressed by position.
+A **slot** is a run of archives; each archive is its payload followed by a
+**member index** (its file list) and a **commit footer** (its identity, sizes,
+and checksums), the footer written last so its presence proves the archive landed
+whole. A slot is complete once every archive it planned has committed. The same
+shape maps to disk, an object store, or tape; each medium frames the header its
+own way.
 
 On **disk** the header is a separate `.hdr` sidecar so the payload stays a clean
-archive, and the files are human-friendly:
+archive, and the files are human-friendly — one archive is three numbered files
+(payload, index, commit):
 
 ```text
 slots/slot-2026-06-21/
-  000000-app01-home-L0.tar.zst   # clean compressed tar (payload)
-  000000-app01-home-L0.hdr       # JSON header sidecar
-  000001-db01-pg-L1.tar.zst
-  000001-db01-pg-L1.hdr
-  000002-seal.json               # slot metadata (identity + sizes + checksums)
-  000002-seal.hdr
+  000000-app01-home-L0.tar.zst        # clean compressed tar (payload)
+  000000-app01-home-L0.hdr            # JSON header sidecar
+  000001-app01-home-L0-index.json.gz  # gzipped member list (browse without extracting)
+  000001-app01-home-L0-index.hdr
+  000002-app01-home-L0-commit.json    # per-archive footer: identity + sizes + checksums
+  000002-app01-home-L0-commit.hdr
+  000003-db01-pg-L1.tar.zst           # the next archive continues the numbering
+  000003-db01-pg-L1.hdr
+  000004-db01-pg-L1-index.json.gz
+  000004-db01-pg-L1-index.hdr
+  000005-db01-pg-L1-commit.json
+  000005-db01-pg-L1-commit.hdr
 ```
 
-The `NNNNNN` prefix is the file's position, and the **seal is always the last
-file** — so its number tracks the archive count (here two archives → seal at
-`000002`; a single-archive slot seals at `000001`).
+The `NNNNNN` prefix is the file's position on the volume — a running counter, so
+it keeps climbing across the slots that share a volume rather than resetting to
+`000000` each slot. Each archive's **commit footer is its last file**; its
+**payload is always the first** of the three, which is all the stock-tool restore
+below needs (it globs the `…-L<n>.tar*` payloads and ignores the index/commit).
 
 (On **tape** the header is instead a fixed 32 KB block inline ahead of each
 payload, since a tape has no sidecars.)
@@ -84,7 +96,11 @@ for lvl in $(seq 0 9); do
   [ -n "$a" ] && zstd -dc "$a" | tar --extract --listed-incremental=/dev/null
 done
 # (an ENCRYPTED archive keeps the same .tar.zst name and reverses the same way,
-#  decrypting first: gpg -d < 000000-app01-home-L0.tar.zst | zstd -dc | tar -xf -)
+#  decrypting first. Public-key (gpg finds the private key in your keyring):
+#    gpg -d < 000000-app01-home-L0.tar.zst | zstd -dc | tar -xf -
+#  Symmetric (passphrase) — pass it non-interactively, never on the command line:
+#    gpg -d --batch --pinentry-mode loopback --passphrase-file /etc/nbackup/secret \
+#      < 000000-app01-home-L0.tar.zst | zstd -dc | tar -xf -)
 # (from tape, skip the 32 KB inline header first: dd bs=32k skip=1 < file | zstd -dc | …)
 # (a SPANNED tape archive is split into parts — `nb slot show <slot>` lists the
 #  volume chain and each part's position (e.g. bay-NN/000001). Strip each part's
@@ -130,6 +146,7 @@ This produces a single `nb` binary. The convention: you **inspect** with a noun
 | `nb report`          | Summarize recent runs, or print one dump's per-DLE report |
 | `nb slot`            | List slots (default)                                     |
 | `nb slot show`       | Show a single slot's archives and copies                |
+| `nb dle`             | List DLEs, or detail one's archive timeline across slots |
 | `nb medium`          | List media, or detail one (incl. bays / drive + shelf)    |
 | `nb verify`          | Verify slot integrity: checksums, or `--deep` structure  |
 | `nb drill`           | Rehearse recovery: prove backups are restorable          |
@@ -444,11 +461,11 @@ Two layers prove your backups are good, weakest to strongest:
   keyless. `nb verify --deep` adds a **structural** check: it streams the archive
   through the real read pipeline — decrypt → decompress → `tar -t` (list, not
   extract) — and asserts the pipeline completes and the members match the seal,
-  proving the bytes are a valid *restorable stream* and exercising the key + codec,
+  proving the bytes are a valid *restorable stream* and exercising the key + scheme,
   while still writing nothing.
 
 - **`nb drill`** is the recoverability rehearsal layered on `nb verify`. Checksums
-  can't catch a lost key, codec/tar drift, a broken incremental chain, or an
+  can't catch a lost key, scheme/tar drift, a broken incremental chain, or an
   unreadable offsite copy — a drill **actually restores** a risk-biased sample of
   DLEs (full + incrementals, deletion-faithful) into a scratch dir and discards it.
   It is NBackup's contribution of the **"0 errors"** digit of [3-2-1-1-0][321].
@@ -468,7 +485,7 @@ exercised at a **tier** — `checksum`, `structural`, a real `chain` restore, or
 `stock` (the documented one-liner) — and the outcome is appended to an inspectable
 **ledger** (`drill-ledger.json`) in the workdir: per DLE its last drill, tier,
 source medium, and pass/fail. A failure is **classified** — integrity (corruption),
-pipeline (key/codec), chain (incremental composition), or missing-copy — because
+pipeline (key/scheme), chain (incremental composition), or missing-copy — because
 each implies a different fix, and the command **exits non-zero** so it can page you.
 
 Two run modes: **attended** (interactive) may prompt to load a tape; **unattended**
@@ -562,10 +579,10 @@ See [`nbackup.example.yaml`](nbackup.example.yaml). Minimal example:
 ```yaml
 cycle: 7d                            # target & hard-max time between fulls per DLE
 
-# Compression. The default codec is zstd, which must be on PATH; set `none` or
-# `gzip` if zstd is not installed (the codec binary is checked before a dump).
+# Compression. The default scheme is zstd, which must be on PATH; set `none` or
+# `gzip` if zstd is not installed (the scheme binary is checked before a dump).
 compress:
-  codec: zstd                        # zstd | gzip | none
+  scheme: zstd                        # zstd | gzip | none
 
 # Named storage definitions; `landing` selects which one slots are created on.
 # Capacity is per-medium; minimum_age is optional (defaults to one cycle).
@@ -712,7 +729,7 @@ B2, Wasabi); `gs://` is Google Cloud Storage; `azblob://` is Azure Blob.
 environment (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_*`). An object store
 is **address-identified** like disk: no labels, no swap prompts, nothing to
 inventory — it just lands and reclaims slots within its `capacity`. Each archive is
-stored as a clean `.tar.<codec>` object (a plain GET restores it with stock tools)
+stored as a clean `.tar.<scheme>` object (a plain GET restores it with stock tools)
 plus a small header sidecar, so a slot streams disk↔cloud unchanged. (Google Drive
 and other file-API stores are out of scope — `gocloud.dev/blob` is an object-store
 abstraction.)

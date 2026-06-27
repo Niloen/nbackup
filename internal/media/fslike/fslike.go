@@ -112,16 +112,16 @@ func payloadExt(h record.Header) string {
 		return ".tar.gz"
 	case "none", "":
 		return ".tar"
-	default: // zstd and any future codec named after its extension
-		return ".tar." + codecExt(h.Compress)
+	default: // zstd and any future compressor named after its extension
+		return ".tar." + compressExt(h.Compress)
 	}
 }
 
-func codecExt(codec string) string {
-	if codec == "zstd" {
+func compressExt(compress string) string {
+	if compress == "zstd" {
 		return "zst"
 	}
-	return codec
+	return compress
 }
 
 func (v *Volume) AppendFile(h record.Header, write func(w io.Writer) error) (int, error) {

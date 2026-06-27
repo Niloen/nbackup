@@ -4,8 +4,8 @@
 // CPU-heavy work, so compression can be threaded and niced independently of nb
 // (in-process compression previously pinned every core).
 //
-// A codec is a registered name (zstd, gzip, none) that knows how to build the
-// argv for compressing and decompressing. The archive records which codec
+// A scheme is a registered name (zstd, gzip, none) that knows how to build the
+// argv for compressing and decompressing. The archive records which scheme
 // produced it, so restore reverses the exact transform.
 package compress
 
@@ -19,16 +19,16 @@ import (
 	"github.com/Niloen/nbackup/internal/programs"
 )
 
-// Options tune a codec invocation.
+// Options tune a scheme invocation.
 type Options struct {
-	Program string // override the codec's default binary (e.g. an absolute path); "" = default
-	Level   int    // compression level; 0 = codec default
-	Threads int    // worker threads where supported; 0 = codec default
+	Program string // override the scheme's default binary (e.g. an absolute path); "" = default
+	Level   int    // compression level; 0 = scheme default
+	Threads int    // worker threads where supported; 0 = scheme default
 	Nice    int    // run the child under `nice -n Nice` for CPU politeness; 0 = no nice
 }
 
-// Spec describes a codec: its archive file extension and how to build the child
-// argv. A nil argv builder means "no external process" (the none codec).
+// Spec describes a scheme: its archive file extension and how to build the child
+// argv. A nil argv builder means "no external process" (the none scheme).
 type Spec struct {
 	Name           string
 	Ext            string // archive extension, e.g. "zst", "gz"; "" for none
@@ -76,26 +76,26 @@ func prog(o Options, def string) string {
 	return def
 }
 
-func spec(codec string) (Spec, error) {
-	s, ok := registry[codec]
+func spec(scheme string) (Spec, error) {
+	s, ok := registry[scheme]
 	if !ok {
-		return Spec{}, fmt.Errorf("unknown codec %q (known: %s)", codec, strings.Join(sortedNames(registry), ", "))
+		return Spec{}, fmt.Errorf("unknown compression scheme %q (known: %s)", scheme, strings.Join(sortedNames(registry), ", "))
 	}
 	return s, nil
 }
 
-// Ext returns the archive file extension for a codec ("" for none).
-func Ext(codec string) (string, error) {
-	s, err := spec(codec)
+// Ext returns the archive file extension for a scheme ("" for none).
+func Ext(scheme string) (string, error) {
+	s, err := spec(scheme)
 	if err != nil {
 		return "", err
 	}
 	return s.Ext, nil
 }
 
-// Check verifies the codec is known and its binary is available on PATH.
-func Check(codec string, o Options) error {
-	s, err := spec(codec)
+// Check verifies the scheme is known and its binary is available on PATH.
+func Check(scheme string, o Options) error {
+	s, err := spec(scheme)
 	if err != nil {
 		return err
 	}
@@ -104,41 +104,41 @@ func Check(codec string, o Options) error {
 	}
 	bin := s.compressArgv(o)[0]
 	if _, err := exec.LookPath(bin); err != nil {
-		return fmt.Errorf("codec %q needs %q on PATH: %w", codec, bin, err)
+		return fmt.Errorf("scheme %q needs %q on PATH: %w", scheme, bin, err)
 	}
 	return nil
 }
 
 // CompressCmd returns the compressor as a pipeline stage, or ok=false for the identity
-// (none) codec, which contributes no stage. It lets the unified pipeline run compression
+// (none) scheme, which contributes no stage. It lets the unified pipeline run compression
 // through any executor (local or a remote client).
-func CompressCmd(codec string, o Options) (cmd programs.Cmd, ok bool, err error) {
-	return stageCmd(codec, func(s Spec) func(Options) []string { return s.compressArgv }, o)
+func CompressCmd(scheme string, o Options) (cmd programs.Cmd, ok bool, err error) {
+	return stageCmd(scheme, func(s Spec) func(Options) []string { return s.compressArgv }, o)
 }
 
 // DecompressCmd returns the decompressor as a pipeline stage (the read-side peer of
 // CompressCmd), or ok=false for none.
-func DecompressCmd(codec string, o Options) (cmd programs.Cmd, ok bool, err error) {
-	return stageCmd(codec, func(s Spec) func(Options) []string { return s.decompressArgv }, o)
+func DecompressCmd(scheme string, o Options) (cmd programs.Cmd, ok bool, err error) {
+	return stageCmd(scheme, func(s Spec) func(Options) []string { return s.decompressArgv }, o)
 }
 
-// Filter returns the codec as a reversible programs.Filter — Forward compresses, Reverse
-// decompresses — for the transform layer to place and chain. The none codec yields a
-// Filter with empty cmds (skipped by the pipeline). It errors only for an unknown codec.
-func Filter(codec string, o Options) (programs.Filter, error) {
-	fwd, _, err := CompressCmd(codec, o)
+// Filter returns the scheme as a reversible programs.Filter — Forward compresses, Reverse
+// decompresses — for the transform layer to place and chain. The none scheme yields a
+// Filter with empty cmds (skipped by the pipeline). It errors only for an unknown scheme.
+func Filter(scheme string, o Options) (programs.Filter, error) {
+	fwd, _, err := CompressCmd(scheme, o)
 	if err != nil {
 		return programs.Filter{}, err
 	}
-	rev, _, err := DecompressCmd(codec, o)
+	rev, _, err := DecompressCmd(scheme, o)
 	if err != nil {
 		return programs.Filter{}, err
 	}
-	return programs.Filter{Name: codec, Forward: fwd, Reverse: rev}, nil
+	return programs.Filter{Name: scheme, Forward: fwd, Reverse: rev}, nil
 }
 
-func stageCmd(codec string, pick func(Spec) func(Options) []string, o Options) (programs.Cmd, bool, error) {
-	s, err := spec(codec)
+func stageCmd(scheme string, pick func(Spec) func(Options) []string, o Options) (programs.Cmd, bool, error) {
+	s, err := spec(scheme)
 	if err != nil {
 		return programs.Cmd{}, false, err
 	}

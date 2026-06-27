@@ -237,11 +237,11 @@ sources:
 
 - **Composed remote pipeline:** the single ssh exec becomes `tar … | zstd … | gpg -e -r
   <recipient>`. The engine composes the remote command from the gnutar tar args + the
-  `filter` codec args + the `crypt` scheme args (the only place these three meet for a
+  `filter` scheme args + the `crypt` scheme args (the only place these three meet for a
   remote dump).
 - **`slotio.Writer` "pre-transformed" mode:** when the produce side already delivers
   final bytes, the Writer **skips its internal filter/crypt wrap** and runs only
-  `meter → volume`, while **still recording `Codec`/`Encrypt` scheme names** from config
+  `meter → volume`, while **still recording `Compress`/`Encrypt` scheme names** from config
   so restore reverses them from the artifact (ARCHITECTURE.md:236). This is the one
   cross-package change; it is small.
 - **Capability `Check` on the client:** `zstd --version` / `gpg` over SSH (the
@@ -354,5 +354,5 @@ deferred opt-in encrypted seal, which would **disable** `nb recover`'s keyless b
   connection loss fails cleanly with no partial seal.
 - **Verify** per repo conventions: `gofmt -l`, `go vet ./...`, `go test -race ./...`;
   tests stub the SSH runner or use a loopback `ssh localhost` guarded by availability
-  (skip when absent, like the GNU-tar skips), codec `none`.
+  (skip when absent, like the GNU-tar skips), scheme `none`.
 ```

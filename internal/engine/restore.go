@@ -31,6 +31,9 @@ type restorer struct {
 	fopts      compress.Options         // decompress invocation options
 	dcopts     crypt.Options            // server-side decrypt key reference
 	displayDLE func(slug string) string // host:path identity for logging
+	// preferMedium forces reads to one copy (the `nb recover --from` medium); "" lets
+	// the clerk pick any copy and fail over. Set per-call by the as-of entry points.
+	preferMedium string
 }
 
 // newRestorer wires a restorer to the engine's catalog, data path, decoder, config, and opts.
@@ -154,25 +157,25 @@ func (r *restorer) extractStep(step restore.Step, destDir, targetHost string, ec
 // whole-archive listed-incremental chain restore. It is the engine's one extraction path —
 // whole-DLE restore, `--to` client restore, and file-level recover all run through it; it
 // adds the decrypt hint to whatever the data path surfaces.
-func (r *restorer) extractInto(slotID, dle string, level int, codec, encrypt, archiverType, destDir, targetHost string, ec config.EncryptConfig, members []string) error {
-	src, err := r.clerk.Open(clerk.Ref{Slot: slotID, DLE: dle, Level: level}, "")
+func (r *restorer) extractInto(slotID, dle string, level int, compressScheme, encrypt, archiverType, destDir, targetHost string, ec config.EncryptConfig, members []string) error {
+	src, err := r.clerk.Open(clerk.Ref{Slot: slotID, DLE: dle, Level: level}, r.preferMedium)
 	if err != nil {
 		return decryptHint(encrypt, err)
 	}
-	plan := r.decodePlan(codec, encrypt, ec, targetHost)
+	plan := r.decodePlan(compressScheme, encrypt, ec, targetHost)
 	return decryptHint(encrypt, r.dec.restoreArchive(src, plan, archiverType, destDir, targetHost, members))
 }
 
 // decodePlan resolves the decode placement (engine policy): decrypt runs on the target (the
 // sink) only when the key is client-held and reached over `--to`; otherwise on the local
 // server, with the server's default decrypt opts. The clerk just places the resolved plan.
-func (r *restorer) decodePlan(codec, encrypt string, ec config.EncryptConfig, targetHost string) DecodePlan {
+func (r *restorer) decodePlan(compressScheme, encrypt string, ec config.EncryptConfig, targetHost string) DecodePlan {
 	opts := r.dcopts
 	inSink := ec.At == "client" && targetHost != ""
 	if inSink {
 		opts = crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile}
 	}
-	return DecodePlan{Codec: codec, CompressOpts: r.fopts, Encrypt: encrypt, DecryptOpts: opts, DecryptInSink: inSink}
+	return DecodePlan{Compress: compressScheme, CompressOpts: r.fopts, Encrypt: encrypt, DecryptOpts: opts, DecryptInSink: inSink}
 }
 
 // ensureServerCanDecode fails fast when a restore would have the server decrypt an
@@ -239,7 +242,12 @@ func (r *restorer) dleByName(name string) (config.DLE, bool) {
 // the date to the most recent slot on or before it (the same resolution recover's
 // browse uses), then replays that DLE's chain. So a bare date means the same slot
 // for both the browse view and a full restore.
-func (r *restorer) RestoreAsOf(dle, asOf, destDir string, force bool, logf Logf) error {
+func (r *restorer) RestoreAsOf(dle, asOf, destDir, from string, force bool, logf Logf) error {
+	reset, err := r.useMedium(from)
+	if err != nil {
+		return err
+	}
+	defer reset()
 	target, err := recovery.AsOf(r.cat.Slots(), asOf)
 	if err != nil {
 		return err
@@ -249,12 +257,30 @@ func (r *restorer) RestoreAsOf(dle, asOf, destDir string, force bool, logf Logf)
 
 // RestoreAsOfTo is RestoreAsOf onto a remote client: it resolves the date to a slot and
 // restores the DLE's chain to destPath on destHost over SSH (see RestoreTo).
-func (r *restorer) RestoreAsOfTo(dle, asOf, destHost, destPath string, logf Logf) error {
+func (r *restorer) RestoreAsOfTo(dle, asOf, destHost, destPath, from string, logf Logf) error {
+	reset, err := r.useMedium(from)
+	if err != nil {
+		return err
+	}
+	defer reset()
 	target, err := recovery.AsOf(r.cat.Slots(), asOf)
 	if err != nil {
 		return err
 	}
 	return r.RestoreTo(target, dle, destHost, destPath, logf)
+}
+
+// useMedium pins reads to one copy for the duration of a restore (the `--from` medium),
+// validating it is configured, and returns a reset to clear the pin. An empty from is
+// the default (any copy, with fail-over).
+func (r *restorer) useMedium(from string) (reset func(), err error) {
+	if from != "" {
+		if _, ok := r.cfg.Media[from]; !ok {
+			return func() {}, fmt.Errorf("unknown medium %q (--from)", from)
+		}
+	}
+	r.preferMedium = from
+	return func() { r.preferMedium = "" }, nil
 }
 
 // errNonEmptyDest refuses a whole-DLE restore into a destination that already

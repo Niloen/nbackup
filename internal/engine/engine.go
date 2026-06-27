@@ -53,27 +53,27 @@ func (l Logf) log(format string, args ...any) {
 // volume; the catalog is a local cache the engine refreshes from the volume.
 // Archivers are resolved per dumptype and cached.
 type Engine struct {
-	cfg         *config.Config
-	mediumName  string       // name of the medium new dumps land on
-	mediumDef   config.Media // its definition
-	vol         media.Volume
-	clerk       *clerk.Clerk // the archive data path (read+write composer); the engine implements its Deps
-	profile     media.Profile
-	landingCost media.Cost // landing medium's pricing (dollar peer of profile)
-	minAge      time.Duration
-	cat         *catalog.Catalog
-	archivers   map[string]archiver.Archiver  // by cache key (dumptype or "@type")
-	codec       string                        // compression codec for new archives
-	fopts       compress.Options              // codec invocation options (level/threads/nice)
-	dcopts      crypt.Options                 // decrypt key reference for restore (from the default encrypt block)
-	op          librarian.Operator            // optional: handles manual tape swaps (nil = unattended)
-	runSink     progress.Sink                 // optional: live run-progress sink (nil = status file only)
-	limiters    map[string]*ratelimit.Limiter // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
-	dec         *decoder                      // the read-side codec operation (restore/verify/list); shares the engine's resolution + decode opts
-	enc         *encoder                      // the write-side codec operation (dump); shares the engine's dumptype-recipe resolution
-	ver         *verifier                     // the verification operation (verify/drill checks); shares catalog + data path + decoder
-	cop         *copier                       // the copy operation (PlanCopy/CopySlot); shares catalog + data path + write machinery
-	rst         *restorer                     // the restore/recover operation; shares catalog + data path + decoder + config
+	cfg            *config.Config
+	mediumName     string       // name of the medium new dumps land on
+	mediumDef      config.Media // its definition
+	vol            media.Volume
+	clerk          *clerk.Clerk // the archive data path (read+write composer); the engine implements its Deps
+	profile        media.Profile
+	landingCost    media.Cost // landing medium's pricing (dollar peer of profile)
+	minAge         time.Duration
+	cat            *catalog.Catalog
+	archivers      map[string]archiver.Archiver  // by cache key (dumptype or "@type")
+	compressScheme string                        // compression scheme for new archives
+	fopts          compress.Options              // compress invocation options (level/threads/nice)
+	dcopts         crypt.Options                 // decrypt key reference for restore (from the default encrypt block)
+	op             librarian.Operator            // optional: handles manual tape swaps (nil = unattended)
+	runSink        progress.Sink                 // optional: live run-progress sink (nil = status file only)
+	limiters       map[string]*ratelimit.Limiter // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
+	dec            *decoder                      // the read-side scheme operation (restore/verify/list); shares the engine's resolution + decode opts
+	enc            *encoder                      // the write-side scheme operation (dump); shares the engine's dumptype-recipe resolution
+	ver            *verifier                     // the verification operation (verify/drill checks); shares catalog + data path + decoder
+	cop            *copier                       // the copy operation (PlanCopy/CopySlot); shares catalog + data path + write machinery
+	rst            *restorer                     // the restore/recover operation; shares catalog + data path + decoder + config
 }
 
 // SetOperator attaches an operator so manual single-drive media can prompt for a
@@ -185,19 +185,19 @@ func New(cfg *config.Config) (*Engine, error) {
 		Nice:           cfg.Nice,
 	}
 	e := &Engine{
-		cfg:         cfg,
-		mediumName:  name,
-		mediumDef:   mediaDef,
-		vol:         vol,
-		profile:     profile,
-		landingCost: costModel,
-		minAge:      minAge,
-		cat:         cat,
-		archivers:   map[string]archiver.Archiver{},
-		codec:       cfg.CompressScheme(),
-		fopts:       fopts,
-		dcopts:      dcopts,
-		limiters:    limiters,
+		cfg:            cfg,
+		mediumName:     name,
+		mediumDef:      mediaDef,
+		vol:            vol,
+		profile:        profile,
+		landingCost:    costModel,
+		minAge:         minAge,
+		cat:            cat,
+		archivers:      map[string]archiver.Archiver{},
+		compressScheme: cfg.CompressScheme(),
+		fopts:          fopts,
+		dcopts:         dcopts,
+		limiters:       limiters,
 	}
 	e.clerk = clerk.New(e, e, catalog.OpenMemberIndex(cfg.WorkdirPath()))
 	e.dec = e.newDecoder()
@@ -703,14 +703,14 @@ func (e *Engine) planWith(date time.Time, sink progress.Sink) *planner.Plan {
 // ValidatePlan checks each DLE the way a real run would resolve it, so a preview
 // (`nb plan` / `nb dump --dry-run`) surfaces problems the size estimates would
 // otherwise swallow into a misleading ~0 B. It runs the same pre-flight a real run
-// does — the compression codec and every dumptype's method and encryption scheme —
-// returning a fatal error for an unrunnable config (an unknown codec/method/scheme,
-// a missing required key reference, or a codec/gpg binary not on PATH), so a preview
+// does — the compression scheme and every dumptype's method and encryption scheme —
+// returning a fatal error for an unrunnable config (an unknown compression/method/encryption scheme,
+// a missing required key reference, or a scheme/gpg binary not on PATH), so a preview
 // no longer gives a green light to a run that `nb dump` will reject. Source paths
 // that are missing or unreadable right now are non-fatal warnings (they may be an
 // unmounted volume the real run will mount).
 func (e *Engine) ValidatePlan() (warnings []string, err error) {
-	if err := compress.Check(e.codec, e.fopts); err != nil {
+	if err := compress.Check(e.compressScheme, e.fopts); err != nil {
 		return nil, err
 	}
 	checkedEnc := map[string]bool{}
@@ -934,10 +934,10 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 		logf.log("WARNING: %s", w)
 	}
 
-	// Pre-flight before creating a slot: the codec binary and every archiver.
+	// Pre-flight before creating a slot: the compressor binary and every archiver.
 	// Resolving every archiver here also populates the archiver cache, so the parallel
 	// workers below only read it (no concurrent writes).
-	if err := compress.Check(e.codec, e.fopts); err != nil {
+	if err := compress.Check(e.compressScheme, e.fopts); err != nil {
 		return nil, err
 	}
 	checkedEnc := map[string]bool{}
@@ -1207,7 +1207,7 @@ func (e *Engine) backupItem(session *clerk.Session, item planner.Item, tr *progr
 	}
 
 	sizeLabel := "compressed"
-	if sum.Codec == "none" {
+	if sum.Compress == "none" {
 		sizeLabel = "stored" // no compressor in the pipe; "compressed" would be a lie
 	}
 	if sum.FileCount == 0 {
@@ -1240,7 +1240,9 @@ func (e *Engine) backupSpec(item planner.Item) (BackupSpec, error) {
 	if item.Level >= 1 {
 		req.BaseLevel = item.BaseLevel
 		if !ar.HasBase(item.Name, item.BaseLevel) {
-			return BackupSpec{}, fmt.Errorf("DLE %s: incremental L%d needs the L%d incremental state but it is missing",
+			return BackupSpec{}, fmt.Errorf("DLE %s: incremental L%d needs the L%d incremental state but it is missing — "+
+				"the prior dump wrote it under the host's state_dir; if that path moved (e.g. a relative state_dir/workdir while `nb` ran from a different directory), "+
+				"set state_dir to an absolute path and re-run a full (L0)",
 				item.Name, item.Level, item.BaseLevel)
 		}
 	}
@@ -1289,14 +1291,15 @@ func (e *Engine) Executor(host string) programs.Executor {
 	return e.executorFor(host)
 }
 
-// RestoreAsOf reconstructs a whole DLE as of a date into destDir; see restorer.
-func (e *Engine) RestoreAsOf(dle, asOf, destDir string, force bool, logf Logf) error {
-	return e.rst.RestoreAsOf(dle, asOf, destDir, force, logf)
+// RestoreAsOf reconstructs a whole DLE as of a date into destDir; see restorer. A
+// non-empty from pins the read to that medium's copy (else any copy, with fail-over).
+func (e *Engine) RestoreAsOf(dle, asOf, destDir, from string, force bool, logf Logf) error {
+	return e.rst.RestoreAsOf(dle, asOf, destDir, from, force, logf)
 }
 
 // RestoreAsOfTo is RestoreAsOf onto a remote client over SSH; see restorer.
-func (e *Engine) RestoreAsOfTo(dle, asOf, destHost, destPath string, logf Logf) error {
-	return e.rst.RestoreAsOfTo(dle, asOf, destHost, destPath, logf)
+func (e *Engine) RestoreAsOfTo(dle, asOf, destHost, destPath, from string, logf Logf) error {
+	return e.rst.RestoreAsOfTo(dle, asOf, destHost, destPath, from, logf)
 }
 
 // decryptHint augments an extraction failure on an encrypted archive with the
@@ -1485,6 +1488,37 @@ func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) 
 		}
 	}
 	return eligible, freed, nil
+}
+
+// reclaimTargetCopy deletes an existing copy of a slot on a removable (fslike: disk
+// or cloud) medium, so a forced re-copy replaces the old files instead of orphaning
+// them (the leak a plain `nb copy --force` would otherwise cause — orphaned parts
+// that no placement references yet still consume capacity). Tape reclaims only whole
+// volumes (relabel), so its prior copy stays orphaned-until-relabel as documented and
+// this is a no-op there. Best-effort: it runs before the re-copy re-authors the slot.
+func (e *Engine) reclaimTargetCopy(slotID, mediumName string) error {
+	if m, ok := e.cfg.Media[mediumName]; ok && m.Type == "tape" {
+		return nil
+	}
+	s, err := e.cat.ReadSlot(slotID)
+	if err != nil {
+		return err
+	}
+	vol, _, _, err := e.mediumVolume(mediumName)
+	if err != nil {
+		return err
+	}
+	for _, a := range s.Archives {
+		for _, pos := range archivePositions(e.cat.Placements(slotID), mediumName, a.DLE) {
+			if err := vol.RemoveFile(pos); err != nil {
+				return fmt.Errorf("reclaim prior copy of %s %s on %q: %w", slotID, a.DLE, mediumName, err)
+			}
+		}
+	}
+	if _, err := e.cat.RemovePlacement(slotID, mediumName); err != nil {
+		return fmt.Errorf("update catalog cache: %w", err)
+	}
+	return nil
 }
 
 // archivePositions gathers the volume file positions of one archive (a DLE's image)

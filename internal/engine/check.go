@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/programs"
@@ -57,7 +58,7 @@ func (rep *CheckReport) add(lines *[]CheckLine, ok, warn bool, msg string) {
 }
 
 func (e *Engine) checkServer(rep *CheckReport) {
-	rep.add(&rep.Server, true, false, fmt.Sprintf("landing medium %q ready", e.Landing()))
+	e.checkMedia(rep)
 
 	wd := e.cfg.WorkdirPath()
 	if err := writableDir(wd); err != nil {
@@ -66,12 +67,12 @@ func (e *Engine) checkServer(rep *CheckReport) {
 		rep.add(&rep.Server, true, false, fmt.Sprintf("workdir %s writable", wd))
 	}
 
-	// The codec is needed server-side for a server-side compress and for restore
+	// The compressor is needed server-side for a server-side compress and for restore
 	// decompression, so a missing binary is a real problem even with client-side dumps.
-	if err := compress.Check(e.codec, e.fopts); err != nil {
-		rep.add(&rep.Server, false, false, fmt.Sprintf("codec %q: %v", e.codec, err))
+	if err := compress.Check(e.compressScheme, e.fopts); err != nil {
+		rep.add(&rep.Server, false, false, fmt.Sprintf("compression %q: %v", e.compressScheme, err))
 	} else {
-		rep.add(&rep.Server, true, false, fmt.Sprintf("codec %q available", e.codec))
+		rep.add(&rep.Server, true, false, fmt.Sprintf("compression %q available", e.compressScheme))
 	}
 
 	checked := map[string]bool{}
@@ -94,6 +95,37 @@ func (e *Engine) checkServer(rep *CheckReport) {
 					rep.add(&rep.Server, false, true, fmt.Sprintf("passphrase_file %q is group/world-readable (%#o) — chmod 600 to protect the symmetric key", pf, info.Mode().Perm()))
 				}
 			}
+		}
+	}
+}
+
+// checkMedia probes every configured medium, not just the landing one. The landing's
+// failure is hard (a dump cannot run); a non-landing medium's is a warning — it is a
+// sync/copy target, so the local backup still works but replication to it would fail,
+// which a `check` that ignored it would let the operator discover only at sync time. A
+// cloud medium's reachability needs credentials/network, so it is reported as
+// configured-but-unprobed (it is validated at first use) rather than opened here.
+func (e *Engine) checkMedia(rep *CheckReport) {
+	landing := e.Landing()
+	names := make([]string, 0, len(e.cfg.Media))
+	for n := range e.cfg.Media {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		isLanding := name == landing
+		label := fmt.Sprintf("medium %q", name)
+		if isLanding {
+			label = fmt.Sprintf("landing medium %q", name)
+		}
+		if e.cfg.Media[name].Type == "cloud" {
+			rep.add(&rep.Server, false, true, fmt.Sprintf("%s (cloud) configured — reachability checked at first use, not here", label))
+			continue
+		}
+		if _, _, _, err := e.mediumVolume(name); err != nil {
+			rep.add(&rep.Server, false, !isLanding, fmt.Sprintf("%s not ready: %v", label, err))
+		} else {
+			rep.add(&rep.Server, true, false, fmt.Sprintf("%s ready", label))
 		}
 	}
 }
@@ -163,7 +195,7 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 // the server-side tools are covered in checkServer.
 func (e *Engine) checkClientTools(rep *CheckReport, hc *HostCheck, ex programs.Executor, dt string) {
 	if e.cfg.ResolveDumpType(dt).Compress == "client" {
-		if cmd, ok, err := compress.CompressCmd(e.codec, e.fopts); err == nil && ok {
+		if cmd, ok, err := compress.CompressCmd(e.compressScheme, e.fopts); err == nil && ok {
 			e.probeTool(rep, hc, ex, cmd.Name, "compressor")
 		}
 	}
