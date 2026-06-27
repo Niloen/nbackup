@@ -290,7 +290,19 @@ ETA:      17m18s
 
 Each DLE's percentage is uncompressed bytes against the planner estimate; the run
 streams source→compressor→volume in one pass, so there is a single `dumping` state
-per DLE (no separate dumper/taper queues). `nb status --watch 2s` refreshes until the
+per DLE (no separate dumper/taper queues). The report covers the whole cycle: a run
+opens in an `estimating` phase while it sizes every DLE (a pass that can take a while on
+a large source), so `nb status` shows that the dump is underway rather than nothing at
+all:
+
+```text
+Run estimate  [estimating]
+  started:  2026-06-21 02:00:01  (elapsed 0m38s)
+  sizing:   2 of 4 DLEs measured
+  estimate: ~22.1 GB so far
+```
+
+It then switches to the dumping view above. `nb status --watch 2s` refreshes until the
 run finishes; afterwards `nb status` shows the last run's final result.
 
 ### Reporting & alerting (unattended)

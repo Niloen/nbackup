@@ -68,6 +68,7 @@ type Engine struct {
 	dcopts         crypt.Options                 // decrypt key reference for restore (from the default encrypt block)
 	op             librarian.Operator            // optional: handles manual tape swaps (nil = unattended)
 	runSink        progress.Sink                 // optional: live run-progress sink (nil = status file only)
+	estimateSink   progress.Sink                 // optional: live estimate-progress sink (nil = status file only)
 	limiters       map[string]*ratelimit.Limiter // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
 	dec            *decoder                      // the read-side scheme operation (restore/verify/list); shares the engine's resolution + decode opts
 	enc            *encoder                      // the write-side scheme operation (dump); shares the engine's dumptype-recipe resolution
@@ -84,6 +85,13 @@ func (e *Engine) SetOperator(op librarian.Operator) { e.op = op }
 // the run-status file, so `nb dump` can paint progress to the terminal without an
 // operator running `nb status`. Nil (the default) keeps the file-only behaviour.
 func (e *Engine) SetRunProgress(sink progress.Sink) { e.runSink = sink }
+
+// SetEstimateProgress attaches a live progress sink for a run's estimate phase —
+// the size-everything prelude that precedes any dumping. Painted alongside the
+// run-status file, it lets `nb dump` show "Estimating sizes…" before "Dumping…"
+// instead of sitting silent while a slow sizing pass runs. Nil (the default) keeps
+// the estimate phase file-only.
+func (e *Engine) SetEstimateProgress(sink progress.Sink) { e.estimateSink = sink }
 
 // librarianFor builds a librarian for a configured medium's open volume. For the
 // engine's own medium it wraps the already-open landing handle (own=true), so its
@@ -785,7 +793,7 @@ func (e *Engine) estimates(dles []config.DLE, sink progress.Sink) map[string]pla
 		for i, d := range dles {
 			rows[i] = progress.Plan{Name: d.ID()}
 		}
-		tr = progress.NewTracker("estimate", workers, rows, time.Now, sink)
+		tr = progress.NewTracker("estimate", progress.PhaseEstimating, workers, rows, time.Now, sink)
 	}
 
 	var (
@@ -929,7 +937,17 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 	if latest, ok := e.latestSlotDate(); ok && record.DateString(date) < latest {
 		return nil, fmt.Errorf("cannot dump for %s: slot(s) dated %s already exist; an earlier-dated run would corrupt the incremental restore order (snapshots have advanced past it) — dump on or after %s", record.DateString(date), latest, latest)
 	}
-	plan := e.Plan(date)
+	// Write the run-status file from the first phase — sizing every DLE, which can be
+	// slow — so `nb status` reflects the whole dump cycle, not dead air until the first
+	// byte is archived. The estimate phase keeps the file non-terminal (the dump is
+	// still to come); a live estimate display, when attached, still erases its region
+	// when sizing completes.
+	fileSink := progress.NewFileSink(e.cfg.WorkdirPath(), time.Now)
+	estSink := keepEstimating(fileSink)
+	if e.estimateSink != nil {
+		estSink = progress.MultiSink(estSink, e.estimateSink)
+	}
+	plan := e.planWith(date, estSink)
 	for _, w := range plan.Warnings {
 		logf.log("WARNING: %s", w)
 	}
@@ -975,18 +993,18 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 		workers = 1
 	}
 
-	// Track live progress to the run-status file so `nb status` can watch a
-	// detached run. Progress reporting never blocks or fails the backup. A live
-	// sink (when attached) paints the same snapshots to the terminal; in that mode
-	// the per-DLE log lines are suppressed so they don't scribble over the in-place
+	// The dump phase takes over the same run-status file the estimate phase opened,
+	// now under the real slot ID. Progress reporting never blocks or fails the backup.
+	// A live sink (when attached) paints the same snapshots to the terminal; in that
+	// mode the per-DLE log lines are suppressed so they don't scribble over the in-place
 	// region (warnings above were already printed before the region opened).
-	sink := progress.Sink(progress.NewFileSink(e.cfg.WorkdirPath(), time.Now))
+	sink := progress.Sink(fileSink)
 	runLogf := logf
 	if e.runSink != nil {
-		sink = progress.MultiSink(sink, e.runSink)
+		sink = progress.MultiSink(fileSink, e.runSink)
 		runLogf = nil
 	}
-	tr := progress.NewTracker(slotID, workers, planProgress(plan.Items), time.Now, sink)
+	tr := progress.NewTracker(slotID, progress.PhaseRunning, workers, planProgress(plan.Items), time.Now, sink)
 
 	session := e.clerk.OpenSlot(w, e.mediumName)
 	if err := e.runWorkers(plan.Items, workers, session, tr, runLogf); err != nil {
@@ -1002,6 +1020,21 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 	}
 	tr.SetPhase(progress.PhaseDone)
 	return sealed, nil
+}
+
+// keepEstimating adapts the estimate phase's status-file sink so the file stays
+// non-terminal across the gap between sizing and the first dumped byte. The estimate
+// tracker signals completion with a terminal PhaseDone — which a live display uses to
+// erase its region — but to the file that would read as a finished run, stopping a
+// `nb status --watch` before the dump it is waiting for has even started. Rewriting it
+// to PhaseEstimating holds the file open until the dump phase claims it.
+func keepEstimating(file progress.Sink) progress.Sink {
+	return func(s progress.Snapshot, force bool) {
+		if s.Phase.Terminal() {
+			s.Phase = progress.PhaseEstimating
+		}
+		file(s, force)
+	}
 }
 
 // planProgress projects planner items onto the progress package's seed type,

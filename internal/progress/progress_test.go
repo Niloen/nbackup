@@ -30,7 +30,7 @@ func plan() []Plan {
 // the snapshot reflects each transition, including ordering by DLE name.
 func TestTrackerLifecycle(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot-2026-06-23", 2, plan(), c.now, nil)
+	tr := NewTracker("slot-2026-06-23", PhaseRunning, 2, plan(), c.now, nil)
 
 	snap := tr.Snapshot()
 	if snap.Phase != PhaseRunning {
@@ -71,7 +71,7 @@ func TestTrackerLifecycle(t *testing.T) {
 // TestTrackerFailure records a failed DLE with its error message.
 func TestTrackerFailure(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot", 1, plan(), c.now, nil)
+	tr := NewTracker("slot", PhaseRunning, 1, plan(), c.now, nil)
 	tr.StartDLE("bravo")
 	tr.FinishDLE("bravo", 0, 0, 0, errors.New("tar exploded"))
 
@@ -89,7 +89,7 @@ func TestTrackerFailure(t *testing.T) {
 // remaining estimate.
 func TestRateAndETA(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot", 1, plan(), c.now, nil)
+	tr := NewTracker("slot", PhaseRunning, 1, plan(), c.now, nil)
 	tr.StartDLE("alpha")
 	c.advance(10 * time.Second)
 	tr.AddBytes("alpha", 100, 40) // 100 of 400 bytes in 10s -> 10 B/s
@@ -115,7 +115,7 @@ func TestRateAndETA(t *testing.T) {
 func TestFileSinkRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	c := newClock()
-	tr := NewTracker("slot-x", 1, plan(), c.now, NewFileSink(dir, c.now))
+	tr := NewTracker("slot-x", PhaseRunning, 1, plan(), c.now, NewFileSink(dir, c.now))
 
 	tr.StartDLE("alpha")
 	tr.FinishDLE("alpha", 1, 300, 100, nil)
@@ -140,8 +140,8 @@ func TestFileSinkThrottle(t *testing.T) {
 	c := newClock()
 	sink := NewFileSink(dir, c.now)
 
-	tr := NewTracker("slot", 1, plan(), c.now, sink) // forced initial write
-	tr.StartDLE("alpha")                             // forced
+	tr := NewTracker("slot", PhaseRunning, 1, plan(), c.now, sink) // forced initial write
+	tr.StartDLE("alpha")                                           // forced
 
 	// Two byte updates within the throttle window: only the first should write.
 	tr.AddBytes("alpha", 10, 4)
@@ -174,7 +174,7 @@ func TestLoadMissing(t *testing.T) {
 // TestRender produces a human report mentioning the key facts.
 func TestRender(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot-2026-06-23", 2, plan(), c.now, nil)
+	tr := NewTracker("slot-2026-06-23", PhaseRunning, 2, plan(), c.now, nil)
 	tr.StartDLE("alpha")
 	c.advance(5 * time.Second)
 	tr.AddBytes("alpha", 150, 60)
@@ -193,7 +193,7 @@ func TestRender(t *testing.T) {
 func TestAtomicWriteNoTemp(t *testing.T) {
 	dir := t.TempDir()
 	c := newClock()
-	tr := NewTracker("slot", 1, plan(), c.now, NewFileSink(dir, c.now))
+	tr := NewTracker("slot", PhaseRunning, 1, plan(), c.now, NewFileSink(dir, c.now))
 	tr.SetPhase(PhaseDone)
 	if _, err := Load(dir); err != nil {
 		t.Fatalf("status file missing: %v", err)

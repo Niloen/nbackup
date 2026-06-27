@@ -471,7 +471,13 @@ byte updates throttled to 1 s, state changes forced). `nb status` is a *separate
 process that just reads and renders that file — a log-writer + status-reader split,
 minus the daemon, which fits "state lives in inspectable files." It needs no engine (no
 media scan), so it is cheap to poll, and the final `done`/`failed` snapshot is left in
-place as the last-run record. Progress reporting never blocks or fails a backup (a write
+place as the last-run record. The file spans the **whole** cycle: a run opens it in the
+`estimating` phase (sizing every DLE — a slow archiver pass the operator would otherwise
+watch in silence), then the dump phase takes over the same file under the real slot ID
+(`running` → `sealing` → `done`/`failed`). The estimate phase is deliberately non-terminal
+so a `--watch` poll never stops on the gap between sizing and the first dumped byte; the
+estimate tracker's terminal "done" (which a live display uses to erase its region) is
+rewritten to `estimating` for the file by the engine's `keepEstimating`. Progress reporting never blocks or fails a backup (a write
 error is a stderr warning). With no holding disk (the one-pass stream), there is no
 separate dumper/taper split, just one `dumping` state per DLE, metered by uncompressed
 bytes against the planner estimate. The measurement point is the source stage's byte tap
