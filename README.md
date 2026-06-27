@@ -669,8 +669,9 @@ second placement** so a restore reads from any available copy (and `nb verify` a
 **multilevel (L0–L9)** planning with a GNU tar snapshot library, immutable
 commit-footed archives with **sequence-suffixed** same-day runs, **deletion-aware** incremental
 restore, checksum verification, point-in-time restore, per-medium capacity reporting,
-cycle-safe pruning, and **unattended reporting and alerting** (`nb report`, pluggable
-email/webhook notifications).
+cycle-safe pruning, **unattended reporting and alerting** (`nb report`, pluggable
+email/webhook notifications), and **remote sources over SSH** (any non-`localhost`
+DLE host runs stock tar on the client — no NBackup software or open port there).
 
 ### Tape
 
@@ -730,17 +731,47 @@ the run fails with a clear message rather than guessing. A restore reassembles a
 spanned archive by mounting its tapes in order. (Internals:
 [ARCHITECTURE.md](ARCHITECTURE.md).)
 
-### Not yet implemented
+### Remote sources over SSH
 
-Declared in config for forward-compatibility:
+A DLE's `host` is meaningful: `localhost` (or an empty host) is dumped locally;
+**any other host name is a remote client backed up over SSH**. NBackup runs stock
+tools (`tar`, and the optional compressor + `gpg`) on the client and streams the
+archive back over the connection — there is **no NBackup software, daemon, or open
+port on the client**, and intermediate bytes never touch the client's disk.
+
+```yaml
+ssh:                              # defaults applied to every remote host
+  user: backup
+  identity_file: ~/.ssh/nbackup   # a path, not a key — NBackup stores no secret
+  options: ["-o", "StrictHostKeyChecking=accept-new"]
+
+hosts:                            # optional: override the defaults per host
+  app01:
+    ssh:
+      port: "2222"
+    state_dir: /var/lib/nbackup   # where this host keeps incremental (.snar) state
+    archivers:
+      gnutar:
+        tar_path: /usr/local/bin/gtar
+
+sources:
+  default:
+    app01: [/home, /etc]          # backed up over SSH; localhost stays local
+```
+
+Credentials follow the same no-secrets-in-config rule as cloud and gpg: the key
+comes from the operator's ssh agent/config (`identity_file` is a path). Listing a
+host under `hosts:` is **only** to override the `ssh:` defaults — it is *not* what
+makes a host remote; any non-`localhost` source is remote by default. `nb check`
+reaches every source host so you can confirm connectivity before a run.
+
+### Not yet implemented
 
 - **Tape whole-volume reclamation** — capacity-driven pruning already fits
   object stores and disk to their `capacity` (reclaiming the oldest
   non-protected slots first); reclaiming whole *tapes* to fit a library's
   capacity is not yet automatic — tape reuse is identified by `nb plan` and
   gated behind a deliberate `nb label --relabel`.
-- **Remote sources** — `host` is metadata; `path` is read from the local
-  filesystem (run the agent where the data is, or mount it).
 
 ## Architecture
 
