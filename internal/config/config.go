@@ -33,10 +33,14 @@ const DefaultArchiver = "gnutar"
 // whole pool, not a thing owned by one medium.
 const DefaultWorkdir = "nbackup-catalog"
 
-// DefaultClientStateDir is the per-client .snar library path used when a remote host
-// does not set ssh.state_dir. It mirrors the server's default (`<workdir>/snapshots`)
-// but is relative, so it resolves under the backup user's home on the client.
-const DefaultClientStateDir = DefaultWorkdir + "/snapshots"
+// DefaultStateDir is the host's incremental-state library root when neither a per-host
+// `hosts.<h>.state_dir` nor the top-level `state_dir` is set. It is deliberately a
+// dedicated location *beside* the catalog workdir, not beneath it: the workdir is a
+// disposable cache (rebuildable from the media) while the state library is the one piece
+// of precious, non-rebuildable state, so nesting it under the wipe-and-rebuild workdir
+// would invite its loss. It is relative, so it resolves under the server's cwd for a
+// local host and under the backup user's home on a client.
+const DefaultStateDir = "nbackup-state"
 
 // Config is the top-level NBackup configuration.
 type Config struct {
@@ -60,9 +64,17 @@ type Config struct {
 	Landing string `yaml:"landing"`
 
 	// Workdir holds the catalog's local cache, independent of any storage medium.
-	// Defaults to DefaultWorkdir. (An archiver's incremental state — gnutar's .snar
-	// library — lives under its own state_dir, defaulting beneath the workdir.)
+	// Defaults to DefaultWorkdir. (An archiver's incremental state lives under the host's
+	// state_dir — a dedicated location beside the workdir, not beneath it; see StateDir.)
 	Workdir string `yaml:"workdir"`
+
+	// StateDir is the fleet-wide default root for archivers' incremental-state libraries
+	// (gnutar's .snar files, a future archiver's dump database, …). It is a host-level,
+	// archiver-agnostic location: every archiver on a host shares it and namespaces its
+	// own state beneath it. A per-host `hosts.<h>.state_dir` overrides it; unset, it
+	// falls back to DefaultStateDir. The location is the host's, not a format property,
+	// so it is not an archiver option.
+	StateDir string `yaml:"state_dir"`
 
 	// Compress configures the external compressor archives are piped through.
 	Compress struct {
@@ -134,24 +146,28 @@ type Config struct {
 	Sources Sources `yaml:"sources"`
 }
 
-// HostConfig describes a remote source host: just how to
-// reach it over SSH. Connection settings are an explicit sub-block so KnownFields rejects
-// a stray key and a literal private key.
+// HostConfig overrides per-host settings for one source host. The two kinds are kept
+// distinct: connection lives in the `ssh` sub-block; StateDir is host-level and
+// archiver-agnostic (where every archiver on this host keeps incremental state); and
+// Archivers carries archiver-specific property overrides keyed by archiver type, so a
+// per-host gnutar binary path is `archivers.gnutar.tar_path` — the seam that scales to
+// a future star/pgsql archiver without growing this struct.
 type HostConfig struct {
-	SSH SSHConfig `yaml:"ssh"`
+	SSH       SSHConfig                    `yaml:"ssh"`
+	StateDir  string                       `yaml:"state_dir"` // this host's incremental-state root (overrides Config.StateDir)
+	Archivers map[string]map[string]string `yaml:"archivers"` // archiver-type → property overrides (e.g. gnutar: {tar_path: …})
 }
 
 // SSHConfig is the SSH connection to a client. NBackup stores no secret: the key comes
 // from the operator's ssh config/agent (IdentityFile is a path, not a key), exactly as
-// cloud and gpg credentials are handled. TarPath/StateDir are the client-side gnutar
-// paths (the .snar library lives on the client — the stateful-client design).
+// cloud and gpg credentials are handled. It carries connection settings only — the
+// client-side tar path and the .snar library root are host/archiver concerns, set via
+// HostConfig.Archivers and HostConfig.StateDir respectively.
 type SSHConfig struct {
 	User         string   `yaml:"user"`
 	Port         string   `yaml:"port"`
 	IdentityFile string   `yaml:"identity_file"`
-	Options      []string `yaml:"options"`   // extra raw ssh options, e.g. ["-o","StrictHostKeyChecking=accept-new"]
-	TarPath      string   `yaml:"tar_path"`  // client GNU tar path ("" = "tar" on the client PATH)
-	StateDir     string   `yaml:"state_dir"` // client .snar library root (default DefaultClientStateDir, under the backup user's home)
+	Options      []string `yaml:"options"` // extra raw ssh options, e.g. ["-o","StrictHostKeyChecking=accept-new"]
 }
 
 // RemoteHost returns the effective SSH connection for a host and true when it is remote.
@@ -185,12 +201,6 @@ func mergeSSH(base, over SSHConfig) SSHConfig {
 	}
 	if over.Options != nil {
 		base.Options = over.Options
-	}
-	if over.TarPath != "" {
-		base.TarPath = over.TarPath
-	}
-	if over.StateDir != "" {
-		base.StateDir = over.StateDir
 	}
 	return base
 }
@@ -426,9 +436,11 @@ type DumpType struct {
 
 // Archiver is a named dump-program definition: a
 // registered archiver type plus its content-independent options, referenced by a
-// dumptype. Options are archiver-specific (gnutar's tar_path, state_dir,
-// one-file-system, …) and flow through the inline map, so KnownFields does not
-// reject them. (Excludes are a dumptype concern, not an archiver option.)
+// dumptype. Options are archiver-specific (gnutar's tar_path, one-file-system, …) and
+// flow through the inline map, so KnownFields does not reject them. A per-host override
+// of any option lives in `hosts.<h>.archivers.<type>`. (Excludes are a dumptype concern,
+// and the incremental-state root is the host's state_dir — neither is an archiver
+// option.)
 type Archiver struct {
 	Type    string            `yaml:"type"`    // registered archiver type ("" = the definition's name)
 	Options map[string]string `yaml:",inline"` // archiver-specific options
@@ -921,4 +933,36 @@ func (c *Config) WorkdirPath() string {
 		return c.Workdir
 	}
 	return DefaultWorkdir
+}
+
+// StatePath returns the fleet-wide default incremental-state root, defaulting to
+// DefaultStateDir when `state_dir` is unset. It is the host-level fallback used by
+// StateDirFor when a host sets no override.
+func (c *Config) StatePath() string {
+	if c.StateDir != "" {
+		return c.StateDir
+	}
+	return DefaultStateDir
+}
+
+// StateDirFor returns the incremental-state root for a host: the host's own
+// `hosts.<host>.state_dir` when set, else the fleet-wide StatePath. The path is a
+// location on the host where the archiver runs (the server for a local host, the client
+// for a remote one); a relative default resolves there, so the server's path never leaks
+// onto a client.
+func (c *Config) StateDirFor(host string) string {
+	if h, ok := c.Hosts[host]; ok && h.StateDir != "" {
+		return h.StateDir
+	}
+	return c.StatePath()
+}
+
+// ArchiverOverrides returns the per-host property overrides for an archiver type on a
+// host (e.g. gnutar's tar_path on a client whose binary lives off the default PATH), or
+// nil when the host sets none. They merge over the archiver definition's options.
+func (c *Config) ArchiverOverrides(host, archiverType string) map[string]string {
+	if h, ok := c.Hosts[host]; ok {
+		return h.Archivers[archiverType]
+	}
+	return nil
 }

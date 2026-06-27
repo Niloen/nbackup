@@ -12,11 +12,12 @@ import (
 	"github.com/Niloen/nbackup/internal/programs"
 )
 
-// newArchiver opens a gnutar archiver with the given options (the caller supplies
-// state_dir for tests that produce incrementals) and skips when GNU tar is absent.
-func newArchiver(t *testing.T, opts archiver.Options) archiver.Archiver {
+// newArchiver opens a gnutar archiver whose incremental state lives under stateRoot (the
+// caller supplies a temp dir for tests that produce incrementals) and skips when GNU tar
+// is absent.
+func newArchiver(t *testing.T, stateRoot string) archiver.Archiver {
 	t.Helper()
-	m, err := archiver.Open("gnutar", opts, programs.Local())
+	m, err := archiver.Open("gnutar", nil, programs.Local(), stateRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +34,7 @@ func newArchiver(t *testing.T, opts archiver.Options) archiver.Archiver {
 func TestBackupRestoreWithDeletion(t *testing.T) {
 	src := t.TempDir()
 	out := t.TempDir()
-	m := newArchiver(t, archiver.Options{"state_dir": t.TempDir()})
+	m := newArchiver(t, t.TempDir())
 
 	write(t, filepath.Join(src, "a.txt"), "alpha")
 	write(t, filepath.Join(src, "b.txt"), "beta")
@@ -66,7 +67,7 @@ func TestBackupRestoreWithDeletion(t *testing.T) {
 
 // TestExclude verifies the request's exclude patterns flow through to tar.
 func TestExclude(t *testing.T) {
-	m := newArchiver(t, archiver.Options{"state_dir": t.TempDir()})
+	m := newArchiver(t, t.TempDir())
 	src := t.TempDir()
 	out := t.TempDir()
 	write(t, filepath.Join(src, "keep.txt"), "keep")
@@ -100,7 +101,7 @@ func TestExclude(t *testing.T) {
 // false for GNU tar; the reshard costs a remainder full. This test guards that fact
 // so a future tar/option change that flips the behavior is caught loudly.
 func TestNewExcludeIsNotADeletion(t *testing.T) {
-	m := newArchiver(t, archiver.Options{"state_dir": t.TempDir()})
+	m := newArchiver(t, t.TempDir())
 	src := t.TempDir()
 	out := t.TempDir()
 	write(t, filepath.Join(src, "datasets", "x.txt"), "x")
@@ -134,7 +135,7 @@ func TestNewExcludeIsNotADeletion(t *testing.T) {
 // size, excludes lower it, and an unchanged incremental is far smaller than a full.
 func TestEstimate(t *testing.T) {
 	src := t.TempDir()
-	m := newArchiver(t, archiver.Options{"state_dir": t.TempDir()})
+	m := newArchiver(t, t.TempDir())
 
 	write(t, filepath.Join(src, "big.bin"), strings.Repeat("x", 200000))
 	write(t, filepath.Join(src, "small.txt"), "hi")

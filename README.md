@@ -178,7 +178,7 @@ line — before or after the subcommand and its arguments:
 NBackup uses a **multilevel** scheme (levels 0–9) with a dynamic, estimate-driven
 schedule and only two inputs — the **cycle** and the medium's **capacity**, no
 balancing knobs. Levels are realized with GNU tar's listed-incremental **snapshot
-library** under `<catalog>/snapshots/<dle>/L<n>.snar`, turning tar's two-level
+library** under `<state_dir>/gnutar/<dle>/L<n>.snar`, turning tar's two-level
 primitive into N-level backups.
 
 **What each run decides.** In order:
@@ -614,9 +614,9 @@ sources:
   parameters; `landing` names the one slots are written to. Adding a medium type is
   a registry registration — no config struct changes.
 - **Archivers** are named definitions of the dump program plus its content-
-  independent options — the tar binary, `one-file-system`, the incremental
-  `state_dir`. Most setups need just one; an undeclared name is a bare type, so
-  `archiver: gnutar` needs no block.
+  independent options — the tar binary, `one-file-system`. Most setups need just one;
+  an undeclared name is a bare type, so `archiver: gnutar` needs no block. (The
+  incremental-state root is a host property — `state_dir` — not an archiver option.)
 - **Dumptypes** name an archiver and carry per-DLE policy — what to skip (`exclude`)
   and encryption. Excludes live here, not on the archiver, because skipping logs is a
   decision about the data, not how tar runs. Compression is config-wide.

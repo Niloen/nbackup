@@ -34,7 +34,7 @@ func TestClientSidePipelineRoundTrip(t *testing.T) {
 	}
 
 	ex := programs.Local()
-	m, err := archiver.Open("gnutar", archiver.Options{"state_dir": t.TempDir()}, ex)
+	m, err := archiver.Open("gnutar", nil, ex, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

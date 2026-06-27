@@ -33,8 +33,10 @@ hosts:
       port: "2222"
       identity_file: /keys/id
       options: ["-o", "StrictHostKeyChecking=accept-new"]
-      tar_path: /usr/bin/tar
-      state_dir: /var/lib/nbackup/snar
+    state_dir: /var/lib/nbackup/snar
+    archivers:
+      gnutar:
+        tar_path: /usr/bin/tar
 sources:
   default:
     app01: [/home]
@@ -47,11 +49,18 @@ sources:
 	if !ok {
 		t.Fatal("app01 should resolve as remote")
 	}
-	if ssh.User != "backup" || ssh.Port != "2222" || ssh.StateDir != "/var/lib/nbackup/snar" {
+	if ssh.User != "backup" || ssh.Port != "2222" {
 		t.Fatalf("ssh fields wrong: %+v", ssh)
 	}
 	if len(ssh.Options) != 2 {
 		t.Fatalf("options not parsed: %v", ssh.Options)
+	}
+	// state_dir is host-level (not an ssh field); tar_path is an archiver-type override.
+	if got := c.StateDirFor("app01"); got != "/var/lib/nbackup/snar" {
+		t.Fatalf("state_dir wrong: %q", got)
+	}
+	if got := c.ArchiverOverrides("app01", "gnutar")["tar_path"]; got != "/usr/bin/tar" {
+		t.Fatalf("gnutar tar_path override wrong: %q", got)
 	}
 	// An unlisted non-localhost host is remote by default (auto-remote); localhost is local.
 	if _, ok := c.RemoteHost("unlisted"); !ok {
@@ -62,9 +71,47 @@ sources:
 	}
 }
 
+func TestStateDirResolution(t *testing.T) {
+	// Precedence: per-host state_dir wins; else the fleet-wide state_dir; else the default.
+	c, err := loadYAML(t, baseMedia+`
+state_dir: /srv/state
+hosts:
+  app01:
+    ssh: { user: backup }
+    state_dir: /var/lib/nbackup/snar
+sources:
+  default:
+    app01: [/home]
+    web01: [/srv]
+`)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := c.StateDirFor("app01"); got != "/var/lib/nbackup/snar" {
+		t.Fatalf("per-host state_dir should win, got %q", got)
+	}
+	if got := c.StateDirFor("web01"); got != "/srv/state" {
+		t.Fatalf("host without override should get the fleet-wide state_dir, got %q", got)
+	}
+}
+
+func TestStateDirDefault(t *testing.T) {
+	// Unset everywhere, a host falls back to the dedicated default (beside the workdir).
+	c, err := loadYAML(t, baseMedia+`
+sources:
+  default:
+    app01: [/home]
+`)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := c.StateDirFor("app01"); got != DefaultStateDir {
+		t.Fatalf("unset state_dir should default to %q, got %q", DefaultStateDir, got)
+	}
+}
+
 func TestHostStateDirOptional(t *testing.T) {
-	// state_dir is optional; the engine fills the client-side default. The config loads
-	// fine and the host resolves as remote with an empty StateDir.
+	// state_dir is optional; an unset host resolves remote and uses the default root.
 	c, err := loadYAML(t, baseMedia+`
 hosts:
   app01:
@@ -76,9 +123,11 @@ sources:
 	if err != nil {
 		t.Fatalf("host without state_dir should load: %v", err)
 	}
-	ssh, ok := c.RemoteHost("app01")
-	if !ok || ssh.StateDir != "" {
-		t.Fatalf("remote app01 should resolve with empty StateDir, got ok=%v dir=%q", ok, ssh.StateDir)
+	if _, ok := c.RemoteHost("app01"); !ok {
+		t.Fatal("app01 should resolve as remote")
+	}
+	if got := c.StateDirFor("app01"); got != DefaultStateDir {
+		t.Fatalf("host without state_dir should use the default, got %q", got)
 	}
 }
 
@@ -86,7 +135,7 @@ func TestHostsKnownFieldsRejectsStray(t *testing.T) {
 	_, err := loadYAML(t, baseMedia+`
 hosts:
   app01:
-    ssh: { user: backup, state_dir: /s, password: hunter2 }
+    ssh: { user: backup, password: hunter2 }
 sources:
   default:
     app01: [/home]
@@ -99,7 +148,7 @@ sources:
 func TestEncryptAtClientRequiresCompressClient(t *testing.T) {
 	_, err := loadYAML(t, baseMedia+`
 hosts:
-  app01: { ssh: { user: b, state_dir: /s } }
+  app01: { ssh: { user: b } }
 dumptypes:
   secure:
     compress: server
@@ -180,7 +229,7 @@ sources:
 func TestValidClientSideEncryptionLoads(t *testing.T) {
 	c, err := loadYAML(t, baseMedia+`
 hosts:
-  app01: { ssh: { user: b, state_dir: /s } }
+  app01: { ssh: { user: b } }
 dumptypes:
   secure:
     compress: client

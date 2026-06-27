@@ -21,7 +21,9 @@ user-facing front page; [PRD.md](PRD.md) is the product vision.
 - Keep the generic media/changer layer **medium-neutral** (`bays`, `volume_size`,
   `nb changer`); tape specifics stay in the `tape` package.
 - Keep the generic `dump`/catalog/engine layer **archiver-neutral** (`Archiver`,
-  `BackupRequest{DLE, Level, BaseLevel}`, `HasBase`, "incremental state"); GNU tar
-  specifics (`.snar`, snapshots, `state_dir`, `tar_path`) stay in `dump/gnutar`. A
-  archiver owns its own incremental state, not the catalog. The concurrency unit is a
-  **worker** (`parallelism.workers`); "archiver" means only the plugin.
+  `BackupRequest{DLE, Level, BaseLevel}`, `HasBase`, "incremental state", the host-level
+  `state_dir` that roots it); GNU tar specifics (`.snar`, snapshots, `tar_path`) stay in
+  `dump/gnutar`. A archiver owns its own incremental state, not the catalog; *where* that
+  state lives is a host property (`state_dir`, shared across archivers, engine-namespaced
+  by type), not an archiver option. The concurrency unit is a **worker**
+  (`parallelism.workers`); "archiver" means only the plugin.

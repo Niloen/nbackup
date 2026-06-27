@@ -11,8 +11,10 @@ Archiver / incremental state / seal / filter / crypt / xfer.Meter).
 **Ergonomics (implemented).** A source host is remote **by default** — anything but
 `localhost` is backed up over SSH; `hosts:` is override-only, not what makes a host remote.
 A top-level `ssh:` block sets global SSH defaults (Amanda's global auth) that a per-host
-`hosts.<name>.ssh` block field-merges over. `state_dir` defaults to
-`nbackup-catalog/snapshots` under the client's home. **`nb check`** is the amcheck
+`hosts.<name>.ssh` block field-merges over. The incremental-state root is a host property,
+`hosts.<name>.state_dir` (fleet default `state_dir:`, else `nbackup-state` under the
+client's home) — shared by every archiver on the host, which the engine namespaces by type
+(`<state_dir>/gnutar`). **`nb check`** is the amcheck
 analogue: it verifies the server and every host — connecting to each remote client by
 default (reachable, GNU tar, source readable, client tools, state_dir), or `--offline` to
 just resolve and report — and exits non-zero on failure. Every probe runs through the
@@ -178,10 +180,10 @@ hosts:
       port: 22
       identity_file: ~/.ssh/nbackup        # else the operator's ssh-agent/config
       options: ["-o", "StrictHostKeyChecking=accept-new"]
-      tar_path: /usr/bin/tar               # verified GNU tar over ssh, like the local check
-      compressor_path: /usr/bin/zstd       # only needed for compress: client
-      gpg_path: /usr/bin/gpg               # only needed for encrypt.at: client
-      state_dir: /var/lib/nbackup/snar     # the client-side .snar library (GNUTAR-LISTDIR)
+    state_dir: /var/lib/nbackup/snar       # host-level .snar root (Amanda's GNUTAR-LISTDIR), all archivers
+    archivers:
+      gnutar:
+        tar_path: /usr/bin/tar             # per-host gnutar binary, verified GNU tar over ssh
 
 dumptypes:
   remote-secure:

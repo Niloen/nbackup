@@ -27,10 +27,11 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 	write(t, filepath.Join(src, "gone.txt"), "temp")
 
 	cfg := &config.Config{
-		Landing: "disk",
-		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(), // catalog state lives separately from the storage medium
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(), // catalog state lives separately from the storage medium
 	}
 	cfg.Compress.Scheme = "none" // exercise the pipeline without depending on a compressor binary
 
@@ -87,11 +88,12 @@ func TestRepeatedLevelRestore(t *testing.T) {
 	write(t, filepath.Join(src, "gone.txt"), "temp")
 
 	cfg := &config.Config{
-		Landing: "disk",
-		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
-		BumpPct: 100, // a saving can never reach 100% of the full, so never bump
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+		BumpPct:  100, // a saving can never reach 100% of the full, so never bump
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -158,10 +160,11 @@ func TestValidatePlan(t *testing.T) {
 
 	base := func() *config.Config {
 		c := &config.Config{
-			Landing: "disk",
-			Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
-			Sources: []config.DLE{{Host: "localhost", Path: src}},
-			Workdir: t.TempDir(),
+			Landing:  "disk",
+			Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
+			Sources:  []config.DLE{{Host: "localhost", Path: src}},
+			Workdir:  t.TempDir(),
+			StateDir: t.TempDir(),
 		}
 		c.Compress.Scheme = "none"
 		return c
@@ -211,9 +214,10 @@ func TestValidatePlan(t *testing.T) {
 func TestParallelWorkers(t *testing.T) {
 	catalogDir := t.TempDir()
 	cfg := &config.Config{
-		Landing: "disk",
-		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
-		Workdir: t.TempDir(),
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none" // no compressor-binary dependency in tests
 	cfg.Parallelism.Workers = 3
@@ -256,9 +260,10 @@ func TestParallelWorkers(t *testing.T) {
 // each source's size (the parallel estimate produces the same result as serial).
 func TestPlanWithProgress(t *testing.T) {
 	cfg := &config.Config{
-		Landing: "disk",
-		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
-		Workdir: t.TempDir(),
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 	cfg.Parallelism.Workers = 3
@@ -334,8 +339,9 @@ func TestThroughputCapThrottlesDump(t *testing.T) {
 			Media: map[string]config.Media{
 				"disk": {Type: "disk", Throughput: throughput, Params: map[string]string{"path": t.TempDir()}},
 			},
-			Sources: []config.DLE{{Host: "localhost", Path: src}},
-			Workdir: t.TempDir(),
+			Sources:  []config.DLE{{Host: "localhost", Path: src}},
+			Workdir:  t.TempDir(),
+			StateDir: t.TempDir(),
 		}
 		cfg.Compress.Scheme = "none" // bytes on the medium ≈ the tar stream, no compressor binary
 		eng, err := New(cfg)
@@ -386,8 +392,9 @@ func TestThroughputCapThrottlesRestore(t *testing.T) {
 			Media: map[string]config.Media{
 				"disk": {Type: "disk", Throughput: throughput, Params: map[string]string{"path": diskDir}},
 			},
-			Sources: []config.DLE{{Host: "localhost", Path: src}},
-			Workdir: workdir,
+			Sources:  []config.DLE{{Host: "localhost", Path: src}},
+			Workdir:  workdir,
+			StateDir: t.TempDir(),
 		}
 		cfg.Compress.Scheme = "none"
 		eng, err := New(cfg)
@@ -438,8 +445,9 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 			"disk": {Type: "disk", Params: map[string]string{"path": diskDir}},
 			"tape": {Type: "tape", Params: map[string]string{"dir": tapeDir}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -466,10 +474,11 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 	// Restore from the tape alone: a fresh engine landed on the tape rebuilds its
 	// catalog from the volume, then restores.
 	tcfg := &config.Config{
-		Landing: "tape",
-		Media:   map[string]config.Media{"tape": {Type: "tape", Params: map[string]string{"dir": tapeDir}}},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(), // separate catalog cache, forcing a rebuild from tape
+		Landing:  "tape",
+		Media:    map[string]config.Media{"tape": {Type: "tape", Params: map[string]string{"dir": tapeDir}}},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(), // separate catalog cache, forcing a rebuild from tape
 	}
 	tcfg.Compress.Scheme = "none"
 	teng, err := New(tcfg)
@@ -496,10 +505,11 @@ func TestTapeLabelVerify(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "data")
 
 	cfg := &config.Config{
-		Landing: "lto",
-		Media:   map[string]config.Media{"lto": {Type: "tape", Params: map[string]string{"dir": tapeDir}}},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Landing:  "lto",
+		Media:    map[string]config.Media{"lto": {Type: "tape", Params: map[string]string{"dir": tapeDir}}},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -551,8 +561,9 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -607,10 +618,11 @@ func TestRunWritesStatus(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "status me")
 
 	cfg := &config.Config{
-		Landing: "disk",
-		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: workdir,
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  workdir,
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -659,8 +671,9 @@ func TestTapeLibraryRestore(t *testing.T) {
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -738,8 +751,9 @@ func TestTapeAppendableFalse(t *testing.T) {
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"lib":  {Type: "tape", Appendable: boolp(false), Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -820,6 +834,7 @@ func TestManualStationWriteSwap(t *testing.T) {
 		},
 		Sources:   []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:   t.TempDir(),
+		StateDir:  t.TempDir(),
 		AutoLabel: true,
 	}
 	cfg.Compress.Scheme = "none"
@@ -869,8 +884,9 @@ func TestManualStationReadSwap(t *testing.T) {
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"lto":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "2"}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -958,8 +974,9 @@ func TestManualStationLandingLabel(t *testing.T) {
 		Media: map[string]config.Media{
 			"vtape": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "3"}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: t.TempDir()}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -995,7 +1012,8 @@ func tapeEngine(t *testing.T, appendable bool, minAge string) *Engine {
 				Params:     map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "4"},
 			},
 		},
-		Workdir: t.TempDir(),
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 	eng, err := New(cfg)
@@ -1157,7 +1175,8 @@ func TestExpectedTapeReportsReelFill(t *testing.T) {
 				Params:     map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "2", "volume_size": "1000"},
 			},
 		},
-		Workdir: t.TempDir(),
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 	eng, err := New(cfg)
@@ -1185,9 +1204,10 @@ func TestExpectedTapeReportsReelFill(t *testing.T) {
 // label, so there is no tape to expect.
 func TestExpectedTapeDiskHasNone(t *testing.T) {
 	cfg := &config.Config{
-		Landing: "disk",
-		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
-		Workdir: t.TempDir(),
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 	eng, err := New(cfg)
@@ -1218,8 +1238,9 @@ func TestDumpSpansArchiveAcrossTapes(t *testing.T) {
 		Media: map[string]config.Media{
 			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "6", "volume_size": "163840"}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -1287,8 +1308,9 @@ func TestCopySpansArchiveAcrossTapes(t *testing.T) {
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "6", "volume_size": "163840"}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
@@ -1351,8 +1373,9 @@ func TestPartSizeSplitsWithinTape(t *testing.T) {
 			// One roomy 4 MiB bay, but part_size caps each part at 64 KiB.
 			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "1", "volume_size": "4194304", "part_size": "65536"}},
 		},
-		Sources: []config.DLE{{Host: "localhost", Path: src}},
-		Workdir: t.TempDir(),
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
 	}
 	cfg.Compress.Scheme = "none"
 
