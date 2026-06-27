@@ -81,7 +81,7 @@ func newReportCmd(a *app) *cobra.Command {
 // runDumpReport prints the per-DLE report for one dump from the run
 // history: the latest dump when slotID is empty, else the named slot. The per-DLE
 // timing it shows is only in the run history (not the seal), so a slot that predates
-// the history — or was compacted out — points the operator at `nb slot show`.
+// the history — or was compacted out — points the operator at `nb slot <id>`.
 func runDumpReport(dir, slotID string, asJSON bool) error {
 	runs, err := report.Load(dir)
 	if err != nil {
@@ -99,7 +99,7 @@ func runDumpReport(dir, slotID string, asJSON bool) error {
 	}
 	if target == nil {
 		if slotID != "" {
-			return fmt.Errorf("no dump report for slot %q in the run history (try `nb slot show %s` for its sizes)", slotID, slotID)
+			return fmt.Errorf("no dump report for slot %q in the run history (try `nb slot %s` for its sizes)", slotID, slotID)
 		}
 		return fmt.Errorf("no dump recorded yet")
 	}

@@ -83,7 +83,7 @@ Restoring a full + its incrementals replays one archive per level in order,
 exactly as `nb recover` does — and `nb drill --tier stock` rehearses that
 bare-tools path for you and prints the commands. (Encrypted archives keep the
 same name and just add a `gpg -d` at the front; spanned tape parts are listed by
-`nb slot show`.) The full by-hand procedure is in
+`nb slot <id>`.) The full by-hand procedure is in
 [docs/restore-by-hand.md](docs/restore-by-hand.md).
 
 ### Encryption
@@ -114,7 +114,8 @@ go install ./cmd/nb
 
 This produces a single `nb` binary. The convention: you **inspect** with a noun
 (`nb slot`, `nb dle`, `nb medium`) and **act** with a flat verb (`nb dump`,
-`nb recover`, `nb prune`, …).
+`nb recover`, `nb prune`, …). Each inspection noun lists with no argument and
+details one item when given an id (`nb slot slot-2026-06-21`, `nb medium lto`).
 
 | Command              | Purpose                                                  |
 |----------------------|----------------------------------------------------------|
@@ -123,8 +124,7 @@ This produces a single `nb` binary. The convention: you **inspect** with a noun
 | `nb dump`            | Execute a run and commit its archives                    |
 | `nb status`          | Show progress of the current (or most recent) run        |
 | `nb report`          | Summarize recent runs, or print one dump's per-DLE report |
-| `nb slot`            | List slots (default)                                     |
-| `nb slot show`       | Show a single slot's archives and copies                |
+| `nb slot`            | List slots, or detail one (`nb slot <id>`: archives + copies) |
 | `nb dle`             | List DLEs, or detail one's archive timeline across slots |
 | `nb medium`          | List media, or detail one (incl. bays / drive + shelf)    |
 | `nb verify`          | Verify slot integrity: checksums, or `--deep` structure  |
@@ -151,7 +151,7 @@ nb dump                # run the backup, committing one slot's archives
 nb dump --dry-run --date 2026-07-15    # plan that day's run; writes nothing
 nb status              # progress of the running (or most recent) dump
 nb slot                # list slots (with a COPIES column: where each lives)
-nb slot show slot-2026-06-21   # archives + every copy's volume and file positions
+nb slot slot-2026-06-21   # archives + every copy's volume and file positions
 nb medium              # media overview: type, slots, usage / capacity, volume
 nb medium lto          # one medium's volume and the slots it holds
 nb verify --all        # re-check every slot's archive checksums
@@ -340,7 +340,7 @@ INCR: 1 dle(s), 122.88 kB -> 40.96 kB (33%)
 
 `nb report --dump --slot slot-2026-06-21` reports a specific dump. (Sizes come from
 each archive's commit footer; the per-DLE timing comes from the run history, so a slot
-dumped before this was recorded shows sizes via `nb slot show` instead.)
+dumped before this was recorded shows sizes via `nb slot <id>` instead.)
 
 To push failures to a human, add a `notify:` block (see `nbackup.example.yaml`).
 Backends are pluggable — built-in **email (SMTP)** and a generic **webhook**
