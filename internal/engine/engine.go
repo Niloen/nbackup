@@ -793,7 +793,7 @@ func (e *Engine) estimates(dles []config.DLE, sink progress.Sink) map[string]pla
 	if sink != nil {
 		rows := make([]progress.Plan, len(dles))
 		for i, d := range dles {
-			rows[i] = progress.Plan{Name: d.Name()}
+			rows[i] = progress.Plan{Name: d.ID()}
 		}
 		tr = progress.NewTracker("estimate", workers, rows, time.Now, sink)
 	}
@@ -809,16 +809,16 @@ func (e *Engine) estimates(dles []config.DLE, sink progress.Sink) map[string]pla
 		go func(d config.DLE, st *catalog.DLEState) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			name := d.Name()
+			name := d.Name() // internal slug: archiver request + planner estimate key
 			if tr != nil {
-				tr.StartDLE(name)
+				tr.StartDLE(d.ID()) // progress display keys by host:path, matching the dump phase
 			}
 			est := e.estimateDLE(d, name, st)
 			mu.Lock()
 			out[name] = est
 			mu.Unlock()
 			if tr != nil {
-				tr.FinishDLE(name, 0, est.Full, 0, nil)
+				tr.FinishDLE(d.ID(), 0, est.Full, 0, nil)
 			}
 		}(d, states[i])
 	}

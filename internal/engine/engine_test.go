@@ -302,8 +302,8 @@ func TestPlanWithProgress(t *testing.T) {
 		t.Error("sink never saw a terminal snapshot")
 	}
 	for _, d := range cfg.Sources {
-		if !started[d.Name()] || !finished[d.Name()] {
-			t.Errorf("DLE %s: started=%v finished=%v, want both", d.Name(), started[d.Name()], finished[d.Name()])
+		if !started[d.ID()] || !finished[d.ID()] {
+			t.Errorf("DLE %s: started=%v finished=%v, want both", d.ID(), started[d.ID()], finished[d.ID()])
 		}
 	}
 	if len(plan.Items) != len(cfg.Sources) {
