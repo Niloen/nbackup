@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
@@ -62,6 +63,13 @@ func (l Logf) log(format string, args ...any) {
 	}
 }
 
+// ErrAllVolumesProtected marks the fail-loud case where a write needs a fresh volume
+// but every volume in the pool is still within retention and none is blank — the
+// rotation's safety backstop (recoverability outranks capacity). It is a sentinel so the
+// write path can surface this actionable verdict in preference to the loaded volume's
+// bare "won't do" reason, while still preferring that reason for a blank/foreign tape.
+var ErrAllVolumesProtected = errors.New("all volumes still within retention")
+
 // ErrVolumeUnavailable marks a read mount that could not place the needed volume in the
 // drive: a robotic library that does not hold it, or a single-drive station where no
 // operator loaded it. It wraps the actionable message so callers (the drill) can classify
@@ -86,6 +94,7 @@ type Librarian struct {
 	cat       *catalog.Catalog
 	op        Operator
 	autoLabel bool
+	minAge    time.Duration // this medium's retention minimum age; gates which volumes recycle
 
 	drive     media.Drive // has a loaded volume (a robotic library or a single drive)
 	hasDrive  bool
@@ -97,14 +106,16 @@ type Librarian struct {
 
 // New constructs a librarian for a medium's open volume. cat is the catalog the
 // label protocol consults and records into; op handles manual swaps (nil =
-// unattended); autoLabel allows labeling a blank volume during a write.
+// unattended); autoLabel allows labeling a blank volume during a write; minAge is the
+// medium's retention minimum age, which gates whether an aged-out volume may be
+// recycled on write (the retention Floor is the safety gate of the label rotation).
 //
 // The medium's shape is read once, here: a media.Changer is a robotic library;
 // anything that is not a Changer is a single-drive station (when it is a media.Shelf)
 // or a plain address-identified volume (disk, s3). media.Drive is the device read
 // (what's loaded) both changer shapes share.
-func New(vol media.Volume, medium string, cat *catalog.Catalog, op Operator, autoLabel bool) *Librarian {
-	l := &Librarian{vol: vol, medium: medium, cat: cat, op: op, autoLabel: autoLabel}
+func New(vol media.Volume, medium string, cat *catalog.Catalog, op Operator, autoLabel bool, minAge time.Duration) *Librarian {
+	l := &Librarian{vol: vol, medium: medium, cat: cat, op: op, autoLabel: autoLabel, minAge: minAge}
 	l.drive, l.hasDrive = vol.(media.Drive)
 	l.changer, l.isLibrary = vol.(media.Changer)
 	l.shelf, l.isStation = vol.(media.Shelf)
@@ -156,28 +167,47 @@ func (l *Librarian) PrepareWrite(appendable bool, expect string, now time.Time, 
 	if l.isLibrary {
 		name, epoch, _, aerr := l.Advance(appendable, map[string]bool{}, expect, now, logf)
 		if aerr != nil {
-			return "", 0, err // surface the original "why the loaded volume won't do"
+			// A full pool of still-protected tapes is the rotation's fail-loud verdict —
+			// more actionable than the loaded volume's bare "won't do" reason, so surface
+			// it. Any other advance failure (out of bays) keeps the original reason, which
+			// is more specific for a blank/foreign loaded tape ("label it first").
+			if errors.Is(aerr, ErrAllVolumesProtected) {
+				return "", 0, aerr
+			}
+			return "", 0, err
 		}
 		return name, epoch, nil
 	}
-	// A single-drive station prompts the operator to swap in a writable reel.
+	// A single-drive station prompts the operator to swap in a writable reel. When the
+	// loaded reel turns out to be an aged-out in-pool tape (the rotation's oldest
+	// reusable volume), it is recycled in place rather than refused — the same swap loop
+	// the spanning roll uses.
 	if l.isStation {
+		tried := map[string]bool{}
 		for {
-			switch _, out, serr := l.requestSwap("", expect, err, logf); {
+			if expect == "" {
+				if rec, ok := l.oldestReusable(tried, now); ok {
+					expect = rec.Label.Name
+				}
+			}
+			switch reel, out, serr := l.requestSwap("", expect, err, logf); {
 			case serr != nil:
 				return "", 0, serr
 			case out == swapUnattended:
 				return "", 0, fmt.Errorf("%v (load a writable volume into the drive and retry)", err)
 			case out == swapAborted:
 				return "", 0, fmt.Errorf("%v (no volume loaded)", err)
+			default:
+				tried[reel] = true
 			}
-			name, epoch, err = l.verifyWritable(appendable, now)
-			if err == nil {
+			name, epoch, _, rerr := l.acceptOrRecycle(appendable, tried, now, logf)
+			if rerr == nil {
 				return name, epoch, nil
 			}
-			if !isReloadable(err) {
-				return "", 0, err
+			if !isReloadable(rerr) {
+				return "", 0, rerr
 			}
+			err = rerr // surface the latest "why the loaded reel won't do" if we give up
 		}
 	}
 	return "", 0, err
@@ -311,14 +341,31 @@ func (l *Librarian) advanceViaLibrary(appendable bool, tried map[string]bool, no
 			lastErr = verr // wrong pool / holds runs / blank with autoLabel off: try the next bay
 			continue
 		}
+		tried[name] = true // never re-select this volume by name during a multi-volume write
 		empty := len(l.cat.SlotsOnLabel(name)) == 0
 		logf.log("medium %q: rolled to bay %s (volume %q)", l.medium, b.ID, name)
 		return name, epoch, empty, nil
 	}
+	// No blank or empty in-pool bay left. Rather than refuse, recycle the oldest tape
+	// whose every run the retention Floor leaves unprotected — the label rotation. The
+	// Floor is the safety gate (a tape holding any kept archive is never reusable); a
+	// recycle keeps the same label name, advancing only the epoch (and physically wiping
+	// the tape via WriteLabel's reset).
+	if rec, ok := l.oldestReusable(tried, now); ok {
+		if err := l.recycleViaLibrary(rec, now, logf); err != nil {
+			return "", 0, false, err
+		}
+		tried[rec.Label.Name] = true
+		name, epoch, verr := l.verifyWritable(appendable, now)
+		if verr != nil {
+			return "", 0, false, verr
+		}
+		return name, epoch, true, nil
+	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("all %d bays are already loaded or tried", len(bays))
 	}
-	return "", 0, false, fmt.Errorf("medium %q has no further writable bay (load or relabel more volumes): %w", l.medium, lastErr)
+	return "", 0, false, l.noReusableErr(tried, now, lastErr)
 }
 
 // advanceViaShelf prompts the operator to load another reel into a single-drive
@@ -327,6 +374,13 @@ func (l *Librarian) advanceViaLibrary(appendable bool, tried map[string]bool, no
 // actionable error rather than blocking.
 func (l *Librarian) advanceViaShelf(appendable bool, tried map[string]bool, expect string, now time.Time, logf Logf) (string, int, bool, error) {
 	for {
+		// Suggest the oldest reusable tape so the operator is told which reel to load
+		// (Amanda's "load tape X"); a blank reel is equally accepted.
+		if expect == "" {
+			if rec, ok := l.oldestReusable(tried, now); ok {
+				expect = rec.Label.Name
+			}
+		}
 		reel, out, err := l.requestSwap("", expect, fmt.Errorf("volume full; another volume is needed"), logf)
 		switch {
 		case err != nil:
@@ -340,16 +394,169 @@ func (l *Librarian) advanceViaShelf(appendable bool, tried map[string]bool, expe
 			return "", 0, false, fmt.Errorf("medium %q: volume %q was already used and is full", l.medium, reel)
 		}
 		tried[reel] = true
-		name, epoch, verr := l.verifyWritable(appendable, now)
+		name, epoch, empty, verr := l.acceptOrRecycle(appendable, tried, now, logf)
 		if verr == nil {
-			empty := len(l.cat.SlotsOnLabel(name)) == 0
+			tried[name] = true // also track by label name (oldestReusable keys on names)
 			return name, epoch, empty, nil
 		}
 		if !isReloadable(verr) {
 			return "", 0, false, verr
 		}
-		// reloadable (blank without autoLabel, wrong pool, …): prompt for another reel
+		expect = "" // the loaded reel won't do; recompute the suggestion for the next prompt
+		// reloadable (blank without autoLabel, wrong pool, still-protected …): prompt again
 	}
+}
+
+// oldestReusable returns the catalog record of the oldest in-pool volume the rotation
+// may recycle: the one written longest ago whose every archive the retention Floor
+// leaves unprotected, skipping any already used this run (by label name). It is the
+// execution-time peer of the engine's volume expectation, applying the identical rule —
+// retention.Compute over this medium's own slots (so a copy elsewhere never makes a
+// volume reusable), pool ordered oldest-WrittenAt first — so the tape a run actually
+// recycles is the one `nb plan` announced it would. ok is false when every volume is
+// still protected (or already used): the caller then needs a blank, or fails loud.
+func (l *Librarian) oldestReusable(tried map[string]bool, now time.Time) (catalog.VolumeRecord, bool) {
+	var pool []catalog.VolumeRecord
+	for _, v := range l.cat.Volumes() {
+		if v.Label.Pool == l.medium && !tried[v.Label.Name] {
+			pool = append(pool, v)
+		}
+	}
+	sort.Slice(pool, func(i, j int) bool { return pool[i].Label.WrittenAt.Before(pool[j].Label.WrittenAt) })
+	floor := retention.Compute(l.cat.SlotsOn(l.medium), l.minAge, now)
+	for _, v := range pool {
+		if _, _, kept := floor.First(l.cat.SlotsOnLabel(v.Label.Name)); kept {
+			continue // some archive on this tape is still within retention — not reusable
+		}
+		return v, true
+	}
+	return catalog.VolumeRecord{}, false
+}
+
+// acceptOrRecycle verifies the loaded volume is writable and, if it is rejected only
+// because it is an aged-out in-pool tape that already holds runs (the one-run-per-tape
+// case), recycles it in place when the retention Floor clears its every archive. It is
+// the per-volume accept used by the single-drive station, where the operator chooses
+// which reel to load: a blank reel is auto-labeled and accepted as before; an aged-out
+// reel the rotation may reuse is recycled rather than refused. Any other rejection
+// (wrong pool, blank without auto_label, still-protected) is returned unchanged so the
+// caller prompts for another reel. tried lists volumes already written this run, which
+// must never be recycled (their fresh content is not yet in the catalog).
+func (l *Librarian) acceptOrRecycle(appendable bool, tried map[string]bool, now time.Time, logf Logf) (string, int, bool, error) {
+	name, epoch, verr := l.verifyWritable(appendable, now)
+	if verr == nil {
+		empty := len(l.cat.SlotsOnLabel(name)) == 0
+		return name, epoch, empty, nil
+	}
+	if !isReloadable(verr) {
+		return "", 0, false, verr
+	}
+	lbl, labeled, lerr := l.readLoadedLabel()
+	if lerr != nil || !labeled || lbl.Pool != l.medium || tried[lbl.Name] {
+		return "", 0, false, verr // not an in-pool tape we may recycle this run
+	}
+	floor := retention.Compute(l.cat.SlotsOn(l.medium), l.minAge, now)
+	if _, _, kept := floor.First(l.cat.SlotsOnLabel(lbl.Name)); kept {
+		return "", 0, false, verr // still within retention — not reusable
+	}
+	if err := l.recycle(lbl, now, logf); err != nil {
+		return "", 0, false, err
+	}
+	name, epoch, verr = l.verifyWritable(appendable, now)
+	if verr != nil {
+		return "", 0, false, verr
+	}
+	return name, epoch, true, nil
+}
+
+// recycleViaLibrary mounts the bay holding the reusable volume rec and recycles it in
+// place — the robotic-library half of the rotation, where the software (not an operator)
+// loads the aged-out tape. The caller has already confirmed rec is Floor-cleared.
+func (l *Librarian) recycleViaLibrary(rec catalog.VolumeRecord, now time.Time, logf Logf) error {
+	bays, err := l.changer.Bays()
+	if err != nil {
+		return err
+	}
+	for _, b := range bays {
+		if b.Label == rec.Label.Name {
+			if err := l.changer.Mount(b.ID); err != nil {
+				return err
+			}
+			return l.recycle(rec.Label, now, logf)
+		}
+	}
+	return fmt.Errorf("medium %q: volume %q (the oldest reusable tape) is not in the library; load it with `nb load %s <bay>` or relabel a blank one", l.medium, rec.Label.Name, l.medium)
+}
+
+// recycle rewrites the loaded volume's label in place for reuse: same name and pool,
+// epoch+1, fresh WrittenAt. WriteLabel resets the volume first, so the aged-out tape is
+// physically wiped before its identity is re-stamped — a reuse, not a rename. It then
+// reconciles the catalog (drop the now-dead prior-epoch placements; a slot that loses
+// its last copy leaves the catalog), reusing the same path `nb label --relabel` does.
+// The caller owns the safety gate (the tape must be Floor-cleared) and having it loaded.
+func (l *Librarian) recycle(prev record.Label, now time.Time, logf Logf) error {
+	lv, ok := l.vol.(media.Labeled)
+	if !ok {
+		return fmt.Errorf("medium %q is address-identified and cannot recycle volumes", l.medium)
+	}
+	recycled := len(l.cat.SlotsOnLabel(prev.Name))
+	next := record.Label{Name: prev.Name, Pool: l.medium, Epoch: prev.Epoch + 1, WrittenAt: now}
+	if err := lv.WriteLabel(next); err != nil {
+		return err
+	}
+	logf.log("medium %q: recycling volume %q (epoch %d -> %d, %d aged-out run(s) past retention)", l.medium, prev.Name, prev.Epoch, next.Epoch, recycled)
+	return l.reconcileRelabel(prev.Name, next)
+}
+
+// readLoadedLabel reads the loaded volume's full label (name, pool, epoch), or
+// labeled=false for a blank or address-identified medium.
+func (l *Librarian) readLoadedLabel() (record.Label, bool, error) {
+	lv, ok := l.vol.(media.Labeled)
+	if !ok {
+		return record.Label{}, false, nil
+	}
+	return lv.ReadLabel()
+}
+
+// noReusableErr crafts the fail-loud refusal when no blank bay is left and no volume can
+// be recycled — never an overwrite (recoverability outranks capacity). It separates two
+// causes: the rotation is *full* (every in-pool volume is still within retention), which
+// names the soonest a volume ages out so the operator knows when the rotation frees a
+// tape; or the medium is simply *out of bays/volumes* (the pre-existing failure), which
+// keeps the original "no further writable bay" wording. tried excludes volumes already
+// written this run (their fresh content is not yet in the catalog).
+func (l *Librarian) noReusableErr(tried map[string]bool, now time.Time, lastErr error) error {
+	floor := retention.Compute(l.cat.SlotsOn(l.medium), l.minAge, now)
+	protected := false
+	for _, v := range l.cat.Volumes() {
+		if v.Label.Pool != l.medium || tried[v.Label.Name] {
+			continue
+		}
+		if _, _, kept := floor.First(l.cat.SlotsOnLabel(v.Label.Name)); kept {
+			protected = true
+			break
+		}
+	}
+	if !protected {
+		return fmt.Errorf("medium %q has no further writable bay (load or relabel more volumes): %w", l.medium, lastErr)
+	}
+	msg := fmt.Sprintf("medium %q: no writable volume — every volume in the pool still holds runs within retention", l.medium)
+	if l.minAge > 0 {
+		var soonest time.Time
+		for _, s := range l.cat.SlotsOn(l.medium) {
+			d, err := record.ParseDateField(s.Date)
+			if err != nil {
+				continue
+			}
+			if out := d.Add(l.minAge); out.After(now) && (soonest.IsZero() || out.Before(soonest)) {
+				soonest = out
+			}
+		}
+		if !soonest.IsZero() {
+			msg += fmt.Sprintf("; the oldest ages out on %s", record.DateString(soonest))
+		}
+	}
+	return fmt.Errorf("%s — load a blank volume, add volumes to the pool, or recycle the oldest now with `nb label --relabel %s <name>`: %w", msg, l.medium, ErrAllVolumesProtected)
 }
 
 // Remaining reports the writable bytes left on the volume currently in the drive,
@@ -404,8 +611,15 @@ type WriteSink struct {
 // epoch). partSize (0 = none) caps each part for media whose remaining capacity is
 // unknowable or to bound part size deliberately.
 func (l *Librarian) WriteSink(volume string, epoch int, appendable bool, partSize int64, now time.Time, logf Logf) *WriteSink {
+	// Seed tried with the starting volume's name so a spanning roll never recycles the
+	// tape this write is already on: its fresh content is not yet in the catalog, so the
+	// retention Floor would otherwise see it as empty and reusable.
+	tried := map[string]bool{}
+	if volume != "" {
+		tried[volume] = true
+	}
 	return &WriteSink{l: l, appendable: appendable, partSize: partSize, now: now, logf: logf,
-		tried: map[string]bool{}, volume: volume, epoch: epoch}
+		tried: tried, volume: volume, epoch: epoch}
 }
 
 // maxPart is the payload bytes the next part may carry on the loaded volume: its

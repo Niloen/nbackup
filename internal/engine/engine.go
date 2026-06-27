@@ -108,7 +108,7 @@ func (e *Engine) librarianFor(name string) (lib *librarian.Librarian, def config
 	if err != nil {
 		return nil, config.Media{}, false, err
 	}
-	return librarian.New(vol, name, e.cat, e.op, e.cfg.AutoLabel), d, own, nil
+	return librarian.New(vol, name, e.cat, e.op, e.cfg.AutoLabel, e.cfg.MinAgeFor(d)), d, own, nil
 }
 
 // New constructs an Engine from configuration: it opens the landing volume and
@@ -508,14 +508,32 @@ func (e *Engine) prepareWriter(medium string, spec archiveio.SlotSpec, now time.
 		return nil, err
 	}
 	appendable := def.IsAppendable()
-	expect := e.expectedVolumeFor(medium, now).Label
-	volName, epoch, err := lib.PrepareWrite(appendable, expect, now, librarian.Logf(logf))
+	exp := e.expectedVolumeFor(medium, now)
+	announceExpectation(medium, exp, logf)
+	volName, epoch, err := lib.PrepareWrite(appendable, exp.Label, now, librarian.Logf(logf))
 	if err != nil {
 		return nil, err
 	}
 	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
 	w := archiveio.NewWriter(sink, spec, e.limiters[medium])
 	return &writeTarget{lib: lib, w: w, partSize: partSize}, nil
+}
+
+// announceExpectation logs which labeled volume a write will use before it starts —
+// the Amanda "amdump will expect tape X" cue, so an operator sees the named tape in run
+// output, not only in `nb plan`. It is operator-facing identity (the Label name only)
+// and a no-op for an appendable medium or an address-identified one (nothing to expect).
+func announceExpectation(medium string, exp VolumeExpectation, logf Logf) {
+	switch {
+	case exp.Appendable || (exp.Label == "" && !exp.FreshVolume):
+		// appendable extends in place; address-identified media carry no label.
+	case exp.FreshVolume:
+		logf.log("medium %q: this run needs a fresh/blank volume (no reusable tape in the pool)", medium)
+	case exp.Recycles > 0:
+		logf.log("medium %q: this run expects volume %q — recycling %d aged-out run(s) past retention", medium, exp.Label, exp.Recycles)
+	default:
+		logf.log("medium %q: this run expects volume %q", medium, exp.Label)
+	}
 }
 
 // PlanCopy resolves and validates a copy without writing (the `nb copy` dry-run); see copier.

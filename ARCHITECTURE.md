@@ -359,11 +359,31 @@ without hardware).
   a physical scan: a one-run-per-tape (non-appendable) run reuses the **oldest volume
   whose every run is unprotected** (past `minimum_age`, with a newer recovery path) —
   the oldest reusable tape — or a *fresh tape* when none is reusable; an appendable
-  run extends the most recently written volume. `nb plan` prints it, and it seeds the
-  swap prompt's suggestion (`SwapRequest.Expect`) so the operator is told *which* reel
-  to load. This is **guidance only** — the engine won't overwrite a reusable tape on its
-  own; recycling it is a deliberate `nb label --relabel` (see deferred whole-volume
-  recycle).
+  run extends the most recently written volume. `nb plan` prints it, run output
+  announces it, and it seeds the swap prompt's suggestion (`SwapRequest.Expect`) so the
+  operator is told *which* reel to load.
+- **Whole-volume recycle on write (label rotation, Amanda's *tapecycle*).** When a run
+  needs a fresh writable volume and no blank/empty in-pool tape is available, NBackup
+  **reuses the oldest reusable tape automatically** rather than refusing: it rewrites
+  that volume's file-0 label in place — same `Name` and `Pool`, `++Epoch`, fresh
+  `WrittenAt` — physically wiping it (`WriteLabel` resets first), and reconciles the
+  catalog (prior-epoch placements are dead, dropped; a slot that loses its last copy
+  leaves). Because placements pin `record.FilePos{Label, Epoch, Pos}`, the epoch bump
+  alone retires every prior-epoch placement; the physical reset means a rebuild sees the
+  new epoch only. This lives entirely in `package librarian` (the media-shape seam):
+  `advanceViaLibrary` recycles a robotic library's oldest Floor-cleared bay after its
+  blank/empty bays are exhausted; `acceptOrRecycle` recycles an aged-out reel a
+  single-drive operator loads; both reuse the `nb label --relabel` reconcile path. The
+  **retention `Floor` is the safety gate** — a tape holding *any* kept archive (counting
+  spanned parts) is never reusable — so reuse is **automatic and unconfigured** (the
+  floor makes it safe). If every tape is still protected and none is blank, the run
+  **fails loud** (`librarian.ErrAllVolumesProtected`: "every volume within retention;
+  oldest ages out on …") rather than overwriting one — recoverability outranks capacity.
+  `nb label --relabel` remains the manual early-recycle override. The selection applies
+  the **same rule** as the Expected-tape announcement (`retention.Compute` over the
+  medium's own slots, pool oldest-`WrittenAt` first), so the tape a run recycles is the
+  one `nb plan` said it would; the in-progress write tape is held out of the candidate
+  set so a span never recycles the reel it is writing.
 - **Bay/reel (physical) vs Label (logical) are distinct.** A `Changer` is
   **label-agnostic** — like a real robot it mounts bays and reads barcodes, never
   the magnetic label; the librarian reads the label *after* mounting. A blank
@@ -386,8 +406,9 @@ without hardware).
   a `librarian.WriteSink`) sizes each part to the loaded volume's known remaining
   capacity (optionally capped by `part_size`) and rolls onto the next writable volume
   *between* parts — a robotic library mounts the next writable bay (blank → auto-labeled,
-  or an empty in-pool tape — never a tape holding runs); a single-drive station prompts
-  for a reel swap; an unbounded or changer-less medium writes one part. There is **no
+  or an empty in-pool tape, or — once blanks are exhausted — the oldest Floor-cleared
+  tape, recycled in place; never a tape holding a *kept* run); a single-drive station
+  prompts for a reel swap; an unbounded or changer-less medium writes one part. There is **no
   reactive "keep what fit on EOT"** and no holding-disk buffer (the one-pass stream
   means a part already on tape cannot be re-read to rewrite it). If a sized part *still*
   overflows (a wrong estimate, or a real drive whose remaining capacity software cannot
@@ -529,9 +550,12 @@ someone. The choices, all mirroring existing stances:
   history shows sizes via `nb slot <id>`.)
 
 **Reclamation asymmetry, and it is per-archive.** Disk/S3 reclaim per **archive**
-(a DLE's image within a slot), not per slot; tape reclaims a whole volume (relabel —
-`tape.RemoveFile` errors, and `volumeProfile.Reclaim` returns nothing, so `nb prune`
-never deletes from a tape). Per-archive is the granularity the **floor already uses**:
+(a DLE's image within a slot), not per slot; tape reclaims a whole volume — by label
+rotation **on write** (the oldest Floor-cleared tape recycled when a run needs a fresh
+volume; see "Whole-volume recycle on write") or a manual `nb label --relabel` — never by
+a prune pass: `tape.RemoveFile` errors, and `volumeProfile.Reclaim` deliberately returns
+nothing, so `nb prune` never deletes from a tape (tape capacity is structural — the depth
+of the label pool *is* the retention). Per-archive is the granularity the **floor already uses**:
 `retention.Compute` returns a floor keyed by `(slot, DLE)` (younger than `minimum_age`,
 or part of a DLE's **live recovery chain** — its last full plus every later incremental,
 since `restore.Chain` replays them all; a recent slot also pins the older base its
@@ -633,11 +657,6 @@ decisions carry it:
 
 ## Deferred / known next steps
 
-- **Whole-volume recycle** on EOT. Spanning rolls onto the next *blank / empty
-  in-pool* tape; auto-recycling an aged-out tape (vs. relabeling it) is still manual
-  (`nb label --relabel`). (Capacity-driven retention is otherwise implemented:
-  `sizeProfile.Reclaim` already prunes object stores and disk to fit `capacity`;
-  only whole-*volume* tape recycle remains.)
 - **Remote sources over SSH** — the dump path is implemented (see
   [docs/design/remote-sources.md](docs/design/remote-sources.md)); a remote DLE dumps
   over SSH with no NBackup software on the client. A source host is remote **by default**
