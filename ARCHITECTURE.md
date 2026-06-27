@@ -520,7 +520,7 @@ someone. The choices, all mirroring existing stances:
   renders the per-DLE table — sizes, compression %, time, rate, full/incremental totals
   — via the one `report` renderer the dump *notification* also uses, so a configured
   dump alert *is* the nightly report, not a bare "it worked". (A slot older than the
-  history shows sizes via `nb slot show`.)
+  history shows sizes via `nb slot <id>`.)
 
 **Reclamation asymmetry, and it is per-archive.** Disk/S3 reclaim per **archive**
 (a DLE's image within a slot), not per slot; tape reclaims a whole volume (relabel —
@@ -614,11 +614,13 @@ decisions carry it:
 - **Verify** every change: `gofmt -l`, `go vet ./...`, `go test -race ./...`.
 - **Test environment:** `zstd` is **not** installed — tests use scheme `none`;
   `tar`, `gzip`, `nice` are present. Tests that need GNU tar `t.Skip` when absent.
-- **CLI:** flags may appear before or after positionals (`parseArgs`); subcommand
-  dispatch (`slot show`) keys on the first arg. The convention is **inspect with a noun**
-  (`nb slot`, `nb dle`, `nb medium`), **act with a flat verb** (`nb dump`, `nb check`, `nb verify`,
-  `nb drill`, `nb prune`, `nb rebuild`, …) — so nouns carry only read subcommands and
-  every mutation is a top-level verb. Per-medium status (incl. bays / drive + shelf)
+- **CLI:** flags may appear before or after positionals (`parseArgs`). The convention is
+  **inspect with a noun** (`nb slot`, `nb dle`, `nb medium`), **act with a flat verb**
+  (`nb dump`, `nb check`, `nb verify`, `nb drill`, `nb prune`, `nb rebuild`, …) — so every
+  mutation is a top-level verb. Each inspection noun is bare-noun + optional positional:
+  no argument lists, an id details that one (`nb slot <id>`, `nb dle <dle>`, `nb medium <name>`),
+  rather than `list`/`show` subcommands — uniform across the three (matches restic's
+  `snapshots`, kubectl's name-presence). Per-medium status (incl. bays / drive + shelf)
   lives in `nb medium <name>`; `nb load` is the one physical action verb (sibling of
   `nb label`). `--catalog` has no short flag (a case-only `-C`/`-c` pair is too easy to
   slip).

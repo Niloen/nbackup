@@ -479,28 +479,20 @@ func newVerifyCmd(a *app) *cobra.Command {
 	return cmd
 }
 
-// newSlotCmd implements `nb slot`: list slots (default), show a slot, or prune.
+// newSlotCmd implements `nb slot`: list slots, or — with a slot id — detail one.
+// Inspection follows the bare-noun convention (like `nb medium`, `nb dle`): no
+// arg lists, a positional arg details that one. (Reclaim slots with `nb prune`.)
 func newSlotCmd(a *app) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "slot",
-		Short: "List or show slots",
-		Long:  "Inspect the slot catalog. With no subcommand it lists slots; see the subcommands to show a single slot. (Reclaim slots with `nb prune`.)",
-		Args:  cobra.NoArgs,
-		// Bare `nb slot` lists slots, preserving prior behavior.
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSlotList(a)
-		},
-	}
-	cmd.AddCommand(newSlotListCmd(a), newSlotShowCmd(a))
-	return cmd
-}
-
-func newSlotListCmd(a *app) *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List slots in the catalog",
-		Args:  cobra.NoArgs,
+		Use:     "slot [slot-id]",
+		Short:   "List slots, or detail one",
+		Long:    "Inspect the slot catalog. With no argument it lists slots; pass a slot id to show that slot's archives and copies. (Reclaim slots with `nb prune`.)",
+		Example: "  nb slot\n  nb slot slot-2026-06-21",
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				return runSlotShow(a, args[0])
+			}
 			return runSlotList(a)
 		},
 	}
@@ -559,94 +551,71 @@ func copiesSummary(ps []catalog.Placement) string {
 	return strings.Join(names, ", ")
 }
 
-func newSlotShowCmd(a *app) *cobra.Command {
-	return &cobra.Command{
-		Use:     "show <slot-id>",
-		Short:   "Show a single slot's archives and copies",
-		Example: "  nb slot show slot-2026-06-21",
-		Args: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 1 {
-				return fmt.Errorf("specify exactly one slot id, e.g. `nb slot show slot-2026-06-21` (list them with `nb slot`)")
-			}
-			return nil
-		},
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := a.loadRO()
-			if err != nil {
-				return err
-			}
-			eng, err := newEngine(cfg)
-			if err != nil {
-				return err
-			}
-			s, err := eng.Catalog().ReadSlot(args[0])
-			if err != nil {
-				return err
-			}
-			fmt.Printf("Slot %s  (%s)\n", s.ID, slotStatusDisplay(s.Status))
-			fmt.Printf("  date:    %s\n", s.Date)
-			fmt.Printf("  committed: %s\n", s.SealedAt.Format("2006-01-02 15:04:05 MST"))
-			fmt.Printf("  total:   %s\n\n", sizeutil.FormatBytes(s.TotalBytes))
-			tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-			fmt.Fprintln(tw, "DLE\tLEVEL\tFILES\tSIZE\tCOMPRESS\tENCRYPT")
-			for _, ar := range s.Archives {
-				enc := ar.Encrypt
-				if enc == "" {
-					enc = "none"
-				}
-				fmt.Fprintf(tw, "%s\tL%d\t%d\t%s\t%s\t%s\n", ar.DLEID(), ar.Level, ar.FileCount, sizeutil.FormatBytes(ar.Compressed), ar.Compress, enc)
-			}
-			tw.Flush()
-
-			placements := eng.Catalog().Placements(s.ID)
-			fmt.Printf("\nCOPIES (%d)\n", len(placements))
-			ptw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-			fmt.Fprintln(ptw, "  MEDIUM\tVOLUMES\tPOSITIONS")
-			for _, p := range placements {
-				volumes := "-"
-				if labels := p.Labels(); len(labels) > 0 {
-					volumes = strings.Join(labels, "+")
-				}
-				positions := make([]string, 0, len(p.Archives))
-				for _, ar := range p.Archives {
-					locs := make([]string, 0, len(ar.Parts))
-					for _, pt := range ar.Parts {
-						locs = append(locs, fmt.Sprintf("%d", pt.Pos))
-					}
-					positions = append(positions, fmt.Sprintf("%s/L%d@%s", eng.DisplayDLE(ar.DLE), ar.Level, strings.Join(locs, ",")))
-				}
-				fmt.Fprintf(ptw, "  %s\t%s\t%s\n", p.Medium, volumes, strings.Join(positions, " "))
-			}
-			ptw.Flush()
-			return nil
-		},
+func runSlotShow(a *app, slotID string) error {
+	cfg, err := a.loadRO()
+	if err != nil {
+		return err
 	}
+	eng, err := newEngine(cfg)
+	if err != nil {
+		return err
+	}
+	s, err := eng.Catalog().ReadSlot(slotID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Slot %s  (%s)\n", s.ID, slotStatusDisplay(s.Status))
+	fmt.Printf("  date:    %s\n", s.Date)
+	fmt.Printf("  committed: %s\n", s.SealedAt.Format("2006-01-02 15:04:05 MST"))
+	fmt.Printf("  total:   %s\n\n", sizeutil.FormatBytes(s.TotalBytes))
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "DLE\tLEVEL\tFILES\tSIZE\tCOMPRESS\tENCRYPT")
+	for _, ar := range s.Archives {
+		enc := ar.Encrypt
+		if enc == "" {
+			enc = "none"
+		}
+		fmt.Fprintf(tw, "%s\tL%d\t%d\t%s\t%s\t%s\n", ar.DLEID(), ar.Level, ar.FileCount, sizeutil.FormatBytes(ar.Compressed), ar.Compress, enc)
+	}
+	tw.Flush()
+
+	placements := eng.Catalog().Placements(s.ID)
+	fmt.Printf("\nCOPIES (%d)\n", len(placements))
+	ptw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(ptw, "  MEDIUM\tVOLUMES\tPOSITIONS")
+	for _, p := range placements {
+		volumes := "-"
+		if labels := p.Labels(); len(labels) > 0 {
+			volumes = strings.Join(labels, "+")
+		}
+		positions := make([]string, 0, len(p.Archives))
+		for _, ar := range p.Archives {
+			locs := make([]string, 0, len(ar.Parts))
+			for _, pt := range ar.Parts {
+				locs = append(locs, fmt.Sprintf("%d", pt.Pos))
+			}
+			positions = append(positions, fmt.Sprintf("%s/L%d@%s", eng.DisplayDLE(ar.DLE), ar.Level, strings.Join(locs, ",")))
+		}
+		fmt.Fprintf(ptw, "  %s\t%s\t%s\n", p.Medium, volumes, strings.Join(positions, " "))
+	}
+	ptw.Flush()
+	return nil
 }
 
 // newDleCmd implements `nb dle`: inspect the catalog grouped by DLE (backup source)
 // rather than by slot. The same archives the slot view groups by run, browsed instead
 // by what was backed up — one row per DLE, then its archive timeline across slots.
 func newDleCmd(a *app) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "dle",
-		Short: "List or show DLEs (backup sources)",
-		Long:  "Inspect the catalog grouped by DLE (a host:path backup source). With no subcommand it lists each DLE and its backup history; `nb dle show <dle>` shows one DLE's archive timeline across slots. (Reclaim with `nb prune`, which is per-DLE on disk/cloud.)",
-		Args:  cobra.NoArgs,
-		// Bare `nb dle` lists DLEs, mirroring `nb slot`.
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDleList(a)
-		},
-	}
-	cmd.AddCommand(newDleListCmd(a), newDleShowCmd(a))
-	return cmd
-}
-
-func newDleListCmd(a *app) *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List DLEs and their backup history",
-		Args:  cobra.NoArgs,
+		Use:     "dle [dle]",
+		Short:   "List DLEs (backup sources), or detail one",
+		Long:    "Inspect the catalog grouped by DLE (a host:path backup source). With no argument it lists each DLE and its backup history; pass a DLE to show its archive timeline across slots. (Reclaim with `nb prune`, which is per-DLE on disk/cloud.)",
+		Example: "  nb dle\n  nb dle localhost:/home",
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				return runDleShow(a, args[0])
+			}
 			return runDleList(a)
 		},
 	}
@@ -724,61 +693,48 @@ func runDleList(a *app) error {
 	return nil
 }
 
-func newDleShowCmd(a *app) *cobra.Command {
-	return &cobra.Command{
-		Use:     "show <dle>",
-		Short:   "Show one DLE's archive timeline across slots",
-		Example: "  nb dle show localhost:/home",
-		Args: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 1 {
-				return fmt.Errorf("specify exactly one DLE, e.g. `nb dle show localhost:/home` (list them with `nb dle`)")
+func runDleShow(a *app, arg string) error {
+	cfg, err := a.loadRO()
+	if err != nil {
+		return err
+	}
+	eng, err := newEngine(cfg)
+	if err != nil {
+		return err
+	}
+	slots := eng.Catalog().Slots()
+	slug, display, ok := resolveDLE(slots, arg)
+	if !ok {
+		return fmt.Errorf("no DLE %q in catalog (list them with `nb dle`)", arg)
+	}
+	fmt.Printf("DLE %s\n\n", display)
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "SLOT\tDATE\tLEVEL\tSIZE\tBASE\tCOPIES")
+	for _, s := range slots {
+		for _, ar := range s.Archives {
+			if ar.DLE != slug {
+				continue
 			}
-			return nil
-		},
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := a.loadRO()
-			if err != nil {
-				return err
+			base := ar.BaseSlot
+			if base == "" {
+				base = "-"
 			}
-			eng, err := newEngine(cfg)
-			if err != nil {
-				return err
-			}
-			slots := eng.Catalog().Slots()
-			slug, display, ok := resolveDLE(slots, args[0])
-			if !ok {
-				return fmt.Errorf("no DLE %q in catalog (list them with `nb dle`)", args[0])
-			}
-			fmt.Printf("DLE %s\n\n", display)
-			tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-			fmt.Fprintln(tw, "SLOT\tDATE\tLEVEL\tSIZE\tBASE\tCOPIES")
-			for _, s := range slots {
-				for _, ar := range s.Archives {
-					if ar.DLE != slug {
-						continue
+			var media []string
+			for _, p := range eng.Catalog().Placements(s.ID) {
+				for _, pa := range p.Archives {
+					if pa.DLE == slug {
+						media = append(media, p.Medium)
+						break
 					}
-					base := ar.BaseSlot
-					if base == "" {
-						base = "-"
-					}
-					var media []string
-					for _, p := range eng.Catalog().Placements(s.ID) {
-						for _, pa := range p.Archives {
-							if pa.DLE == slug {
-								media = append(media, p.Medium)
-								break
-							}
-						}
-					}
-					sort.Strings(media)
-					fmt.Fprintf(tw, "%s\t%s\tL%d\t%s\t%s\t%s\n", s.ID, s.Date, ar.Level,
-						sizeutil.FormatBytes(ar.Compressed), base, strings.Join(media, ", "))
 				}
 			}
-			tw.Flush()
-			return nil
-		},
+			sort.Strings(media)
+			fmt.Fprintf(tw, "%s\t%s\tL%d\t%s\t%s\t%s\n", s.ID, s.Date, ar.Level,
+				sizeutil.FormatBytes(ar.Compressed), base, strings.Join(media, ", "))
+		}
 	}
+	tw.Flush()
+	return nil
 }
 
 // resolveDLE matches a user-typed DLE identifier against the catalog's archives,
@@ -1010,7 +966,7 @@ func runCopyDryRun(cfg *config.Config, slotID, from, to string, force bool) erro
 // newSyncCmd implements `nb sync`: the batch form of `nb copy`. It mirrors every
 // landing slot a target is missing onto that target, oldest
 // first. With --to it syncs one ad-hoc target; without --to it runs the rules in
-// the config's `sync:` block. Copies by default (like `nb slot prune`).
+// the config's `sync:` block. Copies by default (like `nb prune`).
 func newSyncCmd(a *app) *cobra.Command {
 	var from, to, sinceStr string
 	var last int

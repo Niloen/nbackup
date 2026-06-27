@@ -137,11 +137,11 @@ func TestReportDumpCommand(t *testing.T) {
 		t.Errorf("--slot should report the named dump, got:\n%s", out)
 	}
 
-	// An unknown slot is a clear error pointing at `nb slot show`.
+	// An unknown slot is a clear error pointing at `nb slot <id>`.
 	root := NewRootCmd()
 	root.SetArgs([]string{"--catalog", dir, "report", "--slot", "slot-9999-99-99"})
-	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "nb slot show") {
-		t.Errorf("unknown --slot error = %v, want a pointer to `nb slot show`", err)
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "nb slot slot-9999-99-99") {
+		t.Errorf("unknown --slot error = %v, want a pointer to `nb slot <id>`", err)
 	}
 }
 

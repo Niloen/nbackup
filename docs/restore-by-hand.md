@@ -69,7 +69,7 @@ Tape frames each payload with a fixed 32 KB inline header — skip it first:
 dd bs=32k skip=1 < file | zstd -dc | tar -xf -
 ```
 
-A **spanned** archive is split into parts across volumes. `nb slot show <slot>`
+A **spanned** archive is split into parts across volumes. `nb slot <slot>`
 lists the volume chain and each part's position (e.g. `bay-NN/000001`). Strip each
 part's 32 KB header and concatenate before decompressing:
 
