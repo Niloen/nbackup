@@ -151,7 +151,7 @@ func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) record.Ar
 	if err != nil {
 		t.Fatalf("WriteArchive: %v", err)
 	}
-	if err := w.Commit(arch, parts); err != nil {
+	if _, err := w.Commit(arch, parts); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	return arch

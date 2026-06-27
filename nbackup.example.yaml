@@ -94,6 +94,24 @@ media:
 # Which medium slots are created on (the landing).
 landing: fast-disk
 
+# HOLDING DISK (Amanda's holding disk). Mark a fast disk/cloud medium `holding: true` and it
+# becomes a scratch buffer the dump flows THROUGH on the way to the landing — "here's some
+# disk you can use for performance". Dumps land on it in PARALLEL (no single-drive clamp),
+# then one taper drains each committed archive to the landing and reclaims the disk, so a
+# slow tape drive runs at disk speed and a small disk feeds a much larger tape. The landing
+# (e.g. `lto`) stays the authoritative tier; the holding disk is transient.
+#
+#   media:
+#     lto:     { type: tape, dir: /var/lib/nbackup/vtape, bays: 20, volume_size: 6TB }
+#     scratch: { type: disk, path: /var/spool/nbackup, capacity: 500GB, holding: true }
+#   landing: lto
+#   parallelism: { workers: 4 }   # dumps run parallel onto the holding disk
+#
+# `capacity` bounds the in-flight back-pressure (a slow tape ⇒ dumpers wait, never overfill).
+# The holding disk must be disk/cloud, not the landing, and there is at most one. A crashed
+# run's un-flushed archives stay recorded on the holding disk in the catalog; `nb dump`
+# auto-drains them on the next run, or run `nb flush` to drain them explicitly.
+
 # Replication (Amanda's vaulting). Each rule mirrors one medium's sealed slots onto
 # another — the batch, idempotent form of `nb copy`. A cron line of
 # `nb dump && nb sync` lands fast on disk, then pushes copies offsite.

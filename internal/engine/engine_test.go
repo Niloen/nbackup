@@ -710,6 +710,188 @@ func removeSlotFiles(t *testing.T, eng *Engine, slotID string) {
 // TestTapeLibraryRestore copies two slots onto two different tapes in a library,
 // removes the disk copies, then restores both — proving the changer auto-mounts
 // the bay holding each slot's tape on the read side.
+// TestHoldingDiskBuffersTape exercises the holding-disk path: a disk marked holding: true
+// buffers a tape landing. Several DLEs dump to the disk in parallel; the taper drains each to
+// tape and reclaims the disk; afterward the disk is empty, the slot lives on tape, and the
+// chain restores from tape alone.
+func TestHoldingDiskBuffersTape(t *testing.T) {
+	srcA := t.TempDir()
+	srcB := t.TempDir()
+	write(t, filepath.Join(srcA, "a.txt"), "alpha payload")
+	write(t, filepath.Join(srcB, "b.txt"), "bravo payload")
+	scratchDir := t.TempDir()
+
+	cfg := &config.Config{
+		Landing: "lto",
+		Media: map[string]config.Media{
+			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "4"}},
+			"scratch": {Type: "disk", Holding: true, Capacity: "500MB", Params: map[string]string{"path": scratchDir}},
+		},
+		Sources: []config.DLE{
+			{Host: "localhost", Path: srcA},
+			{Host: "localhost", Path: srcB},
+		},
+		Workdir:   t.TempDir(),
+		StateDir:  t.TempDir(),
+		AutoLabel: true,
+	}
+	cfg.Compress.Scheme = "none"
+	cfg.Parallelism.Workers = 2
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("holding-disk dump: %v", err)
+	}
+
+	// The authoritative copy is on tape; the holding disk has been fully reclaimed.
+	for _, p := range eng.cat.Placements(s.ID) {
+		if p.Medium == "scratch" {
+			t.Errorf("holding disk should hold no placement after the run, got %v", p)
+		}
+	}
+	scratchVol, _, _, err := eng.mediumVolume("scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files, _ := scratchVol.Files(); len(files) != 0 {
+		t.Errorf("holding disk must be empty after the run, has %d file(s)", len(files))
+	}
+
+	// Restore both DLEs from tape alone — the holding disk is empty.
+	for _, tc := range []struct{ src, file, want string }{
+		{srcA, "a.txt", "alpha payload"},
+		{srcB, "b.txt", "bravo payload"},
+	} {
+		dest := t.TempDir()
+		name := config.DLE{Host: "localhost", Path: tc.src}.Name()
+		if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
+			t.Fatalf("restore %s from tape: %v", name, err)
+		}
+		assertContent(t, filepath.Join(dest, tc.file), tc.want)
+	}
+}
+
+// TestHoldingDiskFlush drains leftover holding-disk archives to the landing. It builds the
+// post-crash state directly — archives staged on a disk and recorded in the catalog — then
+// runs Flush (as `nb flush`/auto-flush would) and confirms they move to tape, the disk is
+// reclaimed, and the chain restores from tape.
+func TestHoldingDiskFlush(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "stranded on the holding disk")
+	scratchDir := t.TempDir()
+	workdir := t.TempDir()
+	stateDir := t.TempDir()
+	sources := []config.DLE{{Host: "localhost", Path: src}}
+
+	// Stage: dump onto the scratch disk as a landing (leaves a catalogued slot on scratch —
+	// the state a holding-disk run leaves behind when it crashes before flushing).
+	stageCfg := &config.Config{
+		Landing:  "scratch",
+		Media:    map[string]config.Media{"scratch": {Type: "disk", Params: map[string]string{"path": scratchDir}}},
+		Sources:  sources,
+		Workdir:  workdir,
+		StateDir: stateDir,
+	}
+	stageCfg.Compress.Scheme = "none"
+	stageEng, err := New(stageCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := stageEng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	s, err := stageEng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("stage dump: %v", err)
+	}
+
+	// Now treat that scratch disk as a holding disk for a tape landing (same workdir, so the
+	// catalog still holds the scratch placement) and flush.
+	flushCfg := &config.Config{
+		Landing: "lto",
+		Media: map[string]config.Media{
+			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
+			"scratch": {Type: "disk", Holding: true, Params: map[string]string{"path": scratchDir}},
+		},
+		Sources:   sources,
+		Workdir:   workdir,
+		StateDir:  stateDir,
+		AutoLabel: true,
+	}
+	flushCfg.Compress.Scheme = "none"
+	flushEng, err := New(flushCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := flushEng.Flush(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), logfDiscard)
+	if err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("flush moved %d archives, want 1", n)
+	}
+
+	// The archive is now on tape and gone from the holding disk.
+	if flushEng.archiveOnLanding(s.ID, config.DLE{Host: "localhost", Path: src}.Name(), 0) == false {
+		t.Errorf("archive must be on the tape landing after flush")
+	}
+	scratchVol, _, _, err := flushEng.mediumVolume("scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files, _ := scratchVol.Files(); len(files) != 0 {
+		t.Errorf("holding disk must be empty after flush, has %d file(s)", len(files))
+	}
+	dest := t.TempDir()
+	if err := flushEng.Restore(s.ID, config.DLE{Host: "localhost", Path: src}.Name(), dest, false, nil); err != nil {
+		t.Fatalf("restore from tape after flush: %v", err)
+	}
+	assertContent(t, filepath.Join(dest, "f.txt"), "stranded on the holding disk")
+}
+
+// TestHoldingDiskLandingDownFails: when the landing (tape) cannot be written (blank, no
+// auto_label), the holding-disk run fails up front and records nothing — it degrades by
+// refusing to proceed, never by dropping data on the disk and pretending it's safe.
+func TestHoldingDiskLandingDownFails(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "needs a home")
+
+	cfg := &config.Config{
+		Landing: "lto",
+		Media: map[string]config.Media{
+			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "1"}},
+			"scratch": {Type: "disk", Holding: true, Params: map[string]string{"path": t.TempDir()}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+		// AutoLabel deliberately off: the blank tape cannot be written.
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	if _, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil); err == nil {
+		t.Fatal("holding-disk run must fail when the landing is unwritable")
+	}
+	if len(eng.cat.Slots()) != 0 {
+		t.Errorf("a failed holding-disk run must record no slot, got %d", len(eng.cat.Slots()))
+	}
+}
+
 func TestTapeLibraryRestore(t *testing.T) {
 	src := t.TempDir()
 	write(t, filepath.Join(src, "f.txt"), "v1")
@@ -1088,11 +1270,8 @@ func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, byte
 	if err := s.Seal(time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	p := catalog.Placement{
-		Medium:   "lto",
-		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: volume, Epoch: 1, Pos: 1}}, Commit: catalog.FilePos{Label: volume, Epoch: 1, Pos: 2}}},
-	}
-	if err := eng.cat.Record(s, p); err != nil {
+	pos := catalog.ArchivePos{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: volume, Epoch: 1, Pos: 1}}, Commit: catalog.FilePos{Label: volume, Epoch: 1, Pos: 2}}
+	if err := eng.cat.AddArchive(s, "lto", s.Archives[0], pos); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1107,11 +1286,8 @@ func recordFullOnOtherMedium(t *testing.T, eng *Engine, date, dle, medium string
 	if err := s.Seal(time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	p := catalog.Placement{
-		Medium:   medium,
-		Archives: []catalog.ArchivePos{{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: medium, Pos: 1}}, Commit: catalog.FilePos{Label: medium, Pos: 2}}},
-	}
-	if err := eng.cat.Record(s, p); err != nil {
+	pos := catalog.ArchivePos{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: medium, Pos: 1}}, Commit: catalog.FilePos{Label: medium, Pos: 2}}
+	if err := eng.cat.AddArchive(s, medium, s.Archives[0], pos); err != nil {
 		t.Fatal(err)
 	}
 }

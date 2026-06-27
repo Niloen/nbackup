@@ -834,6 +834,43 @@ func newPruneCmd(a *app) *cobra.Command {
 	return cmd
 }
 
+// newFlushCmd implements `nb flush`: drain a crashed holding-disk run's leftover archives to
+// the landing (Amanda's amflush). A normal `nb dump` already auto-flushes leftovers first, so
+// this is the explicit, attended form.
+func newFlushCmd(a *app) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "flush",
+		Short: "Drain leftover holding-disk archives to the landing",
+		Long:  "Copy any archives a crashed holding-disk run left on the holding disk to the landing, then reclaim the disk. The catalog already records what is on the holding disk, so no media scan is needed. `nb dump` runs this automatically before each run; use `nb flush` to drain explicitly. A no-op without a holding disk or when nothing is staged.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := a.load()
+			if err != nil {
+				return err
+			}
+			eng, release, err := a.engineFor(cfg, true) // writes media + catalog: lock it
+			if err != nil {
+				return err
+			}
+			defer release()
+			attachOperator(eng)
+			return a.runReported(cfg, report.Run{Command: report.CommandFlush, ExitClass: "flush-error"}, func() (report.Run, error) {
+				n, err := eng.Flush(time.Now().UTC(), a.logf())
+				if err != nil {
+					return report.Run{}, err
+				}
+				if n == 0 {
+					fmt.Println("nothing to flush")
+				} else {
+					fmt.Printf("flushed %d archive(s) to the landing\n", n)
+				}
+				return report.Run{Command: report.CommandFlush, SlotsCopied: n}, nil
+			})
+		},
+	}
+	return cmd
+}
+
 // printNothingToReclaim explains a zero-reclaim prune. Tape reclaims whole volumes
 // (relabel), never individual slots, so "fits capacity" would be misleading there —
 // it is a no-op by design even when the library is over capacity. Say so, and point

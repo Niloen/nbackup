@@ -69,21 +69,22 @@ func (e *Engine) encodePlacement(dumpType string) EncodePlacement {
 // dumpArchive composes the encode transfer for one archive — the archiver's tar source (on its
 // host) → the encode filters placed per the dumptype (client-side fused into the source,
 // server-side as local Filters) → the slot's medium sink — then commits the archive. prog, if
-// non-nil, receives running (uncompressed, compressed) counts. It returns a Summary.
-func (enc *encoder) dumpArchive(session *clerk.Session, spec BackupSpec, prog func(uncompressed, compressed int64)) (clerk.Summary, error) {
+// non-nil, receives running (uncompressed, compressed) counts. It returns a Summary and the
+// committed archive's metadata + on-medium position, for the caller to hand to the orchestrator.
+func (enc *encoder) dumpArchive(session *clerk.Session, spec BackupSpec, prog func(uncompressed, compressed int64)) (clerk.Summary, record.Archive, record.ArchivePos, error) {
 	pl := enc.placement(spec.DumpType)
 	compF, err := compress.Filter(pl.CompressScheme, pl.CompressOpts)
 	if err != nil {
-		return clerk.Summary{}, err
+		return clerk.Summary{}, record.Archive{}, record.ArchivePos{}, err
 	}
 	encF, err := crypt.Filter(pl.EncryptScheme, pl.EncryptOpts)
 	if err != nil {
-		return clerk.Summary{}, err
+		return clerk.Summary{}, record.Archive{}, record.ArchivePos{}, err
 	}
 
 	bs, err := spec.Archiver.BackupSource(spec.Request)
 	if err != nil {
-		return clerk.Summary{}, err
+		return clerk.Summary{}, record.Archive{}, record.ArchivePos{}, err
 	}
 	meta := record.Archive{
 		DLE:      spec.Request.DLE,
@@ -132,7 +133,7 @@ func (enc *encoder) dumpArchive(session *clerk.Session, spec BackupSpec, prog fu
 	sink := &mediumSink{session: session, meta: meta, tap: func(n int64) { comp.Store(n); report() }}
 	produced, terr := xfer.Transfer(src, filters, sink)
 	if terr != nil {
-		return clerk.Summary{}, terr
+		return clerk.Summary{}, record.Archive{}, record.ArchivePos{}, terr
 	}
 	return session.Commit(sink.measured, sink.parts, produced.FileCount, produced.Uncompressed, produced.Members)
 }

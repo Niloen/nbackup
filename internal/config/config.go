@@ -308,13 +308,20 @@ func (s *Sources) UnmarshalYAML(node *yaml.Node) error {
 // "path", s3 has "bucket"). Capacity and retention are per-medium because each
 // store has its own space and reuse cadence.
 type Media struct {
-	Type       string            `yaml:"type"`
-	Capacity   string            `yaml:"capacity"`    // space NBackup may use here, e.g. "20TB" ("" = unbounded)
-	MinimumAge string            `yaml:"minimum_age"` // retention floor before a slot may be retired here (default: one cycle)
-	Appendable *bool             `yaml:"appendable"`  // pack many runs per volume (default) vs one run per volume
-	Throughput string            `yaml:"throughput"`  // bandwidth cap to/from this medium, e.g. "50MB/s" ("" = uncapped); network politeness, the read/write peer of nice
-	Cost       *CostConfig       `yaml:"cost"`        // optional pricing overrides; absent = inferred from type/url
-	Params     map[string]string `yaml:",inline"`     // type-specific connection params (path, bucket, tapes, ...)
+	Type       string `yaml:"type"`
+	Capacity   string `yaml:"capacity"`    // space NBackup may use here, e.g. "20TB" ("" = unbounded)
+	MinimumAge string `yaml:"minimum_age"` // retention floor before a slot may be retired here (default: one cycle)
+	// Holding marks this medium as a holding disk: a fast scratch buffer the dump flows
+	// through on the way to the landing. Dumps land here in parallel, then a single taper
+	// copies each committed archive to the landing and reclaims it — so the landing's drive
+	// runs at disk speed and a small disk feeds a much larger landing. Must be a disk/cloud
+	// medium (per-archive reclaim, and the only sink safe for concurrent dumpers), never the
+	// landing itself. `capacity` bounds the in-flight back-pressure.
+	Holding    bool              `yaml:"holding"`
+	Appendable *bool             `yaml:"appendable"` // pack many runs per volume (default) vs one run per volume
+	Throughput string            `yaml:"throughput"` // bandwidth cap to/from this medium, e.g. "50MB/s" ("" = uncapped); network politeness, the read/write peer of nice
+	Cost       *CostConfig       `yaml:"cost"`       // optional pricing overrides; absent = inferred from type/url
+	Params     map[string]string `yaml:",inline"`    // type-specific connection params (path, bucket, tapes, ...)
 }
 
 // CostConfig overrides a medium's inferred pricing. Every field is optional: an
@@ -620,6 +627,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("media %s: throughput: %w", name, err)
 		}
 	}
+	if err := c.validateHolding(); err != nil {
+		return err
+	}
 	if err := c.validateSync(); err != nil {
 		return err
 	}
@@ -814,6 +824,49 @@ func (c *Config) LandingMedia() (Media, error) {
 		return Media{}, err
 	}
 	return c.Media[name], nil
+}
+
+// HoldingMedium returns the name of the medium marked `holding: true`, if any — the fast
+// scratch buffer dumps flow through on the way to the landing. ok is false when no medium is
+// a holding disk (the normal direct-to-landing run). Validate guarantees at most one.
+func (c *Config) HoldingMedium() (string, bool) {
+	for name, m := range c.Media {
+		if m.Holding {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// fslikeMediaTypes are the address-identified media that reclaim per archive and whose write
+// sink is unbounded — the only media a holding disk may be (concurrent dumpers need an
+// unbounded sink, and reclaim is per-archive).
+var fslikeMediaTypes = map[string]bool{"disk": true, "cloud": true}
+
+// validateHolding checks the holding-disk marker: at most one medium may set it; it must not
+// be the landing; and it must be a disk/cloud medium (a tape sink is neither per-archive
+// reclaimable nor safe for the parallel dumpers that share it).
+func (c *Config) validateHolding() error {
+	var holding string
+	for name, m := range c.Media {
+		if !m.Holding {
+			continue
+		}
+		if holding != "" {
+			return fmt.Errorf("media %s and %s both set holding: true — at most one holding disk", holding, name)
+		}
+		holding = name
+		if !fslikeMediaTypes[m.Type] {
+			return fmt.Errorf("media %s: holding: true requires a disk or cloud medium (got %q) — the holding disk reclaims per archive and the parallel dumpers need an unbounded write sink", name, m.Type)
+		}
+	}
+	if holding == "" {
+		return nil
+	}
+	if landing, err := c.LandingName(); err == nil && landing == holding {
+		return fmt.Errorf("media %s is both the landing and a holding disk — the holding disk buffers a different landing", holding)
+	}
+	return nil
 }
 
 // ResolveDumpType returns the named dumptype (the zero value for an unknown name;

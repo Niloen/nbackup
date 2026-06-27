@@ -14,3 +14,5 @@
 # Claude Code local agent state is ignored, but checked-in commands are tracked.
 .claude/*
 !.claude/commands/
+
+.idea/

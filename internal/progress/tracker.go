@@ -115,6 +115,29 @@ func (t *Tracker) FinishDLE(name string, fileCount int, uncompressed, compressed
 	t.flush(true)
 }
 
+// StartFlush marks a DLE as draining from the holding disk to the landing (the second phase
+// after its dump committed). A no-op for an unknown DLE.
+func (t *Tracker) StartFlush(name string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if d := t.dle(name); d != nil {
+		d.State = StateFlushing
+	}
+	t.flush(true)
+}
+
+// FinishFlush marks a DLE done once it has landed and been reclaimed from the holding disk.
+// A no-op for an unknown DLE.
+func (t *Tracker) FinishFlush(name string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if d := t.dle(name); d != nil {
+		d.State = StateDone
+		d.EndedAt = t.now()
+	}
+	t.flush(true)
+}
+
 // SetPhase advances the run's overall phase; terminal phases stamp EndedAt.
 func (t *Tracker) SetPhase(p Phase) {
 	t.mu.Lock()

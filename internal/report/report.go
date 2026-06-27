@@ -24,6 +24,7 @@ const (
 	CommandPrune  Command = "prune"
 	CommandVerify Command = "verify"
 	CommandDrill  Command = "drill"
+	CommandFlush  Command = "flush"
 )
 
 // Outcome is the coarse success/failure class the notify layer routes on.

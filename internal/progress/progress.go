@@ -36,10 +36,11 @@ func (p Phase) Terminal() bool { return p == PhaseDone || p == PhaseFailed }
 type State string
 
 const (
-	StatePending State = "pending" // planned, not started
-	StateDumping State = "dumping" // currently archiving
-	StateDone    State = "done"    // archived successfully
-	StateFailed  State = "failed"  // archiving failed
+	StatePending  State = "pending"  // planned, not started
+	StateDumping  State = "dumping"  // currently archiving (to the landing, or the holding disk)
+	StateFlushing State = "flushing" // archived to the holding disk; the taper is draining it to the landing
+	StateDone     State = "done"     // archived successfully (and flushed, in holding-disk mode)
+	StateFailed   State = "failed"   // archiving failed
 )
 
 // DLE is the live progress of a single planned dump.
@@ -94,7 +95,7 @@ func (s Snapshot) TotalOut() int64 { return sum(s.DLEs, func(d DLE) int64 { retu
 func (s Snapshot) Counts() (active, done, failed, pending int) {
 	for _, d := range s.DLEs {
 		switch d.State {
-		case StateDumping:
+		case StateDumping, StateFlushing:
 			active++
 		case StateDone:
 			done++

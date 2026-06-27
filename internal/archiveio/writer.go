@@ -127,18 +127,19 @@ func (w *Writer) WriteArchive(meta record.Archive, payload io.Reader, tap func(l
 // Commit durably finalizes an archive (all fields final): it writes the member index (the
 // gzip'd Members) then the commit footer (the metadata without members) — the footer last,
 // so a crash before it leaves orphan parts a scan ignores. It then records the archive in the
-// in-memory slot and its on-medium positions. Call it once the caller has merged the
-// producer's stats (FileCount/Uncompressed/Members) into the archive WriteArchive returned.
-func (w *Writer) Commit(arch record.Archive, parts []record.FilePos) error {
+// in-memory slot and returns its on-medium position (parts/footer/index) for the caller to
+// catalog. Call it once the caller has merged the producer's stats
+// (FileCount/Uncompressed/Members) into the archive WriteArchive returned.
+func (w *Writer) Commit(arch record.Archive, parts []record.FilePos) (record.ArchivePos, error) {
 	var index record.FilePos
 	if len(arch.Members) > 0 {
 		var buf bytes.Buffer
 		if err := record.EncodeIndex(&buf, arch.Members); err != nil {
-			return err
+			return record.ArchivePos{}, err
 		}
 		pos, err := w.writeRecord(record.KindIndex, arch, buf.Bytes())
 		if err != nil {
-			return err
+			return record.ArchivePos{}, err
 		}
 		index = pos
 	}
@@ -147,17 +148,23 @@ func (w *Writer) Commit(arch record.Archive, parts []record.FilePos) error {
 	footer.Members = nil
 	data, err := record.MarshalCommit(footer)
 	if err != nil {
-		return err
+		return record.ArchivePos{}, err
 	}
 	commit, err := w.writeRecord(record.KindCommit, arch, data)
 	if err != nil {
-		return err
+		return record.ArchivePos{}, err
 	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	w.slot.AddArchive(arch)
 	w.written = append(w.written, archiveRecord{dle: arch.DLE, level: arch.Level, parts: parts, commit: commit, index: index})
-	return nil
+	w.mu.Unlock()
+	return record.ArchivePos{
+		DLE:    arch.DLE,
+		Level:  arch.Level,
+		Parts:  append([]record.FilePos(nil), parts...),
+		Commit: commit,
+		Index:  index,
+	}, nil
 }
 
 // writeRecord places and writes one small whole record (an index or a commit footer) for an
@@ -284,25 +291,38 @@ func (w *Writer) drainParts(base record.Header, src io.Reader) ([]record.FilePos
 // It does NOT compress or re-checksum the stream — the same bytes are written, so the
 // recorded checksum is unchanged — and only the part layout (and Parts count) is new.
 // The header carries the archive's original scheme, so restore reverses the right one.
-func (w *Writer) CopyArchive(meta record.Archive, src io.Reader) (record.Archive, error) {
+func (w *Writer) CopyArchive(meta record.Archive, src io.Reader) (record.Archive, record.ArchivePos, error) {
 	h := sha256.New()
 	parts, err := w.drainParts(w.archiveHeader(meta), io.TeeReader(src, h))
 	if err != nil {
-		return record.Archive{}, err
+		return record.Archive{}, record.ArchivePos{}, err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != meta.SHA256 {
-		return record.Archive{}, fmt.Errorf("copy of %s L%d checksum mismatch (source corrupt?)", meta.DLE, meta.Level)
+		return record.Archive{}, record.ArchivePos{}, fmt.Errorf("copy of %s L%d checksum mismatch (source corrupt?)", meta.DLE, meta.Level)
 	}
 	arch := meta
 	arch.Parts = len(parts)
-	if err := w.Commit(arch, parts); err != nil {
-		return record.Archive{}, err
+	pos, err := w.Commit(arch, parts)
+	if err != nil {
+		return record.Archive{}, record.ArchivePos{}, err
 	}
-	return arch, nil
+	return arch, pos, nil
 }
 
 // SlotID returns the id of the slot being authored.
 func (w *Writer) SlotID() string { return w.slot.ID }
+
+// SlotMeta returns the slot's identity without its archives — the grouping a caller records
+// each archive under (the catalog creates the entry from it). It is the writer's seam for the
+// inline-recording callers (a copy/sync's CopyArchive, the orchestrator's drain), which hold a
+// position but not the slot.
+func (w *Writer) SlotMeta() *record.Slot {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	ident := *w.slot
+	ident.Archives, ident.TotalBytes = nil, 0
+	return &ident
+}
 
 // ArchiveCount reports how many archives have been recorded so far.
 func (w *Writer) ArchiveCount() int {

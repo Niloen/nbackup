@@ -652,6 +652,30 @@ medium-facing stream, back-pressuring the one-pass pipeline without a holding-di
 buffer. Workers writing one medium concurrently **share** the single budget. Set it
 on the medium whose link you must protect — typically the cloud or a remote tier.
 
+### Holding disk
+
+A tape landing normally clamps to one worker (a single drive can't interleave two
+dumps), and a source slower than the drive shoe-shines it. Amanda's **holding disk**
+fixes both: mark a fast disk (or cloud) medium **`holding: true`** and it becomes a
+scratch buffer the dump flows through. Dumps land on it in **parallel**, then one
+taper drains each finished archive to the landing and frees the disk — so the drive
+runs at disk speed and a small disk feeds a much larger tape.
+
+```yaml
+landing: lto
+media:
+  lto:     { type: tape, dir: /var/lib/nbackup/vtape, bays: 20, volume_size: 6TB }
+  scratch: { type: disk, path: /var/spool/nbackup, capacity: 500GB, holding: true }
+parallelism: { workers: 4 }
+```
+
+The landing (`lto`) stays the authoritative copy; the holding disk is transient and
+visible in the catalog while in use. Its `capacity` back-pressures the dumpers (a slow
+tape makes them wait, never overfill); if the landing is unreachable the run fails
+without dropping data. A crashed run's un-flushed archives stay recorded on the
+holding disk — the next `nb dump` auto-drains them, or run `nb flush` to drain
+explicitly. The holding disk must be disk/cloud (not the landing), and there is one.
+
 ## Requirements
 
 - **Go 1.25+** to build.

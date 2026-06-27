@@ -248,6 +248,29 @@ hands-off. Sync and pruning are independent (see Reclamation asymmetry): a copy
 reaching another medium never makes the original prunable. (The user-facing
 oldest-first / `--from` / tiering recipe is in the README.)
 
+**Holding disk = a marked medium, taper on the main goroutine (`media.<m>.holding: true`,
+`engine/flush.go`).** Amanda's holding disk — a fast scratch disk that absorbs parallel dumps
+and feeds one tape drive at disk speed — is opt-in by **marking a disk/cloud medium `holding:
+true`**. It is a **write-path buffer**, not a retention tier: the configured `landing`
+(tape/S3) stays the authoritative, catalogued/retained/planned medium; the dump just flows
+*through* the holding disk. In a holding-disk run the **dump workers become background
+goroutines** that write each archive to the holding disk (an unbounded fslike sink — the only
+kind safe for concurrent `WriteArchive`; that is also why the medium must be disk/cloud, not a
+spanning tape), and the **taper runs on the main goroutine** consuming the committed archives
+(handed off via the writer's `OnCommit`), copying each to the landing and reclaiming its disk
+copy. A `byteGate` sized to the disk's `capacity` back-pressures the dumpers; a landing failure
+aborts it so the dumpers stop and the run fails — never overfilling the disk or dropping data.
+The load-bearing concurrency decision: **the taper is the sole catalog writer.** It writes the
+landing's placements *and* drives the librarian (which records volume labels on spanning), so
+it must own the catalog — and since the dumpers only queue (never touch the catalog), the
+catalog needs **no lock and no per-run actor**; it stays the single-threaded plain store
+"One mutating `nb`" already assumes (the flock still serializes *processes*). The taper records
+each archive's **holding placement** as it commits and removes it on flush, so the holding
+disk is **visible in the catalog live** and a crashed run's un-flushed archives are recoverable
+**without a media scan**: `nb flush` (and an auto-flush at the next `nb dump`) drains them from
+the catalog to the landing. The default direct-to-landing path is untouched (no holding disk =
+no taper, no goroutine hand-off, record-at-`Finish` as before).
+
 **One mutating `nb` per config at a time** (`internal/lock`). Rather than make the
 catalog concurrently writable, we serialize the whole mutating run: every command that
 writes the catalog or media (`dump`, `copy`, `label`, `load`, `rebuild`, `prune`) takes

@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
-	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
@@ -15,9 +14,10 @@ import (
 // WriteArchive/CopyArchive — the clerk takes plain bytes and never sees a scheme or a transfer.
 
 // Session authors one slot onto medium: the operation opens it over an archiveio.Writer, writes
-// each archive's bytes (committing each), and Finishes — which seals the in-memory slot and
-// records the run in the map. It is the single place a slot's placement and per-archive
-// footers/indexes are assembled.
+// each archive's bytes (committing each), and Finishes — which seals the slot. Archives are
+// recorded as they commit: a copy/sync inline in CopyArchive (single-threaded), a parallel dump
+// by the run's orchestrator, which Commit hands the position back to. It is the single place a
+// slot's per-archive footers/indexes are assembled.
 type Session struct {
 	clerk  *Clerk
 	w      *archiveio.Writer
@@ -39,10 +39,15 @@ func (s *Session) WriteArchive(meta record.Archive, payload io.Reader, tap func(
 
 // CopyArchive re-writes an existing archive's raw payload (no transform) onto this slot's
 // volumes, verifying it against the recorded checksum and committing it (footer + index from
-// meta.Members) — so a copy needs no separate Commit (meta is already final).
+// meta.Members) — so a copy needs no separate Commit (meta is already final). Being
+// single-threaded (one copy/sync, or the orchestrator's drain), it records the archive's
+// placement on this medium inline, as it lands.
 func (s *Session) CopyArchive(meta record.Archive, payload io.Reader) error {
-	_, err := s.w.CopyArchive(meta, payload)
-	return err
+	arch, pos, err := s.w.CopyArchive(meta, payload)
+	if err != nil {
+		return err
+	}
+	return s.clerk.cat.AddArchive(s.w.SlotMeta(), s.medium, arch, pos)
 }
 
 // Summary is what the operation needs back to track and log a finished archive — never its
@@ -56,31 +61,34 @@ type Summary struct {
 
 // Commit finalizes a dumped archive: it merges the producer's raw-stream stats (file count,
 // uncompressed size, member list) into the metered archive WriteArchive returned, writes the
-// commit footer + member index, caches the members server-side, and reports a Summary.
-func (s *Session) Commit(measured record.Archive, parts []record.FilePos, fileCount int, uncompressed int64, members []string) (Summary, error) {
+// commit footer + member index, caches the members server-side, and returns a Summary plus the
+// committed archive and its on-medium position. It does NOT record the placement: a dump's
+// workers run in parallel and the catalog has no lock, so the caller hands the committed archive
+// to the run's single orchestrator to record (see engine.Run).
+func (s *Session) Commit(measured record.Archive, parts []record.FilePos, fileCount int, uncompressed int64, members []string) (Summary, record.Archive, record.ArchivePos, error) {
 	arch := measured
 	arch.FileCount = fileCount
 	arch.Uncompressed = uncompressed
 	arch.Members = members
-	if err := s.w.Commit(arch, parts); err != nil {
-		return Summary{}, err
+	pos, err := s.w.Commit(arch, parts)
+	if err != nil {
+		return Summary{}, record.Archive{}, record.ArchivePos{}, err
 	}
 	if len(arch.Members) > 0 {
 		_ = s.clerk.mindex.Store(s.w.SlotID(), arch.DLE, arch.Level, arch.Members)
 	}
-	return Summary{FileCount: arch.FileCount, Uncompressed: arch.Uncompressed, Compressed: arch.Compressed, Compress: arch.Compress}, nil
+	return Summary{FileCount: arch.FileCount, Uncompressed: arch.Uncompressed, Compressed: arch.Compressed, Compress: arch.Compress}, arch, pos, nil
 }
 
-// Finish closes the slot and records the run in the map: it seals the in-memory slot and records
-// its placement (the archives' on-medium positions) under the session's medium. The clerk owns
-// this map write, so every caller that authors a slot gets it recorded the same way.
+// Finish closes the slot: it seals the in-memory slot and stamps it sealed in the catalog. The
+// archives were recorded as they committed — a copy/sync inline in CopyArchive, a dump via the
+// orchestrator that owns the catalog — so Finish only marks the run complete.
 func (s *Session) Finish(now time.Time) (*record.Slot, error) {
 	sealed, err := s.w.Finish(now)
 	if err != nil {
 		return nil, err
 	}
-	placement := catalog.Placement{Medium: s.medium, Archives: s.w.Positions()}
-	if err := s.clerk.cat.Record(sealed, placement); err != nil {
+	if err := s.clerk.cat.SealSlot(sealed.ID, now); err != nil {
 		return nil, err
 	}
 	return sealed, nil

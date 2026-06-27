@@ -56,17 +56,32 @@ func (c *Catalog) Rebuild(volumes map[string]media.Volume) (int, error) {
 	return len(c.entries), nil
 }
 
-// absorb merges one medium's scanned placements and volume labels into the store,
-// without persisting. It is the seam between the importer and the store: each
-// placement enters through upsert (so a slot seen on several media gathers several
-// placements on one entry), and each label upserts the volume registry.
+// absorb merges one medium's scanned placements and volume labels into the store, without
+// persisting (the caller persists once). It is the seam between the importer and the store:
+// each scanned archive enters through the in-memory addArchive — the same single write path a
+// dump uses — so a slot seen on several media gathers several placements on one entry, and the
+// scanned slot's sealed identity creates the entry sealed. Each label upserts the volume registry.
 func (c *Catalog) absorb(idx mediumIndex) {
 	for _, sp := range idx.placements {
-		c.upsert(sp.slot, sp.p)
+		for _, arch := range sp.slot.Archives {
+			if pos, ok := findArchivePos(sp.p.Archives, arch.DLE, arch.Level); ok {
+				c.addArchive(sp.slot, sp.p.Medium, arch, pos)
+			}
+		}
 	}
 	for _, lbl := range idx.labels {
 		c.volumes[lbl.Name] = &VolumeRecord{Label: lbl}
 	}
+}
+
+// findArchivePos returns the position of (dle, level) among a placement's archives.
+func findArchivePos(aps []ArchivePos, dle string, level int) (ArchivePos, bool) {
+	for _, ap := range aps {
+		if ap.DLE == dle && ap.Level == level {
+			return ap, true
+		}
+	}
+	return ArchivePos{}, false
 }
 
 // mediumIndex is the assembled result of scanning one medium: each sealed slot

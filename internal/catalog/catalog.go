@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/Niloen/nbackup/internal/record"
 )
@@ -156,28 +157,93 @@ func Open(workdir string) (*Catalog, error) {
 	return c, nil
 }
 
-// Record stores a slot's content and adds-or-replaces its placement on
-// p.Medium, then persists. Both dump and copy use this — they differ only in
-// which medium the placement names.
-func (c *Catalog) Record(s *record.Slot, p Placement) error {
-	c.upsert(stripMembers(s), p)
+// AddArchive merges one archive's content and its placement position into the catalog and
+// persists — the catalog's single write path. A slot is only a grouping of committed
+// archives, so there is no "add a slot": the entry is created from the archive's slot
+// identity the first time one of its archives lands, and archives accrete into it one at a
+// time. Both a dump (its Finish records each committed archive), a copy/sync, a rebuild scan,
+// and the holding-disk taper write through here; reclaim is the symmetric RemoveArchive.
+//
+// Every catalog mutation is single-threaded (a run funnels all placement writes through one
+// goroutine), so no locking is needed.
+func (c *Catalog) AddArchive(slot *record.Slot, medium string, arch record.Archive, pos ArchivePos) error {
+	c.addArchive(slot, medium, arch, pos)
 	c.sortEntries()
-	c.loaded = true
 	return c.persist()
 }
 
-// stripMembers returns a shallow copy of s with each archive's member list cleared. The
-// catalog cache is the slot index, not the member store: member lists live in the workdir
-// member-index cache and the on-medium index, loaded on demand. Keeping them out of the
-// cache keeps it small (read on every command) regardless of how many files were backed up.
-func stripMembers(s *record.Slot) *record.Slot {
-	cp := *s
-	cp.Archives = make([]record.Archive, len(s.Archives))
-	for i, a := range s.Archives {
-		a.Members = nil
-		cp.Archives[i] = a
+// addArchive is the in-memory merge AddArchive wraps: it creates the slot entry from `slot`'s
+// identity on first sight and merges the archive's content + placement position, but neither
+// sorts nor persists — for a bulk caller (a rebuild scan) that persists once at the end. The
+// catalog cache holds no member lists (they live in the member-index cache + the on-medium
+// index), so members are cleared here.
+func (c *Catalog) addArchive(slot *record.Slot, medium string, arch record.Archive, pos ArchivePos) {
+	e := c.entryByID(slot.ID)
+	if e == nil {
+		ident := *slot
+		ident.Archives, ident.TotalBytes = nil, 0
+		e = &Entry{Slot: &ident}
+		c.entries = append(c.entries, e)
 	}
-	return &cp
+	arch.Members = nil
+	mergeSlotArchive(e.Slot, arch)
+	e.addPlacementPos(medium, pos)
+	c.loaded = true
+}
+
+// mergeSlotArchive adds a's content to the slot, replacing any prior archive of the same
+// (DLE, level) and keeping TotalBytes in step. The slot content is the union of every archive
+// the run produces, independent of which medium currently holds each copy.
+func mergeSlotArchive(s *record.Slot, a record.Archive) {
+	for i := range s.Archives {
+		if s.Archives[i].DLE == a.DLE && s.Archives[i].Level == a.Level {
+			s.Archives[i] = a
+			s.TotalBytes = 0
+			for _, x := range s.Archives {
+				s.TotalBytes += x.Compressed
+			}
+			return
+		}
+	}
+	s.Archives = append(s.Archives, a)
+	s.TotalBytes += a.Compressed
+}
+
+// addPlacementPos records archive position pos on the entry's copy on medium, creating the
+// placement if absent and replacing any prior position of the same (DLE, level).
+func (e *Entry) addPlacementPos(medium string, pos ArchivePos) {
+	for i := range e.Placements {
+		if e.Placements[i].Medium == medium {
+			e.Placements[i].Archives = mergeArchivePos(e.Placements[i].Archives, pos)
+			return
+		}
+	}
+	e.Placements = append(e.Placements, Placement{Medium: medium, Archives: []ArchivePos{pos}})
+}
+
+// mergeArchivePos returns list with pos added, replacing any entry of the same (DLE, level).
+func mergeArchivePos(list []ArchivePos, pos ArchivePos) []ArchivePos {
+	for i := range list {
+		if list[i].DLE == pos.DLE && list[i].Level == pos.Level {
+			list[i] = pos
+			return list
+		}
+	}
+	return append(list, pos)
+}
+
+// SealSlot marks a cached slot sealed (the run finished) — used by `nb flush` to finalize a
+// crashed run's slot once its archives have been drained from the holding disk to the landing.
+// A no-op for an unknown slot; errors only on an empty slot (which Seal refuses).
+func (c *Catalog) SealSlot(id string, now time.Time) error {
+	e := c.entryByID(id)
+	if e == nil {
+		return nil
+	}
+	if err := e.Slot.Seal(now); err != nil {
+		return err
+	}
+	return c.persist()
 }
 
 // RemovePlacement drops the copy of a slot on one medium. When the last copy is
@@ -354,20 +420,6 @@ func (c *Catalog) History() *History {
 	return h
 }
 
-// upsert sets a slot's content and adds-or-replaces its placement on p.Medium,
-// without sorting or persisting. It is the in-memory write shared by Record and by
-// the importer's absorb — the single point where a slot+placement enters the store.
-func (c *Catalog) upsert(s *record.Slot, p Placement) {
-	e := c.entryByID(s.ID)
-	if e == nil {
-		e = &Entry{Slot: s}
-		c.entries = append(c.entries, e)
-	} else {
-		e.Slot = s
-	}
-	e.setPlacement(p)
-}
-
 func (e *Entry) placedOn(medium string) bool {
 	for _, p := range e.Placements {
 		if p.Medium == medium {
@@ -375,17 +427,6 @@ func (e *Entry) placedOn(medium string) bool {
 		}
 	}
 	return false
-}
-
-// setPlacement replaces the placement on the same medium, or appends a new one.
-func (e *Entry) setPlacement(p Placement) {
-	for i, ep := range e.Placements {
-		if ep.Medium == p.Medium {
-			e.Placements[i] = p
-			return
-		}
-	}
-	e.Placements = append(e.Placements, p)
 }
 
 func (c *Catalog) entryByID(id string) *Entry {

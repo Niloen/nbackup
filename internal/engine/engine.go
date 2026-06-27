@@ -929,6 +929,14 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 	if latest, ok := e.latestSlotDate(); ok && record.DateString(date) < latest {
 		return nil, fmt.Errorf("cannot dump for %s: slot(s) dated %s already exist; an earlier-dated run would corrupt the incremental restore order (snapshots have advanced past it) — dump on or after %s", record.DateString(date), latest, latest)
 	}
+	// Drain any leftover archives a previous holding-disk run crashed before flushing, so the
+	// holding disk is clean before this run stages onto it (amflush-on-next-dump). A no-op
+	// without a holding disk or when nothing is staged.
+	if n, err := e.Flush(time.Now().UTC(), logf); err != nil {
+		return nil, fmt.Errorf("flush leftover holding-disk archives before dumping: %w", err)
+	} else if n > 0 {
+		logf.log("flushed %d leftover holding-disk archive(s) from a previous run", n)
+	}
 	plan := e.Plan(date)
 	for _, w := range plan.Warnings {
 		logf.log("WARNING: %s", w)
@@ -960,48 +968,48 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 		return nil, err
 	}
 	spec := archiveio.SlotSpec{ID: slotID, Date: record.DateString(date), Sequence: seq, Generator: "nbdump", CreatedAt: now}
-	wt, err := e.prepareWriter(e.mediumName, spec, now, logf)
+
+	// The dump medium is the holding disk when one is configured (a medium marked `holding: true`,
+	// which buffers the landing's writes), else the landing itself. Either way the workers dump to
+	// it in parallel and the orchestrator (the run's main goroutine, its sole catalog writer)
+	// records each committed archive as it arrives — and, when buffering, drains it to the
+	// authoritative landing at disk speed so the landing's drive never paces the dumpers.
+	holding, buffering := e.cfg.HoldingMedium()
+	dumpMedium := e.mediumName
+	if buffering {
+		dumpMedium = holding
+	}
+
+	dumpWT, err := e.prepareWriter(dumpMedium, spec, now, logf)
 	if err != nil {
 		return nil, err
 	}
-	w := wt.w
 
-	// A spanning-capable landing (a finite tape changer, or part_size set) writes one
-	// drive serially: it cannot interleave two archives' parts and roll mid-write, so
-	// workers are clamped to 1. Disk (unbounded) keeps the configured parallelism.
+	// A spanning-capable landing (a finite tape changer, or part_size set) writes one drive
+	// serially: it cannot interleave two archives' parts and roll mid-write, so workers are
+	// clamped to 1. A holding disk is unbounded disk/cloud (parallel-safe) and never clamps.
 	workers := e.cfg.Workers()
-	if workers > 1 && wt.lib.CanSpan(wt.partSize) {
-		logf.log("medium %q can span volumes; running 1 worker (a single drive writes serially)", e.mediumName)
+	if !buffering && workers > 1 && dumpWT.lib.CanSpan(dumpWT.partSize) {
+		logf.log("medium %q can span volumes; running 1 worker (a single drive writes serially)", dumpMedium)
 		workers = 1
 	}
 
-	// Track live progress to the run-status file so `nb status` can watch a
-	// detached run. Progress reporting never blocks or fails the backup. A live
-	// sink (when attached) paints the same snapshots to the terminal; in that mode
-	// the per-DLE log lines are suppressed so they don't scribble over the in-place
-	// region (warnings above were already printed before the region opened).
+	tr, runLogf := e.progressTracker(slotID, workers, plan.Items, logf)
+	return e.runOrchestrated(plan, workers, spec, dumpMedium, dumpWT, buffering, tr, now, runLogf)
+}
+
+// progressTracker builds the run's progress tracker and the log function to use under it.
+// Progress flushes to the run-status file so `nb status` can watch a detached run; a live
+// terminal sink (when attached) paints the same snapshots and suppresses the per-DLE log
+// lines (runLogf becomes nil) so they don't scribble over the in-place region.
+func (e *Engine) progressTracker(slotID string, workers int, items []planner.Item, logf Logf) (*progress.Tracker, Logf) {
 	sink := progress.Sink(progress.NewFileSink(e.cfg.WorkdirPath(), time.Now))
 	runLogf := logf
 	if e.runSink != nil {
 		sink = progress.MultiSink(sink, e.runSink)
 		runLogf = nil
 	}
-	tr := progress.NewTracker(slotID, workers, planProgress(plan.Items), time.Now, sink)
-
-	session := e.clerk.OpenSlot(w, e.mediumName)
-	if err := e.runWorkers(plan.Items, workers, session, tr, runLogf); err != nil {
-		tr.SetPhase(progress.PhaseFailed)
-		return nil, err
-	}
-
-	tr.SetPhase(progress.PhaseSealing)
-	sealed, err := session.Finish(time.Now().UTC())
-	if err != nil {
-		tr.SetPhase(progress.PhaseFailed)
-		return nil, err
-	}
-	tr.SetPhase(progress.PhaseDone)
-	return sealed, nil
+	return progress.NewTracker(slotID, workers, planProgress(items), time.Now, sink), runLogf
 }
 
 // planProgress projects planner items onto the progress package's seed type,
@@ -1014,15 +1022,21 @@ func planProgress(items []planner.Item) []progress.Plan {
 	return out
 }
 
-// runWorkers backs up every planned item into the slot. With parallelism.workers
-// > 1 it runs that many workers concurrently, bounded by a
-// semaphore; the first error stops scheduling further items and is returned. Each
-// worker writes a distinct object into the slot, which the medium must allow
-// concurrently (disk does) and the slot Writer serializes its bookkeeping.
-func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Session, tr *progress.Tracker, logf Logf) error {
+// runWorkers backs up every planned item to the dump medium, handing each committed archive to
+// the orchestrator over commitCh (the orchestrator is the run's sole catalog writer). With
+// parallelism.workers > 1 it runs that many workers concurrently, bounded by a semaphore; the
+// first error stops scheduling further items and is returned. Each worker writes a distinct
+// object into the slot, which the medium must allow concurrently (disk does) and the slot Writer
+// serializes its bookkeeping. gate (nil for a direct dump) is the holding disk's capacity
+// back-pressure: a worker charges its archive's bytes and blocks while the disk is over capacity,
+// and a taper failure aborts the gate so the workers stop and the run fails.
+func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Session, commitCh chan<- flushItem, gate *byteGate, tr *progress.Tracker, logf Logf) error {
 	if workers <= 1 || len(items) <= 1 {
 		for _, item := range items {
-			if err := e.backupItem(session, item, tr, logf); err != nil {
+			if gate != nil && gate.err() != nil {
+				break
+			}
+			if err := e.dumpAndHandoff(session, item, commitCh, gate, tr, logf); err != nil {
 				return err
 			}
 		}
@@ -1047,7 +1061,7 @@ func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Se
 	failed := func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return firstErr != nil
+		return firstErr != nil || (gate != nil && gate.err() != nil)
 	}
 	for _, item := range items {
 		if failed() {
@@ -1061,7 +1075,7 @@ func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Se
 			if failed() {
 				return
 			}
-			if err := e.backupItem(session, it, tr, logf); err != nil {
+			if err := e.dumpAndHandoff(session, it, commitCh, gate, tr, logf); err != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
@@ -1072,6 +1086,25 @@ func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Se
 	}
 	wg.Wait()
 	return firstErr
+}
+
+// dumpAndHandoff dumps one item to the worker's medium and hands the committed archive to the
+// orchestrator over commitCh. When a holding gate is set, it charges the archive's bytes before
+// the handoff and then blocks while the disk is over capacity (back-pressure) — returning the
+// gate's abort error so the worker stops if the taper has failed.
+func (e *Engine) dumpAndHandoff(session *clerk.Session, item planner.Item, commitCh chan<- flushItem, gate *byteGate, tr *progress.Tracker, logf Logf) error {
+	arch, pos, err := e.backupItem(session, item, tr, logf)
+	if err != nil {
+		return err
+	}
+	if gate != nil {
+		gate.charge(arch.Compressed)
+	}
+	commitCh <- flushItem{arch: arch, pos: pos, dleID: item.DLE.ID()}
+	if gate != nil {
+		return gate.waitUnderCapacity()
+	}
+	return nil
 }
 
 // allocSlotID picks the slot ID for a run on the given date: the first run of
@@ -1177,11 +1210,13 @@ func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 	}
 }
 
-// backupItem archives a single DLE into the open slot session. The engine owns
-// orchestration — the run tracker lifecycle, resolving the archiver and describing the
-// backup (the request + incremental base requirement) — and the session moves and records
-// the bytes; the engine never sees the storage record or its parts.
-func (e *Engine) backupItem(session *clerk.Session, item planner.Item, tr *progress.Tracker, logf Logf) (err error) {
+// backupItem archives a single DLE into the open slot session, returning the committed
+// archive and its on-medium position for the run's orchestrator to record (the worker writes
+// the bytes; only the orchestrator touches the catalog). The engine owns orchestration — the
+// run tracker lifecycle, resolving the archiver and describing the backup (the request +
+// incremental base requirement) — and the session moves the bytes; the engine never sees the
+// storage record or its parts.
+func (e *Engine) backupItem(session *clerk.Session, item planner.Item, tr *progress.Tracker, logf Logf) (arch record.Archive, pos record.ArchivePos, err error) {
 	// The progress tracker keys and displays DLEs by their host:path identity; the
 	// seal and filenames keep the internal slug.
 	pname := item.DLE.ID()
@@ -1197,13 +1232,13 @@ func (e *Engine) backupItem(session *clerk.Session, item planner.Item, tr *progr
 
 	spec, err := e.backupSpec(item)
 	if err != nil {
-		return err
+		return record.Archive{}, record.ArchivePos{}, err
 	}
 
 	logf.log("archiving %s (L%d)", item.DLE.ID(), item.Level)
-	sum, err = e.enc.dumpArchive(session, spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
+	sum, arch, pos, err = e.enc.dumpArchive(session, spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
 	if err != nil {
-		return fmt.Errorf("archive %s: %w", item.DLE.ID(), err)
+		return record.Archive{}, record.ArchivePos{}, fmt.Errorf("archive %s: %w", item.DLE.ID(), err)
 	}
 
 	sizeLabel := "compressed"
@@ -1218,7 +1253,7 @@ func (e *Engine) backupItem(session *clerk.Session, item planner.Item, tr *progr
 	} else {
 		logf.log("  %d file(s), %s %s", sum.FileCount, sizeutil.FormatBytes(sum.Compressed), sizeLabel)
 	}
-	return nil
+	return arch, pos, nil
 }
 
 // backupSpec describes the backup of one planned item: it resolves the archiver and builds
@@ -1270,10 +1305,13 @@ func (e *Engine) RestoreTo(slotID, dleName, destHost, destPath string, logf Logf
 // config-derived transform options/placement).
 
 // PlacementsFor returns a slot's copies in read-preference order (own medium first), and
-// Record records a run's placement — together they are the clerk's Map role (the engine keeps
-// the catalog store + the directory/retention slices).
-func (e *Engine) PlacementsFor(slotID string) []catalog.Placement     { return e.placementsFor(slotID) }
-func (e *Engine) Record(slot *record.Slot, p catalog.Placement) error { return e.cat.Record(slot, p) }
+// AddArchive/SealSlot record a run's archives — together they are the clerk's Map role (the
+// engine keeps the catalog store + the directory/retention slices).
+func (e *Engine) PlacementsFor(slotID string) []catalog.Placement { return e.placementsFor(slotID) }
+func (e *Engine) AddArchive(slot *record.Slot, medium string, arch record.Archive, pos record.ArchivePos) error {
+	return e.cat.AddArchive(slot, medium, arch, pos)
+}
+func (e *Engine) SealSlot(id string, now time.Time) error { return e.cat.SealSlot(id, now) }
 
 // MounterFor returns a read-mount onto a medium's volumes — the clerk's Mounter role, served
 // by the medium's librarian (whose admin face stays with the label/load operations).

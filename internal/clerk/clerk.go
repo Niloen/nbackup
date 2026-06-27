@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
@@ -51,7 +52,11 @@ func (r Ref) expect() archiveio.Expect {
 // slices). PlacementsFor returns copies in read-preference order (the engine's own first).
 type Map interface {
 	PlacementsFor(slotID string) []catalog.Placement
-	Record(slot *record.Slot, p catalog.Placement) error
+	// AddArchive records one committed archive's content + its on-medium position — the
+	// catalog's single write path (a slot is created from the archive's identity, never added
+	// wholesale). SealSlot stamps the slot sealed once its run finishes.
+	AddArchive(slot *record.Slot, medium string, arch record.Archive, pos record.ArchivePos) error
+	SealSlot(id string, now time.Time) error
 }
 
 // Mounter is the clerk's data-path slice of the librarian (the volume manager): mount the
