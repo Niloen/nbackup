@@ -163,6 +163,46 @@ func TestSMTPNotifyContextTimeout(t *testing.T) {
 	}
 }
 
+func TestSendmailNotifyPipesMessage(t *testing.T) {
+	var gotPath string
+	var gotArgs []string
+	var gotMsg []byte
+	n := &sendmailNotifier{
+		path: "/usr/sbin/sendmail", from: "backups@x", to: []string{"ops@x", "boss@x"},
+		run: func(_ context.Context, path string, args []string, msg []byte) error {
+			gotPath, gotArgs, gotMsg = path, args, msg
+			return nil
+		},
+	}
+	err := n.Notify(context.Background(), Event{Subject: "nbackup dump FAILED", Body: "details\nhere"})
+	if err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	if gotPath != "/usr/sbin/sendmail" {
+		t.Errorf("path = %q", gotPath)
+	}
+	// Recipients are passed explicitly after "--", and the envelope sender via -f.
+	if strings.Join(gotArgs, " ") != "-i -f backups@x -- ops@x boss@x" {
+		t.Errorf("args = %v", gotArgs)
+	}
+	msg := string(gotMsg)
+	for _, want := range []string{"Subject: nbackup dump FAILED", "To: ops@x, boss@x", "details\r\nhere"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message missing %q\n%s", want, msg)
+		}
+	}
+}
+
+func TestNewSendmailDefaultsPath(t *testing.T) {
+	n, err := newSendmail(config.NotifyBackend{Type: "sendmail", From: "a@b", To: []string{"c@d"}})
+	if err != nil {
+		t.Fatalf("newSendmail: %v", err)
+	}
+	if got := n.(*sendmailNotifier).path; got != defaultSendmailPath {
+		t.Errorf("path = %q, want default %q", got, defaultSendmailPath)
+	}
+}
+
 // stubDoer records the request and returns a canned response.
 type stubDoer struct {
 	gotURL  string
