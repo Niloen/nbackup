@@ -1214,7 +1214,7 @@ func printInventory(eng *engine.Engine, name string) {
 			if b.ID == view.Loaded {
 				mark = "*"
 			}
-			label, status := volumeLabelStatus(b, name, appendable)
+			label, status := volumeLabelStatus(b, name, appendable, volumeHasSlots(eng, b.Label))
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\n", mark, b.ID, label, status,
 				sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
 		}
@@ -1222,7 +1222,7 @@ func printInventory(eng *engine.Engine, name string) {
 		return
 	}
 	if view.DriveOK {
-		label, status := volumeLabelStatus(view.Drive, name, appendable)
+		label, status := volumeLabelStatus(view.Drive, name, appendable, volumeHasSlots(eng, view.Drive.Label))
 		fmt.Printf("  drive:   %s (%s, %s on volume, %d files)\n", label, status,
 			sizeutil.FormatBytes(view.Drive.Used), view.Drive.Files)
 	} else {
@@ -1233,7 +1233,7 @@ func printInventory(eng *engine.Engine, name string) {
 		rw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 		fmt.Fprintln(rw, "  REEL\tLABEL\tSTATUS\tON VOLUME\tCAPACITY\tFILES")
 		for _, b := range view.Shelf {
-			label, status := volumeLabelStatus(b, name, appendable)
+			label, status := volumeLabelStatus(b, name, appendable, volumeHasSlots(eng, b.Label))
 			fmt.Fprintf(rw, "  %s\t%s\t%s\t%s\t%s\t%d\n", b.ID, label, status,
 				sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
 		}
@@ -1248,11 +1248,21 @@ func capacityStr(c int64) string {
 	return sizeutil.FormatBytes(c)
 }
 
+// volumeHasSlots reports whether the catalog records any committed slot on the named
+// label — false for a blank tape or one holding only orphan parts from an aborted
+// span/write. Used to mark such a tape reclaimable in the inventory.
+func volumeHasSlots(eng *engine.Engine, label string) bool {
+	if label == "" {
+		return false
+	}
+	return len(eng.Catalog().SlotsOnLabel(label)) > 0
+}
+
 // volumeLabelStatus renders a volume's display label and fill status for inventory
 // listings (a blank volume, a full one, a wrong-pool reel, or an appendable labeled
 // one). medium is the medium being inventoried, so a reel labeled for a different
 // pool is flagged rather than shown as one of this medium's own volumes.
-func volumeLabelStatus(b media.VolumeStatus, medium string, appendable bool) (label, status string) {
+func volumeLabelStatus(b media.VolumeStatus, medium string, appendable, hasSlots bool) (label, status string) {
 	switch {
 	case b.Foreign:
 		return "(foreign)", "foreign"
@@ -1262,6 +1272,12 @@ func volumeLabelStatus(b media.VolumeStatus, medium string, appendable bool) (la
 		// A valid NBackup label, but for another pool: the write guard would refuse it
 		// (wrong tape), so the inventory must not present it as this medium's own.
 		return b.Label, fmt.Sprintf("wrong-pool:%s", b.Pool)
+	case b.Files > 1 && !hasSlots:
+		// The volume holds data past its label, but the catalog records no committed
+		// slot on it — orphan parts from an interrupted span/write. It is reusable as
+		// is (no committed data to lose) via `nb label --relabel`, so present it as
+		// reclaimable rather than "full"/"used", which imply it holds real backups.
+		return b.Label, "reclaimable"
 	case b.Capacity > 0 && b.Used >= b.Capacity:
 		return b.Label, "full"
 	case !appendable:

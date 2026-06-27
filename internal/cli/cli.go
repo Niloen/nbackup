@@ -266,8 +266,10 @@ func reelDesc(b media.VolumeStatus, medium string) string {
 		return "(empty)"
 	}
 	// reelDesc only surfaces the "full" case (decided before appendability matters),
-	// so the appendable flag is immaterial here; pass the common default.
-	label, status := volumeLabelStatus(b, medium, true)
+	// so the appendable flag is immaterial here; pass the common default. It has no
+	// catalog here, so pass hasSlots=true to keep the reclaimable-orphan branch (a
+	// catalog-derived inventory concern) out of the swap prompt.
+	label, status := volumeLabelStatus(b, medium, true, true)
 	if status == "full" {
 		return fmt.Sprintf("%s (full)", label)
 	}

@@ -693,6 +693,13 @@ func (l *Librarian) reconcileRelabel(wiped string, lbl record.Label) error {
 				return fmt.Errorf("drop placements on relabeled volume %q: %w", wiped, err)
 			}
 		}
+		// Drop the overwritten identity so the old name stops counting as a live
+		// volume (the same physical tape now carries the new label recorded below).
+		if wiped != lbl.Name {
+			if err := l.cat.RemoveVolume(wiped); err != nil {
+				return fmt.Errorf("drop relabeled volume %q: %w", wiped, err)
+			}
+		}
 	}
 	if err := l.cat.RecordVolume(lbl); err != nil {
 		return fmt.Errorf("record relabeled volume %q: %w", lbl.Name, err)

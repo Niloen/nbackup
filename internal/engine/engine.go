@@ -1203,7 +1203,7 @@ func (e *Engine) backupItem(session *clerk.Session, item planner.Item, tr *progr
 	logf.log("archiving %s (L%d)", item.DLE.ID(), item.Level)
 	sum, err = e.enc.dumpArchive(session, spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
 	if err != nil {
-		return fmt.Errorf("archive %s: %w", item.Name, err)
+		return fmt.Errorf("archive %s: %w", item.DLE.ID(), err)
 	}
 
 	sizeLabel := "compressed"
@@ -1243,7 +1243,7 @@ func (e *Engine) backupSpec(item planner.Item) (BackupSpec, error) {
 			return BackupSpec{}, fmt.Errorf("DLE %s: incremental L%d needs the L%d incremental state but it is missing — "+
 				"the prior dump wrote it under the host's state_dir; if that path moved (e.g. a relative state_dir/workdir while `nb` ran from a different directory), "+
 				"set state_dir to an absolute path and re-run a full (L0)",
-				item.Name, item.Level, item.BaseLevel)
+				item.DLE.ID(), item.Level, item.BaseLevel)
 		}
 	}
 	return BackupSpec{

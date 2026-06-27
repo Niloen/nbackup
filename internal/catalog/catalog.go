@@ -251,6 +251,17 @@ func (c *Catalog) RecordVolume(lbl record.Label) error {
 	return c.persist()
 }
 
+// RemoveVolume drops a labeled volume from the registry. A relabel overwrites a
+// tape's identity, so its old name no longer names a live volume and must stop
+// counting as one (e.g. in the `nb medium` volume tally). A no-op if absent.
+func (c *Catalog) RemoveVolume(name string) error {
+	if _, ok := c.volumes[name]; !ok {
+		return nil
+	}
+	delete(c.volumes, name)
+	return c.persist()
+}
+
 // Slots returns the cached slots in run order.
 func (c *Catalog) Slots() []*record.Slot {
 	out := make([]*record.Slot, 0, len(c.entries))

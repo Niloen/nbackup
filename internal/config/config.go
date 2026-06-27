@@ -590,7 +590,7 @@ func (c *Config) Validate() error {
 					}
 				}
 				sort.Strings(known)
-				return fmt.Errorf("source %s: unknown dumptype %q (known: %s)", s.Name(), dt, strings.Join(known, ", "))
+				return fmt.Errorf("source %s: unknown dumptype %q (known: %s)", s.ID(), dt, strings.Join(known, ", "))
 			}
 		}
 		if err := c.validateTransformPlacement(s); err != nil {
