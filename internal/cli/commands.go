@@ -280,6 +280,7 @@ func newDumpCmd(a *app) *cobra.Command {
 			}
 			defer unlock()
 			attachOperator(eng)
+			eng.SetEstimateProgress(estimateProgress(a.quiet))
 			eng.SetRunProgress(runProgress(a.quiet))
 			return a.runReported(cfg, report.Run{Command: report.CommandDump, ExitClass: "dump-failed"}, func() (report.Run, error) {
 				s, err := eng.Run(date, a.logf())

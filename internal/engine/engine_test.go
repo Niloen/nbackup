@@ -321,6 +321,73 @@ func TestPlanWithProgress(t *testing.T) {
 	}
 }
 
+// TestRunStatusSpansEstimatePhase verifies `nb status` sees the whole dump cycle:
+// the run-status file is written during the estimate prelude (phase "estimating")
+// and — crucially — never reads terminal there, so a `nb status --watch` does not
+// stop before the dump it is waiting for begins. The file ends terminal only once
+// the slot is sealed.
+func TestRunStatusSpansEstimatePhase(t *testing.T) {
+	workdir := t.TempDir()
+	cfg := &config.Config{
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
+		Workdir:  workdir,
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	cfg.Parallelism.Workers = 2
+	for _, n := range []string{"alpha", "bravo"} {
+		dir := t.TempDir()
+		write(t, filepath.Join(dir, n+".txt"), "content-"+n)
+		cfg.Sources = append(cfg.Sources, config.DLE{Host: "localhost", Path: dir})
+	}
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	// The estimate sink fires for every estimate-phase snapshot. The status file is
+	// written first (MultiSink order), so by the time we observe it here it already
+	// reflects this snapshot — and must read "estimating", never terminal.
+	var sawEstimating bool
+	eng.SetEstimateProgress(func(progress.Snapshot, bool) {
+		snap, err := progress.Load(workdir)
+		if err != nil {
+			t.Errorf("load run-status during estimate: %v", err)
+			return
+		}
+		if snap.Phase == progress.PhaseEstimating {
+			sawEstimating = true
+		}
+		if snap.Phase.Terminal() {
+			t.Errorf("run-status reached terminal phase %q during the estimate phase", snap.Phase)
+		}
+	})
+
+	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !sawEstimating {
+		t.Error("run-status file never showed the estimating phase")
+	}
+
+	snap, err := progress.Load(workdir)
+	if err != nil {
+		t.Fatalf("load final run-status: %v", err)
+	}
+	if snap.Phase != progress.PhaseDone {
+		t.Errorf("final phase = %q, want done", snap.Phase)
+	}
+	if snap.SlotID != s.ID {
+		t.Errorf("final slot = %q, want %q", snap.SlotID, s.ID)
+	}
+}
+
 // TestThroughputCapThrottlesDump verifies the acceptance criterion: a configured
 // per-medium throughput cap holds the measured dump rate at/under the limit, and
 // an uncapped run of the same source is faster (so the delay is the cap, not slow
