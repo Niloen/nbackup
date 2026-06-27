@@ -25,7 +25,7 @@ type Step struct {
 // dump for the DLE at or before the target (the "tip"), then the base each
 // incremental was built on (its recorded BaseSlot), walked back to the full.
 //
-// This is Amanda's per-level restore: a level-N dump is cumulative since the
+// This is the per-level restore: a level-N dump is cumulative since the
 // most recent level-(N-1) dump, so only the newest dump of each level is
 // replayed and earlier same-level repeats are skipped. Replaying them is not
 // merely redundant — GNU tar's directory directives (rename, delete) are not

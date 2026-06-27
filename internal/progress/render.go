@@ -10,7 +10,7 @@ import (
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
-// Render writes a one-shot amstatus-style report of a run snapshot to w. now is
+// Render writes a one-shot status report of a run snapshot to w. now is
 // the reference instant for elapsed/rate/ETA of an in-flight run (ignored once the
 // run is terminal, which uses its recorded end time).
 func Render(w io.Writer, s Snapshot, now time.Time) {

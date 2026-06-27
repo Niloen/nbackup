@@ -92,7 +92,7 @@ type archiveRecord struct {
 // sealed. lim, when non-nil, caps the rate of bytes written to the medium (network
 // politeness); a nil lim is uncapped. The same lim is shared across concurrent
 // WriteArchive calls on an unbounded sink, so several workers to one medium share its
-// budget (Amanda's netusage).
+// budget.
 func NewWriter(sink VolumeSink, spec SlotSpec, lim *ratelimit.Limiter) *Writer {
 	slot := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
 	return &Writer{sink: sink, lim: lim, slot: slot}
@@ -107,11 +107,12 @@ func NewWriter(sink VolumeSink, spec SlotSpec, lim *ratelimit.Limiter) *Writer {
 // drains, so the caller merges those and calls Record. The descriptive fields of meta
 // (DLE/Host/Path/Archiver/Compress/Encrypt/Level/BaseSlot) are taken as-is.
 //
-// progress, if non-nil, is called with the running compressed byte count as the payload
-// drains — the live signal for `nb status`. It runs on the draining goroutine, so it
+// tap, if non-nil, is called with the running count of bytes that have landed as the
+// payload drains — a free read of the metering this does anyway (for the checksum + size),
+// surfaced as the live signal for `nb status`. It runs on the draining goroutine, so it
 // must be cheap.
-func (w *Writer) WriteArchive(meta record.Archive, payload io.Reader, progress func(compressed int64)) (record.Archive, []record.FilePos, error) {
-	mr := &meteredReader{r: payload, h: sha256.New(), progress: progress}
+func (w *Writer) WriteArchive(meta record.Archive, payload io.Reader, tap func(landed int64)) (record.Archive, []record.FilePos, error) {
+	mr := &meteredReader{r: payload, h: sha256.New(), tap: tap}
 	parts, err := w.drainParts(w.archiveHeader(meta), mr)
 	if err != nil {
 		return record.Archive{}, nil, err
@@ -183,10 +184,10 @@ func (w *Writer) writeRecord(kind string, a record.Archive, payload []byte) (rec
 // robust to drainParts re-prepending a peeked byte: the re-prepended byte comes from a
 // separate reader, so it is never hashed twice.
 type meteredReader struct {
-	r        io.Reader
-	h        hash.Hash
-	n        int64
-	progress func(int64)
+	r   io.Reader
+	h   hash.Hash
+	n   int64
+	tap func(int64)
 }
 
 func (m *meteredReader) Read(p []byte) (int, error) {
@@ -194,8 +195,8 @@ func (m *meteredReader) Read(p []byte) (int, error) {
 	if k > 0 {
 		m.h.Write(p[:k])
 		m.n += int64(k)
-		if m.progress != nil {
-			m.progress(m.n)
+		if m.tap != nil {
+			m.tap(m.n)
 		}
 	}
 	return k, err
@@ -334,10 +335,10 @@ func (w *Writer) Positions() []record.ArchivePos {
 // its own commit footer (written inline as it finished), so Finish only stamps the in-memory
 // slot's completion (for the catalog and the run summary) and never touches the volume.
 //
-// Like Amanda's taper, the write path reads nothing back: each archive was hashed inline as
-// it streamed out (the streaming-meter sha256 recorded in the catalog), so integrity rests on
-// that checksum, not a re-read. Verifying the bytes actually landed is the job of the
-// explicit, operator-invoked `nb verify` (the amcheckdump analogue).
+// The write path reads nothing back: each archive was hashed inline as it streamed out
+// (the streaming-meter sha256 recorded in the catalog), so integrity rests on that
+// checksum, not a re-read. Verifying the bytes actually landed is the job of the
+// explicit, operator-invoked `nb verify`.
 func (w *Writer) Finish(now time.Time) (*record.Slot, error) {
 	if err := w.slot.Seal(now); err != nil {
 		return nil, err

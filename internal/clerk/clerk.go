@@ -1,6 +1,6 @@
 // Package clerk is NBackup's archive filesystem — the medium layer that turns a logical
-// archive ref into a byte endpoint and back, and nothing more. It is Amanda's Scribe +
-// Recovery::Clerk and the FS's open(): it owns the archive map (resolve a copy's positions on
+// archive ref into a byte endpoint and back, and nothing more. It is like the
+// FS's open(): it owns the archive map (resolve a copy's positions on
 // read, record a run's placement on write — the Map role), the member index, and read-mounting
 // via the librarian (the Mounter role). It speaks only io.* — plain byte endpoints, never a
 // transfer — and exposes endpoints, not operations:
@@ -15,8 +15,8 @@
 //
 // What it deliberately does NOT do: codecs, tar, or composing transfers. The decode/encode and
 // the far-end tar live in the *operations* (the Dumper, Restorer, Verifier, …), which wrap a
-// clerk endpoint in an xfer.Transfer — exactly as cp/gzip compose over a filesystem's open(),
-// and amrestore decodes what the Recovery::Clerk merely reads. So the clerk knows nothing of
+// clerk endpoint in an xfer.Transfer — exactly as cp/gzip compose over a filesystem's open().
+// So the clerk knows nothing of
 // xfer, config, archivers, compress/encrypt, or the librarian package; its only deps are the
 // Map, the Mounter, a bandwidth Limiter, and its own member-index cache.
 package clerk

@@ -11,9 +11,9 @@ import (
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
-// Render writes a digest of recent runs to w (oldest-first input), modeled on
-// Amanda's amreport: a summary line, a per-run table, a failure summary, and — when
-// the window includes a drill — a recovery-health note. It is the one renderer
+// Render writes a digest of recent runs to w (oldest-first input): a summary
+// line, a per-run table, a failure summary, and — when the window includes a
+// drill — a recovery-health note. It is the one renderer
 // shared by `nb report` and (via RenderRun) the notify body, so the terminal
 // digest, the email, and the webhook payload never diverge.
 func Render(w io.Writer, runs []Run, now time.Time) {
@@ -54,7 +54,7 @@ func Render(w io.Writer, runs []Run, now time.Time) {
 	}
 	tw.Flush()
 
-	// Failure summary — Amanda's FAILURE DUMP SUMMARY: what broke and why.
+	// Failure summary: what broke and why.
 	var failed []Run
 	for _, r := range runs {
 		if r.Failed() {
@@ -90,7 +90,7 @@ func RenderRun(w io.Writer, r Run) {
 		fmt.Fprintf(w, "  error [%s]: %s\n", r.ExitClass, r.Error)
 	}
 	renderRecovery(w, &r)
-	// A dump notification carries the full per-DLE report (Amanda's nightly email),
+	// A dump notification carries the full per-DLE report,
 	// so an operator sees what was backed up and how it compressed — not just totals.
 	if r.Command == CommandDump && len(r.DumpStats) > 0 {
 		fmt.Fprintln(w)
@@ -98,7 +98,7 @@ func RenderRun(w io.Writer, r Run) {
 	}
 }
 
-// RenderDump writes an Amanda-style per-DLE dump report for one run: a header, the
+// RenderDump writes a per-DLE dump report for one run: a header, the
 // per-DLE statistics table, and full/incremental totals. It is what `nb report
 // --dump` prints and shares renderDumpTable with the dump notification body.
 func RenderDump(w io.Writer, r Run) {
@@ -118,7 +118,7 @@ func RenderDump(w io.Writer, r Run) {
 }
 
 // renderDumpTable writes the per-DLE statistics table plus full/incremental totals.
-// Rate is uncompressed bytes over dump time (Amanda's dump rate); a row with unknown
+// Rate is uncompressed bytes over dump time; a row with unknown
 // timing shows a dash for time and rate.
 func renderDumpTable(w io.Writer, stats []DLEStat) {
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
@@ -158,7 +158,7 @@ func dumpTime(secs float64) string {
 	return sizeutil.FormatElapsed(time.Duration(secs * float64(time.Second)))
 }
 
-// dumpRate renders uncompressed throughput (Amanda's dump rate), or a dash without timing.
+// dumpRate renders uncompressed throughput, or a dash without timing.
 func dumpRate(orig int64, secs float64) string {
 	if secs <= 0 || orig <= 0 {
 		return "-"

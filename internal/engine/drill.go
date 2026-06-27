@@ -303,7 +303,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		// documented follow-on — see the design note.
 		sink := xfer.NewPrograms(programs.Local()).Add(arch.RestoreStage(dir, nil))
 		_, filters := splitTransforms(transform{cmd: decrypt}, transform{cmd: decompress})
-		_, terr := xfer.Transfer(xfer.Reader(src), filters, sink, xfer.Opts{})
+		_, terr := xfer.Transfer(xfer.Reader(src), filters, sink)
 		if terr != nil {
 			var xe *xfer.Error
 			if errors.As(terr, &xe) && xe.Role == xfer.RoleSink {
@@ -347,7 +347,7 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 		tmp.Close()
 		return classifyOpenErr(err), err.Error()
 	}
-	_, terr := xfer.Transfer(xfer.Reader(src), xfer.NewFilters(), xfer.Writer(tmp), xfer.Opts{})
+	_, terr := xfer.Transfer(xfer.Reader(src), xfer.NewFilters(), xfer.Writer(tmp))
 	tmp.Close()
 	if terr != nil {
 		return classifyOpenErr(terr), terr.Error()

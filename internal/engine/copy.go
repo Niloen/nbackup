@@ -12,7 +12,7 @@ import (
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// copy.go is NBackup's copy operation (Amanda's amflush/vaulting): it re-authors a sealed slot
+// copy.go is NBackup's copy operation: it re-authors a sealed slot
 // from one configured medium onto another, recording the new copy as a second placement. The
 // bytes are carried raw — no transform — so checksums and members carry over; only the part
 // layout changes to fit the target's volumes. It depends on a narrow slice of the orchestrator:
@@ -150,7 +150,7 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		// so the target writes a real member index (keeping that copy self-describing).
 		meta := metaByRef[ref]
 		meta.Members, _ = c.clerk.Members(ref)
-		if _, werr := xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(), &copySink{session: session, meta: meta}, xfer.Opts{}); werr != nil {
+		if _, werr := xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(), &copySink{session: session, meta: meta}); werr != nil {
 			return fmt.Errorf("copy %s L%d to %q: %w", ref.DLE, ref.Level, targetMedia, werr)
 		}
 		return nil

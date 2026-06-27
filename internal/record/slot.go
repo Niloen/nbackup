@@ -86,7 +86,7 @@ type Archive struct {
 	Members      []string `json:"members,omitempty"` // member paths archived: slash-separated, directories with a trailing slash (the archiver-neutral convention recovery browses); the raw token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
 }
 
-// DLEID returns the Amanda-style host:path identity for display, falling back to
+// DLEID returns the host:path identity for display, falling back to
 // the internal DLE slug when host/path were not recorded.
 func (a Archive) DLEID() string {
 	if a.Host == "" && a.Path == "" {

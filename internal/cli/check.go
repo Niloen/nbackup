@@ -8,7 +8,7 @@ import (
 	"github.com/Niloen/nbackup/internal/engine"
 )
 
-// newCheckCmd implements `nb check`: NBackup's amcheck. It verifies the server side and
+// newCheckCmd implements `nb check`: the preflight check. It verifies the server side and
 // every source host — by default it SSHes to each remote client to probe GNU tar, the
 // source paths, any client-side tools, and the state_dir; --offline resolves and reports
 // without connecting. Exits non-zero if any hard check fails, so cron can gate on it.
@@ -16,7 +16,7 @@ func newCheckCmd(a *app) *cobra.Command {
 	var offline bool
 	cmd := &cobra.Command{
 		Use:   "check",
-		Short: "Verify the config and reach every source host (amcheck)",
+		Short: "Verify the config and reach every source host",
 		Long: "Check that a run would succeed: the server (landing medium, workdir, codec, " +
 			"encryption) and each source host. A localhost DLE is checked locally; any other host " +
 			"is remote and, unless --offline, probed over SSH (reachable, GNU tar, source readable, " +

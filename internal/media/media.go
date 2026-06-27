@@ -1,12 +1,12 @@
-// Package media is NBackup's storage abstraction, analogous to Amanda's Device
-// API. A Volume is a linear medium: an ordered sequence of self-describing files,
-// each a record.Header followed by a payload, addressed by position (file
-// number). This one shape maps to a local directory, an object store, or a tape
-// (file marks + fast-forward). The medium owns its physical layout — callers never
-// construct filenames — so slots can be streamed between volumes (disk <-> tape)
-// uniformly. Implementations register themselves, so selecting a medium is a
-// registry lookup. The on-medium artifact format (headers, labels, seals) lives in
-// package record; this package is the device side that reads and writes it.
+// Package media is NBackup's storage abstraction. A Volume is a linear medium:
+// an ordered sequence of self-describing files, each a record.Header followed by
+// a payload, addressed by position (file number). This one shape maps to a local
+// directory, an object store, or a tape (file marks + fast-forward). The medium
+// owns its physical layout — callers never construct filenames — so slots can be
+// streamed between volumes (disk <-> tape) uniformly. Implementations register
+// themselves, so selecting a medium is a registry lookup. The on-medium artifact
+// format (headers, labels, seals) lives in package record; this package is the
+// device side that reads and writes it.
 package media
 
 import (
@@ -153,7 +153,7 @@ func RejectPartSize(opts Options, mediumType string) error {
 // Contract: opening a Volume must be cheap (no reading every file), and
 // AppendFile/ReadFile must not scan — they seek by position. Only Files() is a
 // full pass over the volume; it is the catalog-rebuild path (on tape, a literal
-// scan from the start, as Amanda re-reads a tape). Normal backup/restore/copy
+// scan from the start). Normal backup/restore/copy
 // resolve positions from the catalog and call ReadFile, never Files().
 type Volume interface {
 	// AppendFile writes h, then the payload produced by write, and returns the

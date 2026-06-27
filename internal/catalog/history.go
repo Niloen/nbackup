@@ -10,7 +10,7 @@ type History struct {
 }
 
 // DLEState tracks one DLE's backup history. Sizes are not stored: estimates are
-// computed fresh from the archiver each run (Amanda's client estimate).
+// computed fresh from the archiver each run.
 type DLEState struct {
 	LastFullDate string      `json:"last_full_date"` // YYYY-MM-DD, empty if never
 	LastFullSlot string      `json:"last_full_slot"`
@@ -105,7 +105,7 @@ func (d *DLEState) LastLevel() int {
 
 // RunsAtCurrentLevel counts the most recent consecutive runs that share the
 // latest run's level — how long the DLE has sat at its current level. It gates
-// bumping to the next level: Amanda's bumpdays keeps a DLE at one level for a few
+// bumping to the next level: the bump policy keeps a DLE at one level for a few
 // runs so consecutive incrementals overlap and losing one does not break the chain.
 func (d *DLEState) RunsAtCurrentLevel() int {
 	if len(d.Runs) == 0 {

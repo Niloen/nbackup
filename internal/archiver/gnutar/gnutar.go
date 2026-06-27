@@ -1,9 +1,9 @@
 // Package gnutar implements archiver.Archiver using the system GNU tar binary in
-// listed-incremental mode (the same mechanism Amanda's amgtar uses). It owns all
-// tar-specific concerns — flags, snapshot (.snar) files, and the dumpdir-based
+// listed-incremental mode. It owns all tar-specific concerns — flags, snapshot
+// (.snar) files, and the dumpdir-based
 // deletion semantics — and produces/consumes a raw tar stream. It also owns its
-// incremental-state library: per-DLE, per-level .snar files under state_dir
-// (Amanda's GNUTAR-LISTDIR), so the generic layer never names a snapshot.
+// incremental-state library: per-DLE, per-level .snar files under state_dir,
+// so the generic layer never names a snapshot.
 // Compression and storage are handled by the caller.
 //
 // Every process and every scratch file (the snapshot library, the member-index temp)
@@ -51,7 +51,7 @@ func init() {
 type gnutar struct {
 	bin           string
 	ex            programs.Executor // host where tar runs and the .snar library / index temp live
-	stateDir      string            // root of the per-DLE/per-level .snar library (Amanda's GNUTAR-LISTDIR)
+	stateDir      string            // root of the per-DLE/per-level .snar library
 	oneFileSystem bool
 	sparse        bool
 	checkOnce     sync.Once
@@ -140,8 +140,8 @@ func (g *gnutar) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource,
 	return &archiver.BackupSource{Stage: stage, Exec: g.ex, Finish: finish, Cleanup: cleanup}, nil
 }
 
-// Estimate computes the dump size the way Amanda's client estimate does: it runs tar
-// with the archive targeted at /dev/null. GNU tar detects the null device and walks
+// Estimate computes the dump size by running tar with the archive targeted at
+// /dev/null. GNU tar detects the null device and walks
 // metadata without reading file bodies, so this is fast yet exact — it honors excludes,
 // one-file-system, and the listed-incremental base natively. A throwaway snapshot is
 // used so the real .snar library is untouched. The result is the uncompressed archive

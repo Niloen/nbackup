@@ -66,13 +66,13 @@ type Run struct {
 	Overdue      int           `json:"overdue,omitempty"`       // drill: DLEs not covered within the window
 	NeverDrilled []string      `json:"never_drilled,omitempty"` // drill: DLEs never drilled
 
-	// DumpStats is the per-DLE breakdown of a dump (Amanda's per-disk report rows):
+	// DumpStats is the per-DLE breakdown of a dump:
 	// level, original/output size, files, and dump time. Captured at seal time so the
 	// dump report and its notification are historical, not just the last live run.
 	DumpStats []DLEStat `json:"dump_stats,omitempty"`
 }
 
-// DLEStat is one DLE's statistics within a dump — the row of an Amanda-style dump
+// DLEStat is one DLE's statistics within a dump — the row of a dump
 // report. Orig is the uncompressed archive stream, Out the compressed payload on the
 // volume; Seconds is the dump duration (0 when timing was unavailable).
 type DLEStat struct {
@@ -86,7 +86,7 @@ type DLEStat struct {
 	Seconds float64 `json:"seconds,omitempty"` // dump duration; 0 = unknown
 }
 
-// ID returns the Amanda-style host:path identity for display, falling back to the
+// ID returns the host:path identity for display, falling back to the
 // internal slug when host/path were not recorded.
 func (d DLEStat) ID() string {
 	if d.Host == "" && d.Path == "" {

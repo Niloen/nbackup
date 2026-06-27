@@ -11,7 +11,7 @@ import (
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 )
 
-// CheckReport is the structured result of `nb check` — NBackup's amcheck: server readiness
+// CheckReport is the structured result of `nb check`: server readiness
 // plus per-host (client) readiness. The CLI renders it and exits non-zero when Failures>0.
 type CheckReport struct {
 	Server   []CheckLine
@@ -26,7 +26,7 @@ type CheckLine struct {
 	Msg  string
 }
 
-// HostCheck groups the checks for one source host (Amanda groups amcheck by host).
+// HostCheck groups the checks for one source host.
 type HostCheck struct {
 	Host   string
 	Remote bool

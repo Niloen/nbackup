@@ -57,8 +57,8 @@ func OrderForOnePass(items []ReadItem) []ReadItem {
 	return out
 }
 
-// ReadArchives reads a selection of archives in one ordered pass and drives the read itself —
-// the Recovery::Clerk. It resolves each ref to a copy and positions, orders them physically
+// ReadArchives reads a selection of archives in one ordered pass and drives the read
+// itself. It resolves each ref to a copy and positions, orders them physically
 // (OrderForOnePass), then reads them one at a time on a shared mounting opener (consecutive
 // same-volume archives reuse the mount) — calling fn for each, in read order, with the
 // archive's ref and an open func for a Source over its bytes. fn composes the per-archive

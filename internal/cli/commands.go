@@ -206,9 +206,8 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 	return nil
 }
 
-// describeExpectation renders the tape the next run will write to (Amanda's
-// "amdump will expect tape X") for `nb plan`, with the volume's age relative to
-// the run date.
+// describeExpectation renders the tape the next run will write to for `nb plan`,
+// with the volume's age relative to the run date.
 func describeExpectation(exp engine.VolumeExpectation, date time.Time) string {
 	if exp.Appendable {
 		if exp.FreshVolume {
@@ -355,8 +354,8 @@ func runDumpDryRun(eng *engine.Engine, date time.Time, validationWarnings []stri
 }
 
 // newStatusCmd implements `nb status`: show the progress of the current (or most
-// recent) run by reading the run-status file `nb dump` writes — NBackup's
-// amstatus. It needs no engine, only the catalog workdir, so it is cheap to poll.
+// recent) run by reading the run-status file `nb dump` writes. It needs no
+// engine, only the catalog workdir, so it is cheap to poll.
 func newStatusCmd(a *app) *cobra.Command {
 	var watch time.Duration
 	cmd := &cobra.Command{
@@ -965,7 +964,7 @@ func runCopyDryRun(cfg *config.Config, slotID, from, to string, force bool) erro
 }
 
 // newSyncCmd implements `nb sync`: the batch form of `nb copy`. It mirrors every
-// landing slot a target is missing onto that target (Amanda's vaulting), oldest
+// landing slot a target is missing onto that target, oldest
 // first. With --to it syncs one ad-hoc target; without --to it runs the rules in
 // the config's `sync:` block. Copies by default (like `nb slot prune`).
 func newSyncCmd(a *app) *cobra.Command {

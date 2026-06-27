@@ -127,9 +127,10 @@ func (enc *encoder) dumpArchive(session *clerk.Session, spec BackupSpec, prog fu
 		return xfer.Produced{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members}, nil
 	}).OnCleanup(bs.Cleanup)
 
-	sink := &mediumSink{session: session, meta: meta}
-	produced, terr := xfer.Transfer(src, filters, sink,
-		xfer.Opts{Progress: func(n int64) { comp.Store(n); report() }})
+	// The medium writer meters the bytes that land (it must, for the checksum + size); tap
+	// that running count for live `nb status`, symmetric with tarCmd.Tap's uncompressed side.
+	sink := &mediumSink{session: session, meta: meta, tap: func(n int64) { comp.Store(n); report() }}
+	produced, terr := xfer.Transfer(src, filters, sink)
 	if terr != nil {
 		return clerk.Summary{}, terr
 	}
@@ -142,12 +143,13 @@ func (enc *encoder) dumpArchive(session *clerk.Session, spec BackupSpec, prog fu
 type mediumSink struct {
 	session  *clerk.Session
 	meta     record.Archive
+	tap      func(landed int64) // running count of bytes that have landed, for live status
 	measured record.Archive
 	parts    []record.FilePos
 }
 
-func (m *mediumSink) Drain(in io.Reader, progress func(int64)) error {
-	arch, parts, err := m.session.WriteArchive(m.meta, in, progress)
+func (m *mediumSink) Drain(in io.Reader) error {
+	arch, parts, err := m.session.WriteArchive(m.meta, in, m.tap)
 	if err != nil {
 		return err
 	}
@@ -162,6 +164,6 @@ type copySink struct {
 	meta    record.Archive
 }
 
-func (s *copySink) Drain(in io.Reader, _ func(int64)) error {
+func (s *copySink) Drain(in io.Reader) error {
 	return s.session.CopyArchive(s.meta, in)
 }

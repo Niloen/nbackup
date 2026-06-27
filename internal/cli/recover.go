@@ -15,7 +15,7 @@ import (
 )
 
 // newRecoverCmd implements `nb recover`: browse a DLE's files as of a date and
-// recover a selection — NBackup's amrecover. With no selection flags it opens an
+// recover a selection. With no selection flags it opens an
 // interactive shell (setdate/cd/ls/add/extract); with --path it runs one-shot,
 // and with --list it just prints a listing.
 func newRecoverCmd(a *app) *cobra.Command {
@@ -24,7 +24,7 @@ func newRecoverCmd(a *app) *cobra.Command {
 	var listOnly, all, force, yes bool
 	cmd := &cobra.Command{
 		Use:   "recover",
-		Short: "Browse a date and recover selected files, or restore a whole DLE (amrecover-style)",
+		Short: "Browse a date and recover selected files, or restore a whole DLE",
 		Long: "Recover from backups as they stood on a date. Three modes:\n\n" +
 			"  • interactive (no flags): a shell to browse and pick files — setdate, setdisk," +
 			" disks, cd, ls, add, delete, list, extract.\n" +
@@ -262,7 +262,7 @@ func printListing(n *recovery.Node) {
 	tw.Flush()
 }
 
-// recoverShell is the interactive amrecover-style session: the terminal I/O (prompt,
+// recoverShell is the interactive recovery session: the terminal I/O (prompt,
 // dispatch, printing) wrapped around a pure recovery.Session that holds the browse
 // tree, current directory, and selection.
 type recoverShell struct {

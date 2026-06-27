@@ -1,9 +1,9 @@
 // Package recovery reconstructs a browsable virtual filesystem of a DLE as of a
 // given date and resolves a file selection into the minimal set of per-archive
-// extractions — NBackup's amrecover. It is pure: it works over slot metadata and a
+// extractions. It is pure: it works over slot metadata and a
 // member-list loader, and returns what to extract; the engine performs the I/O.
 //
-// The "index" amrecover keeps in a separate index server is, here, each archive's
+// Browsing needs no separate index server: the "index" is each archive's
 // per-archive member index (a gzip file on the medium, cached server-side and loaded
 // lazily by the clerk — the catalog cache itself stays member-free). BuildTree takes a
 // loader for it and merges the member lists of the restore chain (the full plus every

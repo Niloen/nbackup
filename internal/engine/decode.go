@@ -11,12 +11,12 @@ import (
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// decode.go is NBackup's read-side codec operation — Amanda's amrestore. A decoder reverses an
+// decode.go is NBackup's read-side codec operation. A decoder reverses an
 // archive's transforms: given a raw byte stream a clerk endpoint already opened, it composes the
 // decode pipeline (decrypt → decompress → tar, each placed per the plan) into a sink (tar, hash,
 // or list). The clerk supplies only the bytes; the codec and the far-end tar live here, in the
-// operation — as in Amanda (amrestore decodes, the Recovery::Clerk only reads dumpfile bytes)
-// and a filesystem (cp/gzip compose the transform, the FS just reads/writes).
+// operation — as in a filesystem (cp/gzip compose the transform, the FS just
+// reads/writes).
 //
 // It depends on a narrow slice of the orchestrator — how to reach a host (exec), how to resolve
 // the archiver that reverses a recorded type (archiverFor), and the decode option sets — not the
@@ -82,7 +82,7 @@ func (d *decoder) restoreArchive(rc io.ReadCloser, plan DecodePlan, archiverType
 	)
 	sink := xfer.NewPrograms(target).Add(fused...).Add(arch.RestoreStage(destDir, members))
 
-	_, err = xfer.Transfer(xfer.Reader(rc), filters, sink, xfer.Opts{})
+	_, err = xfer.Transfer(xfer.Reader(rc), filters, sink)
 	return err
 }
 
@@ -90,7 +90,7 @@ func (d *decoder) restoreArchive(rc io.ReadCloser, plan DecodePlan, archiverType
 // matches the recorded sha — a transfer with no decode (source → Hash sink). A clean read whose
 // hash differs returns (false, nil); a read fault returns (false, err).
 func (d *decoder) verifyChecksum(rc io.ReadCloser, sha string) (bool, error) {
-	_, terr := xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(), xfer.Hash(sha), xfer.Opts{})
+	_, terr := xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(), xfer.Hash(sha))
 	if terr != nil {
 		var xe *xfer.Error
 		if errors.As(terr, &xe) && xe.Role == xfer.RoleSink {
@@ -112,7 +112,7 @@ func (d *decoder) listMembers(rc io.ReadCloser, codec, encrypt string, arch arch
 	// A local list runs both transforms server-side (nothing fuses with a far tar).
 	_, filters := splitTransforms(transform{cmd: decrypt}, transform{cmd: decompress})
 	ls := &listSink{arch: arch}
-	_, terr := xfer.Transfer(xfer.Reader(rc), filters, ls, xfer.Opts{})
+	_, terr := xfer.Transfer(xfer.Reader(rc), filters, ls)
 	return ls.members, terr
 }
 
@@ -139,7 +139,7 @@ type listSink struct {
 	members []string
 }
 
-func (s *listSink) Drain(in io.Reader, _ func(int64)) error {
+func (s *listSink) Drain(in io.Reader) error {
 	members, err := s.arch.List(in)
 	s.members = members
 	return err

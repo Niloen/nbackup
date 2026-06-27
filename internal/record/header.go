@@ -6,7 +6,7 @@
 // concern) or how a run is driven (that is the engine's). A volume is recoverable
 // on its own because every file leads with one of these records: scanning them
 // reconstructs the catalog. There is no per-slot seal — a slot is the grouping its
-// archives carry in their headers. Amanda analogue: dumpfile_t + amar.
+// archives carry in their headers.
 package record
 
 import (
@@ -25,11 +25,11 @@ const (
 	KindLabel   = "label"   // a volume label (first file); not part of any slot
 )
 
-// Header is the self-describing block at the start of every file on a volume
-// (Amanda's dumpfile_t). It carries only identity — what is known before the
-// payload is streamed. Measured data (sizes, checksum) lives in the archive's
-// commit footer and its member listing in the per-archive index, not here. A
-// volume is therefore recoverable on its own: scanning headers reconstructs the catalog.
+// Header is the self-describing block at the start of every file on a volume. It
+// carries only identity — what is known before the payload is streamed. Measured
+// data (sizes, checksum) lives in the archive's commit footer and its member
+// listing in the per-archive index, not here. A volume is therefore recoverable
+// on its own: scanning headers reconstructs the catalog.
 type Header struct {
 	Slot      string    `json:"slot"`
 	Kind      string    `json:"kind"`
@@ -72,8 +72,8 @@ type Label struct {
 }
 
 // HeaderBlock is the fixed size of the leading header block on every file. A
-// fixed block (as on Amanda tapes) makes payload extraction uniform across media
-// and keeps stock-tool recovery simple: `dd bs=32k skip=1 < file | zstd -dc`.
+// fixed block makes payload extraction uniform across media and keeps stock-tool
+// recovery simple: `dd bs=32k skip=1 < file | zstd -dc`.
 const HeaderBlock = 32 * 1024
 
 // EncodeHeader writes h as a fixed-size, newline-terminated JSON block — the

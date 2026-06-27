@@ -71,7 +71,7 @@ func TestLimiterReadThrottles(t *testing.T) {
 
 // Concurrent writers sharing one limiter must share the budget: two 1 MiB writes
 // through a single 1 MiB/s cap take ~the time of one 2 MiB write, not run in
-// parallel at full speed. This is the scope-2 (netusage) guarantee.
+// parallel at full speed. This is the shared per-medium budget guarantee.
 func TestLimiterSharedBudget(t *testing.T) {
 	const rate = 1 << 20 // 1 MiB/s shared
 	l := NewLimiter(rate)

@@ -1,7 +1,7 @@
-// Package catalog is NBackup's local cache and bookkeeping layer, analogous to
-// Amanda's curinfo/tapelist/catalog databases. Because a media volume may be slow
-// or offline (tape, Glacier), the catalog keeps a local index so planning,
-// listing, restore-location, pruning, and capacity reporting never touch the media.
+// Package catalog is NBackup's local cache and bookkeeping layer. Because a
+// media volume may be slow or offline (tape, Glacier), the catalog keeps a local
+// index so planning, listing, restore-location, pruning, and capacity reporting
+// never touch the media.
 //
 // Its model separates what a slot *is* from where its copies *are*: an Entry pairs
 // one medium-independent slot (its content, from the seal record) with the set of
@@ -111,9 +111,9 @@ func (p Placement) OnLabel(label string) bool {
 	return false
 }
 
-// VolumeRecord is the catalog's cached identity of a labeled volume (Amanda's
-// tapelist entry, medium-neutrally named). "Which slots are on it" and "is it
-// reusable" are derived from placements + retention, not stored here.
+// VolumeRecord is the catalog's cached identity of a labeled volume. "Which
+// slots are on it" and "is it reusable" are derived from placements + retention,
+// not stored here.
 type VolumeRecord struct {
 	Label record.Label `json:"label"`
 }

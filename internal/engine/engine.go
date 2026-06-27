@@ -1,4 +1,4 @@
-// Package engine is NBackup's orchestrator, analogous to Amanda's driver. It
+// Package engine is NBackup's orchestrator. It
 // wires the planner, archiver, transfer pipeline, media store, catalog, and
 // retention together to execute runs, restores, verification, and pruning. It is
 // the only place that knows about all the abstractions at once; everything below
@@ -451,7 +451,7 @@ func (e *Engine) probeReachable(host string) error {
 // remote host's client-side state_dir / tar_path), and injects the state_dir default
 // (the per-DLE/per-level incremental-state library, beneath the workdir) when neither
 // set one. The location is the orchestrator's to default — an archiver cannot know the
-// workdir — which is why it is injected here (Amanda's compile-time GNUTAR-LISTDIR).
+// workdir — which is why it is injected here.
 func (e *Engine) archiverOptions(options, overrides map[string]string) archiver.Options {
 	opts := archiver.Options{}
 	for k, v := range options {
@@ -612,9 +612,8 @@ func (e *Engine) StoredBytes() int64 { return e.cat.MediumBytes(e.mediumName) }
 func (e *Engine) Landing() string { return e.mediumName }
 
 // VolumeExpectation describes the volume the next run on a labeled medium will
-// write to — NBackup's analogue of Amanda's "amdump will expect tape X". It is
-// derived from the catalog (the tapelist) and the retention policy, never from a
-// physical scan: for a one-run-per-tape (non-appendable) medium it names the
+// write to. It is derived from the catalog's volume registry and the retention
+// policy, never from a physical scan: for a one-run-per-tape (non-appendable) medium it names the
 // oldest reusable volume the run would recycle, or a fresh tape when none is
 // reusable; for an appendable medium it names the current volume the run extends.
 type VolumeExpectation struct {
@@ -650,11 +649,10 @@ func (e *Engine) ExpectedVolume(now time.Time) (VolumeExpectation, bool) {
 }
 
 // expectedVolumeFor computes the expected volume for a labeled medium from the
-// catalog's volume registry (the tapelist) ordered oldest-written-first. A
+// catalog's volume registry ordered oldest-written-first. A
 // non-appendable run reuses the oldest volume whose every run is unprotected (the
-// retention safety floor: past minimum age, with a newer recovery path), matching
-// Amanda's taper picking the oldest reusable tape; an appendable run extends the
-// most recently written volume in the pool.
+// retention safety floor: past minimum age, with a newer recovery path); an
+// appendable run extends the most recently written volume in the pool.
 func (e *Engine) expectedVolumeFor(medium string, now time.Time) VolumeExpectation {
 	def := e.cfg.Media[medium]
 	exp := VolumeExpectation{Medium: medium, Appendable: def.IsAppendable()}
@@ -773,10 +771,10 @@ func (e *Engine) plannerParams(date time.Time) planner.Params {
 
 // estimates predicts, for each DLE, the size of a full and of the incremental at
 // its current level and the next (the inputs the planner's bump decision needs),
-// by asking the archiver (Amanda's "client" estimate). For gnutar this is a
+// by asking the archiver. For gnutar this is a
 // fast metadata-only tar pass; see gnutar.Estimate. Sizes are uncompressed — an
 // upper bound on the compressed bytes finally stored.
-// Estimates run in parallel, bounded by parallelism.workers (Amanda's inparallel):
+// Estimates run in parallel, bounded by parallelism.workers:
 // each DLE's estimate is an independent archiver pass, and on a host with many DLEs
 // the serial sum dominates a preview. When sink is non-nil the work is tracked so a
 // caller can paint live progress. Archivers are resolved serially first because
@@ -1027,7 +1025,7 @@ func planProgress(items []planner.Item) []progress.Plan {
 }
 
 // runWorkers backs up every planned item into the slot. With parallelism.workers
-// > 1 it runs that many workers concurrently (Amanda's inparallel), bounded by a
+// > 1 it runs that many workers concurrently, bounded by a
 // semaphore; the first error stops scheduling further items and is returned. Each
 // worker writes a distinct object into the slot, which the medium must allow
 // concurrently (disk does) and the slot Writer serializes its bookkeeping.
@@ -1351,7 +1349,7 @@ func (e *Engine) DLENames() []string {
 	return out
 }
 
-// dleDisplayMap maps each internal DLE slug to its Amanda-style host:path identity,
+// dleDisplayMap maps each internal DLE slug to its host:path identity,
 // drawing on both the config and the catalog (so a DLE no longer in the config still
 // shows its real identity from the seal). The slug stays the internal key; host:path
 // is the user-facing form.

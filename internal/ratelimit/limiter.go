@@ -11,7 +11,7 @@ import (
 // the read/write analogue of the CPU politeness `nice` already provides. One
 // Limiter wraps any number of streams that should draw from a single budget: the
 // part writes of several concurrent workers to one medium (so the aggregate stays
-// under the cap, like Amanda's netusage), or the parts of one read. It throttles
+// under the cap), or the parts of one read. It throttles
 // the medium-facing stream, so a slow consumer/producer back-pressures the
 // one-pass pipeline through its pipe rather than buffering — no holding disk, no
 // deadlock (the wait is a timer sleep, never a lock).

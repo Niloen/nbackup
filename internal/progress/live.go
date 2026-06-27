@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // MultiSink fans one snapshot out to several sinks (e.g. the run-status file plus
@@ -41,10 +43,16 @@ func LiveSink(w io.Writer, lines func(Snapshot) []string) Sink {
 		painted   bool // a frame is currently on screen
 		lastPaint time.Time
 	)
-	width := terminalWidth()
+	width := terminalWidth(w)
 	erase := func() string {
-		// Move to the top of the frame (ESC[0A is a harmless no-op), return to
-		// column 0, and clear from there to the end of the screen.
+		// Return to column 0 and clear from there to the end of the screen, moving
+		// up over the frame's rows first. A single-line frame (above == 0) leaves
+		// the cursor already on its only row, so no cursor-up is emitted — crucially
+		// we must NOT write ESC[0A, because a real terminal treats the 0 parameter
+		// as 1 and moves up a line, eating the row above (e.g. the shell prompt).
+		if above == 0 {
+			return "\r\033[J"
+		}
 		return fmt.Sprintf("\033[%dA\r\033[J", above)
 	}
 	return func(s Snapshot, force bool) {
@@ -83,9 +91,18 @@ func LiveSink(w io.Writer, lines func(Snapshot) []string) Sink {
 	}
 }
 
-// terminalWidth reports the usable column count for in-place rendering, from
-// $COLUMNS when set (the shell exports it) and 80 otherwise.
-func terminalWidth() int {
+// terminalWidth reports the usable column count for in-place rendering. It asks the
+// terminal directly via TIOCGWINSZ on the output's file descriptor — the only
+// reliable source, since interactive shells keep $COLUMNS as a shell variable and do
+// NOT export it to child processes (so reading the env alone pins every run to the 80
+// fallback, truncating wide terminals and wrapping narrow ones). $COLUMNS is still
+// honored as a fallback (e.g. when w is not a terminal, as in tests), then 80.
+func terminalWidth(w io.Writer) int {
+	if f, ok := w.(interface{ Fd() uintptr }); ok {
+		if ws, err := unix.IoctlGetWinsize(int(f.Fd()), unix.TIOCGWINSZ); err == nil && ws.Col > 20 {
+			return int(ws.Col)
+		}
+	}
 	if v := os.Getenv("COLUMNS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 20 {
 			return n

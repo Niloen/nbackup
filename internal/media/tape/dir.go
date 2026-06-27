@@ -37,9 +37,9 @@ func (c *dirChanger) loaded() (device, string, bool) { return c.loadedDevice() }
 // bays inventories every bay in the library.
 func (c *dirChanger) bays() ([]media.VolumeStatus, error) { return c.entries(false) }
 
-// dirDevice emulates a tape with a directory of numbered files (Amanda's file:
-// device). It is the fully-testable backend and the default for setups without a
-// real drive. Appends are serial (one head); files are numbered 000000, 000001…
+// dirDevice emulates a tape with a directory of numbered files. It is the
+// fully-testable backend and the default for setups without a real drive.
+// Appends are serial (one head); files are numbered 000000, 000001…
 // A non-zero capacity makes the emulated tape finite: a write that would run past
 // it fails mid-stream with media.ErrVolumeFull (end-of-tape), as a real drive
 // signals EOT.
