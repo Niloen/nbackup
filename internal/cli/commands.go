@@ -119,14 +119,19 @@ func newPlanCmd(a *app) *cobra.Command {
 // preview so a single run renders identically in both.
 func fprintPlanItems(w io.Writer, plan *planner.Plan) int64 {
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "DLE\tLEVEL\tEST. SIZE\tREASON")
+	fmt.Fprintln(tw, "DLE\tLEVEL\tEST. SIZE\tFULL SIZE\tREASON")
 	var estTotal int64
 	for _, item := range plan.Items {
 		levelStr := fmt.Sprintf("L%d (full)", item.Level)
+		// For an incremental, show the full-dump size alongside the chosen size so a
+		// small incremental does not hide a large full waiting at the cycle deadline.
+		// For a full the two are identical, so leave the column blank to avoid noise.
+		fullStr := "-"
 		if item.Level >= 1 {
 			levelStr = fmt.Sprintf("L%d (incr)", item.Level)
+			fullStr = "~" + sizeutil.FormatBytes(item.FullBytes)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t~%s\t%s\n", item.DLE.ID(), levelStr, sizeutil.FormatBytes(item.EstBytes), item.Reason)
+		fmt.Fprintf(tw, "%s\t%s\t~%s\t%s\t%s\n", item.DLE.ID(), levelStr, sizeutil.FormatBytes(item.EstBytes), fullStr, item.Reason)
 		estTotal += item.EstBytes
 	}
 	tw.Flush()

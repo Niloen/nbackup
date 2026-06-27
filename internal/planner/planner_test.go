@@ -353,6 +353,51 @@ func TestPromotionSpreadsClusterAcrossCycle(t *testing.T) {
 	}
 }
 
+// TestPromotionPacesDestaggerByRunway checks the runway gate: a cluster of fulls
+// sharing a deadline with ample runway is left alone (don't rush), then spread one
+// full per run over the final cluster-size days before the deadline — never crammed
+// onto an early run.
+func TestPromotionPacesDestaggerByRunway(t *testing.T) {
+	start := time.Date(2026, 6, 27, 0, 0, 0, 0, time.UTC)
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
+	var dles []config.DLE
+	est := map[string]Estimate{}
+	day0 := start.Format("2006-01-02")
+	// Four DLEs all fulled today -> one shared deadline 7 days out.
+	for _, h := range []string{"a", "b", "c", "d"} {
+		d := dleNamed(h)
+		hist.DLEs[d.Name()] = &catalog.DLEState{
+			LastFullDate: day0,
+			LastFullSlot: "slot-x",
+			Runs:         []catalog.RunRecord{{Date: day0, Slot: "slot-x", Level: 0}},
+		}
+		dles = append(dles, d)
+		est[d.Name()] = Estimate{Full: 1_000_000_000, Incr: 1000}
+	}
+
+	plans := Simulate(dles, hist, est, Params{CycleDays: 7, RoomBytes: -1}, start.AddDate(0, 0, 1), 7)
+	// The deadline is 2026-07-04. With a 4-DLE cluster and a 7-day runway, the first
+	// runs must stay quiet (slack), and no run may ever carry more than one full.
+	var fullDays int
+	for i, p := range plans {
+		n := fullsIn(p)
+		if n > 1 {
+			t.Errorf("%s: %d fulls on one run; the cluster must spread one per run", p.Date.Format("2006-01-02"), n)
+		}
+		if n == 1 {
+			fullDays++
+		}
+		// Days 0..2 (2026-06-28..30) have a 4+ day runway for 4 DLEs: nothing is due.
+		if i < 3 && n != 0 {
+			t.Errorf("%s: promoted with runway to spare; should defer (don't rush)", p.Date.Format("2006-01-02"))
+		}
+	}
+	// All four fulls still land within the window, one per run, by the deadline.
+	if fullDays != 4 {
+		t.Errorf("expected the 4-DLE cluster spread over 4 distinct runs, got %d", fullDays)
+	}
+}
+
 // TestCycleCapacityWarning checks the structural cycle check: when one full of
 // every DLE cannot fit capacity, the plan carries a warning (recoverability is
 // at risk) but still schedules the backups.

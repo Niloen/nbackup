@@ -27,9 +27,17 @@
 // for its own deadline rather than being re-fulled early to chase an average (and a
 // tiny DLE merely sharing that deadline can no longer inflate the peak enough to
 // unlock the move) — and (c) it fits the per-run room left before pruning would
-// evict a protected slot. With no free capacity, promotion
-// does nothing; with capacity to spare, it spends it to keep backups fresh and
-// balanced — which is exactly what budgeting that capacity is for.
+// evict a protected slot.
+//
+// Promotion is also *paced*: a cluster of N fulls sharing a deadline D days out is
+// not destaggered all at once but one per run, and only once the runway can no
+// longer hold the cluster on distinct days (days-left < cluster-size). Until then
+// it waits — re-fulling a freshly-fulled DLE six days before its deadline only
+// wastes freshness when a later, closer run could place it instead. The result is
+// quiet runs early in a cluster's life and a tidy one-full-per-day spread over the
+// last few days before the deadline. With no free capacity, promotion does nothing;
+// with capacity to spare, it spends it to keep backups fresh and balanced — which
+// is exactly what budgeting that capacity is for.
 //
 // Whether the cycle fits the medium *at all* is a separate, structural check:
 // over a cycle every DLE is fulled once, and (with minimum_age >= cycle) those
@@ -104,6 +112,7 @@ type Item struct {
 	Level     int    // 0 = full, 1..9 = incremental
 	BaseLevel int    // level whose snapshot an incremental builds on (-1 for a full)
 	EstBytes  int64  // estimated size of the chosen dump
+	FullBytes int64  // estimated size of a full dump (the cycle-deadline cost), shown so a small incremental does not hide a large pending full
 	Reason    string // human-readable explanation
 	BaseSlot  string // slot whose state an incremental builds on
 }
@@ -163,7 +172,7 @@ func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, p 
 			sizeutil.FormatBytes(totalFull), sizeutil.FormatBytes(p.CapacityBytes)))
 	}
 	for _, c := range cands {
-		it := Item{DLE: c.dle, Name: c.name, BaseLevel: -1, Reason: c.reason}
+		it := Item{DLE: c.dle, Name: c.name, BaseLevel: -1, Reason: c.reason, FullBytes: c.estFull}
 		if c.full {
 			it.Level, it.EstBytes = 0, c.estFull
 		} else {
@@ -257,16 +266,22 @@ func runBytes(cands []*cand) int64 {
 // load (the mandatory fulls), then repeatedly relieves the heaviest future day by
 // pulling one of its fulls onto today.
 //
-// Two guards keep it from chasing an average. Each move must not overshoot the day
-// it relieves — today's resulting load may not exceed that day's load after the
-// moved full leaves it — so the move lowers the global peak rather than just
-// relocating it. That means a DLE dominating its own deadline day is never promoted
-// (moving it leaves an equal peak on today), and a tiny DLE merely sharing that
-// deadline cannot inflate the peak enough to unlock the big move. And each move must
-// fit the per-run room, so promotion spends only genuinely free capacity. When the heaviest day
-// cannot be relieved (its fulls are too big to drop the peak or to fit room) it is
-// set aside and the next-heaviest is tried; promotion stops once today is no longer
-// lighter than any remaining peak.
+// Three guards keep it from chasing an average. First, a runway gate paces the
+// destagger: a peak day is relieved only once its deadline is too close to spread
+// its cluster over distinct days (days-left < cluster-size); a peak with slack is
+// set aside for a later, closer run. Because each promotion shrinks the cluster,
+// the gate flips off as soon as the cluster shrinks to the days remaining, so a
+// cluster is relieved at most one full per run — quiet early, one-per-day near the
+// deadline. Second, each move must not overshoot the day it relieves — today's
+// resulting load may not exceed that day's load after the moved full leaves it — so
+// the move lowers the global peak rather than just relocating it. That means a DLE
+// dominating its own deadline day is never promoted (moving it leaves an equal peak
+// on today), and a tiny DLE merely sharing that deadline cannot inflate the peak
+// enough to unlock the big move. Third, each move must fit the per-run room, so
+// promotion spends only genuinely free capacity. When the heaviest day cannot be
+// relieved (it has runway to spare, or its fulls are too big to drop the peak or to
+// fit room) it is set aside and the next-heaviest is tried; promotion stops once
+// today is no longer lighter than any remaining peak.
 func promote(cands []*cand, cycle int, room int64) {
 	// Deadline calendar: an incremental candidate last fulled `days` ago is due in
 	// `cycle-days` days (offset >= 1). byOffset groups the candidates due on each
@@ -306,6 +321,23 @@ func promote(cands []*cand, cycle int, room int64) {
 		}
 		if peakOff == 0 || todayLoad >= peakLoad {
 			return
+		}
+		// Don't rush: a cluster of N fulls sharing a deadline D days out can be
+		// spread one per day across its runway (today plus D future runs = D+1
+		// slots). While the runway still holds the whole cluster on distinct days
+		// (D >= N), pulling one forward now only wastes freshness — a later run,
+		// closer to the deadline, can place it instead. So relieve a peak only once
+		// its runway can no longer absorb the wait: days-left < cluster-size. Defer
+		// otherwise and look for a tighter peak. Because each promotion removes one
+		// DLE from the cluster, the condition flips off as soon as the cluster
+		// shrinks to the days remaining — so this relieves at most one per run,
+		// pacing the destagger across the cycle instead of cramming it onto today.
+		// An overloaded cluster (more DLEs than days) still cliffs down to one-per-
+		// day, but no sooner than its short runway forces.
+		if peakOff >= len(byOffset[peakOff]) {
+			delete(load, peakOff)
+			delete(byOffset, peakOff)
+			continue
 		}
 		// Pull the largest full off the peak day that still leaves today below it (so
 		// the peak strictly drops) and fits the per-run room.
