@@ -20,14 +20,14 @@ func reader(b []byte) Source { return Reader(io.NopCloser(bytes.NewReader(b))) }
 // Sink-role error TestHashSinkMismatch covers).
 func TestHashSinkMatch(t *testing.T) {
 	data := []byte(strings.Repeat("the quick brown fox\n", 500))
-	if _, err := Transfer(reader(data), NewFilters(), Hash(sha(data)), Opts{}); err != nil {
+	if _, err := Transfer(reader(data), NewFilters(), Hash(sha(data))); err != nil {
 		t.Fatalf("Transfer: %v", err)
 	}
 }
 
 // TestHashSinkMismatch: a wrong checksum is a Sink-role failure.
 func TestHashSinkMismatch(t *testing.T) {
-	_, err := Transfer(reader([]byte("abc")), NewFilters(), Hash(sha([]byte("xyz"))), Opts{})
+	_, err := Transfer(reader([]byte("abc")), NewFilters(), Hash(sha([]byte("xyz"))))
 	var te *Error
 	if !errors.As(err, &te) || te.Role != RoleSink {
 		t.Fatalf("want Sink-role error, got %v", err)
@@ -42,7 +42,7 @@ func TestFiltersRoundTrip(t *testing.T) {
 	data := []byte(strings.Repeat("payload-", 4096))
 	f := NewFilters(programs.Cmd{Name: "gzip", Args: []string{"-c"}}).
 		Add(programs.Cmd{Name: "gzip", Args: []string{"-dc"}})
-	if _, err := Transfer(reader(data), f, Hash(sha(data)), Opts{}); err != nil {
+	if _, err := Transfer(reader(data), f, Hash(sha(data))); err != nil {
 		t.Fatalf("round-trip Transfer: %v", err)
 	}
 }
@@ -53,7 +53,7 @@ func TestFiltersFaultRole(t *testing.T) {
 		t.Skip("gzip unavailable")
 	}
 	f := NewFilters(programs.Cmd{Name: "gzip", Args: []string{"-dc"}})
-	_, err := Transfer(reader([]byte("not gzip data")), f, Drain(), Opts{})
+	_, err := Transfer(reader([]byte("not gzip data")), f, Drain())
 	var te *Error
 	if !errors.As(err, &te) || te.Role != RoleFilters {
 		t.Fatalf("want Filters-role error, got %v", err)
@@ -64,7 +64,7 @@ func TestFiltersFaultRole(t *testing.T) {
 func TestProgramSink(t *testing.T) {
 	data := []byte("hello program sink")
 	sink := NewPrograms(programs.Local()).Add(programs.Cmd{Name: "cat"})
-	if _, err := Transfer(reader(data), NewFilters(), sink, Opts{}); err != nil {
+	if _, err := Transfer(reader(data), NewFilters(), sink); err != nil {
 		t.Fatalf("program sink Transfer: %v", err)
 	}
 }

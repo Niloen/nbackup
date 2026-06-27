@@ -61,7 +61,7 @@ registry registration, not a conditional in the core.
 | `clerk` | the archive data path (both directions): composes each operation as one `xfer.Transfer` — `Backup`/`Copy` (write: archiver tar source → encode filters → medium sink), `Extract`/`ListMembers`/`VerifyChecksum` (read: copy selection + fail-over, mounting volumes via the librarian, decode from the record), and the shared `DecodeFilters` builder used by drill. Owns the two archiveio-coupled endpoints (archive `Source`, medium `Sink`) | Scribe + Recovery::Clerk |
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `report` | per-run history record + JSONL/summary file I/O + digest render | amreport |
-| `notify` | pluggable alert backends (smtp/webhook) + registry + dispatch | amreport mailto |
+| `notify` | pluggable alert backends (smtp/sendmail/webhook) + registry + dispatch | amreport mailto |
 | `catalog` | local cache of slot index + volume registry; derives `History` | catalog / curinfo / tapelist |
 | `retention` | retention safety floor: protected slots — `Compute` returns a `Floor` (`.Keeps(id)`) (pure) | policy |
 | `restore` | the archive chain to rebuild a DLE as of a slot (pure) | amrestore |
@@ -486,9 +486,11 @@ someone. The choices, all mirroring existing stances:
 - **History is append-only JSONL; alerts are a registry; secrets are env-refs.**
   The log appends (O(1)) and compacts to a bounded tail, and a reader tolerates a
   torn trailing line (the one unlocked writer, `nb verify`, may race `nb report`).
-  A notify backend is a registered name (`smtp`/`webhook`) like `transform/compress`/`crypt`, so
-  adding a channel is a registration. Secrets (SMTP password, webhook URL) are named
-  environment variables resolved at send time, never stored — and a literal
+  A notify backend is a registered name (`smtp`/`sendmail`/`webhook`) like
+  `transform/compress`/`crypt`, so adding a channel is a registration (`sendmail` pipes
+  the same RFC 5322 message the SMTP path builds to a local MTA binary — postfix,
+  sendmail, exim — needing no relay host or secret). Secrets (SMTP password, webhook
+  URL) are named environment variables resolved at send time, never stored — and a literal
   `password:`/`token:` key is rejected structurally by `KnownFields(true)`. `nb
   report` (read-only, no engine) renders the recent history plus a live
   drill-ledger recovery audit (failing / degrading / stale / never-drilled DLEs via

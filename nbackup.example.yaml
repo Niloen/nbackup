@@ -168,6 +168,11 @@ landing: fast-disk
 #       to: [ops@example.com]    # one or more recipients
 #       username: nbackup        # optional (defaults to `from`)
 #       password_env: SMTP_PASS  # env var holding the password — NOT the password
+#     local-mail:
+#       type: sendmail           # hand off to the local MTA (postfix/sendmail/exim)
+#       from: nbackup@example.com
+#       to: [ops@example.com]    # one or more recipients
+#       # sendmail_path: /usr/sbin/sendmail   # default; the binary the MTA provides
 #     slack:
 #       type: webhook            # generic JSON POST (Slack/Discord/PagerDuty-compatible)
 #       url_env: SLACK_WEBHOOK_URL   # env var holding the (secret) webhook URL

@@ -4,7 +4,7 @@
 // channel half of the "0 errors" story — verified recoverability only matters if a
 // non-zero result reaches a human.
 //
-// Like filter/crypt/media, a channel is a registered, named backend (smtp, webhook),
+// Like filter/crypt/media, a channel is a registered, named backend (smtp, sendmail, webhook),
 // so adding one is a registry registration, not a core conditional. Like
 // progress.NewFileSink, notification is best-effort: a backend error, a missing
 // secret, or a hung endpoint is a warning the caller logs — it never fails or blocks
@@ -63,6 +63,7 @@ func register(s Spec) { registry[s.Name] = s }
 
 func init() {
 	register(Spec{Name: "smtp", build: newSMTP})
+	register(Spec{Name: "sendmail", build: newSendmail})
 	register(Spec{Name: "webhook", build: newWebhook})
 }
 

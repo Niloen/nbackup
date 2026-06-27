@@ -70,11 +70,12 @@ type Source interface {
 	Cleanup()
 }
 
-// Sink consumes the transfer's output stream. progress, if non-nil, is called with the
-// running count of bytes that have reached the sink. A sink that measures something the
-// caller needs hands it back through its own concrete type, not the transfer result.
+// Sink consumes the transfer's output stream. A sink that measures something the caller
+// needs (a checksum, a member listing, a live byte count) does its own metering and hands
+// it back through its own concrete type — the transfer carries no progress channel, since
+// the byte count any sink would report is one it already computes for its own purposes.
 type Sink interface {
-	Drain(in io.Reader, progress func(compressed int64)) error
+	Drain(in io.Reader) error
 }
 
 // Filters is the local middle: a chain of programs run on programs.Local(). It carries no
@@ -93,15 +94,10 @@ func (f Filters) Add(c programs.Cmd) Filters {
 	return Filters{cmds: append(f.cmds[:len(f.cmds):len(f.cmds)], c)}
 }
 
-// Opts tunes a transfer.
-type Opts struct {
-	Progress func(compressed int64) // running bytes reaching the sink; nil = no live progress
-}
-
 // Transfer runs source → filters(local) → sink as one pipeline, returns the producer's
 // raw-stream stats, and on failure a *Error tagged with the faulting zone (upstream cause
 // first).
-func Transfer(source Source, filters Filters, sink Sink, opts Opts) (Produced, error) {
+func Transfer(source Source, filters Filters, sink Sink) (Produced, error) {
 	out, finish, err := source.Open()
 	if err != nil {
 		source.Cleanup()
@@ -122,7 +118,7 @@ func Transfer(source Source, filters Filters, sink Sink, opts Opts) (Produced, e
 		mid, filtReap, filtered = fr, fw, true
 	}
 
-	sinkErr := sink.Drain(mid, opts.Progress)
+	sinkErr := sink.Drain(mid)
 
 	// Reap from the consumer back to the producer, closing each reader to push EOF/SIGPIPE
 	// upstream. A reader's Close surfaces a media/process fault (e.g. an unreadable part on
@@ -228,8 +224,8 @@ func (p *Programs) Cleanup() {
 }
 
 // Sink side: feed `in` as stdin to the chain, then drain its (empty, for tar -x) output.
-func (p *Programs) Drain(in io.Reader, progress func(int64)) error {
-	out, wait, err := p.exec.RunPipe(meterReader(in, progress), p.cmds...)
+func (p *Programs) Drain(in io.Reader) error {
+	out, wait, err := p.exec.RunPipe(in, p.cmds...)
 	if err != nil {
 		return err
 	}
@@ -250,8 +246,8 @@ func Hash(sha string) Sink { return hashSink{sha: sha} }
 
 type hashSink struct{ sha string }
 
-func (s hashSink) Drain(in io.Reader, progress func(int64)) error {
-	got, err := HashReader(meterReader(in, progress))
+func (s hashSink) Drain(in io.Reader) error {
+	got, err := HashReader(in)
 	if err != nil {
 		return err
 	}
@@ -266,8 +262,8 @@ func Drain() Sink { return drainSink{} }
 
 type drainSink struct{}
 
-func (drainSink) Drain(in io.Reader, progress func(int64)) error {
-	_, err := io.Copy(io.Discard, meterReader(in, progress))
+func (drainSink) Drain(in io.Reader) error {
+	_, err := io.Copy(io.Discard, in)
 	return err
 }
 
@@ -276,30 +272,7 @@ func Writer(w io.Writer) Sink { return writerSink{w: w} }
 
 type writerSink struct{ w io.Writer }
 
-func (s writerSink) Drain(in io.Reader, progress func(int64)) error {
-	_, err := io.Copy(s.w, meterReader(in, progress))
+func (s writerSink) Drain(in io.Reader) error {
+	_, err := io.Copy(s.w, in)
 	return err
-}
-
-// meterReader wraps r to report the running byte count to progress (nil = passthrough).
-func meterReader(r io.Reader, progress func(int64)) io.Reader {
-	if progress == nil {
-		return r
-	}
-	return &progressReader{r: r, f: progress}
-}
-
-type progressReader struct {
-	r io.Reader
-	n int64
-	f func(int64)
-}
-
-func (p *progressReader) Read(b []byte) (int, error) {
-	n, err := p.r.Read(b)
-	if n > 0 {
-		p.n += int64(n)
-		p.f(p.n)
-	}
-	return n, err
 }

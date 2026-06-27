@@ -229,15 +229,18 @@ type NotifyConfig struct {
 // Secrets are NEVER stored: they are named environment variables (password_env,
 // url_env) resolved at send time, mirroring crypt's orchestrate-don't-hoard stance.
 type NotifyBackend struct {
-	Type string `yaml:"type"` // smtp | webhook (a registered notifier name)
+	Type string `yaml:"type"` // smtp | sendmail | webhook (a registered notifier name)
 
-	// smtp
+	// smtp / sendmail
 	Host        string   `yaml:"host"`
 	Port        int      `yaml:"port"`
 	From        string   `yaml:"from"`
 	To          []string `yaml:"to"`
 	Username    string   `yaml:"username"`
 	PasswordEnv string   `yaml:"password_env"` // env var holding the SMTP password (never the password itself)
+
+	// sendmail
+	SendmailPath string `yaml:"sendmail_path"` // path to the local sendmail binary (default /usr/sbin/sendmail)
 
 	// webhook
 	URL      string            `yaml:"url"`      // a non-secret endpoint; prefer url_env for anything secret
@@ -248,7 +251,7 @@ type NotifyBackend struct {
 
 // validNotifyTypes is the accepted set for a backend's type (kept here so config
 // validation needs no dependency on package notify, which depends on config).
-var validNotifyTypes = map[string]bool{"smtp": true, "webhook": true}
+var validNotifyTypes = map[string]bool{"smtp": true, "sendmail": true, "webhook": true}
 
 // Sources is the disklist. In config it is written grouped by dumptype, then
 // host, then a list of paths:
@@ -613,12 +616,16 @@ func (c *Config) validateNotify() error {
 	}
 	for name, b := range n.Backends {
 		if !validNotifyTypes[b.Type] {
-			return fmt.Errorf("notify: backend %q: unknown type %q (known: smtp, webhook)", name, b.Type)
+			return fmt.Errorf("notify: backend %q: unknown type %q (known: smtp, sendmail, webhook)", name, b.Type)
 		}
 		switch b.Type {
 		case "smtp":
 			if b.Host == "" || b.From == "" || len(b.To) == 0 {
 				return fmt.Errorf("notify: smtp backend %q requires host, from, and at least one recipient (to)", name)
+			}
+		case "sendmail":
+			if b.From == "" || len(b.To) == 0 {
+				return fmt.Errorf("notify: sendmail backend %q requires from and at least one recipient (to)", name)
 			}
 		case "webhook":
 			if b.URLEnv == "" && b.URL == "" {

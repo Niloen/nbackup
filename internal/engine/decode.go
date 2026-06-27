@@ -82,7 +82,7 @@ func (d *decoder) restoreArchive(rc io.ReadCloser, plan DecodePlan, archiverType
 	)
 	sink := xfer.NewPrograms(target).Add(fused...).Add(arch.RestoreStage(destDir, members))
 
-	_, err = xfer.Transfer(xfer.Reader(rc), filters, sink, xfer.Opts{})
+	_, err = xfer.Transfer(xfer.Reader(rc), filters, sink)
 	return err
 }
 
@@ -90,7 +90,7 @@ func (d *decoder) restoreArchive(rc io.ReadCloser, plan DecodePlan, archiverType
 // matches the recorded sha — a transfer with no decode (source → Hash sink). A clean read whose
 // hash differs returns (false, nil); a read fault returns (false, err).
 func (d *decoder) verifyChecksum(rc io.ReadCloser, sha string) (bool, error) {
-	_, terr := xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(), xfer.Hash(sha), xfer.Opts{})
+	_, terr := xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(), xfer.Hash(sha))
 	if terr != nil {
 		var xe *xfer.Error
 		if errors.As(terr, &xe) && xe.Role == xfer.RoleSink {
@@ -112,7 +112,7 @@ func (d *decoder) listMembers(rc io.ReadCloser, codec, encrypt string, arch arch
 	// A local list runs both transforms server-side (nothing fuses with a far tar).
 	_, filters := splitTransforms(transform{cmd: decrypt}, transform{cmd: decompress})
 	ls := &listSink{arch: arch}
-	_, terr := xfer.Transfer(xfer.Reader(rc), filters, ls, xfer.Opts{})
+	_, terr := xfer.Transfer(xfer.Reader(rc), filters, ls)
 	return ls.members, terr
 }
 
@@ -139,7 +139,7 @@ type listSink struct {
 	members []string
 }
 
-func (s *listSink) Drain(in io.Reader, _ func(int64)) error {
+func (s *listSink) Drain(in io.Reader) error {
 	members, err := s.arch.List(in)
 	s.members = members
 	return err
