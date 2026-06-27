@@ -101,8 +101,9 @@ restore to point gpg at the passphrase file — there is no key-id in the cipher
 Two consequences: **lose the key and the data is unrecoverable** (NBackup holds
 no copy by design), and each archive's **commit footer and member index stay
 plaintext** — filenames and checksums remain readable so `nb recover` can browse
-without the key. Integrity (`nb verify`) and copy/sync also stay keyless; only
-extraction needs the key.
+without the key. Checksum integrity (`nb verify`) and copy/sync also stay keyless;
+only extraction — and the deeper `nb verify --deep`, which decrypts to list the
+stream — needs the key.
 
 ## Install
 
@@ -423,7 +424,7 @@ recover app01:/home:/etc> ls
   hosts   nginx/   passwd
 recover app01:/home:/etc> add hosts nginx
 recover app01:/home:/etc> extract /tmp/out
-recovered 12 entr(ies) from 2 archive(s) into /tmp/out
+recovered 12 file(s) from 2 archive(s) into /tmp/out
 ```
 
 Paths are relative to the DLE's backed-up root. Selecting a directory pulls its

@@ -121,6 +121,14 @@ func Check(scheme string, o Options) error {
 	if _, err := exec.LookPath(bin); err != nil {
 		return fmt.Errorf("encryption scheme %q needs %q on PATH: %w", scheme, bin, err)
 	}
+	// For public-key encryption, confirm the recipient actually resolves to a key in
+	// the keyring now — otherwise a typo'd recipient passes `nb check` and only fails
+	// mid-dump with gpg's cryptic "No name"/WKD-lookup message.
+	if o.Recipient != "" {
+		if out, err := exec.Command(bin, "--batch", "--no-tty", "--list-keys", o.Recipient).CombinedOutput(); err != nil {
+			return fmt.Errorf("encryption scheme %q: recipient %q not found in the gpg keyring: %s", scheme, o.Recipient, strings.TrimSpace(string(out)))
+		}
+	}
 	return nil
 }
 

@@ -64,7 +64,7 @@ func newDrillCmd(a *app) *cobra.Command {
 			"never prompts and skips any target that would need a tape swap). Exits non-zero on any " +
 			"classified drill failure.\n\n" +
 			"Tiers (cheapest → strongest), set with --tier (default structural):\n" +
-			"  checksum    re-hash stored bytes against the seal — integrity only, no decode\n" +
+			"  checksum    re-hash stored bytes against the commit footer — integrity only, no decode\n" +
 			"  structural  decrypt+decompress+`tar -t` — proves a valid restorable stream, writes nothing\n" +
 			"  chain       real point-in-time restore (full+incrementals) to scratch — the strong proof\n" +
 			"  stock       restore via the documented gpg/zstd/tar one-liner — proves recovery needs no NBackup",

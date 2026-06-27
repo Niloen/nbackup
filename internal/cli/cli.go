@@ -92,6 +92,13 @@ func loadConfigRO(cfgPath, catalogOverride string) (*config.Config, error) {
 		return cfg, nil
 	}
 	if _, err := os.Stat(cfgPath); err != nil {
+		// A -c path the operator gave explicitly but that does not exist is a hard
+		// error: a typo'd path must not silently look like an empty catalog (exit 0)
+		// to a script or monitor. Only the *default* nbackup.yaml being absent is
+		// tolerated, so a bare `nb slot` can still browse a local catalog.
+		if cfgPath != DefaultConfigPath {
+			return nil, fmt.Errorf("no config file at %s — check the -c path", cfgPath)
+		}
 		cfg := &config.Config{}
 		applyCatalog(cfg, "")
 		return cfg, nil

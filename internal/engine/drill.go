@@ -236,7 +236,7 @@ func (e *Engine) drillVerify(t drill.Target, medium string, checks VerifyChecks)
 		}
 		a, ok := findArchive(s, step.DLE, step.Level)
 		if !ok {
-			return drill.ClassMissing, fmt.Sprintf("%s %s L%d missing from seal", step.SlotID, step.DLE, step.Level)
+			return drill.ClassMissing, fmt.Sprintf("%s %s L%d missing from the slot's commit footers", step.SlotID, step.DLE, step.Level)
 		}
 		ref := clerk.Ref{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}
 		refs = append(refs, ref)

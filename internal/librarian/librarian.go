@@ -639,7 +639,14 @@ func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration
 			return fmt.Errorf("volume holds non-NBackup data; refusing to overwrite (use --force)")
 		}
 	case err != nil:
-		return err
+		// The existing label could not be parsed — a corrupt or truncated header
+		// (e.g. "unexpected EOF"). --force is the documented escape hatch for
+		// reclaiming foreign data, so honor it here too rather than letting the raw
+		// parse error escape and leave the tape unreclaimable; without --force, say
+		// so clearly. A fresh epoch is correct since no prior identity is readable.
+		if !force {
+			return fmt.Errorf("volume holds unrecognized or corrupt data (%v); refusing to overwrite (use --force)", err)
+		}
 	case labeled:
 		if !relabel {
 			return fmt.Errorf("volume is already labeled %q (epoch %d); use --relabel to reuse it", cur.Name, cur.Epoch)

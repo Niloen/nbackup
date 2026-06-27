@@ -268,10 +268,11 @@ reversible `Filter` (a forward/reverse `programs.Cmd`) the engine places into a
 transfer. Three decisions carry their weight:
 - **Outermost placement is load-bearing.** Because encryption sits *inside* the
   `xfer.Meter`, the seal's `SHA256` covers the *ciphertext* that lands on the volume.
-  So `nb verify` and `CopySlot`/`nb sync` all operate on ciphertext and stay
+  So checksum `nb verify` and `CopySlot`/`nb sync` all operate on ciphertext and stay
   **keyless** — vaulting offsite, verifying integrity, and the medium-independent
   `Entry`/`Placement` identity (one slot, N byte-identical copies) are untouched. Only
-  *extraction* needs the key.
+  *extraction* — and `nb verify --deep`, which decrypts to list the stream — needs the
+  key.
 - **Record the scheme name, never the key.** Each archive's header/seal carries
   `Encrypt: "gpg"` (a compiled-registry primitive, like `Compress`), so restore reverses
   it from the artifact alone — config-free, the same rebuild-from-media property

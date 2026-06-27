@@ -256,7 +256,7 @@ func (v *verifier) verifyArchive(a record.Archive, ref clerk.Ref, medium string,
 		}
 		if !good {
 			logf.log("%s [%s]: %s L%d CHECKSUM MISMATCH", id, medium, a.DLEID(), a.Level)
-			vd.OK, vd.Class, vd.Detail = false, drill.ClassIntegrity, "checksum mismatch vs seal"
+			vd.OK, vd.Class, vd.Detail = false, drill.ClassIntegrity, "checksum mismatch vs commit footer"
 			return vd
 		}
 	}
@@ -313,11 +313,11 @@ func membersDiff(want, got []string) string {
 	sort.Strings(wc)
 	sort.Strings(gc)
 	if len(wc) != len(gc) {
-		return fmt.Sprintf("member count differs from seal: sealed %d, archive lists %d", len(wc), len(gc))
+		return fmt.Sprintf("member count differs from the recorded index: recorded %d, archive lists %d", len(wc), len(gc))
 	}
 	for i := range wc {
 		if wc[i] != gc[i] {
-			return fmt.Sprintf("members differ from seal (e.g. sealed %q vs archive %q)", wc[i], gc[i])
+			return fmt.Sprintf("members differ from the recorded index (e.g. recorded %q vs archive %q)", wc[i], gc[i])
 		}
 	}
 	return ""

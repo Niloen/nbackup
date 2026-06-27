@@ -147,6 +147,12 @@ func compPct(orig, out int64) string {
 	if orig <= 0 {
 		return "-"
 	}
+	if out >= orig {
+		// No space was saved (the `none` scheme, or incompressible data). A
+		// percentage here reads backwards — "100%" looks like "fully compressed" —
+		// so show a dash instead.
+		return "-"
+	}
 	return fmt.Sprintf("%.0f%%", float64(out)/float64(orig)*100)
 }
 

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/restore"
@@ -78,15 +79,34 @@ type Tree struct {
 	DLE        string
 	TargetSlot string // the slot resolved for the as-of date
 	AsOf       string // the requested as-of date (YYYY-MM-DD)
+	chainLen   int    // archives in the restore chain (1 = full only, no incrementals)
 	root       *Node
 }
 
-// AsOf resolves an as-of date to the target slot: the most recent slot whose run
-// date is on or before the date. Slots must be in run order.
+// HasIncrementals reports whether the restore chain includes any incremental beyond
+// the full. The file-level deletion caveat only applies then — with a full-only chain
+// there is no later incremental that could have deleted a file — so callers gate the
+// note on it.
+func (t *Tree) HasIncrementals() bool { return t.chainLen > 1 }
+
+// AsOf resolves an as-of point to the target slot: the most recent slot at or
+// before it. Slots must be in run order. The point is either a plain date
+// (YYYY-MM-DD — the most recent slot whose run date is on or before it, the
+// long-standing behavior) or a date with a time component (YYYY-MM-DD HH[:MM[:SS]],
+// interpreted in UTC) — the most recent slot committed at or before the end of that
+// period, so an earlier same-day run is reachable by naming its time.
 func AsOf(slots []*record.Slot, asOf string) (string, error) {
+	bound, hasTime, err := parseAsOf(asOf)
+	if err != nil {
+		return "", err
+	}
 	target := ""
 	for _, s := range slots {
-		if s.Date <= asOf {
+		if hasTime {
+			if !slotTime(s).After(bound) { // committed at or before the period's end
+				target = s.ID
+			}
+		} else if s.Date <= asOf {
 			target = s.ID
 		}
 	}
@@ -94,6 +114,43 @@ func AsOf(slots []*record.Slot, asOf string) (string, error) {
 		return "", fmt.Errorf("no backup on or before %s", asOf)
 	}
 	return target, nil
+}
+
+// parseAsOf interprets an as-of string. A bare YYYY-MM-DD selects by run date
+// (hasTime false). A date with an hour/minute/second selects by time: bound is the
+// exclusive end of the named period (the hour, minute, or second), so "2026-06-29 14"
+// matches the latest slot committed during or before hour 14.
+func parseAsOf(asOf string) (bound time.Time, hasTime bool, err error) {
+	for _, p := range []struct {
+		layout string
+		window time.Duration
+	}{
+		{"2006-01-02 15:04:05", time.Second},
+		{"2006-01-02 15:04", time.Minute},
+		{"2006-01-02 15", time.Hour},
+	} {
+		if t, e := time.ParseInLocation(p.layout, asOf, time.UTC); e == nil {
+			return t.Add(p.window), true, nil
+		}
+	}
+	if _, e := time.ParseInLocation("2006-01-02", asOf, time.UTC); e == nil {
+		return time.Time{}, false, nil
+	}
+	return time.Time{}, false, fmt.Errorf("invalid as-of %q: want YYYY-MM-DD or 'YYYY-MM-DD HH[:MM[:SS]]'", asOf)
+}
+
+// slotTime is a slot's effective recovery instant: when it committed, falling back to
+// when it was created, then to its run date at midnight UTC for a slot with no
+// recorded times (e.g. one rebuilt from older media).
+func slotTime(s *record.Slot) time.Time {
+	if !s.SealedAt.IsZero() {
+		return s.SealedAt
+	}
+	if !s.CreatedAt.IsZero() {
+		return s.CreatedAt
+	}
+	t, _ := time.ParseInLocation("2006-01-02", s.Date, time.UTC)
+	return t
 }
 
 // BuildTree reconstructs the filesystem of dle as of asOf (YYYY-MM-DD) by merging
@@ -113,6 +170,7 @@ func BuildTree(slots []*record.Slot, dle, asOf string, members func(slotID strin
 		DLE:        dle,
 		TargetSlot: target,
 		AsOf:       asOf,
+		chainLen:   len(steps),
 		root:       &Node{dir: true, children: map[string]*Node{}},
 	}
 	for _, st := range steps {

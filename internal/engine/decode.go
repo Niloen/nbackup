@@ -11,6 +11,12 @@ import (
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
+// errDestSetup marks a restore that failed before writing anything because the
+// destination directory could not be created. A failure carrying it leaves no
+// partial tree, so restore reports it plainly rather than warning about an
+// incomplete restore.
+var errDestSetup = errors.New("destination could not be created")
+
 // decode.go is NBackup's read-side scheme operation. A decoder reverses an
 // archive's transforms: given a raw byte stream a clerk endpoint already opened, it composes the
 // decode pipeline (decrypt → decompress → tar, each placed per the plan) into a sink (tar, hash,
@@ -58,7 +64,10 @@ type DecodePlan struct {
 func (d *decoder) restoreArchive(rc io.ReadCloser, plan DecodePlan, archiverType, destDir, targetHost string, members []string) error {
 	target := d.exec(targetHost)
 	if err := target.MkdirAll(destDir); err != nil {
-		return err
+		// The destination could not even be created (e.g. an unreachable `--to`
+		// client): nothing was written, so mark it so the caller does not warn about
+		// a "partial" restore that never started.
+		return errors.Join(errDestSetup, err)
 	}
 	arch, err := d.archiverFor(archiverType, targetHost)
 	if err != nil {

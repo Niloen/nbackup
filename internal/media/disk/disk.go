@@ -26,7 +26,16 @@ func init() {
 		if err := media.RejectPartSize(opts, "disk"); err != nil {
 			return nil, err
 		}
-		return fslike.Open(fsStore{root: filepath.Join(path, "slots")})
+		// Create the slot root up front (like the tape library's openDir) so an
+		// uncreatable/unwritable path fails when the medium is opened — e.g. at
+		// `nb check` — rather than silently reporting "ready" and only failing once
+		// `nb dump` tries to write. fslike.Open's scan otherwise treats a missing
+		// root as an empty volume.
+		root := filepath.Join(path, "slots")
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			return nil, err
+		}
+		return fslike.Open(fsStore{root: root})
 	})
 	media.RegisterProfile("disk", media.NewSizeProfile)
 	media.RegisterParams("disk", "path", "part_size")

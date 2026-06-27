@@ -1402,6 +1402,34 @@ func (e *Engine) ResolveDLE(arg string) (string, bool) {
 
 // profileFor returns the capacity/reclamation profile for a named medium: the
 // landing medium's cached profile, or one opened on demand for any other medium.
+// MediumOverCapacity reports whether the named medium still holds more than its
+// capacity (a 0 capacity means unbounded). used and capacity are returned for
+// messaging — used after a prune to tell the operator that reclaiming every dead
+// archive was not enough because the protected recovery set alone exceeds capacity.
+func (e *Engine) MediumOverCapacity(name string) (over bool, used, capacity int64, err error) {
+	prof, err := e.profileFor(name)
+	if err != nil {
+		return false, 0, 0, err
+	}
+	capacity = prof.TotalBytes()
+	used = e.cat.MediumBytes(name)
+	return capacity > 0 && used > capacity, used, capacity, nil
+}
+
+// ProjectedOverCapacity reports whether the named medium would exceed its capacity
+// after add more bytes land on it (a 0 capacity means unbounded) — the check
+// `nb copy` runs before/after a copy so it warns about overshooting a target's
+// budget the way `nb sync` already does.
+func (e *Engine) ProjectedOverCapacity(name string, add int64) (over bool, projected, capacity int64, err error) {
+	prof, err := e.profileFor(name)
+	if err != nil {
+		return false, 0, 0, err
+	}
+	capacity = prof.TotalBytes()
+	projected = e.cat.MediumBytes(name) + add
+	return capacity > 0 && projected > capacity, projected, capacity, nil
+}
+
 func (e *Engine) profileFor(name string) (media.Profile, error) {
 	if name == e.mediumName {
 		return e.profile, nil

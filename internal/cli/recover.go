@@ -6,6 +6,7 @@ import (
 	"path"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -19,7 +20,7 @@ import (
 // interactive shell (setdate/cd/ls/add/extract); with --path it runs one-shot,
 // and with --list it just prints a listing.
 func newRecoverCmd(a *app) *cobra.Command {
-	var dleName, dateStr, dest, to, from string
+	var dleName, dateStr, timeStr, dest, to, from string
 	var paths []string
 	var listOnly, all, force, yes bool
 	cmd := &cobra.Command{
@@ -54,16 +55,17 @@ func newRecoverCmd(a *app) *cobra.Command {
 				if listOnly || len(paths) > 0 {
 					return fmt.Errorf("--all restores the whole DLE and cannot be combined with --path/--list")
 				}
-				return runRecoverRestore(eng, dleName, dateStr, dest, to, from, force, yes, a.logf())
+				return runRecoverRestore(eng, dleName, dateStr, timeStr, dest, to, from, force, yes, a.logf())
 			}
 			if listOnly || len(paths) > 0 {
-				return runRecoverBatch(eng, dleName, dateStr, paths, dest, listOnly, yes, a.logf())
+				return runRecoverBatch(eng, dleName, dateStr, timeStr, paths, dest, listOnly, yes, a.logf())
 			}
-			return runRecoverShell(eng, dleName, dateStr, dest)
+			return runRecoverShell(eng, dleName, dateStr, timeStr, dest)
 		},
 	}
 	cmd.Flags().StringVar(&dleName, "dle", "", "DLE to recover from (with --all, omit to restore every DLE)")
-	cmd.Flags().StringVar(&dateStr, "date", "", "as-of date YYYY-MM-DD (default today)")
+	cmd.Flags().StringVar(&dateStr, "date", "", "as-of date YYYY-MM-DD (default today); resolves to the most recent slot on or before that day")
+	cmd.Flags().StringVar(&timeStr, "time", "", "as-of point-in-time 'YYYY-MM-DD HH[:MM[:SS]]' (UTC); resolves to the most recent slot committed in or before that period — reaches an earlier same-day run. Mutually exclusive with --date")
 	cmd.Flags().StringArrayVar(&paths, "path", nil, "file/dir to recover (repeatable); non-interactive")
 	cmd.Flags().StringVar(&dest, "dest", "", "destination directory for recovered files")
 	cmd.Flags().BoolVar(&listOnly, "list", false, "print a listing of --path (or the root) and exit")
@@ -78,8 +80,8 @@ func newRecoverCmd(a *app) *cobra.Command {
 // runRecoverRestore performs a whole-DLE, deletion-accurate restore as of a date —
 // the folded-in `nb restore`. With --dle it restores that DLE; without, every DLE
 // in the catalog, each into its own subdirectory of dest.
-func runRecoverRestore(eng *engine.Engine, dleName, dateStr, dest, to, from string, force, yes bool, logf engine.Logf) error {
-	asOf, err := recoverDate(dateStr)
+func runRecoverRestore(eng *engine.Engine, dleName, dateStr, timeStr, dest, to, from string, force, yes bool, logf engine.Logf) error {
+	asOf, err := recoverAsOf(dateStr, timeStr)
 	if err != nil {
 		return err
 	}
@@ -160,8 +162,8 @@ func runRecoverRestore(eng *engine.Engine, dleName, dateStr, dest, to, from stri
 
 // runRecoverBatch handles the non-interactive paths: --list prints a listing,
 // otherwise --path selections are extracted into --dest.
-func runRecoverBatch(eng *engine.Engine, dleName, dateStr string, paths []string, dest string, listOnly, yes bool, logf engine.Logf) error {
-	asOf, err := recoverDate(dateStr)
+func runRecoverBatch(eng *engine.Engine, dleName, dateStr, timeStr string, paths []string, dest string, listOnly, yes bool, logf engine.Logf) error {
+	asOf, err := recoverAsOf(dateStr, timeStr)
 	if err != nil {
 		return err
 	}
@@ -188,7 +190,9 @@ func runRecoverBatch(eng *engine.Engine, dleName, dateStr string, paths []string
 		}
 		fmt.Printf("# %s as of %s (%s)\n", eng.DisplayDLE(slug), tree.AsOf, tree.TargetSlot)
 		printListing(n)
-		fmt.Println(fileLevelDeletionNote)
+		if tree.HasIncrementals() {
+			fmt.Println(fileLevelDeletionNote)
+		}
 		return nil
 	}
 
@@ -205,7 +209,9 @@ func runRecoverBatch(eng *engine.Engine, dleName, dateStr string, paths []string
 	if !confirmRead(eng.SelectionCost(steps), yes) {
 		return nil
 	}
-	fmt.Println(fileLevelDeletionNote)
+	if tree.HasIncrementals() {
+		fmt.Println(fileLevelDeletionNote)
+	}
 	n, err := eng.ExtractSelection(steps, dest, logf)
 	if err != nil {
 		return err
@@ -239,6 +245,32 @@ func recoverDate(s string) (string, error) {
 		return "", err
 	}
 	return record.DateString(d), nil
+}
+
+// recoverAsOf resolves the --date / --time flags into the string recovery.AsOf
+// understands: a bare YYYY-MM-DD (whole day) or a 'YYYY-MM-DD HH[:MM[:SS]]' instant.
+// The two flags are mutually exclusive — --time is the point-in-time form that can
+// reach an earlier same-day run, --date selects the whole day.
+func recoverAsOf(dateStr, timeStr string) (string, error) {
+	if timeStr != "" {
+		if dateStr != "" {
+			return "", fmt.Errorf("--date and --time are mutually exclusive (use --time for a point-in-time, --date for a whole day)")
+		}
+		return validateAsOfTime(timeStr)
+	}
+	return recoverDate(dateStr)
+}
+
+// validateAsOfTime checks an as-of time value parses (UTC) at day, hour, minute, or
+// second precision and returns it normalized. A bare date is accepted too.
+func validateAsOfTime(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02 15:04", "2006-01-02 15", "2006-01-02"} {
+		if _, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
+			return s, nil
+		}
+	}
+	return "", fmt.Errorf("invalid time %q: want 'YYYY-MM-DD HH[:MM[:SS]]' (UTC) or YYYY-MM-DD", s)
 }
 
 // printListing renders one directory's entries, directories suffixed with "/".
@@ -276,12 +308,12 @@ type recoverShell struct {
 
 // runRecoverShell drives the interactive recovery prompt. It reuses the shared
 // stdinReader so it coexists with operator swap prompts during extraction.
-func runRecoverShell(eng *engine.Engine, dleName, dateStr, dest string) error {
-	date, err := recoverDate(dateStr)
+func runRecoverShell(eng *engine.Engine, dleName, dateStr, timeStr, dest string) error {
+	asOf, err := recoverAsOf(dateStr, timeStr)
 	if err != nil {
 		return err
 	}
-	sh := &recoverShell{eng: eng, date: date, dest: dest}
+	sh := &recoverShell{eng: eng, date: asOf, dest: dest}
 	if dleName != "" {
 		if slug, ok := eng.ResolveDLE(dleName); ok {
 			sh.dle = slug
@@ -338,7 +370,9 @@ func (sh *recoverShell) prompt() string {
 func (sh *recoverShell) banner() {
 	if sh.sess != nil {
 		fmt.Printf("disk %q as of %s (resolved to %s)\n", sh.eng.DisplayDLE(sh.dle), sh.date, sh.sess.Tree().TargetSlot)
-		fmt.Println(fileLevelDeletionNote)
+		if sh.sess.Tree().HasIncrementals() {
+			fmt.Println(fileLevelDeletionNote)
+		}
 		return
 	}
 	fmt.Printf("as of %s — no disk selected. Pick one with 'setdisk <dle>' ('disks' lists them).\n", sh.date)
@@ -368,6 +402,8 @@ func (sh *recoverShell) dispatch(cmd string, args []string) (quit bool) {
 		return true
 	case "setdate":
 		sh.setDate(args)
+	case "settime":
+		sh.setTime(args)
 	case "setdisk", "disk", "sethost":
 		sh.setDisk(args)
 	case "disks", "disklist", "lsdisk":
@@ -432,6 +468,29 @@ func (sh *recoverShell) setDate(args []string) {
 		return
 	}
 	sh.date = d
+	if sh.dle != "" {
+		if err := sh.reload(); err != nil {
+			fmt.Printf("note: %v\n", err)
+			return
+		}
+	}
+	sh.banner()
+}
+
+// setTime sets the as-of point-in-time, then rebrowses. Unlike setdate it accepts a
+// time so an earlier same-day run is reachable; the args are rejoined since the
+// "YYYY-MM-DD HH:MM" form contains a space the shell splits on.
+func (sh *recoverShell) setTime(args []string) {
+	if len(args) == 0 {
+		fmt.Println("usage: settime YYYY-MM-DD HH[:MM[:SS]]")
+		return
+	}
+	when, err := validateAsOfTime(strings.Join(args, " "))
+	if err != nil {
+		fmt.Printf("bad time: %v\n", err)
+		return
+	}
+	sh.date = when
 	if sh.dle != "" {
 		if err := sh.reload(); err != nil {
 			fmt.Printf("note: %v\n", err)
@@ -512,8 +571,14 @@ func (sh *recoverShell) del(args []string) {
 	if sh.sess == nil {
 		return
 	}
-	for _, p := range sh.sess.Remove(args) {
+	removed := sh.sess.Remove(args)
+	for _, p := range removed {
 		fmt.Printf("removed /%s\n", p)
+	}
+	// Give feedback on a no-op delete rather than staying silent, so a mistyped or
+	// already-unselected path is obviously a no-op, not a success.
+	if len(removed) == 0 && len(args) > 0 {
+		fmt.Printf("not in selection: %s\n", strings.Join(args, " "))
 	}
 }
 
@@ -561,7 +626,9 @@ func (sh *recoverShell) extract(args []string) {
 	if !confirmRead(sh.eng.SelectionCost(steps), false) {
 		return
 	}
-	fmt.Println(fileLevelDeletionNote)
+	if sh.sess.Tree().HasIncrementals() {
+		fmt.Println(fileLevelDeletionNote)
+	}
 	n, err := sh.eng.ExtractSelection(steps, sh.dest, logfStdout)
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
@@ -575,6 +642,8 @@ func recoverHelp() {
   disks                list the DLEs available to recover from
   setdisk <dle>        choose the DLE to browse (alias: disk)
   setdate <date>       set the as-of date (YYYY-MM-DD), then rebrowse
+  settime <date time>  set the as-of point-in-time (YYYY-MM-DD HH[:MM[:SS]], UTC),
+                       reaching an earlier same-day run, then rebrowse
   ls [path]            list a directory
   cd [path]            change directory (.. and absolute /paths work)
   pwd                  print the current directory

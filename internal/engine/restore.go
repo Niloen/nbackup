@@ -1,10 +1,12 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/Niloen/nbackup/internal/catalog"
@@ -75,8 +77,30 @@ func (r *restorer) Restore(slotID, dleName, destDir string, force bool, logf Log
 // The non-empty-destination guard is the operator's to honor here (the path is remote),
 // so a whole-DLE restore over --to assumes an empty/new client directory.
 func (r *restorer) RestoreTo(slotID, dleName, destHost, destPath string, logf Logf) error {
-	if _, ok := r.cfg.RemoteHost(destHost); !ok {
-		return fmt.Errorf("--to host %q is not configured under hosts:", destHost)
+	// Validate the target host up front: RemoteHost() treats every non-localhost name
+	// as remote, so a typo'd host would otherwise sail past here and fail mid-restore
+	// with a raw SSH "exit status 255". A valid target appears under hosts: or as a
+	// configured source host.
+	known := map[string]bool{}
+	for h := range r.cfg.Hosts {
+		known[h] = true
+	}
+	for _, d := range r.cfg.DLEs() {
+		if d.Host != "" && d.Host != "localhost" {
+			known[d.Host] = true
+		}
+	}
+	if !known[destHost] {
+		names := make([]string, 0, len(known))
+		for h := range known {
+			names = append(names, h)
+		}
+		sort.Strings(names)
+		hint := "none configured"
+		if len(names) > 0 {
+			hint = strings.Join(names, ", ")
+		}
+		return fmt.Errorf("--to host %q is not a configured host (name it under hosts: or as a source host); known: %s", destHost, hint)
 	}
 	return r.restoreFrom(slotID, dleName, destPath, destHost, false, logf)
 }
@@ -110,6 +134,12 @@ func (r *restorer) restoreFrom(slotID, dleName, destDir, targetHost string, roll
 		logf.log("extracting %s %s L%d -> %s", step.SlotID, r.displayDLE(step.DLE), step.Level, destDir)
 		if err := r.extractStep(step, destDir, targetHost, ec); err != nil {
 			wrapped := fmt.Errorf("extract %s %s L%d: %w", step.SlotID, step.DLE, step.Level, err)
+			// The destination could not even be created — nothing landed, so report the
+			// failure without the misleading "partial restore" warning (or a rollback of
+			// a tree that was never written).
+			if errors.Is(err, errDestSetup) {
+				return wrapped
+			}
 			// A chain that fails partway leaves an incomplete tree. If the dest was
 			// empty when we started (no --force, local), every file in it is ours, so
 			// clear it — a failed whole-DLE restore must not leave a half-restored
@@ -336,6 +366,11 @@ func (r *restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 	files := 0
 	missing, err := r.clerk.ReadArchives(refs, "", func(ref clerk.Ref, open func() (io.ReadCloser, error)) error {
 		st := stepByRef[ref]
+		// An archive in the chain that holds none of the selected files contributes
+		// nothing — skip it silently rather than logging a noisy "extracting 0 file(s)".
+		if countFiles(st.Members) == 0 {
+			return nil
+		}
 		logf.log("extracting %d file(s) from %s %s L%d", countFiles(st.Members), st.SlotID, r.displayDLE(st.DLE), st.Level)
 		rc, serr := open()
 		if serr != nil {

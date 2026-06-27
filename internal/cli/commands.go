@@ -244,8 +244,8 @@ func newDumpCmd(a *app) *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:     "dump",
-		Short:   "Execute a run and seal a slot",
-		Long:    "Execute a planner run, dumping each scheduled DLE and sealing exactly one immutable slot. Use --quiet to suppress progress output. --date sets the run date (with or without --dry-run). With --dry-run the run for --date is planned against the current catalog and printed, exactly as a real dump would decide it, but nothing is written.",
+		Short:   "Execute a run and commit its archives",
+		Long:    "Execute a planner run, dumping each scheduled DLE and committing exactly one immutable slot's archives. Use --quiet to suppress progress output. --date sets the run date (with or without --dry-run). With --dry-run the run for --date is planned against the current catalog and printed, exactly as a real dump would decide it, but nothing is written.",
 		Example: "  nb dump\n  nb dump --date 2026-06-21\n  nb dump --dry-run --date 2026-07-15\n  nb -c prod.yaml dump -q",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -286,7 +286,7 @@ func newDumpCmd(a *app) *cobra.Command {
 				if err != nil {
 					return report.Run{}, err
 				}
-				fmt.Printf("\nSealed %s: %d archive(s), %s total\n", s.ID, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes))
+				fmt.Printf("\nCommitted %s: %d archive(s), %s total\n", s.ID, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes))
 				return report.Run{
 					Command:    report.CommandDump,
 					SlotID:     s.ID,
@@ -354,7 +354,7 @@ func runDumpDryRun(eng *engine.Engine, date time.Time, validationWarnings []stri
 
 	estTotal := fprintPlanItems(os.Stdout, plan)
 	fmt.Printf("\nThis run (estimated): ~%s\n", sizeutil.FormatBytes(estTotal))
-	fmt.Printf("Would seal %s. Run without --dry-run to execute.\n", eng.PlannedSlotID(date))
+	fmt.Printf("Would commit %s. Run without --dry-run to execute.\n", eng.PlannedSlotID(date))
 	return nil
 }
 
@@ -419,20 +419,22 @@ func newVerifyCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "verify [slot-id...]",
 		Short: "Verify slot integrity (checksum, or --deep structural)",
-		Long: "Verify archives against the seal. By default it re-checks payload checksums " +
+		Long: "Verify archives against their commit footers. By default it re-checks payload checksums " +
 			"(integrity). With --deep it also streams each archive through the real read " +
 			"pipeline — decrypt, decompress, then `tar -t` (list, not extract) — and asserts the " +
-			"members match the seal, proving the bytes are a valid restorable stream and " +
+			"members match the recorded index, proving the bytes are a valid restorable stream and " +
 			"exercising the key and compression end-to-end. It writes nothing either way. Pass slot ids " +
-			"to verify just those, or --all for every slot (which may mount every volume in the pool).",
-		Example: "  nb verify slot-2026-06-21\n  nb verify --deep slot-2026-06-21\n  nb verify --all",
+			"to verify just those; with no ids it verifies every slot (which may mount every volume in the pool).",
+		Example: "  nb verify slot-2026-06-21\n  nb verify --deep slot-2026-06-21\n  nb verify",
 		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if all && len(args) > 0 {
 				return fmt.Errorf("--all cannot be combined with explicit slot ids")
 			}
-			if !all && len(args) == 0 {
-				return fmt.Errorf("specify slot ids to verify, or --all to verify every slot")
+			// Bare `nb verify` (no slot ids) verifies the whole catalog — the obvious
+			// reading of "verify my backups". --all stays as an explicit synonym.
+			if len(args) == 0 {
+				all = true
 			}
 			// verify is an assertion (monitors gate on its exit code), so a missing
 			// config is an error — not a green "0 slot(s) verified".
@@ -472,8 +474,8 @@ func newVerifyCmd(a *app) *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().BoolVar(&all, "all", false, "verify every slot in the catalog")
-	cmd.Flags().BoolVar(&deep, "deep", false, "also validate structure: decrypt+decompress+tar-list, members vs seal")
+	cmd.Flags().BoolVar(&all, "all", false, "verify every slot in the catalog (the default when no slot ids are given)")
+	cmd.Flags().BoolVar(&deep, "deep", false, "also validate structure: decrypt+decompress+tar-list, members vs the recorded index")
 	return cmd
 }
 
@@ -527,14 +529,14 @@ func runSlotList(a *app) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "SLOT\tSTATUS\tARCHIVES\tSIZE\tSEALED\tCOPIES")
+	fmt.Fprintln(tw, "SLOT\tSTATUS\tARCHIVES\tSIZE\tCOMMITTED\tCOPIES")
 	for _, s := range slots {
-		sealed := "-"
+		committed := "-"
 		if !s.SealedAt.IsZero() {
-			sealed = s.SealedAt.Format("2006-01-02 15:04")
+			committed = s.SealedAt.Format("2006-01-02 15:04")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", s.ID, s.Status, len(s.Archives),
-			sizeutil.FormatBytes(s.TotalBytes), sealed, copiesSummary(eng.Catalog().Placements(s.ID)))
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", s.ID, slotStatusDisplay(s.Status), len(s.Archives),
+			sizeutil.FormatBytes(s.TotalBytes), committed, copiesSummary(eng.Catalog().Placements(s.ID)))
 	}
 	tw.Flush()
 	return nil
@@ -581,9 +583,9 @@ func newSlotShowCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Slot %s  (%s)\n", s.ID, s.Status)
+			fmt.Printf("Slot %s  (%s)\n", s.ID, slotStatusDisplay(s.Status))
 			fmt.Printf("  date:    %s\n", s.Date)
-			fmt.Printf("  sealed:  %s\n", s.SealedAt.Format("2006-01-02 15:04:05 MST"))
+			fmt.Printf("  committed: %s\n", s.SealedAt.Format("2006-01-02 15:04:05 MST"))
 			fmt.Printf("  total:   %s\n\n", sizeutil.FormatBytes(s.TotalBytes))
 			tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 			fmt.Fprintln(tw, "DLE\tLEVEL\tFILES\tSIZE\tCOMPRESS\tENCRYPT")
@@ -853,6 +855,7 @@ func newPruneCmd(a *app) *cobra.Command {
 				} else {
 					printNothingToReclaim(eng, args[0])
 				}
+				warnIfOverCapacity(eng, args[0])
 				return nil
 			}
 			return a.runReported(cfg, report.Run{Command: report.CommandPrune, ExitClass: "prune-error"}, func() (report.Run, error) {
@@ -865,6 +868,7 @@ func newPruneCmd(a *app) *cobra.Command {
 				} else {
 					printNothingToReclaim(eng, args[0])
 				}
+				warnIfOverCapacity(eng, args[0])
 				return report.Run{Command: report.CommandPrune, SlotsPruned: eligible, BytesMoved: freed}, nil
 			})
 		},
@@ -879,6 +883,16 @@ func newPruneCmd(a *app) *cobra.Command {
 // it is a no-op by design even when the library is over capacity. Say so, and point
 // at the deliberate recycle path, so a user lowering tape capacity isn't told the
 // slots "fit" when per-slot pruning simply does not apply to tape.
+// slotStatusDisplay renders a slot's internal status with the user-facing
+// vocabulary: a complete slot is "committed" (its archives' commit footers are all
+// present), not "sealed" — NBackup has no slot-level seal.
+func slotStatusDisplay(status string) string {
+	if status == record.StatusSealed {
+		return "committed"
+	}
+	return status
+}
+
 func printNothingToReclaim(eng *engine.Engine, name string) {
 	if info, ok := eng.Medium(name); ok && info.Type == "tape" {
 		if info.Capacity > 0 && info.Used > info.Capacity {
@@ -890,6 +904,21 @@ func printNothingToReclaim(eng *engine.Engine, name string) {
 		return
 	}
 	fmt.Printf("\n%s: nothing to reclaim (all slots fit capacity or are protected)\n", name)
+}
+
+// warnIfOverCapacity closes the plan→prune loop: when a prune leaves a medium still
+// over capacity it is because the protected recovery set alone exceeds capacity, so
+// say so rather than reporting "freed N" and silently leaving the medium over budget.
+// Tape is excluded — its whole-volume over-capacity case is covered by
+// printNothingToReclaim's recycle hint.
+func warnIfOverCapacity(eng *engine.Engine, medium string) {
+	if info, ok := eng.Medium(medium); ok && info.Type == "tape" {
+		return
+	}
+	if over, used, capacity, err := eng.MediumOverCapacity(medium); err == nil && over {
+		fmt.Printf("WARNING: %q still holds %s, over its %s capacity — reclaiming every dead archive was not enough; the protected recovery set exceeds capacity, so raise its capacity or shorten minimum_age\n",
+			medium, sizeutil.FormatBytes(used), sizeutil.FormatBytes(capacity))
+	}
 }
 
 // newCopyCmd implements `nb copy`: stream a slot from the landing medium to
@@ -936,6 +965,12 @@ func newCopyCmd(a *app) *cobra.Command {
 				return err
 			}
 			fmt.Println("copy complete")
+			// Mirror `nb sync`'s over-capacity warning so the single-slot sibling does
+			// not silently push a target past its budget.
+			if over, used, capacity, cerr := eng.MediumOverCapacity(to); cerr == nil && over {
+				fmt.Printf("WARNING: %q now holds %s, over its %s capacity — run `nb prune %s` to reclaim, or raise its capacity\n",
+					to, sizeutil.FormatBytes(used), sizeutil.FormatBytes(capacity), to)
+			}
 			return nil
 		},
 	}
@@ -965,6 +1000,10 @@ func runCopyDryRun(cfg *config.Config, slotID, from, to string, force bool) erro
 	}
 	fmt.Printf("%s -> %s: would copy %s (%d archive(s), %s). Re-run without --dry-run to copy.\n",
 		plan.From, plan.To, slotID, plan.Archives, sizeutil.FormatBytes(plan.Bytes))
+	if over, projected, capacity, perr := eng.ProjectedOverCapacity(plan.To, plan.Bytes); perr == nil && over {
+		fmt.Printf("WARNING: %q would hold %s, over its %s capacity — run `nb prune %s` to reclaim, or raise its capacity\n",
+			plan.To, sizeutil.FormatBytes(projected), sizeutil.FormatBytes(capacity), plan.To)
+	}
 	return nil
 }
 
@@ -1190,13 +1229,13 @@ func mediumDetail(eng *engine.Engine, name string) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "SLOT\tSIZE\tARCHIVES\tSEALED")
+	fmt.Fprintln(tw, "SLOT\tSIZE\tARCHIVES\tCOMMITTED")
 	for _, s := range slots {
-		sealed := "-"
+		committed := "-"
 		if !s.SealedAt.IsZero() {
-			sealed = s.SealedAt.Format("2006-01-02 15:04")
+			committed = s.SealedAt.Format("2006-01-02 15:04")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", s.ID, sizeutil.FormatBytes(s.TotalBytes), len(s.Archives), sealed)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", s.ID, sizeutil.FormatBytes(s.TotalBytes), len(s.Archives), committed)
 	}
 	tw.Flush()
 	return nil
@@ -1327,7 +1366,7 @@ func newRebuildCmd(a *app) *cobra.Command {
 	return &cobra.Command{
 		Use:   "rebuild",
 		Short: "Rebuild the catalog cache by rescanning media",
-		Long:  "Rescan every configured medium and rebuild the local catalog cache (slot index and volume registry) from the seals and labels found there.",
+		Long:  "Rescan every configured medium and rebuild the local catalog cache (slot index and volume registry) from the commit footers and labels found there.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.loadRO()

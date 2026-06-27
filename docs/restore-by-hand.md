@@ -49,11 +49,17 @@ An encrypted archive keeps the same `.tar.<ext>` name and reverses the same way,
 decrypting first:
 
 ```bash
+# public-key (the private key is in the operator's keyring):
 gpg -d < 000000-app01-home-L0.tar.zst | zstd -dc | tar -xf -
+
+# symmetric (passphrase_file) — supply the passphrase non-interactively, or a bare
+# `gpg -d` blocks on a pinentry prompt:
+gpg --batch --pinentry-mode loopback --passphrase-file /etc/nbackup/secret -d \
+    < 000000-app01-home-L0.tar.zst | zstd -dc | tar -xf -
 ```
 
 A public-key dump restores on any host with the private key in its keyring; a
-symmetric (`passphrase_file`) dump needs the passphrase supplied to gpg.
+symmetric (`passphrase_file`) dump needs the same passphrase supplied to gpg.
 
 ## From tape
 

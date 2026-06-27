@@ -56,7 +56,7 @@ func (c *dirLibrary) mount(entry string) (device, error) {
 	defer c.mu.Unlock()
 	dir := filepath.Join(c.root, entry)
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		return nil, fmt.Errorf("no such %s%q in library %s", c.prefix, entry, c.root)
+		return nil, fmt.Errorf("no such %q in library %s", entry, c.root)
 	}
 	dev, err := openDir(dir, c.capacity)
 	if err != nil {

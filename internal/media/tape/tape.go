@@ -308,6 +308,11 @@ func deviceStatus(id string, dev device, capacity int64) media.VolumeStatus {
 	case err == media.ErrForeignVolume:
 		// Foreign data: not blank and not writable until a forced relabel.
 		st.Foreign, st.Blank = true, false
+	case err != nil:
+		// A corrupt or truncated header (e.g. "unexpected EOF") is neither a blank
+		// tape nor safely writable — surface it as foreign so inventory and the
+		// overwrite guard treat it consistently (a forced relabel reclaims it).
+		st.Foreign, st.Blank = true, false
 	}
 	return st
 }
