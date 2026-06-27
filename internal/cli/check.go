@@ -63,10 +63,19 @@ func printCheckReport(rep *engine.CheckReport) {
 		}
 	}
 	fmt.Println()
-	if rep.Failures == 0 {
+	switch {
+	case rep.Failures > 0:
+		fmt.Printf("%d check(s) failed", rep.Failures)
+		if rep.Warnings > 0 {
+			fmt.Printf(", %d warning(s)", rep.Warnings)
+		}
+		fmt.Println()
+	case rep.Warnings > 0:
+		// No hard failures, but a `!` line (e.g. an unprobed cloud medium) means "not
+		// a clean bill" — don't claim "all checks passed" over a visible warning.
+		fmt.Printf("checks passed with %d warning(s) — review the ! line(s) above\n", rep.Warnings)
+	default:
 		fmt.Println("all checks passed")
-	} else {
-		fmt.Printf("%d check(s) failed\n", rep.Failures)
 	}
 }
 

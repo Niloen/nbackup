@@ -68,6 +68,10 @@ type Estimate struct {
 	Full     int64 // level 0
 	Incr     int64 // the current sitting level L
 	IncrNext int64 // level L+1 (0 if not yet estimable)
+	// Incomplete is set when the archiver could only partially measure the source
+	// (e.g. tar hit an unreadable file), so Full is a floor, not an exact size.
+	// Build surfaces it as a warning so capacity planning isn't silently undercounted.
+	Incomplete bool
 }
 
 // bumpDays is the redundancy guard: a DLE stays at one incremental level for
@@ -139,11 +143,17 @@ func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, p 
 
 	cands := make([]*cand, 0, len(dles))
 	var totalFull int64
+	var estWarnings []string
 	for _, d := range dles {
 		name := d.Name()
 		st := hist.DLE(name)
 		e := est[name]
 		totalFull += e.Full
+		if e.Incomplete {
+			estWarnings = append(estWarnings, fmt.Sprintf(
+				"DLE %s: source is not fully readable, so its size estimate (~%s) is a floor — capacity planning may undercount (run as a user that can read every file, or exclude the unreadable paths)",
+				d.ID(), sizeutil.FormatBytes(e.Full)))
+		}
 		c := &cand{dle: d, name: name, st: st, days: st.DaysSinceFull(today), estFull: e.Full, estIncr: e.Incr}
 		switch {
 		case c.days < 0:
@@ -161,6 +171,7 @@ func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, p 
 	promote(cands, cycle, p.RoomBytes)
 
 	plan := &Plan{Date: today, Interval: cycle}
+	plan.Warnings = append(plan.Warnings, estWarnings...)
 	// Structural cycle check (priority #1, recoverability): over a cycle every
 	// DLE is fulled once, and with minimum_age >= cycle those fulls coexist on
 	// the medium. If a single complete recovery set cannot fit capacity, no

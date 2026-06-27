@@ -89,7 +89,10 @@ func Compute(slots []*record.Slot, minAge time.Duration, now time.Time) Floor {
 	for _, s := range slots {
 		for _, a := range s.Archives {
 			if a.Level == 0 && !hasNewerFull(slots, a.DLE, s) {
-				pin(s.ID, a.DLE, fmt.Sprintf("last recovery path for DLE %s", a.DLE))
+				// The reason omits the DLE: callers render it in the line's path
+				// column (as host:path), so repeating the internal slug here is
+				// redundant and inconsistent.
+				pin(s.ID, a.DLE, "last recovery path")
 			}
 		}
 	}
@@ -116,7 +119,7 @@ func Compute(slots []*record.Slot, minAge time.Duration, now time.Time) Floor {
 				continue // no full at or before the anchor (cannot happen for a real chain)
 			}
 			for j := full; j <= ai; j++ {
-				pin(ds[j].ID, dle, fmt.Sprintf("in DLE %s's recovery chain", dle))
+				pin(ds[j].ID, dle, "in this DLE's recovery chain")
 			}
 		}
 	}

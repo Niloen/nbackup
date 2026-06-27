@@ -196,7 +196,10 @@ func (l *Librarian) resolveLabel(lv media.Labeled, now time.Time) (record.Label,
 	case errors.Is(err, media.ErrForeignVolume):
 		return record.Label{}, reloadableErr("medium %q holds non-NBackup data; refusing to overwrite — relabel it explicitly with `nb label --force %s <name>`", l.medium, l.medium)
 	case err != nil:
-		return record.Label{}, err
+		// Unparseable/corrupt header (e.g. "parse file header: invalid character …"):
+		// the volume is not a recognizable NBackup tape, so treat it like foreign data —
+		// a clear refusal a swap can resolve, not the raw decoder error.
+		return record.Label{}, reloadableErr("medium %q holds unrecognized or corrupt data (%v); refusing to overwrite — relabel it explicitly with `nb label --force %s <name>`", l.medium, err, l.medium)
 	case !labeled: // blank volume
 		if !l.autoLabel {
 			return record.Label{}, reloadableErr("medium %q is blank/unlabeled; run `nb label %s <name>` first (or set auto_label: true)", l.medium, l.medium)
@@ -841,8 +844,11 @@ func (l *Librarian) Load(target string, byLabel bool, logf Logf) error {
 	switch {
 	case labeled:
 		logf.log("loaded %q: bay %s holds %q", l.medium, bay, name)
-	case errors.Is(lerr, media.ErrForeignVolume):
-		logf.log("loaded %q: bay %s (foreign — non-NBackup data; `nb label --relabel --force` to overwrite)", l.medium, bay)
+	case lerr != nil:
+		// Any read error — a foreign label or unparseable/corrupt data — means the
+		// bay is NOT blank; match the inventory's "foreign" verdict so an operator is
+		// never told an occupied reel is empty.
+		logf.log("loaded %q: bay %s (foreign — non-NBackup or unreadable data; `nb label --relabel --force` to overwrite)", l.medium, bay)
 	default:
 		logf.log("loaded %q: bay %s (blank)", l.medium, bay)
 	}
@@ -877,8 +883,10 @@ func (l *Librarian) insertFromShelf(target string, byLabel bool, logf Logf) erro
 	switch {
 	case labeled:
 		logf.log("loaded %q: reel %s holds %q", l.medium, reel, name)
-	case errors.Is(lerr, media.ErrForeignVolume):
-		logf.log("loaded %q: reel %s (foreign — non-NBackup data; `nb label --relabel --force` to overwrite)", l.medium, reel)
+	case lerr != nil:
+		// Any read error — a foreign label or unparseable/corrupt data — means the
+		// reel is NOT blank; match the inventory's "foreign" verdict.
+		logf.log("loaded %q: reel %s (foreign — non-NBackup or unreadable data; `nb label --relabel --force` to overwrite)", l.medium, reel)
 	default:
 		logf.log("loaded %q: reel %s (blank)", l.medium, reel)
 	}

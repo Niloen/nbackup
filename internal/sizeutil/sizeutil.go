@@ -64,7 +64,7 @@ func ParseBytes(s string) (int64, error) {
 	case "pib":
 		mult = 1 << 50
 	default:
-		return 0, fmt.Errorf("unknown size unit %q", unit)
+		return 0, fmt.Errorf("unknown size unit %q: expected a number with a unit, e.g. 500GB, 20TB, or 1TiB (kB/MB/GB/TB/PB are decimal, KiB/MiB/GiB/TiB/PiB binary)", unit)
 	}
 	return int64(num * mult), nil
 }

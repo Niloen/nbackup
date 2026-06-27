@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -833,9 +834,14 @@ func (e *Engine) estimateDLE(d config.DLE, name string, st *catalog.DLEState) pl
 		return planner.Estimate{} // no estimator available (e.g. tar missing)
 	}
 	excl := e.cfg.ResolveDumpType(d.DumpTypeName()).Exclude
-	full, _ := arch.Estimate(archiver.BackupRequest{DLE: name, SourcePath: d.Path, Level: 0, BaseLevel: -1, Exclude: excl})
+	full, ferr := arch.Estimate(archiver.BackupRequest{DLE: name, SourcePath: d.Path, Level: 0, BaseLevel: -1, Exclude: excl})
+	// A non-nil error with a non-zero floor means tar walked a partially-readable
+	// source (an unreadable member): the size is a floor, not exact. A zero floor is
+	// a total failure (e.g. a missing path) that ValidatePlan already reports, so we
+	// don't double-warn for it here.
+	incomplete := ferr != nil && full > 0
 	if st.LastFullDate == "" {
-		return planner.Estimate{Full: full} // never fulled: only a full is possible
+		return planner.Estimate{Full: full, Incomplete: incomplete} // never fulled: only a full is possible
 	}
 
 	// The DLE sits at level L — 1 right after a full, otherwise its last level. We
@@ -849,7 +855,7 @@ func (e *Engine) estimateDLE(d config.DLE, name string, st *catalog.DLEState) pl
 	if lvl > planner.MaxLevel {
 		lvl = planner.MaxLevel
 	}
-	est := planner.Estimate{Full: full}
+	est := planner.Estimate{Full: full, Incomplete: incomplete}
 	if arch.HasBase(name, lvl-1) {
 		est.Incr, _ = arch.Estimate(archiver.BackupRequest{
 			DLE: name, SourcePath: d.Path, Level: lvl, BaseLevel: lvl - 1, Exclude: excl,
@@ -1236,6 +1242,12 @@ func (e *Engine) backupItem(session *clerk.Session, item planner.Item, tr *progr
 	logf.log("archiving %s (L%d)", item.DLE.ID(), item.Level)
 	sum, err = e.enc.dumpArchive(session, spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
 	if err != nil {
+		// An unreadable file makes tar exit fatally (it never silently ships a partial
+		// archive — that would betray recoverability), so name the likely cause and fix
+		// rather than leaving the operator with a bare "exit status 2".
+		if strings.Contains(err.Error(), "Permission denied") {
+			return fmt.Errorf("archive %s: %w\n(a source file is unreadable — run nb as a user that can read every file under %s, e.g. via sudo/root, or exclude it in the dumptype)", item.DLE.ID(), err, item.DLE.Path)
+		}
 		return fmt.Errorf("archive %s: %w", item.DLE.ID(), err)
 	}
 
@@ -1447,6 +1459,56 @@ func (e *Engine) MediumOverCapacity(name string) (over bool, used, capacity int6
 	capacity = prof.TotalBytes()
 	used = e.cat.MediumBytes(name)
 	return capacity > 0 && used > capacity, used, capacity, nil
+}
+
+// MediumProtectedOverCapacity reports whether the bytes a prune *cannot* reclaim —
+// the protected recovery set — still exceed the medium's capacity. It subtracts
+// everything Reclaim would free from the current total, so the answer is the same
+// whether or not a real prune has run: a dry-run still sees the would-delete archives
+// in the catalog while a completed prune has already removed them, but
+// `residual = current − reclaimable` is identical either way (after a real prune the
+// reclaimable set is empty and the current total is already the residual). This is
+// what `nb prune` warns on, so its preview and its real run agree.
+func (e *Engine) MediumProtectedOverCapacity(name string, now time.Time) (over bool, residual, capacity int64, err error) {
+	prof, err := e.profileFor(name)
+	if err != nil {
+		return false, 0, 0, err
+	}
+	def, ok := e.cfg.Media[name]
+	if !ok {
+		return false, 0, 0, fmt.Errorf("unknown medium %q", name)
+	}
+	capacity = prof.TotalBytes()
+	slots := e.cat.SlotsOn(name)
+	floor := retention.Compute(slots, e.cfg.MinAgeFor(def), now)
+	var reclaimable int64
+	for _, r := range prof.Reclaim(slots, floor, now) {
+		reclaimable += r.Bytes
+	}
+	residual = e.cat.MediumBytes(name) - reclaimable
+	return capacity > 0 && residual > capacity, residual, capacity, nil
+}
+
+// MediumProtectionIsAgeBound reports whether every archive pinning the medium over
+// capacity is held by the minimum_age floor (vs a live recovery chain). When false,
+// advising the operator to shorten minimum_age is useless — a DLE's last full and its
+// later incrementals are pinned regardless of age — so the remedy text drops it.
+func (e *Engine) MediumProtectionIsAgeBound(name string, now time.Time) bool {
+	def, ok := e.cfg.Media[name]
+	if !ok {
+		return true
+	}
+	slots := e.cat.SlotsOn(name)
+	floor := retention.Compute(slots, e.cfg.MinAgeFor(def), now)
+	for _, s := range slots {
+		for _, a := range s.Archives {
+			reason, ok := floor.ReasonArchive(s.ID, a.DLE)
+			if ok && !strings.Contains(reason, "minimum age") {
+				return false // a recovery-chain pin that shortening minimum_age can't release
+			}
+		}
+	}
+	return true
 }
 
 // ProjectedOverCapacity reports whether the named medium would exceed its capacity

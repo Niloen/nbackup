@@ -104,7 +104,7 @@ func RenderRun(w io.Writer, r Run) {
 func RenderDump(w io.Writer, r Run) {
 	fmt.Fprintf(w, "DUMP REPORT  %s", r.SlotID)
 	if !r.StartedAt.IsZero() {
-		fmt.Fprintf(w, "  (%s)", r.StartedAt.Local().Format("2006-01-02 15:04"))
+		fmt.Fprintf(w, "  (run %s)", r.StartedAt.Local().Format("2006-01-02 15:04"))
 	}
 	fmt.Fprintln(w)
 	if r.Failed() {
