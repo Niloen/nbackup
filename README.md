@@ -710,7 +710,26 @@ media:
 ```
 
 `s3://` reaches S3 and any S3-compatible store (MinIO, Cloudflare R2, Backblaze
-B2, Wasabi); `gs://` is Google Cloud Storage; `azblob://` is Azure Blob.
+B2, Wasabi, Synology C2); `gs://` is Google Cloud Storage; `azblob://` is Azure
+Blob.
+
+**S3-compatible endpoints.** For stores that speak the S3 protocol but run at a
+custom URL (MinIO, Wasabi, Synology C2, etc.), add `endpoint` to the URL query:
+
+```yaml
+media:
+  offsite:
+    type: cloud
+    url: s3://my-bucket?region=eu-005&endpoint=https://s3.example.com
+    capacity: 500GB
+```
+
+The `endpoint` parameter (and `region`) are passed through to the AWS SDK v2;
+all [V2ConfigFromURLParams][v2params] query options are supported. Credentials
+still come from the standard AWS SDK environment — `~/.aws/credentials`,
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` env vars, or an IAM role — never
+from the config file.
+
 **Credentials are not in the config** — they come from each SDK's standard
 environment (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_*`). An object store
 is **address-identified** like disk: no labels, no swap prompts, nothing to
@@ -804,3 +823,4 @@ See [LICENSE](LICENSE) for the full text.
 [amanda]: https://www.amanda.org/
 [gocloud]: https://gocloud.dev/howto/blob/
 [321]: https://www.veeam.com/blog/321-backup-rule.html
+[v2params]: https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/aws#V2ConfigFromURLParams
