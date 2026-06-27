@@ -283,7 +283,7 @@ func (w *Writer) drainParts(base record.Header, src io.Reader) ([]record.FilePos
 // parts concatenated) to the slot, re-split into parts sized to the target's volumes.
 // It does NOT compress or re-checksum the stream — the same bytes are written, so the
 // recorded checksum is unchanged — and only the part layout (and Parts count) is new.
-// The header carries the archive's original codec, so restore reverses the right one.
+// The header carries the archive's original scheme, so restore reverses the right one.
 func (w *Writer) CopyArchive(meta record.Archive, src io.Reader) (record.Archive, error) {
 	h := sha256.New()
 	parts, err := w.drainParts(w.archiveHeader(meta), io.TeeReader(src, h))

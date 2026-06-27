@@ -35,17 +35,17 @@ func runFilter(t *testing.T, cmd programs.Cmd, src []byte) []byte {
 }
 
 // TestRoundTrip checks Forward (compress) -> Reverse (decompress) reproduces the input
-// for every built-in codec whose binary is available (none always is), driving the same
+// for every built-in scheme whose binary is available (none always is), driving the same
 // Filter the engine uses.
 func TestRoundTrip(t *testing.T) {
 	payload := []byte(strings.Repeat("the quick brown fox\n", 5000))
-	for _, codec := range []string{"none", "gzip", "zstd"} {
-		codec := codec
-		t.Run(codec, func(t *testing.T) {
-			if err := Check(codec, Options{}); err != nil {
-				t.Skipf("codec unavailable: %v", err)
+	for _, scheme := range []string{"none", "gzip", "zstd"} {
+		scheme := scheme
+		t.Run(scheme, func(t *testing.T) {
+			if err := Check(scheme, Options{}); err != nil {
+				t.Skipf("scheme unavailable: %v", err)
 			}
-			f, err := Filter(codec, Options{Level: 3})
+			f, err := Filter(scheme, Options{Level: 3})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -55,30 +55,30 @@ func TestRoundTrip(t *testing.T) {
 				t.Errorf("round trip mismatch: got %d bytes, want %d", len(got), len(payload))
 			}
 			// A real compressor should shrink this very compressible payload.
-			if codec != "none" && len(compressed) >= len(payload) {
-				t.Errorf("%s did not compress: %d >= %d", codec, len(compressed), len(payload))
+			if scheme != "none" && len(compressed) >= len(payload) {
+				t.Errorf("%s did not compress: %d >= %d", scheme, len(compressed), len(payload))
 			}
 		})
 	}
 }
 
-// TestCheckUnknown rejects an unregistered codec.
+// TestCheckUnknown rejects an unregistered scheme.
 func TestCheckUnknown(t *testing.T) {
 	if err := Check("brotli", Options{}); err == nil {
-		t.Error("expected an error for an unknown codec")
+		t.Error("expected an error for an unknown scheme")
 	}
 }
 
-// TestExt returns the archive extension per codec.
+// TestExt returns the archive extension per scheme.
 func TestExt(t *testing.T) {
 	cases := map[string]string{"zstd": "zst", "gzip": "gz", "none": ""}
-	for codec, want := range cases {
-		got, err := Ext(codec)
+	for scheme, want := range cases {
+		got, err := Ext(scheme)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got != want {
-			t.Errorf("Ext(%q) = %q, want %q", codec, got, want)
+			t.Errorf("Ext(%q) = %q, want %q", scheme, got, want)
 		}
 	}
 }

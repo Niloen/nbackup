@@ -17,7 +17,7 @@ func newCheckCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "check",
 		Short: "Verify the config and reach every source host",
-		Long: "Check that a run would succeed: the server (landing medium, workdir, codec, " +
+		Long: "Check that a run would succeed: the server (landing medium, workdir, compression, " +
 			"encryption) and each source host. A localhost DLE is checked locally; any other host " +
 			"is remote and, unless --offline, probed over SSH (reachable, GNU tar, source readable, " +
 			"client-side tools, state_dir). Exits non-zero if any check fails. Writes nothing.",

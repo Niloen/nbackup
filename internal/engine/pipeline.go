@@ -6,15 +6,15 @@ import (
 )
 
 // pipeline.go holds the one rule the encode (dump) and decode (restore) operations share for
-// placing an archive's codec transforms. Each compress/encrypt step runs either fused with the
+// placing an archive's scheme transforms. Each compress/encrypt step runs either fused with the
 // endpoint program — the client's tar when encoding, the target's tar when decoding, so
 // plaintext never leaves the client and a remote restore ships compressed bytes — or in the
 // local server filters (xfer's pinned middle). Keeping the split here means the two directions
 // cannot drift, and the "none" identity drops out in exactly one place.
 
-// transform is one codec step: a resolved compress/encrypt command and where it runs (fused
-// with the endpoint's tar, or in the local server filters). A zero command (codec/scheme
-// "none") is an identity and vanishes from the pipeline.
+// transform is one scheme step: a resolved compress/encrypt command and where it runs (fused
+// with the endpoint's tar, or in the local server filters). A zero command (a compress or
+// encrypt "none") is an identity and vanishes from the pipeline.
 type transform struct {
 	cmd   programs.Cmd
 	fused bool

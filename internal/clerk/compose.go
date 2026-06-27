@@ -12,7 +12,7 @@ import (
 // compose.go is the clerk's write side: a Session over a slot writer that takes already-encoded
 // archive bytes (an io.Reader), meters + splits + commits them, and records the run. The encode
 // transfer and the xfer machinery live in the operation (the Dumper), which drives bytes into
-// WriteArchive/CopyArchive — the clerk takes plain bytes and never sees a codec or a transfer.
+// WriteArchive/CopyArchive — the clerk takes plain bytes and never sees a scheme or a transfer.
 
 // Session authors one slot onto medium: the operation opens it over an archiveio.Writer, writes
 // each archive's bytes (committing each), and Finishes — which seals the in-memory slot and
@@ -51,7 +51,7 @@ type Summary struct {
 	FileCount    int
 	Uncompressed int64
 	Compressed   int64
-	Codec        string // the compression scheme applied ("none" => stored, not compressed)
+	Compress     string // the compression scheme applied ("none" => stored, not compressed)
 }
 
 // Commit finalizes a dumped archive: it merges the producer's raw-stream stats (file count,
@@ -68,7 +68,7 @@ func (s *Session) Commit(measured record.Archive, parts []record.FilePos, fileCo
 	if len(arch.Members) > 0 {
 		_ = s.clerk.mindex.Store(s.w.SlotID(), arch.DLE, arch.Level, arch.Members)
 	}
-	return Summary{FileCount: arch.FileCount, Uncompressed: arch.Uncompressed, Compressed: arch.Compressed, Codec: arch.Compress}, nil
+	return Summary{FileCount: arch.FileCount, Uncompressed: arch.Uncompressed, Compressed: arch.Compressed, Compress: arch.Compress}, nil
 }
 
 // Finish closes the slot and records the run in the map: it seals the in-memory slot and records

@@ -375,10 +375,10 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 }
 
 // stockPipeline builds the documented restore one-liner for an archive's
-// (encrypt, codec): decrypt (gpg) then decompress (zstd/gzip) then untar with
+// (encrypt, compress): decrypt (gpg) then decompress (zstd/gzip) then untar with
 // listed-incremental, reading stdin and extracting into "$1". It is deliberately the
 // README's stock command, not NBackup's own filter/crypt/method code.
-func stockPipeline(encrypt, codec string) (string, error) {
+func stockPipeline(encrypt, compress string) (string, error) {
 	var stages []string
 	switch encrypt {
 	case "", "none":
@@ -387,14 +387,14 @@ func stockPipeline(encrypt, codec string) (string, error) {
 	default:
 		return "", fmt.Errorf("stock drill: unknown encryption scheme %q", encrypt)
 	}
-	switch codec {
+	switch compress {
 	case "", "none":
 	case "gzip":
 		stages = append(stages, "gzip -dc")
 	case "zstd":
 		stages = append(stages, "zstd -dc")
 	default:
-		return "", fmt.Errorf("stock drill: unknown codec %q", codec)
+		return "", fmt.Errorf("stock drill: unknown compression scheme %q", compress)
 	}
 	stages = append(stages, `tar --extract --listed-incremental=/dev/null --numeric-owner -C "$1" -f -`)
 	return strings.Join(stages, " | "), nil

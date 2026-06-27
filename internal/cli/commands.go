@@ -418,7 +418,7 @@ func newVerifyCmd(a *app) *cobra.Command {
 			"(integrity). With --deep it also streams each archive through the real read " +
 			"pipeline — decrypt, decompress, then `tar -t` (list, not extract) — and asserts the " +
 			"members match the seal, proving the bytes are a valid restorable stream and " +
-			"exercising the key and codec end-to-end. It writes nothing either way. Pass slot ids " +
+			"exercising the key and compression end-to-end. It writes nothing either way. Pass slot ids " +
 			"to verify just those, or --all for every slot (which may mount every volume in the pool).",
 		Example: "  nb verify slot-2026-06-21\n  nb verify --deep slot-2026-06-21\n  nb verify --all",
 		Args:    cobra.ArbitraryArgs,
@@ -581,7 +581,7 @@ func newSlotShowCmd(a *app) *cobra.Command {
 			fmt.Printf("  sealed:  %s\n", s.SealedAt.Format("2006-01-02 15:04:05 MST"))
 			fmt.Printf("  total:   %s\n\n", sizeutil.FormatBytes(s.TotalBytes))
 			tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-			fmt.Fprintln(tw, "DLE\tLEVEL\tFILES\tSIZE\tCODEC\tENCRYPT")
+			fmt.Fprintln(tw, "DLE\tLEVEL\tFILES\tSIZE\tCOMPRESS\tENCRYPT")
 			for _, ar := range s.Archives {
 				enc := ar.Encrypt
 				if enc == "" {
@@ -1063,7 +1063,10 @@ func printSyncReport(r *engine.SyncReport, apply bool) {
 		return
 	}
 	if apply {
-		fmt.Printf("%s -> %s: copied %d slot(s), %s\n", r.From, r.To, r.Copied(), sizeutil.FormatBytes(r.Bytes()))
+		// Report the bytes that actually landed (copied slots), not the whole backlog —
+		// a sync that stops partway (e.g. the target filled) must not claim it moved
+		// bytes for slots it never copied.
+		fmt.Printf("%s -> %s: copied %d slot(s), %s\n", r.From, r.To, r.Copied(), sizeutil.FormatBytes(r.CopiedBytes()))
 	} else {
 		fmt.Printf("%s -> %s: %d slot(s) to copy, %s (dry-run; re-run without --dry-run to copy):\n",
 			r.From, r.To, len(r.Items), sizeutil.FormatBytes(r.Bytes()))
@@ -1120,6 +1123,13 @@ func newMediumCmd(a *app) *cobra.Command {
 			cfg, err := a.loadRO()
 			if err != nil {
 				return err
+			}
+			// A bare config (no sources) means no config file was found — read-only
+			// commands fall back to a synthesized default catalog, so don't present its
+			// phantom default disk medium as if storage were configured (matching `nb slot`).
+			if len(cfg.Sources) == 0 {
+				fmt.Println("no media (no backup config found — copy nbackup.example.yaml to nbackup.yaml and edit it, or pass -c <config>)")
+				return nil
 			}
 			eng, err := newEngine(cfg)
 			if err != nil {
@@ -1198,7 +1208,7 @@ func printInventory(eng *engine.Engine, name string) {
 	appendable := eng.MediumAppendable(name)
 	if view.Library {
 		tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(tw, "\n\tBAY\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
+		fmt.Fprintln(tw, "\n\tBAY\tLABEL\tSTATUS\tON VOLUME\tCAPACITY\tFILES")
 		for _, b := range view.Bays {
 			mark := " "
 			if b.ID == view.Loaded {
@@ -1213,7 +1223,7 @@ func printInventory(eng *engine.Engine, name string) {
 	}
 	if view.DriveOK {
 		label, status := volumeLabelStatus(view.Drive, name, appendable)
-		fmt.Printf("  drive:   %s (%s, %s used, %d files)\n", label, status,
+		fmt.Printf("  drive:   %s (%s, %s on volume, %d files)\n", label, status,
 			sizeutil.FormatBytes(view.Drive.Used), view.Drive.Files)
 	} else {
 		fmt.Println("  drive:   (empty)")
@@ -1221,7 +1231,7 @@ func printInventory(eng *engine.Engine, name string) {
 	if len(view.Shelf) > 0 {
 		fmt.Println("\nIn the room (load with `nb load`, or when prompted):")
 		rw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(rw, "  REEL\tLABEL\tSTATUS\tUSED\tCAPACITY\tFILES")
+		fmt.Fprintln(rw, "  REEL\tLABEL\tSTATUS\tON VOLUME\tCAPACITY\tFILES")
 		for _, b := range view.Shelf {
 			label, status := volumeLabelStatus(b, name, appendable)
 			fmt.Fprintf(rw, "  %s\t%s\t%s\t%s\t%s\t%d\n", b.ID, label, status,

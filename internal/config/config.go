@@ -429,7 +429,7 @@ type DumpType struct {
 
 	// Compress selects where compression runs, for a
 	// remote DLE: "server" (default — on the NBackup host) or "client" (on the source
-	// client, so only compressed bytes cross the wire). The codec/algorithm is the
+	// client, so only compressed bytes cross the wire). The scheme/algorithm is the
 	// config-wide compress block; this is only the location. Local DLEs ignore it.
 	Compress string `yaml:"compress"`
 }
@@ -482,18 +482,36 @@ type DLE struct {
 
 var slugStrip = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
-// yamlUnknownField rewrites go-yaml's "field X not found in type pkg.Type" — which
-// leaks an internal Go type name — into a user-facing "unknown key X".
-var yamlUnknownField = regexp.MustCompile(`field (\S+) not found in type \S+`)
+// yamlUnknownField rewrites go-yaml's "field X not found in type <T>" — which leaks
+// an internal Go type name (a named `pkg.Type`, or a whole anonymous `struct { … }`
+// literal for an inline block) — into a user-facing "unknown key X". The type part
+// is matched to end-of-line so an anonymous struct's body (it contains spaces) is
+// dropped wholesale rather than leaving its field dump behind.
+var yamlUnknownField = regexp.MustCompile(`field (\S+) not found in type .*`)
+
+// secretKeys are config keys a user might reach for to store a secret inline; the
+// config never holds secrets, so the error points them at the env-var indirection.
+var secretKeys = map[string]string{
+	"password": "password_env", "passwd": "password_env",
+	"token": "url_env", "secret": "url_env", "url": "url_env",
+}
 
 // cleanYAMLError turns go-yaml's decode error into a config-author-facing message:
 // it drops the "yaml: unmarshal errors:" banner and the internal Go type name,
 // leaving the line number and the offending key (e.g. `line 1: unknown key "cyle"`).
+// A rejected secret-looking key gets an extra hint toward the env-var reference.
 func cleanYAMLError(err error) string {
 	s := err.Error()
 	s = strings.ReplaceAll(s, "yaml: unmarshal errors:\n", "")
 	s = yamlUnknownField.ReplaceAllString(s, `unknown key "$1"`)
-	return strings.TrimSpace(s)
+	s = strings.TrimSpace(s)
+	for key, envKey := range secretKeys {
+		if strings.Contains(s, `unknown key "`+key+`"`) {
+			s += fmt.Sprintf("\n(secrets are never stored in the config — reference the environment-variable name instead, e.g. `%s`)", envKey)
+			break
+		}
+	}
+	return s
 }
 
 // Name returns a stable, filesystem-safe identifier for the DLE, e.g.

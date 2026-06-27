@@ -19,7 +19,7 @@ import (
 // interactive shell (setdate/cd/ls/add/extract); with --path it runs one-shot,
 // and with --list it just prints a listing.
 func newRecoverCmd(a *app) *cobra.Command {
-	var dleName, dateStr, dest, to string
+	var dleName, dateStr, dest, to, from string
 	var paths []string
 	var listOnly, all, force, yes bool
 	cmd := &cobra.Command{
@@ -54,7 +54,7 @@ func newRecoverCmd(a *app) *cobra.Command {
 				if listOnly || len(paths) > 0 {
 					return fmt.Errorf("--all restores the whole DLE and cannot be combined with --path/--list")
 				}
-				return runRecoverRestore(eng, dleName, dateStr, dest, to, force, yes, a.logf())
+				return runRecoverRestore(eng, dleName, dateStr, dest, to, from, force, yes, a.logf())
 			}
 			if listOnly || len(paths) > 0 {
 				return runRecoverBatch(eng, dleName, dateStr, paths, dest, listOnly, yes, a.logf())
@@ -71,13 +71,14 @@ func newRecoverCmd(a *app) *cobra.Command {
 	cmd.Flags().BoolVar(&force, "force", false, "with --all, restore into a non-empty --dest (its contents are pruned to match the backup)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip the egress-cost confirmation when reading from a cloud/cold medium")
 	cmd.Flags().StringVar(&to, "to", "", "with --all, restore onto a remote client: host:path (host must be in the config's hosts:); tar runs on the client, and for an encrypt.at: client DLE so does decryption — the key stays on the client")
+	cmd.Flags().StringVar(&from, "from", "", "with --all, read from this medium's copy specifically (e.g. the offsite tape) instead of auto-selecting any available copy")
 	return cmd
 }
 
 // runRecoverRestore performs a whole-DLE, deletion-accurate restore as of a date —
 // the folded-in `nb restore`. With --dle it restores that DLE; without, every DLE
 // in the catalog, each into its own subdirectory of dest.
-func runRecoverRestore(eng *engine.Engine, dleName, dateStr, dest, to string, force, yes bool, logf engine.Logf) error {
+func runRecoverRestore(eng *engine.Engine, dleName, dateStr, dest, to, from string, force, yes bool, logf engine.Logf) error {
 	asOf, err := recoverDate(dateStr)
 	if err != nil {
 		return err
@@ -139,9 +140,9 @@ func runRecoverRestore(eng *engine.Engine, dleName, dateStr, dest, to string, fo
 		fmt.Printf("restoring DLE %s as of %s -> %s\n", eng.DisplayDLE(name), asOf, dst)
 		restoreOne := func() error {
 			if toHost != "" {
-				return eng.RestoreAsOfTo(name, asOf, toHost, out, logf)
+				return eng.RestoreAsOfTo(name, asOf, toHost, out, from, logf)
 			}
-			return eng.RestoreAsOf(name, asOf, out, force, logf)
+			return eng.RestoreAsOf(name, asOf, out, from, force, logf)
 		}
 		if err := restoreOne(); err != nil {
 			// When restoring every DLE, one that has no backup yet as of the date is

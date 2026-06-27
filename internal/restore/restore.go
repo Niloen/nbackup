@@ -16,7 +16,7 @@ type Step struct {
 	DLE      string
 	Level    int
 	Archiver string // archiver type that produced the archive
-	Compress string // compression codec to reverse before extracting
+	Compress string // compression scheme to reverse before extracting
 	Encrypt  string // encryption scheme to reverse before decompressing ("" = plaintext)
 }
 

@@ -228,7 +228,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	// Three slots, each ~90 KiB of payload (codec none), so one fits on a 256 KiB
+	// Three slots, each ~90 KiB of payload (scheme none), so one fits on a 256 KiB
 	// tape but two do not — the second slot forces a roll onto a fresh bay.
 	payloads := map[string]string{}
 	var ids []string

@@ -13,10 +13,10 @@ import (
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// dump.go is NBackup's write-side codec operation (the Dumper), the mirror of decode.go: it
+// dump.go is NBackup's write-side scheme operation (the Dumper), the mirror of decode.go: it
 // builds the tar source and the encode filters, places each transform on the client or the
 // server, and runs the transfer into a clerk-provided medium sink — then the clerk commits +
-// records. The codec and tar live here, in the operation; the clerk only lands and records
+// records. The scheme and tar live here, in the operation; the clerk only lands and records
 // bytes. The encoder depends on just one slice of the orchestrator — how to resolve a
 // dumptype's encode recipe — not the whole engine.
 type encoder struct {
@@ -44,7 +44,7 @@ type BackupSpec struct {
 // rides in the SOURCE (fused with tar on the client, so plaintext never leaves it); otherwise
 // it is a local Filter (server-side).
 type EncodePlacement struct {
-	Codec          string
+	CompressScheme string
 	CompressOpts   compress.Options
 	CompressClient bool
 	EncryptScheme  string
@@ -52,12 +52,12 @@ type EncodePlacement struct {
 	EncryptClient  bool
 }
 
-// encodePlacement resolves a dumptype's encode recipe from config: the global codec, the
-// per-dumptype encryption scheme/opts, and where each transform runs.
+// encodePlacement resolves a dumptype's encode recipe from config: the global compression
+// scheme, the per-dumptype encryption scheme/opts, and where each transform runs.
 func (e *Engine) encodePlacement(dumpType string) EncodePlacement {
 	encScheme, encOpts := e.encryptionFor(dumpType)
 	return EncodePlacement{
-		Codec:          e.codec,
+		CompressScheme: e.compressScheme,
 		CompressOpts:   e.fopts,
 		CompressClient: e.cfg.ResolveDumpType(dumpType).Compress == "client",
 		EncryptScheme:  encScheme,
@@ -72,7 +72,7 @@ func (e *Engine) encodePlacement(dumpType string) EncodePlacement {
 // non-nil, receives running (uncompressed, compressed) counts. It returns a Summary.
 func (enc *encoder) dumpArchive(session *clerk.Session, spec BackupSpec, prog func(uncompressed, compressed int64)) (clerk.Summary, error) {
 	pl := enc.placement(spec.DumpType)
-	compF, err := compress.Filter(pl.Codec, pl.CompressOpts)
+	compF, err := compress.Filter(pl.CompressScheme, pl.CompressOpts)
 	if err != nil {
 		return clerk.Summary{}, err
 	}
@@ -90,7 +90,7 @@ func (enc *encoder) dumpArchive(session *clerk.Session, spec BackupSpec, prog fu
 		Host:     spec.Host,
 		Path:     spec.Request.SourcePath,
 		Archiver: spec.Archiver.Name(),
-		Compress: pl.Codec,
+		Compress: pl.CompressScheme,
 		Encrypt:  pl.EncryptScheme,
 		Level:    spec.Request.Level,
 		BaseSlot: spec.BaseSlot,

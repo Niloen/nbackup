@@ -11,10 +11,10 @@ import (
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// decode.go is NBackup's read-side codec operation. A decoder reverses an
+// decode.go is NBackup's read-side scheme operation. A decoder reverses an
 // archive's transforms: given a raw byte stream a clerk endpoint already opened, it composes the
 // decode pipeline (decrypt → decompress → tar, each placed per the plan) into a sink (tar, hash,
-// or list). The clerk supplies only the bytes; the codec and the far-end tar live here, in the
+// or list). The clerk supplies only the bytes; the scheme and the far-end tar live here, in the
 // operation — as in a filesystem (cp/gzip compose the transform, the FS just
 // reads/writes).
 //
@@ -43,7 +43,7 @@ func (e *Engine) newDecoder() *decoder {
 // the engine (policy) — true when the key is client-held and reached over `--to`, so decrypt
 // runs on the target; otherwise it runs in the local server filters.
 type DecodePlan struct {
-	Codec         string
+	Compress      string
 	CompressOpts  compress.Options
 	Encrypt       string
 	DecryptOpts   crypt.Options
@@ -68,7 +68,7 @@ func (d *decoder) restoreArchive(rc io.ReadCloser, plan DecodePlan, archiverType
 	if err != nil {
 		return err
 	}
-	compF, err := compress.Filter(plan.Codec, plan.CompressOpts)
+	compF, err := compress.Filter(plan.Compress, plan.CompressOpts)
 	if err != nil {
 		return err
 	}
@@ -104,8 +104,8 @@ func (d *decoder) verifyChecksum(rc io.ReadCloser, sha string) (bool, error) {
 // listMembers decodes an archive's stream (a clerk endpoint, server-side filters) and lists its
 // members (`tar -t`) — the verify path's structural check. It returns the listed members and
 // the raw, role-tagged transfer error for the caller to classify and hint.
-func (d *decoder) listMembers(rc io.ReadCloser, codec, encrypt string, arch archiver.Archiver) ([]string, error) {
-	decrypt, decompress, err := d.decodeFilters(codec, encrypt)
+func (d *decoder) listMembers(rc io.ReadCloser, compressScheme, encrypt string, arch archiver.Archiver) ([]string, error) {
+	decrypt, decompress, err := d.decodeFilters(compressScheme, encrypt)
 	if err != nil {
 		return nil, err
 	}
@@ -119,8 +119,8 @@ func (d *decoder) listMembers(rc io.ReadCloser, codec, encrypt string, arch arch
 // decodeFilters returns the decrypt and decompress commands that reverse an archive's recorded
 // transforms, keyed by the decoder's default decode options. A none scheme yields an empty Cmd,
 // which a transfer skips.
-func (d *decoder) decodeFilters(codec, encrypt string) (decrypt, decompress programs.Cmd, err error) {
-	cf, err := compress.Filter(codec, d.fopts)
+func (d *decoder) decodeFilters(compressScheme, encrypt string) (decrypt, decompress programs.Cmd, err error) {
+	cf, err := compress.Filter(compressScheme, d.fopts)
 	if err != nil {
 		return programs.Cmd{}, programs.Cmd{}, err
 	}

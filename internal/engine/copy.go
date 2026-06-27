@@ -26,6 +26,7 @@ type copier struct {
 	placementOn   func(slotID, medium string) (catalog.Placement, bool) // a slot's copy on a medium
 	openCheck     func(medium string) error                             // the source medium opens (fail fast before reading)
 	prepareWriter func(medium string, spec archiveio.SlotSpec, now time.Time, logf Logf) (*writeTarget, error)
+	reclaimCopy   func(slotID, medium string) error // drop a prior copy on a removable target before a forced re-copy
 }
 
 // newCopier wires a copier to the engine's catalog, data path, and write machinery.
@@ -41,6 +42,7 @@ func (e *Engine) newCopier() *copier {
 			return err
 		},
 		prepareWriter: e.prepareWriter,
+		reclaimCopy:   e.reclaimTargetCopy,
 	}
 }
 
@@ -114,6 +116,17 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	// Validate the source copy exists on fromMedia up front (a clear error before reading).
 	if err := c.copySource(slotID, fromMedia); err != nil {
 		return err
+	}
+	// A forced re-copy onto a target that already holds the slot must reclaim the
+	// prior copy first; otherwise re-authoring lands new files and the catalog
+	// placement is overwritten, orphaning the old files (lost capacity). On removable
+	// media this deletes them; on tape it is a no-op (orphan-until-relabel, as documented).
+	if force {
+		if _, ok := c.placementOn(slotID, targetMedia); ok {
+			if err := c.reclaimCopy(slotID, targetMedia); err != nil {
+				return err
+			}
+		}
 	}
 	// Re-author the slot onto the target: each archive's already-compressed payload
 	// (the source copy's parts concatenated) is re-split into parts sized to the
