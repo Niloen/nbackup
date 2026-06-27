@@ -50,6 +50,9 @@ func init() {
 	// Same capacity model as disk: a byte budget reclaimed per slot, oldest first.
 	media.RegisterProfile("cloud", media.NewSizeProfile)
 	media.RegisterParams("cloud", "url", "prefix", "part_size")
+	// An object store accepts concurrent puts and deletes individual objects — eligible as a
+	// holding disk (e.g. S3 buffering a tape landing).
+	media.RegisterConcurrentWrite("cloud")
 }
 
 // slotsPrefix is the key prefix under which all slot files live, mirroring the

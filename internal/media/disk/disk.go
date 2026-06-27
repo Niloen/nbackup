@@ -39,6 +39,9 @@ func init() {
 	})
 	media.RegisterProfile("disk", media.NewSizeProfile)
 	media.RegisterParams("disk", "path", "part_size")
+	// A filesystem directory accepts concurrent appends and removes individual files — eligible
+	// as a holding disk.
+	media.RegisterConcurrentWrite("disk")
 }
 
 // fsStore is a fslike.Store over a local directory. Keys are slot-relative paths

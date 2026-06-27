@@ -838,14 +838,11 @@ func (c *Config) HoldingMedium() (string, bool) {
 	return "", false
 }
 
-// fslikeMediaTypes are the address-identified media that reclaim per archive and whose write
-// sink is unbounded — the only media a holding disk may be (concurrent dumpers need an
-// unbounded sink, and reclaim is per-archive).
-var fslikeMediaTypes = map[string]bool{"disk": true, "cloud": true}
-
-// validateHolding checks the holding-disk marker: at most one medium may set it; it must not
-// be the landing; and it must be a disk/cloud medium (a tape sink is neither per-archive
-// reclaimable nor safe for the parallel dumpers that share it).
+// validateHolding checks the structural rules of the holding-disk marker: at most one medium
+// may set it, and it must not be the landing (the holding disk buffers a different landing).
+// Whether the medium's type actually supports a holding disk (concurrent writes + per-archive
+// reclaim) is a media-layer capability the engine checks where the media registry is wired —
+// config stays free of medium-type knowledge.
 func (c *Config) validateHolding() error {
 	var holding string
 	for name, m := range c.Media {
@@ -856,9 +853,6 @@ func (c *Config) validateHolding() error {
 			return fmt.Errorf("media %s and %s both set holding: true — at most one holding disk", holding, name)
 		}
 		holding = name
-		if !fslikeMediaTypes[m.Type] {
-			return fmt.Errorf("media %s: holding: true requires a disk or cloud medium (got %q) — the holding disk reclaims per archive and the parallel dumpers need an unbounded write sink", name, m.Type)
-		}
 	}
 	if holding == "" {
 		return nil

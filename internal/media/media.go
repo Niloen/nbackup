@@ -243,6 +243,21 @@ var volumeFactories = map[string]VolumeFactory{}
 // RegisterVolume registers a Volume implementation under a medium type name.
 func RegisterVolume(typ string, f VolumeFactory) { volumeFactories[typ] = f }
 
+// concurrentWrite records medium types whose Volume accepts concurrent appends from parallel
+// writers and reclaims per file — the address-identified object stores (disk, cloud). A serial,
+// whole-volume medium (tape) shares one rolling volume and reclaims by relabel, so it is absent.
+var concurrentWrite = map[string]bool{}
+
+// RegisterConcurrentWrite marks a medium type as safe for concurrent writes and per-file reclaim.
+// A medium declares it next to RegisterVolume; the unregistered default is false (serial,
+// whole-volume — tape). It is the capability a holding disk requires.
+func RegisterConcurrentWrite(typ string) { concurrentWrite[typ] = true }
+
+// ConcurrentWrite reports whether a medium type accepts concurrent writes and per-file reclaim —
+// the property a holding disk needs: parallel dumpers share its write sink, and the taper
+// reclaims each archive as it drains to the landing. A serial, whole-volume medium returns false.
+func ConcurrentWrite(typ string) bool { return concurrentWrite[typ] }
+
 // OpenVolume constructs the Volume registered for the given medium type.
 func OpenVolume(typ string, opts Options) (Volume, error) {
 	f, ok := volumeFactories[typ]

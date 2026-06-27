@@ -130,6 +130,15 @@ func New(cfg *config.Config) (*Engine, error) {
 		}
 		limiters[mname] = ratelimit.NewLimiter(bps)
 	}
+	// A holding disk buffers the landing's writes: parallel dumpers share its write sink and the
+	// taper reclaims each archive as it drains, so its medium type must accept concurrent writes
+	// and per-file reclaim (disk, cloud). A serial, whole-volume medium (tape) cannot. Checked
+	// here, where the media registry is wired (config validates only the structural rules).
+	if holding, ok := cfg.HoldingMedium(); ok {
+		if t := cfg.Media[holding].Type; !media.ConcurrentWrite(t) {
+			return nil, fmt.Errorf("media %s: holding: true requires a disk or cloud medium (got %q) — the holding disk reclaims per archive and the parallel dumpers need an unbounded write sink", holding, t)
+		}
+	}
 	name, err := cfg.LandingName()
 	if err != nil {
 		return nil, err

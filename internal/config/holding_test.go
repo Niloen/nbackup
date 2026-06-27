@@ -24,21 +24,9 @@ sources:
 	}
 }
 
-// The holding disk must be a disk/cloud medium, not tape.
-func TestHolding_RejectsTape(t *testing.T) {
-	_, err := loadYAML(t, `
-landing: disk
-media:
-  disk: { type: disk, path: /tmp/d }
-  vault: { type: tape, dir: /tmp/v, holding: true }
-sources:
-  default:
-    localhost: [/home]
-`)
-	if err == nil || !strings.Contains(err.Error(), "requires a disk or cloud medium") {
-		t.Fatalf("want disk/cloud requirement, got %v", err)
-	}
-}
+// (A holding disk's medium-type capability — concurrent writes + per-archive reclaim — is a
+// media-layer property the engine checks; see the engine package's holding tests. config
+// validates only the structural rules below, free of medium-type knowledge.)
 
 // At most one holding medium.
 func TestHolding_RejectsTwo(t *testing.T) {

@@ -779,6 +779,27 @@ func TestHoldingDiskBuffersTape(t *testing.T) {
 	}
 }
 
+// A holding disk must be a medium that accepts concurrent writes and per-archive reclaim
+// (disk, cloud) — a tape sink is neither, so New rejects it. The capability is a media-layer
+// property (media.ConcurrentWrite), not a hardcoded type list in config.
+func TestHoldingDiskRejectsTape(t *testing.T) {
+	cfg := &config.Config{
+		Landing: "disk",
+		Media: map[string]config.Media{
+			"disk":  {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"vault": {Type: "tape", Holding: true, Params: map[string]string{"dir": t.TempDir()}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	_, err := New(cfg)
+	if err == nil || !strings.Contains(err.Error(), "requires a disk or cloud medium") {
+		t.Fatalf("want disk/cloud requirement error, got %v", err)
+	}
+}
+
 // TestHoldingDiskFlush drains leftover holding-disk archives to the landing. It builds the
 // post-crash state directly — archives staged on a disk and recorded in the catalog — then
 // runs Flush (as `nb flush`/auto-flush would) and confirms they move to tape, the disk is
