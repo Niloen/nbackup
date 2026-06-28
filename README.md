@@ -676,7 +676,7 @@ A tape landing normally clamps to one worker (a single drive can't interleave tw
 dumps), and a source slower than the drive shoe-shines it. Amanda's **holding disk**
 fixes both: mark a fast disk (or cloud) medium **`holding: true`** and it becomes a
 scratch buffer the dump flows through. Dumps land on it in **parallel**, then one
-taper drains each finished archive to the landing and frees the disk — so the drive
+drainer copies each finished archive to the landing and frees the disk — so the drive
 runs at disk speed and a small disk feeds a much larger tape.
 
 ```yaml
@@ -689,10 +689,14 @@ parallelism: { workers: 4 }
 
 The landing (`lto`) stays the authoritative copy; the holding disk is transient and
 visible in the catalog while in use. Its `capacity` back-pressures the dumpers (a slow
-tape makes them wait, never overfill); if the landing is unreachable the run fails
+tape makes them wait, never overfill); a DLE estimated larger than the disk skips the
+buffer and dumps straight to the landing; if the landing is unreachable the run fails
 without dropping data. A crashed run's un-flushed archives stay recorded on the
 holding disk — the next `nb dump` auto-drains them, or run `nb flush` to drain
-explicitly. The holding disk must be disk/cloud (not the landing), and there is one.
+explicitly. A holding disk must be disk/cloud (not the landing). You may mark **several**
+media `holding: true`; the dumpers spread their writes across them (more spindles =
+more aggregate write bandwidth and a larger combined buffer), and the one drainer copies
+them all to the landing.
 
 ## Requirements
 

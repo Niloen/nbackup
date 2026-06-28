@@ -826,39 +826,36 @@ func (c *Config) LandingMedia() (Media, error) {
 	return c.Media[name], nil
 }
 
-// HoldingMedium returns the name of the medium marked `holding: true`, if any — the fast
-// scratch buffer dumps flow through on the way to the landing. ok is false when no medium is
-// a holding disk (the normal direct-to-landing run). Validate guarantees at most one.
-func (c *Config) HoldingMedium() (string, bool) {
+// HoldingMedia returns the names of every medium marked `holding: true`, sorted — the fast
+// scratch buffers dumps flow through on the way to the landing. Empty when no medium is a holding
+// disk (the normal direct-to-landing run). Dumpers spread their writes across these; the drain
+// copies them all to the one landing. The order is deterministic so a run's disk allocation and
+// Flush's drain order are reproducible.
+func (c *Config) HoldingMedia() []string {
+	var names []string
 	for name, m := range c.Media {
 		if m.Holding {
-			return name, true
+			names = append(names, name)
 		}
 	}
-	return "", false
+	sort.Strings(names)
+	return names
 }
 
-// validateHolding checks the structural rules of the holding-disk marker: at most one medium
-// may set it, and it must not be the landing (the holding disk buffers a different landing).
-// Whether the medium's type actually supports a holding disk (concurrent writes + per-archive
+// validateHolding checks the structural rule of the holding-disk marker: a holding medium must
+// not be the landing (the holding disk buffers a different landing). Several media may be holding
+// disks. Whether a medium's type actually supports a holding disk (concurrent writes + per-archive
 // reclaim) is a media-layer capability the engine checks where the media registry is wired —
 // config stays free of medium-type knowledge.
 func (c *Config) validateHolding() error {
-	var holding string
+	landing, landErr := c.LandingName()
 	for name, m := range c.Media {
 		if !m.Holding {
 			continue
 		}
-		if holding != "" {
-			return fmt.Errorf("media %s and %s both set holding: true — at most one holding disk", holding, name)
+		if landErr == nil && name == landing {
+			return fmt.Errorf("media %s is both the landing and a holding disk — the holding disk buffers a different landing", name)
 		}
-		holding = name
-	}
-	if holding == "" {
-		return nil
-	}
-	if landing, err := c.LandingName(); err == nil && landing == holding {
-		return fmt.Errorf("media %s is both the landing and a holding disk — the holding disk buffers a different landing", holding)
 	}
 	return nil
 }

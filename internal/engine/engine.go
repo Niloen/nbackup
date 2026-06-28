@@ -143,7 +143,7 @@ func New(cfg *config.Config) (*Engine, error) {
 	// drain reclaims each archive as it lands, so its medium type must accept concurrent writes
 	// and per-file reclaim (disk, cloud). A serial, whole-volume medium (tape) cannot. Checked
 	// here, where the media registry is wired (config validates only the structural rules).
-	if holding, ok := cfg.HoldingMedium(); ok {
+	for _, holding := range cfg.HoldingMedia() {
 		if t := cfg.Media[holding].Type; !media.ConcurrentWrite(t) {
 			return nil, fmt.Errorf("media %s: holding: true requires a disk or cloud medium (got %q) — the holding disk reclaims per archive and the parallel dumpers need an unbounded write sink", holding, t)
 		}
@@ -1061,33 +1061,35 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 	}
 	spec := archiveio.SlotSpec{ID: slotID, Date: record.DateString(date), Sequence: seq, Generator: "nbdump", CreatedAt: now}
 
-	// The dump medium is the holding disk when one is configured (a medium marked `holding: true`,
-	// which buffers the landing's writes), else the landing itself. Either way the workers dump to
-	// it in parallel and the orchestrator (the run's main goroutine, its sole catalog writer)
-	// records each committed archive as it arrives — and, when buffering, drains it to the
-	// authoritative landing at disk speed so the landing's drive never paces the dumpers.
-	holding, buffering := e.cfg.HoldingMedium()
-	dumpMedium := e.mediumName
-	if buffering {
-		dumpMedium = holding
-	}
+	// The dump medium is a holding disk when one or more are configured (media marked
+	// `holding: true`, which buffer the landing's writes), else the landing itself. Either way the
+	// workers dump in parallel and the orchestrator (the run's main goroutine, its sole catalog
+	// writer) records each committed archive as it arrives — and, when buffering, spreads the
+	// dumps across the holding disks and drains them to the authoritative landing at disk speed so
+	// the landing's drive never paces the dumpers.
+	holdingNames := e.cfg.HoldingMedia()
+	buffering := len(holdingNames) > 0
 
-	dumpWT, err := e.prepareWriter(dumpMedium, spec, now, logf)
-	if err != nil {
-		return nil, err
-	}
-
-	// A spanning-capable landing (a finite tape changer, or part_size set) writes one drive
-	// serially: it cannot interleave two archives' parts and roll mid-write, so workers are
-	// clamped to 1. A holding disk is unbounded disk/cloud (parallel-safe) and never clamps.
 	workers := e.cfg.Workers()
-	if !buffering && workers > 1 && dumpWT.lib.CanSpan(dumpWT.partSize) {
-		logf.log("medium %q can span volumes; running 1 worker (a single drive writes serially)", dumpMedium)
-		workers = 1
+	var dumpWT *writeTarget
+	if !buffering {
+		// Direct: dump straight to the landing. Open it here so a spanning-capable single drive
+		// (a finite tape changer, or part_size set) clamps to 1 worker — it writes one drive
+		// serially and cannot interleave two archives' parts and roll mid-write. Holding disks are
+		// unbounded disk/cloud (parallel-safe) and never clamp; their writers open in runOrchestrated.
+		var err error
+		dumpWT, err = e.prepareWriter(e.mediumName, spec, now, logf)
+		if err != nil {
+			return nil, err
+		}
+		if workers > 1 && dumpWT.lib.CanSpan(dumpWT.partSize) {
+			logf.log("medium %q can span volumes; running 1 worker (a single drive writes serially)", e.mediumName)
+			workers = 1
+		}
 	}
 
 	tr, runLogf := e.progressTracker(slotID, workers, plan.Items, fileSink, logf)
-	sealed, err := e.runOrchestrated(plan, workers, spec, dumpMedium, dumpWT, buffering, tr, now, runLogf)
+	sealed, err := e.runOrchestrated(plan, workers, spec, holdingNames, dumpWT, tr, now, runLogf)
 	if err != nil {
 		return nil, err
 	}
@@ -1146,16 +1148,17 @@ func planProgress(items []planner.Item) []progress.Plan {
 // parallelism.workers > 1 it runs that many workers concurrently, bounded by a semaphore; the
 // first error stops scheduling further items and is returned. Each worker writes a distinct
 // object into the slot, which the medium must allow concurrently (disk does) and the slot Writer
-// serializes its bookkeeping. gate (nil for a direct dump) is the holding disk's capacity
-// back-pressure: a worker charges its archive's bytes and blocks while the disk is over capacity,
-// and a drain failure aborts the gate so the workers stop and the run fails.
-func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Session, commitCh chan<- handoff, directCh chan<- planner.Item, capBytes int64, gate *byteGate, tr *progress.Tracker, logf Logf) error {
+// serializes its bookkeeping. pool (nil for a direct dump, when session is the landing) is the
+// holding disks' allocator + capacity back-pressure: a worker acquires a disk, charges its
+// archive's bytes, and the next acquire blocks while every disk is over capacity; a drain failure
+// aborts the pool so the workers stop and the run fails.
+func (e *Engine) runWorkers(items []planner.Item, workers int, pool *holdingPool, session *clerk.Session, commitCh chan<- handoff, directCh chan<- planner.Item, tr *progress.Tracker, logf Logf) error {
 	if workers <= 1 || len(items) <= 1 {
 		for _, item := range items {
-			if gate != nil && gate.err() != nil {
+			if pool != nil && pool.err() != nil {
 				break
 			}
-			if err := e.dumpAndHandoff(session, item, commitCh, directCh, capBytes, gate, tr, logf); err != nil {
+			if err := e.dumpAndHandoff(pool, session, item, commitCh, directCh, tr, logf); err != nil {
 				return err
 			}
 		}
@@ -1180,7 +1183,7 @@ func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Se
 	failed := func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return firstErr != nil || (gate != nil && gate.err() != nil)
+		return firstErr != nil || (pool != nil && pool.err() != nil)
 	}
 	for _, item := range items {
 		if failed() {
@@ -1194,7 +1197,7 @@ func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Se
 			if failed() {
 				return
 			}
-			if err := e.dumpAndHandoff(session, it, commitCh, directCh, capBytes, gate, tr, logf); err != nil {
+			if err := e.dumpAndHandoff(pool, session, it, commitCh, directCh, tr, logf); err != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
@@ -1207,47 +1210,48 @@ func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Se
 	return firstErr
 }
 
-// dumpAndHandoff processes one planned DLE. An oversized DLE (one that won't fit the holding disk)
-// is routed to the orchestrator over directCh to be dumped straight to the landing — the worker
-// hands off the item without dumping it and moves on. Otherwise the worker dumps it to its medium
-// and hands the committed archive over commitCh; with a holding gate set it charges the archive's
-// bytes and then blocks while the disk is over capacity (transient back-pressure), returning the
-// gate's abort error so the worker stops if the drain has failed.
-func (e *Engine) dumpAndHandoff(session *clerk.Session, item planner.Item, commitCh chan<- handoff, directCh chan<- planner.Item, capBytes int64, gate *byteGate, tr *progress.Tracker, logf Logf) error {
-	if directCh != nil && routesDirect(item, capBytes) {
-		directCh <- item
+// dumpAndHandoff processes one planned DLE. When buffering (pool set), the worker acquires a
+// holding disk for the DLE; a DLE too big for every disk is routed to the orchestrator over
+// directCh to be dumped straight to the landing (the worker hands off the item without dumping it
+// and moves on). Otherwise it dumps to the acquired disk, charges the archive's bytes, and hands
+// the committed archive over commitCh (tagged with which disk). The next acquire is the
+// back-pressure — it blocks while every disk is over capacity and returns the pool's abort error
+// so the worker stops if the drain has failed. The direct path (pool nil) dumps to the landing.
+func (e *Engine) dumpAndHandoff(pool *holdingPool, session *clerk.Session, item planner.Item, commitCh chan<- handoff, directCh chan<- planner.Item, tr *progress.Tracker, logf Logf) error {
+	if pool != nil {
+		idx, direct, err := pool.acquire(item.EstBytes)
+		if err != nil {
+			return err
+		}
+		if direct {
+			directCh <- item
+			return nil
+		}
+		arch, pos, err := e.backupItem(pool.session(idx), item, tr, logf)
+		if err != nil {
+			return err
+		}
+		pool.charge(idx, arch.Compressed)
+		commitCh <- handoff{arch: arch, pos: pos, dleID: item.DLE.ID(), disk: idx}
 		return nil
 	}
 	arch, pos, err := e.backupItem(session, item, tr, logf)
 	if err != nil {
 		return err
 	}
-	if gate != nil {
-		gate.charge(arch.Compressed)
-	}
 	commitCh <- handoff{arch: arch, pos: pos, dleID: item.DLE.ID()}
-	if gate != nil {
-		return gate.waitUnderCapacity()
-	}
 	return nil
 }
 
-// routesDirect reports whether a DLE is too big to stage on the holding disk and must dump
-// straight to the landing: its estimated size meets or exceeds the disk's capacity. A zero
-// capacity (unbounded holding) never routes direct; a zero estimate (size unknown) buffers. The
-// estimate is an uncompressed upper bound, so the test is conservative — it may route a DLE direct
-// that would have fit once compressed, which is always safe (it just dumps at landing speed).
-func routesDirect(item planner.Item, capBytes int64) bool {
-	return capBytes > 0 && item.EstBytes >= capBytes
-}
-
 // handoff is one committed archive passed from a worker to the orchestrator: the committed
-// archive (full metadata + member list, so the orchestrator needs no catalog read), its
-// positions on the dump medium, and the DLE's display id for progress/logging.
+// archive (full metadata + member list, so the orchestrator needs no catalog read), its positions
+// on the dump medium, the DLE's display id for progress/logging, and (when buffering) the index of
+// the holding disk it landed on, so the drain reads, reclaims, and releases the right disk.
 type handoff struct {
 	arch  record.Archive
 	pos   record.ArchivePos
 	dleID string
+	disk  int
 }
 
 // runOrchestrated executes a dump: the workers dump to the dump medium as background goroutines,
@@ -1255,24 +1259,36 @@ type handoff struct {
 // placement (and, when buffering, drains it to the landing). It is the one path Run takes for
 // every dump — direct (dump medium == landing) or buffered (dump medium == a holding disk). The
 // orchestrator is the sole catalog writer, so the catalog needs no lock.
-func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio.SlotSpec, dumpMedium string, dumpWT *writeTarget, buffering bool, tr *progress.Tracker, now time.Time, logf Logf) (*record.Slot, error) {
-	dumpSession := e.clerk.OpenSlot(dumpWT.w, dumpMedium)
+func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio.SlotSpec, holdingNames []string, dumpWT *writeTarget, tr *progress.Tracker, now time.Time, logf Logf) (*record.Slot, error) {
+	buffering := len(holdingNames) > 0
 
 	var (
-		gate        *byteGate
+		pool        *holdingPool   // buffering: the holding disks + their capacity back-pressure
+		dumpSession *clerk.Session // direct: the landing session workers dump to
 		landW       *archiveio.Writer
 		landSession *clerk.Session
-		holdVol     media.Volume
 		realSink    archiveio.VolumeSink
 		sinkReqCh   chan sinkReq
 		directCh    chan planner.Item // buffering only: oversized DLEs a worker routes direct
-		capBytes    int64             // holding capacity; the routing threshold (0 = unbounded)
 	)
 	if buffering {
+		// One writer per holding disk; the dumpers spread their writes across them (the pool
+		// allocates), and the drain reads each archive back from the disk it landed on.
+		disks := make([]holdingDisk, len(holdingNames))
+		for i, name := range holdingNames {
+			wt, err := e.prepareWriter(name, spec, now, logf)
+			if err != nil {
+				tr.SetPhase(progress.PhaseFailed)
+				return nil, fmt.Errorf("open holding disk %q: %w", name, err)
+			}
+			capB, _ := e.cfg.Media[name].CapacityBytes()
+			disks[i] = holdingDisk{name: name, wt: wt, session: e.clerk.OpenSlot(wt.w, name), holdVol: wt.lib.Volume(), capacity: capB}
+		}
+		pool = newHoldingPool(disks)
+
 		// Landing writer for the drain, built over a proxy sink: the drainer goroutine streams the
 		// bytes, but its NextPart/PlaceRecord funnel through sinkReqCh to the orchestrator, which
 		// runs the real sink — so any volume roll's catalog write lands on the sole catalog writer.
-		// The holding disk's capacity back-pressures the dumpers through the gate.
 		sinkReqCh = make(chan sinkReq)
 		landWT, err := e.prepareWriterWith(e.mediumName, spec, now, logf, func(s archiveio.VolumeSink) archiveio.VolumeSink {
 			realSink = s
@@ -1284,23 +1300,22 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio
 		}
 		landW = landWT.w
 		landSession = e.clerk.OpenSlot(landW, e.mediumName)
-		holdVol = dumpWT.lib.Volume()
-		capBytes, _ = e.cfg.Media[dumpMedium].CapacityBytes()
-		gate = newByteGate(capBytes)
-		// A worker routes an oversized DLE here (it can't fit the disk) for the orchestrator to dump
-		// straight to the landing; sized to the whole plan so a worker never blocks routing.
+		// A worker routes a too-big-for-every-disk DLE here for the orchestrator to dump straight to
+		// the landing; sized to the whole plan so a worker never blocks routing.
 		directCh = make(chan planner.Item, len(plan.Items))
+	} else {
+		dumpSession = e.clerk.OpenSlot(dumpWT.w, e.mediumName)
 	}
 
-	// Workers dump every DLE: a buffered one lands on the dump medium (handed over commitCh), an
+	// Workers dump every DLE: a buffered one lands on a holding disk (handed over commitCh), an
 	// oversized one is routed direct to the landing (over directCh). Both buffers hold the whole
-	// plan so a worker never blocks handing off (the holding disk back-pressures via the gate).
+	// plan so a worker never blocks handing off (the holding disks back-pressure via the pool).
 	commitCh := make(chan handoff, len(plan.Items))
 
 	// Dumpers in the background; close the queues when they finish (the orchestrator's exit signal).
 	var dumpErr error
 	go func() {
-		dumpErr = e.runWorkers(plan.Items, workers, dumpSession, commitCh, directCh, capBytes, gate, tr, logf)
+		dumpErr = e.runWorkers(plan.Items, workers, pool, dumpSession, commitCh, directCh, tr, logf)
 		close(commitCh)
 		if directCh != nil {
 			close(directCh)
@@ -1310,9 +1325,9 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio
 	slotMeta := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
 	var orchErr error
 	if buffering {
-		orchErr = e.orchestrateBuffered(commitCh, directCh, dumpMedium, slotMeta, landW, landSession, realSink, sinkReqCh, holdVol, gate, tr, logf)
+		orchErr = e.orchestrateBuffered(commitCh, directCh, slotMeta, landW, landSession, realSink, sinkReqCh, pool, tr, logf)
 	} else {
-		orchErr = e.orchestrateDirect(commitCh, dumpMedium, slotMeta)
+		orchErr = e.orchestrateDirect(commitCh, e.mediumName, slotMeta)
 	}
 
 	if err := firstErr(orchErr, dumpErr); err != nil {
@@ -1357,16 +1372,16 @@ func (e *Engine) orchestrateDirect(commitCh <-chan handoff, dumpMedium string, s
 //   - sinkReqCh: the drainer's proxy sink needs a NextPart/PlaceRecord — run the real sink here
 //     (a volume roll's catalog writes thus land on this, the sole catalog writer).
 //   - copyDone: a landing write finished — record its placement (a copy also reclaims the holding
-//     copy and releases the gate; a direct dump just records).
+//     copy and releases the disk's budget in the pool; a direct dump just records).
 //
 // Exactly one landing write is in flight at a time (one serial writer), dispatched only when the
-// drainer is idle, copies-first: draining the disk keeps the gate from stalling dumpers, and
-// directs (which never charge the gate) slot into the gaps. On error the loop stops dispatching and
+// drainer is idle, copies-first: draining the disks keeps the pool from stalling dumpers, and
+// directs (which never charge the pool) slot into the gaps. On error the loop stops dispatching and
 // drains any in-flight write (still serving sink requests) so the drainer never deadlocks on the funnel.
-func (e *Engine) orchestrateBuffered(commitCh <-chan handoff, directCh <-chan planner.Item, holding string, slotMeta *record.Slot, landW *archiveio.Writer, landSession *clerk.Session, realSink archiveio.VolumeSink, sinkReqCh chan sinkReq, holdVol media.Volume, gate *byteGate, tr *progress.Tracker, logf Logf) error {
+func (e *Engine) orchestrateBuffered(commitCh <-chan handoff, directCh <-chan planner.Item, slotMeta *record.Slot, landW *archiveio.Writer, landSession *clerk.Session, realSink archiveio.VolumeSink, sinkReqCh chan sinkReq, pool *holdingPool, tr *progress.Tracker, logf Logf) error {
 	workCh := make(chan drainJob, 1)
 	copyDone := make(chan copyResult, 1)
-	go e.drainer(landW, landSession, slotMeta, holdVol, workCh, copyDone, tr, logf)
+	go e.drainer(landW, landSession, slotMeta, pool, workCh, copyDone, tr, logf)
 	defer close(workCh) // stops the drainer once the loop is done
 
 	var pendingCopy []handoff
@@ -1380,7 +1395,7 @@ func (e *Engine) orchestrateBuffered(commitCh <-chan handoff, directCh <-chan pl
 				commitCh = nil // drained; stop selecting the closed channel
 				break
 			}
-			if err := e.cat.AddArchive(slotMeta, holding, it.arch, it.pos); err != nil {
+			if err := e.cat.AddArchive(slotMeta, pool.name(it.disk), it.arch, it.pos); err != nil {
 				failErr = err
 				break
 			}
@@ -1399,12 +1414,12 @@ func (e *Engine) orchestrateBuffered(commitCh <-chan handoff, directCh <-chan pl
 			case res.err != nil:
 				failErr = res.err
 			case res.direct:
-				// A direct dump has no holding copy and no gate charge — just record the landing.
+				// A direct dump has no holding copy and no pool charge — just record the landing.
 				if err := e.cat.AddArchive(slotMeta, e.mediumName, res.arch, res.pos); err != nil {
 					failErr = err
 				}
 			default:
-				if err := e.finalizeDrain(slotMeta, holding, holdVol, res.it, res.arch, res.pos, gate, tr, logf); err != nil {
+				if err := e.finalizeDrain(slotMeta, res.it, res.arch, res.pos, pool, tr, logf); err != nil {
 					failErr = err
 				}
 			}
@@ -1424,7 +1439,7 @@ func (e *Engine) orchestrateBuffered(commitCh <-chan handoff, directCh <-chan pl
 		}
 	}
 	if failErr != nil {
-		gate.abort(failErr) // wake blocked dumpers so they stop and the run fails
+		pool.abort(failErr) // wake blocked dumpers so they stop and the run fails
 		for busy {          // let an in-flight write finish so the drainer isn't stuck on the funnel
 			select {
 			case req := <-sinkReqCh:

@@ -13,7 +13,6 @@ import (
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
 )
@@ -925,6 +924,172 @@ func TestHoldingDiskBuffersTape(t *testing.T) {
 	}
 }
 
+// TestHoldingDisksSpread runs a buffered dump across TWO holding disks: the dumpers spread their
+// archives over both (round-robin), the single drainer copies each from the disk it landed on, and
+// both disks are reclaimed. Capacities are sized so neither disk alone could hold all the DLEs, so
+// the run depends on using both. Every DLE must land on tape, both disks must end empty, and all
+// must restore from tape alone.
+func TestHoldingDisksSpread(t *testing.T) {
+	var sources []config.DLE
+	type want struct{ file, body string }
+	bodies := map[string]want{} // src dir -> expected file + content
+	for _, n := range []string{"a", "b", "c", "d"} {
+		src := t.TempDir()
+		body := "payload-" + n
+		write(t, filepath.Join(src, n+".txt"), body)
+		sources = append(sources, config.DLE{Host: "localhost", Path: src})
+		bodies[src] = want{file: n + ".txt", body: body}
+	}
+
+	cfg := &config.Config{
+		Landing: "lto",
+		Media: map[string]config.Media{
+			"lto": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "4"}},
+			"s1":  {Type: "disk", Holding: true, Capacity: "500MB", Params: map[string]string{"path": t.TempDir()}},
+			"s2":  {Type: "disk", Holding: true, Capacity: "500MB", Params: map[string]string{"path": t.TempDir()}},
+		},
+		Sources:   sources,
+		Workdir:   t.TempDir(),
+		StateDir:  t.TempDir(),
+		AutoLabel: true,
+	}
+	cfg.Compress.Scheme = "none"
+	cfg.Parallelism.Workers = 2
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("multi-disk holding dump: %v", err)
+	}
+
+	// Every authoritative copy is on tape; both holding disks have been fully reclaimed.
+	for _, p := range eng.cat.Placements(s.ID) {
+		if p.Medium == "s1" || p.Medium == "s2" {
+			t.Errorf("holding disk %q should hold no placement after the run, got %v", p.Medium, p)
+		}
+	}
+	for _, h := range []string{"s1", "s2"} {
+		vol, _, _, err := eng.mediumVolume(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if files, _ := vol.Files(); len(files) != 0 {
+			t.Errorf("holding disk %q must be empty after the run, has %d file(s)", h, len(files))
+		}
+	}
+
+	for src, w := range bodies {
+		dest := t.TempDir()
+		name := config.DLE{Host: "localhost", Path: src}.Name()
+		if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
+			t.Fatalf("restore %s from tape: %v", name, err)
+		}
+		assertContent(t, filepath.Join(dest, w.file), w.body)
+	}
+}
+
+// TestHoldingDisksFlush drains leftover archives staged across TWO holding disks. It builds the
+// post-crash state directly — two slots, one stranded on each disk — then runs Flush and confirms
+// it gathers the slots across both disks (the union), drains each from the right disk, reclaims
+// both, and the chains restore from tape. This exercises the multi-disk Flush path (per-disk holdVol
+// resolution, per-disk placement reclaim) that a single-disk Flush cannot.
+func TestHoldingDisksFlush(t *testing.T) {
+	workdir, stateDir := t.TempDir(), t.TempDir()
+	d1, d2 := t.TempDir(), t.TempDir()
+	src1, src2 := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(src1, "one.txt"), "stranded on disk one")
+	write(t, filepath.Join(src2, "two.txt"), "stranded on disk two")
+
+	// Stage: dump each DLE onto its own scratch disk acting as a landing, leaving a catalogued slot
+	// stranded on each — the state a crashed multi-disk holding run leaves behind.
+	stage := func(disk, path string, src config.DLE, date time.Time) *record.Slot {
+		cfg := &config.Config{
+			Landing:  disk,
+			Media:    map[string]config.Media{disk: {Type: "disk", Params: map[string]string{"path": path}}},
+			Sources:  []config.DLE{src},
+			Workdir:  workdir,
+			StateDir: stateDir,
+		}
+		cfg.Compress.Scheme = "none"
+		eng, err := New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+			t.Skipf("GNU tar not available")
+		}
+		s, err := eng.Run(date, nil)
+		if err != nil {
+			t.Fatalf("stage dump on %s: %v", disk, err)
+		}
+		return s
+	}
+	s1 := stage("s1", d1, config.DLE{Host: "localhost", Path: src1}, time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC))
+	s2 := stage("s2", d2, config.DLE{Host: "localhost", Path: src2}, time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC))
+
+	// Now treat both scratch disks as holding disks for a tape landing (same workdir, so the catalog
+	// still holds both scratch placements) and flush.
+	flushCfg := &config.Config{
+		Landing: "lto",
+		Media: map[string]config.Media{
+			"lto": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
+			"s1":  {Type: "disk", Holding: true, Params: map[string]string{"path": d1}},
+			"s2":  {Type: "disk", Holding: true, Params: map[string]string{"path": d2}},
+		},
+		Sources:   []config.DLE{{Host: "localhost", Path: src1}, {Host: "localhost", Path: src2}},
+		Workdir:   workdir,
+		StateDir:  stateDir,
+		AutoLabel: true,
+	}
+	flushCfg.Compress.Scheme = "none"
+	flushEng, err := New(flushCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := flushEng.Flush(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), logfDiscard)
+	if err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("flush moved %d archives, want 2 (one per disk)", n)
+	}
+
+	for h := range map[string]struct{}{"s1": {}, "s2": {}} {
+		vol, _, _, err := flushEng.mediumVolume(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if files, _ := vol.Files(); len(files) != 0 {
+			t.Errorf("holding disk %q must be empty after flush, has %d file(s)", h, len(files))
+		}
+	}
+	for _, tc := range []struct {
+		s    *record.Slot
+		src  string
+		file string
+		want string
+	}{
+		{s1, src1, "one.txt", "stranded on disk one"},
+		{s2, src2, "two.txt", "stranded on disk two"},
+	} {
+		if !flushEng.archiveOnLanding(tc.s.ID, config.DLE{Host: "localhost", Path: tc.src}.Name(), 0) {
+			t.Errorf("archive %s must be on the tape landing after flush", tc.s.ID)
+		}
+		dest := t.TempDir()
+		if err := flushEng.Restore(tc.s.ID, config.DLE{Host: "localhost", Path: tc.src}.Name(), dest, false, nil); err != nil {
+			t.Fatalf("restore %s from tape after flush: %v", tc.s.ID, err)
+		}
+		assertContent(t, filepath.Join(dest, tc.file), tc.want)
+	}
+}
+
 // TestHoldingDiskDrainSpansVolumes exercises the drain's volume-roll path: the tape landing has a
 // small volume_size, so each staged archive spans several reels while it copies. Every roll runs
 // the real WriteSink — and its catalog write — on the orchestrator via the sink funnel, while the
@@ -1002,29 +1167,6 @@ func TestHoldingDiskDrainSpansVolumes(t *testing.T) {
 	}
 }
 
-// routesDirect decides whether a DLE bypasses the holding disk and dumps straight to the landing:
-// its estimate meets/exceeds the disk capacity. Unbounded holding (cap 0) never routes direct; an
-// unknown estimate (0) buffers.
-func TestRoutesDirect(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		est, cap int64
-		want     bool
-	}{
-		{"over capacity routes direct", 600, 500, true},
-		{"at capacity routes direct", 500, 500, true},
-		{"under capacity buffers", 400, 500, false},
-		{"unbounded holding never direct", 10 << 30, 0, false},
-		{"unknown estimate buffers", 0, 500, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := routesDirect(planner.Item{EstBytes: tc.est}, tc.cap); got != tc.want {
-				t.Errorf("routesDirect(est=%d, cap=%d) = %v, want %v", tc.est, tc.cap, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestHoldingDiskRoutesOversizedDirect: with a holding capacity between a small and a large DLE,
 // the large one is dumped straight to the landing (it would not fit the disk) while the small one
 // buffers and drains. Both land on tape, the disk ends empty, and both restore from tape.
@@ -1063,7 +1205,7 @@ func TestHoldingDiskRoutesOversizedDirect(t *testing.T) {
 	capBytes, _ := cfg.Media["scratch"].CapacityBytes()
 	var directCount int
 	for _, it := range plan.Items {
-		if routesDirect(it, capBytes) {
+		if capBytes > 0 && it.EstBytes >= capBytes { // too big for the single holding disk
 			directCount++
 		}
 	}
