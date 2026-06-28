@@ -70,11 +70,15 @@ func Compute(slots []*record.Slot, minAge time.Duration, now time.Time) Floor {
 		}
 	}
 	young := func(s *record.Slot) bool {
-		if minAge <= 0 {
+		if minAge <= 0 || s.SealedAt.IsZero() {
 			return false
 		}
-		date, _ := record.ParseDateField(s.Date)
-		return now.Sub(date) < minAge
+		// Age is measured from when the slot was committed (SealedAt), not its
+		// Date: the Date is day-granular, so comparing it would collapse every
+		// minimum_age under 24h to a whole-day step (a slot committed this morning
+		// would read as exactly "today old"). SealedAt is the real commit instant,
+		// so a sub-day minimum_age keeps only slots actually that recent.
+		return now.Sub(s.SealedAt) < minAge
 	}
 	// 1) Age floor: a young slot pins every archive it carries.
 	for _, s := range slots {

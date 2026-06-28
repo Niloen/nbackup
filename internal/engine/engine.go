@@ -1000,7 +1000,14 @@ func minRoom(a, b int64) int64 {
 }
 
 // Run executes the plan for a date, producing one sealed slot.
-func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
+func (e *Engine) Run(now time.Time, logf Logf) (*record.Slot, error) {
+	// `now` is the run's single time source: the precise instant the slot is stamped
+	// committed (CreatedAt/SealedAt) and the moment retention is judged against. The
+	// run date — the logical key for the slot id, planning, and restore ordering — is
+	// just its day. Keeping the two distinct lets two runs on one day carry distinct
+	// commit instants, so a sub-day minimum_age can tell them apart.
+	now = now.UTC()
+	date := now.Truncate(24 * time.Hour)
 	// Guard the restore-order invariant: restore replays a DLE's slots in date order,
 	// but the archiver's incremental snapshots advance in dump (wall-clock) order. A
 	// run dated earlier than a slot already sealed would splice an out-of-order
@@ -1054,7 +1061,6 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 		}
 	}
 
-	now := time.Now().UTC()
 	slotID, seq, err := e.allocSlotID(date)
 	if err != nil {
 		return nil, err
@@ -1341,7 +1347,7 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio
 	if buffering {
 		sealSession = landSession
 	}
-	sealed, err := sealSession.Finish(time.Now().UTC())
+	sealed, err := sealSession.Finish(now)
 	if err != nil {
 		tr.SetPhase(progress.PhaseFailed)
 		return nil, err

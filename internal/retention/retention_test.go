@@ -8,9 +8,20 @@ import (
 )
 
 // mkSlot builds a slot dated `date` (YYYY-MM-DD) holding the given archives,
-// each "dle:level".
+// each "dle:level". It seals the slot at the date's midnight, so age tests that
+// reason in whole days behave as the date implies; mkSlotAt sets a precise commit
+// instant for sub-day age tests.
 func mkSlot(id, date string, archives ...record.Archive) *record.Slot {
-	return &record.Slot{ID: id, Date: date, Archives: archives}
+	t, _ := record.ParseDateField(date)
+	return mkSlotAt(id, date, t, archives...)
+}
+
+// mkSlotAt is mkSlot with an explicit commit instant (SealedAt), for exercising
+// minimum_age below a day. It derives Sequence from the id so same-date slots order
+// correctly under record.Less (which hasNewerFull relies on).
+func mkSlotAt(id, date string, sealedAt time.Time, archives ...record.Archive) *record.Slot {
+	_, seq, _ := record.ParseID(id)
+	return &record.Slot{ID: id, Date: date, Sequence: seq, SealedAt: sealedAt, Archives: archives}
 }
 
 func arch(dle string, level int) record.Archive { return record.Archive{DLE: dle, Level: level} }
@@ -114,5 +125,31 @@ func TestFloor_MinAgeReasonInDays(t *testing.T) {
 
 	if reason, _ := got.Reason("slot-2026-01-04"); reason != "within minimum age (7d)" {
 		t.Errorf("reason = %q, want \"within minimum age (7d)\"", reason)
+	}
+}
+
+// Age is measured from the commit instant, not the day-granular Date: two slots
+// dated the same day are judged independently by a sub-day minimum_age, so one
+// committed within the window is kept while an earlier one that day ages out.
+// This is the case where a same-day incremental on an old full would otherwise
+// pin that full forever because every slot dated "today" read as age zero.
+func TestFloor_MinAgeSubDay(t *testing.T) {
+	now := time.Date(2026, 1, 4, 11, 0, 0, 0, time.UTC)
+	minAge := time.Hour
+	slots := []*record.Slot{
+		// A newer full exists, so neither old slot is a last recovery path; only
+		// age and the live chain can pin them. The young incremental builds on the
+		// NEWER full, so it cannot drag the old full back into a chain.
+		mkSlotAt("slot-2026-01-04", "2026-01-04", time.Date(2026, 1, 4, 4, 0, 0, 0, time.UTC), arch("app", 0)),     // old full, committed 04:00 (7h ago)
+		mkSlotAt("slot-2026-01-04.2", "2026-01-04", time.Date(2026, 1, 4, 8, 0, 0, 0, time.UTC), arch("app", 0)),   // newer full, committed 08:00 (3h ago)
+		mkSlotAt("slot-2026-01-04.3", "2026-01-04", time.Date(2026, 1, 4, 10, 30, 0, 0, time.UTC), arch("app", 1)), // incremental, committed 10:30 (30m ago, young)
+	}
+	got := Compute(slots, minAge, now)
+
+	if got.Keeps("slot-2026-01-04") {
+		t.Errorf("old full committed 7h ago must age out under a 1h minimum_age; got %v", got)
+	}
+	if !got.Keeps("slot-2026-01-04.3") {
+		t.Errorf("incremental committed 30m ago must be kept within the 1h minimum_age")
 	}
 }

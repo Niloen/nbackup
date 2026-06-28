@@ -1792,9 +1792,12 @@ func recordFullOn(t *testing.T, eng *Engine, date, dle, volume string) {
 func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, bytes int64) {
 	t.Helper()
 	id := record.IDFromParts(date, 1)
-	s := record.NewSlot(id, date, 1, "test", time.Now())
+	// Seal at the slot's own date, not wall-clock: retention measures age from the
+	// commit instant, so a slot meant to read as dated `date` must be sealed then.
+	at, _ := record.ParseDateField(date)
+	s := record.NewSlot(id, date, 1, "test", at)
 	s.AddArchive(record.Archive{DLE: dle, Level: 0, Compressed: bytes})
-	if err := s.Seal(time.Now()); err != nil {
+	if err := s.Seal(at); err != nil {
 		t.Fatal(err)
 	}
 	pos := catalog.ArchivePos{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: volume, Epoch: 1, Pos: 1}}, Commit: catalog.FilePos{Label: volume, Epoch: 1, Pos: 2}}
@@ -1808,9 +1811,10 @@ func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, byte
 func recordFullOnOtherMedium(t *testing.T, eng *Engine, date, dle, medium string) {
 	t.Helper()
 	id := record.IDFromParts(date, 1)
-	s := record.NewSlot(id, date, 1, "test", time.Now())
+	at, _ := record.ParseDateField(date)
+	s := record.NewSlot(id, date, 1, "test", at)
 	s.AddArchive(record.Archive{DLE: dle, Level: 0})
-	if err := s.Seal(time.Now()); err != nil {
+	if err := s.Seal(at); err != nil {
 		t.Fatal(err)
 	}
 	pos := catalog.ArchivePos{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: medium, Pos: 1}}, Commit: catalog.FilePos{Label: medium, Pos: 2}}

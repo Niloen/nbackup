@@ -282,8 +282,16 @@ func newDumpCmd(a *app) *cobra.Command {
 			attachOperator(eng)
 			eng.SetEstimateProgress(estimateProgress(a.quiet))
 			eng.SetRunProgress(runProgress(a.quiet))
+			// Stamp the slot at the real commit instant so retention can measure its
+			// age to sub-day precision; the run date (above, used for guards and
+			// planning) is only its day. An explicit --date pins the instant to that
+			// date's midnight — a coarse but reproducible override.
+			now := date
+			if dateStr == "" {
+				now = time.Now().UTC()
+			}
 			return a.runReported(cfg, report.Run{Command: report.CommandDump, ExitClass: "dump-failed"}, func() (report.Run, error) {
-				s, err := eng.Run(date, a.logf())
+				s, err := eng.Run(now, a.logf())
 				if err != nil {
 					return report.Run{}, err
 				}
@@ -798,9 +806,16 @@ func newPruneCmd(a *app) *cobra.Command {
 				return err
 			}
 			defer release()
-			now, err := ParseDate(dateStr)
-			if err != nil {
-				return err
+			// Retention measures age from each slot's commit instant, so the
+			// reference 'now' must be a real wall-clock time, not a date truncated
+			// to midnight — otherwise a sub-day minimum_age can never elapse within
+			// the run day. An explicit --date stays a coarse, reproducible override.
+			now := time.Now().UTC()
+			if dateStr != "" {
+				var err error
+				if now, err = ParseDate(dateStr); err != nil {
+					return err
+				}
 			}
 			if dryRun {
 				eligible, _, err := eng.Prune(args[0], now, false, a.logf())
@@ -831,7 +846,7 @@ func newPruneCmd(a *app) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "preview without deleting")
-	cmd.Flags().StringVar(&dateStr, "date", "", "reference 'now' date YYYY-MM-DD (default today)")
+	cmd.Flags().StringVar(&dateStr, "date", "", "reference 'now' date YYYY-MM-DD (default: the current time)")
 	return cmd
 }
 
