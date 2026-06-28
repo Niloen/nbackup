@@ -25,14 +25,19 @@ func (localExec) Stat(path string) error {
 	return err
 }
 
+func (localExec) Size(path string) (int64, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return fi.Size(), nil
+}
+
 func (localExec) MkdirAll(dir string) error { return os.MkdirAll(dir, 0o755) }
 
-func (localExec) Remove(path string) error {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
+func (localExec) Remove(path string) error { return os.RemoveAll(path) }
+
+func (localExec) Rename(oldpath, newpath string) error { return os.Rename(oldpath, newpath) }
 
 func (localExec) CopyFile(src, dst string) error {
 	in, err := os.Open(src)

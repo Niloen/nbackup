@@ -872,6 +872,36 @@ func newFlushCmd(a *app) *cobra.Command {
 	return cmd
 }
 
+// newResetCmd implements `nb reset <dle>`: clear a DLE's incremental state so its next
+// dump starts a fresh full. The escape hatch when a chain goes bad — an interrupted dump
+// that left a dead snapshot, or a base that no longer matches the source.
+func newResetCmd(a *app) *cobra.Command {
+	return &cobra.Command{
+		Use:     "reset <dle>",
+		Short:   "Clear a DLE's incremental state so its next dump is a full",
+		Long:    "Discard a DLE's incremental state (its GNU tar snapshot library) so the next `nb dump` starts a fresh full and a new incremental chain. Use this when an incremental chain has gone bad — e.g. a dump interrupted out of space left a dead snapshot, so incrementals would re-dump everything. The catalog and existing archives are untouched; only the per-host incremental state is cleared. The DLE is named by its host:path identity (as `nb plan` shows) or its config name.",
+		Example: "  nb reset web1:/var/www",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := a.load()
+			if err != nil {
+				return err
+			}
+			eng, release, err := a.engineFor(cfg, true) // touches per-host state: lock out a concurrent dump
+			if err != nil {
+				return err
+			}
+			defer release()
+			id, err := eng.ResetState(args[0])
+			if err != nil {
+				return err
+			}
+			fmt.Printf("reset incremental state for %s — its next dump will be a full\n", id)
+			return nil
+		},
+	}
+}
+
 // printNothingToReclaim explains a zero-reclaim prune. Tape reclaims whole volumes
 // (relabel), never individual slots, so "fits capacity" would be misleading there —
 // it is a no-op by design even when the library is over capacity. Say so, and point

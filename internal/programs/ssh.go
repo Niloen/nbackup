@@ -3,6 +3,7 @@ package programs
 import (
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -69,9 +70,21 @@ func (s sshExec) Command(name string, args ...string) *exec.Cmd {
 
 func (s sshExec) Stat(path string) error    { return s.Command("test", "-e", path).Run() }
 func (s sshExec) MkdirAll(dir string) error { return s.Command("mkdir", "-p", dir).Run() }
-func (s sshExec) Remove(path string) error  { return s.Command("rm", "-f", path).Run() }
+func (s sshExec) Remove(path string) error  { return s.Command("rm", "-rf", "--", path).Run() }
 func (s sshExec) CopyFile(src, dst string) error {
 	return s.Command("cp", "--", src, dst).Run()
+}
+
+func (s sshExec) Size(path string) (int64, error) {
+	out, err := s.Command("stat", "-c", "%s", "--", path).Output()
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+}
+
+func (s sshExec) Rename(oldpath, newpath string) error {
+	return s.Command("mv", "-f", "--", oldpath, newpath).Run()
 }
 
 func (s sshExec) TempFile(pattern string) (string, error) {

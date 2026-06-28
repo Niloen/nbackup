@@ -136,6 +136,7 @@ details one item when given an id (`nb slot slot-2026-06-21`, `nb medium lto`).
 | `nb label`           | Label a volume (required for tape before its first dump) |
 | `nb load`            | Load a volume into a medium's drive (bay or shelf reel)   |
 | `nb prune <medium>`  | Delete a medium's slots past its cycle/capacity limits  |
+| `nb reset <dle>`     | Clear a DLE's incremental state so its next dump is a full |
 | `nb rebuild`         | Rebuild the local slot-index cache from media            |
 
 Run `nb help <command>` (or `nb <command> --help`) for per-command usage and

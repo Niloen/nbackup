@@ -143,6 +143,20 @@ runs on the client, that root is a client path, and nothing in catalog/engine/pl
 changes. The state is precious — losing a DLE's base forces its next run to a full (the
 drill posture warns).
 
+**A dump's new state enters the library only when its archive commits.** tar writes the
+next snapshot to a `.new` side file seeded from the committed base, which it reads but
+never mutates; the `BackupSource.Promote` hook renames `.new` over the live snapshot only
+after the archive is durably committed to the dump medium (Amanda's rename-on-success,
+bound — as in Amanda — to the dump landing, not the later flush). So a dump killed
+mid-stream (out of space, a signal) leaves the base intact and a retry at the same level
+still works, and `HasBase` rejects a present-but-empty snapshot (the corpse a killed dump
+of an earlier design left behind) so a dead base can never masquerade as usable. When a
+planned incremental has no usable base — missing, empty, or a moved `state_dir` — the
+engine **forces a full** with a warning rather than failing or dumping a full-sized
+"incremental" onto nothing (`forceFullWhereBaseMissing`, again Amanda's level-0 fallback).
+`nb reset <dle>` is the deliberate version of the same: it discards a DLE's incremental
+state so the next dump starts a fresh chain.
+
 *Where* the root lives is a **host** property, not the archiver's: a `state_dir`
 configured per host (`hosts.<h>.state_dir`), with a fleet-wide default
 (`state_dir:`) and, unset, `nbackup-state`. It is deliberately a dedicated location

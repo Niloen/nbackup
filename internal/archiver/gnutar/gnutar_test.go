@@ -172,6 +172,105 @@ func TestEstimate(t *testing.T) {
 	}
 }
 
+// TestSnapshotPromotionIsAtomic verifies a dump's snapshot only enters the library once
+// the archive is committed: an uncommitted (failed/interrupted) dump leaves the committed
+// base byte-for-byte intact, so a retry builds on a valid base rather than a corpse. This
+// is the regression guard for "an out-of-space dump zeroed the snapshot, so the next
+// incremental re-dumped everything".
+func TestSnapshotPromotionIsAtomic(t *testing.T) {
+	src := t.TempDir()
+	stateRoot := t.TempDir()
+	m := newArchiver(t, stateRoot)
+	write(t, filepath.Join(src, "a.txt"), "alpha")
+
+	// A committed full leaves a usable base.
+	backup(t, m, archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 0, BaseLevel: -1}, filepath.Join(t.TempDir(), "l0.tar"))
+	if !m.HasBase("app", 0) {
+		t.Fatal("L0 base should exist after a committed full")
+	}
+	live := filepath.Join(stateRoot, "app", "L0.snar")
+	good, err := os.ReadFile(live)
+	if err != nil || len(good) == 0 {
+		t.Fatalf("read committed L0 snapshot: err=%v len=%d", err, len(good))
+	}
+
+	// Start a fresh L0 dump, run tar, but never promote it — the archive never committed
+	// (e.g. the medium filled). Only Cleanup runs, as on the failure path.
+	bs, err := m.BackupSource(archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 0, BaseLevel: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, wait, err := bs.Exec.RunPipe(nil, bs.Stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, out)
+	out.Close()
+	if err := wait(); err != nil {
+		t.Fatal(err)
+	}
+	if bs.Cleanup != nil {
+		bs.Cleanup()
+	}
+
+	after, err := os.ReadFile(live)
+	if err != nil {
+		t.Fatalf("committed base vanished after an uncommitted dump: %v", err)
+	}
+	if string(after) != string(good) {
+		t.Fatal("committed base was mutated by an uncommitted dump (it must be untouched until promote)")
+	}
+	if !m.HasBase("app", 0) {
+		t.Fatal("base should still be usable after an uncommitted dump")
+	}
+}
+
+// TestHasBaseRejectsEmptySnapshot verifies a present-but-empty snapshot (the corpse a
+// killed dump can leave behind) does not count as a usable base, so the engine forces a
+// full rather than building a full-sized incremental on it.
+func TestHasBaseRejectsEmptySnapshot(t *testing.T) {
+	stateRoot := t.TempDir()
+	m := newArchiver(t, stateRoot)
+	dir := filepath.Join(stateRoot, "app")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	snap := filepath.Join(dir, "L0.snar")
+	if err := os.WriteFile(snap, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if m.HasBase("app", 0) {
+		t.Fatal("an empty snapshot must not count as a usable base")
+	}
+	if err := os.WriteFile(snap, []byte("GNU tar-1.34-2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !m.HasBase("app", 0) {
+		t.Fatal("a non-empty snapshot should count as a usable base")
+	}
+}
+
+// TestResetStateClearsBase verifies reset discards a DLE's incremental state (so the next
+// dump is forced to a full) and is a no-op for a DLE with nothing stored.
+func TestResetStateClearsBase(t *testing.T) {
+	src := t.TempDir()
+	m := newArchiver(t, t.TempDir())
+	write(t, filepath.Join(src, "a.txt"), "alpha")
+	backup(t, m, archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 0, BaseLevel: -1}, filepath.Join(t.TempDir(), "l0.tar"))
+	if !m.HasBase("app", 0) {
+		t.Fatal("base should exist after a full")
+	}
+	if err := m.ResetState("app"); err != nil {
+		t.Fatal(err)
+	}
+	if m.HasBase("app", 0) {
+		t.Fatal("base should be gone after reset")
+	}
+	if err := m.ResetState("never-dumped"); err != nil {
+		t.Fatalf("reset of a DLE with no state should be a no-op: %v", err)
+	}
+}
+
 // backup runs the archiver's backup pipeline source to outFile, the way the writer does
 // (run the tar stage, drain its stdout, finish), exercising the new BackupSource API.
 func backup(t *testing.T, m archiver.Archiver, req archiver.BackupRequest, outFile string) {
@@ -198,6 +297,13 @@ func backup(t *testing.T, m archiver.Archiver, req archiver.BackupRequest, outFi
 	}
 	if _, err := bs.Finish(); err != nil {
 		t.Fatalf("finish L%d: %v", req.Level, err)
+	}
+	// A real dump promotes the new snapshot into the library only once the archive is
+	// committed; this helper models that success path.
+	if bs.Promote != nil {
+		if err := bs.Promote(); err != nil {
+			t.Fatalf("promote L%d: %v", req.Level, err)
+		}
 	}
 	if bs.Cleanup != nil {
 		bs.Cleanup()

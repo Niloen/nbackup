@@ -152,6 +152,86 @@ func TestRepeatedLevelRestore(t *testing.T) {
 	}
 }
 
+// TestResetForcesFullNextRun verifies the recovery path for a bad incremental chain:
+// after a full, `nb reset` clears the DLE's incremental state, and the next plan/run is
+// downgraded to a full (with a warning) rather than an incremental built on a missing
+// base. This is the end-to-end guard for the out-of-space failure that left the snapshot
+// dead and made the next "incremental" re-dump everything.
+func TestResetForcesFullNextRun(t *testing.T) {
+	src := t.TempDir()
+	catalogDir := t.TempDir()
+	write(t, filepath.Join(src, "keep.txt"), "v1")
+
+	cfg := &config.Config{
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	day1 := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	if _, err := eng.Run(day1, nil); err != nil {
+		t.Fatalf("day1 run: %v", err)
+	}
+
+	// Without a reset, day2 would be an incremental (a usable base exists).
+	day2 := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
+	if got := eng.Plan(day2).Items[0].Level; got != 1 {
+		t.Fatalf("precondition: day2 should plan L1, got L%d", got)
+	}
+
+	id, err := eng.ResetState(config.DLE{Host: "localhost", Path: src}.ID())
+	if err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if id == "" {
+		t.Fatal("reset should return the DLE identity")
+	}
+
+	// The base is gone, so the plan is forced back to a full, with a warning.
+	plan := eng.Plan(day2)
+	if got := plan.Items[0].Level; got != 0 {
+		t.Fatalf("after reset, day2 should plan L0, got L%d", got)
+	}
+	if !hasWarning(plan.Warnings, "forcing a full") {
+		t.Fatalf("expected a forced-full warning, got %v", plan.Warnings)
+	}
+
+	// And a real run honors it: day2 dumps a full, not an incremental.
+	time.Sleep(1100 * time.Millisecond)
+	s2, err := eng.Run(day2, nil)
+	if err != nil {
+		t.Fatalf("day2 run: %v", err)
+	}
+	if got := s2.Archives[0].Level; got != 0 {
+		t.Fatalf("after reset, day2 run should be L0, got L%d", got)
+	}
+
+	// Resetting an unknown DLE is an error (you can only reset something configured).
+	if _, err := eng.ResetState("nope:/x"); err == nil {
+		t.Fatal("reset of an unconfigured DLE should error")
+	}
+}
+
+func hasWarning(warnings []string, substr string) bool {
+	for _, w := range warnings {
+		if strings.Contains(w, substr) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestValidatePlan checks that a plan preview surfaces the config problems the
 // size estimates would otherwise swallow: an unknown archiver is fatal, a
 // missing source path warns but does not fail, and a clean config is silent.
