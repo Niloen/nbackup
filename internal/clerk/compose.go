@@ -50,34 +50,25 @@ func (s *Session) CopyArchive(meta record.Archive, payload io.Reader) error {
 	return s.clerk.cat.AddArchive(s.w.SlotMeta(), s.medium, arch, pos)
 }
 
-// Summary is what the operation needs back to track and log a finished archive — never its
-// parts or storage record.
-type Summary struct {
-	FileCount    int
-	Uncompressed int64
-	Compressed   int64
-	Compress     string // the compression scheme applied ("none" => stored, not compressed)
-}
-
 // Commit finalizes a dumped archive: it merges the producer's raw-stream stats (file count,
 // uncompressed size, member list) into the metered archive WriteArchive returned, writes the
-// commit footer + member index, caches the members server-side, and returns a Summary plus the
-// committed archive and its on-medium position. It does NOT record the placement: a dump's
-// workers run in parallel and the catalog has no lock, so the caller hands the committed archive
-// to the run's single orchestrator to record (see engine.Run).
-func (s *Session) Commit(measured record.Archive, parts []record.FilePos, fileCount int, uncompressed int64, members []string) (Summary, record.Archive, record.ArchivePos, error) {
+// commit footer + member index, caches the members server-side, and returns the committed archive
+// and its on-medium position. It does NOT record the placement: a dump's workers run in parallel
+// and the catalog has no lock, so the caller hands the committed archive to the run's single
+// orchestrator to record (see engine.Run).
+func (s *Session) Commit(measured record.Archive, parts []record.FilePos, fileCount int, uncompressed int64, members []string) (record.Archive, record.ArchivePos, error) {
 	arch := measured
 	arch.FileCount = fileCount
 	arch.Uncompressed = uncompressed
 	arch.Members = members
 	pos, err := s.w.Commit(arch, parts)
 	if err != nil {
-		return Summary{}, record.Archive{}, record.ArchivePos{}, err
+		return record.Archive{}, record.ArchivePos{}, err
 	}
 	if len(arch.Members) > 0 {
 		_ = s.clerk.mindex.Store(s.w.SlotID(), arch.DLE, arch.Level, arch.Members)
 	}
-	return Summary{FileCount: arch.FileCount, Uncompressed: arch.Uncompressed, Compressed: arch.Compressed, Compress: arch.Compress}, arch, pos, nil
+	return arch, pos, nil
 }
 
 // Finish closes the slot: it seals the in-memory slot and stamps it sealed in the catalog. The

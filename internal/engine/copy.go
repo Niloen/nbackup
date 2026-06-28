@@ -200,6 +200,6 @@ type copySink struct {
 	meta    record.Archive
 }
 
-func (s *copySink) Drain(in io.Reader) error {
-	return s.session.CopyArchive(s.meta, in)
+func (s *copySink) Drain(in io.Reader) (xfer.Committer, error) {
+	return nil, s.session.CopyArchive(s.meta, in)
 }
