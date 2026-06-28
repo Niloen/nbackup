@@ -1109,13 +1109,13 @@ func planProgress(items []planner.Item) []progress.Plan {
 // serializes its bookkeeping. gate (nil for a direct dump) is the holding disk's capacity
 // back-pressure: a worker charges its archive's bytes and blocks while the disk is over capacity,
 // and a drain failure aborts the gate so the workers stop and the run fails.
-func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Session, commitCh chan<- handoff, gate *byteGate, tr *progress.Tracker, logf Logf) error {
+func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Session, commitCh chan<- handoff, directCh chan<- planner.Item, capBytes int64, gate *byteGate, tr *progress.Tracker, logf Logf) error {
 	if workers <= 1 || len(items) <= 1 {
 		for _, item := range items {
 			if gate != nil && gate.err() != nil {
 				break
 			}
-			if err := e.dumpAndHandoff(session, item, commitCh, gate, tr, logf); err != nil {
+			if err := e.dumpAndHandoff(session, item, commitCh, directCh, capBytes, gate, tr, logf); err != nil {
 				return err
 			}
 		}
@@ -1154,7 +1154,7 @@ func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Se
 			if failed() {
 				return
 			}
-			if err := e.dumpAndHandoff(session, it, commitCh, gate, tr, logf); err != nil {
+			if err := e.dumpAndHandoff(session, it, commitCh, directCh, capBytes, gate, tr, logf); err != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
@@ -1167,11 +1167,17 @@ func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Se
 	return firstErr
 }
 
-// dumpAndHandoff dumps one item to the worker's medium and hands the committed archive to the
-// orchestrator over commitCh. When a holding gate is set, it charges the archive's bytes before
-// the handoff and then blocks while the disk is over capacity (back-pressure) — returning the
+// dumpAndHandoff processes one planned DLE. An oversized DLE (one that won't fit the holding disk)
+// is routed to the orchestrator over directCh to be dumped straight to the landing — the worker
+// hands off the item without dumping it and moves on. Otherwise the worker dumps it to its medium
+// and hands the committed archive over commitCh; with a holding gate set it charges the archive's
+// bytes and then blocks while the disk is over capacity (transient back-pressure), returning the
 // gate's abort error so the worker stops if the drain has failed.
-func (e *Engine) dumpAndHandoff(session *clerk.Session, item planner.Item, commitCh chan<- handoff, gate *byteGate, tr *progress.Tracker, logf Logf) error {
+func (e *Engine) dumpAndHandoff(session *clerk.Session, item planner.Item, commitCh chan<- handoff, directCh chan<- planner.Item, capBytes int64, gate *byteGate, tr *progress.Tracker, logf Logf) error {
+	if directCh != nil && routesDirect(item, capBytes) {
+		directCh <- item
+		return nil
+	}
 	arch, pos, err := e.backupItem(session, item, tr, logf)
 	if err != nil {
 		return err
@@ -1184,6 +1190,15 @@ func (e *Engine) dumpAndHandoff(session *clerk.Session, item planner.Item, commi
 		return gate.waitUnderCapacity()
 	}
 	return nil
+}
+
+// routesDirect reports whether a DLE is too big to stage on the holding disk and must dump
+// straight to the landing: its estimated size meets or exceeds the disk's capacity. A zero
+// capacity (unbounded holding) never routes direct; a zero estimate (size unknown) buffers. The
+// estimate is an uncompressed upper bound, so the test is conservative — it may route a DLE direct
+// that would have fit once compressed, which is always safe (it just dumps at landing speed).
+func routesDirect(item planner.Item, capBytes int64) bool {
+	return capBytes > 0 && item.EstBytes >= capBytes
 }
 
 // handoff is one committed archive passed from a worker to the orchestrator: the committed
@@ -1203,10 +1218,6 @@ type handoff struct {
 func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio.SlotSpec, dumpMedium string, dumpWT *writeTarget, buffering bool, tr *progress.Tracker, now time.Time, logf Logf) (*record.Slot, error) {
 	dumpSession := e.clerk.OpenSlot(dumpWT.w, dumpMedium)
 
-	// Workers hand each committed archive over commitCh; the buffer holds the whole plan so a
-	// worker never blocks on the orchestrator (a holding disk back-pressures via the gate instead).
-	commitCh := make(chan handoff, len(plan.Items))
-
 	var (
 		gate        *byteGate
 		landW       *archiveio.Writer
@@ -1214,6 +1225,8 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio
 		holdVol     media.Volume
 		realSink    archiveio.VolumeSink
 		sinkReqCh   chan sinkReq
+		directCh    chan planner.Item // buffering only: oversized DLEs a worker routes direct
+		capBytes    int64             // holding capacity; the routing threshold (0 = unbounded)
 	)
 	if buffering {
 		// Landing writer for the drain, built over a proxy sink: the drainer goroutine streams the
@@ -1232,21 +1245,32 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio
 		landW = landWT.w
 		landSession = e.clerk.OpenSlot(landW, e.mediumName)
 		holdVol = dumpWT.lib.Volume()
-		capBytes, _ := e.cfg.Media[dumpMedium].CapacityBytes()
+		capBytes, _ = e.cfg.Media[dumpMedium].CapacityBytes()
 		gate = newByteGate(capBytes)
+		// A worker routes an oversized DLE here (it can't fit the disk) for the orchestrator to dump
+		// straight to the landing; sized to the whole plan so a worker never blocks routing.
+		directCh = make(chan planner.Item, len(plan.Items))
 	}
 
-	// Dumpers in the background; close the queue when they finish (the orchestrator's exit signal).
+	// Workers dump every DLE: a buffered one lands on the dump medium (handed over commitCh), an
+	// oversized one is routed direct to the landing (over directCh). Both buffers hold the whole
+	// plan so a worker never blocks handing off (the holding disk back-pressures via the gate).
+	commitCh := make(chan handoff, len(plan.Items))
+
+	// Dumpers in the background; close the queues when they finish (the orchestrator's exit signal).
 	var dumpErr error
 	go func() {
-		dumpErr = e.runWorkers(plan.Items, workers, dumpSession, commitCh, gate, tr, logf)
+		dumpErr = e.runWorkers(plan.Items, workers, dumpSession, commitCh, directCh, capBytes, gate, tr, logf)
 		close(commitCh)
+		if directCh != nil {
+			close(directCh)
+		}
 	}()
 
 	slotMeta := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
 	var orchErr error
 	if buffering {
-		orchErr = e.orchestrateBuffered(commitCh, dumpMedium, slotMeta, landW, realSink, sinkReqCh, holdVol, gate, tr, logf)
+		orchErr = e.orchestrateBuffered(commitCh, directCh, dumpMedium, slotMeta, landW, landSession, realSink, sinkReqCh, holdVol, gate, tr, logf)
 	} else {
 		orchErr = e.orchestrateDirect(commitCh, dumpMedium, slotMeta)
 	}
@@ -1284,61 +1308,84 @@ func (e *Engine) orchestrateDirect(commitCh <-chan handoff, dumpMedium string, s
 }
 
 // orchestrateBuffered is the responsive control loop for a buffered dump. It owns the catalog and
-// the real landing sink (realSink), and hands the byte-copy of each staged archive to a single
-// drainer goroutine. Its select multiplexes three events so control never blocks on the byte
-// stream:
+// the real landing sink (realSink), and hands each landing write — a staged-archive copy or an
+// oversized DLE's direct dump — to a single drainer goroutine. Its select multiplexes the events
+// so control never blocks on the byte stream:
 //   - commitCh: a dumper committed to the holding disk — record its placement (the live view),
-//     queue it to drain. This keeps happening while a copy streams, so the catalog stays fresh.
+//     queue it to copy. This keeps happening while a write streams, so the catalog stays fresh.
+//   - directCh: a worker routed an oversized DLE direct — queue it to dump straight to the landing.
 //   - sinkReqCh: the drainer's proxy sink needs a NextPart/PlaceRecord — run the real sink here
 //     (a volume roll's catalog writes thus land on this, the sole catalog writer).
-//   - copyDone: a copy finished — record its landing placement and reclaim the holding copy
-//     (finalizeDrain), then the back-pressure is released.
+//   - copyDone: a landing write finished — record its placement (a copy also reclaims the holding
+//     copy and releases the gate; a direct dump just records).
 //
-// Exactly one copy is in flight at a time (the landing is written by one serial writer), so a
-// new archive is dispatched only when the drainer is idle. On error the loop stops dispatching and
-// drains any in-flight copy (still serving sink requests) so the drainer never deadlocks on the
-// funnel.
-func (e *Engine) orchestrateBuffered(commitCh <-chan handoff, holding string, slotMeta *record.Slot, landW *archiveio.Writer, realSink archiveio.VolumeSink, sinkReqCh chan sinkReq, holdVol media.Volume, gate *byteGate, tr *progress.Tracker, logf Logf) error {
-	workCh := make(chan handoff, 1)
+// Exactly one landing write is in flight at a time (one serial writer), dispatched only when the
+// drainer is idle, copies-first: draining the disk keeps the gate from stalling dumpers, and
+// directs (which never charge the gate) slot into the gaps. On error the loop stops dispatching and
+// drains any in-flight write (still serving sink requests) so the drainer never deadlocks on the funnel.
+func (e *Engine) orchestrateBuffered(commitCh <-chan handoff, directCh <-chan planner.Item, holding string, slotMeta *record.Slot, landW *archiveio.Writer, landSession *clerk.Session, realSink archiveio.VolumeSink, sinkReqCh chan sinkReq, holdVol media.Volume, gate *byteGate, tr *progress.Tracker, logf Logf) error {
+	workCh := make(chan drainJob, 1)
 	copyDone := make(chan copyResult, 1)
-	go e.drainer(landW, slotMeta, holdVol, workCh, copyDone, tr)
+	go e.drainer(landW, landSession, slotMeta, holdVol, workCh, copyDone, tr, logf)
 	defer close(workCh) // stops the drainer once the loop is done
 
-	var pending []handoff
+	var pendingCopy []handoff
+	var pendingDirect []planner.Item
 	var failErr error
-	open, busy := true, false
-	for failErr == nil && (open || len(pending) > 0 || busy) {
+	busy := false
+	for failErr == nil && (commitCh != nil || directCh != nil || len(pendingCopy) > 0 || len(pendingDirect) > 0 || busy) {
 		select {
 		case it, ok := <-commitCh:
 			if !ok {
-				open, commitCh = false, nil // drained; stop selecting the closed channel
+				commitCh = nil // drained; stop selecting the closed channel
 				break
 			}
 			if err := e.cat.AddArchive(slotMeta, holding, it.arch, it.pos); err != nil {
 				failErr = err
 				break
 			}
-			pending = append(pending, it)
+			pendingCopy = append(pendingCopy, it)
+		case d, ok := <-directCh:
+			if !ok {
+				directCh = nil
+				break
+			}
+			pendingDirect = append(pendingDirect, d)
 		case req := <-sinkReqCh:
 			req.reply <- serve(realSink, req)
 		case res := <-copyDone:
 			busy = false
-			if res.err != nil {
+			switch {
+			case res.err != nil:
 				failErr = res.err
-				break
-			}
-			if err := e.finalizeDrain(slotMeta, holding, holdVol, res.it, res.arch, res.pos, gate, tr, logf); err != nil {
-				failErr = err
+			case res.direct:
+				// A direct dump has no holding copy and no gate charge — just record the landing.
+				if err := e.cat.AddArchive(slotMeta, e.mediumName, res.arch, res.pos); err != nil {
+					failErr = err
+				}
+			default:
+				if err := e.finalizeDrain(slotMeta, holding, holdVol, res.it, res.arch, res.pos, gate, tr, logf); err != nil {
+					failErr = err
+				}
 			}
 		}
-		if failErr == nil && !busy && len(pending) > 0 {
-			workCh <- pending[0] // buffered(1), drainer idle: never blocks
-			pending, busy = pending[1:], true
+		if failErr == nil && !busy { // dispatch one landing write, copies-first
+			if len(pendingCopy) > 0 {
+				j := pendingCopy[0]
+				pendingCopy = pendingCopy[1:]
+				workCh <- drainJob{copy: &j}
+				busy = true
+			} else if len(pendingDirect) > 0 {
+				d := pendingDirect[0]
+				pendingDirect = pendingDirect[1:]
+				workCh <- drainJob{direct: &d}
+				busy = true
+			}
 		}
 	}
 	if failErr != nil {
 		gate.abort(failErr) // wake blocked dumpers so they stop and the run fails
-		for busy {          // let an in-flight copy finish so the drainer isn't stuck on the funnel
+		for busy {          // let an in-flight write finish so the drainer isn't stuck on the funnel
 			select {
 			case req := <-sinkReqCh:
 				req.reply <- serve(realSink, req)

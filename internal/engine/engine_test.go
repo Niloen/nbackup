@@ -13,6 +13,7 @@ import (
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
 )
@@ -919,6 +920,147 @@ func TestHoldingDiskDrainSpansVolumes(t *testing.T) {
 		name := config.DLE{Host: "localhost", Path: tc.src}.Name()
 		if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
 			t.Fatalf("restore %s from spanned tape: %v", name, err)
+		}
+		assertContent(t, filepath.Join(dest, tc.file), tc.want)
+	}
+}
+
+// routesDirect decides whether a DLE bypasses the holding disk and dumps straight to the landing:
+// its estimate meets/exceeds the disk capacity. Unbounded holding (cap 0) never routes direct; an
+// unknown estimate (0) buffers.
+func TestRoutesDirect(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		est, cap int64
+		want     bool
+	}{
+		{"over capacity routes direct", 600, 500, true},
+		{"at capacity routes direct", 500, 500, true},
+		{"under capacity buffers", 400, 500, false},
+		{"unbounded holding never direct", 10 << 30, 0, false},
+		{"unknown estimate buffers", 0, 500, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := routesDirect(planner.Item{EstBytes: tc.est}, tc.cap); got != tc.want {
+				t.Errorf("routesDirect(est=%d, cap=%d) = %v, want %v", tc.est, tc.cap, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHoldingDiskRoutesOversizedDirect: with a holding capacity between a small and a large DLE,
+// the large one is dumped straight to the landing (it would not fit the disk) while the small one
+// buffers and drains. Both land on tape, the disk ends empty, and both restore from tape.
+func TestHoldingDiskRoutesOversizedDirect(t *testing.T) {
+	srcSmall, srcBig := t.TempDir(), t.TempDir()
+	smallBody := "small payload"
+	bigBody := strings.Repeat("oversized-direct-payload-", 48*1024) // ~1.2 MiB, over the 512 KiB cap
+	write(t, filepath.Join(srcSmall, "s.txt"), smallBody)
+	write(t, filepath.Join(srcBig, "b.txt"), bigBody)
+	scratchDir := t.TempDir()
+
+	cfg := &config.Config{
+		Landing:   "lto",
+		AutoLabel: true,
+		Media: map[string]config.Media{
+			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "4"}},
+			"scratch": {Type: "disk", Holding: true, Capacity: "512KB", Params: map[string]string{"path": scratchDir}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: srcSmall}, {Host: "localhost", Path: srcBig}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	cfg.Parallelism.Workers = 2
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	// Guard the premise: the big DLE's estimate must exceed the capacity (routed direct) and the
+	// small one's must not — otherwise the test wouldn't exercise the direct path.
+	plan := eng.Plan(time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC))
+	capBytes, _ := cfg.Media["scratch"].CapacityBytes()
+	var directCount int
+	for _, it := range plan.Items {
+		if routesDirect(it, capBytes) {
+			directCount++
+		}
+	}
+	if directCount != 1 {
+		t.Skipf("estimates didn't split as intended (%d of %d route direct); skipping", directCount, len(plan.Items))
+	}
+
+	s, err := eng.Run(time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("mixed direct/buffered dump: %v", err)
+	}
+	for _, p := range eng.cat.Placements(s.ID) {
+		if p.Medium == "scratch" {
+			t.Errorf("holding disk should hold no placement after the run, got %v", p)
+		}
+	}
+	if scratchVol, _, _, err := eng.mediumVolume("scratch"); err != nil {
+		t.Fatal(err)
+	} else if files, _ := scratchVol.Files(); len(files) != 0 {
+		t.Errorf("holding disk must be empty after the run, has %d file(s)", len(files))
+	}
+	for _, tc := range []struct{ src, file, want string }{
+		{srcSmall, "s.txt", smallBody},
+		{srcBig, "b.txt", bigBody},
+	} {
+		dest := t.TempDir()
+		name := config.DLE{Host: "localhost", Path: tc.src}.Name()
+		if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
+			t.Fatalf("restore %s from tape: %v", name, err)
+		}
+		assertContent(t, filepath.Join(dest, tc.file), tc.want)
+	}
+}
+
+// TestHoldingDiskAllDirect: a holding capacity smaller than every DLE routes them all direct — the
+// run degenerates to serial landing dumps with the disk untouched, and still restores from tape.
+func TestHoldingDiskAllDirect(t *testing.T) {
+	srcA, srcB := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(srcA, "a.txt"), "alpha payload")
+	write(t, filepath.Join(srcB, "b.txt"), "bravo payload")
+
+	cfg := &config.Config{
+		Landing:   "lto",
+		AutoLabel: true,
+		Media: map[string]config.Media{
+			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "4"}},
+			"scratch": {Type: "disk", Holding: true, Capacity: "1KB", Params: map[string]string{"path": t.TempDir()}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: srcA}, {Host: "localhost", Path: srcB}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	cfg.Parallelism.Workers = 2
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	s, err := eng.Run(time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("all-direct dump: %v", err)
+	}
+	for _, tc := range []struct{ src, file, want string }{
+		{srcA, "a.txt", "alpha payload"},
+		{srcB, "b.txt", "bravo payload"},
+	} {
+		dest := t.TempDir()
+		name := config.DLE{Host: "localhost", Path: tc.src}.Name()
+		if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
+			t.Fatalf("restore %s from tape: %v", name, err)
 		}
 		assertContent(t, filepath.Join(dest, tc.file), tc.want)
 	}
