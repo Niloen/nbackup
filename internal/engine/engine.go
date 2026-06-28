@@ -1084,11 +1084,7 @@ func (e *Engine) Run(now time.Time, logf Logf) (*record.Slot, error) {
 	// orchestrator goroutine while every volume roll's catalog write funnels back to it (the sole
 	// catalog writer). Opening it here also lets a spanning-capable single drive clamp the workers.
 	funnel := drain.NewFunnel()
-	var realSink archiveio.VolumeSink
-	landWT, err := e.prepareWriterWith(e.mediumName, spec, now, logf, func(s archiveio.VolumeSink) archiveio.VolumeSink {
-		realSink = s
-		return funnel.Proxy()
-	})
+	landWT, err := e.prepareWriterWith(e.mediumName, spec, now, logf, funnel.Wrap)
 	if err != nil {
 		return nil, err
 	}
@@ -1110,7 +1106,7 @@ func (e *Engine) Run(now time.Time, logf Logf) (*record.Slot, error) {
 	}
 
 	tr, runLogf := e.progressTracker(slotID, workers, plan.Items, fileSink, logf)
-	sealed, err := e.runOrchestrated(plan, workers, landingSlots, spec, holdingNames, landWT, realSink, funnel, tr, now, runLogf)
+	sealed, err := e.runOrchestrated(plan, workers, landingSlots, spec, holdingNames, landWT, funnel, tr, now, runLogf)
 	if err != nil {
 		return nil, err
 	}
@@ -1164,23 +1160,23 @@ func planProgress(items []planner.Item) []progress.Plan {
 	return out
 }
 
-// drainStore adapts a *drain.Drainer to the dumper.Store the producer writes into: it bridges the
-// Drainer's concrete Acquire/Target to the producer's interface, keeping the two packages
-// independent (neither imports the other).
+// drainStore adapts a *drain.Drainer to the dumper.Store the producer ingests into: it bridges the
+// Drainer's concrete Acquire/Sink to the producer's interface, keeping the two packages independent
+// (neither imports the other).
 type drainStore struct{ dr *drain.Drainer }
 
-func (s drainStore) Acquire(est int64) (dumper.Target, error) {
-	t, err := s.dr.Acquire(est)
+func (s drainStore) Acquire(est int64, meta record.Archive, prog func(int64)) (dumper.Sink, error) {
+	sink, err := s.dr.Acquire(est, meta, prog)
 	if err != nil {
 		return nil, err
 	}
-	return t, nil
+	return sink, nil
 }
 
 // runOrchestrated executes a dump: it opens the holding disks (the buffer the producers stage onto),
 // builds the drain over the already-opened landing writer, runs the producers, and seals the
 // landing the drain authored. The drain is the run's sole catalog writer.
-func (e *Engine) runOrchestrated(plan *planner.Plan, workers, landingSlots int, spec archiveio.SlotSpec, holdingNames []string, landWT *writeTarget, realSink archiveio.VolumeSink, funnel *drain.Funnel, tr *progress.Tracker, now time.Time, logf Logf) (*record.Slot, error) {
+func (e *Engine) runOrchestrated(plan *planner.Plan, workers, landingSlots int, spec archiveio.SlotSpec, holdingNames []string, landWT *writeTarget, funnel *drain.Funnel, tr *progress.Tracker, now time.Time, logf Logf) (*record.Slot, error) {
 	disks := make([]drain.Disk, len(holdingNames))
 	for i, name := range holdingNames {
 		wt, err := e.prepareWriter(name, spec, now, logf)
@@ -1195,9 +1191,11 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers, landingSlots int, 
 	slotMeta := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
 
 	dr := drain.New(drain.Config{
-		Cat: e.cat, Landing: e.mediumName, SlotMeta: slotMeta,
-		LandW: landWT.w, LandSession: landSession, RealSink: realSink, Funnel: funnel,
-		Pool: drain.NewPool(disks), LandingSlots: landingSlots, Tracker: tr, Logf: logf,
+		Cat: e.cat, SlotMeta: slotMeta, Pool: drain.NewPool(disks), Tracker: tr, Logf: logf,
+		Landing: drain.Landing{
+			Name: e.mediumName, Writer: landWT.w, Session: landSession,
+			Funnel: funnel, Slots: landingSlots,
+		},
 	})
 
 	dumpErr := e.dmp.Run(plan.Items, workers, drainStore{dr}, tr, logf)

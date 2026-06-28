@@ -1,9 +1,10 @@
 // Package dumper is the producing half of a dump: it spins up workers that archive each planned
 // DLE — running the tar source and the encode pipeline (compress/encrypt, placed client- or
-// server-side) — and writes the bytes into a Store the consumer hands out. It owns parallelism and
-// the per-item dump; it never touches the catalog or decides where an archive is stored. The
-// consumer (a drain over holding disks, or the landing itself) implements Store: Acquire reserves a
-// write Target (back-pressuring the producer), and Target.Landed reports the committed archive.
+// server-side) — and transfers the bytes into a Store the consumer hands out. It owns parallelism
+// and the per-item dump; it never touches the catalog or decides where an archive is stored. The
+// consumer (the drain over holding disks, or the landing itself) is an archive store: Acquire
+// reserves an ingestion Sink for one archive (back-pressuring the producer), the producer transfers
+// the encoded stream into it, and Sink.Commit finalizes the stored archive.
 package dumper
 
 import (
@@ -11,26 +12,29 @@ import (
 	"sync"
 
 	"github.com/Niloen/nbackup/internal/archiver"
-	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// Store is the consumer the producer writes into: it hands out one write Target per archive,
-// back-pressuring via Acquire. The drain implements it (deciding holding-disk vs direct); a test
-// can fake it.
+// Store is the archive store the producer ingests into: it hands out one ingestion Sink per
+// archive, back-pressuring via Acquire. The drain implements it (deciding holding-disk vs direct);
+// a test can fake it.
 type Store interface {
-	// Acquire reserves where to write an archive estimated at est bytes, blocking for
-	// back-pressure and returning the run's error if the consumer has failed.
-	Acquire(est int64) (Target, error)
+	// Acquire reserves ingestion for the archive described by meta, estimated at est bytes,
+	// blocking for back-pressure and returning the run's error if the store has failed. prog
+	// receives the running compressed (landed) byte count for the producer's progress tracker.
+	Acquire(est int64, meta record.Archive, prog func(compressed int64)) (Sink, error)
 }
 
-// Target is one archive's write reservation: the session to write into, and a callback to report
-// the committed archive.
-type Target interface {
-	Session() *clerk.Session
-	Landed(arch record.Archive, pos record.ArchivePos) error
+// Sink is one archive's ingestion handle: an xfer.Sink the producer transfers the encoded stream
+// into, plus Commit which finalizes the stored archive and returns its committed catalog record
+// (sizes + file count) for the producer's tracker and log. The producer never sees the session,
+// the medium, or the catalog.
+type Sink interface {
+	xfer.Sink
+	Commit(p xfer.Produced) (record.Archive, error)
 }
 
 // Config is the resolution the producer needs, injected by the engine so the producer stays free
@@ -56,24 +60,16 @@ func New(cfg Config) *Dumper {
 	return &Dumper{archiverFor: cfg.ArchiverFor, exclude: cfg.Exclude, placement: cfg.Placement, threads: cfg.Threads}
 }
 
-// Run archives every item into store: it acquires a Target for each, dumps the archive into the
-// Target's session, and reports it Landed. With workers > 1 it runs that many concurrently, bounded
-// by a semaphore; the first error stops scheduling and is returned (a consumer failure surfaces as
-// the error Acquire/Landed return, so blocked workers wake and stop too).
+// Run archives every item into store: for each it acquires an ingestion Sink, transfers the encoded
+// archive into it, and commits it (see dumpItem). With workers > 1 it runs that many concurrently,
+// bounded by a semaphore; the first error stops scheduling and is returned (a store failure surfaces
+// as the error Acquire/Commit return, so blocked workers wake and stop too).
 func (d *Dumper) Run(items []planner.Item, workers int, store Store, tr *progress.Tracker, logf func(format string, args ...any)) error {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
 	dumpOne := func(item planner.Item) error {
-		t, err := store.Acquire(item.EstBytes)
-		if err != nil {
-			return err
-		}
-		arch, pos, err := d.dumpItem(t.Session(), item, tr, logf)
-		if err != nil {
-			return err
-		}
-		return t.Landed(arch, pos)
+		return d.dumpItem(store, item, tr, logf)
 	}
 	if workers <= 1 || len(items) <= 1 {
 		for _, item := range items {

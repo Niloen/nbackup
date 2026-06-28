@@ -2,12 +2,10 @@ package dumper
 
 import (
 	"fmt"
-	"io"
 	"strings"
 	"sync/atomic"
 
 	"github.com/Niloen/nbackup/internal/archiver"
-	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/progress"
@@ -20,8 +18,8 @@ import (
 
 // encode.go is the producer's write-side scheme work, the mirror of the engine's decode: it builds
 // the tar source and the encode filters, places each transform on the client or the server, and
-// runs the transfer into a clerk-provided medium sink — then the clerk commits + records. The
-// scheme and tar live here; the clerk only lands and records bytes.
+// transfers the stream into an ingestion Sink the store hands out — then Sink.Commit lands and
+// records it. The scheme and tar live here; the store only lands and records bytes.
 
 // BackupSpec describes one archive to back up: the resolved archiver and its request, plus the
 // identity bits not in the request (the DLE's host, the base slot for an incremental, and the
@@ -47,54 +45,53 @@ type EncodePlacement struct {
 	EncryptClient  bool
 }
 
-// dumpItem archives a single DLE into the open slot session, returning the committed archive and
-// its on-medium position for the consumer to record (the producer writes the bytes; only the
-// consumer touches the catalog). It owns the run-tracker lifecycle and describes the backup; the
-// session moves the bytes.
-func (d *Dumper) dumpItem(session *clerk.Session, item planner.Item, tr *progress.Tracker, logf func(format string, args ...any)) (arch record.Archive, pos record.ArchivePos, err error) {
+// dumpItem archives a single DLE into the store: it acquires an ingestion Sink, transfers the
+// encoded archive into it, and commits it — driving the run tracker from the committed record. It
+// owns the run-tracker lifecycle and describes the backup; the store lands and records the bytes.
+func (d *Dumper) dumpItem(store Store, item planner.Item, tr *progress.Tracker, logf func(format string, args ...any)) (err error) {
 	// The progress tracker keys and displays DLEs by their host:path identity; the
 	// seal and filenames keep the internal slug.
 	pname := item.DLE.ID()
 	tr.StartDLE(pname)
-	var sum clerk.Summary
+	var committed record.Archive
 	defer func() {
 		if err != nil {
 			tr.FinishDLE(pname, 0, 0, 0, err)
 		} else {
-			tr.FinishDLE(pname, sum.FileCount, sum.Uncompressed, sum.Compressed, nil)
+			tr.FinishDLE(pname, committed.FileCount, committed.Uncompressed, committed.Compressed, nil)
 		}
 	}()
 
 	spec, err := d.backupSpec(item)
 	if err != nil {
-		return record.Archive{}, record.ArchivePos{}, err
+		return err
 	}
 
 	logf("archiving %s (L%d)", item.DLE.ID(), item.Level)
-	sum, arch, pos, err = d.dumpArchive(session, spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
+	committed, err = d.dumpArchive(store, item.EstBytes, spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
 	if err != nil {
 		// An unreadable file makes tar exit fatally (it never silently ships a partial
 		// archive — that would betray recoverability), so name the likely cause and fix
 		// rather than leaving the operator with a bare "exit status 2".
 		if strings.Contains(err.Error(), "Permission denied") {
-			return record.Archive{}, record.ArchivePos{}, fmt.Errorf("archive %s: %w\n(a source file is unreadable — run nb as a user that can read every file under %s, e.g. via sudo/root, or exclude it in the dumptype)", item.DLE.ID(), err, item.DLE.Path)
+			return fmt.Errorf("archive %s: %w\n(a source file is unreadable — run nb as a user that can read every file under %s, e.g. via sudo/root, or exclude it in the dumptype)", item.DLE.ID(), err, item.DLE.Path)
 		}
-		return record.Archive{}, record.ArchivePos{}, fmt.Errorf("archive %s: %w", item.DLE.ID(), err)
+		return fmt.Errorf("archive %s: %w", item.DLE.ID(), err)
 	}
 
 	sizeLabel := "compressed"
-	if sum.Compress == "none" {
+	if committed.Compress == "none" {
 		sizeLabel = "stored" // no compressor in the pipe; "compressed" would be a lie
 	}
-	if sum.FileCount == 0 {
+	if committed.FileCount == 0 {
 		// An incremental with nothing changed still writes tar's structural overhead
 		// (archive header/footer + directory census); say so rather than the puzzling
 		// "0 file(s), 10.24 kB stored".
-		logf("  no changed files (%s of tar metadata)", sizeutil.FormatBytes(sum.Compressed))
+		logf("  no changed files (%s of tar metadata)", sizeutil.FormatBytes(committed.Compressed))
 	} else {
-		logf("  %d file(s), %s %s", sum.FileCount, sizeutil.FormatBytes(sum.Compressed), sizeLabel)
+		logf("  %d file(s), %s %s", committed.FileCount, sizeutil.FormatBytes(committed.Compressed), sizeLabel)
 	}
-	return arch, pos, nil
+	return nil
 }
 
 // backupSpec describes the backup of one planned item: it resolves the archiver and builds the
@@ -133,23 +130,23 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 
 // dumpArchive composes the encode transfer for one archive — the archiver's tar source (on its
 // host) → the encode filters placed per the dumptype (client-side fused into the source,
-// server-side as local Filters) → the slot's medium sink — then commits the archive. prog, if
-// non-nil, receives running (uncompressed, compressed) counts. It returns a Summary and the
-// committed archive's metadata + on-medium position, for the caller to hand to the consumer.
-func (d *Dumper) dumpArchive(session *clerk.Session, spec BackupSpec, prog func(uncompressed, compressed int64)) (clerk.Summary, record.Archive, record.ArchivePos, error) {
+// server-side as local Filters) → an ingestion Sink the store hands out — then commits the stored
+// archive. prog, if non-nil, receives running (uncompressed, compressed) counts. It returns the
+// committed archive record (sizes + file count) for the caller's tracker and log.
+func (d *Dumper) dumpArchive(store Store, est int64, spec BackupSpec, prog func(uncompressed, compressed int64)) (record.Archive, error) {
 	pl := d.placement(spec.DumpType)
 	compF, err := compress.Filter(pl.CompressScheme, pl.CompressOpts)
 	if err != nil {
-		return clerk.Summary{}, record.Archive{}, record.ArchivePos{}, err
+		return record.Archive{}, err
 	}
 	encF, err := crypt.Filter(pl.EncryptScheme, pl.EncryptOpts)
 	if err != nil {
-		return clerk.Summary{}, record.Archive{}, record.ArchivePos{}, err
+		return record.Archive{}, err
 	}
 
 	bs, err := spec.Archiver.BackupSource(spec.Request)
 	if err != nil {
-		return clerk.Summary{}, record.Archive{}, record.ArchivePos{}, err
+		return record.Archive{}, err
 	}
 	meta := record.Archive{
 		DLE:      spec.Request.DLE,
@@ -193,45 +190,30 @@ func (d *Dumper) dumpArchive(session *clerk.Session, spec BackupSpec, prog func(
 		return xfer.Produced{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members}, nil
 	}).OnCleanup(bs.Cleanup)
 
-	// The medium writer meters the bytes that land (it must, for the checksum + size); tap
-	// that running count for live `nb status`, symmetric with tarCmd.Tap's uncompressed side.
-	sink := &mediumSink{session: session, meta: meta, tap: func(n int64) { comp.Store(n); report() }}
+	// Acquire the ingestion Sink before the transfer spawns tar, so back-pressure (a full holding
+	// disk, or a busy landing) gates the dump before any heavy work starts. The store meters the
+	// bytes that land (it must, for the checksum + size) and taps the running compressed count for
+	// live `nb status`, symmetric with tarCmd.Tap's uncompressed side.
+	sink, err := store.Acquire(est, meta, func(n int64) { comp.Store(n); report() })
+	if err != nil {
+		return record.Archive{}, err
+	}
 	produced, terr := xfer.Transfer(src, filters, sink)
 	if terr != nil {
-		return clerk.Summary{}, record.Archive{}, record.ArchivePos{}, terr
+		return record.Archive{}, terr
 	}
-	sum, committed, pos, cerr := session.Commit(sink.measured, sink.parts, produced.FileCount, produced.Uncompressed, produced.Members)
+	committed, cerr := sink.Commit(produced)
 	if cerr != nil {
-		return clerk.Summary{}, record.Archive{}, record.ArchivePos{}, cerr
+		return record.Archive{}, cerr
 	}
-	// The archive is durably committed to the dump medium; only now promote the archiver's
-	// new incremental state into its library (Amanda's rename-on-success). Until here the
-	// dump wrote a ".new" side file, so the transfer or commit failing above left the base
-	// a retry builds on untouched — a killed tar can never corrupt the chain.
+	// The archive is durably committed to the store; only now promote the archiver's new
+	// incremental state into its library (Amanda's rename-on-success). Until here the dump wrote a
+	// ".new" side file, so the transfer or commit failing above left the base a retry builds on
+	// untouched — a killed tar can never corrupt the chain.
 	if bs.Promote != nil {
 		if err := bs.Promote(); err != nil {
-			return clerk.Summary{}, record.Archive{}, record.ArchivePos{}, fmt.Errorf("promote incremental state: %w", err)
+			return record.Archive{}, fmt.Errorf("promote incremental state: %w", err)
 		}
 	}
-	return sum, committed, pos, nil
-}
-
-// mediumSink is the producer's xfer.Sink bridge to the clerk's write endpoint: it drains the
-// encoded stream into the slot writer (metering + splitting) and keeps the measured archive + parts
-// for dumpArchive's Commit.
-type mediumSink struct {
-	session  *clerk.Session
-	meta     record.Archive
-	tap      func(landed int64) // running count of bytes that have landed, for live status
-	measured record.Archive
-	parts    []record.FilePos
-}
-
-func (m *mediumSink) Drain(in io.Reader) error {
-	arch, parts, err := m.session.WriteArchive(m.meta, in, m.tap)
-	if err != nil {
-		return err
-	}
-	m.measured, m.parts = arch, parts
-	return nil
+	return committed, nil
 }

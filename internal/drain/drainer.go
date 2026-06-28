@@ -12,13 +12,18 @@ import (
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// drainer.go is the consuming half of a dump. A producer dumps each archive into a Target the
-// Drainer hands out; the Drainer decides per archive whether to buffer it on a holding disk (then
+// drainer.go is the consuming half of a dump: the run's archive store. A producer ingests each
+// archive into a Sink the Drainer hands out (Acquire → transfer → Sink.Commit); the Drainer decides
+// per archive whether to buffer it on a holding disk (then
 // copy it to the authoritative landing later) or — when no disk fits, or none is configured — write
 // it straight to the landing. It is the run's sole catalog writer: every placement record, every
 // volume roll's catalog write, and the holding reclaim happen on its one orchestrator goroutine.
+//
+// Landing bundles everything the Drainer needs to write the authoritative landing — its name,
+// writer, session, the funnel its control calls route through, and how many writes may run at once.
 //
 // Three actors, all private here:
 //   - the orchestrator goroutine (orchestrate): the sole catalog writer. It records placements,
@@ -34,26 +39,32 @@ import (
 // the worker count. Holding back-pressure is the Pool's; a landing failure aborts the Pool so the
 // producers stop and the run fails — never dropping data.
 
-// Config is what the engine wires a Drainer from: the catalog it solely writes, the landing it
-// drains to (its writer built over Funnel.Proxy(), its session, and the real sink the funnel
-// targets), the holding Pool (empty = never buffer), the landing's write parallelism, and the
-// run's progress + log seams.
+// Config is what the engine wires a Drainer from: the catalog it solely writes, the slot it
+// records under, the Landing it drains to, the holding Pool (empty = never buffer), and the run's
+// progress + log seams.
 type Config struct {
-	Cat          *catalog.Catalog
-	Landing      string // landing medium name
-	SlotMeta     *record.Slot
-	LandW        *archiveio.Writer
-	LandSession  *clerk.Session
-	RealSink     archiveio.VolumeSink // the real landing sink Funnel.Proxy() funnels to
-	Funnel       *Funnel
-	Pool         *Pool // holding disks; empty = no buffering (every archive goes direct)
-	LandingSlots int   // concurrent landing writers: 1 buffering/spanning, else workers
-	Tracker      *progress.Tracker
-	Logf         func(format string, args ...any)
+	Cat      *catalog.Catalog
+	SlotMeta *record.Slot
+	Landing  Landing
+	Pool     *Pool // holding disks; empty = no buffering (every archive goes direct)
+	Tracker  *progress.Tracker
+	Logf     func(format string, args ...any)
 }
 
-// Drainer is the consuming side of a dump (see the file comment). Build it with New, drive it from
-// the producer with Acquire + Target.Landed, and close it with Finish.
+// Landing is the authoritative store the drain copies (or writes) archives to: its medium name, the
+// archiveio Writer built over the funnel proxy, the slot session (for direct writes and the final
+// seal), the Funnel its control calls route back through, and Slots — how many landing writes may
+// run at once (1 while buffering or spanning, else the worker count).
+type Landing struct {
+	Name    string
+	Writer  *archiveio.Writer
+	Session *clerk.Session
+	Funnel  *Funnel
+	Slots   int
+}
+
+// Drainer is the consuming side of a dump — the run's archive store (see the file comment). Build
+// it with New, drive it from the producer with Acquire + Sink.Commit, and close it with Finish.
 type Drainer struct {
 	cat          *catalog.Catalog
 	landing      string
@@ -83,14 +94,14 @@ type Drainer struct {
 func New(cfg Config) *Drainer {
 	d := &Drainer{
 		cat:          cfg.Cat,
-		landing:      cfg.Landing,
+		landing:      cfg.Landing.Name,
 		slotMeta:     cfg.SlotMeta,
-		landW:        cfg.LandW,
-		landSession:  cfg.LandSession,
-		realSink:     cfg.RealSink,
-		reqCh:        cfg.Funnel.reqCh,
+		landW:        cfg.Landing.Writer,
+		landSession:  cfg.Landing.Session,
+		realSink:     cfg.Landing.Funnel.real,
+		reqCh:        cfg.Landing.Funnel.reqCh,
 		pool:         cfg.Pool,
-		landingSlots: cfg.LandingSlots,
+		landingSlots: cfg.Landing.Slots,
 		tr:           cfg.Tracker,
 		logf:         cfg.Logf,
 		landCh:       make(chan landReq),
@@ -108,44 +119,68 @@ func New(cfg Config) *Drainer {
 	return d
 }
 
-// Target is one archive's write reservation: the session the producer writes into, and which
-// holding disk it landed on (disk < 0 means the landing itself, a direct write).
-type Target struct {
+// Sink is one archive's ingestion handle from Acquire: an xfer.Sink that writes the encoded bytes
+// onto the chosen medium (a holding disk, or the landing for a direct write), and Commit which
+// finalizes the stored archive. disk < 0 means the landing itself (a direct write); meta + tap are
+// the archive's input record and the running-compressed-count progress hook.
+type Sink struct {
 	d       *Drainer
 	session *clerk.Session
 	disk    int
+	meta    record.Archive
+	tap     func(int64) // running count of bytes that have landed, for live status
+
+	measured record.Archive
+	parts    []record.FilePos
 }
 
-// Session is where the producer writes this archive.
-func (t *Target) Session() *clerk.Session { return t.session }
+// Drain writes the encoded stream onto the chosen medium, metering it and keeping the measured
+// archive + parts for Commit. It runs on the producer goroutine (the bytes' data half).
+func (s *Sink) Drain(in io.Reader) error {
+	arch, parts, err := s.session.WriteArchive(s.meta, in, s.tap)
+	if err != nil {
+		return err
+	}
+	s.measured, s.parts = arch, parts
+	return nil
+}
 
-// Landed reports the committed archive. A holding write records its placement and queues the copy;
-// a direct write records the landing placement and releases the landing permit. It returns the
-// run's error if the drain has aborted.
-func (t *Target) Landed(arch record.Archive, pos record.ArchivePos) error {
+// Commit finalizes the stored archive: it writes the commit footer and merges the producer's
+// raw-stream stats, then records the placement (a holding write queues the holding→landing copy; a
+// direct write records the landing placement and releases the landing permit). It returns the
+// committed catalog record, or the run's error if the store has aborted.
+func (s *Sink) Commit(p xfer.Produced) (record.Archive, error) {
+	_, committed, pos, err := s.session.Commit(s.measured, s.parts, p.FileCount, p.Uncompressed, p.Members)
+	if err != nil {
+		return record.Archive{}, err
+	}
 	reply := make(chan error, 1)
-	t.d.landCh <- landReq{arch: arch, pos: pos, disk: t.disk, reply: reply}
-	return <-reply
+	s.d.landCh <- landReq{arch: committed, pos: pos, disk: s.disk, reply: reply}
+	if err := <-reply; err != nil {
+		return record.Archive{}, err
+	}
+	return committed, nil
 }
 
-// Acquire reserves where to write an archive estimated at est bytes. It blocks for back-pressure: a
-// holding write waits while every fitting disk is over capacity; a direct write (no disk fits, or
-// none is configured) waits for a free landing permit. It returns the run's error if the drain has
-// aborted.
-func (d *Drainer) Acquire(est int64) (*Target, error) {
+// Acquire reserves ingestion for an archive described by meta, estimated at est bytes, and returns
+// the Sink to transfer it into. It blocks for back-pressure: a holding write waits while every
+// fitting disk is over capacity; a direct write (no disk fits, or none is configured) waits for a
+// free landing permit. prog receives the running compressed (landed) byte count. It returns the
+// run's error if the drain has aborted.
+func (d *Drainer) Acquire(est int64, meta record.Archive, prog func(int64)) (*Sink, error) {
 	idx, direct, err := d.pool.Acquire(est)
 	if err != nil {
 		return nil, err
 	}
 	if !direct {
-		return &Target{d: d, session: d.pool.Session(idx), disk: idx}, nil
+		return &Sink{d: d, session: d.pool.Session(idx), disk: idx, meta: meta, tap: prog}, nil
 	}
 	reply := make(chan error, 1)
 	d.permitReqCh <- permitReq{reply: reply}
 	if err := <-reply; err != nil {
 		return nil, err
 	}
-	return &Target{d: d, session: d.landSession, disk: -1}, nil
+	return &Sink{d: d, session: d.landSession, disk: -1, meta: meta, tap: prog}, nil
 }
 
 // Aborted returns the run's error once the drain has failed (so producers can stop scheduling), or

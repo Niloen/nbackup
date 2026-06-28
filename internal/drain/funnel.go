@@ -10,22 +10,28 @@ import (
 // doing a direct write) while every volume roll's catalog write stays on the sole catalog writer.
 
 // Funnel is the proxy VolumeSink the landing Writer is built over, paired with the channel its
-// calls travel on. The engine wraps the landing's real sink with Funnel.Proxy() when it opens the
-// writer, and hands the Funnel (and the captured real sink) to New; the Drainer serves the channel
-// on its orchestrator goroutine.
+// calls travel on and the real sink they ultimately reach. The engine calls Wrap(real) when it
+// opens the writer — handing over the real landing sink and getting back the proxy to build over —
+// and passes the Funnel to New as part of the Landing; the Drainer serves the channel on its
+// orchestrator goroutine, forwarding each call to real.
 type Funnel struct {
 	proxy *proxySink
 	reqCh chan sinkReq
+	real  archiveio.VolumeSink // the landing's real sink, captured by Wrap
 }
 
-// NewFunnel builds a Funnel whose Proxy the engine plugs into the landing Writer.
+// NewFunnel builds a Funnel whose proxy the engine plugs into the landing Writer via Wrap.
 func NewFunnel() *Funnel {
 	ch := make(chan sinkReq)
 	return &Funnel{proxy: &proxySink{reqCh: ch}, reqCh: ch}
 }
 
-// Proxy is the VolumeSink to build the landing Writer over.
-func (f *Funnel) Proxy() archiveio.VolumeSink { return f.proxy }
+// Wrap captures the landing's real sink and returns the proxy VolumeSink to build the landing
+// Writer over. The Drainer later serves the funnelled calls onto real (see serve).
+func (f *Funnel) Wrap(real archiveio.VolumeSink) archiveio.VolumeSink {
+	f.real = real
+	return f.proxy
+}
 
 // proxySink is a VolumeSink whose NextPart/PlaceRecord touch neither the librarian nor the catalog:
 // they send the call to the orchestrator over reqCh and block on the reply. The byte write the
