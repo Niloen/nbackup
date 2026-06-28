@@ -2,179 +2,21 @@ package engine
 
 import (
 	"fmt"
-	"io"
 	"sort"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/clerk"
-	"github.com/Niloen/nbackup/internal/drain"
 	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/planner"
-	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-// flush.go is the holding disks' drain. The dump orchestrator (engine.go) drives every run; when
-// the dump medium is one or more holding disks it hands each committed archive here to be drained:
-// copied to the authoritative landing, then reclaimed off the disk it landed on. The copy runs on a
-// drainer goroutine (copyOne) while the orchestrator stays free to record control; the orchestrator
-// finalizes each copy (finalizeDrain). A drain.Pool spreads dumps across the disks and, sized to
-// each disk's capacity, back-pressures the dumpers; a landing failure aborts it so the dumpers stop
-// and the run fails — never dropping data. The dumpers write unbounded disk/cloud sinks
-// (parallel-safe); the landing is written by one serial writer (the two combinations the writer
-// already documents). Flush is the amflush analogue, draining a crashed run's leftover holding
-// archives on the next dump.
-
-// copyOne is the drain's DATA half: it reads one staged archive from the holding disk and streams
-// it to the landing, returning the committed archive and its landing position. It runs on the
-// drainer goroutine. It drives the landing Writer directly (not the clerk Session), so it touches
-// the catalog only through the Writer's VolumeSink — whose control calls the proxy funnels back to
-// the orchestrator, never writing the catalog here. The placement record and the holding reclaim
-// are the control half (finalizeDrain), run by the orchestrator (the sole catalog writer).
-func (e *Engine) copyOne(landW *archiveio.Writer, slotMeta *record.Slot, holdVol media.Volume, holding string, it handoff, tr *progress.Tracker) (record.Archive, record.ArchivePos, error) {
-	if tr != nil {
-		tr.StartFlush(it.dleID, holding)
-	}
-	ref := clerk.Ref{Slot: slotMeta.ID, DLE: it.arch.DLE, Level: it.arch.Level}
-	rc, err := openArchiveAt(holdVol, ref, it.pos.Parts)
-	if err != nil {
-		return record.Archive{}, record.ArchivePos{}, fmt.Errorf("flush %s L%d: read holding disk: %w", it.dleID, it.arch.Level, err)
-	}
-	arch, pos, err := landW.CopyArchive(it.arch, rc)
-	rc.Close()
-	if err != nil {
-		return record.Archive{}, record.ArchivePos{}, fmt.Errorf("flush %s L%d to %q: %w", it.dleID, it.arch.Level, e.mediumName, err)
-	}
-	return arch, pos, nil
-}
-
-// finalizeDrain is the drain's CONTROL half: it records the landed archive's placement, then
-// reclaims the holding copy (files + placement) and releases its back-pressure. It runs on the
-// orchestrator (the sole catalog writer). The landing placement is recorded before the holding
-// copy is dropped, so the archive is never absent from the catalog.
-func (e *Engine) finalizeDrain(slotMeta *record.Slot, it handoff, arch record.Archive, pos record.ArchivePos, pool *drain.Pool, tr *progress.Tracker, logf Logf) error {
-	holding := pool.Name(it.disk)
-	holdVol := pool.HoldVol(it.disk)
-	if err := e.cat.AddArchive(slotMeta, e.mediumName, arch, pos); err != nil {
-		return fmt.Errorf("flush %s: record landing placement: %w", it.dleID, err)
-	}
-	for _, p := range archivePosFiles(it.pos) {
-		if err := holdVol.RemoveFile(p); err != nil {
-			return fmt.Errorf("flush %s: reclaim holding disk: %w", it.dleID, err)
-		}
-	}
-	if _, _, err := e.cat.RemoveArchive(slotMeta.ID, holding, it.arch.DLE); err != nil {
-		return fmt.Errorf("flush %s: drop holding placement: %w", it.dleID, err)
-	}
-	pool.Release(it.disk, it.arch.Compressed)
-	if tr != nil {
-		tr.FinishFlush(it.dleID)
-	}
-	logf.log("flushed %s L%d to %q", it.dleID, it.arch.Level, e.mediumName)
-	return nil
-}
-
-// drainer copies staged archives to the landing on its own goroutine: it runs copyOne (the pure
-// byte-copy) for each archive the orchestrator hands it over workCh and reports the result on
-// doneCh. It touches the catalog and the librarian only through the landing Writer's proxy sink,
-// whose NextPart/PlaceRecord funnel back to the orchestrator — so the byte stream runs here while
-// all control (catalog writes, librarian volume rolls) stays on the orchestrator. The landing is
-// written by one serial writer, so there is exactly one drainer. Each job is either a staged-archive
-// copy (copyOne, reading from the holding disk) or an oversized DLE's direct dump (backupItem,
-// running the full pipeline straight to the landing) — both write the same landing Writer.
-func (e *Engine) drainer(landW *archiveio.Writer, landSession *clerk.Session, slotMeta *record.Slot, pool *drain.Pool, workCh <-chan drainJob, doneCh chan<- copyResult, tr *progress.Tracker, logf Logf) {
-	for job := range workCh {
-		if job.copy != nil {
-			arch, pos, err := e.copyOne(landW, slotMeta, pool.HoldVol(job.copy.disk), pool.Name(job.copy.disk), *job.copy, tr)
-			doneCh <- copyResult{it: *job.copy, arch: arch, pos: pos, err: err}
-		} else {
-			arch, pos, err := e.backupItem(landSession, *job.direct, tr, logf)
-			doneCh <- copyResult{arch: arch, pos: pos, err: err, direct: true}
-		}
-	}
-}
-
-// drainJob is one landing write the orchestrator dispatches to the drainer: exactly one of copy
-// (a staged archive to copy off the holding disk) or direct (an oversized DLE to dump straight to
-// the landing) is set.
-type drainJob struct {
-	copy   *handoff
-	direct *planner.Item
-}
-
-// copyResult is one finished (or failed) landing write the drainer hands back to the orchestrator,
-// which records the landing placement — and, for a copy (direct=false), reclaims the holding copy
-// and releases the gate (finalizeDrain). it is set only for a copy.
-type copyResult struct {
-	it     handoff
-	arch   record.Archive
-	pos    record.ArchivePos
-	err    error
-	direct bool
-}
-
-// sinkReq is a VolumeSink call the drainer's proxy funnels to the orchestrator: placeRecord
-// selects PlaceRecord(size) over NextPart(). The orchestrator runs the real sink and replies on
-// reply — so any volume roll's catalog writes (RecordVolume / recycle) land on the sole catalog
-// writer.
-type sinkReq struct {
-	placeRecord bool
-	size        int64
-	reply       chan sinkResp
-}
-
-// sinkResp is the orchestrator's reply to a sinkReq: the union of NextPart's and PlaceRecord's
-// returns (max is unused for PlaceRecord).
-type sinkResp struct {
-	vol    media.Volume
-	max    int64
-	volume string
-	epoch  int
-	err    error
-}
-
-// proxySink is the VolumeSink the drainer's landing Writer is built over. Its NextPart/PlaceRecord
-// touch neither the librarian nor the catalog — they send the call to the orchestrator over reqCh
-// and block on the reply. The byte write (vol.AppendFile) the caller does on the returned volume
-// is the data half, on the drainer goroutine; the control half (the sink call) runs on the
-// orchestrator. The round-trip is synchronous, so the drive is never written from two goroutines.
-type proxySink struct {
-	reqCh chan<- sinkReq
-}
-
-func (p *proxySink) NextPart() (media.Volume, int64, string, int, error) {
-	reply := make(chan sinkResp, 1)
-	p.reqCh <- sinkReq{reply: reply}
-	r := <-reply
-	return r.vol, r.max, r.volume, r.epoch, r.err
-}
-
-func (p *proxySink) PlaceRecord(size int64) (media.Volume, string, int, error) {
-	reply := make(chan sinkResp, 1)
-	p.reqCh <- sinkReq{placeRecord: true, size: size, reply: reply}
-	r := <-reply
-	return r.vol, r.volume, r.epoch, r.err
-}
-
-// serve runs one funneled sink call on the real WriteSink — on the orchestrator goroutine, so a
-// roll's RecordVolume/recycle catalog writes land on the sole catalog writer.
-func serve(real archiveio.VolumeSink, req sinkReq) sinkResp {
-	if req.placeRecord {
-		vol, volume, epoch, err := real.PlaceRecord(req.size)
-		return sinkResp{vol: vol, volume: volume, epoch: epoch, err: err}
-	}
-	vol, max, volume, epoch, err := real.NextPart()
-	return sinkResp{vol: vol, max: max, volume: volume, epoch: epoch, err: err}
-}
-
-// openArchiveAt reads an archive's parts straight from a live volume (the holding writer's own,
-// whose index the dumpers keep current), concatenating them — the drain's read seam, bypassing
-// the catalog and the fresh-mounter path (which would have a stale index for in-flight files).
-func openArchiveAt(vol media.Volume, ref clerk.Ref, parts []record.FilePos) (io.ReadCloser, error) {
-	return archiveio.NewReader().Open(parts, archiveio.Expect{Slot: ref.Slot, DLE: ref.DLE, Level: ref.Level},
-		func(p record.FilePos) (record.Header, io.ReadCloser, error) { return vol.ReadFile(p.Pos) })
-}
+// flush.go is the amflush analogue: it drains a crashed run's leftover holding-disk archives to the
+// authoritative landing on the next dump. The live drain (a running dump's producer → holding disk →
+// landing) lives in package drain; this is the recovery path for what a crash stranded. A
+// holding-disk run records each archive's holding placement before flushing it and removes it after,
+// so a crash leaves the un-flushed archives recorded on the holding medium in the catalog — Flush
+// reads those placements (no medium scan needed) and drains them.
 
 // archivePosFiles lists an archive's file positions for reclamation, the commit footer (the
 // marker) first so an interrupted reclaim un-commits before dropping parts.
