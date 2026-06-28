@@ -1079,7 +1079,7 @@ func TestHoldingDisksFlush(t *testing.T) {
 		{s1, src1, "one.txt", "stranded on disk one"},
 		{s2, src2, "two.txt", "stranded on disk two"},
 	} {
-		if !flushEng.archiveOnLanding(tc.s.ID, config.DLE{Host: "localhost", Path: tc.src}.Name(), 0) {
+		if !placedOnLanding(flushEng, tc.s.ID, config.DLE{Host: "localhost", Path: tc.src}.Name()) {
 			t.Errorf("archive %s must be on the tape landing after flush", tc.s.ID)
 		}
 		dest := t.TempDir()
@@ -1367,7 +1367,7 @@ func TestHoldingDiskFlush(t *testing.T) {
 	}
 
 	// The archive is now on tape and gone from the holding disk.
-	if flushEng.archiveOnLanding(s.ID, config.DLE{Host: "localhost", Path: src}.Name(), 0) == false {
+	if !placedOnLanding(flushEng, s.ID, config.DLE{Host: "localhost", Path: src}.Name()) {
 		t.Errorf("archive must be on the tape landing after flush")
 	}
 	scratchVol, _, _, err := flushEng.mediumVolume("scratch")
@@ -2399,6 +2399,21 @@ func write(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// placedOnLanding reports whether the slot has a placement for dle on the engine's landing medium.
+func placedOnLanding(e *Engine, slotID, dle string) bool {
+	for _, p := range e.cat.Placements(slotID) {
+		if p.Medium != e.mediumName {
+			continue
+		}
+		for _, a := range p.Archives {
+			if a.DLE == dle {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func assertContent(t *testing.T, path, want string) {
