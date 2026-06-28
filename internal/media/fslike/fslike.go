@@ -128,6 +128,12 @@ func (v *Volume) AppendFile(h record.Header, write func(w io.Writer) error) (int
 	v.mu.Lock()
 	pos := v.next
 	v.next++
+	// Claim the position (and its slot subtree) up front, marked incomplete, before
+	// releasing the lock to write the files. A concurrent RemoveFile reclaiming another
+	// archive's last file then sees this slot is still occupied and keeps its directory —
+	// without this, the window between writing the payload below and registering it would
+	// let that RemoveTree delete the subtree out from under this in-flight file.
+	v.idx[pos] = entry{slot: h.Slot, incomplete: true}
 	v.mu.Unlock()
 
 	base := stem(pos, h)

@@ -222,3 +222,35 @@ func TestRemoveFile(t *testing.T) {
 		t.Fatalf("second RemoveFile should be a no-op: %v", err)
 	}
 }
+
+// TestRemoveFileRaceWithAppend guards the concurrency the multi-holding-disk drain relies on:
+// a dump appends a new archive to a slot while the drain reclaims another archive's last file
+// from the SAME slot. RemoveFile reclaims a slot's directory when it empties — so the in-flight
+// append must keep its directory from being swept out from under its just-written payload.
+// Each iteration starts a fresh slot with one file, then removes it concurrently with appending
+// a second to the same slot; the second file must survive and be readable.
+func TestRemoveFileRaceWithAppend(t *testing.T) {
+	for i := 0; i < 300; i++ {
+		dir := t.TempDir()
+		v := openVol(t, dir)
+		slot := "slot-race"
+		posA := appendArchive(t, v, slot, "a", 0, "a-payload")
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		var posB int
+		go func() { defer wg.Done(); _ = v.RemoveFile(posA) }()
+		go func() { defer wg.Done(); posB = appendArchive(t, v, slot, "b", 0, "b-payload") }()
+		wg.Wait()
+
+		_, rc, err := v.ReadFile(posB)
+		if err != nil {
+			t.Fatalf("iter %d: concurrently-appended file vanished: %v", i, err)
+		}
+		got, _ := io.ReadAll(rc)
+		rc.Close()
+		if string(got) != "b-payload" {
+			t.Fatalf("iter %d: read %q, want b-payload", i, got)
+		}
+	}
+}
