@@ -3,6 +3,7 @@ package notify
 import (
 	"context"
 	"fmt"
+	"html"
 	"net"
 	"net/smtp"
 	"os"
@@ -71,15 +72,42 @@ func (n *smtpNotifier) Notify(ctx context.Context, ev Event) error {
 	}
 }
 
-// smtpMessage assembles a minimal RFC 5322 plaintext message.
+// messageBoundary separates the MIME parts. It is static — the report body is
+// machine-rendered columns and a label, never this literal — so the message stays
+// deterministic (and Date is the only varying header).
+const messageBoundary = "nbackup-alt-boundary-b9c1f0a3"
+
+// smtpMessage assembles an RFC 5322 multipart/alternative message carrying the
+// report body twice: once as text/plain (for plaintext-only clients) and once as
+// text/html wrapping it in <pre>. Webmail clients render text/plain in a
+// proportional font, which collapses the report's column alignment; the HTML
+// alternative renders monospace so the columns line up again.
 func smtpMessage(from string, to []string, subject, body string) []byte {
+	crlf := func(s string) string { return strings.ReplaceAll(s, "\n", "\r\n") }
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "From: %s\r\n", from)
 	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(to, ", "))
 	fmt.Fprintf(&b, "Subject: %s\r\n", subject)
 	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
-	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+	b.WriteString("MIME-Version: 1.0\r\n")
+	fmt.Fprintf(&b, "Content-Type: multipart/alternative; boundary=%q\r\n", messageBoundary)
 	b.WriteString("\r\n")
-	b.WriteString(strings.ReplaceAll(body, "\n", "\r\n"))
+
+	// Plaintext alternative: the report verbatim.
+	fmt.Fprintf(&b, "--%s\r\n", messageBoundary)
+	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
+	b.WriteString(crlf(body))
+	b.WriteString("\r\n")
+
+	// HTML alternative: the same text in a monospace <pre>, HTML-escaped so any
+	// <, >, & in the report can't break the markup.
+	fmt.Fprintf(&b, "--%s\r\n", messageBoundary)
+	b.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
+	b.WriteString(`<pre style="font:13px/1.4 monospace;white-space:pre">`)
+	b.WriteString(crlf(html.EscapeString(body)))
+	b.WriteString("</pre>\r\n")
+
+	fmt.Fprintf(&b, "--%s--\r\n", messageBoundary)
 	return []byte(b.String())
 }
