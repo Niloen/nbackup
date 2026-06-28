@@ -1006,6 +1006,14 @@ func minRoom(a, b int64) int64 {
 	}
 }
 
+// localDay is the calendar day of instant in loc, at midnight — the operator's
+// wall-clock date, which the slot id carries. Taking loc explicitly (rather than
+// reading time.Local directly) keeps the day rule unit-testable across zones.
+func localDay(instant time.Time, loc *time.Location) time.Time {
+	y, m, d := instant.In(loc).Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, loc)
+}
+
 // Run executes the plan for a date, producing one sealed slot.
 func (e *Engine) Run(now time.Time, logf Logf) (*record.Slot, error) {
 	// `now` is the run's single time source: the precise instant the slot is stamped
@@ -1013,8 +1021,12 @@ func (e *Engine) Run(now time.Time, logf Logf) (*record.Slot, error) {
 	// run date — the logical key for the slot id, planning, and restore ordering — is
 	// just its day. Keeping the two distinct lets two runs on one day carry distinct
 	// commit instants, so a sub-day minimum_age can tell them apart.
+	//
+	// The day is the run's LOCAL calendar date — the day the operator sees on the wall
+	// clock, which is what the slot id carries. The commit instant itself is stamped in
+	// UTC (an absolute time for retention/age math); only the day shown in the id is local.
+	date := localDay(now, time.Local)
 	now = now.UTC()
-	date := now.Truncate(24 * time.Hour)
 	// Guard the restore-order invariant: restore replays a DLE's slots in date order,
 	// but the archiver's incremental snapshots advance in dump (wall-clock) order. A
 	// run dated earlier than a slot already sealed would splice an out-of-order

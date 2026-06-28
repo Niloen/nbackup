@@ -127,7 +127,7 @@ func TestSyncSelectionLast(t *testing.T) {
 	if len(report.Items) != 1 {
 		t.Fatalf("--last 1 backlog = %d, want 1", len(report.Items))
 	}
-	if report.Items[0].SlotID != "slot-2026-06-23" {
+	if report.Items[0].SlotID != "slot-2026-06-23.001" {
 		t.Fatalf("--last 1 kept %q, want the newest slot", report.Items[0].SlotID)
 	}
 }

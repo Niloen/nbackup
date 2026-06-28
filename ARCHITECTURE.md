@@ -19,7 +19,9 @@ of this document otherwise describes NBackup in its own terms.
 - **Run** — one planner execution (typically daily).
 - **Slot** — the primary artifact: one **Run** produces exactly one Slot, an
   immutable, sealed set of archives. Addressable unit for copy / restore / list.
-  (`slot-YYYY-MM-DD`, `.2`/`.3` for same-day reruns.)
+  (`slot-YYYY-MM-DD.NNN` — the run's local calendar date plus a fixed-width,
+  zero-padded sequence: `.001` for the day's first run, `.002`/`.003` for reruns.
+  Fixed width so the ids sort chronologically even as an object-store key.)
 - **Archive** — one **DLE** image at one level inside a Slot. The unit of
   **retention/pruning**: the floor and disk/cloud reclamation are per-archive, so an
   old slot can shed one DLE's image while keeping a slot-mate the chain needs. Browse

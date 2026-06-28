@@ -44,7 +44,7 @@ archive, and the files are human-friendly — one archive is three numbered file
 (payload, index, commit):
 
 ```text
-slots/slot-2026-06-21/
+slots/slot-2026-06-21.001/
   000000-app01-home-L0.tar.zst        # clean compressed tar (payload)
   000000-app01-home-L0.hdr            # JSON header sidecar
   000001-app01-home-L0-index.json.gz  # gzipped member list (browse without extracting)
@@ -116,7 +116,7 @@ go install ./cmd/nb
 This produces a single `nb` binary. The convention: you **inspect** with a noun
 (`nb slot`, `nb dle`, `nb medium`) and **act** with a flat verb (`nb dump`,
 `nb recover`, `nb prune`, …). Each inspection noun lists with no argument and
-details one item when given an id (`nb slot slot-2026-06-21`, `nb medium lto`).
+details one item when given an id (`nb slot slot-2026-06-21.001`, `nb medium lto`).
 
 | Command              | Purpose                                                  |
 |----------------------|----------------------------------------------------------|
@@ -153,7 +153,7 @@ nb dump                # run the backup, committing one slot's archives
 nb dump --dry-run --date 2026-07-15    # plan that day's run; writes nothing
 nb status              # progress of the running (or most recent) dump
 nb slot                # list slots (with a COPIES column: where each lives)
-nb slot slot-2026-06-21   # archives + every copy's volume and file positions
+nb slot slot-2026-06-21.001   # archives + every copy's volume and file positions
 nb medium              # media overview: type, slots, usage / capacity, volume
 nb medium lto          # one medium's volume and the slots it holds
 nb verify --all        # re-check every slot's archive checksums
@@ -253,9 +253,12 @@ a calculation over the catalog and a rate table, no billing API.
 
 ### Slot naming and multiple runs per day
 
-The first run of a day is `slot-YYYY-MM-DD`. Run again the same day and you get
-`slot-YYYY-MM-DD.2`, `.3`, … Each slot stays immutable; a committed date is never
-overwritten. Restores and pruning order slots by date **then** sequence.
+A slot is named for its run's local calendar date plus a sequence: the first run
+of a day is `slot-YYYY-MM-DD.001`, and running again the same day gives `.002`,
+`.003`, … The sequence is fixed-width so sorting slot ids as plain text orders them
+in time — in an `ls`, a log, or an object-store listing. Each slot stays immutable;
+a committed run is never overwritten. Restores and pruning order slots by date
+**then** sequence.
 
 ### Committing
 
@@ -273,7 +276,7 @@ in the catalog workdir. From any other shell, `nb status` reads it and prints an
 at-a-glance report:
 
 ```text
-Run slot-2026-06-21  [running]
+Run slot-2026-06-21.001  [running]
   started:  2026-06-21 02:00:03  (elapsed 4m12s)
   workers:  2 configured, 2 active
   dles:     1 done, 2 active, 1 pending
@@ -343,7 +346,7 @@ prints the latest dump in detail — each DLE's level, original/output size,
 compression %, files, dump time, and rate, with full/incremental totals:
 
 ```text
-DUMP REPORT  slot-2026-06-24  (2026-06-24 02:00)
+DUMP REPORT  slot-2026-06-24.001  (2026-06-24 02:00)
 DLE          LVL  ORIG       OUT       COMP%  FILES  TIME    RATE
 app01:/home  0    21.47 GB   5.37 GB   25%    1240   12m04s  29.66 MB/s
 app01:/etc   1    122.88 kB  40.96 kB  33%    9      1s      …
@@ -352,7 +355,7 @@ FULL: 1 dle(s), 21.47 GB -> 5.37 GB (25%)
 INCR: 1 dle(s), 122.88 kB -> 40.96 kB (33%)
 ```
 
-`nb report --dump --slot slot-2026-06-21` reports a specific dump. (Sizes come from
+`nb report --dump --slot slot-2026-06-21.001` reports a specific dump. (Sizes come from
 each archive's commit footer; the per-DLE timing comes from the run history, so a slot
 dumped before this was recorded shows sizes via `nb slot <id>` instead.)
 
