@@ -89,27 +89,39 @@ func (g *byteGate) err() error {
 	return g.aborted
 }
 
-// flushOne copies one archive from the holding disk to the landing, then reclaims the holding
-// copy (files + placement) and releases its back-pressure. CopyArchive records the landing
-// placement inline (single-threaded here), so the archive is on the landing in the catalog
-// before its holding copy is dropped — never absent.
-func (e *Engine) flushOne(landSession *clerk.Session, slotMeta *record.Slot, holding string, holdVol media.Volume, it handoff, gate *byteGate, tr *progress.Tracker, logf Logf) error {
+// copyOne is the drain's DATA half: it reads one staged archive from the holding disk and streams
+// it to the landing, returning the committed archive and its landing position. It drives the
+// landing Writer directly (not the clerk Session), so it touches the catalog only through the
+// Writer's VolumeSink — never the placement record. That record, and the holding reclaim, are the
+// control half (finalizeDrain), run by the orchestrator (the sole catalog writer). Splitting them
+// here lets a later step move copyOne onto a taper goroutine while control stays on the orchestrator.
+func (e *Engine) copyOne(landW *archiveio.Writer, slotMeta *record.Slot, holdVol media.Volume, it handoff, tr *progress.Tracker) (record.Archive, record.ArchivePos, error) {
 	if tr != nil {
 		tr.StartFlush(it.dleID)
 	}
 	ref := clerk.Ref{Slot: slotMeta.ID, DLE: it.arch.DLE, Level: it.arch.Level}
 	rc, err := openArchiveAt(holdVol, ref, it.pos.Parts)
 	if err != nil {
-		return fmt.Errorf("flush %s L%d: read holding disk: %w", it.dleID, it.arch.Level, err)
+		return record.Archive{}, record.ArchivePos{}, fmt.Errorf("flush %s L%d: read holding disk: %w", it.dleID, it.arch.Level, err)
 	}
-	if err := landSession.CopyArchive(it.arch, rc); err != nil {
-		rc.Close()
-		return fmt.Errorf("flush %s L%d to %q: %w", it.dleID, it.arch.Level, e.mediumName, err)
-	}
+	arch, pos, err := landW.CopyArchive(it.arch, rc)
 	rc.Close()
+	if err != nil {
+		return record.Archive{}, record.ArchivePos{}, fmt.Errorf("flush %s L%d to %q: %w", it.dleID, it.arch.Level, e.mediumName, err)
+	}
+	return arch, pos, nil
+}
 
-	for _, pos := range archivePosFiles(it.pos) {
-		if err := holdVol.RemoveFile(pos); err != nil {
+// finalizeDrain is the drain's CONTROL half: it records the landed archive's placement, then
+// reclaims the holding copy (files + placement) and releases its back-pressure. It runs on the
+// orchestrator (the sole catalog writer). The landing placement is recorded before the holding
+// copy is dropped, so the archive is never absent from the catalog.
+func (e *Engine) finalizeDrain(slotMeta *record.Slot, holding string, holdVol media.Volume, it handoff, arch record.Archive, pos record.ArchivePos, gate *byteGate, tr *progress.Tracker, logf Logf) error {
+	if err := e.cat.AddArchive(slotMeta, e.mediumName, arch, pos); err != nil {
+		return fmt.Errorf("flush %s: record landing placement: %w", it.dleID, err)
+	}
+	for _, p := range archivePosFiles(it.pos) {
+		if err := holdVol.RemoveFile(p); err != nil {
 			return fmt.Errorf("flush %s: reclaim holding disk: %w", it.dleID, err)
 		}
 	}

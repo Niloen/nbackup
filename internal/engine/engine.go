@@ -1197,6 +1197,7 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio
 
 	var (
 		gate        *byteGate
+		landW       *archiveio.Writer
 		landSession *clerk.Session
 		holdVol     media.Volume
 	)
@@ -1208,7 +1209,8 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio
 			tr.SetPhase(progress.PhaseFailed)
 			return nil, fmt.Errorf("open landing %q: %w", e.mediumName, err)
 		}
-		landSession = e.clerk.OpenSlot(landWT.w, e.mediumName)
+		landW = landWT.w
+		landSession = e.clerk.OpenSlot(landW, e.mediumName)
 		holdVol = dumpWT.lib.Volume()
 		capBytes, _ := e.cfg.Media[dumpMedium].CapacityBytes()
 		gate = newByteGate(capBytes)
@@ -1222,7 +1224,12 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio
 	}()
 
 	slotMeta := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
-	orchErr := e.orchestrate(commitCh, dumpMedium, slotMeta, buffering, landSession, holdVol, gate, tr, logf)
+	var orchErr error
+	if buffering {
+		orchErr = e.orchestrateBuffered(commitCh, dumpMedium, slotMeta, landW, holdVol, gate, tr, logf)
+	} else {
+		orchErr = e.orchestrateDirect(commitCh, dumpMedium, slotMeta)
+	}
 
 	if err := firstErr(orchErr, dumpErr); err != nil {
 		tr.SetPhase(progress.PhaseFailed)
@@ -1244,18 +1251,31 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio
 	return sealed, nil
 }
 
-// orchestrate records each committed archive's dump-medium placement as it arrives and, when
-// buffering, drains it to the landing. Each loop it first records every commit available right
-// now (so the catalog reflects the dump medium's contents promptly — the live view), then, when
-// buffering, flushes one staged archive to the landing. A direct dump never stages, so it just
-// records each placement as it arrives. The drain itself (flushOne) lives in flush.go with the
-// rest of the holding-disk taper.
-func (e *Engine) orchestrate(commitCh <-chan handoff, dumpMedium string, slotMeta *record.Slot, buffering bool, landSession *clerk.Session, holdVol media.Volume, gate *byteGate, tr *progress.Tracker, logf Logf) error {
+// orchestrateDirect records each committed archive's placement on the dump medium (the landing)
+// as it arrives — the direct dump, with no buffering and no drain. The orchestrator is the run's
+// sole catalog writer.
+func (e *Engine) orchestrateDirect(commitCh <-chan handoff, dumpMedium string, slotMeta *record.Slot) error {
+	for it := range commitCh {
+		if err := e.cat.AddArchive(slotMeta, dumpMedium, it.arch, it.pos); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// orchestrateBuffered records each archive's holding-disk placement as it arrives (the live view)
+// and drains the staged archives to the landing one at a time. Each loop it first records every
+// commit available right now (so the catalog reflects the disk's contents promptly), then drains
+// one staged archive: copyOne (the data half — holding read + landing write) and finalizeDrain
+// (the control half — record landing, reclaim holding, release back-pressure). Both run on this
+// goroutine for now; a later step moves copyOne onto a taper goroutine so the byte-copy overlaps
+// the live-view recording. The orchestrator is the sole catalog writer throughout.
+func (e *Engine) orchestrateBuffered(commitCh <-chan handoff, holding string, slotMeta *record.Slot, landW *archiveio.Writer, holdVol media.Volume, gate *byteGate, tr *progress.Tracker, logf Logf) error {
 	var pending []handoff
 	open := true
 	for open || len(pending) > 0 {
 		if open {
-			// Record every immediately-available commit's dump-medium placement.
+			// Record every immediately-available commit's holding-disk placement.
 		drain:
 			for {
 				select {
@@ -1264,12 +1284,10 @@ func (e *Engine) orchestrate(commitCh <-chan handoff, dumpMedium string, slotMet
 						open = false
 						break drain
 					}
-					if err := e.cat.AddArchive(slotMeta, dumpMedium, it.arch, it.pos); err != nil {
+					if err := e.cat.AddArchive(slotMeta, holding, it.arch, it.pos); err != nil {
 						return err
 					}
-					if buffering {
-						pending = append(pending, it)
-					}
+					pending = append(pending, it)
 				default:
 					break drain
 				}
@@ -1278,7 +1296,12 @@ func (e *Engine) orchestrate(commitCh <-chan handoff, dumpMedium string, slotMet
 		if len(pending) > 0 {
 			it := pending[0]
 			pending = pending[1:]
-			if err := e.flushOne(landSession, slotMeta, dumpMedium, holdVol, it, gate, tr, logf); err != nil {
+			arch, pos, err := e.copyOne(landW, slotMeta, holdVol, it, tr)
+			if err != nil {
+				gate.abort(err)
+				return err
+			}
+			if err := e.finalizeDrain(slotMeta, holding, holdVol, it, arch, pos, gate, tr, logf); err != nil {
 				gate.abort(err)
 				return err
 			}
@@ -1287,18 +1310,16 @@ func (e *Engine) orchestrate(commitCh <-chan handoff, dumpMedium string, slotMet
 		if !open {
 			break
 		}
-		// Nothing pending (or not buffering) and the dumpers are still going: block for the next.
+		// Nothing pending and the dumpers are still going: block for the next commit.
 		it, ok := <-commitCh
 		if !ok {
 			open = false
 			continue
 		}
-		if err := e.cat.AddArchive(slotMeta, dumpMedium, it.arch, it.pos); err != nil {
+		if err := e.cat.AddArchive(slotMeta, holding, it.arch, it.pos); err != nil {
 			return err
 		}
-		if buffering {
-			pending = append(pending, it)
-		}
+		pending = append(pending, it)
 	}
 	return nil
 }
