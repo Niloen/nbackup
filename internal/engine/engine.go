@@ -745,7 +745,7 @@ func (e *Engine) PlanWithProgress(date time.Time, sink progress.Sink) *planner.P
 
 func (e *Engine) planWith(date time.Time, sink progress.Sink) *planner.Plan {
 	dles := e.cfg.DLEs()
-	plan := planner.Build(dles, e.cat.History(), e.estimates(dles, sink), e.plannerParams(date), date)
+	plan := planner.Build(dles, e.cat.History(), e.estimates(dles, sink), e.cat.ForcedFulls(), e.plannerParams(date), date)
 	e.forceFullWhereBaseMissing(plan)
 	return plan
 }
@@ -820,7 +820,7 @@ func (e *Engine) ValidatePlan() (warnings []string, err error) {
 // and held constant, so this is a schedule forecast, not a capacity timeline.
 func (e *Engine) Simulate(start time.Time, days int) []*planner.Plan {
 	dles := e.cfg.DLEs()
-	return planner.Simulate(dles, e.cat.History(), e.estimates(dles, nil), e.plannerParams(start), start, days)
+	return planner.Simulate(dles, e.cat.History(), e.estimates(dles, nil), e.cat.ForcedFulls(), e.plannerParams(start), start, days)
 }
 
 // plannerParams derives the planner's tuning inputs from config and the medium for
@@ -1029,6 +1029,7 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 		estSink = progress.MultiSink(estSink, e.estimateSink)
 	}
 	plan := e.planWith(date, estSink)
+	forced := e.cat.ForcedFulls() // captured to consume once the run seals (the lock blocks a concurrent reset)
 	for _, w := range plan.Warnings {
 		logf.log("WARNING: %s", w)
 	}
@@ -1086,7 +1087,18 @@ func (e *Engine) Run(date time.Time, logf Logf) (*record.Slot, error) {
 	}
 
 	tr, runLogf := e.progressTracker(slotID, workers, plan.Items, fileSink, logf)
-	return e.runOrchestrated(plan, workers, spec, dumpMedium, dumpWT, buffering, tr, now, runLogf)
+	sealed, err := e.runOrchestrated(plan, workers, spec, dumpMedium, dumpWT, buffering, tr, now, runLogf)
+	if err != nil {
+		return nil, err
+	}
+	// The run sealed, so every planned DLE — including every forced one, which the planner
+	// scheduled at L0 — has been dumped. Consume the force-full directives now; a failed run
+	// (returned above) leaves them so the next run retries. The lock `nb dump` holds means no
+	// `nb reset` slipped in between planning and here.
+	if err := e.cat.ClearForceFulls(forced); err != nil {
+		return nil, err
+	}
+	return sealed, nil
 }
 
 // progressTracker builds the run's dump-phase tracker and the log function to use under it. It
@@ -1725,21 +1737,18 @@ func (e *Engine) ResolveDLE(arg string) (string, bool) {
 	return "", false
 }
 
-// ResetState clears a configured DLE's incremental state so its next dump starts a fresh
-// full (the planner picks a level from history, but with no usable base the run is forced
-// to L0 — see forceFullWhereBaseMissing). arg is a host:path identity or the internal
-// slug; it returns the DLE's display identity. The DLE must be in the configuration, since
-// resetting it only makes sense to re-dump it. State for a remote DLE lives on its client,
-// so this reaches that host through the archiver's executor.
-func (e *Engine) ResetState(arg string) (string, error) {
+// ForceFull schedules a configured DLE for a full on its next run, the archiver-independent
+// `nb reset`: it records a force-full directive the planner honors (a mandatory L0),
+// rather than reaching into and deleting the archiver's incremental state. The forced full
+// reseeds that state itself when it runs, and — with commit-bound promotion — the old
+// chain stays intact until the new full actually commits. arg is a host:path identity or
+// the internal slug; it returns the DLE's display identity. The DLE must be configured,
+// since forcing a full only makes sense to re-dump it.
+func (e *Engine) ForceFull(arg string) (string, error) {
 	for _, d := range e.cfg.DLEs() {
 		if d.Name() == arg || d.ID() == arg {
-			ar, err := e.archiverFor(d.DumpTypeName(), d.Host)
-			if err != nil {
-				return "", err
-			}
-			if err := ar.ResetState(d.Name()); err != nil {
-				return "", fmt.Errorf("reset %s: %w", d.ID(), err)
+			if err := e.cat.SetForceFull(d.Name()); err != nil {
+				return "", fmt.Errorf("force full %s: %w", d.ID(), err)
 			}
 			return d.ID(), nil
 		}

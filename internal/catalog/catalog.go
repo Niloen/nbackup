@@ -16,10 +16,13 @@
 // rebuilds that store from the media (the source of truth); it hands finished
 // placements back through the store's write path and never touches its fields.
 //
-// Everything the catalog holds is derivable from the media; it owns no precious
-// state. An archiver's incremental state (gnutar's .snar library) is the one piece of
-// non-derivable local state, and it belongs to the archiver, not here (see package
-// archiver).
+// Almost everything the catalog holds is derivable from the media; the cache is a
+// performance copy, not a system of record. The one exception is per-DLE operator intent
+// (DLEMeta — today just the `nb reset` force-full directive): it cannot be scanned back, so
+// it lives in the cache file beside the entries and is preserved across a Rebuild. An
+// archiver's incremental state (gnutar's .snar library) is non-derivable too, but it is
+// precious and belongs to the archiver, not here (see package archiver); the force-full
+// directive, by contrast, is small and short-lived — a run consumes it.
 package catalog
 
 import (
@@ -119,24 +122,36 @@ type VolumeRecord struct {
 	Label record.Label `json:"label"`
 }
 
+// DLEMeta is the catalog's per-DLE operator/planner metadata, keyed by DLE slug. Unlike an
+// Entry (which is media-derived and rebuilt by scanning), this is intent that cannot be
+// scanned back — so it lives in the cache file and is deliberately preserved across a
+// Rebuild. It is a struct, not a bare flag, so further per-DLE state can accrete here
+// without reshaping the cache. Today it carries only ForceFull: the operator asked (via
+// `nb reset`) that this DLE be fulled on its next run; a run consumes it.
+type DLEMeta struct {
+	ForceFull bool `json:"force_full,omitempty"`
+}
+
 // Catalog is a local cache of slot entries plus a registry of labeled volumes. It
 // holds no long-lived volume reference; volumes are passed in only to (re)scan.
 type Catalog struct {
 	workdir string
 	entries []*Entry
 	volumes map[string]*VolumeRecord // by volume label name
+	dles    map[string]*DLEMeta      // per-DLE operator/planner metadata, by slug
 	loaded  bool
 }
 
 type cacheFile struct {
 	Entries []*Entry                 `json:"entries"`
 	Volumes map[string]*VolumeRecord `json:"volumes,omitempty"`
+	DLEs    map[string]*DLEMeta      `json:"dles,omitempty"`
 }
 
 // Open loads the catalog cache from the workdir. If the cache file is absent, the
 // catalog is empty and not yet loaded (EnsureFresh will populate it).
 func Open(workdir string) (*Catalog, error) {
-	c := &Catalog{workdir: workdir, volumes: map[string]*VolumeRecord{}}
+	c := &Catalog{workdir: workdir, volumes: map[string]*VolumeRecord{}, dles: map[string]*DLEMeta{}}
 	data, err := os.ReadFile(filepath.Join(workdir, CacheFile))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -151,6 +166,9 @@ func Open(workdir string) (*Catalog, error) {
 	c.entries = cf.Entries
 	if cf.Volumes != nil {
 		c.volumes = cf.Volumes
+	}
+	if cf.DLEs != nil {
+		c.dles = cf.DLEs
 	}
 	c.sortEntries()
 	c.loaded = true
@@ -420,6 +438,69 @@ func (c *Catalog) History() *History {
 	return h
 }
 
+// SetForceFull marks a DLE (by slug) to be fulled on its next run and persists. It is the
+// store behind `nb reset`: the planner reads ForcedFulls and schedules a mandatory L0.
+func (c *Catalog) SetForceFull(slug string) error {
+	c.metaFor(slug).ForceFull = true
+	return c.persist()
+}
+
+// ForcedFulls returns the set of DLE slugs currently flagged for a forced full.
+func (c *Catalog) ForcedFulls() map[string]bool {
+	out := map[string]bool{}
+	for slug, m := range c.dles {
+		if m.ForceFull {
+			out[slug] = true
+		}
+	}
+	return out
+}
+
+// ClearForceFulls drops the force-full flag for the given DLE slugs and persists — called
+// once a run seals, having dumped every planned (hence every forced) DLE at L0.
+func (c *Catalog) ClearForceFulls(slugs map[string]bool) error {
+	changed := false
+	for slug := range slugs {
+		if m := c.dles[slug]; m != nil && m.ForceFull {
+			m.ForceFull = false
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return c.persist()
+}
+
+// metaFor returns the DLE's metadata record, creating it on first use.
+func (c *Catalog) metaFor(slug string) *DLEMeta {
+	if c.dles == nil {
+		c.dles = map[string]*DLEMeta{}
+	}
+	m := c.dles[slug]
+	if m == nil {
+		m = &DLEMeta{}
+		c.dles[slug] = m
+	}
+	return m
+}
+
+// prunedDLEMeta drops zero-value records so the cache file carries only DLEs with live
+// metadata (a consumed force-full leaves no residue).
+func prunedDLEMeta(dles map[string]*DLEMeta) map[string]*DLEMeta {
+	var out map[string]*DLEMeta
+	for slug, m := range dles {
+		if m == nil || *m == (DLEMeta{}) {
+			continue
+		}
+		if out == nil {
+			out = map[string]*DLEMeta{}
+		}
+		out[slug] = m
+	}
+	return out
+}
+
 func (e *Entry) placedOn(medium string) bool {
 	for _, p := range e.Placements {
 		if p.Medium == medium {
@@ -456,7 +537,7 @@ func (c *Catalog) persist() error {
 	if err := os.MkdirAll(c.workdir, 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(cacheFile{Entries: c.entries, Volumes: c.volumes}, "", "  ")
+	data, err := json.MarshalIndent(cacheFile{Entries: c.entries, Volumes: c.volumes, DLEs: prunedDLEMeta(c.dles)}, "", "  ")
 	if err != nil {
 		return err
 	}

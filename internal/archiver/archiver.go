@@ -81,11 +81,6 @@ type Archiver interface {
 	// an empty snapshot a killed dump left behind) reports false, so a corrupt base
 	// forces a full rather than silently producing a full-sized incremental.
 	HasBase(dle string, level int) bool
-	// ResetState discards a DLE's incremental state so its next dump starts a fresh
-	// chain. With no base left, the engine downgrades the next run to a full. It is the
-	// archiver-neutral "start this DLE over" — `nb reset` — and a no-op when nothing is
-	// stored.
-	ResetState(dle string) error
 	// RestoreStage returns the extractor as a program stage (extract from stdin into
 	// destDir), so a decode→extract pipeline can run entirely on the host where the
 	// bytes should land — letting a client-held key decrypt on the client and a

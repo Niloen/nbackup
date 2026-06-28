@@ -154,8 +154,16 @@ of an earlier design left behind) so a dead base can never masquerade as usable.
 planned incremental has no usable base — missing, empty, or a moved `state_dir` — the
 engine **forces a full** with a warning rather than failing or dumping a full-sized
 "incremental" onto nothing (`forceFullWhereBaseMissing`, again Amanda's level-0 fallback).
-`nb reset <dle>` is the deliberate version of the same: it discards a DLE's incremental
-state so the next dump starts a fresh chain.
+
+`nb reset <dle>` is the deliberate version, and it is **archiver-independent**: rather than
+reaching in to delete a snapshot, it records a per-DLE **force-full directive in the
+catalog** (`DLEMeta.ForceFull`) that the planner honors as a mandatory level 0 — the peer
+of Amanda's `amadmin force`, expressed as catalog state instead of a `curinfo` flag. The
+directive is the one piece of catalog state that is *not* media-derived (operator intent
+can't be scanned back), so it is kept in the cache file beside the entries and preserved
+across `nb rebuild`; a run consumes it. Forcing the level rather than deleting state means
+the archiver reseeds itself on the L0, and — with commit-bound promotion — the existing
+chain stays intact until the new full actually commits.
 
 *Where* the root lives is a **host** property, not the archiver's: a `state_dir`
 configured per host (`hosts.<h>.state_dir`), with a fleet-wide default

@@ -134,8 +134,11 @@ type cand struct {
 	reason    string
 }
 
-// Build produces a plan for the given date from per-DLE estimates.
-func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, p Params, today time.Time) *Plan {
+// Build produces a plan for the given date from per-DLE estimates. forced names DLEs an
+// operator has asked to full on the next run (`nb reset`); each is scheduled a mandatory
+// level 0, overriding the cycle/bump schedule — the archiver-independent peer of Amanda's
+// FORCE_FULL, decided here rather than by deleting the archiver's incremental state.
+func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, forced map[string]bool, p Params, today time.Time) *Plan {
 	cycle := p.CycleDays
 	if cycle < 1 {
 		cycle = 7
@@ -156,6 +159,9 @@ func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, p 
 		}
 		c := &cand{dle: d, name: name, st: st, days: st.DaysSinceFull(today), estFull: e.Full, estIncr: e.Incr}
 		switch {
+		case forced[name]:
+			c.full, c.mandatory = true, true
+			c.reason = "forced full (nb reset)"
 		case c.days < 0:
 			c.full, c.mandatory = true, true
 			c.reason = "first backup of this DLE (mandatory full)"
@@ -237,7 +243,7 @@ func chooseIncrLevel(st *catalog.DLEState, e Estimate, bumpPercent float64) (lev
 // reclamation timeline. The bump decision likewise weighs today's level sizes, so
 // a forecast past a simulated bump approximates the deeper level's size with the
 // current one's — a schedule sketch, not an exact size projection.
-func Simulate(dles []config.DLE, hist *catalog.History, est map[string]Estimate, p Params, start time.Time, days int) []*Plan {
+func Simulate(dles []config.DLE, hist *catalog.History, est map[string]Estimate, forced map[string]bool, p Params, start time.Time, days int) []*Plan {
 	if days < 1 {
 		days = 1
 	}
@@ -245,7 +251,13 @@ func Simulate(dles []config.DLE, hist *catalog.History, est map[string]Estimate,
 	plans := make([]*Plan, 0, days)
 	for i := 0; i < days; i++ {
 		date := start.AddDate(0, 0, i)
-		plan := Build(dles, h, est, p, date)
+		// A forced full is consumed on the first simulated day; later days follow the
+		// ordinary schedule the day-0 full reseeds.
+		dayForced := forced
+		if i > 0 {
+			dayForced = nil
+		}
+		plan := Build(dles, h, est, dayForced, p, date)
 		plans = append(plans, plan)
 		// Advance the cloned history as if this day's run had been sealed, so the
 		// next day's DaysSinceFull / LastLevel / RunsAtCurrentLevel see it.

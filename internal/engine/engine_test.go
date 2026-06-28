@@ -152,11 +152,10 @@ func TestRepeatedLevelRestore(t *testing.T) {
 	}
 }
 
-// TestResetForcesFullNextRun verifies the recovery path for a bad incremental chain:
-// after a full, `nb reset` clears the DLE's incremental state, and the next plan/run is
-// downgraded to a full (with a warning) rather than an incremental built on a missing
-// base. This is the end-to-end guard for the out-of-space failure that left the snapshot
-// dead and made the next "incremental" re-dump everything.
+// TestResetForcesFullNextRun verifies `nb reset` as a planner directive: after a full it
+// schedules the DLE for a level 0 on the next run (touching no incremental state), the
+// forced run dumps a full, and the directive is consumed so the run after that returns to
+// the ordinary incremental schedule.
 func TestResetForcesFullNextRun(t *testing.T) {
 	src := t.TempDir()
 	catalogDir := t.TempDir()
@@ -190,7 +189,7 @@ func TestResetForcesFullNextRun(t *testing.T) {
 		t.Fatalf("precondition: day2 should plan L1, got L%d", got)
 	}
 
-	id, err := eng.ResetState(config.DLE{Host: "localhost", Path: src}.ID())
+	id, err := eng.ForceFull(config.DLE{Host: "localhost", Path: src}.ID())
 	if err != nil {
 		t.Fatalf("reset: %v", err)
 	}
@@ -198,16 +197,16 @@ func TestResetForcesFullNextRun(t *testing.T) {
 		t.Fatal("reset should return the DLE identity")
 	}
 
-	// The base is gone, so the plan is forced back to a full, with a warning.
+	// The directive forces the next plan to a full, labeled as such.
 	plan := eng.Plan(day2)
 	if got := plan.Items[0].Level; got != 0 {
 		t.Fatalf("after reset, day2 should plan L0, got L%d", got)
 	}
-	if !hasWarning(plan.Warnings, "forcing a full") {
-		t.Fatalf("expected a forced-full warning, got %v", plan.Warnings)
+	if !strings.Contains(plan.Items[0].Reason, "forced full") {
+		t.Fatalf("expected a forced-full reason, got %q", plan.Items[0].Reason)
 	}
 
-	// And a real run honors it: day2 dumps a full, not an incremental.
+	// A real run honors it: day2 dumps a full, not an incremental.
 	time.Sleep(1100 * time.Millisecond)
 	s2, err := eng.Run(day2, nil)
 	if err != nil {
@@ -217,19 +216,17 @@ func TestResetForcesFullNextRun(t *testing.T) {
 		t.Fatalf("after reset, day2 run should be L0, got L%d", got)
 	}
 
-	// Resetting an unknown DLE is an error (you can only reset something configured).
-	if _, err := eng.ResetState("nope:/x"); err == nil {
+	// The directive is consumed: the next plan is back on the ordinary schedule (an
+	// incremental on the fresh full), not stuck forcing fulls forever.
+	day3 := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+	if got := eng.Plan(day3).Items[0].Level; got != 1 {
+		t.Fatalf("after the forced full ran, day3 should plan L1 again, got L%d", got)
+	}
+
+	// Forcing an unknown DLE is an error (you can only reset something configured).
+	if _, err := eng.ForceFull("nope:/x"); err == nil {
 		t.Fatal("reset of an unconfigured DLE should error")
 	}
-}
-
-func hasWarning(warnings []string, substr string) bool {
-	for _, w := range warnings {
-		if strings.Contains(w, substr) {
-			return true
-		}
-	}
-	return false
 }
 
 // TestValidatePlan checks that a plan preview surfaces the config problems the

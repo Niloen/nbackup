@@ -82,12 +82,6 @@ func (g *gnutar) HasBase(dle string, level int) bool {
 	return err == nil && n > 0
 }
 
-// ResetState discards a DLE's whole snapshot library (every level's snapshot and any
-// leftover ".new" side files), so the next dump finds no base and starts a fresh full.
-func (g *gnutar) ResetState(dle string) error {
-	return g.ex.Remove(filepath.Join(g.stateDir, dle))
-}
-
 // Check verifies the configured binary is GNU tar (cached), running `tar --version` on
 // the executor's host.
 func (g *gnutar) Check() error {

@@ -250,27 +250,6 @@ func TestHasBaseRejectsEmptySnapshot(t *testing.T) {
 	}
 }
 
-// TestResetStateClearsBase verifies reset discards a DLE's incremental state (so the next
-// dump is forced to a full) and is a no-op for a DLE with nothing stored.
-func TestResetStateClearsBase(t *testing.T) {
-	src := t.TempDir()
-	m := newArchiver(t, t.TempDir())
-	write(t, filepath.Join(src, "a.txt"), "alpha")
-	backup(t, m, archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 0, BaseLevel: -1}, filepath.Join(t.TempDir(), "l0.tar"))
-	if !m.HasBase("app", 0) {
-		t.Fatal("base should exist after a full")
-	}
-	if err := m.ResetState("app"); err != nil {
-		t.Fatal(err)
-	}
-	if m.HasBase("app", 0) {
-		t.Fatal("base should be gone after reset")
-	}
-	if err := m.ResetState("never-dumped"); err != nil {
-		t.Fatalf("reset of a DLE with no state should be a no-op: %v", err)
-	}
-}
-
 // backup runs the archiver's backup pipeline source to outFile, the way the writer does
 // (run the tar stage, drain its stdout, finish), exercising the new BackupSource API.
 func backup(t *testing.T, m archiver.Archiver, req archiver.BackupRequest, outFile string) {

@@ -223,3 +223,42 @@ func TestRebuildReassemblesSpannedSlot(t *testing.T) {
 		t.Fatalf("placement volumes = %v, want 2", got)
 	}
 }
+
+// TestForceFullDirectivePersists verifies the `nb reset` directive round-trips through the
+// cache file, survives a Rebuild (it is operator intent, not media-derived, so a scan must
+// not drop it), and is gone for good once cleared.
+func TestForceFullDirectivePersists(t *testing.T) {
+	dir := t.TempDir()
+	cat, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.SetForceFull("h-data"); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reopened.ForcedFulls()["h-data"] {
+		t.Fatal("force-full directive should persist across Open")
+	}
+	if _, err := reopened.Rebuild(map[string]media.Volume{}); err != nil {
+		t.Fatal(err)
+	}
+	if !reopened.ForcedFulls()["h-data"] {
+		t.Fatal("force-full directive should survive a rebuild")
+	}
+
+	if err := reopened.ClearForceFulls(map[string]bool{"h-data": true}); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.ForcedFulls()) != 0 {
+		t.Fatalf("cleared directive should not reappear, got %v", again.ForcedFulls())
+	}
+}
