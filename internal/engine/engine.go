@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -22,6 +21,7 @@ import (
 	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drain"
+	"github.com/Niloen/nbackup/internal/dumper"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
@@ -73,7 +73,7 @@ type Engine struct {
 	estimateSink   progress.Sink                 // optional: live estimate-progress sink (nil = status file only)
 	limiters       map[string]*ratelimit.Limiter // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
 	dec            *decoder                      // the read-side scheme operation (restore/verify/list); shares the engine's resolution + decode opts
-	enc            *encoder                      // the write-side scheme operation (dump); shares the engine's dumptype-recipe resolution
+	dmp            *dumper.Dumper                // the producer (dump): workers + tar source + encode pipeline; the engine injects its resolution
 	ver            *verifier                     // the verification operation (verify/drill checks); shares catalog + data path + decoder
 	cop            *copier                       // the copy operation (PlanCopy/CopySlot); shares catalog + data path + write machinery
 	rst            *restorer                     // the restore/recover operation; shares catalog + data path + decoder + config
@@ -220,7 +220,12 @@ func New(cfg *config.Config) (*Engine, error) {
 	}
 	e.clerk = clerk.New(e, e, catalog.OpenMemberIndex(cfg.WorkdirPath()))
 	e.dec = e.newDecoder()
-	e.enc = e.newEncoder()
+	e.dmp = dumper.New(dumper.Config{
+		ArchiverFor: e.archiverFor,
+		Exclude:     func(dt string) []string { return e.cfg.ResolveDumpType(dt).Exclude },
+		Placement:   e.encodePlacement,
+		Threads:     e.fopts.Threads,
+	})
 	e.ver = e.newVerifier()
 	e.cop = e.newCopier()
 	e.rst = e.newRestorer()
@@ -1153,77 +1158,17 @@ func planProgress(items []planner.Item) []progress.Plan {
 	return out
 }
 
-// runProducers dumps every planned item, acquiring a write target from the drain for each and
-// reporting the committed archive. The drain decides each item's destination (a holding disk or,
-// when none fits, the landing) and back-pressures via Acquire. With parallelism.workers > 1 it runs
-// that many concurrently, bounded by a semaphore; the first error stops scheduling and is returned.
-func (e *Engine) runProducers(items []planner.Item, workers int, dr *drain.Drainer, tr *progress.Tracker, logf Logf) error {
-	dumpOne := func(item planner.Item) error {
-		t, err := dr.Acquire(item.EstBytes)
-		if err != nil {
-			return err
-		}
-		arch, pos, err := e.backupItem(t.Session(), item, tr, logf)
-		if err != nil {
-			return err
-		}
-		return t.Landed(arch, pos)
-	}
-	if workers <= 1 || len(items) <= 1 {
-		for _, item := range items {
-			if dr.Aborted() != nil {
-				break
-			}
-			if err := dumpOne(item); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
+// drainStore adapts a *drain.Drainer to the dumper.Store the producer writes into: it bridges the
+// Drainer's concrete Acquire/Target to the producer's interface, keeping the two packages
+// independent (neither imports the other).
+type drainStore struct{ dr *drain.Drainer }
 
-	threads := e.fopts.Threads
-	if threads < 1 {
-		threads = 1
+func (s drainStore) Acquire(est int64) (dumper.Target, error) {
+	t, err := s.dr.Acquire(est)
+	if err != nil {
+		return nil, err
 	}
-	if cores := runtime.GOMAXPROCS(0); workers*threads > cores {
-		logf.log("WARNING: %d workers x %d compressor thread(s) = %d exceeds %d cores; CPU may be oversubscribed",
-			workers, threads, workers*threads, cores)
-	}
-
-	var (
-		wg       sync.WaitGroup
-		sem      = make(chan struct{}, workers)
-		mu       sync.Mutex
-		firstErr error
-	)
-	failed := func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return firstErr != nil || dr.Aborted() != nil
-	}
-	for _, item := range items {
-		if failed() {
-			break
-		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(it planner.Item) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			if failed() {
-				return
-			}
-			if err := dumpOne(it); err != nil {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = err
-				}
-				mu.Unlock()
-			}
-		}(item)
-	}
-	wg.Wait()
-	return firstErr
+	return t, nil
 }
 
 // runOrchestrated executes a dump: it opens the holding disks (the buffer the producers stage onto),
@@ -1249,7 +1194,7 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers, landingSlots int, 
 		Pool: drain.NewPool(disks), LandingSlots: landingSlots, Tracker: tr, Logf: logf,
 	})
 
-	dumpErr := e.runProducers(plan.Items, workers, dr, tr, logf)
+	dumpErr := e.dmp.Run(plan.Items, workers, drainStore{dr}, tr, logf)
 
 	tr.SetPhase(progress.PhaseSealing)
 	sealed, finErr := dr.Finish(now)
@@ -1372,92 +1317,6 @@ func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
 		}
 		return id, seq, nil
 	}
-}
-
-// backupItem archives a single DLE into the open slot session, returning the committed
-// archive and its on-medium position for the run's orchestrator to record (the worker writes
-// the bytes; only the orchestrator touches the catalog). The engine owns orchestration — the
-// run tracker lifecycle, resolving the archiver and describing the backup (the request +
-// incremental base requirement) — and the session moves the bytes; the engine never sees the
-// storage record or its parts.
-func (e *Engine) backupItem(session *clerk.Session, item planner.Item, tr *progress.Tracker, logf Logf) (arch record.Archive, pos record.ArchivePos, err error) {
-	// The progress tracker keys and displays DLEs by their host:path identity; the
-	// seal and filenames keep the internal slug.
-	pname := item.DLE.ID()
-	tr.StartDLE(pname)
-	var sum clerk.Summary
-	defer func() {
-		if err != nil {
-			tr.FinishDLE(pname, 0, 0, 0, err)
-		} else {
-			tr.FinishDLE(pname, sum.FileCount, sum.Uncompressed, sum.Compressed, nil)
-		}
-	}()
-
-	spec, err := e.backupSpec(item)
-	if err != nil {
-		return record.Archive{}, record.ArchivePos{}, err
-	}
-
-	logf.log("archiving %s (L%d)", item.DLE.ID(), item.Level)
-	sum, arch, pos, err = e.enc.dumpArchive(session, spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
-	if err != nil {
-		// An unreadable file makes tar exit fatally (it never silently ships a partial
-		// archive — that would betray recoverability), so name the likely cause and fix
-		// rather than leaving the operator with a bare "exit status 2".
-		if strings.Contains(err.Error(), "Permission denied") {
-			return record.Archive{}, record.ArchivePos{}, fmt.Errorf("archive %s: %w\n(a source file is unreadable — run nb as a user that can read every file under %s, e.g. via sudo/root, or exclude it in the dumptype)", item.DLE.ID(), err, item.DLE.Path)
-		}
-		return record.Archive{}, record.ArchivePos{}, fmt.Errorf("archive %s: %w", item.DLE.ID(), err)
-	}
-
-	sizeLabel := "compressed"
-	if sum.Compress == "none" {
-		sizeLabel = "stored" // no compressor in the pipe; "compressed" would be a lie
-	}
-	if sum.FileCount == 0 {
-		// An incremental with nothing changed still writes tar's structural overhead
-		// (archive header/footer + directory census); say so rather than the puzzling
-		// "0 file(s), 10.24 kB stored".
-		logf.log("  no changed files (%s of tar metadata)", sizeutil.FormatBytes(sum.Compressed))
-	} else {
-		logf.log("  %d file(s), %s %s", sum.FileCount, sizeutil.FormatBytes(sum.Compressed), sizeLabel)
-	}
-	return arch, pos, nil
-}
-
-// backupSpec describes the backup of one planned item: it resolves the archiver and builds
-// the request (with the dumptype's excludes), and for an incremental requires the base
-// incremental state to be present. It is pure intent — the schemes, transform placement, and
-// storage record are the session's to derive.
-func (e *Engine) backupSpec(item planner.Item) (BackupSpec, error) {
-	ar, err := e.archiverFor(item.DLE.DumpTypeName(), item.DLE.Host)
-	if err != nil {
-		return BackupSpec{}, err
-	}
-	req := archiver.BackupRequest{
-		DLE:        item.Name,
-		SourcePath: item.DLE.Path,
-		Level:      item.Level,
-		BaseLevel:  -1,
-		Exclude:    e.cfg.ResolveDumpType(item.DLE.DumpTypeName()).Exclude,
-	}
-	if item.Level >= 1 {
-		req.BaseLevel = item.BaseLevel
-		if !ar.HasBase(item.Name, item.BaseLevel) {
-			return BackupSpec{}, fmt.Errorf("DLE %s: incremental L%d needs the L%d incremental state but it is missing — "+
-				"the prior dump wrote it under the host's state_dir; if that path moved (e.g. a relative state_dir/workdir while `nb` ran from a different directory), "+
-				"set state_dir to an absolute path and re-run a full (L0)",
-				item.DLE.ID(), item.Level, item.BaseLevel)
-		}
-	}
-	return BackupSpec{
-		Archiver: ar,
-		Request:  req,
-		Host:     item.DLE.Host,
-		BaseSlot: item.BaseSlot,
-		DumpType: item.DLE.DumpTypeName(),
-	}, nil
 }
 
 // Restore reconstructs a DLE as of a slot into destDir; see restorer.

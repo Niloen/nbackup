@@ -85,9 +85,9 @@ func (d *decoder) restoreArchive(rc io.ReadCloser, plan DecodePlan, archiverType
 	// Place each decode step: decrypt lands in the sink (on the target) when the key is
 	// client-held, else in the local filters; decompress always fuses with tar on the target so
 	// a remote restore ships compressed bytes. The sink chain is decrypt → decompress → tar.
-	fused, filters := splitTransforms(
-		transform{cmd: encF.Reverse, fused: plan.DecryptInSink},
-		transform{cmd: compF.Reverse, fused: true},
+	fused, filters := xfer.SplitTransforms(
+		xfer.Transform{Cmd: encF.Reverse, Fused: plan.DecryptInSink},
+		xfer.Transform{Cmd: compF.Reverse, Fused: true},
 	)
 	sink := xfer.NewPrograms(target).Add(fused...).Add(arch.RestoreStage(destDir, members))
 
@@ -119,7 +119,7 @@ func (d *decoder) listMembers(rc io.ReadCloser, compressScheme, encrypt string, 
 		return nil, err
 	}
 	// A local list runs both transforms server-side (nothing fuses with a far tar).
-	_, filters := splitTransforms(transform{cmd: decrypt}, transform{cmd: decompress})
+	_, filters := xfer.SplitTransforms(xfer.Transform{Cmd: decrypt}, xfer.Transform{Cmd: decompress})
 	ls := &listSink{arch: arch}
 	_, terr := xfer.Transfer(xfer.Reader(rc), filters, ls)
 	return ls.members, terr
