@@ -289,9 +289,10 @@ func (c *Catalog) RemovePlacement(slotID, medium string) (gone bool, err error) 
 // medium — the per-archive peer of RemovePlacement. It removes that DLE's ArchivePos
 // from the medium's placement; when the placement keeps no archives the whole
 // placement goes (placementGone), and when that was the slot's last copy the entry
-// goes too (entryGone) — the slot no longer exists anywhere. The slot's
-// medium-independent content (Entry.Slot.Archives) is left intact while any copy
-// survives: it describes what the slot is, not what any one medium still holds.
+// goes too (entryGone) — the slot no longer exists anywhere. When no remaining
+// placement holds this DLE, the slot's medium-independent content
+// (Entry.Slot.Archives) drops it too: the slot stops advertising an image no
+// medium holds, even while it keeps other DLEs' images on surviving copies.
 func (c *Catalog) RemoveArchive(slotID, medium, dle string) (placementGone, entryGone bool, err error) {
 	e := c.entryByID(slotID)
 	if e == nil {
@@ -312,14 +313,24 @@ func (c *Catalog) RemoveArchive(slotID, medium, dle string) (placementGone, entr
 		break
 	}
 	kept := e.Placements[:0:0]
+	dleStillHeld := false
 	for _, p := range e.Placements {
 		if len(p.Archives) > 0 {
 			kept = append(kept, p)
 		} else {
 			placementGone = true
 		}
+		for _, a := range p.Archives {
+			if a.DLE == dle {
+				dleStillHeld = true
+				break
+			}
+		}
 	}
 	e.Placements = kept
+	if !dleStillHeld {
+		e.Slot.DropArchive(dle)
+	}
 	if len(e.Placements) == 0 {
 		c.removeEntry(slotID)
 		entryGone = true

@@ -116,6 +116,25 @@ func (s *Slot) AddArchive(a Archive) {
 	s.TotalBytes += a.Compressed
 }
 
+// DropArchive removes a DLE's archive and keeps TotalBytes in sync, the inverse
+// of AddArchive. Used when the last copy of that DLE's image has been reclaimed,
+// so the slot's medium-independent content no longer advertises an image no
+// medium holds. Reports whether an archive was removed.
+func (s *Slot) DropArchive(dle string) bool {
+	kept := s.Archives[:0:0]
+	removed := false
+	for _, a := range s.Archives {
+		if a.DLE == dle {
+			s.TotalBytes -= a.Compressed
+			removed = true
+			continue
+		}
+		kept = append(kept, a)
+	}
+	s.Archives = kept
+	return removed
+}
+
 // Seal marks the slot immutable. It refuses to seal a slot with no archives, so
 // an empty run can never be recorded as a recovery point.
 func (s *Slot) Seal(now time.Time) error {

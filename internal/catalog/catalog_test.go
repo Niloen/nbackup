@@ -148,6 +148,54 @@ func TestCacheLifecycle(t *testing.T) {
 	}
 }
 
+// TestRemoveArchiveDropsCopylessDLE confirms that reclaiming the last copy of one
+// DLE's image from a slot that still holds other DLEs drops it from the slot's
+// medium-independent content — so `nb dle` never lists an image no medium holds —
+// while leaving the surviving DLE (and the slot entry) intact.
+func TestRemoveArchiveDropsCopylessDLE(t *testing.T) {
+	dir := t.TempDir()
+	vol := newVolume(t, dir)
+
+	putSlot(t, vol, sealed("slot-2026-06-20", "2026-06-20", 1,
+		record.Archive{DLE: "h-leo", Level: 0, Compressed: 100},
+		record.Archive{DLE: "h-shared", Level: 0, Compressed: 100}))
+
+	cat, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.EnsureFresh("disk", vol); err != nil {
+		t.Fatal(err)
+	}
+
+	placementGone, entryGone, err := cat.RemoveArchive("slot-2026-06-20", "disk", "h-leo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if placementGone {
+		t.Errorf("placementGone = true, want false (h-shared still holds the placement)")
+	}
+	if entryGone {
+		t.Errorf("entryGone = true, want false (slot still has a surviving copy)")
+	}
+
+	slot, err := cat.ReadSlot("slot-2026-06-20")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range slot.Archives {
+		if a.DLE == "h-leo" {
+			t.Errorf("slot still lists h-leo after its last copy was removed: %+v", slot.Archives)
+		}
+	}
+	if len(slot.Archives) != 1 || slot.Archives[0].DLE != "h-shared" {
+		t.Errorf("slot archives = %+v, want only h-shared", slot.Archives)
+	}
+	if slot.TotalBytes != 100 {
+		t.Errorf("TotalBytes = %d, want 100 (h-leo's 100 dropped)", slot.TotalBytes)
+	}
+}
+
 // writePart writes one archive part (with its part index) onto the mounted volume.
 func writePart(t *testing.T, v media.Volume, slotID, dle string, level, part int) int {
 	t.Helper()
