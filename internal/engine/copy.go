@@ -192,3 +192,14 @@ func (c *copier) copySource(slotID, fromMedia string) error {
 	}
 	return nil
 }
+
+// copySink is the copy operation's xfer.Sink bridge: it drains the source's raw bytes into the
+// clerk's passthrough CopyArchive (verify + commit on the spot).
+type copySink struct {
+	session *clerk.Session
+	meta    record.Archive
+}
+
+func (s *copySink) Drain(in io.Reader) error {
+	return s.session.CopyArchive(s.meta, in)
+}

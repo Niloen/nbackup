@@ -91,6 +91,17 @@ func (t *Tracker) AddBytes(name string, uncompressed, compressed int64) {
 	t.flush(false)
 }
 
+// AddDrainBytes records cumulative compressed bytes copied to the landing for a DLE the
+// drainer is flushing off a holding disk. Throttle-eligible (force=false), mirroring AddBytes.
+func (t *Tracker) AddDrainBytes(name string, copied int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if d := t.dle(name); d != nil {
+		d.DrainBytes = copied
+	}
+	t.flush(false)
+}
+
 // FinishDLE marks a DLE done (or failed when err != nil) with its final tallies.
 func (t *Tracker) FinishDLE(name string, fileCount int, uncompressed, compressed int64, err error) {
 	t.mu.Lock()
@@ -114,6 +125,7 @@ func (t *Tracker) FinishDLE(name string, fileCount int, uncompressed, compressed
 			}
 		}
 	}
+	t.markDumpEndIfDone()
 	t.flush(true)
 }
 
@@ -127,6 +139,10 @@ func (t *Tracker) StartFlush(name, holding string) {
 		d.State = StateFlushing
 		d.Holding = holding
 	}
+	if t.snap.DrainStartedAt.IsZero() {
+		t.snap.DrainStartedAt = t.now()
+	}
+	t.markDumpEndIfDone() // a DLE entering its drain has finished dumping
 	t.flush(true)
 }
 
@@ -138,8 +154,26 @@ func (t *Tracker) FinishFlush(name string) {
 	if d := t.dle(name); d != nil {
 		d.State = StateDone
 		d.EndedAt = t.now()
+		if d.OutBytes > 0 {
+			d.DrainBytes = d.OutBytes // settle the drain bar to 100%
+		}
 	}
 	t.flush(true)
+}
+
+// markDumpEndIfDone stamps DumpEndedAt the first time no DLE is still pending or dumping —
+// the instant the dumping pipeline finished, which freezes the dump rate so it stops
+// decaying while the drainer flushes a remaining tail. Caller holds the lock.
+func (t *Tracker) markDumpEndIfDone() {
+	if !t.snap.DumpEndedAt.IsZero() {
+		return
+	}
+	for _, d := range t.snap.DLEs {
+		if d.State == StatePending || d.State == StateDumping {
+			return
+		}
+	}
+	t.snap.DumpEndedAt = t.now()
 }
 
 // SetPhase advances the run's overall phase; terminal phases stamp EndedAt.

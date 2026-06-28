@@ -1,4 +1,4 @@
-package engine
+package drain
 
 import (
 	"errors"
@@ -7,19 +7,19 @@ import (
 	"time"
 )
 
-// The holdingPool back-pressures a dumper: once a disk is full, the next acquire for it blocks
-// until the drain releases space — "holding disk full ⇒ dumper waits". With one disk this is the
-// old byteGate behavior.
-func TestHoldingPoolBlocksUntilReleased(t *testing.T) {
-	p := newHoldingPool([]holdingDisk{{capacity: 100}})
-	if idx, direct, err := p.acquire(10); err != nil || direct || idx != 0 {
+// The Pool back-pressures a producer: once a disk is full, the next acquire for it blocks
+// until the drain releases space — "holding disk full ⇒ producer waits". With one disk this is a
+// plain byte gate.
+func TestPoolBlocksUntilReleased(t *testing.T) {
+	p := NewPool([]Disk{{Capacity: 100}})
+	if idx, direct, err := p.Acquire(10); err != nil || direct || idx != 0 {
 		t.Fatalf("acquire under capacity = (%d,%v,%v); want (0,false,nil)", idx, direct, err)
 	}
-	p.charge(0, 130) // now over capacity
+	p.Charge(0, 130) // now over capacity
 
 	acquired := make(chan int, 1)
 	go func() {
-		i, _, _ := p.acquire(10) // must block: the only disk is full
+		i, _, _ := p.Acquire(10) // must block: the only disk is full
 		acquired <- i
 	}()
 	select {
@@ -28,7 +28,7 @@ func TestHoldingPoolBlocksUntilReleased(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	p.release(0, 130) // used drops to 0: the waiter proceeds
+	p.Release(0, 130) // used drops to 0: the waiter proceeds
 	select {
 	case i := <-acquired:
 		if i != 0 {
@@ -39,11 +39,11 @@ func TestHoldingPoolBlocksUntilReleased(t *testing.T) {
 	}
 }
 
-// A landing failure aborts the pool, so every blocked dumper wakes and fails fast instead of
+// A landing failure aborts the pool, so every blocked producer wakes and fails fast instead of
 // waiting for space that will never free.
-func TestHoldingPoolAbortWakesBlocked(t *testing.T) {
-	p := newHoldingPool([]holdingDisk{{capacity: 100}})
-	p.charge(0, 100) // full
+func TestPoolAbortWakesBlocked(t *testing.T) {
+	p := NewPool([]Disk{{Capacity: 100}})
+	p.Charge(0, 100) // full
 
 	var wg sync.WaitGroup
 	errs := make([]error, 3)
@@ -51,34 +51,34 @@ func TestHoldingPoolAbortWakesBlocked(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, _, errs[i] = p.acquire(50) // all block (disk full)
+			_, _, errs[i] = p.Acquire(50) // all block (disk full)
 		}(i)
 	}
 	time.Sleep(20 * time.Millisecond)
 
 	boom := errors.New("landing down")
-	p.abort(boom)
+	p.Abort(boom)
 	wg.Wait()
 	for i, err := range errs {
 		if !errors.Is(err, boom) {
-			t.Errorf("blocked dumper %d returned %v, want the abort error", i, err)
+			t.Errorf("blocked producer %d returned %v, want the abort error", i, err)
 		}
 	}
-	if p.err() == nil {
-		t.Error("err() must report the abort after abort()")
+	if p.Err() == nil {
+		t.Error("Err() must report the abort after Abort()")
 	}
 }
 
 // Allocation is round-robin across the disks, so successive dumps spread across spindles.
-func TestHoldingPoolRoundRobin(t *testing.T) {
-	p := newHoldingPool([]holdingDisk{{capacity: 1000}, {capacity: 1000}, {capacity: 1000}})
+func TestPoolRoundRobin(t *testing.T) {
+	p := NewPool([]Disk{{Capacity: 1000}, {Capacity: 1000}, {Capacity: 1000}})
 	var got []int
 	for i := 0; i < 6; i++ {
-		idx, direct, err := p.acquire(10)
+		idx, direct, err := p.Acquire(10)
 		if err != nil || direct {
 			t.Fatalf("acquire %d = (%d,%v,%v)", i, idx, direct, err)
 		}
-		p.charge(idx, 10)
+		p.Charge(idx, 10)
 		got = append(got, idx)
 	}
 	want := []int{0, 1, 2, 0, 1, 2}
@@ -90,11 +90,11 @@ func TestHoldingPoolRoundRobin(t *testing.T) {
 }
 
 // A full disk is skipped: acquire keeps landing on the disk that still has room.
-func TestHoldingPoolSkipsFull(t *testing.T) {
-	p := newHoldingPool([]holdingDisk{{capacity: 100}, {capacity: 100}})
-	p.charge(0, 100) // disk 0 full
+func TestPoolSkipsFull(t *testing.T) {
+	p := NewPool([]Disk{{Capacity: 100}, {Capacity: 100}})
+	p.Charge(0, 100) // disk 0 full
 	for i := 0; i < 3; i++ {
-		idx, direct, err := p.acquire(10)
+		idx, direct, err := p.Acquire(10)
 		if err != nil || direct {
 			t.Fatalf("acquire %d = (%d,%v,%v)", i, idx, direct, err)
 		}
@@ -104,10 +104,10 @@ func TestHoldingPoolSkipsFull(t *testing.T) {
 	}
 }
 
-// acquire routes a DLE direct (bypassing the disks) only when no disk can ever fit it — its
+// Acquire routes a DLE direct (bypassing the disks) only when no disk can ever fit it — its
 // estimate meets/exceeds the largest disk's capacity and there is no unbounded disk. An unbounded
 // disk fits anything; an unknown estimate (0) buffers.
-func TestHoldingPoolRoutesDirect(t *testing.T) {
+func TestPoolRoutesDirect(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		caps []int64
@@ -124,11 +124,11 @@ func TestHoldingPoolRoutesDirect(t *testing.T) {
 		{"unknown estimate buffers", []int64{500}, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			disks := make([]holdingDisk, len(tc.caps))
+			disks := make([]Disk, len(tc.caps))
 			for i, c := range tc.caps {
-				disks[i] = holdingDisk{capacity: c}
+				disks[i] = Disk{Capacity: c}
 			}
-			_, direct, err := newHoldingPool(disks).acquire(tc.est)
+			_, direct, err := NewPool(disks).Acquire(tc.est)
 			if err != nil {
 				t.Fatal(err)
 			}

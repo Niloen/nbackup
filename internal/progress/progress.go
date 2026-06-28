@@ -50,30 +50,51 @@ const (
 
 // DLE is the live progress of a single planned dump.
 type DLE struct {
-	Name      string    `json:"name"`
-	Level     int       `json:"level"`
-	State     State     `json:"state"`
-	EstBytes  int64     `json:"est_bytes"`  // planner estimate (uncompressed)
-	DoneBytes int64     `json:"done_bytes"` // uncompressed bytes archived so far
-	OutBytes  int64     `json:"out_bytes"`  // compressed bytes written so far
-	FileCount int       `json:"file_count"`
-	Holding   string    `json:"holding,omitempty"` // holding disk it buffered on, set when draining begins (empty for a direct dump)
-	StartedAt time.Time `json:"started_at,omitempty"`
-	EndedAt   time.Time `json:"ended_at,omitempty"`
-	Err       string    `json:"err,omitempty"`
+	Name       string    `json:"name"`
+	Level      int       `json:"level"`
+	State      State     `json:"state"`
+	EstBytes   int64     `json:"est_bytes"`   // planner estimate (uncompressed)
+	DoneBytes  int64     `json:"done_bytes"`  // uncompressed bytes archived so far
+	OutBytes   int64     `json:"out_bytes"`   // compressed bytes produced so far (the size staged on the holding disk)
+	DrainBytes int64     `json:"drain_bytes"` // compressed bytes copied from the holding disk to the landing so far
+	FileCount  int       `json:"file_count"`
+	Holding    string    `json:"holding,omitempty"` // holding disk it buffered on, set when draining begins (empty for a direct dump)
+	StartedAt  time.Time `json:"started_at,omitempty"`
+	EndedAt    time.Time `json:"ended_at,omitempty"`
+	Err        string    `json:"err,omitempty"`
 }
 
-// Pct is the DLE's completion against its estimate (0..100, capped). Returns 0
+// Pct is the DLE's dump completion against its estimate (0..100, capped). Returns 0
 // when there is no estimate to measure against.
-func (d DLE) Pct() float64 {
-	if d.EstBytes <= 0 {
+func (d DLE) Pct() float64 { return pct(d.DoneBytes, d.EstBytes) }
+
+// DrainPct is a holding-disk DLE's drain completion: bytes copied to the landing
+// against the compressed total it staged (0..100, capped). 0 when nothing is staged.
+func (d DLE) DrainPct() float64 { return pct(d.DrainBytes, d.OutBytes) }
+
+// Drains reports whether the DLE goes through a holding disk, so it has a drain phase.
+// Holding is set when its drain begins and persists through done; a direct dump (no
+// holding disk, or an oversized DLE streamed straight to the landing) leaves it empty.
+func (d DLE) Drains() bool { return d.Holding != "" }
+
+// OnVolume is the bytes that have landed on the authoritative volume: for a drained
+// DLE the amount copied so far, for a direct dump the compressed bytes it wrote there.
+func (d DLE) OnVolume() int64 {
+	if d.Drains() {
+		return d.DrainBytes
+	}
+	return d.OutBytes
+}
+
+// pct is done/total as a capped 0..100 percentage (0 when there is nothing to measure).
+func pct(done, total int64) float64 {
+	if total <= 0 {
 		return 0
 	}
-	p := float64(d.DoneBytes) / float64(d.EstBytes) * 100
-	if p > 100 {
-		return 100
+	if p := float64(done) / float64(total) * 100; p < 100 {
+		return p
 	}
-	return p
+	return 100
 }
 
 // Snapshot is the whole run's state at one instant — what gets persisted and
@@ -85,7 +106,13 @@ type Snapshot struct {
 	StartedAt time.Time `json:"started_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	EndedAt   time.Time `json:"ended_at,omitempty"`
-	DLEs      []DLE     `json:"dles"`
+	// DumpEndedAt freezes the moment the last dump finished, and DrainStartedAt the
+	// moment the first drain began — so the two pipelines' rates are each measured over
+	// their own window instead of the run's whole wall-clock (dumping and draining run
+	// concurrently, and the dump rate must not decay while a tail of drains finishes).
+	DumpEndedAt    time.Time `json:"dump_ended_at,omitempty"`
+	DrainStartedAt time.Time `json:"drain_started_at,omitempty"`
+	DLEs           []DLE     `json:"dles"`
 }
 
 // TotalEst sums the planned estimates (uncompressed).
@@ -94,8 +121,33 @@ func (s Snapshot) TotalEst() int64 { return sum(s.DLEs, func(d DLE) int64 { retu
 // TotalDone sums uncompressed bytes archived so far.
 func (s Snapshot) TotalDone() int64 { return sum(s.DLEs, func(d DLE) int64 { return d.DoneBytes }) }
 
-// TotalOut sums compressed bytes written so far.
+// TotalOut sums compressed bytes produced so far.
 func (s Snapshot) TotalOut() int64 { return sum(s.DLEs, func(d DLE) int64 { return d.OutBytes }) }
+
+// TotalToDrain sums the compressed size every drained DLE must copy to the landing.
+func (s Snapshot) TotalToDrain() int64 {
+	return sum(s.DLEs, func(d DLE) int64 {
+		if d.Drains() {
+			return d.OutBytes
+		}
+		return 0
+	})
+}
+
+// TotalDrained sums compressed bytes copied to the landing so far (drained DLEs).
+func (s Snapshot) TotalDrained() int64 {
+	return sum(s.DLEs, func(d DLE) int64 {
+		if d.Drains() {
+			return d.DrainBytes
+		}
+		return 0
+	})
+}
+
+// TotalOnVolume sums the bytes that have landed on the authoritative volume.
+func (s Snapshot) TotalOnVolume() int64 {
+	return sum(s.DLEs, func(d DLE) int64 { return d.OnVolume() })
+}
 
 // Counts tallies DLEs by state.
 func (s Snapshot) Counts() (active, done, failed, pending int) {
@@ -127,28 +179,47 @@ func (s Snapshot) Elapsed(now time.Time) time.Duration {
 	return end.Sub(s.StartedAt)
 }
 
-// Rate is the overall archived throughput in uncompressed bytes/sec (0 until any
-// measurable time has passed).
+// Rate is the dumping throughput in uncompressed bytes/sec, measured over the dump
+// window (run start to the last dump's finish). Scoping it to that window means it
+// reflects dumping speed and does not decay while the drainer works through a tail of
+// flushes after dumping is done. 0 until measurable time has passed.
 func (s Snapshot) Rate(now time.Time) float64 {
-	secs := s.Elapsed(now).Seconds()
+	end := now
+	if !s.DumpEndedAt.IsZero() {
+		end = s.DumpEndedAt
+	} else if s.Phase.Terminal() && !s.EndedAt.IsZero() {
+		end = s.EndedAt
+	}
+	secs := end.Sub(s.StartedAt).Seconds()
 	if secs <= 0 {
 		return 0
 	}
 	return float64(s.TotalDone()) / secs
 }
 
-// Pct is the run's overall completion against the total estimate (0..100).
-func (s Snapshot) Pct() float64 {
-	est := s.TotalEst()
-	if est <= 0 {
+// DrainRate is the draining throughput in compressed bytes/sec, measured from the first
+// drain to now (or the run's end). 0 before any drain has started or until time passes.
+func (s Snapshot) DrainRate(now time.Time) float64 {
+	if s.DrainStartedAt.IsZero() {
 		return 0
 	}
-	p := float64(s.TotalDone()) / float64(est) * 100
-	if p > 100 {
-		return 100
+	end := now
+	if s.Phase.Terminal() && !s.EndedAt.IsZero() {
+		end = s.EndedAt
 	}
-	return p
+	secs := end.Sub(s.DrainStartedAt).Seconds()
+	if secs <= 0 {
+		return 0
+	}
+	return float64(s.TotalDrained()) / secs
 }
+
+// Pct is the run's overall dump completion against the total estimate (0..100).
+func (s Snapshot) Pct() float64 { return pct(s.TotalDone(), s.TotalEst()) }
+
+// DrainPct is the run's overall drain completion: bytes copied to the landing against
+// the compressed total to drain (0..100). 0 when nothing is staged for draining.
+func (s Snapshot) DrainPct() float64 { return pct(s.TotalDrained(), s.TotalToDrain()) }
 
 // ETA estimates remaining time from the current rate and the unfinished
 // estimate. Returns ok=false while no rate is known or the run is terminal.
