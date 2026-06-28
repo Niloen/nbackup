@@ -77,10 +77,17 @@ type Executor interface {
 
 	// Stat returns nil iff path exists on this host.
 	Stat(path string) error
+	// Size returns path's size in bytes, or an error if it is absent/unstattable.
+	Size(path string) (int64, error)
 	MkdirAll(dir string) error
-	// Remove deletes path, treating "not present" as success.
+	// Remove deletes path, treating "not present" as success. It removes a directory
+	// and its contents recursively (an archiver's per-DLE state library is a directory).
 	Remove(path string) error
 	CopyFile(src, dst string) error
+	// Rename atomically moves oldpath to newpath on this host, replacing any existing
+	// newpath. Both must be on the same host (it is the snapshot-library promote step:
+	// rename a freshly written ".new" over the committed base only once a dump succeeds).
+	Rename(oldpath, newpath string) error
 	// TempFile creates an empty scratch file on this host and returns its path.
 	TempFile(pattern string) (string, error)
 	ReadFile(path string) ([]byte, error)

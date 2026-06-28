@@ -745,7 +745,35 @@ func (e *Engine) PlanWithProgress(date time.Time, sink progress.Sink) *planner.P
 
 func (e *Engine) planWith(date time.Time, sink progress.Sink) *planner.Plan {
 	dles := e.cfg.DLEs()
-	return planner.Build(dles, e.cat.History(), e.estimates(dles, sink), e.plannerParams(date), date)
+	plan := planner.Build(dles, e.cat.History(), e.estimates(dles, sink), e.plannerParams(date), date)
+	e.forceFullWhereBaseMissing(plan)
+	return plan
+}
+
+// forceFullWhereBaseMissing downgrades any planned incremental whose base incremental
+// state is missing or unusable to a full, in place, with a warning. The planner picks the
+// level from the catalog's run history, which can outlive the archiver's per-host state —
+// a state_dir that moved, or a base a crashed dump never finished. Rather than fail the
+// run (or, worse, dump a full-sized "incremental" onto a dead base), force a fresh full,
+// the way Amanda falls back to level 0 when it can't find a usable base. A real run and a
+// preview (`nb plan` / `--dry-run`) both go through here, so they agree.
+func (e *Engine) forceFullWhereBaseMissing(plan *planner.Plan) {
+	for i := range plan.Items {
+		it := &plan.Items[i]
+		if it.Level < 1 {
+			continue
+		}
+		ar, err := e.archiverFor(it.DLE.DumpTypeName(), it.DLE.Host)
+		if err != nil || ar.HasBase(it.Name, it.BaseLevel) {
+			continue
+		}
+		plan.Warnings = append(plan.Warnings, fmt.Sprintf(
+			"DLE %s: the L%d incremental state is missing or unusable (a prior dump may have been interrupted, or state_dir moved) — forcing a full (L0)",
+			it.DLE.ID(), it.BaseLevel))
+		it.Level, it.BaseLevel, it.BaseSlot = 0, -1, ""
+		it.EstBytes = it.FullBytes
+		it.Reason = "forced full: incremental base missing or unusable"
+	}
 }
 
 // ValidatePlan checks each DLE the way a real run would resolve it, so a preview
@@ -1742,6 +1770,28 @@ func (e *Engine) ResolveDLE(arg string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// ResetState clears a configured DLE's incremental state so its next dump starts a fresh
+// full (the planner picks a level from history, but with no usable base the run is forced
+// to L0 — see forceFullWhereBaseMissing). arg is a host:path identity or the internal
+// slug; it returns the DLE's display identity. The DLE must be in the configuration, since
+// resetting it only makes sense to re-dump it. State for a remote DLE lives on its client,
+// so this reaches that host through the archiver's executor.
+func (e *Engine) ResetState(arg string) (string, error) {
+	for _, d := range e.cfg.DLEs() {
+		if d.Name() == arg || d.ID() == arg {
+			ar, err := e.archiverFor(d.DumpTypeName(), d.Host)
+			if err != nil {
+				return "", err
+			}
+			if err := ar.ResetState(d.Name()); err != nil {
+				return "", fmt.Errorf("reset %s: %w", d.ID(), err)
+			}
+			return d.ID(), nil
+		}
+	}
+	return "", fmt.Errorf("no DLE %q in the configuration", arg)
 }
 
 // profileFor returns the capacity/reclamation profile for a named medium: the

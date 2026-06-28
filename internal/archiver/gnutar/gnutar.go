@@ -66,10 +66,26 @@ func (g *gnutar) snapPath(dle string, level int) string {
 	return filepath.Join(g.stateDir, dle, fmt.Sprintf("L%d.snar", level))
 }
 
-// HasBase reports whether the snapshot left by a completed dump at the level is
-// present — the base a higher incremental builds on.
+// workSnap is the side file a dump writes its new snapshot to (Amanda's ".new"). tar
+// updates it in place; only a committed dump promotes it over the live snapPath, so a
+// killed dump leaves the committed base untouched.
+func (g *gnutar) workSnap(dle string, level int) string {
+	return g.snapPath(dle, level) + ".new"
+}
+
+// HasBase reports whether the snapshot left by a completed dump at the level is a usable
+// base for a higher incremental. A missing file — or a present but empty one, which a
+// killed dump can leave behind — is not usable, so it reports false and the engine
+// forces a full instead of building a full-sized incremental on a dead snapshot.
 func (g *gnutar) HasBase(dle string, level int) bool {
-	return g.ex.Stat(g.snapPath(dle, level)) == nil
+	n, err := g.ex.Size(g.snapPath(dle, level))
+	return err == nil && n > 0
+}
+
+// ResetState discards a DLE's whole snapshot library (every level's snapshot and any
+// leftover ".new" side files), so the next dump finds no base and starts a fresh full.
+func (g *gnutar) ResetState(dle string) error {
+	return g.ex.Remove(filepath.Join(g.stateDir, dle))
 }
 
 // Check verifies the configured binary is GNU tar (cached), running `tar --version` on
@@ -103,14 +119,17 @@ func parseTotals(stderr string) int64 {
 
 // BackupSource builds the tar-create stage that produces the raw archive stream and a
 // Finish hook that, after the pipeline drains, reads the member index and totals from the
-// host scratch. The snapshot for this level is seeded in place first, so tar updates the
-// real .snar library as it runs.
+// host scratch. tar writes the new snapshot to a ".new" side file seeded from the base;
+// the committed library snapshot is read but never mutated, and Promote renames the side
+// file over it only once the caller has durably committed the archive — so a killed dump
+// (out of space, signal) leaves the base intact and a retry at the same level still works.
 func (g *gnutar) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource, error) {
 	if err := g.Check(); err != nil {
 		return nil, err
 	}
-	outSnap := g.snapPath(r.DLE, r.Level)
-	if err := g.seedSnapshot(r, outSnap); err != nil {
+	live := g.snapPath(r.DLE, r.Level)
+	work := g.workSnap(r.DLE, r.Level)
+	if err := g.seedSnapshot(r, work); err != nil {
 		return nil, err
 	}
 	indexPath, err := g.ex.TempFile("nbackup-index-*")
@@ -118,7 +137,7 @@ func (g *gnutar) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource,
 		return nil, err
 	}
 	stderr := &bytes.Buffer{}
-	argv := g.createArgs(r, "-", outSnap, indexPath)
+	argv := g.createArgs(r, "-", work, indexPath)
 	stage := programs.Cmd{
 		Name:   argv[0],
 		Args:   argv[1:],
@@ -136,8 +155,9 @@ func (g *gnutar) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource,
 			Members:      members,
 		}, nil
 	}
+	promote := func() error { return g.ex.Rename(work, live) }
 	cleanup := func() { _ = g.ex.Remove(indexPath) }
-	return &archiver.BackupSource{Stage: stage, Exec: g.ex, Finish: finish, Cleanup: cleanup}, nil
+	return &archiver.BackupSource{Stage: stage, Exec: g.ex, Finish: finish, Promote: promote, Cleanup: cleanup}, nil
 }
 
 // Estimate computes the dump size by running tar with the archive targeted at

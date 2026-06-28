@@ -43,10 +43,18 @@ type BackupResult struct {
 // it; the archiver does not stream the bytes itself. This is what lets a dump's
 // tar+compress+encrypt fuse on one host (the client) so plaintext never leaves it.
 // Stage's Stderr is pre-wired by the archiver to capture totals; Cleanup removes scratch.
+//
+// Promote commits this dump's incremental state into the archiver's library — the
+// caller invokes it once the archive is durably committed, and only then. Until it is
+// called the dump writes its new state to a side file, leaving the base a retry would
+// build on untouched; a dump that fails (or whose archive never commits) is simply never
+// promoted, so a killed tar can never corrupt the library. It is the rename half of the
+// ".new"-then-promote pattern; nil for an archiver with no incremental state.
 type BackupSource struct {
 	Stage   programs.Cmd
 	Exec    programs.Executor
 	Finish  func() (*BackupResult, error)
+	Promote func() error
 	Cleanup func()
 }
 
@@ -59,16 +67,25 @@ type Archiver interface {
 	// Estimate returns the uncompressed bytes the request would archive.
 	Estimate(r BackupRequest) (int64, error)
 	// BackupSource returns the producing pipeline source for one archive (see
-	// BackupSource): the program stage that emits the raw stream and a Finish hook to
-	// gather the result. It also updates the archiver's own incremental state for
-	// (DLE, Level) when the pipeline completes. The caller runs the pipeline.
+	// BackupSource): the program stage that emits the raw stream, a Finish hook to
+	// gather the result, and a Promote hook that commits the dump's new incremental
+	// state for (DLE, Level) into the library — which the caller invokes only once the
+	// archive is durably committed, so a failed dump never advances the state. The
+	// caller runs the pipeline.
 	BackupSource(r BackupRequest) (*BackupSource, error)
 	// HasBase reports whether the incremental state a dump at level+1 would build
 	// on — the state left by a completed dump at the given level — is present. The
 	// engine uses it to decide whether an incremental is dumpable (else the DLE is
 	// forced to a full) and to gate level estimates. It is the archiver-neutral
-	// replacement for "does the base snapshot exist".
+	// replacement for "does the base snapshot exist". A present-but-unusable base (e.g.
+	// an empty snapshot a killed dump left behind) reports false, so a corrupt base
+	// forces a full rather than silently producing a full-sized incremental.
 	HasBase(dle string, level int) bool
+	// ResetState discards a DLE's incremental state so its next dump starts a fresh
+	// chain. With no base left, the engine downgrades the next run to a full. It is the
+	// archiver-neutral "start this DLE over" — `nb reset` — and a no-op when nothing is
+	// stored.
+	ResetState(dle string) error
 	// RestoreStage returns the extractor as a program stage (extract from stdin into
 	// destDir), so a decode→extract pipeline can run entirely on the host where the
 	// bytes should land — letting a client-held key decrypt on the client and a

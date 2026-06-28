@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"io"
 	"sync/atomic"
 
@@ -135,7 +136,20 @@ func (enc *encoder) dumpArchive(session *clerk.Session, spec BackupSpec, prog fu
 	if terr != nil {
 		return clerk.Summary{}, record.Archive{}, record.ArchivePos{}, terr
 	}
-	return session.Commit(sink.measured, sink.parts, produced.FileCount, produced.Uncompressed, produced.Members)
+	sum, committed, pos, cerr := session.Commit(sink.measured, sink.parts, produced.FileCount, produced.Uncompressed, produced.Members)
+	if cerr != nil {
+		return clerk.Summary{}, record.Archive{}, record.ArchivePos{}, cerr
+	}
+	// The archive is durably committed to the dump medium; only now promote the archiver's
+	// new incremental state into its library (Amanda's rename-on-success). Until here the
+	// dump wrote a ".new" side file, so the transfer or commit failing above left the base
+	// a retry builds on untouched — a killed tar can never corrupt the chain.
+	if bs.Promote != nil {
+		if err := bs.Promote(); err != nil {
+			return clerk.Summary{}, record.Archive{}, record.ArchivePos{}, fmt.Errorf("promote incremental state: %w", err)
+		}
+	}
+	return sum, committed, pos, nil
 }
 
 // mediumSink is the operation's xfer.Sink bridge to the clerk's write endpoint: it drains the
