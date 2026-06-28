@@ -216,6 +216,88 @@ func TestRenderDraining(t *testing.T) {
 	}
 }
 
+// TestDrainProgressAndRates drives a holding-disk DLE through dump -> drain -> done and
+// checks the two pipelines are metered independently: the drain bar tracks copied bytes,
+// the dump rate freezes when dumping ends (not decaying through the drain tail), and the
+// drain rate is measured over its own window.
+func TestDrainProgressAndRates(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("slot", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000}}, c.now, nil)
+
+	tr.StartDLE("alpha")
+	c.advance(10 * time.Second)
+	tr.FinishDLE("alpha", 1, 1000, 800, nil) // dumped 1000 uncompressed -> 800 staged, in 10s
+
+	// Dumping is done: the dump rate must freeze at 100 B/s regardless of later elapsed.
+	dumpEnd := c.now()
+	tr.StartFlush("alpha", "scratch")
+	c.advance(8 * time.Second)
+	tr.AddDrainBytes("alpha", 400) // 400 of 800 copied in 8s -> 50 B/s drain
+
+	snap := tr.Snapshot()
+	now := c.now()
+	a := snap.DLEs[0]
+	if a.State != StateFlushing || !a.Drains() {
+		t.Fatalf("alpha should be draining: %+v", a)
+	}
+	if got := a.DrainPct(); got != 50 {
+		t.Fatalf("drain pct = %.0f, want 50", got)
+	}
+	if got := a.OnVolume(); got != 400 {
+		t.Fatalf("on-volume = %d, want 400", got)
+	}
+	if got := snap.Rate(now); got != 100 {
+		t.Fatalf("dump rate = %.2f, want 100 (frozen at dump end, %v)", got, dumpEnd)
+	}
+	if got := snap.DrainRate(now); got != 50 {
+		t.Fatalf("drain rate = %.2f, want 50", got)
+	}
+	if got := snap.DrainPct(); got != 50 {
+		t.Fatalf("run drain pct = %.0f, want 50", got)
+	}
+
+	// The flush bar and a separate Flush footer line must both appear.
+	var sb strings.Builder
+	Render(&sb, snap, now)
+	out := sb.String()
+	for _, want := range []string{"DUMP", "FLUSH", "Flush:", "Volume:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q in:\n%s", want, out)
+		}
+	}
+
+	tr.FinishFlush("alpha")
+	if got := tr.Snapshot().DLEs[0].DrainBytes; got != 800 {
+		t.Fatalf("FinishFlush should settle drain to staged size 800, got %d", got)
+	}
+}
+
+// TestDirectDumpNoDrain confirms a DLE that never goes through a holding disk shows no
+// drain phase: no Drain footer, "direct" in its drain cell, and volume = compressed out.
+func TestDirectDumpNoDrain(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("slot", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000}}, c.now, nil)
+	tr.StartDLE("alpha")
+	tr.FinishDLE("alpha", 1, 1000, 800, nil)
+
+	snap := tr.Snapshot()
+	if snap.TotalToDrain() != 0 {
+		t.Fatalf("direct dump must not count toward drain: %d", snap.TotalToDrain())
+	}
+	if got := snap.DLEs[0].OnVolume(); got != 800 {
+		t.Fatalf("direct on-volume = %d, want 800 (compressed out)", got)
+	}
+	var sb strings.Builder
+	Render(&sb, snap, c.now())
+	out := sb.String()
+	if strings.Contains(out, "Flush:") {
+		t.Errorf("direct-only run must not render a Flush line:\n%s", out)
+	}
+	if !strings.Contains(out, "direct") {
+		t.Errorf("a done direct dump should show \"direct\" in its drain cell:\n%s", out)
+	}
+}
+
 // TestAtomicWriteNoTemp confirms the sink leaves no stray temp file behind.
 func TestAtomicWriteNoTemp(t *testing.T) {
 	dir := t.TempDir()

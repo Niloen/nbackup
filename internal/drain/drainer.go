@@ -299,7 +299,11 @@ func (d *Drainer) copyOne(j handoff) (record.Archive, record.ArchivePos, error) 
 	if err != nil {
 		return record.Archive{}, record.ArchivePos{}, fmt.Errorf("flush %s L%d: read holding disk: %w", dleID, j.arch.Level, err)
 	}
-	arch, pos, err := d.landW.CopyArchive(j.arch, rc)
+	var tap func(int64)
+	if d.tr != nil {
+		tap = func(copied int64) { d.tr.AddDrainBytes(dleID, copied) }
+	}
+	arch, pos, err := d.landW.CopyArchive(j.arch, rc, tap)
 	rc.Close()
 	if err != nil {
 		return record.Archive{}, record.ArchivePos{}, fmt.Errorf("flush %s L%d to %q: %w", dleID, j.arch.Level, d.landing, err)

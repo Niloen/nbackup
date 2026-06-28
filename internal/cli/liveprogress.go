@@ -53,12 +53,16 @@ func runLines(s progress.Snapshot) []string {
 	}
 	lines := []string{head}
 	lines = append(lines, activeRows(s, func(d progress.DLE) string {
-		if d.State == progress.StateFlushing { // dumped to a holding disk; draining to the landing
+		if d.State == progress.StateFlushing { // dumped to a holding disk; flushing to the landing
 			from := ""
 			if d.Holding != "" {
 				from = " from " + d.Holding
 			}
-			return fmt.Sprintf("  ▸ %s L%d  draining%s", d.Name, d.Level, from)
+			pct := ""
+			if d.OutBytes > 0 {
+				pct = fmt.Sprintf("  %3.0f%%", d.DrainPct())
+			}
+			return fmt.Sprintf("  ▸ %s L%d  flushing%s%s", d.Name, d.Level, from, pct)
 		}
 		pct := ""
 		if d.EstBytes > 0 {
@@ -67,8 +71,13 @@ func runLines(s progress.Snapshot) []string {
 		return fmt.Sprintf("  ▸ %s L%d  %s of ~%s%s", d.Name, d.Level,
 			sizeutil.FormatBytes(d.DoneBytes), sizeutil.FormatBytes(d.EstBytes), pct)
 	})...)
-	return append(lines, fmt.Sprintf("Total: %s of ~%s  (%.0f%%)",
+	lines = append(lines, fmt.Sprintf("Total: %s of ~%s  (%.0f%%)",
 		sizeutil.FormatBytes(s.TotalDone()), sizeutil.FormatBytes(s.TotalEst()), s.Pct()))
+	if toDrain := s.TotalToDrain(); toDrain > 0 {
+		lines = append(lines, fmt.Sprintf("Flush: %s of %s  (%.0f%%)",
+			sizeutil.FormatBytes(s.TotalDrained()), sizeutil.FormatBytes(toDrain), s.DrainPct()))
+	}
+	return lines
 }
 
 // activeRows formats up to liveProgressRows actively-running DLEs with row, folding

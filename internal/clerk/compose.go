@@ -43,7 +43,7 @@ func (s *Session) WriteArchive(meta record.Archive, payload io.Reader, tap func(
 // single-threaded (one copy/sync, or the orchestrator's drain), it records the archive's
 // placement on this medium inline, as it lands.
 func (s *Session) CopyArchive(meta record.Archive, payload io.Reader) error {
-	arch, pos, err := s.w.CopyArchive(meta, payload)
+	arch, pos, err := s.w.CopyArchive(meta, payload, nil)
 	if err != nil {
 		return err
 	}

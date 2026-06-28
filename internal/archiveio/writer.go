@@ -291,13 +291,17 @@ func (w *Writer) drainParts(base record.Header, src io.Reader) ([]record.FilePos
 // It does NOT compress or re-checksum the stream — the same bytes are written, so the
 // recorded checksum is unchanged — and only the part layout (and Parts count) is new.
 // The header carries the archive's original scheme, so restore reverses the right one.
-func (w *Writer) CopyArchive(meta record.Archive, src io.Reader) (record.Archive, record.ArchivePos, error) {
-	h := sha256.New()
-	parts, err := w.drainParts(w.archiveHeader(meta), io.TeeReader(src, h))
+//
+// tap, if non-nil, is called with the running count of bytes copied as the payload
+// drains — the live drain signal for `nb status`, riding the metering this does anyway
+// (size + checksum). It runs on the draining goroutine, so it must be cheap.
+func (w *Writer) CopyArchive(meta record.Archive, src io.Reader, tap func(copied int64)) (record.Archive, record.ArchivePos, error) {
+	mr := &meteredReader{r: src, h: sha256.New(), tap: tap}
+	parts, err := w.drainParts(w.archiveHeader(meta), mr)
 	if err != nil {
 		return record.Archive{}, record.ArchivePos{}, err
 	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != meta.SHA256 {
+	if got := hex.EncodeToString(mr.h.Sum(nil)); got != meta.SHA256 {
 		return record.Archive{}, record.ArchivePos{}, fmt.Errorf("copy of %s L%d checksum mismatch (source corrupt?)", meta.DLE, meta.Level)
 	}
 	arch := meta
