@@ -9,6 +9,7 @@ import (
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
 )
@@ -142,21 +143,38 @@ func (e *Engine) finalizeDrain(slotMeta *record.Slot, holding string, holdVol me
 // doneCh. It touches the catalog and the librarian only through the landing Writer's proxy sink,
 // whose NextPart/PlaceRecord funnel back to the orchestrator — so the byte stream runs here while
 // all control (catalog writes, librarian volume rolls) stays on the orchestrator. The landing is
-// written by one serial writer, so there is exactly one drainer.
-func (e *Engine) drainer(landW *archiveio.Writer, slotMeta *record.Slot, holdVol media.Volume, workCh <-chan handoff, doneCh chan<- copyResult, tr *progress.Tracker) {
-	for it := range workCh {
-		arch, pos, err := e.copyOne(landW, slotMeta, holdVol, it, tr)
-		doneCh <- copyResult{it: it, arch: arch, pos: pos, err: err}
+// written by one serial writer, so there is exactly one drainer. Each job is either a staged-archive
+// copy (copyOne, reading from the holding disk) or an oversized DLE's direct dump (backupItem,
+// running the full pipeline straight to the landing) — both write the same landing Writer.
+func (e *Engine) drainer(landW *archiveio.Writer, landSession *clerk.Session, slotMeta *record.Slot, holdVol media.Volume, workCh <-chan drainJob, doneCh chan<- copyResult, tr *progress.Tracker, logf Logf) {
+	for job := range workCh {
+		if job.copy != nil {
+			arch, pos, err := e.copyOne(landW, slotMeta, holdVol, *job.copy, tr)
+			doneCh <- copyResult{it: *job.copy, arch: arch, pos: pos, err: err}
+		} else {
+			arch, pos, err := e.backupItem(landSession, *job.direct, tr, logf)
+			doneCh <- copyResult{arch: arch, pos: pos, err: err, direct: true}
+		}
 	}
 }
 
-// copyResult is one finished (or failed) copy the drainer hands back to the orchestrator, which
-// then records the landing placement and reclaims the holding copy (finalizeDrain).
+// drainJob is one landing write the orchestrator dispatches to the drainer: exactly one of copy
+// (a staged archive to copy off the holding disk) or direct (an oversized DLE to dump straight to
+// the landing) is set.
+type drainJob struct {
+	copy   *handoff
+	direct *planner.Item
+}
+
+// copyResult is one finished (or failed) landing write the drainer hands back to the orchestrator,
+// which records the landing placement — and, for a copy (direct=false), reclaims the holding copy
+// and releases the gate (finalizeDrain). it is set only for a copy.
 type copyResult struct {
-	it   handoff
-	arch record.Archive
-	pos  record.ArchivePos
-	err  error
+	it     handoff
+	arch   record.Archive
+	pos    record.ArchivePos
+	err    error
+	direct bool
 }
 
 // sinkReq is a VolumeSink call the drainer's proxy funnels to the orchestrator: placeRecord
