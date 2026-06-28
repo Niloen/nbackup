@@ -117,13 +117,15 @@ func (t *Tracker) FinishDLE(name string, fileCount int, uncompressed, compressed
 	t.flush(true)
 }
 
-// StartFlush marks a DLE as draining from the holding disk to the landing (the second phase
-// after its dump committed). A no-op for an unknown DLE.
-func (t *Tracker) StartFlush(name string) {
+// StartFlush marks a DLE as draining from the holding disk it landed on (holding) to the landing
+// (the second phase after its dump committed). Recording the disk lets a multi-disk run show where
+// each DLE buffered. A no-op for an unknown DLE.
+func (t *Tracker) StartFlush(name, holding string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if d := t.dle(name); d != nil {
 		d.State = StateFlushing
+		d.Holding = holding
 	}
 	t.flush(true)
 }

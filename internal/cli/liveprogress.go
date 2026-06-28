@@ -53,6 +53,13 @@ func runLines(s progress.Snapshot) []string {
 	}
 	lines := []string{head}
 	lines = append(lines, activeRows(s, func(d progress.DLE) string {
+		if d.State == progress.StateFlushing { // dumped to a holding disk; draining to the landing
+			from := ""
+			if d.Holding != "" {
+				from = " from " + d.Holding
+			}
+			return fmt.Sprintf("  ▸ %s L%d  draining%s", d.Name, d.Level, from)
+		}
 		pct := ""
 		if d.EstBytes > 0 {
 			pct = fmt.Sprintf("  %3.0f%%", d.Pct())
@@ -65,12 +72,15 @@ func runLines(s progress.Snapshot) []string {
 }
 
 // activeRows formats up to liveProgressRows actively-running DLEs with row, folding
-// any overflow into a single "+N more" line so the frame height stays bounded.
+// any overflow into a single "+N more" line so the frame height stays bounded. Active
+// means dumping or draining (StateFlushing) — matching Snapshot.Counts, so a DLE the
+// drainer is still copying to the landing stays visible instead of vanishing from the
+// list while the run waits on it. (In the estimate phase no DLE is flushing.)
 func activeRows(s progress.Snapshot, row func(progress.DLE) string) []string {
 	var rows []string
 	overflow := 0
 	for _, d := range s.DLEs {
-		if d.State != progress.StateDumping {
+		if d.State != progress.StateDumping && d.State != progress.StateFlushing {
 			continue
 		}
 		if len(rows) >= liveProgressRows {

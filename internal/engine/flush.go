@@ -146,9 +146,9 @@ func (p *holdingPool) session(idx int) *clerk.Session { return p.disks[idx].sess
 // the catalog only through the Writer's VolumeSink — whose control calls the proxy funnels back to
 // the orchestrator, never writing the catalog here. The placement record and the holding reclaim
 // are the control half (finalizeDrain), run by the orchestrator (the sole catalog writer).
-func (e *Engine) copyOne(landW *archiveio.Writer, slotMeta *record.Slot, holdVol media.Volume, it handoff, tr *progress.Tracker) (record.Archive, record.ArchivePos, error) {
+func (e *Engine) copyOne(landW *archiveio.Writer, slotMeta *record.Slot, holdVol media.Volume, holding string, it handoff, tr *progress.Tracker) (record.Archive, record.ArchivePos, error) {
 	if tr != nil {
-		tr.StartFlush(it.dleID)
+		tr.StartFlush(it.dleID, holding)
 	}
 	ref := clerk.Ref{Slot: slotMeta.ID, DLE: it.arch.DLE, Level: it.arch.Level}
 	rc, err := openArchiveAt(holdVol, ref, it.pos.Parts)
@@ -200,7 +200,7 @@ func (e *Engine) finalizeDrain(slotMeta *record.Slot, it handoff, arch record.Ar
 func (e *Engine) drainer(landW *archiveio.Writer, landSession *clerk.Session, slotMeta *record.Slot, pool *holdingPool, workCh <-chan drainJob, doneCh chan<- copyResult, tr *progress.Tracker, logf Logf) {
 	for job := range workCh {
 		if job.copy != nil {
-			arch, pos, err := e.copyOne(landW, slotMeta, pool.holdVol(job.copy.disk), *job.copy, tr)
+			arch, pos, err := e.copyOne(landW, slotMeta, pool.holdVol(job.copy.disk), pool.name(job.copy.disk), *job.copy, tr)
 			doneCh <- copyResult{it: *job.copy, arch: arch, pos: pos, err: err}
 		} else {
 			arch, pos, err := e.backupItem(landSession, *job.direct, tr, logf)

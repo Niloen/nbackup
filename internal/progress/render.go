@@ -34,7 +34,7 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 	fmt.Fprintln(tw, "DLE\tLEVEL\tSTATE\tPROGRESS\tDONE\tEST\tWRITTEN")
 	for _, d := range s.DLEs {
 		fmt.Fprintf(tw, "%s\tL%d\t%s\t%s\t%s\t%s\t%s\n",
-			d.Name, d.Level, d.State, progressCell(d),
+			d.Name, d.Level, stateCell(d), progressCell(d),
 			sizeutil.FormatBytes(d.DoneBytes), estCell(d.EstBytes), sizeutil.FormatBytes(d.OutBytes))
 	}
 	tw.Flush()
@@ -71,6 +71,15 @@ func renderEstimating(w io.Writer, s Snapshot, now time.Time) {
 	fmt.Fprintf(w, "  started:  %s  (elapsed %s)\n", s.StartedAt.Local().Format("2006-01-02 15:04:05"), sizeutil.FormatElapsed(s.Elapsed(now)))
 	fmt.Fprintf(w, "  sizing:   %d of %d DLEs measured\n", sized, len(s.DLEs))
 	fmt.Fprintf(w, "  estimate: ~%s so far\n", sizeutil.FormatBytes(s.TotalDone()))
+}
+
+// stateCell renders a DLE's state, annotating a draining DLE with the holding disk it
+// landed on (so a multi-disk run shows where each buffered): "flushing←scratch".
+func stateCell(d DLE) string {
+	if d.State == StateFlushing && d.Holding != "" {
+		return "flushing←" + d.Holding
+	}
+	return string(d.State)
 }
 
 // progressCell renders a small text bar plus percent against the estimate, or a

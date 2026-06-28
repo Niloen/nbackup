@@ -189,6 +189,33 @@ func TestRender(t *testing.T) {
 	}
 }
 
+// TestRenderDraining: a DLE draining off a holding disk renders its "flushing" state annotated
+// with the disk it landed on, so a multi-disk run shows where each buffered.
+func TestRenderDraining(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("slot-2026-06-23", PhaseRunning, 2, plan(), c.now, nil)
+	tr.StartDLE("alpha")
+	tr.FinishDLE("alpha", 3, 300, 120, nil)
+	tr.StartFlush("alpha", "scratch2")
+
+	snap := tr.Snapshot()
+	var got *DLE
+	for i := range snap.DLEs {
+		if snap.DLEs[i].Name == "alpha" {
+			got = &snap.DLEs[i]
+		}
+	}
+	if got == nil || got.State != StateFlushing || got.Holding != "scratch2" {
+		t.Fatalf("StartFlush must set state=flushing, holding=scratch2; got %+v", got)
+	}
+
+	var sb strings.Builder
+	Render(&sb, snap, c.now())
+	if out := sb.String(); !strings.Contains(out, "flushing←scratch2") {
+		t.Errorf("render must annotate the draining DLE with its holding disk; got:\n%s", out)
+	}
+}
+
 // TestAtomicWriteNoTemp confirms the sink leaves no stray temp file behind.
 func TestAtomicWriteNoTemp(t *testing.T) {
 	dir := t.TempDir()

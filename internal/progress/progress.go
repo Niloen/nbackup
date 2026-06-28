@@ -6,9 +6,11 @@
 // any daemon or socket, only an inspectable file (the same philosophy as the
 // catalog: state lives in files).
 //
-// NBackup has no holding disk: each DLE streams source -> compressor -> volume in
-// one pass, so there is no separate archiver/taper split — one DLE has one
-// "dumping" state, metered by uncompressed bytes against the planner estimate.
+// A default DLE streams source -> compressor -> volume in one pass: one "dumping"
+// state, metered by uncompressed bytes against the planner estimate. A holding-disk
+// run adds a second phase per DLE — once its dump commits to a holding disk, the
+// drainer copies it to the landing — surfaced as the "flushing" state (which holding
+// disk it drained from is recorded too, so a multi-disk run shows where each landed).
 package progress
 
 import (
@@ -40,9 +42,9 @@ type State string
 
 const (
 	StatePending  State = "pending"  // planned, not started
-	StateDumping  State = "dumping"  // currently archiving (to the landing, or the holding disk)
-	StateFlushing State = "flushing" // archived to the holding disk; the taper is draining it to the landing
-	StateDone     State = "done"     // archived successfully (and flushed, in holding-disk mode)
+	StateDumping  State = "dumping"  // currently archiving (to the landing, or a holding disk)
+	StateFlushing State = "flushing" // committed to a holding disk; the drainer is copying it to the landing
+	StateDone     State = "done"     // archived successfully (and drained, in holding-disk mode)
 	StateFailed   State = "failed"   // archiving failed
 )
 
@@ -55,6 +57,7 @@ type DLE struct {
 	DoneBytes int64     `json:"done_bytes"` // uncompressed bytes archived so far
 	OutBytes  int64     `json:"out_bytes"`  // compressed bytes written so far
 	FileCount int       `json:"file_count"`
+	Holding   string    `json:"holding,omitempty"` // holding disk it buffered on, set when draining begins (empty for a direct dump)
 	StartedAt time.Time `json:"started_at,omitempty"`
 	EndedAt   time.Time `json:"ended_at,omitempty"`
 	Err       string    `json:"err,omitempty"`
