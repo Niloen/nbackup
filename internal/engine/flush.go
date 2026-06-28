@@ -155,7 +155,11 @@ func (e *Engine) copyOne(landW *archiveio.Writer, slotMeta *record.Slot, holdVol
 	if err != nil {
 		return record.Archive{}, record.ArchivePos{}, fmt.Errorf("flush %s L%d: read holding disk: %w", it.dleID, it.arch.Level, err)
 	}
-	arch, pos, err := landW.CopyArchive(it.arch, rc)
+	var tap func(int64)
+	if tr != nil {
+		tap = func(copied int64) { tr.AddDrainBytes(it.dleID, copied) }
+	}
+	arch, pos, err := landW.CopyArchive(it.arch, rc, tap)
 	rc.Close()
 	if err != nil {
 		return record.Archive{}, record.ArchivePos{}, fmt.Errorf("flush %s L%d to %q: %w", it.dleID, it.arch.Level, e.mediumName, err)

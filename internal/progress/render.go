@@ -30,22 +30,34 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w)
 
+	// Two bars per DLE: DUMP meters source -> holding/landing (uncompressed, against the
+	// estimate); FLUSH meters holding -> landing (compressed, against the staged size).
+	// DUMPED is the uncompressed source size; VOLUME is what has landed authoritatively.
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "DLE\tLEVEL\tSTATE\tPROGRESS\tDONE\tEST\tWRITTEN")
+	fmt.Fprintln(tw, "DLE\tLEVEL\tSTATE\tDUMP\tFLUSH\tDUMPED\tVOLUME")
 	for _, d := range s.DLEs {
 		fmt.Fprintf(tw, "%s\tL%d\t%s\t%s\t%s\t%s\t%s\n",
-			d.Name, d.Level, stateCell(d), progressCell(d),
-			sizeutil.FormatBytes(d.DoneBytes), estCell(d.EstBytes), sizeutil.FormatBytes(d.OutBytes))
+			d.Name, d.Level, stateCell(d), dumpCell(d), drainCell(d),
+			sizeutil.FormatBytes(d.DoneBytes), sizeutil.FormatBytes(d.OnVolume()))
 	}
 	tw.Flush()
 
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "Total:    %s of ~%s  (%.0f%%)\n",
+	fmt.Fprintf(w, "Dump:     %s of ~%s  (%.0f%%)",
 		sizeutil.FormatBytes(s.TotalDone()), sizeutil.FormatBytes(s.TotalEst()), s.Pct())
-	fmt.Fprintf(w, "Written:  %s to volume\n", sizeutil.FormatBytes(s.TotalOut()))
 	if rate := s.Rate(now); rate > 0 {
-		fmt.Fprintf(w, "Rate:     %s/s\n", sizeutil.FormatBytes(int64(rate)))
+		fmt.Fprintf(w, "   %s/s", sizeutil.FormatBytes(int64(rate)))
 	}
+	fmt.Fprintln(w)
+	if toDrain := s.TotalToDrain(); toDrain > 0 {
+		fmt.Fprintf(w, "Flush:    %s of %s  (%.0f%%)",
+			sizeutil.FormatBytes(s.TotalDrained()), sizeutil.FormatBytes(toDrain), s.DrainPct())
+		if rate := s.DrainRate(now); rate > 0 {
+			fmt.Fprintf(w, "   %s/s", sizeutil.FormatBytes(int64(rate)))
+		}
+		fmt.Fprintln(w)
+	}
+	fmt.Fprintf(w, "Volume:   %s written\n", sizeutil.FormatBytes(s.TotalOnVolume()))
 	if eta, ok := s.ETA(now); ok {
 		fmt.Fprintf(w, "ETA:      %s\n", sizeutil.FormatElapsed(eta))
 	}
@@ -82,9 +94,9 @@ func stateCell(d DLE) string {
 	return string(d.State)
 }
 
-// progressCell renders a small text bar plus percent against the estimate, or a
-// dash when there is nothing to show yet.
-func progressCell(d DLE) string {
+// dumpCell renders the DUMP bar — progress against the estimate — or a dash/marker when
+// there is nothing to meter (pending, failed, or no estimate).
+func dumpCell(d DLE) string {
 	switch d.State {
 	case StatePending:
 		return "-"
@@ -94,18 +106,32 @@ func progressCell(d DLE) string {
 	if d.EstBytes <= 0 {
 		return "n/a"
 	}
+	return barCell(d.Pct())
+}
+
+// drainCell renders the FLUSH bar for a holding-disk DLE — bytes copied to the landing
+// against the staged size. A direct dump has no separate flush: it shows "direct" once
+// done (it streamed straight to the volume) and a dash while it is still dumping.
+func drainCell(d DLE) string {
+	if d.Drains() {
+		return barCell(d.DrainPct())
+	}
+	if d.State == StateDone {
+		return "direct"
+	}
+	return "-"
+}
+
+// barCell renders a fixed-width text bar plus percent, e.g. "[####......]  40%".
+func barCell(pct float64) string {
 	const width = 10
-	filled := int(d.Pct() / 100 * width)
+	filled := int(pct / 100 * width)
 	if filled > width {
 		filled = width
 	}
-	bar := strings.Repeat("#", filled) + strings.Repeat(".", width-filled)
-	return fmt.Sprintf("[%s] %3.0f%%", bar, d.Pct())
-}
-
-func estCell(b int64) string {
-	if b <= 0 {
-		return "?"
+	if filled < 0 {
+		filled = 0
 	}
-	return "~" + sizeutil.FormatBytes(b)
+	bar := strings.Repeat("#", filled) + strings.Repeat(".", width-filled)
+	return fmt.Sprintf("[%s] %3.0f%%", bar, pct)
 }
