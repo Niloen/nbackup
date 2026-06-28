@@ -1,0 +1,153 @@
+package fslike
+
+import (
+	"bytes"
+	"io"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/Niloen/nbackup/internal/record"
+)
+
+// memStore is an in-memory fslike.Store for exercising the layer's concurrency seams.
+// onWrite, if set, is invoked from Write after the payload bytes are stored but before
+// Write returns — a hook to widen the window between "payload on disk" and "position
+// indexed" that AppendFile straddles.
+type memStore struct {
+	mu      sync.Mutex
+	files   map[string][]byte
+	onWrite func(key string)
+}
+
+func newMemStore() *memStore { return &memStore{files: map[string][]byte{}} }
+
+func (s *memStore) Key(slot, name string) string { return slot + "/" + name }
+
+func (s *memStore) Write(key string, write func(w io.Writer) error) error {
+	var buf bytes.Buffer
+	if err := write(&buf); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.files[key] = append([]byte(nil), buf.Bytes()...)
+	s.mu.Unlock()
+	if s.onWrite != nil {
+		s.onWrite(key)
+	}
+	return nil
+}
+
+func (s *memStore) WriteAll(key string, b []byte) error {
+	s.mu.Lock()
+	s.files[key] = append([]byte(nil), b...)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *memStore) ReadAll(key string) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.files[key]
+	if !ok {
+		return nil, io.EOF
+	}
+	return append([]byte(nil), b...), nil
+}
+
+func (s *memStore) Open(key string) (io.ReadCloser, error) {
+	b, err := s.ReadAll(key)
+	if err != nil {
+		return nil, err
+	}
+	return io.NopCloser(bytes.NewReader(b)), nil
+}
+
+func (s *memStore) List() ([]Object, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Object
+	for key := range s.files {
+		slot, name, _ := strings.Cut(key, "/")
+		out = append(out, Object{Key: key, Slot: slot, Base: name})
+	}
+	return out, nil
+}
+
+func (s *memStore) RemoveTree(slot string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key := range s.files {
+		if strings.HasPrefix(key, slot+"/") {
+			delete(s.files, key)
+		}
+	}
+	return nil
+}
+
+func (s *memStore) Remove(key string) error {
+	s.mu.Lock()
+	delete(s.files, key)
+	s.mu.Unlock()
+	return nil
+}
+
+func appendArchive(t *testing.T, v *Volume, slot, dle, payload string) int {
+	t.Helper()
+	pos, err := v.AppendFile(
+		record.Header{Slot: slot, Kind: record.KindArchive, DLE: dle, Level: 0, Compress: "none"},
+		func(w io.Writer) error { _, e := w.Write([]byte(payload)); return e },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pos
+}
+
+// TestReclaimSparesInFlightAppend reproduces the holding-disk corruption: dumpers
+// append into one slot directory while the drain reclaims drained archives from the
+// same slot. When a reclaim removed a slot's last *indexed* file, it used to RemoveTree
+// the directory based on the lagging in-memory index — destroying a payload another
+// dumper had just written but not yet indexed. The position-reservation in AppendFile
+// must make the reclaim see the in-flight append and spare its directory.
+func TestReclaimSparesInFlightAppend(t *testing.T) {
+	st := newMemStore()
+	v, err := Open(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A previously drained archive's leftover file, the reclaim's target.
+	posA := appendArchive(t, v, "slot-x", "done", "AAA")
+
+	// A second dumper begins appending into the same slot. Block inside Write — the
+	// in-flight payload is on disk but not yet finalized — until the reclaim has run.
+	reached := make(chan struct{})
+	release := make(chan struct{})
+	st.onWrite = func(key string) {
+		if strings.Contains(key, "inflight") {
+			close(reached)
+			<-release
+		}
+	}
+	done := make(chan int, 1)
+	go func() { done <- appendArchive(t, v, "slot-x", "inflight", "BBB") }()
+
+	<-reached
+	// The drain reclaims slot-x's last indexed file while the second append is mid-flight.
+	if err := v.RemoveFile(posA); err != nil {
+		t.Fatalf("RemoveFile: %v", err)
+	}
+	close(release)
+	posB := <-done
+
+	// The in-flight payload must have survived the concurrent reclaim.
+	_, rc, err := v.ReadFile(posB)
+	if err != nil {
+		t.Fatalf("in-flight payload destroyed by concurrent reclaim: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if string(got) != "BBB" {
+		t.Fatalf("payload = %q, want %q", got, "BBB")
+	}
+}

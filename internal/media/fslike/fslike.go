@@ -59,7 +59,10 @@ type Store interface {
 
 // entry pairs a file's header sidecar and payload keys with its slot. incomplete
 // marks a position missing one of the two — an interrupted append leaves a payload
-// with no header sidecar; such an orphan is indexed but skipped, never read.
+// with no header sidecar; such an orphan is indexed but skipped, never read. It also
+// marks a position reserved by an in-flight AppendFile (both keys still empty): the
+// reservation keeps the index from lagging the directory so a concurrent reclaim sees
+// the slot is still in use (see AppendFile).
 type entry struct {
 	hdr        string
 	payload    string
@@ -128,11 +131,29 @@ func (v *Volume) AppendFile(h record.Header, write func(w io.Writer) error) (int
 	v.mu.Lock()
 	pos := v.next
 	v.next++
+	// Reserve the position before writing the files, so the index never lags the
+	// directory. A dumper creates the payload on disk before the position is indexed,
+	// and does the I/O outside the lock so appends run in parallel; without this
+	// reservation a concurrent RemoveFile reclaiming the slot's last file would judge
+	// the slot empty from the lagging index and RemoveTree the subtree — taking the
+	// freshly written, not-yet-indexed payload with it. The reservation makes that
+	// RemoveFile see the in-flight append and leave the directory alone. Finalized
+	// below once both artifacts have landed; the defer drops it on any early return.
+	v.idx[pos] = entry{slot: h.Slot, incomplete: true}
 	v.mu.Unlock()
 
 	base := stem(pos, h)
 	payloadKey := v.store.Key(h.Slot, base+payloadExt(h))
 	hdrKey := v.store.Key(h.Slot, base+".hdr")
+
+	committed := false
+	defer func() {
+		if !committed {
+			v.mu.Lock()
+			delete(v.idx, pos)
+			v.mu.Unlock()
+		}
+	}()
 
 	// Payload first (a clean archive), then the header sidecar — so an interrupted
 	// write leaves a sidecar-less orphan that scan/rebuild ignores.
@@ -149,6 +170,7 @@ func (v *Volume) AppendFile(h record.Header, write func(w io.Writer) error) (int
 
 	v.mu.Lock()
 	v.idx[pos] = entry{hdr: hdrKey, payload: payloadKey, slot: h.Slot}
+	committed = true
 	v.mu.Unlock()
 	return pos, nil
 }
