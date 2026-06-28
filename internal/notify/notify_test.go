@@ -148,6 +148,23 @@ func TestSMTPNotifyBuildsMessage(t *testing.T) {
 	}
 }
 
+func TestSMTPMessageIsMultipartWithMonospaceHTML(t *testing.T) {
+	msg := string(smtpMessage("backups@x", []string{"ops@x"}, "nbackup dump OK", "DLE      level\nroot/etc 1 <ok>"))
+	for _, want := range []string{
+		"Content-Type: multipart/alternative;",
+		"Content-Type: text/plain; charset=utf-8",
+		"Content-Type: text/html; charset=utf-8",
+		"monospace",             // the HTML part renders the columns monospace
+		"<pre",                  // wrapped so column alignment survives
+		"root/etc 1 &lt;ok&gt;", // body HTML-escaped in the HTML part
+		"root/etc 1 <ok>",       // body verbatim in the plaintext part
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message missing %q\n%s", want, msg)
+		}
+	}
+}
+
 func TestSMTPNotifyContextTimeout(t *testing.T) {
 	n := &smtpNotifier{
 		addr: "mail:587", from: "a@x", to: []string{"b@x"},
