@@ -8,7 +8,7 @@ import (
 )
 
 // The byteGate back-pressures a committing dumper: charging past capacity makes it wait until
-// the taper releases space — "holding disk full ⇒ dumper waits".
+// the drain releases space — "holding disk full ⇒ dumper waits".
 func TestByteGateBlocksUntilReleased(t *testing.T) {
 	g := newByteGate(100)
 	g.charge(80) // under capacity

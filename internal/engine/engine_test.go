@@ -779,7 +779,7 @@ func removeSlotFiles(t *testing.T, eng *Engine, slotID string) {
 // removes the disk copies, then restores both — proving the changer auto-mounts
 // the bay holding each slot's tape on the read side.
 // TestHoldingDiskBuffersTape exercises the holding-disk path: a disk marked holding: true
-// buffers a tape landing. Several DLEs dump to the disk in parallel; the taper drains each to
+// buffers a tape landing. Several DLEs dump to the disk in parallel; the drain copies each to
 // tape and reclaims the disk; afterward the disk is empty, the slot lives on tape, and the
 // chain restores from tape alone.
 func TestHoldingDiskBuffersTape(t *testing.T) {
@@ -842,6 +842,83 @@ func TestHoldingDiskBuffersTape(t *testing.T) {
 		name := config.DLE{Host: "localhost", Path: tc.src}.Name()
 		if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
 			t.Fatalf("restore %s from tape: %v", name, err)
+		}
+		assertContent(t, filepath.Join(dest, tc.file), tc.want)
+	}
+}
+
+// TestHoldingDiskDrainSpansVolumes exercises the drain's volume-roll path: the tape landing has a
+// small volume_size, so each staged archive spans several reels while it copies. Every roll runs
+// the real WriteSink — and its catalog write — on the orchestrator via the sink funnel, while the
+// drainer goroutine streams the bytes and the other DLE's commit is recorded concurrently. The run
+// must complete, each archive must land spanning >= 2 parts, the disk must be reclaimed, and both
+// chains must restore from the spanned tapes.
+func TestHoldingDiskDrainSpansVolumes(t *testing.T) {
+	srcA, srcB := t.TempDir(), t.TempDir()
+	// Bodies well over the 160 KiB reel so each archive rolls across volumes mid-drain.
+	write(t, filepath.Join(srcA, "a.txt"), strings.Repeat("alpha-spanning-payload-", 16*1024))
+	write(t, filepath.Join(srcB, "b.txt"), strings.Repeat("bravo-spanning-payload-", 16*1024))
+	scratchDir := t.TempDir()
+
+	cfg := &config.Config{
+		Landing:   "lto",
+		AutoLabel: true,
+		Media: map[string]config.Media{
+			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "12", "volume_size": "163840"}},
+			"scratch": {Type: "disk", Holding: true, Capacity: "500MB", Params: map[string]string{"path": scratchDir}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: srcA}, {Host: "localhost", Path: srcB}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	cfg.Parallelism.Workers = 2
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	s, err := eng.Run(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("holding-disk dump with spanning landing: %v", err)
+	}
+
+	// Each archive landed on tape spanning >= 2 parts (it rolled mid-drain), and the holding disk
+	// is fully reclaimed.
+	var tape catalog.Placement
+	for _, p := range eng.cat.Placements(s.ID) {
+		if p.Medium == "scratch" {
+			t.Errorf("holding disk should hold no placement after the run, got %v", p)
+		}
+		if p.Medium == "lto" {
+			tape = p
+		}
+	}
+	for _, src := range []string{srcA, srcB} {
+		name := config.DLE{Host: "localhost", Path: src}.Name()
+		if parts, _ := tape.Parts(name, 0); len(parts) < 2 {
+			t.Fatalf("archive %s landed in %d part(s), want >= 2 (must span)", name, len(parts))
+		}
+	}
+	if scratchVol, _, _, err := eng.mediumVolume("scratch"); err != nil {
+		t.Fatal(err)
+	} else if files, _ := scratchVol.Files(); len(files) != 0 {
+		t.Errorf("holding disk must be empty after the run, has %d file(s)", len(files))
+	}
+
+	// Both chains restore from the spanned tapes alone.
+	for _, tc := range []struct{ src, file, want string }{
+		{srcA, "a.txt", strings.Repeat("alpha-spanning-payload-", 16*1024)},
+		{srcB, "b.txt", strings.Repeat("bravo-spanning-payload-", 16*1024)},
+	} {
+		dest := t.TempDir()
+		name := config.DLE{Host: "localhost", Path: tc.src}.Name()
+		if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
+			t.Fatalf("restore %s from spanned tape: %v", name, err)
 		}
 		assertContent(t, filepath.Join(dest, tc.file), tc.want)
 	}

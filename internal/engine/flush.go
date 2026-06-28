@@ -13,17 +13,18 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-// flush.go is the holding disk's taper. The dump orchestrator (engine.go) drives every run; when
+// flush.go is the holding disk's drain. The dump orchestrator (engine.go) drives every run; when
 // the dump medium is a holding disk it hands each committed archive here to be drained: copied to
-// the authoritative landing, then reclaimed off the disk (flushOne). A byteGate sized to the
-// holding disk's capacity back-pressures the dumpers; a landing failure aborts it so the dumpers
-// stop and the run fails — never dropping data. The dumpers write an unbounded disk/cloud sink
-// (parallel-safe); the taper drives the spanning landing serially (the two combinations the
-// writer already documents). Flush is the amflush analogue, draining a crashed run's leftover
-// holding archives on the next dump.
+// the authoritative landing, then reclaimed off the disk. The copy runs on a drainer goroutine
+// (copyOne) while the orchestrator stays free to record control; the orchestrator finalizes each
+// copy (finalizeDrain). A byteGate sized to the holding disk's capacity back-pressures the
+// dumpers; a landing failure aborts it so the dumpers stop and the run fails — never dropping
+// data. The dumpers write an unbounded disk/cloud sink (parallel-safe); the landing is written by
+// one serial writer (the two combinations the writer already documents). Flush is the amflush
+// analogue, draining a crashed run's leftover holding archives on the next dump.
 
 // byteGate is the holding disk's capacity back-pressure. A dumper charges an archive's bytes
-// when it commits, then waits while the disk is over capacity; the taper releases the bytes
+// when it commits, then waits while the disk is over capacity; the drain releases the bytes
 // once the archive has landed and been reclaimed. A landing failure aborts the gate, waking
 // blocked dumpers (which then stop) so the run fails rather than overfilling the disk. A
 // zero/negative capacity is unbounded (no back-pressure).
@@ -42,7 +43,7 @@ func newByteGate(capacity int64) *byteGate {
 }
 
 // charge accounts n landed bytes against the disk budget (does not block). Charging before
-// the archive is enqueued keeps the accounting correct: the taper's release happens-after.
+// the archive is enqueued keeps the accounting correct: the drain's release happens-after.
 func (g *byteGate) charge(n int64) {
 	g.mu.Lock()
 	g.used += n
@@ -50,8 +51,8 @@ func (g *byteGate) charge(n int64) {
 }
 
 // waitUnderCapacity blocks while the disk holds more than its capacity, returning the abort
-// error if the taper failed. The archive that pushed it over is already enqueued, so the taper
-// drains it and releases, unblocking the dumper.
+// error if the drain failed. The archive that pushed it over is already enqueued, so the drain
+// copies it and releases, unblocking the dumper.
 func (g *byteGate) waitUnderCapacity() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -90,11 +91,11 @@ func (g *byteGate) err() error {
 }
 
 // copyOne is the drain's DATA half: it reads one staged archive from the holding disk and streams
-// it to the landing, returning the committed archive and its landing position. It drives the
-// landing Writer directly (not the clerk Session), so it touches the catalog only through the
-// Writer's VolumeSink — never the placement record. That record, and the holding reclaim, are the
-// control half (finalizeDrain), run by the orchestrator (the sole catalog writer). Splitting them
-// here lets a later step move copyOne onto a taper goroutine while control stays on the orchestrator.
+// it to the landing, returning the committed archive and its landing position. It runs on the
+// drainer goroutine. It drives the landing Writer directly (not the clerk Session), so it touches
+// the catalog only through the Writer's VolumeSink — whose control calls the proxy funnels back to
+// the orchestrator, never writing the catalog here. The placement record and the holding reclaim
+// are the control half (finalizeDrain), run by the orchestrator (the sole catalog writer).
 func (e *Engine) copyOne(landW *archiveio.Writer, slotMeta *record.Slot, holdVol media.Volume, it handoff, tr *progress.Tracker) (record.Archive, record.ArchivePos, error) {
 	if tr != nil {
 		tr.StartFlush(it.dleID)
@@ -136,8 +137,84 @@ func (e *Engine) finalizeDrain(slotMeta *record.Slot, holding string, holdVol me
 	return nil
 }
 
+// drainer copies staged archives to the landing on its own goroutine: it runs copyOne (the pure
+// byte-copy) for each archive the orchestrator hands it over workCh and reports the result on
+// doneCh. It touches the catalog and the librarian only through the landing Writer's proxy sink,
+// whose NextPart/PlaceRecord funnel back to the orchestrator — so the byte stream runs here while
+// all control (catalog writes, librarian volume rolls) stays on the orchestrator. The landing is
+// written by one serial writer, so there is exactly one drainer.
+func (e *Engine) drainer(landW *archiveio.Writer, slotMeta *record.Slot, holdVol media.Volume, workCh <-chan handoff, doneCh chan<- copyResult, tr *progress.Tracker) {
+	for it := range workCh {
+		arch, pos, err := e.copyOne(landW, slotMeta, holdVol, it, tr)
+		doneCh <- copyResult{it: it, arch: arch, pos: pos, err: err}
+	}
+}
+
+// copyResult is one finished (or failed) copy the drainer hands back to the orchestrator, which
+// then records the landing placement and reclaims the holding copy (finalizeDrain).
+type copyResult struct {
+	it   handoff
+	arch record.Archive
+	pos  record.ArchivePos
+	err  error
+}
+
+// sinkReq is a VolumeSink call the drainer's proxy funnels to the orchestrator: placeRecord
+// selects PlaceRecord(size) over NextPart(). The orchestrator runs the real sink and replies on
+// reply — so any volume roll's catalog writes (RecordVolume / recycle) land on the sole catalog
+// writer.
+type sinkReq struct {
+	placeRecord bool
+	size        int64
+	reply       chan sinkResp
+}
+
+// sinkResp is the orchestrator's reply to a sinkReq: the union of NextPart's and PlaceRecord's
+// returns (max is unused for PlaceRecord).
+type sinkResp struct {
+	vol    media.Volume
+	max    int64
+	volume string
+	epoch  int
+	err    error
+}
+
+// proxySink is the VolumeSink the drainer's landing Writer is built over. Its NextPart/PlaceRecord
+// touch neither the librarian nor the catalog — they send the call to the orchestrator over reqCh
+// and block on the reply. The byte write (vol.AppendFile) the caller does on the returned volume
+// is the data half, on the drainer goroutine; the control half (the sink call) runs on the
+// orchestrator. The round-trip is synchronous, so the drive is never written from two goroutines.
+type proxySink struct {
+	reqCh chan<- sinkReq
+}
+
+func (p *proxySink) NextPart() (media.Volume, int64, string, int, error) {
+	reply := make(chan sinkResp, 1)
+	p.reqCh <- sinkReq{reply: reply}
+	r := <-reply
+	return r.vol, r.max, r.volume, r.epoch, r.err
+}
+
+func (p *proxySink) PlaceRecord(size int64) (media.Volume, string, int, error) {
+	reply := make(chan sinkResp, 1)
+	p.reqCh <- sinkReq{placeRecord: true, size: size, reply: reply}
+	r := <-reply
+	return r.vol, r.volume, r.epoch, r.err
+}
+
+// serve runs one funneled sink call on the real WriteSink — on the orchestrator goroutine, so a
+// roll's RecordVolume/recycle catalog writes land on the sole catalog writer.
+func serve(real archiveio.VolumeSink, req sinkReq) sinkResp {
+	if req.placeRecord {
+		vol, volume, epoch, err := real.PlaceRecord(req.size)
+		return sinkResp{vol: vol, volume: volume, epoch: epoch, err: err}
+	}
+	vol, max, volume, epoch, err := real.NextPart()
+	return sinkResp{vol: vol, max: max, volume: volume, epoch: epoch, err: err}
+}
+
 // openArchiveAt reads an archive's parts straight from a live volume (the holding writer's own,
-// whose index the dumpers keep current), concatenating them — the taper's read seam, bypassing
+// whose index the dumpers keep current), concatenating them — the drain's read seam, bypassing
 // the catalog and the fresh-mounter path (which would have a stale index for in-flight files).
 func openArchiveAt(vol media.Volume, ref clerk.Ref, parts []record.FilePos) (io.ReadCloser, error) {
 	return archiveio.NewReader().Open(parts, archiveio.Expect{Slot: ref.Slot, DLE: ref.DLE, Level: ref.Level},
