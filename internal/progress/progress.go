@@ -58,7 +58,8 @@ type DLE struct {
 	OutBytes   int64     `json:"out_bytes"`   // compressed bytes produced so far (the size staged on the holding disk)
 	DrainBytes int64     `json:"drain_bytes"` // compressed bytes copied from the holding disk to the landing so far
 	FileCount  int       `json:"file_count"`
-	Holding    string    `json:"holding,omitempty"` // holding disk it buffered on, set the moment its dump commits there (empty for a direct dump)
+	Holding    string    `json:"holding,omitempty"`    // holding disk it buffered on, set the moment its dump commits there (empty for a direct dump)
+	ToHolding  bool      `json:"to_holding,omitempty"` // dump is routed to a holding disk, set when ingestion is acquired there — before it commits; marks the staging window until Holding is set
 	StartedAt  time.Time `json:"started_at,omitempty"`
 	EndedAt    time.Time `json:"ended_at,omitempty"`
 	Err        string    `json:"err,omitempty"`
@@ -78,10 +79,11 @@ func (d DLE) DrainPct() float64 { return pct(d.DrainBytes, d.OutBytes) }
 // dump (no holding disk, or an oversized DLE streamed straight to the landing) leaves it empty.
 func (d DLE) Drains() bool { return d.Holding != "" }
 
-// OnVolume is the bytes that have landed on the authoritative volume: for a drained
-// DLE the amount copied so far, for a direct dump the compressed bytes it wrote there.
+// OnVolume is the bytes that have landed on the authoritative volume: 0 while a holding-bound
+// DLE is still staging to its disk (its bytes are on holding, not the volume), the amount copied
+// so far once it drains, and for a direct dump the compressed bytes it wrote straight to the volume.
 func (d DLE) OnVolume() int64 {
-	if d.Drains() {
+	if d.Drains() || d.ToHolding {
 		return d.DrainBytes
 	}
 	return d.OutBytes

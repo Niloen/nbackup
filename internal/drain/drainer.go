@@ -173,6 +173,12 @@ func (d *Drainer) Acquire(est int64, meta record.Archive, prog func(int64)) (*Si
 		return nil, err
 	}
 	if !direct {
+		if d.tr != nil {
+			// The dump is bound for this holding disk: mark it staging now, before any bytes commit,
+			// so live status shows it staging to holding (not yet on the volume) rather than mistaking
+			// the in-flight dump for a direct write to the landing.
+			d.tr.MarkToHolding(meta.Host + ":" + meta.Path)
+		}
 		return &Sink{d: d, session: d.pool.Session(idx), disk: idx, meta: meta, tap: prog}, nil
 	}
 	reply := make(chan error, 1)
@@ -250,8 +256,9 @@ func (d *Drainer) orchestrate() {
 				}
 				pendingCopy = append(pendingCopy, handoff{arch: lr.arch, pos: lr.pos, disk: lr.disk})
 				if d.tr != nil {
-					// Mark it buffered now, while it is queued behind other drains, so live status
-					// shows it staged on holding (a 0% flush bar) instead of mistaking it for a direct write.
+					// The dump committed to this disk: record where it staged so the queued DLE shows a
+					// 0% flush bar (and which disk) while it waits behind other drains — taking over from
+					// the "staging" mark its in-flight dump carried.
 					d.tr.StageHolding(lr.arch.Host+":"+lr.arch.Path, d.pool.Name(lr.disk))
 				}
 				lr.reply <- nil
