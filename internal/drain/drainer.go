@@ -249,6 +249,11 @@ func (d *Drainer) orchestrate() {
 					break
 				}
 				pendingCopy = append(pendingCopy, handoff{arch: lr.arch, pos: lr.pos, disk: lr.disk})
+				if d.tr != nil {
+					// Mark it buffered now, while it is queued behind other drains, so live status
+					// shows it staged on holding (a 0% flush bar) instead of mistaking it for a direct write.
+					d.tr.StageHolding(lr.arch.Host+":"+lr.arch.Path, d.pool.Name(lr.disk))
+				}
 				lr.reply <- nil
 			} else {
 				// A direct write has no holding copy and no Pool charge — just record the landing.

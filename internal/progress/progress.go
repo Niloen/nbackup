@@ -58,7 +58,7 @@ type DLE struct {
 	OutBytes   int64     `json:"out_bytes"`   // compressed bytes produced so far (the size staged on the holding disk)
 	DrainBytes int64     `json:"drain_bytes"` // compressed bytes copied from the holding disk to the landing so far
 	FileCount  int       `json:"file_count"`
-	Holding    string    `json:"holding,omitempty"` // holding disk it buffered on, set when draining begins (empty for a direct dump)
+	Holding    string    `json:"holding,omitempty"` // holding disk it buffered on, set the moment its dump commits there (empty for a direct dump)
 	StartedAt  time.Time `json:"started_at,omitempty"`
 	EndedAt    time.Time `json:"ended_at,omitempty"`
 	Err        string    `json:"err,omitempty"`
@@ -73,8 +73,9 @@ func (d DLE) Pct() float64 { return pct(d.DoneBytes, d.EstBytes) }
 func (d DLE) DrainPct() float64 { return pct(d.DrainBytes, d.OutBytes) }
 
 // Drains reports whether the DLE goes through a holding disk, so it has a drain phase.
-// Holding is set when its drain begins and persists through done; a direct dump (no
-// holding disk, or an oversized DLE streamed straight to the landing) leaves it empty.
+// Holding is set the moment its dump commits to the holding disk and persists through done,
+// so a DLE staged but still queued behind another's drain already reads as draining; a direct
+// dump (no holding disk, or an oversized DLE streamed straight to the landing) leaves it empty.
 func (d DLE) Drains() bool { return d.Holding != "" }
 
 // OnVolume is the bytes that have landed on the authoritative volume: for a drained
