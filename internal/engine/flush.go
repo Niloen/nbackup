@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/clerk"
+	"github.com/Niloen/nbackup/internal/drain"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
@@ -19,126 +19,12 @@ import (
 // the dump medium is one or more holding disks it hands each committed archive here to be drained:
 // copied to the authoritative landing, then reclaimed off the disk it landed on. The copy runs on a
 // drainer goroutine (copyOne) while the orchestrator stays free to record control; the orchestrator
-// finalizes each copy (finalizeDrain). A holdingPool spreads dumps across the disks and, sized to
+// finalizes each copy (finalizeDrain). A drain.Pool spreads dumps across the disks and, sized to
 // each disk's capacity, back-pressures the dumpers; a landing failure aborts it so the dumpers stop
 // and the run fails — never dropping data. The dumpers write unbounded disk/cloud sinks
 // (parallel-safe); the landing is written by one serial writer (the two combinations the writer
 // already documents). Flush is the amflush analogue, draining a crashed run's leftover holding
 // archives on the next dump.
-
-// holdingDisk is one disk in the holding pool: the writer the dumpers stage onto, its session and
-// volume (for the drain to read back and reclaim), and its capacity budget plus current usage.
-type holdingDisk struct {
-	name     string
-	wt       *writeTarget
-	session  *clerk.Session
-	holdVol  media.Volume // == wt.lib.Volume()
-	capacity int64        // bytes; 0 = unbounded (no back-pressure)
-	used     int64        // landed bytes not yet drained; guarded by holdingPool.mu
-}
-
-// holdingPool is the capacity back-pressure and disk allocator across one or more holding disks. A
-// dumper acquires a disk for its DLE (round-robin, skipping full or too-small disks), charges the
-// archive's bytes when it commits, and the next acquire blocks while every eligible disk is over
-// capacity; the drain releases the bytes once the archive has landed and been reclaimed, waking a
-// blocked dumper. A landing failure aborts the pool, waking blocked dumpers (which then stop) so the
-// run fails rather than overfilling. With a single disk it behaves exactly like the old byteGate.
-type holdingPool struct {
-	mu      sync.Mutex
-	cond    *sync.Cond
-	disks   []holdingDisk
-	cursor  int // round-robin allocation hand
-	aborted error
-}
-
-func newHoldingPool(disks []holdingDisk) *holdingPool {
-	p := &holdingPool{disks: disks}
-	p.cond = sync.NewCond(&p.mu)
-	return p
-}
-
-// fits reports whether disk d could ever hold an archive estimated at est bytes — an unbounded disk
-// fits anything, a bounded one fits an estimate strictly under its capacity (matching the old
-// routesDirect threshold, where est >= capacity routes direct).
-func (d *holdingDisk) fits(est int64) bool { return d.capacity == 0 || est < d.capacity }
-
-// hasRoom reports whether disk d is currently under its capacity budget (always true unbounded).
-func (d *holdingDisk) hasRoom() bool { return d.capacity == 0 || d.used < d.capacity }
-
-// acquire picks a holding disk for a DLE estimated at est bytes, blocking while every disk that
-// could fit it is over capacity. It returns direct=true when no disk can ever fit est (the DLE is
-// too big for the largest disk and there is no unbounded one) — the caller dumps it straight to the
-// landing. Allocation is round-robin from the cursor, skipping disks that can't fit est or have no
-// room right now, so successive dumps spread across spindles. It returns the abort error if the
-// drain has failed. The estimate is an uncompressed upper bound, so direct routing is conservative.
-func (p *holdingPool) acquire(est int64) (idx int, direct bool, err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	anyFits := false
-	for i := range p.disks {
-		if p.disks[i].fits(est) {
-			anyFits = true
-			break
-		}
-	}
-	if !anyFits {
-		return 0, true, nil
-	}
-	for {
-		if p.aborted != nil {
-			return 0, false, p.aborted
-		}
-		for n := 0; n < len(p.disks); n++ {
-			i := p.cursor % len(p.disks)
-			p.cursor = (p.cursor + 1) % len(p.disks)
-			if p.disks[i].fits(est) && p.disks[i].hasRoom() {
-				return i, false, nil
-			}
-		}
-		p.cond.Wait()
-	}
-}
-
-// charge accounts n landed bytes against disk idx's budget (does not block). Charging before the
-// archive is enqueued keeps the accounting correct: the drain's release happens-after.
-func (p *holdingPool) charge(idx int, n int64) {
-	p.mu.Lock()
-	p.disks[idx].used += n
-	p.mu.Unlock()
-}
-
-// release returns n charged bytes to disk idx and wakes any blocked dumpers.
-func (p *holdingPool) release(idx int, n int64) {
-	p.mu.Lock()
-	p.disks[idx].used -= n
-	if p.disks[idx].used < 0 {
-		p.disks[idx].used = 0
-	}
-	p.cond.Broadcast()
-	p.mu.Unlock()
-}
-
-// abort wakes every blocked dumper — the landing is unreachable, so the run must fail rather than
-// wait for space that will never free.
-func (p *holdingPool) abort(err error) {
-	p.mu.Lock()
-	if p.aborted == nil {
-		p.aborted = err
-	}
-	p.cond.Broadcast()
-	p.mu.Unlock()
-}
-
-func (p *holdingPool) err() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.aborted
-}
-
-// name and holdVol resolve a disk handed back in a handoff (these read immutable fields, no lock).
-func (p *holdingPool) name(idx int) string            { return p.disks[idx].name }
-func (p *holdingPool) holdVol(idx int) media.Volume   { return p.disks[idx].holdVol }
-func (p *holdingPool) session(idx int) *clerk.Session { return p.disks[idx].session }
 
 // copyOne is the drain's DATA half: it reads one staged archive from the holding disk and streams
 // it to the landing, returning the committed archive and its landing position. It runs on the
@@ -167,9 +53,9 @@ func (e *Engine) copyOne(landW *archiveio.Writer, slotMeta *record.Slot, holdVol
 // reclaims the holding copy (files + placement) and releases its back-pressure. It runs on the
 // orchestrator (the sole catalog writer). The landing placement is recorded before the holding
 // copy is dropped, so the archive is never absent from the catalog.
-func (e *Engine) finalizeDrain(slotMeta *record.Slot, it handoff, arch record.Archive, pos record.ArchivePos, pool *holdingPool, tr *progress.Tracker, logf Logf) error {
-	holding := pool.name(it.disk)
-	holdVol := pool.holdVol(it.disk)
+func (e *Engine) finalizeDrain(slotMeta *record.Slot, it handoff, arch record.Archive, pos record.ArchivePos, pool *drain.Pool, tr *progress.Tracker, logf Logf) error {
+	holding := pool.Name(it.disk)
+	holdVol := pool.HoldVol(it.disk)
 	if err := e.cat.AddArchive(slotMeta, e.mediumName, arch, pos); err != nil {
 		return fmt.Errorf("flush %s: record landing placement: %w", it.dleID, err)
 	}
@@ -181,7 +67,7 @@ func (e *Engine) finalizeDrain(slotMeta *record.Slot, it handoff, arch record.Ar
 	if _, _, err := e.cat.RemoveArchive(slotMeta.ID, holding, it.arch.DLE); err != nil {
 		return fmt.Errorf("flush %s: drop holding placement: %w", it.dleID, err)
 	}
-	pool.release(it.disk, it.arch.Compressed)
+	pool.Release(it.disk, it.arch.Compressed)
 	if tr != nil {
 		tr.FinishFlush(it.dleID)
 	}
@@ -197,10 +83,10 @@ func (e *Engine) finalizeDrain(slotMeta *record.Slot, it handoff, arch record.Ar
 // written by one serial writer, so there is exactly one drainer. Each job is either a staged-archive
 // copy (copyOne, reading from the holding disk) or an oversized DLE's direct dump (backupItem,
 // running the full pipeline straight to the landing) — both write the same landing Writer.
-func (e *Engine) drainer(landW *archiveio.Writer, landSession *clerk.Session, slotMeta *record.Slot, pool *holdingPool, workCh <-chan drainJob, doneCh chan<- copyResult, tr *progress.Tracker, logf Logf) {
+func (e *Engine) drainer(landW *archiveio.Writer, landSession *clerk.Session, slotMeta *record.Slot, pool *drain.Pool, workCh <-chan drainJob, doneCh chan<- copyResult, tr *progress.Tracker, logf Logf) {
 	for job := range workCh {
 		if job.copy != nil {
-			arch, pos, err := e.copyOne(landW, slotMeta, pool.holdVol(job.copy.disk), pool.name(job.copy.disk), *job.copy, tr)
+			arch, pos, err := e.copyOne(landW, slotMeta, pool.HoldVol(job.copy.disk), pool.Name(job.copy.disk), *job.copy, tr)
 			doneCh <- copyResult{it: *job.copy, arch: arch, pos: pos, err: err}
 		} else {
 			arch, pos, err := e.backupItem(landSession, *job.direct, tr, logf)

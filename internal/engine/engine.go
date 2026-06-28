@@ -21,6 +21,7 @@ import (
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/drain"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
@@ -1152,10 +1153,10 @@ func planProgress(items []planner.Item) []progress.Plan {
 // holding disks' allocator + capacity back-pressure: a worker acquires a disk, charges its
 // archive's bytes, and the next acquire blocks while every disk is over capacity; a drain failure
 // aborts the pool so the workers stop and the run fails.
-func (e *Engine) runWorkers(items []planner.Item, workers int, pool *holdingPool, session *clerk.Session, commitCh chan<- handoff, directCh chan<- planner.Item, tr *progress.Tracker, logf Logf) error {
+func (e *Engine) runWorkers(items []planner.Item, workers int, pool *drain.Pool, session *clerk.Session, commitCh chan<- handoff, directCh chan<- planner.Item, tr *progress.Tracker, logf Logf) error {
 	if workers <= 1 || len(items) <= 1 {
 		for _, item := range items {
-			if pool != nil && pool.err() != nil {
+			if pool != nil && pool.Err() != nil {
 				break
 			}
 			if err := e.dumpAndHandoff(pool, session, item, commitCh, directCh, tr, logf); err != nil {
@@ -1183,7 +1184,7 @@ func (e *Engine) runWorkers(items []planner.Item, workers int, pool *holdingPool
 	failed := func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return firstErr != nil || (pool != nil && pool.err() != nil)
+		return firstErr != nil || (pool != nil && pool.Err() != nil)
 	}
 	for _, item := range items {
 		if failed() {
@@ -1217,9 +1218,9 @@ func (e *Engine) runWorkers(items []planner.Item, workers int, pool *holdingPool
 // the committed archive over commitCh (tagged with which disk). The next acquire is the
 // back-pressure — it blocks while every disk is over capacity and returns the pool's abort error
 // so the worker stops if the drain has failed. The direct path (pool nil) dumps to the landing.
-func (e *Engine) dumpAndHandoff(pool *holdingPool, session *clerk.Session, item planner.Item, commitCh chan<- handoff, directCh chan<- planner.Item, tr *progress.Tracker, logf Logf) error {
+func (e *Engine) dumpAndHandoff(pool *drain.Pool, session *clerk.Session, item planner.Item, commitCh chan<- handoff, directCh chan<- planner.Item, tr *progress.Tracker, logf Logf) error {
 	if pool != nil {
-		idx, direct, err := pool.acquire(item.EstBytes)
+		idx, direct, err := pool.Acquire(item.EstBytes)
 		if err != nil {
 			return err
 		}
@@ -1227,11 +1228,11 @@ func (e *Engine) dumpAndHandoff(pool *holdingPool, session *clerk.Session, item 
 			directCh <- item
 			return nil
 		}
-		arch, pos, err := e.backupItem(pool.session(idx), item, tr, logf)
+		arch, pos, err := e.backupItem(pool.Session(idx), item, tr, logf)
 		if err != nil {
 			return err
 		}
-		pool.charge(idx, arch.Compressed)
+		pool.Charge(idx, arch.Compressed)
 		commitCh <- handoff{arch: arch, pos: pos, dleID: item.DLE.ID(), disk: idx}
 		return nil
 	}
@@ -1263,7 +1264,7 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio
 	buffering := len(holdingNames) > 0
 
 	var (
-		pool        *holdingPool   // buffering: the holding disks + their capacity back-pressure
+		pool        *drain.Pool    // buffering: the holding disks + their capacity back-pressure
 		dumpSession *clerk.Session // direct: the landing session workers dump to
 		landW       *archiveio.Writer
 		landSession *clerk.Session
@@ -1274,7 +1275,7 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio
 	if buffering {
 		// One writer per holding disk; the dumpers spread their writes across them (the pool
 		// allocates), and the drain reads each archive back from the disk it landed on.
-		disks := make([]holdingDisk, len(holdingNames))
+		disks := make([]drain.Disk, len(holdingNames))
 		for i, name := range holdingNames {
 			wt, err := e.prepareWriter(name, spec, now, logf)
 			if err != nil {
@@ -1282,9 +1283,9 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio
 				return nil, fmt.Errorf("open holding disk %q: %w", name, err)
 			}
 			capB, _ := e.cfg.Media[name].CapacityBytes()
-			disks[i] = holdingDisk{name: name, wt: wt, session: e.clerk.OpenSlot(wt.w, name), holdVol: wt.lib.Volume(), capacity: capB}
+			disks[i] = drain.Disk{Name: name, Session: e.clerk.OpenSlot(wt.w, name), HoldVol: wt.lib.Volume(), Capacity: capB}
 		}
-		pool = newHoldingPool(disks)
+		pool = drain.NewPool(disks)
 
 		// Landing writer for the drain, built over a proxy sink: the drainer goroutine streams the
 		// bytes, but its NextPart/PlaceRecord funnel through sinkReqCh to the orchestrator, which
@@ -1378,7 +1379,7 @@ func (e *Engine) orchestrateDirect(commitCh <-chan handoff, dumpMedium string, s
 // drainer is idle, copies-first: draining the disks keeps the pool from stalling dumpers, and
 // directs (which never charge the pool) slot into the gaps. On error the loop stops dispatching and
 // drains any in-flight write (still serving sink requests) so the drainer never deadlocks on the funnel.
-func (e *Engine) orchestrateBuffered(commitCh <-chan handoff, directCh <-chan planner.Item, slotMeta *record.Slot, landW *archiveio.Writer, landSession *clerk.Session, realSink archiveio.VolumeSink, sinkReqCh chan sinkReq, pool *holdingPool, tr *progress.Tracker, logf Logf) error {
+func (e *Engine) orchestrateBuffered(commitCh <-chan handoff, directCh <-chan planner.Item, slotMeta *record.Slot, landW *archiveio.Writer, landSession *clerk.Session, realSink archiveio.VolumeSink, sinkReqCh chan sinkReq, pool *drain.Pool, tr *progress.Tracker, logf Logf) error {
 	workCh := make(chan drainJob, 1)
 	copyDone := make(chan copyResult, 1)
 	go e.drainer(landW, landSession, slotMeta, pool, workCh, copyDone, tr, logf)
@@ -1395,7 +1396,7 @@ func (e *Engine) orchestrateBuffered(commitCh <-chan handoff, directCh <-chan pl
 				commitCh = nil // drained; stop selecting the closed channel
 				break
 			}
-			if err := e.cat.AddArchive(slotMeta, pool.name(it.disk), it.arch, it.pos); err != nil {
+			if err := e.cat.AddArchive(slotMeta, pool.Name(it.disk), it.arch, it.pos); err != nil {
 				failErr = err
 				break
 			}
@@ -1439,7 +1440,7 @@ func (e *Engine) orchestrateBuffered(commitCh <-chan handoff, directCh <-chan pl
 		}
 	}
 	if failErr != nil {
-		pool.abort(failErr) // wake blocked dumpers so they stop and the run fails
+		pool.Abort(failErr) // wake blocked dumpers so they stop and the run fails
 		for busy {          // let an in-flight write finish so the drainer isn't stuck on the funnel
 			select {
 			case req := <-sinkReqCh:
