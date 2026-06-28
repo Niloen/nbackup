@@ -16,7 +16,7 @@ import (
 )
 
 // drainer.go is the consuming half of a dump: the run's archive store. A producer ingests each
-// archive into a Sink the Drainer hands out (Acquire → transfer → Sink.Commit); the Drainer decides
+// archive into a Sink the Drainer hands out (Acquire → transfer → commit); the Drainer decides
 // per archive whether to buffer it on a holding disk (then
 // copy it to the authoritative landing later) or — when no disk fits, or none is configured — write
 // it straight to the landing. It is the run's sole catalog writer: every placement record, every
@@ -120,46 +120,52 @@ func New(cfg Config) *Drainer {
 }
 
 // Sink is one archive's ingestion handle from Acquire: an xfer.Sink that writes the encoded bytes
-// onto the chosen medium (a holding disk, or the landing for a direct write), and Commit which
-// finalizes the stored archive. disk < 0 means the landing itself (a direct write); meta + tap are
-// the archive's input record and the running-compressed-count progress hook.
+// onto the chosen medium (a holding disk, or the landing for a direct write). Draining yields a
+// committer that finalizes the stored archive. disk < 0 means the landing itself (a direct write);
+// meta + tap are the archive's input record and the running-compressed-count progress hook.
 type Sink struct {
 	d       *Drainer
 	session *clerk.Session
 	disk    int
 	meta    record.Archive
 	tap     func(int64) // running count of bytes that have landed, for live status
+}
 
+// Drain writes the encoded stream onto the chosen medium, metering it. It runs on the producer
+// goroutine (the bytes' data half) and returns a committer carrying the measured archive + parts,
+// which Transfer seals once the producer's totals are known.
+func (s *Sink) Drain(in io.Reader) (xfer.Committer, error) {
+	arch, parts, err := s.session.WriteArchive(s.meta, in, s.tap)
+	if err != nil {
+		return nil, err
+	}
+	return &committer{d: s.d, session: s.session, disk: s.disk, measured: arch, parts: parts}, nil
+}
+
+// committer finalizes one staged archive once the producer's totals are known: it writes the commit
+// footer (merging the stats) and hands the committed archive to the orchestrator to record (a
+// holding write queues the holding→landing copy; a direct write records the landing placement and
+// releases the landing permit). It is the xfer.Committer a Drain returns, so it cannot run before
+// its bytes have landed.
+type committer struct {
+	d        *Drainer
+	session  *clerk.Session
+	disk     int
 	measured record.Archive
 	parts    []record.FilePos
 }
 
-// Drain writes the encoded stream onto the chosen medium, metering it and keeping the measured
-// archive + parts for Commit. It runs on the producer goroutine (the bytes' data half).
-func (s *Sink) Drain(in io.Reader) error {
-	arch, parts, err := s.session.WriteArchive(s.meta, in, s.tap)
+// Commit writes the footer and records the placement, returning the run's error if the store has
+// aborted. The committed catalog record is the store's own (recorded via the orchestrator); the
+// producer needs nothing back, so Commit yields only an error.
+func (c *committer) Commit(p xfer.Produced) error {
+	committed, pos, err := c.session.Commit(c.measured, c.parts, p.FileCount, p.Uncompressed, p.Members)
 	if err != nil {
 		return err
 	}
-	s.measured, s.parts = arch, parts
-	return nil
-}
-
-// Commit finalizes the stored archive: it writes the commit footer and merges the producer's
-// raw-stream stats, then records the placement (a holding write queues the holding→landing copy; a
-// direct write records the landing placement and releases the landing permit). It returns the
-// committed catalog record, or the run's error if the store has aborted.
-func (s *Sink) Commit(p xfer.Produced) (record.Archive, error) {
-	_, committed, pos, err := s.session.Commit(s.measured, s.parts, p.FileCount, p.Uncompressed, p.Members)
-	if err != nil {
-		return record.Archive{}, err
-	}
 	reply := make(chan error, 1)
-	s.d.landCh <- landReq{arch: committed, pos: pos, disk: s.disk, reply: reply}
-	if err := <-reply; err != nil {
-		return record.Archive{}, err
-	}
-	return committed, nil
+	c.d.landCh <- landReq{arch: committed, pos: pos, disk: c.disk, reply: reply}
+	return <-reply
 }
 
 // Acquire reserves ingestion for an archive described by meta, estimated at est bytes, and returns
@@ -167,7 +173,7 @@ func (s *Sink) Commit(p xfer.Produced) (record.Archive, error) {
 // fitting disk is over capacity; a direct write (no disk fits, or none is configured) waits for a
 // free landing permit. prog receives the running compressed (landed) byte count. It returns the
 // run's error if the drain has aborted.
-func (d *Drainer) Acquire(est int64, meta record.Archive, prog func(int64)) (*Sink, error) {
+func (d *Drainer) Acquire(est int64, meta record.Archive, prog func(int64)) (xfer.Sink, error) {
 	idx, direct, err := d.pool.Acquire(est)
 	if err != nil {
 		return nil, err

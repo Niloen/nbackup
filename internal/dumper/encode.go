@@ -130,9 +130,9 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 
 // dumpArchive composes the encode transfer for one archive — the archiver's tar source (on its
 // host) → the encode filters placed per the dumptype (client-side fused into the source,
-// server-side as local Filters) → an ingestion Sink the store hands out — then commits the stored
-// archive. prog, if non-nil, receives running (uncompressed, compressed) counts. It returns the
-// committed archive record (sizes + file count) for the caller's tracker and log.
+// server-side as local Filters) → an ingestion xfer.Sink the store hands out, which the transfer
+// seals on commit. prog, if non-nil, receives running (uncompressed, compressed) counts. It returns
+// the archive record with its final sizes + file count for the caller's tracker and log.
 func (d *Dumper) dumpArchive(store Store, est int64, spec BackupSpec, prog func(uncompressed, compressed int64)) (record.Archive, error) {
 	pl := d.placement(spec.DumpType)
 	compF, err := compress.Filter(pl.CompressScheme, pl.CompressOpts)
@@ -198,22 +198,27 @@ func (d *Dumper) dumpArchive(store Store, est int64, spec BackupSpec, prog func(
 	if err != nil {
 		return record.Archive{}, err
 	}
+	// Transfer drives the whole ingestion: it streams the encoded archive into the sink and, on a
+	// clean transfer, has the sink seal it (footer + placement) against the producer's totals,
+	// returning those totals.
 	produced, terr := xfer.Transfer(src, filters, sink)
 	if terr != nil {
 		return record.Archive{}, terr
 	}
-	committed, cerr := sink.Commit(produced)
-	if cerr != nil {
-		return record.Archive{}, cerr
-	}
 	// The archive is durably committed to the store; only now promote the archiver's new
 	// incremental state into its library (Amanda's rename-on-success). Until here the dump wrote a
-	// ".new" side file, so the transfer or commit failing above left the base a retry builds on
-	// untouched — a killed tar can never corrupt the chain.
+	// ".new" side file, so the transfer failing above left the base a retry builds on untouched —
+	// a killed tar can never corrupt the chain.
 	if bs.Promote != nil {
 		if err := bs.Promote(); err != nil {
 			return record.Archive{}, fmt.Errorf("promote incremental state: %w", err)
 		}
 	}
-	return committed, nil
+	// The store recorded the authoritative catalog record itself; the caller needs only the final
+	// tallies for its tracker + log. File count and uncompressed size are the producer's; the
+	// compressed size is the byte count the store metered into comp.
+	meta.FileCount = produced.FileCount
+	meta.Uncompressed = produced.Uncompressed
+	meta.Compressed = comp.Load()
+	return meta, nil
 }
