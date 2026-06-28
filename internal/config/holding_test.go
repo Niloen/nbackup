@@ -19,8 +19,8 @@ sources:
 	if err != nil {
 		t.Fatalf("valid holding config must load, got %v", err)
 	}
-	if name, ok := c.HoldingMedium(); !ok || name != "scratch" {
-		t.Errorf("HoldingMedium() = %q,%v; want scratch,true", name, ok)
+	if got := c.HoldingMedia(); len(got) != 1 || got[0] != "scratch" {
+		t.Errorf("HoldingMedia() = %v; want [scratch]", got)
 	}
 }
 
@@ -28,20 +28,25 @@ sources:
 // media-layer property the engine checks; see the engine package's holding tests. config
 // validates only the structural rules below, free of medium-type knowledge.)
 
-// At most one holding medium.
-func TestHolding_RejectsTwo(t *testing.T) {
-	_, err := loadYAML(t, `
+// Several holding media are allowed; HoldingMedia returns them sorted (deterministic allocation
+// and drain order).
+func TestHolding_AllowsMultiple(t *testing.T) {
+	c, err := loadYAML(t, `
 landing: lto
 media:
   lto: { type: tape, dir: /tmp/v }
-  a:   { type: disk, path: /tmp/a, holding: true }
   b:   { type: disk, path: /tmp/b, holding: true }
+  a:   { type: disk, path: /tmp/a, holding: true }
 sources:
   default:
     localhost: [/home]
 `)
-	if err == nil || !strings.Contains(err.Error(), "at most one holding disk") {
-		t.Fatalf("want at-most-one error, got %v", err)
+	if err != nil {
+		t.Fatalf("multiple holding disks must load, got %v", err)
+	}
+	got := c.HoldingMedia()
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("HoldingMedia() = %v; want [a b]", got)
 	}
 }
 
