@@ -140,7 +140,7 @@ func New(cfg *config.Config) (*Engine, error) {
 		limiters[mname] = ratelimit.NewLimiter(bps)
 	}
 	// A holding disk buffers the landing's writes: parallel dumpers share its write sink and the
-	// taper reclaims each archive as it drains, so its medium type must accept concurrent writes
+	// drain reclaims each archive as it lands, so its medium type must accept concurrent writes
 	// and per-file reclaim (disk, cloud). A serial, whole-volume medium (tape) cannot. Checked
 	// here, where the media registry is wired (config validates only the structural rules).
 	if holding, ok := cfg.HoldingMedium(); ok {
@@ -508,6 +508,15 @@ type writeTarget struct {
 // -> WriteSink -> NewWriter contract lives, shared by a dump (Run) and a copy/sync
 // (CopySlot).
 func (e *Engine) prepareWriter(medium string, spec archiveio.SlotSpec, now time.Time, logf Logf) (*writeTarget, error) {
+	return e.prepareWriterWith(medium, spec, now, logf, nil)
+}
+
+// prepareWriterWith is prepareWriter with a seam to wrap the medium's volume sink before the
+// Writer is built over it (wrap nil is the identity). The holding-disk drain uses it to substitute
+// a proxy sink that funnels the librarian's control calls — NextPart/PlaceRecord, where a volume
+// roll touches the catalog — back to the orchestrator, while the byte-copy runs on the drainer
+// goroutine. Wrapping here keeps the single PrepareWrite→WriteSink→NewWriter contract in one place.
+func (e *Engine) prepareWriterWith(medium string, spec archiveio.SlotSpec, now time.Time, logf Logf, wrap func(archiveio.VolumeSink) archiveio.VolumeSink) (*writeTarget, error) {
 	lib, def, _, err := e.librarianFor(medium)
 	if err != nil {
 		return nil, err
@@ -523,7 +532,10 @@ func (e *Engine) prepareWriter(medium string, spec archiveio.SlotSpec, now time.
 	if err != nil {
 		return nil, err
 	}
-	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
+	var sink archiveio.VolumeSink = lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
+	if wrap != nil {
+		sink = wrap(sink)
+	}
 	w := archiveio.NewWriter(sink, spec, e.limiters[medium])
 	return &writeTarget{lib: lib, w: w, partSize: partSize}, nil
 }
@@ -1124,7 +1136,7 @@ func planProgress(items []planner.Item) []progress.Plan {
 // object into the slot, which the medium must allow concurrently (disk does) and the slot Writer
 // serializes its bookkeeping. gate (nil for a direct dump) is the holding disk's capacity
 // back-pressure: a worker charges its archive's bytes and blocks while the disk is over capacity,
-// and a taper failure aborts the gate so the workers stop and the run fails.
+// and a drain failure aborts the gate so the workers stop and the run fails.
 func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Session, commitCh chan<- handoff, gate *byteGate, tr *progress.Tracker, logf Logf) error {
 	if workers <= 1 || len(items) <= 1 {
 		for _, item := range items {
@@ -1186,7 +1198,7 @@ func (e *Engine) runWorkers(items []planner.Item, workers int, session *clerk.Se
 // dumpAndHandoff dumps one item to the worker's medium and hands the committed archive to the
 // orchestrator over commitCh. When a holding gate is set, it charges the archive's bytes before
 // the handoff and then blocks while the disk is over capacity (back-pressure) — returning the
-// gate's abort error so the worker stops if the taper has failed.
+// gate's abort error so the worker stops if the drain has failed.
 func (e *Engine) dumpAndHandoff(session *clerk.Session, item planner.Item, commitCh chan<- handoff, gate *byteGate, tr *progress.Tracker, logf Logf) error {
 	arch, pos, err := e.backupItem(session, item, tr, logf)
 	if err != nil {
@@ -1225,18 +1237,28 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio
 
 	var (
 		gate        *byteGate
+		landW       *archiveio.Writer
 		landSession *clerk.Session
 		holdVol     media.Volume
+		realSink    archiveio.VolumeSink
+		sinkReqCh   chan sinkReq
 	)
 	if buffering {
-		// Landing writer + session for the drain (this goroutine drives the spanning landing
-		// serially). The holding disk's capacity back-pressures the dumpers through the gate.
-		landWT, err := e.prepareWriter(e.mediumName, spec, now, logf)
+		// Landing writer for the drain, built over a proxy sink: the drainer goroutine streams the
+		// bytes, but its NextPart/PlaceRecord funnel through sinkReqCh to the orchestrator, which
+		// runs the real sink — so any volume roll's catalog write lands on the sole catalog writer.
+		// The holding disk's capacity back-pressures the dumpers through the gate.
+		sinkReqCh = make(chan sinkReq)
+		landWT, err := e.prepareWriterWith(e.mediumName, spec, now, logf, func(s archiveio.VolumeSink) archiveio.VolumeSink {
+			realSink = s
+			return &proxySink{reqCh: sinkReqCh}
+		})
 		if err != nil {
 			tr.SetPhase(progress.PhaseFailed)
 			return nil, fmt.Errorf("open landing %q: %w", e.mediumName, err)
 		}
-		landSession = e.clerk.OpenSlot(landWT.w, e.mediumName)
+		landW = landWT.w
+		landSession = e.clerk.OpenSlot(landW, e.mediumName)
 		holdVol = dumpWT.lib.Volume()
 		capBytes, _ := e.cfg.Media[dumpMedium].CapacityBytes()
 		gate = newByteGate(capBytes)
@@ -1250,7 +1272,12 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio
 	}()
 
 	slotMeta := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
-	orchErr := e.orchestrate(commitCh, dumpMedium, slotMeta, buffering, landSession, holdVol, gate, tr, logf)
+	var orchErr error
+	if buffering {
+		orchErr = e.orchestrateBuffered(commitCh, dumpMedium, slotMeta, landW, realSink, sinkReqCh, holdVol, gate, tr, logf)
+	} else {
+		orchErr = e.orchestrateDirect(commitCh, dumpMedium, slotMeta)
+	}
 
 	if err := firstErr(orchErr, dumpErr); err != nil {
 		tr.SetPhase(progress.PhaseFailed)
@@ -1272,63 +1299,83 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers int, spec archiveio
 	return sealed, nil
 }
 
-// orchestrate records each committed archive's dump-medium placement as it arrives and, when
-// buffering, drains it to the landing. Each loop it first records every commit available right
-// now (so the catalog reflects the dump medium's contents promptly — the live view), then, when
-// buffering, flushes one staged archive to the landing. A direct dump never stages, so it just
-// records each placement as it arrives. The drain itself (flushOne) lives in flush.go with the
-// rest of the holding-disk taper.
-func (e *Engine) orchestrate(commitCh <-chan handoff, dumpMedium string, slotMeta *record.Slot, buffering bool, landSession *clerk.Session, holdVol media.Volume, gate *byteGate, tr *progress.Tracker, logf Logf) error {
-	var pending []handoff
-	open := true
-	for open || len(pending) > 0 {
-		if open {
-			// Record every immediately-available commit's dump-medium placement.
-		drain:
-			for {
-				select {
-				case it, ok := <-commitCh:
-					if !ok {
-						open = false
-						break drain
-					}
-					if err := e.cat.AddArchive(slotMeta, dumpMedium, it.arch, it.pos); err != nil {
-						return err
-					}
-					if buffering {
-						pending = append(pending, it)
-					}
-				default:
-					break drain
-				}
-			}
-		}
-		if len(pending) > 0 {
-			it := pending[0]
-			pending = pending[1:]
-			if err := e.flushOne(landSession, slotMeta, dumpMedium, holdVol, it, gate, tr, logf); err != nil {
-				gate.abort(err)
-				return err
-			}
-			continue
-		}
-		if !open {
-			break
-		}
-		// Nothing pending (or not buffering) and the dumpers are still going: block for the next.
-		it, ok := <-commitCh
-		if !ok {
-			open = false
-			continue
-		}
+// orchestrateDirect records each committed archive's placement on the dump medium (the landing)
+// as it arrives — the direct dump, with no buffering and no drain. The orchestrator is the run's
+// sole catalog writer.
+func (e *Engine) orchestrateDirect(commitCh <-chan handoff, dumpMedium string, slotMeta *record.Slot) error {
+	for it := range commitCh {
 		if err := e.cat.AddArchive(slotMeta, dumpMedium, it.arch, it.pos); err != nil {
 			return err
 		}
-		if buffering {
-			pending = append(pending, it)
-		}
 	}
 	return nil
+}
+
+// orchestrateBuffered is the responsive control loop for a buffered dump. It owns the catalog and
+// the real landing sink (realSink), and hands the byte-copy of each staged archive to a single
+// drainer goroutine. Its select multiplexes three events so control never blocks on the byte
+// stream:
+//   - commitCh: a dumper committed to the holding disk — record its placement (the live view),
+//     queue it to drain. This keeps happening while a copy streams, so the catalog stays fresh.
+//   - sinkReqCh: the drainer's proxy sink needs a NextPart/PlaceRecord — run the real sink here
+//     (a volume roll's catalog writes thus land on this, the sole catalog writer).
+//   - copyDone: a copy finished — record its landing placement and reclaim the holding copy
+//     (finalizeDrain), then the back-pressure is released.
+//
+// Exactly one copy is in flight at a time (the landing is written by one serial writer), so a
+// new archive is dispatched only when the drainer is idle. On error the loop stops dispatching and
+// drains any in-flight copy (still serving sink requests) so the drainer never deadlocks on the
+// funnel.
+func (e *Engine) orchestrateBuffered(commitCh <-chan handoff, holding string, slotMeta *record.Slot, landW *archiveio.Writer, realSink archiveio.VolumeSink, sinkReqCh chan sinkReq, holdVol media.Volume, gate *byteGate, tr *progress.Tracker, logf Logf) error {
+	workCh := make(chan handoff, 1)
+	copyDone := make(chan copyResult, 1)
+	go e.drainer(landW, slotMeta, holdVol, workCh, copyDone, tr)
+	defer close(workCh) // stops the drainer once the loop is done
+
+	var pending []handoff
+	var failErr error
+	open, busy := true, false
+	for failErr == nil && (open || len(pending) > 0 || busy) {
+		select {
+		case it, ok := <-commitCh:
+			if !ok {
+				open, commitCh = false, nil // drained; stop selecting the closed channel
+				break
+			}
+			if err := e.cat.AddArchive(slotMeta, holding, it.arch, it.pos); err != nil {
+				failErr = err
+				break
+			}
+			pending = append(pending, it)
+		case req := <-sinkReqCh:
+			req.reply <- serve(realSink, req)
+		case res := <-copyDone:
+			busy = false
+			if res.err != nil {
+				failErr = res.err
+				break
+			}
+			if err := e.finalizeDrain(slotMeta, holding, holdVol, res.it, res.arch, res.pos, gate, tr, logf); err != nil {
+				failErr = err
+			}
+		}
+		if failErr == nil && !busy && len(pending) > 0 {
+			workCh <- pending[0] // buffered(1), drainer idle: never blocks
+			pending, busy = pending[1:], true
+		}
+	}
+	if failErr != nil {
+		gate.abort(failErr) // wake blocked dumpers so they stop and the run fails
+		for busy {          // let an in-flight copy finish so the drainer isn't stuck on the funnel
+			select {
+			case req := <-sinkReqCh:
+				req.reply <- serve(realSink, req)
+			case <-copyDone:
+				busy = false
+			}
+		}
+	}
+	return failErr
 }
 
 // firstErr returns the first non-nil error, in order.
