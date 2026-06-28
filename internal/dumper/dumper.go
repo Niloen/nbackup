@@ -3,8 +3,8 @@
 // server-side) — and transfers the bytes into a Store the consumer hands out. It owns parallelism
 // and the per-item dump; it never touches the catalog or decides where an archive is stored. The
 // consumer (the drain over holding disks, or the landing itself) is an archive store: Acquire
-// reserves an ingestion Sink for one archive (back-pressuring the producer), the producer transfers
-// the encoded stream into it, and Sink.Commit finalizes the stored archive.
+// reserves an ingestion xfer.Sink for one archive (back-pressuring the producer), the producer
+// transfers the encoded stream into it, and the sink's commit finalizes the stored archive.
 package dumper
 
 import (
@@ -18,23 +18,15 @@ import (
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// Store is the archive store the producer ingests into: it hands out one ingestion Sink per
+// Store is the archive store the producer ingests into: it hands out one ingestion xfer.Sink per
 // archive, back-pressuring via Acquire. The drain implements it (deciding holding-disk vs direct);
-// a test can fake it.
+// a test can fake it. The producer transfers the encoded stream into the sink — whose Drain seals
+// the stored archive on commit — and never sees the session, the medium, or the catalog.
 type Store interface {
 	// Acquire reserves ingestion for the archive described by meta, estimated at est bytes,
 	// blocking for back-pressure and returning the run's error if the store has failed. prog
 	// receives the running compressed (landed) byte count for the producer's progress tracker.
-	Acquire(est int64, meta record.Archive, prog func(compressed int64)) (Sink, error)
-}
-
-// Sink is one archive's ingestion handle: an xfer.Sink the producer transfers the encoded stream
-// into, plus Commit which finalizes the stored archive and returns its committed catalog record
-// (sizes + file count) for the producer's tracker and log. The producer never sees the session,
-// the medium, or the catalog.
-type Sink interface {
-	xfer.Sink
-	Commit(p xfer.Produced) (record.Archive, error)
+	Acquire(est int64, meta record.Archive, prog func(compressed int64)) (xfer.Sink, error)
 }
 
 // Config is the resolution the producer needs, injected by the engine so the producer stays free

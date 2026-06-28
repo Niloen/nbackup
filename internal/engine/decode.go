@@ -148,8 +148,8 @@ type listSink struct {
 	members []string
 }
 
-func (s *listSink) Drain(in io.Reader) error {
+func (s *listSink) Drain(in io.Reader) (xfer.Committer, error) {
 	members, err := s.arch.List(in)
 	s.members = members
-	return err
+	return nil, err
 }

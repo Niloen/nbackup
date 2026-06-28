@@ -34,6 +34,7 @@ import (
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
+	"github.com/Niloen/nbackup/internal/xfer"
 
 	// Register the bundled media and archiver implementations.
 	_ "github.com/Niloen/nbackup/internal/archiver/gnutar"
@@ -1165,12 +1166,8 @@ func planProgress(items []planner.Item) []progress.Plan {
 // (neither imports the other).
 type drainStore struct{ dr *drain.Drainer }
 
-func (s drainStore) Acquire(est int64, meta record.Archive, prog func(int64)) (dumper.Sink, error) {
-	sink, err := s.dr.Acquire(est, meta, prog)
-	if err != nil {
-		return nil, err
-	}
-	return sink, nil
+func (s drainStore) Acquire(est int64, meta record.Archive, prog func(int64)) (xfer.Sink, error) {
+	return s.dr.Acquire(est, meta, prog)
 }
 
 // runOrchestrated executes a dump: it opens the holding disks (the buffer the producers stage onto),

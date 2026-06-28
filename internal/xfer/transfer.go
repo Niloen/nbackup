@@ -86,12 +86,24 @@ type Source interface {
 	Cleanup()
 }
 
-// Sink consumes the transfer's output stream. A sink that measures something the caller
-// needs (a checksum, a member listing, a live byte count) does its own metering and hands
-// it back through its own concrete type — the transfer carries no progress channel, since
-// the byte count any sink would report is one it already computes for its own purposes.
+// Sink consumes the transfer's output stream. Draining yields a Committer when the sink has
+// something to finalize once the producer's totals are known (an ingestion sink sealing a stored
+// archive); a sink that stores nothing — a hash, a discard, a writer, a restore/copy tar — returns
+// a nil Committer. A sink that measures something the caller needs (a checksum, a member listing)
+// does its own metering and hands it back through its own concrete type — the transfer carries no
+// progress channel, since the byte count any sink would report is one it already computes for its
+// own purposes.
 type Sink interface {
-	Drain(in io.Reader) error
+	Drain(in io.Reader) (Committer, error)
+}
+
+// Committer finalizes what a Drain stored, given the producer's totals (known only once the source
+// has been reaped). Transfer calls it after a clean drain-and-reap — never before Drain (a Committer
+// exists only as a Drain's result, so the wrong order is unrepresentable) and never on a faulted
+// transfer. It returns only error: the sink folds the totals into its own stored record (e.g. an
+// archive's commit footer) and keeps any caller-visible result on its own concrete type.
+type Committer interface {
+	Commit(Produced) error
 }
 
 // Filters is the local middle: a chain of programs run on programs.Local(). It carries no
@@ -134,7 +146,7 @@ func Transfer(source Source, filters Filters, sink Sink) (Produced, error) {
 		mid, filtReap, filtered = fr, fw, true
 	}
 
-	sinkErr := sink.Drain(mid)
+	committer, sinkErr := sink.Drain(mid)
 
 	// Reap from the consumer back to the producer, closing each reader to push EOF/SIGPIPE
 	// upstream. A reader's Close surfaces a media/process fault (e.g. an unreadable part on
@@ -182,6 +194,14 @@ func Transfer(source Source, filters Filters, sink Sink) (Produced, error) {
 		return Produced{}, &Error{RoleFilters, filtErr}
 	case sinkErr != nil:
 		return Produced{}, &Error{RoleSink, sinkErr}
+	}
+
+	// The transfer is clean and the source reaped, so produced is final: let the sink seal what it
+	// stored against those totals. A sink that stored nothing returns no committer.
+	if committer != nil {
+		if err := committer.Commit(produced); err != nil {
+			return Produced{}, &Error{RoleSink, err}
+		}
 	}
 	return produced, nil
 }
@@ -254,11 +274,12 @@ func (p *Programs) Cleanup() {
 	}
 }
 
-// Sink side: feed `in` as stdin to the chain, then drain its (empty, for tar -x) output.
-func (p *Programs) Drain(in io.Reader) error {
+// Sink side: feed `in` as stdin to the chain, then drain its (empty, for tar -x) output. A program
+// sink writes the filesystem, not a stored archive, so it has nothing to commit (nil Committer).
+func (p *Programs) Drain(in io.Reader) (Committer, error) {
 	out, wait, err := p.exec.RunPipe(in, p.cmds...)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	_, copyErr := io.Copy(io.Discard, out) // a program sink (tar -x) writes the fs; drain the rest
 	out.Close()
@@ -266,7 +287,7 @@ func (p *Programs) Drain(in io.Reader) error {
 	if werr == nil {
 		werr = copyErr
 	}
-	return werr
+	return nil, werr
 }
 
 // --- generic sinks ---
@@ -277,15 +298,15 @@ func Hash(sha string) Sink { return hashSink{sha: sha} }
 
 type hashSink struct{ sha string }
 
-func (s hashSink) Drain(in io.Reader) error {
+func (s hashSink) Drain(in io.Reader) (Committer, error) {
 	got, err := HashReader(in)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if got != s.sha {
-		return fmt.Errorf("checksum mismatch: got %s, want %s", got, s.sha)
+		return nil, fmt.Errorf("checksum mismatch: got %s, want %s", got, s.sha)
 	}
-	return nil
+	return nil, nil
 }
 
 // Drain is a sink that discards the stream (the recoverability proof's "did it decode").
@@ -293,9 +314,9 @@ func Drain() Sink { return drainSink{} }
 
 type drainSink struct{}
 
-func (drainSink) Drain(in io.Reader) error {
+func (drainSink) Drain(in io.Reader) (Committer, error) {
 	_, err := io.Copy(io.Discard, in)
-	return err
+	return nil, err
 }
 
 // Writer is a sink that copies the stream to w (a temp file, stdout).
@@ -303,7 +324,7 @@ func Writer(w io.Writer) Sink { return writerSink{w: w} }
 
 type writerSink struct{ w io.Writer }
 
-func (s writerSink) Drain(in io.Reader) error {
+func (s writerSink) Drain(in io.Reader) (Committer, error) {
 	_, err := io.Copy(s.w, in)
-	return err
+	return nil, err
 }
