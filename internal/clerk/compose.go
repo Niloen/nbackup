@@ -3,7 +3,6 @@ package clerk
 import (
 	"context"
 	"io"
-	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/media"
@@ -14,13 +13,14 @@ import (
 // compose.go is the clerk's write side: a Session over a slot writer that takes already-encoded
 // archive bytes (an io.Reader), meters + splits + commits them, and records the run. The encode
 // transfer and the xfer machinery live in the operation (the Dumper), which drives bytes into the
-// SlotWriter's NextPart/Commit — the clerk takes plain bytes and never sees a scheme or a transfer.
+// ArchiveWriter's NextPart/Commit — the clerk takes plain bytes and never sees a scheme or a transfer.
 
-// Session authors one slot onto medium: the operation opens it over an archiveio.Writer, writes each
-// archive (committing each, which records its placement), and Finishes — which seals the slot. It is
-// an xfer.SlotStorage: NewWrite hands out a per-archive SlotWriter, OpenArchive/Reclaim read and drop
-// a staged archive (the holding->backing drain), and Finish seals. vol is the medium's volume, used
-// to read and reclaim staged archives on a single-volume medium (a holding disk).
+// Session authors one slot onto medium: the operation opens it over an archiveio.Writer and writes
+// each archive (committing each, which records its placement). It is an archiveio.ArchiveStore:
+// NewArchive hands out a per-archive ArchiveWriter, and OpenArchive/Reclaim read and drop a staged
+// archive (the holding->backing drain). There is no seal — a slot is its committed archives, read from
+// the catalog. vol is the medium's volume, used to read and reclaim staged archives on a single-volume
+// medium (a holding disk).
 type Session struct {
 	clerk  *Clerk
 	w      *archiveio.Writer
@@ -28,7 +28,7 @@ type Session struct {
 	vol    media.Volume
 }
 
-var _ xfer.SlotStorage = (*Session)(nil)
+var _ archiveio.ArchiveStore = (*Session)(nil)
 
 // OpenSlot starts a write session over an open slot writer landing on medium, with vol the medium's
 // volume for staged reads/reclaims (a holding disk's single volume; the backing passes its loaded
@@ -37,27 +37,27 @@ func (c *Clerk) OpenSlot(w *archiveio.Writer, medium string, vol media.Volume) *
 	return &Session{clerk: c, w: w, medium: medium, vol: vol}
 }
 
-// NewWrite begins writing a fresh archive's already-encoded payload onto the slot, pulled
-// part-by-part by the returned SlotWriter's NextPart (the operation copies into each part writer and
-// closes it). Commit then seals the archive — writing its footer + member index and recording its
+// NewArchive begins writing a fresh archive's already-encoded payload onto the slot, pulled
+// part-by-part by the returned ArchiveWriter's NextPart (the operation copies into each part writer and
+// closes it). Commit then finalizes the archive — writing its footer + member index and recording its
 // placement — once the producer's raw stats are known. prog, if non-nil, receives the running count
 // of landed bytes. A single medium does not route, so est (the size estimate) is unused here.
-func (s *Session) NewWrite(meta record.Archive, _ int64, prog func(int64)) (xfer.SlotWriter, error) {
-	return &ArchiveWriter{s: s, aw: s.w.NewArchive(meta, prog)}, nil
+func (s *Session) NewArchive(spec archiveio.ArchiveSpec, _ int64, prog func(int64)) (archiveio.ArchiveWriter, error) {
+	return &ArchiveWriter{s: s, aw: s.w.NewArchive(spec, prog)}, nil
 }
 
-// ArchiveWriter is one archive's NextPart-driven write handle (an xfer.SlotWriter): a thin clerk
-// wrapper over the archiveio writer that, on Commit, additionally caches the member index and records
-// the archive's placement on the slot's medium. Result hands back the committed archive + position
-// after Commit.
+// ArchiveWriter is one archive's NextPart-driven write handle (an archiveio.ArchiveWriter): a thin
+// clerk wrapper over the archiveio writer that, on Commit, additionally caches the member index and
+// records the archive's placement on the slot's medium. Result hands back the committed archive +
+// position after Commit.
 type ArchiveWriter struct {
 	s    *Session
-	aw   *archiveio.ArchiveWriter
+	aw   archiveio.ArchiveWriter
 	arch record.Archive
 	pos  record.ArchivePos
 }
 
-var _ xfer.SlotWriter = (*ArchiveWriter)(nil)
+var _ archiveio.ArchiveWriter = (*ArchiveWriter)(nil)
 
 // NextPart rolls to the next volume and returns the next part's writer plus its byte cap (max < 0 =
 // unbounded). The caller copies up to max bytes into it and closes it; cancel ctx before Close to
@@ -110,24 +110,13 @@ func (s *Session) Reclaim(arch record.Archive, pos record.ArchivePos) error {
 	return err
 }
 
-// CopyArchive re-writes an existing archive's raw payload (no transform) onto this slot's
-// volumes, verifying it against the recorded checksum and committing it (footer + index from
-// meta.Members) — so a copy needs no separate Commit (meta is already final). Being
-// single-threaded (one copy/sync, or the flush recovery path), it records the archive's
-// placement on this medium inline, as it lands.
-func (s *Session) CopyArchive(ctx context.Context, meta record.Archive, payload io.Reader) error {
-	arch, pos, err := s.w.CopyArchive(ctx, meta, payload, nil)
-	if err != nil {
-		return err
-	}
-	return s.clerk.cat.AddArchive(s.w.SlotMeta(), s.medium, arch, pos)
-}
-
-// Finish ends the write session and returns the slot it authored. There is no seal — the archives
-// were each recorded as they committed (NewWrite's Commit, or CopyArchive inline), so a slot is
-// simply its committed archives.
-func (s *Session) Finish(now time.Time) (*record.Slot, error) {
-	return s.w.Finish(now)
+// NewCopy begins re-authoring an existing archive's raw payload (no transform) onto this slot,
+// pulled part-by-part by the returned ArchiveWriter's NextPart — the same handle as NewArchive, but
+// the writer verifies the bytes against the source's recorded checksum and preserves its identity
+// (stats, members, CreatedAt). On Commit it records the new placement on this medium, like NewArchive.
+// It is the write side of the holding->backing drain, `nb copy`, and crash-recovery Flush.
+func (s *Session) NewCopy(arch record.Archive, prog func(int64)) (archiveio.ArchiveWriter, error) {
+	return &ArchiveWriter{s: s, aw: s.w.NewCopy(arch, prog)}, nil
 }
 
 // archivePosFiles lists an archive's file positions for reclamation, the commit footer (the marker)

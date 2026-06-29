@@ -1196,13 +1196,19 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers, landingSlots int, 
 	dumpErr := e.dmp.Run(context.Background(), plan.Items, workers, dr, tr, logf)
 
 	tr.SetPhase(progress.PhaseSealing)
-	sealed, finErr := dr.Finish(now)
-	if err := firstErr(dumpErr, finErr); err != nil {
+	if err := firstErr(dumpErr, dr.Drain()); err != nil {
 		tr.SetPhase(progress.PhaseFailed)
 		return nil, err
 	}
 	tr.SetPhase(progress.PhaseDone)
-	return sealed, nil
+	// The slot is its committed archives, read from the catalog (the cache each archive recorded into
+	// as it committed). An empty run committed nothing, so the catalog has no entry — report the empty
+	// slot the run authored.
+	slot, err := e.cat.ReadSlot(spec.ID)
+	if err != nil {
+		slot = record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
+	}
+	return slot, nil
 }
 
 // firstErr returns the first non-nil error, in order.

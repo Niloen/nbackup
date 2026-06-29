@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"sync"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/media"
@@ -64,38 +63,25 @@ type SlotSpec struct {
 }
 
 // Writer authors a single slot onto a medium via a VolumeSink. Callers stream each archive's
-// payload with WriteArchive and finalize it with Commit (which writes the archive's member
+// payload with NewArchive and finalize it with Commit (which writes the archive's member
 // index and its commit footer — the per-archive marker). There is no slot-level seal: a slot
 // is the grouping its archives carry in their headers, and a crashed run's committed archives
-// survive (uncommitted parts are orphans a scan ignores). WriteArchive is safe for concurrent
-// use only on an unbounded sink (disk); a bounded, spanning-capable sink rolls one shared
+// survive (uncommitted parts are orphans a scan ignores). The Writer accumulates no slot state —
+// each archive is durable and catalogued the moment it commits — so NewArchive is safe for
+// concurrent use on an unbounded sink (disk); a bounded, spanning-capable sink rolls one shared
 // volume and must be driven serially (the engine clamps archivers).
 type Writer struct {
 	sink VolumeSink
 	lim  *ratelimit.Limiter // optional bandwidth cap on the bytes landing on the medium (nil = uncapped)
 	now  func() time.Time   // clock for per-archive commit timestamps (nil → time.Now)
-
-	mu      sync.Mutex // guards the records below
-	slot    *record.Slot
-	written []archiveRecord // one per committed archive, in Commit order
+	slot *record.Slot       // the slot's identity (id/date/createdAt); read-only after construction
 }
 
-// archiveRecord remembers where an archive's parts, member index, and commit footer landed,
-// so the catalog can index it (see Positions).
-type archiveRecord struct {
-	dle    string
-	level  int
-	parts  []record.FilePos
-	commit record.FilePos
-	index  record.FilePos
-}
-
-// NewWriter begins authoring a new slot, described by spec, onto sink. The Writer builds
-// and owns the record.Slot from spec (the caller never hands one in); Seal returns it
-// sealed. lim, when non-nil, caps the rate of bytes written to the medium (network
-// politeness); a nil lim is uncapped. The same lim is shared across concurrent
-// WriteArchive calls on an unbounded sink, so several workers to one medium share its
-// budget.
+// NewWriter begins authoring a new slot, described by spec, onto sink. The Writer holds the slot's
+// identity from spec (the caller never hands a record.Slot in). lim, when non-nil, caps the rate of
+// bytes written to the medium (network politeness); a nil lim is uncapped. The same lim is shared
+// across concurrent NewArchive writers on an unbounded sink, so several workers to one medium share
+// its budget.
 func NewWriter(sink VolumeSink, spec SlotSpec, lim *ratelimit.Limiter, now func() time.Time) *Writer {
 	if now == nil {
 		now = time.Now
@@ -104,43 +90,61 @@ func NewWriter(sink VolumeSink, spec SlotSpec, lim *ratelimit.Limiter, now func(
 	return &Writer{sink: sink, lim: lim, now: now, slot: slot}
 }
 
-// NewArchive begins writing the archive described by meta onto the slot, pulled part-by-part by
+// NewArchive begins writing the archive described by spec onto the slot, pulled part-by-part by
 // NextPart (the caller copies up to each part's cap into the returned writer, closes it, and asks for
 // the next until the payload is exhausted). Rolling to a fresh volume happens inside NextPart, so a
 // spanning medium's roll lands wherever the sink routes it. The payload is metered (sha256 + size) on
 // the write path — so the metering runs on the caller's goroutine — and Commit finalizes the footer
-// with the producer's totals. The descriptive fields of meta are taken as-is; tap, if non-nil, gets
-// the running landed byte count.
-func (w *Writer) NewArchive(meta record.Archive, tap func(landed int64)) *ArchiveWriter {
-	return &ArchiveWriter{w: w, base: w.archiveHeader(meta), meta: meta, tap: tap, h: sha256.New()}
+// with the producer's totals. archiveio turns the spec plus the metered bytes into the record.Archive;
+// tap, if non-nil, gets the running landed byte count.
+func (w *Writer) NewArchive(spec ArchiveSpec, tap func(landed int64)) ArchiveWriter {
+	meta := record.Archive{
+		DLE:      spec.DLE,
+		Host:     spec.Host,
+		Path:     spec.Path,
+		Archiver: spec.Archiver,
+		Compress: spec.Compress,
+		Encrypt:  spec.Encrypt,
+		Level:    spec.Level,
+		BaseSlot: spec.BaseSlot,
+	}
+	return &archiveWriter{w: w, base: w.archiveHeader(meta), meta: meta, tap: tap, h: sha256.New()}
 }
 
-// ArchiveWriter is one archive's part-by-part writer (see NewArchive). It is an xfer.Sink: a transfer
-// drives NextPart/Commit, then the caller reads the committed archive and its on-medium position from
-// Result to record the placement.
-type ArchiveWriter struct {
-	w     *Writer
-	base  record.Header
-	meta  record.Archive
-	tap   func(int64)
-	h     hash.Hash
-	n     int64
-	parts []record.FilePos
-	part  int
+// NewCopy begins re-authoring an already-committed archive onto the slot — the same path as
+// NewArchive (pulled part-by-part by NextPart), but for a copy: the bytes are carried raw, so on
+// Commit the writer verifies the metered checksum against arch.SHA256 and preserves arch's stats,
+// members, and CreatedAt (a copy keeps the source's identity and age); only the part layout, sized to
+// this medium's volumes, is new. The spool's holding->backing drain, `nb copy`, and crash-recovery
+// Flush all share this one copy path. tap, if non-nil, gets the running landed byte count.
+func (w *Writer) NewCopy(arch record.Archive, tap func(landed int64)) ArchiveWriter {
+	return &archiveWriter{w: w, base: w.archiveHeader(arch), meta: arch, expectSHA: arch.SHA256, tap: tap, h: sha256.New()}
+}
+
+// archiveWriter is one archive's part-by-part writer (see NewArchive / NewCopy) — the concrete
+// ArchiveWriter. A transfer drives NextPart/Commit, then the caller reads the committed archive and
+// its on-medium position from Result to record the placement.
+type archiveWriter struct {
+	w         *Writer
+	base      record.Header
+	meta      record.Archive
+	expectSHA string // a copy's known digest to verify against ("" for a fresh dump)
+	tap       func(int64)
+	h         hash.Hash
+	n         int64
+	parts     []record.FilePos
+	part      int
 
 	arch record.Archive    // the committed archive, set by Commit (read via Result)
 	pos  record.ArchivePos // its on-medium position, set by Commit (read via Result)
 }
 
-var (
-	_ xfer.Sink       = (*ArchiveWriter)(nil)
-	_ xfer.SlotWriter = (*ArchiveWriter)(nil)
-)
+var _ ArchiveWriter = (*archiveWriter)(nil)
 
 // NextPart rolls to the next volume and returns a writer for the next part plus its byte cap
 // (max < 0 = unbounded). The caller copies up to max bytes into it and Closes it; the part's position
 // is recorded on Close. Cancel ctx before Close to abort the part (no committed file).
-func (a *ArchiveWriter) NextPart(ctx context.Context) (io.WriteCloser, int64, error) {
+func (a *archiveWriter) NextPart(ctx context.Context) (io.WriteCloser, int64, error) {
 	vol, max, volName, epoch, err := a.w.sink.NextPart()
 	if err != nil {
 		return nil, 0, err
@@ -158,7 +162,7 @@ func (a *ArchiveWriter) NextPart(ctx context.Context) (io.WriteCloser, int64, er
 // archivePartWriter meters the bytes (sha + size, on the caller's goroutine) then writes them
 // through — rate-limited — to the volume. Close records the part's position.
 type archivePartWriter struct {
-	a       *ArchiveWriter
+	a       *archiveWriter
 	fw      media.FileWriter
 	dst     io.Writer
 	volName string
@@ -185,19 +189,30 @@ func (p *archivePartWriter) Close() error {
 	return nil
 }
 
-// Commit (xfer.Sink) finalizes the archive against the producer's raw-stream totals: it merges them
-// into the metered archive (sha + compressed size are this writer's), writes the footer + member
-// index, and stashes the committed archive + its on-medium position for Result. It records no
-// placement — the caller does, from Result.
-func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.Produced) error {
+// Commit (xfer.Sink) finalizes the archive: it sets the metered compressed size and the new part
+// count, writes the footer + member index, and stashes the committed archive + its on-medium position
+// for Result. It records no placement — the caller does, from Result.
+//
+// A fresh dump derives the rest from this writer and the producer's raw-stream totals (sha, file
+// count, uncompressed size, members) and stamps CreatedAt now. A copy (NewCopy) instead verifies the
+// metered checksum against the source's known digest and preserves the source's stats, members, and
+// CreatedAt — the producer totals are ignored, the bytes being carried raw.
+func (a *archiveWriter) Commit(ctx context.Context, p xfer.Produced) error {
 	arch := a.meta
 	arch.Compressed = a.n
-	arch.SHA256 = hex.EncodeToString(a.h.Sum(nil))
 	arch.Parts = len(a.parts)
-	arch.FileCount = p.FileCount
-	arch.Uncompressed = p.Uncompressed
-	arch.Members = p.Members
-	arch.CreatedAt = a.w.now() // the archive's landing time (per-archive)
+	if a.expectSHA != "" {
+		if got := hex.EncodeToString(a.h.Sum(nil)); got != a.expectSHA {
+			return fmt.Errorf("copy of %s L%d checksum mismatch (source corrupt?)", arch.DLE, arch.Level)
+		}
+		// arch already carries the source's SHA256 / FileCount / Uncompressed / Members / CreatedAt.
+	} else {
+		arch.SHA256 = hex.EncodeToString(a.h.Sum(nil))
+		arch.FileCount = p.FileCount
+		arch.Uncompressed = p.Uncompressed
+		arch.Members = p.Members
+		arch.CreatedAt = a.w.now() // the archive's landing time (per-archive)
+	}
 	pos, err := a.w.Commit(ctx, arch, a.parts)
 	if err != nil {
 		return err
@@ -208,14 +223,15 @@ func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.Produced) error {
 
 // Result returns the committed archive and its on-medium position (parts/footer/index). It is valid
 // only after a successful Commit; the caller records the placement from it.
-func (a *ArchiveWriter) Result() (record.Archive, record.ArchivePos) { return a.arch, a.pos }
+func (a *archiveWriter) Result() (record.Archive, record.ArchivePos) { return a.arch, a.pos }
 
 // Commit durably finalizes an archive (all fields final): it writes the member index (the
 // gzip'd Members) then the commit footer (the metadata without members) — the footer last,
-// so a crash before it leaves orphan parts a scan ignores. It then records the archive in the
-// in-memory slot and returns its on-medium position (parts/footer/index) for the caller to
-// catalog. Call it once the caller has merged the producer's stats
-// (FileCount/Uncompressed/Members) into the archive WriteArchive returned.
+// so a crash before it leaves orphan parts a scan ignores. It returns the archive's on-medium
+// position (parts/footer/index) for the caller to catalog. The Writer keeps no slot state — the
+// footer makes the archive durable and the caller catalogues it from the returned position — so
+// concurrent Commits on an unbounded sink need no coordination here. Call it once the caller has
+// merged the producer's stats (FileCount/Uncompressed/Members) into the archive.
 func (w *Writer) Commit(ctx context.Context, arch record.Archive, parts []record.FilePos) (record.ArchivePos, error) {
 	var index record.FilePos
 	if len(arch.Members) > 0 {
@@ -240,10 +256,6 @@ func (w *Writer) Commit(ctx context.Context, arch record.Archive, parts []record
 	if err != nil {
 		return record.ArchivePos{}, err
 	}
-	w.mu.Lock()
-	w.slot.AddArchive(arch)
-	w.written = append(w.written, archiveRecord{dle: arch.DLE, level: arch.Level, parts: parts, commit: commit, index: index})
-	w.mu.Unlock()
 	return record.ArchivePos{
 		DLE:    arch.DLE,
 		Level:  arch.Level,
@@ -276,32 +288,9 @@ func (w *Writer) writeRecord(ctx context.Context, kind string, a record.Archive,
 	return record.FilePos{Label: volName, Epoch: epoch, Pos: fw.Pos()}, nil
 }
 
-// meteredReader counts and hashes the bytes read through it — the streaming sha256 and
-// size of the payload that lands on the medium — and reports the running total. It is
-// robust to drainParts re-prepending a peeked byte: the re-prepended byte comes from a
-// separate reader, so it is never hashed twice.
-type meteredReader struct {
-	r   io.Reader
-	h   hash.Hash
-	n   int64
-	tap func(int64)
-}
-
-func (m *meteredReader) Read(p []byte) (int, error) {
-	k, err := m.r.Read(p)
-	if k > 0 {
-		m.h.Write(p[:k])
-		m.n += int64(k)
-		if m.tap != nil {
-			m.tap(m.n)
-		}
-	}
-	return k, err
-}
-
-// archiveHeader builds the base record.Header an archive's parts share (drainParts
-// clones it per part with an ascending Part index). Every framing field comes straight
-// from the archive's descriptive metadata.
+// archiveHeader builds the base record.Header an archive's parts share (NextPart clones
+// it per part with an ascending Part index). Every framing field comes straight from the
+// archive's descriptive metadata.
 func (w *Writer) archiveHeader(a record.Archive) record.Header {
 	return record.Header{
 		Slot:      w.slot.ID,
@@ -318,144 +307,15 @@ func (w *Writer) archiveHeader(a record.Archive) record.Header {
 	}
 }
 
-// drainParts reads the payload from src and writes it as one or more part files
-// (headers cloned from base, with an ascending Part index), rolling the sink to the
-// next volume whenever a part fills. It returns the ordered part positions. On error
-// it returns it for the caller to handle (closing the producer); the partial files
-// left behind are unsealed and ignored by a scan.
-func (w *Writer) drainParts(ctx context.Context, base record.Header, src io.Reader) ([]record.FilePos, error) {
-	var (
-		parts []record.FilePos
-		part  int
-	)
-	for {
-		vol, max, volName, epoch, err := w.sink.NextPart()
-		if err != nil {
-			return nil, err
-		}
-
-		h := base
-		h.Part = part
-
-		fw, err := vol.AppendFile(ctx, h)
-		if err != nil {
-			return nil, err
-		}
-		r := src
-		if max >= 0 {
-			r = io.LimitReader(src, max)
-		}
-		// Pace the write to the medium's cap. Throttling here back-pressures the
-		// producer (tar → compress → encrypt) through the pipe, so the one-pass
-		// pipeline slows without buffering. A nil lim leaves the writer untouched.
-		wrote, cerr := io.Copy(w.lim.Writer(fw), r)
-		if clErr := fw.Close(); cerr == nil {
-			cerr = clErr
-		}
-		if cerr != nil {
-			return nil, cerr
-		}
-		parts = append(parts, record.FilePos{Label: volName, Epoch: epoch, Pos: fw.Pos()})
-		part++
-
-		// Producer exhausted within this part (or the sink is unbounded): done.
-		if max < 0 || wrote < max {
-			return parts, nil
-		}
-		// Filled the part exactly at the cap — peek one byte to tell "exactly done"
-		// from "more to come". On EOF the archive is complete; otherwise continue with
-		// the peeked byte re-prepended (the next NextPart rolls if the volume is full,
-		// or stays put when the cap was a part_size split within a volume).
-		var b [1]byte
-		n, perr := io.ReadFull(src, b[:])
-		if n == 0 {
-			if perr == io.EOF || perr == io.ErrUnexpectedEOF {
-				return parts, nil
-			}
-			return nil, perr
-		}
-		src = io.MultiReader(bytes.NewReader(b[:1]), src)
-	}
-}
-
-// CopyArchive writes an already-compressed archive payload (src is the source copy's
-// parts concatenated) to the slot, re-split into parts sized to the target's volumes.
-// It does NOT compress or re-checksum the stream — the same bytes are written, so the
-// recorded checksum is unchanged — and only the part layout (and Parts count) is new.
-// The header carries the archive's original scheme, so restore reverses the right one.
-//
-// tap, if non-nil, is called with the running count of bytes copied as the payload
-// drains — the live drain signal for `nb status`, riding the metering this does anyway
-// (size + checksum). It runs on the draining goroutine, so it must be cheap.
-func (w *Writer) CopyArchive(ctx context.Context, meta record.Archive, src io.Reader, tap func(copied int64)) (record.Archive, record.ArchivePos, error) {
-	mr := &meteredReader{r: src, h: sha256.New(), tap: tap}
-	parts, err := w.drainParts(ctx, w.archiveHeader(meta), mr)
-	if err != nil {
-		return record.Archive{}, record.ArchivePos{}, err
-	}
-	if got := hex.EncodeToString(mr.h.Sum(nil)); got != meta.SHA256 {
-		return record.Archive{}, record.ArchivePos{}, fmt.Errorf("copy of %s L%d checksum mismatch (source corrupt?)", meta.DLE, meta.Level)
-	}
-	arch := meta
-	arch.Parts = len(parts)
-	pos, err := w.Commit(ctx, arch, parts)
-	if err != nil {
-		return record.Archive{}, record.ArchivePos{}, err
-	}
-	return arch, pos, nil
-}
-
 // SlotID returns the id of the slot being authored.
 func (w *Writer) SlotID() string { return w.slot.ID }
 
-// SlotMeta returns the slot's identity without its archives — the grouping a caller records
-// each archive under (the catalog creates the entry from it). It is the writer's seam for the
-// inline-recording callers (a copy/sync's CopyArchive, the orchestrator's drain), which hold a
-// position but not the slot.
+// SlotMeta returns the slot's identity without any archives — the grouping a caller records each
+// archive under (the catalog creates the entry from it). It is the writer's seam for the
+// inline-recording callers (the orchestrator's drain, a copy), which hold a position but not the
+// slot.
 func (w *Writer) SlotMeta() *record.Slot {
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	ident := *w.slot
 	ident.Archives, ident.TotalBytes = nil, 0
 	return &ident
-}
-
-// ArchiveCount reports how many archives have been recorded so far.
-func (w *Writer) ArchiveCount() int {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return len(w.slot.Archives)
-}
-
-// Positions returns the on-medium positions of every committed archive — its parts, its
-// commit footer, and its member index — for the catalog to index. Call after all
-// WriteArchive/Commit calls have completed.
-func (w *Writer) Positions() []record.ArchivePos {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	out := make([]record.ArchivePos, len(w.written))
-	for i, a := range w.written {
-		out[i] = record.ArchivePos{
-			DLE:    a.dle,
-			Level:  a.level,
-			Parts:  append([]record.FilePos(nil), a.parts...),
-			Commit: a.commit,
-			Index:  a.index,
-		}
-	}
-	return out
-}
-
-// Finish closes the slot in memory and returns it — the run's grouping of committed
-// archives. There is no slot-level record on the medium: each archive is already durable via
-// its own commit footer (written inline as it finished), so Finish only stamps the in-memory
-// slot's completion (for the catalog and the run summary) and never touches the volume.
-//
-// The write path reads nothing back: each archive was hashed inline as it streamed out
-// (the streaming-meter sha256 recorded in the catalog), so integrity rests on that
-// checksum, not a re-read. Verifying the bytes actually landed is the job of the
-// explicit, operator-invoked `nb verify`.
-func (w *Writer) Finish(now time.Time) (*record.Slot, error) {
-	_ = now // no slot-level seal: a slot is its committed archives (each durable via its footer)
-	return w.slot, nil
 }

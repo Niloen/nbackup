@@ -2,30 +2,27 @@ package spool
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"hash"
 	"io"
 	"sync"
-	"time"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// spool.go is the consuming half of a dump: the run's buffered, concurrency-safe archive store — a
-// WriteSlotStorage over a backing SlotStorage plus holding ones. A producer ingests each archive into
-// a Sink the Spool hands out (NewWrite → transfer → commit); the Spool decides per archive whether to buffer
-// it on a holding disk (then copy it to the authoritative backing later) or — when no disk fits, or
-// none is configured — write it straight to the backing.
+// spool.go is the consuming half of a dump: the run's buffered, concurrency-safe archive store — an
+// archiveio.ArchiveWriteStore over a backing archiveio.ArchiveStore plus holding ones. A producer
+// ingests each archive into a Sink the Spool hands out (NewArchive → transfer → commit); the Spool
+// decides per archive whether to buffer it on a holding disk (then copy it to the authoritative
+// backing later) or — when no disk fits, or none is configured — write it straight to the backing.
 //
-// The Spool depends only on xfer.SlotStorage (one backing, an array of holding) — never on the clerk
-// or the catalog. The sink it hands a producer is a RemoteSink: its NextPart and Commit are control
-// calls that run on the orchestrator goroutine (the librarian that may roll/change volumes and the
-// sole catalog writer), while the payload bytes the producer writes into each part stay on the
-// producer's goroutine. So every volume roll and every placement record (which a SlotStorage's
+// The Spool depends only on archiveio.ArchiveStore (one backing, an array of holding) — never on the
+// clerk or the catalog. The sink it hands a producer is a RemoteSink: its NextPart and Commit are
+// control calls that run on the orchestrator goroutine (the librarian that may roll/change volumes and
+// the sole catalog writer), while the payload bytes the producer writes into each part stay on the
+// producer's goroutine. So every volume roll and every placement record (which an ArchiveWriter's
 // Commit does) lands single-threaded on the orchestrator, with no bytes flowing through it.
 //
 // Three actors, all private here:
@@ -52,21 +49,21 @@ type Config struct {
 }
 
 // Backing is the authoritative store the drain copies (or writes) archives to: its medium name, the
-// SlotStorage authoring it, and Slots — how many backing writes may run at once (1 while buffering or
+// ArchiveStore authoring it, and Slots — how many backing writes may run at once (1 while buffering or
 // spanning, else the worker count).
 type Backing struct {
 	Name    string
-	Storage xfer.SlotStorage
+	Storage archiveio.ArchiveStore
 	Slots   int
 }
 
-// Spool is a concurrency-safe xfer.WriteSlotStorage.
-var _ xfer.WriteSlotStorage = (*Spool)(nil)
+// Spool is a concurrency-safe archiveio.ArchiveWriteStore.
+var _ archiveio.ArchiveWriteStore = (*Spool)(nil)
 
 // Spool is the consuming side of a dump — the run's archive store (see the file comment). Build it
-// with New, drive it from the producer with NewWrite + transfer/commit, and close it with Finish.
+// with New, drive it from the producer with NewArchive + transfer/commit, and close it with Drain.
 type Spool struct {
-	backing      xfer.SlotStorage
+	backing      archiveio.ArchiveStore
 	backingName  string
 	pool         *Pool
 	backingSlots int
@@ -109,13 +106,13 @@ func New(cfg Config) *Spool {
 	return d
 }
 
-// NewWrite reserves ingestion for an archive described by meta, estimated at est bytes, and returns
-// the SlotWriter to transfer it into — a RemoteSink over the chosen medium's SlotWriter. It blocks
-// for back-pressure: a holding write waits while every fitting disk is over capacity; a direct write
-// (no disk fits, or none is configured) waits for a free backing permit. prog receives the running
-// compressed (landed) byte count. It returns the run's error if the spool has aborted. It makes Spool
-// an xfer.WriteSlotStorage.
-func (d *Spool) NewWrite(meta record.Archive, est int64, prog func(int64)) (xfer.SlotWriter, error) {
+// NewArchive reserves ingestion for an archive described by spec, estimated at est bytes, and returns
+// the ArchiveWriter to transfer it into — a RemoteSink over the chosen medium's ArchiveWriter. It
+// blocks for back-pressure: a holding write waits while every fitting disk is over capacity; a direct
+// write (no disk fits, or none is configured) waits for a free backing permit. prog receives the
+// running compressed (landed) byte count. It returns the run's error if the spool has aborted. It
+// makes Spool an archiveio.ArchiveWriteStore.
+func (d *Spool) NewArchive(spec archiveio.ArchiveSpec, est int64, prog func(int64)) (archiveio.ArchiveWriter, error) {
 	idx, direct, err := d.pool.Acquire(est)
 	if err != nil {
 		return nil, err
@@ -125,9 +122,9 @@ func (d *Spool) NewWrite(meta record.Archive, est int64, prog func(int64)) (xfer
 			// The dump is bound for this holding disk: mark it staging now, before any bytes commit, so
 			// live status shows it staging to holding (not yet on the volume) rather than mistaking the
 			// in-flight dump for a direct write to the landing.
-			d.tr.MarkToHolding(meta.Host + ":" + meta.Path)
+			d.tr.MarkToHolding(spec.Host + ":" + spec.Path)
 		}
-		real, err := d.pool.Storage(idx).NewWrite(meta, est, prog)
+		real, err := d.pool.Storage(idx).NewArchive(spec, est, prog)
 		if err != nil {
 			return nil, err
 		}
@@ -138,14 +135,14 @@ func (d *Spool) NewWrite(meta record.Archive, est int64, prog func(int64)) (xfer
 	if err := <-reply; err != nil {
 		return nil, err
 	}
-	real, err := d.backing.NewWrite(meta, est, prog)
+	real, err := d.backing.NewArchive(spec, est, prog)
 	if err != nil {
 		return nil, err
 	}
 	return &remoteSink{d: d, real: real, kind: writeDirect}, nil
 }
 
-// writeKind tells the orchestrator how to follow up a RemoteSink's Commit, after the SlotWriter has
+// writeKind tells the orchestrator how to follow up a RemoteSink's Commit, after the ArchiveWriter has
 // recorded the placement.
 type writeKind int
 
@@ -159,10 +156,10 @@ const (
 // orchestrator — the librarian (which may roll/change volumes) and the sole catalog writer. The
 // payload bytes the caller writes into the part writer NextPart returns stay on the caller's
 // goroutine; only the control calls cross to the orchestrator. real is the medium's per-archive
-// SlotWriter the orchestrator runs the calls on.
+// ArchiveWriter the orchestrator runs the calls on.
 type remoteSink struct {
 	d    *Spool
-	real xfer.SlotWriter
+	real archiveio.ArchiveWriter
 	kind writeKind
 	disk int // holding disk index (writeHolding)
 }
@@ -180,7 +177,7 @@ func (r *remoteSink) Commit(ctx context.Context, p xfer.Produced) error {
 	return (<-reply).err
 }
 
-// Result delegates to the medium's writer so a remoteSink satisfies xfer.SlotWriter. The producer
+// Result delegates to the medium's writer so a remoteSink satisfies archiveio.ArchiveWriter. The producer
 // driving it never reads the position (the orchestrator records the placement inside Commit); it is
 // the orchestrator that reads Result, off the real writer, when it queues a holding→backing copy.
 func (r *remoteSink) Result() (record.Archive, record.ArchivePos) { return r.real.Result() }
@@ -188,7 +185,7 @@ func (r *remoteSink) Result() (record.Archive, record.ArchivePos) { return r.rea
 // sinkReq is a routed RemoteSink call served on the orchestrator: commit selects Commit(produced)
 // over NextPart, kind/disk carry the follow-up bookkeeping (only meaningful for a commit).
 type sinkReq struct {
-	sink     xfer.SlotWriter
+	sink     archiveio.ArchiveWriter
 	commit   bool
 	ctx      context.Context
 	produced xfer.Produced
@@ -212,15 +209,14 @@ func (d *Spool) Aborted() error {
 	return d.abortErr
 }
 
-// Finish signals that the producers are done, waits for the orchestrator to drain every queued copy,
-// then seals the backing slot and returns it — or the run's error if the drain failed.
-func (d *Spool) Finish(now time.Time) (*record.Slot, error) {
+// Drain signals that the producers are done and waits for the orchestrator to flush every queued
+// holding->backing copy, returning the run's error if the drain failed. There is no slot to return —
+// the backing's committed archives are already in the catalog (each recorded as it committed), so the
+// run's slot is read from there.
+func (d *Spool) Drain() error {
 	close(d.shutdownCh)
 	<-d.finished
-	if err := d.Aborted(); err != nil {
-		return nil, err
-	}
-	return d.backing.Finish(now)
+	return d.Aborted()
 }
 
 func (d *Spool) setAbort(err error) {
@@ -350,10 +346,10 @@ func (d *Spool) drainLoop() {
 
 // copyOne reads one staged archive from its holding disk and streams it to the backing through a
 // RemoteSink — so its volume rolls and its placement record land on the orchestrator, while the bytes
-// flow on this copy goroutine. The staged source re-checksums the payload against the recorded digest
-// (catching holding-disk corruption) before the backing commit. The placement record and the holding
-// reclaim are the orchestrator's (the backing commit records the former; finalizeDrain does the
-// latter).
+// flow on this copy goroutine. The backing's NewCopy writer re-checksums the payload against the
+// recorded digest (catching holding-disk corruption) and preserves the source's identity. The
+// placement record and the holding reclaim are the orchestrator's (the backing commit records the
+// former; finalizeDrain does the latter).
 func (d *Spool) copyOne(j handoff) error {
 	holding := d.pool.Name(j.disk)
 	dleID := j.arch.Host + ":" + j.arch.Path
@@ -368,18 +364,18 @@ func (d *Spool) copyOne(j handoff) error {
 	if d.tr != nil {
 		tap = func(copied int64) { d.tr.AddDrainBytes(dleID, copied) }
 	}
-	real, err := d.backing.NewWrite(j.arch, 0, tap) // est is unused: the backing medium is fixed
+	real, err := d.backing.NewCopy(j.arch, tap)
 	if err != nil {
 		return fmt.Errorf("flush %s L%d to %q: %w", dleID, j.arch.Level, d.backingName, err)
 	}
 	rs := &remoteSink{d: d, real: real, kind: writeCopy}
-	if _, err := xfer.Transfer(context.Background(), &stagedSource{rc: rc, arch: j.arch}, xfer.Filters{}, rs); err != nil {
+	if _, err := xfer.Transfer(context.Background(), xfer.Reader(rc), xfer.Filters{}, rs); err != nil {
 		return fmt.Errorf("flush %s L%d to %q: %w", dleID, j.arch.Level, d.backingName, err)
 	}
 	return nil
 }
 
-// finalizeDrain reclaims the holding copy (files + placement, via the holding SlotStorage) and
+// finalizeDrain reclaims the holding copy (files + placement, via the holding ArchiveStore) and
 // releases its back-pressure once the archive has landed on the backing. It runs on the orchestrator.
 // The backing placement was already recorded by the copy's commit, so the archive is never absent
 // from the catalog.
@@ -395,37 +391,6 @@ func (d *Spool) finalizeDrain(it handoff) error {
 	d.logf("flushed %s L%d to %q", dleID, it.arch.Level, d.backingName)
 	return nil
 }
-
-// stagedSource is an xfer.Source over a staged archive's payload for the holding→backing copy: it
-// streams the holding bytes (re-checksumming them so corruption fails the copy) and reports the
-// archive's known producer stats so the backing commit reproduces the same record.
-type stagedSource struct {
-	rc   io.ReadCloser
-	arch record.Archive
-	h    hash.Hash
-}
-
-func (s *stagedSource) Open() (io.ReadCloser, func() (xfer.Produced, error), error) {
-	s.h = sha256.New()
-	out := &hashReadCloser{Reader: io.TeeReader(s.rc, s.h), rc: s.rc}
-	return out, func() (xfer.Produced, error) {
-		if got := hex.EncodeToString(s.h.Sum(nil)); got != s.arch.SHA256 {
-			return xfer.Produced{}, fmt.Errorf("copy of %s L%d checksum mismatch (source corrupt?)", s.arch.DLE, s.arch.Level)
-		}
-		return xfer.Produced{FileCount: s.arch.FileCount, Uncompressed: s.arch.Uncompressed, Members: s.arch.Members}, nil
-	}, nil
-}
-
-func (s *stagedSource) Cleanup() {}
-
-// hashReadCloser tees the staged payload through a running checksum while delegating Close to the
-// underlying volume reader.
-type hashReadCloser struct {
-	io.Reader
-	rc io.ReadCloser
-}
-
-func (h *hashReadCloser) Close() error { return h.rc.Close() }
 
 // handoff is one committed holding archive the orchestrator queues to copy: its metadata, its
 // positions on the holding disk, and which disk it landed on (so the copy reads, reclaims, and

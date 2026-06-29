@@ -8,9 +8,9 @@
 //   - read:  Open → an io.ReadCloser over one archive's raw on-medium bytes (copy-selected);
 //     ReadArchives → the same, but the clerk drives an ordered one-pass read and calls back
 //     per archive.
-//   - write: a Session over a slot writer takes an io.Reader of already-encoded bytes
-//     (WriteArchive for a dump, CopyArchive for a copy), then Commit (footer + index) and
-//     Finish (placement).
+//   - write: a Session is an archiveio.ArchiveStore — NewArchive hands out a per-archive writer for
+//     a fresh dump, NewCopy one for re-authoring an existing archive raw; each writer's Commit lands
+//     the footer + index and records the placement. There is no seal: a slot is its committed archives.
 //   - Members(ref) → the archive's member list (cache → on-medium index).
 //
 // What it deliberately does NOT do: schemes, tar, or composing transfers. The decode/encode and

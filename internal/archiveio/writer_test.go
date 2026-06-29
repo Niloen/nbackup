@@ -158,23 +158,23 @@ func openerOver(vols ...*memVolume) PartOpener {
 	}
 }
 
-func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) record.Archive {
+func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) (record.Archive, record.ArchivePos) {
 	t.Helper()
-	meta := record.Archive{DLE: dle, Host: "localhost", Path: "/p", Archiver: "m", Level: 0, Compress: "none"}
-	aw := w.NewArchive(meta, nil)
+	spec := ArchiveSpec{DLE: dle, Host: "localhost", Path: "/p", Archiver: "m", Level: 0, Compress: "none"}
+	aw := w.NewArchive(spec, nil)
 	if err := driveArchive(aw, body); err != nil {
 		t.Fatalf("driveArchive: %v", err)
 	}
 	if err := aw.Commit(context.Background(), xfer.Produced{FileCount: 1, Uncompressed: int64(len(body)), Members: []string{dle}}); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
-	arch, _ := aw.Result()
-	return arch
+	arch, pos := aw.Result()
+	return arch, pos
 }
 
 // driveArchive mimics xfer.Transfer's pull loop: copy body into parts (rolling between) until the
 // stream is exhausted. It returns the first NextPart/copy/Close error so a test can assert on it.
-func driveArchive(aw *ArchiveWriter, body []byte) error {
+func driveArchive(aw ArchiveWriter, body []byte) error {
 	r := bufio.NewReader(bytes.NewReader(body))
 	for {
 		pw, max, err := aw.NextPart(context.Background())
@@ -219,17 +219,13 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	spec := SlotSpec{ID: "slot-2026-06-21", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
 	w := NewWriter(sink, spec, nil, nil)
 
-	body := []byte(strings.Repeat("abcdefgh", 25*1024/8*4)) // 100 KiB → spans v1+v2, seal on v3
-	arch := writeOneArchive(t, w, "dle1", body)
+	body := []byte(strings.Repeat("abcdefgh", 25*1024/8*4)) // 100 KiB → spans v1+v2, last part on v3
+	arch, apos := writeOneArchive(t, w, "dle1", body)
 	if arch.Parts < 2 {
 		t.Fatalf("Parts = %d, want >= 2 (the archive must span)", arch.Parts)
 	}
 
-	pos := w.Positions()
-	if len(pos) != 1 {
-		t.Fatalf("Positions len = %d, want 1", len(pos))
-	}
-	parts := pos[0].Parts
+	parts := apos.Parts
 	if len(parts) != arch.Parts {
 		t.Fatalf("recorded %d parts, archive says %d", len(parts), arch.Parts)
 	}
@@ -239,10 +235,6 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	}
 	if len(vols) < 2 {
 		t.Fatalf("parts landed on a single volume %v; did not span", vols)
-	}
-
-	if _, err := w.Finish(time.Unix(1, 0).UTC()); err != nil {
-		t.Fatalf("Finish: %v", err)
 	}
 
 	// Read the archive back by concatenating its parts; it must equal the input.
@@ -277,15 +269,12 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	spec := SlotSpec{ID: "slot-x", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
 	w := NewWriter(sink, spec, nil, nil)
 	body := []byte(strings.Repeat("z", 55*1024)) // 55 KiB / 10 KiB ≈ 6 parts
-	arch := writeOneArchive(t, w, "dle1", body)
+	arch, apos := writeOneArchive(t, w, "dle1", body)
 	if arch.Parts < 5 {
 		t.Fatalf("Parts = %d, want >= 5", arch.Parts)
 	}
-	if _, err := w.Finish(time.Unix(1, 0).UTC()); err != nil {
-		t.Fatalf("Finish: %v", err)
-	}
 	r := NewReader()
-	rc, err := r.Open(w.Positions()[0].Parts, Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v))
+	rc, err := r.Open(apos.Parts, Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +295,7 @@ func TestRollFailureNoDeadlock(t *testing.T) {
 	w := NewWriter(sink, spec, nil, nil)
 
 	body := []byte(strings.Repeat("q", 200*1024)) // far bigger than one volume
-	err := driveArchive(w.NewArchive(record.Archive{DLE: "dle1", Level: 0}, nil), body)
+	err := driveArchive(w.NewArchive(ArchiveSpec{DLE: "dle1", Level: 0}, nil), body)
 	if err == nil {
 		t.Fatal("expected an error when the sink cannot roll")
 	}

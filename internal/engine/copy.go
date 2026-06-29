@@ -133,10 +133,10 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	// (the source copy's parts concatenated) is re-split into parts sized to the
 	// target's volumes, rolling onto a fresh volume mid-archive when one fills. The
 	// bytes are unchanged, so checksums and members carry over; only the part layout
-	// is new. The slot's logical content (the source seal) is what the catalog keeps.
+	// is new.
 	now := time.Now().UTC()
-	// Re-author under the source's identity (CreatedAt and all) so the copy's seal
-	// record names the same logical slot; the catalog still keeps the source seal.
+	// Re-author under the source's identity (CreatedAt and all) so each copied archive's
+	// footer names the same logical slot, with the same per-archive age.
 	spec := archiveio.SlotSpec{ID: s.ID, Date: s.Date, Sequence: s.Sequence, Generator: s.Generator, CreatedAt: s.CreatedAt}
 	wt, err := c.prepareWriter(targetMedia, spec, now, logf)
 	if err != nil {
@@ -161,10 +161,16 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 			return fmt.Errorf("copy %s L%d to %q: %w", ref.DLE, ref.Level, targetMedia, serr)
 		}
 		// Re-author the archive raw (no transform) onto the target's volumes. Load the members
-		// so the target writes a real member index (keeping that copy self-describing).
+		// so the target writes a real member index (keeping that copy self-describing). NewCopy
+		// verifies the bytes against the recorded checksum and preserves the source's identity;
+		// its Commit records the new placement on the target.
 		meta := metaByRef[ref]
 		meta.Members, _ = c.clerk.Members(ref)
-		if _, werr := xfer.Transfer(context.Background(), xfer.Reader(rc), xfer.NewFilters(), &copySink{session: session, meta: meta}); werr != nil {
+		cw, werr := session.NewCopy(meta, nil)
+		if werr != nil {
+			return fmt.Errorf("copy %s L%d to %q: %w", ref.DLE, ref.Level, targetMedia, werr)
+		}
+		if _, werr := xfer.Transfer(context.Background(), xfer.Reader(rc), xfer.NewFilters(), cw); werr != nil {
 			return fmt.Errorf("copy %s L%d to %q: %w", ref.DLE, ref.Level, targetMedia, werr)
 		}
 		return nil
@@ -175,9 +181,8 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	if len(missing) > 0 {
 		return fmt.Errorf("source copy of %s on %q is missing one or more archives", slotID, fromMedia)
 	}
-	if _, err := session.Finish(now); err != nil {
-		return fmt.Errorf("finish copy on %q: %w", targetMedia, err)
-	}
+	// No seal: each archive's copy recorded its placement on the target as it committed
+	// (NewCopy's Commit), so the copy is complete once every archive has landed.
 	logf.log("copied %s (%d archive(s)) to %q", slotID, len(s.Archives), targetMedia)
 	return nil
 }
@@ -193,25 +198,3 @@ func (c *copier) copySource(slotID, fromMedia string) error {
 	}
 	return nil
 }
-
-// copySink is the copy operation's xfer.Sink bridge: the source's raw bytes are fed through a pipe
-// into the clerk's passthrough CopyArchive (verify + re-split + commit on the spot). NextPart hands
-// the transfer the pipe writer (one unbounded part); Commit waits for CopyArchive's result.
-type copySink struct {
-	session *clerk.Session
-	meta    record.Archive
-	done    chan error
-}
-
-func (s *copySink) NextPart(ctx context.Context) (io.WriteCloser, int64, error) {
-	pr, pw := io.Pipe()
-	s.done = make(chan error, 1)
-	go func() {
-		err := s.session.CopyArchive(ctx, s.meta, pr)
-		pr.CloseWithError(err) // unblock the transfer's writes if CopyArchive died first
-		s.done <- err
-	}()
-	return pw, -1, nil
-}
-
-func (s *copySink) Commit(_ context.Context, _ xfer.Produced) error { return <-s.done }

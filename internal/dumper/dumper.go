@@ -2,7 +2,7 @@
 // DLE — running the tar source and the encode pipeline (compress/encrypt, placed client- or
 // server-side) — and transfers the bytes into a Store the consumer hands out. It owns parallelism
 // and the per-item dump; it never touches the catalog or decides where an archive is stored. The
-// consumer (the drain over holding disks, or the landing itself) is an archive store: Acquire
+// consumer (the drain over holding disks, or the landing itself) is an archive store: NewArchive
 // reserves an ingestion xfer.Sink for one archive (back-pressuring the producer), the producer
 // transfers the encoded stream into it, and the sink's commit finalizes the stored archive.
 package dumper
@@ -12,16 +12,16 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
-	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// The producer ingests into an xfer.WriteSlotStorage: for each archive it calls NewWrite for a write handle (an
-// xfer.Sink, back-pressuring), transfers the encoded stream into it, and the handle's commit seals
-// the stored archive. The clerk implements a serial WriteSlotStorage; the spool a concurrency-safe, buffered
-// one. The producer never sees the session, the medium, or the catalog — only the WriteSlotStorage.
+// The producer ingests into an archiveio.ArchiveWriteStore: for each archive it calls NewArchive for a
+// write handle (an xfer.Sink, back-pressuring), transfers the encoded stream into it, and the handle's
+// commit seals the stored archive. The clerk implements a serial store; the spool a concurrency-safe,
+// buffered one. The producer never sees the session, the medium, or the catalog — only the store.
 
 // Config is the resolution the producer needs, injected by the engine so the producer stays free
 // of config and the catalog: how to resolve a DLE's archiver, its dumptype excludes, and its encode
@@ -33,7 +33,7 @@ type Config struct {
 	Threads     int
 }
 
-// Dumper archives planned items into an xfer.WriteSlotStorage. Build it with New and drive it with Run.
+// Dumper archives planned items into an archiveio.ArchiveWriteStore. Build it with New and drive it with Run.
 type Dumper struct {
 	archiverFor func(dumpType, host string) (archiver.Archiver, error)
 	exclude     func(dumpType string) []string
@@ -46,11 +46,11 @@ func New(cfg Config) *Dumper {
 	return &Dumper{archiverFor: cfg.ArchiverFor, exclude: cfg.Exclude, placement: cfg.Placement, threads: cfg.Threads}
 }
 
-// Run archives every item into fs: for each it Creates an ingestion Sink, transfers the encoded
-// archive into it, and commits it (see dumpItem). With workers > 1 it runs that many concurrently,
-// bounded by a semaphore; the first error stops scheduling and is returned (a WriteSlotStorage failure
-// surfaces as the error Create/commit return, so blocked workers wake and stop too).
-func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs xfer.WriteSlotStorage, tr *progress.Tracker, logf func(format string, args ...any)) error {
+// Run archives every item into fs: for each it opens an ingestion Sink (NewArchive), transfers the
+// encoded archive into it, and commits it (see dumpItem). With workers > 1 it runs that many
+// concurrently, bounded by a semaphore; the first error stops scheduling and is returned (a store
+// failure surfaces as the error NewArchive/commit return, so blocked workers wake and stop too).
+func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs archiveio.ArchiveWriteStore, tr *progress.Tracker, logf func(format string, args ...any)) error {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}

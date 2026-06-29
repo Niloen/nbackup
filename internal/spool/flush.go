@@ -11,6 +11,7 @@ import (
 	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/xfer"
 )
 
 // flush.go is the amflush analogue: it drains a crashed run's leftover holding-disk archives to the
@@ -98,12 +99,15 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 					if err != nil {
 						return flushed, fmt.Errorf("flush %s %s: read holding disk: %w", s.ID, dleID, err)
 					}
-					// CopyArchive records the backing placement inline.
-					if err := backingSession.CopyArchive(context.Background(), arch, rc); err != nil {
+					// NewCopy records the backing placement on its Commit; xfer.Reader closes rc.
+					cw, err := backingSession.NewCopy(arch, nil)
+					if err != nil {
 						rc.Close()
 						return flushed, fmt.Errorf("flush %s %s to %q: %w", s.ID, dleID, d.Backing, err)
 					}
-					rc.Close()
+					if _, err := xfer.Transfer(context.Background(), xfer.Reader(rc), xfer.NewFilters(), cw); err != nil {
+						return flushed, fmt.Errorf("flush %s %s to %q: %w", s.ID, dleID, d.Backing, err)
+					}
 				}
 				for _, pos := range archivePosFiles(ap) {
 					if err := holdVol.RemoveFile(pos); err != nil {

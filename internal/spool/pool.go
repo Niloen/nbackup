@@ -8,7 +8,7 @@ package spool
 import (
 	"sync"
 
-	"github.com/Niloen/nbackup/internal/xfer"
+	"github.com/Niloen/nbackup/internal/archiveio"
 )
 
 // Disk is one disk in the holding Pool: the slot Storage the producer stages onto (and the drain
@@ -16,7 +16,7 @@ import (
 // count, guarded by Pool.mu.
 type Disk struct {
 	Name     string
-	Storage  xfer.SlotStorage
+	Storage  archiveio.ArchiveStore
 	Capacity int64 // bytes; 0 = unbounded (no back-pressure)
 	used     int64
 }
@@ -120,5 +120,5 @@ func (p *Pool) Err() error {
 }
 
 // Name and Storage resolve a disk by index (these read immutable fields, no lock).
-func (p *Pool) Name(idx int) string              { return p.disks[idx].Name }
-func (p *Pool) Storage(idx int) xfer.SlotStorage { return p.disks[idx].Storage }
+func (p *Pool) Name(idx int) string                    { return p.disks[idx].Name }
+func (p *Pool) Storage(idx int) archiveio.ArchiveStore { return p.disks[idx].Storage }
