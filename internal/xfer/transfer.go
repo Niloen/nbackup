@@ -3,11 +3,8 @@ package xfer
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"strings"
 	"syscall"
@@ -41,12 +38,13 @@ func isBrokenPipe(err error) bool {
 // "truncated input" symptom tar shows downstream. That role is exactly the Pipeline vs
 // Chain/Structural split the drill and verify layers classify on.
 
-// Produced is what a source reports about the raw stream once its producer has finished:
-// the totals only the producer knows (uncompressed size, file count, member list). A
-// non-producing source (a plain medium read) reports the zero value. It is the transfer's
-// single out-of-band channel — a sink that needs to hand something back (e.g. a `tar -t`
-// listing) does so through its own concrete type, not through the transfer result.
-type Produced struct {
+// SourceStats is what a source reports about the raw stream once its producer has
+// finished: the totals only the producer knows (uncompressed size, file count, member
+// list). A non-producing source (a plain medium read) reports the zero value. It is the
+// transfer's single out-of-band channel — a sink that needs to hand something back (e.g.
+// a `tar -t` listing) does so through its own concrete type, not through the transfer
+// result.
+type SourceStats struct {
 	Uncompressed int64
 	FileCount    int
 	Members      []string
@@ -87,7 +85,7 @@ type Source interface {
 	// chain has drained, reaps the source's processes and reports their raw-stream stats
 	// (one event: "the producer is done, here is what it produced"). Its error is the
 	// source-zone error. Cleanup releases scratch.
-	Open() (out io.ReadCloser, finish func() (Produced, error), err error)
+	Open() (out io.ReadCloser, finish func() (SourceStats, error), err error)
 	Cleanup()
 }
 
@@ -99,7 +97,7 @@ type Source interface {
 // aborts the in-flight part (no committed file), which is how a faulted transfer unwinds.
 type Sink interface {
 	NextPart(ctx context.Context) (io.WriteCloser, int64, error)
-	Commit(ctx context.Context, p Produced) error
+	Commit(ctx context.Context, s SourceStats) error
 }
 
 // Filters is the local middle: a chain of programs run on programs.Local(). It carries no
@@ -122,11 +120,11 @@ func (f Filters) Add(c programs.Cmd) Filters {
 // raw-stream stats, and on failure a *Error tagged with the faulting zone (upstream cause
 // first). ctx threads to the sink's part writers; on a fault Transfer cancels it so the
 // in-flight part aborts (no committed file) rather than committing a partial.
-func Transfer(ctx context.Context, source Source, filters Filters, sink Sink) (Produced, error) {
+func Transfer(ctx context.Context, source Source, filters Filters, sink Sink) (SourceStats, error) {
 	out, finish, err := source.Open()
 	if err != nil {
 		source.Cleanup()
-		return Produced{}, &Error{RoleSource, err}
+		return SourceStats{}, &Error{RoleSource, err}
 	}
 
 	mid := out
@@ -138,7 +136,7 @@ func Transfer(ctx context.Context, source Source, filters Filters, sink Sink) (P
 			out.Close()
 			_, _ = finish() // reap the source we already started
 			source.Cleanup()
-			return Produced{}, &Error{RoleFilters, ferr}
+			return SourceStats{}, &Error{RoleFilters, ferr}
 		}
 		mid, filtReap, filtered = fr, fw, true
 	}
@@ -161,7 +159,7 @@ func Transfer(ctx context.Context, source Source, filters Filters, sink Sink) (P
 	} else {
 		srcCloseErr = mid.Close() // mid is the source's output; the sink already reaped its procs
 	}
-	produced, finErr := finish() // reap the source's procs and read their totals
+	stats, finErr := finish() // reap the source's procs and read their totals
 	source.Cleanup()
 	if finErr == nil {
 		finErr = srcCloseErr // a clean reap still leaves a media-read close fault to surface
@@ -188,23 +186,23 @@ func Transfer(ctx context.Context, source Source, filters Filters, sink Sink) (P
 	switch {
 	case finErr != nil:
 		cancel() // abort any in-flight part rather than commit a partial
-		return Produced{}, &Error{RoleSource, finErr}
+		return SourceStats{}, &Error{RoleSource, finErr}
 	case filtErr != nil:
 		cancel()
-		return Produced{}, &Error{RoleFilters, filtErr}
+		return SourceStats{}, &Error{RoleFilters, filtErr}
 	case sinkErr != nil:
 		cancel()
-		return Produced{}, &Error{RoleSink, sinkErr}
+		return SourceStats{}, &Error{RoleSink, sinkErr}
 	}
 
-	// The transfer is clean and the source reaped, so produced is final: seal the sink against those
+	// The transfer is clean and the source reaped, so stats are final: seal the sink against those
 	// totals (writes the footer + records the placement, for a medium sink).
-	if err := sink.Commit(actx, produced); err != nil {
+	if err := sink.Commit(actx, stats); err != nil {
 		cancel()
-		return Produced{}, &Error{RoleSink, err}
+		return SourceStats{}, &Error{RoleSink, err}
 	}
 	cancel()
-	return produced, nil
+	return stats, nil
 }
 
 // drive pulls parts from sink and copies the (filtered) stream mid into each until exhausted, closing
@@ -255,154 +253,3 @@ func copyPart(w io.Writer, r *bufio.Reader, max int64) (eof bool, err error) {
 	}
 	return false, nil
 }
-
-// --- generic sources ---
-
-// Reader is an in-process source over a reader (the medium read, or a test stream). It has
-// no producer of its own, so it reports no stats — a stat-less source; Transfer closes rc.
-func Reader(rc io.ReadCloser) Source { return &readerSource{rc: rc} }
-
-type readerSource struct{ rc io.ReadCloser }
-
-func (s *readerSource) Open() (io.ReadCloser, func() (Produced, error), error) {
-	return s.rc, func() (Produced, error) { return Produced{}, nil }, nil
-}
-func (s *readerSource) Cleanup() {}
-
-// Programs is a chain of programs on one executor. As a Source its first command produces
-// (tar -c, no stdin); as a Sink it consumes the incoming stream as stdin (tar -x). It
-// satisfies both Source and Sink, so it serves whichever end the operation places it in.
-type Programs struct {
-	exec    programs.Executor
-	cmds    []programs.Cmd
-	finish  func() (Produced, error) // source: producer totals (e.g. tar --totals)
-	cleanup func()
-
-	// sink side (set by NextPart): the chain consumes the part stream as stdin (tar -x).
-	wait      func() error
-	drainDone chan error
-}
-
-// NewPrograms starts a program chain on ex.
-func NewPrograms(ex programs.Executor) *Programs { return &Programs{exec: ex} }
-
-// Add appends commands to the chain, dropping identity commands (empty Name) so a "none"
-// compress or encrypt scheme leaves no stage behind. Variadic so a caller can splice in a placed slice.
-func (p *Programs) Add(cmds ...programs.Cmd) *Programs {
-	for _, c := range cmds {
-		if c.Name != "" {
-			p.cmds = append(p.cmds, c)
-		}
-	}
-	return p
-}
-
-// Finishing sets the producer's stat hook (source use).
-func (p *Programs) Finishing(fn func() (Produced, error)) *Programs { p.finish = fn; return p }
-
-// OnCleanup sets a scratch-cleanup hook (source use).
-func (p *Programs) OnCleanup(fn func()) *Programs { p.cleanup = fn; return p }
-
-// Source side: the chain produces (tar -c, no stdin). finish waits the chain's processes
-// and then reads the producer's totals — one event, since the totals are only readable once
-// the producer has exited; a reap failure wins over the totals it would have reported.
-func (p *Programs) Open() (io.ReadCloser, func() (Produced, error), error) {
-	out, wait, err := p.exec.RunPipe(nil, p.cmds...)
-	if err != nil {
-		return nil, nil, err
-	}
-	finish := func() (Produced, error) {
-		if werr := wait(); werr != nil {
-			return Produced{}, werr
-		}
-		if p.finish != nil {
-			return p.finish()
-		}
-		return Produced{}, nil
-	}
-	return out, finish, nil
-}
-func (p *Programs) Cleanup() {
-	if p.cleanup != nil {
-		p.cleanup()
-	}
-}
-
-// Sink side: a program sink (tar -x) consumes the whole stream as stdin — one unbounded part.
-// NextPart starts the chain over a pipe (the returned writer is its stdin) and drains the chain's
-// (empty, for tar -x) output on a goroutine; Commit waits for the chain and the drain. It writes the
-// filesystem, not a stored archive, so there is no footer/placement to seal.
-func (p *Programs) NextPart(_ context.Context) (io.WriteCloser, int64, error) {
-	pr, pw := io.Pipe()
-	out, wait, err := p.exec.RunPipe(pr, p.cmds...)
-	if err != nil {
-		pr.Close()
-		pw.Close()
-		return nil, 0, err
-	}
-	p.wait = wait
-	p.drainDone = make(chan error, 1)
-	go func() {
-		_, e := io.Copy(io.Discard, out)
-		out.Close()
-		p.drainDone <- e
-	}()
-	return pw, -1, nil
-}
-
-func (p *Programs) Commit(_ context.Context, _ Produced) error {
-	werr := p.wait()
-	derr := <-p.drainDone
-	if werr == nil {
-		werr = derr
-	}
-	return werr
-}
-
-// --- generic sinks ---
-
-// nopWriteCloser adapts an io.Writer to a part writer whose Close is a no-op (the sink keeps no
-// per-part medium state to finalize).
-type nopWriteCloser struct{ io.Writer }
-
-func (nopWriteCloser) Close() error { return nil }
-
-// Hash consumes the stream, hashing it, and reports at Commit whether it matches sha (a mismatch is
-// the sink-zone error that fails the transfer).
-func Hash(sha string) Sink { return &hashSink{sha: sha, h: sha256.New()} }
-
-type hashSink struct {
-	sha string
-	h   hash.Hash
-}
-
-func (s *hashSink) NextPart(_ context.Context) (io.WriteCloser, int64, error) {
-	return nopWriteCloser{s.h}, -1, nil
-}
-
-func (s *hashSink) Commit(_ context.Context, _ Produced) error {
-	if got := hex.EncodeToString(s.h.Sum(nil)); got != s.sha {
-		return fmt.Errorf("checksum mismatch: got %s, want %s", got, s.sha)
-	}
-	return nil
-}
-
-// Drain is a sink that discards the stream (the recoverability proof's "did it decode").
-func Drain() Sink { return drainSink{} }
-
-type drainSink struct{}
-
-func (drainSink) NextPart(_ context.Context) (io.WriteCloser, int64, error) {
-	return nopWriteCloser{io.Discard}, -1, nil
-}
-func (drainSink) Commit(_ context.Context, _ Produced) error { return nil }
-
-// Writer is a sink that copies the stream to w (a temp file, stdout).
-func Writer(w io.Writer) Sink { return writerSink{w: w} }
-
-type writerSink struct{ w io.Writer }
-
-func (s writerSink) NextPart(_ context.Context) (io.WriteCloser, int64, error) {
-	return nopWriteCloser{s.w}, -1, nil
-}
-func (s writerSink) Commit(_ context.Context, _ Produced) error { return nil }

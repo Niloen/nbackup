@@ -165,7 +165,7 @@ func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) (record.A
 	if err := driveArchive(aw, body); err != nil {
 		t.Fatalf("driveArchive: %v", err)
 	}
-	if err := aw.Commit(context.Background(), xfer.Produced{FileCount: 1, Uncompressed: int64(len(body)), Members: []string{dle}}); err != nil {
+	if err := aw.Commit(context.Background(), xfer.SourceStats{FileCount: 1, Uncompressed: int64(len(body)), Members: []string{dle}}); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	arch, pos := aw.Result()

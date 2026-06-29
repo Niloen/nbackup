@@ -302,7 +302,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		// Source/Filters fault — an unreadable part or a decrypt/decompress child — is a decode
 		// failure (Pipeline). Driving the proof on the client for a client-only key is the
 		// documented follow-on — see the design note.
-		sink := xfer.NewPrograms(programs.Local()).Add(arch.RestoreStage(dir, nil))
+		sink := xfer.NewProgramChain(programs.Local()).Add(arch.RestoreStage(dir, nil))
 		_, filters := xfer.SplitTransforms(xfer.Transform{Cmd: decrypt}, xfer.Transform{Cmd: decompress})
 		_, terr := xfer.Transfer(context.Background(), xfer.Reader(src), filters, sink)
 		if terr != nil {

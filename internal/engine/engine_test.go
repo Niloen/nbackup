@@ -494,7 +494,7 @@ func TestRunStatusSpansEstimatePhase(t *testing.T) {
 func TestThroughputCapThrottlesDump(t *testing.T) {
 	src := t.TempDir()
 	// ~3.2 MiB so the transfer dominates the token bucket's initial burst
-	// (xfer.maxBurst = 1 MiB), making the throttle observable in a short test.
+	// (ratelimit.maxBurst = 1 MiB), making the throttle observable in a short test.
 	big := strings.Repeat("nbackup-bandwidth-throttle-test\n", 100_000)
 	write(t, filepath.Join(src, "big.txt"), big)
 
@@ -529,7 +529,7 @@ func TestThroughputCapThrottlesDump(t *testing.T) {
 	capped, bytes := run("2MB/s")
 	uncapped, _ := run("")
 
-	// The bucket starts with at most one burst (xfer.maxBurst = 1 MiB) of slack, so
+	// The bucket starts with at most one burst (ratelimit.maxBurst = 1 MiB) of slack, so
 	// the run can be no faster than (bytes - 1 MiB) / rate. A 10% margin absorbs
 	// scheduling jitter.
 	floor := time.Duration(float64(bytes-(1<<20)) / rate * float64(time.Second) * 0.9)

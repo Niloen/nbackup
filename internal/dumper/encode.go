@@ -180,16 +180,16 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.ArchiveWriteStore
 		xfer.Transform{Cmd: compF.Forward, Fused: pl.CompressClient},
 		xfer.Transform{Cmd: encF.Forward, Fused: pl.EncryptClient},
 	)
-	src := xfer.NewPrograms(srcExec).Add(tarCmd).Add(fused...)
-	src.Finishing(func() (xfer.Produced, error) {
+	src := xfer.NewProgramChain(srcExec).Add(tarCmd).Add(fused...)
+	src.Finishing(func() (xfer.SourceStats, error) {
 		res, ferr := bs.Finish()
 		if ferr != nil {
-			return xfer.Produced{}, ferr
+			return xfer.SourceStats{}, ferr
 		}
 		if res == nil {
-			return xfer.Produced{}, nil
+			return xfer.SourceStats{}, nil
 		}
-		return xfer.Produced{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members}, nil
+		return xfer.SourceStats{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members}, nil
 	}).OnCleanup(bs.Cleanup)
 
 	// Create the ingestion Sink before the transfer spawns tar, so back-pressure (a full holding
