@@ -360,10 +360,11 @@ See [Replication](../features/replication).
 ## notify
 
 Unattended alerting. A failed run reaches the configured channels;
-`nb report --notify` mails the nightly digest. **Secrets are never stored** —
-an SMTP password or webhook URL is referenced by the **name** of an environment
-variable (`password_env`, `url_env`) and resolved at send time. A literal
-`password:`/`token:` key is **rejected**.
+`nb report --notify` mails the nightly digest. A literal `password:`/`token:` key is
+**rejected** (neither is a config field), so an SMTP password is referenced by the
+**name** of an environment variable (`password_env`) and resolved at send time. A
+webhook URL may be a literal `url:` or, when the URL is itself secret (Slack/Discord),
+the name of an environment variable (`url_env`, preferred).
 
 ```yaml
 notify:

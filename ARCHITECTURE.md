@@ -596,9 +596,11 @@ someone. The choices, all mirroring existing stances:
   A notify backend is a registered name (`smtp`/`sendmail`/`webhook`) like
   `transform/compress`/`crypt`, so adding a channel is a registration (`sendmail` pipes
   the same RFC 5322 message the SMTP path builds to a local MTA binary — postfix,
-  sendmail, exim — needing no relay host or secret). Secrets (SMTP password, webhook
-  URL) are named environment variables resolved at send time, never stored — and a literal
-  `password:`/`token:` key is rejected structurally by `KnownFields(true)`. `nb
+  sendmail, exim — needing no relay host or secret). A literal `password:`/`token:` key
+  is rejected structurally by `KnownFields(true)` (neither is a field), so an SMTP password
+  is a named environment variable (`password_env`) resolved at send time; a webhook URL is
+  either a literal `url:` or a named env var (`url_env`, preferred when the URL is itself a
+  secret). `nb
   report` (read-only, no engine) renders the recent history plus a live
   drill-ledger recovery audit (failing / degrading / stale / never-drilled DLEs via
   `drill.Ledger.Coverage`); `nb report --notify` mails the same digest.

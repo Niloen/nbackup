@@ -86,8 +86,9 @@ sync:
   - from: offsite
     to: deep-archive
 
-# Alerting. Secrets are referenced by env-var NAME and resolved at send time — a
-# literal password:/token: is rejected.
+# Alerting. A literal password:/token: key is rejected (not a config field), so the
+# SMTP password is given by env-var NAME (password_env), resolved at send time. The
+# Slack webhook URL is secret too, so it uses url_env (a literal url: is also accepted).
 notify:
   on_failure: [email, slack]
   digest: [email]
