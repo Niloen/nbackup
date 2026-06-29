@@ -28,6 +28,7 @@ import (
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/ratelimit"
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/xfer"
 )
 
 // VolumeSink is the writer's view of a medium's changer: where the next part goes,
@@ -110,7 +111,9 @@ func (w *Writer) NewArchive(meta record.Archive, tap func(landed int64)) *Archiv
 	return &ArchiveWriter{w: w, base: w.archiveHeader(meta), meta: meta, tap: tap, h: sha256.New()}
 }
 
-// ArchiveWriter is one archive's part-by-part writer (see NewArchive).
+// ArchiveWriter is one archive's part-by-part writer (see NewArchive). It is an xfer.Sink: a transfer
+// drives NextPart/Commit, then the caller reads the committed archive and its on-medium position from
+// Result to record the placement.
 type ArchiveWriter struct {
 	w     *Writer
 	base  record.Header
@@ -120,7 +123,15 @@ type ArchiveWriter struct {
 	n     int64
 	parts []record.FilePos
 	part  int
+
+	arch record.Archive    // the committed archive, set by Commit (read via Result)
+	pos  record.ArchivePos // its on-medium position, set by Commit (read via Result)
 }
+
+var (
+	_ xfer.Sink       = (*ArchiveWriter)(nil)
+	_ xfer.SlotWriter = (*ArchiveWriter)(nil)
+)
 
 // NextPart rolls to the next volume and returns a writer for the next part plus its byte cap
 // (max < 0 = unbounded). The caller copies up to max bytes into it and Closes it; the part's position
@@ -170,23 +181,29 @@ func (p *archivePartWriter) Close() error {
 	return nil
 }
 
-// Commit finalizes the archive: it merges the producer's raw-stream totals into the metered archive
-// (sha + compressed size are this writer's), writes the footer + member index, and returns the
-// committed archive + its on-medium position. It records no placement — the caller does.
-func (a *ArchiveWriter) Commit(ctx context.Context, fileCount int, uncompressed int64, members []string) (record.Archive, record.ArchivePos, error) {
+// Commit (xfer.Sink) finalizes the archive against the producer's raw-stream totals: it merges them
+// into the metered archive (sha + compressed size are this writer's), writes the footer + member
+// index, and stashes the committed archive + its on-medium position for Result. It records no
+// placement — the caller does, from Result.
+func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.Produced) error {
 	arch := a.meta
 	arch.Compressed = a.n
 	arch.SHA256 = hex.EncodeToString(a.h.Sum(nil))
 	arch.Parts = len(a.parts)
-	arch.FileCount = fileCount
-	arch.Uncompressed = uncompressed
-	arch.Members = members
+	arch.FileCount = p.FileCount
+	arch.Uncompressed = p.Uncompressed
+	arch.Members = p.Members
 	pos, err := a.w.Commit(ctx, arch, a.parts)
 	if err != nil {
-		return record.Archive{}, record.ArchivePos{}, err
+		return err
 	}
-	return arch, pos, nil
+	a.arch, a.pos = arch, pos
+	return nil
 }
+
+// Result returns the committed archive and its on-medium position (parts/footer/index). It is valid
+// only after a successful Commit; the caller records the placement from it.
+func (a *ArchiveWriter) Result() (record.Archive, record.ArchivePos) { return a.arch, a.pos }
 
 // Commit durably finalizes an archive (all fields final): it writes the member index (the
 // gzip'd Members) then the commit footer (the metadata without members) — the footer last,

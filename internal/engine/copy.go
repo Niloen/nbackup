@@ -154,7 +154,7 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		refs = append(refs, ref)
 		metaByRef[ref] = a
 	}
-	session := c.clerk.OpenSlot(w, targetMedia)
+	session := c.clerk.OpenSlot(w, targetMedia, wt.lib.Volume())
 	missing, err := c.clerk.ReadArchives(refs, fromMedia, func(ref clerk.Ref, open func() (io.ReadCloser, error)) error {
 		rc, serr := open()
 		if serr != nil {

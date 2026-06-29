@@ -8,18 +8,16 @@ package spool
 import (
 	"sync"
 
-	"github.com/Niloen/nbackup/internal/clerk"
-	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// Disk is one disk in the holding Pool: the slot Session the producer stages onto and the volume (for
-// the drain to read back and reclaim), plus its capacity budget. used is the landed-not-yet-drained
-// byte count, guarded by Pool.mu.
+// Disk is one disk in the holding Pool: the slot Storage the producer stages onto (and the drain
+// reads back + reclaims through), plus its capacity budget. used is the landed-not-yet-drained byte
+// count, guarded by Pool.mu.
 type Disk struct {
 	Name     string
-	Session  *clerk.Session
-	HoldVol  media.Volume // == the disk writer's lib.Volume()
-	Capacity int64        // bytes; 0 = unbounded (no back-pressure)
+	Storage  xfer.SlotStorage
+	Capacity int64 // bytes; 0 = unbounded (no back-pressure)
 	used     int64
 }
 
@@ -121,7 +119,6 @@ func (p *Pool) Err() error {
 	return p.aborted
 }
 
-// Name, HoldVol, and Session resolve a disk by index (these read immutable fields, no lock).
-func (p *Pool) Name(idx int) string            { return p.disks[idx].Name }
-func (p *Pool) HoldVol(idx int) media.Volume   { return p.disks[idx].HoldVol }
-func (p *Pool) Session(idx int) *clerk.Session { return p.disks[idx].Session }
+// Name and Storage resolve a disk by index (these read immutable fields, no lock).
+func (p *Pool) Name(idx int) string              { return p.disks[idx].Name }
+func (p *Pool) Storage(idx int) xfer.SlotStorage { return p.disks[idx].Storage }

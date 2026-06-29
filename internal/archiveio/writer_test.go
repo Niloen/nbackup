@@ -12,6 +12,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/xfer"
 )
 
 // memVolume is a minimal in-memory media.Volume for testing the spanning writer and
@@ -164,10 +165,10 @@ func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) record.Ar
 	if err := driveArchive(aw, body); err != nil {
 		t.Fatalf("driveArchive: %v", err)
 	}
-	arch, _, err := aw.Commit(context.Background(), 1, int64(len(body)), []string{dle})
-	if err != nil {
+	if err := aw.Commit(context.Background(), xfer.Produced{FileCount: 1, Uncompressed: int64(len(body)), Members: []string{dle}}); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
+	arch, _ := aw.Result()
 	return arch
 }
 

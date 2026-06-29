@@ -31,7 +31,7 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 			if err != nil {
 				return nil, err
 			}
-			return e.clerk.OpenSlot(wt.w, e.mediumName), nil
+			return e.clerk.OpenSlot(wt.w, e.mediumName, wt.lib.Volume()), nil
 		},
 		DisplayDLE: e.DisplayDLE,
 		Logf:       logf,

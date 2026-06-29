@@ -1081,12 +1081,10 @@ func (e *Engine) Run(now time.Time, logf Logf) (*record.Slot, error) {
 	holdingNames := e.cfg.HoldingMedia()
 	buffering := len(holdingNames) > 0
 
-	// Open the landing over an orchestrator client so the drain (and any direct write) can stream
-	// bytes off the orchestrator goroutine while every volume roll's catalog write routes back to it
-	// (the sole catalog writer). Opening it here also lets a spanning-capable single drive clamp the
-	// workers.
-	client := spool.NewClient()
-	landWT, err := e.prepareWriterWith(e.mediumName, spec, now, logf, client.Wrap)
+	// Open the landing writer here (over the medium's real sink — the spool routes a producer's sink
+	// calls to its orchestrator, so no proxy is needed). Opening it now also lets a spanning-capable
+	// single drive clamp the workers.
+	landWT, err := e.prepareWriter(e.mediumName, spec, now, logf)
 	if err != nil {
 		return nil, err
 	}
@@ -1108,7 +1106,7 @@ func (e *Engine) Run(now time.Time, logf Logf) (*record.Slot, error) {
 	}
 
 	tr, runLogf := e.progressTracker(slotID, workers, plan.Items, fileSink, logf)
-	sealed, err := e.runOrchestrated(plan, workers, landingSlots, spec, holdingNames, landWT, client, tr, now, runLogf)
+	sealed, err := e.runOrchestrated(plan, workers, landingSlots, spec, holdingNames, landWT, tr, now, runLogf)
 	if err != nil {
 		return nil, err
 	}
@@ -1165,7 +1163,7 @@ func planProgress(items []planner.Item) []progress.Plan {
 // runOrchestrated executes a dump: it opens the holding disks (the buffer the producers stage onto),
 // builds the spool over the already-opened landing writer, runs the producers, and seals the
 // landing the spool authored. The spool is the run's sole catalog writer.
-func (e *Engine) runOrchestrated(plan *planner.Plan, workers, landingSlots int, spec archiveio.SlotSpec, holdingNames []string, landWT *writeTarget, client *spool.Client, tr *progress.Tracker, now time.Time, logf Logf) (*record.Slot, error) {
+func (e *Engine) runOrchestrated(plan *planner.Plan, workers, landingSlots int, spec archiveio.SlotSpec, holdingNames []string, landWT *writeTarget, tr *progress.Tracker, now time.Time, logf Logf) (*record.Slot, error) {
 	disks := make([]spool.Disk, len(holdingNames))
 	for i, name := range holdingNames {
 		wt, err := e.prepareWriter(name, spec, now, logf)
@@ -1174,17 +1172,13 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers, landingSlots int, 
 			return nil, fmt.Errorf("open holding disk %q: %w", name, err)
 		}
 		capB, _ := e.cfg.Media[name].CapacityBytes()
-		disks[i] = spool.Disk{Name: name, Session: e.clerk.OpenSlot(wt.w, name), HoldVol: wt.lib.Volume(), Capacity: capB}
+		disks[i] = spool.Disk{Name: name, Storage: e.clerk.OpenSlot(wt.w, name, wt.lib.Volume()), Capacity: capB}
 	}
-	landSession := e.clerk.OpenSlot(landWT.w, e.mediumName)
-	slotMeta := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
+	landStorage := e.clerk.OpenSlot(landWT.w, e.mediumName, landWT.lib.Volume())
 
 	dr := spool.New(spool.Config{
-		Catalog: e.cat, SlotMeta: slotMeta, Holding: spool.NewPool(disks), Tracker: tr, Logf: logf,
-		Backing: spool.Backing{
-			Name: e.mediumName, Writer: landWT.w, Session: landSession,
-			Client: client, Slots: landingSlots,
-		},
+		Holding: spool.NewPool(disks), Tracker: tr, Logf: logf,
+		Backing: spool.Backing{Name: e.mediumName, Storage: landStorage, Slots: landingSlots},
 	})
 
 	dumpErr := e.dmp.Run(context.Background(), plan.Items, workers, dr, tr, logf)
@@ -1333,6 +1327,10 @@ func (e *Engine) PlacementsFor(slotID string) []catalog.Placement { return e.pla
 func (e *Engine) AddArchive(slot *record.Slot, medium string, arch record.Archive, pos record.ArchivePos) error {
 	return e.cat.AddArchive(slot, medium, arch, pos)
 }
+func (e *Engine) RemoveArchive(slotID, medium, dle string) (placementGone, entryGone bool, err error) {
+	return e.cat.RemoveArchive(slotID, medium, dle)
+}
+
 func (e *Engine) SealSlot(id string, now time.Time) error { return e.cat.SealSlot(id, now) }
 
 // MounterFor returns a read-mount onto a medium's volumes — the clerk's Mounter role, served

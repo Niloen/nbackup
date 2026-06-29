@@ -56,6 +56,9 @@ type Map interface {
 	// catalog's single write path (a slot is created from the archive's identity, never added
 	// wholesale). SealSlot stamps the slot sealed once its run finishes.
 	AddArchive(slot *record.Slot, medium string, arch record.Archive, pos record.ArchivePos) error
+	// RemoveArchive drops one archive's placement on a medium (and its slot entry if that was the
+	// last copy) — the reclaim path when a staged archive has landed on the backing.
+	RemoveArchive(slotID, medium, dle string) (placementGone, entryGone bool, err error)
 	SealSlot(id string, now time.Time) error
 }
 

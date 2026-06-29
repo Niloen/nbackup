@@ -163,3 +163,17 @@ func catalogArchive(cat *catalog.Catalog, ck *clerk.Clerk, slotID, dle string, l
 	}
 	return record.Archive{}, fmt.Errorf("archive %s L%d not in catalog", dle, level)
 }
+
+// archivePosFiles lists an archive's file positions for reclamation, the commit footer (the marker)
+// first so an interrupted reclaim un-commits before dropping parts.
+func archivePosFiles(a record.ArchivePos) []int {
+	pos := make([]int, 0, len(a.Parts)+2)
+	pos = append(pos, a.Commit.Pos)
+	if a.Index != (record.FilePos{}) {
+		pos = append(pos, a.Index.Pos)
+	}
+	for _, pt := range a.Parts {
+		pos = append(pos, pt.Pos)
+	}
+	return pos
+}
