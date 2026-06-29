@@ -123,7 +123,7 @@ func (v *verifier) verify(slotIDs []string, opts VerifyOptions, logf Logf) (*Ver
 		if err != nil {
 			// Slot metadata unreadable (not in catalog): a failed slot verdict rather
 			// than aborting the whole pass, so one bad id doesn't mask the rest.
-			logf.log("%s: ERROR %v", id, err)
+			logf.Log("%s: ERROR %v", id, err)
 			rep.Slots = append(rep.Slots, SlotVerdict{
 				Slot: id, OK: false,
 				Archives: []ArchiveVerdict{{Slot: id, OK: false, Class: drill.ClassMissing, Detail: err.Error()}},
@@ -154,7 +154,7 @@ func (v *verifier) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVe
 		if opts.Medium != "" {
 			where = fmt.Sprintf("medium %q", opts.Medium)
 		}
-		logf.log("%s: NO COPIES on %s", id, where)
+		logf.Log("%s: NO COPIES on %s", id, where)
 		sv.OK = false
 		sv.Archives = append(sv.Archives, ArchiveVerdict{
 			Slot: id, Medium: opts.Medium, OK: false,
@@ -186,11 +186,11 @@ func (v *verifier) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVe
 			// damaged: skip it (with a note) rather than reporting a false integrity
 			// failure. Other errors (a configured medium that won't open) still fail.
 			if errors.Is(err, ErrUnknownMedium) {
-				logf.log("%s [%s]: skipped — medium not defined in this config", id, p.Medium)
+				logf.Log("%s [%s]: skipped — medium not defined in this config", id, p.Medium)
 				skippedCopies = append(skippedCopies, p.Medium)
 				continue
 			}
-			logf.log("%s [%s]: ERROR %v", id, p.Medium, err)
+			logf.Log("%s [%s]: ERROR %v", id, p.Medium, err)
 			sv.OK = false
 			badCopies = append(badCopies, p.Medium)
 			sv.Archives = append(sv.Archives, ArchiveVerdict{
@@ -202,7 +202,7 @@ func (v *verifier) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVe
 		for _, a := range s.Archives {
 			v, ok := verdicts[clerk.Ref{Slot: id, DLE: a.DLE, Level: a.Level}]
 			if !ok {
-				logf.log("%s [%s]: %s L%d POSITION MISSING", id, p.Medium, a.DLEID(), a.Level)
+				logf.Log("%s [%s]: %s L%d POSITION MISSING", id, p.Medium, a.DLEID(), a.Level)
 				v = ArchiveVerdict{Slot: id, DLE: a.DLE, Level: a.Level, Medium: p.Medium, OK: false,
 					Class: drill.ClassMissing, Detail: "archive position missing on this copy"}
 			}
@@ -222,15 +222,15 @@ func (v *verifier) verifySlot(id string, opts VerifyOptions, logf Logf) (*SlotVe
 	case sv.OK && len(goodCopies) == 0 && len(skippedCopies) > 0:
 		// Every copy lives on a medium this config does not define — nothing was
 		// actually checked, so say so rather than reporting a misleading "OK".
-		logf.log("%s: SKIPPED — copies only on media not in this config: %s", id, strings.Join(skippedCopies, ", "))
+		logf.Log("%s: SKIPPED — copies only on media not in this config: %s", id, strings.Join(skippedCopies, ", "))
 	case sv.OK:
-		logf.log("%s: OK (%d archive(s), %d cop(ies))", id, len(s.Archives), len(goodCopies))
+		logf.Log("%s: OK (%d archive(s), %d cop(ies))", id, len(s.Archives), len(goodCopies))
 	case len(goodCopies) > 0:
 		// Surface that an intact copy remains, and which medium to re-copy from.
-		logf.log("%s: FAILED on %s, but an intact copy remains on %s (re-copy to repair)",
+		logf.Log("%s: FAILED on %s, but an intact copy remains on %s (re-copy to repair)",
 			id, strings.Join(badCopies, ", "), strings.Join(goodCopies, ", "))
 	default:
-		logf.log("%s: FAILED on all cop(ies): %s", id, strings.Join(badCopies, ", "))
+		logf.Log("%s: FAILED on all cop(ies): %s", id, strings.Join(badCopies, ", "))
 	}
 	return sv, nil
 }
@@ -244,25 +244,25 @@ func (v *verifier) verifyArchive(a record.Archive, ref clerk.Ref, medium string,
 	if opts.Checks.has(CheckChecksum) {
 		rc, serr := open()
 		if serr != nil {
-			logf.log("%s [%s]: %s L%d ERROR %v", id, medium, a.DLEID(), a.Level, serr)
+			logf.Log("%s [%s]: %s L%d ERROR %v", id, medium, a.DLEID(), a.Level, serr)
 			vd.OK, vd.Class, vd.Detail = false, drill.ClassPipeline, serr.Error()
 			return vd
 		}
 		good, err := v.dec.verifyChecksum(rc, a.SHA256)
 		if err != nil {
-			logf.log("%s [%s]: %s L%d ERROR %v", id, medium, a.DLEID(), a.Level, err)
+			logf.Log("%s [%s]: %s L%d ERROR %v", id, medium, a.DLEID(), a.Level, err)
 			vd.OK, vd.Class, vd.Detail = false, drill.ClassPipeline, err.Error()
 			return vd
 		}
 		if !good {
-			logf.log("%s [%s]: %s L%d CHECKSUM MISMATCH", id, medium, a.DLEID(), a.Level)
+			logf.Log("%s [%s]: %s L%d CHECKSUM MISMATCH", id, medium, a.DLEID(), a.Level)
 			vd.OK, vd.Class, vd.Detail = false, drill.ClassIntegrity, "checksum mismatch vs commit footer"
 			return vd
 		}
 	}
 	if opts.Checks.has(CheckStructural) {
 		if cls, detail := v.structuralCheck(id, a, open); cls != drill.ClassNone {
-			logf.log("%s [%s]: %s L%d STRUCTURAL %s: %s", id, medium, a.DLEID(), a.Level, cls, detail)
+			logf.Log("%s [%s]: %s L%d STRUCTURAL %s: %s", id, medium, a.DLEID(), a.Level, cls, detail)
 			vd.OK, vd.Class, vd.Detail = false, cls, detail
 			return vd
 		}

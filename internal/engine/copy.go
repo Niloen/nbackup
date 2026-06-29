@@ -43,7 +43,7 @@ func (e *Engine) newCopier() *copier {
 			return err
 		},
 		prepareWriter: e.prepareWriter,
-		reclaimCopy:   e.reclaimTargetCopy,
+		reclaimCopy:   e.acct.ReclaimCopy,
 	}
 }
 
@@ -144,7 +144,7 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		return err
 	}
 	w := wt.w
-	logf.log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
+	logf.Log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
 	// Open the source copy's archives as a one-pass read (the clerk resolves their positions),
 	// then re-author each onto the target. Copy order is immaterial — archives are keyed by
 	// (dle, level) — so the physical ordering is a free win.
@@ -184,7 +184,7 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	}
 	// No seal: each archive's copy recorded its placement on the target as it committed
 	// (NewCopy's Commit), so the copy is complete once every archive has landed.
-	logf.log("copied %s (%d archive(s)) to %q", slotID, len(s.Archives), targetMedia)
+	logf.Log("copied %s (%d archive(s)) to %q", slotID, len(s.Archives), targetMedia)
 	return nil
 }
 

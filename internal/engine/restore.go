@@ -126,12 +126,12 @@ func (r *restorer) restoreFrom(slotID, dleName, destDir, targetHost string, roll
 	}
 	decryptOnClient := targetHost != "" && ec.At == "client" && ec.SchemeName() != "none"
 	if decryptOnClient {
-		logf.log("decrypting on %s (encrypt.at: client) — only ciphertext leaves the server", targetHost)
+		logf.Log("decrypting on %s (encrypt.at: client) — only ciphertext leaves the server", targetHost)
 	} else if err := r.ensureServerCanDecode(steps, logf); err != nil {
 		return err
 	}
 	for _, step := range steps {
-		logf.log("extracting %s %s L%d -> %s", step.SlotID, r.displayDLE(step.DLE), step.Level, destDir)
+		logf.Log("extracting %s %s L%d -> %s", step.SlotID, r.displayDLE(step.DLE), step.Level, destDir)
 		if err := r.extractStep(step, destDir, targetHost, ec); err != nil {
 			wrapped := fmt.Errorf("extract %s %s L%d: %w", step.SlotID, step.DLE, step.Level, err)
 			// The destination could not even be created — nothing landed, so report the
@@ -235,7 +235,7 @@ func (r *restorer) ensureServerCanDecode(steps []restore.Step, logf Logf) error 
 		}
 		if warn && !warned[s.DLE] {
 			warned[s.DLE] = true
-			logf.log("WARNING: DLE %s is encrypted on the client (encrypt.at: client); a server-side restore can only decrypt it if its private key is escrowed in this server's gpg keyring — otherwise restore it on the client", s.DLE)
+			logf.Log("WARNING: DLE %s is encrypted on the client (encrypt.at: client); a server-side restore can only decrypt it if its private key is escrowed in this server's gpg keyring — otherwise restore it on the client", s.DLE)
 		}
 	}
 	return nil
@@ -371,7 +371,7 @@ func (r *restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 		if countFiles(st.Members) == 0 {
 			return nil
 		}
-		logf.log("extracting %d file(s) from %s %s L%d", countFiles(st.Members), st.SlotID, r.displayDLE(st.DLE), st.Level)
+		logf.Log("extracting %d file(s) from %s %s L%d", countFiles(st.Members), st.SlotID, r.displayDLE(st.DLE), st.Level)
 		rc, serr := open()
 		if serr != nil {
 			return serr

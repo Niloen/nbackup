@@ -73,7 +73,10 @@ registry registration, not a conditional in the core.
 | `recovery` | as-of-date browse tree + per-archive file selection (pure) | amrecover |
 | `drill` | recovery-drill ledger + risk-biased selection + failure taxonomy (pure) | amverify (orchestrated) |
 | `planner` | multilevel level scheduling (pure) | planner |
-| `engine` | the driver: parallel workers, retention, the slot session (open/finish/placement), drill selection; wires planner→`clerk`→media→catalog and delegates each operation's data movement to the `clerk` | driver |
+| `accounting` | medium capacity/retention/prune arithmetic: what a medium holds against its capacity, the protected residual a prune can't reclaim, per-run room, and the prune/reclaim mutators (distinct from the dollar-cost overlay in `engine/cost.go`) | (driver, capacity half) |
+| `scheduler` | the engine-side **driver** that feeds the pure `planner` its config/history/capacity inputs + the parallel size estimates, then applies the impure force-full post-pass `planner` can't (it probes the archiver's on-disk incremental state); also validates a run's config for previews | driver (planner front-end) |
+| `conductor` | the backup-run lane: executes one plan into one sealed slot — flush leftovers, pre-flight tools, alloc slot id, open the landing writer, run the `dumper` + `spool`, seal | driver (dump half) |
+| `engine` | the driver: composes the leaf operations, owns the slot session (open/finish/placement) and drill selection, and wires planner→`clerk`→media→catalog; delegates capacity to `accounting`, planning/estimation to `scheduler`, the dump run to `conductor`, and each operation's data movement to the `clerk` | driver |
 | `cli` | thin command wiring | amdump / amadmin |
 
 Dependencies flow one way: `cli → engine → {planner, retention, archiver, xfer,
@@ -557,11 +560,11 @@ watch in silence), then the dump phase takes over the same file under the real s
 (`running` → `sealing` → `done`/`failed`). The estimate phase is deliberately non-terminal
 so a `--watch` poll never stops on the gap between sizing and the first dumped byte; the
 estimate tracker's terminal "done" (which a live display uses to erase its region) is
-rewritten to `estimating` for the file by the engine's `keepEstimating`. Progress reporting never blocks or fails a backup (a write
+rewritten to `estimating` for the file by the conductor's `keepEstimating`. Progress reporting never blocks or fails a backup (a write
 error is a stderr warning). With no holding disk (the one-pass stream), there is no
 separate dumper/taper split, just one `dumping` state per DLE, metered by uncompressed
 bytes against the planner estimate. The measurement point is the source stage's byte tap
-(`programs.Cmd.Tap`) on the tar→compressor stream, wired in the engine's `backupItem`;
+(`programs.Cmd.Tap`) on the tar→compressor stream, wired in the dumper's `dumpArchive`;
 compressed bytes come from `archiveio`'s streaming meter as the payload drains into parts
 (both feed the same per-DLE counters, throttled so they can be polled live).
 
