@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/accounting"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
@@ -23,6 +24,7 @@ import (
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/dumper"
 	"github.com/Niloen/nbackup/internal/librarian"
+	"github.com/Niloen/nbackup/internal/logf"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/programs"
@@ -31,6 +33,7 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/retention"
+	"github.com/Niloen/nbackup/internal/scheduler"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/spool"
 	"github.com/Niloen/nbackup/internal/transform/compress"
@@ -43,14 +46,10 @@ import (
 	_ "github.com/Niloen/nbackup/internal/media/tape"
 )
 
-// Logf is an optional progress logger.
-type Logf func(format string, args ...any)
-
-func (l Logf) log(format string, args ...any) {
-	if l != nil {
-		l(format, args...)
-	}
-}
+// Logf is an optional progress logger. It is an alias for logf.Logf, which lives in
+// a leaf package so the lanes split out of the engine (accounting, scheduler,
+// conductor) can all take one without an import cycle through the engine.
+type Logf = logf.Logf
 
 // Engine holds the wired-up components for one configuration. It owns the media
 // volume; the catalog is a local cache the engine refreshes from the volume.
@@ -78,6 +77,8 @@ type Engine struct {
 	ver            *verifier                     // the verification operation (verify/drill checks); shares catalog + data path + decoder
 	cop            *copier                       // the copy operation (PlanCopy/CopySlot); shares catalog + data path + write machinery
 	rst            *restorer                     // the restore/recover operation; shares catalog + data path + decoder + config
+	acct           *accounting.Ledger            // capacity/retention arithmetic (stubbed; engine still does the real work)
+	sched          *scheduler.Scheduler          // plan/estimate/validate lane (stubbed; engine still does the real work)
 }
 
 // SetOperator attaches an operator so manual single-drive media can prompt for a
@@ -228,6 +229,8 @@ func New(cfg *config.Config) (*Engine, error) {
 		Threads:     e.fopts.Threads,
 	})
 	e.ver = e.newVerifier()
+	e.acct = e.newLedger()
+	e.sched = e.newScheduler()
 	e.cop = e.newCopier()
 	e.rst = e.newRestorer()
 	return e, nil
@@ -292,18 +295,10 @@ func (e *Engine) MediumAppendable(name string) bool {
 	return true
 }
 
-// MediumInfo is a per-medium summary for catalog visibility (`nb medium`): what
-// the medium is, how much it holds against its capacity, and (for labeled media)
-// the volume currently associated with it in the catalog.
-type MediumInfo struct {
-	Name     string
-	Type     string
-	Slots    int
-	Used     int64
-	Capacity int64  // 0 = unbounded
-	Volume   string // label name; "" for address-identified media (disk, s3)
-	Epoch    int
-}
+// MediumInfo is a per-medium summary for catalog visibility (`nb medium`). It is an
+// alias for accounting.MediumInfo (which now owns the type) so callers — including
+// internal/cli — are unaffected.
+type MediumInfo = accounting.MediumInfo
 
 // Media returns a summary of every configured medium, sorted by name.
 func (e *Engine) Media() []MediumInfo {
@@ -492,7 +487,7 @@ func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
 		}
 		vol, _, _, err := e.mediumVolume(name)
 		if err != nil {
-			logf.log("WARNING: skipping medium %q: %v", name, err)
+			logf.Log("WARNING: skipping medium %q: %v", name, err)
 			continue
 		}
 		vols[name] = vol
@@ -556,11 +551,11 @@ func announceExpectation(medium string, exp VolumeExpectation, logf Logf) {
 	case exp.Appendable || (exp.Label == "" && !exp.FreshVolume):
 		// appendable extends in place; address-identified media carry no label.
 	case exp.FreshVolume:
-		logf.log("medium %q: this run needs a fresh/blank volume (no reusable tape in the pool)", medium)
+		logf.Log("medium %q: this run needs a fresh/blank volume (no reusable tape in the pool)", medium)
 	case exp.Recycles > 0:
-		logf.log("medium %q: this run expects volume %q — recycling %d aged-out run(s) past retention", medium, exp.Label, exp.Recycles)
+		logf.Log("medium %q: this run expects volume %q — recycling %d aged-out run(s) past retention", medium, exp.Label, exp.Recycles)
 	default:
-		logf.log("medium %q: this run expects volume %q", medium, exp.Label)
+		logf.Log("medium %q: this run expects volume %q", medium, exp.Label)
 	}
 }
 
@@ -1042,7 +1037,7 @@ func (e *Engine) Run(now time.Time, logf Logf) (*catalog.Slot, error) {
 	if n, err := e.Flush(time.Now().UTC(), logf); err != nil {
 		return nil, fmt.Errorf("flush leftover holding-disk archives before dumping: %w", err)
 	} else if n > 0 {
-		logf.log("flushed %d leftover holding-disk archive(s) from a previous run", n)
+		logf.Log("flushed %d leftover holding-disk archive(s) from a previous run", n)
 	}
 	// Write the run-status file from the first phase — sizing every DLE, which can be
 	// slow — so `nb status` reflects the whole dump cycle, not dead air until the first
@@ -1057,7 +1052,7 @@ func (e *Engine) Run(now time.Time, logf Logf) (*catalog.Slot, error) {
 	plan := e.planWith(date, estSink)
 	forced := e.cat.ForcedFulls() // captured to consume once the run seals (the lock blocks a concurrent reset)
 	for _, w := range plan.Warnings {
-		logf.log("WARNING: %s", w)
+		logf.Log("WARNING: %s", w)
 	}
 
 	// Pre-flight before creating a slot: the compressor binary and every archiver.
@@ -1109,7 +1104,7 @@ func (e *Engine) Run(now time.Time, logf Logf) (*catalog.Slot, error) {
 	if !buffering {
 		if landWT.lib.CanSpan(landWT.partSize) {
 			if workers > 1 {
-				logf.log("medium %q can span volumes; running 1 worker (a single drive writes serially)", e.mediumName)
+				logf.Log("medium %q can span volumes; running 1 worker (a single drive writes serially)", e.mediumName)
 				workers = 1
 			}
 		} else {
@@ -1615,9 +1610,9 @@ func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) 
 			continue // reported below
 		}
 		if reason, ok := floor.ReasonArchive(a.Slot, a.DLE); ok {
-			logf.log("keep   %s %s  (%s)", a.Slot, e.DisplayDLE(a.DLE), reason)
+			logf.Log("keep   %s %s  (%s)", a.Slot, e.DisplayDLE(a.DLE), reason)
 		} else {
-			logf.log("keep   %s %s  (fits capacity)", a.Slot, e.DisplayDLE(a.DLE))
+			logf.Log("keep   %s %s  (fits capacity)", a.Slot, e.DisplayDLE(a.DLE))
 		}
 	}
 
@@ -1647,9 +1642,9 @@ func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) 
 				return eligible, freed, fmt.Errorf("update catalog cache: %w", err)
 			}
 			freed += r.Bytes
-			logf.log("DELETE %s %s  (%s freed, %s)", a.Slot, e.DisplayDLE(a.DLE), sizeutil.FormatBytes(r.Bytes), r.Note)
+			logf.Log("DELETE %s %s  (%s freed, %s)", a.Slot, e.DisplayDLE(a.DLE), sizeutil.FormatBytes(r.Bytes), r.Note)
 		} else {
-			logf.log("would delete %s %s  (%s, %s)", a.Slot, e.DisplayDLE(a.DLE), sizeutil.FormatBytes(r.Bytes), r.Note)
+			logf.Log("would delete %s %s  (%s, %s)", a.Slot, e.DisplayDLE(a.DLE), sizeutil.FormatBytes(r.Bytes), r.Note)
 		}
 	}
 	return eligible, freed, nil

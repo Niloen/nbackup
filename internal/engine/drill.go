@@ -196,7 +196,7 @@ func (e *Engine) drillTarget(t drill.Target, medium string, opts DrillOptions, l
 	if opts.Unattended {
 		if ok, reason := e.unattendedReachable(medium, t.Steps); !ok {
 			res.Class, res.Detail = drill.ClassSkipped, reason
-			logf.log("drill %s: SKIPPED — %s", res.DLEDisplay, reason)
+			logf.Log("drill %s: SKIPPED — %s", res.DLEDisplay, reason)
 			return res
 		}
 	}
@@ -218,9 +218,9 @@ func (e *Engine) drillTarget(t drill.Target, medium string, opts DrillOptions, l
 	res.Class, res.Detail = cls, detail
 	res.OK = cls == drill.ClassNone
 	if res.OK {
-		logf.log("drill %s [%s] as of %s on %q: OK (%s)", res.DLEDisplay, opts.Tier, t.AsOf, medium, sizeutil.FormatBytes(res.Bytes))
+		logf.Log("drill %s [%s] as of %s on %q: OK (%s)", res.DLEDisplay, opts.Tier, t.AsOf, medium, sizeutil.FormatBytes(res.Bytes))
 	} else {
-		logf.log("drill %s [%s] as of %s on %q: FAIL [%s] %s", res.DLEDisplay, opts.Tier, t.AsOf, medium, cls, detail)
+		logf.Log("drill %s [%s] as of %s on %q: FAIL [%s] %s", res.DLEDisplay, opts.Tier, t.AsOf, medium, cls, detail)
 	}
 	return res
 }
@@ -296,7 +296,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		if err != nil {
 			return classifyOpenErr(err), err.Error()
 		}
-		logf.log("drill-restoring %s %s L%d", step.SlotID, e.DisplayDLE(step.DLE), step.Level)
+		logf.Log("drill-restoring %s %s L%d", step.SlotID, e.DisplayDLE(step.DLE), step.Level)
 		// The transfer: read → decode (server-side Filters) → tar -x extract. The transfer's
 		// role tags the fault: a Sink (tar) fault is a chain-composition failure (Chain); a
 		// Source/Filters fault — an unreadable part or a decrypt/decompress child — is a decode
@@ -368,7 +368,7 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 	cmd.Stdin = in
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
-	logf.log("stock-restoring %s %s L%d via documented one-liner: %s", step.SlotID, step.DLE, step.Level, script)
+	logf.Log("stock-restoring %s %s L%d via documented one-liner: %s", step.SlotID, step.DLE, step.Level, script)
 	if err := cmd.Run(); err != nil {
 		return drill.ClassPipeline, fmt.Sprintf("stock one-liner failed: %v\n%s", err, strings.TrimSpace(stderr.String()))
 	}
