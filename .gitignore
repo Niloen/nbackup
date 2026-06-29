@@ -18,3 +18,10 @@
 
 .idea/
 nbackup-state/
+
+# Jekyll docs-site local preview artifacts (GitHub Pages builds from source)
+/docs/_site/
+/docs/.jekyll-cache/
+/docs/.jekyll-metadata
+/docs/Gemfile.lock
+/docs/vendor/

@@ -1,0 +1,42 @@
+title: Niloen Backup
+description: >-
+  Niloen Backup (NBackup) — an Amanda-inspired, slot-based backup system with
+  first-class disk, cloud, and tape storage. Backups are immutable, self-describing,
+  and restore with stock tools.
+remote_theme: just-the-docs/just-the-docs
+
+# When published as a GitHub project page at https://<owner>.github.io/nbackup/,
+# set url/baseurl to match. For a user/org page or custom domain, blank them out.
+url: https://niloen.github.io
+baseurl: /nbackup
+
+# Just-the-Docs options
+color_scheme: dark
+search_enabled: true
+search:
+  heading_level: 3
+  previews: 3
+
+heading_anchors: true
+
+# A persistent link back to the source in the top-right.
+aux_links:
+  GitHub:
+    - https://github.com/Niloen/nbackup
+aux_links_new_tab: true
+
+# Footer
+back_to_top: true
+back_to_top_text: "Back to top"
+last_edit_timestamp: false
+
+# Internal design notes live under docs/design/ and are intentionally kept out of
+# the published navigation (they remain readable as raw files in the repo).
+exclude:
+  - design/
+  - Gemfile
+  - Gemfile.lock
+  - vendor/
+
+plugins:
+  - jekyll-remote-theme
