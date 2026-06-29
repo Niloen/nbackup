@@ -423,9 +423,9 @@ func (l *Librarian) oldestReusable(tried map[string]bool, now time.Time) (catalo
 		}
 	}
 	sort.Slice(pool, func(i, j int) bool { return pool[i].Label.WrittenAt.Before(pool[j].Label.WrittenAt) })
-	floor := retention.Compute(l.cat.SlotsOn(l.medium), l.minAge, now)
+	floor := retention.Compute(l.cat.ArchivesOn(l.medium), l.minAge, now)
 	for _, v := range pool {
-		if _, _, kept := floor.First(l.cat.SlotsOnLabel(v.Label.Name)); kept {
+		if _, _, kept := floor.First(l.cat.SlotIDsOnLabel(v.Label.Name)); kept {
 			continue // some archive on this tape is still within retention — not reusable
 		}
 		return v, true
@@ -455,8 +455,8 @@ func (l *Librarian) acceptOrRecycle(appendable bool, tried map[string]bool, now 
 	if lerr != nil || !labeled || lbl.Pool != l.medium || tried[lbl.Name] {
 		return "", 0, false, verr // not an in-pool tape we may recycle this run
 	}
-	floor := retention.Compute(l.cat.SlotsOn(l.medium), l.minAge, now)
-	if _, _, kept := floor.First(l.cat.SlotsOnLabel(lbl.Name)); kept {
+	floor := retention.Compute(l.cat.ArchivesOn(l.medium), l.minAge, now)
+	if _, _, kept := floor.First(l.cat.SlotIDsOnLabel(lbl.Name)); kept {
 		return "", 0, false, verr // still within retention — not reusable
 	}
 	if err := l.recycle(lbl, now, logf); err != nil {
@@ -526,13 +526,13 @@ func (l *Librarian) readLoadedLabel() (record.Label, bool, error) {
 // keeps the original "no further writable bay" wording. tried excludes volumes already
 // written this run (their fresh content is not yet in the catalog).
 func (l *Librarian) noReusableErr(tried map[string]bool, now time.Time, lastErr error) error {
-	floor := retention.Compute(l.cat.SlotsOn(l.medium), l.minAge, now)
+	floor := retention.Compute(l.cat.ArchivesOn(l.medium), l.minAge, now)
 	protected := false
 	for _, v := range l.cat.Volumes() {
 		if v.Label.Pool != l.medium || tried[v.Label.Name] {
 			continue
 		}
-		if _, _, kept := floor.First(l.cat.SlotsOnLabel(v.Label.Name)); kept {
+		if _, _, kept := floor.First(l.cat.SlotIDsOnLabel(v.Label.Name)); kept {
 			protected = true
 			break
 		}
@@ -544,7 +544,7 @@ func (l *Librarian) noReusableErr(tried map[string]bool, now time.Time, lastErr 
 	if l.minAge > 0 {
 		var soonest time.Time
 		for _, s := range l.cat.SlotsOn(l.medium) {
-			d, err := record.ParseDateField(s.Date)
+			d, err := record.ParseDateField(s.Date())
 			if err != nil {
 				continue
 			}
@@ -874,8 +874,8 @@ func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration
 		// the catalog rather than scanning the mounted reel correctly attributes a
 		// spanned slot to every tape it touches — even the head tape, whose seal
 		// record lives only on the last tape of the span.
-		floor := retention.Compute(l.cat.SlotsOn(l.medium), minAge, now)
-		if id, reason, ok := floor.First(l.cat.SlotsOnLabel(cur.Name)); ok && !force {
+		floor := retention.Compute(l.cat.ArchivesOn(l.medium), minAge, now)
+		if id, reason, ok := floor.First(l.cat.SlotIDsOnLabel(cur.Name)); ok && !force {
 			return fmt.Errorf("volume %q still holds protected slot %s (%s); refusing to relabel (use --force)", cur.Name, id, reason)
 		}
 		epoch = cur.Epoch + 1

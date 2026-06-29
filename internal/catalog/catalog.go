@@ -41,8 +41,8 @@ const CacheFile = "catalog.json"
 // Entry is the catalog's per-slot record: one logical slot plus every place a
 // copy of it lives.
 type Entry struct {
-	Slot       *record.Slot `json:"slot"`       // medium-independent content (from the seal)
-	Placements []Placement  `json:"placements"` // one per medium holding a copy
+	Slot       *Slot       `json:"slot"`       // medium-independent content, grouped from the archives' commit footers
+	Placements []Placement `json:"placements"` // one per medium holding a copy
 }
 
 // Placement is one copy of a slot on one medium. The copy's archives may span
@@ -183,47 +183,27 @@ func Open(workdir string) (*Catalog, error) {
 //
 // Every catalog mutation is single-threaded (a run routes all placement writes through one
 // goroutine), so no locking is needed.
-func (c *Catalog) AddArchive(slot *record.Slot, medium string, arch record.Archive, pos ArchivePos) error {
-	c.addArchive(slot, medium, arch, pos)
+func (c *Catalog) AddArchive(arch record.Archive, medium string, pos ArchivePos) error {
+	c.addArchive(arch, medium, pos)
 	c.sortEntries()
 	return c.persist()
 }
 
-// addArchive is the in-memory merge AddArchive wraps: it creates the slot entry from `slot`'s
-// identity on first sight and merges the archive's content + placement position, but neither
-// sorts nor persists — for a bulk caller (a rebuild scan) that persists once at the end. The
-// catalog cache holds no member lists (they live in the member-index cache + the on-medium
-// index), so members are cleared here.
-func (c *Catalog) addArchive(slot *record.Slot, medium string, arch record.Archive, pos ArchivePos) {
-	e := c.entryByID(slot.ID)
+// addArchive is the in-memory merge AddArchive wraps: it creates the slot entry from the
+// archive's own slot tag (arch.Slot) on first sight and merges the archive's content +
+// placement position, but neither sorts nor persists — for a bulk caller (a rebuild scan)
+// that persists once at the end. The catalog cache holds no member lists (they live in the
+// member-index cache + the on-medium index), so members are cleared here.
+func (c *Catalog) addArchive(arch record.Archive, medium string, pos ArchivePos) {
+	e := c.entryByID(arch.Slot)
 	if e == nil {
-		ident := *slot
-		ident.Archives, ident.TotalBytes = nil, 0
-		e = &Entry{Slot: &ident}
+		e = &Entry{Slot: &Slot{ID: arch.Slot}}
 		c.entries = append(c.entries, e)
 	}
 	arch.Members = nil
-	mergeSlotArchive(e.Slot, arch)
+	e.Slot.addArchive(arch)
 	e.addPlacementPos(medium, pos)
 	c.loaded = true
-}
-
-// mergeSlotArchive adds a's content to the slot, replacing any prior archive of the same
-// (DLE, level) and keeping TotalBytes in step. The slot content is the union of every archive
-// the run produces, independent of which medium currently holds each copy.
-func mergeSlotArchive(s *record.Slot, a record.Archive) {
-	for i := range s.Archives {
-		if s.Archives[i].DLE == a.DLE && s.Archives[i].Level == a.Level {
-			s.Archives[i] = a
-			s.TotalBytes = 0
-			for _, x := range s.Archives {
-				s.TotalBytes += x.Compressed
-			}
-			return
-		}
-	}
-	s.Archives = append(s.Archives, a)
-	s.TotalBytes += a.Compressed
 }
 
 // addPlacementPos records archive position pos on the entry's copy on medium, creating the
@@ -314,7 +294,7 @@ func (c *Catalog) RemoveArchive(slotID, medium, dle string) (placementGone, entr
 	}
 	e.Placements = kept
 	if !dleStillHeld {
-		e.Slot.DropArchive(dle)
+		e.Slot.dropArchive(dle)
 	}
 	if len(e.Placements) == 0 {
 		c.removeEntry(slotID)
@@ -343,8 +323,8 @@ func (c *Catalog) RemoveVolume(name string) error {
 }
 
 // Slots returns the cached slots in run order.
-func (c *Catalog) Slots() []*record.Slot {
-	out := make([]*record.Slot, 0, len(c.entries))
+func (c *Catalog) Slots() []*Slot {
+	out := make([]*Slot, 0, len(c.entries))
 	for _, e := range c.entries {
 		out = append(out, e.Slot)
 	}
@@ -352,7 +332,7 @@ func (c *Catalog) Slots() []*record.Slot {
 }
 
 // ReadSlot returns a cached slot by ID.
-func (c *Catalog) ReadSlot(id string) (*record.Slot, error) {
+func (c *Catalog) ReadSlot(id string) (*Slot, error) {
 	if e := c.entryByID(id); e != nil {
 		return e.Slot, nil
 	}
@@ -368,8 +348,8 @@ func (c *Catalog) Placements(slotID string) []Placement {
 }
 
 // SlotsOn returns the slots with a copy on the named medium, in run order.
-func (c *Catalog) SlotsOn(medium string) []*record.Slot {
-	var out []*record.Slot
+func (c *Catalog) SlotsOn(medium string) []*Slot {
+	var out []*Slot
 	for _, e := range c.entries {
 		if e.placedOn(medium) {
 			out = append(out, e.Slot)
@@ -380,12 +360,50 @@ func (c *Catalog) SlotsOn(medium string) []*record.Slot {
 
 // SlotsOnLabel returns the slots with a copy on the volume with the given label,
 // in run order — used to tell whether a tape already holds a run.
-func (c *Catalog) SlotsOnLabel(label string) []*record.Slot {
-	var out []*record.Slot
+func (c *Catalog) SlotsOnLabel(label string) []*Slot {
+	var out []*Slot
 	for _, e := range c.entries {
 		for _, p := range e.Placements {
 			if p.OnLabel(label) {
 				out = append(out, e.Slot)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// Archives returns every cached archive (each carrying its slot tag), across all slots, in
+// run order — the corpus the policy layer (restore, recovery, drill) reasons over.
+func (c *Catalog) Archives() []record.Archive {
+	var out []record.Archive
+	for _, e := range c.entries {
+		out = append(out, e.Slot.Archives...)
+	}
+	return out
+}
+
+// ArchivesOn returns the archives of every slot with a copy on the named medium — the
+// per-medium corpus retention and reclamation reason over. The slot's content is its archives
+// across media, scoped here to slots present on the medium (matching SlotsOn).
+func (c *Catalog) ArchivesOn(medium string) []record.Archive {
+	var out []record.Archive
+	for _, e := range c.entries {
+		if e.placedOn(medium) {
+			out = append(out, e.Slot.Archives...)
+		}
+	}
+	return out
+}
+
+// SlotIDsOnLabel returns the ids of the slots with a copy on the volume with the given label,
+// in run order — what a volume's reusability check (retention.Floor.First) consults.
+func (c *Catalog) SlotIDsOnLabel(label string) []string {
+	var out []string
+	for _, e := range c.entries {
+		for _, p := range e.Placements {
+			if p.OnLabel(label) {
+				out = append(out, e.Slot.ID)
 				break
 			}
 		}
@@ -398,7 +416,7 @@ func (c *Catalog) MediumBytes(medium string) int64 {
 	var total int64
 	for _, e := range c.entries {
 		if e.placedOn(medium) {
-			total += e.Slot.TotalBytes
+			total += e.Slot.TotalBytes()
 		}
 	}
 	return total
@@ -428,7 +446,7 @@ func (c *Catalog) History() *History {
 	for _, e := range c.entries { // already in run order
 		s := e.Slot
 		for _, a := range s.Archives {
-			h.RecordRun(a.DLE, s.ID, s.Date, a.Level)
+			h.RecordRun(a.DLE, s.ID, s.Date(), a.Level)
 		}
 	}
 	return h
@@ -526,7 +544,7 @@ func (c *Catalog) removeEntry(id string) {
 }
 
 func (c *Catalog) sortEntries() {
-	sort.Slice(c.entries, func(i, j int) bool { return record.Less(c.entries[i].Slot, c.entries[j].Slot) })
+	sort.Slice(c.entries, func(i, j int) bool { return record.SlotIDLess(c.entries[i].Slot.ID, c.entries[j].Slot.ID) })
 }
 
 func (c *Catalog) persist() error {

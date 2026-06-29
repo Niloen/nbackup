@@ -687,7 +687,7 @@ func (e *Engine) ExpectedVolume(now time.Time) (VolumeExpectation, bool) {
 	exp.VolumeBytes = e.profile.VolumeSize()
 	if exp.Appendable && !exp.FreshVolume {
 		for _, s := range e.cat.SlotsOnLabel(exp.Label) {
-			exp.UsedBytes += s.TotalBytes
+			exp.UsedBytes += s.TotalBytes()
 		}
 	}
 	return exp, true
@@ -722,9 +722,9 @@ func (e *Engine) expectedVolumeFor(medium string, now time.Time) VolumeExpectati
 	// slots. Scoping to e.cat.Slots() (all media) would recycle a tape merely
 	// because a newer full landed on disk — discarding the offsite copy and the
 	// redundancy double storage exists to provide.
-	floor := retention.Compute(e.cat.SlotsOn(medium), minAge, now)
+	floor := retention.Compute(e.cat.ArchivesOn(medium), minAge, now)
 	for _, v := range pool {
-		held := e.cat.SlotsOnLabel(v.Label.Name)
+		held := e.cat.SlotIDsOnLabel(v.Label.Name)
 		if _, _, ok := floor.First(held); ok {
 			continue // some slot on this tape is still kept — not reusable
 		}
@@ -962,11 +962,11 @@ func (e *Engine) poolRoom(now time.Time) int64 {
 		return -1
 	}
 	slots := e.cat.SlotsOn(e.mediumName)
-	floor := retention.Compute(slots, e.minAge, now)
+	floor := retention.Compute(e.cat.ArchivesOn(e.mediumName), e.minAge, now)
 	var keptBytes int64
 	for _, s := range slots {
 		if floor.Keeps(s.ID) {
-			keptBytes += s.TotalBytes
+			keptBytes += s.TotalBytes()
 		}
 	}
 	if room := capacity - keptBytes; room > 0 {
@@ -1015,7 +1015,7 @@ func localDay(instant time.Time, loc *time.Location) time.Time {
 }
 
 // Run executes the plan for a date, producing one sealed slot.
-func (e *Engine) Run(now time.Time, logf Logf) (*record.Slot, error) {
+func (e *Engine) Run(now time.Time, logf Logf) (*catalog.Slot, error) {
 	// `now` is the run's single time source: the precise instant the slot is stamped
 	// committed (CreatedAt) and the moment retention is judged against. The
 	// run date — the logical key for the slot id, planning, and restore ordering — is
@@ -1080,11 +1080,11 @@ func (e *Engine) Run(now time.Time, logf Logf) (*record.Slot, error) {
 		}
 	}
 
-	slotID, seq, err := e.allocSlotID(date)
+	slotID, _, err := e.allocSlotID(date)
 	if err != nil {
 		return nil, err
 	}
-	spec := archiveio.SlotSpec{ID: slotID, Date: record.DateString(date), Sequence: seq, Generator: "nbdump", CreatedAt: now}
+	spec := archiveio.SlotSpec{ID: slotID, CreatedAt: now}
 
 	// The producers dump every DLE; the drain consumes them — buffering each onto a holding disk
 	// (one or more media marked `holding: true`) and copying it to the authoritative landing, or,
@@ -1175,7 +1175,7 @@ func planProgress(items []planner.Item) []progress.Plan {
 // runOrchestrated executes a dump: it opens the holding disks (the buffer the producers stage onto),
 // builds the spool over the already-opened landing writer, runs the producers, and seals the
 // landing the spool authored. The spool is the run's sole catalog writer.
-func (e *Engine) runOrchestrated(plan *planner.Plan, workers, landingSlots int, spec archiveio.SlotSpec, holdingNames []string, landWT *writeTarget, tr *progress.Tracker, now time.Time, logf Logf) (*record.Slot, error) {
+func (e *Engine) runOrchestrated(plan *planner.Plan, workers, landingSlots int, spec archiveio.SlotSpec, holdingNames []string, landWT *writeTarget, tr *progress.Tracker, now time.Time, logf Logf) (*catalog.Slot, error) {
 	disks := make([]spool.Disk, len(holdingNames))
 	for i, name := range holdingNames {
 		wt, err := e.prepareWriter(name, spec, now, logf)
@@ -1206,7 +1206,7 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers, landingSlots int, 
 	// slot the run authored.
 	slot, err := e.cat.ReadSlot(spec.ID)
 	if err != nil {
-		slot = record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
+		slot = &catalog.Slot{ID: spec.ID}
 	}
 	return slot, nil
 }
@@ -1230,8 +1230,8 @@ func firstErr(errs ...error) error {
 func (e *Engine) latestSlotDate() (string, bool) {
 	latest := ""
 	for _, s := range e.cat.Slots() {
-		if s.Date > latest {
-			latest = s.Date
+		if d := s.Date(); d > latest {
+			latest = d
 		}
 	}
 	return latest, latest != ""
@@ -1342,8 +1342,8 @@ func (e *Engine) RestoreTo(slotID, dleName, destHost, destPath string, logf Logf
 // AddArchive records a run's archives — together they are the clerk's Map role (the
 // engine keeps the catalog store + the directory/retention slices).
 func (e *Engine) PlacementsFor(slotID string) []catalog.Placement { return e.placementsFor(slotID) }
-func (e *Engine) AddArchive(slot *record.Slot, medium string, arch record.Archive, pos record.ArchivePos) error {
-	return e.cat.AddArchive(slot, medium, arch, pos)
+func (e *Engine) AddArchive(arch record.Archive, medium string, pos record.ArchivePos) error {
+	return e.cat.AddArchive(arch, medium, pos)
 }
 func (e *Engine) RemoveArchive(slotID, medium, dle string) (placementGone, entryGone bool, err error) {
 	return e.cat.RemoveArchive(slotID, medium, dle)
@@ -1527,10 +1527,10 @@ func (e *Engine) MediumProtectedOverCapacity(name string, now time.Time) (over b
 		return false, 0, 0, fmt.Errorf("unknown medium %q", name)
 	}
 	capacity = prof.TotalBytes()
-	slots := e.cat.SlotsOn(name)
-	floor := retention.Compute(slots, e.cfg.MinAgeFor(def), now)
+	archives := e.cat.ArchivesOn(name)
+	floor := retention.Compute(archives, e.cfg.MinAgeFor(def), now)
 	var reclaimable int64
-	for _, r := range prof.Reclaim(slots, floor, now) {
+	for _, r := range prof.Reclaim(archives, floor, now) {
 		reclaimable += r.Bytes
 	}
 	residual = e.cat.MediumBytes(name) - reclaimable
@@ -1546,14 +1546,12 @@ func (e *Engine) MediumProtectionIsAgeBound(name string, now time.Time) bool {
 	if !ok {
 		return true
 	}
-	slots := e.cat.SlotsOn(name)
-	floor := retention.Compute(slots, e.cfg.MinAgeFor(def), now)
-	for _, s := range slots {
-		for _, a := range s.Archives {
-			reason, ok := floor.ReasonArchive(s.ID, a.DLE)
-			if ok && !strings.Contains(reason, "minimum age") {
-				return false // a recovery-chain pin that shortening minimum_age can't release
-			}
+	archives := e.cat.ArchivesOn(name)
+	floor := retention.Compute(archives, e.cfg.MinAgeFor(def), now)
+	for _, a := range archives {
+		reason, ok := floor.ReasonArchive(a.Slot, a.DLE)
+		if ok && !strings.Contains(reason, "minimum age") {
+			return false // a recovery-chain pin that shortening minimum_age can't release
 		}
 	}
 	return true
@@ -1600,28 +1598,26 @@ func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) 
 		return 0, 0, err
 	}
 	minAge := e.cfg.MinAgeFor(def)
-	slots := e.cat.SlotsOn(mediumName)
-	floor := retention.Compute(slots, minAge, now)
+	archives := e.cat.ArchivesOn(mediumName)
+	floor := retention.Compute(archives, minAge, now)
 
 	// Reclamation is per archive (slot+DLE): a medium's Reclaim walks the oldest
 	// non-protected archives, so an old slot can lose one DLE's image while keeping
 	// another the chain still needs.
 	type archiveRef struct{ slot, dle string }
 	reclaim := map[archiveRef]media.Reclamation{}
-	for _, r := range profile.Reclaim(slots, floor, now) {
+	for _, r := range profile.Reclaim(archives, floor, now) {
 		reclaim[archiveRef{r.SlotID, r.DLE}] = r
 	}
 
-	for _, s := range slots {
-		for _, a := range s.Archives {
-			if _, ok := reclaim[archiveRef{s.ID, a.DLE}]; ok {
-				continue // reported below
-			}
-			if reason, ok := floor.ReasonArchive(s.ID, a.DLE); ok {
-				logf.log("keep   %s %s  (%s)", s.ID, e.DisplayDLE(a.DLE), reason)
-			} else {
-				logf.log("keep   %s %s  (fits capacity)", s.ID, e.DisplayDLE(a.DLE))
-			}
+	for _, a := range archives {
+		if _, ok := reclaim[archiveRef{a.Slot, a.DLE}]; ok {
+			continue // reported below
+		}
+		if reason, ok := floor.ReasonArchive(a.Slot, a.DLE); ok {
+			logf.log("keep   %s %s  (%s)", a.Slot, e.DisplayDLE(a.DLE), reason)
+		} else {
+			logf.log("keep   %s %s  (fits capacity)", a.Slot, e.DisplayDLE(a.DLE))
 		}
 	}
 
@@ -1632,30 +1628,28 @@ func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) 
 			return eligible, freed, err
 		}
 	}
-	for _, s := range slots {
-		for _, a := range s.Archives {
-			r, ok := reclaim[archiveRef{s.ID, a.DLE}]
-			if !ok {
-				continue
-			}
-			eligible++
-			if apply {
-				// Reclaim this archive's copy on this medium only — its files, one
-				// position at a time; the slot (and the archive's copies elsewhere)
-				// survives in the catalog.
-				for _, pos := range archivePositions(e.cat.Placements(s.ID), mediumName, a.DLE) {
-					if err := vol.RemoveFile(pos); err != nil {
-						return eligible, freed, fmt.Errorf("delete %s %s: %w", s.ID, a.DLE, err)
-					}
+	for _, a := range archives {
+		r, ok := reclaim[archiveRef{a.Slot, a.DLE}]
+		if !ok {
+			continue
+		}
+		eligible++
+		if apply {
+			// Reclaim this archive's copy on this medium only — its files, one
+			// position at a time; the slot (and the archive's copies elsewhere)
+			// survives in the catalog.
+			for _, pos := range archivePositions(e.cat.Placements(a.Slot), mediumName, a.DLE) {
+				if err := vol.RemoveFile(pos); err != nil {
+					return eligible, freed, fmt.Errorf("delete %s %s: %w", a.Slot, a.DLE, err)
 				}
-				if _, _, err := e.cat.RemoveArchive(s.ID, mediumName, a.DLE); err != nil {
-					return eligible, freed, fmt.Errorf("update catalog cache: %w", err)
-				}
-				freed += r.Bytes
-				logf.log("DELETE %s %s  (%s freed, %s)", s.ID, e.DisplayDLE(a.DLE), sizeutil.FormatBytes(r.Bytes), r.Note)
-			} else {
-				logf.log("would delete %s %s  (%s, %s)", s.ID, e.DisplayDLE(a.DLE), sizeutil.FormatBytes(r.Bytes), r.Note)
 			}
+			if _, _, err := e.cat.RemoveArchive(a.Slot, mediumName, a.DLE); err != nil {
+				return eligible, freed, fmt.Errorf("update catalog cache: %w", err)
+			}
+			freed += r.Bytes
+			logf.log("DELETE %s %s  (%s freed, %s)", a.Slot, e.DisplayDLE(a.DLE), sizeutil.FormatBytes(r.Bytes), r.Note)
+		} else {
+			logf.log("would delete %s %s  (%s, %s)", a.Slot, e.DisplayDLE(a.DLE), sizeutil.FormatBytes(r.Bytes), r.Note)
 		}
 	}
 	return eligible, freed, nil

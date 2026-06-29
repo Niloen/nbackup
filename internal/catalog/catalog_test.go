@@ -24,7 +24,7 @@ func newVolume(t *testing.T, path string) media.Volume {
 
 // putSlot writes a committed slot's archive files the way the writer would: each archive's
 // part(s), then its member index and commit footer — the per-archive marker.
-func putSlot(t *testing.T, v media.Volume, s *record.Slot) {
+func putSlot(t *testing.T, v media.Volume, s *Slot) {
 	t.Helper()
 	for _, a := range s.Archives {
 		putPart(t, v, s.ID, a)
@@ -69,8 +69,12 @@ func putCommit(t *testing.T, v media.Volume, slotID string, a record.Archive) {
 	}
 }
 
-func committedSlot(id, date string, seq int, archives ...record.Archive) *record.Slot {
-	return &record.Slot{ID: id, Date: date, Sequence: seq, Archives: archives, TotalBytes: 100}
+func committedSlot(id, date string, seq int, archives ...record.Archive) *Slot {
+	_, _ = date, seq // the date and sequence are encoded in the id
+	for i := range archives {
+		archives[i].Slot = id
+	}
+	return &Slot{ID: id, Archives: archives}
 }
 
 // placementPos finds an archive's first recorded part position in any of a slot's
@@ -193,8 +197,8 @@ func TestRemoveArchiveDropsCopylessDLE(t *testing.T) {
 	if len(slot.Archives) != 1 || slot.Archives[0].DLE != "h-shared" {
 		t.Errorf("slot archives = %+v, want only h-shared", slot.Archives)
 	}
-	if slot.TotalBytes != 100 {
-		t.Errorf("TotalBytes = %d, want 100 (h-leo's 100 dropped)", slot.TotalBytes)
+	if slot.TotalBytes() != 100 {
+		t.Errorf("TotalBytes = %d, want 100 (h-leo's 100 dropped)", slot.TotalBytes())
 	}
 }
 

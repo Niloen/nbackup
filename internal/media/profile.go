@@ -33,8 +33,10 @@ type Profile interface {
 	// retention floor (what must never be reclaimed, computed by the retention
 	// package). It returns the reclamations to perform, in deletion order. The
 	// granularity is the medium's own: an object store reclaims per archive
-	// (slot+DLE); a whole-volume medium (tape) reclaims nothing here.
-	Reclaim(slots []*record.Slot, keep Retention, now time.Time) []Reclamation
+	// (slot+DLE); a whole-volume medium (tape) reclaims nothing here. It reasons over
+	// the medium's archives directly (each carrying its slot tag) — a slot is just
+	// their grouping, which reclamation does not need.
+	Reclaim(archives []record.Archive, keep Retention, now time.Time) []Reclamation
 }
 
 // Retention reports which archives reclamation must never delete — the floor the
@@ -92,39 +94,40 @@ func (p sizeProfile) TotalBytes() int64 { return p.capacity }
 func (p sizeProfile) VolumeSize() int64 { return 0 }
 
 // Reclaim deletes the oldest non-protected archives until total <= capacity.
-// Reclamation is per archive (slot+DLE), not per slot: because the retention floor
-// is per-archive (a DLE's chain is independent of its slot-mates'), an old slot
-// often holds one DLE whose chain has moved on — reclaimable — beside another the
-// chain still needs. Walking archives oldest-first reclaims exactly the dead ones,
-// freeing space a slot-granular pass would strand behind a single still-pinned DLE.
-func (p sizeProfile) Reclaim(slots []*record.Slot, keep Retention, now time.Time) []Reclamation {
+// Reclamation is per archive (slot+DLE): because the retention floor is per-archive (a
+// DLE's chain is independent of its slot-mates'), an old slot often holds one DLE whose
+// chain has moved on — reclaimable — beside another the chain still needs. Walking
+// archives oldest-first reclaims exactly the dead ones, freeing space a slot-granular
+// pass would strand behind a single still-pinned DLE. Archives are ordered by their slot
+// (run order, oldest first) then DLE for a deterministic plan.
+func (p sizeProfile) Reclaim(archives []record.Archive, keep Retention, now time.Time) []Reclamation {
 	if p.capacity <= 0 {
 		return nil // unbounded: nothing to reclaim
 	}
 	var total int64
-	for _, s := range slots {
-		total += s.TotalBytes
+	for _, a := range archives {
+		total += a.Compressed
 	}
 	if total <= p.capacity {
 		return nil
 	}
-	ordered := append([]*record.Slot(nil), slots...)
-	sort.Slice(ordered, func(i, j int) bool { return record.Less(ordered[i], ordered[j]) }) // oldest first
-	var out []Reclamation
-	for _, s := range ordered {
-		// Within a slot, walk archives in DLE order for a deterministic plan.
-		archives := append([]record.Archive(nil), s.Archives...)
-		sort.Slice(archives, func(i, j int) bool { return archives[i].DLE < archives[j].DLE })
-		for _, a := range archives {
-			if total <= p.capacity {
-				return out
-			}
-			if keep.KeepsArchive(s.ID, a.DLE) {
-				continue
-			}
-			out = append(out, Reclamation{SlotID: s.ID, DLE: a.DLE, Bytes: a.Compressed, Note: "over capacity"})
-			total -= a.Compressed
+	ordered := append([]record.Archive(nil), archives...)
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].Slot != ordered[j].Slot {
+			return record.SlotIDLess(ordered[i].Slot, ordered[j].Slot) // oldest slot first
 		}
+		return ordered[i].DLE < ordered[j].DLE
+	})
+	var out []Reclamation
+	for _, a := range ordered {
+		if total <= p.capacity {
+			return out
+		}
+		if keep.KeepsArchive(a.Slot, a.DLE) {
+			continue
+		}
+		out = append(out, Reclamation{SlotID: a.Slot, DLE: a.DLE, Bytes: a.Compressed, Note: "over capacity"})
+		total -= a.Compressed
 	}
 	return out
 }
@@ -184,7 +187,7 @@ func (p volumeProfile) VolumeSize() int64 { return p.volumeSize }
 // (`librarian.Advance` / `acceptOrRecycle`), keeping the same label and advancing its
 // epoch. Tape capacity is structural (the depth of the label pool is the retention), so
 // there is nothing for a capacity-driven prune to delete here.
-func (p volumeProfile) Reclaim(slots []*record.Slot, keep Retention, now time.Time) []Reclamation {
+func (p volumeProfile) Reclaim(archives []record.Archive, keep Retention, now time.Time) []Reclamation {
 	return nil
 }
 

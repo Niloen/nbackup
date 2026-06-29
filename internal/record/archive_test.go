@@ -3,7 +3,6 @@ package record
 import (
 	"sort"
 	"testing"
-	"time"
 )
 
 func TestIDAndParse(t *testing.T) {
@@ -83,47 +82,29 @@ func TestIDSortsLexically(t *testing.T) {
 	}
 }
 
-// TestOrderingSequenceNumeric ensures same-day slots sort by numeric sequence,
-// not lexicographically (so .10 follows .2).
-func TestOrderingSequenceNumeric(t *testing.T) {
-	slots := []*Slot{
-		{Date: "2026-06-21", Sequence: 10},
-		{Date: "2026-06-21", Sequence: 2},
-		{Date: "2026-06-20", Sequence: 1},
-		{Date: "2026-06-21", Sequence: 1},
+// TestSlotIDLess ensures same-day slot ids order by numeric sequence, not
+// lexicographically (so .010 follows .002), and that a non-slot-shaped id falls back
+// to a plain lexical compare.
+func TestSlotIDLess(t *testing.T) {
+	ids := []string{
+		IDFromParts("2026-06-21", 10),
+		IDFromParts("2026-06-21", 2),
+		IDFromParts("2026-06-20", 1),
+		IDFromParts("2026-06-21", 1),
 	}
-	sort.Slice(slots, func(i, j int) bool { return Less(slots[i], slots[j]) })
-	want := []struct {
-		date string
-		seq  int
-	}{
-		{"2026-06-20", 1},
-		{"2026-06-21", 1},
-		{"2026-06-21", 2},
-		{"2026-06-21", 10},
+	sort.Slice(ids, func(i, j int) bool { return SlotIDLess(ids[i], ids[j]) })
+	want := []string{
+		IDFromParts("2026-06-20", 1),
+		IDFromParts("2026-06-21", 1),
+		IDFromParts("2026-06-21", 2),
+		IDFromParts("2026-06-21", 10),
 	}
-	for i, w := range want {
-		if slots[i].Date != w.date || slots[i].Sequence != w.seq {
-			t.Errorf("position %d = (%s,%d), want (%s,%d)", i, slots[i].Date, slots[i].Sequence, w.date, w.seq)
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Errorf("position %d = %s, want %s", i, ids[i], want[i])
 		}
 	}
-}
-
-// TestLifecycle covers the slot's content API: AddArchive keeps TotalBytes in sync, and
-// LastArchiveAt reports the latest archive's landing time (a slot has no seal — it is its archives).
-func TestLifecycle(t *testing.T) {
-	now := time.Date(2026, 6, 21, 8, 0, 0, 0, time.UTC)
-	s := NewSlot("slot-2026-06-21", "2026-06-21", 1, "nbdump", now)
-	if !s.LastArchiveAt().IsZero() {
-		t.Fatal("an empty slot should have a zero LastArchiveAt")
-	}
-
-	s.AddArchive(Archive{DLE: "h-data", Level: 0, Compressed: 100, CreatedAt: now})
-	s.AddArchive(Archive{DLE: "h-etc", Level: 0, Compressed: 23, CreatedAt: now.Add(time.Minute)})
-	if s.TotalBytes != 123 {
-		t.Errorf("TotalBytes = %d, want 123 (kept in sync by AddArchive)", s.TotalBytes)
-	}
-	if got := s.LastArchiveAt(); !got.Equal(now.Add(time.Minute)) {
-		t.Errorf("LastArchiveAt = %v, want the later archive's landing time", got)
+	if !SlotIDLess("a", "b") || SlotIDLess("b", "a") {
+		t.Errorf("non-slot ids should fall back to lexical order")
 	}
 }

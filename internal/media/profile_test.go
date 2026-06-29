@@ -16,21 +16,17 @@ func (k keepSet) KeepsArchive(slot, dle string) bool { return k[slot+"|"+dle] }
 // slots — oldest-first, skipping protected archives, stopping once under capacity. So
 // an old slot loses its reclaimable DLE while a protected slot-mate stays.
 func TestSizeProfileReclaimsPerArchive(t *testing.T) {
-	slots := []*record.Slot{
-		{ID: "slot-2026-01-01", Date: "2026-01-01", TotalBytes: 200, Archives: []record.Archive{
-			{DLE: "app", Level: 0, Compressed: 100},
-			{DLE: "db", Level: 0, Compressed: 100},
-		}},
-		{ID: "slot-2026-02-01", Date: "2026-02-01", TotalBytes: 200, Archives: []record.Archive{
-			{DLE: "app", Level: 1, Compressed: 100},
-			{DLE: "db", Level: 1, Compressed: 100},
-		}},
+	archives := []record.Archive{
+		{Slot: "slot-2026-01-01", DLE: "app", Level: 0, Compressed: 100},
+		{Slot: "slot-2026-01-01", DLE: "db", Level: 0, Compressed: 100},
+		{Slot: "slot-2026-02-01", DLE: "app", Level: 1, Compressed: 100},
+		{Slot: "slot-2026-02-01", DLE: "db", Level: 1, Compressed: 100},
 	}
 	// db is protected in both slots (its live chain); app's archives are reclaimable.
 	keep := keepSet{"slot-2026-01-01|db": true, "slot-2026-02-01|db": true}
 	p := sizeProfile{capacity: 250} // total 400 → free 150 (two archives)
 
-	got := p.Reclaim(slots, keep, time.Time{})
+	got := p.Reclaim(archives, keep, time.Time{})
 	if len(got) != 2 {
 		t.Fatalf("reclaimed %d archives, want 2: %+v", len(got), got)
 	}

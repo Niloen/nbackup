@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/record"
 )
@@ -111,7 +112,7 @@ func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force boo
 		report.Items = append(report.Items, SyncItem{
 			SlotID:   s.ID,
 			Archives: len(s.Archives),
-			Bytes:    s.TotalBytes,
+			Bytes:    s.TotalBytes(),
 		})
 	}
 	// Capacity projection (sampled before any copy, so it reads the same for dry-run
@@ -144,14 +145,14 @@ func (e *Engine) placedOn(slotID, medium string) bool {
 }
 
 // applySelection narrows landing slots (oldest-first) to the selection window.
-func applySelection(slots []*record.Slot, sel SyncSelection) []*record.Slot {
+func applySelection(slots []*catalog.Slot, sel SyncSelection) []*catalog.Slot {
 	if !sel.Since.IsZero() {
 		kept := slots[:0:0]
 		for _, s := range slots {
 			// Filter on the slot's logical date (the day it backs up), not its
 			// physical CreatedAt seal time — otherwise back-dated or imported slots,
 			// whose CreatedAt is "now", all slip past any --since bound.
-			d, _ := record.ParseDateField(s.Date)
+			d, _ := record.ParseDateField(s.Date())
 			if !d.Before(sel.Since) {
 				kept = append(kept, s)
 			}

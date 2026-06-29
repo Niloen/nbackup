@@ -78,7 +78,7 @@ func (c *copier) PlanCopy(slotID, fromMedia, targetMedia string, force bool) (Co
 	if fromMedia == targetMedia {
 		return CopyPlan{}, fmt.Errorf("copy source and target are the same medium %q", targetMedia)
 	}
-	plan := CopyPlan{SlotID: slotID, From: fromMedia, To: targetMedia, Archives: len(s.Archives), Bytes: s.TotalBytes}
+	plan := CopyPlan{SlotID: slotID, From: fromMedia, To: targetMedia, Archives: len(s.Archives), Bytes: s.TotalBytes()}
 	if !force {
 		if p, ok := c.placementOn(slotID, targetMedia); ok {
 			plan.AlreadyOnTarget = true
@@ -135,9 +135,10 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	// bytes are unchanged, so checksums and members carry over; only the part layout
 	// is new.
 	now := time.Now().UTC()
-	// Re-author under the source's identity (CreatedAt and all) so each copied archive's
-	// footer names the same logical slot, with the same per-archive age.
-	spec := archiveio.SlotSpec{ID: s.ID, Date: s.Date, Sequence: s.Sequence, Generator: s.Generator, CreatedAt: s.CreatedAt}
+	// Re-author under the source's identity so each copied archive's footer names the same
+	// logical slot; each archive keeps its own CreatedAt (NewCopy preserves it), so the header
+	// stamp here is just the run's last-activity time.
+	spec := archiveio.SlotSpec{ID: s.ID, CreatedAt: s.LastArchiveAt()}
 	wt, err := c.prepareWriter(targetMedia, spec, now, logf)
 	if err != nil {
 		return err

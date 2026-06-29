@@ -62,7 +62,7 @@ type Floor struct {
 //
 // Note: once verification status is tracked, the successor requirement should
 // tighten from "a newer full exists" to "a newer verified full exists".
-func Compute(slots []*record.Slot, minAge time.Duration, now time.Time) Floor {
+func Compute(archives []record.Archive, minAge time.Duration, now time.Time) Floor {
 	reasons := map[archiveRef]string{}
 	pin := func(slot, dle, reason string) {
 		if _, ok := reasons[archiveRef{slot, dle}]; !ok {
@@ -71,58 +71,52 @@ func Compute(slots []*record.Slot, minAge time.Duration, now time.Time) Floor {
 	}
 	youngArchive := func(a record.Archive) bool {
 		// Age is measured per archive from when it committed (CreatedAt), not the slot's
-		// Date: the Date is day-granular, so comparing it would collapse every minimum_age
+		// date: the date is day-granular, so comparing it would collapse every minimum_age
 		// under 24h to a whole-day step. CreatedAt is the real landing instant, so a sub-day
 		// minimum_age keeps only archives actually that recent. A zero CreatedAt (older media)
 		// reads as not-young, i.e. reclaimable.
 		return minAge > 0 && !a.CreatedAt.IsZero() && now.Sub(a.CreatedAt) < minAge
 	}
-	// young reports whether any of a slot's archives is within the minimum age — the slot-level
-	// view the recovery-chain rule anchors on.
-	young := func(s *record.Slot) bool {
-		for _, a := range s.Archives {
-			if youngArchive(a) {
-				return true
-			}
+	// slotYoung[id] reports whether any archive of the slot is within the minimum age — the
+	// slot-level view the recovery-chain rule anchors on.
+	slotYoung := map[string]bool{}
+	for _, a := range archives {
+		if youngArchive(a) {
+			slotYoung[a.Slot] = true
 		}
-		return false
 	}
 	// 1) Age floor: pin each archive still within the minimum age (per archive).
-	for _, s := range slots {
-		for _, a := range s.Archives {
-			if youngArchive(a) {
-				pin(s.ID, a.DLE, fmt.Sprintf("within minimum age (%s)", sizeutil.FormatDuration(minAge)))
-			}
+	for _, a := range archives {
+		if youngArchive(a) {
+			pin(a.Slot, a.DLE, fmt.Sprintf("within minimum age (%s)", sizeutil.FormatDuration(minAge)))
 		}
 	}
 	// 2) Last-recovery floor (kept distinct so an archive that is a DLE's last full
 	// is reported by that full, not a mere incremental the slot also carries).
-	for _, s := range slots {
-		for _, a := range s.Archives {
-			if a.Level == 0 && !hasNewerFull(slots, a.DLE, s) {
-				// The reason omits the DLE: callers render it in the line's path
-				// column (as host:path), so repeating the internal slug here is
-				// redundant and inconsistent.
-				pin(s.ID, a.DLE, "last recovery path")
-			}
+	for _, a := range archives {
+		if a.Level == 0 && !hasNewerFull(archives, a.DLE, a.Slot) {
+			// The reason omits the DLE: callers render it in the line's path
+			// column (as host:path), so repeating the internal slug here is
+			// redundant and inconsistent.
+			pin(a.Slot, a.DLE, "last recovery path")
 		}
 	}
 	// 3) Recovery-chain floor.
-	for _, dle := range dleNames(slots) {
-		ds := slotsWith(slots, dle)
+	for _, dle := range dleNames(archives) {
+		ds := archivesOf(archives, dle) // the dle's archives in run order, one per slot
 		anchors := map[int]bool{}
 		if n := len(ds); n > 0 {
 			anchors[n-1] = true // the latest slot: keeps the live chain (and its full)
 		}
-		for i, s := range ds {
-			if young(s) {
+		for i, a := range ds {
+			if slotYoung[a.Slot] {
 				anchors[i] = true // a recent slot: keep the base its restore needs
 			}
 		}
 		for ai := range anchors {
 			full := -1
 			for j := 0; j <= ai; j++ {
-				if hasFull(ds[j], dle) {
+				if ds[j].Level == 0 {
 					full = j
 				}
 			}
@@ -130,57 +124,38 @@ func Compute(slots []*record.Slot, minAge time.Duration, now time.Time) Floor {
 				continue // no full at or before the anchor (cannot happen for a real chain)
 			}
 			for j := full; j <= ai; j++ {
-				pin(ds[j].ID, dle, "in this DLE's recovery chain")
+				pin(ds[j].Slot, dle, "in this DLE's recovery chain")
 			}
 		}
 	}
 	return Floor{reasons: reasons}
 }
 
-// dleNames returns the distinct DLEs across the slots, sorted for determinism.
-func dleNames(slots []*record.Slot) []string {
+// dleNames returns the distinct DLEs across the archives, sorted for determinism.
+func dleNames(archives []record.Archive) []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, s := range slots {
-		for _, a := range s.Archives {
-			if !seen[a.DLE] {
-				seen[a.DLE] = true
-				out = append(out, a.DLE)
-			}
+	for _, a := range archives {
+		if !seen[a.DLE] {
+			seen[a.DLE] = true
+			out = append(out, a.DLE)
 		}
 	}
 	sort.Strings(out)
 	return out
 }
 
-// slotsWith returns the slots holding an archive of dle, in run order.
-func slotsWith(slots []*record.Slot, dle string) []*record.Slot {
-	var out []*record.Slot
-	for _, s := range slots {
-		if hasArchive(s, dle) {
-			out = append(out, s)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return record.Less(out[i], out[j]) })
-	return out
-}
-
-func hasArchive(s *record.Slot, dle string) bool {
-	for _, a := range s.Archives {
+// archivesOf returns the archives of dle, in run order (by slot). A run dumps each DLE once,
+// so there is one archive per slot.
+func archivesOf(archives []record.Archive, dle string) []record.Archive {
+	var out []record.Archive
+	for _, a := range archives {
 		if a.DLE == dle {
-			return true
+			out = append(out, a)
 		}
 	}
-	return false
-}
-
-func hasFull(s *record.Slot, dle string) bool {
-	for _, a := range s.Archives {
-		if a.DLE == dle && a.Level == 0 {
-			return true
-		}
-	}
-	return false
+	sort.Slice(out, func(i, j int) bool { return record.SlotIDLess(out[i].Slot, out[j].Slot) })
+	return out
 }
 
 // KeepsArchive reports whether the floor pins one archive (slot+DLE), so per-archive
@@ -237,33 +212,27 @@ func reasonRank(reason string) int {
 	}
 }
 
-// First returns the first of slots that the floor pins, with the reason — the
-// medium-wide floor projected onto one volume's slots. The caller computes the
-// Floor over a whole medium (so "a newer full exists" is judged medium-wide),
-// then passes the slots that have a part on the one volume being considered for
-// reclamation — tape recycling or relabel. Because a spanned slot has a placement
-// on every tape it touches, it is reported for each of them: reclaiming any one
-// tape would destroy the slot, even the tapes that hold no seal record. Shared by
-// the prune/recycle path and `nb label --relabel` so both judge a volume's
-// reusability identically.
-func (f Floor) First(slots []*record.Slot) (slotID, reason string, ok bool) {
-	for _, sl := range slots {
-		if r, p := f.Reason(sl.ID); p {
-			return sl.ID, r, true
+// First returns the first of the given slot ids that the floor pins, with the reason — the
+// medium-wide floor projected onto one volume's slots. The caller computes the Floor over a
+// whole medium (so "a newer full exists" is judged medium-wide), then passes the ids of the
+// slots that have a part on the one volume being considered for reclamation — tape recycling
+// or relabel. Because a spanned slot has a placement on every tape it touches, it is reported
+// for each of them: reclaiming any one tape would destroy the slot, even the tapes that hold
+// no seal record. Shared by the prune/recycle path and `nb label --relabel` so both judge a
+// volume's reusability identically.
+func (f Floor) First(slotIDs []string) (slotID, reason string, ok bool) {
+	for _, id := range slotIDs {
+		if r, p := f.Reason(id); p {
+			return id, r, true
 		}
 	}
 	return "", "", false
 }
 
-func hasNewerFull(slots []*record.Slot, dle string, target *record.Slot) bool {
-	for _, s := range slots {
-		if !record.Less(target, s) {
-			continue // s must come strictly after target in run order
-		}
-		for _, a := range s.Archives {
-			if a.DLE == dle && a.Level == 0 {
-				return true
-			}
+func hasNewerFull(archives []record.Archive, dle, targetSlot string) bool {
+	for _, a := range archives {
+		if a.DLE == dle && a.Level == 0 && record.SlotIDLess(targetSlot, a.Slot) {
+			return true // a full of dle in a strictly later slot
 		}
 	}
 	return false

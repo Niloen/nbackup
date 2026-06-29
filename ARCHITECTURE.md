@@ -52,7 +52,7 @@ registry registration, not a conditional in the core.
 | Package | Responsibility | Amanda analogue |
 |---|---|---|
 | `config` | config + domain entities: `DLE`, `Media`, `DumpType` | disklist / dumptype / storage |
-| `record` | the self-describing on-medium artifact records: `Header` framing + `Label` (volume id record) + `Archive` (commit-footer metadata + the in-memory `Slot` grouping/lifecycle) + the per-archive member index (`EncodeIndex`) + their (de)serialization | dumpfile_t / amar |
+| `record` | the self-describing on-medium artifact records: `Header` framing + `Label` (volume id record) + `Archive` (commit-footer metadata, self-locating via its `Slot` tag) + the slot-id vocabulary (`IDFromParts`/`ParseID`/`SlotIDLess`) + the per-archive member index (`EncodeIndex`) + their (de)serialization | dumpfile_t / amar |
 | `archiveio` | maps a slot's archives onto a `Volume`'s files — meter + split a payload into parts then write its index + commit footer (`WriteArchive`/`Commit`/`Finish`); concatenate + assert parts on read (`Expect`); knows nothing of compress/encrypt | taper / amrestore |
 | `media` | `Volume` + `Labeled` + `Drive`/`Changer` (device) + `Shelf` (environment) + `Profile` + registry; reads/writes `record` artifacts | Device API |
 | `librarian` | operates a medium's `Changer`/`Shelf` + label protocol (make-writable, advance, mount, label, load) | changer / amtape |
@@ -67,8 +67,8 @@ registry registration, not a conditional in the core.
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `report` | per-run history record + JSONL/summary file I/O + digest render | amreport |
 | `notify` | pluggable alert backends (smtp/sendmail/webhook) + registry + dispatch | amreport mailto |
-| `catalog` | local cache of slot index + volume registry; derives `History` | catalog / curinfo / tapelist |
-| `retention` | retention safety floor: protected archives — `Compute` returns a per-`(slot,DLE)` `Floor` (`.KeepsArchive`, plus slot-level `.Keeps`/`.First`) (pure) | policy |
+| `catalog` | local cache of slot index + volume registry; owns the in-memory `Slot` grouping (id + its archives, with derived `Date`/`TotalBytes`/`LastArchiveAt`) and exposes archive projections (`Archives`/`ArchivesOn`) for the policy layer; derives `History` | catalog / curinfo / tapelist |
+| `retention` | retention safety floor: protected archives — `Compute` over `[]record.Archive` returns a per-`(slot,DLE)` `Floor` (`.KeepsArchive`, plus slot-level `.Keeps`/`.First`) (pure) | policy |
 | `restore` | the archive chain to rebuild a DLE as of a slot (pure) | amrestore |
 | `recovery` | as-of-date browse tree + per-archive file selection (pure) | amrecover |
 | `drill` | recovery-drill ledger + risk-biased selection + failure taxonomy (pure) | amverify (orchestrated) |
@@ -100,8 +100,11 @@ and its member index — so the footer's presence proves the whole archive lande
 The footer holds the per-archive **integrity** the framing headers omit (`SHA256`,
 sizes, part count); the member list rides in a separate per-archive **index**
 (`KindIndex`, gzip), kept out of the footer so a scan reads only small footers. There
-is **no per-slot seal**: a slot is just the run-id its archives carry in their
-headers, reconstructed by grouping committed archives. This drops all-or-nothing run
+is **no per-slot seal**: a slot is just the run-id its archives carry (the `Slot` tag
+on every header and commit footer), reconstructed by grouping committed archives. The
+`Slot` grouping itself is an in-memory `catalog` type, not an on-medium record; the
+policy layer (retention/restore/recovery/drill/reclaim) reasons over the self-locating
+`[]record.Archive` directly, so a slot is purely a catalog + tagging concept. This drops all-or-nothing run
 atomicity (we considered and rejected keeping the seal): a crashed run keeps every
 *committed* archive, a rerun fills in the rest — "run complete?" is a derivation (did
 every planned DLE commit?), not a stored bit.

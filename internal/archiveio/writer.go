@@ -49,16 +49,12 @@ type VolumeSink interface {
 	PlaceRecord(size int64) (vol media.Volume, volume string, epoch int, err error)
 }
 
-// SlotSpec is the descriptive identity of a slot to author: what is known before
-// any archive is written, independent of the archives and bytes the Writer
-// assembles while streaming. NewWriter starts the slot from it and Finish returns
-// the finished record.Slot — so the caller describes the slot and archiveio produces the
-// artifact, never the reverse. The fields mirror record.NewSlot's parameters.
+// SlotSpec is the identity of a slot to author: the slot id every archive in the run is
+// tagged with, plus when authoring began (stamped into each file's header). A slot is just
+// that shared tag — the archives carry it and the catalog groups them back — so there is no
+// slot record for the Writer to produce.
 type SlotSpec struct {
 	ID        string    // the slot's identity (see record.IDFromParts)
-	Date      string    // run date, YYYY-MM-DD
-	Sequence  int       // 1 for the day's first run, 2+ for later runs
-	Generator string    // tool authoring the slot (e.g. "nbdump")
 	CreatedAt time.Time // when authoring began; a copy preserves the source slot's
 }
 
@@ -71,23 +67,22 @@ type SlotSpec struct {
 // concurrent use on an unbounded sink (disk); a bounded, spanning-capable sink rolls one shared
 // volume and must be driven serially (the engine clamps archivers).
 type Writer struct {
-	sink VolumeSink
-	lim  *ratelimit.Limiter // optional bandwidth cap on the bytes landing on the medium (nil = uncapped)
-	now  func() time.Time   // clock for per-archive commit timestamps (nil → time.Now)
-	slot *record.Slot       // the slot's identity (id/date/createdAt); read-only after construction
+	sink      VolumeSink
+	lim       *ratelimit.Limiter // optional bandwidth cap on the bytes landing on the medium (nil = uncapped)
+	now       func() time.Time   // clock for per-archive commit timestamps (nil → time.Now)
+	slotID    string             // the slot tag every archive in this run carries; read-only after construction
+	createdAt time.Time          // when authoring began, stamped into each file's header
 }
 
-// NewWriter begins authoring a new slot, described by spec, onto sink. The Writer holds the slot's
-// identity from spec (the caller never hands a record.Slot in). lim, when non-nil, caps the rate of
-// bytes written to the medium (network politeness); a nil lim is uncapped. The same lim is shared
-// across concurrent NewArchive writers on an unbounded sink, so several workers to one medium share
-// its budget.
+// NewWriter begins authoring a new slot, described by spec, onto sink. The Writer holds only the
+// slot tag and creation time from spec. lim, when non-nil, caps the rate of bytes written to the
+// medium (network politeness); a nil lim is uncapped. The same lim is shared across concurrent
+// NewArchive writers on an unbounded sink, so several workers to one medium share its budget.
 func NewWriter(sink VolumeSink, spec SlotSpec, lim *ratelimit.Limiter, now func() time.Time) *Writer {
 	if now == nil {
 		now = time.Now
 	}
-	slot := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
-	return &Writer{sink: sink, lim: lim, now: now, slot: slot}
+	return &Writer{sink: sink, lim: lim, now: now, slotID: spec.ID, createdAt: spec.CreatedAt}
 }
 
 // NewArchive begins writing the archive described by spec onto the slot, pulled part-by-part by
@@ -99,6 +94,7 @@ func NewWriter(sink VolumeSink, spec SlotSpec, lim *ratelimit.Limiter, now func(
 // tap, if non-nil, gets the running landed byte count.
 func (w *Writer) NewArchive(spec ArchiveSpec, tap func(landed int64)) ArchiveWriter {
 	meta := record.Archive{
+		Slot:     w.slotID,
 		DLE:      spec.DLE,
 		Host:     spec.Host,
 		Path:     spec.Path,
@@ -118,6 +114,7 @@ func (w *Writer) NewArchive(spec ArchiveSpec, tap func(landed int64)) ArchiveWri
 // this medium's volumes, is new. The spool's holding->backing drain, `nb copy`, and crash-recovery
 // Flush all share this one copy path. tap, if non-nil, gets the running landed byte count.
 func (w *Writer) NewCopy(arch record.Archive, tap func(landed int64)) ArchiveWriter {
+	arch.Slot = w.slotID // re-authored under this writer's slot (the same id, by construction)
 	return &archiveWriter{w: w, base: w.archiveHeader(arch), meta: arch, expectSHA: arch.SHA256, tap: tap, h: sha256.New()}
 }
 
@@ -273,7 +270,7 @@ func (w *Writer) writeRecord(ctx context.Context, kind string, a record.Archive,
 	if err != nil {
 		return record.FilePos{}, fmt.Errorf("place %s record: %w", kind, err)
 	}
-	h := record.Header{Slot: w.slot.ID, Kind: kind, DLE: a.DLE, Level: a.Level, CreatedAt: w.slot.CreatedAt}
+	h := record.Header{Slot: w.slotID, Kind: kind, DLE: a.DLE, Level: a.Level, CreatedAt: w.createdAt}
 	fw, err := vol.AppendFile(ctx, h)
 	if err != nil {
 		return record.FilePos{}, err
@@ -293,7 +290,7 @@ func (w *Writer) writeRecord(ctx context.Context, kind string, a record.Archive,
 // archive's descriptive metadata.
 func (w *Writer) archiveHeader(a record.Archive) record.Header {
 	return record.Header{
-		Slot:      w.slot.ID,
+		Slot:      w.slotID,
 		Kind:      record.KindArchive,
 		DLE:       a.DLE,
 		Host:      a.Host,
@@ -303,19 +300,9 @@ func (w *Writer) archiveHeader(a record.Archive) record.Header {
 		Encrypt:   a.Encrypt,
 		Level:     a.Level,
 		BaseSlot:  a.BaseSlot,
-		CreatedAt: w.slot.CreatedAt,
+		CreatedAt: w.createdAt,
 	}
 }
 
 // SlotID returns the id of the slot being authored.
-func (w *Writer) SlotID() string { return w.slot.ID }
-
-// SlotMeta returns the slot's identity without any archives — the grouping a caller records each
-// archive under (the catalog creates the entry from it). It is the writer's seam for the
-// inline-recording callers (the orchestrator's drain, a copy), which hold a position but not the
-// slot.
-func (w *Writer) SlotMeta() *record.Slot {
-	ident := *w.slot
-	ident.Archives, ident.TotalBytes = nil, 0
-	return &ident
-}
+func (w *Writer) SlotID() string { return w.slotID }

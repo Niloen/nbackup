@@ -77,7 +77,7 @@ func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.Produced) error {
 	if len(arch.Members) > 0 {
 		_ = a.s.clerk.mindex.Store(a.s.w.SlotID(), arch.DLE, arch.Level, arch.Members)
 	}
-	if err := a.s.clerk.cat.AddArchive(a.s.w.SlotMeta(), a.s.medium, arch, pos); err != nil {
+	if err := a.s.clerk.cat.AddArchive(arch, a.s.medium, pos); err != nil {
 		return err
 	}
 	a.arch, a.pos = arch, pos
