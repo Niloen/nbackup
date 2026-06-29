@@ -59,7 +59,7 @@ func appendArchive(t *testing.T, v media.Volume, slot, dle string, level int, pa
 func TestVolumeRoundTrip(t *testing.T) {
 	v := openVol(t)
 
-	pos := appendArchive(t, v, "slot-2026-06-22", "h-data", 0, "hello world")
+	pos := appendArchive(t, v, "slot-2026-06-22.001", "h-data", 0, "hello world")
 
 	h, rc, err := v.ReadFile(pos)
 	if err != nil {
@@ -93,7 +93,7 @@ func TestCleanPayloadObject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	appendArchive(t, v, "slot-2026-06-22", "h-data", 0, "hello world")
+	appendArchive(t, v, "slot-2026-06-22.001", "h-data", 0, "hello world")
 
 	var payloadKey, hdrKey string
 	iter := bucket.List(nil)
@@ -112,8 +112,8 @@ func TestCleanPayloadObject(t *testing.T) {
 			payloadKey = obj.Key
 		}
 	}
-	if !strings.HasPrefix(payloadKey, "slots/slot-2026-06-22/") {
-		t.Errorf("payload key = %q, want slots/slot-2026-06-22/…​.tar", payloadKey)
+	if !strings.HasPrefix(payloadKey, "slots/slot-2026-06-22.001/") {
+		t.Errorf("payload key = %q, want slots/slot-2026-06-22.001/…​.tar", payloadKey)
 	}
 	if hdrKey == "" {
 		t.Errorf("no .hdr sidecar object written")

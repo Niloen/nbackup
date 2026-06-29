@@ -26,7 +26,7 @@ var goldenTime = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 // test fails — a tripwire on the self-describing file header's wire record.
 func goldenHeader() record.Header {
 	return record.Header{
-		Slot:      "slot-2026-01-02",
+		Slot:      "slot-2026-01-02.001",
 		Kind:      record.KindArchive,
 		DLE:       "h-data",
 		Host:      "h",
@@ -34,7 +34,7 @@ func goldenHeader() record.Header {
 		Archiver:  "gnutar",
 		Compress:  "none",
 		Level:     1,
-		BaseSlot:  "slot-2026-01-01",
+		BaseSlot:  "slot-2026-01-01.001",
 		CreatedAt: goldenTime,
 	}
 }
@@ -45,7 +45,6 @@ func goldenLabel() record.Label {
 		Magic:     record.LabelMagic,
 		Name:      "lto-0007",
 		Pool:      "lto",
-		Sequence:  7,
 		Epoch:     3,
 		WrittenAt: goldenTime,
 	}

@@ -208,13 +208,12 @@ func mergeSSH(base, over SSHConfig) SSHConfig {
 // DrillConfig is the `drill:` block: how often each DLE must be drilled, how many to
 // drill per run, which copy to read, and how deeply. CLI flags override these.
 type DrillConfig struct {
-	Window     string `yaml:"window"`      // each DLE drilled within this window (default 30d)
-	Sample     int    `yaml:"sample"`      // DLEs drilled per run (default 1)
-	From       string `yaml:"from"`        // source medium to drill ("" = the landing medium)
-	Tier       string `yaml:"tier"`        // checksum | structural | chain | stock (default structural)
-	StockTools bool   `yaml:"stock_tools"` // drill via the documented stock one-liner (shorthand for tier: stock)
-	Worm       bool   `yaml:"worm"`        // run the WORM/immutability probe
-	Unattended bool   `yaml:"unattended"`  // cron mode: never prompt; skip swap-needing targets
+	Window     string `yaml:"window"`     // each DLE drilled within this window (default 30d)
+	Sample     int    `yaml:"sample"`     // DLEs drilled per run (default 1)
+	From       string `yaml:"from"`       // source medium to drill ("" = the landing medium)
+	Tier       string `yaml:"tier"`       // checksum | structural | chain | stock (default structural)
+	Worm       bool   `yaml:"worm"`       // run the WORM/immutability probe
+	Unattended bool   `yaml:"unattended"` // cron mode: never prompt; skip swap-needing targets
 }
 
 // validDrillTiers is the accepted set for the drill tier token (kept here so config
@@ -768,12 +767,9 @@ func (c *Config) DrillSample() int {
 	return DefaultDrillSample
 }
 
-// DrillTierName returns the configured drill tier token, applying the stock_tools
-// shorthand and defaulting to "structural" (the no-write tier fit for routine drills).
+// DrillTierName returns the configured drill tier token, defaulting to
+// "structural" (the no-write tier fit for routine drills).
 func (c *Config) DrillTierName() string {
-	if c.Drill.StockTools {
-		return "stock"
-	}
 	if c.Drill.Tier != "" {
 		return c.Drill.Tier
 	}

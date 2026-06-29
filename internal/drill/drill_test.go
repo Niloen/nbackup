@@ -74,9 +74,9 @@ func TestSelectRotatesAndRanks(t *testing.T) {
 	now := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
 	// a: full only (chain 1). b: full + 2 incrementals (chain 3). c: full only.
 	slots := cat(
-		mkSlot("slot-2026-06-20", "2026-06-20", arch("a", 0), arch("b", 0), arch("c", 0)),
-		mkSlot("slot-2026-06-21", "2026-06-21", arch("b", 1)),
-		mkSlot("slot-2026-06-22", "2026-06-22", arch("b", 2)),
+		mkSlot("slot-2026-06-20.001", "2026-06-20", arch("a", 0), arch("b", 0), arch("c", 0)),
+		mkSlot("slot-2026-06-21.001", "2026-06-21", arch("b", 1)),
+		mkSlot("slot-2026-06-22.001", "2026-06-22", arch("b", 2)),
 	)
 	dles := []string{"a", "b", "c"}
 	asOf := "2026-06-24"
@@ -113,14 +113,14 @@ func TestSelectRotatesAndRanks(t *testing.T) {
 func TestSelectPointInTime(t *testing.T) {
 	now := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
 	slots := cat(
-		mkSlot("slot-2026-06-20", "2026-06-20", arch("a", 0)),
-		mkSlot("slot-2026-06-22", "2026-06-22", arch("a", 1)),
-		mkSlot("slot-2026-06-24", "2026-06-24", arch("a", 1)),
+		mkSlot("slot-2026-06-20.001", "2026-06-20", arch("a", 0)),
+		mkSlot("slot-2026-06-22.001", "2026-06-22", arch("a", 1)),
+		mkSlot("slot-2026-06-24.001", "2026-06-24", arch("a", 1)),
 	)
 	led := &Ledger{Records: map[string]Record{}}
 	got := Select([]string{"a"}, slots, "2026-06-22", led, 30*24*time.Hour, 1, now)
-	if len(got) != 1 || got[0].SlotID != "slot-2026-06-22" {
-		t.Fatalf("point-in-time target = %+v, want slot-2026-06-22", got)
+	if len(got) != 1 || got[0].SlotID != "slot-2026-06-22.001" {
+		t.Fatalf("point-in-time target = %+v, want slot-2026-06-22.001", got)
 	}
 	if got[0].ChainLen != 2 {
 		t.Fatalf("chain as of 2026-06-22 = %d, want 2 (L0+L1)", got[0].ChainLen)

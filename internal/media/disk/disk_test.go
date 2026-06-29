@@ -47,7 +47,7 @@ func TestVolumeRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	v := openVol(t, dir)
 
-	pos := appendArchive(t, v, "slot-2026-06-22", "h-data", 0, "hello world")
+	pos := appendArchive(t, v, "slot-2026-06-22.001", "h-data", 0, "hello world")
 
 	h, rc, err := v.ReadFile(pos)
 	if err != nil {
@@ -67,7 +67,7 @@ func TestVolumeRoundTrip(t *testing.T) {
 
 	// The on-disk payload file is a CLEAN archive (no header to skip) and the
 	// header lives in a separate .hdr sidecar — usable directly with stock tools.
-	slotDir := filepath.Join(dir, "slots", "slot-2026-06-22")
+	slotDir := filepath.Join(dir, "slots", "slot-2026-06-22.001")
 	entries, err := os.ReadDir(slotDir)
 	if err != nil {
 		t.Fatal(err)
@@ -146,10 +146,10 @@ func TestConcurrentAppend(t *testing.T) {
 func TestOrphanPayloadIgnored(t *testing.T) {
 	dir := t.TempDir()
 	v := openVol(t, dir)
-	pos := appendArchive(t, v, "slot-2026-06-22", "h-data", 0, "good")
+	pos := appendArchive(t, v, "slot-2026-06-22.001", "h-data", 0, "good")
 
 	// Drop a bare payload (no sidecar) into a fresh slot, as an aborted Write would.
-	orphanSlot := filepath.Join(dir, "slots", "slot-2026-06-25")
+	orphanSlot := filepath.Join(dir, "slots", "slot-2026-06-25.001")
 	if err := os.MkdirAll(orphanSlot, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -174,10 +174,10 @@ func TestOrphanPayloadIgnored(t *testing.T) {
 func TestTornHeaderSkipped(t *testing.T) {
 	dir := t.TempDir()
 	v := openVol(t, dir)
-	pos := appendArchive(t, v, "slot-2026-06-22", "h-data", 0, "good")
+	pos := appendArchive(t, v, "slot-2026-06-22.001", "h-data", 0, "good")
 
 	// A complete-looking pair (payload + .hdr) whose .hdr is garbage JSON.
-	slot := filepath.Join(dir, "slots", "slot-2026-06-25")
+	slot := filepath.Join(dir, "slots", "slot-2026-06-25.001")
 	if err := os.MkdirAll(slot, 0o755); err != nil {
 		t.Fatal(err)
 	}

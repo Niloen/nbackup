@@ -94,12 +94,12 @@ func TestCacheLifecycle(t *testing.T) {
 	dir := t.TempDir() // serves as both volume root and workdir
 	vol := newVolume(t, dir)
 
-	putSlot(t, vol, committedSlot("slot-2026-06-20", "2026-06-20", 1,
+	putSlot(t, vol, committedSlot("slot-2026-06-20.001", "2026-06-20", 1,
 		record.Archive{DLE: "h-data", Level: 0, Compressed: 100}))
-	putSlot(t, vol, committedSlot("slot-2026-06-21", "2026-06-21", 1,
+	putSlot(t, vol, committedSlot("slot-2026-06-21.001", "2026-06-21", 1,
 		record.Archive{DLE: "h-data", Level: 1, Compressed: 100}))
 	// A crashed run (archive parts but no commit footer) must be ignored by the rebuild.
-	putPart(t, vol, "slot-2026-06-22", record.Archive{DLE: "h-data", Level: 1})
+	putPart(t, vol, "slot-2026-06-22.001", record.Archive{DLE: "h-data", Level: 1})
 
 	// Cold open: no cache yet, then EnsureFresh populates and persists it.
 	cat, err := Open(dir)
@@ -115,8 +115,8 @@ func TestCacheLifecycle(t *testing.T) {
 	if got := len(cat.Slots()); got != 2 {
 		t.Fatalf("expected 2 sealed slots indexed, got %d", got)
 	}
-	if _, ok := placementPos(cat, "slot-2026-06-20", "h-data", 0); !ok {
-		t.Errorf("expected a recorded position for slot-2026-06-20 h-data L0")
+	if _, ok := placementPos(cat, "slot-2026-06-20.001", "h-data", 0); !ok {
+		t.Errorf("expected a recorded position for slot-2026-06-20.001 h-data L0")
 	}
 
 	// Reopen: cache loads from disk; reads (incl. placements) work with NO volume.
@@ -127,7 +127,7 @@ func TestCacheLifecycle(t *testing.T) {
 	if got := len(cat2.Slots()); got != 2 {
 		t.Fatalf("reloaded cache has %d slots, want 2", got)
 	}
-	if _, ok := placementPos(cat2, "slot-2026-06-21", "h-data", 1); !ok {
+	if _, ok := placementPos(cat2, "slot-2026-06-21.001", "h-data", 1); !ok {
 		t.Errorf("reloaded cache lost the placement index")
 	}
 	if b := cat2.MediumBytes("disk"); b != 200 {
@@ -137,8 +137,8 @@ func TestCacheLifecycle(t *testing.T) {
 	// History is derived from the slots.
 	h := cat2.History()
 	d := h.DLE("h-data")
-	if d.LastFullSlot != "slot-2026-06-20" {
-		t.Errorf("last full = %q, want slot-2026-06-20", d.LastFullSlot)
+	if d.LastFullSlot != "slot-2026-06-20.001" {
+		t.Errorf("last full = %q, want slot-2026-06-20.001", d.LastFullSlot)
 	}
 	if d.IncrementalsSinceFull() != 1 {
 		t.Errorf("incrementals since full = %d, want 1", d.IncrementalsSinceFull())
@@ -162,8 +162,8 @@ func TestRemoveArchiveDropsCopylessDLE(t *testing.T) {
 	dir := t.TempDir()
 	vol := newVolume(t, dir)
 
-	putSlot(t, vol, committedSlot("slot-2026-06-20", "2026-06-20", 1,
-		record.Archive{DLE: "h-leo", Level: 0, Compressed: 100},
+	putSlot(t, vol, committedSlot("slot-2026-06-20.001", "2026-06-20", 1,
+		record.Archive{DLE: "h-removed", Level: 0, Compressed: 100},
 		record.Archive{DLE: "h-shared", Level: 0, Compressed: 100}))
 
 	cat, err := Open(dir)
@@ -174,7 +174,7 @@ func TestRemoveArchiveDropsCopylessDLE(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	placementGone, entryGone, err := cat.RemoveArchive("slot-2026-06-20", "disk", "h-leo")
+	placementGone, entryGone, err := cat.RemoveArchive("slot-2026-06-20.001", "disk", "h-removed")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,20 +185,20 @@ func TestRemoveArchiveDropsCopylessDLE(t *testing.T) {
 		t.Errorf("entryGone = true, want false (slot still has a surviving copy)")
 	}
 
-	slot, err := cat.ReadSlot("slot-2026-06-20")
+	slot, err := cat.ReadSlot("slot-2026-06-20.001")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, a := range slot.Archives {
-		if a.DLE == "h-leo" {
-			t.Errorf("slot still lists h-leo after its last copy was removed: %+v", slot.Archives)
+		if a.DLE == "h-removed" {
+			t.Errorf("slot still lists h-removed after its last copy was removed: %+v", slot.Archives)
 		}
 	}
 	if len(slot.Archives) != 1 || slot.Archives[0].DLE != "h-shared" {
 		t.Errorf("slot archives = %+v, want only h-shared", slot.Archives)
 	}
 	if slot.TotalBytes() != 100 {
-		t.Errorf("TotalBytes = %d, want 100 (h-leo's 100 dropped)", slot.TotalBytes())
+		t.Errorf("TotalBytes = %d, want 100 (h-removed's 100 dropped)", slot.TotalBytes())
 	}
 }
 
@@ -238,7 +238,7 @@ func TestRebuildReassemblesSpannedSlot(t *testing.T) {
 	if err := lv.WriteLabel(record.Label{Name: "vol-a", Pool: "tape", Epoch: 1, WrittenAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	writePart(t, vol, "slot-2026-06-21", "h-data", 0, 0)
+	writePart(t, vol, "slot-2026-06-21.001", "h-data", 0, 0)
 
 	// Bay 2 holds part 1 and the commit footer that marks the (2-part) archive complete.
 	if err := ch.Mount("bay-02"); err != nil {
@@ -247,8 +247,8 @@ func TestRebuildReassemblesSpannedSlot(t *testing.T) {
 	if err := lv.WriteLabel(record.Label{Name: "vol-b", Pool: "tape", Epoch: 1, WrittenAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	writePart(t, vol, "slot-2026-06-21", "h-data", 0, 1)
-	putCommit(t, vol, "slot-2026-06-21", record.Archive{DLE: "h-data", Level: 0, Parts: 2})
+	writePart(t, vol, "slot-2026-06-21.001", "h-data", 0, 1)
+	putCommit(t, vol, "slot-2026-06-21.001", record.Archive{DLE: "h-data", Level: 0, Parts: 2})
 
 	cat, err := Open(t.TempDir())
 	if err != nil {
@@ -258,7 +258,7 @@ func TestRebuildReassemblesSpannedSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ps := cat.Placements("slot-2026-06-21")
+	ps := cat.Placements("slot-2026-06-21.001")
 	if len(ps) != 1 {
 		t.Fatalf("placements = %d, want 1", len(ps))
 	}

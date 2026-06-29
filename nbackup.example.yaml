@@ -149,7 +149,6 @@ landing: fast-disk
 #                       #   chain      = real point-in-time chain restore to scratch
 #                       #   stock      = restore via the documented gpg/zstd/tar
 #                       #                one-liner (proves recovery needs no NBackup)
-#   stock_tools: false  # shorthand for tier: stock
 #   worm: true          # probe the medium for WORM/immutability (Object Lock / LTO
 #                       # WORM): keeps one fixed probe object and checks that deleting
 #                       # it is refused. NBackup only DETECTS immutability; you

@@ -9,7 +9,7 @@ import (
 func TestRenderDigest(t *testing.T) {
 	now := time.Date(2026, 6, 24, 2, 0, 0, 0, time.UTC)
 	runs := []Run{
-		{Command: CommandDump, Outcome: OutcomeSuccess, SlotID: "slot-2026-06-24", Archives: 3, BytesMoved: 1 << 30,
+		{Command: CommandDump, Outcome: OutcomeSuccess, SlotID: "slot-2026-06-24.001", Archives: 3, BytesMoved: 1 << 30,
 			StartedAt: now.Add(-time.Hour), EndedAt: now.Add(-time.Hour).Add(2 * time.Minute)},
 		{Command: CommandSync, Outcome: OutcomeFailure, ExitClass: "sync-error", Error: "target full",
 			StartedAt: now.Add(-30 * time.Minute), EndedAt: now.Add(-29 * time.Minute)},
@@ -79,7 +79,7 @@ func TestRenderRunFailure(t *testing.T) {
 
 func dumpRunFixture() Run {
 	return Run{
-		Command: CommandDump, Outcome: OutcomeSuccess, SlotID: "slot-2026-06-24",
+		Command: CommandDump, Outcome: OutcomeSuccess, SlotID: "slot-2026-06-24.001",
 		StartedAt: time.Date(2026, 6, 24, 2, 0, 0, 0, time.UTC), EndedAt: time.Date(2026, 6, 24, 2, 12, 0, 0, time.UTC),
 		DumpStats: []DLEStat{
 			{DLE: "app01-home", Level: 0, Orig: 20 << 30, Out: 5 << 30, Files: 1240, Seconds: 724},
@@ -94,7 +94,7 @@ func TestRenderDump(t *testing.T) {
 	RenderDump(&sb, dumpRunFixture())
 	out := sb.String()
 	for _, want := range []string{
-		"DUMP REPORT  slot-2026-06-24",
+		"DUMP REPORT  slot-2026-06-24.001",
 		"DLE", "ORIG", "OUT", "COMP%", "FILES", "TIME", "RATE",
 		"app01-home", "21.47 GB", "1240",
 		"app01-etc",

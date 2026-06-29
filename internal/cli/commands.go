@@ -434,7 +434,7 @@ func newVerifyCmd(a *app) *cobra.Command {
 			"members match the recorded index, proving the bytes are a valid restorable stream and " +
 			"exercising the key and compression end-to-end. It writes nothing either way. Pass slot ids " +
 			"to verify just those; with no ids it verifies every slot (which may mount every volume in the pool).",
-		Example: "  nb verify slot-2026-06-21\n  nb verify --deep slot-2026-06-21\n  nb verify",
+		Example: "  nb verify slot-2026-06-21.001\n  nb verify --deep slot-2026-06-21.001\n  nb verify",
 		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if all && len(args) > 0 {
@@ -496,7 +496,7 @@ func newSlotCmd(a *app) *cobra.Command {
 		Use:     "slot [slot-id]",
 		Short:   "List slots, or detail one",
 		Long:    "Inspect the slot catalog. With no argument it lists slots; pass a slot id to show that slot's archives and copies. (Reclaim slots with `nb prune`.)",
-		Example: "  nb slot\n  nb slot slot-2026-06-21",
+		Example: "  nb slot\n  nb slot slot-2026-06-21.001",
 		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
@@ -971,7 +971,7 @@ func newCopyCmd(a *app) *cobra.Command {
 		Use:     "copy <slot-id>",
 		Short:   "Copy a slot from one medium to another (e.g. disk -> tape)",
 		Long:    "Stream a slot from one configured medium to another. The destination is selected with --to; the source defaults to the landing medium and is overridden with --from (e.g. un-vault tape -> disk). Copies by default (like `nb sync`/`nb prune`); pass --dry-run (-n) to preview.",
-		Example: "  nb copy --to tape slot-2026-06-21\n  nb copy --to tape --dry-run slot-2026-06-21\n  nb copy --from tape --to disk slot-2026-06-21",
+		Example: "  nb copy --to tape slot-2026-06-21.001\n  nb copy --to tape --dry-run slot-2026-06-21.001\n  nb copy --from tape --to disk slot-2026-06-21.001",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.load()

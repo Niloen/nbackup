@@ -23,13 +23,13 @@ func membersOf(archives []record.Archive, dle string) func(string, int) ([]strin
 
 func scenario() []record.Archive {
 	return []record.Archive{{
-		Slot: "slot-2026-06-21", DLE: "app", Level: 0, Archiver: "gnutar", Compress: "none",
+		Slot: "slot-2026-06-21.001", DLE: "app", Level: 0, Archiver: "gnutar", Compress: "none",
 		Members: []string{
 			"./", "./etc/", "./etc/hosts", "./etc/passwd",
 			"./var/", "./var/log/", "./var/log/a.log",
 		},
 	}, {
-		Slot: "slot-2026-06-22", DLE: "app", Level: 1, Archiver: "gnutar", Compress: "none",
+		Slot: "slot-2026-06-22.001", DLE: "app", Level: 1, Archiver: "gnutar", Compress: "none",
 		Members: []string{"./", "./etc/", "./etc/hosts", "./etc/new.conf"},
 	}}
 }
@@ -40,10 +40,10 @@ func TestAsOf(t *testing.T) {
 		date, want string
 		wantErr    bool
 	}{
-		{"2026-06-22", "slot-2026-06-22", false},
-		{"2026-06-21", "slot-2026-06-21", false},
-		{"2026-06-25", "slot-2026-06-22", false}, // latest on/before
-		{"2026-06-20", "", true},                 // before all slots
+		{"2026-06-22", "slot-2026-06-22.001", false},
+		{"2026-06-21", "slot-2026-06-21.001", false},
+		{"2026-06-25", "slot-2026-06-22.001", false}, // latest on/before
+		{"2026-06-20", "", true},                     // before all slots
 	} {
 		got, err := AsOf(slots, tc.date)
 		if tc.wantErr {
@@ -63,18 +63,18 @@ func TestBuildTreeMostRecentWins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tree.TargetSlot != "slot-2026-06-22" {
+	if tree.TargetSlot != "slot-2026-06-22.001" {
 		t.Fatalf("target = %s", tree.TargetSlot)
 	}
 
 	// hosts was rewritten on day 2 → sourced from the incremental.
 	hosts, ok := tree.Lookup("etc/hosts")
-	if !ok || hosts.src == nil || hosts.src.SlotID != "slot-2026-06-22" {
+	if !ok || hosts.src == nil || hosts.src.SlotID != "slot-2026-06-22.001" {
 		t.Fatalf("etc/hosts source = %+v", hosts)
 	}
 	// passwd was untouched → still sourced from the full.
 	passwd, ok := tree.Lookup("etc/passwd")
-	if !ok || passwd.src == nil || passwd.src.SlotID != "slot-2026-06-21" {
+	if !ok || passwd.src == nil || passwd.src.SlotID != "slot-2026-06-21.001" {
 		t.Fatalf("etc/passwd source = %+v", passwd)
 	}
 	// new.conf appeared on day 2.
@@ -94,7 +94,7 @@ func TestBuildTreeAsOfEarlierDate(t *testing.T) {
 	}
 	// As of day 1, hosts comes from the full and new.conf does not exist yet.
 	hosts, ok := tree.Lookup("etc/hosts")
-	if !ok || hosts.src.SlotID != "slot-2026-06-21" {
+	if !ok || hosts.src.SlotID != "slot-2026-06-21.001" {
 		t.Fatalf("etc/hosts should be from the full, got %+v", hosts.src)
 	}
 	if _, ok := tree.Lookup("etc/new.conf"); ok {
@@ -136,11 +136,11 @@ func TestCollectDirectoryGroupsByArchive(t *testing.T) {
 	if len(steps) != 2 {
 		t.Fatalf("want 2 archive steps, got %d: %+v", len(steps), steps)
 	}
-	if !contains(bySlot["slot-2026-06-22"], "./etc/hosts") || !contains(bySlot["slot-2026-06-22"], "./etc/new.conf") {
-		t.Errorf("incremental members = %v", bySlot["slot-2026-06-22"])
+	if !contains(bySlot["slot-2026-06-22.001"], "./etc/hosts") || !contains(bySlot["slot-2026-06-22.001"], "./etc/new.conf") {
+		t.Errorf("incremental members = %v", bySlot["slot-2026-06-22.001"])
 	}
-	if !contains(bySlot["slot-2026-06-21"], "./etc/passwd") {
-		t.Errorf("full members = %v", bySlot["slot-2026-06-21"])
+	if !contains(bySlot["slot-2026-06-21.001"], "./etc/passwd") {
+		t.Errorf("full members = %v", bySlot["slot-2026-06-21.001"])
 	}
 }
 

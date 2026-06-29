@@ -52,6 +52,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
@@ -262,7 +263,7 @@ func Simulate(dles []config.DLE, hist *catalog.History, est map[string]Estimate,
 		// Advance the cloned history as if this day's run had been sealed, so the
 		// next day's DaysSinceFull / LastLevel / RunsAtCurrentLevel see it.
 		day := date.Format("2006-01-02")
-		slotID := "slot-" + day
+		slotID := record.IDFromParts(day, 1) // simulated id; mirrors the real run's padded shape
 		for _, it := range plan.Items {
 			h.RecordRun(it.Name, slotID, day, it.Level)
 		}
