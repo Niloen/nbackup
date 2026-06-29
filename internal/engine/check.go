@@ -73,11 +73,19 @@ func (e *Engine) checkServer(rep *CheckReport) {
 	}
 
 	// The compressor is needed server-side for a server-side compress and for restore
-	// decompression, so a missing binary is a real problem even with client-side dumps.
-	if err := compress.Check(e.compressScheme, e.fopts); err != nil {
-		rep.add(&rep.Server, false, false, fmt.Sprintf("compression %q: %v", e.compressScheme, err))
-	} else {
-		rep.add(&rep.Server, true, false, fmt.Sprintf("compression %q available", e.compressScheme))
+	// decompression of any scheme a dumptype records, so check every distinct scheme a
+	// missing binary is a real problem even with client-side dumps.
+	checkedScheme := map[string]bool{}
+	for _, scheme := range append([]string{e.cfg.CompressScheme()}, e.dumptypeCompressSchemes()...) {
+		if checkedScheme[scheme] {
+			continue
+		}
+		checkedScheme[scheme] = true
+		if err := compress.Check(scheme, e.fopts); err != nil {
+			rep.add(&rep.Server, false, false, fmt.Sprintf("compression %q: %v", scheme, err))
+		} else {
+			rep.add(&rep.Server, true, false, fmt.Sprintf("compression %q available", scheme))
+		}
 	}
 
 	checked := map[string]bool{}
@@ -206,8 +214,9 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 // (compress/encrypt: client). For a server-side transform there is nothing to check here —
 // the server-side tools are covered in checkServer.
 func (e *Engine) checkClientTools(rep *CheckReport, hc *HostCheck, ex programs.Executor, dt string) {
-	if e.cfg.ResolveDumpType(dt).Compress == "client" {
-		if cmd, ok, err := compress.CompressCmd(e.compressScheme, e.fopts); err == nil && ok {
+	if e.cfg.CompressionFor(dt).At == "client" {
+		scheme, opts := e.compressionFor(dt)
+		if cmd, ok, err := compress.CompressCmd(scheme, opts); err == nil && ok {
 			e.probeTool(rep, hc, ex, cmd.Name, "compressor")
 		}
 	}

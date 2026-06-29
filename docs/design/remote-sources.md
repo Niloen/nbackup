@@ -134,9 +134,9 @@ single point** along it, and the per-stage `client`/`server` setting chooses whe
 | after `encrypt` (**full client-side**) | client | client | ciphertext | bandwidth **+** plaintext never leaves client |
 
 **Validation rule:** because encrypt is downstream of compress and the cut is one point,
-`encrypt.at: client` implies `compress: client` (you cannot encrypt server-side on the
+`encrypt.at: client` implies `compress.at: client` (you cannot encrypt server-side on the
 client's behalf without first shipping plaintext). The loader rejects
-`encrypt.at: client` + `compress: server`.
+`encrypt.at: client` + `compress.at: server`.
 
 ### The key never moves — three trust postures
 
@@ -187,7 +187,8 @@ hosts:
 
 dumptypes:
   remote-secure:
-    compress: client                       # none | server | client   (Amanda's compress directive)
+    compress:
+      at: client                           # server (default) | client   (Amanda's compress directive)
     encrypt:
       scheme: gpg
       at: client                           # server | client          (Amanda's encrypt client/server)
@@ -233,7 +234,7 @@ sources:
 - **Out of scope here:** compress/encrypt still run server-side; `encrypt.at`/`compress`
   accept only `server` until Slice 2.
 
-### Slice 2 — client-side compress + encrypt (`compress: client`, `encrypt.at: client`).
+### Slice 2 — client-side compress + encrypt (`compress.at: client`, `encrypt.at: client`).
 
 - **Composed remote pipeline:** the single ssh exec becomes `tar … | zstd … | gpg -e -r
   <recipient>`. The engine composes the remote command from the gnutar tar args + the
@@ -251,7 +252,7 @@ sources:
 - **Progress fidelity:** the uncompressed `xfer.Counter` lives on the tar→compressor
   stream, now on the client, so the server sees only compressed/ciphertext bytes;
   per-DLE % falls back to **compressed-against-estimate**. Documented, acceptable.
-- **Validation:** reject `encrypt.at: client` + `compress: server`.
+- **Validation:** reject `encrypt.at: client` + `compress.at: server`.
 
 ### Slice 3 — restore to the client (`nb restore --to host:path`) for the untrusted-server posture.
 

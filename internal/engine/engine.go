@@ -249,6 +249,32 @@ func (e *Engine) encryptionFor(dtName string) (scheme string, opts crypt.Options
 	}
 }
 
+// compressionFor resolves the compression scheme and compressor options for a
+// dumptype's dumps: the dumptype's own `compress` block, else the config default —
+// the write-side peer of encryptionFor. Unlike encryption, the scheme is always a
+// concrete name (zstd|gzip|none): it is recorded per-archive and reversed from the
+// artifact, so it is never elided to "".
+func (e *Engine) compressionFor(dtName string) (scheme string, opts compress.Options) {
+	cc := e.cfg.CompressionFor(dtName)
+	return cc.SchemeName(), compress.Options{
+		Program: cc.Program,
+		Level:   cc.Level,
+		Threads: cc.Threads,
+		Nice:    e.cfg.Nice,
+	}
+}
+
+// dumptypeCompressSchemes returns the compression scheme each configured DLE's dumptype
+// resolves to — the distinct set the server must be able to (de)compress. Used by `nb
+// check` so a per-dumptype compress override is verified, not just the config default.
+func (e *Engine) dumptypeCompressSchemes() []string {
+	var out []string
+	for _, d := range e.cfg.DLEs() {
+		out = append(out, e.cfg.CompressionFor(d.DumpTypeName()).SchemeName())
+	}
+	return out
+}
+
 // mediumVolume returns a Volume for the named medium. For the engine's own
 // medium it returns the already-open handle (own=true) so that handle's cached
 // state stays coherent and the catalog — which caches exactly this medium — can be

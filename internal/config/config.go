@@ -76,13 +76,10 @@ type Config struct {
 	// so it is not an archiver option.
 	StateDir string `yaml:"state_dir"`
 
-	// Compress configures the external compressor archives are piped through.
-	Compress struct {
-		Scheme  string `yaml:"scheme"`  // zstd|gzip|none (default zstd)
-		Level   int    `yaml:"level"`   // compression level; 0 = scheme default
-		Threads int    `yaml:"threads"` // worker threads where supported; 0 = scheme default
-		Program string `yaml:"program"` // optional binary override (name or path)
-	} `yaml:"compress"`
+	// Compress configures the external compressor archives are piped through. It is the
+	// config-wide default; a dumptype may replace it wholesale with its own `compress`
+	// block (see DumpType.Compress), exactly as encryption overrides.
+	Compress CompressConfig `yaml:"compress"`
 
 	// Encrypt configures the external encryptor archives are piped through, after
 	// compression. It is the config-wide default; a dumptype may replace it wholesale
@@ -429,15 +426,10 @@ type SyncRule struct {
 // split. Excludes live here, not on the archiver: skipping `*.log` is
 // a content decision about the source, not a property of how tar runs.
 type DumpType struct {
-	Archiver string         `yaml:"archiver"` // named archiver definition ("" = DefaultArchiver)
-	Exclude  []string       `yaml:"exclude"`  // patterns to skip (passed to the archiver per dump)
-	Encrypt  *EncryptConfig `yaml:"encrypt"`  // nil = inherit the config-wide default; set = replace it wholesale (no field merge)
-
-	// Compress selects where compression runs, for a
-	// remote DLE: "server" (default — on the NBackup host) or "client" (on the source
-	// client, so only compressed bytes cross the wire). The scheme/algorithm is the
-	// config-wide compress block; this is only the location. Local DLEs ignore it.
-	Compress string `yaml:"compress"`
+	Archiver string          `yaml:"archiver"` // named archiver definition ("" = DefaultArchiver)
+	Exclude  []string        `yaml:"exclude"`  // patterns to skip (passed to the archiver per dump)
+	Encrypt  *EncryptConfig  `yaml:"encrypt"`  // nil = inherit the config-wide default; set = replace it wholesale (no field merge)
+	Compress *CompressConfig `yaml:"compress"` // nil = inherit the config-wide default; set = replace it wholesale (no field merge) — the peer of Encrypt
 }
 
 // Archiver is a named dump-program definition: a
@@ -450,6 +442,33 @@ type DumpType struct {
 type Archiver struct {
 	Type    string            `yaml:"type"`    // registered archiver type ("" = the definition's name)
 	Options map[string]string `yaml:",inline"` // archiver-specific options
+}
+
+// CompressConfig selects a compression scheme, its tuning, and where it runs. It is
+// the write-side peer of EncryptConfig: the top-level `compress:` block is the
+// config-wide default, and a dumptype may replace it wholesale with its own block
+// (no field merge), so a dumptype can pick a different algorithm/level as well as a
+// different location. The scheme is a compiled name (zstd|gzip|none), recorded
+// per-archive so restore reverses it from the artifact alone.
+type CompressConfig struct {
+	Scheme  string `yaml:"scheme"`  // zstd | gzip | none (default zstd)
+	Level   int    `yaml:"level"`   // compression level; 0 = scheme default
+	Threads int    `yaml:"threads"` // worker threads where supported; 0 = scheme default
+	Program string `yaml:"program"` // optional binary override (name or path)
+
+	// At selects where compression runs, for a remote DLE: "server" (default — on the
+	// NBackup host) or "client" (on the source client, so only compressed bytes cross
+	// the wire). Encryption is downstream of compression, so an encrypt.at: client
+	// requires this to be "client" too (validated at load). Local DLEs ignore it.
+	At string `yaml:"at"`
+}
+
+// SchemeName returns the configured scheme, defaulting to DefaultCompress (zstd).
+func (cc CompressConfig) SchemeName() string {
+	if cc.Scheme != "" {
+		return cc.Scheme
+	}
+	return DefaultCompress
 }
 
 // EncryptConfig selects an encryption scheme and its key reference. The scheme is
@@ -881,21 +900,21 @@ func (c *Config) ResolveArchiver(name string) Archiver {
 }
 
 // validateTransformPlacement checks a source's compress/encrypt location settings: the
-// values are server|client, encrypt.at: client requires compress: client (encryption is
+// values are server|client, encrypt.at: client requires compress.at: client (encryption is
 // downstream of compression — otherwise plaintext would cross the wire), and either
 // "client" requires the host to be configured under hosts: (a local DLE has nowhere else
 // to run the transform).
 func (c *Config) validateTransformPlacement(s DLE) error {
 	dt := s.DumpTypeName()
-	compressAt := c.ResolveDumpType(dt).Compress
+	compressAt := c.CompressionFor(dt).At
 	encAt := c.EncryptionFor(dt).At
-	for what, v := range map[string]string{"compress": compressAt, "encrypt.at": encAt} {
+	for what, v := range map[string]string{"compress.at": compressAt, "encrypt.at": encAt} {
 		if v != "" && v != "server" && v != "client" {
 			return fmt.Errorf("source %s: %s must be \"server\" or \"client\", got %q", s.Name(), what, v)
 		}
 	}
 	if encAt == "client" && compressAt != "client" {
-		return fmt.Errorf("source %s: encrypt.at: client requires compress: client (encryption is downstream of compression)", s.Name())
+		return fmt.Errorf("source %s: encrypt.at: client requires compress.at: client (encryption is downstream of compression)", s.Name())
 	}
 	if _, remote := c.RemoteHost(s.Host); !remote && (compressAt == "client" || encAt == "client") {
 		return fmt.Errorf("source %s: compress/encrypt \"client\" requires a remote host, but %q is local", s.Name(), s.Host)
@@ -913,12 +932,21 @@ func (c *Config) EncryptionFor(dtName string) EncryptConfig {
 	return c.Encrypt
 }
 
-// CompressScheme returns the configured compression scheme, defaulting to zstd.
-func (c *Config) CompressScheme() string {
-	if c.Compress.Scheme != "" {
-		return c.Compress.Scheme
+// CompressionFor returns the compression settings for a dumptype: its own `compress`
+// block if it sets one, otherwise the config-wide default. The override replaces the
+// default wholesale — fields are not merged — exactly like EncryptionFor.
+func (c *Config) CompressionFor(dtName string) CompressConfig {
+	if dt, ok := c.DumpTypes[dtName]; ok && dt.Compress != nil {
+		return *dt.Compress
 	}
-	return DefaultCompress
+	return c.Compress
+}
+
+// CompressScheme returns the config-wide default compression scheme, defaulting to
+// zstd. Per-dumptype dumps resolve their scheme via CompressionFor; this is the
+// baseline the server-side decode/check uses.
+func (c *Config) CompressScheme() string {
+	return c.Compress.SchemeName()
 }
 
 // Workers returns the number of concurrent DLE dumps per run (default 1).
