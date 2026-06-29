@@ -522,7 +522,7 @@ func TestThroughputCapThrottlesDump(t *testing.T) {
 		if err != nil {
 			t.Fatalf("run (throughput=%q): %v", throughput, err)
 		}
-		return time.Since(start), s.TotalBytes
+		return time.Since(start), s.TotalBytes()
 	}
 
 	const rate = 2 << 20 // 2 MiB/s
@@ -590,9 +590,9 @@ func TestThroughputCapThrottlesRestore(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 
-	floor := time.Duration(float64(s.TotalBytes-(1<<20)) / rate * float64(time.Second) * 0.9)
+	floor := time.Duration(float64(s.TotalBytes()-(1<<20)) / rate * float64(time.Second) * 0.9)
 	if elapsed < floor {
-		t.Errorf("capped restore took %v; a 2MB/s read cap over %d bytes implies at least %v", elapsed, s.TotalBytes, floor)
+		t.Errorf("capped restore took %v; a 2MB/s read cap over %d bytes implies at least %v", elapsed, s.TotalBytes(), floor)
 	}
 }
 
@@ -1030,7 +1030,7 @@ func TestHoldingDisksFlush(t *testing.T) {
 
 	// Stage: dump each DLE onto its own scratch disk acting as a landing, leaving a catalogued slot
 	// stranded on each — the state a crashed multi-disk holding run leaves behind.
-	stage := func(disk, path string, src config.DLE, date time.Time) *record.Slot {
+	stage := func(disk, path string, src config.DLE, date time.Time) *catalog.Slot {
 		cfg := &config.Config{
 			Landing:  disk,
 			Media:    map[string]config.Media{disk: {Type: "disk", Params: map[string]string{"path": path}}},
@@ -1092,7 +1092,7 @@ func TestHoldingDisksFlush(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct {
-		s    *record.Slot
+		s    *catalog.Slot
 		src  string
 		file string
 		want string
@@ -1816,10 +1816,9 @@ func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, byte
 	// Stamp the archive's CreatedAt at the slot's own date, not wall-clock: retention measures age
 	// per archive from its landing instant, so one meant to read as dated `date` must land then.
 	at, _ := record.ParseDateField(date)
-	s := record.NewSlot(id, date, 1, "test", at)
-	s.AddArchive(record.Archive{DLE: dle, Level: 0, Compressed: bytes, CreatedAt: at})
+	arch := record.Archive{Slot: id, DLE: dle, Level: 0, Compressed: bytes, CreatedAt: at}
 	pos := catalog.ArchivePos{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: volume, Epoch: 1, Pos: 1}}, Commit: catalog.FilePos{Label: volume, Epoch: 1, Pos: 2}}
-	if err := eng.cat.AddArchive(s, "lto", s.Archives[0], pos); err != nil {
+	if err := eng.cat.AddArchive(arch, "lto", pos); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1830,10 +1829,9 @@ func recordFullOnOtherMedium(t *testing.T, eng *Engine, date, dle, medium string
 	t.Helper()
 	id := record.IDFromParts(date, 1)
 	at, _ := record.ParseDateField(date)
-	s := record.NewSlot(id, date, 1, "test", at)
-	s.AddArchive(record.Archive{DLE: dle, Level: 0, CreatedAt: at})
+	arch := record.Archive{Slot: id, DLE: dle, Level: 0, CreatedAt: at}
 	pos := catalog.ArchivePos{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: medium, Pos: 1}}, Commit: catalog.FilePos{Label: medium, Pos: 2}}
-	if err := eng.cat.AddArchive(s, medium, s.Archives[0], pos); err != nil {
+	if err := eng.cat.AddArchive(arch, medium, pos); err != nil {
 		t.Fatal(err)
 	}
 }

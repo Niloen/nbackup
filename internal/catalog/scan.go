@@ -3,7 +3,6 @@ package catalog
 import (
 	"io"
 	"sort"
-	"time"
 
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
@@ -65,7 +64,7 @@ func (c *Catalog) absorb(idx mediumIndex) {
 	for _, sp := range idx.placements {
 		for _, arch := range sp.slot.Archives {
 			if pos, ok := findArchivePos(sp.p.Archives, arch.DLE, arch.Level); ok {
-				c.addArchive(sp.slot, sp.p.Medium, arch, pos)
+				c.addArchive(arch, sp.p.Medium, pos)
 			}
 		}
 	}
@@ -91,10 +90,10 @@ type mediumIndex struct {
 	labels     []record.Label
 }
 
-// slotPlacement pairs a sealed slot's content with its placement on the scanned
+// slotPlacement pairs a slot's content with its placement on the scanned
 // medium, ready for the store to absorb.
 type slotPlacement struct {
-	slot *record.Slot
+	slot *Slot
 	p    Placement
 }
 
@@ -145,7 +144,7 @@ func assemble(medium string, acc *mediumScan) []slotPlacement {
 	})
 
 	type slotAcc struct {
-		slot *record.Slot
+		slot *Slot
 		p    Placement
 	}
 	slots := map[string]*slotAcc{}
@@ -154,9 +153,8 @@ func assemble(medium string, acc *mediumScan) []slotPlacement {
 		sc := acc.commits[key]
 		sa := slots[key.slot]
 		if sa == nil {
-			date, seq, _ := record.ParseID(key.slot)
 			sa = &slotAcc{
-				slot: &record.Slot{ID: key.slot, Date: date, Sequence: seq, CreatedAt: sc.createdAt},
+				slot: &Slot{ID: key.slot},
 				p:    Placement{Medium: medium},
 			}
 			slots[key.slot] = sa
@@ -175,7 +173,9 @@ func assemble(medium string, acc *mediumScan) []slotPlacement {
 		if ixLoc, ok := acc.indexes[key]; ok {
 			ap.Index = ixLoc // note where the member index lives; members load lazily (browse/verify)
 		}
-		sa.slot.AddArchive(*sc.arch)
+		arch := *sc.arch
+		arch.Slot = key.slot // the header's slot tag is authoritative for grouping
+		sa.slot.addArchive(arch)
 		sa.p.Archives = append(sa.p.Archives, ap)
 	}
 
@@ -189,7 +189,7 @@ func assemble(medium string, acc *mediumScan) []slotPlacement {
 
 // ScanSlots reads a volume's committed slots without touching the cache — used to check a
 // volume's current contents (e.g. whether a tape is still active before relabel).
-func ScanSlots(vol media.Volume) ([]*record.Slot, error) {
+func ScanSlots(vol media.Volume) ([]*Slot, error) {
 	res, err := scanVolume("", vol)
 	if err != nil {
 		return nil, err
@@ -197,7 +197,7 @@ func ScanSlots(vol media.Volume) ([]*record.Slot, error) {
 	acc := newMediumScan()
 	acc.add(res)
 	sps := assemble("", acc)
-	slots := make([]*record.Slot, 0, len(sps))
+	slots := make([]*Slot, 0, len(sps))
 	for _, sp := range sps {
 		slots = append(slots, sp.slot)
 	}
@@ -217,11 +217,10 @@ type archiveKey struct {
 }
 
 // scannedCommit is a committed archive found during a scan: its footer metadata (without
-// members), where the footer landed, and the slot's creation time (carried in the header).
+// members) and where the footer landed.
 type scannedCommit struct {
-	arch      *record.Archive
-	loc       FilePos
-	createdAt time.Time
+	arch *record.Archive
+	loc  FilePos
 }
 
 // scanResult is one volume's contribution to a medium scan: its archive parts, commit
@@ -301,7 +300,7 @@ func scanVolume(medium string, vol media.Volume) (scanResult, error) {
 				continue // unreadable footer: skip (the archive reads as uncommitted)
 			}
 			res.commits[archiveKey{slot: f.Header.Slot, dle: f.Header.DLE, level: f.Header.Level}] =
-				scannedCommit{arch: a, loc: loc, createdAt: f.Header.CreatedAt}
+				scannedCommit{arch: a, loc: loc}
 		case record.KindIndex:
 			// Note where the member index lives, but do NOT read it — members load lazily
 			// (browse / structural verify), so a rebuild reads only small commit footers.

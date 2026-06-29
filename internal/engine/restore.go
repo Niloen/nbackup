@@ -111,7 +111,7 @@ func (r *restorer) RestoreTo(slotID, dleName, destHost, destPath string, logf Lo
 // too. The exported Restore/RestoreTo are thin wrappers; reads fail over across copies
 // (medium-scoped reads are the drill's own path, drillChain).
 func (r *restorer) restoreFrom(slotID, dleName, destDir, targetHost string, rollbackOnFail bool, logf Logf) error {
-	steps, err := restore.Chain(r.cat.Slots(), dleName, slotID)
+	steps, err := restore.Chain(r.cat.Archives(), dleName, slotID)
 	if err != nil {
 		return err
 	}
@@ -278,7 +278,7 @@ func (r *restorer) RestoreAsOf(dle, asOf, destDir, from string, force bool, logf
 		return err
 	}
 	defer reset()
-	target, err := recovery.AsOf(r.cat.Slots(), asOf)
+	target, err := recovery.AsOf(r.cat.Archives(), asOf)
 	if err != nil {
 		return err
 	}
@@ -293,7 +293,7 @@ func (r *restorer) RestoreAsOfTo(dle, asOf, destHost, destPath, from string, log
 		return err
 	}
 	defer reset()
-	target, err := recovery.AsOf(r.cat.Slots(), asOf)
+	target, err := recovery.AsOf(r.cat.Archives(), asOf)
 	if err != nil {
 		return err
 	}
@@ -335,7 +335,7 @@ func errNonEmptyDest(destDir string) error {
 // the recover entry point. Member lists are loaded lazily via the clerk (cache, or the
 // on-medium index on a miss), so a fully-cached browse touches no media until extract.
 func (r *restorer) OpenRecover(dle, asOf string) (*recovery.Tree, error) {
-	return recovery.BuildTree(r.cat.Slots(), dle, asOf, func(slotID string, level int) ([]string, error) {
+	return recovery.BuildTree(r.cat.Archives(), dle, asOf, func(slotID string, level int) ([]string, error) {
 		return r.clerk.Members(clerk.Ref{Slot: slotID, DLE: dle, Level: level})
 	})
 }

@@ -10,36 +10,28 @@ import (
 // rewrites etc/hosts and adds etc/new.conf.
 // membersOf is a test member loader: it returns each archive's inline Members from the
 // scenario slots, standing in for the engine's lazy clerk-backed loader.
-func membersOf(slots []*record.Slot, dle string) func(string, int) ([]string, error) {
-	byID := map[string]*record.Slot{}
-	for _, s := range slots {
-		byID[s.ID] = s
-	}
+func membersOf(archives []record.Archive, dle string) func(string, int) ([]string, error) {
 	return func(slotID string, level int) ([]string, error) {
-		if s := byID[slotID]; s != nil {
-			for i := range s.Archives {
-				if s.Archives[i].DLE == dle && s.Archives[i].Level == level {
-					return s.Archives[i].Members, nil
-				}
+		for i := range archives {
+			if archives[i].Slot == slotID && archives[i].DLE == dle && archives[i].Level == level {
+				return archives[i].Members, nil
 			}
 		}
 		return nil, nil
 	}
 }
 
-func scenario() []*record.Slot {
-	full := &record.Slot{ID: "slot-2026-06-21", Date: "2026-06-21", Archives: []record.Archive{{
-		DLE: "app", Level: 0, Archiver: "gnutar", Compress: "none",
+func scenario() []record.Archive {
+	return []record.Archive{{
+		Slot: "slot-2026-06-21", DLE: "app", Level: 0, Archiver: "gnutar", Compress: "none",
 		Members: []string{
 			"./", "./etc/", "./etc/hosts", "./etc/passwd",
 			"./var/", "./var/log/", "./var/log/a.log",
 		},
-	}}}
-	incr := &record.Slot{ID: "slot-2026-06-22", Date: "2026-06-22", Archives: []record.Archive{{
-		DLE: "app", Level: 1, Archiver: "gnutar", Compress: "none",
+	}, {
+		Slot: "slot-2026-06-22", DLE: "app", Level: 1, Archiver: "gnutar", Compress: "none",
 		Members: []string{"./", "./etc/", "./etc/hosts", "./etc/new.conf"},
-	}}}
-	return []*record.Slot{full, incr}
+	}}
 }
 
 func TestAsOf(t *testing.T) {

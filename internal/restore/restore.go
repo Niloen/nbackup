@@ -1,10 +1,11 @@
 // Package restore computes the ordered chain of archives needed to reconstruct a
-// DLE as of a target slot. It is pure: it works over slot metadata and returns
+// DLE as of a target slot. It is pure: it works over archive metadata and returns
 // the steps; the engine performs the I/O and extraction.
 package restore
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/Niloen/nbackup/internal/record"
 )
@@ -33,45 +34,48 @@ type Step struct {
 // L1 carrying the same rename aborts the chain. Following BaseSlot is also what
 // keeps the chain consistent: each step's base is the exact dump it derives
 // from, never an unrelated same-level dump. A missing base is a broken chain and
-// is an error (a deliberate failure, not a partial restore). The input slots
-// must be sorted in run order.
-func Chain(slots []*record.Slot, dleName, targetSlotID string) ([]Step, error) {
-	targetIdx := -1
-	for i, s := range slots {
-		if s.ID == targetSlotID {
-			targetIdx = i
+// is an error (a deliberate failure, not a partial restore). The input is the
+// catalog's archives (each carrying its slot tag); a slot is just their grouping.
+func Chain(archives []record.Archive, dleName, targetSlotID string) ([]Step, error) {
+	targetExists := false
+	for _, a := range archives {
+		if a.Slot == targetSlotID {
+			targetExists = true
 			break
 		}
 	}
-	if targetIdx < 0 {
+	if !targetExists {
 		return nil, fmt.Errorf("slot %s not found in catalog", targetSlotID)
 	}
 
+	// The DLE's archives in run order (one per slot — a run dumps each DLE once).
+	ds := archivesOf(archives, dleName)
+
 	// The tip is the most recent dump of the DLE at or before the target.
-	curIdx := -1
-	for i := targetIdx; i >= 0; i-- {
-		if archiveFor(slots[i], dleName) != nil {
-			curIdx = i
+	cur := -1
+	for i := len(ds) - 1; i >= 0; i-- {
+		if !record.SlotIDLess(targetSlotID, ds[i].Slot) { // ds[i].Slot <= target
+			cur = i
 			break
 		}
 	}
-	if curIdx < 0 {
+	if cur < 0 {
 		return nil, fmt.Errorf("no backup found for DLE %q at or before %s", dleName, targetSlotID)
 	}
 
 	// Walk back along the base chain, newest level first.
 	var steps []Step
 	for {
-		s, a := slots[curIdx], archiveFor(slots[curIdx], dleName)
-		steps = append(steps, Step{SlotID: s.ID, DLE: a.DLE, Level: a.Level, Archiver: a.Archiver, Compress: a.Compress, Encrypt: a.Encrypt})
+		a := ds[cur]
+		steps = append(steps, Step{SlotID: a.Slot, DLE: a.DLE, Level: a.Level, Archiver: a.Archiver, Compress: a.Compress, Encrypt: a.Encrypt})
 		if a.Level == 0 {
 			break
 		}
-		baseIdx, err := baseIndex(slots, curIdx, dleName, *a)
+		baseIdx, err := baseIndex(ds, cur, dleName)
 		if err != nil {
 			return nil, err
 		}
-		curIdx = baseIdx
+		cur = baseIdx
 	}
 
 	// Reverse into run order: the full first, then each level up to the tip.
@@ -81,38 +85,38 @@ func Chain(slots []*record.Slot, dleName, targetSlotID string) ([]Step, error) {
 	return steps, nil
 }
 
-// baseIndex locates the archive that an incremental builds on. It honors the
-// recorded BaseSlot strictly — if it names a slot that is no longer in the
-// catalog (pruned away), that is a broken chain and an error, never a silent
-// substitution. When BaseSlot was not recorded it derives the base as the most
-// recent dump one level down before curIdx (what the planner would have
-// recorded). A missing base either way is an error, not a partial restore.
-func baseIndex(slots []*record.Slot, curIdx int, dleName string, a record.Archive) (int, error) {
+// baseIndex locates the archive that an incremental builds on, within ds (the DLE's archives
+// in run order). It honors the recorded BaseSlot strictly — if it names a slot that no longer
+// holds a backup for the DLE (pruned away), that is a broken chain and an error, never a
+// silent substitution. When BaseSlot was not recorded it derives the base as the most recent
+// dump one level down before curIdx (what the planner would have recorded). A missing base
+// either way is an error, not a partial restore.
+func baseIndex(ds []record.Archive, curIdx int, dleName string) (int, error) {
+	a := ds[curIdx]
 	if a.BaseSlot != "" {
 		for i := curIdx - 1; i >= 0; i-- {
-			if slots[i].ID == a.BaseSlot {
-				if archiveFor(slots[i], dleName) != nil {
-					return i, nil
-				}
-				break
+			if ds[i].Slot == a.BaseSlot {
+				return i, nil
 			}
 		}
-		return 0, fmt.Errorf("broken incremental chain for DLE %q: slot %s (level %d) builds on slot %q, which holds no backup for it", dleName, slots[curIdx].ID, a.Level, a.BaseSlot)
+		return 0, fmt.Errorf("broken incremental chain for DLE %q: slot %s (level %d) builds on slot %q, which holds no backup for it", dleName, a.Slot, a.Level, a.BaseSlot)
 	}
 	for i := curIdx - 1; i >= 0; i-- {
-		if b := archiveFor(slots[i], dleName); b != nil && b.Level == a.Level-1 {
+		if ds[i].Level == a.Level-1 {
 			return i, nil
 		}
 	}
-	return 0, fmt.Errorf("broken incremental chain for DLE %q: slot %s (level %d) has no level-%d base at or before it", dleName, slots[curIdx].ID, a.Level, a.Level-1)
+	return 0, fmt.Errorf("broken incremental chain for DLE %q: slot %s (level %d) has no level-%d base at or before it", dleName, a.Slot, a.Level, a.Level-1)
 }
 
-// archiveFor returns the slot's archive for the named DLE, or nil if absent.
-func archiveFor(s *record.Slot, dleName string) *record.Archive {
-	for i := range s.Archives {
-		if s.Archives[i].DLE == dleName {
-			return &s.Archives[i]
+// archivesOf returns the archives of dle, in run order (by slot id).
+func archivesOf(archives []record.Archive, dleName string) []record.Archive {
+	var out []record.Archive
+	for _, a := range archives {
+		if a.DLE == dleName {
+			out = append(out, a)
 		}
 	}
-	return nil
+	sort.Slice(out, func(i, j int) bool { return record.SlotIDLess(out[i].Slot, out[j].Slot) })
+	return out
 }

@@ -51,7 +51,7 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 	// a single crashed slot may have placements spread over several holding disks. Drain each slot
 	// once (one backing session, one seal), copying every holding disk's portion of it.
 	holdVols := make(map[string]media.Volume, len(d.Holdings))
-	slotSet := map[string]*record.Slot{}
+	slotSet := map[string]*catalog.Slot{}
 	for _, h := range d.Holdings {
 		vol, err := d.HoldVol(h)
 		if err != nil {
@@ -73,7 +73,7 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 
 	for _, id := range ids {
 		s := slotSet[id]
-		spec := archiveio.SlotSpec{ID: s.ID, Date: s.Date, Sequence: s.Sequence, Generator: s.Generator, CreatedAt: s.CreatedAt}
+		spec := archiveio.SlotSpec{ID: s.ID, CreatedAt: s.LastArchiveAt()}
 		backingSession, err := d.OpenBacking(spec)
 		if err != nil {
 			return flushed, fmt.Errorf("flush %s: open backing %q: %w", s.ID, d.Backing, err)

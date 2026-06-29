@@ -33,34 +33,14 @@ type ArchivePos struct {
 	Index  FilePos   `json:"index,omitempty"` // the member index's location ("" position = no members)
 }
 
-// Slot is a run's grouping of archives — the in-memory unit retention and display work on.
-// It is NOT a record on the medium: each archive carries the slot id in its header and is
-// made durable by its own commit footer, so a slot is reconstructed by grouping committed
-// archives (a crashed run keeps its committed archives; uncommitted parts are orphans). There
-// is no completion state — a slot is simply its archives; its "time" is the latest archive that
-// landed (LastArchiveAt). The catalog assembles one from a scan; an empty run has no slot at all.
-//
-// The ID is the slot's identity: "slot-" + Date + a fixed-width ".NNN" sequence
-// (".001" for the day's first run) — see IDFromParts. The natural key is a date,
-// so the "slot-" tag is what keeps it from reading as a plain date wherever it
-// appears bare: catalog JSON (an id beside an identical date), logs,
-// Archive.BaseSlot references, and the on-disk slots/<id>/ directory. The system's
-// other ids need no such tag because they are already distinctive words (labels
-// "<medium>-<date>", DLEs "<host>-<path>"), not bare dates.
-type Slot struct {
-	ID         string    `json:"id"`          // e.g. "slot-2026-06-21.001"
-	Date       string    `json:"date"`        // run date, YYYY-MM-DD
-	Sequence   int       `json:"sequence"`    // 1 for the first run of the day, 2+ for later runs
-	CreatedAt  time.Time `json:"created_at"`  // when the run started (its first archive's authoring began)
-	Generator  string    `json:"generator"`   // tool that produced the slot
-	Archives   []Archive `json:"archives"`    // one entry per DLE backed up
-	TotalBytes int64     `json:"total_bytes"` // sum of compressed archive sizes
-}
-
-// Archive describes a single DLE dump within a slot. It is identified on a volume
-// by (Slot, DLE, Level); its physical position is held by the catalog, not here,
-// so a slot's metadata is portable across volumes.
+// Archive describes a single DLE dump — the commit footer that marks the dump complete
+// and the metadata a catalog caches. It is self-locating: Slot, DLE, and Level together
+// name it uniquely on a volume, so an archive read off the medium carries the slot it
+// belongs to without a separate grouping record (its physical position is held by the
+// catalog, not here, so the metadata stays portable across volumes). A "slot" is just the
+// shared Slot tag a run's archives carry — there is no slot record on the medium.
 type Archive struct {
+	Slot         string    `json:"slot"`              // the slot (run) this dump belongs to, e.g. "slot-2026-06-21.001"
 	DLE          string    `json:"dle"`               // DLE name, e.g. "app01-home"
 	Host         string    `json:"host"`              // source host
 	Path         string    `json:"path"`              // source path
@@ -87,56 +67,16 @@ func (a Archive) DLEID() string {
 	return a.Host + ":" + a.Path
 }
 
-// NewSlot starts a new slot for a run. Archives are added with AddArchive (TotalBytes is
-// kept in sync); there is no completion step — a slot is its archives.
-func NewSlot(id, date string, seq int, generator string, now time.Time) *Slot {
-	return &Slot{
-		ID:        id,
-		Date:      date,
-		Sequence:  seq,
-		CreatedAt: now,
-		Generator: generator,
-	}
-}
-
-// AddArchive appends an archive and keeps TotalBytes in sync, so the running
-// total can never drift from the recorded archives.
-func (s *Slot) AddArchive(a Archive) {
-	s.Archives = append(s.Archives, a)
-	s.TotalBytes += a.Compressed
-}
-
-// DropArchive removes a DLE's archive and keeps TotalBytes in sync, the inverse
-// of AddArchive. Used when the last copy of that DLE's image has been reclaimed,
-// so the slot's medium-independent content no longer advertises an image no
-// medium holds. Reports whether an archive was removed.
-func (s *Slot) DropArchive(dle string) bool {
-	kept := s.Archives[:0:0]
-	removed := false
-	for _, a := range s.Archives {
-		if a.DLE == dle {
-			s.TotalBytes -= a.Compressed
-			removed = true
-			continue
-		}
-		kept = append(kept, a)
-	}
-	s.Archives = kept
-	return removed
-}
-
-// LastArchiveAt is the time the slot's most recently committed archive landed — the slot's
-// "last activity", for display and (via each archive's own CreatedAt) retention. Zero when the
-// slot has no archives.
-func (s *Slot) LastArchiveAt() time.Time {
-	var last time.Time
-	for _, a := range s.Archives {
-		if a.CreatedAt.After(last) {
-			last = a.CreatedAt
-		}
-	}
-	return last
-}
+// A slot is a run's grouping of archives, named by a slot id the run's archives all carry
+// (Archive.Slot). It is not a record on the medium: each archive is made durable by its own
+// commit footer, so a run is reconstructed by grouping committed archives that share a slot id
+// (a crashed run keeps its committed archives; uncommitted parts are orphans). The id is the
+// slot's whole identity: "slot-" + Date + a fixed-width ".NNN" sequence (".001" for the day's
+// first run) — see IDFromParts. The natural key is a date, so the "slot-" tag is what keeps it
+// from reading as a plain date wherever it appears bare: catalog JSON, logs, Archive.BaseSlot
+// references, and the on-disk slots/<id>/ directory. The system's other ids need no such tag
+// because they are already distinctive words (labels "<medium>-<date>", DLEs "<host>-<path>"),
+// not bare dates.
 
 // IDFromParts builds a slot ID from a date string and sequence number. Every run
 // is suffixed with a fixed-width, zero-padded sequence (".001" for the day's first
@@ -145,8 +85,7 @@ func (s *Slot) LastArchiveAt() time.Time {
 // sort *after* its same-day reruns there, since "." (0x2E) precedes "/" (0x2F); the
 // fixed width likewise keeps ".10" from sorting before ".2". The three digits cap a
 // day at 999 runs, which a daily backup never approaches. The "slot-" prefix tags an
-// otherwise date-shaped key so it never reads as a plain date (see the Slot.ID doc);
-// ParseID strips it back off.
+// otherwise date-shaped key so it never reads as a plain date; ParseID strips it back off.
 func IDFromParts(date string, seq int) string {
 	return fmt.Sprintf("slot-%s.%03d", date, seq)
 }
@@ -156,7 +95,7 @@ func DateString(date time.Time) string {
 	return date.Format("2006-01-02")
 }
 
-// ParseDateField parses a slot's Date field (YYYY-MM-DD).
+// ParseDateField parses a slot's date (YYYY-MM-DD).
 func ParseDateField(s string) (time.Time, error) {
 	return time.Parse("2006-01-02", s)
 }
@@ -179,13 +118,29 @@ func ParseID(id string) (date string, seq int, err error) {
 	return date, seq, nil
 }
 
-// Less reports whether slot a comes before slot b in run order, keyed by date
-// then sequence (so "slot-DATE.10" correctly follows "slot-DATE.2").
-func Less(a, b *Slot) bool {
-	if a.Date != b.Date {
-		return a.Date < b.Date
+// SlotDate returns the date (YYYY-MM-DD) encoded in a slot id, or "" if it does not parse.
+func SlotDate(id string) string {
+	date, _, err := ParseID(id)
+	if err != nil {
+		return ""
 	}
-	return a.Sequence < b.Sequence
+	return date
+}
+
+// SlotIDLess reports whether slot id a comes before b in run order, keyed by date then
+// sequence (so "slot-DATE.10" correctly follows "slot-DATE.2"). The ids are built to sort
+// this way lexically too; the parse keeps a legacy unpadded "slot-DATE" ordering correct.
+// An id that does not parse (not slot-shaped) falls back to a plain lexical compare.
+func SlotIDLess(a, b string) bool {
+	da, sa, ea := ParseID(a)
+	db, sb, eb := ParseID(b)
+	if ea != nil || eb != nil {
+		return a < b
+	}
+	if da != db {
+		return da < db
+	}
+	return sa < sb
 }
 
 // MarshalCommit serializes an archive's commit footer — its metadata (Members omitempty, so

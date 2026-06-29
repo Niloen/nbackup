@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
@@ -109,12 +110,11 @@ func (e *Engine) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 	}
 
 	dles := e.DLENames()
-	slots := e.cat.Slots()
 	ledger, err := drill.Load(e.cfg.WorkdirPath())
 	if err != nil {
 		return nil, err
 	}
-	targets := drill.Select(dles, slots, opts.AsOf, ledger, opts.Window, opts.Sample, opts.Now)
+	targets := drill.Select(dles, e.cat.Archives(), opts.AsOf, ledger, opts.Window, opts.Sample, opts.Now)
 
 	rep := &DrillReport{
 		AsOf: opts.AsOf, Window: opts.Window, Medium: medium, Tier: opts.Tier,
@@ -459,7 +459,7 @@ func (e *Engine) chainBytes(steps []restore.Step) int64 {
 	return n
 }
 
-func findArchive(s *record.Slot, dle string, level int) (record.Archive, bool) {
+func findArchive(s *catalog.Slot, dle string, level int) (record.Archive, bool) {
 	for _, a := range s.Archives {
 		if a.DLE == dle && a.Level == level {
 			return a, true

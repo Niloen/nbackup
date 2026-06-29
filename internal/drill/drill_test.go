@@ -7,12 +7,23 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-func mkSlot(id, date string, archives ...record.Archive) *record.Slot {
-	s := &record.Slot{ID: id, Date: date, Sequence: 1, Archives: archives}
-	for _, a := range archives {
-		s.TotalBytes += a.Compressed
+// mkSlot tags each archive with the slot id and returns them (Select works on archives,
+// each carrying its slot tag). date is implied by the id, so it is unused here.
+func mkSlot(id, date string, archives ...record.Archive) []record.Archive {
+	_ = date
+	for i := range archives {
+		archives[i].Slot = id
 	}
-	return s
+	return archives
+}
+
+// cat flattens several slots' archives into the one corpus Select takes.
+func cat(slots ...[]record.Archive) []record.Archive {
+	var out []record.Archive
+	for _, s := range slots {
+		out = append(out, s...)
+	}
+	return out
 }
 
 func arch(dle string, level int) record.Archive {
@@ -62,11 +73,11 @@ func TestLedgerRoundTrip(t *testing.T) {
 func TestSelectRotatesAndRanks(t *testing.T) {
 	now := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
 	// a: full only (chain 1). b: full + 2 incrementals (chain 3). c: full only.
-	slots := []*record.Slot{
+	slots := cat(
 		mkSlot("slot-2026-06-20", "2026-06-20", arch("a", 0), arch("b", 0), arch("c", 0)),
 		mkSlot("slot-2026-06-21", "2026-06-21", arch("b", 1)),
 		mkSlot("slot-2026-06-22", "2026-06-22", arch("b", 2)),
-	}
+	)
 	dles := []string{"a", "b", "c"}
 	asOf := "2026-06-24"
 
@@ -101,11 +112,11 @@ func TestSelectRotatesAndRanks(t *testing.T) {
 // the as-of date, not the latest overall.
 func TestSelectPointInTime(t *testing.T) {
 	now := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
-	slots := []*record.Slot{
+	slots := cat(
 		mkSlot("slot-2026-06-20", "2026-06-20", arch("a", 0)),
 		mkSlot("slot-2026-06-22", "2026-06-22", arch("a", 1)),
 		mkSlot("slot-2026-06-24", "2026-06-24", arch("a", 1)),
-	}
+	)
 	led := &Ledger{Records: map[string]Record{}}
 	got := Select([]string{"a"}, slots, "2026-06-22", led, 30*24*time.Hour, 1, now)
 	if len(got) != 1 || got[0].SlotID != "slot-2026-06-22" {

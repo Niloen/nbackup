@@ -95,19 +95,32 @@ func (t *Tree) HasIncrementals() bool { return t.chainLen > 1 }
 // long-standing behavior) or a date with a time component (YYYY-MM-DD HH[:MM[:SS]],
 // interpreted in UTC) — the most recent slot committed at or before the end of that
 // period, so an earlier same-day run is reachable by naming its time.
-func AsOf(slots []*record.Slot, asOf string) (string, error) {
+func AsOf(archives []record.Archive, asOf string) (string, error) {
 	bound, hasTime, err := parseAsOf(asOf)
 	if err != nil {
 		return "", err
 	}
+	// Group the archives into slots, in run order, each with its commit time (the latest
+	// archive that landed in it).
+	last := map[string]time.Time{}
+	var ids []string
+	for _, a := range archives {
+		if _, seen := last[a.Slot]; !seen {
+			ids = append(ids, a.Slot)
+		}
+		if a.CreatedAt.After(last[a.Slot]) {
+			last[a.Slot] = a.CreatedAt
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return record.SlotIDLess(ids[i], ids[j]) })
 	target := ""
-	for _, s := range slots {
+	for _, id := range ids {
 		if hasTime {
-			if !slotTime(s).After(bound) { // committed at or before the period's end
-				target = s.ID
+			if !slotTime(id, last[id]).After(bound) { // committed at or before the period's end
+				target = id
 			}
-		} else if s.Date <= asOf {
-			target = s.ID
+		} else if record.SlotDate(id) <= asOf {
+			target = id
 		}
 	}
 	if target == "" {
@@ -139,17 +152,14 @@ func parseAsOf(asOf string) (bound time.Time, hasTime bool, err error) {
 	return time.Time{}, false, fmt.Errorf("invalid as-of %q: want YYYY-MM-DD or 'YYYY-MM-DD HH[:MM[:SS]]'", asOf)
 }
 
-// slotTime is a slot's effective recovery instant: when it committed, falling back to
-// when it was created, then to its run date at midnight UTC for a slot with no
-// recorded times (e.g. one rebuilt from older media).
-func slotTime(s *record.Slot) time.Time {
-	if t := s.LastArchiveAt(); !t.IsZero() {
-		return t
+// slotTime is a slot's effective recovery instant: when its last archive committed, falling
+// back to its run date at midnight UTC for a slot whose archives carry no commit time (e.g.
+// one rebuilt from older media). last is the latest CreatedAt across the slot's archives.
+func slotTime(slotID string, last time.Time) time.Time {
+	if !last.IsZero() {
+		return last
 	}
-	if !s.CreatedAt.IsZero() {
-		return s.CreatedAt
-	}
-	t, _ := time.ParseInLocation("2006-01-02", s.Date, time.UTC)
+	t, _ := time.ParseInLocation("2006-01-02", record.SlotDate(slotID), time.UTC)
 	return t
 }
 
@@ -157,12 +167,12 @@ func slotTime(s *record.Slot) time.Time {
 // the member lists of the restore chain in run order, so each path resolves to the
 // most recent archive that holds it. The member lists are loaded via members (the
 // catalog cache holds the slot index, not the member lists — those are loaded lazily).
-func BuildTree(slots []*record.Slot, dle, asOf string, members func(slotID string, level int) ([]string, error)) (*Tree, error) {
-	target, err := AsOf(slots, asOf)
+func BuildTree(archives []record.Archive, dle, asOf string, members func(slotID string, level int) ([]string, error)) (*Tree, error) {
+	target, err := AsOf(archives, asOf)
 	if err != nil {
 		return nil, err
 	}
-	steps, err := restore.Chain(slots, dle, target)
+	steps, err := restore.Chain(archives, dle, target)
 	if err != nil {
 		return nil, err
 	}

@@ -52,9 +52,9 @@ func (r Ref) expect() archiveio.Expect {
 type Map interface {
 	PlacementsFor(slotID string) []catalog.Placement
 	// AddArchive records one committed archive's content + its on-medium position — the
-	// catalog's single write path (a slot is created from the archive's identity, never added
-	// wholesale; there is no completion step — a slot is its archives).
-	AddArchive(slot *record.Slot, medium string, arch record.Archive, pos record.ArchivePos) error
+	// catalog's single write path. The slot entry is created from the archive's own slot tag
+	// (arch.Slot), never added wholesale; there is no completion step — a slot is its archives.
+	AddArchive(arch record.Archive, medium string, pos record.ArchivePos) error
 	// RemoveArchive drops one archive's placement on a medium (and its slot entry if that was the
 	// last copy) — the reclaim path when a staged archive has landed on the backing.
 	RemoveArchive(slotID, medium, dle string) (placementGone, entryGone bool, err error)

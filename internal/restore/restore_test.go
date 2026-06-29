@@ -12,8 +12,22 @@ func arch(dle string, level int, base string) record.Archive {
 	return record.Archive{DLE: dle, Level: level, Archiver: "gnutar", Compress: "none", BaseSlot: base}
 }
 
-func slot(id string, archives ...record.Archive) *record.Slot {
-	return &record.Slot{ID: id, Archives: archives}
+// slot tags each archive with the slot id and returns them (Chain works on archives,
+// each carrying its slot tag).
+func slot(id string, archives ...record.Archive) []record.Archive {
+	for i := range archives {
+		archives[i].Slot = id
+	}
+	return archives
+}
+
+// cat flattens several slots' archives into the one corpus Chain takes.
+func cat(slots ...[]record.Archive) []record.Archive {
+	var out []record.Archive
+	for _, s := range slots {
+		out = append(out, s...)
+	}
+	return out
 }
 
 // levels returns the per-step level sequence of a chain, for compact assertions.
@@ -46,7 +60,7 @@ func eq[T comparable](a, b []T) bool {
 }
 
 func TestChainFullOnly(t *testing.T) {
-	slots := []*record.Slot{slot("s0", arch("a", 0, ""))}
+	slots := cat(slot("s0", arch("a", 0, "")))
 	steps, err := Chain(slots, "a", "s0")
 	if err != nil {
 		t.Fatal(err)
@@ -60,11 +74,11 @@ func TestChainFullOnly(t *testing.T) {
 // incrementals are cumulative since the full, so only the newest L1 is replayed
 // and the redundant middle one is skipped.
 func TestChainSkipsRedundantSameLevel(t *testing.T) {
-	slots := []*record.Slot{
+	slots := cat(
 		slot("s0", arch("a", 0, "")),
 		slot("s1", arch("a", 1, "s0")),
 		slot("s2", arch("a", 1, "s0")),
-	}
+	)
 	steps, err := Chain(slots, "a", "s2")
 	if err != nil {
 		t.Fatal(err)
@@ -76,13 +90,13 @@ func TestChainSkipsRedundantSameLevel(t *testing.T) {
 
 // A real multilevel chain replays exactly one archive per level, in run order.
 func TestChainOnePerLevel(t *testing.T) {
-	slots := []*record.Slot{
+	slots := cat(
 		slot("s0", arch("a", 0, "")),
 		slot("s1", arch("a", 1, "s0")),
 		slot("s2", arch("a", 1, "s0")),
 		slot("s3", arch("a", 2, "s2")),
 		slot("s4", arch("a", 2, "s2")),
-	}
+	)
 	steps, err := Chain(slots, "a", "s4")
 	if err != nil {
 		t.Fatal(err)
@@ -97,11 +111,11 @@ func TestChainOnePerLevel(t *testing.T) {
 
 // A target before the tip restores the point-in-time subchain.
 func TestChainPointInTime(t *testing.T) {
-	slots := []*record.Slot{
+	slots := cat(
 		slot("s0", arch("a", 0, "")),
 		slot("s1", arch("a", 1, "s0")),
 		slot("s2", arch("a", 1, "s0")),
-	}
+	)
 	steps, err := Chain(slots, "a", "s1")
 	if err != nil {
 		t.Fatal(err)
@@ -113,11 +127,11 @@ func TestChainPointInTime(t *testing.T) {
 
 // When BaseSlot was never recorded, the base is derived from level ordering.
 func TestChainDerivesBaseWithoutBaseSlot(t *testing.T) {
-	slots := []*record.Slot{
+	slots := cat(
 		slot("s0", arch("a", 0, "")),
 		slot("s1", arch("a", 1, "")),
 		slot("s2", arch("a", 2, "")),
-	}
+	)
 	steps, err := Chain(slots, "a", "s2")
 	if err != nil {
 		t.Fatal(err)
@@ -130,24 +144,24 @@ func TestChainDerivesBaseWithoutBaseSlot(t *testing.T) {
 // A recorded base that is no longer in the catalog is a broken chain, not a
 // silent substitution — the restore fails rather than producing a partial tree.
 func TestChainBrokenWhenBaseSlotMissing(t *testing.T) {
-	slots := []*record.Slot{
+	slots := cat(
 		slot("s0", arch("a", 0, "")),
 		slot("s2", arch("a", 1, "s1")), // s1 pruned away
-	}
+	)
 	if _, err := Chain(slots, "a", "s2"); err == nil {
 		t.Fatal("expected broken-chain error when BaseSlot is missing")
 	}
 }
 
 func TestChainNoBackupForDLE(t *testing.T) {
-	slots := []*record.Slot{slot("s0", arch("a", 0, ""))}
+	slots := cat(slot("s0", arch("a", 0, "")))
 	if _, err := Chain(slots, "b", "s0"); err == nil {
 		t.Fatal("expected error for a DLE with no backup")
 	}
 }
 
 func TestChainUnknownTarget(t *testing.T) {
-	slots := []*record.Slot{slot("s0", arch("a", 0, ""))}
+	slots := cat(slot("s0", arch("a", 0, "")))
 	if _, err := Chain(slots, "a", "nope"); err == nil {
 		t.Fatal("expected error for an unknown target slot")
 	}
@@ -155,11 +169,11 @@ func TestChainUnknownTarget(t *testing.T) {
 
 // Multiple DLEs in shared slots: each DLE's chain is independent.
 func TestChainIgnoresOtherDLEs(t *testing.T) {
-	slots := []*record.Slot{
+	slots := cat(
 		slot("s0", arch("a", 0, ""), arch("b", 0, "")),
 		slot("s1", arch("b", 1, "s0")),
 		slot("s2", arch("a", 1, "s0")),
-	}
+	)
 	steps, err := Chain(slots, "a", "s2")
 	if err != nil {
 		t.Fatal(err)

@@ -11,20 +11,29 @@ import (
 // each "dle:level". It seals the slot at the date's midnight, so age tests that
 // reason in whole days behave as the date implies; mkSlotAt sets a precise commit
 // instant for sub-day age tests.
-func mkSlot(id, date string, archives ...record.Archive) *record.Slot {
+func mkSlot(id, date string, archives ...record.Archive) []record.Archive {
 	t, _ := record.ParseDateField(date)
 	return mkSlotAt(id, date, t, archives...)
 }
 
 // mkSlotAt is mkSlot with an explicit commit instant, stamped on each archive's CreatedAt
-// (retention ages per archive), for exercising minimum_age below a day. It derives Sequence from
-// the id so same-date slots order correctly under record.Less (which hasNewerFull relies on).
-func mkSlotAt(id, date string, at time.Time, archives ...record.Archive) *record.Slot {
-	_, seq, _ := record.ParseID(id)
+// (retention ages per archive), for exercising minimum_age below a day. It returns the slot's
+// archives, each tagged with the slot id — the corpus the policy layer works on.
+func mkSlotAt(id, date string, at time.Time, archives ...record.Archive) []record.Archive {
 	for i := range archives {
+		archives[i].Slot = id
 		archives[i].CreatedAt = at
 	}
-	return &record.Slot{ID: id, Date: date, Sequence: seq, Archives: archives}
+	return archives
+}
+
+// cat flattens several slots' archives into the one corpus the policy functions take.
+func cat(slots ...[]record.Archive) []record.Archive {
+	var out []record.Archive
+	for _, s := range slots {
+		out = append(out, s...)
+	}
+	return out
 }
 
 func arch(dle string, level int) record.Archive { return record.Archive{DLE: dle, Level: level} }
@@ -36,10 +45,10 @@ func arch(dle string, level int) record.Archive { return record.Archive{DLE: dle
 // a chain superseded by a newer full is reclaimable (TestFloor_SupersededChain...).
 func TestFloor_LiveChainKept(t *testing.T) {
 	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
-	slots := []*record.Slot{
+	slots := cat(
 		mkSlot("slot-2026-01-01", "2026-01-01", arch("app", 0)), // the base full
 		mkSlot("slot-2026-01-02", "2026-01-02", arch("app", 1)), // tip incremental, no newer full
-	}
+	)
 	got := Compute(slots, 0, now) // minAge 0 so age never keeps
 
 	if reason, ok := got.Reason("slot-2026-01-01"); !ok {
@@ -58,11 +67,11 @@ func TestFloor_LiveChainKept(t *testing.T) {
 // exists, the old full + its incrementals are no longer a needed recovery path.
 func TestFloor_SupersededChainReclaimable(t *testing.T) {
 	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
-	slots := []*record.Slot{
+	slots := cat(
 		mkSlot("slot-2026-01-01", "2026-01-01", arch("app", 0)), // old full (superseded)
 		mkSlot("slot-2026-01-02", "2026-01-02", arch("app", 1)), // old incremental (superseded)
 		mkSlot("slot-2026-02-01", "2026-02-01", arch("app", 0)), // newer full
-	}
+	)
 	got := Compute(slots, 0, now) // minAge 0
 
 	for _, id := range []string{"slot-2026-01-01", "slot-2026-01-02"} {
@@ -79,11 +88,11 @@ func TestFloor_SupersededChainReclaimable(t *testing.T) {
 // keep reason must name the DLE whose full it actually carries.
 func TestFloor_ReasonNamesTheProtectingFull(t *testing.T) {
 	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
-	slots := []*record.Slot{
+	slots := cat(
 		mkSlot("slot-2026-01-01", "2026-01-01", arch("etc", 0)),
 		// etc gets a later full here; home gets its only full here too.
 		mkSlot("slot-2026-01-02", "2026-01-02", arch("etc", 1), arch("home", 0)),
-	}
+	)
 	got := Compute(slots, 0, now)
 
 	if reason, _ := got.Reason("slot-2026-01-02"); reason != "last recovery path" {
@@ -97,13 +106,13 @@ func TestFloor_ReasonNamesTheProtectingFull(t *testing.T) {
 // one — a slot-granular floor would keep the whole slot for the live DLE's sake.
 func TestFloor_PerArchiveWithinOneSlot(t *testing.T) {
 	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
-	slots := []*record.Slot{
+	slots := cat(
 		// Day 1: both DLEs full.
 		mkSlot("slot-2026-01-01", "2026-01-01", arch("app", 0), arch("db", 0)),
 		// Day 2: app gets a newer full (superseding its day-1 full); db only increments,
 		// so db's day-1 full is still its last recovery path.
 		mkSlot("slot-2026-02-01", "2026-02-01", arch("app", 0), arch("db", 1)),
-	}
+	)
 	got := Compute(slots, 0, now) // minAge 0 so only chain/last-recovery pin
 
 	if got.KeepsArchive("slot-2026-01-01", "app") {
@@ -123,7 +132,7 @@ func TestFloor_PerArchiveWithinOneSlot(t *testing.T) {
 // the age in the config's day vocabulary.
 func TestFloor_MinAgeReasonInDays(t *testing.T) {
 	now := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
-	slots := []*record.Slot{mkSlot("slot-2026-01-04", "2026-01-04", arch("app", 1))}
+	slots := cat(mkSlot("slot-2026-01-04", "2026-01-04", arch("app", 1)))
 	got := Compute(slots, 7*24*time.Hour, now)
 
 	if reason, _ := got.Reason("slot-2026-01-04"); reason != "within minimum age (7d)" {
@@ -139,14 +148,14 @@ func TestFloor_MinAgeReasonInDays(t *testing.T) {
 func TestFloor_MinAgeSubDay(t *testing.T) {
 	now := time.Date(2026, 1, 4, 11, 0, 0, 0, time.UTC)
 	minAge := time.Hour
-	slots := []*record.Slot{
+	slots := cat(
 		// A newer full exists, so neither old slot is a last recovery path; only
 		// age and the live chain can pin them. The young incremental builds on the
 		// NEWER full, so it cannot drag the old full back into a chain.
 		mkSlotAt("slot-2026-01-04", "2026-01-04", time.Date(2026, 1, 4, 4, 0, 0, 0, time.UTC), arch("app", 0)),     // old full, committed 04:00 (7h ago)
 		mkSlotAt("slot-2026-01-04.2", "2026-01-04", time.Date(2026, 1, 4, 8, 0, 0, 0, time.UTC), arch("app", 0)),   // newer full, committed 08:00 (3h ago)
 		mkSlotAt("slot-2026-01-04.3", "2026-01-04", time.Date(2026, 1, 4, 10, 30, 0, 0, time.UTC), arch("app", 1)), // incremental, committed 10:30 (30m ago, young)
-	}
+	)
 	got := Compute(slots, minAge, now)
 
 	if got.Keeps("slot-2026-01-04") {

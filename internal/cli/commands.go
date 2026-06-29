@@ -295,12 +295,12 @@ func newDumpCmd(a *app) *cobra.Command {
 				if err != nil {
 					return report.Run{}, err
 				}
-				fmt.Printf("\nCommitted %s: %d archive(s), %s total\n", s.ID, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes))
+				fmt.Printf("\nCommitted %s: %d archive(s), %s total\n", s.ID, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes()))
 				return report.Run{
 					Command:    report.CommandDump,
 					SlotID:     s.ID,
 					Archives:   len(s.Archives),
-					BytesMoved: s.TotalBytes,
+					BytesMoved: s.TotalBytes(),
 					DumpStats:  dumpStats(s, cfg.WorkdirPath()),
 				}, nil
 			})
@@ -316,7 +316,7 @@ func newDumpCmd(a *app) *cobra.Command {
 // the run-status snapshot the tracker just flushed (the same file `nb status` reads),
 // matched by DLE name and level. When the snapshot is missing or stale, sizes are
 // still recorded and timing is left zero (rendered as a dash).
-func dumpStats(s *record.Slot, workdir string) []report.DLEStat {
+func dumpStats(s *catalog.Slot, workdir string) []report.DLEStat {
 	type key struct {
 		name  string
 		level int
@@ -537,7 +537,7 @@ func runSlotList(a *app) error {
 			committed = t.Format("2006-01-02 15:04")
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", s.ID, "committed", len(s.Archives),
-			sizeutil.FormatBytes(s.TotalBytes), committed, copiesSummary(eng.Catalog().Placements(s.ID)))
+			sizeutil.FormatBytes(s.TotalBytes()), committed, copiesSummary(eng.Catalog().Placements(s.ID)))
 	}
 	tw.Flush()
 	return nil
@@ -574,9 +574,9 @@ func runSlotShow(a *app, slotID string) error {
 		return err
 	}
 	fmt.Printf("Slot %s  (%s)\n", s.ID, "committed")
-	fmt.Printf("  date:    %s\n", s.Date)
+	fmt.Printf("  date:    %s\n", s.Date())
 	fmt.Printf("  committed: %s\n", s.LastArchiveAt().Format("2006-01-02 15:04:05 MST"))
-	fmt.Printf("  total:   %s\n\n", sizeutil.FormatBytes(s.TotalBytes))
+	fmt.Printf("  total:   %s\n\n", sizeutil.FormatBytes(s.TotalBytes()))
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "DLE\tLEVEL\tFILES\tSIZE\tCOMPRESS\tENCRYPT")
 	for _, ar := range s.Archives {
@@ -674,7 +674,7 @@ func runDleList(a *app) error {
 			g.bytes += ar.Compressed
 			g.lastLevel = ar.Level
 			if ar.Level == 0 {
-				g.lastFull = s.Date
+				g.lastFull = s.Date()
 			}
 			for _, p := range ps {
 				for _, pa := range p.Archives {
@@ -738,7 +738,7 @@ func runDleShow(a *app, arg string) error {
 				}
 			}
 			sort.Strings(media)
-			fmt.Fprintf(tw, "%s\t%s\tL%d\t%s\t%s\t%s\n", s.ID, s.Date, ar.Level,
+			fmt.Fprintf(tw, "%s\t%s\tL%d\t%s\t%s\t%s\n", s.ID, s.Date(), ar.Level,
 				sizeutil.FormatBytes(ar.Compressed), base, strings.Join(media, ", "))
 		}
 	}
@@ -750,7 +750,7 @@ func runDleShow(a *app, arg string) error {
 // accepting either the internal slug or the host:path display id, and returns the
 // slug plus a display string. Archives carry their own host/path, so the match needs
 // no config — a DLE that was dumped but later removed from config still resolves.
-func resolveDLE(slots []*record.Slot, arg string) (slug, display string, ok bool) {
+func resolveDLE(slots []*catalog.Slot, arg string) (slug, display string, ok bool) {
 	for _, s := range slots {
 		for _, ar := range s.Archives {
 			if ar.DLE == arg || ar.DLEID() == arg {
@@ -1276,7 +1276,7 @@ func mediumDetail(eng *engine.Engine, name string) error {
 		if t := s.LastArchiveAt(); !t.IsZero() {
 			committed = t.Format("2006-01-02 15:04")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", s.ID, sizeutil.FormatBytes(s.TotalBytes), len(s.Archives), committed)
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", s.ID, sizeutil.FormatBytes(s.TotalBytes()), len(s.Archives), committed)
 	}
 	tw.Flush()
 	return nil

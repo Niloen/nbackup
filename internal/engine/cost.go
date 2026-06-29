@@ -60,23 +60,20 @@ type ForecastPoint struct {
 // Pure and offline.
 func (e *Engine) ForecastCost(start time.Time, days int) []ForecastPoint {
 	plans := e.Simulate(start, days)
-	working := append([]*record.Slot(nil), e.cat.SlotsOn(e.mediumName)...)
+	working := append([]record.Archive(nil), e.cat.ArchivesOn(e.mediumName)...)
 	points := make([]ForecastPoint, 0, len(plans))
 	for i, plan := range plans {
 		date := start.AddDate(0, 0, i)
 		ds := record.DateString(date)
 
-		// Synthesize the day's run as a slot (sized from the plan's estimates),
-		// replacing any existing slot of the same id so a re-simulation is idempotent.
-		sl := record.NewSlot(record.IDFromParts(ds, 1), ds, 1, "forecast", date)
+		// Synthesize the day's run as archives (sized from the plan's estimates), replacing
+		// any existing archives of the same slot id so a re-simulation is idempotent.
+		slotID := record.IDFromParts(ds, 1)
+		working = dropSlot(working, slotID)
 		var runBytes int64
 		for _, it := range plan.Items {
-			sl.AddArchive(record.Archive{DLE: it.Name, Level: it.Level, Compressed: it.EstBytes, CreatedAt: date})
+			working = append(working, record.Archive{Slot: slotID, DLE: it.Name, Level: it.Level, Compressed: it.EstBytes, CreatedAt: date})
 			runBytes += it.EstBytes
-		}
-		working = dropSlot(working, sl.ID)
-		if len(sl.Archives) > 0 {
-			working = append(working, sl)
 		}
 
 		// Reclaim against this medium's capacity, honoring the retention floor.
@@ -88,8 +85,8 @@ func (e *Engine) ForecastCost(start time.Time, days int) []ForecastPoint {
 		}
 
 		var bytes int64
-		for _, s := range working {
-			bytes += s.TotalBytes
+		for _, a := range working {
+			bytes += a.Compressed
 		}
 		points = append(points, ForecastPoint{
 			Date: ds, Bytes: bytes, Monthly: e.landingCost.MonthlyStorage(bytes),
@@ -114,13 +111,13 @@ type ReadEstimate struct {
 // the chains the restore would replay, read off the copy a restore would pick (the
 // landing medium first). DLEs with no backup as of the date contribute nothing.
 func (e *Engine) RestoreCost(dles []string, asOf string) ReadEstimate {
-	target, err := recovery.AsOf(e.cat.Slots(), asOf)
+	target, err := recovery.AsOf(e.cat.Archives(), asOf)
 	if err != nil {
 		return ReadEstimate{Priced: e.landingCost.Priced(), Provider: e.landingCost.Provider}
 	}
 	var refs []archiveRef
 	for _, dle := range dles {
-		steps, err := restore.Chain(e.cat.Slots(), dle, target)
+		steps, err := restore.Chain(e.cat.Archives(), dle, target)
 		if err != nil {
 			continue
 		}
@@ -224,39 +221,26 @@ func partCount(a record.Archive) int64 {
 	return 1
 }
 
-func dropSlot(slots []*record.Slot, id string) []*record.Slot {
-	out := slots[:0:0]
-	for _, s := range slots {
-		if s.ID != id {
-			out = append(out, s)
+// dropSlot removes every archive of a slot id from the working set.
+func dropSlot(archives []record.Archive, id string) []record.Archive {
+	out := archives[:0:0]
+	for _, a := range archives {
+		if a.Slot != id {
+			out = append(out, a)
 		}
 	}
 	return out
 }
 
 // dropArchive removes one DLE's archive from a slot in the working set (the
-// per-archive peer of dropSlot), so the cost forecast mirrors per-archive
-// reclamation: it shrinks the slot's TotalBytes by the archive's size and drops the
-// slot entirely once its last archive is gone.
-func dropArchive(slots []*record.Slot, id, dle string) []*record.Slot {
-	out := slots[:0:0]
-	for _, s := range slots {
-		if s.ID != id {
-			out = append(out, s)
+// per-archive peer of dropSlot), so the cost forecast mirrors per-archive reclamation.
+func dropArchive(archives []record.Archive, id, dle string) []record.Archive {
+	out := archives[:0:0]
+	for _, a := range archives {
+		if a.Slot == id && a.DLE == dle {
 			continue
 		}
-		kept := s.Archives[:0:0]
-		for _, a := range s.Archives {
-			if a.DLE == dle {
-				s.TotalBytes -= a.Compressed
-			} else {
-				kept = append(kept, a)
-			}
-		}
-		s.Archives = kept
-		if len(s.Archives) > 0 {
-			out = append(out, s)
-		}
+		out = append(out, a)
 	}
 	return out
 }

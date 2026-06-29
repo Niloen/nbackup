@@ -33,14 +33,14 @@ type candidate struct {
 // or before asOf for each DLE — not only the latest slot. At most `sample` targets
 // are returned (sample <= 0 = every due DLE); a DLE already drilled OK within the
 // window is not reselected. The slots must be in run order (oldest first).
-func Select(dles []string, slots []*record.Slot, asOf string, ledger *Ledger, window time.Duration, sample int, now time.Time) []Target {
+func Select(dles []string, archives []record.Archive, asOf string, ledger *Ledger, window time.Duration, sample int, now time.Time) []Target {
 	var due []candidate
 	for _, dle := range dles {
-		targetSlot := newestSlotForDLE(slots, dle, asOf)
+		targetSlot := newestSlotForDLE(archives, dle, asOf)
 		if targetSlot == "" {
 			continue // no recovery point for this DLE as of the date
 		}
-		steps, err := restore.Chain(slots, dle, targetSlot)
+		steps, err := restore.Chain(archives, dle, targetSlot)
 		if err != nil || len(steps) == 0 {
 			continue // no full at/before the date — nothing to compose
 		}
@@ -54,7 +54,7 @@ func Select(dles []string, slots []*record.Slot, asOf string, ledger *Ledger, wi
 				SlotID:   targetSlot,
 				AsOf:     asOf,
 				ChainLen: len(steps),
-				FullAge:  fullAgeDays(slots, steps[0].SlotID, asOf, now),
+				FullAge:  fullAgeDays(steps[0].SlotID, asOf, now),
 				Steps:    steps,
 			},
 			lastDrill: rec.LastDrill,
@@ -92,19 +92,15 @@ func Select(dles []string, slots []*record.Slot, asOf string, ledger *Ledger, wi
 }
 
 // newestSlotForDLE returns the id of the newest slot at or before asOf that holds an
-// archive for the DLE, or "" if none. Slots are in run order (oldest first), so the
-// last match wins.
-func newestSlotForDLE(slots []*record.Slot, dle, asOf string) string {
+// archive for the DLE, or "" if none.
+func newestSlotForDLE(archives []record.Archive, dle, asOf string) string {
 	id := ""
-	for _, s := range slots {
-		if s.Date > asOf {
-			continue // strictly after the point-in-time
+	for _, a := range archives {
+		if a.DLE != dle || record.SlotDate(a.Slot) > asOf {
+			continue // wrong DLE, or strictly after the point-in-time
 		}
-		for _, a := range s.Archives {
-			if a.DLE == dle {
-				id = s.ID
-				break
-			}
+		if id == "" || record.SlotIDLess(id, a.Slot) {
+			id = a.Slot
 		}
 	}
 	return id
@@ -112,15 +108,9 @@ func newestSlotForDLE(slots []*record.Slot, dle, asOf string) string {
 
 // fullAgeDays is the age in days of the full the chain relies on, measured to asOf
 // (the point being drilled). It falls back to now when asOf does not parse.
-func fullAgeDays(slots []*record.Slot, fullSlotID, asOf string, now time.Time) int {
-	var fullDate time.Time
-	for _, s := range slots {
-		if s.ID == fullSlotID {
-			fullDate, _ = record.ParseDateField(s.Date)
-			break
-		}
-	}
-	if fullDate.IsZero() {
+func fullAgeDays(fullSlotID, asOf string, now time.Time) int {
+	fullDate, err := record.ParseDateField(record.SlotDate(fullSlotID))
+	if err != nil {
 		return 0
 	}
 	ref, err := record.ParseDateField(asOf)
