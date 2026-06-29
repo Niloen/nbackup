@@ -197,7 +197,7 @@ func (p *archivePartWriter) Close() error {
 // count, uncompressed size, members) and stamps CreatedAt now. A copy (NewCopy) instead verifies the
 // metered checksum against the source's known digest and preserves the source's stats, members, and
 // CreatedAt — the producer totals are ignored, the bytes being carried raw.
-func (a *archiveWriter) Commit(ctx context.Context, p xfer.Produced) error {
+func (a *archiveWriter) Commit(ctx context.Context, p xfer.SourceStats) error {
 	arch := a.meta
 	arch.Compressed = a.n
 	arch.Parts = len(a.parts)

@@ -69,7 +69,7 @@ func (a *ArchiveWriter) NextPart(ctx context.Context) (io.WriteCloser, int64, er
 // Commit (xfer.Sink) finalizes the archive against the producer's stats (footer + member index),
 // caches the members, and records the placement on the slot's medium. Run on the orchestrator (the
 // sole catalog writer) via the spool's RemoteSink, so the catalog write stays single-owner.
-func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.Produced) error {
+func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.SourceStats) error {
 	if err := a.aw.Commit(ctx, p); err != nil {
 		return err
 	}

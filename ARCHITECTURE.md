@@ -62,7 +62,7 @@ registry registration, not a conditional in the core.
 | `transform/compress` | external compressor child processes (zstd/gzip/none) + registry; `Filter(scheme)` returns the forward/reverse `programs.Cmd` | compress |
 | `transform/crypt` | external encryptor child processes (gpg/none) + registry; `Filter(scheme)` returns the forward/reverse `programs.Cmd` | amcrypt/amgpgcrypt |
 | `programs` | the base: a `Cmd` (external program to run) + an `Execution` transport that runs a pipe of commands on one host, transparently `Local` or `SSH`; the command/execution concept compress, crypt, and the archiver all build on | amandad (replaced by stock sshd) |
-| `xfer` | the data-movement primitive: `Transfer(source, filters, sink)` moves one stream through three zones — a `Source` (a client's tar, or a medium read), local `Filters` (compress/encrypt or decrypt/decompress), and a `Sink` (a medium, a target's tar, a hash) — tagging faults by zone; plus the `Meter`/`Limiter` byte pieces | Amanda Xfer / netusage |
+| `xfer` | the data-movement primitive: `Transfer(source, filters, sink)` moves one stream through three zones — a `Source` (a client's tar, or a medium read), local `Filters` (compress/encrypt or decrypt/decompress), and a `Sink` (a medium, a target's tar, a hash) — tagging faults by zone | Amanda Xfer / netusage |
 | `clerk` | the archive data path (both directions): composes each operation as one `xfer.Transfer` — `Backup`/`Copy` (write: archiver tar source → encode filters → medium sink), `Extract`/`ListMembers`/`VerifyChecksum` (read: copy selection + fail-over, mounting volumes via the librarian, decode from the record), and the shared `DecodeFilters` builder used by drill. Owns the two archiveio-coupled endpoints (archive `Source`, medium `Sink`) | Scribe + Recovery::Clerk |
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `report` | per-run history record + JSONL/summary file I/O + digest render | amreport |
@@ -490,7 +490,7 @@ needs the network analogue, or an uncapped `nb dump`/`nb sync` to S3 saturates t
 office uplink during business hours (and once remote sources land, the read side too).
 The cap is a medium config knob — `throughput: 50MB/s` (bytes/sec, `/s` optional) —
 because the thing protected is the uplink *to a given medium*. It is enforced by a
-token-bucket `xfer.Limiter`, an in-process stream stage wrapping the **medium-facing**
+token-bucket `ratelimit.Limiter`, an in-process stream stage wrapping the **medium-facing**
 stream: on write it paces the bytes landing on the volume (inside
 `archiveio.Writer.drainParts`), back-pressuring the one-pass pipeline through its pipe —
 no holding-disk buffer, and the wait is a timer sleep so it cannot deadlock; on read it
@@ -501,7 +501,7 @@ medium draw from a single budget — a global bandwidth ceiling, which here coll
 the per-medium cap because a run writes a single landing medium. The default is
 uncapped: a nil `Limiter` returns the stream untouched, so a run with no `throughput`
 set behaves byte-for-byte as before. It composes with `nice` (CPU) and stays
-medium-neutral — it lives in `xfer`/`engine`, never a medium package. (Deferred:
+medium-neutral — it lives in `ratelimit` (wired in by `engine`), never a medium package. (Deferred:
 time-of-day awareness — a tighter cap during business hours.)
 
 **Medium-neutral vocabulary.** The generic media/changer/config layer must not say

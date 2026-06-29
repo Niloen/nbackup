@@ -62,8 +62,8 @@ func TestClientSidePipelineRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	var cipherBuf bytes.Buffer
-	producer := xfer.NewPrograms(ex).Add(bs.Stage).Add(comp).Add(enc).
-		Finishing(func() (xfer.Produced, error) { _, e := bs.Finish(); return xfer.Produced{}, e }).
+	producer := xfer.NewProgramChain(ex).Add(bs.Stage).Add(comp).Add(enc).
+		Finishing(func() (xfer.SourceStats, error) { _, e := bs.Finish(); return xfer.SourceStats{}, e }).
 		OnCleanup(func() {
 			if bs.Cleanup != nil {
 				bs.Cleanup()
@@ -87,7 +87,7 @@ func TestClientSidePipelineRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := t.TempDir()
-	sink := xfer.NewPrograms(ex).Add(dec).Add(decomp).Add(m.RestoreStage(dest, nil))
+	sink := xfer.NewProgramChain(ex).Add(dec).Add(decomp).Add(m.RestoreStage(dest, nil))
 	if _, err := xfer.Transfer(context.Background(), xfer.Reader(io.NopCloser(bytes.NewReader(cipher))), xfer.NewFilters(), sink); err != nil {
 		t.Fatalf("decode/extract: %v", err)
 	}

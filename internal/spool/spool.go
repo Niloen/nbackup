@@ -171,7 +171,7 @@ func (r *remoteSink) NextPart(ctx context.Context) (io.WriteCloser, int64, error
 	return s.w, s.max, s.err
 }
 
-func (r *remoteSink) Commit(ctx context.Context, p xfer.Produced) error {
+func (r *remoteSink) Commit(ctx context.Context, p xfer.SourceStats) error {
 	reply := make(chan sinkResp, 1)
 	r.d.reqCh <- sinkReq{sink: r.real, commit: true, ctx: ctx, produced: p, kind: r.kind, disk: r.disk, reply: reply}
 	return (<-reply).err
@@ -188,7 +188,7 @@ type sinkReq struct {
 	sink     archiveio.ArchiveWriter
 	commit   bool
 	ctx      context.Context
-	produced xfer.Produced
+	produced xfer.SourceStats
 	kind     writeKind
 	disk     int
 	reply    chan sinkResp

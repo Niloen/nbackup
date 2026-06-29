@@ -90,7 +90,7 @@ func (d *decoder) restoreArchive(rc io.ReadCloser, plan DecodePlan, archiverType
 		xfer.Transform{Cmd: encF.Reverse, Fused: plan.DecryptInSink},
 		xfer.Transform{Cmd: compF.Reverse, Fused: true},
 	)
-	sink := xfer.NewPrograms(target).Add(fused...).Add(arch.RestoreStage(destDir, members))
+	sink := xfer.NewProgramChain(target).Add(fused...).Add(arch.RestoreStage(destDir, members))
 
 	_, err = xfer.Transfer(context.Background(), xfer.Reader(rc), filters, sink)
 	return err
@@ -162,4 +162,4 @@ func (s *listSink) NextPart(ctx context.Context) (io.WriteCloser, int64, error) 
 	return pw, -1, nil
 }
 
-func (s *listSink) Commit(_ context.Context, _ xfer.Produced) error { return <-s.done }
+func (s *listSink) Commit(_ context.Context, _ xfer.SourceStats) error { return <-s.done }

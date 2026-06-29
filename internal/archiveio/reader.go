@@ -57,7 +57,7 @@ func (r *Reader) Open(parts []record.FilePos, want Expect, open PartOpener) (io.
 func (r *Reader) VerifyParts(parts []record.FilePos, want Expect, sha string, open PartOpener) (bool, error) {
 	raw := &partsReader{parts: parts, want: want, open: open}
 	defer raw.Close()
-	got, err := xfer.HashReader(raw)
+	got, err := xfer.SHA256(raw)
 	if err != nil {
 		return false, err
 	}

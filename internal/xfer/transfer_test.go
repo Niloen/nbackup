@@ -64,7 +64,7 @@ func TestFiltersFaultRole(t *testing.T) {
 // TestProgramSink: a program sink (cat) consumes the stream as stdin.
 func TestProgramSink(t *testing.T) {
 	data := []byte("hello program sink")
-	sink := NewPrograms(programs.Local()).Add(programs.Cmd{Name: "cat"})
+	sink := NewProgramChain(programs.Local()).Add(programs.Cmd{Name: "cat"})
 	if _, err := Transfer(context.Background(), reader(data), NewFilters(), sink); err != nil {
 		t.Fatalf("program sink Transfer: %v", err)
 	}
