@@ -533,7 +533,7 @@ dump (everything `Local`), a thin client (tar on `SSH`, transforms in local Filt
 and a fully client-side dump (tar+compress+encrypt all in the `SSH` Source — only
 ciphertext crosses to the server Sink) are the *same* code with different zone
 placement. The transport lives in one neutral package and is injected
-into archivers via `archiver.Open(name, opts, ex)` — SSH is part of **no** archiver, so
+into archivers via `archiver.Open(name, opts, ex, stateRoot)` — SSH is part of **no** archiver, so
 a new archiver gets remote execution for free as long as its binaries are on the
 client. The meter stays server-side, so each archive's commit footer still covers the
 bytes that land (verify/copy/sync stay keyless). This is the source-side peer of the

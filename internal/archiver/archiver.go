@@ -7,12 +7,22 @@
 // incremental state — the non-derivable, per-DLE/per-level base data an incremental
 // builds on (GNU tar's listed-incremental snapshots, a dump database, ...) — keyed
 // by DLE and level, so the generic layer never names a snapshot or a state file.
+//
+// The interface splits along two axes the reader should keep in mind:
+//   - Streaming operations that the caller composes into a pipeline return a program stage
+//     for it to run, never bytes: BackupSource (the produce side) hands back a stage plus
+//     the Finish/Promote/Cleanup hooks one dump needs, and RestoreStage (the consume side)
+//     hands back a bare stage — restore carries no hooks because it commits no state.
+//   - Synchronous queries run their program themselves and return a value: Estimate (a size)
+//     and List (the member paths). They do not compose as stages because they yield an
+//     answer rather than passing bytes through.
+//
+// Companion files: the plugin registry (Factory/Register/Open/Names) is in registry.go and
+// the config Options type is in options.go.
 package archiver
 
 import (
-	"fmt"
 	"io"
-	"sort"
 
 	"github.com/Niloen/nbackup/internal/programs"
 )
@@ -96,62 +106,4 @@ type Archiver interface {
 	// compare against the seal. The returned paths use the same convention as
 	// BackupResult.Members.
 	List(in io.Reader) ([]string, error)
-}
-
-// Options are generic key/value parameters from an archiver definition (e.g.
-// "tar_path", "one-file-system"). The incremental-state root is not among them: it is a
-// host-level location passed to Open separately (see Factory), not a format property.
-type Options map[string]string
-
-// Get returns the value for a key, or "".
-func (o Options) Get(key string) string { return o[key] }
-
-// Bool parses a boolean option, returning def when unset or unparseable.
-func (o Options) Bool(key string, def bool) bool {
-	switch o[key] {
-	case "":
-		return def
-	case "true", "yes", "1", "on":
-		return true
-	case "false", "no", "0", "off":
-		return false
-	default:
-		return def
-	}
-}
-
-// Factory constructs an Archiver from options, the executor (host) its programs run on,
-// and stateRoot — this archiver's private directory for incremental state, under which it
-// keys by DLE and level. The caller derives stateRoot from the host's shared state_dir,
-// namespaced by archiver type (e.g. <state_dir>/gnutar), so archivers sharing a host
-// don't collide; the archiver owns everything beneath it. The executor makes remote
-// execution transparent: an archiver runs its tools through it without knowing whether the
-// host is local or a client over SSH, and stateRoot resolves on that same host so the
-// incremental state lives where the data is read. It is a parameter, not an Option,
-// because the location is the host's to decide, not a format property.
-type Factory func(Options, programs.Executor, string) (Archiver, error)
-
-var factories = map[string]Factory{}
-
-// Register registers an Archiver implementation under a type name.
-func Register(name string, f Factory) { factories[name] = f }
-
-// Open constructs the Archiver registered under the type name, running its programs
-// through ex (local or a remote client) and keeping incremental state under stateRoot.
-func Open(name string, opts Options, ex programs.Executor, stateRoot string) (Archiver, error) {
-	f, ok := factories[name]
-	if !ok {
-		return nil, fmt.Errorf("unknown archiver %q (known: %v)", name, Names())
-	}
-	return f(opts, ex, stateRoot)
-}
-
-// Names lists registered archiver type names.
-func Names() []string {
-	out := make([]string, 0, len(factories))
-	for k := range factories {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }

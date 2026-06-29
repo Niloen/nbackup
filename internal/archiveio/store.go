@@ -31,21 +31,6 @@ type ArchiveSpec struct {
 	BaseSlot string
 }
 
-// SpecOf recovers the descriptive intent of an existing archive, to re-author it through the normal
-// NewArchive path (the spool's holding->backing copy).
-func SpecOf(a record.Archive) ArchiveSpec {
-	return ArchiveSpec{
-		DLE:      a.DLE,
-		Host:     a.Host,
-		Path:     a.Path,
-		Archiver: a.Archiver,
-		Compress: a.Compress,
-		Encrypt:  a.Encrypt,
-		Level:    a.Level,
-		BaseSlot: a.BaseSlot,
-	}
-}
-
 // ArchiveWriter is one archive's write handle. A transfer drives it as an xfer.Sink (NextPart +
 // Commit), and the caller reads the committed archive and its on-medium position from Result
 // afterwards — e.g. to queue a holding->backing copy or to reclaim the staged copy once it has
