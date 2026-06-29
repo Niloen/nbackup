@@ -299,11 +299,12 @@ func printListing(n *recovery.Node) {
 // dispatch, printing) wrapped around a pure recovery.Session that holds the browse
 // tree, current directory, and selection.
 type recoverShell struct {
-	eng  *engine.Engine
-	dle  string
-	date string // YYYY-MM-DD
-	sess *recovery.Session
-	dest string
+	eng   *engine.Engine
+	dle   string
+	date  string // YYYY-MM-DD
+	sess  *recovery.Session
+	dest  string
+	noted bool // whether the file-level deletion note has been shown this session
 }
 
 // runRecoverShell drives the interactive recovery prompt. It reuses the shared
@@ -370,9 +371,7 @@ func (sh *recoverShell) prompt() string {
 func (sh *recoverShell) banner() {
 	if sh.sess != nil {
 		fmt.Printf("disk %q as of %s (resolved to %s)\n", sh.eng.DisplayDLE(sh.dle), sh.date, sh.sess.Tree().TargetSlot)
-		if sh.sess.Tree().HasIncrementals() {
-			fmt.Println(fileLevelDeletionNote)
-		}
+		sh.noteDeletionOnce()
 		return
 	}
 	fmt.Printf("as of %s — no disk selected. Pick one with 'setdisk <dle>' ('disks' lists them).\n", sh.date)
@@ -457,6 +456,31 @@ func (sh *recoverShell) reload() error {
 	return nil
 }
 
+// rebrowse re-opens the current disk as of a candidate date, committing it as the
+// session's as-of date only when a backup exists then. A date with no backup
+// leaves the current selection, browse position, and as-of date untouched — so a
+// mistyped or backup-less date never silently drops the disk selection.
+func (sh *recoverShell) rebrowse(date string) error {
+	tree, err := sh.eng.OpenRecover(sh.dle, date)
+	if err != nil {
+		return err
+	}
+	sh.date = date
+	sh.sess = recovery.NewSession(tree)
+	return nil
+}
+
+// noteDeletionOnce prints the file-level deletion caveat the first time a browsed
+// disk has incrementals, then stays quiet — so a session that rebrowses (setdate,
+// settime) and then extracts doesn't repeat the same warning.
+func (sh *recoverShell) noteDeletionOnce() {
+	if sh.noted || sh.sess == nil || !sh.sess.Tree().HasIncrementals() {
+		return
+	}
+	fmt.Println(fileLevelDeletionNote)
+	sh.noted = true
+}
+
 func (sh *recoverShell) setDate(args []string) {
 	if len(args) != 1 {
 		fmt.Println("usage: setdate YYYY-MM-DD")
@@ -467,12 +491,16 @@ func (sh *recoverShell) setDate(args []string) {
 		fmt.Printf("bad date: %v\n", err)
 		return
 	}
-	sh.date = d
-	if sh.dle != "" {
-		if err := sh.reload(); err != nil {
-			fmt.Printf("note: %v\n", err)
-			return
-		}
+	if sh.dle == "" {
+		sh.date = d
+		sh.banner()
+		return
+	}
+	if err := sh.rebrowse(d); err != nil {
+		// A date with no backup is reported but leaves the current disk,
+		// selection, and browse position intact — like a bad-format date.
+		fmt.Printf("note: %v\n", err)
+		return
 	}
 	sh.banner()
 }
@@ -490,12 +518,16 @@ func (sh *recoverShell) setTime(args []string) {
 		fmt.Printf("bad time: %v\n", err)
 		return
 	}
-	sh.date = when
-	if sh.dle != "" {
-		if err := sh.reload(); err != nil {
-			fmt.Printf("note: %v\n", err)
-			return
-		}
+	if sh.dle == "" {
+		sh.date = when
+		sh.banner()
+		return
+	}
+	if err := sh.rebrowse(when); err != nil {
+		// A time with no backup is reported but leaves the current disk,
+		// selection, and browse position intact — like a bad-format time.
+		fmt.Printf("note: %v\n", err)
+		return
 	}
 	sh.banner()
 }
@@ -626,9 +658,7 @@ func (sh *recoverShell) extract(args []string) {
 	if !confirmRead(sh.eng.SelectionCost(steps), false) {
 		return
 	}
-	if sh.sess.Tree().HasIncrementals() {
-		fmt.Println(fileLevelDeletionNote)
-	}
+	sh.noteDeletionOnce()
 	n, err := sh.eng.ExtractSelection(steps, sh.dest, logfStdout)
 	if err != nil {
 		fmt.Printf("error: %v\n", err)

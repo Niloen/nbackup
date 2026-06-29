@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"gopkg.in/yaml.v3"
 )
@@ -638,12 +639,20 @@ func (c *Config) Validate() error {
 		if _, err := m.CapacityBytes(); err != nil {
 			return fmt.Errorf("media %s: capacity: %w", name, err)
 		}
-		if _, err := m.MinAge(); err != nil {
+		if age, err := m.MinAge(); err != nil {
 			return fmt.Errorf("media %s: minimum_age: %w", name, err)
+		} else if m.MinimumAge != "" && age <= 0 {
+			// A non-positive floor would fall through to the one-cycle default in
+			// MinAgeFor, silently ignoring the user's explicit value. Reject it so the
+			// mistake surfaces; omitting the key is the way to ask for the default.
+			return fmt.Errorf("medium %q: minimum_age must be positive (omit it to default to one cycle)", name)
 		}
 		if _, err := m.ThroughputBytes(); err != nil {
 			return fmt.Errorf("media %s: throughput: %w", name, err)
 		}
+	}
+	if err := c.validateArchivers(); err != nil {
+		return err
 	}
 	if err := c.validateHolding(); err != nil {
 		return err
@@ -656,6 +665,36 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateNotify(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateArchivers checks every named archiver definition's inline options against the
+// option keys its type accepts (declared in the archiver registry). Options ride an
+// inline map, so YAML's KnownFields check can't reach them; without this a typo'd option
+// (e.g. `one-file-sytem`) would be silently dropped, quietly disabling a safety-relevant
+// flag. An unregistered type is left to fail at Open with its own "unknown archiver".
+func (c *Config) validateArchivers() error {
+	for name, def := range c.Archivers {
+		typeName := def.Type
+		if typeName == "" {
+			typeName = name
+		}
+		known, ok := archiver.KnownOptions(typeName)
+		if !ok {
+			continue
+		}
+		accepted := make(map[string]bool, len(known))
+		for _, k := range known {
+			accepted[k] = true
+		}
+		for key := range def.Options {
+			if !accepted[key] {
+				sorted := append([]string(nil), known...)
+				sort.Strings(sorted)
+				return fmt.Errorf("archivers.%s: unknown option %q (accepted: %s)", name, key, strings.Join(sorted, ", "))
+			}
+		}
 	}
 	return nil
 }
@@ -1001,9 +1040,9 @@ func (c *Config) BumpPercent() float64 {
 // "yesterday must not overwrite last month" safety without a knob — a slot stays
 // retainable for at least the window in which it is still a recovery base.
 func (c *Config) MinAgeFor(m Media) time.Duration {
-	// Validate already parsed and accepted m.MinimumAge, so MinAge cannot fail
-	// here; a non-positive floor is not rejected up-front, so it falls through
-	// to the one-cycle default.
+	// Validate already parsed m.MinimumAge and rejected a non-positive explicit
+	// value, so MinAge here is either a positive floor or 0 (the key was omitted);
+	// 0 falls through to the one-cycle default.
 	age, _ := m.MinAge()
 	if age > 0 {
 		return age

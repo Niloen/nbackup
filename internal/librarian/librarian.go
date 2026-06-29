@@ -81,9 +81,17 @@ var ErrVolumeUnavailable = errors.New("needed volume is not available")
 // (stale catalog, I/O) that swapping would not help.
 type reloadable struct{ error }
 
+func (r reloadable) Unwrap() error { return r.error }
+
 func reloadableErr(format string, a ...any) error { return reloadable{fmt.Errorf(format, a...)} }
 
 func isReloadable(err error) bool { r := reloadable{}; return errors.As(err, &r) }
+
+// errBlankNeedsLabel marks the one reloadable reason a fresh swap cannot resolve on
+// a single-drive station: a blank reel with auto_label off. Loading yet another blank
+// only repeats the rejection, so the spanning loop fails fast on it (errors.Is) with
+// the actionable message below rather than re-prompting forever.
+var errBlankNeedsLabel = errors.New("run `nb label` on it first, or set auto_label: true to label fresh reels automatically")
 
 // Librarian wraps one medium's volume and drives its changer. It is constructed per
 // medium the engine touches; it caches the medium's resolved shape (changer / shelf)
@@ -232,7 +240,7 @@ func (l *Librarian) resolveLabel(lv media.Labeled, now time.Time) (record.Label,
 		return record.Label{}, reloadableErr("medium %q holds unrecognized or corrupt data (%v); refusing to overwrite — relabel it explicitly with `nb label --force %s <name>`", l.medium, err, l.medium)
 	case !labeled: // blank volume
 		if !l.autoLabel {
-			return record.Label{}, reloadableErr("medium %q is blank/unlabeled; run `nb label %s <name>` first (or set auto_label: true)", l.medium, l.medium)
+			return record.Label{}, reloadable{fmt.Errorf("medium %q has a blank/unlabeled reel loaded: %w", l.medium, errBlankNeedsLabel)}
 		}
 		lbl = record.Label{Name: l.autoLabelName(now), Pool: l.medium, Epoch: 1, WrittenAt: now}
 		if err := lv.WriteLabel(lbl); err != nil {
@@ -398,6 +406,14 @@ func (l *Librarian) advanceViaShelf(appendable bool, tried map[string]bool, expe
 		if verr == nil {
 			tried[name] = true // also track by label name (oldestReusable keys on names)
 			return name, epoch, empty, nil
+		}
+		if errors.Is(verr, errBlankNeedsLabel) {
+			// auto_label is off and the operator loaded an unlabeled reel. Spanning needs
+			// a fresh writable volume, but NBackup may not label a blank without auto_label,
+			// and re-prompting only offers more blanks it must reject too — eventually
+			// looping back to a reel already used and full. Fail fast with the actionable
+			// reason instead of looping; pre-label the reels or set auto_label: true.
+			return "", 0, false, verr
 		}
 		if !isReloadable(verr) {
 			return "", 0, false, verr

@@ -53,17 +53,18 @@ done
 
 ## Encrypted archives
 
-An encrypted archive keeps the same `.tar.<ext>` name and reverses the same way,
-decrypting first:
+An encrypted archive's payload carries a `.gpg` suffix on top of the `.tar.<ext>`
+name (`…-L0.tar.zst.gpg`), signalling that it is ciphertext; reverse it the same
+way, decrypting first:
 
 ```bash
 # public-key (the private key is in the operator's keyring):
-gpg -d < 000000-app01-home-L0.tar.zst | zstd -dc | tar -xf -
+gpg -d < 000000-app01-home-L0.tar.zst.gpg | zstd -dc | tar -xf -
 
 # symmetric (passphrase_file) — supply the passphrase non-interactively, or a bare
 # `gpg -d` blocks on a pinentry prompt:
 gpg --batch --pinentry-mode loopback --passphrase-file /etc/nbackup/secret -d \
-    < 000000-app01-home-L0.tar.zst | zstd -dc | tar -xf -
+    < 000000-app01-home-L0.tar.zst.gpg | zstd -dc | tar -xf -
 ```
 
 A public-key dump restores on any host with the private key in its keyring; a
@@ -77,11 +78,18 @@ Tape frames each payload with a fixed 32 KB inline header — skip it first:
 dd bs=32k skip=1 < file | zstd -dc | tar -xf -
 ```
 
-A **spanned** archive is split into parts across volumes. `nb slot <slot>`
-lists the volume chain and each part's position (e.g. `bay-NN/000001`). Strip each
-part's 32 KB header and concatenate before decompressing:
+A **spanned** archive is split into parts written across several volumes. On a
+robotic (dir-backed) library each volume is a `bay-NN/` directory whose file
+`000000` is the volume's identity label; the data files follow as `000001`,
+`000002`, …. `nb slot <slot>` prints the volume chain — in write order — and, per
+archive, the file position of each part (a position of `1` is the file `000001`).
+Map each volume label to the bay it sits in with `nb medium <medium>` (it
+inventories bay → label). Then read each part as `<dir>/bay-NN/<position>`, strip
+its 32 KB header, and concatenate the parts in chain order before decompressing:
 
 ```bash
-for p in bay-01/000001 bay-02/000001 …; do dd bs=32k skip=1 < "$p"; done \
-  | zstd -dc | tar -xf -
+# one part per volume, in the chain order `nb slot` prints (positions here are 1):
+for p in vtape/bay-08/000001 vtape/bay-01/000001 vtape/bay-02/000001; do
+  dd bs=32k skip=1 < "$p"
+done | zstd -dc | tar -xf -
 ```

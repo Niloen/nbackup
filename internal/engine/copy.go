@@ -72,6 +72,12 @@ func (c *copier) PlanCopy(slotID, fromMedia, targetMedia string, force bool) (Co
 	if fromMedia == "" {
 		fromMedia = c.landing
 	}
+	// Validate the source name up front, like `nb sync` does, so an unknown --from
+	// fails with "unknown source medium" instead of slipping through to the
+	// already-on-target short-circuit and reporting a misleading no-copy-on-source.
+	if !c.knownMedium(fromMedia) {
+		return CopyPlan{}, fmt.Errorf("unknown source medium %q", fromMedia)
+	}
 	if !c.knownMedium(targetMedia) {
 		return CopyPlan{}, fmt.Errorf("unknown medium %q", targetMedia)
 	}

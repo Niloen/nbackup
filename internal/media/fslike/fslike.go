@@ -113,14 +113,23 @@ func payloadExt(h record.Header) string {
 	case record.KindIndex:
 		return ".json.gz"
 	}
+	var ext string
 	switch h.Compress {
 	case "gzip":
-		return ".tar.gz"
+		ext = ".tar.gz"
 	case "none", "":
-		return ".tar"
+		ext = ".tar"
 	default: // zstd and any future compressor named after its extension
-		return ".tar." + compressExt(h.Compress)
+		ext = ".tar." + compressExt(h.Compress)
 	}
+	// An encrypted payload is ciphertext, not a readable tar/gz: append the scheme
+	// (gpg) so the name says "decrypt first" and a stock `tar`/`gzip` is not reached
+	// for on a gpg blob. Only the payload carries it — the commit footer and member
+	// index stay plaintext (and keep their .json/.json.gz names).
+	if h.Encrypt != "" && h.Encrypt != "none" {
+		ext += "." + h.Encrypt
+	}
+	return ext
 }
 
 func compressExt(compress string) string {
