@@ -117,7 +117,7 @@ func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force boo
 	}
 	// Capacity projection (sampled before any copy, so it reads the same for dry-run
 	// and apply): current target usage plus the backlog about to land.
-	if prof, perr := e.profileFor(target); perr == nil {
+	if prof, perr := e.acct.ProfileFor(target); perr == nil {
 		report.TargetCapacity = prof.TotalBytes()
 	}
 	report.ProjectedBytes = e.cat.MediumBytes(target) + report.Bytes()

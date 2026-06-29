@@ -43,7 +43,7 @@ func (e *Engine) newCopier() *copier {
 			return err
 		},
 		prepareWriter: e.prepareWriter,
-		reclaimCopy:   e.reclaimTargetCopy,
+		reclaimCopy:   e.acct.ReclaimCopy,
 	}
 }
 

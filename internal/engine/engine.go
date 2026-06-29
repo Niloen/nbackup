@@ -6,14 +6,10 @@
 package engine
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/accounting"
@@ -35,7 +31,6 @@ import (
 	"github.com/Niloen/nbackup/internal/retention"
 	"github.com/Niloen/nbackup/internal/scheduler"
 	"github.com/Niloen/nbackup/internal/sizeutil"
-	"github.com/Niloen/nbackup/internal/spool"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 
@@ -273,27 +268,18 @@ func (e *Engine) mediumVolume(name string) (vol media.Volume, def config.Media, 
 }
 
 // Capacity returns the landing medium's total retainable bytes (0 = unbounded).
-func (e *Engine) Capacity() int64 { return e.profile.TotalBytes() }
+func (e *Engine) Capacity() int64 { return e.acct.Capacity() }
 
 // CapacityStatus reports whether current usage exceeds capacity and the percent
 // used (0 when unbounded).
 func (e *Engine) CapacityStatus(current int64) (over bool, pct float64) {
-	c := e.profile.TotalBytes()
-	if c <= 0 {
-		return false, 0
-	}
-	return current > c, float64(current) / float64(c) * 100
+	return e.acct.CapacityStatus(current)
 }
 
 // MediumAppendable reports whether a medium packs many runs per volume (the
 // default) rather than one run per volume — so inventory can label a written
 // non-appendable reel "used" instead of "append".
-func (e *Engine) MediumAppendable(name string) bool {
-	if m, ok := e.cfg.Media[name]; ok {
-		return m.IsAppendable()
-	}
-	return true
-}
+func (e *Engine) MediumAppendable(name string) bool { return e.acct.MediumAppendable(name) }
 
 // MediumInfo is a per-medium summary for catalog visibility (`nb medium`). It is an
 // alias for accounting.MediumInfo (which now owns the type) so callers — including
@@ -301,51 +287,11 @@ func (e *Engine) MediumAppendable(name string) bool {
 type MediumInfo = accounting.MediumInfo
 
 // Media returns a summary of every configured medium, sorted by name.
-func (e *Engine) Media() []MediumInfo {
-	names := make([]string, 0, len(e.cfg.Media))
-	for n := range e.cfg.Media {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	out := make([]MediumInfo, 0, len(names))
-	for _, n := range names {
-		info, _ := e.Medium(n)
-		out = append(out, info)
-	}
-	return out
-}
+func (e *Engine) Media() []MediumInfo { return e.acct.Media() }
 
 // Medium returns the summary for one configured medium; ok is false if the name
 // is unknown.
-func (e *Engine) Medium(name string) (MediumInfo, bool) {
-	d, ok := e.cfg.Media[name]
-	if !ok {
-		return MediumInfo{}, false
-	}
-	info := MediumInfo{
-		Name:  name,
-		Type:  d.Type,
-		Slots: len(e.cat.SlotsOn(name)),
-		Used:  e.cat.MediumBytes(name),
-	}
-	if prof, err := media.OpenProfile(d.Type, media.Options(d.ProfileOptions())); err == nil {
-		info.Capacity = prof.TotalBytes()
-	}
-	// Summarize the medium's labeled volumes from the catalog (no medium type
-	// special-casing): address-identified media (disk, s3) carry no label so the
-	// pool is empty and Volume stays ""; a single labeled volume shows its name and
-	// epoch; a pool of several (a tape library/station) shows the count, with the
-	// per-volume detail in `nb medium <name>`.
-	switch pool := e.volumesInPool(name); len(pool) {
-	case 0:
-		// nothing labeled (address-identified, or a still-blank changer)
-	case 1:
-		info.Volume, info.Epoch = pool[0].Label.Name, pool[0].Label.Epoch
-	default:
-		info.Volume = fmt.Sprintf("%d volume(s)", len(pool))
-	}
-	return info, true
-}
+func (e *Engine) Medium(name string) (MediumInfo, bool) { return e.acct.Medium(name) }
 
 // volumesInPool returns the labeled volumes the catalog tracks for a medium
 // (matched by the label pool == medium name), sorted by name.
@@ -645,7 +591,7 @@ func (e *Engine) placementsFor(slotID string) []catalog.Placement {
 }
 
 // StoredBytes is the bytes currently stored on the engine's own medium.
-func (e *Engine) StoredBytes() int64 { return e.cat.MediumBytes(e.mediumName) }
+func (e *Engine) StoredBytes() int64 { return e.acct.StoredBytes() }
 
 // Landing is the resolved name of the medium new dumps land on. Unlike the raw
 // config field it is never empty — it reflects the sole-medium fallback New applied.
@@ -734,7 +680,7 @@ func (e *Engine) expectedVolumeFor(medium string, now time.Time) VolumeExpectati
 // due by the cycle deadline, and promotes future fulls forward to level light
 // runs (bounded by the per-run capacity room).
 func (e *Engine) Plan(date time.Time) *planner.Plan {
-	return e.planWith(date, nil)
+	return e.sched.Plan(date, nil)
 }
 
 // PlanWithProgress is Plan with a live sink for the estimate phase, which can be
@@ -742,40 +688,7 @@ func (e *Engine) Plan(date time.Time) *planner.Plan {
 // silent. sink (nil to disable) receives a snapshot as each DLE's estimate starts
 // and finishes.
 func (e *Engine) PlanWithProgress(date time.Time, sink progress.Sink) *planner.Plan {
-	return e.planWith(date, sink)
-}
-
-func (e *Engine) planWith(date time.Time, sink progress.Sink) *planner.Plan {
-	dles := e.cfg.DLEs()
-	plan := planner.Build(dles, e.cat.History(), e.estimates(dles, sink), e.cat.ForcedFulls(), e.plannerParams(date), date)
-	e.forceFullWhereBaseMissing(plan)
-	return plan
-}
-
-// forceFullWhereBaseMissing downgrades any planned incremental whose base incremental
-// state is missing or unusable to a full, in place, with a warning. The planner picks the
-// level from the catalog's run history, which can outlive the archiver's per-host state —
-// a state_dir that moved, or a base a crashed dump never finished. Rather than fail the
-// run (or, worse, dump a full-sized "incremental" onto a dead base), force a fresh full,
-// the way Amanda falls back to level 0 when it can't find a usable base. A real run and a
-// preview (`nb plan` / `--dry-run`) both go through here, so they agree.
-func (e *Engine) forceFullWhereBaseMissing(plan *planner.Plan) {
-	for i := range plan.Items {
-		it := &plan.Items[i]
-		if it.Level < 1 {
-			continue
-		}
-		ar, err := e.archiverFor(it.DLE.DumpTypeName(), it.DLE.Host)
-		if err != nil || ar.HasBase(it.Name, it.BaseLevel) {
-			continue
-		}
-		plan.Warnings = append(plan.Warnings, fmt.Sprintf(
-			"DLE %s: the L%d incremental state is missing or unusable (a prior dump may have been interrupted, or state_dir moved) — forcing a full (L0)",
-			it.DLE.ID(), it.BaseLevel))
-		it.Level, it.BaseLevel, it.BaseSlot = 0, -1, ""
-		it.EstBytes = it.FullBytes
-		it.Reason = "forced full: incremental base missing or unusable"
-	}
+	return e.sched.Plan(date, sink)
 }
 
 // ValidatePlan checks each DLE the way a real run would resolve it, so a preview
@@ -788,31 +701,7 @@ func (e *Engine) forceFullWhereBaseMissing(plan *planner.Plan) {
 // that are missing or unreadable right now are non-fatal warnings (they may be an
 // unmounted volume the real run will mount).
 func (e *Engine) ValidatePlan() (warnings []string, err error) {
-	if err := compress.Check(e.compressScheme, e.fopts); err != nil {
-		return nil, err
-	}
-	checkedEnc := map[string]bool{}
-	hostProbed := map[string]bool{}
-	for _, d := range e.cfg.DLEs() {
-		if err := e.preflightDumptype(d.DumpTypeName(), d.Host, false, checkedEnc); err != nil {
-			return nil, err
-		}
-		// Only a local source can be stat'd here; a remote DLE's path lives on the
-		// client. A remote host is probed over SSH (once per host) so an unreachable
-		// client warns here rather than silently estimating ~0 B — the misleading
-		// "healthy" plan `nb check` would otherwise be the only thing to catch.
-		if _, remote := e.cfg.RemoteHost(d.Host); !remote {
-			if _, err := os.Stat(d.Path); err != nil {
-				warnings = append(warnings, fmt.Sprintf("DLE %s: source path %s is missing or unreadable (%v) — the real run will fail unless it becomes available", d.ID(), d.Path, err))
-			}
-		} else if !hostProbed[d.Host] {
-			hostProbed[d.Host] = true
-			if err := e.probeReachable(d.Host); err != nil {
-				warnings = append(warnings, fmt.Sprintf("%v — its DLEs cannot be estimated until it is reachable (shown as ~0 B)", err))
-			}
-		}
-	}
-	return warnings, nil
+	return e.sched.Validate()
 }
 
 // Simulate forecasts the next `days` daily runs from `start` without writing
@@ -821,121 +710,7 @@ func (e *Engine) ValidatePlan() (warnings []string, err error) {
 // projected forward. Estimates and the capacity ceiling are sampled once at `start`
 // and held constant, so this is a schedule forecast, not a capacity timeline.
 func (e *Engine) Simulate(start time.Time, days int) []*planner.Plan {
-	dles := e.cfg.DLEs()
-	return planner.Simulate(dles, e.cat.History(), e.estimates(dles, nil), e.cat.ForcedFulls(), e.plannerParams(start), start, days)
-}
-
-// plannerParams derives the planner's tuning inputs from config and the medium for
-// a run date. Shared by Plan and Simulate so a single-day plan and the forward
-// forecast use identical balancing rules.
-func (e *Engine) plannerParams(date time.Time) planner.Params {
-	return planner.Params{
-		CycleDays:     e.cfg.CycleDays(),
-		CapacityBytes: e.profile.TotalBytes(),
-		RoomBytes:     e.capacityRoom(date),
-		BumpPercent:   e.cfg.BumpPercent(),
-	}
-}
-
-// estimates predicts, for each DLE, the size of a full and of the incremental at
-// its current level and the next (the inputs the planner's bump decision needs),
-// by asking the archiver. For gnutar this is a
-// fast metadata-only tar pass; see gnutar.Estimate. Sizes are uncompressed — an
-// upper bound on the compressed bytes finally stored.
-// Estimates run in parallel, bounded by parallelism.workers:
-// each DLE's estimate is an independent archiver pass, and on a host with many DLEs
-// the serial sum dominates a preview. When sink is non-nil the work is tracked so a
-// caller can paint live progress. Archivers are resolved serially first because
-// archiverFor writes a shared cache the workers must only read.
-func (e *Engine) estimates(dles []config.DLE, sink progress.Sink) map[string]planner.Estimate {
-	hist := e.cat.History()
-	out := make(map[string]planner.Estimate, len(dles))
-	states := make([]*catalog.DLEState, len(dles))
-	for i, d := range dles {
-		_, _ = e.archiverFor(d.DumpTypeName(), d.Host) // warm the cache; errors resurface per-DLE below
-		states[i] = hist.DLE(d.Name())                 // History.DLE memoizes; resolve serially before the workers read it
-	}
-
-	workers := e.cfg.Workers()
-	var tr *progress.Tracker
-	if sink != nil {
-		rows := make([]progress.Plan, len(dles))
-		for i, d := range dles {
-			rows[i] = progress.Plan{Name: d.ID()}
-		}
-		tr = progress.NewTracker("estimate", progress.PhaseEstimating, workers, rows, time.Now, sink)
-	}
-
-	var (
-		wg  sync.WaitGroup
-		sem = make(chan struct{}, workers)
-		mu  sync.Mutex
-	)
-	for i, d := range dles {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(d config.DLE, st *catalog.DLEState) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			name := d.Name() // internal slug: archiver request + planner estimate key
-			if tr != nil {
-				tr.StartDLE(d.ID()) // progress display keys by host:path, matching the dump phase
-			}
-			est := e.estimateDLE(d, name, st)
-			mu.Lock()
-			out[name] = est
-			mu.Unlock()
-			if tr != nil {
-				tr.FinishDLE(d.ID(), 0, est.Full, 0, nil)
-			}
-		}(d, states[i])
-	}
-	wg.Wait()
-	if tr != nil {
-		tr.SetPhase(progress.PhaseDone)
-	}
-	return out
-}
-
-func (e *Engine) estimateDLE(d config.DLE, name string, st *catalog.DLEState) planner.Estimate {
-	arch, err := e.archiverFor(d.DumpTypeName(), d.Host)
-	if err != nil || arch.Check() != nil {
-		return planner.Estimate{} // no estimator available (e.g. tar missing)
-	}
-	excl := e.cfg.ResolveDumpType(d.DumpTypeName()).Exclude
-	full, ferr := arch.Estimate(archiver.BackupRequest{DLE: name, SourcePath: d.Path, Level: 0, BaseLevel: -1, Exclude: excl})
-	// A non-nil error with a non-zero floor means tar walked a partially-readable
-	// source (an unreadable member): the size is a floor, not exact. A zero floor is
-	// a total failure (e.g. a missing path) that ValidatePlan already reports, so we
-	// don't double-warn for it here.
-	incomplete := ferr != nil && full > 0
-	if st.LastFullDate == "" {
-		return planner.Estimate{Full: full, Incomplete: incomplete} // never fulled: only a full is possible
-	}
-
-	// The DLE sits at level L — 1 right after a full, otherwise its last level. We
-	// estimate that level and the next so the planner can judge whether climbing to
-	// L+1 saves enough to be worth it (see planner.chooseIncrLevel). L+1 is only
-	// estimable once an L dump exists to base it on; until then IncrNext stays 0.
-	lvl := st.LastLevel()
-	if lvl < 1 {
-		lvl = 1
-	}
-	if lvl > planner.MaxLevel {
-		lvl = planner.MaxLevel
-	}
-	est := planner.Estimate{Full: full, Incomplete: incomplete}
-	if arch.HasBase(name, lvl-1) {
-		est.Incr, _ = arch.Estimate(archiver.BackupRequest{
-			DLE: name, SourcePath: d.Path, Level: lvl, BaseLevel: lvl - 1, Exclude: excl,
-		})
-	}
-	if lvl < planner.MaxLevel && arch.HasBase(name, lvl) {
-		est.IncrNext, _ = arch.Estimate(archiver.BackupRequest{
-			DLE: name, SourcePath: d.Path, Level: lvl + 1, BaseLevel: lvl, Exclude: excl,
-		})
-	}
-	return est
+	return e.sched.Simulate(start, days)
 }
 
 // capacityRoom is the hard per-run write ceiling fed to the planner: the most a
@@ -946,28 +721,7 @@ func (e *Engine) estimateDLE(d config.DLE, name string, st *catalog.DLEState) pl
 // on media that lack it — object stores have no reel, a bare drive has no bounded
 // pool — and the result is unbounded only when both are.
 func (e *Engine) capacityRoom(now time.Time) int64 {
-	return minRoom(e.poolRoom(now), e.volumeRoom(now))
-}
-
-// poolRoom is the retention bound: capacity minus the bytes pruning cannot
-// reclaim (the protected set). Negative = unbounded (no pool budget).
-func (e *Engine) poolRoom(now time.Time) int64 {
-	capacity := e.profile.TotalBytes()
-	if capacity <= 0 {
-		return -1
-	}
-	slots := e.cat.SlotsOn(e.mediumName)
-	floor := retention.Compute(e.cat.ArchivesOn(e.mediumName), e.minAge, now)
-	var keptBytes int64
-	for _, s := range slots {
-		if floor.Keeps(s.ID) {
-			keptBytes += s.TotalBytes()
-		}
-	}
-	if room := capacity - keptBytes; room > 0 {
-		return room
-	}
-	return 0
+	return minRoom(e.acct.PoolRoom(now), e.volumeRoom(now))
 }
 
 // volumeRoom is the physical bound: the bytes left on the reel the run lands on
@@ -1001,322 +755,17 @@ func minRoom(a, b int64) int64 {
 	}
 }
 
-// localDay is the calendar day of instant in loc, at midnight — the operator's
-// wall-clock date, which the slot id carries. Taking loc explicitly (rather than
-// reading time.Local directly) keeps the day rule unit-testable across zones.
-func localDay(instant time.Time, loc *time.Location) time.Time {
-	y, m, d := instant.In(loc).Date()
-	return time.Date(y, m, d, 0, 0, 0, 0, loc)
-}
-
-// Run executes the plan for a date, producing one sealed slot.
+// Run executes the plan for a date, producing one sealed slot. It delegates to a
+// per-run conductor.Conductor (see internal/conductor and newConductor); the engine
+// just builds the run lane's dependency slice.
 func (e *Engine) Run(now time.Time, logf Logf) (*catalog.Slot, error) {
-	// `now` is the run's single time source: the precise instant the slot is stamped
-	// committed (CreatedAt) and the moment retention is judged against. The
-	// run date — the logical key for the slot id, planning, and restore ordering — is
-	// just its day. Keeping the two distinct lets two runs on one day carry distinct
-	// commit instants, so a sub-day minimum_age can tell them apart.
-	//
-	// The day is the run's LOCAL calendar date — the day the operator sees on the wall
-	// clock, which is what the slot id carries. The commit instant itself is stamped in
-	// UTC (an absolute time for retention/age math); only the day shown in the id is local.
-	date := localDay(now, time.Local)
-	now = now.UTC()
-	// Guard the restore-order invariant: restore replays a DLE's slots in date order,
-	// but the archiver's incremental snapshots advance in dump (wall-clock) order. A
-	// run dated earlier than a slot already sealed would splice an out-of-order
-	// archive into the chain whose snapshot has already moved past it — silently
-	// dropping files at restore. Reject it (a same-day rerun, equal date, is fine and
-	// takes the next .N). Backdating before today is already caught at the CLI.
-	if latest, ok := e.latestSlotDate(); ok && record.DateString(date) < latest {
-		return nil, fmt.Errorf("cannot dump for %s: slot(s) dated %s already exist; an earlier-dated run would corrupt the incremental restore order (snapshots have advanced past it) — dump on or after %s", record.DateString(date), latest, latest)
-	}
-	// Drain any leftover archives a previous holding-disk run crashed before flushing, so the
-	// holding disk is clean before this run stages onto it (amflush-on-next-dump). A no-op
-	// without a holding disk or when nothing is staged.
-	if n, err := e.Flush(time.Now().UTC(), logf); err != nil {
-		return nil, fmt.Errorf("flush leftover holding-disk archives before dumping: %w", err)
-	} else if n > 0 {
-		logf.Log("flushed %d leftover holding-disk archive(s) from a previous run", n)
-	}
-	// Write the run-status file from the first phase — sizing every DLE, which can be
-	// slow — so `nb status` reflects the whole dump cycle, not dead air until the first
-	// byte is archived. The estimate phase keeps the file non-terminal (the dump is
-	// still to come); a live estimate display, when attached, still erases its region
-	// when sizing completes.
-	fileSink := progress.NewFileSink(e.cfg.WorkdirPath(), time.Now)
-	estSink := keepEstimating(fileSink)
-	if e.estimateSink != nil {
-		estSink = progress.MultiSink(estSink, e.estimateSink)
-	}
-	plan := e.planWith(date, estSink)
-	forced := e.cat.ForcedFulls() // captured to consume once the run seals (the lock blocks a concurrent reset)
-	for _, w := range plan.Warnings {
-		logf.Log("WARNING: %s", w)
-	}
-
-	// Pre-flight before creating a slot: the compressor binary and every archiver.
-	// Resolving every archiver here also populates the archiver cache, so the parallel
-	// workers below only read it (no concurrent writes).
-	if err := compress.Check(e.compressScheme, e.fopts); err != nil {
-		return nil, err
-	}
-	checkedEnc := map[string]bool{}
-	checkedHost := map[string]bool{}
-	for _, item := range plan.Items {
-		if !checkedHost[item.DLE.Host] {
-			if err := e.probeReachable(item.DLE.Host); err != nil {
-				return nil, err
-			}
-			checkedHost[item.DLE.Host] = true
-		}
-		if err := e.preflightDumptype(item.DLE.DumpTypeName(), item.DLE.Host, true, checkedEnc); err != nil {
-			return nil, err
-		}
-	}
-
-	slotID, _, err := e.allocSlotID(date)
-	if err != nil {
-		return nil, err
-	}
-	spec := archiveio.SlotSpec{ID: slotID, CreatedAt: now}
-
-	// The producers dump every DLE; the drain consumes them — buffering each onto a holding disk
-	// (one or more media marked `holding: true`) and copying it to the authoritative landing, or,
-	// when no disk fits or none is configured, writing it straight to the landing. Holding disks let
-	// the producers run flat out while the landing's drive drains at its own pace.
-	holdingNames := e.cfg.HoldingMedia()
-	buffering := len(holdingNames) > 0
-
-	// Open the landing writer here (over the medium's real sink — the spool routes a producer's sink
-	// calls to its orchestrator, so no proxy is needed). Opening it now also lets a spanning-capable
-	// single drive clamp the workers.
-	landWT, err := e.prepareWriter(e.mediumName, spec, now, logf)
-	if err != nil {
-		return nil, err
-	}
-
-	// landingSlots is how many landing writes may run at once: one while buffering (the drain copies
-	// serially, and a direct write shares that single timeline), and for a direct run one for a
-	// spanning-capable single drive (clamping the workers too) or all of them for an unbounded disk.
-	workers := e.cfg.Workers()
-	landingSlots := 1
-	if !buffering {
-		if landWT.lib.CanSpan(landWT.partSize) {
-			if workers > 1 {
-				logf.Log("medium %q can span volumes; running 1 worker (a single drive writes serially)", e.mediumName)
-				workers = 1
-			}
-		} else {
-			landingSlots = workers
-		}
-	}
-
-	tr, runLogf := e.progressTracker(slotID, workers, plan.Items, fileSink, logf)
-	sealed, err := e.runOrchestrated(plan, workers, landingSlots, spec, holdingNames, landWT, tr, now, runLogf)
-	if err != nil {
-		return nil, err
-	}
-	// The run sealed, so every planned DLE — including every forced one, which the planner
-	// scheduled at L0 — has been dumped. Consume the force-full directives now; a failed run
-	// (returned above) leaves them so the next run retries. The lock `nb dump` holds means no
-	// `nb reset` slipped in between planning and here.
-	if err := e.cat.ClearForceFulls(forced); err != nil {
-		return nil, err
-	}
-	return sealed, nil
+	return e.newConductor().Run(now, logf)
 }
 
-// progressTracker builds the run's dump-phase tracker and the log function to use under it. It
-// takes over fileSink — the run-status file the estimate phase opened — so `nb status` sees one
-// continuous dump cycle, now under the real slot ID. A live terminal sink (when attached) paints
-// the same snapshots and suppresses the per-DLE log lines (runLogf becomes nil) so they don't
-// scribble over the in-place region. Progress reporting never blocks or fails the backup.
-func (e *Engine) progressTracker(slotID string, workers int, items []planner.Item, fileSink progress.Sink, logf Logf) (*progress.Tracker, Logf) {
-	sink := fileSink
-	runLogf := logf
-	if e.runSink != nil {
-		sink = progress.MultiSink(fileSink, e.runSink)
-		runLogf = nil
-	}
-	return progress.NewTracker(slotID, progress.PhaseRunning, workers, planProgress(items), time.Now, sink), runLogf
-}
-
-// keepEstimating adapts the estimate phase's status-file sink so the file stays
-// non-terminal across the gap between sizing and the first dumped byte. The estimate
-// tracker signals completion with a terminal PhaseDone — which a live display uses to
-// erase its region — but to the file that would read as a finished run, stopping a
-// `nb status --watch` before the dump it is waiting for has even started. Rewriting it
-// to PhaseEstimating holds the file open until the dump phase claims it.
-func keepEstimating(file progress.Sink) progress.Sink {
-	return func(s progress.Snapshot, force bool) {
-		if s.Phase.Terminal() {
-			s.Phase = progress.PhaseEstimating
-		}
-		file(s, force)
-	}
-}
-
-// planProgress projects planner items onto the progress package's seed type,
-// keeping progress unaware of the planner.
-func planProgress(items []planner.Item) []progress.Plan {
-	out := make([]progress.Plan, len(items))
-	for i, it := range items {
-		out[i] = progress.Plan{Name: it.DLE.ID(), Level: it.Level, EstBytes: it.EstBytes}
-	}
-	return out
-}
-
-// runOrchestrated executes a dump: it opens the holding disks (the buffer the producers stage onto),
-// builds the spool over the already-opened landing writer, runs the producers, and seals the
-// landing the spool authored. The spool is the run's sole catalog writer.
-func (e *Engine) runOrchestrated(plan *planner.Plan, workers, landingSlots int, spec archiveio.SlotSpec, holdingNames []string, landWT *writeTarget, tr *progress.Tracker, now time.Time, logf Logf) (*catalog.Slot, error) {
-	disks := make([]spool.Disk, len(holdingNames))
-	for i, name := range holdingNames {
-		wt, err := e.prepareWriter(name, spec, now, logf)
-		if err != nil {
-			tr.SetPhase(progress.PhaseFailed)
-			return nil, fmt.Errorf("open holding disk %q: %w", name, err)
-		}
-		capB, _ := e.cfg.Media[name].CapacityBytes()
-		disks[i] = spool.Disk{Name: name, Storage: e.clerk.OpenSlot(wt.w, name, wt.lib.Volume()), Capacity: capB}
-	}
-	landStorage := e.clerk.OpenSlot(landWT.w, e.mediumName, landWT.lib.Volume())
-
-	dr := spool.New(spool.Config{
-		Holding: spool.NewPool(disks), Tracker: tr, Logf: logf,
-		Backing: spool.Backing{Name: e.mediumName, Storage: landStorage, Slots: landingSlots},
-	})
-
-	dumpErr := e.dmp.Run(context.Background(), plan.Items, workers, dr, tr, logf)
-
-	tr.SetPhase(progress.PhaseSealing)
-	if err := firstErr(dumpErr, dr.Drain()); err != nil {
-		tr.SetPhase(progress.PhaseFailed)
-		return nil, err
-	}
-	tr.SetPhase(progress.PhaseDone)
-	// The slot is its committed archives, read from the catalog (the cache each archive recorded into
-	// as it committed). An empty run committed nothing, so the catalog has no entry — report the empty
-	// slot the run authored.
-	slot, err := e.cat.ReadSlot(spec.ID)
-	if err != nil {
-		slot = &catalog.Slot{ID: spec.ID}
-	}
-	return slot, nil
-}
-
-// firstErr returns the first non-nil error, in order.
-func firstErr(errs ...error) error {
-	for _, e := range errs {
-		if e != nil {
-			return e
-		}
-	}
-	return nil
-}
-
-// allocSlotID picks the slot ID for a run on the given date: the first run of
-// the day is "slot-DATE", later runs get the next free ".N". A leftover unsealed
-// slot from a failed attempt is reclaimed. This consults the volume (the write
-// path may touch media) so it is robust to a stale cache.
-// latestSlotDate returns the most recent slot date (YYYY-MM-DD) across the whole
-// catalog, or ("", false) when no slots exist. Dates are lexically comparable.
-func (e *Engine) latestSlotDate() (string, bool) {
-	latest := ""
-	for _, s := range e.cat.Slots() {
-		if d := s.Date(); d > latest {
-			latest = d
-		}
-	}
-	return latest, latest != ""
-}
-
-// PlannedSlotID returns the slot id a real dump on date would seal next: the next
-// free same-day sequence given the sealed slots already in the catalog. It is the
-// preview peer of allocSlotID (which additionally reclaims an unsealed orphan on the
-// loaded volume) and exists so `nb dump --dry-run` names the slot a real run would
-// produce — not always `.1` — when the date is already sealed.
+// PlannedSlotID returns the slot id a real dump on date would seal next. Like Run, it
+// delegates to the per-run conductor.Conductor.
 func (e *Engine) PlannedSlotID(date time.Time) string {
-	have := map[string]bool{}
-	for _, s := range e.cat.Slots() {
-		have[s.ID] = true
-	}
-	ds := record.DateString(date)
-	for seq := 1; ; seq++ {
-		id := record.IDFromParts(ds, seq)
-		if !have[id] {
-			return id
-		}
-	}
-}
-
-func (e *Engine) allocSlotID(date time.Time) (id string, seq int, err error) {
-	files, err := e.vol.Files()
-	if err != nil {
-		// A changer with nothing loaded yet (a fresh library before its first mount,
-		// e.g. auto_label on a blank pool) has no files to scan for orphans. The
-		// catalog still seeds every known slot id pool-globally below, so treat an
-		// empty drive as "no extra files" rather than a hard failure — letting a
-		// first dump proceed to PrepareWrite, which mounts and auto-labels a bay.
-		if !errors.Is(err, media.ErrNoVolume) {
-			return "", 0, err
-		}
-		files = nil
-	}
-	present := map[string]bool{} // slot id -> exists (catalog or loaded volume)
-	sealed := map[string]bool{}  // slot id -> sealed (immutable; never reuse the id)
-	// Seed from the catalog, which indexes every sealed slot across the whole pool.
-	// A slot id is pool-global, so a same-day rerun must take the next free .N even
-	// when an earlier run sealed onto a different volume (or medium) than the one now
-	// loaded — scanning only the loaded volume's Files() would miss it and reuse the
-	// id, shadowing that earlier run in the catalog. Catalog slots are sealed by
-	// construction (Record runs only after Seal).
-	for _, s := range e.cat.Slots() {
-		present[s.ID] = true
-		sealed[s.ID] = true
-	}
-	// The loaded volume may also carry an orphan from a failed attempt that the catalog
-	// never recorded; note it so its id can be reclaimed below. A slot with any committed
-	// archive (a commit footer) is a real recovery point — its id is never reused; one with
-	// only uncommitted parts is a reclaimable orphan.
-	for _, f := range files {
-		present[f.Header.Slot] = true
-		if f.Header.Kind == record.KindCommit {
-			sealed[f.Header.Slot] = true
-		}
-	}
-	day := record.DateString(date)
-	for seq = 1; ; seq++ {
-		id = record.IDFromParts(day, seq)
-		if !present[id] {
-			return id, seq, nil
-		}
-		if sealed[id] {
-			continue // a sealed slot occupies this id; try the next sequence
-		}
-		// Unsealed leftover from a failed attempt: reclaim its files. A medium that
-		// cannot remove individual files (tape — space is reclaimed by relabeling the
-		// whole volume) leaves the orphan in place; a scan ignores it (it has no seal),
-		// and it is reclaimed on the next relabel. Take the next id rather than failing.
-		removed := true
-		for _, f := range files {
-			if f.Header.Slot != id {
-				continue
-			}
-			if err := e.vol.RemoveFile(f.Pos); err != nil {
-				if errors.Is(err, media.ErrNoFileRemoval) {
-					removed = false
-					break
-				}
-				return "", 0, err
-			}
-		}
-		if !removed {
-			continue
-		}
-		return id, seq, nil
-	}
+	return e.newConductor().PlannedSlotID(date)
 }
 
 // Restore reconstructs a DLE as of a slot into destDir; see restorer.
@@ -1488,20 +937,12 @@ func (e *Engine) ForceFull(arg string) (string, error) {
 	return "", fmt.Errorf("no DLE %q in the configuration", arg)
 }
 
-// profileFor returns the capacity/reclamation profile for a named medium: the
-// landing medium's cached profile, or one opened on demand for any other medium.
 // MediumOverCapacity reports whether the named medium still holds more than its
 // capacity (a 0 capacity means unbounded). used and capacity are returned for
 // messaging — used after a prune to tell the operator that reclaiming every dead
 // archive was not enough because the protected recovery set alone exceeds capacity.
 func (e *Engine) MediumOverCapacity(name string) (over bool, used, capacity int64, err error) {
-	prof, err := e.profileFor(name)
-	if err != nil {
-		return false, 0, 0, err
-	}
-	capacity = prof.TotalBytes()
-	used = e.cat.MediumBytes(name)
-	return capacity > 0 && used > capacity, used, capacity, nil
+	return e.acct.MediumOverCapacity(name)
 }
 
 // MediumProtectedOverCapacity reports whether the bytes a prune *cannot* reclaim —
@@ -1513,23 +954,7 @@ func (e *Engine) MediumOverCapacity(name string) (over bool, used, capacity int6
 // reclaimable set is empty and the current total is already the residual). This is
 // what `nb prune` warns on, so its preview and its real run agree.
 func (e *Engine) MediumProtectedOverCapacity(name string, now time.Time) (over bool, residual, capacity int64, err error) {
-	prof, err := e.profileFor(name)
-	if err != nil {
-		return false, 0, 0, err
-	}
-	def, ok := e.cfg.Media[name]
-	if !ok {
-		return false, 0, 0, fmt.Errorf("unknown medium %q", name)
-	}
-	capacity = prof.TotalBytes()
-	archives := e.cat.ArchivesOn(name)
-	floor := retention.Compute(archives, e.cfg.MinAgeFor(def), now)
-	var reclaimable int64
-	for _, r := range prof.Reclaim(archives, floor, now) {
-		reclaimable += r.Bytes
-	}
-	residual = e.cat.MediumBytes(name) - reclaimable
-	return capacity > 0 && residual > capacity, residual, capacity, nil
+	return e.acct.MediumProtectedOverCapacity(name, now)
 }
 
 // MediumProtectionIsAgeBound reports whether every archive pinning the medium over
@@ -1537,19 +962,7 @@ func (e *Engine) MediumProtectedOverCapacity(name string, now time.Time) (over b
 // advising the operator to shorten minimum_age is useless — a DLE's last full and its
 // later incrementals are pinned regardless of age — so the remedy text drops it.
 func (e *Engine) MediumProtectionIsAgeBound(name string, now time.Time) bool {
-	def, ok := e.cfg.Media[name]
-	if !ok {
-		return true
-	}
-	archives := e.cat.ArchivesOn(name)
-	floor := retention.Compute(archives, e.cfg.MinAgeFor(def), now)
-	for _, a := range archives {
-		reason, ok := floor.ReasonArchive(a.Slot, a.DLE)
-		if ok && !strings.Contains(reason, "minimum age") {
-			return false // a recovery-chain pin that shortening minimum_age can't release
-		}
-	}
-	return true
+	return e.acct.MediumProtectionIsAgeBound(name, now)
 }
 
 // ProjectedOverCapacity reports whether the named medium would exceed its capacity
@@ -1557,24 +970,7 @@ func (e *Engine) MediumProtectionIsAgeBound(name string, now time.Time) bool {
 // `nb copy` runs before/after a copy so it warns about overshooting a target's
 // budget the way `nb sync` already does.
 func (e *Engine) ProjectedOverCapacity(name string, add int64) (over bool, projected, capacity int64, err error) {
-	prof, err := e.profileFor(name)
-	if err != nil {
-		return false, 0, 0, err
-	}
-	capacity = prof.TotalBytes()
-	projected = e.cat.MediumBytes(name) + add
-	return capacity > 0 && projected > capacity, projected, capacity, nil
-}
-
-func (e *Engine) profileFor(name string) (media.Profile, error) {
-	if name == e.mediumName {
-		return e.profile, nil
-	}
-	d, ok := e.cfg.Media[name]
-	if !ok {
-		return nil, fmt.Errorf("unknown medium %q", name)
-	}
-	return media.OpenProfile(d.Type, media.Options(d.ProfileOptions()))
+	return e.acct.ProjectedOverCapacity(name, add)
 }
 
 // Prune reconciles a named medium to its own retention model: it computes that
@@ -1584,137 +980,5 @@ func (e *Engine) profileFor(name string) (media.Profile, error) {
 // — pruning one medium never touches a copy on another. Any configured medium can
 // be pruned (not only the landing one), so an offsite tier can be trimmed too.
 func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) (eligible int, freed int64, err error) {
-	def, ok := e.cfg.Media[mediumName]
-	if !ok {
-		return 0, 0, fmt.Errorf("unknown medium %q", mediumName)
-	}
-	profile, err := e.profileFor(mediumName)
-	if err != nil {
-		return 0, 0, err
-	}
-	minAge := e.cfg.MinAgeFor(def)
-	archives := e.cat.ArchivesOn(mediumName)
-	floor := retention.Compute(archives, minAge, now)
-
-	// Reclamation is per archive (slot+DLE): a medium's Reclaim walks the oldest
-	// non-protected archives, so an old slot can lose one DLE's image while keeping
-	// another the chain still needs.
-	type archiveRef struct{ slot, dle string }
-	reclaim := map[archiveRef]media.Reclamation{}
-	for _, r := range profile.Reclaim(archives, floor, now) {
-		reclaim[archiveRef{r.SlotID, r.DLE}] = r
-	}
-
-	for _, a := range archives {
-		if _, ok := reclaim[archiveRef{a.Slot, a.DLE}]; ok {
-			continue // reported below
-		}
-		if reason, ok := floor.ReasonArchive(a.Slot, a.DLE); ok {
-			logf.Log("keep   %s %s  (%s)", a.Slot, e.DisplayDLE(a.DLE), reason)
-		} else {
-			logf.Log("keep   %s %s  (fits capacity)", a.Slot, e.DisplayDLE(a.DLE))
-		}
-	}
-
-	// Open the medium's volume only when there is something to actually delete.
-	var vol media.Volume
-	if apply && len(reclaim) > 0 {
-		if vol, _, _, err = e.mediumVolume(mediumName); err != nil {
-			return eligible, freed, err
-		}
-	}
-	for _, a := range archives {
-		r, ok := reclaim[archiveRef{a.Slot, a.DLE}]
-		if !ok {
-			continue
-		}
-		eligible++
-		if apply {
-			// Reclaim this archive's copy on this medium only — its files, one
-			// position at a time; the slot (and the archive's copies elsewhere)
-			// survives in the catalog.
-			for _, pos := range archivePositions(e.cat.Placements(a.Slot), mediumName, a.DLE) {
-				if err := vol.RemoveFile(pos); err != nil {
-					return eligible, freed, fmt.Errorf("delete %s %s: %w", a.Slot, a.DLE, err)
-				}
-			}
-			if _, _, err := e.cat.RemoveArchive(a.Slot, mediumName, a.DLE); err != nil {
-				return eligible, freed, fmt.Errorf("update catalog cache: %w", err)
-			}
-			freed += r.Bytes
-			logf.Log("DELETE %s %s  (%s freed, %s)", a.Slot, e.DisplayDLE(a.DLE), sizeutil.FormatBytes(r.Bytes), r.Note)
-		} else {
-			logf.Log("would delete %s %s  (%s, %s)", a.Slot, e.DisplayDLE(a.DLE), sizeutil.FormatBytes(r.Bytes), r.Note)
-		}
-	}
-	return eligible, freed, nil
-}
-
-// reclaimTargetCopy deletes an existing copy of a slot on a removable (fslike: disk
-// or cloud) medium, so a forced re-copy replaces the old files instead of orphaning
-// them (the leak a plain `nb copy --force` would otherwise cause — orphaned parts
-// that no placement references yet still consume capacity). Tape reclaims only whole
-// volumes (relabel), so its prior copy stays orphaned-until-relabel as documented and
-// this is a no-op there. Best-effort: it runs before the re-copy re-authors the slot.
-func (e *Engine) reclaimTargetCopy(slotID, mediumName string) error {
-	if m, ok := e.cfg.Media[mediumName]; ok && m.Type == "tape" {
-		return nil
-	}
-	s, err := e.cat.ReadSlot(slotID)
-	if err != nil {
-		return err
-	}
-	vol, _, _, err := e.mediumVolume(mediumName)
-	if err != nil {
-		return err
-	}
-	for _, a := range s.Archives {
-		for _, pos := range archivePositions(e.cat.Placements(slotID), mediumName, a.DLE) {
-			if err := vol.RemoveFile(pos); err != nil {
-				return fmt.Errorf("reclaim prior copy of %s %s on %q: %w", slotID, a.DLE, mediumName, err)
-			}
-		}
-	}
-	if _, err := e.cat.RemovePlacement(slotID, mediumName); err != nil {
-		return fmt.Errorf("update catalog cache: %w", err)
-	}
-	return nil
-}
-
-// archivePositions gathers the volume file positions of one archive (a DLE's image)
-// in the copy of a slot on medium, in safe removal order: commit footer first, then
-// the member index, then the parts.
-//
-// The order is crash-safety-critical and mirrors the write order in reverse. An
-// archive is made durable by its commit footer, written LAST (after its parts and
-// index); the footer's presence is what proves the whole archive landed, and a
-// catalog rebuild assembles only archives that have a footer (assemble iterates the
-// commits — parts without one are orphans it ignores). So removing the footer FIRST
-// "un-commits" the archive: a crash mid-prune then leaves parts/index as orphans with
-// no footer, which a rebuild skips. Removing parts first would leave a footer whose
-// parts are gone — which a rebuild would resurrect into the catalog as a committed-
-// but-unreadable archive (the exact "we think it's committed but it's only partly
-// there" hazard). Removal is one os.Remove per file, so the ordering holds at the same
-// level the write path relies on (no fsync either side).
-func archivePositions(ps []catalog.Placement, medium, dle string) []int {
-	for _, p := range ps {
-		if p.Medium != medium {
-			continue
-		}
-		for _, a := range p.Archives {
-			if a.DLE != dle {
-				continue
-			}
-			pos := make([]int, 0, len(a.Parts)+2)
-			pos = append(pos, a.Commit.Pos) // the marker: un-commit first
-			if a.Index != (record.FilePos{}) {
-				pos = append(pos, a.Index.Pos)
-			}
-			for _, pt := range a.Parts {
-				pos = append(pos, pt.Pos)
-			}
-			return pos
-		}
-	}
-	return nil
+	return e.acct.Prune(mediumName, now, apply, logf)
 }
