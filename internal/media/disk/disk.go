@@ -5,6 +5,7 @@
 package disk
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -52,23 +53,18 @@ func (s fsStore) Key(slot, name string) string { return filepath.Join(slot, name
 
 func (s fsStore) full(key string) string { return filepath.Join(s.root, key) }
 
-func (s fsStore) Write(key string, write func(w io.Writer) error) error {
+// Writer opens the payload file for streaming. Local writes are not ctx-cancelable mid-write; an
+// aborted append (the caller cancels ctx, fslike then skips the header) leaves this partial as a
+// sidecar-less orphan a scan ignores, matching the old behavior.
+func (s fsStore) Writer(_ context.Context, key string) (io.WriteCloser, error) {
 	full := s.full(key)
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-		return err
+		return nil, err
 	}
-	f, err := os.Create(full)
-	if err != nil {
-		return err
-	}
-	if err := write(f); err != nil {
-		f.Close() // leave the partial as a sidecar-less orphan; scan ignores it
-		return err
-	}
-	return f.Close()
+	return os.Create(full)
 }
 
-func (s fsStore) WriteAll(key string, b []byte) error {
+func (s fsStore) WriteAll(_ context.Context, key string, b []byte) error {
 	full := s.full(key)
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return err

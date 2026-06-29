@@ -1092,7 +1092,7 @@ func TestHoldingDisksFlush(t *testing.T) {
 
 // TestHoldingDiskDrainSpansVolumes exercises the drain's volume-roll path: the tape landing has a
 // small volume_size, so each staged archive spans several reels while it copies. Every roll runs
-// the real WriteSink — and its catalog write — on the orchestrator via the sink funnel, while the
+// the real WriteSink — and its catalog write — on the orchestrator via the sink Client, while the
 // drainer goroutine streams the bytes and the other DLE's commit is recorded concurrently. The run
 // must complete, each archive must land spanning >= 2 parts, the disk must be reclaimed, and both
 // chains must restore from the spanned tapes.

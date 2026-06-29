@@ -2,6 +2,7 @@ package fslike
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"strings"
 	"sync"
@@ -24,21 +25,28 @@ func newMemStore() *memStore { return &memStore{files: map[string][]byte{}} }
 
 func (s *memStore) Key(slot, name string) string { return slot + "/" + name }
 
-func (s *memStore) Write(key string, write func(w io.Writer) error) error {
-	var buf bytes.Buffer
-	if err := write(&buf); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.files[key] = append([]byte(nil), buf.Bytes()...)
-	s.mu.Unlock()
-	if s.onWrite != nil {
-		s.onWrite(key)
+func (s *memStore) Writer(_ context.Context, key string) (io.WriteCloser, error) {
+	return &memWriter{s: s, key: key}, nil
+}
+
+type memWriter struct {
+	s   *memStore
+	key string
+	buf bytes.Buffer
+}
+
+func (w *memWriter) Write(p []byte) (int, error) { return w.buf.Write(p) }
+func (w *memWriter) Close() error {
+	w.s.mu.Lock()
+	w.s.files[w.key] = append([]byte(nil), w.buf.Bytes()...)
+	w.s.mu.Unlock()
+	if w.s.onWrite != nil {
+		w.s.onWrite(w.key)
 	}
 	return nil
 }
 
-func (s *memStore) WriteAll(key string, b []byte) error {
+func (s *memStore) WriteAll(_ context.Context, key string, b []byte) error {
 	s.mu.Lock()
 	s.files[key] = append([]byte(nil), b...)
 	s.mu.Unlock()
@@ -94,14 +102,18 @@ func (s *memStore) Remove(key string) error {
 
 func appendArchive(t *testing.T, v *Volume, slot, dle, payload string) int {
 	t.Helper()
-	pos, err := v.AppendFile(
-		record.Header{Slot: slot, Kind: record.KindArchive, DLE: dle, Level: 0, Compress: "none"},
-		func(w io.Writer) error { _, e := w.Write([]byte(payload)); return e },
-	)
+	fw, err := v.AppendFile(context.Background(),
+		record.Header{Slot: slot, Kind: record.KindArchive, DLE: dle, Level: 0, Compress: "none"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return pos
+	if _, err := fw.Write([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return fw.Pos()
 }
 
 // TestReclaimSparesInFlightAppend reproduces the holding-disk corruption: dumpers

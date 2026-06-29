@@ -12,6 +12,7 @@
 package fslike
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
@@ -39,11 +41,12 @@ type Object struct {
 type Store interface {
 	// Key builds the storage key for a file named name (base+ext) in slot.
 	Key(slot, name string) string
-	// Write streams write's output to key atomically: a failed or aborted write must
-	// not leave a committed file (so an interrupted append is a sidecar-less orphan).
-	Write(key string, write func(w io.Writer) error) error
+	// Writer opens a streaming writer for key. Close commits the file; if ctx is canceled the file
+	// must not commit (a cloud upload is abandoned; a local partial is left for the caller to discard),
+	// so an aborted append never leaves a committed payload.
+	Writer(ctx context.Context, key string) (io.WriteCloser, error)
 	// WriteAll writes b to key (the header sidecar).
-	WriteAll(key string, b []byte) error
+	WriteAll(ctx context.Context, key string, b []byte) error
 	// ReadAll reads the whole file at key (the header sidecar).
 	ReadAll(key string) ([]byte, error)
 	// Open opens the file at key for streaming; the caller closes it.
@@ -127,7 +130,7 @@ func compressExt(compress string) string {
 	return compress
 }
 
-func (v *Volume) AppendFile(h record.Header, write func(w io.Writer) error) (int, error) {
+func (v *Volume) AppendFile(ctx context.Context, h record.Header) (media.FileWriter, error) {
 	v.mu.Lock()
 	pos := v.next
 	v.next++
@@ -137,8 +140,8 @@ func (v *Volume) AppendFile(h record.Header, write func(w io.Writer) error) (int
 	// reservation a concurrent RemoveFile reclaiming the slot's last file would judge
 	// the slot empty from the lagging index and RemoveTree the subtree — taking the
 	// freshly written, not-yet-indexed payload with it. The reservation makes that
-	// RemoveFile see the in-flight append and leave the directory alone. Finalized
-	// below once both artifacts have landed; the defer drops it on any early return.
+	// RemoveFile see the in-flight append and leave the directory alone. Finalized on
+	// the writer's Close once both artifacts have landed; dropped there on abort/error.
 	v.idx[pos] = entry{slot: h.Slot, incomplete: true}
 	v.mu.Unlock()
 
@@ -146,33 +149,62 @@ func (v *Volume) AppendFile(h record.Header, write func(w io.Writer) error) (int
 	payloadKey := v.store.Key(h.Slot, base+payloadExt(h))
 	hdrKey := v.store.Key(h.Slot, base+".hdr")
 
-	committed := false
-	defer func() {
-		if !committed {
-			v.mu.Lock()
-			delete(v.idx, pos)
-			v.mu.Unlock()
-		}
-	}()
-
-	// Payload first (a clean archive), then the header sidecar — so an interrupted
-	// write leaves a sidecar-less orphan that scan/rebuild ignores.
-	if err := v.store.Write(payloadKey, write); err != nil {
-		return 0, err
-	}
 	hb, err := json.Marshal(h)
 	if err != nil {
-		return 0, err
+		v.drop(pos)
+		return nil, err
 	}
-	if err := v.store.WriteAll(hdrKey, append(hb, '\n')); err != nil {
-		return 0, err
+	pw, err := v.store.Writer(ctx, payloadKey)
+	if err != nil {
+		v.drop(pos)
+		return nil, err
 	}
+	return &fileWriter{v: v, ctx: ctx, pw: pw, pos: pos, slot: h.Slot, hdrKey: hdrKey, payloadKey: payloadKey, hdr: append(hb, '\n')}, nil
+}
 
+// drop releases an in-flight position's reservation (an aborted or failed append).
+func (v *Volume) drop(pos int) {
 	v.mu.Lock()
-	v.idx[pos] = entry{hdr: hdrKey, payload: payloadKey, slot: h.Slot}
-	committed = true
+	delete(v.idx, pos)
 	v.mu.Unlock()
-	return pos, nil
+}
+
+// fileWriter is the payload writer for one in-flight AppendFile. Write streams to the payload; Close
+// commits — payload first, then the header sidecar (so an interrupted write leaves a sidecar-less
+// orphan a scan ignores) — or, if ctx was canceled, abandons the file and drops the reservation.
+type fileWriter struct {
+	v          *Volume
+	ctx        context.Context
+	pw         io.WriteCloser
+	pos        int
+	slot       string
+	hdrKey     string
+	payloadKey string
+	hdr        []byte
+}
+
+func (f *fileWriter) Pos() int                    { return f.pos }
+func (f *fileWriter) Write(p []byte) (int, error) { return f.pw.Write(p) }
+
+func (f *fileWriter) Close() error {
+	cerr := f.pw.Close() // commits (cloud) or, on a canceled ctx, abandons the upload
+	if f.ctx.Err() != nil {
+		// Aborted: a local partial is left as a sidecar-less orphan (no header); the reservation goes.
+		f.v.drop(f.pos)
+		return f.ctx.Err()
+	}
+	if cerr != nil {
+		f.v.drop(f.pos)
+		return cerr
+	}
+	if err := f.v.store.WriteAll(f.ctx, f.hdrKey, f.hdr); err != nil {
+		f.v.drop(f.pos)
+		return err
+	}
+	f.v.mu.Lock()
+	f.v.idx[f.pos] = entry{hdr: f.hdrKey, payload: f.payloadKey, slot: f.slot}
+	f.v.mu.Unlock()
+	return nil
 }
 
 func (v *Volume) ReadFile(pos int) (record.Header, io.ReadCloser, error) {

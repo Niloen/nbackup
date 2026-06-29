@@ -1,7 +1,9 @@
 package archiveio
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -27,20 +29,34 @@ func newMemVolume(name string, capacity int64) *memVolume {
 	return &memVolume{name: name, capacity: capacity, hdrs: map[int]record.Header{}, data: map[int][]byte{}}
 }
 
-func (v *memVolume) AppendFile(h record.Header, write func(w io.Writer) error) (int, error) {
-	var buf bytes.Buffer
-	if err := write(&buf); err != nil {
-		return 0, err
+func (v *memVolume) AppendFile(ctx context.Context, h record.Header) (media.FileWriter, error) {
+	return &memFileWriter{v: v, ctx: ctx, h: h}, nil
+}
+
+type memFileWriter struct {
+	v   *memVolume
+	ctx context.Context
+	h   record.Header
+	buf bytes.Buffer
+	pos int
+}
+
+func (w *memFileWriter) Pos() int                    { return w.pos }
+func (w *memFileWriter) Write(p []byte) (int, error) { return w.buf.Write(p) }
+func (w *memFileWriter) Close() error {
+	if w.ctx.Err() != nil {
+		return w.ctx.Err()
 	}
-	if v.capacity > 0 && v.used+record.HeaderBlock+int64(buf.Len()) > v.capacity {
-		return 0, media.ErrVolumeFull // backstop: proactive sizing should avoid this
+	if w.v.capacity > 0 && w.v.used+record.HeaderBlock+int64(w.buf.Len()) > w.v.capacity {
+		return media.ErrVolumeFull // backstop: proactive sizing should avoid this
 	}
-	pos := v.next
-	v.next++
-	v.hdrs[pos] = h
-	v.data[pos] = append([]byte(nil), buf.Bytes()...)
-	v.used += record.HeaderBlock + int64(buf.Len())
-	return pos, nil
+	pos := w.v.next
+	w.v.next++
+	w.v.hdrs[pos] = w.h
+	w.v.data[pos] = append([]byte(nil), w.buf.Bytes()...)
+	w.v.used += record.HeaderBlock + int64(w.buf.Len())
+	w.pos = pos
+	return nil
 }
 
 func (v *memVolume) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
@@ -143,18 +159,52 @@ func openerOver(vols ...*memVolume) PartOpener {
 
 func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) record.Archive {
 	t.Helper()
-	meta := record.Archive{
-		DLE: dle, Host: "localhost", Path: "/p", Archiver: "m", Level: 0, Compress: "none",
-		Uncompressed: int64(len(body)), FileCount: 1, Members: []string{dle},
+	meta := record.Archive{DLE: dle, Host: "localhost", Path: "/p", Archiver: "m", Level: 0, Compress: "none"}
+	aw := w.NewArchive(meta, nil)
+	if err := driveArchive(aw, body); err != nil {
+		t.Fatalf("driveArchive: %v", err)
 	}
-	arch, parts, err := w.WriteArchive(meta, bytes.NewReader(body), nil)
+	arch, _, err := aw.Commit(context.Background(), 1, int64(len(body)), []string{dle})
 	if err != nil {
-		t.Fatalf("WriteArchive: %v", err)
-	}
-	if _, err := w.Commit(arch, parts); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	return arch
+}
+
+// driveArchive mimics xfer.Transfer's pull loop: copy body into parts (rolling between) until the
+// stream is exhausted. It returns the first NextPart/copy/Close error so a test can assert on it.
+func driveArchive(aw *ArchiveWriter, body []byte) error {
+	r := bufio.NewReader(bytes.NewReader(body))
+	for {
+		pw, max, err := aw.NextPart(context.Background())
+		if err != nil {
+			return err
+		}
+		eof := false
+		var copyErr error
+		if max < 0 {
+			_, copyErr = io.Copy(pw, r)
+			eof = true
+		} else if _, copyErr = io.CopyN(pw, r, max); copyErr == io.EOF {
+			eof, copyErr = true, nil
+		} else if copyErr == nil {
+			if _, pe := r.Peek(1); pe == io.EOF {
+				eof = true
+			} else if pe != nil {
+				copyErr = pe
+			}
+		}
+		if copyErr != nil {
+			pw.Close()
+			return copyErr
+		}
+		if err := pw.Close(); err != nil {
+			return err
+		}
+		if eof {
+			return nil
+		}
+	}
 }
 
 // TestSpanAcrossVolumes writes an archive larger than one volume and confirms it
@@ -259,7 +309,7 @@ func TestRollFailureNoDeadlock(t *testing.T) {
 	w := NewWriter(sink, spec, nil)
 
 	body := []byte(strings.Repeat("q", 200*1024)) // far bigger than one volume
-	_, _, err := w.WriteArchive(record.Archive{DLE: "dle1", Level: 0}, bytes.NewReader(body), nil)
+	err := driveArchive(w.NewArchive(record.Archive{DLE: "dle1", Level: 0}, nil), body)
 	if err == nil {
 		t.Fatal("expected an error when the sink cannot roll")
 	}

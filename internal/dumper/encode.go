@@ -1,10 +1,12 @@
 package dumper
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync/atomic"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/programs"
@@ -48,7 +50,7 @@ type EncodePlacement struct {
 // dumpItem archives a single DLE into the store: it acquires an ingestion Sink, transfers the
 // encoded archive into it, and commits it — driving the run tracker from the committed record. It
 // owns the run-tracker lifecycle and describes the backup; the store lands and records the bytes.
-func (d *Dumper) dumpItem(store Store, item planner.Item, tr *progress.Tracker, logf func(format string, args ...any)) (err error) {
+func (d *Dumper) dumpItem(ctx context.Context, fs archiveio.WriteFS, item planner.Item, tr *progress.Tracker, logf func(format string, args ...any)) (err error) {
 	// The progress tracker keys and displays DLEs by their host:path identity; the
 	// seal and filenames keep the internal slug.
 	pname := item.DLE.ID()
@@ -68,7 +70,7 @@ func (d *Dumper) dumpItem(store Store, item planner.Item, tr *progress.Tracker, 
 	}
 
 	logf("archiving %s (L%d)", item.DLE.ID(), item.Level)
-	committed, err = d.dumpArchive(store, item.EstBytes, spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
+	committed, err = d.dumpArchive(ctx, fs, item.EstBytes, spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
 	if err != nil {
 		// An unreadable file makes tar exit fatally (it never silently ships a partial
 		// archive — that would betray recoverability), so name the likely cause and fix
@@ -133,7 +135,7 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 // server-side as local Filters) → an ingestion xfer.Sink the store hands out, which the transfer
 // seals on commit. prog, if non-nil, receives running (uncompressed, compressed) counts. It returns
 // the archive record with its final sizes + file count for the caller's tracker and log.
-func (d *Dumper) dumpArchive(store Store, est int64, spec BackupSpec, prog func(uncompressed, compressed int64)) (record.Archive, error) {
+func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.WriteFS, est int64, spec BackupSpec, prog func(uncompressed, compressed int64)) (record.Archive, error) {
 	pl := d.placement(spec.DumpType)
 	compF, err := compress.Filter(pl.CompressScheme, pl.CompressOpts)
 	if err != nil {
@@ -190,18 +192,18 @@ func (d *Dumper) dumpArchive(store Store, est int64, spec BackupSpec, prog func(
 		return xfer.Produced{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members}, nil
 	}).OnCleanup(bs.Cleanup)
 
-	// Acquire the ingestion Sink before the transfer spawns tar, so back-pressure (a full holding
-	// disk, or a busy landing) gates the dump before any heavy work starts. The store meters the
-	// bytes that land (it must, for the checksum + size) and taps the running compressed count for
+	// Create the ingestion Sink before the transfer spawns tar, so back-pressure (a full holding
+	// disk, or a busy backing medium) gates the dump before any heavy work starts. The WriteFS meters
+	// the bytes that land (it must, for the checksum + size) and taps the running compressed count for
 	// live `nb status`, symmetric with tarCmd.Tap's uncompressed side.
-	sink, err := store.Acquire(est, meta, func(n int64) { comp.Store(n); report() })
+	sink, err := fs.Create(meta, est, func(n int64) { comp.Store(n); report() })
 	if err != nil {
 		return record.Archive{}, err
 	}
 	// Transfer drives the whole ingestion: it streams the encoded archive into the sink and, on a
 	// clean transfer, has the sink seal it (footer + placement) against the producer's totals,
 	// returning those totals.
-	produced, terr := xfer.Transfer(src, filters, sink)
+	produced, terr := xfer.Transfer(ctx, src, filters, sink)
 	if terr != nil {
 		return record.Archive{}, terr
 	}

@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"context"
 	"io"
 	"testing"
 	"time"
@@ -28,7 +29,7 @@ func putSlot(t *testing.T, v media.Volume, s *record.Slot) {
 	t.Helper()
 	for _, a := range s.Archives {
 		h := record.Header{Slot: s.ID, Kind: record.KindArchive, DLE: a.DLE, Level: a.Level, Compress: a.Compress}
-		if _, err := v.AppendFile(h, func(w io.Writer) error {
+		if _, err := writeFileT(v, h, func(w io.Writer) error {
 			_, e := w.Write([]byte("payload"))
 			return e
 		}); err != nil {
@@ -45,7 +46,7 @@ func putSlot(t *testing.T, v media.Volume, s *record.Slot) {
 func putCommit(t *testing.T, v media.Volume, slotID string, a record.Archive) {
 	t.Helper()
 	if len(a.Members) > 0 {
-		if _, err := v.AppendFile(record.Header{Slot: slotID, Kind: record.KindIndex, DLE: a.DLE, Level: a.Level}, func(w io.Writer) error {
+		if _, err := writeFileT(v, record.Header{Slot: slotID, Kind: record.KindIndex, DLE: a.DLE, Level: a.Level}, func(w io.Writer) error {
 			return record.EncodeIndex(w, a.Members)
 		}); err != nil {
 			t.Fatal(err)
@@ -57,7 +58,7 @@ func putCommit(t *testing.T, v media.Volume, slotID string, a record.Archive) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := v.AppendFile(record.Header{Slot: slotID, Kind: record.KindCommit, DLE: a.DLE, Level: a.Level}, func(w io.Writer) error {
+	if _, err := writeFileT(v, record.Header{Slot: slotID, Kind: record.KindCommit, DLE: a.DLE, Level: a.Level}, func(w io.Writer) error {
 		_, e := w.Write(data)
 		return e
 	}); err != nil {
@@ -199,7 +200,7 @@ func TestRemoveArchiveDropsCopylessDLE(t *testing.T) {
 // writePart writes one archive part (with its part index) onto the mounted volume.
 func writePart(t *testing.T, v media.Volume, slotID, dle string, level, part int) int {
 	t.Helper()
-	pos, err := v.AppendFile(record.Header{Slot: slotID, Kind: record.KindArchive, DLE: dle, Level: level, Part: part},
+	pos, err := writeFileT(v, record.Header{Slot: slotID, Kind: record.KindArchive, DLE: dle, Level: level, Part: part},
 		func(w io.Writer) error { _, e := w.Write([]byte("part-payload")); return e })
 	if err != nil {
 		t.Fatal(err)
@@ -309,4 +310,20 @@ func TestForceFullDirectivePersists(t *testing.T) {
 	if len(again.ForcedFulls()) != 0 {
 		t.Fatalf("cleared directive should not reappear, got %v", again.ForcedFulls())
 	}
+}
+
+// writeFileT bridges tests to the writer-based AppendFile (callback shape kept for brevity).
+func writeFileT(v media.Volume, h record.Header, write func(io.Writer) error) (int, error) {
+	fw, err := v.AppendFile(context.Background(), h)
+	if err != nil {
+		return 0, err
+	}
+	if err := write(fw); err != nil {
+		fw.Close()
+		return 0, err
+	}
+	if err := fw.Close(); err != nil {
+		return 0, err
+	}
+	return fw.Pos(), nil
 }

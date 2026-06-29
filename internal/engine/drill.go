@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -303,7 +304,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		// documented follow-on — see the design note.
 		sink := xfer.NewPrograms(programs.Local()).Add(arch.RestoreStage(dir, nil))
 		_, filters := xfer.SplitTransforms(xfer.Transform{Cmd: decrypt}, xfer.Transform{Cmd: decompress})
-		_, terr := xfer.Transfer(xfer.Reader(src), filters, sink)
+		_, terr := xfer.Transfer(context.Background(), xfer.Reader(src), filters, sink)
 		if terr != nil {
 			var xe *xfer.Error
 			if errors.As(terr, &xe) && xe.Role == xfer.RoleSink {
@@ -347,7 +348,7 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 		tmp.Close()
 		return classifyOpenErr(err), err.Error()
 	}
-	_, terr := xfer.Transfer(xfer.Reader(src), xfer.NewFilters(), xfer.Writer(tmp))
+	_, terr := xfer.Transfer(context.Background(), xfer.Reader(src), xfer.NewFilters(), xfer.Writer(tmp))
 	tmp.Close()
 	if terr != nil {
 		return classifyOpenErr(terr), terr.Error()
@@ -573,11 +574,15 @@ func (e *Engine) ensureWormProbe(vol media.Volume, now time.Time) error {
 		}
 	}
 	h := record.Header{Slot: wormProbeSlot, Kind: record.KindArchive, DLE: "worm-probe", CreatedAt: now}
-	_, err = vol.AppendFile(h, func(w io.Writer) error {
-		_, werr := io.WriteString(w, "nbackup recovery-drill WORM probe — delete attempts test immutability\n")
-		return werr
-	})
-	return err
+	fw, err := vol.AppendFile(context.Background(), h)
+	if err != nil {
+		return err
+	}
+	_, werr := io.WriteString(fw, "nbackup recovery-drill WORM probe — delete attempts test immutability\n")
+	if cerr := fw.Close(); werr == nil {
+		werr = cerr
+	}
+	return werr
 }
 
 // PostureStatus is a posture check's verdict.

@@ -1,6 +1,7 @@
-package drain
+package spool
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"time"
@@ -13,28 +14,28 @@ import (
 )
 
 // flush.go is the amflush analogue: it drains a crashed run's leftover holding-disk archives to the
-// authoritative landing on the next dump. The live drain (Drainer) handles a running dump; this is
+// authoritative backing on the next dump. The live drain (Spool) handles a running dump; this is
 // the recovery path for what a crash stranded. A holding-disk run records each archive's holding
 // placement before flushing it and removes it after, so a crash leaves the un-flushed archives
 // recorded on the holding medium in the catalog — Flush reads those placements (no medium scan) and
 // drains them.
 
 // FlushDeps is what Flush needs from the host: the catalog and data path it reads/reclaims through,
-// the landing and holding medium names, and three host-bound seams — resolving a holding disk's
-// volume, opening a landing session for a slot, and the DLE display id — plus an optional log.
+// the backing and holding medium names, and three host-bound seams — resolving a holding disk's
+// volume, opening a backing session for a slot, and the DLE display id — plus an optional log.
 type FlushDeps struct {
 	Cat         *catalog.Catalog
 	Clerk       *clerk.Clerk
-	Landing     string
+	Backing     string
 	Holdings    []string
 	HoldVol     func(name string) (media.Volume, error)
-	OpenLanding func(spec archiveio.SlotSpec) (*clerk.Session, error)
+	OpenBacking func(spec archiveio.SlotSpec) (*clerk.Session, error)
 	DisplayDLE  func(dle string) string
 	Logf        func(format string, args ...any)
 }
 
-// Flush drains a crashed run's leftover archives from the holding disks to the landing. It reads the
-// stranded holding placements from the catalog (no medium scan), copies each archive to the landing,
+// Flush drains a crashed run's leftover archives from the holding disks to the backing. It reads the
+// stranded holding placements from the catalog (no medium scan), copies each archive to the backing,
 // removes the holding placement, reclaims the disk, and seals the slot. It is idempotent and a no-op
 // when no holding disk is configured or nothing is staged.
 func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
@@ -47,7 +48,7 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 	}
 	// Resolve each holding disk's volume once, and collect the union of slots staged across them —
 	// a single crashed slot may have placements spread over several holding disks. Drain each slot
-	// once (one landing session, one seal), copying every holding disk's portion of it.
+	// once (one backing session, one seal), copying every holding disk's portion of it.
 	holdVols := make(map[string]media.Volume, len(d.Holdings))
 	slotSet := map[string]*record.Slot{}
 	for _, h := range d.Holdings {
@@ -72,9 +73,9 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 	for _, id := range ids {
 		s := slotSet[id]
 		spec := archiveio.SlotSpec{ID: s.ID, Date: s.Date, Sequence: s.Sequence, Generator: s.Generator, CreatedAt: s.CreatedAt}
-		landSession, err := d.OpenLanding(spec)
+		backingSession, err := d.OpenBacking(spec)
 		if err != nil {
-			return flushed, fmt.Errorf("flush %s: open landing %q: %w", s.ID, d.Landing, err)
+			return flushed, fmt.Errorf("flush %s: open backing %q: %w", s.ID, d.Backing, err)
 		}
 
 		for _, holding := range d.Holdings {
@@ -86,9 +87,9 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 			for _, ap := range hp.Archives {
 				ref := clerk.Ref{Slot: s.ID, DLE: ap.DLE, Level: ap.Level}
 				dleID := d.DisplayDLE(ap.DLE)
-				// A crash between recording the landing placement and reclaiming the holding one
+				// A crash between recording the backing placement and reclaiming the holding one
 				// leaves an archive on both; in that case just reclaim, don't re-copy.
-				if !archiveOnLanding(d.Cat, d.Landing, s.ID, ap.DLE, ap.Level) {
+				if !archiveOnBacking(d.Cat, d.Backing, s.ID, ap.DLE, ap.Level) {
 					arch, err := catalogArchive(d.Cat, d.Clerk, s.ID, ap.DLE, ap.Level)
 					if err != nil {
 						return flushed, fmt.Errorf("flush %s %s: %w", s.ID, dleID, err)
@@ -97,10 +98,10 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 					if err != nil {
 						return flushed, fmt.Errorf("flush %s %s: read holding disk: %w", s.ID, dleID, err)
 					}
-					// CopyArchive records the landing placement inline.
-					if err := landSession.CopyArchive(arch, rc); err != nil {
+					// CopyArchive records the backing placement inline.
+					if err := backingSession.CopyArchive(context.Background(), arch, rc); err != nil {
 						rc.Close()
-						return flushed, fmt.Errorf("flush %s %s to %q: %w", s.ID, dleID, d.Landing, err)
+						return flushed, fmt.Errorf("flush %s %s to %q: %w", s.ID, dleID, d.Backing, err)
 					}
 					rc.Close()
 				}
@@ -113,7 +114,7 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 					return flushed, err
 				}
 				flushed++
-				logf("flushed %s %s to %q", s.ID, dleID, d.Landing)
+				logf("flushed %s %s to %q", s.ID, dleID, d.Backing)
 			}
 		}
 		if err := d.Cat.SealSlot(s.ID, now); err != nil {
@@ -133,9 +134,9 @@ func placementOn(cat *catalog.Catalog, slotID, medium string) (catalog.Placement
 	return catalog.Placement{}, false
 }
 
-// archiveOnLanding reports whether the slot's landing placement already holds (dle, level).
-func archiveOnLanding(cat *catalog.Catalog, landing, slotID, dle string, level int) bool {
-	p, ok := placementOn(cat, slotID, landing)
+// archiveOnBacking reports whether the slot's backing placement already holds (dle, level).
+func archiveOnBacking(cat *catalog.Catalog, backing, slotID, dle string, level int) bool {
+	p, ok := placementOn(cat, slotID, backing)
 	if !ok {
 		return false
 	}

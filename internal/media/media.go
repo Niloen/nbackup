@@ -10,6 +10,7 @@
 package media
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sort"
@@ -148,6 +149,14 @@ func RejectPartSize(opts Options, mediumType string) error {
 	return nil
 }
 
+// FileWriter is the payload writer AppendFile hands back: write the payload, then Close to commit
+// (or cancel the AppendFile ctx before Close to abort). Pos reports the file's on-volume position and
+// is valid only after a successful Close.
+type FileWriter interface {
+	io.WriteCloser
+	Pos() int
+}
+
 // Volume is a medium holding an ordered sequence of header-framed files.
 //
 // Contract: opening a Volume must be cheap (no reading every file), and
@@ -156,10 +165,13 @@ func RejectPartSize(opts Options, mediumType string) error {
 // scan from the start). Normal backup/restore/copy
 // resolve positions from the catalog and call ReadFile, never Files().
 type Volume interface {
-	// AppendFile writes h, then the payload produced by write, and returns the
-	// file's position. The Volume owns concurrency and position assignment
-	// (disk allows concurrent appends; tape serializes).
-	AppendFile(h record.Header, write func(w io.Writer) error) (pos int, err error)
+	// AppendFile begins a header-framed file for h and returns a writer for its payload. The caller
+	// writes the payload and Closes the writer to commit the file; FileWriter.Pos then reports where
+	// it landed. To abort — leave no committed file — the caller cancels ctx before Close: Close then
+	// discards the partial (a cloud upload is abandoned; a disk payload is left a sidecar-less orphan a
+	// scan ignores). The Volume owns concurrency and position assignment (disk allows concurrent
+	// appends; tape serializes).
+	AppendFile(ctx context.Context, h record.Header) (FileWriter, error)
 	// ReadFile positions to pos and returns its header and a payload stream the
 	// caller must close.
 	ReadFile(pos int) (record.Header, io.ReadCloser, error)

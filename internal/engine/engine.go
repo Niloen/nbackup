@@ -6,6 +6,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -20,7 +21,6 @@ import (
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/config"
-	"github.com/Niloen/nbackup/internal/drain"
 	"github.com/Niloen/nbackup/internal/dumper"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
@@ -32,9 +32,9 @@ import (
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/retention"
 	"github.com/Niloen/nbackup/internal/sizeutil"
+	"github.com/Niloen/nbackup/internal/spool"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
-	"github.com/Niloen/nbackup/internal/xfer"
 
 	// Register the bundled media and archiver implementations.
 	_ "github.com/Niloen/nbackup/internal/archiver/gnutar"
@@ -519,10 +519,10 @@ func (e *Engine) prepareWriter(medium string, spec archiveio.SlotSpec, now time.
 }
 
 // prepareWriterWith is prepareWriter with a seam to wrap the medium's volume sink before the
-// Writer is built over it (wrap nil is the identity). The holding-disk drain uses it to substitute
-// a proxy sink that funnels the librarian's control calls — NextPart/PlaceRecord, where a volume
-// roll touches the catalog — back to the orchestrator, while the byte-copy runs on the drainer
-// goroutine. Wrapping here keeps the single PrepareWrite→WriteSink→NewWriter contract in one place.
+// Writer is built over it (wrap nil is the identity). The drain uses it to substitute an
+// orchestrator-client proxy sink for the librarian's control calls — NextPart/PlaceRecord, where a
+// volume roll touches the catalog — routing them to the orchestrator, while the byte-copy runs on the
+// spool's copy goroutine. Wrapping here keeps the single PrepareWrite→WriteSink→NewWriter contract in one place.
 func (e *Engine) prepareWriterWith(medium string, spec archiveio.SlotSpec, now time.Time, logf Logf, wrap func(archiveio.VolumeSink) archiveio.VolumeSink) (*writeTarget, error) {
 	lib, def, _, err := e.librarianFor(medium)
 	if err != nil {
@@ -1081,11 +1081,12 @@ func (e *Engine) Run(now time.Time, logf Logf) (*record.Slot, error) {
 	holdingNames := e.cfg.HoldingMedia()
 	buffering := len(holdingNames) > 0
 
-	// Open the landing over a funnel so the drain (and any direct write) can stream bytes off the
-	// orchestrator goroutine while every volume roll's catalog write funnels back to it (the sole
-	// catalog writer). Opening it here also lets a spanning-capable single drive clamp the workers.
-	funnel := drain.NewFunnel()
-	landWT, err := e.prepareWriterWith(e.mediumName, spec, now, logf, funnel.Wrap)
+	// Open the landing over an orchestrator client so the drain (and any direct write) can stream
+	// bytes off the orchestrator goroutine while every volume roll's catalog write routes back to it
+	// (the sole catalog writer). Opening it here also lets a spanning-capable single drive clamp the
+	// workers.
+	client := spool.NewClient()
+	landWT, err := e.prepareWriterWith(e.mediumName, spec, now, logf, client.Wrap)
 	if err != nil {
 		return nil, err
 	}
@@ -1107,7 +1108,7 @@ func (e *Engine) Run(now time.Time, logf Logf) (*record.Slot, error) {
 	}
 
 	tr, runLogf := e.progressTracker(slotID, workers, plan.Items, fileSink, logf)
-	sealed, err := e.runOrchestrated(plan, workers, landingSlots, spec, holdingNames, landWT, funnel, tr, now, runLogf)
+	sealed, err := e.runOrchestrated(plan, workers, landingSlots, spec, holdingNames, landWT, client, tr, now, runLogf)
 	if err != nil {
 		return nil, err
 	}
@@ -1161,20 +1162,11 @@ func planProgress(items []planner.Item) []progress.Plan {
 	return out
 }
 
-// drainStore adapts a *drain.Drainer to the dumper.Store the producer ingests into: it bridges the
-// Drainer's concrete Acquire/Sink to the producer's interface, keeping the two packages independent
-// (neither imports the other).
-type drainStore struct{ dr *drain.Drainer }
-
-func (s drainStore) Acquire(est int64, meta record.Archive, prog func(int64)) (xfer.Sink, error) {
-	return s.dr.Acquire(est, meta, prog)
-}
-
 // runOrchestrated executes a dump: it opens the holding disks (the buffer the producers stage onto),
-// builds the drain over the already-opened landing writer, runs the producers, and seals the
-// landing the drain authored. The drain is the run's sole catalog writer.
-func (e *Engine) runOrchestrated(plan *planner.Plan, workers, landingSlots int, spec archiveio.SlotSpec, holdingNames []string, landWT *writeTarget, funnel *drain.Funnel, tr *progress.Tracker, now time.Time, logf Logf) (*record.Slot, error) {
-	disks := make([]drain.Disk, len(holdingNames))
+// builds the spool over the already-opened landing writer, runs the producers, and seals the
+// landing the spool authored. The spool is the run's sole catalog writer.
+func (e *Engine) runOrchestrated(plan *planner.Plan, workers, landingSlots int, spec archiveio.SlotSpec, holdingNames []string, landWT *writeTarget, client *spool.Client, tr *progress.Tracker, now time.Time, logf Logf) (*record.Slot, error) {
+	disks := make([]spool.Disk, len(holdingNames))
 	for i, name := range holdingNames {
 		wt, err := e.prepareWriter(name, spec, now, logf)
 		if err != nil {
@@ -1182,20 +1174,20 @@ func (e *Engine) runOrchestrated(plan *planner.Plan, workers, landingSlots int, 
 			return nil, fmt.Errorf("open holding disk %q: %w", name, err)
 		}
 		capB, _ := e.cfg.Media[name].CapacityBytes()
-		disks[i] = drain.Disk{Name: name, Session: e.clerk.OpenSlot(wt.w, name), HoldVol: wt.lib.Volume(), Capacity: capB}
+		disks[i] = spool.Disk{Name: name, Session: e.clerk.OpenSlot(wt.w, name), HoldVol: wt.lib.Volume(), Capacity: capB}
 	}
 	landSession := e.clerk.OpenSlot(landWT.w, e.mediumName)
 	slotMeta := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
 
-	dr := drain.New(drain.Config{
-		Cat: e.cat, SlotMeta: slotMeta, Pool: drain.NewPool(disks), Tracker: tr, Logf: logf,
-		Landing: drain.Landing{
+	dr := spool.New(spool.Config{
+		Catalog: e.cat, SlotMeta: slotMeta, Holding: spool.NewPool(disks), Tracker: tr, Logf: logf,
+		Backing: spool.Backing{
 			Name: e.mediumName, Writer: landWT.w, Session: landSession,
-			Funnel: funnel, Slots: landingSlots,
+			Client: client, Slots: landingSlots,
 		},
 	})
 
-	dumpErr := e.dmp.Run(plan.Items, workers, drainStore{dr}, tr, logf)
+	dumpErr := e.dmp.Run(context.Background(), plan.Items, workers, dr, tr, logf)
 
 	tr.SetPhase(progress.PhaseSealing)
 	sealed, finErr := dr.Finish(now)

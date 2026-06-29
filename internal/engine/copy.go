@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"time"
@@ -163,7 +164,7 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		// so the target writes a real member index (keeping that copy self-describing).
 		meta := metaByRef[ref]
 		meta.Members, _ = c.clerk.Members(ref)
-		if _, werr := xfer.Transfer(xfer.Reader(rc), xfer.NewFilters(), &copySink{session: session, meta: meta}); werr != nil {
+		if _, werr := xfer.Transfer(context.Background(), xfer.Reader(rc), xfer.NewFilters(), &copySink{session: session, meta: meta}); werr != nil {
 			return fmt.Errorf("copy %s L%d to %q: %w", ref.DLE, ref.Level, targetMedia, werr)
 		}
 		return nil
@@ -193,13 +194,24 @@ func (c *copier) copySource(slotID, fromMedia string) error {
 	return nil
 }
 
-// copySink is the copy operation's xfer.Sink bridge: it drains the source's raw bytes into the
-// clerk's passthrough CopyArchive (verify + commit on the spot).
+// copySink is the copy operation's xfer.Sink bridge: the source's raw bytes are fed through a pipe
+// into the clerk's passthrough CopyArchive (verify + re-split + commit on the spot). NextPart hands
+// the transfer the pipe writer (one unbounded part); Commit waits for CopyArchive's result.
 type copySink struct {
 	session *clerk.Session
 	meta    record.Archive
+	done    chan error
 }
 
-func (s *copySink) Drain(in io.Reader) (xfer.Committer, error) {
-	return nil, s.session.CopyArchive(s.meta, in)
+func (s *copySink) NextPart(ctx context.Context) (io.WriteCloser, int64, error) {
+	pr, pw := io.Pipe()
+	s.done = make(chan error, 1)
+	go func() {
+		err := s.session.CopyArchive(ctx, s.meta, pr)
+		pr.CloseWithError(err) // unblock the transfer's writes if CopyArchive died first
+		s.done <- err
+	}()
+	return pw, -1, nil
 }
+
+func (s *copySink) Commit(_ context.Context, _ xfer.Produced) error { return <-s.done }

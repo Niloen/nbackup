@@ -8,26 +8,20 @@
 package dumper
 
 import (
+	"context"
 	"runtime"
 	"sync"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
-	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// Store is the archive store the producer ingests into: it hands out one ingestion xfer.Sink per
-// archive, back-pressuring via Acquire. The drain implements it (deciding holding-disk vs direct);
-// a test can fake it. The producer transfers the encoded stream into the sink — whose Drain seals
-// the stored archive on commit — and never sees the session, the medium, or the catalog.
-type Store interface {
-	// Acquire reserves ingestion for the archive described by meta, estimated at est bytes,
-	// blocking for back-pressure and returning the run's error if the store has failed. prog
-	// receives the running compressed (landed) byte count for the producer's progress tracker.
-	Acquire(est int64, meta record.Archive, prog func(compressed int64)) (xfer.Sink, error)
-}
+// The producer ingests into an archiveio.WriteFS: for each archive it Creates a write handle (an
+// xfer.Sink, back-pressuring), transfers the encoded stream into it, and the handle's commit seals
+// the stored archive. The clerk implements a serial WriteFS; the spool a concurrency-safe, buffered
+// one. The producer never sees the session, the medium, or the catalog — only the WriteFS.
 
 // Config is the resolution the producer needs, injected by the engine so the producer stays free
 // of config and the catalog: how to resolve a DLE's archiver, its dumptype excludes, and its encode
@@ -39,7 +33,7 @@ type Config struct {
 	Threads     int
 }
 
-// Dumper archives planned items into a Store. Build it with New and drive it with Run.
+// Dumper archives planned items into an archiveio.WriteFS. Build it with New and drive it with Run.
 type Dumper struct {
 	archiverFor func(dumpType, host string) (archiver.Archiver, error)
 	exclude     func(dumpType string) []string
@@ -52,16 +46,16 @@ func New(cfg Config) *Dumper {
 	return &Dumper{archiverFor: cfg.ArchiverFor, exclude: cfg.Exclude, placement: cfg.Placement, threads: cfg.Threads}
 }
 
-// Run archives every item into store: for each it acquires an ingestion Sink, transfers the encoded
+// Run archives every item into fs: for each it Creates an ingestion Sink, transfers the encoded
 // archive into it, and commits it (see dumpItem). With workers > 1 it runs that many concurrently,
-// bounded by a semaphore; the first error stops scheduling and is returned (a store failure surfaces
-// as the error Acquire/Commit return, so blocked workers wake and stop too).
-func (d *Dumper) Run(items []planner.Item, workers int, store Store, tr *progress.Tracker, logf func(format string, args ...any)) error {
+// bounded by a semaphore; the first error stops scheduling and is returned (a WriteFS failure
+// surfaces as the error Create/commit return, so blocked workers wake and stop too).
+func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs archiveio.WriteFS, tr *progress.Tracker, logf func(format string, args ...any)) error {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
 	dumpOne := func(item planner.Item) error {
-		return d.dumpItem(store, item, tr, logf)
+		return d.dumpItem(ctx, fs, item, tr, logf)
 	}
 	if workers <= 1 || len(items) <= 1 {
 		for _, item := range items {

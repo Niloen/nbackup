@@ -106,28 +106,44 @@ func (d *dirDevice) bytesUsed() int64 {
 	return d.used
 }
 
-func (d *dirDevice) writeFile(write func(w io.Writer) error) (int, error) {
+func (d *dirDevice) appendWriter() (deviceWriter, error) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	pos := d.next
 	f, err := os.Create(d.path(pos))
 	if err != nil {
+		d.mu.Unlock()
+		return nil, err
+	}
+	// Cap the write at the remaining capacity so an over-long file hits EOT mid-stream; on EOT the
+	// partial file is discarded (the tape cannot hold it).
+	return &dirFileWriter{d: d, f: f, pos: pos, cw: &capWriter{w: f, remaining: d.remaining()}}, nil
+}
+
+// dirFileWriter writes one file to the dir-backed tape; the device lock is held until Commit/Abort.
+type dirFileWriter struct {
+	d   *dirDevice
+	f   *os.File
+	pos int
+	cw  *capWriter
+}
+
+func (w *dirFileWriter) Write(p []byte) (int, error) { return w.cw.Write(p) }
+
+func (w *dirFileWriter) Commit() (int, error) {
+	defer w.d.mu.Unlock()
+	if err := w.f.Close(); err != nil {
+		os.Remove(w.d.path(w.pos))
 		return 0, err
 	}
-	// Cap the write at the remaining capacity so an over-long file hits EOT
-	// mid-stream; on EOT the partial file is discarded (the tape cannot hold it).
-	cw := &capWriter{w: f, remaining: d.remaining()}
-	werr := write(cw)
-	if cerr := f.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr != nil {
-		os.Remove(d.path(pos)) // drop the partial; the head does not advance
-		return 0, werr
-	}
-	d.used += cw.written
-	d.next = pos + 1
-	return pos, nil
+	w.d.used += w.cw.written
+	w.d.next = w.pos + 1
+	return w.pos, nil
+}
+
+func (w *dirFileWriter) Abort() {
+	defer w.d.mu.Unlock()
+	w.f.Close()
+	os.Remove(w.d.path(w.pos)) // drop the partial; the head does not advance
 }
 
 // remaining is the writable bytes left on the volume (max int64 when unbounded).

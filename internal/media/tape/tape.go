@@ -12,6 +12,7 @@
 package tape
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -111,8 +112,10 @@ func atoiOpt(s string, def int) (int, error) {
 // by number. Implementations emulate a directory (dirDevice) or drive a real tape
 // (mtDevice).
 type device interface {
-	// writeFile appends a file at end-of-data and returns its file number.
-	writeFile(write func(w io.Writer) error) (pos int, err error)
+	// appendWriter begins a file at end-of-data and returns a writer for it, holding the device
+	// serially until the writer is committed or aborted (a tape is one-writer-at-a-time). Commit
+	// finalizes the file (filemark) and returns its number; Abort discards the partial.
+	appendWriter() (deviceWriter, error)
 	// readFile fast-forwards to file pos and returns its bytes (caller closes).
 	readFile(pos int) (io.ReadCloser, error)
 	// count returns the number of files on the volume (the next file number).
@@ -141,19 +144,56 @@ func (t *tape) requireDev() (device, error) {
 	return t.dev, nil
 }
 
-// AppendFile frames an inline header block ahead of the payload (a tape cannot
-// carry a sidecar) and appends it as the next file on the mounted bay.
-func (t *tape) AppendFile(h record.Header, write func(w io.Writer) error) (int, error) {
+// deviceWriter is one tape file's writer: the device lock is held from appendWriter until Commit
+// (finalize + filemark, returning the file number) or Abort (discard the partial). A tape is
+// one-writer-at-a-time, so the held lock IS the serialization.
+type deviceWriter interface {
+	io.Writer
+	Commit() (pos int, err error)
+	Abort()
+}
+
+// AppendFile frames an inline header block ahead of the payload (a tape cannot carry a sidecar) and
+// appends it as the next file on the mounted bay. The device hands back a writer that holds the drive
+// serially; the consumer writes the payload, and Close commits it (filemark) — or, if ctx was
+// canceled, aborts (the append-only partial tail is left for the rebuild scan to ignore).
+func (t *tape) AppendFile(ctx context.Context, h record.Header) (media.FileWriter, error) {
 	dev, err := t.requireDev()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return dev.writeFile(func(w io.Writer) error {
-		if err := record.EncodeHeader(w, h); err != nil {
-			return err
-		}
-		return write(w)
-	})
+	dw, err := dev.appendWriter()
+	if err != nil {
+		return nil, err
+	}
+	if err := record.EncodeHeader(dw, h); err != nil {
+		dw.Abort()
+		return nil, err
+	}
+	return &tapeWriter{ctx: ctx, dw: dw}, nil
+}
+
+// tapeWriter is the media.FileWriter over a device writer: it adds the ctx-keyed commit/abort choice.
+type tapeWriter struct {
+	ctx context.Context
+	dw  deviceWriter
+	pos int
+}
+
+func (t *tapeWriter) Pos() int                    { return t.pos }
+func (t *tapeWriter) Write(p []byte) (int, error) { return t.dw.Write(p) }
+
+func (t *tapeWriter) Close() error {
+	if t.ctx.Err() != nil {
+		t.dw.Abort()
+		return t.ctx.Err()
+	}
+	pos, err := t.dw.Commit()
+	if err != nil {
+		return err
+	}
+	t.pos = pos
+	return nil
 }
 
 // ReadFile fast-forwards to a file number on the mounted bay and decodes its
@@ -235,9 +275,15 @@ func (t *tape) WriteLabel(lbl record.Label) error {
 	if err != nil {
 		return err
 	}
-	_, err = t.AppendFile(record.Header{Kind: record.KindLabel, CreatedAt: lbl.WrittenAt},
-		func(w io.Writer) error { _, e := w.Write(data); return e })
-	return err
+	w, err := t.AppendFile(context.Background(), record.Header{Kind: record.KindLabel, CreatedAt: lbl.WrittenAt})
+	if err != nil {
+		return err
+	}
+	_, werr := w.Write(data)
+	if cerr := w.Close(); werr == nil {
+		werr = cerr
+	}
+	return werr
 }
 
 // roboticChanger is a robotic tape library (media.Changer): a dirChanger of bays

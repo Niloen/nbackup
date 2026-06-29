@@ -46,7 +46,7 @@ func TestRejectsPartSize(t *testing.T) {
 
 func appendArchive(t *testing.T, v media.Volume, slot, dle string, level int, payload string) int {
 	t.Helper()
-	pos, err := v.AppendFile(
+	pos, err := writeFileT(v,
 		record.Header{Slot: slot, Kind: record.KindArchive, DLE: dle, Level: level, Compress: "none"},
 		func(w io.Writer) error { _, e := w.Write([]byte(payload)); return e },
 	)
@@ -212,17 +212,22 @@ func TestRemoveFile(t *testing.T) {
 	}
 }
 
-// TestAbortedWriteLeavesNoObject confirms a failed payload write does not commit a
-// partial object — the same atomicity the disk and tape media rely on.
+// TestAbortedWriteLeavesNoObject confirms an aborted write — the ctx canceled before Close — does
+// not commit a file: no header sidecar is written, so the orphan payload is skipped by the scan,
+// the same atomicity the disk and tape media rely on.
 func TestAbortedWriteLeavesNoObject(t *testing.T) {
 	cv := openVol(t)
-	wantErr := fmt.Errorf("boom")
-	_, err := cv.AppendFile(
-		record.Header{Slot: "slot-x", Kind: record.KindArchive, DLE: "h-data", Compress: "none"},
-		func(w io.Writer) error { return wantErr },
-	)
-	if err == nil {
-		t.Fatal("expected the write error to propagate")
+	ctx, cancel := context.WithCancel(context.Background())
+	fw, err := cv.AppendFile(ctx, record.Header{Slot: "slot-x", Kind: record.KindArchive, DLE: "h-data", Compress: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write([]byte("partial payload")); err != nil {
+		t.Fatal(err)
+	}
+	cancel() // abort the write
+	if err := fw.Close(); err == nil {
+		t.Fatal("expected Close to report the aborted write")
 	}
 	files, err := cv.Files()
 	if err != nil {
@@ -231,4 +236,20 @@ func TestAbortedWriteLeavesNoObject(t *testing.T) {
 	if len(files) != 0 {
 		t.Fatalf("aborted write left files behind: %+v", files)
 	}
+}
+
+// writeFileT bridges tests to the writer-based AppendFile (callback shape kept for brevity).
+func writeFileT(v media.Volume, h record.Header, write func(io.Writer) error) (int, error) {
+	fw, err := v.AppendFile(context.Background(), h)
+	if err != nil {
+		return 0, err
+	}
+	if err := write(fw); err != nil {
+		fw.Close()
+		return 0, err
+	}
+	if err := fw.Close(); err != nil {
+		return 0, err
+	}
+	return fw.Pos(), nil
 }

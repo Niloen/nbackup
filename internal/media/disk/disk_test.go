@@ -1,6 +1,7 @@
 package disk
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -32,7 +33,7 @@ func TestRejectsPartSize(t *testing.T) {
 
 func appendArchive(t *testing.T, v media.Volume, slot, dle string, level int, payload string) int {
 	t.Helper()
-	pos, err := v.AppendFile(
+	pos, err := writeFileT(v,
 		record.Header{Slot: slot, Kind: record.KindArchive, DLE: dle, Level: level, Compress: "none"},
 		func(w io.Writer) error { _, e := w.Write([]byte(payload)); return e },
 	)
@@ -253,4 +254,20 @@ func TestRemoveFileRaceWithAppend(t *testing.T) {
 			t.Fatalf("iter %d: read %q, want b-payload", i, got)
 		}
 	}
+}
+
+// writeFileT bridges tests to the writer-based AppendFile (callback shape kept for brevity).
+func writeFileT(v media.Volume, h record.Header, write func(io.Writer) error) (int, error) {
+	fw, err := v.AppendFile(context.Background(), h)
+	if err != nil {
+		return 0, err
+	}
+	if err := write(fw); err != nil {
+		fw.Close()
+		return 0, err
+	}
+	if err := fw.Close(); err != nil {
+		return 0, err
+	}
+	return fw.Pos(), nil
 }

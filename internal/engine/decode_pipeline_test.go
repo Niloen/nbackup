@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -68,7 +69,7 @@ func TestClientSidePipelineRoundTrip(t *testing.T) {
 				bs.Cleanup()
 			}
 		})
-	if _, err := xfer.Transfer(producer, xfer.NewFilters(), xfer.Writer(&cipherBuf)); err != nil {
+	if _, err := xfer.Transfer(context.Background(), producer, xfer.NewFilters(), xfer.Writer(&cipherBuf)); err != nil {
 		t.Fatalf("produce: %v", err)
 	}
 	cipher := cipherBuf.Bytes()
@@ -87,7 +88,7 @@ func TestClientSidePipelineRoundTrip(t *testing.T) {
 	}
 	dest := t.TempDir()
 	sink := xfer.NewPrograms(ex).Add(dec).Add(decomp).Add(m.RestoreStage(dest, nil))
-	if _, err := xfer.Transfer(xfer.Reader(io.NopCloser(bytes.NewReader(cipher))), xfer.NewFilters(), sink); err != nil {
+	if _, err := xfer.Transfer(context.Background(), xfer.Reader(io.NopCloser(bytes.NewReader(cipher))), xfer.NewFilters(), sink); err != nil {
 		t.Fatalf("decode/extract: %v", err)
 	}
 

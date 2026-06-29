@@ -182,7 +182,7 @@ func Open(workdir string) (*Catalog, error) {
 // time. Both a dump (its Finish records each committed archive), a copy/sync, a rebuild scan,
 // and the holding-disk taper write through here; reclaim is the symmetric RemoveArchive.
 //
-// Every catalog mutation is single-threaded (a run funnels all placement writes through one
+// Every catalog mutation is single-threaded (a run routes all placement writes through one
 // goroutine), so no locking is needed.
 func (c *Catalog) AddArchive(slot *record.Slot, medium string, arch record.Archive, pos ArchivePos) error {
 	c.addArchive(slot, medium, arch, pos)

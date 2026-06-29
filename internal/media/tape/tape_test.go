@@ -1,6 +1,7 @@
 package tape
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -40,12 +41,12 @@ func TestTapeSequential(t *testing.T) {
 		t.Fatalf("fresh tape should be blank, got %+v", files)
 	}
 
-	p0, err := v.AppendFile(record.Header{Slot: "slot-x", Kind: record.KindArchive, DLE: "h-data"},
+	p0, err := writeFileT(v, record.Header{Slot: "slot-x", Kind: record.KindArchive, DLE: "h-data"},
 		func(w io.Writer) error { _, e := w.Write([]byte("one")); return e })
 	if err != nil {
 		t.Fatal(err)
 	}
-	p1, err := v.AppendFile(record.Header{Slot: "slot-x", Kind: record.KindCommit},
+	p1, err := writeFileT(v, record.Header{Slot: "slot-x", Kind: record.KindCommit},
 		func(w io.Writer) error { _, e := w.Write([]byte("seal")); return e })
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +77,7 @@ func TestTapeSequential(t *testing.T) {
 	if len(files2) != 2 {
 		t.Fatalf("after reopen expected 2 files, got %d", len(files2))
 	}
-	p2, _ := v2.AppendFile(record.Header{Slot: "slot-y", Kind: record.KindCommit},
+	p2, _ := writeFileT(v2, record.Header{Slot: "slot-y", Kind: record.KindCommit},
 		func(w io.Writer) error { return nil })
 	if p2 != 2 {
 		t.Errorf("append after reopen got file %d, want 2", p2)
@@ -110,7 +111,7 @@ func TestTapeLabel(t *testing.T) {
 
 	// Append an archive after the label (file 1), then relabel: reset must discard
 	// it, leaving only the new label at file 0.
-	if _, err := v.AppendFile(record.Header{Slot: "s", Kind: record.KindArchive, DLE: "d"},
+	if _, err := writeFileT(v, record.Header{Slot: "s", Kind: record.KindArchive, DLE: "d"},
 		func(w io.Writer) error { _, e := w.Write([]byte("x")); return e }); err != nil {
 		t.Fatal(err)
 	}
@@ -145,13 +146,13 @@ func TestTapeFull(t *testing.T) {
 	if err := lv.WriteLabel(record.Label{Name: "t1", Pool: "p", Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := v.AppendFile(record.Header{Slot: "s", Kind: record.KindArchive, DLE: "d1"},
+	if _, err := writeFileT(v, record.Header{Slot: "s", Kind: record.KindArchive, DLE: "d1"},
 		func(w io.Writer) error { _, e := w.Write([]byte("x")); return e }); err != nil {
 		t.Fatalf("first archive should fit: %v", err)
 	}
 
 	before, _ := v.Files()
-	_, err = v.AppendFile(record.Header{Slot: "s", Kind: record.KindArchive, DLE: "d2"},
+	_, err = writeFileT(v, record.Header{Slot: "s", Kind: record.KindArchive, DLE: "d2"},
 		func(w io.Writer) error { _, e := w.Write(make([]byte, record.HeaderBlock)); return e })
 	if !errors.Is(err, media.ErrVolumeFull) {
 		t.Fatalf("write past capacity: err=%v, want ErrVolumeFull", err)
@@ -165,7 +166,7 @@ func TestTapeFull(t *testing.T) {
 	if err := lv.WriteLabel(record.Label{Name: "t1", Pool: "p", Epoch: 2}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := v.AppendFile(record.Header{Slot: "s2", Kind: record.KindArchive, DLE: "d1"},
+	if _, err := writeFileT(v, record.Header{Slot: "s2", Kind: record.KindArchive, DLE: "d1"},
 		func(w io.Writer) error { _, e := w.Write([]byte("y")); return e }); err != nil {
 		t.Fatalf("relabeled tape should accept writes again: %v", err)
 	}
@@ -326,7 +327,7 @@ func TestTapeForeignVolume(t *testing.T) {
 	v := openTape(t, dir)
 
 	// File 0 is an archive, not a label.
-	if _, err := v.AppendFile(record.Header{Slot: "s", Kind: record.KindArchive, DLE: "d"},
+	if _, err := writeFileT(v, record.Header{Slot: "s", Kind: record.KindArchive, DLE: "d"},
 		func(w io.Writer) error { _, e := w.Write([]byte("data")); return e }); err != nil {
 		t.Fatal(err)
 	}
@@ -342,11 +343,11 @@ func TestTapeForeignVolume(t *testing.T) {
 func TestTapeTornTailSkipped(t *testing.T) {
 	dir := t.TempDir()
 	v := openTape(t, dir)
-	if _, err := v.AppendFile(record.Header{Slot: "s", Kind: record.KindArchive, DLE: "d"},
+	if _, err := writeFileT(v, record.Header{Slot: "s", Kind: record.KindArchive, DLE: "d"},
 		func(w io.Writer) error { _, e := w.Write([]byte("one")); return e }); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := v.AppendFile(record.Header{Slot: "s", Kind: record.KindCommit},
+	if _, err := writeFileT(v, record.Header{Slot: "s", Kind: record.KindCommit},
 		func(w io.Writer) error { _, e := w.Write([]byte("seal")); return e }); err != nil {
 		t.Fatal(err)
 	}
@@ -365,4 +366,20 @@ func TestTapeTornTailSkipped(t *testing.T) {
 	if len(files) != 2 {
 		t.Fatalf("torn tail not skipped: got %d files, want 2", len(files))
 	}
+}
+
+// writeFileT bridges tests to the writer-based AppendFile (callback shape kept for brevity).
+func writeFileT(v media.Volume, h record.Header, write func(io.Writer) error) (int, error) {
+	fw, err := v.AppendFile(context.Background(), h)
+	if err != nil {
+		return 0, err
+	}
+	if err := write(fw); err != nil {
+		fw.Close()
+		return 0, err
+	}
+	if err := fw.Close(); err != nil {
+		return 0, err
+	}
+	return fw.Pos(), nil
 }

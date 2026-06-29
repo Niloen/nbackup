@@ -90,26 +90,15 @@ type blobStore struct {
 
 func (s blobStore) Key(slot, name string) string { return path.Join(slotsPrefix, slot, name) }
 
-// Write streams write's output to key, aborting the upload (rather than committing
-// a partial object) if write fails.
-func (s blobStore) Write(key string, write func(w io.Writer) error) error {
-	ctx, cancel := context.WithCancel(s.ctx)
-	defer cancel()
-	w, err := s.bucket.NewWriter(ctx, key, nil)
-	if err != nil {
-		return err
-	}
-	if err := write(w); err != nil {
-		cancel()  // abort the (possibly multipart) upload
-		w.Close() // best-effort; the canceled context discards any buffered parts
-		return err
-	}
-	// Close commits the object; its error is the authoritative write result.
-	return w.Close()
+// Writer opens a streaming writer bound to ctx: Close commits the object; canceling ctx before Close
+// abandons the (possibly multipart) upload — gocloud discards any buffered parts — so the caller's
+// abort is just a ctx cancel, no bespoke unwind here.
+func (s blobStore) Writer(ctx context.Context, key string) (io.WriteCloser, error) {
+	return s.bucket.NewWriter(ctx, key, nil)
 }
 
-func (s blobStore) WriteAll(key string, b []byte) error {
-	return s.bucket.WriteAll(s.ctx, key, b, nil)
+func (s blobStore) WriteAll(ctx context.Context, key string, b []byte) error {
+	return s.bucket.WriteAll(ctx, key, b, nil)
 }
 
 func (s blobStore) ReadAll(key string) ([]byte, error) { return s.bucket.ReadAll(s.ctx, key) }

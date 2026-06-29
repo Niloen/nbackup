@@ -1,6 +1,7 @@
 package clerk
 
 import (
+	"context"
 	"io"
 	"time"
 
@@ -29,12 +30,41 @@ func (c *Clerk) OpenSlot(w *archiveio.Writer, medium string) *Session {
 	return &Session{clerk: c, w: w, medium: medium}
 }
 
-// WriteArchive writes a fresh archive's already-encoded payload onto the slot's volumes,
-// metering (sha256 + size) and splitting it into parts. It returns the measured archive (sha,
-// compressed size, part count) and the part positions; the operation merges the producer's raw
-// stats and calls Commit. tap, if non-nil, receives the running count of landed bytes.
-func (s *Session) WriteArchive(meta record.Archive, payload io.Reader, tap func(int64)) (record.Archive, []record.FilePos, error) {
-	return s.w.WriteArchive(meta, payload, tap)
+// NewArchive begins writing a fresh archive's already-encoded payload onto the slot, pulled
+// part-by-part by the returned handle's NextPart (the operation copies into each part writer and
+// closes it). Commit then seals the archive once the producer's raw stats are known. tap, if non-nil,
+// receives the running count of landed bytes.
+func (s *Session) NewArchive(meta record.Archive, tap func(int64)) *ArchiveWriter {
+	return &ArchiveWriter{s: s, aw: s.w.NewArchive(meta, tap)}
+}
+
+// ArchiveWriter is one archive's NextPart-driven write handle: a thin clerk wrapper over the
+// archiveio writer that additionally caches the member index server-side on Commit. It records no
+// placement — a parallel dump's worker commits, and hands the position to the run's single
+// orchestrator to record.
+type ArchiveWriter struct {
+	s  *Session
+	aw *archiveio.ArchiveWriter
+}
+
+// NextPart rolls to the next volume and returns the next part's writer plus its byte cap (max < 0 =
+// unbounded). The caller copies up to max bytes into it and closes it; cancel ctx before Close to
+// abort the part.
+func (a *ArchiveWriter) NextPart(ctx context.Context) (io.WriteCloser, int64, error) {
+	return a.aw.NextPart(ctx)
+}
+
+// Commit finalizes the archive (footer + member index) with the producer's raw-stream stats and
+// returns the committed archive + its on-medium position, caching the members server-side.
+func (a *ArchiveWriter) Commit(ctx context.Context, fileCount int, uncompressed int64, members []string) (record.Archive, record.ArchivePos, error) {
+	arch, pos, err := a.aw.Commit(ctx, fileCount, uncompressed, members)
+	if err != nil {
+		return record.Archive{}, record.ArchivePos{}, err
+	}
+	if len(arch.Members) > 0 {
+		_ = a.s.clerk.mindex.Store(a.s.w.SlotID(), arch.DLE, arch.Level, arch.Members)
+	}
+	return arch, pos, nil
 }
 
 // CopyArchive re-writes an existing archive's raw payload (no transform) onto this slot's
@@ -42,33 +72,12 @@ func (s *Session) WriteArchive(meta record.Archive, payload io.Reader, tap func(
 // meta.Members) — so a copy needs no separate Commit (meta is already final). Being
 // single-threaded (one copy/sync, or the orchestrator's drain), it records the archive's
 // placement on this medium inline, as it lands.
-func (s *Session) CopyArchive(meta record.Archive, payload io.Reader) error {
-	arch, pos, err := s.w.CopyArchive(meta, payload, nil)
+func (s *Session) CopyArchive(ctx context.Context, meta record.Archive, payload io.Reader) error {
+	arch, pos, err := s.w.CopyArchive(ctx, meta, payload, nil)
 	if err != nil {
 		return err
 	}
 	return s.clerk.cat.AddArchive(s.w.SlotMeta(), s.medium, arch, pos)
-}
-
-// Commit finalizes a dumped archive: it merges the producer's raw-stream stats (file count,
-// uncompressed size, member list) into the metered archive WriteArchive returned, writes the
-// commit footer + member index, caches the members server-side, and returns the committed archive
-// and its on-medium position. It does NOT record the placement: a dump's workers run in parallel
-// and the catalog has no lock, so the caller hands the committed archive to the run's single
-// orchestrator to record (see engine.Run).
-func (s *Session) Commit(measured record.Archive, parts []record.FilePos, fileCount int, uncompressed int64, members []string) (record.Archive, record.ArchivePos, error) {
-	arch := measured
-	arch.FileCount = fileCount
-	arch.Uncompressed = uncompressed
-	arch.Members = members
-	pos, err := s.w.Commit(arch, parts)
-	if err != nil {
-		return record.Archive{}, record.ArchivePos{}, err
-	}
-	if len(arch.Members) > 0 {
-		_ = s.clerk.mindex.Store(s.w.SlotID(), arch.DLE, arch.Level, arch.Members)
-	}
-	return arch, pos, nil
 }
 
 // Finish closes the slot: it seals the in-memory slot and stamps it sealed in the catalog. The

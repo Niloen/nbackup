@@ -63,36 +63,53 @@ func (m *mtDevice) count() (int, error) {
 // without hitting EOT, so capacity tracking falls back to the reactive ErrVolumeFull.
 func (m *mtDevice) bytesUsed() int64 { return 0 }
 
-func (m *mtDevice) writeFile(write func(w io.Writer) error) (int, error) {
+func (m *mtDevice) appendWriter() (deviceWriter, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if err := m.mt("eom"); err != nil {
-		return 0, err
+		m.mu.Unlock()
+		return nil, err
 	}
 	pos, err := m.fileNumber()
 	if err != nil {
-		return 0, err
+		m.mu.Unlock()
+		return nil, err
 	}
 	f, err := os.OpenFile(m.dev, os.O_WRONLY, 0)
 	if err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
+	return &mtFileWriter{m: m, f: f, bw: bufio.NewWriterSize(f, tapeBlock), pos: pos}, nil
+}
+
+// mtFileWriter writes one file to a real tape; the device lock is held until Commit/Abort.
+type mtFileWriter struct {
+	m   *mtDevice
+	f   *os.File
+	bw  *bufio.Writer
+	pos int
+}
+
+func (w *mtFileWriter) Write(p []byte) (int, error) { return w.bw.Write(p) }
+
+func (w *mtFileWriter) Commit() (int, error) {
+	defer w.m.mu.Unlock()
+	if err := w.bw.Flush(); err != nil {
+		w.f.Close()
 		return 0, err
 	}
-	bw := bufio.NewWriterSize(f, tapeBlock)
-	if err := write(bw); err != nil {
-		f.Close()
+	if err := w.f.Close(); err != nil { // closing the device writes a filemark too on most drivers
 		return 0, err
 	}
-	if err := bw.Flush(); err != nil {
-		f.Close()
+	if err := w.m.mt("weof", "1"); err != nil {
 		return 0, err
 	}
-	if err := f.Close(); err != nil { // closing the device writes a filemark too on most drivers
-		return 0, err
-	}
-	if err := m.mt("weof", "1"); err != nil {
-		return 0, err
-	}
-	return pos, nil
+	return w.pos, nil
+}
+
+func (w *mtFileWriter) Abort() {
+	defer w.m.mu.Unlock()
+	w.f.Close() // leave the unfinalized partial; the rebuild scan ignores it
 }
 
 // reset rewinds to beginning-of-tape; the subsequent label write at file 0 (plus
