@@ -386,7 +386,7 @@ func (l *Librarian) advanceViaShelf(appendable bool, tried map[string]bool, expe
 		case err != nil:
 			return "", 0, false, err
 		case out == swapUnattended:
-			return "", 0, false, fmt.Errorf("medium %q drive is full; load a fresh volume and re-run (the copy resumes where it stopped)", l.medium)
+			return "", 0, false, fmt.Errorf("medium %q drive is full; label a blank volume and load it, then re-run", l.medium)
 		case out == swapAborted:
 			return "", 0, false, fmt.Errorf("medium %q drive is full and no further volume was loaded", l.medium)
 		}
@@ -851,6 +851,11 @@ func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration
 	epoch := 1
 	wiped := "" // the volume a relabel overwrites; its placements become stale
 	switch {
+	case errors.Is(err, media.ErrNoVolume):
+		// Empty drive: there is nothing to label, and --force cannot conjure a tape.
+		// Surface the real condition rather than burying it in the foreign/corrupt
+		// "use --force" refusal below (which a swap, not a force, would resolve).
+		return fmt.Errorf("medium %q has no volume loaded; load one first with `nb load %s <bay>`", l.medium, l.medium)
 	case errors.Is(err, media.ErrForeignVolume):
 		if !force {
 			return fmt.Errorf("volume holds non-NBackup data; refusing to overwrite (use --force)")
