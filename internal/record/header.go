@@ -25,11 +25,26 @@ const (
 	KindLabel   = "label"   // a volume label (first file); not part of any slot
 )
 
-// Header is the self-describing block at the start of every file on a volume. It
-// carries only identity — what is known before the payload is streamed. Measured
-// data (sizes, checksum) lives in the archive's commit footer and its member
-// listing in the per-archive index, not here. A volume is therefore recoverable
-// on its own: scanning headers reconstructs the catalog.
+// Header is the self-describing block at the start of every file on a volume. It is
+// a *complete standalone identity record*: it carries the full identity of the file —
+// which slot/DLE/level it is, the schemes needed to reverse the payload, and the part
+// index — so a single payload file is forensically self-describing on its own, even
+// detached from its commit footer. A human (or a stock-tool recovery) can read the
+// block and know exactly how to restore the bytes that follow: e.g. for an encrypted,
+// compressed part, `dd bs=32k skip=1 < file | gpg -d | zstd -dc`, the Encrypt and
+// Compress fields naming each stage in order.
+//
+// Only the *measured* data is deliberately kept out — sizes and checksum live in the
+// commit footer (Archive), the member listing in the per-archive index — because none
+// of it is known before the payload is streamed. Everything that IS known up front is
+// recorded here in full.
+//
+// The footer (Archive) repeats most of these identity fields: that duplication is by
+// design, not redundancy to trim. NBackup's own read path groups parts and reconstructs
+// the catalog from a few header fields (Slot, Kind, DLE, Level, Part, and Compress for
+// the payload extension) and reads the rest of an archive's metadata from the footer;
+// the remaining header fields (Host, Path, Archiver, Encrypt, BaseSlot, CreatedAt) exist
+// for the standalone/forensic story above, so a lone part file is never a mystery.
 type Header struct {
 	Slot      string    `json:"slot"`
 	Kind      string    `json:"kind"`
@@ -63,11 +78,10 @@ const LabelMagic = "nbackup"
 // independent identity — it travels on the cartridge, so moving a tape between
 // drives does not change which volume it is.
 type Label struct {
-	Magic     string    `json:"magic"`              // LabelMagic — proves the volume is ours
-	Name      string    `json:"name"`               // unique, human-facing (e.g. "lto-0007")
-	Pool      string    `json:"pool"`               // the medium/pool name; blocks cross-pool clobber
-	Sequence  int       `json:"sequence,omitempty"` // ordinal within the pool (optional)
-	Epoch     int       `json:"epoch"`              // bumped on every (re)label; detects a stale catalog
+	Magic     string    `json:"magic"` // LabelMagic — proves the volume is ours
+	Name      string    `json:"name"`  // unique, human-facing (e.g. "lto-0007")
+	Pool      string    `json:"pool"`  // the medium/pool name; blocks cross-pool clobber
+	Epoch     int       `json:"epoch"` // bumped on every (re)label; detects a stale catalog
 	WrittenAt time.Time `json:"written_at"`
 }
 

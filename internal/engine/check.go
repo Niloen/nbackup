@@ -71,13 +71,25 @@ func (e *Engine) checkServer(rep *CheckReport) {
 	} else {
 		rep.add(&rep.Server, true, false, fmt.Sprintf("workdir %s writable", wd))
 	}
+	if !filepath.IsAbs(wd) {
+		abs, _ := filepath.Abs(wd)
+		rep.add(&rep.Server, false, true, fmt.Sprintf("workdir %q is relative (resolves to %s); a cron job that runs nb from another directory will use a different catalog — set an absolute `workdir`", wd, abs))
+	}
 
 	// The compressor is needed server-side for a server-side compress and for restore
-	// decompression, so a missing binary is a real problem even with client-side dumps.
-	if err := compress.Check(e.compressScheme, e.fopts); err != nil {
-		rep.add(&rep.Server, false, false, fmt.Sprintf("compression %q: %v", e.compressScheme, err))
-	} else {
-		rep.add(&rep.Server, true, false, fmt.Sprintf("compression %q available", e.compressScheme))
+	// decompression of any scheme a dumptype records, so check every distinct scheme a
+	// missing binary is a real problem even with client-side dumps.
+	checkedScheme := map[string]bool{}
+	for _, scheme := range append([]string{e.cfg.CompressScheme()}, e.dumptypeCompressSchemes()...) {
+		if checkedScheme[scheme] {
+			continue
+		}
+		checkedScheme[scheme] = true
+		if err := compress.Check(scheme, e.fopts); err != nil {
+			rep.add(&rep.Server, false, false, fmt.Sprintf("compression %q: %v", scheme, err))
+		} else {
+			rep.add(&rep.Server, true, false, fmt.Sprintf("compression %q available", scheme))
+		}
 	}
 
 	checked := map[string]bool{}
@@ -199,6 +211,12 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 	} else {
 		rep.add(&hc.Lines, true, false, fmt.Sprintf("state_dir %s writable", stateDir))
 	}
+	// A relative state_dir resolves against the working directory of whoever runs nb
+	// on this host, so a cron job started from elsewhere loses the incremental base and
+	// silently re-fulls every DLE. The catalog rebuilds from media; this state does not.
+	if !filepath.IsAbs(stateDir) {
+		rep.add(&hc.Lines, false, true, fmt.Sprintf("state_dir %q is relative; it resolves against nb's working directory on %s, so a cron job run from another directory will lose the incremental base and re-full — set an absolute `state_dir`", stateDir, host))
+	}
 	return hc
 }
 
@@ -206,8 +224,9 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 // (compress/encrypt: client). For a server-side transform there is nothing to check here —
 // the server-side tools are covered in checkServer.
 func (e *Engine) checkClientTools(rep *CheckReport, hc *HostCheck, ex programs.Executor, dt string) {
-	if e.cfg.ResolveDumpType(dt).Compress == "client" {
-		if cmd, ok, err := compress.CompressCmd(e.compressScheme, e.fopts); err == nil && ok {
+	if e.cfg.CompressionFor(dt).At == "client" {
+		scheme, opts := e.compressionFor(dt)
+		if cmd, ok, err := compress.CompressCmd(scheme, opts); err == nil && ok {
 			e.probeTool(rep, hc, ex, cmd.Name, "compressor")
 		}
 	}

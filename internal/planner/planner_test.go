@@ -65,9 +65,9 @@ func TestBumpDecision(t *testing.T) {
 	mkHist := func() *catalog.History {
 		return &catalog.History{DLEs: map[string]*catalog.DLEState{"h-data": {
 			LastFullDate: "2026-06-20",
-			LastFullSlot: "slot-2026-06-20",
+			LastFullSlot: "slot-2026-06-20.001",
 			Runs: []catalog.RunRecord{
-				{Date: "2026-06-20", Slot: "slot-2026-06-20", Level: 0},
+				{Date: "2026-06-20", Slot: "slot-2026-06-20.001", Level: 0},
 				{Date: "2026-06-21", Slot: "slot-l1a", Level: 1},
 				{Date: "2026-06-22", Slot: "slot-l1b", Level: 1},
 			},
@@ -106,9 +106,9 @@ func TestBumpDaysGuard(t *testing.T) {
 	today := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{"h-data": {
 		LastFullDate: "2026-06-20",
-		LastFullSlot: "slot-2026-06-20",
+		LastFullSlot: "slot-2026-06-20.001",
 		Runs: []catalog.RunRecord{
-			{Date: "2026-06-20", Slot: "slot-2026-06-20", Level: 0},
+			{Date: "2026-06-20", Slot: "slot-2026-06-20.001", Level: 0},
 			{Date: "2026-06-21", Slot: "slot-l1a", Level: 1},
 		},
 	}}}

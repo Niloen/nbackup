@@ -30,7 +30,7 @@ func plan() []Plan {
 // the snapshot reflects each transition, including ordering by DLE name.
 func TestTrackerLifecycle(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot-2026-06-23", PhaseRunning, 2, plan(), c.now, nil)
+	tr := NewTracker("slot-2026-06-23.001", PhaseRunning, 2, plan(), c.now, nil)
 
 	snap := tr.Snapshot()
 	if snap.Phase != PhaseRunning {
@@ -174,7 +174,7 @@ func TestLoadMissing(t *testing.T) {
 // TestRender produces a human report mentioning the key facts.
 func TestRender(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot-2026-06-23", PhaseRunning, 2, plan(), c.now, nil)
+	tr := NewTracker("slot-2026-06-23.001", PhaseRunning, 2, plan(), c.now, nil)
 	tr.StartDLE("alpha")
 	c.advance(5 * time.Second)
 	tr.AddBytes("alpha", 150, 60)
@@ -182,7 +182,7 @@ func TestRender(t *testing.T) {
 	var sb strings.Builder
 	Render(&sb, tr.Snapshot(), c.now())
 	out := sb.String()
-	for _, want := range []string{"slot-2026-06-23", "running", "alpha", "50%", "dumping"} {
+	for _, want := range []string{"slot-2026-06-23.001", "running", "alpha", "50%", "dumping"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render missing %q in:\n%s", want, out)
 		}
@@ -193,7 +193,7 @@ func TestRender(t *testing.T) {
 // with the disk it landed on, so a multi-disk run shows where each buffered.
 func TestRenderDraining(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot-2026-06-23", PhaseRunning, 2, plan(), c.now, nil)
+	tr := NewTracker("slot-2026-06-23.001", PhaseRunning, 2, plan(), c.now, nil)
 	tr.StartDLE("alpha")
 	tr.FinishDLE("alpha", 3, 300, 120, nil)
 	tr.StartFlush("alpha", "scratch2")

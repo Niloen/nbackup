@@ -29,27 +29,20 @@ func TestIDAndParse(t *testing.T) {
 	}
 }
 
-// TestParseIDToleratesLegacy keeps ParseID reading ids written by the older,
-// pre-fixed-width scheme — a bare "slot-DATE" (the day's first run) and an
-// unpadded ".N" — so a catalog scan of media that predates the padding still
-// groups their archives correctly.
-func TestParseIDToleratesLegacy(t *testing.T) {
-	cases := []struct {
-		id   string
-		date string
-		seq  int
-	}{
-		{"slot-2026-06-21", "2026-06-21", 1},
-		{"slot-2026-06-21.8", "2026-06-21", 8},
+// TestParseIDRejectsSequenceless pins the single canonical id shape: a sequence-less
+// "slot-DATE" is not a valid id and is rejected, so a bare date can never masquerade
+// as the day's first run. A present-but-unpadded sequence (".8") still parses — the
+// padding is only the producer's sort-stability discipline, not a parse requirement.
+func TestParseIDRejectsSequenceless(t *testing.T) {
+	if _, _, err := ParseID("slot-2026-06-21"); err == nil {
+		t.Errorf("ParseID(%q) succeeded; want a sequence-less id to be rejected", "slot-2026-06-21")
 	}
-	for _, c := range cases {
-		d, s, err := ParseID(c.id)
-		if err != nil {
-			t.Fatalf("ParseID(%q): %v", c.id, err)
-		}
-		if d != c.date || s != c.seq {
-			t.Errorf("ParseID(%q) = (%q,%d), want (%q,%d)", c.id, d, s, c.date, c.seq)
-		}
+	d, s, err := ParseID("slot-2026-06-21.8")
+	if err != nil {
+		t.Fatalf("ParseID(%q): %v", "slot-2026-06-21.8", err)
+	}
+	if d != "2026-06-21" || s != 8 {
+		t.Errorf("ParseID(%q) = (%q,%d), want (%q,8)", "slot-2026-06-21.8", d, s, "2026-06-21")
 	}
 }
 

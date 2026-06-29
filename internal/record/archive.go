@@ -40,22 +40,22 @@ type ArchivePos struct {
 // catalog, not here, so the metadata stays portable across volumes). A "slot" is just the
 // shared Slot tag a run's archives carry — there is no slot record on the medium.
 type Archive struct {
-	Slot         string    `json:"slot"`              // the slot (run) this dump belongs to, e.g. "slot-2026-06-21.001"
-	DLE          string    `json:"dle"`               // DLE name, e.g. "app01-home"
-	Host         string    `json:"host"`              // source host
-	Path         string    `json:"path"`              // source path
-	Archiver     string    `json:"archiver"`          // archiver type that produced it
-	Compress     string    `json:"compress"`          // compression scheme (zstd|gzip|none); reversed on restore
-	Encrypt      string    `json:"encrypt,omitempty"` // encryption scheme (gpg); reversed on restore. "" = plaintext. The key is never stored — restore resolves it from the operator's keyring.
-	Level        int       `json:"level"`             // 0 = full, >=1 = incremental
-	Compressed   int64     `json:"compressed"`        // payload size on the volume
-	Uncompressed int64     `json:"uncompressed"`      // archive stream size before compression
-	FileCount    int       `json:"file_count"`        // number of member entries archived
-	SHA256       string    `json:"sha256"`            // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
-	Parts        int       `json:"parts,omitempty"`   // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
-	BaseSlot     string    `json:"base_slot"`         // for level>=1, the slot whose state this builds on
-	CreatedAt    time.Time `json:"created_at"`        // when this archive committed (landed) — per-archive, the basis for retention age and the "last archive added" display
-	Members      []string  `json:"members,omitempty"` // member paths archived: slash-separated, directories with a trailing slash (the archiver-neutral convention recovery browses); the raw token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
+	Slot         string    `json:"slot"`                // the slot (run) this dump belongs to, e.g. "slot-2026-06-21.001"
+	DLE          string    `json:"dle"`                 // DLE name, e.g. "app01-home"
+	Host         string    `json:"host"`                // source host
+	Path         string    `json:"path"`                // source path
+	Archiver     string    `json:"archiver"`            // archiver type that produced it
+	Compress     string    `json:"compress"`            // compression scheme (zstd|gzip|none); reversed on restore
+	Encrypt      string    `json:"encrypt,omitempty"`   // encryption scheme (gpg); reversed on restore. "" = plaintext. The key is never stored — restore resolves it from the operator's keyring.
+	Level        int       `json:"level"`               // 0 = full, >=1 = incremental
+	Compressed   int64     `json:"compressed"`          // payload size on the volume
+	Uncompressed int64     `json:"uncompressed"`        // archive stream size before compression
+	FileCount    int       `json:"file_count"`          // number of member entries archived
+	SHA256       string    `json:"sha256"`              // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
+	Parts        int       `json:"parts,omitempty"`     // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
+	BaseSlot     string    `json:"base_slot,omitempty"` // for level>=1, the slot whose state this builds on (a full omits it)
+	CreatedAt    time.Time `json:"created_at"`          // when this archive committed (landed) — per-archive, the basis for retention age and the "last archive added" display
+	Members      []string  `json:"members,omitempty"`   // member paths archived: slash-separated, directories with a trailing slash (the archiver-neutral convention recovery browses); the raw token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
 }
 
 // DLEID returns the host:path identity for display, falling back to
@@ -100,8 +100,10 @@ func ParseDateField(s string) (time.Time, error) {
 	return time.Parse("2006-01-02", s)
 }
 
-// ParseID extracts the date and sequence from a slot ID. A bare "slot-DATE" has
-// sequence 1.
+// ParseID extracts the date and sequence from a slot ID. Every slot id carries an
+// explicit, zero-padded sequence (IDFromParts is the sole producer), so a
+// sequence-less "slot-DATE" is not a valid id and is rejected — there is one
+// canonical id shape, not a tolerated short form.
 func ParseID(id string) (date string, seq int, err error) {
 	rest, ok := strings.CutPrefix(id, "slot-")
 	if !ok {
@@ -109,7 +111,7 @@ func ParseID(id string) (date string, seq int, err error) {
 	}
 	date, seqStr, hasSeq := strings.Cut(rest, ".")
 	if !hasSeq {
-		return date, 1, nil
+		return "", 0, fmt.Errorf("slot id %q has no sequence (want slot-DATE.NNN)", id)
 	}
 	seq, err = strconv.Atoi(seqStr)
 	if err != nil {
@@ -128,9 +130,9 @@ func SlotDate(id string) string {
 }
 
 // SlotIDLess reports whether slot id a comes before b in run order, keyed by date then
-// sequence (so "slot-DATE.10" correctly follows "slot-DATE.2"). The ids are built to sort
-// this way lexically too; the parse keeps a legacy unpadded "slot-DATE" ordering correct.
-// An id that does not parse (not slot-shaped) falls back to a plain lexical compare.
+// sequence (so "slot-DATE.10" correctly follows "slot-DATE.2"). The padded ids sort this
+// way lexically too; parsing makes the intent explicit. An id that does not parse (not a
+// canonical slot id) falls back to a plain lexical compare.
 func SlotIDLess(a, b string) bool {
 	da, sa, ea := ParseID(a)
 	db, sb, eb := ParseID(b)

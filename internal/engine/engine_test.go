@@ -2085,7 +2085,7 @@ func TestTapeRecycleRefusedWhenAllKept(t *testing.T) {
 	if !strings.Contains(err.Error(), "within retention") {
 		t.Fatalf("error should explain every tape is still within retention; got: %v", err)
 	}
-	if _, rerr := eng.cat.ReadSlot("slot-2026-06-03"); rerr == nil {
+	if _, rerr := eng.cat.ReadSlot("slot-2026-06-03.001"); rerr == nil {
 		t.Fatal("the refused run must not be recorded")
 	}
 }

@@ -46,17 +46,17 @@ func arch(dle string, level int) record.Archive { return record.Archive{DLE: dle
 func TestFloor_LiveChainKept(t *testing.T) {
 	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	slots := cat(
-		mkSlot("slot-2026-01-01", "2026-01-01", arch("app", 0)), // the base full
-		mkSlot("slot-2026-01-02", "2026-01-02", arch("app", 1)), // tip incremental, no newer full
+		mkSlot("slot-2026-01-01.001", "2026-01-01", arch("app", 0)), // the base full
+		mkSlot("slot-2026-01-02.001", "2026-01-02", arch("app", 1)), // tip incremental, no newer full
 	)
 	got := Compute(slots, 0, now) // minAge 0 so age never keeps
 
-	if reason, ok := got.Reason("slot-2026-01-01"); !ok {
+	if reason, ok := got.Reason("slot-2026-01-01.001"); !ok {
 		t.Errorf("base full slot must be kept as the last recovery path; got %v", got)
 	} else if want := "last recovery path"; reason != want {
 		t.Errorf("full reason = %q, want %q", reason, want)
 	}
-	if reason, ok := got.Reason("slot-2026-01-02"); !ok {
+	if reason, ok := got.Reason("slot-2026-01-02.001"); !ok {
 		t.Errorf("tip incremental must be kept as part of the live recovery chain; got %v", got)
 	} else if want := "in this DLE's recovery chain"; reason != want {
 		t.Errorf("tip reason = %q, want %q", reason, want)
@@ -68,18 +68,18 @@ func TestFloor_LiveChainKept(t *testing.T) {
 func TestFloor_SupersededChainReclaimable(t *testing.T) {
 	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	slots := cat(
-		mkSlot("slot-2026-01-01", "2026-01-01", arch("app", 0)), // old full (superseded)
-		mkSlot("slot-2026-01-02", "2026-01-02", arch("app", 1)), // old incremental (superseded)
-		mkSlot("slot-2026-02-01", "2026-02-01", arch("app", 0)), // newer full
+		mkSlot("slot-2026-01-01.001", "2026-01-01", arch("app", 0)), // old full (superseded)
+		mkSlot("slot-2026-01-02.001", "2026-01-02", arch("app", 1)), // old incremental (superseded)
+		mkSlot("slot-2026-02-01.001", "2026-02-01", arch("app", 0)), // newer full
 	)
 	got := Compute(slots, 0, now) // minAge 0
 
-	for _, id := range []string{"slot-2026-01-01", "slot-2026-01-02"} {
+	for _, id := range []string{"slot-2026-01-01.001", "slot-2026-01-02.001"} {
 		if got.Keeps(id) {
 			t.Errorf("superseded slot %s was kept, want reclaimable: %v", id, got)
 		}
 	}
-	if !got.Keeps("slot-2026-02-01") {
+	if !got.Keeps("slot-2026-02-01.001") {
 		t.Errorf("the newer full must be kept; got %v", got)
 	}
 }
@@ -89,13 +89,13 @@ func TestFloor_SupersededChainReclaimable(t *testing.T) {
 func TestFloor_ReasonNamesTheProtectingFull(t *testing.T) {
 	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	slots := cat(
-		mkSlot("slot-2026-01-01", "2026-01-01", arch("etc", 0)),
+		mkSlot("slot-2026-01-01.001", "2026-01-01", arch("etc", 0)),
 		// etc gets a later full here; home gets its only full here too.
-		mkSlot("slot-2026-01-02", "2026-01-02", arch("etc", 1), arch("home", 0)),
+		mkSlot("slot-2026-01-02.001", "2026-01-02", arch("etc", 1), arch("home", 0)),
 	)
 	got := Compute(slots, 0, now)
 
-	if reason, _ := got.Reason("slot-2026-01-02"); reason != "last recovery path" {
+	if reason, _ := got.Reason("slot-2026-01-02.001"); reason != "last recovery path" {
 		t.Errorf("reason = %q, want it to name home (its full), not etc (a mere incremental)", reason)
 	}
 }
@@ -108,22 +108,22 @@ func TestFloor_PerArchiveWithinOneSlot(t *testing.T) {
 	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	slots := cat(
 		// Day 1: both DLEs full.
-		mkSlot("slot-2026-01-01", "2026-01-01", arch("app", 0), arch("db", 0)),
+		mkSlot("slot-2026-01-01.001", "2026-01-01", arch("app", 0), arch("db", 0)),
 		// Day 2: app gets a newer full (superseding its day-1 full); db only increments,
 		// so db's day-1 full is still its last recovery path.
-		mkSlot("slot-2026-02-01", "2026-02-01", arch("app", 0), arch("db", 1)),
+		mkSlot("slot-2026-02-01.001", "2026-02-01", arch("app", 0), arch("db", 1)),
 	)
 	got := Compute(slots, 0, now) // minAge 0 so only chain/last-recovery pin
 
-	if got.KeepsArchive("slot-2026-01-01", "app") {
+	if got.KeepsArchive("slot-2026-01-01.001", "app") {
 		t.Errorf("app's day-1 full is superseded — its archive should be reclaimable")
 	}
-	if !got.KeepsArchive("slot-2026-01-01", "db") {
+	if !got.KeepsArchive("slot-2026-01-01.001", "db") {
 		t.Errorf("db's day-1 full is its last recovery path — its archive must be kept")
 	}
 	// The slot as a whole is still pinned (db keeps it), so a slot-granular pass would
 	// strand app's dead archive behind db.
-	if !got.Keeps("slot-2026-01-01") {
+	if !got.Keeps("slot-2026-01-01.001") {
 		t.Errorf("slot must be kept at the slot level because db still needs it")
 	}
 }
@@ -132,10 +132,10 @@ func TestFloor_PerArchiveWithinOneSlot(t *testing.T) {
 // the age in the config's day vocabulary.
 func TestFloor_MinAgeReasonInDays(t *testing.T) {
 	now := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
-	slots := cat(mkSlot("slot-2026-01-04", "2026-01-04", arch("app", 1)))
+	slots := cat(mkSlot("slot-2026-01-04.001", "2026-01-04", arch("app", 1)))
 	got := Compute(slots, 7*24*time.Hour, now)
 
-	if reason, _ := got.Reason("slot-2026-01-04"); reason != "within minimum age (7d)" {
+	if reason, _ := got.Reason("slot-2026-01-04.001"); reason != "within minimum age (7d)" {
 		t.Errorf("reason = %q, want \"within minimum age (7d)\"", reason)
 	}
 }
@@ -152,13 +152,13 @@ func TestFloor_MinAgeSubDay(t *testing.T) {
 		// A newer full exists, so neither old slot is a last recovery path; only
 		// age and the live chain can pin them. The young incremental builds on the
 		// NEWER full, so it cannot drag the old full back into a chain.
-		mkSlotAt("slot-2026-01-04", "2026-01-04", time.Date(2026, 1, 4, 4, 0, 0, 0, time.UTC), arch("app", 0)),     // old full, committed 04:00 (7h ago)
+		mkSlotAt("slot-2026-01-04.001", "2026-01-04", time.Date(2026, 1, 4, 4, 0, 0, 0, time.UTC), arch("app", 0)), // old full, committed 04:00 (7h ago)
 		mkSlotAt("slot-2026-01-04.2", "2026-01-04", time.Date(2026, 1, 4, 8, 0, 0, 0, time.UTC), arch("app", 0)),   // newer full, committed 08:00 (3h ago)
 		mkSlotAt("slot-2026-01-04.3", "2026-01-04", time.Date(2026, 1, 4, 10, 30, 0, 0, time.UTC), arch("app", 1)), // incremental, committed 10:30 (30m ago, young)
 	)
 	got := Compute(slots, minAge, now)
 
-	if got.Keeps("slot-2026-01-04") {
+	if got.Keeps("slot-2026-01-04.001") {
 		t.Errorf("old full committed 7h ago must age out under a 1h minimum_age; got %v", got)
 	}
 	if !got.Keeps("slot-2026-01-04.3") {

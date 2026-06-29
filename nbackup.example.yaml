@@ -149,7 +149,6 @@ landing: fast-disk
 #                       #   chain      = real point-in-time chain restore to scratch
 #                       #   stock      = restore via the documented gpg/zstd/tar
 #                       #                one-liner (proves recovery needs no NBackup)
-#   stock_tools: false  # shorthand for tier: stock
 #   worm: true          # probe the medium for WORM/immutability (Object Lock / LTO
 #                       # WORM): keeps one fixed probe object and checks that deleting
 #                       # it is refused. NBackup only DETECTS immutability; you
@@ -211,6 +210,7 @@ landing: fast-disk
 # base forces its next run to a full). Defaults to ./nbackup-state. Both default
 # RELATIVE TO THE WORKING DIRECTORY, so a cron job that runs `nb` from elsewhere
 # must set an ABSOLUTE path here (and for workdir) or it will silently re-full.
+# `nb check` warns when either resolves to a relative path, for exactly this reason.
 # state_dir: /var/lib/nbackup/state
 # A per-host override (e.g. for a remote client's own path) lives under hosts:.
 
@@ -226,11 +226,17 @@ landing: fast-disk
 # Compression. Archives are piped through an external compressor child (like
 # Amanda), so the CPU work is in a separate, throttleable process. The scheme
 # binary must be on PATH (zstd by default; gzip; or "none" for no compression).
+# This block is the config-wide default; a dumptype may set its own `compress`
+# block to override it wholesale — the exact peer of `encrypt` below (different
+# scheme/level, or a client-side `at`). The scheme is recorded per-archive, so
+# restore reverses it from the artifact alone.
 compress:
   scheme: zstd        # zstd | gzip | none
   level: 3           # compression level (0 = scheme default)
   threads: 0         # compressor worker threads (0 = scheme default; zstd: single)
   # program: /usr/bin/zstd   # optional binary override
+  # at: server        # server (default) | client — where compression runs for a
+  #                   # remote DLE (config-wide default; usually set per-dumptype)
 
 # Encryption. After compression, archives can be piped through an external
 # encryptor child (gpg), like Amanda's encrypt program. The scheme name is a
@@ -276,20 +282,26 @@ dumptypes:
   no-logs:
     archiver: default
     exclude: ["*.log", "*.tmp"]
-  # A dumptype can override the default encryption wholesale (e.g. a stricter key):
+  # A dumptype can override the default compression and/or encryption wholesale
+  # (no field merge — restate the whole block). E.g. a stricter key, or a cheaper
+  # scheme for already-compressed data:
   # finance:
   #   archiver: default
+  #   compress:
+  #     scheme: zstd
+  #     level: 19                 # spend more CPU on this data
   #   encrypt:
   #     scheme: gpg
   #     recipient: finance-key@example.com
   # A remote DLE can run compression and/or encryption on the CLIENT (Amanda's
   # compress/encrypt client), so only compressed ciphertext crosses the wire and
-  # plaintext never leaves the source. encrypt.at: client requires compress: client
+  # plaintext never leaves the source. encrypt.at: client requires compress.at: client
   # (encryption is downstream of compression). With a public-key recipient only the
   # public key need be on the client; the private key decrypts wherever it lives.
   # remote-secure:
   #   archiver: default
-  #   compress: client            # server (default) | client
+  #   compress:
+  #     at: client                # server (default) | client
   #   encrypt:
   #     scheme: gpg
   #     recipient: backups@example.com

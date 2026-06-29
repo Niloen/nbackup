@@ -151,14 +151,14 @@ hosts:
   app01: { ssh: { user: b } }
 dumptypes:
   secure:
-    compress: server
+    compress: { at: server }
     encrypt: { scheme: gpg, recipient: k@x, at: client }
 sources:
   secure:
     app01: [/home]
 `)
-	if err == nil || !strings.Contains(err.Error(), "requires compress: client") {
-		t.Fatalf("want compress:client requirement, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "requires compress.at: client") {
+		t.Fatalf("want compress.at:client requirement, got %v", err)
 	}
 }
 
@@ -168,7 +168,7 @@ func TestTransformClientRequiresRemoteHost(t *testing.T) {
 	_, err := loadYAML(t, baseMedia+`
 dumptypes:
   secure:
-    compress: client
+    compress: { at: client }
 sources:
   secure:
     localhost: [/home]
@@ -232,7 +232,7 @@ hosts:
   app01: { ssh: { user: b } }
 dumptypes:
   secure:
-    compress: client
+    compress: { at: client }
     encrypt: { scheme: gpg, recipient: k@x, at: client }
 sources:
   secure:
@@ -241,7 +241,44 @@ sources:
 	if err != nil {
 		t.Fatalf("valid client-side config should load: %v", err)
 	}
-	if c.EncryptionFor("secure").At != "client" || c.ResolveDumpType("secure").Compress != "client" {
+	if c.EncryptionFor("secure").At != "client" || c.CompressionFor("secure").At != "client" {
 		t.Fatal("client-side placement not parsed")
+	}
+}
+
+// TestCompressionForOverridesWholesale locks the per-dumptype compression override as
+// the peer of encryption: a dumptype's own `compress` block replaces the config-wide
+// default wholesale, while a dumptype without one inherits it.
+func TestCompressionForOverridesWholesale(t *testing.T) {
+	c, err := loadYAML(t, baseMedia+`
+compress:
+  scheme: zstd
+  level: 3
+dumptypes:
+  fast:
+    compress:
+      scheme: gzip
+      level: 9
+  plain:
+    archiver: default
+sources:
+  fast:
+    localhost: [/a]
+  plain:
+    localhost: [/b]
+`)
+	if err != nil {
+		t.Fatalf("config should load: %v", err)
+	}
+	if got := c.CompressionFor("fast"); got.SchemeName() != "gzip" || got.Level != 9 {
+		t.Errorf("CompressionFor(fast) = %+v, want gzip/9 (wholesale override)", got)
+	}
+	// "plain" sets no compress block, so it inherits the config-wide default.
+	if got := c.CompressionFor("plain"); got.SchemeName() != "zstd" || got.Level != 3 {
+		t.Errorf("CompressionFor(plain) = %+v, want zstd/3 (inherited default)", got)
+	}
+	// An unknown dumptype also falls back to the default.
+	if got := c.CompressionFor("nope"); got.SchemeName() != "zstd" {
+		t.Errorf("CompressionFor(nope) = %+v, want the zstd default", got)
 	}
 }

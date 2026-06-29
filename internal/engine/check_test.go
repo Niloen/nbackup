@@ -97,3 +97,45 @@ func TestCheckFlagsUnreadableSource(t *testing.T) {
 		t.Fatalf("expected an unreadable-source line: %+v", local.Lines)
 	}
 }
+
+// TestCheckWarnsOnRelativePaths verifies the cron footgun advisory: a relative workdir
+// or state_dir resolves against nb's working directory, so a cron job started elsewhere
+// re-fulls; nb check flags both as warnings (not failures).
+func TestCheckWarnsOnRelativePaths(t *testing.T) {
+	tmp := t.TempDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(cwd)
+
+	cfg := &config.Config{
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": filepath.Join(tmp, "m")}}},
+		Sources:  []config.DLE{{Host: "localhost", Path: tmp}},
+		Workdir:  "rel-catalog",
+		StateDir: "rel-state",
+	}
+	cfg.Compress.Scheme = "none"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, "localhost"); err != nil || m.Check() != nil {
+		t.Skip("GNU tar not available")
+	}
+	rep := eng.Check(true)
+	if rep.Failures != 0 {
+		t.Errorf("relative paths are advisories, not failures: %+v", rep)
+	}
+	if !anyMsg(rep.Server, `workdir "rel-catalog" is relative`) {
+		t.Errorf("expected a relative-workdir advisory: %+v", rep.Server)
+	}
+	local, _ := hostLines(rep, "localhost")
+	if !anyMsg(local.Lines, `state_dir "rel-state" is relative`) {
+		t.Errorf("expected a relative-state_dir advisory: %+v", local.Lines)
+	}
+}
