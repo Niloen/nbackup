@@ -43,11 +43,12 @@ type ArchiveWriter interface {
 // ArchiveWriteStore is the slot-write surface the producer drives: NewArchive reserves a per-archive
 // ArchiveWriter (whose Commit records the placement), blocking for back-pressure and returning the
 // run's error if the store has failed. est is the producer's size estimate — a routing store (the
-// spool) uses it to pick a medium; a leaf medium ignores it. prog, when non-nil, receives the running
-// landed (compressed) byte count. The dumper points at either a spool (buffered, concurrency-safe over
-// a backing + holding media) or a single medium's store, never caring which.
+// spool) uses it to pick a medium; a leaf medium ignores it. For live byte progress the caller wraps
+// the returned writer with MeterArchive; the store itself carries no progress concern. The dumper
+// points at either a spool (buffered, concurrency-safe over a backing + holding media) or a single
+// medium's store, never caring which.
 type ArchiveWriteStore interface {
-	NewArchive(spec ArchiveSpec, est int64, prog func(int64)) (ArchiveWriter, error)
+	NewArchive(spec ArchiveSpec, est int64) (ArchiveWriter, error)
 }
 
 // ArchiveStore is a single medium's slot store: an ArchiveWriteStore that additionally re-authors an
@@ -58,7 +59,7 @@ type ArchiveWriteStore interface {
 // spool composes these (one backing, an array of holding); the clerk implements them.
 type ArchiveStore interface {
 	ArchiveWriteStore
-	NewCopy(arch record.Archive, prog func(int64)) (ArchiveWriter, error)
+	NewCopy(arch record.Archive) (ArchiveWriter, error)
 	OpenArchive(arch record.Archive, pos record.ArchivePos) (io.ReadCloser, error)
 	Reclaim(arch record.Archive, pos record.ArchivePos) error
 }

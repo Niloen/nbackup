@@ -40,10 +40,10 @@ func (c *Clerk) OpenSlot(w *archiveio.Writer, medium string, vol media.Volume) *
 // NewArchive begins writing a fresh archive's already-encoded payload onto the slot, pulled
 // part-by-part by the returned ArchiveWriter's NextPart (the operation copies into each part writer and
 // closes it). Commit then finalizes the archive — writing its footer + member index and recording its
-// placement — once the producer's raw stats are known. prog, if non-nil, receives the running count
-// of landed bytes. A single medium does not route, so est (the size estimate) is unused here.
-func (s *Session) NewArchive(spec archiveio.ArchiveSpec, _ int64, prog func(int64)) (archiveio.ArchiveWriter, error) {
-	return &ArchiveWriter{s: s, aw: s.w.NewArchive(spec, prog)}, nil
+// placement — once the producer's raw stats are known. A single medium does not route, so est (the
+// size estimate) is unused here.
+func (s *Session) NewArchive(spec archiveio.ArchiveSpec, _ int64) (archiveio.ArchiveWriter, error) {
+	return &ArchiveWriter{s: s, aw: s.w.NewArchive(spec)}, nil
 }
 
 // ArchiveWriter is one archive's NextPart-driven write handle (an archiveio.ArchiveWriter): a thin
@@ -115,8 +115,8 @@ func (s *Session) Reclaim(arch record.Archive, pos record.ArchivePos) error {
 // the writer verifies the bytes against the source's recorded checksum and preserves its identity
 // (stats, members, CreatedAt). On Commit it records the new placement on this medium, like NewArchive.
 // It is the write side of the holding->backing drain, `nb copy`, and crash-recovery Flush.
-func (s *Session) NewCopy(arch record.Archive, prog func(int64)) (archiveio.ArchiveWriter, error) {
-	return &ArchiveWriter{s: s, aw: s.w.NewCopy(arch, prog)}, nil
+func (s *Session) NewCopy(arch record.Archive) (archiveio.ArchiveWriter, error) {
+	return &ArchiveWriter{s: s, aw: s.w.NewCopy(arch)}, nil
 }
 
 // archivePosFiles lists an archive's file positions for reclamation, the commit footer (the marker)

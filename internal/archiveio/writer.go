@@ -90,9 +90,10 @@ func NewWriter(sink VolumeSink, spec SlotSpec, lim *ratelimit.Limiter, now func(
 // the next until the payload is exhausted). Rolling to a fresh volume happens inside NextPart, so a
 // spanning medium's roll lands wherever the sink routes it. The payload is metered (sha256 + size) on
 // the write path — so the metering runs on the caller's goroutine — and Commit finalizes the footer
-// with the producer's totals. archiveio turns the spec plus the metered bytes into the record.Archive;
-// tap, if non-nil, gets the running landed byte count.
-func (w *Writer) NewArchive(spec ArchiveSpec, tap func(landed int64)) ArchiveWriter {
+// with the producer's totals. archiveio turns the spec plus the metered bytes into the record.Archive.
+// To observe the running landed byte count for live progress, wrap the returned writer with
+// MeterArchive — the writer itself carries no progress concern.
+func (w *Writer) NewArchive(spec ArchiveSpec) ArchiveWriter {
 	meta := record.Archive{
 		Slot:     w.slotID,
 		DLE:      spec.DLE,
@@ -104,7 +105,7 @@ func (w *Writer) NewArchive(spec ArchiveSpec, tap func(landed int64)) ArchiveWri
 		Level:    spec.Level,
 		BaseSlot: spec.BaseSlot,
 	}
-	return &archiveWriter{w: w, base: w.archiveHeader(meta), meta: meta, tap: tap, h: sha256.New()}
+	return &archiveWriter{w: w, base: w.archiveHeader(meta), meta: meta, h: sha256.New()}
 }
 
 // NewCopy begins re-authoring an already-committed archive onto the slot — the same path as
@@ -112,11 +113,62 @@ func (w *Writer) NewArchive(spec ArchiveSpec, tap func(landed int64)) ArchiveWri
 // Commit the writer verifies the metered checksum against arch.SHA256 and preserves arch's stats,
 // members, and CreatedAt (a copy keeps the source's identity and age); only the part layout, sized to
 // this medium's volumes, is new. The spool's holding->backing drain, `nb copy`, and crash-recovery
-// Flush all share this one copy path. tap, if non-nil, gets the running landed byte count.
-func (w *Writer) NewCopy(arch record.Archive, tap func(landed int64)) ArchiveWriter {
+// Flush all share this one copy path. Wrap the returned writer with MeterArchive for live progress.
+func (w *Writer) NewCopy(arch record.Archive) ArchiveWriter {
 	arch.Slot = w.slotID // re-authored under this writer's slot (the same id, by construction)
-	return &archiveWriter{w: w, base: w.archiveHeader(arch), meta: arch, expectSHA: arch.SHA256, tap: tap, h: sha256.New()}
+	return &archiveWriter{w: w, base: w.archiveHeader(arch), meta: arch, expectSHA: arch.SHA256, h: sha256.New()}
 }
+
+// MeterArchive wraps an ArchiveWriter to report the running count of landed bytes via tap, so live
+// progress can observe a write without the storage layers having to carry a progress parameter. It
+// counts the bytes the caller writes into each part (cumulative across the archive's parts) and
+// forwards Commit/Result untouched. tap fires on the goroutine that writes the parts; a nil tap is a
+// no-op (the writer is returned unwrapped). The caller — the one place that wants live progress —
+// applies it; the writer, store, spool, and clerk stay observability-free.
+func MeterArchive(aw ArchiveWriter, tap func(landed int64)) ArchiveWriter {
+	if tap == nil {
+		return aw
+	}
+	return &meteredArchive{aw: aw, tap: tap}
+}
+
+type meteredArchive struct {
+	aw  ArchiveWriter
+	tap func(int64)
+	n   int64 // cumulative landed bytes; touched only on the part-writing goroutine
+}
+
+func (m *meteredArchive) NextPart(ctx context.Context) (io.WriteCloser, int64, error) {
+	w, max, err := m.aw.NextPart(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	return &meteredPart{m: m, w: w}, max, nil
+}
+
+func (m *meteredArchive) Commit(ctx context.Context, s xfer.SourceStats) error {
+	return m.aw.Commit(ctx, s)
+}
+
+func (m *meteredArchive) Result() (record.Archive, record.ArchivePos) { return m.aw.Result() }
+
+// meteredPart counts bytes flowing through one part, accumulating into the shared archive total and
+// reporting it after each write.
+type meteredPart struct {
+	m *meteredArchive
+	w io.WriteCloser
+}
+
+func (p *meteredPart) Write(b []byte) (int, error) {
+	n, err := p.w.Write(b)
+	if n > 0 {
+		p.m.n += int64(n)
+		p.m.tap(p.m.n)
+	}
+	return n, err
+}
+
+func (p *meteredPart) Close() error { return p.w.Close() }
 
 // archiveWriter is one archive's part-by-part writer (see NewArchive / NewCopy) — the concrete
 // ArchiveWriter. A transfer drives NextPart/Commit, then the caller reads the committed archive and
@@ -126,7 +178,6 @@ type archiveWriter struct {
 	base      record.Header
 	meta      record.Archive
 	expectSHA string // a copy's known digest to verify against ("" for a fresh dump)
-	tap       func(int64)
 	h         hash.Hash
 	n         int64
 	parts     []record.FilePos
@@ -171,9 +222,6 @@ func (p *archivePartWriter) Write(b []byte) (int, error) {
 	if n > 0 {
 		p.a.h.Write(b[:n])
 		p.a.n += int64(n)
-		if p.a.tap != nil {
-			p.a.tap(p.a.n)
-		}
 	}
 	return n, err
 }

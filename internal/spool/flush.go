@@ -100,7 +100,7 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 						return flushed, fmt.Errorf("flush %s %s: read holding disk: %w", s.ID, dleID, err)
 					}
 					// NewCopy records the backing placement on its Commit; xfer.Reader closes rc.
-					cw, err := backingSession.NewCopy(arch, nil)
+					cw, err := backingSession.NewCopy(arch)
 					if err != nil {
 						rc.Close()
 						return flushed, fmt.Errorf("flush %s %s to %q: %w", s.ID, dleID, d.Backing, err)
