@@ -129,6 +129,32 @@ func (t *Tracker) FinishDLE(name string, fileCount int, uncompressed, compressed
 	t.flush(true)
 }
 
+// MarkToHolding records that a DLE's dump is routed to a holding disk — set the moment ingestion is
+// acquired there, before any bytes commit. It marks the staging window: live status then shows the
+// DLE staging to holding (and not yet on the volume) instead of mistaking its in-flight dump for a
+// direct write to the landing. A no-op for an unknown DLE.
+func (t *Tracker) MarkToHolding(name string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if d := t.dle(name); d != nil {
+		d.ToHolding = true
+	}
+	t.flush(true)
+}
+
+// StageHolding records that a DLE's dump committed to holding disk `holding`, the moment it lands
+// there — before it is its turn to drain. This is what distinguishes a buffered DLE queued behind
+// another's drain from a direct dump: until the drainer reaches it, only this mark tells the two
+// apart (without it, a queued holding DLE renders as "direct"). A no-op for an unknown DLE.
+func (t *Tracker) StageHolding(name, holding string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if d := t.dle(name); d != nil {
+		d.Holding = holding
+	}
+	t.flush(true)
+}
+
 // StartFlush marks a DLE as draining from the holding disk it landed on (holding) to the landing
 // (the second phase after its dump committed). Recording the disk lets a multi-disk run show where
 // each DLE buffered. A no-op for an unknown DLE.

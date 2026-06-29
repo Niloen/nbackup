@@ -272,6 +272,62 @@ func TestDrainProgressAndRates(t *testing.T) {
 	}
 }
 
+// TestStagedHoldingNotDirect: a DLE whose dump has committed to a holding disk but is still
+// queued behind another DLE's drain (StageHolding called, StartFlush not yet) must read as
+// draining — a 0% flush bar, not the misleading "direct" of a dump that bypassed holding.
+func TestStagedHoldingNotDirect(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("slot", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000}}, c.now, nil)
+	tr.StartDLE("alpha")
+	tr.StageHolding("alpha", "scratch") // committed to holding...
+	tr.FinishDLE("alpha", 1, 1000, 800, nil)
+	// ...but the drainer has not reached it yet, so no StartFlush / AddDrainBytes.
+
+	snap := tr.Snapshot()
+	a := snap.DLEs[0]
+	if !a.Drains() {
+		t.Fatalf("a DLE staged on holding must read as draining; got %+v", a)
+	}
+	if got := a.DrainPct(); got != 0 {
+		t.Fatalf("a staged-but-not-yet-drained DLE must show 0%% drain, got %.0f", got)
+	}
+	var sb strings.Builder
+	Render(&sb, snap, c.now())
+	if out := sb.String(); strings.Contains(out, "direct") {
+		t.Errorf("a DLE buffered on holding must not render as \"direct\":\n%s", out)
+	}
+}
+
+// TestStagingToHolding: while a holding-bound DLE is still dumping to its disk (MarkToHolding
+// called, dump not committed), its FLUSH cell reads "staging" — not the misleading "-"/"direct"
+// of a dump that bypassed holding — and its VOLUME is 0, since the bytes are on holding, not the
+// authoritative volume yet.
+func TestStagingToHolding(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("slot", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000}}, c.now, nil)
+	tr.StartDLE("alpha")
+	tr.MarkToHolding("alpha")      // routed to holding...
+	tr.AddBytes("alpha", 500, 400) // ...still dumping there: 400 compressed on holding, not landed
+
+	snap := tr.Snapshot()
+	a := snap.DLEs[0]
+	if a.Drains() {
+		t.Fatalf("a DLE still dumping to holding has not committed, so must not read as draining: %+v", a)
+	}
+	if got := a.OnVolume(); got != 0 {
+		t.Fatalf("staging on-volume = %d, want 0 (bytes are on holding, not the volume)", got)
+	}
+	var sb strings.Builder
+	Render(&sb, snap, c.now())
+	out := sb.String()
+	if !strings.Contains(out, "staging") {
+		t.Errorf("a DLE dumping to holding should show \"staging\" in its drain cell:\n%s", out)
+	}
+	if strings.Contains(out, "direct") {
+		t.Errorf("a holding-bound dump must not render as \"direct\":\n%s", out)
+	}
+}
+
 // TestDirectDumpNoDrain confirms a DLE that never goes through a holding disk shows no
 // drain phase: no Drain footer, "direct" in its drain cell, and volume = compressed out.
 func TestDirectDumpNoDrain(t *testing.T) {

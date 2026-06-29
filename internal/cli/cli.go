@@ -29,18 +29,23 @@ func Fatalf(format string, args ...any) {
 	os.Exit(1)
 }
 
-// todayUTC is today's date at UTC midnight — the run-date default and the
-// past/future boundary the plan/dump guards compare against.
-func todayUTC() time.Time {
-	return time.Now().UTC().Truncate(24 * time.Hour)
+// today is today's date at local midnight — the run-date default and the
+// past/future boundary the plan/dump guards compare against. Slot dates are the
+// operator's local calendar day (the day on the wall clock), so "today" and the
+// guards reason in that same local zone.
+func today() time.Time {
+	y, m, d := time.Now().Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.Local)
 }
 
-// ParseDate parses a YYYY-MM-DD date, or returns today (UTC) when empty.
+// ParseDate parses a YYYY-MM-DD date in the local zone, or returns today (local)
+// when empty. Local so an explicit --date names the same calendar day the slot id
+// will carry.
 func ParseDate(s string) (time.Time, error) {
 	if s == "" {
-		return todayUTC(), nil
+		return today(), nil
 	}
-	d, err := time.Parse("2006-01-02", s)
+	d, err := time.ParseInLocation("2006-01-02", s, time.Local)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("invalid date %q: --date must be in YYYY-MM-DD format", s)
 	}
@@ -52,7 +57,7 @@ func ParseDate(s string) (time.Time, error) {
 // ignores everything that happened since and reports a misleading from-scratch
 // cold start — not a meaningful preview. Today and future dates are fine.
 func errPastPlan(date time.Time) error {
-	if date.Before(todayUTC()) {
+	if date.Before(today()) {
 		return fmt.Errorf("cannot plan a run for %s: it is in the past, and planning only reflects history before the run date (so a past date reports a misleading cold start)", record.DateString(date))
 	}
 	return nil
@@ -64,7 +69,7 @@ func errPastPlan(date time.Time) error {
 // incremental level rather than starting that date's own chain) and splice an
 // out-of-order archive into date-ordered restore chains. Today and future are fine.
 func errPastDump(date time.Time) error {
-	if date.Before(todayUTC()) {
+	if date.Before(today()) {
 		return fmt.Errorf("cannot dump for %s: it is in the past, and backdating a run is not supported (the planner builds on history before the run date) — use today's date", record.DateString(date))
 	}
 	return nil

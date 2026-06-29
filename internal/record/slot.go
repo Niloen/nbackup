@@ -47,15 +47,15 @@ type ArchivePos struct {
 // writer builds one up during a run (NewSlot -> AddArchive via Commit -> Finish) and the
 // catalog assembles one from a scan; "sealed" now means only "the run finished" (in memory).
 //
-// The ID is the slot's identity: "slot-" + Date (+ ".Sequence" for the 2nd+ run
-// of a day) — see IDFromParts. The natural key is a date, so the "slot-" tag is
-// what keeps it from reading as a plain date wherever it appears bare: catalog
-// JSON (an id beside an identical date), logs, Archive.BaseSlot references, and
-// the on-disk slots/<id>/ directory. The system's other ids need no such tag
-// because they are already distinctive words (labels "<medium>-<date>", DLEs
-// "<host>-<path>"), not bare dates.
+// The ID is the slot's identity: "slot-" + Date + a fixed-width ".NNN" sequence
+// (".001" for the day's first run) — see IDFromParts. The natural key is a date,
+// so the "slot-" tag is what keeps it from reading as a plain date wherever it
+// appears bare: catalog JSON (an id beside an identical date), logs,
+// Archive.BaseSlot references, and the on-disk slots/<id>/ directory. The system's
+// other ids need no such tag because they are already distinctive words (labels
+// "<medium>-<date>", DLEs "<host>-<path>"), not bare dates.
 type Slot struct {
-	ID         string    `json:"id"`          // e.g. "slot-2026-06-21" or "slot-2026-06-21.2"
+	ID         string    `json:"id"`          // e.g. "slot-2026-06-21.001"
 	Date       string    `json:"date"`        // run date, YYYY-MM-DD
 	Sequence   int       `json:"sequence"`    // 1 for the first run of the day, 2+ for later runs
 	CreatedAt  time.Time `json:"created_at"`  // when creation started
@@ -149,14 +149,17 @@ func (s *Slot) Seal(now time.Time) error {
 // IsSealed reports whether the slot has been sealed.
 func (s *Slot) IsSealed() bool { return s.Status == StatusSealed }
 
-// IDFromParts builds a slot ID from a date string and sequence number. The
-// "slot-" prefix tags an otherwise date-shaped key so it never reads as a plain
-// date (see the Slot.ID doc); ParseID strips it back off.
+// IDFromParts builds a slot ID from a date string and sequence number. Every run
+// is suffixed with a fixed-width, zero-padded sequence (".001" for the day's first
+// run) so the ids sort chronologically under a plain lexical compare — even as an
+// object-store key with a trailing "/". A bare "slot-DATE" first run would instead
+// sort *after* its same-day reruns there, since "." (0x2E) precedes "/" (0x2F); the
+// fixed width likewise keeps ".10" from sorting before ".2". The three digits cap a
+// day at 999 runs, which a daily backup never approaches. The "slot-" prefix tags an
+// otherwise date-shaped key so it never reads as a plain date (see the Slot.ID doc);
+// ParseID strips it back off.
 func IDFromParts(date string, seq int) string {
-	if seq <= 1 {
-		return "slot-" + date
-	}
-	return fmt.Sprintf("slot-%s.%d", date, seq)
+	return fmt.Sprintf("slot-%s.%03d", date, seq)
 }
 
 // DateString formats a date the way slots use it.

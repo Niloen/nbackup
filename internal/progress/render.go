@@ -109,12 +109,19 @@ func dumpCell(d DLE) string {
 	return barCell(d.Pct())
 }
 
-// drainCell renders the FLUSH bar for a holding-disk DLE — bytes copied to the landing
-// against the staged size. A direct dump has no separate flush: it shows "direct" once
-// done (it streamed straight to the volume) and a dash while it is still dumping.
+// drainCell renders the FLUSH bar for a holding-disk DLE — bytes copied to the landing against the
+// staged size. While such a DLE is still dumping to its holding disk it shows "staging": the flush
+// has not begun and its bytes are not on the volume yet. A direct dump has no separate flush: it
+// shows "direct" once done (it streamed straight to the volume) and a dash while it is still dumping.
 func drainCell(d DLE) string {
+	if d.State == StateFailed {
+		return "-"
+	}
 	if d.Drains() {
 		return barCell(d.DrainPct())
+	}
+	if d.ToHolding {
+		return "staging"
 	}
 	if d.State == StateDone {
 		return "direct"

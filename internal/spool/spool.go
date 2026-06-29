@@ -122,6 +122,12 @@ func (d *Spool) Create(meta record.Archive, est int64, prog func(int64)) (xfer.S
 		return nil, err
 	}
 	if !direct {
+		if d.tr != nil {
+			// The dump is bound for this holding disk: mark it staging now, before any bytes commit, so
+			// live status shows it staging to holding (not yet on the volume) rather than mistaking the
+			// in-flight dump for a direct write to the landing.
+			d.tr.MarkToHolding(meta.Host + ":" + meta.Path)
+		}
 		return &remoteSink{d: d, real: d.pool.Storage(idx).NewWrite(meta, prog), kind: writeHolding, disk: idx}, nil
 	}
 	reply := make(chan error, 1)
@@ -263,6 +269,12 @@ func (d *Spool) orchestrate() {
 			}
 			if req.kind == writeHolding {
 				arch, pos := req.sink.Result()
+				if d.tr != nil {
+					// The dump committed to this disk: record where it staged so the queued DLE shows a
+					// 0% flush bar (and which disk) while it waits behind other drains — taking over from
+					// the "staging" mark its in-flight dump carried.
+					d.tr.StageHolding(arch.Host+":"+arch.Path, d.pool.Name(req.disk))
+				}
 				pendingCopy = append(pendingCopy, handoff{arch: arch, pos: pos, disk: req.disk})
 			}
 			req.reply <- sinkResp{}
