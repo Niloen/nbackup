@@ -19,7 +19,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -60,27 +59,8 @@ type gnutar struct {
 
 func (g *gnutar) Name() string { return "gnutar" }
 
-// snapPath is the location of a DLE's snapshot for a level within the library (on the
-// executor's host).
-func (g *gnutar) snapPath(dle string, level int) string {
-	return filepath.Join(g.stateDir, dle, fmt.Sprintf("L%d.snar", level))
-}
-
-// workSnap is the side file a dump writes its new snapshot to (Amanda's ".new"). tar
-// updates it in place; only a committed dump promotes it over the live snapPath, so a
-// killed dump leaves the committed base untouched.
-func (g *gnutar) workSnap(dle string, level int) string {
-	return g.snapPath(dle, level) + ".new"
-}
-
-// HasBase reports whether the snapshot left by a completed dump at the level is a usable
-// base for a higher incremental. A missing file — or a present but empty one, which a
-// killed dump can leave behind — is not usable, so it reports false and the engine
-// forces a full instead of building a full-sized incremental on a dead snapshot.
-func (g *gnutar) HasBase(dle string, level int) bool {
-	n, err := g.ex.Size(g.snapPath(dle, level))
-	return err == nil && n > 0
-}
+// The per-DLE/per-level .snar library (snapPath, workSnap, HasBase, seedSnapshot,
+// promoteSnapshot) lives in snapshot.go.
 
 // Check verifies the configured binary is GNU tar (cached), running `tar --version` on
 // the executor's host.
@@ -113,15 +93,15 @@ func parseTotals(stderr string) int64 {
 
 // BackupSource builds the tar-create stage that produces the raw archive stream and a
 // Finish hook that, after the pipeline drains, reads the member index and totals from the
-// host scratch. tar writes the new snapshot to a ".new" side file seeded from the base;
-// the committed library snapshot is read but never mutated, and Promote renames the side
-// file over it only once the caller has durably committed the archive — so a killed dump
-// (out of space, signal) leaves the base intact and a retry at the same level still works.
+// host scratch. tar writes the new snapshot to a work snapshot (a ".new" side file) seeded
+// from the committed base, which is read but never mutated; Promote renames the work
+// snapshot over the live base only once the caller has durably committed the archive — so a
+// killed dump (out of space, signal) leaves the base intact and a retry at the same level
+// still works.
 func (g *gnutar) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource, error) {
 	if err := g.Check(); err != nil {
 		return nil, err
 	}
-	live := g.snapPath(r.DLE, r.Level)
 	work := g.workSnap(r.DLE, r.Level)
 	if err := g.seedSnapshot(r, work); err != nil {
 		return nil, err
@@ -149,7 +129,7 @@ func (g *gnutar) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource,
 			Members:      members,
 		}, nil
 	}
-	promote := func() error { return g.ex.Rename(work, live) }
+	promote := func() error { return g.promoteSnapshot(r.DLE, r.Level) }
 	cleanup := func() { _ = g.ex.Remove(indexPath) }
 	return &archiver.BackupSource{Stage: stage, Exec: g.ex, Finish: finish, Promote: promote, Cleanup: cleanup}, nil
 }
@@ -239,20 +219,6 @@ func (g *gnutar) RestoreStage(destDir string, members []string) programs.Cmd {
 		args = append(args, members...)
 	}
 	return programs.Cmd{Name: g.bin, Args: args, OKExit: []int{1}}
-}
-
-// seedSnapshot prepares outSnap as the starting incremental state for the dump on the
-// executor's host: a copy of the base level's snapshot for an incremental (so the real
-// base file is never mutated — tar updates outSnap in place), or an absent file for a
-// full so tar starts fresh.
-func (g *gnutar) seedSnapshot(r archiver.BackupRequest, outSnap string) error {
-	if err := g.ex.MkdirAll(filepath.Dir(outSnap)); err != nil {
-		return err
-	}
-	if r.Level == 0 || r.BaseLevel < 0 {
-		return g.ex.Remove(outSnap) // Remove treats an absent file as success
-	}
-	return g.ex.CopyFile(g.snapPath(r.DLE, r.BaseLevel), outSnap)
 }
 
 // createArgs builds the shared tar create-mode argument list. fileTarget is "-" for a
