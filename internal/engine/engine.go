@@ -265,15 +265,13 @@ func build(cfg *config.Config, tolerateLanding bool) (*Engine, error) {
 
 // encryptionFor resolves the encryption scheme and encryptor options for a
 // dumptype's dumps: the dumptype's own `encrypt` block, else the config default.
-// A plaintext dump returns "" (not "none") so the scheme is omitted from the
-// recorded header rather than written as noise.
+// The scheme is always a concrete name (gpg|none) — the exact peer of
+// compressionFor — so a plaintext dump records "none", not "" (the two transforms
+// describe their off-state identically in the artifact). crypt.Filter("none") is
+// the identity, so the live pipeline treats it as no encryptor.
 func (e *Engine) encryptionFor(dtName string) (scheme string, opts crypt.Options) {
 	ec := e.cfg.EncryptionFor(dtName)
-	scheme = ec.Scheme
-	if scheme == "none" {
-		scheme = ""
-	}
-	return scheme, crypt.Options{
+	return ec.SchemeName(), crypt.Options{
 		Program:        ec.Program,
 		Recipient:      ec.Recipient,
 		PassphraseFile: ec.PassphraseFile,
@@ -283,9 +281,9 @@ func (e *Engine) encryptionFor(dtName string) (scheme string, opts crypt.Options
 
 // compressionFor resolves the compression scheme and compressor options for a
 // dumptype's dumps: the dumptype's own `compress` block, else the config default —
-// the write-side peer of encryptionFor. Unlike encryption, the scheme is always a
-// concrete name (zstd|gzip|none): it is recorded per-archive and reversed from the
-// artifact, so it is never elided to "".
+// the write-side peer of encryptionFor. The scheme is always a concrete name
+// (zstd|gzip|none): it is recorded per-archive and reversed from the artifact, so
+// it is never elided to "" — just as encryptionFor records a concrete "none".
 func (e *Engine) compressionFor(dtName string) (scheme string, opts compress.Options) {
 	cc := e.cfg.CompressionFor(dtName)
 	return cc.SchemeName(), compress.Options{
@@ -891,7 +889,7 @@ func (e *Engine) RestoreAsOfTo(dle, asOf, destHost, destPath, from string, logf 
 // passphrase the run had — so name both possibilities rather than leaving the
 // operator with gpg's message alone. A nil error or a plaintext archive pass through.
 func decryptHint(scheme string, err error) error {
-	if err == nil || scheme == "" {
+	if err == nil || scheme == "" || scheme == "none" {
 		return err
 	}
 	return fmt.Errorf("%w\n(this archive is %s-encrypted, so extraction needs the key: for a passphrase/symmetric dump add an `encrypt:` block with the same passphrase_file; for a public-key dump ensure its private key is in the gpg keyring)", err, scheme)

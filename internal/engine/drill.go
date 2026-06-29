@@ -709,7 +709,7 @@ func (e *Engine) postureKey() (string, PostureStatus, string) {
 	configured := false
 	for _, n := range names {
 		scheme, opts := e.encryptionFor(n)
-		if scheme == "" {
+		if scheme == "" || scheme == "none" {
 			continue
 		}
 		configured = true

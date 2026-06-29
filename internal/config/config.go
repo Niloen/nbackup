@@ -669,31 +669,50 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// validateArchivers checks every named archiver definition's inline options against the
-// option keys its type accepts (declared in the archiver registry). Options ride an
-// inline map, so YAML's KnownFields check can't reach them; without this a typo'd option
-// (e.g. `one-file-sytem`) would be silently dropped, quietly disabling a safety-relevant
-// flag. An unregistered type is left to fail at Open with its own "unknown archiver".
+// validateArchivers checks every archiver's inline options against the option keys its
+// type accepts (declared in the archiver registry) — both the named definitions and any
+// per-host override of them (`hosts.<h>.archivers.<type>`). Options ride an inline map, so
+// YAML's KnownFields check can't reach them; without this a typo'd option (e.g.
+// `one-file-sytem`) would be silently dropped, quietly disabling a safety-relevant flag. An
+// unregistered type is left to fail at Open with its own "unknown archiver".
 func (c *Config) validateArchivers() error {
 	for name, def := range c.Archivers {
 		typeName := def.Type
 		if typeName == "" {
 			typeName = name
 		}
-		known, ok := archiver.KnownOptions(typeName)
-		if !ok {
-			continue
+		if err := validateArchiverOptions(fmt.Sprintf("archivers.%s", name), typeName, def.Options); err != nil {
+			return err
 		}
-		accepted := make(map[string]bool, len(known))
-		for _, k := range known {
-			accepted[k] = true
-		}
-		for key := range def.Options {
-			if !accepted[key] {
-				sorted := append([]string(nil), known...)
-				sort.Strings(sorted)
-				return fmt.Errorf("archivers.%s: unknown option %q (accepted: %s)", name, key, strings.Join(sorted, ", "))
+	}
+	// Per-host overrides are keyed by archiver type, so the key is the type directly.
+	for host, h := range c.Hosts {
+		for typeName, overrides := range h.Archivers {
+			if err := validateArchiverOptions(fmt.Sprintf("hosts.%s.archivers.%s", host, typeName), typeName, overrides); err != nil {
+				return err
 			}
+		}
+	}
+	return nil
+}
+
+// validateArchiverOptions rejects any option key the archiver type does not accept,
+// naming the offending key and the accepted set. An unregistered type is skipped
+// (left to fail at Open). label is the config location for the error message.
+func validateArchiverOptions(label, typeName string, options map[string]string) error {
+	known, ok := archiver.KnownOptions(typeName)
+	if !ok {
+		return nil
+	}
+	accepted := make(map[string]bool, len(known))
+	for _, k := range known {
+		accepted[k] = true
+	}
+	for key := range options {
+		if !accepted[key] {
+			sorted := append([]string(nil), known...)
+			sort.Strings(sorted)
+			return fmt.Errorf("%s: unknown option %q (accepted: %s)", label, key, strings.Join(sorted, ", "))
 		}
 	}
 	return nil

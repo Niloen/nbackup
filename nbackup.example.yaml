@@ -310,9 +310,13 @@ dumptypes:
   # plaintext never leaves the source. encrypt.at: client requires compress.at: client
   # (encryption is downstream of compression). With a public-key recipient only the
   # public key need be on the client; the private key decrypts wherever it lives.
+  # REMEMBER the override is wholesale (no field merge): restate scheme/level too,
+  # not just `at:` — otherwise the top-level `level: 3` reverts to the scheme default.
   # remote-secure:
   #   archiver: default
   #   compress:
+  #     scheme: zstd              # restate the whole block — no merge with the top-level one
+  #     level: 3
   #     at: client                # server (default) | client
   #   encrypt:
   #     scheme: gpg
