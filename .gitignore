@@ -11,9 +11,10 @@
 # the real config is local; only the example is tracked
 /nbackup.yaml
 
-# Claude Code local agent state is ignored, but checked-in commands are tracked.
+# Claude Code local agent state is ignored, but checked-in commands and skills are tracked.
 .claude/*
 !.claude/commands/
+!.claude/skills/
 
 .idea/
 nbackup-state/
