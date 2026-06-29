@@ -72,8 +72,8 @@ type Engine struct {
 	ver            *verifier                     // the verification operation (verify/drill checks); shares catalog + data path + decoder
 	cop            *copier                       // the copy operation (PlanCopy/CopySlot); shares catalog + data path + write machinery
 	rst            *restorer                     // the restore/recover operation; shares catalog + data path + decoder + config
-	acct           *accounting.Ledger            // capacity/retention arithmetic (stubbed; engine still does the real work)
-	sched          *scheduler.Scheduler          // plan/estimate/validate lane (stubbed; engine still does the real work)
+	acct           *accounting.Accountant        // capacity/retention arithmetic; the engine's capacity methods delegate here
+	sched          *scheduler.Scheduler          // plan/estimate/validate lane; the engine's plan methods delegate here
 }
 
 // SetOperator attaches an operator so manual single-drive media can prompt for a

@@ -5,11 +5,11 @@ import (
 	"github.com/Niloen/nbackup/internal/media"
 )
 
-// newLedger wires an accounting.Ledger to the engine's catalog, config, landing
+// newLedger wires an accounting.Accountant to the engine's catalog, config, landing
 // profile, and the few closures the capacity/retention arithmetic cannot derive on
-// its own. The ledger is stubbed for now — the engine still does the real work — so
-// this only establishes the seam (see internal/accounting).
-func (e *Engine) newLedger() *accounting.Ledger {
+// its own. The engine's capacity/retention methods are thin pass-throughs to it
+// (see internal/accounting).
+func (e *Engine) newLedger() *accounting.Accountant {
 	return accounting.New(accounting.Deps{
 		Cat:            e.cat,
 		Cfg:            e.cfg,
@@ -20,7 +20,6 @@ func (e *Engine) newLedger() *accounting.Ledger {
 			v, _, _, err := e.mediumVolume(n)
 			return v, err
 		},
-		VolumesInPool: e.volumesInPool,
-		DisplayDLE:    e.DisplayDLE,
+		DisplayDLE: e.DisplayDLE,
 	})
 }

@@ -8,9 +8,8 @@ import (
 )
 
 // newScheduler wires a scheduler.Scheduler to the engine's config, catalog history,
-// archiver resolution, and pre-flight checks. The scheduler is stubbed for now — the
-// engine still does the real planning — so this only establishes the seam (see
-// internal/scheduler).
+// archiver resolution, and pre-flight checks. The engine's plan/estimate/validate
+// methods are thin pass-throughs to it (see internal/scheduler).
 func (e *Engine) newScheduler() *scheduler.Scheduler {
 	return scheduler.New(scheduler.Deps{
 		DLEs:              e.cfg.DLEs,

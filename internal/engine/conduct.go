@@ -15,8 +15,8 @@ import (
 // shared PrepareWrite→WriteSink→NewWriter contract), opens the slot store over it,
 // and reports the medium's spanning capability and capacity. It mirrors the calls
 // runOrchestrated makes (clerk.OpenSlot, lib.CanSpan, Media.CapacityBytes) so the
-// types line up. It is the one real helper this seam commit adds; the conductor
-// itself is still stubbed (see internal/conductor).
+// types line up — folding that machinery here keeps the conductor free of the
+// clerk/librarian packages.
 func (e *Engine) openWriter(medium string, spec archiveio.SlotSpec, now time.Time, lf logf.Logf) (conductor.PreparedWriter, error) {
 	wt, err := e.prepareWriter(medium, spec, now, lf)
 	if err != nil {
@@ -33,8 +33,8 @@ func (e *Engine) openWriter(medium string, spec archiveio.SlotSpec, now time.Tim
 // newConductor wires a per-run conductor.Conductor to the engine's dumper, plan
 // lane, landing volume, and write/flush machinery. Plan binds to the scheduler's
 // method (not the engine's own planWith) so the run lane reads its plan from the
-// scheduler. The conductor is stubbed for now — the engine still drives the real
-// run — so this only establishes the seam (see internal/conductor).
+// scheduler. The engine's Backup/PlannedSlotID methods build one of these per run
+// and delegate to it (see internal/conductor).
 func (e *Engine) newConductor() *conductor.Conductor {
 	return conductor.New(conductor.Deps{
 		Cat:               e.cat,
@@ -46,8 +46,8 @@ func (e *Engine) newConductor() *conductor.Conductor {
 		ProbeReachable:    e.probeReachable,
 		PreflightDumptype: e.preflightDumptype,
 		Flush:             e.Flush,
-		HoldingMedia:      e.cfg.HoldingMedia,
-		Workers:           e.cfg.Workers,
+		HoldingMedia:      e.cfg.HoldingMedia(),
+		Workers:           e.cfg.Workers(),
 		NewFileSink:       func() progress.Sink { return progress.NewFileSink(e.cfg.WorkdirPath(), time.Now) },
 		Landing:           e.mediumName,
 		RunSink:           e.runSink,
