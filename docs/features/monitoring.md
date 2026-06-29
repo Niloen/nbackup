@@ -147,8 +147,11 @@ notify:
 - Other commands' success is **opt-in**: list backends in `on_success` for
   `sync` / `verify` / `drill` / `prune` (that list then applies to dump too).
 
-Secrets are referenced by **environment-variable name** and resolved at send time,
-so nothing sensitive lives in the config — a literal `password:` is rejected. A
+A literal `password:`/`token:` key is **rejected** (neither is a config field), so
+an SMTP password is given by the **name** of an environment variable (`password_env`)
+and resolved at send time — credentials never sit in the config. A webhook URL may be
+a literal `url:` *or*, when the URL is itself a secret (Slack/Discord bear the
+credential in the URL), the name of an environment variable (`url_env`, preferred). A
 notification failure (unreachable mail server, missing secret, hung endpoint) is
 **only ever a stderr warning**: it never fails or blocks the backup.
 

@@ -396,8 +396,10 @@ for `sync`/`verify`/`drill`/`prune` (that list then applies to dump too). A dump
 notification carries the **full per-DLE dump report** (the `nb report --dump` table),
 so the nightly email *is* the full report — not just "it worked".
 
-Secrets are referenced by environment-variable *name* and resolved at send time, so
-nothing sensitive lives in the config (a literal `password:` is rejected). A
+A literal `password:`/`token:` key is rejected (neither is a config field), so an SMTP
+password is referenced by environment-variable *name* (`password_env`) and resolved at
+send time — credentials never sit in the config. A webhook URL may be a literal `url:`
+or, when secret (Slack/Discord), an env-var name (`url_env`, preferred). A
 notification failure — unreachable mail server, missing secret, hung endpoint — is
 only ever a stderr warning: it never fails or blocks the backup. So a complete
 hands-off cron line is:
