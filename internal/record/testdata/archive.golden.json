@@ -1,0 +1,17 @@
+{
+  "slot": "slot-2026-01-02.001",
+  "dle": "h-data",
+  "host": "h",
+  "path": "/data",
+  "archiver": "gnutar",
+  "compress": "none",
+  "encrypt": "none",
+  "level": 1,
+  "compressed": 4096,
+  "uncompressed": 8192,
+  "file_count": 3,
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "parts": 2,
+  "base_slot": "slot-2026-01-01.001",
+  "created_at": "2026-01-02T03:04:05Z"
+}

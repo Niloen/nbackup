@@ -33,9 +33,34 @@ func goldenHeader() record.Header {
 		Path:      "/data",
 		Archiver:  "gnutar",
 		Compress:  "none",
+		Encrypt:   "none",
 		Level:     1,
 		BaseSlot:  "slot-2026-01-01.001",
 		CreatedAt: goldenTime,
+	}
+}
+
+// goldenArchive is one commit footer carrying every field — the per-archive marker a
+// rebuild reads off the medium, the richest frozen on-medium record. Members is
+// omitempty (it rides in the separate index, cleared before MarshalCommit), so the
+// footer omits it.
+func goldenArchive() record.Archive {
+	return record.Archive{
+		Slot:         "slot-2026-01-02.001",
+		DLE:          "h-data",
+		Host:         "h",
+		Path:         "/data",
+		Archiver:     "gnutar",
+		Compress:     "none",
+		Encrypt:      "none",
+		Level:        1,
+		Compressed:   4096,
+		Uncompressed: 8192,
+		FileCount:    3,
+		SHA256:       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		Parts:        2,
+		BaseSlot:     "slot-2026-01-01.001",
+		CreatedAt:    goldenTime,
 	}
 }
 
@@ -62,6 +87,18 @@ func TestLabelGolden(t *testing.T) {
 	assertGolden(t, "label.golden.json", goldenLabel())
 }
 
+// TestArchiveGolden pins the JSON wire encoding of the commit footer, marshaled the
+// way the writer commits it (record.MarshalCommit, indented). A renamed, dropped,
+// retyped, or re-tagged field on record.Archive changes the committed golden and fails
+// here — the footer's tripwire, the peer of TestHeaderGolden for the on-medium marker.
+func TestArchiveGolden(t *testing.T) {
+	got, err := record.MarshalCommit(goldenArchive())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertGoldenBytes(t, "archive.golden.json", bytes.TrimRight(got, "\n"))
+}
+
 // assertGolden marshals v the way the format package writes it (compact JSON, as
 // EncodeHeader and WriteLabel do) and compares to the committed golden, or rewrites
 // it under -update.
@@ -71,6 +108,14 @@ func assertGolden(t *testing.T, name string, v any) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertGoldenBytes(t, name, got)
+}
+
+// assertGoldenBytes compares already-marshaled wire bytes to the committed golden, or
+// rewrites it under -update. It is the shared core for records whose on-medium
+// encoding is not plain compact JSON (the commit footer is indented).
+func assertGoldenBytes(t *testing.T, name string, got []byte) {
+	t.Helper()
 	path := filepath.Join("testdata", name)
 	if *updateGolden {
 		if err := os.MkdirAll("testdata", 0o755); err != nil {

@@ -7,6 +7,13 @@
 // on its own because every file leads with one of these records: scanning them
 // reconstructs the catalog. There is no per-slot seal — a slot is the grouping its
 // archives carry in their headers.
+//
+// Alongside the on-medium records it also defines the location types that *point at*
+// them — FilePos (a file's volume+position) and ArchivePos (an archive's parts,
+// commit, and index positions). These are catalog placements, not bytes on the
+// medium: the catalog persists them in its rebuildable workdir cache, and the scanner
+// reconstructs them by reading the records above. They live here so the writer (which
+// emits the positions) and the catalog (which stores them) share one type.
 package record
 
 import (
@@ -53,11 +60,11 @@ type Header struct {
 	Path      string    `json:"path,omitempty"`
 	Archiver  string    `json:"archiver,omitempty"`
 	Compress  string    `json:"compress,omitempty"`
-	Encrypt   string    `json:"encrypt,omitempty"` // encryption scheme name (gpg); reversed on restore. "" = plaintext. The key is never recorded — gpg resolves it from the ciphertext + keyring.
+	Encrypt   string    `json:"encrypt,omitempty"` // encryption scheme name (gpg|none); reversed on restore. "none" = plaintext (the peer of Compress, which is likewise always concrete). The key is never recorded — gpg resolves it from the ciphertext + keyring.
 	Level     int       `json:"level,omitempty"`
 	BaseSlot  string    `json:"base_slot,omitempty"`
 	Part      int       `json:"part,omitempty"` // 0-based index of this part within its archive (0 = first/only); the archive's total part count lives in its commit footer (Archive.Parts), not here
-	CreatedAt time.Time `json:"created_at"`
+	CreatedAt time.Time `json:"created_at"`     // when the run that authored this file began — a per-run stamp shared by every file of a slot. NOT this archive's own landing time: that is Archive.CreatedAt in the commit footer (per-archive, the retention-age basis), which for a copied slot can differ from the source run's start recorded here.
 }
 
 // FileInfo is a file's position and header, as returned by Files().

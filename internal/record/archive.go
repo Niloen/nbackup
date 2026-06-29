@@ -46,7 +46,7 @@ type Archive struct {
 	Path         string    `json:"path"`                // source path
 	Archiver     string    `json:"archiver"`            // archiver type that produced it
 	Compress     string    `json:"compress"`            // compression scheme (zstd|gzip|none); reversed on restore
-	Encrypt      string    `json:"encrypt,omitempty"`   // encryption scheme (gpg); reversed on restore. "" = plaintext. The key is never stored — restore resolves it from the operator's keyring.
+	Encrypt      string    `json:"encrypt"`             // encryption scheme (gpg|none); reversed on restore. "none" = plaintext — always concrete, the peer of Compress, so the two transforms describe their off-state identically. The key is never stored — restore resolves it from the operator's keyring.
 	Level        int       `json:"level"`               // 0 = full, >=1 = incremental
 	Compressed   int64     `json:"compressed"`          // payload size on the volume
 	Uncompressed int64     `json:"uncompressed"`        // archive stream size before compression
