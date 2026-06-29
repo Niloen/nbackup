@@ -73,6 +73,7 @@ type SlotSpec struct {
 type Writer struct {
 	sink VolumeSink
 	lim  *ratelimit.Limiter // optional bandwidth cap on the bytes landing on the medium (nil = uncapped)
+	now  func() time.Time   // clock for per-archive commit timestamps (nil → time.Now)
 
 	mu      sync.Mutex // guards the records below
 	slot    *record.Slot
@@ -95,9 +96,12 @@ type archiveRecord struct {
 // politeness); a nil lim is uncapped. The same lim is shared across concurrent
 // WriteArchive calls on an unbounded sink, so several workers to one medium share its
 // budget.
-func NewWriter(sink VolumeSink, spec SlotSpec, lim *ratelimit.Limiter) *Writer {
+func NewWriter(sink VolumeSink, spec SlotSpec, lim *ratelimit.Limiter, now func() time.Time) *Writer {
+	if now == nil {
+		now = time.Now
+	}
 	slot := record.NewSlot(spec.ID, spec.Date, spec.Sequence, spec.Generator, spec.CreatedAt)
-	return &Writer{sink: sink, lim: lim, slot: slot}
+	return &Writer{sink: sink, lim: lim, now: now, slot: slot}
 }
 
 // NewArchive begins writing the archive described by meta onto the slot, pulled part-by-part by
@@ -193,6 +197,7 @@ func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.Produced) error {
 	arch.FileCount = p.FileCount
 	arch.Uncompressed = p.Uncompressed
 	arch.Members = p.Members
+	arch.CreatedAt = a.w.now() // the archive's landing time (per-archive)
 	pos, err := a.w.Commit(ctx, arch, a.parts)
 	if err != nil {
 		return err
@@ -451,8 +456,6 @@ func (w *Writer) Positions() []record.ArchivePos {
 // checksum, not a re-read. Verifying the bytes actually landed is the job of the
 // explicit, operator-invoked `nb verify`.
 func (w *Writer) Finish(now time.Time) (*record.Slot, error) {
-	if err := w.slot.Seal(now); err != nil {
-		return nil, err
-	}
+	_ = now // no slot-level seal: a slot is its committed archives (each durable via its footer)
 	return w.slot, nil
 }

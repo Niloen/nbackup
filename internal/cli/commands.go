@@ -533,10 +533,10 @@ func runSlotList(a *app) error {
 	fmt.Fprintln(tw, "SLOT\tSTATUS\tARCHIVES\tSIZE\tCOMMITTED\tCOPIES")
 	for _, s := range slots {
 		committed := "-"
-		if !s.SealedAt.IsZero() {
-			committed = s.SealedAt.Format("2006-01-02 15:04")
+		if t := s.LastArchiveAt(); !t.IsZero() {
+			committed = t.Format("2006-01-02 15:04")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", s.ID, slotStatusDisplay(s.Status), len(s.Archives),
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", s.ID, "committed", len(s.Archives),
 			sizeutil.FormatBytes(s.TotalBytes), committed, copiesSummary(eng.Catalog().Placements(s.ID)))
 	}
 	tw.Flush()
@@ -573,9 +573,9 @@ func runSlotShow(a *app, slotID string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Slot %s  (%s)\n", s.ID, slotStatusDisplay(s.Status))
+	fmt.Printf("Slot %s  (%s)\n", s.ID, "committed")
 	fmt.Printf("  date:    %s\n", s.Date)
-	fmt.Printf("  committed: %s\n", s.SealedAt.Format("2006-01-02 15:04:05 MST"))
+	fmt.Printf("  committed: %s\n", s.LastArchiveAt().Format("2006-01-02 15:04:05 MST"))
 	fmt.Printf("  total:   %s\n\n", sizeutil.FormatBytes(s.TotalBytes))
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "DLE\tLEVEL\tFILES\tSIZE\tCOMPRESS\tENCRYPT")
@@ -922,15 +922,6 @@ func newResetCmd(a *app) *cobra.Command {
 // it is a no-op by design even when the library is over capacity. Say so, and point
 // at the deliberate recycle path, so a user lowering tape capacity isn't told the
 // slots "fit" when per-slot pruning simply does not apply to tape.
-// slotStatusDisplay renders a slot's internal status with the user-facing
-// vocabulary: a complete slot is "committed" (its archives' commit footers are all
-// present), not "sealed" — NBackup has no slot-level seal.
-func slotStatusDisplay(status string) string {
-	if status == record.StatusSealed {
-		return "committed"
-	}
-	return status
-}
 
 func printNothingToReclaim(eng *engine.Engine, name string) {
 	if info, ok := eng.Medium(name); ok && info.Type == "tape" {
@@ -1282,8 +1273,8 @@ func mediumDetail(eng *engine.Engine, name string) error {
 	fmt.Fprintln(tw, "SLOT\tSIZE\tARCHIVES\tCOMMITTED")
 	for _, s := range slots {
 		committed := "-"
-		if !s.SealedAt.IsZero() {
-			committed = s.SealedAt.Format("2006-01-02 15:04")
+		if t := s.LastArchiveAt(); !t.IsZero() {
+			committed = t.Format("2006-01-02 15:04")
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", s.ID, sizeutil.FormatBytes(s.TotalBytes), len(s.Archives), committed)
 	}

@@ -123,18 +123,11 @@ func (s *Session) CopyArchive(ctx context.Context, meta record.Archive, payload 
 	return s.clerk.cat.AddArchive(s.w.SlotMeta(), s.medium, arch, pos)
 }
 
-// Finish closes the slot: it seals the in-memory slot and stamps it sealed in the catalog. The
-// archives were recorded as they committed (NewWrite's Commit, or CopyArchive inline), so Finish
-// only marks the run complete.
+// Finish ends the write session and returns the slot it authored. There is no seal — the archives
+// were each recorded as they committed (NewWrite's Commit, or CopyArchive inline), so a slot is
+// simply its committed archives.
 func (s *Session) Finish(now time.Time) (*record.Slot, error) {
-	sealed, err := s.w.Finish(now)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.clerk.cat.SealSlot(sealed.ID, now); err != nil {
-		return nil, err
-	}
-	return sealed, nil
+	return s.w.Finish(now)
 }
 
 // archivePosFiles lists an archive's file positions for reclamation, the commit footer (the marker)

@@ -117,9 +117,6 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 				logf("flushed %s %s to %q", s.ID, dleID, d.Backing)
 			}
 		}
-		if err := d.Cat.SealSlot(s.ID, now); err != nil {
-			return flushed, fmt.Errorf("flush %s: seal: %w", s.ID, err)
-		}
 	}
 	return flushed, nil
 }

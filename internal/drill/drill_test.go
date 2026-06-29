@@ -8,7 +8,7 @@ import (
 )
 
 func mkSlot(id, date string, archives ...record.Archive) *record.Slot {
-	s := &record.Slot{ID: id, Date: date, Sequence: 1, Status: record.StatusSealed, Archives: archives}
+	s := &record.Slot{ID: id, Date: date, Sequence: 1, Archives: archives}
 	for _, a := range archives {
 		s.TotalBytes += a.Compressed
 	}

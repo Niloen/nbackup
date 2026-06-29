@@ -31,7 +31,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"time"
 
 	"github.com/Niloen/nbackup/internal/record"
 )
@@ -248,20 +247,6 @@ func mergeArchivePos(list []ArchivePos, pos ArchivePos) []ArchivePos {
 		}
 	}
 	return append(list, pos)
-}
-
-// SealSlot marks a cached slot sealed (the run finished) — used by `nb flush` to finalize a
-// crashed run's slot once its archives have been drained from the holding disk to the landing.
-// A no-op for an unknown slot; errors only on an empty slot (which Seal refuses).
-func (c *Catalog) SealSlot(id string, now time.Time) error {
-	e := c.entryByID(id)
-	if e == nil {
-		return nil
-	}
-	if err := e.Slot.Seal(now); err != nil {
-		return err
-	}
-	return c.persist()
 }
 
 // RemovePlacement drops the copy of a slot on one medium. When the last copy is

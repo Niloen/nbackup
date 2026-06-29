@@ -69,21 +69,28 @@ func Compute(slots []*record.Slot, minAge time.Duration, now time.Time) Floor {
 			reasons[archiveRef{slot, dle}] = reason
 		}
 	}
-	young := func(s *record.Slot) bool {
-		if minAge <= 0 || s.SealedAt.IsZero() {
-			return false
-		}
-		// Age is measured from when the slot was committed (SealedAt), not its
-		// Date: the Date is day-granular, so comparing it would collapse every
-		// minimum_age under 24h to a whole-day step (a slot committed this morning
-		// would read as exactly "today old"). SealedAt is the real commit instant,
-		// so a sub-day minimum_age keeps only slots actually that recent.
-		return now.Sub(s.SealedAt) < minAge
+	youngArchive := func(a record.Archive) bool {
+		// Age is measured per archive from when it committed (CreatedAt), not the slot's
+		// Date: the Date is day-granular, so comparing it would collapse every minimum_age
+		// under 24h to a whole-day step. CreatedAt is the real landing instant, so a sub-day
+		// minimum_age keeps only archives actually that recent. A zero CreatedAt (older media)
+		// reads as not-young, i.e. reclaimable.
+		return minAge > 0 && !a.CreatedAt.IsZero() && now.Sub(a.CreatedAt) < minAge
 	}
-	// 1) Age floor: a young slot pins every archive it carries.
+	// young reports whether any of a slot's archives is within the minimum age — the slot-level
+	// view the recovery-chain rule anchors on.
+	young := func(s *record.Slot) bool {
+		for _, a := range s.Archives {
+			if youngArchive(a) {
+				return true
+			}
+		}
+		return false
+	}
+	// 1) Age floor: pin each archive still within the minimum age (per archive).
 	for _, s := range slots {
-		if young(s) {
-			for _, a := range s.Archives {
+		for _, a := range s.Archives {
+			if youngArchive(a) {
 				pin(s.ID, a.DLE, fmt.Sprintf("within minimum age (%s)", sizeutil.FormatDuration(minAge)))
 			}
 		}

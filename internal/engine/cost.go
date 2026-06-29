@@ -66,17 +66,16 @@ func (e *Engine) ForecastCost(start time.Time, days int) []ForecastPoint {
 		date := start.AddDate(0, 0, i)
 		ds := record.DateString(date)
 
-		// Synthesize the day's run as a sealed slot (sized from the plan's estimates),
+		// Synthesize the day's run as a slot (sized from the plan's estimates),
 		// replacing any existing slot of the same id so a re-simulation is idempotent.
 		sl := record.NewSlot(record.IDFromParts(ds, 1), ds, 1, "forecast", date)
 		var runBytes int64
 		for _, it := range plan.Items {
-			sl.AddArchive(record.Archive{DLE: it.Name, Level: it.Level, Compressed: it.EstBytes})
+			sl.AddArchive(record.Archive{DLE: it.Name, Level: it.Level, Compressed: it.EstBytes, CreatedAt: date})
 			runBytes += it.EstBytes
 		}
 		working = dropSlot(working, sl.ID)
 		if len(sl.Archives) > 0 {
-			_ = sl.Seal(date)
 			working = append(working, sl)
 		}
 

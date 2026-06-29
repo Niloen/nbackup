@@ -217,7 +217,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	sink := &memSink{vols: []*memVolume{v1, v2, v3}}
 
 	spec := SlotSpec{ID: "slot-2026-06-21", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
-	w := NewWriter(sink, spec, nil)
+	w := NewWriter(sink, spec, nil, nil)
 
 	body := []byte(strings.Repeat("abcdefgh", 25*1024/8*4)) // 100 KiB → spans v1+v2, seal on v3
 	arch := writeOneArchive(t, w, "dle1", body)
@@ -241,12 +241,8 @@ func TestSpanAcrossVolumes(t *testing.T) {
 		t.Fatalf("parts landed on a single volume %v; did not span", vols)
 	}
 
-	sealed, err := w.Finish(time.Unix(1, 0).UTC())
-	if err != nil {
+	if _, err := w.Finish(time.Unix(1, 0).UTC()); err != nil {
 		t.Fatalf("Finish: %v", err)
-	}
-	if !sealed.IsSealed() {
-		t.Fatal("slot not sealed")
 	}
 
 	// Read the archive back by concatenating its parts; it must equal the input.
@@ -279,7 +275,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	sink := &memSink{vols: []*memVolume{v}, partCap: 10 * 1024}
 
 	spec := SlotSpec{ID: "slot-x", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
-	w := NewWriter(sink, spec, nil)
+	w := NewWriter(sink, spec, nil, nil)
 	body := []byte(strings.Repeat("z", 55*1024)) // 55 KiB / 10 KiB ≈ 6 parts
 	arch := writeOneArchive(t, w, "dle1", body)
 	if arch.Parts < 5 {
@@ -307,7 +303,7 @@ func TestRollFailureNoDeadlock(t *testing.T) {
 	v := newMemVolume("v1", 96*1024) // one small volume, no room to roll
 	sink := &memSink{vols: []*memVolume{v}}
 	spec := SlotSpec{ID: "slot-y", Date: "2026-06-21", Sequence: 1, Generator: "test", CreatedAt: time.Unix(0, 0).UTC()}
-	w := NewWriter(sink, spec, nil)
+	w := NewWriter(sink, spec, nil, nil)
 
 	body := []byte(strings.Repeat("q", 200*1024)) // far bigger than one volume
 	err := driveArchive(w.NewArchive(record.Archive{DLE: "dle1", Level: 0}, nil), body)

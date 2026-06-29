@@ -16,12 +16,15 @@ func mkSlot(id, date string, archives ...record.Archive) *record.Slot {
 	return mkSlotAt(id, date, t, archives...)
 }
 
-// mkSlotAt is mkSlot with an explicit commit instant (SealedAt), for exercising
-// minimum_age below a day. It derives Sequence from the id so same-date slots order
-// correctly under record.Less (which hasNewerFull relies on).
-func mkSlotAt(id, date string, sealedAt time.Time, archives ...record.Archive) *record.Slot {
+// mkSlotAt is mkSlot with an explicit commit instant, stamped on each archive's CreatedAt
+// (retention ages per archive), for exercising minimum_age below a day. It derives Sequence from
+// the id so same-date slots order correctly under record.Less (which hasNewerFull relies on).
+func mkSlotAt(id, date string, at time.Time, archives ...record.Archive) *record.Slot {
 	_, seq, _ := record.ParseID(id)
-	return &record.Slot{ID: id, Date: date, Sequence: seq, SealedAt: sealedAt, Archives: archives}
+	for i := range archives {
+		archives[i].CreatedAt = at
+	}
+	return &record.Slot{ID: id, Date: date, Sequence: seq, Archives: archives}
 }
 
 func arch(dle string, level int) record.Archive { return record.Archive{DLE: dle, Level: level} }

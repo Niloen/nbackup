@@ -8,13 +8,6 @@ import (
 	"time"
 )
 
-const (
-	// StatusOpen marks a slot whose creation is in progress.
-	StatusOpen = "open"
-	// StatusSealed marks an immutable, complete slot.
-	StatusSealed = "sealed"
-)
-
 // FilePos is the location of one file on a volume: the label of the volume it is on
 // plus a file position. Label is the volume's global, device-independent identity (the
 // name on the cartridge); it is empty for address-identified media (disk, s3), which
@@ -43,9 +36,9 @@ type ArchivePos struct {
 // Slot is a run's grouping of archives — the in-memory unit retention and display work on.
 // It is NOT a record on the medium: each archive carries the slot id in its header and is
 // made durable by its own commit footer, so a slot is reconstructed by grouping committed
-// archives (a crashed run keeps its committed archives; uncommitted parts are orphans). The
-// writer builds one up during a run (NewSlot -> AddArchive via Commit -> Finish) and the
-// catalog assembles one from a scan; "sealed" now means only "the run finished" (in memory).
+// archives (a crashed run keeps its committed archives; uncommitted parts are orphans). There
+// is no completion state — a slot is simply its archives; its "time" is the latest archive that
+// landed (LastArchiveAt). The catalog assembles one from a scan; an empty run has no slot at all.
 //
 // The ID is the slot's identity: "slot-" + Date + a fixed-width ".NNN" sequence
 // (".001" for the day's first run) — see IDFromParts. The natural key is a date,
@@ -58,9 +51,7 @@ type Slot struct {
 	ID         string    `json:"id"`          // e.g. "slot-2026-06-21.001"
 	Date       string    `json:"date"`        // run date, YYYY-MM-DD
 	Sequence   int       `json:"sequence"`    // 1 for the first run of the day, 2+ for later runs
-	CreatedAt  time.Time `json:"created_at"`  // when creation started
-	SealedAt   time.Time `json:"sealed_at"`   // when sealed (zero if open)
-	Status     string    `json:"status"`      // open | sealed
+	CreatedAt  time.Time `json:"created_at"`  // when the run started (its first archive's authoring began)
 	Generator  string    `json:"generator"`   // tool that produced the slot
 	Archives   []Archive `json:"archives"`    // one entry per DLE backed up
 	TotalBytes int64     `json:"total_bytes"` // sum of compressed archive sizes
@@ -70,20 +61,21 @@ type Slot struct {
 // by (Slot, DLE, Level); its physical position is held by the catalog, not here,
 // so a slot's metadata is portable across volumes.
 type Archive struct {
-	DLE          string   `json:"dle"`               // DLE name, e.g. "app01-home"
-	Host         string   `json:"host"`              // source host
-	Path         string   `json:"path"`              // source path
-	Archiver     string   `json:"archiver"`          // archiver type that produced it
-	Compress     string   `json:"compress"`          // compression scheme (zstd|gzip|none); reversed on restore
-	Encrypt      string   `json:"encrypt,omitempty"` // encryption scheme (gpg); reversed on restore. "" = plaintext. The key is never stored — restore resolves it from the operator's keyring.
-	Level        int      `json:"level"`             // 0 = full, >=1 = incremental
-	Compressed   int64    `json:"compressed"`        // payload size on the volume
-	Uncompressed int64    `json:"uncompressed"`      // archive stream size before compression
-	FileCount    int      `json:"file_count"`        // number of member entries archived
-	SHA256       string   `json:"sha256"`            // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
-	Parts        int      `json:"parts,omitempty"`   // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
-	BaseSlot     string   `json:"base_slot"`         // for level>=1, the slot whose state this builds on
-	Members      []string `json:"members,omitempty"` // member paths archived: slash-separated, directories with a trailing slash (the archiver-neutral convention recovery browses); the raw token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
+	DLE          string    `json:"dle"`               // DLE name, e.g. "app01-home"
+	Host         string    `json:"host"`              // source host
+	Path         string    `json:"path"`              // source path
+	Archiver     string    `json:"archiver"`          // archiver type that produced it
+	Compress     string    `json:"compress"`          // compression scheme (zstd|gzip|none); reversed on restore
+	Encrypt      string    `json:"encrypt,omitempty"` // encryption scheme (gpg); reversed on restore. "" = plaintext. The key is never stored — restore resolves it from the operator's keyring.
+	Level        int       `json:"level"`             // 0 = full, >=1 = incremental
+	Compressed   int64     `json:"compressed"`        // payload size on the volume
+	Uncompressed int64     `json:"uncompressed"`      // archive stream size before compression
+	FileCount    int       `json:"file_count"`        // number of member entries archived
+	SHA256       string    `json:"sha256"`            // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
+	Parts        int       `json:"parts,omitempty"`   // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
+	BaseSlot     string    `json:"base_slot"`         // for level>=1, the slot whose state this builds on
+	CreatedAt    time.Time `json:"created_at"`        // when this archive committed (landed) — per-archive, the basis for retention age and the "last archive added" display
+	Members      []string  `json:"members,omitempty"` // member paths archived: slash-separated, directories with a trailing slash (the archiver-neutral convention recovery browses); the raw token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
 }
 
 // DLEID returns the host:path identity for display, falling back to
@@ -95,16 +87,14 @@ func (a Archive) DLEID() string {
 	return a.Host + ":" + a.Path
 }
 
-// NewSlot starts a new open slot for a run. Archives are added with AddArchive
-// and the slot is finalized with Seal; callers should not set the lifecycle
-// fields (Status, timestamps, TotalBytes) directly.
+// NewSlot starts a new slot for a run. Archives are added with AddArchive (TotalBytes is
+// kept in sync); there is no completion step — a slot is its archives.
 func NewSlot(id, date string, seq int, generator string, now time.Time) *Slot {
 	return &Slot{
 		ID:        id,
 		Date:      date,
 		Sequence:  seq,
 		CreatedAt: now,
-		Status:    StatusOpen,
 		Generator: generator,
 	}
 }
@@ -135,19 +125,18 @@ func (s *Slot) DropArchive(dle string) bool {
 	return removed
 }
 
-// Seal marks the slot immutable. It refuses to seal a slot with no archives, so
-// an empty run can never be recorded as a recovery point.
-func (s *Slot) Seal(now time.Time) error {
-	if len(s.Archives) == 0 {
-		return fmt.Errorf("cannot seal slot %s: no archives", s.ID)
+// LastArchiveAt is the time the slot's most recently committed archive landed — the slot's
+// "last activity", for display and (via each archive's own CreatedAt) retention. Zero when the
+// slot has no archives.
+func (s *Slot) LastArchiveAt() time.Time {
+	var last time.Time
+	for _, a := range s.Archives {
+		if a.CreatedAt.After(last) {
+			last = a.CreatedAt
+		}
 	}
-	s.Status = StatusSealed
-	s.SealedAt = now
-	return nil
+	return last
 }
-
-// IsSealed reports whether the slot has been sealed.
-func (s *Slot) IsSealed() bool { return s.Status == StatusSealed }
 
 // IDFromParts builds a slot ID from a date string and sequence number. Every run
 // is suffixed with a fixed-width, zero-padded sequence (".001" for the day's first

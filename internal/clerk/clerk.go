@@ -25,7 +25,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
@@ -54,12 +53,11 @@ type Map interface {
 	PlacementsFor(slotID string) []catalog.Placement
 	// AddArchive records one committed archive's content + its on-medium position — the
 	// catalog's single write path (a slot is created from the archive's identity, never added
-	// wholesale). SealSlot stamps the slot sealed once its run finishes.
+	// wholesale; there is no completion step — a slot is its archives).
 	AddArchive(slot *record.Slot, medium string, arch record.Archive, pos record.ArchivePos) error
 	// RemoveArchive drops one archive's placement on a medium (and its slot entry if that was the
 	// last copy) — the reclaim path when a staged archive has landed on the backing.
 	RemoveArchive(slotID, medium, dle string) (placementGone, entryGone bool, err error)
-	SealSlot(id string, now time.Time) error
 }
 
 // Mounter is the clerk's data-path slice of the librarian (the volume manager): mount the

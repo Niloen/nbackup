@@ -109,31 +109,21 @@ func TestOrderingSequenceNumeric(t *testing.T) {
 	}
 }
 
-// TestLifecycle covers the new slot lifecycle API: AddArchive keeps TotalBytes
-// in sync, and Seal refuses an empty slot but stamps a populated one.
+// TestLifecycle covers the slot's content API: AddArchive keeps TotalBytes in sync, and
+// LastArchiveAt reports the latest archive's landing time (a slot has no seal — it is its archives).
 func TestLifecycle(t *testing.T) {
 	now := time.Date(2026, 6, 21, 8, 0, 0, 0, time.UTC)
 	s := NewSlot("slot-2026-06-21", "2026-06-21", 1, "nbdump", now)
-	if s.Status != StatusOpen || s.IsSealed() {
-		t.Fatalf("new slot should be open, got %q", s.Status)
+	if !s.LastArchiveAt().IsZero() {
+		t.Fatal("an empty slot should have a zero LastArchiveAt")
 	}
 
-	// Sealing an empty slot is refused (no recovery point from nothing).
-	if err := s.Seal(now); err == nil {
-		t.Fatal("expected Seal to fail on an empty slot")
-	}
-
-	s.AddArchive(Archive{DLE: "h-data", Level: 0, Compressed: 100})
-	s.AddArchive(Archive{DLE: "h-etc", Level: 0, Compressed: 23})
+	s.AddArchive(Archive{DLE: "h-data", Level: 0, Compressed: 100, CreatedAt: now})
+	s.AddArchive(Archive{DLE: "h-etc", Level: 0, Compressed: 23, CreatedAt: now.Add(time.Minute)})
 	if s.TotalBytes != 123 {
 		t.Errorf("TotalBytes = %d, want 123 (kept in sync by AddArchive)", s.TotalBytes)
 	}
-
-	sealedAt := now.Add(time.Minute)
-	if err := s.Seal(sealedAt); err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-	if !s.IsSealed() || !s.SealedAt.Equal(sealedAt) {
-		t.Errorf("after Seal: sealed=%v at=%v", s.IsSealed(), s.SealedAt)
+	if got := s.LastArchiveAt(); !got.Equal(now.Add(time.Minute)) {
+		t.Errorf("LastArchiveAt = %v, want the later archive's landing time", got)
 	}
 }

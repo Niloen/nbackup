@@ -13,7 +13,7 @@ func arch(dle string, level int, base string) record.Archive {
 }
 
 func slot(id string, archives ...record.Archive) *record.Slot {
-	return &record.Slot{ID: id, Status: record.StatusSealed, Archives: archives}
+	return &record.Slot{ID: id, Archives: archives}
 }
 
 // levels returns the per-step level sequence of a chain, for compact assertions.

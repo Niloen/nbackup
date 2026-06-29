@@ -156,7 +156,7 @@ func assemble(medium string, acc *mediumScan) []slotPlacement {
 		if sa == nil {
 			date, seq, _ := record.ParseID(key.slot)
 			sa = &slotAcc{
-				slot: &record.Slot{ID: key.slot, Date: date, Sequence: seq, Status: record.StatusSealed, CreatedAt: sc.createdAt, SealedAt: sc.createdAt},
+				slot: &record.Slot{ID: key.slot, Date: date, Sequence: seq, CreatedAt: sc.createdAt},
 				p:    Placement{Medium: medium},
 			}
 			slots[key.slot] = sa

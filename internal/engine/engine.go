@@ -543,7 +543,7 @@ func (e *Engine) prepareWriterWith(medium string, spec archiveio.SlotSpec, now t
 	if wrap != nil {
 		sink = wrap(sink)
 	}
-	w := archiveio.NewWriter(sink, spec, e.limiters[medium])
+	w := archiveio.NewWriter(sink, spec, e.limiters[medium], func() time.Time { return now })
 	return &writeTarget{lib: lib, w: w, partSize: partSize}, nil
 }
 
@@ -1017,7 +1017,7 @@ func localDay(instant time.Time, loc *time.Location) time.Time {
 // Run executes the plan for a date, producing one sealed slot.
 func (e *Engine) Run(now time.Time, logf Logf) (*record.Slot, error) {
 	// `now` is the run's single time source: the precise instant the slot is stamped
-	// committed (CreatedAt/SealedAt) and the moment retention is judged against. The
+	// committed (CreatedAt) and the moment retention is judged against. The
 	// run date — the logical key for the slot id, planning, and restore ordering — is
 	// just its day. Keeping the two distinct lets two runs on one day carry distinct
 	// commit instants, so a sub-day minimum_age can tell them apart.
@@ -1333,7 +1333,7 @@ func (e *Engine) RestoreTo(slotID, dleName, destHost, destPath string, logf Logf
 // config-derived transform options/placement).
 
 // PlacementsFor returns a slot's copies in read-preference order (own medium first), and
-// AddArchive/SealSlot record a run's archives — together they are the clerk's Map role (the
+// AddArchive records a run's archives — together they are the clerk's Map role (the
 // engine keeps the catalog store + the directory/retention slices).
 func (e *Engine) PlacementsFor(slotID string) []catalog.Placement { return e.placementsFor(slotID) }
 func (e *Engine) AddArchive(slot *record.Slot, medium string, arch record.Archive, pos record.ArchivePos) error {
@@ -1342,8 +1342,6 @@ func (e *Engine) AddArchive(slot *record.Slot, medium string, arch record.Archiv
 func (e *Engine) RemoveArchive(slotID, medium, dle string) (placementGone, entryGone bool, err error) {
 	return e.cat.RemoveArchive(slotID, medium, dle)
 }
-
-func (e *Engine) SealSlot(id string, now time.Time) error { return e.cat.SealSlot(id, now) }
 
 // MounterFor returns a read-mount onto a medium's volumes — the clerk's Mounter role, served
 // by the medium's librarian (whose admin face stays with the label/load operations).

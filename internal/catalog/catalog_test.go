@@ -22,23 +22,26 @@ func newVolume(t *testing.T, path string) media.Volume {
 	return v
 }
 
-// putSlot writes a slot's archive files the way the writer would: each archive's part(s),
-// then (for a sealed slot) its member index and commit footer — the per-archive marker. An
-// unsealed slot's archives are written without a commit, so they read as orphan parts.
+// putSlot writes a committed slot's archive files the way the writer would: each archive's
+// part(s), then its member index and commit footer — the per-archive marker.
 func putSlot(t *testing.T, v media.Volume, s *record.Slot) {
 	t.Helper()
 	for _, a := range s.Archives {
-		h := record.Header{Slot: s.ID, Kind: record.KindArchive, DLE: a.DLE, Level: a.Level, Compress: a.Compress}
-		if _, err := writeFileT(v, h, func(w io.Writer) error {
-			_, e := w.Write([]byte("payload"))
-			return e
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if s.Status != record.StatusSealed {
-			continue // uncommitted parts (a crashed run) — no index/commit
-		}
+		putPart(t, v, s.ID, a)
 		putCommit(t, v, s.ID, a)
+	}
+}
+
+// putPart writes one archive's part file with no commit footer — the orphan a crashed run leaves,
+// which the rebuild must ignore.
+func putPart(t *testing.T, v media.Volume, slotID string, a record.Archive) {
+	t.Helper()
+	h := record.Header{Slot: slotID, Kind: record.KindArchive, DLE: a.DLE, Level: a.Level, Compress: a.Compress}
+	if _, err := writeFileT(v, h, func(w io.Writer) error {
+		_, e := w.Write([]byte("payload"))
+		return e
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -66,9 +69,8 @@ func putCommit(t *testing.T, v media.Volume, slotID string, a record.Archive) {
 	}
 }
 
-func sealed(id, date string, seq int, archives ...record.Archive) *record.Slot {
-	return &record.Slot{ID: id, Date: date, Sequence: seq, Status: record.StatusSealed,
-		SealedAt: time.Unix(0, 0).UTC(), Archives: archives, TotalBytes: 100}
+func committedSlot(id, date string, seq int, archives ...record.Archive) *record.Slot {
+	return &record.Slot{ID: id, Date: date, Sequence: seq, Archives: archives, TotalBytes: 100}
 }
 
 // placementPos finds an archive's first recorded part position in any of a slot's
@@ -88,13 +90,12 @@ func TestCacheLifecycle(t *testing.T) {
 	dir := t.TempDir() // serves as both volume root and workdir
 	vol := newVolume(t, dir)
 
-	putSlot(t, vol, sealed("slot-2026-06-20", "2026-06-20", 1,
+	putSlot(t, vol, committedSlot("slot-2026-06-20", "2026-06-20", 1,
 		record.Archive{DLE: "h-data", Level: 0, Compressed: 100}))
-	putSlot(t, vol, sealed("slot-2026-06-21", "2026-06-21", 1,
+	putSlot(t, vol, committedSlot("slot-2026-06-21", "2026-06-21", 1,
 		record.Archive{DLE: "h-data", Level: 1, Compressed: 100}))
-	// An unsealed slot (archives but no seal) must be ignored by the cache.
-	putSlot(t, vol, &record.Slot{ID: "slot-2026-06-22", Date: "2026-06-22", Sequence: 1,
-		Status: record.StatusOpen, Archives: []record.Archive{{DLE: "h-data", Level: 1}}})
+	// A crashed run (archive parts but no commit footer) must be ignored by the rebuild.
+	putPart(t, vol, "slot-2026-06-22", record.Archive{DLE: "h-data", Level: 1})
 
 	// Cold open: no cache yet, then EnsureFresh populates and persists it.
 	cat, err := Open(dir)
@@ -157,7 +158,7 @@ func TestRemoveArchiveDropsCopylessDLE(t *testing.T) {
 	dir := t.TempDir()
 	vol := newVolume(t, dir)
 
-	putSlot(t, vol, sealed("slot-2026-06-20", "2026-06-20", 1,
+	putSlot(t, vol, committedSlot("slot-2026-06-20", "2026-06-20", 1,
 		record.Archive{DLE: "h-leo", Level: 0, Compressed: 100},
 		record.Archive{DLE: "h-shared", Level: 0, Compressed: 100}))
 

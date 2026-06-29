@@ -143,8 +143,8 @@ func parseAsOf(asOf string) (bound time.Time, hasTime bool, err error) {
 // when it was created, then to its run date at midnight UTC for a slot with no
 // recorded times (e.g. one rebuilt from older media).
 func slotTime(s *record.Slot) time.Time {
-	if !s.SealedAt.IsZero() {
-		return s.SealedAt
+	if t := s.LastArchiveAt(); !t.IsZero() {
+		return t
 	}
 	if !s.CreatedAt.IsZero() {
 		return s.CreatedAt
