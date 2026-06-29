@@ -1,5 +1,6 @@
 ---
 description: Road-test NBackup as a brand-new user — read the docs, exercise common use cases in parallel, and report bugs + usability findings.
+model: sonnet
 ---
 
 You are road-testing **NBackup** the way a brand-new user would: read the
