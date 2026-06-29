@@ -194,17 +194,19 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.ArchiveWriteStore
 
 	// Create the ingestion Sink before the transfer spawns tar, so back-pressure (a full holding
 	// disk, or a busy backing medium) gates the dump before any heavy work starts. The store meters
-	// the bytes that land (it must, for the checksum + size) and taps the running compressed count for
-	// live `nb status`, symmetric with tarCmd.Tap's uncompressed side.
-	sink, err := fs.NewArchive(aspec, est, func(n int64) { comp.Store(n); report() })
+	// the bytes that land itself (it must, for the checksum + size).
+	sink, err := fs.NewArchive(aspec, est)
 	if err != nil {
 		return record.Archive{}, err
 	}
+	// Progress is layered on here, by the one caller that wants it: wrap the sink to tap the running
+	// compressed count for live `nb status` (symmetric with tarCmd.Tap's uncompressed side). The store
+	// stays observability-free.
+	sink = archiveio.MeterArchive(sink, func(n int64) { comp.Store(n); report() })
 	// Transfer drives the whole ingestion: it streams the encoded archive into the sink and, on a
 	// clean transfer, has the sink seal it (footer + placement) against the producer's totals,
 	// returning those totals.
-	produced, terr := xfer.Transfer(ctx, src, filters, sink)
-	if terr != nil {
+	if _, terr := xfer.Transfer(ctx, src, filters, sink); terr != nil {
 		return record.Archive{}, terr
 	}
 	// The archive is durably committed to the store; only now promote the archiver's new
@@ -216,20 +218,9 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.ArchiveWriteStore
 			return record.Archive{}, fmt.Errorf("promote incremental state: %w", err)
 		}
 	}
-	// The store recorded the authoritative catalog record itself; the caller needs only the final
-	// tallies for its tracker + log. File count and uncompressed size are the producer's; the
-	// compressed size is the byte count the store metered into comp.
-	return record.Archive{
-		DLE:          aspec.DLE,
-		Host:         aspec.Host,
-		Path:         aspec.Path,
-		Archiver:     aspec.Archiver,
-		Compress:     aspec.Compress,
-		Encrypt:      aspec.Encrypt,
-		Level:        aspec.Level,
-		BaseSlot:     aspec.BaseSlot,
-		FileCount:    produced.FileCount,
-		Uncompressed: produced.Uncompressed,
-		Compressed:   comp.Load(),
-	}, nil
+	// The store sealed the archive and recorded the authoritative catalog record itself; the caller
+	// needs only the final tallies for its tracker + log, so read them straight off the committed
+	// record rather than rebuilding it from the progress counters.
+	arch, _ := sink.Result()
+	return arch, nil
 }

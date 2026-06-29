@@ -161,7 +161,7 @@ func openerOver(vols ...*memVolume) PartOpener {
 func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) (record.Archive, record.ArchivePos) {
 	t.Helper()
 	spec := ArchiveSpec{DLE: dle, Host: "localhost", Path: "/p", Archiver: "m", Level: 0, Compress: "none"}
-	aw := w.NewArchive(spec, nil)
+	aw := w.NewArchive(spec)
 	if err := driveArchive(aw, body); err != nil {
 		t.Fatalf("driveArchive: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestRollFailureNoDeadlock(t *testing.T) {
 	w := NewWriter(sink, spec, nil, nil)
 
 	body := []byte(strings.Repeat("q", 200*1024)) // far bigger than one volume
-	err := driveArchive(w.NewArchive(ArchiveSpec{DLE: "dle1", Level: 0}, nil), body)
+	err := driveArchive(w.NewArchive(ArchiveSpec{DLE: "dle1", Level: 0}), body)
 	if err == nil {
 		t.Fatal("expected an error when the sink cannot roll")
 	}

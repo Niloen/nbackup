@@ -112,7 +112,7 @@ func New(cfg Config) *Spool {
 // write (no disk fits, or none is configured) waits for a free backing permit. prog receives the
 // running compressed (landed) byte count. It returns the run's error if the spool has aborted. It
 // makes Spool an archiveio.ArchiveWriteStore.
-func (d *Spool) NewArchive(spec archiveio.ArchiveSpec, est int64, prog func(int64)) (archiveio.ArchiveWriter, error) {
+func (d *Spool) NewArchive(spec archiveio.ArchiveSpec, est int64) (archiveio.ArchiveWriter, error) {
 	idx, direct, err := d.pool.Acquire(est)
 	if err != nil {
 		return nil, err
@@ -124,7 +124,7 @@ func (d *Spool) NewArchive(spec archiveio.ArchiveSpec, est int64, prog func(int6
 			// in-flight dump for a direct write to the landing.
 			d.tr.MarkToHolding(spec.Host + ":" + spec.Path)
 		}
-		real, err := d.pool.Storage(idx).NewArchive(spec, est, prog)
+		real, err := d.pool.Storage(idx).NewArchive(spec, est)
 		if err != nil {
 			return nil, err
 		}
@@ -135,7 +135,7 @@ func (d *Spool) NewArchive(spec archiveio.ArchiveSpec, est int64, prog func(int6
 	if err := <-reply; err != nil {
 		return nil, err
 	}
-	real, err := d.backing.NewArchive(spec, est, prog)
+	real, err := d.backing.NewArchive(spec, est)
 	if err != nil {
 		return nil, err
 	}
@@ -360,13 +360,12 @@ func (d *Spool) copyOne(j handoff) error {
 	if err != nil {
 		return fmt.Errorf("flush %s L%d: read holding disk: %w", dleID, j.arch.Level, err)
 	}
-	var tap func(int64)
-	if d.tr != nil {
-		tap = func(copied int64) { d.tr.AddDrainBytes(dleID, copied) }
-	}
-	real, err := d.backing.NewCopy(j.arch, tap)
+	real, err := d.backing.NewCopy(j.arch)
 	if err != nil {
 		return fmt.Errorf("flush %s L%d to %q: %w", dleID, j.arch.Level, d.backingName, err)
+	}
+	if d.tr != nil {
+		real = archiveio.MeterArchive(real, func(copied int64) { d.tr.AddDrainBytes(dleID, copied) })
 	}
 	rs := &remoteSink{d: d, real: real, kind: writeCopy}
 	if _, err := xfer.Transfer(context.Background(), xfer.Reader(rc), xfer.Filters{}, rs); err != nil {

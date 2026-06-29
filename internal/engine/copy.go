@@ -166,7 +166,7 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		// its Commit records the new placement on the target.
 		meta := metaByRef[ref]
 		meta.Members, _ = c.clerk.Members(ref)
-		cw, werr := session.NewCopy(meta, nil)
+		cw, werr := session.NewCopy(meta)
 		if werr != nil {
 			return fmt.Errorf("copy %s L%d to %q: %w", ref.DLE, ref.Level, targetMedia, werr)
 		}
