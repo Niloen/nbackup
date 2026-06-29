@@ -210,6 +210,7 @@ landing: fast-disk
 # base forces its next run to a full). Defaults to ./nbackup-state. Both default
 # RELATIVE TO THE WORKING DIRECTORY, so a cron job that runs `nb` from elsewhere
 # must set an ABSOLUTE path here (and for workdir) or it will silently re-full.
+# `nb check` warns when either resolves to a relative path, for exactly this reason.
 # state_dir: /var/lib/nbackup/state
 # A per-host override (e.g. for a remote client's own path) lives under hosts:.
 

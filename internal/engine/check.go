@@ -71,6 +71,10 @@ func (e *Engine) checkServer(rep *CheckReport) {
 	} else {
 		rep.add(&rep.Server, true, false, fmt.Sprintf("workdir %s writable", wd))
 	}
+	if !filepath.IsAbs(wd) {
+		abs, _ := filepath.Abs(wd)
+		rep.add(&rep.Server, false, true, fmt.Sprintf("workdir %q is relative (resolves to %s); a cron job that runs nb from another directory will use a different catalog — set an absolute `workdir`", wd, abs))
+	}
 
 	// The compressor is needed server-side for a server-side compress and for restore
 	// decompression of any scheme a dumptype records, so check every distinct scheme a
@@ -206,6 +210,12 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 		rep.add(&hc.Lines, false, false, fmt.Sprintf("state_dir %s not creatable: %v", stateDir, err))
 	} else {
 		rep.add(&hc.Lines, true, false, fmt.Sprintf("state_dir %s writable", stateDir))
+	}
+	// A relative state_dir resolves against the working directory of whoever runs nb
+	// on this host, so a cron job started from elsewhere loses the incremental base and
+	// silently re-fulls every DLE. The catalog rebuilds from media; this state does not.
+	if !filepath.IsAbs(stateDir) {
+		rep.add(&hc.Lines, false, true, fmt.Sprintf("state_dir %q is relative; it resolves against nb's working directory on %s, so a cron job run from another directory will lose the incremental base and re-full — set an absolute `state_dir`", stateDir, host))
 	}
 	return hc
 }
