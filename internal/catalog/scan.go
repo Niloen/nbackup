@@ -69,7 +69,7 @@ func (c *Catalog) absorb(idx mediumIndex) {
 		}
 	}
 	for _, lbl := range idx.labels {
-		c.volumes[lbl.Name] = &VolumeRecord{Label: lbl}
+		c.upsertVolume(lbl)
 	}
 }
 
@@ -102,7 +102,7 @@ type slotPlacement struct {
 // or just the loaded reel of a single-drive station — lives in media.WalkReadable,
 // so the catalog never type-asserts a Volume's shape itself.
 func scanMedium(medium string, vol media.Volume) (mediumIndex, error) {
-	acc := newMediumScan()
+	acc := newScanMaps()
 	var labels []record.Label
 	err := media.WalkReadable(vol, func(v media.Volume) error {
 		res, err := scanVolume(medium, v)
@@ -128,7 +128,7 @@ func scanMedium(medium string, vol media.Volume) (mediumIndex, error) {
 // skipped. A part missing from the scan (a tape not present) leaves a short part list —
 // verify/restore reports the gap and fails over to another copy. Archives are ordered by
 // (dle, level) so a rebuild is deterministic.
-func assemble(medium string, acc *mediumScan) []slotPlacement {
+func assemble(medium string, acc *scanMaps) []slotPlacement {
 	keys := make([]archiveKey, 0, len(acc.commits))
 	for k := range acc.commits {
 		keys = append(keys, k)
@@ -143,17 +143,13 @@ func assemble(medium string, acc *mediumScan) []slotPlacement {
 		return keys[i].level < keys[j].level
 	})
 
-	type slotAcc struct {
-		slot *Slot
-		p    Placement
-	}
-	slots := map[string]*slotAcc{}
+	slots := map[string]*slotPlacement{}
 	var order []string // slot ids in first-seen order
 	for _, key := range keys {
 		sc := acc.commits[key]
 		sa := slots[key.slot]
 		if sa == nil {
-			sa = &slotAcc{
+			sa = &slotPlacement{
 				slot: &Slot{ID: key.slot},
 				p:    Placement{Medium: medium},
 			}
@@ -181,8 +177,7 @@ func assemble(medium string, acc *mediumScan) []slotPlacement {
 
 	out := make([]slotPlacement, 0, len(order))
 	for _, id := range order {
-		sa := slots[id]
-		out = append(out, slotPlacement{slot: sa.slot, p: sa.p})
+		out = append(out, *slots[id])
 	}
 	return out
 }
@@ -194,7 +189,7 @@ func ScanSlots(vol media.Volume) ([]*Slot, error) {
 	if err != nil {
 		return nil, err
 	}
-	acc := newMediumScan()
+	acc := newScanMaps()
 	acc.add(res)
 	sps := assemble("", acc)
 	slots := make([]*Slot, 0, len(sps))
@@ -223,33 +218,27 @@ type scannedCommit struct {
 	loc  FilePos
 }
 
-// scanResult is one volume's contribution to a medium scan: its archive parts, commit
-// footers, member-index locations (the members are not read — that is lazy), and label.
-type scanResult struct {
-	parts   map[partKey]FilePos
-	commits map[archiveKey]scannedCommit
-	indexes map[archiveKey]FilePos
-	label   *record.Label
-}
-
-// mediumScan accumulates a whole medium's parts, commits, and index locations across its
-// volumes before placements are assembled (an archive's parts — and its commit/index — may
-// straddle several volumes).
-type mediumScan struct {
+// scanMaps holds the file locations a scan collects, keyed for assembly: each archive part's
+// position, each committed archive's footer, and each member index. It serves two roles — one
+// volume's contribution (embedded in scanResult) and the whole-medium accumulator that gathers
+// them, since an archive's parts (and its commit/index) may straddle several of the medium's
+// volumes.
+type scanMaps struct {
 	parts   map[partKey]FilePos
 	commits map[archiveKey]scannedCommit
 	indexes map[archiveKey]FilePos
 }
 
-func newMediumScan() *mediumScan {
-	return &mediumScan{
+func newScanMaps() *scanMaps {
+	return &scanMaps{
 		parts:   map[partKey]FilePos{},
 		commits: map[archiveKey]scannedCommit{},
 		indexes: map[archiveKey]FilePos{},
 	}
 }
 
-func (m *mediumScan) add(res scanResult) {
+// add merges one volume's scanned locations into the accumulator.
+func (m *scanMaps) add(res scanResult) {
 	for k, loc := range res.parts {
 		m.parts[k] = loc // last-seen wins (an orphaned re-copy is harmless to reads)
 	}
@@ -259,6 +248,14 @@ func (m *mediumScan) add(res scanResult) {
 	for k, loc := range res.indexes {
 		m.indexes[k] = loc
 	}
+}
+
+// scanResult is one volume's contribution to a medium scan: its location maps (parts, commit
+// footers, member-index locations — the members are not read, that is lazy) plus the volume's
+// label.
+type scanResult struct {
+	scanMaps
+	label *record.Label
 }
 
 // scanVolume reads one volume's files into raw parts, commit footers, and member indexes,
@@ -283,12 +280,7 @@ func scanVolume(medium string, vol media.Volume) (scanResult, error) {
 		}
 	}
 
-	res := scanResult{
-		parts:   map[partKey]FilePos{},
-		commits: map[archiveKey]scannedCommit{},
-		indexes: map[archiveKey]FilePos{},
-		label:   label,
-	}
+	res := scanResult{scanMaps: *newScanMaps(), label: label}
 	for _, f := range files {
 		loc := FilePos{Label: labelName, Epoch: epoch, Pos: f.Pos}
 		switch f.Header.Kind {

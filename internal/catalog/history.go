@@ -9,6 +9,18 @@ type History struct {
 	DLEs map[string]*DLEState `json:"dles"`
 }
 
+// History derives per-DLE run history from the cached slots (source of truth).
+func (c *Catalog) History() *History {
+	h := &History{DLEs: map[string]*DLEState{}}
+	for _, e := range c.entries { // already in run order
+		s := e.Slot
+		for _, a := range s.Archives {
+			h.RecordRun(a.DLE, s.ID, s.Date(), a.Level)
+		}
+	}
+	return h
+}
+
 // DLEState tracks one DLE's backup history. Sizes are not stored: estimates are
 // computed fresh from the archiver each run.
 type DLEState struct {

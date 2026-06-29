@@ -38,97 +38,11 @@ import (
 // CacheFile is the catalog cache stored in the workdir.
 const CacheFile = "catalog.json"
 
-// Entry is the catalog's per-slot record: one logical slot plus every place a
-// copy of it lives.
-type Entry struct {
-	Slot       *Slot       `json:"slot"`       // medium-independent content, grouped from the archives' commit footers
-	Placements []Placement `json:"placements"` // one per medium holding a copy
-}
-
-// Placement is one copy of a slot on one medium. The copy's archives may span
-// several of the medium's volumes (tape spanning): each archive names the volumes
-// and positions its parts landed on, plus where its per-archive commit footer and
-// member index live (the commit footer is the marker, written last).
-type Placement struct {
-	// Medium is the pool this copy is accounted to (retention, capacity, cost) and
-	// the changer to open to reach it. It is NOT a device pin: a labeled volume is
-	// located by its label at mount time, so which drive holds a tape is resolved at
-	// runtime, not stored here.
-	Medium   string       `json:"medium"`
-	Archives []ArchivePos `json:"archives"` // each archive and the positions of its parts, commit, and index
-}
-
-// FilePos and ArchivePos are the file-location types the catalog persists. They are
-// the very types the archiveio writer emits and the reader consumes, defined once in
-// package record (the shared on-medium artifact vocabulary) so a writer's recorded
-// positions become a placement with no field-by-field conversion. FilePos.Label is the
-// volume's global, device-independent identity ("" for address-identified media, which
-// carry no label); ArchivePos lists an archive's ordered parts (one unless it spanned).
-type (
-	FilePos    = record.FilePos
-	ArchivePos = record.ArchivePos
-)
-
-// Parts returns the ordered part locations of an archive on this placement.
-func (p Placement) Parts(dle string, level int) ([]FilePos, bool) {
-	for _, a := range p.Archives {
-		if a.DLE == dle && a.Level == level {
-			return a.Parts, len(a.Parts) > 0
-		}
-	}
-	return nil, false
-}
-
-// Labels returns the distinct volume labels this placement occupies — every
-// archive part's label plus the seal's — in first-seen order. It is what tells
-// which tapes a copy needs mounted. It is empty for address-identified media,
-// which carry no labels: a disk/s3 copy spans no tapes, and is reached by its
-// medium alone (Placement.Medium), needing no label-based mount.
-func (p Placement) Labels() []string {
-	seen := map[string]bool{}
-	var out []string
-	add := func(v string) {
-		if v != "" && !seen[v] {
-			seen[v] = true
-			out = append(out, v)
-		}
-	}
-	for _, a := range p.Archives {
-		for _, pt := range a.Parts {
-			add(pt.Label)
-		}
-		add(a.Commit.Label)
-		add(a.Index.Label)
-	}
-	return out
-}
-
-// OnLabel reports whether any part of this placement (or its seal) lives on the
-// volume with the given label.
-func (p Placement) OnLabel(label string) bool {
-	for _, v := range p.Labels() {
-		if v == label {
-			return true
-		}
-	}
-	return false
-}
-
 // VolumeRecord is the catalog's cached identity of a labeled volume. "Which
 // slots are on it" and "is it reusable" are derived from placements + retention,
 // not stored here.
 type VolumeRecord struct {
 	Label record.Label `json:"label"`
-}
-
-// DLEMeta is the catalog's per-DLE operator/planner metadata, keyed by DLE slug. Unlike an
-// Entry (which is media-derived and rebuilt by scanning), this is intent that cannot be
-// scanned back — so it lives in the cache file and is deliberately preserved across a
-// Rebuild. It is a struct, not a bare flag, so further per-DLE state can accrete here
-// without reshaping the cache. Today it carries only ForceFull: the operator asked (via
-// `nb reset`) that this DLE be fulled on its next run; a run consumes it.
-type DLEMeta struct {
-	ForceFull bool `json:"force_full,omitempty"`
 }
 
 // Catalog is a local cache of slot entries plus a registry of labeled volumes. It
@@ -306,9 +220,16 @@ func (c *Catalog) RemoveArchive(slotID, medium, dle string) (placementGone, entr
 // RecordVolume upserts a labeled volume's identity in the registry, so a later run
 // can detect a swapped or relabeled volume.
 func (c *Catalog) RecordVolume(lbl record.Label) error {
+	c.upsertVolume(lbl)
+	return c.persist()
+}
+
+// upsertVolume records a labeled volume's identity in the registry without persisting —
+// the in-memory write path shared by RecordVolume and the importer's absorb (which
+// persists once at the end of a scan).
+func (c *Catalog) upsertVolume(lbl record.Label) {
 	c.volumes[lbl.Name] = &VolumeRecord{Label: lbl}
 	c.loaded = true
-	return c.persist()
 }
 
 // RemoveVolume drops a labeled volume from the registry. A relabel overwrites a
@@ -438,90 +359,6 @@ func (c *Catalog) Volume(name string) (VolumeRecord, bool) {
 		return *v, true
 	}
 	return VolumeRecord{}, false
-}
-
-// History derives per-DLE run history from the cached slots (source of truth).
-func (c *Catalog) History() *History {
-	h := &History{DLEs: map[string]*DLEState{}}
-	for _, e := range c.entries { // already in run order
-		s := e.Slot
-		for _, a := range s.Archives {
-			h.RecordRun(a.DLE, s.ID, s.Date(), a.Level)
-		}
-	}
-	return h
-}
-
-// SetForceFull marks a DLE (by slug) to be fulled on its next run and persists. It is the
-// store behind `nb reset`: the planner reads ForcedFulls and schedules a mandatory L0.
-func (c *Catalog) SetForceFull(slug string) error {
-	c.metaFor(slug).ForceFull = true
-	return c.persist()
-}
-
-// ForcedFulls returns the set of DLE slugs currently flagged for a forced full.
-func (c *Catalog) ForcedFulls() map[string]bool {
-	out := map[string]bool{}
-	for slug, m := range c.dles {
-		if m.ForceFull {
-			out[slug] = true
-		}
-	}
-	return out
-}
-
-// ClearForceFulls drops the force-full flag for the given DLE slugs and persists — called
-// once a run seals, having dumped every planned (hence every forced) DLE at L0.
-func (c *Catalog) ClearForceFulls(slugs map[string]bool) error {
-	changed := false
-	for slug := range slugs {
-		if m := c.dles[slug]; m != nil && m.ForceFull {
-			m.ForceFull = false
-			changed = true
-		}
-	}
-	if !changed {
-		return nil
-	}
-	return c.persist()
-}
-
-// metaFor returns the DLE's metadata record, creating it on first use.
-func (c *Catalog) metaFor(slug string) *DLEMeta {
-	if c.dles == nil {
-		c.dles = map[string]*DLEMeta{}
-	}
-	m := c.dles[slug]
-	if m == nil {
-		m = &DLEMeta{}
-		c.dles[slug] = m
-	}
-	return m
-}
-
-// prunedDLEMeta drops zero-value records so the cache file carries only DLEs with live
-// metadata (a consumed force-full leaves no residue).
-func prunedDLEMeta(dles map[string]*DLEMeta) map[string]*DLEMeta {
-	var out map[string]*DLEMeta
-	for slug, m := range dles {
-		if m == nil || *m == (DLEMeta{}) {
-			continue
-		}
-		if out == nil {
-			out = map[string]*DLEMeta{}
-		}
-		out[slug] = m
-	}
-	return out
-}
-
-func (e *Entry) placedOn(medium string) bool {
-	for _, p := range e.Placements {
-		if p.Medium == medium {
-			return true
-		}
-	}
-	return false
 }
 
 func (c *Catalog) entryByID(id string) *Entry {
