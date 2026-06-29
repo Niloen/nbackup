@@ -22,14 +22,23 @@ type SlotWriter interface {
 	Result() (record.Archive, record.ArchivePos)
 }
 
-// SlotStorage authors archives onto one slot on one medium. NewWrite hands out a per-archive
-// SlotWriter (whose Commit records the placement); OpenArchive reads a committed archive's payload
-// back and Reclaim drops it (placement + files) — the read/delete the drain needs to move a staged
-// archive to the backing and free the holding disk; Finish seals the slot. prog, when non-nil,
-// receives the running landed (compressed) byte count for the archive being written.
+// WriteSlotStorage is the slot-write surface the producer drives: NewWrite reserves a per-archive
+// SlotWriter (whose Commit records the placement), blocking for back-pressure and returning the run's
+// error if the store has failed; Finish seals the slot. est is the producer's size estimate — a
+// routing store (the spool) uses it to pick a medium; a leaf medium ignores it. prog, when non-nil,
+// receives the running landed (compressed) byte count. The dumper points at either a spool (buffered,
+// concurrency-safe over a backing + holding media) or a single medium's store, never caring which.
+type WriteSlotStorage interface {
+	NewWrite(meta record.Archive, est int64, prog func(int64)) (SlotWriter, error)
+	Finish(now time.Time) (*record.Slot, error)
+}
+
+// SlotStorage is a single medium's slot store: a WriteSlotStorage that additionally reads a committed
+// archive's payload back (OpenArchive) and drops it (Reclaim) — the read/delete a holding->backing
+// drain needs to move a staged archive to the backing and free the holding disk. The spool composes
+// these (one backing, an array of holding); the clerk implements them.
 type SlotStorage interface {
-	NewWrite(meta record.Archive, prog func(int64)) SlotWriter
+	WriteSlotStorage
 	OpenArchive(arch record.Archive, pos record.ArchivePos) (io.ReadCloser, error)
 	Reclaim(arch record.Archive, pos record.ArchivePos) error
-	Finish(now time.Time) (*record.Slot, error)
 }

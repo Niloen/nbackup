@@ -12,16 +12,16 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
+	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// The producer ingests into an archiveio.WriteFS: for each archive it Creates a write handle (an
+// The producer ingests into an xfer.WriteSlotStorage: for each archive it calls NewWrite for a write handle (an
 // xfer.Sink, back-pressuring), transfers the encoded stream into it, and the handle's commit seals
-// the stored archive. The clerk implements a serial WriteFS; the spool a concurrency-safe, buffered
-// one. The producer never sees the session, the medium, or the catalog — only the WriteFS.
+// the stored archive. The clerk implements a serial WriteSlotStorage; the spool a concurrency-safe, buffered
+// one. The producer never sees the session, the medium, or the catalog — only the WriteSlotStorage.
 
 // Config is the resolution the producer needs, injected by the engine so the producer stays free
 // of config and the catalog: how to resolve a DLE's archiver, its dumptype excludes, and its encode
@@ -33,7 +33,7 @@ type Config struct {
 	Threads     int
 }
 
-// Dumper archives planned items into an archiveio.WriteFS. Build it with New and drive it with Run.
+// Dumper archives planned items into an xfer.WriteSlotStorage. Build it with New and drive it with Run.
 type Dumper struct {
 	archiverFor func(dumpType, host string) (archiver.Archiver, error)
 	exclude     func(dumpType string) []string
@@ -48,9 +48,9 @@ func New(cfg Config) *Dumper {
 
 // Run archives every item into fs: for each it Creates an ingestion Sink, transfers the encoded
 // archive into it, and commits it (see dumpItem). With workers > 1 it runs that many concurrently,
-// bounded by a semaphore; the first error stops scheduling and is returned (a WriteFS failure
+// bounded by a semaphore; the first error stops scheduling and is returned (a WriteSlotStorage failure
 // surfaces as the error Create/commit return, so blocked workers wake and stop too).
-func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs archiveio.WriteFS, tr *progress.Tracker, logf func(format string, args ...any)) error {
+func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs xfer.WriteSlotStorage, tr *progress.Tracker, logf func(format string, args ...any)) error {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}

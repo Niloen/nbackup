@@ -41,9 +41,9 @@ func (c *Clerk) OpenSlot(w *archiveio.Writer, medium string, vol media.Volume) *
 // part-by-part by the returned SlotWriter's NextPart (the operation copies into each part writer and
 // closes it). Commit then seals the archive — writing its footer + member index and recording its
 // placement — once the producer's raw stats are known. prog, if non-nil, receives the running count
-// of landed bytes.
-func (s *Session) NewWrite(meta record.Archive, prog func(int64)) xfer.SlotWriter {
-	return &ArchiveWriter{s: s, aw: s.w.NewArchive(meta, prog)}
+// of landed bytes. A single medium does not route, so est (the size estimate) is unused here.
+func (s *Session) NewWrite(meta record.Archive, _ int64, prog func(int64)) (xfer.SlotWriter, error) {
+	return &ArchiveWriter{s: s, aw: s.w.NewArchive(meta, prog)}, nil
 }
 
 // ArchiveWriter is one archive's NextPart-driven write handle (an xfer.SlotWriter): a thin clerk

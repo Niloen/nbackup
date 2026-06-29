@@ -6,7 +6,6 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/programs"
@@ -50,7 +49,7 @@ type EncodePlacement struct {
 // dumpItem archives a single DLE into the store: it acquires an ingestion Sink, transfers the
 // encoded archive into it, and commits it — driving the run tracker from the committed record. It
 // owns the run-tracker lifecycle and describes the backup; the store lands and records the bytes.
-func (d *Dumper) dumpItem(ctx context.Context, fs archiveio.WriteFS, item planner.Item, tr *progress.Tracker, logf func(format string, args ...any)) (err error) {
+func (d *Dumper) dumpItem(ctx context.Context, fs xfer.WriteSlotStorage, item planner.Item, tr *progress.Tracker, logf func(format string, args ...any)) (err error) {
 	// The progress tracker keys and displays DLEs by their host:path identity; the
 	// seal and filenames keep the internal slug.
 	pname := item.DLE.ID()
@@ -135,7 +134,7 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 // server-side as local Filters) → an ingestion xfer.Sink the store hands out, which the transfer
 // seals on commit. prog, if non-nil, receives running (uncompressed, compressed) counts. It returns
 // the archive record with its final sizes + file count for the caller's tracker and log.
-func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.WriteFS, est int64, spec BackupSpec, prog func(uncompressed, compressed int64)) (record.Archive, error) {
+func (d *Dumper) dumpArchive(ctx context.Context, fs xfer.WriteSlotStorage, est int64, spec BackupSpec, prog func(uncompressed, compressed int64)) (record.Archive, error) {
 	pl := d.placement(spec.DumpType)
 	compF, err := compress.Filter(pl.CompressScheme, pl.CompressOpts)
 	if err != nil {
@@ -193,10 +192,10 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.WriteFS, est int6
 	}).OnCleanup(bs.Cleanup)
 
 	// Create the ingestion Sink before the transfer spawns tar, so back-pressure (a full holding
-	// disk, or a busy backing medium) gates the dump before any heavy work starts. The WriteFS meters
+	// disk, or a busy backing medium) gates the dump before any heavy work starts. The WriteSlotStorage meters
 	// the bytes that land (it must, for the checksum + size) and taps the running compressed count for
 	// live `nb status`, symmetric with tarCmd.Tap's uncompressed side.
-	sink, err := fs.Create(meta, est, func(n int64) { comp.Store(n); report() })
+	sink, err := fs.NewWrite(meta, est, func(n int64) { comp.Store(n); report() })
 	if err != nil {
 		return record.Archive{}, err
 	}

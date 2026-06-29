@@ -10,15 +10,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
 // spool.go is the consuming half of a dump: the run's buffered, concurrency-safe archive store — a
-// WriteFS over a backing SlotStorage plus holding ones. A producer ingests each archive into a Sink
-// the Spool hands out (Create → transfer → commit); the Spool decides per archive whether to buffer
+// WriteSlotStorage over a backing SlotStorage plus holding ones. A producer ingests each archive into
+// a Sink the Spool hands out (NewWrite → transfer → commit); the Spool decides per archive whether to buffer
 // it on a holding disk (then copy it to the authoritative backing later) or — when no disk fits, or
 // none is configured — write it straight to the backing.
 //
@@ -61,11 +60,11 @@ type Backing struct {
 	Slots   int
 }
 
-// Spool is a concurrency-safe archiveio.WriteFS.
-var _ archiveio.WriteFS = (*Spool)(nil)
+// Spool is a concurrency-safe xfer.WriteSlotStorage.
+var _ xfer.WriteSlotStorage = (*Spool)(nil)
 
 // Spool is the consuming side of a dump — the run's archive store (see the file comment). Build it
-// with New, drive it from the producer with Create + transfer/commit, and close it with Finish.
+// with New, drive it from the producer with NewWrite + transfer/commit, and close it with Finish.
 type Spool struct {
 	backing      xfer.SlotStorage
 	backingName  string
@@ -110,13 +109,13 @@ func New(cfg Config) *Spool {
 	return d
 }
 
-// Create reserves ingestion for an archive described by meta, estimated at est bytes, and returns the
-// xfer.Sink to transfer it into — a RemoteSink over the chosen medium's SlotWriter. It blocks for
-// back-pressure: a holding write waits while every fitting disk is over capacity; a direct write (no
-// disk fits, or none is configured) waits for a free backing permit. prog receives the running
+// NewWrite reserves ingestion for an archive described by meta, estimated at est bytes, and returns
+// the SlotWriter to transfer it into — a RemoteSink over the chosen medium's SlotWriter. It blocks
+// for back-pressure: a holding write waits while every fitting disk is over capacity; a direct write
+// (no disk fits, or none is configured) waits for a free backing permit. prog receives the running
 // compressed (landed) byte count. It returns the run's error if the spool has aborted. It makes Spool
-// an archiveio.WriteFS.
-func (d *Spool) Create(meta record.Archive, est int64, prog func(int64)) (xfer.Sink, error) {
+// an xfer.WriteSlotStorage.
+func (d *Spool) NewWrite(meta record.Archive, est int64, prog func(int64)) (xfer.SlotWriter, error) {
 	idx, direct, err := d.pool.Acquire(est)
 	if err != nil {
 		return nil, err
@@ -128,14 +127,22 @@ func (d *Spool) Create(meta record.Archive, est int64, prog func(int64)) (xfer.S
 			// in-flight dump for a direct write to the landing.
 			d.tr.MarkToHolding(meta.Host + ":" + meta.Path)
 		}
-		return &remoteSink{d: d, real: d.pool.Storage(idx).NewWrite(meta, prog), kind: writeHolding, disk: idx}, nil
+		real, err := d.pool.Storage(idx).NewWrite(meta, est, prog)
+		if err != nil {
+			return nil, err
+		}
+		return &remoteSink{d: d, real: real, kind: writeHolding, disk: idx}, nil
 	}
 	reply := make(chan error, 1)
 	d.permitReqCh <- permitReq{reply: reply}
 	if err := <-reply; err != nil {
 		return nil, err
 	}
-	return &remoteSink{d: d, real: d.backing.NewWrite(meta, prog), kind: writeDirect}, nil
+	real, err := d.backing.NewWrite(meta, est, prog)
+	if err != nil {
+		return nil, err
+	}
+	return &remoteSink{d: d, real: real, kind: writeDirect}, nil
 }
 
 // writeKind tells the orchestrator how to follow up a RemoteSink's Commit, after the SlotWriter has
@@ -172,6 +179,11 @@ func (r *remoteSink) Commit(ctx context.Context, p xfer.Produced) error {
 	r.d.reqCh <- sinkReq{sink: r.real, commit: true, ctx: ctx, produced: p, kind: r.kind, disk: r.disk, reply: reply}
 	return (<-reply).err
 }
+
+// Result delegates to the medium's writer so a remoteSink satisfies xfer.SlotWriter. The producer
+// driving it never reads the position (the orchestrator records the placement inside Commit); it is
+// the orchestrator that reads Result, off the real writer, when it queues a holding→backing copy.
+func (r *remoteSink) Result() (record.Archive, record.ArchivePos) { return r.real.Result() }
 
 // sinkReq is a routed RemoteSink call served on the orchestrator: commit selects Commit(produced)
 // over NextPart, kind/disk carry the follow-up bookkeeping (only meaningful for a commit).
@@ -356,7 +368,11 @@ func (d *Spool) copyOne(j handoff) error {
 	if d.tr != nil {
 		tap = func(copied int64) { d.tr.AddDrainBytes(dleID, copied) }
 	}
-	rs := &remoteSink{d: d, real: d.backing.NewWrite(j.arch, tap), kind: writeCopy}
+	real, err := d.backing.NewWrite(j.arch, 0, tap) // est is unused: the backing medium is fixed
+	if err != nil {
+		return fmt.Errorf("flush %s L%d to %q: %w", dleID, j.arch.Level, d.backingName, err)
+	}
+	rs := &remoteSink{d: d, real: real, kind: writeCopy}
 	if _, err := xfer.Transfer(context.Background(), &stagedSource{rc: rc, arch: j.arch}, xfer.Filters{}, rs); err != nil {
 		return fmt.Errorf("flush %s L%d to %q: %w", dleID, j.arch.Level, d.backingName, err)
 	}
