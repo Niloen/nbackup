@@ -1,0 +1,103 @@
+---
+title: Recovery
+layout: default
+parent: Features
+nav_order: 7
+description: "Recover backups as they stood on a date — a whole DLE, or browse and pick individual files. No index server needed."
+---
+
+# Recovery
+{: .no_toc }
+
+Recover backups as they stood on a date — rebuild a whole DLE, or browse and pick individual files, with no index server in the loop.
+{: .fs-6 .fw-300 }
+
+1. TOC
+{:toc}
+
+---
+
+`nb recover` recovers from backups **as they stood on a date**, in two modes:
+rebuild an entire DLE, or browse its filesystem and pull back individual files.
+A DLE is identified by `host:path` (e.g. `app01:/home`) — that is what the tables
+show and what `--dle` (and the interactive `setdisk`) accept.
+
+## Whole-DLE restore (`--all`)
+
+```bash
+nb recover --dle app01:/home --date 2026-06-21 --all --dest /tmp/out
+```
+
+This rebuilds an entire DLE: it replays the most recent full at or before the
+date, then every later incremental up to it, **in run order**, using GNU tar's
+incremental extraction.
+
+Because the incrementals carry directory census data, **deletions are applied** —
+a file removed between the full and the date is absent after the restore — and
+extraction **prunes the destination to match the backup**. So `--dest` must be
+empty, or pass `--force` to restore into a populated directory, replacing its
+contents.
+
+Omit `--dle` to restore **every** DLE, each into its own subdirectory of `--dest`:
+
+```bash
+nb recover --date 2026-06-21 --all --dest /tmp/out
+```
+
+## File-level recovery (browse + pick)
+
+Without `--all`, recover browses a DLE's filesystem and pulls back individual
+files or directories. The browse view **merges the restore chain** — the full
+plus every later incremental up to the date — so each path shows its newest
+version on or before the date, recovered from the archive that holds it.
+
+There is **no separate index server**: browsing reads the **member index** every
+archive already records, so it touches only the catalog and reaches media only
+when you extract.
+
+### One-shot, scriptable
+
+```bash
+nb recover --dle app01:/home --date 2026-06-20 --list --path /etc
+nb recover --dle app01:/home --date 2026-06-20 \
+    --path /etc/hosts --path /etc/nginx --dest /tmp/out
+```
+
+### Interactive shell
+
+`nb recover` with no arguments opens a shell that tracks a current DLE and date;
+set those, then navigate and select:
+
+```text
+recover> setdisk app01:/home
+recover> setdate 2026-06-20
+recover app01:/home:/> cd etc
+recover app01:/home:/etc> ls
+  hosts   nginx/   passwd
+recover app01:/home:/etc> add hosts nginx
+recover app01:/home:/etc> extract /tmp/out
+recovered 12 file(s) from 2 archive(s) into /tmp/out
+```
+
+Paths are relative to the DLE's backed-up root. Selecting a directory pulls its
+**whole subtree** (each file from the archive that last changed it).
+
+{: .note }
+Selected-file recovery **never deletes** — you get exactly what you ask for, and
+nothing in `--dest` is pruned. One fidelity consequence: GNU tar records
+deletions in its snapshot, not the member index, so a file deleted at a later
+incremental still shows in the browse view. Recover the **whole DLE** with
+`--all` when you need deletion-accurate state.
+
+## Egress on a cloud restore
+
+Pulling from a cloud store costs egress. `nb recover` estimates the **egress $**
+before it reads and warns — and, interactively, confirms — when the amount is
+material. See [Cost forecasting](cost).
+
+---
+
+See also [Verification & drills](verification) to prove a restore will work
+before you need it, [Restore by hand](../restore-by-hand) for the
+stock-tools path that needs no NBackup, and [Replication](replication) to
+restage an offsite copy back to disk first.

@@ -1,3 +1,11 @@
+---
+title: Restore by hand
+layout: default
+parent: Reference
+nav_order: 3
+description: "Recover an NBackup archive with stock gpg/zstd/tar and no NBackup binary, config, or catalog."
+---
+
 # Restoring without NBackup
 
 NBackup's artifacts are plain GNU-tar archives, compressed (and optionally
@@ -6,7 +14,7 @@ the by-hand procedure for when the binary, config, or catalog are all gone. For
 normal restores use `nb recover`; to rehearse this exact bare-tools path (and have
 the commands printed for you), run `nb drill --tier stock`.
 
-The on-disk layout is described in the [README](../README.md#artifacts-you-can-read):
+The on-disk layout is described in [Concepts](concepts#artifacts-you-can-read):
 each archive is a clean `NNNNNN-<dle>-L<n>.tar.<ext>` payload with a `.hdr`
 sidecar, plus a small commit footer and member index per archive.
 

@@ -1,0 +1,16 @@
+# Local preview of the documentation site.
+#
+#   cd docs
+#   bundle install
+#   bundle exec jekyll serve
+#
+# GitHub Pages builds the site itself from `main / docs` — this Gemfile is only
+# for previewing locally before pushing.
+source "https://rubygems.org"
+
+gem "github-pages", group: :jekyll_plugins
+gem "jekyll-remote-theme"
+
+# Windows / JRuby helpers (harmless elsewhere).
+gem "tzinfo-data", platforms: [:mingw, :mswin, :x64_mingw, :jruby]
+gem "wdm", "~> 0.1.1", platforms: [:mingw, :mswin, :x64_mingw]
