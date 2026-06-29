@@ -1,5 +1,11 @@
 # Example NBackup configuration.
 # Copy to nbackup.yaml and adjust.
+#
+# FIRST RUN: the paths below use a production-style /var/lib/nbackup/... layout,
+# which needs root. To try NBackup as an ordinary user, repoint every storage path
+# (the media `path`/`dir`, plus `workdir` and `state_dir`) at a writable directory
+# you own — e.g. ~/nbackup — before `nb check`, or the run dead-ends on a permission
+# error.
 
 # The dump cycle: the target — and hard maximum — time between fulls for every
 # DLE (default 7d). It is the main scheduling knob. Each run fulls the DLEs due
@@ -19,10 +25,11 @@ cycle: 7d
 # Named storage definitions. Each is a Volume with a `type`, its own capacity and
 # retention, plus type-specific connection parameters. Slots can be copied
 # between media with `nb copy` (e.g. `nb copy <slot> --to lto`).
+# (These /var/lib/nbackup paths need root — see the FIRST RUN note at the top.)
 media:
   fast-disk:
     type: disk          # a filesystem directory (local or NFS)
-    path: /var/lib/nbackup/catalog
+    path: /var/lib/nbackup/slots   # where slot files live (distinct from the workdir)
     capacity: 20TB      # space NBackup may use here; `nb prune` reclaims oldest to fit
     # minimum_age: 30d  # retention floor before a slot may be retired (default: one cycle)
   lto:
@@ -201,7 +208,7 @@ landing: fast-disk
 # Where the catalog's local cache lives. This is the catalog's own directory,
 # independent of any storage medium — the catalog is a cache over the whole pool,
 # not part of one medium. Defaults to ./nbackup-catalog.
-# workdir: /var/lib/nbackup/catalog
+# workdir: /var/lib/nbackup/workdir
 
 # Where archivers keep their incremental state (for gnutar, the .snar listed-
 # incremental library). This is a HOST property, not an archiver option, and is a
@@ -216,7 +223,12 @@ landing: fast-disk
 
 # Let a dump auto-label a *blank* tape instead of requiring `nb label` first.
 # Off by default: explicit labeling is what makes the overwrite guard meaningful.
-# It never overwrites foreign or non-blank media.
+# It never overwrites foreign or non-blank media. A ROBOTIC library labels a blank
+# bay it mounts on its own; a MANUAL station labels the blank reel the operator
+# loads when prompted. SPANNING a dump across reels on a manual station therefore
+# needs auto_label: true (so each fresh reel you load mid-run gets labeled) — with
+# it off, pre-`nb label` every reel you will load, or an unlabeled blank loaded
+# mid-span is refused.
 # auto_label: false
 
 # (The GNU tar binary is a per-archiver option — `tar_path` on a `archivers:` entry

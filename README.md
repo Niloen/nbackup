@@ -73,16 +73,21 @@ through an external compressor (`zstd` by default; `gzip` or `none` also built
 in) and, optionally, an external **encryptor** (`gpg`). NBackup orchestrates
 `tar`, the compressor, and gpg as child processes rather than reimplementing
 them, so the tools that wrote an archive are the tools that read it —
-**recovery never requires NBackup**. A full restores with one pipe:
+**recovery never requires NBackup**. A full restores with the stock tool for its
+scheme — a `zstd`-compressed payload through one pipe, a `gzip` one the same way,
+and a `none` payload with plain `tar`:
 
 ```bash
-zstd -dc 000000-app01-home-L0.tar.zst | tar -xf -
+zstd -dc 000000-app01-home-L0.tar.zst | tar -xf -   # scheme: zstd
+gzip -dc 000000-app01-home-L0.tar.gz  | tar -xf -   # scheme: gzip
+tar -xf  000000-app01-home-L0.tar                   # scheme: none
 ```
 
 Restoring a full + its incrementals replays one archive per level in order,
 exactly as `nb recover` does — and `nb drill --tier stock` rehearses that
-bare-tools path for you and prints the commands. (Encrypted archives keep the
-same name and just add a `gpg -d` at the front; spanned tape parts are listed by
+bare-tools path for you and prints the commands. (Encrypted archives carry a
+`.gpg` suffix on the payload — `…-L0.tar.zst.gpg` — and just add a `gpg -d` at the
+front of the pipe; spanned tape parts are listed by
 `nb slot <id>`.) The full by-hand procedure is in
 [docs/restore-by-hand.md](docs/restore-by-hand.md).
 
@@ -281,20 +286,23 @@ Run slot-2026-06-21.001  [running]
   workers:  2 configured, 2 active
   dles:     1 done, 2 active, 1 pending
 
-DLE            LEVEL  STATE    PROGRESS           DONE       EST        WRITTEN
-app01:/etc     L1     done     [##########] 100%  120.00 kB  ~118.0 kB  41.00 kB
-app01:/home    L0     dumping  [####......]  42%  8.40 GB    ~20.0 GB   3.10 GB
-db01:/pg       L0     dumping  [##........]  18%  3.60 GB    ~20.0 GB   1.40 GB
-app01:/var     L1     pending  -                  0 B        ~2.0 GB    0 B
+DLE            LEVEL  STATE    DUMP               FLUSH   DUMPED     VOLUME
+app01:/etc     L1     done     [##########] 100%  direct  120.00 kB  41.00 kB
+app01:/home    L0     dumping  [####......]  42%   -       8.40 GB    2.90 GB
+db01:/pg       L0     dumping  [##........]  18%   -       3.60 GB    1.20 GB
+app01:/var     L1     pending  -                  -       0 B        0 B
 
-Total:    12.12 GB of ~62.12 GB  (20%)
-Rate:     48.10 MB/s
+Dump:     12.12 GB of ~62.12 GB  (20%)   48.10 MB/s
+Volume:   4.11 GB written
 ETA:      17m18s
 ```
 
-Each DLE's percentage is uncompressed bytes against the planner estimate; the run
-streams source→compressor→volume in one pass, so there is a single `dumping` state
-per DLE (no separate dumper/taper queues). The report covers the whole cycle: a run
+The DUMP bar meters each DLE's source→volume progress (uncompressed bytes against the
+planner estimate); DUMPED is the uncompressed source read so far and VOLUME what has
+landed authoritatively. FLUSH is `direct` for a one-pass run that streams
+source→compressor→volume (a single `dumping` state per DLE, no separate dumper/taper
+queues); with a holding disk it becomes a second bar metering the drain from the
+holding disk to the landing. The report covers the whole cycle: a run
 opens in an `estimating` phase while it sizes every DLE (a pass that can take a while on
 a large source), so `nb status` shows that the dump is underway rather than nothing at
 all:

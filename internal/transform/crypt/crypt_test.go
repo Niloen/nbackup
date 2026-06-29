@@ -110,3 +110,63 @@ func TestCheck(t *testing.T) {
 		t.Error("expected an error for gpg with no recipient or passphrase file")
 	}
 }
+
+// TestCheckUnreadablePassphraseFile fails check on a mode-000 passphrase file:
+// os.Stat would pass it (it only needs +x on the parent dir), so the dump would
+// fail mid-run with gpg "Permission denied". Check must catch it up front by
+// trying to open the file the way gpg will.
+func TestCheckUnreadablePassphraseFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read mode-000 files, so the unreadable case can't be reproduced")
+	}
+	pass := filepath.Join(t.TempDir(), "pass")
+	if err := os.WriteFile(pass, []byte("correct horse battery staple\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(pass, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	err := Check("gpg", Options{PassphraseFile: pass})
+	if err == nil {
+		t.Fatal("expected an error for an unreadable passphrase file")
+	}
+	if !strings.Contains(err.Error(), "unreadable") {
+		t.Errorf("error should name the file as unreadable, got: %v", err)
+	}
+}
+
+// TestGPGDecryptLoopback locks in that symmetric decrypt runs gpg with
+// --pinentry-mode loopback (matching encrypt). Without it, a tty-less restore
+// emits "problem with the agent: Inappropriate ioctl" and the misleading
+// "decryption failed: No secret key". The passphrase must travel via
+// --passphrase-file, never as an argv literal.
+func TestGPGDecryptLoopback(t *testing.T) {
+	pass := filepath.Join(t.TempDir(), "pass")
+	o := Options{PassphraseFile: pass}
+	cmd, ok, err := DecryptCmd("gpg", o)
+	if err != nil || !ok {
+		t.Fatalf("DecryptCmd: ok=%v err=%v", ok, err)
+	}
+	argv := append([]string{cmd.Name}, cmd.Args...)
+	if !containsPair(argv, "--pinentry-mode", "loopback") {
+		t.Errorf("decrypt argv missing --pinentry-mode loopback: %v", argv)
+	}
+	if !containsPair(argv, "--passphrase-file", pass) {
+		t.Errorf("decrypt argv must pass the passphrase via --passphrase-file: %v", argv)
+	}
+	for _, a := range argv {
+		if a == "correct horse battery staple" {
+			t.Error("passphrase must never appear as an argv literal")
+		}
+	}
+}
+
+// containsPair reports whether argv has want immediately followed by next.
+func containsPair(argv []string, want, next string) bool {
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == want && argv[i+1] == next {
+			return true
+		}
+	}
+	return false
+}

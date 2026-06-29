@@ -110,12 +110,17 @@ func Check(scheme string, o Options) error {
 	if o.Recipient != "" && o.PassphraseFile != "" {
 		return fmt.Errorf("encryption scheme %q: set exactly one of `recipient` (public-key) or `passphrase_file` (symmetric), not both", scheme)
 	}
-	// Fail fast on a passphrase file that isn't there: otherwise gpg only fails
-	// once bytes start flowing, surfacing as a broken-pipe mid-dump.
+	// Fail fast on a passphrase file gpg can't read: a missing file, or one we
+	// lack read permission for (e.g. mode 000). os.Stat would pass a mode-000
+	// file — it only needs +x on the parent dir — so actually open it for reading,
+	// the same access gpg will need, and let gpg's broken-pipe-mid-dump turn into
+	// a clear check-time error.
 	if o.PassphraseFile != "" {
-		if _, err := os.Stat(o.PassphraseFile); err != nil {
+		f, err := os.Open(o.PassphraseFile)
+		if err != nil {
 			return fmt.Errorf("encryption scheme %q: passphrase_file %q is unreadable: %w", scheme, o.PassphraseFile, err)
 		}
+		f.Close()
 	}
 	bin := s.encryptArgv(o)[0]
 	if _, err := exec.LookPath(bin); err != nil {

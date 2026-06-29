@@ -163,3 +163,29 @@ func TestReclaimSparesInFlightAppend(t *testing.T) {
 		t.Fatalf("payload = %q, want %q", got, "BBB")
 	}
 }
+
+func TestPayloadExtEncryption(t *testing.T) {
+	cases := []struct {
+		name    string
+		h       record.Header
+		wantExt string
+	}{
+		{"plain none", record.Header{Kind: record.KindArchive, Compress: "none"}, ".tar"},
+		{"plain gzip", record.Header{Kind: record.KindArchive, Compress: "gzip"}, ".tar.gz"},
+		{"plain zstd", record.Header{Kind: record.KindArchive, Compress: "zstd"}, ".tar.zst"},
+		{"encrypted none", record.Header{Kind: record.KindArchive, Compress: "none", Encrypt: "gpg"}, ".tar.gpg"},
+		{"encrypted gzip", record.Header{Kind: record.KindArchive, Compress: "gzip", Encrypt: "gpg"}, ".tar.gz.gpg"},
+		{"encrypted zstd", record.Header{Kind: record.KindArchive, Compress: "zstd", Encrypt: "gpg"}, ".tar.zst.gpg"},
+		{"encrypt none-string stays plain", record.Header{Kind: record.KindArchive, Compress: "gzip", Encrypt: "none"}, ".tar.gz"},
+		// The commit footer and member index are never encrypted — they keep plaintext names.
+		{"commit ignores encrypt", record.Header{Kind: record.KindCommit, Compress: "gzip", Encrypt: "gpg"}, ".json"},
+		{"index ignores encrypt", record.Header{Kind: record.KindIndex, Compress: "gzip", Encrypt: "gpg"}, ".json.gz"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := payloadExt(c.h); got != c.wantExt {
+				t.Errorf("payloadExt = %q, want %q", got, c.wantExt)
+			}
+		})
+	}
+}

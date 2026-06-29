@@ -109,7 +109,7 @@ func newPlanCmd(a *app) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&dateStr, "date", "", "run date YYYY-MM-DD (default today)")
+	cmd.Flags().StringVar(&dateStr, "date", "", "run date YYYY-MM-DD (default today); planning a date behind the latest committed run may show a full, since incremental state reflects the most recent dump")
 	cmd.Flags().IntVar(&days, "days", 1, "forecast this many consecutive daily runs from --date")
 	return cmd
 }
@@ -174,6 +174,7 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 		fmt.Fprintln(tw, "DATE\tFULL\tINCR\tEST. SIZE\tFULLS")
 	}
 	var windowTotal int64
+	var totalIncrs int
 	for i, p := range plans {
 		var fulls, incrs int
 		var est int64
@@ -188,6 +189,7 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 			}
 		}
 		windowTotal += est
+		totalIncrs += incrs
 		names := strings.Join(fullNames, ", ")
 		if names == "" {
 			names = "-"
@@ -202,6 +204,13 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 		}
 	}
 	tw.Flush()
+	if totalIncrs > 0 {
+		// The simulation replays the level schedule but never mutates the filesystem,
+		// so no bytes change between simulated runs and every forecast incremental sizes
+		// to 0 B. Say so, lest a reader read "~0 B" as a broken estimate; a real
+		// incremental is a fraction of its full (shown in the FULL/INCR counts).
+		fmt.Println("\nNote: a forecast incremental over a simulated full shows ~0 B because the simulation makes no filesystem changes between runs; a real incremental is a fraction of its full.")
+	}
 	fmt.Printf("\nWindow total (estimated): ~%s over %d run(s)\n", sizeutil.FormatBytes(windowTotal), days)
 	if priced && len(curve) > 0 {
 		last := curve[len(curve)-1]
@@ -306,7 +315,7 @@ func newDumpCmd(a *app) *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&dateStr, "date", "", "run date YYYY-MM-DD (default today)")
+	cmd.Flags().StringVar(&dateStr, "date", "", "run date YYYY-MM-DD (default today); a --dry-run for a date behind the latest committed run may show a full, since incremental state reflects the most recent dump")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "plan the run for --date and print it without writing anything")
 	return cmd
 }
@@ -590,25 +599,46 @@ func runSlotShow(a *app, slotID string) error {
 
 	placements := eng.Catalog().Placements(s.ID)
 	fmt.Printf("\nCOPIES (%d)\n", len(placements))
+	// One row per segment (each data part, then the commit footer) rather than one
+	// row per copy: a copy spanned across many volumes would otherwise pack every
+	// volume name into one overflowing cell, and listing the data parts but not the
+	// commit volume read like an off-by-one. A row per segment names where each piece
+	// landed — volume + file number — so a spanned archive is legible and the commit
+	// (written last, possibly on a later volume) is shown explicitly.
 	ptw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(ptw, "  MEDIUM\tVOLUMES\tPOSITIONS")
+	fmt.Fprintln(ptw, "  MEDIUM\tDLE\tLEVEL\tSEGMENT\tVOLUME\tFILE")
+	spanned := false
 	for _, p := range placements {
-		volumes := "-"
-		if labels := p.Labels(); len(labels) > 0 {
-			volumes = strings.Join(labels, "+")
-		}
-		positions := make([]string, 0, len(p.Archives))
 		for _, ar := range p.Archives {
-			locs := make([]string, 0, len(ar.Parts))
-			for _, pt := range ar.Parts {
-				locs = append(locs, fmt.Sprintf("%d", pt.Pos))
+			dle := eng.DisplayDLE(ar.DLE)
+			level := fmt.Sprintf("L%d", ar.Level)
+			n := len(ar.Parts)
+			for i, pt := range ar.Parts {
+				seg := "data"
+				if n > 1 {
+					seg = fmt.Sprintf("part %d/%d", i+1, n)
+					spanned = true
+				}
+				fmt.Fprintf(ptw, "  %s\t%s\t%s\t%s\t%s\t%d\n", p.Medium, dle, level, seg, volumeOrDash(pt.Label), pt.Pos)
 			}
-			positions = append(positions, fmt.Sprintf("%s/L%d@%s", eng.DisplayDLE(ar.DLE), ar.Level, strings.Join(locs, ",")))
+			fmt.Fprintf(ptw, "  %s\t%s\t%s\t%s\t%s\t%d\n", p.Medium, dle, level, "commit", volumeOrDash(ar.Commit.Label), ar.Commit.Pos)
 		}
-		fmt.Fprintf(ptw, "  %s\t%s\t%s\n", p.Medium, volumes, strings.Join(positions, " "))
 	}
 	ptw.Flush()
+	fmt.Println("  FILE is the segment's sequential file number on VOLUME (VOLUME \"-\" = a label-less medium, e.g. disk/s3).")
+	if spanned {
+		fmt.Println("  A spanned archive lists each data part on its volume; the commit footer is written last and may land on a later volume.")
+	}
 	return nil
+}
+
+// volumeOrDash renders a volume label, or "-" for a label-less medium (disk/s3),
+// where files are addressed within the single medium rather than by volume label.
+func volumeOrDash(label string) string {
+	if label == "" {
+		return "-"
+	}
+	return label
 }
 
 // newDleCmd implements `nb dle`: inspect the catalog grouped by DLE (backup source)
@@ -1135,7 +1165,7 @@ func newSyncCmd(a *app) *cobra.Command {
 	cmd.Flags().StringVar(&to, "to", "", "target medium (omit to run the config's sync: rules)")
 	cmd.Flags().StringVar(&from, "from", "", "source medium (default: the landing medium)")
 	cmd.Flags().IntVar(&last, "last", 0, "copy only the N most recent slots (0 = all)")
-	cmd.Flags().StringVar(&sinceStr, "since", "", "copy only slots created on/after this date YYYY-MM-DD")
+	cmd.Flags().StringVar(&sinceStr, "since", "", "copy only slots dated on/after this date YYYY-MM-DD")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "preview without copying")
 	cmd.Flags().BoolVar(&force, "force", false, "re-copy slots already recorded on the target")
 	return cmd
@@ -1262,6 +1292,7 @@ func mediumDetail(eng *engine.Engine, name string) error {
 	fmt.Printf("Medium %s  (%s)\n", m.Name, m.Type)
 	fmt.Printf("  volume:  %s\n", volumeStr(m))
 	fmt.Printf("  used:    %s / %s%s\n", sizeutil.FormatBytes(m.Used), capacityStr(m.Capacity), overMarker(m.Used, m.Capacity))
+	fmt.Printf("  retention: minimum_age %s\n", sizeutil.FormatDuration(eng.MediumMinAge(name)))
 	printInventory(eng, name)
 	fmt.Println()
 	slots := eng.Catalog().SlotsOn(name)

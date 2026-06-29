@@ -142,6 +142,13 @@ func (e *Engine) checkMedia(rep *CheckReport) {
 			rep.add(&rep.Server, false, false, fmt.Sprintf("%s has unknown type %q (known: %v)", label, e.cfg.Media[name].Type, media.VolumeTypes()))
 			continue
 		}
+		// The landing volume is opened (and indexed) at engine construction; under the
+		// tolerant `nb check` build that failure is recorded rather than fatal, so report
+		// it here instead of the cached open handle's (nil) error.
+		if isLanding && e.landingErr != nil {
+			rep.add(&rep.Server, false, false, fmt.Sprintf("%s not ready: %v", label, e.landingErr))
+			continue
+		}
 		if e.cfg.Media[name].Type == "cloud" {
 			rep.add(&rep.Server, false, true, fmt.Sprintf("%s (cloud) configured — reachability checked at first use, not here", label))
 			continue

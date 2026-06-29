@@ -31,7 +31,9 @@ func newCheckCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eng, err := newEngine(cfg)
+			// Tolerant build: a landing medium that won't open is collected as a check
+			// failure (not an early abort), so `nb check` reports every problem at once.
+			eng, err := engine.NewForCheck(cfg)
 			if err != nil {
 				return err
 			}

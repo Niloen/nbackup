@@ -29,7 +29,7 @@ import (
 )
 
 func init() {
-	archiver.Register("gnutar", func(opts archiver.Options, ex programs.Executor, stateRoot string) (archiver.Archiver, error) {
+	archiver.Register("gnutar", []string{"tar_path", "one-file-system", "sparse"}, func(opts archiver.Options, ex programs.Executor, stateRoot string) (archiver.Archiver, error) {
 		bin := opts.Get("tar_path")
 		if bin == "" {
 			bin = "tar"

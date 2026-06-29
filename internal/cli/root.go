@@ -48,6 +48,28 @@ func NewRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 
+	// A flag error names the command it occurred on, so the usage hint points at that
+	// subcommand's help (`nb dump --help`) rather than the root — the help the operator
+	// actually wants when a subcommand flag is wrong. Inherited by every subcommand.
+	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return fmt.Errorf("%w\nRun '%s --help' for usage", err, cmd.CommandPath())
+	})
+
+	// Replace cobra's default help command, whose unknown-topic path prints a message
+	// but exits 0 (its handler is a Run, not a RunE) — a typo'd `nb help <topic>` must
+	// fail like `nb <topic>` does so a script never mistakes it for success.
+	root.SetHelpCommand(&cobra.Command{
+		Use:   "help [command]",
+		Short: "Help about any command",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target, _, e := root.Find(args)
+			if target == nil || e != nil {
+				return fmt.Errorf("unknown help topic %q\nRun 'nb --help' for the command list", strings.Join(args, " "))
+			}
+			return target.Help()
+		},
+	})
+
 	pf := root.PersistentFlags()
 	pf.StringVarP(&a.cfgPath, "config", "c", DefaultConfigPath, "path to config file")
 	// --catalog has no short flag: a `-C`/`-c` pair distinguished only by case is
@@ -95,17 +117,15 @@ func newVersionCmd() *cobra.Command {
 	}
 }
 
-// Execute runs the nb command tree. Errors are returned for main to report. A
-// usage-shaped error (unknown command/flag) gets a pointer to --help, since
-// SilenceUsage suppresses cobra's own hint to keep operational failures terse.
+// Execute runs the nb command tree. Errors are returned for main to report. An
+// unknown command gets a pointer to --help, since SilenceUsage suppresses cobra's
+// own hint to keep operational failures terse. Unknown-flag errors are pointed at
+// the right subcommand's help by SetFlagErrorFunc (in NewRootCmd), so they need no
+// handling here.
 func Execute() error {
 	err := NewRootCmd().Execute()
-	if err != nil {
-		m := err.Error()
-		if strings.HasPrefix(m, "unknown command") || strings.HasPrefix(m, "unknown flag") ||
-			strings.HasPrefix(m, "unknown shorthand flag") {
-			return fmt.Errorf("%w\nRun 'nb --help' for usage", err)
-		}
+	if err != nil && strings.HasPrefix(err.Error(), "unknown command") {
+		return fmt.Errorf("%w\nRun 'nb --help' for usage", err)
 	}
 	return err
 }

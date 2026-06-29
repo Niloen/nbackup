@@ -67,6 +67,7 @@ type Engine struct {
 	runSink        progress.Sink                 // optional: live run-progress sink (nil = status file only)
 	estimateSink   progress.Sink                 // optional: live estimate-progress sink (nil = status file only)
 	limiters       map[string]*ratelimit.Limiter // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
+	landingErr     error                         // set when the landing medium could not be opened/indexed under a tolerant build (`nb check`); nil on a normal build
 	dec            *decoder                      // the read-side scheme operation (restore/verify/list); shares the engine's resolution + decode opts
 	dmp            *dumper.Dumper                // the producer (dump): workers + tar source + encode pipeline; the engine injects its resolution
 	ver            *verifier                     // the verification operation (verify/drill checks); shares catalog + data path + decoder
@@ -113,7 +114,20 @@ func (e *Engine) librarianFor(name string) (lib *librarian.Librarian, def config
 // its capacity profile via the media registry, and loads the catalog cache
 // (refreshing it from the volume the first time it is needed). Archivers are
 // opened lazily per dumptype.
-func New(cfg *config.Config) (*Engine, error) {
+func New(cfg *config.Config) (*Engine, error) { return build(cfg, false) }
+
+// NewForCheck builds an engine for `nb check`, which must report every problem
+// rather than abort on the first. Unlike New, a landing medium that cannot be
+// opened or indexed is not fatal: the failure is recorded (Engine.landingErr) and
+// surfaced as a collected check failure, so the rest of the checks — compression,
+// encryption, other media, every source host — still run. Config-shaped errors
+// (a bad media param, an unworkable holding disk) remain hard, since there is
+// nothing meaningful left to check past them.
+func NewForCheck(cfg *config.Config) (*Engine, error) { return build(cfg, true) }
+
+// build wires an Engine from configuration. With tolerateLanding set (the `nb check`
+// path) a landing medium that won't open or index is recorded rather than fatal.
+func build(cfg *config.Config, tolerateLanding bool) (*Engine, error) {
 	// Validate every medium's inline options against the keys its type accepts, so
 	// a typo (e.g. `capcity:`) is a hard error rather than a silently-ignored knob.
 	// Done here, where the media registry is loaded, and over all media (not just
@@ -151,15 +165,24 @@ func New(cfg *config.Config) (*Engine, error) {
 		return nil, err
 	}
 	mediaDef := cfg.Media[name]
+	var landingErr error
 	vol, err := media.OpenVolume(mediaDef.Type, media.Options(mediaDef.Params))
 	if err != nil {
 		// Opening a cloud volume lists the bucket, so this is where absent SDK
 		// credentials or an unreachable store first surface. Name the medium and
 		// point at the credential source rather than leaking the raw provider error.
 		if mediaDef.Type == "cloud" {
-			return nil, fmt.Errorf("cannot reach landing medium %q: %w\n(a cloud store reads its credentials from the SDK environment: AWS_*, GOOGLE_APPLICATION_CREDENTIALS, or AZURE_*)", name, err)
+			err = fmt.Errorf("cannot reach landing medium %q: %w\n(a cloud store reads its credentials from the SDK environment: AWS_*, GOOGLE_APPLICATION_CREDENTIALS, or AZURE_*)", name, err)
+		} else {
+			err = fmt.Errorf("cannot open landing medium %q: %w", name, err)
 		}
-		return nil, fmt.Errorf("cannot open landing medium %q: %w", name, err)
+		// `nb check` collects this rather than aborting, so the rest of the checks
+		// still run; every other caller fails hard (a run cannot write a landing it
+		// cannot open). vol stays nil; the index step below is skipped.
+		if !tolerateLanding {
+			return nil, err
+		}
+		landingErr = err
 	}
 	profile, err := media.OpenProfile(mediaDef.Type, media.Options(mediaDef.ProfileOptions()))
 	if err != nil {
@@ -173,17 +196,25 @@ func New(cfg *config.Config) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := cat.EnsureFresh(name, vol); err != nil {
-		// The one-time bootstrap scan indexes whatever the landing medium already
-		// holds; once the local catalog cache exists, planning/listing is fully
-		// offline. A cloud store fails here only when its SDK credentials are absent
-		// or it is unreachable — surface that legibly with the medium named, rather
-		// than the raw provider SDK error.
-		hint := ""
-		if mediaDef.Type == "cloud" {
-			hint = " — a cloud store reads its credentials from the SDK environment (AWS_*, GOOGLE_APPLICATION_CREDENTIALS, or AZURE_*); set them, or run where the catalog cache already exists"
+	// vol is nil only on a tolerated landing-open failure (check); skip indexing then —
+	// the recorded landingErr already explains why the landing is unreachable.
+	if vol != nil {
+		if err := cat.EnsureFresh(name, vol); err != nil {
+			// The one-time bootstrap scan indexes whatever the landing medium already
+			// holds; once the local catalog cache exists, planning/listing is fully
+			// offline. A cloud store fails here only when its SDK credentials are absent
+			// or it is unreachable — surface that legibly with the medium named, rather
+			// than the raw provider SDK error.
+			hint := ""
+			if mediaDef.Type == "cloud" {
+				hint = " — a cloud store reads its credentials from the SDK environment (AWS_*, GOOGLE_APPLICATION_CREDENTIALS, or AZURE_*); set them, or run where the catalog cache already exists"
+			}
+			err = fmt.Errorf("cannot reach landing medium %q to index existing backups: %w%s", name, err, hint)
+			if !tolerateLanding {
+				return nil, err
+			}
+			landingErr = err
 		}
-		return nil, fmt.Errorf("cannot reach landing medium %q to index existing backups: %w%s", name, err, hint)
 	}
 	minAge := cfg.MinAgeFor(mediaDef)
 	fopts := compress.Options{
@@ -205,6 +236,7 @@ func New(cfg *config.Config) (*Engine, error) {
 		mediumName:     name,
 		mediumDef:      mediaDef,
 		vol:            vol,
+		landingErr:     landingErr,
 		profile:        profile,
 		landingCost:    costModel,
 		minAge:         minAge,
@@ -318,6 +350,13 @@ func (e *Engine) Media() []MediumInfo { return e.acct.Media() }
 // Medium returns the summary for one configured medium; ok is false if the name
 // is unknown.
 func (e *Engine) Medium(name string) (MediumInfo, bool) { return e.acct.Medium(name) }
+
+// MediumMinAge returns a medium's effective retention floor — its configured
+// minimum_age, or the dump cycle when unset — the same value pruning enforces
+// before retiring a slot. An unknown name yields the default floor.
+func (e *Engine) MediumMinAge(name string) time.Duration {
+	return e.cfg.MinAgeFor(e.cfg.Media[name])
+}
 
 // volumesInPool returns the labeled volumes the catalog tracks for a medium
 // (matched by the label pool == medium name), sorted by name.

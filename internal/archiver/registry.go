@@ -20,8 +20,25 @@ type Factory func(Options, programs.Executor, string) (Archiver, error)
 
 var factories = map[string]Factory{}
 
-// Register registers an Archiver implementation under a type name.
-func Register(name string, f Factory) { factories[name] = f }
+// knownOptions records the option keys each archiver type accepts, so config load can
+// reject a typo'd option (e.g. `one-file-sytem`) rather than silently dropping it — an
+// inline option map bypasses YAML's KnownFields check, so the registry is the one place
+// that knows a type's real option set.
+var knownOptions = map[string][]string{}
+
+// Register registers an Archiver implementation under a type name, declaring the option
+// keys it accepts (used by config validation to reject unknown options).
+func Register(name string, opts []string, f Factory) {
+	factories[name] = f
+	knownOptions[name] = opts
+}
+
+// KnownOptions returns the option keys the named archiver type accepts, and whether the
+// type is registered.
+func KnownOptions(name string) ([]string, bool) {
+	opts, ok := knownOptions[name]
+	return opts, ok
+}
 
 // Open constructs the Archiver registered under the type name, running its programs
 // through ex (local or a remote client) and keeping incremental state under stateRoot.
