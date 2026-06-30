@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -144,17 +145,27 @@ func Execute() error {
 	// so without this the terminal sits silent and looks hung. A second signal force-quits, in case
 	// a graceful cancel itself hangs: stopping the notifier restores the default disposition so the
 	// next signal terminates the process outright.
+	//
+	// The notice is held back a beat: it's about a *slow* unwind, so a command that exits promptly
+	// on cancel (e.g. the read-only `nb status --watch` viewer) closes done first and stays quiet —
+	// no dump-flavored "canceling…" where nothing was being canceled.
+	done := make(chan struct{})
 	go func() {
 		select {
 		case <-sigCh:
-			fmt.Fprintln(os.Stderr, "\ncanceling… (press Ctrl-C again to force quit)")
 			signal.Stop(sigCh)
 			cancel()
-		case <-ctx.Done():
+			select {
+			case <-time.After(150 * time.Millisecond):
+				fmt.Fprintln(os.Stderr, "\ncanceling… (press Ctrl-C again to force quit)")
+			case <-done:
+			}
+		case <-done:
 		}
 	}()
 
 	err := NewRootCmd().ExecuteContext(ctx)
+	close(done)
 	if err != nil && strings.HasPrefix(err.Error(), "unknown command") {
 		return fmt.Errorf("%w\nRun 'nb --help' for usage", err)
 	}

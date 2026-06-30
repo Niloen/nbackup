@@ -412,7 +412,14 @@ func newStatusCmd(a *app) *cobra.Command {
 				if err == nil && snap.Phase.Terminal() {
 					return nil // run finished; stop watching
 				}
-				time.Sleep(watch)
+				// Watching is a read-only poll, so Ctrl-C just quits the viewer: exit cleanly
+				// (nil, no "canceled" notice — there's nothing in flight to cancel) rather than
+				// sleeping out the interval first.
+				select {
+				case <-cmd.Context().Done():
+					return nil
+				case <-time.After(watch):
+				}
 			}
 		},
 	}
