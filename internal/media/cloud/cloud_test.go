@@ -35,12 +35,26 @@ func TestRequiresURL(t *testing.T) {
 	}
 }
 
-// TestRejectsPartSize mirrors disk: an object store is unbounded, never splits an
-// archive, and silently ignoring part_size would mislead.
-func TestRejectsPartSize(t *testing.T) {
-	_, err := media.OpenVolume("cloud", media.Options{"url": "mem://", "part_size": "1MB"})
-	if err == nil {
-		t.Fatal("expected cloud to reject part_size")
+// TestAcceptsPartSize confirms the cloud factory no longer rejects part_size: an object
+// store splits a large archive into part-objects, so the knob is honored (the writer
+// drives the split; the factory just opens the bucket). The default/bound live in the
+// part-size policy and are exercised at the engine level.
+func TestAcceptsPartSize(t *testing.T) {
+	if _, err := media.OpenVolume("cloud", media.Options{"url": "mem://", "part_size": "1MB"}); err != nil {
+		t.Fatalf("cloud should accept part_size: %v", err)
+	}
+}
+
+// TestPartSizePolicy confirms the registered default (10 GB) and upper bound (40 GB)
+// the engine applies — the default keeps each object moderate, the cap keeps a single
+// object's multipart upload below the object store's 10000-part ceiling.
+func TestPartSizePolicy(t *testing.T) {
+	p := media.PartSizeFor("cloud")
+	if p.Default != 10_000_000_000 {
+		t.Errorf("cloud part_size default = %d, want 10 GB", p.Default)
+	}
+	if p.Max != 40_000_000_000 {
+		t.Errorf("cloud part_size max = %d, want 40 GB", p.Max)
 	}
 }
 

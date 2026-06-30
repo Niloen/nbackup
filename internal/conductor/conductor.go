@@ -18,13 +18,22 @@ import (
 	"github.com/Niloen/nbackup/internal/progress"
 )
 
-// PreparedWriter is the folded view of a medium opened for writing: the slot store
-// the producers author into, whether the medium can span volumes (so the caller can
-// clamp parallelism), and the medium's capacity in bytes. The engine builds it from
-// its clerk/librarian machinery so the conductor stays free of those packages.
+// PreparedWriter is the folded view of a medium opened for writing: the slot store the
+// producers author into, whether the medium can span volumes and whether it writes
+// serially (the two together decide parallelism), and the medium's capacity in bytes.
+// The engine builds it from its clerk/librarian machinery so the conductor stays free
+// of those packages.
+//
+// Serial and CanSpan are independent. Serial means a single physical drive that rolls
+// one shared volume (tape) — it cannot interleave two archives, so a concurrent run is
+// clamped and its landing writes serialized. CanSpan means an archive is split into
+// parts (a sized tape, or any medium with part_size). A concurrent-write medium (disk,
+// cloud) is NOT serial even when it spans: it splits each archive into independent
+// objects/files on one logical volume and stays fully parallel.
 type PreparedWriter struct {
 	Store    archiveio.ArchiveStore
 	CanSpan  bool
+	Serial   bool
 	Capacity int64
 }
 

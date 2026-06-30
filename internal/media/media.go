@@ -138,16 +138,40 @@ type Options map[string]string
 // Get returns the value for a parameter key, or "".
 func (o Options) Get(key string) string { return o[key] }
 
-// RejectPartSize returns an error when opts sets part_size on an unbounded,
-// address-identified medium (disk, cloud) that never splits an archive into parts — so
-// the knob is refused with one shared message rather than silently ignored. Spanning
-// media (tape) accept and honor part_size instead.
+// RejectPartSize returns an error when opts sets part_size on an unbounded medium
+// (disk) that never splits an archive into parts — so the knob is refused with one
+// shared message rather than silently ignored. Spanning media (tape) and part-splitting
+// object stores (cloud) accept and honor part_size instead.
 func RejectPartSize(opts Options, mediumType string) error {
 	if opts.Get("part_size") != "" {
 		return fmt.Errorf("%s medium does not support part_size (it is unbounded and never splits archives)", mediumType)
 	}
 	return nil
 }
+
+// PartSizePolicy is a medium type's posture toward the part_size knob: the default
+// applied when the operator leaves it unset, and an optional upper bound (with a
+// medium-specific note) that guards a value the write path cannot honor. A type with
+// no registered policy (disk, tape) has neither — part_size is unset-means-unbounded
+// and bounded only by the shared lower limit the engine enforces.
+type PartSizePolicy struct {
+	Default int64  // part_size applied when unset (0 = none: a single unbounded part)
+	Max     int64  // upper bound for an explicit part_size (0 = no upper bound)
+	MaxNote string // appended to the over-max error to explain the medium's limit
+}
+
+// partSizePolicies records each medium type's PartSizePolicy. A medium declares it next
+// to RegisterVolume; an unregistered type has the zero policy (no default, no bound).
+var partSizePolicies = map[string]PartSizePolicy{}
+
+// RegisterPartSize records a medium type's part-size default and bound. The cloud
+// medium uses it to default to a moderate object size and cap the object below the
+// object store's multipart-upload ceiling; the generic layer never hardcodes a type.
+func RegisterPartSize(typ string, p PartSizePolicy) { partSizePolicies[typ] = p }
+
+// PartSizeFor returns a medium type's PartSizePolicy (the zero policy when none is
+// registered). The engine consults it to default and bound a medium's part_size.
+func PartSizeFor(typ string) PartSizePolicy { return partSizePolicies[typ] }
 
 // FileWriter is the payload writer AppendFile hands back: write the payload, then Close to commit
 // (or cancel the AppendFile ctx before Close to abort). Pos reports the file's on-volume position and

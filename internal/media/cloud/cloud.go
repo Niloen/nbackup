@@ -39,19 +39,30 @@ func init() {
 		if url == "" {
 			return nil, fmt.Errorf("cloud medium requires a url (e.g. s3://bucket?region=…, gs://bucket, azblob://container)")
 		}
-		// An object store is unbounded per object, so an archive is always a single
-		// part; part_size (the tape-spanning chunk bound) is meaningless here and is
-		// refused so the knob is never silently ignored — mirroring the disk medium.
-		if err := media.RejectPartSize(opts, "cloud"); err != nil {
-			return nil, err
-		}
+		// part_size is honored here: a large archive is split into several part-objects
+		// of <= part_size rather than one giant object, so a multi-GB archive never hits
+		// the object store's multipart-upload part-count ceiling (S3 caps a single
+		// object's upload at 10000 parts). Splitting is per archive on the one logical
+		// volume; it stays fully concurrent (unlike a serial tape drive). The default and
+		// upper bound live in the part-size policy registered below; the engine applies
+		// them. The factory itself is part-size-agnostic — the writer drives the split.
 		return open(url, opts.Get("prefix"))
 	})
 	// Same capacity model as disk: a byte budget reclaimed per slot, oldest first.
 	media.RegisterProfile("cloud", media.NewSizeProfile)
 	media.RegisterParams("cloud", "url", "prefix", "part_size")
+	// Split each archive into <= part_size part-objects, defaulting to 10 GB. The cap
+	// keeps one object's multipart upload well under the 10000-part limit: at the
+	// default 5 MiB upload buffer that ceiling is ~48.8 GB, so an object above ~40 GB
+	// risks the original "exceeded total allowed MaxUploadParts" failure. Memory stays
+	// flat — the 5 MiB streaming buffer is unchanged regardless of part_size.
+	media.RegisterPartSize("cloud", media.PartSizePolicy{
+		Default: 10_000_000_000, // 10 GB
+		Max:     40_000_000_000, // 40 GB
+		MaxNote: "an object store caps a single object's multipart upload at 10000 parts (~48.8 GB at the 5 MiB buffer); use a smaller part_size so each part-object stays well under it",
+	})
 	// An object store accepts concurrent puts and deletes individual objects — eligible as a
-	// holding disk (e.g. S3 buffering a tape landing).
+	// holding disk (e.g. S3 buffering a tape landing), and a part-split write stays concurrent.
 	media.RegisterConcurrentWrite("cloud")
 }
 
