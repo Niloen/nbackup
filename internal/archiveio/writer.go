@@ -152,6 +152,8 @@ func (m *meteredArchive) Commit(ctx context.Context, s xfer.SourceStats) error {
 
 func (m *meteredArchive) Result() (record.Archive, record.ArchivePos) { return m.aw.Result() }
 
+func (m *meteredArchive) Close() error { return m.aw.Close() }
+
 // meteredPart counts bytes flowing through one part, accumulating into the shared archive total and
 // reporting it after each write.
 type meteredPart struct {
@@ -269,6 +271,12 @@ func (a *archiveWriter) Commit(ctx context.Context, p xfer.SourceStats) error {
 // Result returns the committed archive and its on-medium position (parts/footer/index). It is valid
 // only after a successful Commit; the caller records the placement from it.
 func (a *archiveWriter) Result() (record.Archive, record.ArchivePos) { return a.arch, a.pos }
+
+// Close releases the writer's resources — it holds none between parts (each part writer self-closes
+// as it is written, an aborted part is dropped via its canceled ctx, and Commit is terminal), so
+// there is nothing to unwind here. It exists to satisfy the ArchiveWriter handle's io.Closer; the
+// spool's RemoteSink is the one wrapper whose Close does real work (returning the backing permit).
+func (a *archiveWriter) Close() error { return nil }
 
 // Commit durably finalizes an archive (all fields final): it writes the member index (the
 // gzip'd Members) then the commit footer (the metadata without members) — the footer last,

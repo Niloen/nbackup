@@ -88,6 +88,9 @@ func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.SourceStats) error {
 // Commit.
 func (a *ArchiveWriter) Result() (record.Archive, record.ArchivePos) { return a.arch, a.pos }
 
+// Close releases the underlying writer's resources; the clerk holds none of its own.
+func (a *ArchiveWriter) Close() error { return a.aw.Close() }
+
 // OpenArchive reads a committed archive's payload back by concatenating its parts straight off the
 // session's volume (whose index the producer keeps current) — the drain's read seam, for copying a
 // staged archive to the backing.

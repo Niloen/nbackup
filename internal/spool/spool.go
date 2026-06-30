@@ -74,6 +74,7 @@ type Spool struct {
 
 	reqCh       chan sinkReq   // a RemoteSink's NextPart/Commit, served on the orchestrator
 	permitReqCh chan permitReq // a direct write waiting for the backing permit
+	releaseCh   chan release   // a direct write returning its backing permit (RemoteSink.Close)
 	workCh      chan handoff   // copies dispatched to the copy goroutine
 	copyDoneCh  chan copyResult
 	shutdownCh  chan struct{} // closed by Finish: no more producers
@@ -95,6 +96,7 @@ func New(cfg Config) *Spool {
 		logf:         cfg.Logf,
 		reqCh:        make(chan sinkReq),
 		permitReqCh:  make(chan permitReq),
+		releaseCh:    make(chan release),
 		workCh:       make(chan handoff),
 		copyDoneCh:   make(chan copyResult),
 		shutdownCh:   make(chan struct{}),
@@ -150,7 +152,7 @@ type writeKind int
 
 const (
 	writeHolding writeKind = iota // staged on a holding disk: queue a holding→backing copy
-	writeDirect                   // straight to the backing: release the backing permit
+	writeDirect                   // straight to the backing: holds a backing permit (released on Close)
 	writeCopy                     // the drain's copy to the backing: nothing (finalizeDrain reclaims)
 )
 
@@ -183,6 +185,23 @@ func (r *remoteSink) Commit(ctx context.Context, p xfer.SourceStats) error {
 // driving it never reads the position (the orchestrator records the placement inside Commit); it is
 // the orchestrator that reads Result, off the real writer, when it queues a holding→backing copy.
 func (r *remoteSink) Result() (record.Archive, record.ArchivePos) { return r.real.Result() }
+
+// Close releases what this archive held, whether the transfer committed or faulted before commit. A
+// direct write holds a backing permit; return it to the orchestrator here (not in Commit) so a
+// faulted direct write — which never reaches Commit — frees its slot too, instead of leaking it and
+// stalling the next direct writer forever. The producer defers Close right after NewArchive, so it
+// runs on every path. A holding or copy write holds no permit, so Close just closes the underlying
+// medium writer. The orchestrator is always serving when Close runs (every Close happens before
+// Drain), so the synchronous hand-off cannot block on a stopped server.
+func (r *remoteSink) Close() error {
+	err := r.real.Close()
+	if r.kind == writeDirect {
+		ack := make(chan struct{}, 1)
+		r.d.releaseCh <- release{ack: ack}
+		<-ack
+	}
+	return err
+}
 
 // sinkReq is a routed RemoteSink call served on the orchestrator: commit selects Commit(produced)
 // over NextPart, kind/disk carry the follow-up bookkeeping (only meaningful for a commit).
@@ -231,10 +250,12 @@ func (d *Spool) setAbort(err error) {
 }
 
 // orchestrate is the server and the sole catalog writer. Its select multiplexes the producers' (and
-// the copy's) routed sink calls, the permit waiters, and the copy goroutine so control never blocks
-// on a byte stream; it dispatches one backing write at a time copies-first (draining the disks keeps
-// the Pool from stalling producers). On error it aborts the Pool and replies the error to every
-// waiter, then drains the in-flight copy and exits once Finish has signalled no more producers.
+// the copy's) routed sink calls, the permit waiters and releases, and the copy goroutine so control
+// never blocks on a byte stream; it dispatches one backing write at a time copies-first (draining the
+// disks keeps the Pool from stalling producers). A direct write takes a permit when granted and
+// returns it on Close (committed or faulted), so a failed dump never leaks its slot. On error it
+// aborts the Pool and replies the error to every waiter, then drains the in-flight copy and exits
+// once Finish has signalled no more producers.
 func (d *Spool) orchestrate() {
 	defer close(d.finished)
 	defer close(d.workCh) // stops drainLoop
@@ -263,11 +284,6 @@ func (d *Spool) orchestrate() {
 				req.reply <- sinkResp{w: w, max: max, err: err}
 				break
 			}
-			// A direct write consumes a backing permit slot; release it whether or not its Commit
-			// (the placement record) succeeds.
-			if req.kind == writeDirect {
-				backingInUse--
-			}
 			if failErr != nil {
 				req.reply <- sinkResp{err: failErr}
 				break
@@ -294,6 +310,12 @@ func (d *Spool) orchestrate() {
 				break
 			}
 			pendingPermit = append(pendingPermit, pr)
+		case rel := <-d.releaseCh:
+			// A direct write finished (RemoteSink.Close) — committed or faulted before commit — and
+			// returns its backing permit. Releasing here, not in the Commit handler, is what frees a
+			// faulted direct write's slot; the dispatch block below then grants a waiting writer.
+			backingInUse--
+			rel.ack <- struct{}{}
 		case res := <-d.copyDoneCh:
 			copying = false
 			backingInUse--
@@ -406,6 +428,12 @@ type handoff struct {
 // granted.
 type permitReq struct {
 	reply chan error
+}
+
+// release is a direct write returning its backing permit on Close; ack is closed-back once the
+// orchestrator has decremented the count, so the producer's Close blocks until the slot is free.
+type release struct {
+	ack chan struct{}
 }
 
 // copyResult is one finished (or failed) copy the drain goroutine hands back to the orchestrator,

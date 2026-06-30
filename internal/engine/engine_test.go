@@ -1387,6 +1387,52 @@ func TestHoldingDiskLandingDownFails(t *testing.T) {
 	}
 }
 
+// TestDumpContinuesPastFailedDLE confirms a single DLE's failure no longer aborts the whole run: a
+// missing source (scheduled first, so the old fail-fast would have stopped here) fails at tar time,
+// but the good DLE after it is still dumped and committed, and the run reports failure overall.
+func TestDumpContinuesPastFailedDLE(t *testing.T) {
+	good := t.TempDir()
+	write(t, filepath.Join(good, "f.txt"), "i survive")
+	bad := filepath.Join(t.TempDir(), "does-not-exist") // never created -> tar fails at dump time
+
+	cfg := &config.Config{
+		Landing: "disk",
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+		},
+		// Bad DLE first: with the default single worker it is attempted before the good one, so the
+		// old "first error stops scheduling" would never reach the good DLE.
+		Sources:  []config.DLE{{Host: "localhost", Path: bad}, {Host: "localhost", Path: good}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	if _, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil); err == nil {
+		t.Fatal("a run with a failing DLE must report failure")
+	}
+
+	// The good DLE committed despite the earlier failure: exactly one archive landed.
+	slots := eng.cat.Slots()
+	if len(slots) != 1 {
+		t.Fatalf("expected the good DLE to commit one slot, got %d", len(slots))
+	}
+	if got := len(slots[0].Archives); got != 1 {
+		t.Fatalf("expected 1 committed archive (the good DLE), got %d", got)
+	}
+	if got := slots[0].Archives[0].DLE; !strings.Contains(got, filepath.Base(good)) {
+		t.Errorf("committed archive should be the good DLE, got %q", got)
+	}
+}
+
 func TestTapeLibraryRestore(t *testing.T) {
 	src := t.TempDir()
 	write(t, filepath.Join(src, "f.txt"), "v1")

@@ -9,6 +9,7 @@ package dumper
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"sync"
 
@@ -48,8 +49,10 @@ func New(cfg Config) *Dumper {
 
 // Run archives every item into fs: for each it opens an ingestion Sink (NewArchive), transfers the
 // encoded archive into it, and commits it (see dumpItem). With workers > 1 it runs that many
-// concurrently, bounded by a semaphore; the first error stops scheduling and is returned (a store
-// failure surfaces as the error NewArchive/commit return, so blocked workers wake and stop too).
+// concurrently, bounded by a semaphore. A single DLE's failure (its source or its upload) does not
+// stop the others — every DLE is attempted and the per-DLE errors are joined into the return value,
+// so the archives that succeeded still commit while the run reports failure. Only a backing-store
+// abort (the landing is unreachable, so nothing more can land) stops scheduling new DLEs.
 func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs archiveio.ArchiveWriteStore, tr *progress.Tracker, logf func(format string, args ...any)) error {
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -57,13 +60,24 @@ func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs 
 	dumpOne := func(item planner.Item) error {
 		return d.dumpItem(ctx, fs, item, tr, logf)
 	}
+	// A backing-store abort is fatal — once the landing is unreachable no further archive can land,
+	// so stop scheduling. A DLE's own failure is not: it is recorded and the rest carry on. The Spool
+	// exposes Aborted(); a single-medium store (the clerk) does not, so there it never aborts here.
+	aborted := func() bool {
+		a, ok := fs.(interface{ Aborted() error })
+		return ok && a.Aborted() != nil
+	}
 	if workers <= 1 || len(items) <= 1 {
+		var errs []error
 		for _, item := range items {
+			if aborted() {
+				break
+			}
 			if err := dumpOne(item); err != nil {
-				return err
+				errs = append(errs, err)
 			}
 		}
-		return nil
+		return errors.Join(errs...)
 	}
 
 	threads := d.threads
@@ -76,18 +90,13 @@ func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs 
 	}
 
 	var (
-		wg       sync.WaitGroup
-		sem      = make(chan struct{}, workers)
-		mu       sync.Mutex
-		firstErr error
+		wg   sync.WaitGroup
+		sem  = make(chan struct{}, workers)
+		mu   sync.Mutex
+		errs []error
 	)
-	failed := func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return firstErr != nil
-	}
 	for _, item := range items {
-		if failed() {
+		if aborted() {
 			break
 		}
 		wg.Add(1)
@@ -95,18 +104,13 @@ func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs 
 		go func(it planner.Item) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if failed() {
-				return
-			}
 			if err := dumpOne(it); err != nil {
 				mu.Lock()
-				if firstErr == nil {
-					firstErr = err
-				}
+				errs = append(errs, err)
 				mu.Unlock()
 			}
 		}(item)
 	}
 	wg.Wait()
-	return firstErr
+	return errors.Join(errs...)
 }

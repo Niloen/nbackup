@@ -203,6 +203,11 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.ArchiveWriteStore
 	// compressed count for live `nb status` (symmetric with tarCmd.Tap's uncompressed side). The store
 	// stays observability-free.
 	sink = archiveio.MeterArchive(sink, func(n int64) { comp.Store(n); report() })
+	// Release the sink's resources (for a direct landing write, its backing permit) on every exit
+	// path — success, a faulted transfer, or a promote failure. The permit is held from NewArchive,
+	// so without this a failed dump would leak it and stall the next direct writer; Close is the
+	// symmetric counterpart to that acquire, independent of whether Commit ran.
+	defer sink.Close()
 	// Transfer drives the whole ingestion: it streams the encoded archive into the sink and, on a
 	// clean transfer, has the sink seal it (footer + placement) against the producer's totals,
 	// returning those totals.
