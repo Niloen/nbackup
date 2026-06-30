@@ -594,20 +594,6 @@ func (l *Librarian) Remaining() (int64, bool) {
 	return st.Capacity - st.Used, true
 }
 
-// CanSpan reports whether a write to this medium can span volumes mid-archive: it
-// needs either a knowable remaining capacity (a finite reel, so the writer can size
-// each part to fit and roll proactively) or a configured part_size. Disk and any
-// medium without a loaded finite volume cannot span. The engine uses this to serialize
-// workers when spanning is possible (a single drive cannot interleave two archives'
-// parts).
-func (l *Librarian) CanSpan(partSize int64) bool {
-	if partSize > 0 {
-		return true
-	}
-	_, known := l.Remaining()
-	return known
-}
-
 // WriteSink drives a multi-part, possibly multi-volume write for the archiveio writer:
 // it sizes each part to the loaded volume's remaining capacity (capped by part_size),
 // rolls onto a fresh volume when the loaded one fills, and places the seal record. It
@@ -690,6 +676,19 @@ func (s *WriteSink) PlaceRecord(size int64) (media.Volume, string, int, error) {
 		}
 	}
 	return s.l.vol, s.volume, s.epoch, nil
+}
+
+// Bounded implements archiveio.VolumeSink: it reports whether a part's size is ever capped —
+// by a configured part_size or by a finite volume's knowable remaining capacity — so an archive
+// may land as several parts (cloud splitting, or a reel spanning). The writer marks each such
+// part a slice (Header.Split). False only for an unbounded medium (disk: no part_size, no
+// software-visible capacity), where every archive is a single standalone part.
+func (s *WriteSink) Bounded() bool {
+	if s.partSize > 0 {
+		return true
+	}
+	_, known := s.l.Remaining()
+	return known
 }
 
 // promptSwap asks the operator (via l.op) to pick a reel to load on a single-drive

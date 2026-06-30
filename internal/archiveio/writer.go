@@ -47,6 +47,15 @@ type VolumeSink interface {
 	// index or its commit footer) of the given payload size to, rolling first if it will
 	// not fit the loaded volume.
 	PlaceRecord(size int64) (vol media.Volume, volume string, epoch int, err error)
+	// Bounded reports whether this sink ever caps a part's size — by a configured part_size
+	// or by a finite volume's remaining capacity (the dual of NextPart's "max < 0 means
+	// unbounded"). When true an archive may land as several parts (cloud splitting under a
+	// part_size cap, or a finite reel spanning volumes mid-archive), so the writer stamps
+	// every part's Header.Split to mark it a slice of one whole — named and read as such,
+	// not as a standalone file. When false (disk: no cap, infinite room) each archive is a
+	// single, standalone part. It is a property of the medium, constant for the write, so the
+	// writer asks once. (This is the same predicate as the medium's spanning capability.)
+	Bounded() bool
 }
 
 // SlotSpec is the identity of a slot to author: the slot id every archive in the run is
@@ -343,7 +352,8 @@ func (w *Writer) writeRecord(ctx context.Context, kind string, a record.Archive,
 
 // archiveHeader builds the base record.Header an archive's parts share (NextPart clones
 // it per part with an ascending Part index). Every framing field comes straight from the
-// archive's descriptive metadata.
+// archive's descriptive metadata; Split is the sink's Bounded posture (constant for the
+// write), stamped so a multi-part payload's parts are named and read as slices, not standalone files.
 func (w *Writer) archiveHeader(a record.Archive) record.Header {
 	return record.Header{
 		Slot:      w.slotID,
@@ -356,6 +366,7 @@ func (w *Writer) archiveHeader(a record.Archive) record.Header {
 		Encrypt:   a.Encrypt,
 		Level:     a.Level,
 		BaseSlot:  a.BaseSlot,
+		Split:     w.sink.Bounded(),
 		CreatedAt: w.createdAt,
 	}
 }

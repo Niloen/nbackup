@@ -376,7 +376,15 @@ It does, however, **split a large archive into `≤ part_size` part-objects** (d
 10 GB), so an 84 GB archive becomes several objects rather than one — keeping each
 object's S3 multipart upload well under the 10000-part ceiling (~48.8 GB at the default
 5 MiB buffer; the buffer is unchanged, so process memory stays flat regardless of
-archive size). This is the **same proactive part machinery tape spanning uses** (the
+archive size). A split archive's part objects take a **`.pNNN` part-index suffix after
+the payload extension** (`…-L<n>.tar.gz.p000`, `.p001`, …; carried by `record.Header.Split`,
+set per part once a `part_size` cap applies) so no fragment poses as a directly-openable
+`.tar.gz`, the slices group and order by name, and `cat …tar.gz.p* | tar xz` reconstructs;
+the `.hdr` sidecar keeps its plain name (each part has its own position-prefixed sidecar).
+The suffix rides on the `part_size` cap *being engaged*, not on the final part count — a
+small cloud archive that fits in one part still lands as `.p000` (the total is unknown
+when the name is minted, and renaming an object store key is copy+delete). Only an
+unbounded medium with no cap (disk) keeps the bare, stock-openable `…-L<n>.tar.<ext>` name. This is the **same proactive part machinery tape spanning uses** (the
 `archiveio.Writer`'s parts, under `fslike`), but **decoupled from serial volume
 rolling**: splitting (`CanSpan` / part_size) is independent of being a *serial
 single-drive* medium (`Serial`, keyed off `media.ConcurrentWrite`). Cloud is

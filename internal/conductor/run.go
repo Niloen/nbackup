@@ -109,15 +109,21 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 
 	// landingSlots is how many landing writes may run at once: one while buffering (the drain copies
 	// serially, and a direct write shares that single timeline), one for a serial single-drive medium
-	// (tape — a spanning serial drive also clamps the workers, since it cannot interleave two archives'
-	// parts), and all of them for a concurrent-write medium (disk or cloud, which split each archive
-	// into independent objects/files — fully parallel even with part_size set).
+	// (tape — a single drive writes one archive at a time, which on the direct path also clamps the
+	// workers), and all of them for a concurrent-write medium (disk or cloud, which write each archive
+	// as independent objects/files — fully parallel even when an archive is split into parts).
+	//
+	// The clamp keys on Serial alone, not on whether an archive spans: part contiguity on the shared
+	// drive is already guaranteed by landingSlots=1 (a direct write holds the backing permit across its
+	// whole archive), and with no holding buffer a second producer cannot start until the first closes,
+	// so extra workers never pipeline — they only sit blocked. Splitting an archive into parts is the
+	// writer's concern (part sizing, Header.Split), not the conductor's.
 	workers := c.d.Workers
 	landingSlots := 1
 	if !buffering {
 		if landPW.Serial {
-			if landPW.CanSpan && workers > 1 {
-				logf.Log("medium %q writes serially and can span volumes; running 1 worker (a single drive cannot interleave archives)", c.d.Landing)
+			if workers > 1 {
+				logf.Log("medium %q writes serially; running 1 worker (a single drive writes one archive at a time)", c.d.Landing)
 				workers = 1
 			}
 		} else {

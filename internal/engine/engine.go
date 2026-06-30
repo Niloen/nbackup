@@ -506,12 +506,10 @@ func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
 }
 
 // writeTarget bundles a medium prepared for writing: a librarian whose first volume
-// is mounted and label-verified, the archiveio writer streaming the slot onto it, and the
-// medium's part_size (so the caller can decide parallelism via lib.CanSpan).
+// is mounted and label-verified, and the archiveio writer streaming the slot onto it.
 type writeTarget struct {
-	lib      *librarian.Librarian
-	w        *archiveio.Writer
-	partSize int64
+	lib *librarian.Librarian
+	w   *archiveio.Writer
 }
 
 // prepareWriter resolves a medium, enforces the label protocol on its loaded volume
@@ -549,7 +547,7 @@ func (e *Engine) prepareWriterWith(medium string, spec archiveio.SlotSpec, now t
 		sink = wrap(sink)
 	}
 	w := archiveio.NewWriter(sink, spec, e.limiters[medium], func() time.Time { return now })
-	return &writeTarget{lib: lib, w: w, partSize: partSize}, nil
+	return &writeTarget{lib: lib, w: w}, nil
 }
 
 // announceExpectation logs which labeled volume a write will use before it starts —

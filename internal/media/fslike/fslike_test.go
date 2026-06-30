@@ -180,6 +180,13 @@ func TestPayloadExtEncryption(t *testing.T) {
 		// The commit footer and member index are never encrypted — they keep plaintext names.
 		{"commit ignores encrypt", record.Header{Kind: record.KindCommit, Compress: "gzip", Encrypt: "gpg"}, ".json"},
 		{"index ignores encrypt", record.Header{Kind: record.KindIndex, Compress: "gzip", Encrypt: "gpg"}, ".json.gz"},
+		// A split archive appends a .pNNN part-index suffix AFTER the payload extension, so a
+		// fragment never poses as a directly-openable .tar.gz/.gpg. Set even for a sole part 0.
+		{"split part 0", record.Header{Kind: record.KindArchive, Compress: "gzip", Split: true}, ".tar.gz.p000"},
+		{"split part 1", record.Header{Kind: record.KindArchive, Compress: "gzip", Split: true, Part: 1}, ".tar.gz.p001"},
+		{"split encrypted part 2", record.Header{Kind: record.KindArchive, Compress: "zstd", Encrypt: "gpg", Split: true, Part: 2}, ".tar.zst.gpg.p002"},
+		// Split rides only on the payload; the commit/index records keep their plaintext names.
+		{"split commit stays plain", record.Header{Kind: record.KindCommit, Split: true, Part: 1}, ".json"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
