@@ -164,6 +164,35 @@ func TestReclaimSparesInFlightAppend(t *testing.T) {
 	}
 }
 
+// TestIncompleteFiles pins the torn-append enumeration the prune sweep relies on: a
+// position with exactly one of its payload/.hdr pair present (an interrupted append) is
+// reported; a well-formed pair is not. A both-empty in-flight reservation cannot survive
+// a reopen (scan rebuilds only from stored objects), so the reopened index has none.
+func TestIncompleteFiles(t *testing.T) {
+	st := newMemStore()
+	v, err := Open(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendArchive(t, v, "slot-x", "app", "AAA") // a complete pair (payload + .hdr)
+	// A torn append: a payload object at a conforming position with no .hdr sidecar.
+	if err := st.WriteAll(context.Background(), "slot-x/7-torn.tar", []byte("BBB")); err != nil {
+		t.Fatal(err)
+	}
+	// Reopen so scan() reindexes from the store and marks the torn position incomplete.
+	v2, err := Open(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := v2.IncompleteFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != 7 {
+		t.Fatalf("IncompleteFiles = %v, want [7] (the torn file only, not the complete pair)", got)
+	}
+}
+
 func TestPayloadExtEncryption(t *testing.T) {
 	cases := []struct {
 		name    string

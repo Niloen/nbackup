@@ -123,9 +123,13 @@ each medium's `Files()` enumeration treats *any* artifact it cannot read or pars
 as uncommitted and **skips it**, so a single torn file can never abort `nb rebuild`.
 The commit test differs per medium (fslike: payload paired with its later-written
 sidecar; tape: a decodable framed record), so it lives in each medium, not a shared
-layer. Orphans are reclaimed only when their slot/volume is, via prune/relabel —
-never on read. Integrity of files a footer *does* commit (bit-rot) is verify's job,
-not the rebuild's.
+layer. Orphans are never reclaimed on read. On a per-file medium (disk, cloud) `nb
+prune` sweeps them: it removes the footer-less parts and torn files no committed
+archive references, detected from the medium's *own* commit footers (never the cache,
+so a stale catalog can never make a committed archive look orphaned) and bounded by
+the same `minimum_age` retention uses, with a refused delete tolerated so it never
+fights WORM/Object-Lock. On a whole-volume medium (tape) orphans wait for relabel.
+Integrity of files a footer *does* commit (bit-rot) is verify's job, not the rebuild's.
 
 **The catalog is a cache; the media are the source of truth.** Every file is
 self-describing (header), every archive carries its own commit footer, every labeled

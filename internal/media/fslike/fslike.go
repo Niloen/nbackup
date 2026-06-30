@@ -292,6 +292,25 @@ func (v *Volume) Files() ([]record.FileInfo, error) {
 	return out, nil
 }
 
+// IncompleteFiles reports the positions of files an interrupted append left
+// half-written — exactly one of the payload/header pair present. scan() marks these
+// incomplete (and Files() skips them), so they belong to no archive and a prune sweep
+// reaps them. A both-empty entry is an in-flight AppendFile reservation, not a stored
+// fragment, so it is excluded (it also cannot survive a crash: scan() only ever
+// reconstructs entries from objects actually on the store).
+func (v *Volume) IncompleteFiles() ([]int, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	var out []int
+	for pos, e := range v.idx {
+		if (e.hdr == "") != (e.payload == "") { // exactly one half present
+			out = append(out, pos)
+		}
+	}
+	sort.Ints(out)
+	return out, nil
+}
+
 // RemoveFile deletes the payload and header sidecar at pos and drops them from the
 // index. The slot is read from the index entry; when removing this file empties the
 // slot's subtree, the now-empty directory is reclaimed too, leaving no stray

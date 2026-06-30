@@ -182,6 +182,53 @@ func assemble(medium string, acc *scanMaps) []slotPlacement {
 	return out
 }
 
+// OrphanFiles scans one volume and returns the files that belong to no committed archive:
+// parts and member indexes a crashed run left behind without ever writing their commit
+// footer (and any file whose footer is present but unreadable, since its archive then never
+// assembles). These are invisible to retention — assemble discards them, so the catalog never
+// records them — yet they still consume the medium.
+//
+// Detection reads the volume's OWN commit footers (the on-medium ground truth), never the
+// catalog cache: orphans are the readable files (vol.Files()) minus the positions of the
+// archives a fresh scan assembles. This is the safety-critical property — a stale or empty
+// cache can never make a committed archive look orphaned, because the same footer that proves
+// an archive is good is what marks its files referenced here. Volume labels are never orphans.
+// On any scan error nothing is returned, so a caller deletes nothing on a partial read.
+//
+// It sees only files committed at the medium layer; a torn append (a payload whose header
+// sidecar never landed) is not surfaced here — that fragment is enumerated separately via
+// media.IncompleteEnumerator.
+func OrphanFiles(vol media.Volume) ([]record.FileInfo, error) {
+	files, err := vol.Files()
+	if err != nil {
+		return nil, err
+	}
+	idx, err := scanMedium("", vol)
+	if err != nil {
+		return nil, err
+	}
+	referenced := map[int]bool{}
+	for _, sp := range idx.placements {
+		for _, ap := range sp.p.Archives {
+			for _, pt := range ap.Parts {
+				referenced[pt.Pos] = true
+			}
+			referenced[ap.Commit.Pos] = true
+			if ap.Index != (record.FilePos{}) {
+				referenced[ap.Index.Pos] = true
+			}
+		}
+	}
+	var orphans []record.FileInfo
+	for _, f := range files {
+		if f.Header.Kind == record.KindLabel || referenced[f.Pos] {
+			continue
+		}
+		orphans = append(orphans, f)
+	}
+	return orphans, nil
+}
+
 // ScanSlots reads a volume's committed slots without touching the cache — used to check a
 // volume's current contents (e.g. whether a tape is still active before relabel).
 func ScanSlots(vol media.Volume) ([]*Slot, error) {
