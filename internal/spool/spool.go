@@ -34,10 +34,12 @@ import (
 //   - the producer's own goroutines (external): a direct write runs on the producer goroutine that
 //     holds the backing permit, routing its control calls to the orchestrator.
 //
-// The backing is a single serial writer when it can span volumes (a copy and a direct write must not
-// interleave parts), modelled as a permit of Slots: 1 when buffering or spanning, else the worker
-// count. Holding back-pressure is the Pool's; a backing failure aborts the Pool so the producers stop
-// and the run fails — never dropping data.
+// The backing is a single serial writer when the medium writes serially — a single rolling drive
+// (tape), where a copy and a direct write must not interleave parts — modelled as a permit of Slots:
+// 1 when buffering or for a serial medium, else the worker count (a concurrent-write object store/disk
+// admits parallel writes even when it splits archives into parts). The caller sets Slots; the spool
+// just honors it. Holding back-pressure is the Pool's; a backing failure aborts the Pool so the
+// producers stop and the run fails — never dropping data.
 
 // Config is what the engine wires a Spool from: the Backing medium it drains to, the Holding disks
 // (empty = never buffer), and the run's progress + log seams.
@@ -50,7 +52,7 @@ type Config struct {
 
 // Backing is the authoritative store the drain copies (or writes) archives to: its medium name, the
 // ArchiveStore authoring it, and Slots — how many backing writes may run at once (1 while buffering or
-// spanning, else the worker count).
+// for a serial single-drive medium, else the worker count).
 type Backing struct {
 	Name    string
 	Storage archiveio.ArchiveStore

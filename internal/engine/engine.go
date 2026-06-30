@@ -578,16 +578,21 @@ func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	return e.cop.CopySlot(slotID, fromMedia, targetMedia, force, logf)
 }
 
-// partSizeFor reads a medium's optional part_size parameter (the deliberate per-part
-// chunk bound). It must be at least two header blocks so a part can carry payload.
+// partSizeFor resolves a medium's per-part chunk bound: the explicit part_size param
+// when set, otherwise the medium type's registered default (10 GB for cloud, none for
+// disk/tape). An explicit value must be at least two header blocks so a part can carry
+// payload, and must not exceed the type's registered maximum — the cloud cap keeps a
+// part-object's multipart upload below the object store's 10000-part ceiling so the
+// knob can never silently reproduce the original over-large-object failure.
 func (e *Engine) partSizeFor(medium string) (int64, error) {
 	d, ok := e.cfg.Media[medium]
 	if !ok {
 		return 0, fmt.Errorf("unknown medium %q", medium)
 	}
+	policy := media.PartSizeFor(d.Type)
 	s := d.Params["part_size"]
 	if s == "" {
-		return 0, nil
+		return policy.Default, nil // 0 (unbounded single part) unless the type defaults one
 	}
 	n, err := sizeutil.ParseBytes(s)
 	if err != nil {
@@ -595,6 +600,9 @@ func (e *Engine) partSizeFor(medium string) (int64, error) {
 	}
 	if n < 2*record.HeaderBlock {
 		return 0, fmt.Errorf("medium %q part_size %s is too small; use at least %s", medium, sizeutil.FormatBytes(n), sizeutil.FormatBytes(2*record.HeaderBlock))
+	}
+	if policy.Max > 0 && n > policy.Max {
+		return 0, fmt.Errorf("medium %q part_size %s exceeds the maximum %s: %s", medium, sizeutil.FormatBytes(n), sizeutil.FormatBytes(policy.Max), policy.MaxNote)
 	}
 	return n, nil
 }

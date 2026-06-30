@@ -6,6 +6,7 @@ import (
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/conductor"
 	"github.com/Niloen/nbackup/internal/logf"
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 )
@@ -24,8 +25,13 @@ func (e *Engine) openWriter(medium string, spec archiveio.SlotSpec, now time.Tim
 	}
 	capB, _ := e.cfg.Media[medium].CapacityBytes()
 	return conductor.PreparedWriter{
-		Store:    e.clerk.OpenSlot(wt.w, medium, wt.lib.Volume()),
-		CanSpan:  wt.lib.CanSpan(wt.partSize),
+		Store:   e.clerk.OpenSlot(wt.w, medium, wt.lib.Volume()),
+		CanSpan: wt.lib.CanSpan(wt.partSize),
+		// Serial keys off the concurrent-write capability, not CanSpan: a serial medium
+		// (tape) shares one rolling drive, while a concurrent-write object store/disk
+		// splits an archive into independent objects/files and stays parallel even with
+		// part_size set. So enabling part_size on cloud never clamps it to one worker.
+		Serial:   !media.ConcurrentWrite(e.cfg.Media[medium].Type),
 		Capacity: capB,
 	}, nil
 }

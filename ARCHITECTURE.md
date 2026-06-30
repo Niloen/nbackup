@@ -362,15 +362,31 @@ covers S3, GCS, Azure Blob, and any S3-compatible store, via the Go CDK
 (`gocloud.dev/blob`); the backend is chosen by the bucket `url` scheme (`s3://`,
 `gs://`, `azblob://`), with `file://`/`mem://` drivers making it fully testable with no
 network or credentials. It is **address-identified, like disk** — a bucket+key names a
-volume unambiguously, so it implements none of `Labeled`/`Drive`/`Changer`/`Shelf`,
-runs no label/swap/spanning machinery, and registers `NewSizeProfile` (a byte budget
-reclaimed per slot). The on-store layout is the disk medium's verbatim —
+volume unambiguously, so it implements none of `Labeled`/`Drive`/`Changer`/`Shelf` and
+runs no label/swap machinery, and registers `NewSizeProfile` (a byte budget reclaimed
+per slot). The on-store layout is the disk medium's verbatim —
 `slots/<slot>/<NNNNNN>-<dle>-L<n>.tar.<ext>` clean payload objects plus a `.hdr`
 sidecar — so a slot streams disk↔cloud unchanged and a plain GET yields a
 stock-tool-restorable archive. Atomicity is the same: payload object first, sidecar
 last, a failed upload aborted (not committed), so an interrupted write leaves a
 sidecar-less orphan that scan/rebuild ignores. Credentials come from each SDK's ambient
 environment, never the config.
+
+It does, however, **split a large archive into `≤ part_size` part-objects** (default
+10 GB), so an 84 GB archive becomes several objects rather than one — keeping each
+object's S3 multipart upload well under the 10000-part ceiling (~48.8 GB at the default
+5 MiB buffer; the buffer is unchanged, so process memory stays flat regardless of
+archive size). This is the **same proactive part machinery tape spanning uses** (the
+`archiveio.Writer`'s parts, under `fslike`), but **decoupled from serial volume
+rolling**: splitting (`CanSpan` / part_size) is independent of being a *serial
+single-drive* medium (`Serial`, keyed off `media.ConcurrentWrite`). Cloud is
+part-splitting but **not serial** — its parts are independent objects with ascending
+positions on the one logical volume — so it stays **fully concurrent** (workers are not
+clamped to 1, landing slots stay = workers), unlike a tape drive that splits *and* rolls
+one shared reel serially. `part_size` defaults and is bounded by a per-medium
+`media.PartSizePolicy` (cloud: 10 GB default, 40 GB max, the cap enforced so the knob
+can't silently reproduce the 10000-part failure); disk stays single-file (unbounded,
+one stock-usable payload) and still rejects `part_size`.
 
 **Tape = volumes behind one drive.** The `device` seam (the `mt` analogue, one
 mounted tape) is shared by all shapes; the positioning surface differs and is what

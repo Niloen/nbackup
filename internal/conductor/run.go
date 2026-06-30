@@ -94,22 +94,24 @@ func (c *Conductor) Run(now time.Time, logf logf.Logf) (*catalog.Slot, error) {
 	buffering := len(holdingNames) > 0
 
 	// Open the landing writer here (over the medium's real sink — the spool routes a producer's sink
-	// calls to its orchestrator, so no proxy is needed). Opening it now also lets a spanning-capable
-	// single drive clamp the workers.
+	// calls to its orchestrator, so no proxy is needed). Opening it now also lets a serial single
+	// drive clamp the workers.
 	landPW, err := c.d.OpenWriter(c.d.Landing, spec, now, logf)
 	if err != nil {
 		return nil, err
 	}
 
 	// landingSlots is how many landing writes may run at once: one while buffering (the drain copies
-	// serially, and a direct write shares that single timeline), and for a direct run one for a
-	// spanning-capable single drive (clamping the workers too) or all of them for an unbounded disk.
+	// serially, and a direct write shares that single timeline), one for a serial single-drive medium
+	// (tape — a spanning serial drive also clamps the workers, since it cannot interleave two archives'
+	// parts), and all of them for a concurrent-write medium (disk or cloud, which split each archive
+	// into independent objects/files — fully parallel even with part_size set).
 	workers := c.d.Workers
 	landingSlots := 1
 	if !buffering {
-		if landPW.CanSpan {
-			if workers > 1 {
-				logf.Log("medium %q can span volumes; running 1 worker (a single drive writes serially)", c.d.Landing)
+		if landPW.Serial {
+			if landPW.CanSpan && workers > 1 {
+				logf.Log("medium %q writes serially and can span volumes; running 1 worker (a single drive cannot interleave archives)", c.d.Landing)
 				workers = 1
 			}
 		} else {
