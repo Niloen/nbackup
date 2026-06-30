@@ -41,15 +41,16 @@ func init() {
 	s := fslike.Spec()
 	s.Type = "cloud"
 	s.Params = []string{"url", "prefix", "part_size"}
-	// Split each archive into <= part_size part-objects, defaulting to 10 GB. The cap
+	// Split each archive into <= part_size part-objects, defaulting to 10 GiB. The cap
 	// keeps one object's multipart upload well under the 10000-part limit: at the
-	// default 5 MiB upload buffer that ceiling is ~48.8 GB, so an object above ~40 GB
+	// default 5 MiB upload buffer that ceiling is ~48.8 GiB, so an object above ~40 GiB
 	// risks the original "exceeded total allowed MaxUploadParts" failure. Memory stays
-	// flat — the 5 MiB streaming buffer is unchanged regardless of part_size.
+	// flat — the 5 MiB streaming buffer is unchanged regardless of part_size. Sizes are
+	// binary (powers of 1024) so they read as round numbers in object-store tooling.
 	s.PartSize = media.PartSizePolicy{
-		Default: 10_000_000_000, // 10 GB
-		Max:     40_000_000_000, // 40 GB
-		MaxNote: "an object store caps a single object's multipart upload at 10000 parts (~48.8 GB at the 5 MiB buffer); use a smaller part_size so each part-object stays well under it",
+		Default: 10 << 30, // 10 GiB
+		Max:     40 << 30, // 40 GiB
+		MaxNote: "an object store caps a single object's multipart upload at 10000 parts (~48.8 GiB at the 5 MiB buffer); use a smaller part_size so each part-object stays well under it",
 	}
 	s.Cost = newCost
 	s.New = func(opts media.Options) (media.Volume, error) {
