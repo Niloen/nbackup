@@ -35,8 +35,16 @@ type ArchiveSpec struct {
 // Commit), and the caller reads the committed archive and its on-medium position from Result
 // afterwards — e.g. to queue a holding->backing copy or to reclaim the staged copy once it has
 // landed. Commit records the placement; Result is valid only after a successful Commit.
+//
+// Close releases the handle's resources — for a routing store (the spool) the backing permit a
+// direct write holds — whether or not Commit ran. The producer defers it once, right after
+// acquiring the writer, so a faulted transfer (which never reaches Commit) still frees the permit;
+// it is a no-op for a leaf medium's writer. Close lives here, not on xfer.Sink: the resource it
+// frees is a store-layer concept, so the release pairs with NewArchive's acquire at this layer,
+// leaving xfer.Sink the pure byte-plumbing primitive whose only fault unwind is ctx-cancel.
 type ArchiveWriter interface {
 	xfer.Sink
+	io.Closer
 	Result() (record.Archive, record.ArchivePos)
 }
 
