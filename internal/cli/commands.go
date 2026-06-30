@@ -587,6 +587,12 @@ func runSlotShow(a *app, slotID string) error {
 	}
 	s, err := eng.Catalog().ReadSlot(slotID)
 	if err != nil {
+		// `nb slot list` (and friends) parse the word as a slot id; a non-slot-id argument
+		// that isn't found is almost always a user reaching for a subcommand that does not
+		// exist — point them at the bare list rather than at `nb rebuild`.
+		if !strings.HasPrefix(slotID, "slot-") {
+			return fmt.Errorf("%w (to list all slots, run `nb slot` with no argument)", err)
+		}
 		return err
 	}
 	fmt.Printf("Slot %s  (%s)\n", s.ID, "committed")
@@ -815,7 +821,7 @@ func newPruneCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "prune <medium>",
 		Short:   "Delete a medium's slots past its cycle/capacity limits",
-		Long:    "Reclaim slots on the named medium that fall outside its own cycle and capacity limits. Retention is per-medium, so the medium to prune must be named explicitly (pruning one store never touches a copy on another). Deletes by default; pass --dry-run (-n) to preview.",
+		Long:    "Reclaim slots on the named medium that fall outside its own cycle and capacity limits. Retention is per-medium, so the medium to prune must be named explicitly (pruning one store never touches a copy on another). Deletes by default; pass --dry-run (-n) to preview. If the protected recovery set alone exceeds capacity, prune reclaims what it can, prints a WARNING, and still exits 0 (recoverability outranks capacity — grow capacity or lengthen the cycle); watch for it via `nb report`/notify rather than the exit code.",
 		Example: "  nb prune disk\n  nb prune disk --dry-run\n  nb prune offsite",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
@@ -843,6 +849,17 @@ func newPruneCmd(a *app) *cobra.Command {
 				return err
 			}
 			defer release()
+			// Validate the medium name up front (before the run-reporting path): a typo'd
+			// medium is an argument error, not a failed run — it must not land in the run log
+			// or fire notify.on_failure.
+			if _, ok := cfg.Media[args[0]]; !ok {
+				names := make([]string, 0, len(cfg.Media))
+				for name := range cfg.Media {
+					names = append(names, name)
+				}
+				sort.Strings(names)
+				return fmt.Errorf("unknown medium %q (configured: %s)", args[0], strings.Join(names, ", "))
+			}
 			// Retention measures age from each slot's commit instant, so the
 			// reference 'now' must be a real wall-clock time, not a date truncated
 			// to midnight — otherwise a sub-day minimum_age can never elapse within
@@ -913,10 +930,12 @@ func newFlushCmd(a *app) *cobra.Command {
 					return report.Run{}, err
 				}
 				if n == 0 {
+					// Nothing staged (no holding disk, or already drained) — a no-op, not a run:
+					// don't pollute the run log / nb report with an empty "OK" flush.
 					fmt.Println("nothing to flush")
-				} else {
-					fmt.Printf("flushed %d archive(s) to the landing\n", n)
+					return report.Run{}, skip(nil)
 				}
+				fmt.Printf("flushed %d archive(s) to the landing\n", n)
 				return report.Run{Command: report.CommandFlush, SlotsCopied: n}, nil
 			})
 		},
@@ -1171,8 +1190,8 @@ func newSyncCmd(a *app) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&to, "to", "", "target medium (omit to run the config's sync: rules)")
 	cmd.Flags().StringVar(&from, "from", "", "source medium (default: the landing medium)")
-	cmd.Flags().IntVar(&last, "last", 0, "copy only the N most recent slots (0 = all)")
-	cmd.Flags().StringVar(&sinceStr, "since", "", "copy only slots dated on/after this date YYYY-MM-DD")
+	cmd.Flags().IntVar(&last, "last", 0, "copy only the N most recent slots (0 = all); combined with --since, the newest N of those on/after the date")
+	cmd.Flags().StringVar(&sinceStr, "since", "", "copy only slots dated on/after this date YYYY-MM-DD (intersects with --last)")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "preview without copying")
 	cmd.Flags().BoolVar(&force, "force", false, "re-copy slots already recorded on the target")
 	return cmd

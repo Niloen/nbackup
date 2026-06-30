@@ -1,11 +1,15 @@
 # Example NBackup configuration.
 # Copy to nbackup.yaml and adjust.
 #
-# FIRST RUN: the paths below use a production-style /var/lib/nbackup/... layout,
-# which needs root. To try NBackup as an ordinary user, repoint every storage path
-# (the media `path`/`dir`, plus `workdir` and `state_dir`) at a writable directory
-# you own — e.g. ~/nbackup — before `nb check`, or the run dead-ends on a permission
-# error.
+# FIRST RUN: this file is a full tour (disk + tape + manual drive + cloud) and is NOT
+# the quickest start — `nb check` won't go green until you repoint every medium's path.
+# To just try NBackup, start from the README's minimal config (one disk medium); come
+# back here to copy the block for a medium you actually add.
+#
+# The paths below use a production-style /var/lib/nbackup/... layout, which needs root.
+# To run as an ordinary user, repoint every storage path you keep — the media
+# `path`/`dir` of each medium, plus `workdir` and `state_dir` — at a writable directory
+# you own (e.g. ~/nbackup) before `nb check`, or the run dead-ends on a permission error.
 
 # The dump cycle: the target — and hard maximum — time between fulls for every
 # DLE (default 7d). It is the main scheduling knob. Each run fulls the DLEs due
@@ -358,7 +362,10 @@ dumptypes:
 # will try to connect to it. For a single machine, keep the host as `localhost`.
 sources:
   default:
-    localhost: [/home, /etc]
+    localhost: [/home]   # /etc too holds system config worth backing up, but reading
+                         # all of it (shadow, sudoers, …) needs root — run as root for
+                         # a complete dump; otherwise the run commits a PARTIAL archive,
+                         # omitting the unreadable files with a warning.
   # A second host (any name but `localhost`) is dumped over SSH — uncomment once
   # the `ssh:`/`hosts:` section is set up:
   # no-logs:

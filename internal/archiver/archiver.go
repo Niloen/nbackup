@@ -43,6 +43,11 @@ type BackupResult struct {
 	Uncompressed int64    // raw stream size
 	FileCount    int      // number of file members
 	Members      []string // member paths
+	// Unreadable lists source paths the archiver could not read (e.g. a permission-denied
+	// file): the archive committed without them — a *partial* dump. Empty means complete.
+	// A partial archive is still a valid, restorable stream of what was readable; the caller
+	// warns and exits non-zero so the gap is loud, rather than discarding a usable backup.
+	Unreadable []string
 }
 
 // BackupSource is the producing side of one archive as a pipeline source: the program

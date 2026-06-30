@@ -852,6 +852,7 @@ func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration
 	// an existing tape for relabel, a blank one for a new label. On a single-drive
 	// station there is no bay to choose: labeling acts on whatever reel the operator
 	// has loaded into the drive.
+	chosenBay := ""
 	if l.isLibrary {
 		bay, err := l.chooseBay(name, relabel)
 		if err != nil {
@@ -860,6 +861,7 @@ func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration
 		if err := l.changer.Mount(bay); err != nil {
 			return err
 		}
+		chosenBay = bay
 	}
 
 	cur, labeled, err := lv.ReadLabel()
@@ -885,6 +887,14 @@ func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration
 			return fmt.Errorf("volume holds unrecognized or corrupt data (%v); refusing to overwrite (use --force)", err)
 		}
 	case labeled:
+		// A readable NBackup label from a different pool is a foreign reel — the same thing
+		// the dump write-path refuses (verifyWritable) and inventory flags `wrong-pool`. It
+		// parses cleanly, so it slips past the non-NBackup/corrupt guards above and (belonging
+		// to another pool) holds no protected slot in this medium's catalog; refuse it here so
+		// `nb label --relabel` cannot silently clobber it, honoring the same --force escape hatch.
+		if cur.Pool != l.medium && !force {
+			return fmt.Errorf("volume %q belongs to pool %q, not %q — refusing to overwrite a foreign reel (use --force)", cur.Name, cur.Pool, l.medium)
+		}
 		if !relabel {
 			return fmt.Errorf("volume is already labeled %q (epoch %d); use --relabel to reuse it", cur.Name, cur.Epoch)
 		}
@@ -909,7 +919,14 @@ func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration
 	if got, ok, err := lv.ReadLabel(); err != nil || !ok || got.Name != name {
 		return fmt.Errorf("label write could not be confirmed (read back %q, ok=%v, err=%v)", got.Name, ok, err)
 	}
-	logf.log("labeled %q as %q (epoch %d)", l.medium, name, epoch)
+	// Name the bay on a robotic library: a new label grabs a blank bay and mounts it,
+	// which can move the mount away from a bay the operator just loaded — say so rather
+	// than switching silently.
+	if chosenBay != "" {
+		logf.log("labeled bay %s of %q as %q (epoch %d) and mounted it", chosenBay, l.medium, name, epoch)
+	} else {
+		logf.log("labeled %q as %q (epoch %d)", l.medium, name, epoch)
+	}
 
 	return l.reconcileRelabel(wiped, lbl)
 }

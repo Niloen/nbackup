@@ -64,6 +64,8 @@ it keeps climbing across the slots that share a volume rather than resetting to
 `000000` each slot. Each archive's **commit footer is its last file**; its
 **payload is always the first** of the three, which is all the stock-tool restore
 below needs (it globs the `…-L<n>.tar*` payloads and ignores the index/commit).
+(A zero-change incremental — a DLE with nothing new since its base — writes just the
+payload and commit, with no index file; recover reads the base full's index for it.)
 
 (On **tape** the header is instead a fixed 32 KB block inline ahead of each
 payload, since a tape has no sidecars.)
@@ -142,6 +144,7 @@ details one item when given an id (`nb slot slot-2026-06-21.001`, `nb medium lto
 | `nb load`            | Load a volume into a medium's drive (bay or shelf reel)   |
 | `nb prune <medium>`  | Delete a medium's slots past its cycle/capacity limits  |
 | `nb reset <dle>`     | Schedule a DLE for a full on its next run (fresh chain)  |
+| `nb flush`           | Drain a holding disk's un-flushed archives to the landing |
 | `nb rebuild`         | Rebuild the local slot-index cache from media            |
 
 Run `nb help <command>` (or `nb <command> --help`) for per-command usage and
@@ -638,7 +641,9 @@ dumptypes:
 # `ssh:`/`hosts:` config), so keep it `localhost` on a single machine.
 sources:
   default:
-    localhost: [/home, /etc]
+    localhost: [/home]          # add /etc to also back up system config — but that
+                                # needs root; without it the run commits a PARTIAL
+                                # archive (unreadable files omitted, with a warning)
   no-logs:
     localhost: [/srv/www, /opt/app]
 ```

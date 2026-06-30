@@ -48,6 +48,7 @@ type SourceStats struct {
 	Uncompressed int64
 	FileCount    int
 	Members      []string
+	Unreadable   []string // source paths the producer could not read (a partial dump); empty = complete
 }
 
 // Role identifies which zone of a transfer faulted, so a caller can classify the failure.

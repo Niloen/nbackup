@@ -197,16 +197,16 @@ func TestCloudPartSizeDefaultAndBound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("partSizeFor (unset): %v", err)
 	}
-	if got != 10_000_000_000 {
-		t.Errorf("default part_size = %d, want 10 GB", got)
+	if got != 10<<30 { // 10 GiB (binary units, per the cloud medium's part_size policy)
+		t.Errorf("default part_size = %d, want 10 GiB", got)
 	}
 
-	eng2, err := New(base(map[string]string{"url": "mem://", "part_size": "41GB"}))
+	eng2, err := New(base(map[string]string{"url": "mem://", "part_size": "50GB"})) // > 40 GiB cap
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := eng2.partSizeFor("cloud"); err == nil {
-		t.Fatal("part_size above the 40 GB cap should be rejected")
+		t.Fatal("part_size above the 40 GiB cap should be rejected")
 	} else if !strings.Contains(err.Error(), "exceeds the maximum") {
 		t.Errorf("error = %q, want it to explain the maximum", err)
 	}
