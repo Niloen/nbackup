@@ -132,6 +132,10 @@ func (s *memSink) NextPart() (media.Volume, int64, string, int, error) {
 	return v, s.room(), v.name, 1, nil
 }
 
+// Bounded mirrors room()'s unbounded case: a part is capped by partCap or by a finite
+// volume capacity, so only a no-cap volume with no partCap is unbounded.
+func (s *memSink) Bounded() bool { return s.partCap > 0 || s.vols[s.idx].capacity > 0 }
+
 func (s *memSink) PlaceRecord(size int64) (media.Volume, string, int, error) {
 	if r := s.room(); r >= 0 && size > r {
 		if err := s.advance(); err != nil {
@@ -217,7 +221,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	sink := &memSink{vols: []*memVolume{v1, v2, v3}}
 
 	spec := SlotSpec{ID: "slot-2026-06-21.001", CreatedAt: time.Unix(0, 0).UTC()}
-	w := NewWriter(sink, spec, nil, nil)
+	w := NewWriter(sink, spec, nil, nil) // bounded by volume capacity (spanning) → sink.Bounded()==true
 
 	body := []byte(strings.Repeat("abcdefgh", 25*1024/8*4)) // 100 KiB → spans v1+v2, last part on v3
 	arch, apos := writeOneArchive(t, w, "dle1", body)
@@ -267,7 +271,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	sink := &memSink{vols: []*memVolume{v}, partCap: 10 * 1024}
 
 	spec := SlotSpec{ID: "slot-x", CreatedAt: time.Unix(0, 0).UTC()}
-	w := NewWriter(sink, spec, nil, nil)
+	w := NewWriter(sink, spec, nil, nil)         // bounded by partCap (intra-volume split) → sink.Bounded()==true
 	body := []byte(strings.Repeat("z", 55*1024)) // 55 KiB / 10 KiB ≈ 6 parts
 	arch, apos := writeOneArchive(t, w, "dle1", body)
 	if arch.Parts < 5 {

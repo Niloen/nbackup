@@ -14,10 +14,9 @@ import (
 // openWriter folds the engine's clerk/librarian write machinery into the medium-
 // neutral conductor.PreparedWriter the run lane needs: it prepares the writer (the
 // shared PrepareWrite→WriteSink→NewWriter contract), opens the slot store over it,
-// and reports the medium's spanning capability and capacity. It mirrors the calls
-// runOrchestrated makes (clerk.OpenSlot, lib.CanSpan, Media.CapacityBytes) so the
-// types line up — folding that machinery here keeps the conductor free of the
-// clerk/librarian packages.
+// and reports whether the medium is serial and its capacity. It mirrors the calls
+// runOrchestrated makes (clerk.OpenSlot, Media.CapacityBytes) so the types line up —
+// folding that machinery here keeps the conductor free of the clerk/librarian packages.
 func (e *Engine) openWriter(medium string, spec archiveio.SlotSpec, now time.Time, lf logf.Logf) (conductor.PreparedWriter, error) {
 	wt, err := e.prepareWriter(medium, spec, now, lf)
 	if err != nil {
@@ -25,12 +24,11 @@ func (e *Engine) openWriter(medium string, spec archiveio.SlotSpec, now time.Tim
 	}
 	capB, _ := e.cfg.Media[medium].CapacityBytes()
 	return conductor.PreparedWriter{
-		Store:   e.clerk.OpenSlot(wt.w, medium, wt.lib.Volume()),
-		CanSpan: wt.lib.CanSpan(wt.partSize),
-		// Serial keys off the concurrent-write capability, not CanSpan: a serial medium
-		// (tape) shares one rolling drive, while a concurrent-write object store/disk
-		// splits an archive into independent objects/files and stays parallel even with
-		// part_size set. So enabling part_size on cloud never clamps it to one worker.
+		Store: e.clerk.OpenSlot(wt.w, medium, wt.lib.Volume()),
+		// Serial keys off the concurrent-write capability: a serial medium (tape) shares one
+		// rolling drive and writes one archive at a time, while a concurrent-write object
+		// store/disk writes archives as independent objects/files and stays parallel — even
+		// when it splits a large archive into parts. So part_size on cloud never clamps workers.
 		Serial:   !media.ConcurrentWrite(e.cfg.Media[medium].Type),
 		Capacity: capB,
 	}, nil

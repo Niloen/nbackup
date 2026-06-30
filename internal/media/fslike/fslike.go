@@ -2,7 +2,10 @@
 // identified media (disk, cloud): each file is two artifacts under
 // slots/<slot>/ — a clean payload (<NNNNNN>-<dle>-L<n>.tar.<ext>, directly usable
 // with stock tools) and a JSON header sidecar (<NNNNNN>-…-L<n>.hdr). Positions are
-// volume-global file numbers paired by their numeric filename prefix.
+// volume-global file numbers paired by their numeric filename prefix. A split archive
+// (one written under a part_size cap) appends a .pNNN part-index suffix to the payload
+// (…-L<n>.tar.gz.p000, .p001, …) so the slices group and order by name and no fragment
+// poses as a standalone artifact; the sidecar keeps the plain .hdr name (see payloadExt).
 //
 // The layout (stems, extensions, slot subtrees, payload-first atomicity, the
 // scan that indexes by filename prefix) lives here once; a backing Store supplies
@@ -140,6 +143,18 @@ func payloadExt(h record.Header) string {
 	// index stay plaintext (and keep their .json/.json.gz names).
 	if h.Encrypt != "" && h.Encrypt != "none" {
 		ext += "." + h.Encrypt
+	}
+	// A split archive's payload is one slice of a multi-part whole, not a standalone
+	// file: append a .pNNN part-index suffix AFTER the .tar/.gz/.gpg extension so the
+	// name no longer claims to be a directly-openable artifact (a stock `tar` on a lone
+	// part fails fast instead of yielding garbage) and the siblings group and order by
+	// name — `cat <stem>.tar.gz.p* | tar xz` reconstructs. The header sidecar keeps the
+	// plain <stem>.hdr (each part already has its own position-prefixed sidecar). Set
+	// for every part including a sole one, since the total is unknown when the name is
+	// minted (see record.Header.Split). The position prefix remains the authoritative
+	// order; .pNNN is the human-facing within-archive index.
+	if h.Split {
+		ext += fmt.Sprintf(".p%03d", h.Part)
 	}
 	return ext
 }

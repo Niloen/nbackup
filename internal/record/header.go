@@ -50,7 +50,7 @@ const (
 // design, not redundancy to trim. NBackup's own read path groups parts and reconstructs
 // the catalog from a few header fields (Slot, Kind, DLE, Level, Part, and Compress for
 // the payload extension) and reads the rest of an archive's metadata from the footer;
-// the remaining header fields (Host, Path, Archiver, Encrypt, BaseSlot, CreatedAt) exist
+// the remaining header fields (Host, Path, Archiver, Encrypt, BaseSlot, Split, CreatedAt) exist
 // for the standalone/forensic story above, so a lone part file is never a mystery.
 type Header struct {
 	Slot      string    `json:"slot"`
@@ -63,8 +63,9 @@ type Header struct {
 	Encrypt   string    `json:"encrypt,omitempty"` // encryption scheme name (gpg|none); reversed on restore. "none" = plaintext (the peer of Compress, which is likewise always concrete). The key is never recorded — gpg resolves it from the ciphertext + keyring.
 	Level     int       `json:"level,omitempty"`
 	BaseSlot  string    `json:"base_slot,omitempty"`
-	Part      int       `json:"part,omitempty"` // 0-based index of this part within its archive (0 = first/only); the archive's total part count lives in its commit footer (Archive.Parts), not here
-	CreatedAt time.Time `json:"created_at"`     // when the run that authored this file began — a per-run stamp shared by every file of a slot. NOT this archive's own landing time: that is Archive.CreatedAt in the commit footer (per-archive, the retention-age basis), which for a copied slot can differ from the source run's start recorded here.
+	Part      int       `json:"part,omitempty"`  // 0-based index of this part within its archive (0 = first/only); the archive's total part count lives in its commit footer (Archive.Parts), not here
+	Split     bool      `json:"split,omitempty"` // true when this archive is written in size-bounded parts — under a part_size cap (cloud) or across a finite volume's capacity (a spanning reel) — so its payload is one slice (see Part) of a possibly-multi-part whole; concatenate the siblings in Part order before any stock-tool reversal. Set even when the archive needed only one part (the total is not known up front; it lands in the commit footer's Archive.Parts). false = a single standalone payload on an unbounded medium (disk).
+	CreatedAt time.Time `json:"created_at"`      // when the run that authored this file began — a per-run stamp shared by every file of a slot. NOT this archive's own landing time: that is Archive.CreatedAt in the commit footer (per-archive, the retention-age basis), which for a copied slot can differ from the source run's start recorded here.
 }
 
 // FileInfo is a file's position and header, as returned by Files().

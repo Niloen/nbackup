@@ -109,9 +109,9 @@ func TestCloudPartSizeSplitsAndRestores(t *testing.T) {
 }
 
 // TestCloudPartSizeStaysConcurrent proves enabling part_size on a cloud medium does NOT
-// clamp it to a single serial drive: the medium reports CanSpan (it splits archives)
-// but is not Serial (concurrent-write object store), so the conductor keeps every worker
-// and never logs the single-drive clamp. It runs several DLEs through multiple workers
+// clamp it to a single serial drive: a concurrent-write object store is not Serial, so the
+// conductor keeps every worker and never logs the single-drive clamp — splitting an archive
+// into parts is irrelevant to its parallelism. It runs several DLEs through multiple workers
 // under -race to exercise concurrent part-split landing writes.
 func TestCloudPartSizeStaysConcurrent(t *testing.T) {
 	var dles []config.DLE
@@ -141,15 +141,12 @@ func TestCloudPartSizeStaysConcurrent(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	// White-box: the prepared writer spans (splits parts) but is not serial, so the
-	// conductor's clamp (Serial && CanSpan) never fires.
+	// White-box: the prepared writer is not serial, so the conductor's clamp (keyed on
+	// Serial alone) never fires even though part_size splits each archive into parts.
 	spec := archiveio.SlotSpec{ID: record.IDFromParts(record.DateString(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)), 1), CreatedAt: time.Now()}
 	pw, err := eng.openWriter("cloud", spec, time.Now(), nil)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !pw.CanSpan {
-		t.Errorf("cloud with part_size should report CanSpan")
 	}
 	if pw.Serial {
 		t.Errorf("cloud is a concurrent-write medium; Serial must be false even with part_size")
