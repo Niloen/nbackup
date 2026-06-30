@@ -1,4 +1,4 @@
-# NBackup
+# Niloen Backup - Slot-based backup system in Go
 
 A slot-based backup system in Go. Its design comes from **[Amanda][amanda]** —
 balanced multilevel scheduling, immutable daily artifacts, human-readable
