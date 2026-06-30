@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/accounting"
@@ -54,7 +55,9 @@ type Engine struct {
 	cfg            *config.Config
 	mediumName     string       // name of the medium new dumps land on
 	mediumDef      config.Media // its definition
-	vol            media.Volume
+	vol            media.Volume // the landing volume, opened lazily by landing() — nil until a command actually needs the medium
+	volOnce        sync.Once    // guards the one-time landing open + catalog bootstrap
+	volErr         error        // remembers a failed landing open so retries don't re-probe
 	clerk          *clerk.Clerk // the archive data path (read+write composer); the engine implements its Deps
 	profile        media.Profile
 	landingCost    media.Cost // landing medium's pricing (dollar peer of profile)
@@ -68,7 +71,6 @@ type Engine struct {
 	runSink        progress.Sink                 // optional: live run-progress sink (nil = status file only)
 	estimateSink   progress.Sink                 // optional: live estimate-progress sink (nil = status file only)
 	limiters       map[string]*ratelimit.Limiter // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
-	landingErr     error                         // set when the landing medium could not be opened/indexed under a tolerant build (`nb check`); nil on a normal build
 	dec            *decoder                      // the read-side scheme operation (restore/verify/list); shares the engine's resolution + decode opts
 	dmp            *dumper.Dumper                // the producer (dump): workers + tar source + encode pipeline; the engine injects its resolution
 	ver            *verifier                     // the verification operation (verify/drill checks); shares catalog + data path + decoder
@@ -111,24 +113,23 @@ func (e *Engine) librarianFor(name string) (lib *librarian.Librarian, def config
 	return librarian.New(vol, name, e.cat, e.op, e.cfg.AutoLabel, e.cfg.MinAgeFor(d)), d, own, nil
 }
 
-// New constructs an Engine from configuration: it opens the landing volume and
-// its capacity profile via the media registry, and loads the catalog cache
-// (refreshing it from the volume the first time it is needed). Archivers are
-// opened lazily per dumptype.
-func New(cfg *config.Config) (*Engine, error) { return build(cfg, false) }
+// New constructs an Engine from configuration: it resolves the landing medium's
+// capacity profile via the media registry and loads the catalog cache. The landing
+// volume itself is opened lazily, the first time a command actually touches the
+// medium (see landing) — so a catalog-only command (report, slot, dle) never lists a
+// bucket or mounts a tape. Archivers are opened lazily per dumptype.
+func New(cfg *config.Config) (*Engine, error) { return build(cfg) }
 
-// NewForCheck builds an engine for `nb check`, which must report every problem
-// rather than abort on the first. Unlike New, a landing medium that cannot be
-// opened or indexed is not fatal: the failure is recorded (Engine.landingErr) and
-// surfaced as a collected check failure, so the rest of the checks — compression,
-// encryption, other media, every source host — still run. Config-shaped errors
-// (a bad media param, an unworkable holding disk) remain hard, since there is
-// nothing meaningful left to check past them.
-func NewForCheck(cfg *config.Config) (*Engine, error) { return build(cfg, true) }
+// NewForCheck builds an engine for `nb check`. It is identical to New now that the
+// landing volume opens lazily: `nb check` probes the landing explicitly (see
+// checkMedia) and reports an open failure as a collected check failure rather than
+// aborting — so the rest of the checks still run. Kept as a distinct constructor so
+// the intent at the call site stays legible.
+func NewForCheck(cfg *config.Config) (*Engine, error) { return build(cfg) }
 
-// build wires an Engine from configuration. With tolerateLanding set (the `nb check`
-// path) a landing medium that won't open or index is recorded rather than fatal.
-func build(cfg *config.Config, tolerateLanding bool) (*Engine, error) {
+// build wires an Engine from configuration. The landing volume is not opened here;
+// landing() opens it on first use.
+func build(cfg *config.Config) (*Engine, error) {
 	// Validate every medium's inline options against the keys its type accepts, so
 	// a typo (e.g. `capcity:`) is a hard error rather than a silently-ignored knob.
 	// Done here, where the media registry is loaded, and over all media (not just
@@ -166,25 +167,6 @@ func build(cfg *config.Config, tolerateLanding bool) (*Engine, error) {
 		return nil, err
 	}
 	mediaDef := cfg.Media[name]
-	var landingErr error
-	vol, err := media.OpenVolume(mediaDef.Type, media.Options(mediaDef.Params))
-	if err != nil {
-		// Opening a cloud volume lists the bucket, so this is where absent SDK
-		// credentials or an unreachable store first surface. Name the medium and
-		// point at the credential source rather than leaking the raw provider error.
-		if mediaDef.Type == "cloud" {
-			err = fmt.Errorf("cannot reach landing medium %q: %w\n(a cloud store reads its credentials from the SDK environment: AWS_*, GOOGLE_APPLICATION_CREDENTIALS, or AZURE_*)", name, err)
-		} else {
-			err = fmt.Errorf("cannot open landing medium %q: %w", name, err)
-		}
-		// `nb check` collects this rather than aborting, so the rest of the checks
-		// still run; every other caller fails hard (a run cannot write a landing it
-		// cannot open). vol stays nil; the index step below is skipped.
-		if !tolerateLanding {
-			return nil, err
-		}
-		landingErr = err
-	}
 	profile, err := media.OpenProfile(mediaDef.Type, media.Options(mediaDef.ProfileOptions()))
 	if err != nil {
 		return nil, err
@@ -196,26 +178,6 @@ func build(cfg *config.Config, tolerateLanding bool) (*Engine, error) {
 	cat, err := catalog.Open(cfg.WorkdirPath())
 	if err != nil {
 		return nil, err
-	}
-	// vol is nil only on a tolerated landing-open failure (check); skip indexing then —
-	// the recorded landingErr already explains why the landing is unreachable.
-	if vol != nil {
-		if err := cat.EnsureFresh(name, vol); err != nil {
-			// The one-time bootstrap scan indexes whatever the landing medium already
-			// holds; once the local catalog cache exists, planning/listing is fully
-			// offline. A cloud store fails here only when its SDK credentials are absent
-			// or it is unreachable — surface that legibly with the medium named, rather
-			// than the raw provider SDK error.
-			hint := ""
-			if mediaDef.Type == "cloud" {
-				hint = " — a cloud store reads its credentials from the SDK environment (AWS_*, GOOGLE_APPLICATION_CREDENTIALS, or AZURE_*); set them, or run where the catalog cache already exists"
-			}
-			err = fmt.Errorf("cannot reach landing medium %q to index existing backups: %w%s", name, err, hint)
-			if !tolerateLanding {
-				return nil, err
-			}
-			landingErr = err
-		}
 	}
 	minAge := cfg.MinAgeFor(mediaDef)
 	fopts := compress.Options{
@@ -236,8 +198,6 @@ func build(cfg *config.Config, tolerateLanding bool) (*Engine, error) {
 		cfg:            cfg,
 		mediumName:     name,
 		mediumDef:      mediaDef,
-		vol:            vol,
-		landingErr:     landingErr,
 		profile:        profile,
 		landingCost:    costModel,
 		minAge:         minAge,
@@ -306,6 +266,49 @@ func (e *Engine) dumptypeCompressSchemes() []string {
 	return out
 }
 
+// landing opens the engine's own (landing) volume on first use and bootstraps the
+// catalog against it, memoizing the handle. Opening is deferred to here — never done
+// at construction — so a catalog-only command (report, slot, dle, status) never
+// touches the medium: no bucket LIST for a cloud landing, no physical mount for a
+// tape. The commands that genuinely need the medium (dump, restore, verify, prune,
+// rebuild, and `nb check`, which probes it on purpose) reach it through this, so the
+// open error surfaces at the point of use rather than on every invocation. The
+// catalog bootstrap (EnsureFresh) is a no-op once the local cache exists, so this is
+// cheap on every call after the first; an open failure is remembered so a retry
+// within the same process does not re-probe an unreachable store.
+func (e *Engine) landing() (media.Volume, error) {
+	e.volOnce.Do(func() {
+		vol, err := media.OpenVolume(e.mediumDef.Type, media.Options(e.mediumDef.Params))
+		if err != nil {
+			// Opening a cloud volume lists the bucket, so this is where absent SDK
+			// credentials or an unreachable store first surface. Name the medium and
+			// point at the credential source rather than leaking the raw provider error.
+			if e.mediumDef.Type == "cloud" {
+				err = fmt.Errorf("cannot reach landing medium %q: %w\n(a cloud store reads its credentials from the SDK environment: AWS_*, GOOGLE_APPLICATION_CREDENTIALS, or AZURE_*)", e.mediumName, err)
+			} else {
+				err = fmt.Errorf("cannot open landing medium %q: %w", e.mediumName, err)
+			}
+			e.volErr = err
+			return
+		}
+		// The one-time bootstrap scan indexes whatever the landing medium already
+		// holds; once the local catalog cache exists, planning/listing is fully
+		// offline. A cloud store fails here only when its SDK credentials are absent or
+		// it is unreachable — surface that legibly with the medium named, rather than
+		// the raw provider SDK error.
+		if err := e.cat.EnsureFresh(e.mediumName, vol); err != nil {
+			hint := ""
+			if e.mediumDef.Type == "cloud" {
+				hint = " — a cloud store reads its credentials from the SDK environment (AWS_*, GOOGLE_APPLICATION_CREDENTIALS, or AZURE_*); set them, or run where the catalog cache already exists"
+			}
+			e.volErr = fmt.Errorf("cannot reach landing medium %q to index existing backups: %w%s", e.mediumName, err, hint)
+			return
+		}
+		e.vol = vol
+	})
+	return e.vol, e.volErr
+}
+
 // mediumVolume returns a Volume for the named medium. For the engine's own
 // medium it returns the already-open handle (own=true) so that handle's cached
 // state stays coherent and the catalog — which caches exactly this medium — can be
@@ -314,7 +317,11 @@ func (e *Engine) dumptypeCompressSchemes() []string {
 // engine never compares medium names itself.
 func (e *Engine) mediumVolume(name string) (vol media.Volume, def config.Media, own bool, err error) {
 	if name == e.mediumName {
-		return e.vol, e.mediumDef, true, nil
+		v, err := e.landing()
+		if err != nil {
+			return nil, config.Media{}, false, err
+		}
+		return v, e.mediumDef, true, nil
 	}
 	d, ok := e.cfg.Media[name]
 	if !ok {
@@ -490,7 +497,11 @@ func (e *Engine) archiverOptions(typeName string, options map[string]string, hos
 // the local cache, returning the number of distinct slots indexed. Media that
 // can't be opened (e.g. an offline tape) are skipped with a warning.
 func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
-	vols := map[string]media.Volume{e.mediumName: e.vol}
+	vol, err := e.landing()
+	if err != nil {
+		return 0, err
+	}
+	vols := map[string]media.Volume{e.mediumName: vol}
 	for name := range e.cfg.Media {
 		if name == e.mediumName {
 			continue
@@ -829,6 +840,13 @@ func minRoom(a, b int64) int64 {
 // per-run conductor.Conductor (see internal/conductor and newConductor); the engine
 // just builds the run lane's dependency slice.
 func (e *Engine) Run(ctx context.Context, now time.Time, logf Logf) (*catalog.Slot, error) {
+	// Open the landing now so newConductor captures the live handle (it snapshots
+	// e.vol into the run lane's deps) and a landing that won't open fails the run here
+	// rather than mid-stream. The dry-run peer (PlannedSlotID) reads only the catalog,
+	// so it deliberately does not open the medium.
+	if _, err := e.landing(); err != nil {
+		return nil, err
+	}
 	return e.newConductor().Run(ctx, now, logf)
 }
 

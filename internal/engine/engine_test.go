@@ -858,7 +858,11 @@ func boolp(b bool) *bool { return &b }
 // to simulate a copy going missing from one medium.
 func removeSlotFiles(t *testing.T, eng *Engine, slotID string) {
 	t.Helper()
-	files, err := eng.vol.Files()
+	vol, err := eng.landing()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := vol.Files()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -866,7 +870,7 @@ func removeSlotFiles(t *testing.T, eng *Engine, slotID string) {
 		if f.Header.Slot != slotID {
 			continue
 		}
-		if err := eng.vol.RemoveFile(f.Pos); err != nil {
+		if err := vol.RemoveFile(f.Pos); err != nil {
 			t.Fatal(err)
 		}
 	}
