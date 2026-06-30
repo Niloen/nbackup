@@ -131,17 +131,27 @@ func Execute() error {
 	// killing the process outright — so a canceled `nb dump` unwinds, kills its in-flight
 	// tar/compressor, and records a terminal status rather than leaving run-status.json
 	// frozen at "running".
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	// On the first signal, tell the operator the cancel was heard — unwinding a dump
-	// (killing the in-flight tar/compressor, draining the spool) is not instant, so without
-	// this the terminal sits silent and looks hung. A second signal force-quits, in case a
-	// graceful cancel itself hangs: the first signal already canceled ctx, and restoring the
-	// default disposition (stop) lets the next one terminate the process outright.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Notify on a channel rather than via signal.NotifyContext: that ctx is also canceled by
+	// its stop func on normal exit, which would fire the goroutine below and print "canceling…"
+	// even when nothing was canceled. A dedicated channel reacts only to a real signal.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	// On the first signal, cancel the run's context and tell the operator the cancel was heard —
+	// unwinding a dump (killing the in-flight tar/compressor, draining the spool) is not instant,
+	// so without this the terminal sits silent and looks hung. A second signal force-quits, in case
+	// a graceful cancel itself hangs: stopping the notifier restores the default disposition so the
+	// next signal terminates the process outright.
 	go func() {
-		<-ctx.Done()
-		fmt.Fprintln(os.Stderr, "\ncanceling… (press Ctrl-C again to force quit)")
-		stop()
+		select {
+		case <-sigCh:
+			fmt.Fprintln(os.Stderr, "\ncanceling… (press Ctrl-C again to force quit)")
+			signal.Stop(sigCh)
+			cancel()
+		case <-ctx.Done():
+		}
 	}()
 
 	err := NewRootCmd().ExecuteContext(ctx)
