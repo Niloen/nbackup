@@ -22,15 +22,17 @@ import (
 // drains them.
 
 // FlushDeps is what Flush needs from the host: the catalog and data path it reads/reclaims through,
-// the backing and holding medium names, and three host-bound seams — resolving a holding disk's
-// volume, opening a backing session for a slot, and the DLE display id — plus an optional log.
+// the holding medium names, and four host-bound seams — resolving a staged archive's landing (its
+// dumptype's `landing`, so a crashed multi-landing run drains each DLE back to its own medium),
+// resolving a holding disk's volume, opening a backing session for a (landing, slot), and the DLE
+// display id — plus an optional log.
 type FlushDeps struct {
 	Cat         *catalog.Catalog
 	Clerk       *clerk.Clerk
-	Backing     string
+	LandingFor  func(dle string) string
 	Holdings    []string
 	HoldVol     func(name string) (media.Volume, error)
-	OpenBacking func(spec archiveio.SlotSpec) (*clerk.Session, error)
+	OpenBacking func(landing string, spec archiveio.SlotSpec) (*clerk.Session, error)
 	DisplayDLE  func(dle string) string
 	Logf        func(format string, args ...any)
 }
@@ -74,9 +76,19 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 	for _, id := range ids {
 		s := slotSet[id]
 		spec := archiveio.SlotSpec{ID: s.ID, CreatedAt: s.LastArchiveAt()}
-		backingSession, err := d.OpenBacking(spec)
-		if err != nil {
-			return flushed, fmt.Errorf("flush %s: open backing %q: %w", s.ID, d.Backing, err)
+		// One backing session per landing this slot's staged archives route to, opened lazily — a
+		// multi-landing run may have staged DLEs bound for different media onto one holding disk.
+		sessions := map[string]*clerk.Session{}
+		sessionFor := func(landing string) (*clerk.Session, error) {
+			if sess, ok := sessions[landing]; ok {
+				return sess, nil
+			}
+			sess, err := d.OpenBacking(landing, spec)
+			if err != nil {
+				return nil, fmt.Errorf("flush %s: open landing %q: %w", s.ID, landing, err)
+			}
+			sessions[landing] = sess
+			return sess, nil
 		}
 
 		for _, holding := range d.Holdings {
@@ -88,25 +100,30 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 			for _, ap := range hp.Archives {
 				ref := clerk.Ref{Slot: s.ID, DLE: ap.DLE, Level: ap.Level}
 				dleID := d.DisplayDLE(ap.DLE)
-				// A crash between recording the backing placement and reclaiming the holding one
+				landing := d.LandingFor(ap.DLE)
+				// A crash between recording the landing placement and reclaiming the holding one
 				// leaves an archive on both; in that case just reclaim, don't re-copy.
-				if !archiveOnBacking(d.Cat, d.Backing, s.ID, ap.DLE, ap.Level) {
+				if !archiveOnBacking(d.Cat, landing, s.ID, ap.DLE, ap.Level) {
 					arch, err := catalogArchive(d.Cat, d.Clerk, s.ID, ap.DLE, ap.Level)
 					if err != nil {
 						return flushed, fmt.Errorf("flush %s %s: %w", s.ID, dleID, err)
+					}
+					backingSession, err := sessionFor(landing)
+					if err != nil {
+						return flushed, err
 					}
 					rc, err := d.Clerk.Open(ref, holding)
 					if err != nil {
 						return flushed, fmt.Errorf("flush %s %s: read holding disk: %w", s.ID, dleID, err)
 					}
-					// NewCopy records the backing placement on its Commit; xfer.Reader closes rc.
+					// NewCopy records the landing placement on its Commit; xfer.Reader closes rc.
 					cw, err := backingSession.NewCopy(arch)
 					if err != nil {
 						rc.Close()
-						return flushed, fmt.Errorf("flush %s %s to %q: %w", s.ID, dleID, d.Backing, err)
+						return flushed, fmt.Errorf("flush %s %s to %q: %w", s.ID, dleID, landing, err)
 					}
 					if _, err := xfer.Transfer(context.Background(), xfer.Reader(rc), xfer.NewFilters(), cw); err != nil {
-						return flushed, fmt.Errorf("flush %s %s to %q: %w", s.ID, dleID, d.Backing, err)
+						return flushed, fmt.Errorf("flush %s %s to %q: %w", s.ID, dleID, landing, err)
 					}
 				}
 				for _, pos := range archivePosFiles(ap) {
@@ -118,7 +135,7 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 					return flushed, err
 				}
 				flushed++
-				logf("flushed %s %s to %q", s.ID, dleID, d.Backing)
+				logf("flushed %s %s to %q", s.ID, dleID, landing)
 			}
 		}
 	}

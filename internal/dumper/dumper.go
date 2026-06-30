@@ -57,33 +57,36 @@ type dumpGate func() (release func())
 // noGate runs the transfer unbounded — the serial path (a single worker, or a single DLE) needs no slot.
 var noGate = dumpGate(func() func() { return func() {} })
 
-// Run archives every item into fs: for each it opens an ingestion Sink (NewArchive), transfers the
-// encoded archive into it, and commits it (see dumpItem). With workers > 1 it runs one goroutine per
-// DLE, each acquiring its target before borrowing one of `workers` transfer slots (a dumpGate), so
-// the bound counts dumps actually running, not DLEs waiting on a holding disk or the landing. A
-// single DLE's failure (its source or its upload) does not
-// stop the others — every DLE is attempted and the per-DLE errors are joined into the return value,
-// so the archives that succeeded still commit while the run reports failure. Only a backing-store
-// abort (the landing is unreachable, so nothing more can land) stops scheduling new DLEs.
-func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs archiveio.ArchiveWriteStore, tr *progress.Tracker, logf func(format string, args ...any)) error {
+// Run archives every item into the store route maps it to: for each it opens an ingestion Sink
+// (NewArchive), transfers the encoded archive into it, and commits it (see dumpItem). route resolves a
+// DLE's landing (its dumptype's `landing` override, else the config-wide one) to that backing's store,
+// so different sources land on different media within one run; the dumper itself never decides where an
+// archive is stored. With workers > 1 it runs one goroutine per DLE, each acquiring its target before
+// borrowing one of `workers` transfer slots (a dumpGate), so the bound counts dumps actually running,
+// not DLEs waiting on a holding disk or a landing. A single DLE's failure (its source or its upload)
+// does not stop the others — every DLE is attempted and the per-DLE errors are joined into the return
+// value, so the archives that succeeded still commit while the run reports failure. Only a backing-store
+// abort (a landing is unreachable, so nothing more can land) stops scheduling new DLEs.
+func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, route func(planner.Item) archiveio.ArchiveWriteStore, tr *progress.Tracker, logf func(format string, args ...any)) error {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	// A backing-store abort is fatal — once the landing is unreachable no further archive can land,
+	// A backing-store abort is fatal — once a landing is unreachable no further archive can land,
 	// so stop scheduling. A DLE's own failure is not: it is recorded and the rest carry on. The Spool
 	// exposes Aborted(); a single-medium store (the clerk) does not, so there it never aborts here.
-	aborted := func() bool {
+	aborted := func(fs archiveio.ArchiveWriteStore) bool {
 		a, ok := fs.(interface{ Aborted() error })
 		return ok && a.Aborted() != nil
 	}
-	// Stop scheduling once the run is canceled (ctx) or the backing has aborted. An
+	// Stop scheduling once the run is canceled (ctx) or a backing has aborted. An
 	// in-flight dump's processes are killed through ctx (programs.RunPipe); this just keeps
 	// no further DLE from starting.
-	stop := func() bool { return ctx.Err() != nil || aborted() }
+	stop := func(fs archiveio.ArchiveWriteStore) bool { return ctx.Err() != nil || aborted(fs) }
 	if workers <= 1 || len(items) <= 1 {
 		var errs []error
 		for _, item := range items {
-			if stop() {
+			fs := route(item)
+			if stop(fs) {
 				break
 			}
 			if err := d.dumpItem(ctx, fs, item, noGate, tr, logf); err != nil {
@@ -113,18 +116,19 @@ func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs 
 		errs []error
 	)
 	for _, item := range items {
-		if stop() {
+		fs := route(item)
+		if stop(fs) {
 			break
 		}
 		wg.Add(1)
-		go func(it planner.Item) {
+		go func(it planner.Item, fs archiveio.ArchiveWriteStore) {
 			defer wg.Done()
 			if err := d.dumpItem(ctx, fs, it, gate, tr, logf); err != nil {
 				mu.Lock()
 				errs = append(errs, err)
 				mu.Unlock()
 			}
-		}(item)
+		}(item, fs)
 	}
 	wg.Wait()
 	return errors.Join(errs...)

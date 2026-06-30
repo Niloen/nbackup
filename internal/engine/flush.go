@@ -18,20 +18,20 @@ import (
 // a no-op when no holding disk is configured or nothing is staged.
 func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 	return spool.Flush(spool.FlushDeps{
-		Cat:      e.cat,
-		Clerk:    e.clerk,
-		Backing:  e.mediumName,
-		Holdings: e.cfg.HoldingMedia(),
+		Cat:        e.cat,
+		Clerk:      e.clerk,
+		LandingFor: e.landingForDLEName,
+		Holdings:   e.cfg.HoldingMedia(),
 		HoldVol: func(name string) (media.Volume, error) {
 			vol, _, _, err := e.mediumVolume(name)
 			return vol, err
 		},
-		OpenBacking: func(spec archiveio.SlotSpec) (*clerk.Session, error) {
-			wt, err := e.prepareWriter(e.mediumName, spec, now, logf)
+		OpenBacking: func(landing string, spec archiveio.SlotSpec) (*clerk.Session, error) {
+			wt, err := e.prepareWriter(landing, spec, now, logf)
 			if err != nil {
 				return nil, err
 			}
-			return e.clerk.OpenSlot(wt.w, e.mediumName, wt.lib.Volume()), nil
+			return e.clerk.OpenSlot(wt.w, landing, wt.lib.Volume()), nil
 		},
 		DisplayDLE: e.DisplayDLE,
 		Logf:       logf,

@@ -431,6 +431,7 @@ type DumpType struct {
 	Exclude  []string        `yaml:"exclude"`  // patterns to skip (passed to the archiver per dump)
 	Encrypt  *EncryptConfig  `yaml:"encrypt"`  // nil = inherit the config-wide default; set = replace it wholesale (no field merge)
 	Compress *CompressConfig `yaml:"compress"` // nil = inherit the config-wide default; set = replace it wholesale (no field merge) — the peer of Encrypt
+	Landing  string          `yaml:"landing"`  // medium this dumptype's DLEs land on; "" = the config-wide `landing`. Routes different sources to different media (cheap cloud vs fast disk vs tape) within one run.
 }
 
 // Archiver is a named dump-program definition: a
@@ -657,6 +658,9 @@ func (c *Config) Validate() error {
 	if err := c.validateDumpTypeArchivers(); err != nil {
 		return err
 	}
+	if err := c.validateDumpTypeLandings(); err != nil {
+		return err
+	}
 	if err := c.validateHolding(); err != nil {
 		return err
 	}
@@ -668,6 +672,26 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateNotify(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateDumpTypeLandings rejects a dumptype whose `landing` override names a medium
+// that is not defined — the per-dumptype peer of landingDefined, so a routing typo is
+// caught at load rather than mid-run. A holding medium is not a valid landing (it is a
+// write-path buffer, not an authoritative destination).
+func (c *Config) validateDumpTypeLandings() error {
+	for name, dt := range c.DumpTypes {
+		if dt.Landing == "" {
+			continue
+		}
+		m, ok := c.Media[dt.Landing]
+		if !ok {
+			return fmt.Errorf("dumptype %q: landing %q is not a defined medium", name, dt.Landing)
+		}
+		if m.Holding {
+			return fmt.Errorf("dumptype %q: landing %q is a holding medium, not a landing", name, dt.Landing)
+		}
 	}
 	return nil
 }
@@ -920,6 +944,18 @@ func (c *Config) LandingName() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no landing medium selected (set `landing:` to a media name)")
+}
+
+// LandingFor resolves the medium a DLE's archives land on: its dumptype's `landing`
+// override when set, else the config-wide LandingName. A dumptype override routes
+// different sources to different media (e.g. bulk media to cheap cloud, databases to
+// fast disk) within one run. The override is validated against `media` at load
+// (validateDumpTypeLandings), so a run-time resolve trusts it.
+func (c *Config) LandingFor(d DLE) (string, error) {
+	if l := c.ResolveDumpType(d.DumpTypeName()).Landing; l != "" {
+		return l, nil
+	}
+	return c.LandingName()
 }
 
 // LandingMedia resolves the media definition used for landing. If no landing is
