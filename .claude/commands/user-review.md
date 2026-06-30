@@ -1,6 +1,5 @@
 ---
 description: Road-test NBackup as a brand-new user — read the docs, exercise common use cases in parallel, and report bugs + usability findings.
-model: sonnet
 ---
 
 You are road-testing **NBackup** the way a brand-new user would: read the
@@ -31,8 +30,8 @@ If `$ARGUMENTS` is non-empty, focus the review on that area (e.g. "tape",
 ## Run the use cases in parallel
 
 Launch parallel subagents (one per area, in their own temp dirs) so the review is
-fast and independent. Each agent acts as a new user, follows the README, and
-reports findings. Cover these areas:
+fast and independent. Each agent acts as a new user, follows the
+README, and reports findings. Cover at least these areas, but explore other usecases as well:
 
 1. **Core lifecycle (disk):** quick-start config, `plan` / `plan --days`, `dump`,
    inspect the slot dir, `slot` / `slot <id>` / `medium` / `status`, `verify`
