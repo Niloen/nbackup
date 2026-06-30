@@ -33,7 +33,7 @@ func init() {
 		// reclamation is deferred to label rotation, so no concurrent-write capability —
 		// a serial, whole-volume medium.
 		Profile: media.NewVolumeProfile,
-		Params:  []string{"dir", "device", "slots", "drives", "manual", "volume_size", "part_size", "block_size"},
+		Params:  []string{"dir", "device", "changer", "slots", "drives", "manual", "volume_size", "part_size", "block_size"},
 	})
 }
 
@@ -53,6 +53,29 @@ func newTapeVolume(opts media.Options) (media.Volume, error) {
 		capacity = c
 	}
 	switch {
+	case opts.Get("changer") != "":
+		// A real SCSI media changer (mtx): `changer` is the control (sg) device and
+		// `device` lists the drive nodes a robot loads slots into. Like a real drive,
+		// each cartridge's fill is unknowable (capacity 0 → proactive spanning via
+		// part_size); the file-backed sim keys (dir/slots/drives/manual) do not apply.
+		for _, k := range []string{"dir", "slots", "drives", "manual", "volume_size"} {
+			if opts.Get(k) != "" {
+				return nil, fmt.Errorf("`%s` does not apply to a SCSI changer (changer:); list the drive nodes in `device` and bound parts with `part_size`", k)
+			}
+		}
+		block, err := blockOpt(opts.Get("block_size"))
+		if err != nil {
+			return nil, err
+		}
+		nodes := splitDevices(opts.Get("device"))
+		if len(nodes) == 0 {
+			return nil, fmt.Errorf("a SCSI changer (changer:) needs its tape drive node(s) in `device` (e.g. device: /dev/nst0)")
+		}
+		ld, err := openMtxLoader(opts.Get("changer"), nodes, block)
+		if err != nil {
+			return nil, err
+		}
+		return newTapeChanger(ld, 0)
 	case opts.Get("dir") != "":
 		slots, err := atoiOpt(opts.Get("slots"), 1)
 		if err != nil {
@@ -77,13 +100,9 @@ func newTapeVolume(opts media.Options) (media.Volume, error) {
 				return nil, fmt.Errorf("`%s` applies only to a file-backed library (dir:); a real drive (device:) is a single hand-loaded drive", k)
 			}
 		}
-		var block int
-		if s := opts.Get("block_size"); s != "" {
-			b, err := sizeutil.ParseBytes(s)
-			if err != nil {
-				return nil, fmt.Errorf("block_size: %w", err)
-			}
-			block = int(b)
+		block, err := blockOpt(opts.Get("block_size"))
+		if err != nil {
+			return nil, err
 		}
 		dev, err := openMT(opts.Get("device"), block)
 		if err != nil {
@@ -109,6 +128,18 @@ func boolOpt(s string) (bool, error) {
 		return false, nil
 	}
 	return strconv.ParseBool(s)
+}
+
+// blockOpt parses the tape block_size option (0 when empty → the backend default).
+func blockOpt(s string) (int, error) {
+	if s == "" {
+		return 0, nil
+	}
+	b, err := sizeutil.ParseBytes(s)
+	if err != nil {
+		return 0, fmt.Errorf("block_size: %w", err)
+	}
+	return int(b), nil
 }
 
 // device is the mt-level seam: one mounted tape as a sequence of files addressed

@@ -303,7 +303,9 @@ func WalkReadable(vol Volume, fn func(Volume) error) error {
 			continue
 		}
 		if err := ch.Load(s.Slot, 0); err != nil {
-			return err
+			// A cartridge this drive cannot load (wrong generation, stuck, a dud) holds
+			// nothing readable for the catalog — skip it rather than abort the scan.
+			continue
 		}
 		if err := fn(ch.Drive(0)); err != nil {
 			return err

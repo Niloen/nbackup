@@ -39,12 +39,17 @@ media:
   lto:
     type: tape          # a LIBRARY: drives (data-transfer elements) fed from slots
     dir: /var/lib/nbackup/vtape   # a file-backed virtual library (no hardware)
-    # device: /dev/nst0           # OR a real single drive (no-rewind device, Linux st),
-    #                             # a one-drive hand-loaded changer: `slots`/`drives`/`manual`
-    #                             # do not apply, and its capacity is the tape's own (set
-    #                             # part_size instead of volume_size, since EOT is only hit)
-    # block_size: 64k             # (device: only) tape record size; writes are chunked to
-    #                             # this and reads buffered to it. Default 64k; range 32k–256k
+    # REAL HARDWARE (Linux) — pick ONE of these instead of `dir:`:
+    # changer: /dev/sg0           # a SCSI media changer (robotic library) driven via mtx(1):
+    # device: /dev/nst0           #   `changer` is the control (sg) node, `device` the drive
+    #                             #   node(s) (comma-separate several). The robot loads slots
+    #                             #   into the drive; barcodes come from the library scanner.
+    #                             #   `slots`/`drives`/`manual`/`volume_size` do not apply; bound
+    #                             #   parts with `part_size` (a drive can't see its own fill).
+    # device: /dev/nst0           # OR (no `changer:`) a real single drive a human hand-loads —
+    #                             #   `slots`/`drives`/`manual` do not apply; set `part_size`.
+    # block_size: 64k             # (device:/changer: only) tape record size; writes are chunked
+    #                             # to this and reads buffered to it. Default 64k; range 32k–256k
     #                             # (the st driver's safe single-buffer allocation). A tape is
     #                             # still readable if you later change this — reads auto-grow.
     slots: 20           # storage slots (dir-backed); total capacity is slots × volume_size

@@ -372,7 +372,8 @@ func (l *Librarian) advanceViaLibrary(appendable bool, tried map[string]bool, no
 		}
 		tried[key] = true
 		if err := l.changer.Load(s.Slot, 0); err != nil {
-			return "", 0, false, err
+			lastErr = err // a cartridge this drive can't load (wrong generation, dud): try the next slot
+			continue
 		}
 		name, epoch, verr := l.verifyWritable(appendable, now)
 		if verr != nil {
@@ -557,7 +558,7 @@ func (l *Librarian) findSlot(name string) (int, bool, error) {
 			continue
 		}
 		if err := l.changer.Load(s.Slot, 0); err != nil {
-			return 0, false, err
+			continue // a cartridge this drive can't load holds no label we can read
 		}
 		if n, labeled, _ := l.readVolumeLabel(); labeled && n == name {
 			return s.Slot, true, nil
@@ -1093,7 +1094,7 @@ func (l *Librarian) chooseSlot(name string, relabel bool) (int, error) {
 			continue
 		}
 		if err := l.changer.Load(s.Slot, 0); err != nil {
-			return -1, err
+			continue // a cartridge this drive can't load is not a candidate for labeling
 		}
 		n, labeled, lerr := l.readVolumeLabel()
 		switch {

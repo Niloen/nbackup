@@ -323,11 +323,21 @@ live under the tape medium's `changer:`, never in the generic layer.
    in a librarian-internal `directChanger` so it has one shape. `nb medium` is
    barcode-first (drives + slots); `nb load <slot>` / `--label`. The interface **admits N
    drives** but the librarian still schedules drive 0 only.
-3. **Real `mtx` changer loader (3.2).** A `mtxLoader` driving `mtx -f /dev/sg0` (the
-   `chg-robot` equivalent), surfacing real barcodes; slots into the slots/drives model
-   already in place. Not started.
+3. **Real `mtx` changer loader (3.2). — DONE (2026-06-30).** `mtxLoader`
+   (`internal/media/tape/mtx_linux.go`) drives `mtx -f <sg>` — the `chg-robot`
+   equivalent: `mtx status` parsed for drives/slots/barcodes (without loading), `mtx
+   load <slot> <drive>` / `unload` to move cartridges (unloading a full drive first,
+   since a real drive can't be loaded full). Config is `changer: /dev/sg0` + `device:`
+   (the drive node(s)); the byte I/O is the existing st(4) `mtDevice` per drive. Cleaning
+   cartridges (`CLN…`) are filtered, and a slot the drive cannot load (wrong LTO
+   generation, stuck, dud) is skipped by the scan and the write-selection rather than
+   aborting. Validated against the mtx/sg LTO-8 emulator: check → dump (robot auto-loads
+   + labels a blank slot, rolls across physical tapes) → verify → recover (cross-tape
+   chain, byte-identical) → `nb load <slot>`/`--label`. The librarian still schedules
+   drive 0 only.
 4. **Multi-drive scheduling (3.3).** Parallel tape writers — the librarian assigns a
-   drive per worker. The interface is ready; the engine/librarian scheduling is not.
+   drive per worker. The `Changer` interface and `mtxLoader` already model N drives; the
+   engine/librarian scheduling is the remaining work.
 
 Greenfield, no migration shims (per project convention): the `bays`/`reels`/`mode` keys
 were replaced by `slots`/`drives`/`manual` outright.
