@@ -84,8 +84,9 @@ type Source interface {
 	// Open begins producing and returns the output stream plus a finish that, once the
 	// chain has drained, reaps the source's processes and reports their raw-stream stats
 	// (one event: "the producer is done, here is what it produced"). Its error is the
-	// source-zone error. Cleanup releases scratch.
-	Open() (out io.ReadCloser, finish func() (SourceStats, error), err error)
+	// source-zone error. Cleanup releases scratch. ctx binds the producer's processes:
+	// canceling it kills them, which is how a canceled run stops an in-flight dump.
+	Open(ctx context.Context) (out io.ReadCloser, finish func() (SourceStats, error), err error)
 	Cleanup()
 }
 
@@ -121,7 +122,7 @@ func (f Filters) Add(c programs.Cmd) Filters {
 // first). ctx threads to the sink's part writers; on a fault Transfer cancels it so the
 // in-flight part aborts (no committed file) rather than committing a partial.
 func Transfer(ctx context.Context, source Source, filters Filters, sink Sink) (SourceStats, error) {
-	out, finish, err := source.Open()
+	out, finish, err := source.Open(ctx)
 	if err != nil {
 		source.Cleanup()
 		return SourceStats{}, &Error{RoleSource, err}
@@ -131,7 +132,7 @@ func Transfer(ctx context.Context, source Source, filters Filters, sink Sink) (S
 	filtReap := func() error { return nil }
 	filtered := false
 	if len(filters.cmds) > 0 {
-		fr, fw, ferr := programs.Local().RunPipe(out, filters.cmds...)
+		fr, fw, ferr := programs.Local().RunPipe(ctx, out, filters.cmds...)
 		if ferr != nil {
 			out.Close()
 			_, _ = finish() // reap the source we already started

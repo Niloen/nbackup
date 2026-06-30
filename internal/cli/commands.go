@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/conductor"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/media"
@@ -300,8 +302,13 @@ func newDumpCmd(a *app) *cobra.Command {
 				now = time.Now().UTC()
 			}
 			return a.runReported(cfg, report.Run{Command: report.CommandDump, ExitClass: "dump-failed"}, func() (report.Run, error) {
-				s, err := eng.Run(now, a.logf())
+				s, err := eng.Run(cmd.Context(), now, a.logf())
 				if err != nil {
+					// A canceled run is operator-initiated, not a dump failure: record it under its
+					// own exit class so the run log distinguishes the two.
+					if errors.Is(err, conductor.ErrCanceled) {
+						return report.Run{Command: report.CommandDump, ExitClass: "canceled"}, err
+					}
 					return report.Run{}, err
 				}
 				fmt.Printf("\nCommitted %s: %d archive(s), %s total\n", s.ID, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes()))

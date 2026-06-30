@@ -27,6 +27,9 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 	if failed > 0 {
 		fmt.Fprintf(w, ", %d FAILED", failed)
 	}
+	if canceled := s.Canceled(); canceled > 0 {
+		fmt.Fprintf(w, ", %d canceled", canceled)
+	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w)
 
@@ -102,6 +105,8 @@ func dumpCell(d DLE) string {
 		return "-"
 	case StateFailed:
 		return "failed"
+	case StateCanceled:
+		return "canceled"
 	}
 	if d.EstBytes <= 0 {
 		return "n/a"
@@ -114,7 +119,7 @@ func dumpCell(d DLE) string {
 // has not begun and its bytes are not on the volume yet. A direct dump has no separate flush: it
 // shows "direct" once done (it streamed straight to the volume) and a dash while it is still dumping.
 func drainCell(d DLE) string {
-	if d.State == StateFailed {
+	if d.State == StateFailed || d.State == StateCanceled {
 		return "-"
 	}
 	if d.Drains() {

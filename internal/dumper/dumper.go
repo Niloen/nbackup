@@ -67,10 +67,14 @@ func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs 
 		a, ok := fs.(interface{ Aborted() error })
 		return ok && a.Aborted() != nil
 	}
+	// Stop scheduling once the run is canceled (ctx) or the backing has aborted. An
+	// in-flight dump's processes are killed through ctx (programs.RunPipe); this just keeps
+	// no further DLE from starting.
+	stop := func() bool { return ctx.Err() != nil || aborted() }
 	if workers <= 1 || len(items) <= 1 {
 		var errs []error
 		for _, item := range items {
-			if aborted() {
+			if stop() {
 				break
 			}
 			if err := dumpOne(item); err != nil {
@@ -96,7 +100,7 @@ func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs 
 		errs []error
 	)
 	for _, item := range items {
-		if aborted() {
+		if stop() {
 			break
 		}
 		wg.Add(1)

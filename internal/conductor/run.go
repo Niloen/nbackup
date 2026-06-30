@@ -14,8 +14,14 @@ import (
 	"github.com/Niloen/nbackup/internal/spool"
 )
 
-// Run executes the plan for a date, producing one sealed slot.
-func (c *Conductor) Run(now time.Time, logf logf.Logf) (*catalog.Slot, error) {
+// ErrCanceled is the error a run returns when the operator interrupts it (SIGINT/SIGTERM):
+// the dump is stopped, its status marked canceled, and nothing sealed. It wraps
+// context.Canceled so callers can classify it with errors.Is.
+var ErrCanceled = fmt.Errorf("run canceled: %w", context.Canceled)
+
+// Run executes the plan for a date, producing one sealed slot. Canceling ctx interrupts the
+// run: in-flight dumps are killed, the status is marked canceled, and it returns ErrCanceled.
+func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*catalog.Slot, error) {
 	// `now` is the run's single time source: the precise instant the slot is stamped
 	// committed (CreatedAt) and the moment retention is judged against. The
 	// run date — the logical key for the slot id, planning, and restore ordering — is
@@ -120,7 +126,13 @@ func (c *Conductor) Run(now time.Time, logf logf.Logf) (*catalog.Slot, error) {
 	}
 
 	tr, runLogf := c.progressTracker(slotID, workers, plan.Items, fileSink, logf)
-	sealed, err := c.runOrchestrated(plan, workers, landingSlots, spec, holdingNames, landPW, tr, now, runLogf)
+	// Caught here it covers a cancel during the estimate/preflight prelude (above), before any
+	// dump starts; runOrchestrated catches one during the dump itself.
+	if ctx.Err() != nil {
+		tr.SetPhase(progress.PhaseCanceled)
+		return nil, ErrCanceled
+	}
+	sealed, err := c.runOrchestrated(ctx, plan, workers, landingSlots, spec, holdingNames, landPW, tr, now, runLogf)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +149,7 @@ func (c *Conductor) Run(now time.Time, logf logf.Logf) (*catalog.Slot, error) {
 // runOrchestrated executes a dump: it opens the holding disks (the buffer the producers stage onto),
 // builds the spool over the already-opened landing writer, runs the producers, and seals the
 // landing the spool authored. The spool is the run's sole catalog writer.
-func (c *Conductor) runOrchestrated(plan *planner.Plan, workers, landingSlots int, spec archiveio.SlotSpec, holdingNames []string, landPW PreparedWriter, tr *progress.Tracker, now time.Time, lf logf.Logf) (*catalog.Slot, error) {
+func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, workers, landingSlots int, spec archiveio.SlotSpec, holdingNames []string, landPW PreparedWriter, tr *progress.Tracker, now time.Time, lf logf.Logf) (*catalog.Slot, error) {
 	disks := make([]spool.Disk, len(holdingNames))
 	for i, name := range holdingNames {
 		pw, err := c.d.OpenWriter(name, spec, now, lf)
@@ -148,12 +160,23 @@ func (c *Conductor) runOrchestrated(plan *planner.Plan, workers, landingSlots in
 		disks[i] = spool.Disk{Name: name, Storage: pw.Store, Capacity: pw.Capacity}
 	}
 
-	sp := spool.New(spool.Config{
+	sp := spool.New(ctx, spool.Config{
 		Holding: spool.NewPool(disks), Tracker: tr, Logf: lf,
 		Backing: spool.Backing{Name: c.d.Landing, Storage: landPW.Store, Slots: landingSlots},
 	})
 
-	dumpErr := c.d.Dmp.Run(context.Background(), plan.Items, workers, sp, tr, lf)
+	dumpErr := c.d.Dmp.Run(ctx, plan.Items, workers, sp, tr, lf)
+
+	// A canceled run is not a failure to seal: stop the spool (it aborted on the same ctx, so
+	// Drain just joins it without flushing the queued copies — those flush on the next run),
+	// mark the status canceled, and seal nothing. Leftover holding archives are reclaimed by
+	// the amflush-on-next-dump path.
+	if ctx.Err() != nil {
+		_ = sp.Drain()
+		tr.SetPhase(progress.PhaseCanceled)
+		lf.Log("run canceled — nothing sealed; any buffered archives flush on the next run")
+		return nil, ErrCanceled
+	}
 
 	tr.SetPhase(progress.PhaseSealing)
 	if err := firstErr(dumpErr, sp.Drain()); err != nil {

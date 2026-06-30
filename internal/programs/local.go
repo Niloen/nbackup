@@ -2,6 +2,7 @@ package programs
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"os/exec"
@@ -70,7 +71,7 @@ func (localExec) ReadFile(path string) ([]byte, error) { return os.ReadFile(path
 // RunPipe chains the stages with in-process os/exec pipes: each stage's stdout feeds the
 // next stage's stdin, optionally tapped for a byte counter. The identity case (one stage
 // with nil program is not expressible here; zero stages returns stdin unchanged).
-func (localExec) RunPipe(stdin io.Reader, progs ...Cmd) (io.ReadCloser, func() error, error) {
+func (localExec) RunPipe(ctx context.Context, stdin io.Reader, progs ...Cmd) (io.ReadCloser, func() error, error) {
 	if len(progs) == 0 {
 		return io.NopCloser(stdin), func() error { return nil }, nil
 	}
@@ -79,7 +80,7 @@ func (localExec) RunPipe(stdin io.Reader, progs ...Cmd) (io.ReadCloser, func() e
 	cur := stdin
 	for i, p := range progs {
 		argv := p.argv()
-		c := exec.Command(argv[0], argv[1:]...)
+		c := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		c.Stdin = cur
 		w, buf := captureBuf(p)
 		c.Stderr = w

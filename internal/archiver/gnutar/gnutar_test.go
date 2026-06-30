@@ -1,6 +1,7 @@
 package gnutar
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -200,7 +201,7 @@ func TestSnapshotPromotionIsAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, wait, err := bs.Exec.RunPipe(nil, bs.Stage)
+	out, wait, err := bs.Exec.RunPipe(context.Background(), nil, bs.Stage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +264,7 @@ func backup(t *testing.T, m archiver.Archiver, req archiver.BackupRequest, outFi
 	if err != nil {
 		t.Fatalf("backup source L%d: %v", req.Level, err)
 	}
-	out, wait, err := bs.Exec.RunPipe(nil, bs.Stage)
+	out, wait, err := bs.Exec.RunPipe(context.Background(), nil, bs.Stage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +300,7 @@ func restore(t *testing.T, m archiver.Archiver, inFile, dest string) {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	out, wait, err := programs.Local().RunPipe(f, m.RestoreStage(dest, nil))
+	out, wait, err := programs.Local().RunPipe(context.Background(), f, m.RestoreStage(dest, nil))
 	if err != nil {
 		t.Fatal(err)
 	}

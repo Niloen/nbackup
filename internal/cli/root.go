@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -123,7 +127,20 @@ func newVersionCmd() *cobra.Command {
 // the right subcommand's help by SetFlagErrorFunc (in NewRootCmd), so they need no
 // handling here.
 func Execute() error {
-	err := NewRootCmd().Execute()
+	// SIGINT/SIGTERM cancels the run's context (threaded down to the dump) instead of
+	// killing the process outright — so a canceled `nb dump` unwinds, kills its in-flight
+	// tar/compressor, and records a terminal status rather than leaving run-status.json
+	// frozen at "running".
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	// A second signal force-quits, in case a graceful cancel hangs (the first signal already
+	// canceled ctx; restoring the default disposition lets the next one terminate).
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+
+	err := NewRootCmd().ExecuteContext(ctx)
 	if err != nil && strings.HasPrefix(err.Error(), "unknown command") {
 		return fmt.Errorf("%w\nRun 'nb --help' for usage", err)
 	}

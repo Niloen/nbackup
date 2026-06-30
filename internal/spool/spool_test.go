@@ -37,7 +37,7 @@ func (*fakeWriter) Close() error { return nil }
 // that faults before Commit (the producer's deferred Close runs, Commit never does) must return its
 // backing permit, so the next direct write can acquire the single slot instead of blocking forever.
 func TestDirectPermitReleasedOnCloseWithoutCommit(t *testing.T) {
-	sp := New(Config{
+	sp := New(context.Background(), Config{
 		Backing: Backing{Name: "landing", Storage: fakeStore{}, Slots: 1},
 		Holding: NewPool(nil), // no holding disks => every write routes direct
 	})

@@ -13,7 +13,7 @@ func Reader(rc io.ReadCloser) Source { return &readerSource{rc: rc} }
 
 type readerSource struct{ rc io.ReadCloser }
 
-func (s *readerSource) Open() (io.ReadCloser, func() (SourceStats, error), error) {
+func (s *readerSource) Open(context.Context) (io.ReadCloser, func() (SourceStats, error), error) {
 	return s.rc, func() (SourceStats, error) { return SourceStats{}, nil }, nil
 }
 func (s *readerSource) Cleanup() {}
@@ -62,8 +62,8 @@ func (p *ProgramChain) OnCleanup(fn func()) *ProgramChain { p.cleanup = fn; retu
 // Source side: the chain produces (tar -c, no stdin). finish waits the chain's processes
 // and then reads the producer's totals — one event, since the totals are only readable once
 // the producer has exited; a reap failure wins over the totals it would have reported.
-func (p *ProgramChain) Open() (io.ReadCloser, func() (SourceStats, error), error) {
-	out, wait, err := p.exec.RunPipe(nil, p.cmds...)
+func (p *ProgramChain) Open(ctx context.Context) (io.ReadCloser, func() (SourceStats, error), error) {
+	out, wait, err := p.exec.RunPipe(ctx, nil, p.cmds...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -88,9 +88,9 @@ func (p *ProgramChain) Cleanup() {
 // NextPart starts the chain over a pipe (the returned writer is its stdin) and drains the chain's
 // (empty, for tar -x) output on a goroutine; Commit waits for the chain and the drain. It writes the
 // filesystem, not a stored archive, so there is no footer/placement to seal.
-func (p *ProgramChain) NextPart(_ context.Context) (io.WriteCloser, int64, error) {
+func (p *ProgramChain) NextPart(ctx context.Context) (io.WriteCloser, int64, error) {
 	pr, pw := io.Pipe()
-	out, wait, err := p.exec.RunPipe(pr, p.cmds...)
+	out, wait, err := p.exec.RunPipe(ctx, pr, p.cmds...)
 	if err != nil {
 		pr.Close()
 		pw.Close()

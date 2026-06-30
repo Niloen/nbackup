@@ -16,6 +16,7 @@ package programs
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os/exec"
@@ -66,8 +67,9 @@ type Executor interface {
 	// RunPipe runs progs[0] | progs[1] | ... on this host. stdin feeds progs[0]
 	// (nil = no input); the returned reader is progs[last]'s stdout. wait() blocks for
 	// every stage and reports the first failure (with its stderr). The caller must drain
-	// (and Close) the reader, then call wait.
-	RunPipe(stdin io.Reader, progs ...Cmd) (stdout io.ReadCloser, wait func() error, err error)
+	// (and Close) the reader, then call wait. Canceling ctx kills the stages — how a dump
+	// stops its in-flight tar/compressor when the run is canceled.
+	RunPipe(ctx context.Context, stdin io.Reader, progs ...Cmd) (stdout io.ReadCloser, wait func() error, err error)
 
 	// Command builds a single command on this host (for one-shot probes like
 	// `tar --version` or the `/dev/null` estimate). The returned *exec.Cmd already

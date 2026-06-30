@@ -16,6 +16,7 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -98,7 +99,7 @@ func makeDiskFixture() error {
 		if err != nil {
 			return err
 		}
-		s1, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+		s1, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
 		if err != nil {
 			return fmt.Errorf("full run: %w", err)
 		}
@@ -111,7 +112,7 @@ func makeDiskFixture() error {
 		if err := os.Remove(filepath.Join(src, "data/gone.txt")); err != nil {
 			return err
 		}
-		s2, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+		s2, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
 		if err != nil {
 			return fmt.Errorf("incremental run: %w", err)
 		}
@@ -167,7 +168,7 @@ func makeTapeFixture() error {
 		if err != nil {
 			return err
 		}
-		s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+		s, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
 		if err != nil {
 			return fmt.Errorf("dump: %w", err)
 		}
