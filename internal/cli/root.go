@@ -133,10 +133,14 @@ func Execute() error {
 	// frozen at "running".
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	// A second signal force-quits, in case a graceful cancel hangs (the first signal already
-	// canceled ctx; restoring the default disposition lets the next one terminate).
+	// On the first signal, tell the operator the cancel was heard — unwinding a dump
+	// (killing the in-flight tar/compressor, draining the spool) is not instant, so without
+	// this the terminal sits silent and looks hung. A second signal force-quits, in case a
+	// graceful cancel itself hangs: the first signal already canceled ctx, and restoring the
+	// default disposition (stop) lets the next one terminate the process outright.
 	go func() {
 		<-ctx.Done()
+		fmt.Fprintln(os.Stderr, "\ncanceling… (press Ctrl-C again to force quit)")
 		stop()
 	}()
 

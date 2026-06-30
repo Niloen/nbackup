@@ -15,9 +15,16 @@ import (
 )
 
 // ErrCanceled is the error a run returns when the operator interrupts it (SIGINT/SIGTERM):
-// the dump is stopped, its status marked canceled, and nothing sealed. It wraps
-// context.Canceled so callers can classify it with errors.Is.
-var ErrCanceled = fmt.Errorf("run canceled: %w", context.Canceled)
+// the dump is stopped, its status marked canceled, and nothing sealed. Its message is the
+// plain operator-facing reason; it unwraps to context.Canceled so callers can still classify
+// it with errors.Is (against either ErrCanceled or context.Canceled) without the raw
+// "context canceled" leaking into what the operator reads.
+var ErrCanceled error = canceledError{}
+
+type canceledError struct{}
+
+func (canceledError) Error() string { return "canceled by operator (Ctrl-C)" }
+func (canceledError) Unwrap() error { return context.Canceled }
 
 // Run executes the plan for a date, producing one sealed slot. Canceling ctx interrupts the
 // run: in-flight dumps are killed, the status is marked canceled, and it returns ErrCanceled.
