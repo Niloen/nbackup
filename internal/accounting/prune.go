@@ -18,14 +18,14 @@ import (
 // capacity. Retention is per-medium, so each store is pruned against its own slots
 // — pruning one medium never touches a copy on another. Any configured medium can
 // be pruned (not only the landing one), so an offsite tier can be trimmed too.
-func (a *Accountant) Prune(mediumName string, now time.Time, apply bool, out logf.Logf) (eligible int, freed int64, err error) {
+func (a *Accountant) Prune(mediumName string, now time.Time, apply bool, out logf.Logf) (eligible int, swept int, freed int64, err error) {
 	def, ok := a.d.Cfg.Media[mediumName]
 	if !ok {
-		return 0, 0, fmt.Errorf("unknown medium %q", mediumName)
+		return 0, 0, 0, fmt.Errorf("unknown medium %q", mediumName)
 	}
 	profile, err := a.ProfileFor(mediumName)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	minAge := a.d.Cfg.MinAgeFor(def)
 	archives := a.d.Cat.ArchivesOn(mediumName)
@@ -55,7 +55,7 @@ func (a *Accountant) Prune(mediumName string, now time.Time, apply bool, out log
 	var vol media.Volume
 	if apply && len(reclaim) > 0 {
 		if vol, err = a.d.OpenVolume(mediumName); err != nil {
-			return eligible, freed, err
+			return eligible, swept, freed, err
 		}
 	}
 	for _, ar := range archives {
@@ -70,11 +70,11 @@ func (a *Accountant) Prune(mediumName string, now time.Time, apply bool, out log
 			// survives in the catalog.
 			for _, pos := range archivePositions(a.d.Cat.Placements(ar.Slot), mediumName, ar.DLE) {
 				if err := vol.RemoveFile(pos); err != nil {
-					return eligible, freed, fmt.Errorf("delete %s %s: %w", ar.Slot, ar.DLE, err)
+					return eligible, swept, freed, fmt.Errorf("delete %s %s: %w", ar.Slot, ar.DLE, err)
 				}
 			}
 			if _, _, err := a.d.Cat.RemoveArchive(ar.Slot, mediumName, ar.DLE); err != nil {
-				return eligible, freed, fmt.Errorf("update catalog cache: %w", err)
+				return eligible, swept, freed, fmt.Errorf("update catalog cache: %w", err)
 			}
 			freed += r.Bytes
 			out.Log("DELETE %s %s  (%s freed, %s)", ar.Slot, a.d.DisplayDLE(ar.DLE), sizeutil.FormatBytes(r.Bytes), r.Note)
@@ -82,7 +82,94 @@ func (a *Accountant) Prune(mediumName string, now time.Time, apply bool, out log
 			out.Log("would delete %s %s  (%s, %s)", ar.Slot, a.d.DisplayDLE(ar.DLE), sizeutil.FormatBytes(r.Bytes), r.Note)
 		}
 	}
-	return eligible, freed, nil
+
+	// Sweep crash leftovers: files no committed archive references, which a run that
+	// died before writing its commit footer left behind. Retention above cannot see
+	// them (assemble discards footer-less files, so the catalog never recorded them),
+	// yet they still hold the store's capacity — and on an address-identified medium
+	// nothing else reclaims them, so a prune is where they go.
+	if media.ConcurrentWrite(def.Type) {
+		if swept, err = a.sweepOrphans(mediumName, minAge, now, apply, out); err != nil {
+			return eligible, swept, freed, err
+		}
+	}
+	return eligible, swept, freed, nil
+}
+
+// sweepOrphans removes the files on a per-file-reclaim medium (disk, cloud) that belong
+// to no committed archive — the crash detritus retention is blind to. It unions two
+// cache-free sources: footer-less complete archives (catalog.OrphanFiles, detected from
+// the medium's own commit footers) and torn appends (media.IncompleteEnumerator, a
+// half-written file a scan never sees). Each is removed by position via RemoveFile, which
+// then reclaims an emptied slot for free.
+//
+// Three safety pillars:
+//   - Detection is MEDIUM-TRUTH, never the catalog cache — a stale or empty cache can never
+//     make a committed archive look orphaned, because an archive is referenced here only when
+//     its own commit footer is present on the medium.
+//   - The workdir lock (internal/lock, held by every mutating run including a real prune)
+//     guarantees no dump is writing concurrently, so an uncommitted file is a dead leftover,
+//     never a part in flight.
+//   - It honors the medium's minimum_age exactly as retention does, and a refused delete is
+//     tolerated, so it never fights immutable storage (S3 Object Lock, WORM): operators set
+//     minimum_age >= their Object-Lock retention so a still-locked orphan is simply not
+//     attempted, and any delete the storage still refuses is left for a later prune rather
+//     than failing the run.
+//
+// Tape is excluded by the caller (ConcurrentWrite gate): it reclaims orphans at relabel.
+func (a *Accountant) sweepOrphans(mediumName string, minAge time.Duration, now time.Time, apply bool, out logf.Logf) (swept int, err error) {
+	vol, err := a.d.OpenVolume(mediumName)
+	if err != nil {
+		return 0, err
+	}
+	orphans, err := catalog.OrphanFiles(vol)
+	if err != nil {
+		return 0, err
+	}
+
+	// remove is best-effort: a refused delete is how immutable storage (S3 Object Lock,
+	// WORM) reports a still-locked object, and sweeping is opportunistic cleanup, so it
+	// warns and leaves the file for a later prune rather than failing the whole run.
+	remove := func(pos int, desc string) {
+		if !apply {
+			out.Log("would sweep orphan at %d  (%s)", pos, desc)
+			swept++
+			return
+		}
+		if rerr := vol.RemoveFile(pos); rerr != nil {
+			out.Log("WARN   could not sweep orphan at %d (%s): %v — left for a later prune", pos, desc, rerr)
+			return
+		}
+		out.Log("SWEEP  orphan at %d reclaimed  (%s)", pos, desc)
+		swept++
+	}
+
+	for _, f := range orphans {
+		// Honor minimum_age like retention does: a crash leftover younger than the floor is
+		// left alone. Age is the file's run stamp (Header.CreatedAt); with the default
+		// minimum_age of 0 every orphan is eligible at once, unchanged from before.
+		if minAge > 0 && now.Sub(f.Header.CreatedAt) < minAge {
+			out.Log("keep   orphan at %d  (%s %s, within minimum_age)", f.Pos, f.Header.Slot, a.d.DisplayDLE(f.Header.DLE))
+			continue
+		}
+		remove(f.Pos, fmt.Sprintf("%s %s, no commit footer", f.Header.Slot, a.d.DisplayDLE(f.Header.DLE)))
+	}
+
+	torn, ok := vol.(media.IncompleteEnumerator)
+	if !ok {
+		return swept, nil
+	}
+	positions, err := torn.IncompleteFiles()
+	if err != nil {
+		return swept, err
+	}
+	for _, pos := range positions {
+		// A torn file carries no run stamp to age (its header may be the missing half), so it
+		// cannot be minimum_age-gated; the best-effort remove tolerates an immutable-storage
+		// refusal, so on a WORM medium it is simply retried on a later prune.
+		remove(pos, "torn file, interrupted append")
+	}
+	return swept, nil
 }
 
 // ReclaimCopy deletes an existing copy of a slot on a removable (fslike: disk

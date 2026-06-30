@@ -63,6 +63,28 @@ overwriting one — recoverability outranks capacity. `nb prune` never deletes
 individual archives from a tape; `nb label --relabel` is the manual early-recycle
 override.
 
+## Sweeping crash leftovers
+
+An interrupted run (a hard kill or power loss before a dump's **commit footer** is
+written) can leave **orphans** on a per-file medium: a complete archive part with no
+commit footer, or a torn half-written file. They belong to no archive, so retention
+above never sees them, yet they keep consuming the store. On disk and S3, `nb prune`
+**sweeps** them after the retention pass — `--dry-run` previews them too.
+
+Detection is safe by construction:
+
+- It reads the medium's **own commit footers**, never the catalog cache, so a lost or
+  stale catalog can never make a committed archive look like an orphan.
+- It honors the medium's `minimum_age` just like retention, so on an immutable bucket
+  you set `minimum_age ≥ your Object-Lock retention` and the sweep never even attempts
+  a still-locked object; any delete the storage still refuses is logged and left for a
+  later prune rather than failing the run.
+
+Tape is untouched by the sweep — its orphans are reclaimed by relabel like everything
+else. One S3 case is outside NBackup's reach: a hard-killed upload can leave a *dangling
+incomplete multipart upload* that never appears in a bucket listing. Clean those with an
+`AbortIncompleteMultipartUpload` **bucket lifecycle rule** (a few days).
+
 ## Priority order
 
 The behavior above follows one immovable priority order:

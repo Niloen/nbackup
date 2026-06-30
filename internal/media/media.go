@@ -216,6 +216,19 @@ type Volume interface {
 	RemoveFile(pos int) error
 }
 
+// IncompleteEnumerator is implemented by per-file media (fslike: disk, cloud) that
+// track files an interrupted append left half-written — a payload with no header
+// sidecar, or the reverse. Such a fragment belongs to no archive: a catalog scan and
+// Files() both skip it, so it is invisible to retention yet still holds capacity. A
+// prune sweep reaps it by position via RemoveFile, which deletes whichever half is
+// present. Whole-volume media (tape) reclaim by relabel and do not implement this.
+type IncompleteEnumerator interface {
+	// IncompleteFiles returns the positions of files missing one of their
+	// payload/header halves. It excludes both well-formed files (which Files()
+	// reports) and not-yet-written in-flight reservations (neither half present).
+	IncompleteFiles() ([]int, error)
+}
+
 // WalkReadable visits every readable volume reachable from vol in turn, calling fn
 // for each one mounted. It is the medium-shape primitive the catalog rebuild scan
 // needs, kept here next to the shape interfaces it asserts on (Changer/Drive) so the

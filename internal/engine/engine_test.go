@@ -2554,6 +2554,137 @@ func write(t *testing.T, path, content string) {
 	}
 }
 
+// pruneSweepEngine wires a disk-landing engine over a fresh source + catalog and runs a
+// level-0 dump, returning the engine, the committed slot, the disk root, and the live
+// source dir. Shared by the orphan-sweep tests below.
+func pruneSweepEngine(t *testing.T) (*Engine, *catalog.Slot, string, string) {
+	t.Helper()
+	src := t.TempDir()
+	catalogDir := t.TempDir()
+	write(t, filepath.Join(src, "keep.txt"), "v1")
+
+	cfg := &config.Config{
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	s1, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	return eng, s1, catalogDir, src
+}
+
+// TestPruneSweepsCrashOrphans exercises the full sweep through nb prune: a footer-less
+// archive part and a torn append (both crash leftovers) are reported by a dry-run and
+// removed by an apply, while the committed backup is left fully restorable.
+func TestPruneSweepsCrashOrphans(t *testing.T) {
+	eng, s1, catalogDir, src := pruneSweepEngine(t)
+
+	// (a) a footer-less archive part: committed at the file layer (payload + .hdr) but no
+	// commit footer, so no archive references it.
+	vol, err := media.OpenVolume("disk", media.Options{"path": catalogDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fw, err := vol.AppendFile(context.Background(),
+		record.Header{Slot: "slot-2026-06-20.001", Kind: record.KindArchive, DLE: "ghost", Compress: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write([]byte("orphan payload")); err != nil {
+		t.Fatal(err)
+	}
+	if err := fw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// (b) a torn append: a payload object at a conforming position with no .hdr sidecar.
+	tornDir := filepath.Join(catalogDir, "slots", "slot-2026-06-19.001")
+	if err := os.MkdirAll(tornDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tornFile := filepath.Join(tornDir, "990-torn.tar")
+	if err := os.WriteFile(tornFile, []byte("half"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Prune through a fresh engine: like a real `nb prune` process it scans the medium
+	// anew, so it sees the leftovers injected after the dump engine cached its volume.
+	eng2, err := New(eng.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC)
+	if _, swept, _, err := eng2.Prune("disk", now, false, nil); err != nil {
+		t.Fatalf("dry-run prune: %v", err)
+	} else if swept != 2 {
+		t.Fatalf("dry-run swept=%d, want 2 (footer-less part + torn file)", swept)
+	}
+
+	_, swept, _, err := eng2.Prune("disk", now, true, nil)
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if swept != 2 {
+		t.Fatalf("swept=%d, want 2", swept)
+	}
+	if _, err := os.Stat(tornFile); !os.IsNotExist(err) {
+		t.Errorf("torn file survived the sweep, stat err = %v", err)
+	}
+
+	// The committed backup is untouched and still restores.
+	dest := t.TempDir()
+	name := config.DLE{Host: "localhost", Path: src}.Name()
+	if err := eng2.Restore(s1.ID, name, dest, false, nil); err != nil {
+		t.Fatalf("restore after sweep: %v", err)
+	}
+	assertContent(t, filepath.Join(dest, "keep.txt"), "v1")
+}
+
+// TestPruneSweepKeepsCommittedWhenCacheLost is the safety regression: even with the
+// catalog cache wiped (the danger that broke a cache-based design — a stale cache makes
+// every committed file look unreferenced), an apply-prune sweeps nothing and the backup
+// survives, because orphan detection reads the medium's own commit footers, not the cache.
+func TestPruneSweepKeepsCommittedWhenCacheLost(t *testing.T) {
+	eng, s1, _, src := pruneSweepEngine(t)
+
+	// Lose the cache, then prune through a fresh engine that starts with an empty catalog.
+	if err := os.Remove(filepath.Join(eng.cfg.WorkdirPath(), catalog.CacheFile)); err != nil {
+		t.Fatal(err)
+	}
+	eng2, err := New(eng.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC)
+	_, swept, _, err := eng2.Prune("disk", now, true, nil)
+	if err != nil {
+		t.Fatalf("prune with lost cache: %v", err)
+	}
+	if swept != 0 {
+		t.Fatalf("swept=%d, want 0 — a committed archive must never be swept on a lost cache", swept)
+	}
+
+	// The committed backup still restores through the fresh engine.
+	dest := t.TempDir()
+	name := config.DLE{Host: "localhost", Path: src}.Name()
+	if err := eng2.Restore(s1.ID, name, dest, false, nil); err != nil {
+		t.Fatalf("restore after lost-cache prune: %v", err)
+	}
+	assertContent(t, filepath.Join(dest, "keep.txt"), "v1")
+}
+
 // placedOnLanding reports whether the slot has a placement for dle on the engine's landing medium.
 func placedOnLanding(e *Engine, slotID, dle string) bool {
 	for _, p := range e.cat.Placements(slotID) {

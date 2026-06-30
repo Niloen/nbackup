@@ -88,6 +88,33 @@ func placementPos(c *Catalog, slotID, dle string, level int) (int, bool) {
 	return 0, false
 }
 
+// TestOrphanFiles pins the prune sweep's detector: it returns exactly the files no
+// committed archive references — a crashed run's footer-less parts — and never a file a
+// commit footer covers. Detection takes only the volume (no *Catalog argument), so it is
+// structurally cache-independent: a stale or empty cache cannot make a committed archive
+// look orphaned, because the same footer that proves an archive good is read here.
+func TestOrphanFiles(t *testing.T) {
+	dir := t.TempDir()
+	vol := newVolume(t, dir)
+
+	// One committed archive (part + commit footer) and, in another slot, a footer-less
+	// orphan part a crashed run left behind.
+	putSlot(t, vol, committedSlot("slot-2026-06-20.001", "2026-06-20", 1,
+		record.Archive{DLE: "h-data", Level: 0, Compressed: 100}))
+	putPart(t, vol, "slot-2026-06-22.001", record.Archive{DLE: "h-data", Level: 1})
+
+	orphans, err := OrphanFiles(vol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orphans) != 1 {
+		t.Fatalf("OrphanFiles returned %d files, want 1 (the footer-less part only): %+v", len(orphans), orphans)
+	}
+	if got := orphans[0].Header.Slot; got != "slot-2026-06-22.001" {
+		t.Fatalf("orphan slot = %q, want slot-2026-06-22.001 (the committed archive must be spared)", got)
+	}
+}
+
 // TestCacheLifecycle covers refresh-from-volume, position indexing, persistence,
 // reload without the volume, and history derivation.
 func TestCacheLifecycle(t *testing.T) {

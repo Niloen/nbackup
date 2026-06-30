@@ -1067,6 +1067,6 @@ func (e *Engine) ProjectedOverCapacity(name string, add int64) (over bool, proje
 // capacity. Retention is per-medium, so each store is pruned against its own slots
 // — pruning one medium never touches a copy on another. Any configured medium can
 // be pruned (not only the landing one), so an offsite tier can be trimmed too.
-func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) (eligible int, freed int64, err error) {
+func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) (eligible int, swept int, freed int64, err error) {
 	return e.acct.Prune(mediumName, now, apply, logf)
 }

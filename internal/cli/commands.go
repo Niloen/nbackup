@@ -828,7 +828,7 @@ func newPruneCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "prune <medium>",
 		Short:   "Delete a medium's slots past its cycle/capacity limits",
-		Long:    "Reclaim slots on the named medium that fall outside its own cycle and capacity limits. Retention is per-medium, so the medium to prune must be named explicitly (pruning one store never touches a copy on another). Deletes by default; pass --dry-run (-n) to preview. If the protected recovery set alone exceeds capacity, prune reclaims what it can, prints a WARNING, and still exits 0 (recoverability outranks capacity — grow capacity or lengthen the cycle); watch for it via `nb report`/notify rather than the exit code.",
+		Long:    "Reclaim slots on the named medium that fall outside its own cycle and capacity limits. Retention is per-medium, so the medium to prune must be named explicitly (pruning one store never touches a copy on another). Deletes by default; pass --dry-run (-n) to preview. On a per-file medium (disk, cloud) it also sweeps crash leftovers — footer-less or torn files an interrupted run left behind, which no archive references — detected from the medium's own commit footers and bounded by minimum_age (so it never fights WORM/Object-Lock). If the protected recovery set alone exceeds capacity, prune reclaims what it can, prints a WARNING, and still exits 0 (recoverability outranks capacity — grow capacity or lengthen the cycle); watch for it via `nb report`/notify rather than the exit code.",
 		Example: "  nb prune disk\n  nb prune disk --dry-run\n  nb prune offsite",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
@@ -879,27 +879,33 @@ func newPruneCmd(a *app) *cobra.Command {
 				}
 			}
 			if dryRun {
-				eligible, _, err := eng.Prune(args[0], now, false, a.logf())
+				eligible, swept, _, err := eng.Prune(args[0], now, false, a.logf())
 				if err != nil {
 					return err
 				}
 				if eligible > 0 {
 					fmt.Printf("\n%d archive(s) eligible. Re-run without --dry-run to delete.\n", eligible)
-				} else {
+				} else if swept == 0 {
 					printNothingToReclaim(eng, args[0])
+				}
+				if swept > 0 {
+					fmt.Printf("%d crash leftover(s) to sweep (orphaned by an interrupted run, no commit footer).\n", swept)
 				}
 				warnIfOverCapacity(eng, args[0], now)
 				return nil
 			}
 			return a.runReported(cfg, report.Run{Command: report.CommandPrune, ExitClass: "prune-error"}, func() (report.Run, error) {
-				eligible, freed, err := eng.Prune(args[0], now, true, a.logf())
+				eligible, swept, freed, err := eng.Prune(args[0], now, true, a.logf())
 				if err != nil {
 					return report.Run{}, err
 				}
 				if eligible > 0 {
 					fmt.Printf("\n%s: deleted %d archive(s), freed %s\n", args[0], eligible, sizeutil.FormatBytes(freed))
-				} else {
+				} else if swept == 0 {
 					printNothingToReclaim(eng, args[0])
+				}
+				if swept > 0 {
+					fmt.Printf("%s: swept %d crash leftover(s) (orphaned by an interrupted run, no commit footer)\n", args[0], swept)
 				}
 				warnIfOverCapacity(eng, args[0], now)
 				return report.Run{Command: report.CommandPrune, SlotsPruned: eligible, BytesMoved: freed}, nil
