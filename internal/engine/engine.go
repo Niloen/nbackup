@@ -6,6 +6,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -829,8 +830,8 @@ func minRoom(a, b int64) int64 {
 // Run executes the plan for a date, producing one sealed slot. It delegates to a
 // per-run conductor.Conductor (see internal/conductor and newConductor); the engine
 // just builds the run lane's dependency slice.
-func (e *Engine) Run(now time.Time, logf Logf) (*catalog.Slot, error) {
-	return e.newConductor().Run(now, logf)
+func (e *Engine) Run(ctx context.Context, now time.Time, logf Logf) (*catalog.Slot, error) {
+	return e.newConductor().Run(ctx, now, logf)
 }
 
 // PlannedSlotID returns the slot id a real dump on date would seal next. Like Run, it

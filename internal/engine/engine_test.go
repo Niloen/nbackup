@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/conductor"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
@@ -45,7 +48,7 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 	}
 
 	day1 := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
-	if _, err := eng.Run(day1, nil); err != nil {
+	if _, err := eng.Run(context.Background(), day1, nil); err != nil {
 		t.Fatalf("day1 run: %v", err)
 	}
 
@@ -56,7 +59,7 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 	}
 
 	day2 := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
-	s2, err := eng.Run(day2, nil)
+	s2, err := eng.Run(context.Background(), day2, nil)
 	if err != nil {
 		t.Fatalf("day2 run: %v", err)
 	}
@@ -72,6 +75,55 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 	assertContent(t, filepath.Join(dest, "keep.txt"), "v2")
 	if _, err := os.Stat(filepath.Join(dest, "gone.txt")); !os.IsNotExist(err) {
 		t.Errorf("gone.txt should be deleted after restore, stat err = %v", err)
+	}
+}
+
+// TestRunCanceledMarksStatusCanceled exercises the cancel path: a run whose context is
+// already canceled must abort with conductor.ErrCanceled (wrapping context.Canceled),
+// seal nothing, and leave the run-status file at a terminal "canceled" phase rather than
+// frozen at "running" — the bug where canceling a dump left status showing it running.
+func TestRunCanceledMarksStatusCanceled(t *testing.T) {
+	src := t.TempDir()
+	catalogDir := t.TempDir()
+	write(t, filepath.Join(src, "keep.txt"), "v1")
+
+	cfg := &config.Config{
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before the dump starts: the prelude check must abort the run
+
+	_, runErr := eng.Run(ctx, time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	if !errors.Is(runErr, conductor.ErrCanceled) {
+		t.Fatalf("run error = %v; want conductor.ErrCanceled", runErr)
+	}
+	if !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("run error = %v; want it to wrap context.Canceled", runErr)
+	}
+
+	snap, err := progress.Load(cfg.WorkdirPath())
+	if err != nil {
+		t.Fatalf("load run status: %v", err)
+	}
+	if snap.Phase != progress.PhaseCanceled {
+		t.Fatalf("status phase = %q; want %q", snap.Phase, progress.PhaseCanceled)
+	}
+	if !snap.Phase.Terminal() {
+		t.Fatalf("canceled phase must be terminal so `nb status` stops showing the run as live")
 	}
 }
 
@@ -107,7 +159,7 @@ func TestRepeatedLevelRestore(t *testing.T) {
 	}
 
 	day1 := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
-	if _, err := eng.Run(day1, nil); err != nil {
+	if _, err := eng.Run(context.Background(), day1, nil); err != nil {
 		t.Fatalf("day1 run: %v", err)
 	}
 
@@ -119,7 +171,7 @@ func TestRepeatedLevelRestore(t *testing.T) {
 	}
 	write(t, filepath.Join(src, "new.txt"), "n1")
 	day2 := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
-	if s, err := eng.Run(day2, nil); err != nil {
+	if s, err := eng.Run(context.Background(), day2, nil); err != nil {
 		t.Fatalf("day2 run: %v", err)
 	} else if got := s.Archives[0].Level; got != 1 {
 		t.Fatalf("day2 should be L1, got L%d", got)
@@ -130,7 +182,7 @@ func TestRepeatedLevelRestore(t *testing.T) {
 	write(t, filepath.Join(src, "keep.txt"), "v3")
 	write(t, filepath.Join(src, "new2.txt"), "n2")
 	day3 := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
-	s3, err := eng.Run(day3, nil)
+	s3, err := eng.Run(context.Background(), day3, nil)
 	if err != nil {
 		t.Fatalf("day3 run: %v", err)
 	}
@@ -179,7 +231,7 @@ func TestResetForcesFullNextRun(t *testing.T) {
 	}
 
 	day1 := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
-	if _, err := eng.Run(day1, nil); err != nil {
+	if _, err := eng.Run(context.Background(), day1, nil); err != nil {
 		t.Fatalf("day1 run: %v", err)
 	}
 
@@ -208,7 +260,7 @@ func TestResetForcesFullNextRun(t *testing.T) {
 
 	// A real run honors it: day2 dumps a full, not an incremental.
 	time.Sleep(1100 * time.Millisecond)
-	s2, err := eng.Run(day2, nil)
+	s2, err := eng.Run(context.Background(), day2, nil)
 	if err != nil {
 		t.Fatalf("day2 run: %v", err)
 	}
@@ -315,7 +367,7 @@ func TestParallelWorkers(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("parallel run: %v", err)
 	}
@@ -446,7 +498,7 @@ func TestRunStatusSpansEstimatePhase(t *testing.T) {
 		}
 	})
 
-	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -497,7 +549,7 @@ func TestThroughputCapThrottlesDump(t *testing.T) {
 			t.Skipf("GNU tar not available")
 		}
 		start := time.Now()
-		s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+		s, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
 		if err != nil {
 			t.Fatalf("run (throughput=%q): %v", throughput, err)
 		}
@@ -554,7 +606,7 @@ func TestThroughputCapThrottlesRestore(t *testing.T) {
 	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
-	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
@@ -604,7 +656,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 	day := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
-	s, err := eng.Run(day, nil)
+	s, err := eng.Run(context.Background(), day, nil)
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
@@ -668,7 +720,7 @@ func TestTapeLabelVerify(t *testing.T) {
 	day := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
 
 	// Blank tape: dump refused.
-	if _, err := eng.Run(day, nil); err == nil {
+	if _, err := eng.Run(context.Background(), day, nil); err == nil {
 		t.Fatal("expected dump to be refused on a blank/unlabeled tape")
 	}
 
@@ -676,7 +728,7 @@ func TestTapeLabelVerify(t *testing.T) {
 	if err := eng.LabelVolume("lto", "lto-0001", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label: %v", err)
 	}
-	if _, err := eng.Run(day, nil); err != nil {
+	if _, err := eng.Run(context.Background(), day, nil); err != nil {
 		t.Fatalf("dump after label: %v", err)
 	}
 
@@ -688,7 +740,7 @@ func TestTapeLabelVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 	day2 := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
-	if _, err := eng.Run(day2, nil); err == nil {
+	if _, err := eng.Run(context.Background(), day2, nil); err == nil {
 		t.Fatal("expected dump to be refused when the mounted tape was relabeled since the catalog was updated")
 	}
 }
@@ -719,7 +771,7 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
-	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
@@ -776,7 +828,7 @@ func TestRunWritesStatus(t *testing.T) {
 	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
-	s, err := eng.Run(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
@@ -859,7 +911,7 @@ func TestHoldingDiskBuffersTape(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("holding-disk dump: %v", err)
 	}
@@ -932,7 +984,7 @@ func TestHoldingDisksSpread(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("multi-disk holding dump: %v", err)
 	}
@@ -993,7 +1045,7 @@ func TestHoldingDisksFlush(t *testing.T) {
 		if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 			t.Skipf("GNU tar not available")
 		}
-		s, err := eng.Run(date, nil)
+		s, err := eng.Run(context.Background(), date, nil)
 		if err != nil {
 			t.Fatalf("stage dump on %s: %v", disk, err)
 		}
@@ -1093,7 +1145,7 @@ func TestHoldingDiskDrainSpansVolumes(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	s, err := eng.Run(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("holding-disk dump with spanning landing: %v", err)
 	}
@@ -1181,7 +1233,7 @@ func TestHoldingDiskRoutesOversizedDirect(t *testing.T) {
 		t.Skipf("estimates didn't split as intended (%d of %d route direct); skipping", directCount, len(plan.Items))
 	}
 
-	s, err := eng.Run(time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("mixed direct/buffered dump: %v", err)
 	}
@@ -1236,7 +1288,7 @@ func TestHoldingDiskAllDirect(t *testing.T) {
 	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
-	s, err := eng.Run(time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("all-direct dump: %v", err)
 	}
@@ -1303,7 +1355,7 @@ func TestHoldingDiskFlush(t *testing.T) {
 	if m, err := stageEng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
-	s, err := stageEng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	s, err := stageEng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("stage dump: %v", err)
 	}
@@ -1379,7 +1431,7 @@ func TestHoldingDiskLandingDownFails(t *testing.T) {
 	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
-	if _, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil); err == nil {
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil); err == nil {
 		t.Fatal("holding-disk run must fail when the landing is unwritable")
 	}
 	if len(eng.cat.Slots()) != 0 {
@@ -1416,7 +1468,7 @@ func TestDumpContinuesPastFailedDLE(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	if _, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil); err == nil {
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil); err == nil {
 		t.Fatal("a run with a failing DLE must report failure")
 	}
 
@@ -1457,7 +1509,7 @@ func TestTapeLibraryRestore(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	s1, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	s1, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump 1: %v", err)
 	}
@@ -1474,7 +1526,7 @@ func TestTapeLibraryRestore(t *testing.T) {
 	// could be missed by the L1 and the restore would see v1 (a flaky failure).
 	time.Sleep(1100 * time.Millisecond)
 	write(t, filepath.Join(src, "f.txt"), "v2")
-	s2, err := eng.Run(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
+	s2, err := eng.Run(context.Background(), time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump 2: %v", err)
 	}
@@ -1532,7 +1584,7 @@ func TestTapeAppendableFalse(t *testing.T) {
 	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
-	s1, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	s1, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump 1: %v", err)
 	}
@@ -1540,7 +1592,7 @@ func TestTapeAppendableFalse(t *testing.T) {
 	// snapshot timestamp — otherwise the L1 could miss a same-instant change.
 	time.Sleep(1100 * time.Millisecond)
 	write(t, filepath.Join(src, "f.txt"), "data2")
-	s2, err := eng.Run(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
+	s2, err := eng.Run(context.Background(), time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump 2: %v", err)
 	}
@@ -1617,7 +1669,7 @@ func TestManualStationWriteSwap(t *testing.T) {
 	op := &scriptedOperator{}
 	eng.SetOperator(op)
 
-	s, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
@@ -1666,7 +1718,7 @@ func TestManualStationReadSwap(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	s1, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	s1, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump 1: %v", err)
 	}
@@ -1687,7 +1739,7 @@ func TestManualStationReadSwap(t *testing.T) {
 	// could be missed by the L1 and the restore would see v1 (a flaky failure).
 	time.Sleep(1100 * time.Millisecond)
 	write(t, filepath.Join(src, "f.txt"), "v2")
-	s2, err := eng.Run(time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
+	s2, err := eng.Run(context.Background(), time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump 2: %v", err)
 	}
@@ -2022,11 +2074,11 @@ func TestTapeRecyclesOldestOnWrite(t *testing.T) {
 
 	// Two runs fill the two-bay pool (one run per tape). Run dates sit well in the past
 	// so the default one-cycle age floor never pins them — only last-recovery / chain.
-	s1, err := eng.Run(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), nil)
+	s1, err := eng.Run(context.Background(), time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("run 1: %v", err)
 	}
-	s2, err := eng.Run(time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC), nil)
+	s2, err := eng.Run(context.Background(), time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("run 2: %v", err)
 	}
@@ -2040,7 +2092,7 @@ func TestTapeRecyclesOldestOnWrite(t *testing.T) {
 	// superseded by s2's full) rather than refuse.
 	var logs []string
 	logf := func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
-	s3, err := eng.Run(time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC), logf)
+	s3, err := eng.Run(context.Background(), time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC), logf)
 	if err != nil {
 		t.Fatalf("run 3 (should recycle %q): %v", l1, err)
 	}
@@ -2116,15 +2168,15 @@ func TestTapeRecycleRefusedWhenAllKept(t *testing.T) {
 	}
 
 	// Both bays hold runs well within the 365d age floor — every tape is protected.
-	if _, err := eng.Run(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), nil); err != nil {
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), nil); err != nil {
 		t.Fatalf("run 1: %v", err)
 	}
-	if _, err := eng.Run(time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC), nil); err != nil {
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC), nil); err != nil {
 		t.Fatalf("run 2: %v", err)
 	}
 
 	// Third run: no blank, nothing reusable — it must fail loud, never overwrite.
-	_, err = eng.Run(time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC), nil)
+	_, err = eng.Run(context.Background(), time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC), nil)
 	if err == nil {
 		t.Fatal("expected a run with a full pool of protected tapes to fail, not overwrite")
 	}
@@ -2166,12 +2218,12 @@ func TestDumpSpanRecyclesReusableTape(t *testing.T) {
 
 	// Two small runs fill bay-01 and bay-02 (each a full superseding the last).
 	write(t, filepath.Join(src, "f.txt"), "small-1")
-	s1, err := eng.Run(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), nil)
+	s1, err := eng.Run(context.Background(), time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("run 1: %v", err)
 	}
 	write(t, filepath.Join(src, "f.txt"), "small-2")
-	if _, err := eng.Run(time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC), nil); err != nil {
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC), nil); err != nil {
 		t.Fatalf("run 2: %v", err)
 	}
 	l1 := labelOnMedium(t, eng, s1.ID, "lib") // oldest, now Floor-cleared
@@ -2179,7 +2231,7 @@ func TestDumpSpanRecyclesReusableTape(t *testing.T) {
 	// A run too big for one reel: it starts on the one remaining blank bay, then — with
 	// no blank left — recycles the oldest Floor-cleared tape (l1) to finish the span.
 	write(t, filepath.Join(src, "big.txt"), strings.Repeat("x", 250*1024))
-	s3, err := eng.Run(time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC), nil)
+	s3, err := eng.Run(context.Background(), time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("spanning run should recycle %q to finish, got: %v", l1, err)
 	}
@@ -2251,7 +2303,7 @@ func TestDumpSpansArchiveAcrossTapes(t *testing.T) {
 		t.Fatalf("load bay-01: %v", err)
 	}
 
-	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
@@ -2315,7 +2367,7 @@ func TestCopySpansArchiveAcrossTapes(t *testing.T) {
 	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
-	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
@@ -2381,7 +2433,7 @@ func TestPartSizeSplitsWithinTape(t *testing.T) {
 	if err := eng.LoadVolume("lib", "bay-01", false, nil); err != nil {
 		t.Fatalf("load bay-01: %v", err)
 	}
-	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}

@@ -2,6 +2,7 @@ package programs
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,7 +12,7 @@ import (
 
 func runPipe(t *testing.T, ex Executor, stdin io.Reader, progs ...Cmd) ([]byte, error) {
 	t.Helper()
-	out, wait, err := ex.RunPipe(stdin, progs...)
+	out, wait, err := ex.RunPipe(context.Background(), stdin, progs...)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +211,7 @@ func TestSSHLoopbackFileOps(t *testing.T) {
 func TestSSHPipelineUsesPipefail(t *testing.T) {
 	ex := SSH(Params{Host: "app01"})
 	// Two stages must be wrapped so an upstream failure is not masked.
-	cmd := ex.(sshExec).ssh("")
+	cmd := ex.(sshExec).ssh(context.Background(), "")
 	_ = cmd
 	// Build the remote command the way RunPipe does and assert its shape.
 	remote := shJoin([]string{"bash", "-o", "pipefail", "-c",

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,7 +39,7 @@ func TestRecoverSelectedFiles(t *testing.T) {
 	}
 
 	day1 := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
-	if _, err := eng.Run(day1, nil); err != nil {
+	if _, err := eng.Run(context.Background(), day1, nil); err != nil {
 		t.Fatalf("day1: %v", err)
 	}
 
@@ -47,7 +48,7 @@ func TestRecoverSelectedFiles(t *testing.T) {
 	write(t, filepath.Join(src, "etc", "new.conf"), "new-v1") // added
 
 	day2 := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
-	if _, err := eng.Run(day2, nil); err != nil {
+	if _, err := eng.Run(context.Background(), day2, nil); err != nil {
 		t.Fatalf("day2: %v", err)
 	}
 
@@ -117,12 +118,12 @@ func TestRecoverWholeDirectory(t *testing.T) {
 	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skip("GNU tar not available")
 	}
-	if _, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(1100 * time.Millisecond)
 	write(t, filepath.Join(src, "etc", "hosts"), "h2")
-	if _, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil); err != nil {
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil); err != nil {
 		t.Fatal(err)
 	}
 

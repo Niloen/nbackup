@@ -31,11 +31,12 @@ const (
 	PhaseSealing    Phase = "sealing"    // all dumps done; verifying + writing the seal
 	PhaseDone       Phase = "done"       // sealed successfully (terminal)
 	PhaseFailed     Phase = "failed"     // a dump or the seal failed (terminal)
+	PhaseCanceled   Phase = "canceled"   // the operator interrupted the run (terminal)
 )
 
-// Terminal reports whether the run has finished (succeeded or failed). The
+// Terminal reports whether the run has finished (succeeded, failed, or canceled). The
 // estimate phase is non-terminal: it is the prelude to the dump, not its end.
-func (p Phase) Terminal() bool { return p == PhaseDone || p == PhaseFailed }
+func (p Phase) Terminal() bool { return p == PhaseDone || p == PhaseFailed || p == PhaseCanceled }
 
 // State is one DLE's progress within the run.
 type State string
@@ -46,6 +47,7 @@ const (
 	StateFlushing State = "flushing" // committed to a holding disk; the drainer is copying it to the landing
 	StateDone     State = "done"     // archived successfully (and drained, in holding-disk mode)
 	StateFailed   State = "failed"   // archiving failed
+	StateCanceled State = "canceled" // interrupted in flight by a canceled run
 )
 
 // DLE is the live progress of a single planned dump.
@@ -162,11 +164,25 @@ func (s Snapshot) Counts() (active, done, failed, pending int) {
 			done++
 		case StateFailed:
 			failed++
+		case StateCanceled:
+			// Counted separately (see Snapshot.Canceled); excluded from the live buckets so
+			// an interrupted DLE is not miscounted as still pending.
 		default:
 			pending++
 		}
 	}
 	return
+}
+
+// Canceled tallies DLEs interrupted in flight by a canceled run.
+func (s Snapshot) Canceled() int {
+	var n int
+	for _, d := range s.DLEs {
+		if d.State == StateCanceled {
+			n++
+		}
+	}
+	return n
 }
 
 // Elapsed is the wall time from start to the reference instant (UpdatedAt for a

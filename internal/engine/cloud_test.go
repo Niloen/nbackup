@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -42,7 +43,7 @@ func TestCloudLandingRoundTrip(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump to cloud: %v", err)
 	}
@@ -89,7 +90,7 @@ func TestCloudPartSizeSplitsAndRestores(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump to cloud: %v", err)
 	}
@@ -163,7 +164,7 @@ func TestCloudPartSizeStaysConcurrent(t *testing.T) {
 			mu.Unlock()
 		}
 	}
-	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), logf)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), logf)
 	if err != nil {
 		t.Fatalf("concurrent part-split dump: %v", err)
 	}
@@ -242,7 +243,7 @@ func TestSyncDiskToCloud(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}

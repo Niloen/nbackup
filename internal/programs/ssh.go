@@ -1,6 +1,7 @@
 package programs
 
 import (
+	"context"
 	"io"
 	"os/exec"
 	"strconv"
@@ -56,16 +57,19 @@ func (s sshExec) sshFlags() []string {
 }
 
 // ssh builds an ssh *exec.Cmd whose single trailing argument is remoteCmd (a string the
-// remote login shell parses).
-func (s sshExec) ssh(remoteCmd string) *exec.Cmd {
+// remote login shell parses), bound to ctx: canceling it kills the local ssh process,
+// which drops the connection so the remote pipeline (tar et al.) sees EOF/SIGHUP and exits
+// — the remote arm of canceling an in-flight dump.
+func (s sshExec) ssh(ctx context.Context, remoteCmd string) *exec.Cmd {
 	args := append(s.sshFlags(), s.target(), remoteCmd)
-	return exec.Command("ssh", args...)
+	return exec.CommandContext(ctx, "ssh", args...)
 }
 
 // Command runs one program on the client. The argv is shell-quoted into a single remote
-// command string so the caller's StdoutPipe/Run/Output behave as if local.
+// command string so the caller's StdoutPipe/Run/Output behave as if local. One-shot probes
+// have no cancellation scope of their own, so they run under context.Background.
 func (s sshExec) Command(name string, args ...string) *exec.Cmd {
-	return s.ssh(shJoin(append([]string{name}, args...)))
+	return s.ssh(context.Background(), shJoin(append([]string{name}, args...)))
 }
 
 func (s sshExec) Stat(path string) error    { return s.Command("test", "-e", path).Run() }
@@ -104,7 +108,7 @@ func (s sshExec) ReadFile(path string) ([]byte, error) {
 // failing upstream stage (e.g. tar) is not masked by a succeeding downstream one. Tap is
 // not honored (the bytes are inside the remote pipe); the first stage's Stderr receives
 // the whole pipeline's standard error (where tar's `--totals` lives).
-func (s sshExec) RunPipe(stdin io.Reader, progs ...Cmd) (io.ReadCloser, func() error, error) {
+func (s sshExec) RunPipe(ctx context.Context, stdin io.Reader, progs ...Cmd) (io.ReadCloser, func() error, error) {
 	if len(progs) == 0 {
 		return io.NopCloser(stdin), func() error { return nil }, nil
 	}
@@ -118,7 +122,7 @@ func (s sshExec) RunPipe(stdin io.Reader, progs ...Cmd) (io.ReadCloser, func() e
 		}
 		remote = shJoin([]string{"bash", "-o", "pipefail", "-c", strings.Join(parts, " | ")})
 	}
-	cmd := s.ssh(remote)
+	cmd := s.ssh(ctx, remote)
 	cmd.Stdin = stdin
 	stderrW, stderrBuf := captureBuf(firstWithStderr(progs))
 	cmd.Stderr = stderrW

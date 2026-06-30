@@ -129,6 +129,19 @@ func (t *Tracker) FinishDLE(name string, fileCount int, uncompressed, compressed
 	t.flush(true)
 }
 
+// CancelDLE marks a DLE interrupted in flight by a canceled run — distinct from a failure,
+// so status shows it as canceled rather than a scary error. A no-op for an unknown DLE.
+func (t *Tracker) CancelDLE(name string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if d := t.dle(name); d != nil {
+		d.State = StateCanceled
+		d.EndedAt = t.now()
+	}
+	t.markDumpEndIfDone()
+	t.flush(true)
+}
+
 // MarkToHolding records that a DLE's dump is routed to a holding disk — set the moment ingestion is
 // acquired there, before any bytes commit. It marks the staging window: live status then shows the
 // DLE staging to holding (and not yet on the volume) instead of mistaking its in-flight dump for a

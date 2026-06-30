@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,12 +39,12 @@ func TestSyncMirrorsLandingToTarget(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	s1, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	s1, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump 1: %v", err)
 	}
 	write(t, filepath.Join(src, "g.txt"), "more")
-	s2, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	s2, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump 2: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestSyncSelectionLast(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 	for d := 21; d <= 23; d++ {
-		if _, err := eng.Run(time.Date(2026, 6, d, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		if _, err := eng.Run(context.Background(), time.Date(2026, 6, d, 0, 0, 0, 0, time.UTC), nil); err != nil {
 			t.Fatalf("dump %d: %v", d, err)
 		}
 	}
@@ -159,7 +160,7 @@ func TestSyncFromNonLanding(t *testing.T) {
 	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
-	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
@@ -235,7 +236,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 	for i, day := range []int{21, 22, 23} {
 		body := strings.Repeat(string(rune('a'+i)), 90*1024)
 		write(t, filepath.Join(src, "f.txt"), body)
-		s, err := eng.Run(time.Date(2026, 6, day, 0, 0, 0, 0, time.UTC), nil)
+		s, err := eng.Run(context.Background(), time.Date(2026, 6, day, 0, 0, 0, 0, time.UTC), nil)
 		if err != nil {
 			t.Fatalf("dump %d: %v", day, err)
 		}
@@ -331,7 +332,7 @@ func TestRelabelRefusesProtectedSpanTape(t *testing.T) {
 	}
 
 	day := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
-	s, err := eng.Run(day, nil)
+	s, err := eng.Run(context.Background(), day, nil)
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
@@ -417,7 +418,7 @@ func TestSyncSlotOutOfTapes(t *testing.T) {
 	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
-	s, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}

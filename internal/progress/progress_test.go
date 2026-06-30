@@ -85,6 +85,33 @@ func TestTrackerFailure(t *testing.T) {
 	}
 }
 
+// TestTrackerCancel records a DLE interrupted by a canceled run as canceled — distinct
+// from a failure (so it carries no error and is not counted as FAILED) and excluded from
+// the live buckets, while the run's canceled phase is terminal.
+func TestTrackerCancel(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("slot", PhaseRunning, 2, plan(), c.now, nil)
+	tr.StartDLE("alpha")
+	tr.CancelDLE("alpha")
+	tr.SetPhase(PhaseCanceled)
+
+	snap := tr.Snapshot()
+	a := snap.DLEs[0]
+	if a.State != StateCanceled || a.Err != "" {
+		t.Fatalf("alpha = %+v; want canceled with no error", a)
+	}
+	if snap.Canceled() != 1 {
+		t.Fatalf("canceled count = %d, want 1", snap.Canceled())
+	}
+	active, done, failed, pending := snap.Counts()
+	if active != 0 || done != 0 || failed != 0 || pending != 1 { // bravo still pending; alpha excluded
+		t.Fatalf("counts = %d/%d/%d/%d; canceled DLE must not land in any live bucket", active, done, failed, pending)
+	}
+	if snap.Phase != PhaseCanceled || !snap.Phase.Terminal() {
+		t.Fatalf("phase = %s (terminal=%v); want canceled+terminal", snap.Phase, snap.Phase.Terminal())
+	}
+}
+
 // TestRateAndETA checks throughput and ETA derive from elapsed time and the
 // remaining estimate.
 func TestRateAndETA(t *testing.T) {

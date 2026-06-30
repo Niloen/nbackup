@@ -57,10 +57,15 @@ func (d *Dumper) dumpItem(ctx context.Context, fs archiveio.ArchiveWriteStore, i
 	tr.StartDLE(pname)
 	var committed record.Archive
 	defer func() {
-		if err != nil {
-			tr.FinishDLE(pname, 0, 0, 0, err)
-		} else {
+		switch {
+		case err == nil:
 			tr.FinishDLE(pname, committed.FileCount, committed.Uncompressed, committed.Compressed, nil)
+		case ctx.Err() != nil:
+			// The run was canceled and that killed this dump's processes — report it as
+			// canceled, not a failure (whose error would be a confusing killed-process symptom).
+			tr.CancelDLE(pname)
+		default:
+			tr.FinishDLE(pname, 0, 0, 0, err)
 		}
 	}()
 

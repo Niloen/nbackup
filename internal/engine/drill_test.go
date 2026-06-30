@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -49,11 +50,11 @@ func newDrillFixture(t *testing.T, scheme string) *drillFixture {
 		t.Skip("GNU tar not available")
 	}
 
-	if _, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
 		t.Fatalf("full dump: %v", err)
 	}
 	write(t, filepath.Join(src, "b.txt"), "incremental content")
-	if _, err := eng.Run(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil); err != nil {
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil); err != nil {
 		t.Fatalf("incremental dump: %v", err)
 	}
 	if _, err := eng.SyncTo("", "offsite", SyncSelection{}, true, false, nil); err != nil {
@@ -265,7 +266,7 @@ func TestDrillUnattendedSkipsSwap(t *testing.T) {
 	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skip("GNU tar not available")
 	}
-	if _, err := eng.Run(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
 		t.Fatalf("dump: %v", err)
 	}
 	// Load a blank reel and mirror the slot onto the station (auto-labeled).

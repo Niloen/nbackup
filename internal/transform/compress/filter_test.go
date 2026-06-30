@@ -2,6 +2,7 @@ package compress
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -17,7 +18,7 @@ func runFilter(t *testing.T, cmd programs.Cmd, src []byte) []byte {
 	if cmd.Name == "" {
 		return src
 	}
-	out, wait, err := programs.Local().RunPipe(bytes.NewReader(src), cmd)
+	out, wait, err := programs.Local().RunPipe(context.Background(), bytes.NewReader(src), cmd)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -71,6 +71,7 @@ type Spool struct {
 	backingSlots int
 	tr           *progress.Tracker
 	logf         func(format string, args ...any)
+	ctx          context.Context
 
 	reqCh       chan sinkReq   // a RemoteSink's NextPart/Commit, served on the orchestrator
 	permitReqCh chan permitReq // a direct write waiting for the backing permit
@@ -85,9 +86,13 @@ type Spool struct {
 }
 
 // New builds a Spool from cfg and starts its orchestrator and copy goroutines. The producer may call
-// Create concurrently; Finish stops it.
-func New(cfg Config) *Spool {
+// Create concurrently; Finish stops it. Canceling ctx aborts the run: the orchestrator stops
+// dispatching queued holding→backing copies (the leftovers flush on the next run) so a canceled dump
+// does not block flushing everything it had buffered — it governs the lifetime of the goroutines New
+// starts, which is why it is a parameter here rather than in Config.
+func New(ctx context.Context, cfg Config) *Spool {
 	d := &Spool{
+		ctx:          ctx,
 		backing:      cfg.Backing.Storage,
 		backingName:  cfg.Backing.Name,
 		pool:         cfg.Holding,
@@ -104,6 +109,9 @@ func New(cfg Config) *Spool {
 	}
 	if d.logf == nil {
 		d.logf = func(string, ...any) {}
+	}
+	if d.ctx == nil {
+		d.ctx = context.Background()
 	}
 	go d.orchestrate()
 	go d.drainLoop()
@@ -269,11 +277,20 @@ func (d *Spool) orchestrate() {
 		shutting      bool
 	)
 	shutdownCh := d.shutdownCh
+	cancelCh := d.ctx.Done()
 	for {
 		if shutting && !copying && len(pendingCopy) == 0 {
 			return
 		}
 		select {
+		case <-cancelCh:
+			// The run was canceled: abort like a backing failure so queued copies are dropped
+			// (they flush on the next run) and every waiter is released, instead of flushing
+			// everything buffered. An in-flight copy is left to finish; Drain then joins us.
+			if failErr == nil {
+				failErr = context.Canceled
+			}
+			cancelCh = nil // a closed Done channel is always ready; stop selecting it
 		case req := <-d.reqCh:
 			if !req.commit {
 				if failErr != nil {
@@ -392,7 +409,7 @@ func (d *Spool) copyOne(j handoff) error {
 		real = archiveio.MeterArchive(real, func(copied int64) { d.tr.AddDrainBytes(dleID, copied) })
 	}
 	rs := &remoteSink{d: d, real: real, kind: writeCopy}
-	if _, err := xfer.Transfer(context.Background(), xfer.Reader(rc), xfer.Filters{}, rs); err != nil {
+	if _, err := xfer.Transfer(d.ctx, xfer.Reader(rc), xfer.Filters{}, rs); err != nil {
 		return fmt.Errorf("flush %s L%d to %q: %w", dleID, j.arch.Level, d.backingName, err)
 	}
 	return nil
