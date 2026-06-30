@@ -55,7 +55,18 @@ func (d *Dumper) dumpItem(ctx context.Context, fs archiveio.ArchiveWriteStore, i
 	// The progress tracker keys and displays DLEs by their host:path identity; the
 	// seal and filenames keep the internal slug.
 	pname := item.DLE.ID()
-	tr.StartDLE(pname)
+	// Flip to "dumping" only when a transfer slot is actually in hand. A DLE acquires its target
+	// (a holding-disk slot or the backing permit) and then borrows a worker through the gate before
+	// any bytes move — both can block. Marking it "dumping" up here, as we used to, made every DLE
+	// merely queued for a worker claim progress it had not started. Wrap the gate so the transition
+	// fires at the one instant the heavy work begins; until then the DLE stays "pending". This also
+	// stamps the per-DLE StartedAt off the wait, so its clock measures dumping, not time in the queue.
+	inner := gate
+	gate = dumpGate(func() func() {
+		release := inner()
+		tr.StartDLE(pname)
+		return release
+	})
 	var committed record.Archive
 	defer func() {
 		switch {
