@@ -15,7 +15,7 @@ func TestPoolBlocksUntilReleased(t *testing.T) {
 	if idx, direct, err := p.Acquire(10); err != nil || direct || idx != 0 {
 		t.Fatalf("acquire under capacity = (%d,%v,%v); want (0,false,nil)", idx, direct, err)
 	}
-	p.Charge(0, 130) // now over capacity
+	p.disks[0].used = 130 // force over capacity
 
 	acquired := make(chan int, 1)
 	go func() {
@@ -43,7 +43,7 @@ func TestPoolBlocksUntilReleased(t *testing.T) {
 // waiting for space that will never free.
 func TestPoolAbortWakesBlocked(t *testing.T) {
 	p := NewPool([]Disk{{Capacity: 100}})
-	p.Charge(0, 100) // full
+	p.disks[0].used = 100 // full
 
 	var wg sync.WaitGroup
 	errs := make([]error, 3)
@@ -78,7 +78,6 @@ func TestPoolRoundRobin(t *testing.T) {
 		if err != nil || direct {
 			t.Fatalf("acquire %d = (%d,%v,%v)", i, idx, direct, err)
 		}
-		p.Charge(idx, 10)
 		got = append(got, idx)
 	}
 	want := []int{0, 1, 2, 0, 1, 2}
@@ -92,7 +91,7 @@ func TestPoolRoundRobin(t *testing.T) {
 // A full disk is skipped: acquire keeps landing on the disk that still has room.
 func TestPoolSkipsFull(t *testing.T) {
 	p := NewPool([]Disk{{Capacity: 100}, {Capacity: 100}})
-	p.Charge(0, 100) // disk 0 full
+	p.disks[0].used = 100 // disk 0 full
 	for i := 0; i < 3; i++ {
 		idx, direct, err := p.Acquire(10)
 		if err != nil || direct {

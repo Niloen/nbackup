@@ -47,18 +47,27 @@ func New(cfg Config) *Dumper {
 	return &Dumper{archiverFor: cfg.ArchiverFor, exclude: cfg.Exclude, placement: cfg.Placement, threads: cfg.Threads}
 }
 
+// dumpGate bounds how many DLEs run the heavy transfer (the tar source + encode pipeline) at once.
+// A DLE acquires its target (the store's NewArchive — a holding-disk slot or the backing permit)
+// before entering the gate, so a DLE parked waiting on a full holding disk or a busy landing holds
+// no slot, and `workers` counts dumps actually running rather than waiters. acquire blocks for a
+// slot and returns the matching release.
+type dumpGate func() (release func())
+
+// noGate runs the transfer unbounded — the serial path (a single worker, or a single DLE) needs no slot.
+var noGate = dumpGate(func() func() { return func() {} })
+
 // Run archives every item into fs: for each it opens an ingestion Sink (NewArchive), transfers the
-// encoded archive into it, and commits it (see dumpItem). With workers > 1 it runs that many
-// concurrently, bounded by a semaphore. A single DLE's failure (its source or its upload) does not
+// encoded archive into it, and commits it (see dumpItem). With workers > 1 it runs one goroutine per
+// DLE, each acquiring its target before borrowing one of `workers` transfer slots (a dumpGate), so
+// the bound counts dumps actually running, not DLEs waiting on a holding disk or the landing. A
+// single DLE's failure (its source or its upload) does not
 // stop the others — every DLE is attempted and the per-DLE errors are joined into the return value,
 // so the archives that succeeded still commit while the run reports failure. Only a backing-store
 // abort (the landing is unreachable, so nothing more can land) stops scheduling new DLEs.
 func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs archiveio.ArchiveWriteStore, tr *progress.Tracker, logf func(format string, args ...any)) error {
 	if logf == nil {
 		logf = func(string, ...any) {}
-	}
-	dumpOne := func(item planner.Item) error {
-		return d.dumpItem(ctx, fs, item, tr, logf)
 	}
 	// A backing-store abort is fatal — once the landing is unreachable no further archive can land,
 	// so stop scheduling. A DLE's own failure is not: it is recorded and the rest carry on. The Spool
@@ -77,7 +86,7 @@ func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs 
 			if stop() {
 				break
 			}
-			if err := dumpOne(item); err != nil {
+			if err := d.dumpItem(ctx, fs, item, noGate, tr, logf); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -93,9 +102,13 @@ func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs 
 			workers, threads, workers*threads, cores)
 	}
 
+	// One goroutine per DLE. Each acquires its target inside dumpItem (off the gate, so a DLE waiting
+	// for a holding disk or the backing permit parks here without holding a worker) and then borrows
+	// a slot through gate for the transfer only — so `workers` bounds dumps actually running.
+	sem := make(chan struct{}, workers)
+	gate := dumpGate(func() func() { sem <- struct{}{}; return func() { <-sem } })
 	var (
 		wg   sync.WaitGroup
-		sem  = make(chan struct{}, workers)
 		mu   sync.Mutex
 		errs []error
 	)
@@ -104,11 +117,9 @@ func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, fs 
 			break
 		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(it planner.Item) {
 			defer wg.Done()
-			defer func() { <-sem }()
-			if err := dumpOne(it); err != nil {
+			if err := d.dumpItem(ctx, fs, it, gate, tr, logf); err != nil {
 				mu.Lock()
 				errs = append(errs, err)
 				mu.Unlock()

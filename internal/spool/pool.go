@@ -12,8 +12,9 @@ import (
 )
 
 // Disk is one disk in the holding Pool: the slot Storage the producer stages onto (and the drain
-// reads back + reclaims through), plus its capacity budget. used is the landed-not-yet-drained byte
-// count, guarded by Pool.mu.
+// reads back + reclaims through), plus its capacity budget. used sums two reservations against the
+// disk — each dump's in-flight estimate (Acquire→Close) and each committed archive's landed bytes
+// (Commit→drain) — guarded by Pool.mu.
 type Disk struct {
 	Name     string
 	Storage  archiveio.ArchiveStore
@@ -22,9 +23,10 @@ type Disk struct {
 }
 
 // Pool is the capacity back-pressure and disk allocator across one or more holding disks. The
-// producer acquires a disk for its DLE (round-robin, skipping full or too-small disks), charges
-// the archive's bytes when it commits, and the next acquire blocks while every eligible disk is
-// over capacity; the drain releases the bytes once the archive has landed and been reclaimed,
+// producer acquires a disk for its DLE (round-robin, skipping full or too-small disks), reserving
+// the DLE's estimate against that disk for its in-flight write; the next acquire blocks while every
+// eligible disk is over capacity. The producer frees that reservation when it closes the sink; a
+// committed archive's landed bytes are charged until the drain copies them off and reclaims them,
 // waking a blocked producer. A backing failure aborts the pool, waking blocked producers (which
 // then stop) so the run fails rather than overfilling. With a single disk it is a plain byte gate.
 type Pool struct {
@@ -46,15 +48,19 @@ func NewPool(disks []Disk) *Pool {
 // routes direct).
 func (d *Disk) fits(est int64) bool { return d.Capacity == 0 || est < d.Capacity }
 
-// hasRoom reports whether disk d is currently under its capacity budget (always true unbounded).
-func (d *Disk) hasRoom() bool { return d.Capacity == 0 || d.used < d.Capacity }
+// hasRoomFor reports whether disk d can fit a reservation of est more bytes within its capacity
+// budget (always true unbounded).
+func (d *Disk) hasRoomFor(est int64) bool { return d.Capacity == 0 || d.used+est <= d.Capacity }
 
 // Acquire picks a holding disk for a DLE estimated at est bytes, blocking while every disk that
 // could fit it is over capacity. It returns direct=true when no disk can ever fit est (the DLE is
 // too big for the largest disk and there is no unbounded one) — the caller dumps it straight to the
 // backing. Allocation is round-robin from the cursor, skipping disks that can't fit est or have no
-// room right now, so successive dumps spread across spindles. It returns the abort error if the
-// drain has failed. The estimate is an uncompressed upper bound, so direct routing is conservative.
+// room right now, so successive dumps spread across spindles. On success it reserves est against the
+// chosen disk's budget for the dump's in-flight write — freed when the producer closes the sink — so
+// the many producers that acquire up front cannot collectively overfill a disk while writing. It
+// returns the abort error if the drain has failed. The estimate is an uncompressed upper bound, so
+// both direct routing and the reservation are conservative.
 func (p *Pool) Acquire(est int64) (idx int, direct bool, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -75,7 +81,8 @@ func (p *Pool) Acquire(est int64) (idx int, direct bool, err error) {
 		for n := 0; n < len(p.disks); n++ {
 			i := p.cursor % len(p.disks)
 			p.cursor = (p.cursor + 1) % len(p.disks)
-			if p.disks[i].fits(est) && p.disks[i].hasRoom() {
+			if p.disks[i].fits(est) && p.disks[i].hasRoomFor(est) {
+				p.disks[i].used += est // reserve the in-flight write; the producer frees it on Close
 				return i, false, nil
 			}
 		}
@@ -83,15 +90,19 @@ func (p *Pool) Acquire(est int64) (idx int, direct bool, err error) {
 	}
 }
 
-// Charge accounts n landed bytes against disk idx's budget (does not block). Charging before the
-// archive is enqueued keeps the accounting correct: the drain's Release happens-after.
+// Charge adds n landed bytes to disk idx's budget (does not block). Acquire reserves a dump's
+// estimate for its in-flight write; on commit the archive's actual bytes occupy the disk until the
+// drain copies them off, so charge those too — a later Acquire then back-pressures on the drain
+// backlog, not just on the dumps still writing. The estimate reservation and these landed bytes
+// briefly overlap (the producer frees the estimate on Close), which only over-reserves. Release
+// frees the landed bytes once the archive has drained.
 func (p *Pool) Charge(idx int, n int64) {
 	p.mu.Lock()
 	p.disks[idx].used += n
 	p.mu.Unlock()
 }
 
-// Release returns n charged bytes to disk idx and wakes any blocked producers.
+// Release returns n bytes (a reservation or landed bytes) to disk idx and wakes any blocked producers.
 func (p *Pool) Release(idx int, n int64) {
 	p.mu.Lock()
 	p.disks[idx].used -= n

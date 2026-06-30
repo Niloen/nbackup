@@ -50,7 +50,7 @@ type EncodePlacement struct {
 // dumpItem archives a single DLE into the store: it acquires an ingestion Sink, transfers the
 // encoded archive into it, and commits it — driving the run tracker from the committed record. It
 // owns the run-tracker lifecycle and describes the backup; the store lands and records the bytes.
-func (d *Dumper) dumpItem(ctx context.Context, fs archiveio.ArchiveWriteStore, item planner.Item, tr *progress.Tracker, logf func(format string, args ...any)) (err error) {
+func (d *Dumper) dumpItem(ctx context.Context, fs archiveio.ArchiveWriteStore, item planner.Item, gate dumpGate, tr *progress.Tracker, logf func(format string, args ...any)) (err error) {
 	// The progress tracker keys and displays DLEs by their host:path identity; the
 	// seal and filenames keep the internal slug.
 	pname := item.DLE.ID()
@@ -75,7 +75,7 @@ func (d *Dumper) dumpItem(ctx context.Context, fs archiveio.ArchiveWriteStore, i
 	}
 
 	logf("archiving %s (L%d)", item.DLE.ID(), item.Level)
-	committed, err = d.dumpArchive(ctx, fs, item.EstBytes, spec, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
+	committed, err = d.dumpArchive(ctx, fs, item.EstBytes, spec, gate, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
 	if err != nil {
 		// An unreadable file makes tar exit fatally (it never silently ships a partial
 		// archive — that would betray recoverability), so name the likely cause and fix
@@ -140,7 +140,7 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 // server-side as local Filters) → an ingestion xfer.Sink the store hands out, which the transfer
 // seals on commit. prog, if non-nil, receives running (uncompressed, compressed) counts. It returns
 // the archive record with its final sizes + file count for the caller's tracker and log.
-func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.ArchiveWriteStore, est int64, spec BackupSpec, prog func(uncompressed, compressed int64)) (record.Archive, error) {
+func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.ArchiveWriteStore, est int64, spec BackupSpec, gate dumpGate, prog func(uncompressed, compressed int64)) (record.Archive, error) {
 	pl := d.placement(spec.DumpType)
 	compF, err := compress.Filter(pl.CompressScheme, pl.CompressOpts)
 	if err != nil {
@@ -197,9 +197,9 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.ArchiveWriteStore
 		return xfer.SourceStats{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members}, nil
 	}).OnCleanup(bs.Cleanup)
 
-	// Create the ingestion Sink before the transfer spawns tar, so back-pressure (a full holding
-	// disk, or a busy backing medium) gates the dump before any heavy work starts. The store meters
-	// the bytes that land itself (it must, for the checksum + size).
+	// Create the ingestion Sink before entering the gate, so the wait for the target (a full holding
+	// disk, or the backing permit) holds no transfer slot — only the heavy work below is gated. The
+	// store meters the bytes that land itself (it must, for the checksum + size).
 	sink, err := fs.NewArchive(aspec, est)
 	if err != nil {
 		return record.Archive{}, err
@@ -208,11 +208,16 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.ArchiveWriteStore
 	// compressed count for live `nb status` (symmetric with tarCmd.Tap's uncompressed side). The store
 	// stays observability-free.
 	sink = archiveio.MeterArchive(sink, func(n int64) { comp.Store(n); report() })
-	// Release the sink's resources (for a direct landing write, its backing permit) on every exit
-	// path — success, a faulted transfer, or a promote failure. The permit is held from NewArchive,
-	// so without this a failed dump would leak it and stall the next direct writer; Close is the
-	// symmetric counterpart to that acquire, independent of whether Commit ran.
+	// Release the sink's resources (for a direct landing write, its backing permit; for a holding
+	// write, its disk reservation) on every exit path — success, a faulted transfer, or a promote
+	// failure. The resource is held from NewArchive, so without this a failed dump would leak it;
+	// Close is the symmetric counterpart to that acquire, independent of whether Commit ran.
 	defer sink.Close()
+	// Borrow a transfer slot only now — the target is secured, so the gate bounds dumps that are
+	// actually running tar + the encode pipeline. release runs before sink.Close (defer LIFO), so the
+	// worker is handed back the instant the transfer ends, ahead of returning the target resource.
+	release := gate()
+	defer release()
 	// Transfer drives the whole ingestion: it streams the encoded archive into the sink and, on a
 	// clean transfer, has the sink seal it (footer + placement) against the producer's totals,
 	// returning those totals.

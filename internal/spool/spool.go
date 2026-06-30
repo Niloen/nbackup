@@ -140,7 +140,7 @@ func (d *Spool) NewArchive(spec archiveio.ArchiveSpec, est int64) (archiveio.Arc
 		if err != nil {
 			return nil, err
 		}
-		return &remoteSink{d: d, real: real, kind: writeHolding, disk: idx}, nil
+		return &remoteSink{d: d, real: real, kind: writeHolding, disk: idx, est: est}, nil
 	}
 	reply := make(chan error, 1)
 	d.permitReqCh <- permitReq{reply: reply}
@@ -173,7 +173,8 @@ type remoteSink struct {
 	d    *Spool
 	real archiveio.ArchiveWriter
 	kind writeKind
-	disk int // holding disk index (writeHolding)
+	disk int   // holding disk index (writeHolding)
+	est  int64 // in-flight reservation Acquire took on disk (writeHolding); the producer frees it on Close
 }
 
 func (r *remoteSink) NextPart(ctx context.Context) (io.WriteCloser, int64, error) {
@@ -194,19 +195,24 @@ func (r *remoteSink) Commit(ctx context.Context, p xfer.SourceStats) error {
 // the orchestrator that reads Result, off the real writer, when it queues a holding→backing copy.
 func (r *remoteSink) Result() (record.Archive, record.ArchivePos) { return r.real.Result() }
 
-// Close releases what this archive held, whether the transfer committed or faulted before commit. A
-// direct write holds a backing permit; return it to the orchestrator here (not in Commit) so a
-// faulted direct write — which never reaches Commit — frees its slot too, instead of leaking it and
-// stalling the next direct writer forever. The producer defers Close right after NewArchive, so it
-// runs on every path. A holding or copy write holds no permit, so Close just closes the underlying
-// medium writer. The orchestrator is always serving when Close runs (every Close happens before
-// Drain), so the synchronous hand-off cannot block on a stopped server.
+// Close releases what this archive held while it was being written, on every path — whether the
+// transfer committed or faulted before commit. A direct write holds a backing permit; return it to
+// the orchestrator here (not in Commit) so a faulted direct write — which never reaches Commit —
+// frees its slot too, instead of leaking it and stalling the next direct writer forever. A holding
+// write holds the in-flight disk reservation Acquire took; free it here. If the dump committed, its
+// landed bytes were charged separately (on the Commit follow-up) and the drain frees those, so this
+// release is unconditional and never double-frees. The producer defers Close right after NewArchive,
+// so it runs on every path. The orchestrator is always serving when Close runs (every Close happens
+// before Drain), so the synchronous hand-off cannot block on a stopped server.
 func (r *remoteSink) Close() error {
 	err := r.real.Close()
-	if r.kind == writeDirect {
+	switch r.kind {
+	case writeDirect:
 		ack := make(chan struct{}, 1)
 		r.d.releaseCh <- release{ack: ack}
 		<-ack
+	case writeHolding:
+		r.d.pool.Release(r.disk, r.est)
 	}
 	return err
 }
@@ -312,6 +318,11 @@ func (d *Spool) orchestrate() {
 			}
 			if req.kind == writeHolding {
 				arch, pos := req.sink.Result()
+				// The staged archive now occupies the disk until the drain copies it off; charge its
+				// landed bytes so a later Acquire back-pressures on the drain backlog. The dump's
+				// in-flight estimate is still reserved until the producer closes the sink — the two
+				// briefly overlap, which only over-reserves.
+				d.pool.Charge(req.disk, arch.Compressed)
 				if d.tr != nil {
 					// The dump committed to this disk: record where it staged so the queued DLE shows a
 					// 0% flush bar (and which disk) while it waits behind other drains — taking over from
