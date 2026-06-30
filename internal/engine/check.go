@@ -142,19 +142,28 @@ func (e *Engine) checkMedia(rep *CheckReport) {
 			rep.add(&rep.Server, false, false, fmt.Sprintf("%s has unknown type %q (known: %v)", label, e.cfg.Media[name].Type, media.VolumeTypes()))
 			continue
 		}
-		// The landing volume is opened (and indexed) at engine construction; under the
-		// tolerant `nb check` build that failure is recorded rather than fatal, so report
-		// it here instead of the cached open handle's (nil) error.
-		if isLanding && e.landingErr != nil {
-			rep.add(&rep.Server, false, false, fmt.Sprintf("%s not ready: %v", label, e.landingErr))
+		// The landing is where dumps must go, so `nb check` opens it for real (the one
+		// place that deliberately pays the open the rest of the system now defers) and a
+		// failure is a hard error. For a cloud landing this is exactly where missing
+		// credentials or an unreachable bucket surface; opening it also bootstraps the
+		// catalog, so a clean open means the landing is genuinely runnable.
+		if isLanding {
+			if _, err := e.landing(); err != nil {
+				rep.add(&rep.Server, false, false, fmt.Sprintf("%s not ready: %v", label, err))
+			} else {
+				rep.add(&rep.Server, true, false, fmt.Sprintf("%s ready", label))
+			}
 			continue
 		}
+		// A non-landing cloud tier is a sync/copy target validated at first use: probing
+		// it here would force credentials/network for a medium the local backup doesn't
+		// need, so report it as configured-but-unprobed.
 		if e.cfg.Media[name].Type == "cloud" {
 			rep.add(&rep.Server, false, true, fmt.Sprintf("%s (cloud) configured — reachability checked at first use, not here", label))
 			continue
 		}
 		if _, _, _, err := e.mediumVolume(name); err != nil {
-			rep.add(&rep.Server, false, !isLanding, fmt.Sprintf("%s not ready: %v", label, err))
+			rep.add(&rep.Server, false, true, fmt.Sprintf("%s not ready: %v", label, err))
 		} else {
 			rep.add(&rep.Server, true, false, fmt.Sprintf("%s ready", label))
 		}
