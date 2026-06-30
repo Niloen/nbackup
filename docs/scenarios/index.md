@@ -19,7 +19,7 @@ to yours and adapt.
 | [Cloud-only](cloud-only) | Dump straight to an object store (S3/compatible). No local copy. |
 | [Tape with a holding disk](tape-holding-disk) | A fast disk buffers parallel dumps and feeds one tape drive at disk speed. |
 | [S3 with a holding disk](s3-holding-disk) | A local buffer absorbs dumps, then drains to a bandwidth-capped cloud tier. |
-| [Robotic tape library](tape-library) | A multi-bay changer with automatic label rotation. |
+| [Robotic tape library](tape-library) | A changer with drives fed from slots and automatic label rotation. |
 | [Remote hosts over SSH](remote-hosts) | Back up several remote machines with no agent installed. |
 | [Full 3-2-1-1-0 deployment](full-321) | Disk + offsite + immutability + drills + alerting, end to end. |
 

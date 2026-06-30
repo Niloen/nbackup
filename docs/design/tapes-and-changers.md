@@ -288,7 +288,7 @@ media:
   # File-backed library (today's default; unchanged in spirit)
   vtl:
     type: tape
-    changer: { driver: dir, dir: /var/lib/nbackup/vtape, bays: 20 }
+    changer: { driver: dir, dir: /var/lib/nbackup/vtape, slots: 20 }
     tapetype: lto8
 
   # Single drive loaded by hand
@@ -313,12 +313,24 @@ live under the tape medium's `changer:`, never in the generic layer.
    filemark per file, and truncates from BOT on relabel. Block size is an inline
    `block_size` on the medium (default 64k) — the full named-tapetype concept (3.1) is
    deferred until a second field (filemark/density) earns it. Non-Linux is a clean stub.
-2. **`mtx` changer driver (3.2).** Unlocks real libraries; single-drive to start.
-3. **multi-drive (3.3).** Parallel tape writers; the larger engine/librarian change.
-4. **config refactor (3.5).** Can ship with step 1 (additive) or batch with step 2.
+2. **Changer remodel — slots + drives + the `Manual` capability. — DONE (2026-06-30).**
+   `media.Changer` is now `Slots`/`Drives`/`Drive(i)`/`Load(slot,drive)`/`Unload(drive)`/
+   `Manual()` over real SCSI vocabulary; `media.Shelf`/`Bays`/`Mount` retired. The tape
+   package collapses to a `loader` behind one `tapeChanger`: a file-backed `dirLoader`
+   (`slots: N` cartridges, `drives: K`, optional `manual: true`, simulated per-slot
+   barcodes) and the real `realDriveLoader` (one drive, `ErrManualLoad`). The librarian's
+   internals run over slots/drives with its public API unchanged; disk/cloud are wrapped
+   in a librarian-internal `directChanger` so it has one shape. `nb medium` is
+   barcode-first (drives + slots); `nb load <slot>` / `--label`. The interface **admits N
+   drives** but the librarian still schedules drive 0 only.
+3. **Real `mtx` changer loader (3.2).** A `mtxLoader` driving `mtx -f /dev/sg0` (the
+   `chg-robot` equivalent), surfacing real barcodes; slots into the slots/drives model
+   already in place. Not started.
+4. **Multi-drive scheduling (3.3).** Parallel tape writers — the librarian assigns a
+   drive per worker. The interface is ready; the engine/librarian scheduling is not.
 
-Greenfield, no migration shims (per project convention): the `dir:`/`device:` keys are
-replaced by the `changer:`/`drives:`/`tapetype:` form outright.
+Greenfield, no migration shims (per project convention): the `bays`/`reels`/`mode` keys
+were replaced by `slots`/`drives`/`manual` outright.
 
 ## Open questions
 

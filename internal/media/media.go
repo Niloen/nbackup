@@ -51,6 +51,12 @@ var ErrVolumeFull = fmt.Errorf("volume full: end of volume reached")
 // nothing loaded. The engine wraps this with medium-specific guidance.
 var ErrNoVolume = fmt.Errorf("no volume loaded in the drive")
 
+// ErrManualLoad reports that a changer cannot move media itself: a real standalone
+// drive (no robot) where only a human loads a cartridge. Changer.Load returns it so
+// the librarian prompts the operator and re-reads the drive, rather than treating an
+// unmovable drive as a hard failure. Callers test it with errors.Is.
+var ErrManualLoad = fmt.Errorf("changer cannot load media itself; a human must load the drive")
+
 // ErrNoFileRemoval reports that a medium cannot delete an individual file: space
 // is reclaimed by reusing a whole volume (relabel), not by removing files. Object
 // stores (disk, cloud) support per-file removal; tape does not. Callers test it
@@ -71,57 +77,76 @@ var ErrNoFileRemoval = fmt.Errorf("per-file removal unsupported; reuse is whole-
 // operations act on the loaded volume.
 type Drive interface {
 	Volume
-	// Loaded reports the volume currently in the drive; ok is false when empty.
+	// Loaded reports the cartridge currently in the drive (its barcode, label, fill);
+	// ok is false when the drive is empty.
 	Loaded() (VolumeStatus, bool)
 }
 
-// Changer is the robotic-library device: a drive fed by a robot that mounts any of
-// many physical bays. It is what distinguishes a robotic library from a single-drive
-// station — the library reaches every tape itself (Bays + Mount), the station cannot
-// and so does NOT implement Changer (it is a Drive plus a Shelf instead). Holding a
-// Volume, the librarian reads the shape from this one assertion: a Changer is a
-// robotic library; anything else is a single drive or a plain volume.
+// Changer is a tape library's logistics: a set of drives (data-transfer elements)
+// fed from a set of slots (storage elements) by a robot — or, for a lone drive, by a
+// human. It moves cartridges and reports inventory; it never does byte I/O (that is a
+// Drive/Volume) and never reads an on-tape label (that needs a load — a real library
+// knows only the physical barcode its scanner reads). One Changer models every shape:
+// a robotic library (many slots, one or more drives, software loads), and a single
+// drive (no addressable slots, one drive, a human loads — see Manual).
 //
-// It is deliberately label-AGNOSTIC: like a real robot it addresses bays and never
-// reads the magnetic label itself; the label is read only after a bay is mounted
-// (via Labeled.ReadLabel). It carries ONLY what real hardware's software can do —
-// position the robot among bays it can reach.
+// The shape is one assertion: a Volume that is also a Changer is a library of
+// removable cartridges; anything else is a single, directly-addressed volume (disk,
+// s3). The librarian holds the Changer and hands Volumes upward, so nothing above it
+// addresses slots or drives.
 type Changer interface {
-	Drive
-	// Bays lists the physical positions the robot can mount. Every reported id is a
-	// valid Mount target.
-	Bays() ([]VolumeStatus, error)
-	// Mount loads the named bay into the drive (a robot move).
-	Mount(bay string) error
+	// Slots inventories the storage elements: each cartridge the library can see by
+	// barcode, WITHOUT loading it. A slot whose cartridge is currently in a drive
+	// reports empty. A single drive has no addressable slots (its shelf is offline,
+	// invisible to software) and returns none.
+	Slots() ([]SlotStatus, error)
+	// Drives inventories the data-transfer elements: each drive and what it holds.
+	Drives() ([]DriveStatus, error)
+	// Drive returns the stable byte handle for drive i. Its Volume operations act on
+	// whatever cartridge is loaded there now (ErrNoVolume when empty); a later Load
+	// rebinds the bytes under the same handle, so a write sink spans cartridges
+	// without being re-pointed.
+	Drive(i int) Drive
+	// Load places the cartridge in slot into drive (a robot move). A Manual changer
+	// (a single drive a human loads) returns ErrManualLoad — the librarian then
+	// prompts the operator instead of loading itself.
+	Load(slot, drive int) error
+	// Unload returns the cartridge in drive to a slot (its home, or any free one).
+	Unload(drive int) error
+	// Manual reports whether loading needs a human: true for a real standalone drive
+	// (and a file-backed changer configured to simulate one), false for a robot that
+	// loads unattended. It is the librarian's cue to prompt an operator rather than
+	// pick a slot and Load it itself.
+	Manual() bool
 }
 
-// Shelf is the operator-managed environment of a single-drive station — the reels in
-// the room and the act of loading one into the one drive. Loading a reel a human
-// keeps on a shelf is a physical act with no device API, so it lives here, apart
-// from the Drive/Changer device seams. The librarian consults it only to actually do
-// a swap (prompt over the room, then Insert the operator's choice); it is never a
-// general shape marker.
-//
-// A real standalone drive implements Shelf degenerately: an empty room (software
-// cannot see the reels) and an Insert that errors (only a human loads it). The disk
-// emulator implements it functionally — its reels are directories it can enumerate
-// and load — so the manual-swap UX is exercisable in one process.
-type Shelf interface {
-	// Shelf lists the reels in the room but not currently in the drive. Empty for a
-	// real drive (software cannot see the room).
-	Shelf() ([]VolumeStatus, error)
-	// Insert loads the named room reel into the single drive, displacing whatever is
-	// loaded back to the room. A real drive returns an error (only a human can load
-	// it); the emulator effects the swap in software.
-	Insert(reel string) error
+// SlotStatus is one storage element's state: its address and the barcode of the
+// cartridge it holds. The barcode is the physical VolumeTag the library scanner
+// reads without loading — the cheap identity used to pick which slot to load; the
+// on-tape Label is read only after the cartridge reaches a drive.
+type SlotStatus struct {
+	Slot         int    // storage-element address (1-based, as the library numbers them)
+	Barcode      string // physical VolumeTag; "" when the slot is empty or has no scanner
+	Full         bool
+	ImportExport bool // a mailslot (import/export element), not a normal storage slot
 }
 
-// VolumeStatus is one volume's physical state: a bay in a Library, or the reel
-// in (or available to) a Station's drive. Label is the volume label written on the
-// cartridge ("" when blank) — for the disk emulator it stands in for the barcode a
-// real library's reader would report without a drive read.
+// DriveStatus is one data-transfer element's state: its address, what cartridge is
+// loaded (by barcode and home slot), and the loaded volume's physical fill.
+type DriveStatus struct {
+	Drive    int          // data-transfer-element address (0-based)
+	Loaded   bool         // a cartridge is in the drive
+	FromSlot int          // the slot it came from, for Unload; -1 when unknown
+	Volume   VolumeStatus // the loaded cartridge's barcode/label/fill (zero when empty)
+}
+
+// VolumeStatus is one cartridge's physical state, as seen once loaded (or scanned).
+// Barcode is the physical VolumeTag; Label is the on-tape identity ("" when blank or
+// unread). For the file-backed changer the barcode is a stable simulated tag, distinct
+// from the label, so the barcode-vs-label split is exercised without hardware.
 type VolumeStatus struct {
-	ID       string // bay id (Library) or reel id (Station shelf); "" for a real drive
+	ID       string // slot/drive id for display; "" when not applicable
+	Barcode  string // physical VolumeTag (scanner identity), distinct from the on-tape Label
 	Label    string
 	Pool     string // the label's pool (the owning medium); "" when blank/foreign/unread
 	Blank    bool
@@ -229,49 +254,63 @@ type IncompleteEnumerator interface {
 	IncompleteFiles() ([]int, error)
 }
 
-// WalkReadable visits every readable volume reachable from vol in turn, calling fn
-// for each one mounted. It is the medium-shape primitive the catalog rebuild scan
-// needs, kept here next to the shape interfaces it asserts on (Changer/Drive) so the
+// WalkReadable visits every readable cartridge reachable from vol in turn, calling fn
+// for each one loaded in a drive. It is the medium-shape primitive the catalog rebuild
+// scan needs, kept here next to the shape interfaces it asserts on (Changer) so the
 // catalog never type-asserts a Volume itself:
 //
-//   - a robotic library (a Changer) mounts each non-blank bay in turn and restores
-//     whatever was loaded when done;
-//   - a single-drive station or bare drive (a Drive that is not a Changer) can only
-//     reach the reel currently in the drive — the rest sit offline in the room and
-//     cannot be mounted unattended — so fn sees that one volume, or nothing when the
-//     drive is empty;
+//   - a robotic library (a Changer) visits whatever is already in its drives, then
+//     loads each occupied slot into drive 0 in turn, restoring drive 0 when done;
+//   - a single drive a human loads (a Manual Changer) can reach only the cartridge
+//     already in it — the rest sit offline, unloadable unattended — so fn sees that
+//     one volume, or nothing when the drive is empty;
 //   - a plain address-identified volume (disk, s3) is visited directly.
 //
 // It positions only — it never reads labels — so it is a pure shape walk, distinct
 // from the librarian's label-aware advance.
 func WalkReadable(vol Volume, fn func(Volume) error) error {
-	ch, isLibrary := vol.(Changer)
-	if !isLibrary {
-		if d, ok := vol.(Drive); ok {
-			if _, loaded := d.Loaded(); !loaded {
-				return nil // single drive with an empty drive: nothing to scan
-			}
-		}
-		return fn(vol)
+	ch, isChanger := vol.(Changer)
+	if !isChanger {
+		return fn(vol) // a single directly-addressed volume (disk, s3)
 	}
-	prev, hadPrev := ch.Loaded()
-	bays, err := ch.Bays()
+	drives, err := ch.Drives()
 	if err != nil {
 		return err
 	}
-	for _, b := range bays {
-		if b.Blank {
+	// Visit cartridges already loaded in drives, and note drive 0's cartridge so it
+	// can be restored after the slot scan borrows that drive.
+	restore := -1
+	for _, d := range drives {
+		if !d.Loaded {
 			continue
 		}
-		if err := ch.Mount(b.ID); err != nil {
-			return err
+		if d.Drive == 0 {
+			restore = d.FromSlot
 		}
-		if err := fn(vol); err != nil {
+		if err := fn(ch.Drive(d.Drive)); err != nil {
 			return err
 		}
 	}
-	if hadPrev {
-		if err := ch.Mount(prev.ID); err != nil {
+	if ch.Manual() {
+		return nil // a human-loaded drive reaches only what is already in it
+	}
+	slots, err := ch.Slots()
+	if err != nil {
+		return err
+	}
+	for _, s := range slots {
+		if !s.Full || s.ImportExport {
+			continue
+		}
+		if err := ch.Load(s.Slot, 0); err != nil {
+			return err
+		}
+		if err := fn(ch.Drive(0)); err != nil {
+			return err
+		}
+	}
+	if restore >= 0 {
+		if err := ch.Load(restore, 0); err != nil {
 			return err
 		}
 	}

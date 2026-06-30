@@ -123,27 +123,33 @@ media:
     type: tape
 ```
 
-A tape medium comes in shapes that differ in **who changes the tape**:
+A tape medium is a **changer**: a set of **drives** (data-transfer elements) fed
+from a set of **slots** (storage elements that hold cartridges). It comes in
+shapes that differ in **who loads the tape**:
 
-- A **robotic library** — `dir:` (a file-backed virtual library), `bays: N`
-  physical positions, a finite `volume_size` per tape. A command moves which bay
-  is mounted.
-- A **single drive changed by hand** — either a disk-emulated station
-  (`mode: manual`, reels that sit on a shelf), or a real drive (`device:` driven
-  via `mt`). It shows only the reel currently loaded.
+- A **changer with a robot** — `dir:` (a file-backed virtual library), `slots: N`
+  cartridges, `drives: K` (default 1), a finite `volume_size` per cartridge. A
+  command loads a slot into a drive; the robot does it unattended.
+- A **single drive loaded by hand** — either a file-backed sim (`manual: true`, a
+  drive a human loads), or a real drive (`device:`, a one-drive changer with
+  `block_size:` for the tape record size). It shows only the cartridge currently
+  loaded.
 
-When a backup or restore needs a different tape, NBackup **prompts you to swap it
-in and waits**. An unattended run errors instead of hanging.
+When a backup or restore needs a different tape, a robot loads it; a `manual:
+true` changer or a real `device:` drive **prompts you to load it and waits**. An
+unattended run errors instead of hanging.
 
 ### Labelling and loading
 
-Tapes are **labelled**, not address-identified. You label a blank, inventory a
-medium, and load a tape:
+Tapes are **labelled**, not address-identified. Each slot reports a physical
+**barcode** the library scanner reads without loading the cartridge; the on-tape
+**label** is read only after a cartridge is loaded into a drive. You label a
+blank, inventory a medium, and load a tape:
 
 ```bash
-nb label lto lto-0001     # label a blank
-nb medium lto             # inventory: bays (or drive + shelf) and their labels
-nb load lto bay-02        # mount a bay (or: nb load --label lto lto-0007)
+nb label lto lto-0001     # label a blank (a robot grabs a blank slot)
+nb medium lto             # inventory: drives (loaded barcode + label) and slots
+nb load lto 2             # load slot 2 (or: nb load --label lto lto-0007)
 ```
 
 Each tape carries a self-describing label that NBackup **verifies before every
@@ -156,30 +162,31 @@ media:
   lto:
     type: tape
     dir: /var/lib/nbackup/vtape
-    bays: 20
+    slots: 20
+    drives: 1
     volume_size: 6TB
     appendable: true        # default: pack many runs per tape; false = one run per tape
 ```
 
 `appendable: true` (the default) packs many runs onto one tape; `appendable:
 false` writes one run per tape. A run that fills a tape mid-write **spans onto the
-next automatically** — a robotic library mounts the next writable bay (auto-labelling
-a blank, or recycling the oldest tape past retention), while a manual drive prompts
+next automatically** — a robot loads the next writable slot (auto-labelling a
+blank, or recycling the oldest tape past retention), while a manual drive prompts
 for a swap. See [Robotic tape library](../scenarios/tape-library) for the full
 walkthrough.
 
-A tape medium's capacity derives as `bays × volume_size` (`0` = unbounded).
+A tape medium's capacity derives as `slots × volume_size` (`0` = unbounded).
 
 ## Inspecting media
 
 ```bash
 nb medium          # overview: each medium's type, slots, usage / capacity, volume
-nb medium lto      # one medium's volume + slots (incl. bays, or drive + shelf)
+nb medium lto      # one medium's volume + slots (incl. drives + slots for tape)
 ```
 
 `nb medium` with no argument lists every medium; with a name it details that one
-— a disk or cloud medium's usage, or a tape medium's bays (library) or loaded
-drive plus shelf (single drive).
+— a disk or cloud medium's usage, or a tape changer's drives (each with the loaded
+cartridge's barcode, label, and fill) and its occupied slots (by barcode).
 
 ## Capacity (per medium)
 
@@ -188,11 +195,11 @@ Capacity is the headline knob, set **per medium**:
 ```yaml
 media:
   disk: { type: disk, path: /var/lib/nbackup/catalog, capacity: 20TB }
-  lto:  { type: tape, dir: /var/lib/nbackup/vtape, bays: 20, volume_size: 6TB }
+  lto:  { type: tape, dir: /var/lib/nbackup/vtape, slots: 20, volume_size: 6TB }
 ```
 
-Disk and cloud spell it directly (`capacity: 20TB`); a tape library derives it as
-`bays × volume_size`. The planner fills free capacity with promoted fulls, and
+Disk and cloud spell it directly (`capacity: 20TB`); a tape changer derives it as
+`slots × volume_size`. The planner fills free capacity with promoted fulls, and
 pruning reclaims to stay within it. An optional `minimum_age` is a per-medium
 safety floor (defaults to one cycle) below which a slot is never retired. See
 [Planning](planning) and [Pruning](pruning) for how each consumes capacity.
@@ -221,7 +228,7 @@ medium whose link you must protect, typically a cloud or other remote tier.
 |---|---|---|---|
 | `disk` | Address (path) | No | No |
 | `cloud` | Address (URL key) | No | No |
-| `tape` | Label | Yes | Robot mounts bays; manual prompts you |
+| `tape` | Label | Yes | Robot loads slots; manual prompts you |
 
 ---
 

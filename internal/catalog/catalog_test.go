@@ -247,7 +247,7 @@ func writePart(t *testing.T, v media.Volume, slotID, dle string, level, part int
 func TestRebuildReassemblesSpannedSlot(t *testing.T) {
 	dir := t.TempDir()
 	open := func() media.Volume {
-		v, err := media.OpenVolume("tape", media.Options{"dir": dir, "bays": "2", "volume_size": "1048576"})
+		v, err := media.OpenVolume("tape", media.Options{"dir": dir, "slots": "2", "volume_size": "1048576"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -258,8 +258,8 @@ func TestRebuildReassemblesSpannedSlot(t *testing.T) {
 	lv := vol.(media.Labeled)
 	now := time.Unix(0, 0).UTC()
 
-	// Bay 1 holds part 0 of the archive (no seal — it is committed elsewhere).
-	if err := ch.Mount("bay-01"); err != nil {
+	// Slot 1 holds part 0 of the archive (no seal — it is committed elsewhere).
+	if err := ch.Load(1, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := lv.WriteLabel(record.Label{Name: "vol-a", Pool: "tape", Epoch: 1, WrittenAt: now}); err != nil {
@@ -267,8 +267,8 @@ func TestRebuildReassemblesSpannedSlot(t *testing.T) {
 	}
 	writePart(t, vol, "slot-2026-06-21.001", "h-data", 0, 0)
 
-	// Bay 2 holds part 1 and the commit footer that marks the (2-part) archive complete.
-	if err := ch.Mount("bay-02"); err != nil {
+	// Slot 2 holds part 1 and the commit footer that marks the (2-part) archive complete.
+	if err := ch.Load(2, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := lv.WriteLabel(record.Label{Name: "vol-b", Pool: "tape", Epoch: 1, WrittenAt: now}); err != nil {

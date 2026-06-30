@@ -35,7 +35,7 @@ larger tape.
 ```yaml
 landing: lto
 media:
-  lto:     { type: tape, dir: /var/lib/nbackup/vtape, bays: 20, volume_size: 6TB }
+  lto:     { type: tape, dir: /var/lib/nbackup/vtape, slots: 20, volume_size: 6TB }
   scratch: { type: disk, path: /var/spool/nbackup, capacity: 500GB, holding: true }
 parallelism: { workers: 4 }
 ```
@@ -69,7 +69,7 @@ A holding disk must be a disk or cloud medium — never the landing. You may mar
 
 ```yaml
 media:
-  lto:      { type: tape, dir: /var/lib/nbackup/vtape, bays: 20, volume_size: 6TB }
+  lto:      { type: tape, dir: /var/lib/nbackup/vtape, slots: 20, volume_size: 6TB }
   scratch1: { type: disk, path: /mnt/ssd1, capacity: 500GB, holding: true }
   scratch2: { type: disk, path: /mnt/ssd2, capacity: 500GB, holding: true }
 ```

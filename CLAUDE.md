@@ -18,8 +18,8 @@ user-facing front page; [PRD.md](PRD.md) is the product vision.
   back-compat shims or migrations; don't add concepts/layers speculatively.
 - **Verify every change:** `gofmt -l`, `go vet ./...`, `go test -race ./...`.
 - **Test env has no `zstd`** — use scheme `none` in tests (tar/gzip/nice present).
-- Keep the generic media/changer layer **medium-neutral** (`bays`, `volume_size`,
-  `nb changer`); tape specifics stay in the `tape` package.
+- Keep the generic media/changer layer **medium-neutral** (`slots`, `drives`,
+  `volume_size`, `nb medium`); tape specifics stay in the `tape` package.
 - Keep the generic `archiver`/catalog/engine layer **archiver-neutral** (`Archiver`,
   `BackupRequest{DLE, Level, BaseLevel}`, `HasBase`, "incremental state", the host-level
   `state_dir` that roots it); GNU tar specifics (`.snar`, snapshots, `tar_path`) stay in

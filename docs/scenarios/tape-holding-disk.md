@@ -41,7 +41,8 @@ media:
   lto:
     type: tape
     dir: /var/lib/nbackup/vtape    # a file-backed virtual library (no hardware)
-    bays: 20                       # capacity = bays × volume_size = 120TB
+    slots: 20                      # storage slots; capacity = slots × volume_size = 120TB
+    drives: 1                      # data-transfer drives a robot loads slots into
     volume_size: 6TB
   scratch:
     type: disk
@@ -79,7 +80,7 @@ sources:
 nb label lto lto-0001     # label a blank tape before its first dump
 nb plan                   # preview the run — announces the tape it expects
 nb dump                   # dump in parallel to the holding disk, drain to tape
-nb medium lto             # inventory the library: bays → labels, usage
+nb medium lto             # inventory the library: drives (loaded) + slots (barcodes)
 nb flush                  # drain a crashed run's staged archives to tape
 nb status                 # progress of the running (or most recent) dump
 ```

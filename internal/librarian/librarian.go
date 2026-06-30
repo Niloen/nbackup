@@ -4,13 +4,12 @@
 // calls, and runs the label protocol (pool/epoch/appendable/auto-label) on top.
 //
 // It is the single place that knows a medium's physical shape, so the rest of the
-// engine stays shape-agnostic. The shape is one type assertion: a media.Changer is a
-// robotic library (it mounts its own bays); anything that is not a Changer is a
-// single-drive station or a plain volume. A media.Shelf (the operator-managed room)
-// is consulted only to actually do a swap — prompt over the room, then Insert the
-// operator's choice — never as a general shape marker. media.Drive (what's loaded)
-// is the device read both changer shapes share. So a robotic library advances by
-// mounting its next bay; a single drive asks the operator over its Shelf.
+// engine stays shape-agnostic — everything above the librarian handles only Volumes.
+// A tape medium is a media.Changer: a set of drives fed from a set of slots. The
+// changer's Manual() says who loads it — a robot (advance by loading the next slot,
+// unattended) or a human (prompt the operator over the slots, then load their choice).
+// A directly-addressed medium (disk, s3) is wrapped in a trivial one-drive changer so
+// the librarian has a single shape for all of them.
 //
 // The librarian is a shared service: dump, copy/sync, restore, rebuild, label, and
 // load all bottom out in "present the right volume on medium X". It depends only on
@@ -23,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
@@ -94,8 +94,10 @@ func isReloadable(err error) bool { r := reloadable{}; return errors.As(err, &r)
 var errBlankNeedsLabel = errors.New("run `nb label` on it first, or set auto_label: true to label fresh reels automatically")
 
 // Librarian wraps one medium's volume and drives its changer. It is constructed per
-// medium the engine touches; it caches the medium's resolved shape (changer / shelf)
-// so callers never type-assert a Volume themselves.
+// medium the engine touches; it caches the medium's resolved shape so callers never
+// type-assert a Volume themselves. A directly-addressed medium (disk, s3) is wrapped
+// in a trivial changer adapter so the librarian has one shape for everything; the
+// engine above only ever sees the Volume.
 type Librarian struct {
 	vol       media.Volume
 	medium    string
@@ -104,12 +106,9 @@ type Librarian struct {
 	autoLabel bool
 	minAge    time.Duration // this medium's retention minimum age; gates which volumes recycle
 
-	drive     media.Drive // has a loaded volume (a robotic library or a single drive)
-	hasDrive  bool
-	changer   media.Changer // robotic library: bays + mount
-	isLibrary bool
-	shelf     media.Shelf // single-drive station: the operator-managed room
-	isStation bool
+	changer   media.Changer // the tape changer, or directChanger for disk/s3
+	isChanger bool          // vol is a real media.Changer (tape) — not the adapter, so it can span
+	manual    bool          // changer.Manual(): a human loads (prompt the operator) vs a robot loads
 }
 
 // New constructs a librarian for a medium's open volume. cat is the catalog the
@@ -118,17 +117,44 @@ type Librarian struct {
 // medium's retention minimum age, which gates whether an aged-out volume may be
 // recycled on write (the retention Floor is the safety gate of the label rotation).
 //
-// The medium's shape is read once, here: a media.Changer is a robotic library;
-// anything that is not a Changer is a single-drive station (when it is a media.Shelf)
-// or a plain address-identified volume (disk, s3). media.Drive is the device read
-// (what's loaded) both changer shapes share.
+// The medium's shape is read once, here: a media.Changer is a tape library; anything
+// else (disk, s3) is a single directly-addressed volume, wrapped in a directChanger
+// so the rest of the librarian has one shape. A tape changer's Manual() says whether a
+// human loads it (prompt the operator) or a robot does (load unattended).
 func New(vol media.Volume, medium string, cat *catalog.Catalog, op Operator, autoLabel bool, minAge time.Duration) *Librarian {
 	l := &Librarian{vol: vol, medium: medium, cat: cat, op: op, autoLabel: autoLabel, minAge: minAge}
-	l.drive, l.hasDrive = vol.(media.Drive)
-	l.changer, l.isLibrary = vol.(media.Changer)
-	l.shelf, l.isStation = vol.(media.Shelf)
+	if ch, ok := vol.(media.Changer); ok {
+		l.changer, l.isChanger, l.manual = ch, true, ch.Manual()
+	} else {
+		l.changer = directChanger{vol}
+	}
 	return l
 }
+
+// loaded reports the cartridge in the working drive (drive 0). It is the one-drive
+// view the librarian uses today; multi-drive scheduling would pass a drive index.
+func (l *Librarian) loaded() (media.VolumeStatus, bool) { return l.changer.Drive(0).Loaded() }
+
+// directChanger adapts a directly-addressed Volume (disk, s3) to media.Changer: one
+// drive permanently loaded with the one volume, no slots, no robot. Load/Unload are
+// no-ops (there is nothing to move), so the librarian's changer paths collapse to the
+// single-volume case without a special branch. It is librarian-internal: the media
+// layer still sees the bare Volume (WalkReadable visits it directly).
+type directChanger struct{ media.Volume }
+
+func (d directChanger) Slots() ([]media.SlotStatus, error) { return nil, nil }
+func (d directChanger) Drives() ([]media.DriveStatus, error) {
+	return []media.DriveStatus{{Drive: 0, Loaded: true, FromSlot: -1}}, nil
+}
+func (d directChanger) Drive(int) media.Drive { return directDrive{d.Volume} }
+func (d directChanger) Load(int, int) error   { return nil }
+func (d directChanger) Unload(int) error      { return nil }
+func (d directChanger) Manual() bool          { return false }
+
+// directDrive presents a directly-addressed Volume as an always-loaded media.Drive.
+type directDrive struct{ media.Volume }
+
+func (d directDrive) Loaded() (media.VolumeStatus, bool) { return media.VolumeStatus{}, true }
 
 // Volume returns the underlying volume handle.
 func (l *Librarian) Volume() media.Volume { return l.vol }
@@ -172,7 +198,7 @@ func (l *Librarian) PrepareWrite(appendable bool, expect string, now time.Time, 
 	// same selection Advance does mid-span, applied here so a run can also *start* on
 	// a blank/empty bay (e.g. nothing loaded yet, or the loaded reel already holds a
 	// run on a one-run-per-tape medium) rather than failing with "no tape loaded".
-	if l.isLibrary {
+	if l.isChanger && !l.manual {
 		name, epoch, _, aerr := l.Advance(appendable, map[string]bool{}, expect, now, logf)
 		if aerr != nil {
 			// A full pool of still-protected tapes is the rotation's fail-loud verdict —
@@ -186,11 +212,11 @@ func (l *Librarian) PrepareWrite(appendable bool, expect string, now time.Time, 
 		}
 		return name, epoch, nil
 	}
-	// A single-drive station prompts the operator to swap in a writable reel. When the
-	// loaded reel turns out to be an aged-out in-pool tape (the rotation's oldest
-	// reusable volume), it is recycled in place rather than refused — the same swap loop
-	// the spanning roll uses.
-	if l.isStation {
+	// A manual (hand-loaded) drive prompts the operator to load a writable cartridge.
+	// When the loaded cartridge turns out to be an aged-out in-pool tape (the rotation's
+	// oldest reusable volume), it is recycled in place rather than refused — the same
+	// swap loop the spanning roll uses.
+	if l.manual {
 		tried := map[string]bool{}
 		for {
 			if expect == "" {
@@ -230,7 +256,7 @@ func (l *Librarian) resolveLabel(lv media.Labeled, now time.Time) (record.Label,
 	lbl, labeled, err := lv.ReadLabel()
 	switch {
 	case errors.Is(err, media.ErrNoVolume):
-		return record.Label{}, reloadableErr("medium %q has no volume loaded; load one with `nb load %s <bay>` or label a blank one with `nb label %s <name>`", l.medium, l.medium, l.medium)
+		return record.Label{}, reloadableErr("medium %q has no volume loaded; load one with `nb load %s <slot>` or label a blank one with `nb label %s <name>`", l.medium, l.medium, l.medium)
 	case errors.Is(err, media.ErrForeignVolume):
 		return record.Label{}, reloadableErr("medium %q holds non-NBackup data; refusing to overwrite — relabel it explicitly with `nb label --force %s <name>`", l.medium, l.medium)
 	case err != nil:
@@ -311,14 +337,14 @@ func (l *Librarian) autoLabelName(now time.Time) string {
 // too big for any volume" from "the previous volume was nearly full").
 func (l *Librarian) Advance(appendable bool, tried map[string]bool, expect string, now time.Time, logf Logf) (volName string, epoch int, wasEmpty bool, err error) {
 	switch {
-	case l.isLibrary:
-		// A robotic library rolls itself onto its next writable bay.
-		return l.advanceViaLibrary(appendable, tried, now, logf)
-	case l.isStation:
-		// A single-drive station prompts the operator to load another reel.
+	case !l.isChanger:
+		return "", 0, false, fmt.Errorf("medium %q is a single volume with no changer; it cannot span volumes", l.medium)
+	case l.manual:
+		// A hand-loaded drive prompts the operator to load another cartridge.
 		return l.advanceViaShelf(appendable, tried, expect, now, logf)
 	default:
-		return "", 0, false, fmt.Errorf("medium %q is a single volume with no changer; it cannot span volumes", l.medium)
+		// A robot rolls itself onto its next writable slot.
+		return l.advanceViaLibrary(appendable, tried, now, logf)
 	}
 }
 
@@ -327,31 +353,38 @@ func (l *Librarian) Advance(appendable bool, tried map[string]bool, expect strin
 // bay until one verifies writable (skipping wrong-pool / occupied / blank-without-
 // autoLabel bays), or reports that no further bay can be written.
 func (l *Librarian) advanceViaLibrary(appendable bool, tried map[string]bool, now time.Time, logf Logf) (string, int, bool, error) {
-	// The volume that just filled must not be rolled back to; mark it tried.
-	if st, ok := l.changer.Loaded(); ok {
-		tried[st.ID] = true
+	// The cartridge that just filled must not be rolled back to; mark it tried by label.
+	if st, ok := l.loaded(); ok && st.Label != "" {
+		tried[st.Label] = true
 	}
-	bays, err := l.changer.Bays()
+	slots, err := l.changer.Slots()
 	if err != nil {
 		return "", 0, false, err
 	}
 	var lastErr error
-	for _, b := range bays {
-		if tried[b.ID] {
+	for _, s := range slots {
+		if !s.Full || s.ImportExport {
 			continue
 		}
-		tried[b.ID] = true
-		if err := l.changer.Mount(b.ID); err != nil {
+		key := "slot:" + strconv.Itoa(s.Slot)
+		if tried[key] {
+			continue
+		}
+		tried[key] = true
+		if err := l.changer.Load(s.Slot, 0); err != nil {
 			return "", 0, false, err
 		}
 		name, epoch, verr := l.verifyWritable(appendable, now)
 		if verr != nil {
-			lastErr = verr // wrong pool / holds runs / blank with autoLabel off: try the next bay
+			lastErr = verr // wrong pool / holds runs / blank with autoLabel off: try the next slot
 			continue
+		}
+		if tried[name] {
+			continue // already used this run — the full tape we span from, or an earlier roll
 		}
 		tried[name] = true // never re-select this volume by name during a multi-volume write
 		empty := len(l.cat.SlotsOnLabel(name)) == 0
-		logf.log("medium %q: rolled to bay %s (volume %q)", l.medium, b.ID, name)
+		logf.log("medium %q: rolled to slot %d (volume %q)", l.medium, s.Slot, name)
 		return name, epoch, empty, nil
 	}
 	// No blank or empty in-pool bay left. Rather than refuse, recycle the oldest tape
@@ -371,7 +404,7 @@ func (l *Librarian) advanceViaLibrary(appendable bool, tried map[string]bool, no
 		return name, epoch, true, nil
 	}
 	if lastErr == nil {
-		lastErr = fmt.Errorf("all %d bays are already loaded or tried", len(bays))
+		lastErr = fmt.Errorf("all %d slots are already loaded or tried", len(slots))
 	}
 	return "", 0, false, l.noReusableErr(tried, now, lastErr)
 }
@@ -489,19 +522,48 @@ func (l *Librarian) acceptOrRecycle(appendable bool, tried map[string]bool, now 
 // place — the robotic-library half of the rotation, where the software (not an operator)
 // loads the aged-out tape. The caller has already confirmed rec is Floor-cleared.
 func (l *Librarian) recycleViaLibrary(rec catalog.VolumeRecord, now time.Time, logf Logf) error {
-	bays, err := l.changer.Bays()
+	_, ok, err := l.findSlot(rec.Label.Name)
 	if err != nil {
 		return err
 	}
-	for _, b := range bays {
-		if b.Label == rec.Label.Name {
-			if err := l.changer.Mount(b.ID); err != nil {
-				return err
-			}
-			return l.recycle(rec.Label, now, logf)
+	if !ok {
+		return fmt.Errorf("medium %q: volume %q (the oldest reusable tape) is not in the library; load it with `nb load %s <slot>` or relabel a blank one", l.medium, rec.Label.Name, l.medium)
+	}
+	return l.recycle(rec.Label, now, logf) // findSlot left it loaded in drive 0
+}
+
+// findSlot locates the slot holding the cartridge labeled name by loading each
+// occupied slot into drive 0 and reading its label, leaving the match loaded. A real
+// library would map barcode→label from the catalog to skip the scan; the file-backed
+// changer reads labels directly. ok is false when no slot holds that label.
+func (l *Librarian) findSlot(name string) (int, bool, error) {
+	// The wanted cartridge may already be in a drive — its slot then reports empty,
+	// so the scan below would miss it. Check the drives' loaded labels first.
+	drives, err := l.changer.Drives()
+	if err != nil {
+		return 0, false, err
+	}
+	for _, d := range drives {
+		if d.Loaded && d.Volume.Label == name {
+			return d.FromSlot, true, nil
 		}
 	}
-	return fmt.Errorf("medium %q: volume %q (the oldest reusable tape) is not in the library; load it with `nb load %s <bay>` or relabel a blank one", l.medium, rec.Label.Name, l.medium)
+	slots, err := l.changer.Slots()
+	if err != nil {
+		return 0, false, err
+	}
+	for _, s := range slots {
+		if !s.Full || s.ImportExport {
+			continue
+		}
+		if err := l.changer.Load(s.Slot, 0); err != nil {
+			return 0, false, err
+		}
+		if n, labeled, _ := l.readVolumeLabel(); labeled && n == name {
+			return s.Slot, true, nil
+		}
+	}
+	return 0, false, nil
 }
 
 // recycle rewrites the loaded volume's label in place for reuse: same name and pool,
@@ -581,10 +643,7 @@ func (l *Librarian) noReusableErr(tried map[string]bool, now time.Time, lastErr 
 // by hitting it), or a non-changer medium — the caller then relies on the reactive
 // media.ErrVolumeFull path instead of pre-checking.
 func (l *Librarian) Remaining() (int64, bool) {
-	if !l.hasDrive {
-		return 0, false
-	}
-	st, ok := l.drive.Loaded()
+	st, ok := l.loaded()
 	if !ok || st.Capacity <= 0 {
 		return 0, false
 	}
@@ -695,21 +754,67 @@ func (s *WriteSink) Bounded() bool {
 // station. need is the specific volume label wanted (reads) or "" (writes); expect
 // is the volume a write would prefer (the oldest reusable tape) or "".
 func (l *Librarian) promptSwap(need, expect string, cause error) (string, bool) {
-	shelf, err := l.shelf.Shelf()
+	room, err := l.room()
 	if err != nil {
 		return "", false
 	}
 	var loaded media.VolumeStatus
-	if l.hasDrive {
-		if st, ok := l.drive.Loaded(); ok {
-			loaded = st
-		}
+	if st, ok := l.loaded(); ok {
+		loaded = st
 	}
 	reason := ""
 	if cause != nil {
 		reason = cause.Error()
 	}
-	return l.op.Swap(SwapRequest{Medium: l.medium, Reason: reason, Need: need, Expect: expect, Loaded: loaded, Shelf: shelf})
+	return l.op.Swap(SwapRequest{Medium: l.medium, Reason: reason, Need: need, Expect: expect, Loaded: loaded, Shelf: room})
+}
+
+// room lists the cartridges available to load into the drive — every occupied slot
+// not currently in a drive — each by slot id and its barcode, for the operator
+// prompt. A real drive has no addressable slots, so the room is empty (the operator
+// loads from their own physical shelf and the librarian re-reads the drive).
+func (l *Librarian) room() ([]media.VolumeStatus, error) {
+	slots, err := l.changer.Slots()
+	if err != nil {
+		return nil, err
+	}
+	var out []media.VolumeStatus
+	for _, s := range slots {
+		if !s.Full || s.ImportExport {
+			continue
+		}
+		st := media.VolumeStatus{ID: strconv.Itoa(s.Slot), Barcode: s.Barcode}
+		// Read the slot's label so the operator can choose by label or blankness — a
+		// file-backed changer can (it loads the slot to read it); a real drive has no
+		// addressable slots, so the room is empty and this never runs.
+		if err := l.changer.Load(s.Slot, 0); err == nil {
+			if name, labeled, lerr := l.readVolumeLabel(); labeled {
+				st.Label = name
+			} else if lerr == nil {
+				st.Blank = true
+			}
+		}
+		out = append(out, st)
+	}
+	return out, nil
+}
+
+// insertChoice effects the operator's swap choice: on a file-backed changer it loads
+// the chosen slot (the simulated hands); on a real drive (no addressable slots) it is
+// a no-op — the human already inserted the cartridge and the caller re-reads it.
+func (l *Librarian) insertChoice(choice string) error {
+	slots, err := l.changer.Slots()
+	if err != nil {
+		return err
+	}
+	if len(slots) == 0 {
+		return nil
+	}
+	slot, err := strconv.Atoi(choice)
+	if err != nil {
+		return fmt.Errorf("invalid slot %q", choice)
+	}
+	return l.changer.Load(slot, 0)
 }
 
 // swapOutcome is the result of one single-drive swap step.
@@ -735,8 +840,8 @@ func (l *Librarian) requestSwap(need, expect string, cause error, logf Logf) (re
 	if !ok {
 		return "", swapAborted, nil
 	}
-	logf.log("loading reel %s into the %q drive", reel, l.medium)
-	if err := l.shelf.Insert(reel); err != nil {
+	logf.log("loading %s into the %q drive", reel, l.medium)
+	if err := l.insertChoice(reel); err != nil {
 		return "", swapInserted, err
 	}
 	return reel, swapInserted, nil
@@ -755,27 +860,25 @@ func (l *Librarian) MountForRead(volume string, epoch int) error {
 }
 
 func (l *Librarian) mount(volume string) error {
-	if !l.isLibrary && !l.isStation {
+	if !l.isChanger {
 		return nil // address-identified: a single volume, nothing to mount
 	}
 	if l.mountedMatches(volume) {
 		return nil // the right tape is already in the drive
 	}
-	// A single-drive station prompts the operator to swap the needed reel in.
-	if l.isStation {
+	// A hand-loaded drive prompts the operator to swap the needed cartridge in.
+	if l.manual {
 		return l.mountViaShelf(volume)
 	}
-	// A robotic library auto-mounts the bay holding the needed label.
-	bays, err := l.changer.Bays()
+	// A robot loads the slot holding the needed label.
+	_, ok, err := l.findSlot(volume)
 	if err != nil {
 		return err
 	}
-	for _, b := range bays {
-		if b.Label == volume {
-			return l.changer.Mount(b.ID)
-		}
+	if !ok {
+		return fmt.Errorf("%w: volume %q (holding a copy of the slot on %q) is not in the library; load it with `nb load %s <slot>`", ErrVolumeUnavailable, volume, l.medium, l.medium)
 	}
-	return fmt.Errorf("%w: volume %q (holding a copy of the slot on %q) is not in the library; load it with `nb load %s <bay>`", ErrVolumeUnavailable, volume, l.medium, l.medium)
+	return nil // findSlot left the matching slot loaded in drive 0
 }
 
 // mountViaShelf loads the named reel on a single-drive station: if it is not already
@@ -848,20 +951,17 @@ func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration
 		return fmt.Errorf("medium %q is address-identified and does not use labels", l.medium)
 	}
 
-	// On a robotic library, pick the physical bay this label belongs to and mount it —
-	// an existing tape for relabel, a blank one for a new label. On a single-drive
-	// station there is no bay to choose: labeling acts on whatever reel the operator
-	// has loaded into the drive.
-	chosenBay := ""
-	if l.isLibrary {
-		bay, err := l.chooseBay(name, relabel)
+	// On a robot, pick the slot this label belongs to and load it — an existing tape
+	// for relabel, a blank one for a new label. On a hand-loaded drive there is no slot
+	// to choose: labeling acts on whatever cartridge the operator loaded into the drive.
+	chosenSlot := -1
+	if l.isChanger && !l.manual {
+		slot, err := l.chooseSlot(name, relabel)
 		if err != nil {
 			return err
 		}
-		if err := l.changer.Mount(bay); err != nil {
-			return err
-		}
-		chosenBay = bay
+		// chooseSlot leaves the chosen slot loaded in drive 0.
+		chosenSlot = slot
 	}
 
 	cur, labeled, err := lv.ReadLabel()
@@ -872,7 +972,7 @@ func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration
 		// Empty drive: there is nothing to label, and --force cannot conjure a tape.
 		// Surface the real condition rather than burying it in the foreign/corrupt
 		// "use --force" refusal below (which a swap, not a force, would resolve).
-		return fmt.Errorf("medium %q has no volume loaded; load one first with `nb load %s <bay>`", l.medium, l.medium)
+		return fmt.Errorf("medium %q has no volume loaded; load one first with `nb load %s <slot>`", l.medium, l.medium)
 	case errors.Is(err, media.ErrForeignVolume):
 		if !force {
 			return fmt.Errorf("volume holds non-NBackup data; refusing to overwrite (use --force)")
@@ -922,8 +1022,8 @@ func (l *Librarian) Label(name string, relabel, force bool, minAge time.Duration
 	// Name the bay on a robotic library: a new label grabs a blank bay and mounts it,
 	// which can move the mount away from a bay the operator just loaded — say so rather
 	// than switching silently.
-	if chosenBay != "" {
-		logf.log("labeled bay %s of %q as %q (epoch %d) and mounted it", chosenBay, l.medium, name, epoch)
+	if chosenSlot >= 0 {
+		logf.log("labeled slot %d of %q as %q (epoch %d) and loaded it", chosenSlot, l.medium, name, epoch)
 	} else {
 		logf.log("labeled %q as %q (epoch %d)", l.medium, name, epoch)
 	}
@@ -961,185 +1061,130 @@ func (l *Librarian) reconcileRelabel(wiped string, lbl record.Label) error {
 	return nil
 }
 
-// chooseBay selects which physical bay a label operation targets on a robotic
-// library. A bay explicitly loaded (`nb load <bay>`) is the target — label and
-// relabel act on it, just as a single-drive station labels whatever reel is in the
-// drive — so loading a bay then labeling it does what it says, and `--relabel` on a
-// loaded tape recycles it to the new name. With nothing loaded, a relabel finds the
-// tape by its current name (an in-place re-stamp) and a new label grabs a blank bay.
-// Label() enforces the safety rules on the chosen bay (blank for a new label,
-// --relabel + protected-slot guard for a reuse); chooseBay only refuses to create a
-// duplicate label on a second bay.
-func (l *Librarian) chooseBay(name string, relabel bool) (string, error) {
-	bays, err := l.changer.Bays()
+// chooseSlot selects which slot a label operation targets on a robot, leaving it
+// loaded in drive 0. A slot explicitly loaded (`nb load <slot>`) is the target — label
+// and relabel act on whatever it holds, so loading a slot then labeling it does what
+// it says, and `--relabel` on a loaded tape recycles it to the new name. With nothing
+// loaded, a relabel finds the tape by its current name (an in-place re-stamp) and a
+// new label grabs a blank slot. Because the changer reports only barcodes, finding a
+// named or blank slot means loading each occupied slot and reading its label; the scan
+// also refuses to stamp a name a different slot already carries (a duplicate label).
+func (l *Librarian) chooseSlot(name string, relabel bool) (int, error) {
+	// A loaded slot is the explicit target for a relabel (recycle whatever it holds),
+	// or for a new label only when it is blank; a loaded non-blank slot is left alone
+	// and a new label takes a fresh blank slot instead.
+	if drs, _ := l.changer.Drives(); len(drs) > 0 && drs[0].Loaded {
+		if relabel {
+			return drs[0].FromSlot, nil
+		}
+		if _, labeled, _ := l.readVolumeLabel(); !labeled {
+			return drs[0].FromSlot, nil
+		}
+	}
+	// Nothing loaded: scan the slots, reading each label, to find the named tape (for a
+	// relabel) or a blank slot (for a new label), and to detect a duplicate name.
+	slots, err := l.changer.Slots()
 	if err != nil {
-		return "", err
+		return -1, err
 	}
-	loaded := ""
-	if cur, ok := l.changer.Loaded(); ok {
-		loaded = cur.ID
-	}
-	// Refuse to stamp a name another bay already carries (a duplicate label). For a
-	// relabel, the loaded bay is exempt — re-stamping it (same name, fresh epoch) is
-	// allowed — and a name held by a *different* bay is reachable by loading it.
-	for _, b := range bays {
-		if b.Label == name && !(relabel && b.ID == loaded) {
-			if relabel {
-				return "", fmt.Errorf("a tape labeled %q already exists on bay %s; load it to relabel it, or pick a different name", name, b.ID)
-			}
-			return "", fmt.Errorf("a tape labeled %q already exists; use --relabel to reuse it", name)
+	named, blank := -1, -1
+	for _, s := range slots {
+		if !s.Full || s.ImportExport {
+			continue
+		}
+		if err := l.changer.Load(s.Slot, 0); err != nil {
+			return -1, err
+		}
+		n, labeled, lerr := l.readVolumeLabel()
+		switch {
+		case labeled && n == name && named < 0:
+			named = s.Slot
+		case !labeled && lerr == nil && blank < 0:
+			blank = s.Slot
 		}
 	}
 	if relabel {
-		// A loaded bay is the explicit recycle target (`nb load <bay>` picked it), so
-		// --relabel can rename/recycle whatever it holds; with nothing loaded, re-stamp
-		// the tape currently named `name` in place.
-		if loaded != "" {
-			return loaded, nil
+		if named < 0 {
+			return -1, fmt.Errorf("no tape loaded and none labeled %q; run `nb load %s <slot>` to pick the tape to recycle", name, l.medium)
 		}
-		for _, b := range bays {
-			if b.Label == name {
-				return b.ID, nil
-			}
+		if err := l.changer.Load(named, 0); err != nil {
+			return -1, err
 		}
-		return "", fmt.Errorf("no tape loaded and none labeled %q; run `nb load %s <bay>` to pick the tape to recycle", name, l.medium)
+		return named, nil
 	}
-	// A new label takes a blank bay, preferring one already loaded so `nb load <blank>`
-	// then `nb label` directs it; a loaded but non-blank bay is left alone (recycle it
-	// with --relabel) and the next free blank is used instead.
-	if loaded != "" {
-		for _, b := range bays {
-			if b.ID == loaded && b.Blank {
-				return loaded, nil
-			}
-		}
+	if named >= 0 {
+		return -1, fmt.Errorf("a tape labeled %q already exists in slot %d; use --relabel to reuse it", name, named)
 	}
-	for _, b := range bays {
-		if b.Blank {
-			return b.ID, nil
-		}
+	if blank < 0 {
+		return -1, fmt.Errorf("no blank slot available — load a slot to recycle and relabel it with `nb label --relabel`")
 	}
-	return "", fmt.Errorf("no blank bay available; all %d are in use — load a bay to recycle and relabel it with `nb label --relabel`", len(bays))
+	if err := l.changer.Load(blank, 0); err != nil {
+		return -1, err
+	}
+	return blank, nil
 }
 
-// View is a medium's physical inventory for `nb medium <name>`: a robotic library's
-// bays, or a single-drive station's drive plus any room reels it can load. Exactly
-// one of Library/Station is set.
+// View is a tape medium's physical inventory for `nb medium <name>`: its slots (each
+// by barcode) and its drives (each with what is loaded). Manual reports whether a
+// human loads it (so the display can say "drive" with a shelf the operator stocks)
+// rather than a robot.
 type View struct {
-	Library bool                 // robotic: Bays is the full inventory
-	Loaded  string               // loaded bay id (library)
-	Bays    []media.VolumeStatus // every bay and what it holds
-	Station bool                 // single drive: Drive is what's loaded
-	Drive   media.VolumeStatus   // the reel/tape in the drive (when DriveOK)
-	DriveOK bool                 // false when the drive is empty
-	Shelf   []media.VolumeStatus // reels available to load (single-drive station)
+	Manual bool
+	Slots  []media.SlotStatus
+	Drives []media.DriveStatus
 }
 
-// View inventories the medium's changer for display. A robotic library reports its
-// bays; a single-drive station reports the loaded volume and its room reels.
+// View inventories the medium's changer for display.
 func (l *Librarian) View() (View, error) {
-	if l.isLibrary {
-		bays, err := l.changer.Bays()
-		if err != nil {
-			return View{}, err
-		}
-		loaded := ""
-		if st, ok := l.changer.Loaded(); ok {
-			loaded = st.ID
-		}
-		return View{Library: true, Loaded: loaded, Bays: bays}, nil
+	if !l.isChanger {
+		return View{}, fmt.Errorf("medium %q has no changer to inventory (it is addressed directly, not by loading volumes)", l.medium)
 	}
-	if l.isStation {
-		v := View{Station: true}
-		v.Drive, v.DriveOK = l.drive.Loaded()
-		if shelf, err := l.shelf.Shelf(); err == nil {
-			v.Shelf = shelf
-		}
-		return v, nil
+	slots, err := l.changer.Slots()
+	if err != nil {
+		return View{}, err
 	}
-	return View{}, fmt.Errorf("medium %q has no changer to inventory (it is addressed directly, not by loading volumes)", l.medium)
+	drives, err := l.changer.Drives()
+	if err != nil {
+		return View{}, err
+	}
+	return View{Manual: l.manual, Slots: slots, Drives: drives}, nil
 }
 
-// Load mounts a volume on a changer medium, addressed by bay/reel id, or by label
-// when byLabel is set (the host-side "load the volume labeled X" helper).
+// Load loads a cartridge into the drive on a changer medium, addressed by slot
+// number, or by label when byLabel is set (the "load the volume labeled X" helper).
 func (l *Librarian) Load(target string, byLabel bool, logf Logf) error {
-	// A single-drive station loads a reel from the room into its one drive.
-	if l.isStation {
-		return l.insertFromShelf(target, byLabel, logf)
-	}
-	if !l.isLibrary {
+	if !l.isChanger {
 		return fmt.Errorf("medium %q has no changer to load (it is addressed directly, not by loading volumes)", l.medium)
 	}
-	bay := target
 	if byLabel {
-		bays, err := l.changer.Bays()
+		slot, ok, err := l.findSlot(target)
 		if err != nil {
 			return err
 		}
-		found := ""
-		for _, b := range bays {
-			if b.Label == target {
-				found = b.ID
-				break
-			}
+		if !ok {
+			return fmt.Errorf("no tape labeled %q in the %q library", target, l.medium)
 		}
-		if found == "" {
-			return fmt.Errorf("no tape labeled %q in the library", target)
-		}
-		bay = found
+		logf.log("loaded %q: slot %d holds %q", l.medium, slot, target) // findSlot left it loaded
+		return nil
 	}
-	if err := l.changer.Mount(bay); err != nil {
-		return err
-	}
-	name, labeled, lerr := l.readVolumeLabel()
-	switch {
-	case labeled:
-		logf.log("loaded %q: bay %s holds %q", l.medium, bay, name)
-	case lerr != nil:
-		// Any read error — a foreign label or unparseable/corrupt data — means the
-		// bay is NOT blank; match the inventory's "foreign" verdict so an operator is
-		// never told an occupied reel is empty.
-		logf.log("loaded %q: bay %s (foreign — non-NBackup or unreadable data; `nb label --relabel --force` to overwrite)", l.medium, bay)
-	default:
-		logf.log("loaded %q: bay %s (blank)", l.medium, bay)
-	}
-	return nil
-}
-
-// insertFromShelf loads a reel from a station's room into its single drive, addressed
-// by reel id or (with byLabel) by the label it carries.
-func (l *Librarian) insertFromShelf(target string, byLabel bool, logf Logf) error {
-	shelf, err := l.shelf.Shelf()
+	slot, err := strconv.Atoi(target)
 	if err != nil {
-		return err
+		return fmt.Errorf("invalid slot %q (load by slot number, or use --label)", target)
 	}
-	reel := ""
-	for _, b := range shelf {
-		if (byLabel && b.Label == target) || (!byLabel && b.ID == target) {
-			reel = b.ID
-			break
-		}
-	}
-	if reel == "" {
-		what := "reel"
-		if byLabel {
-			what = "tape labeled"
-		}
-		return fmt.Errorf("no %s %q in the %q room (it may already be in the drive)", what, target, l.medium)
-	}
-	if err := l.shelf.Insert(reel); err != nil {
+	if err := l.changer.Load(slot, 0); err != nil {
 		return err
 	}
 	name, labeled, lerr := l.readVolumeLabel()
 	switch {
 	case labeled:
-		logf.log("loaded %q: reel %s holds %q", l.medium, reel, name)
+		logf.log("loaded %q: slot %d holds %q", l.medium, slot, name)
 	case lerr != nil:
 		// Any read error — a foreign label or unparseable/corrupt data — means the
-		// reel is NOT blank; match the inventory's "foreign" verdict.
-		logf.log("loaded %q: reel %s (foreign — non-NBackup or unreadable data; `nb label --relabel --force` to overwrite)", l.medium, reel)
+		// slot is NOT blank; match the inventory's "foreign" verdict so an operator is
+		// never told an occupied cartridge is empty.
+		logf.log("loaded %q: slot %d (foreign — non-NBackup or unreadable data; `nb label --relabel --force` to overwrite)", l.medium, slot)
 	default:
-		logf.log("loaded %q: reel %s (blank)", l.medium, reel)
+		logf.log("loaded %q: slot %d (blank)", l.medium, slot)
 	}
 	return nil
 }

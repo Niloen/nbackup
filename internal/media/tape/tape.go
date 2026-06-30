@@ -1,14 +1,16 @@
-// Package tape implements tape-like media. A tape is a flat, sequential sequence
-// of files addressed by file number, the first being a volume label.
+// Package tape implements tape-like media. A tape (cartridge) is a flat, sequential
+// sequence of files addressed by file number, the first being a volume label.
 //
-// One medium maps to one of three shapes. A robotic library of bays behind one drive
-// (roboticChanger, a dirChanger) is a media.Changer. The two single-drive shapes —
-// a real drive an operator loads by hand (driveChanger) and the disk-emulated station
-// whose reels are directories the software can enumerate and load (shelfChanger, a
-// manualStation) — are NOT changers: they are a media.Drive (the one loaded volume)
-// plus a media.Shelf (the operator-managed room), the emulator functional and the
-// real drive degenerate. All reuse the same I/O core (the `tape` struct) over a
-// mounted `device` — the mt analogue (positioning + block I/O of one mounted tape).
+// One medium is a media.Changer: a set of drives (data-transfer elements) fed from a
+// set of slots (storage elements). A `loader` is the changer's backend — it
+// inventories slots by barcode and binds a cartridge to a drive, producing the
+// `device` (the mt analogue: positioning + block I/O of one mounted cartridge) the
+// drive reads and writes. Two loaders exist: a file-backed one (dirLoader: slots are
+// subdirectories, drives are persisted load-pointers; it can simulate either a robot
+// or a hand-loaded drive), and a real single drive (realDriveLoader: one mtDevice, no
+// slots, a human loads — media.ErrManualLoad). The changer (tapeChanger) is also a
+// media.Volume that proxies the active drive, so the medium handle is a Volume above
+// the librarian while the librarian uses the Changer facet for logistics.
 package tape
 
 import (
@@ -31,74 +33,49 @@ func init() {
 		// reclamation is deferred to label rotation, so no concurrent-write capability —
 		// a serial, whole-volume medium.
 		Profile: media.NewVolumeProfile,
-		Params:  []string{"dir", "device", "bays", "volume_size", "mode", "reels", "part_size", "block_size"},
+		Params:  []string{"dir", "device", "slots", "drives", "manual", "volume_size", "part_size", "block_size"},
 	})
 }
 
-// newTapeVolume constructs a tape Volume: a virtual library/station rooted at `dir`, or a
-// real drive at `device`.
+// newTapeVolume constructs a tape changer: a file-backed library/station rooted at
+// `dir`, or a real drive at `device`. Either way the result is a tapeChanger, which
+// is both a media.Changer (the librarian's logistics) and a media.Volume (the active
+// drive's cartridge, so the medium handle is a Volume above the librarian).
 func newTapeVolume(opts media.Options) (media.Volume, error) {
+	// volume_size caps each emulated cartridge so it fills like a real reel; a real
+	// drive reports EOT only by hitting it, so capacity there stays 0 (use part_size).
+	var capacity int64
+	if s := opts.Get("volume_size"); s != "" {
+		c, err := sizeutil.ParseBytes(s)
+		if err != nil {
+			return nil, fmt.Errorf("volume_size: %w", err)
+		}
+		capacity = c
+	}
 	switch {
 	case opts.Get("dir") != "":
-		// The emulated medium is finite: volume_size caps each tape so it fills
-		// like a real reel.
-		var capacity int64
-		if s := opts.Get("volume_size"); s != "" {
-			c, err := sizeutil.ParseBytes(s)
-			if err != nil {
-				return nil, fmt.Errorf("volume_size: %w", err)
-			}
-			capacity = c
-		}
-		// mode: manual is the single-drive station — one drive whose content the
-		// operator swaps from an offline room of reels (a ShelfStation). The default
-		// is the robotic library — many physical bays a robot switches between (a
-		// Library). They count different things, so they use different keys: `reels`
-		// (how many tapes are in the room) vs `bays` (positions).
-		if opts.Get("mode") == "manual" {
-			if opts.Get("bays") != "" {
-				return nil, fmt.Errorf("manual tape station has a single drive, not bays; use `reels` for how many tapes are in the room")
-			}
-			reels, err := atoiOpt(opts.Get("reels"), 1)
-			if err != nil {
-				return nil, fmt.Errorf("reels: %w", err)
-			}
-			mc, err := openManualStation(opts.Get("dir"), capacity, reels)
-			if err != nil {
-				return nil, err
-			}
-			t := &tape{}
-			if dev, reel, ok := mc.loaded(); ok {
-				t.dev, t.bay = dev, reel
-			}
-			return &shelfChanger{tape: t, mc: mc}, nil
-		}
-		if opts.Get("reels") != "" {
-			return nil, fmt.Errorf("`reels` applies only to a manual tape station (mode: manual); a robotic library counts `bays`")
-		}
-		bays, err := atoiOpt(opts.Get("bays"), 1)
+		slots, err := atoiOpt(opts.Get("slots"), 1)
 		if err != nil {
-			return nil, fmt.Errorf("bays: %w", err)
+			return nil, fmt.Errorf("slots: %w", err)
 		}
-		dc, err := openDirChanger(opts.Get("dir"), capacity, bays)
+		drives, err := atoiOpt(opts.Get("drives"), 1)
+		if err != nil {
+			return nil, fmt.Errorf("drives: %w", err)
+		}
+		manual, err := boolOpt(opts.Get("manual"))
+		if err != nil {
+			return nil, fmt.Errorf("manual: %w", err)
+		}
+		ld, err := openDirLoader(opts.Get("dir"), capacity, slots, drives, manual)
 		if err != nil {
 			return nil, err
 		}
-		t := &tape{}
-		if dev, bay, ok := dc.loaded(); ok {
-			t.dev, t.bay = dev, bay
-		}
-		return &roboticChanger{tape: t, ch: dc}, nil
+		return newTapeChanger(ld, capacity)
 	case opts.Get("device") != "":
-		// A real standalone drive: one fixed device the operator loads by hand. It
-		// is a Station (report what is loaded), not a Library (no addressable bays).
-		var capacity int64
-		if s := opts.Get("volume_size"); s != "" {
-			c, err := sizeutil.ParseBytes(s)
-			if err != nil {
-				return nil, fmt.Errorf("volume_size: %w", err)
+		for _, k := range []string{"slots", "drives", "manual"} {
+			if opts.Get(k) != "" {
+				return nil, fmt.Errorf("`%s` applies only to a file-backed library (dir:); a real drive (device:) is a single hand-loaded drive", k)
 			}
-			capacity = c
 		}
 		var block int
 		if s := opts.Get("block_size"); s != "" {
@@ -112,9 +89,9 @@ func newTapeVolume(opts media.Options) (media.Volume, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &driveChanger{tape: &tape{dev: dev}, capacity: capacity}, nil
+		return newTapeChanger(&realDriveLoader{dev: dev}, capacity)
 	default:
-		return nil, fmt.Errorf("tape medium requires 'dir' (virtual tape library) or 'device' (real drive)")
+		return nil, fmt.Errorf("tape medium requires 'dir' (file-backed library) or 'device' (real drive)")
 	}
 }
 
@@ -124,6 +101,14 @@ func atoiOpt(s string, def int) (int, error) {
 		return def, nil
 	}
 	return strconv.Atoi(s)
+}
+
+// boolOpt parses a boolean option, defaulting to false when empty.
+func boolOpt(s string) (bool, error) {
+	if s == "" {
+		return false, nil
+	}
+	return strconv.ParseBool(s)
 }
 
 // device is the mt-level seam: one mounted tape as a sequence of files addressed
@@ -146,13 +131,11 @@ type device interface {
 	bytesUsed() int64
 }
 
-// tape is the I/O core shared by all three medium shapes: it frames files and the
-// label over the single currently-mounted device. The positioning surface (which
-// bay/reel is in the drive) lives in the wrappers — roboticChanger, driveChanger,
-// shelfChanger — that embed it.
+// tape is the per-cartridge I/O core: it frames files and the label over one mounted
+// device (the cartridge currently bound to a drive). One tape backs each tapeDrive;
+// the positioning surface (which cartridge is in which drive) lives in the tapeChanger.
 type tape struct {
 	dev device // mounted device; nil when the drive is empty
-	bay string // mounted bay/reel id (for display); "" when empty
 }
 
 func (t *tape) requireDev() (device, error) {
@@ -304,61 +287,117 @@ func (t *tape) WriteLabel(lbl record.Label) error {
 	return werr
 }
 
-// roboticChanger is a robotic tape library (media.Changer): a dirChanger of bays
-// the "robot" mounts into the one drive, addressed by bay id. It reaches every tape
-// through its bays, so it does NOT implement media.Shelf.
-type roboticChanger struct {
+// loader is a changer's backend: it inventories cartridges by slot/barcode and binds
+// a cartridge to a drive, producing the device the drive reads and writes. The
+// file-backed dirLoader maps slots to subdirectories; realDriveLoader is one real
+// drive a human loads (no slots). A future mtx loader would drive a SCSI robot.
+type loader interface {
+	driveCount() int
+	manual() bool
+	slots() ([]media.SlotStatus, error)
+	// load binds the cartridge in slot to drive, returning its device and barcode.
+	load(slot, drive int) (dev device, barcode string, err error)
+	unload(drive int) error
+	// loaded reports drive's current binding (device, barcode, home slot), if any.
+	loaded(drive int) (dev device, barcode string, fromSlot int, ok bool)
+}
+
+// tapeDrive is one data-transfer element: the per-cartridge I/O core (tape) over the
+// device currently bound to it, plus the bound cartridge's barcode and home slot. It
+// is a media.Drive (a Volume that reports what is loaded).
+type tapeDrive struct {
 	*tape
-	ch *dirChanger
-}
-
-// Mount loads a bay into the drive (media.Changer).
-func (l *roboticChanger) Mount(bay string) error {
-	dev, err := l.ch.mount(bay)
-	if err != nil {
-		return err
-	}
-	l.dev, l.bay = dev, bay
-	return nil
-}
-
-// Loaded reports the volume mounted in the drive (media.Drive); ok is false when
-// the drive is empty.
-func (l *roboticChanger) Loaded() (media.VolumeStatus, bool) {
-	if l.dev == nil {
-		return media.VolumeStatus{}, false
-	}
-	return deviceStatus(l.bay, l.dev, l.ch.capacity), true
-}
-
-// Bays inventories the library (media.Changer).
-func (l *roboticChanger) Bays() ([]media.VolumeStatus, error) { return l.ch.bays() }
-
-// driveChanger is a real standalone drive: a media.Drive (one fixed device the
-// operator loads by hand) plus a degenerate media.Shelf — an empty room and an
-// Insert that errors, because a human, not software, changes the reel. It is NOT a
-// media.Changer: there is no robot and no bays to mount.
-type driveChanger struct {
-	*tape
+	barcode  string
+	fromSlot int
 	capacity int64
 }
 
-// Loaded reports the volume in the drive (media.Drive). A real drive is always
-// "loaded" with its device; ok is false only if it could not be opened.
-func (s *driveChanger) Loaded() (media.VolumeStatus, bool) {
-	if s.dev == nil {
+// Loaded reports the cartridge in this drive (media.Drive); ok is false when empty.
+func (d *tapeDrive) Loaded() (media.VolumeStatus, bool) {
+	if d.dev == nil {
 		return media.VolumeStatus{}, false
 	}
-	return deviceStatus("", s.dev, s.capacity), true
+	st := deviceStatus("", d.dev, d.capacity)
+	st.Barcode = d.barcode
+	return st, true
 }
 
-// Shelf reports an empty room (media.Shelf): software cannot enumerate a real
-// drive's reels.
-func (s *driveChanger) Shelf() ([]media.VolumeStatus, error) { return nil, nil }
+// tapeChanger is a tape library: K drives fed from a loader's slots. It is a
+// media.Changer (the librarian's logistics) and — by embedding drive 0 — a
+// media.Volume/Labeled that proxies the active drive, so the medium handle is a
+// Volume above the librarian while the librarian uses the Changer facet below.
+type tapeChanger struct {
+	*tapeDrive // drive 0: the active-drive Volume/Labeled facet (drives[0])
+	drives     []*tapeDrive
+	ld         loader
+}
 
-// Insert errors (media.Shelf): only a human loads a reel into a real drive.
-func (s *driveChanger) Insert(string) error {
-	return fmt.Errorf("real tape drive: load the reel by hand, then retry")
+// newTapeChanger builds the K drives from the loader's initial (persisted) state.
+func newTapeChanger(ld loader, capacity int64) (*tapeChanger, error) {
+	drives := make([]*tapeDrive, ld.driveCount())
+	for i := range drives {
+		d := &tapeDrive{tape: &tape{}, fromSlot: -1, capacity: capacity}
+		if dev, barcode, slot, ok := ld.loaded(i); ok {
+			d.dev, d.barcode, d.fromSlot = dev, barcode, slot
+		}
+		drives[i] = d
+	}
+	return &tapeChanger{tapeDrive: drives[0], drives: drives, ld: ld}, nil
+}
+
+func (c *tapeChanger) Manual() bool                       { return c.ld.manual() }
+func (c *tapeChanger) Drive(i int) media.Drive            { return c.drives[i] }
+func (c *tapeChanger) Slots() ([]media.SlotStatus, error) { return c.ld.slots() }
+
+// Drives inventories every drive and what it holds (media.Changer).
+func (c *tapeChanger) Drives() ([]media.DriveStatus, error) {
+	out := make([]media.DriveStatus, len(c.drives))
+	for i, d := range c.drives {
+		st, ok := d.Loaded()
+		out[i] = media.DriveStatus{Drive: i, Loaded: ok, FromSlot: d.fromSlot, Volume: st}
+	}
+	return out, nil
+}
+
+// Load binds the cartridge in slot to drive (media.Changer), rebinding the drive's
+// device so its Volume operations act on the new cartridge.
+func (c *tapeChanger) Load(slot, drive int) error {
+	dev, barcode, err := c.ld.load(slot, drive)
+	if err != nil {
+		return err
+	}
+	d := c.drives[drive]
+	d.dev, d.barcode, d.fromSlot = dev, barcode, slot
+	return nil
+}
+
+// Unload returns the cartridge in drive to its slot (media.Changer).
+func (c *tapeChanger) Unload(drive int) error {
+	if err := c.ld.unload(drive); err != nil {
+		return err
+	}
+	d := c.drives[drive]
+	d.dev, d.barcode, d.fromSlot = nil, "", -1
+	return nil
+}
+
+// realDriveLoader is a single real drive a human loads: one fixed device, no
+// addressable slots, and a Load that refuses (media.ErrManualLoad) because only a
+// human moves the reel. The librarian prompts the operator and re-reads the drive.
+type realDriveLoader struct{ dev device }
+
+func (r *realDriveLoader) driveCount() int                    { return 1 }
+func (r *realDriveLoader) manual() bool                       { return true }
+func (r *realDriveLoader) slots() ([]media.SlotStatus, error) { return nil, nil }
+func (r *realDriveLoader) load(slot, drive int) (device, string, error) {
+	return nil, "", media.ErrManualLoad
+}
+func (r *realDriveLoader) unload(int) error { return media.ErrManualLoad }
+func (r *realDriveLoader) loaded(drive int) (device, string, int, bool) {
+	if drive != 0 {
+		return nil, "", -1, false
+	}
+	return r.dev, "", -1, true // the drive always has its device; whether a tape is in it is read on access
 }
 
 // deviceStatus inventories one mounted device: its label, fill, and file count.

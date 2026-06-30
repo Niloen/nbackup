@@ -37,42 +37,44 @@ media:
     capacity: 20TB      # space NBackup may use here; `nb prune` reclaims oldest to fit
     # minimum_age: 30d  # retention floor before a slot may be retired (default: one cycle)
   lto:
-    type: tape          # a ROBOTIC LIBRARY of bays behind one drive
+    type: tape          # a LIBRARY: drives (data-transfer elements) fed from slots
     dir: /var/lib/nbackup/vtape   # a file-backed virtual library (no hardware)
     # device: /dev/nst0           # OR a real single drive (no-rewind device, Linux st),
-    #                             # which is a one-bay library: `bays` does not apply to it,
-    #                             # and its capacity is the tape's own (set part_size
-    #                             # instead of volume_size, since EOT is only hit, not read)
+    #                             # a one-drive hand-loaded changer: `slots`/`drives`/`manual`
+    #                             # do not apply, and its capacity is the tape's own (set
+    #                             # part_size instead of volume_size, since EOT is only hit)
     # block_size: 64k             # (device: only) tape record size; writes are chunked to
     #                             # this and reads buffered to it. Default 64k; range 32k–256k
     #                             # (the st driver's safe single-buffer allocation). A tape is
     #                             # still readable if you later change this — reads auto-grow.
-    bays: 20            # physical bays (dir-backed library); total capacity is bays × volume_size
-    volume_size: 6TB    # per-volume capacity — a write past it hits end-of-tape
+    slots: 20           # storage slots (dir-backed); total capacity is slots × volume_size
+    drives: 1           # data-transfer drives (a robot loads slots into them; >1 = parallel)
+    volume_size: 6TB    # per-cartridge capacity — a write past it hits end-of-tape
     minimum_age: 180d
     appendable: true    # default: pack many runs per tape (Bacula-style) until full.
                         # false = one run per tape (Amanda-style).
-    # Tapes carry a self-describing identity label (file 0) that NBackup verifies
-    # before writing — so a wrong, foreign, or still-active reel is never clobbered.
-    # A robotic library addresses physical bays; the label is read after mounting:
-    #   nb medium lto                     # inventory bay -> label (and what's loaded)
-    #   nb label lto lto-0001             # grab a blank bay and label it
-    #   nb load lto bay-02                # mount a bay (or: nb load --label lto lto-0007)
+    # Cartridges carry a self-describing identity label (file 0) that NBackup verifies
+    # before writing — so a wrong, foreign, or still-active reel is never clobbered. The
+    # library reports each slot's physical barcode; the on-tape label is read after a load:
+    #   nb medium lto                     # inventory drives + slots (barcodes)
+    #   nb label lto lto-0001             # grab a blank slot and label it
+    #   nb load lto 2                     # load slot 2 (or: nb load --label lto lto-0007)
     #   nb label --relabel lto lto-0042   # recycle an aged-out tape
   desk-drive:
     type: tape          # a SINGLE DRIVE you change tapes in by hand
-    dir: /var/lib/nbackup/station   # file-backed station (a real one is device: /dev/nst0)
-    mode: manual        # one drive whose reel the operator swaps by hand; the
-                        # other reels sit on an offline shelf the system can't see
-    reels: 6            # how many tapes are in the room (file-backed sim only — a
+    dir: /var/lib/nbackup/station   # file-backed sim (a real one is device: /dev/nst0)
+    manual: true        # a human loads the drive: NBackup prompts and waits, rather than
+                        # a robot loading a slot itself. The file-backed sim still loads
+                        # in-process so the swap UX is exercisable without hardware.
+    slots: 6            # cartridges the operator can choose from (file-backed sim only — a
                         # real drive just shows what's loaded and a shelf you stock yourself)
     volume_size: 6TB
     minimum_age: 180d
     appendable: false   # typical for a hand-changed drive: one run per tape
     # When a backup or restore needs a different tape, NBackup prompts you to swap
     # the reel in the drive and waits (unattended runs error instead of blocking):
-    #   nb medium desk-drive              # the drive + reels in the room
-    #   nb load desk-drive reel-03        # load a reel by id (or --label by name)
+    #   nb medium desk-drive              # the drive + cartridges in the room
+    #   nb load desk-drive 3              # load slot 3 by id (or --label by name)
     #   nb label desk-drive lto-0001      # label whatever reel is loaded
   cloud:
     type: cloud         # an OBJECT STORE via the Go CDK (gocloud.dev/blob)
@@ -117,7 +119,7 @@ landing: fast-disk
 # (e.g. `lto`) stays the authoritative tier; the holding disk is transient.
 #
 #   media:
-#     lto:     { type: tape, dir: /var/lib/nbackup/vtape, bays: 20, volume_size: 6TB }
+#     lto:     { type: tape, dir: /var/lib/nbackup/vtape, slots: 20, volume_size: 6TB }
 #     scratch: { type: disk, path: /var/spool/nbackup, capacity: 500GB, holding: true }
 #   landing: lto
 #   parallelism: { workers: 4 }   # dumps run parallel onto the holding disk
@@ -233,7 +235,7 @@ landing: fast-disk
 # Off by default: explicit labeling is what makes the overwrite guard meaningful.
 # It never overwrites foreign or non-blank media. A ROBOTIC library labels a blank
 # bay it mounts on its own; a MANUAL station labels the blank reel the operator
-# loads when prompted. SPANNING a dump across reels on a manual station therefore
+# loads when prompted. SPANNING a dump across cartridges on a manual drive therefore
 # needs auto_label: true (so each fresh reel you load mid-run gets labeled) — with
 # it off, pre-`nb label` every reel you will load, or an unlabeled blank loaded
 # mid-span is refused.

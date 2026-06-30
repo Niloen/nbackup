@@ -72,24 +72,35 @@ symmetric (`passphrase_file`) dump needs the same passphrase supplied to gpg.
 
 ## From tape
 
-Tape frames each payload with a fixed 32 KB inline header — skip it first:
+Tape frames each payload with a fixed 32 KB inline header — skip it first. On a
+file-backed (dir-backed) library each volume is a `slot-NN/` directory of plain
+files, so a regular `dd` reads one:
 
 ```bash
 dd bs=32k skip=1 < file | zstd -dc | tar -xf -
 ```
 
+On a real drive (`/dev/nst0`) the backend writes in variable-block mode, so position
+to the file with `mt` and read with a block size at least the medium's `block_size`
+(the records are that big — `bs=256k` covers the 256k ceiling):
+
+```bash
+mt -f /dev/nst0 asf 1                              # position to tape file 1 (file 0 is the label)
+dd if=/dev/nst0 bs=256k skip=1 | zstd -dc | tar -xf -   # skip the 32 KB header record
+```
+
 A **spanned** archive is split into parts written across several volumes. On a
-robotic (dir-backed) library each volume is a `bay-NN/` directory whose file
-`000000` is the volume's identity label; the data files follow as `000001`,
-`000002`, …. `nb slot <slot>` prints the volume chain — in write order — and, per
-archive, the file position of each part (a position of `1` is the file `000001`).
-Map each volume label to the bay it sits in with `nb medium <medium>` (it
-inventories bay → label). Then read each part as `<dir>/bay-NN/<position>`, strip
-its 32 KB header, and concatenate the parts in chain order before decompressing:
+dir-backed library each volume is a `slot-NN/` directory whose file `000000` is the
+volume's identity label; the data files follow as `000001`, `000002`, …. `nb slot
+<slot>` prints the volume chain — in write order — and, per archive, the file
+position of each part (a position of `1` is the file `000001`). Match each volume
+label to its `slot-NN/` directory by reading that directory's `000000` label file.
+Then read each part as `<dir>/slot-NN/<position>`, strip its 32 KB header, and
+concatenate the parts in chain order before decompressing:
 
 ```bash
 # one part per volume, in the chain order `nb slot` prints (positions here are 1):
-for p in vtape/bay-08/000001 vtape/bay-01/000001 vtape/bay-02/000001; do
+for p in vtape/slot-08/000001 vtape/slot-01/000001 vtape/slot-02/000001; do
   dd bs=32k skip=1 < "$p"
 done | zstd -dc | tar -xf -
 ```

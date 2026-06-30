@@ -213,7 +213,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			// Small tapes (256 KiB) across 4 bays: one slot fits, two do not.
-			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "4", "volume_size": "262144"}},
+			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "4", "volume_size": "262144"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -246,7 +246,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 
 	// Seed the first (blank) bay so the library has a tape in the drive to start on;
 	// the changer auto-labels and rolls onto the rest as each fills.
-	if err := eng.LoadVolume("lib", "bay-01", false, nil); err != nil {
+	if err := eng.LoadVolume("lib", "1", false, nil); err != nil {
 		t.Fatalf("load bay-01: %v", err)
 	}
 
@@ -315,7 +315,7 @@ func TestRelabelRefusesProtectedSpanTape(t *testing.T) {
 		Cycle:     "1d",
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
-			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "6", "volume_size": "262144"}},
+			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "6", "volume_size": "262144"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -336,7 +336,7 @@ func TestRelabelRefusesProtectedSpanTape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
-	if err := eng.LoadVolume("lib", "bay-01", false, nil); err != nil {
+	if err := eng.LoadVolume("lib", "1", false, nil); err != nil {
 		t.Fatalf("load bay-01: %v", err)
 	}
 	if _, err := eng.SyncTo("", "lib", SyncSelection{}, true, false, nil); err != nil {
@@ -403,7 +403,7 @@ func TestSyncSlotOutOfTapes(t *testing.T) {
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			// One 64 KiB bay: far too small for the slot above, with no second bay to
 			// span onto.
-			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "1", "volume_size": "65536"}},
+			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "1", "volume_size": "65536"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -422,7 +422,7 @@ func TestSyncSlotOutOfTapes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
-	if err := eng.LoadVolume("lib", "bay-01", false, nil); err != nil {
+	if err := eng.LoadVolume("lib", "1", false, nil); err != nil {
 		t.Fatalf("load bay-01: %v", err)
 	}
 
