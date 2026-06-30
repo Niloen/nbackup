@@ -45,16 +45,16 @@ func TestAcceptsPartSize(t *testing.T) {
 	}
 }
 
-// TestPartSizePolicy confirms the registered default (10 GB) and upper bound (40 GB)
+// TestPartSizePolicy confirms the registered default (10 GiB) and upper bound (40 GiB)
 // the engine applies — the default keeps each object moderate, the cap keeps a single
 // object's multipart upload below the object store's 10000-part ceiling.
 func TestPartSizePolicy(t *testing.T) {
 	p := media.PartSizeFor("cloud")
-	if p.Default != 10_000_000_000 {
-		t.Errorf("cloud part_size default = %d, want 10 GB", p.Default)
+	if p.Default != 10<<30 {
+		t.Errorf("cloud part_size default = %d, want 10 GiB", p.Default)
 	}
-	if p.Max != 40_000_000_000 {
-		t.Errorf("cloud part_size max = %d, want 40 GB", p.Max)
+	if p.Max != 40<<30 {
+		t.Errorf("cloud part_size max = %d, want 40 GiB", p.Max)
 	}
 }
 
