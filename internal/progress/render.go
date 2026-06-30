@@ -34,14 +34,15 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 	fmt.Fprintln(w)
 
 	// Two bars per DLE: DUMP meters source -> holding/landing (uncompressed, against the
-	// estimate); FLUSH meters holding -> landing (compressed, against the staged size).
-	// DUMPED is the uncompressed source size; VOLUME is what has landed authoritatively.
+	// estimate); FLUSH meters holding -> landing (compressed, against the staged size). The
+	// three size columns read as the dump's progression: EST is the planner estimate DUMPED
+	// (the uncompressed source size) races toward, and VOLUME is what has landed authoritatively.
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "DLE\tLEVEL\tSTATE\tDUMP\tFLUSH\tDUMPED\tVOLUME")
+	fmt.Fprintln(tw, "DLE\tLEVEL\tSTATE\tDUMP\tFLUSH\tEST\tDUMPED\tVOLUME")
 	for _, d := range s.DLEs {
-		fmt.Fprintf(tw, "%s\tL%d\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\tL%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			d.Name, d.Level, stateCell(d), dumpCell(d), drainCell(d),
-			sizeutil.FormatBytes(d.DoneBytes), sizeutil.FormatBytes(d.OnVolume()))
+			estCell(d), sizeutil.FormatBytes(d.DoneBytes), sizeutil.FormatBytes(d.OnVolume()))
 	}
 	tw.Flush()
 
@@ -95,6 +96,15 @@ func stateCell(d DLE) string {
 		return "flushing←" + d.Holding
 	}
 	return string(d.State)
+}
+
+// estCell renders the planner's uncompressed size estimate for a DLE, or "n/a" when none was
+// produced (the same no-estimate condition that makes dumpCell unable to draw a bar).
+func estCell(d DLE) string {
+	if d.EstBytes <= 0 {
+		return "n/a"
+	}
+	return sizeutil.FormatBytes(d.EstBytes)
 }
 
 // dumpCell renders the DUMP bar — progress against the estimate — or a dash/marker when
