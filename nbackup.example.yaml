@@ -39,10 +39,14 @@ media:
   lto:
     type: tape          # a ROBOTIC LIBRARY of bays behind one drive
     dir: /var/lib/nbackup/vtape   # a file-backed virtual library (no hardware)
-    # device: /dev/nst0           # OR a real single drive (no-rewind device), which
-    #                             # is a one-bay library: `bays` does not apply to it,
+    # device: /dev/nst0           # OR a real single drive (no-rewind device, Linux st),
+    #                             # which is a one-bay library: `bays` does not apply to it,
     #                             # and its capacity is the tape's own (set part_size
     #                             # instead of volume_size, since EOT is only hit, not read)
+    # block_size: 64k             # (device: only) tape record size; writes are chunked to
+    #                             # this and reads buffered to it. Default 64k; range 32k–256k
+    #                             # (the st driver's safe single-buffer allocation). A tape is
+    #                             # still readable if you later change this — reads auto-grow.
     bays: 20            # physical bays (dir-backed library); total capacity is bays × volume_size
     volume_size: 6TB    # per-volume capacity — a write past it hits end-of-tape
     minimum_age: 180d

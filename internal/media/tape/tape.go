@@ -31,7 +31,7 @@ func init() {
 		// reclamation is deferred to label rotation, so no concurrent-write capability —
 		// a serial, whole-volume medium.
 		Profile: media.NewVolumeProfile,
-		Params:  []string{"dir", "device", "bays", "volume_size", "mode", "reels", "part_size"},
+		Params:  []string{"dir", "device", "bays", "volume_size", "mode", "reels", "part_size", "block_size"},
 	})
 }
 
@@ -100,7 +100,15 @@ func newTapeVolume(opts media.Options) (media.Volume, error) {
 			}
 			capacity = c
 		}
-		dev, err := openMT(opts.Get("device"))
+		var block int
+		if s := opts.Get("block_size"); s != "" {
+			b, err := sizeutil.ParseBytes(s)
+			if err != nil {
+				return nil, fmt.Errorf("block_size: %w", err)
+			}
+			block = int(b)
+		}
+		dev, err := openMT(opts.Get("device"), block)
 		if err != nil {
 			return nil, err
 		}
