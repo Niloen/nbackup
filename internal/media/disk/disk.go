@@ -16,7 +16,13 @@ import (
 )
 
 func init() {
-	media.RegisterVolume("disk", func(opts media.Options) (media.Volume, error) {
+	// A filesystem directory is an fslike-backed object store, so it inherits the size
+	// profile and the concurrent-write capability (eligible as a holding disk) from the
+	// shared layout; only the constructor and accepted params are disk-specific.
+	s := fslike.Spec()
+	s.Type = "disk"
+	s.Params = []string{"path", "part_size"}
+	s.New = func(opts media.Options) (media.Volume, error) {
 		path := opts.Get("path")
 		if path == "" {
 			return nil, fmt.Errorf("disk medium requires a path")
@@ -37,12 +43,8 @@ func init() {
 			return nil, err
 		}
 		return fslike.Open(fsStore{root: root})
-	})
-	media.RegisterProfile("disk", media.NewSizeProfile)
-	media.RegisterParams("disk", "path", "part_size")
-	// A filesystem directory accepts concurrent appends and removes individual files — eligible
-	// as a holding disk.
-	media.RegisterConcurrentWrite("disk")
+	}
+	media.Register(s)
 }
 
 // fsStore is a fslike.Store over a local directory. Keys are slot-relative paths

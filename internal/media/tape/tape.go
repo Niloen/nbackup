@@ -24,80 +24,90 @@ import (
 )
 
 func init() {
-	media.RegisterVolume("tape", func(opts media.Options) (media.Volume, error) {
-		switch {
-		case opts.Get("dir") != "":
-			// The emulated medium is finite: volume_size caps each tape so it fills
-			// like a real reel.
-			var capacity int64
-			if s := opts.Get("volume_size"); s != "" {
-				c, err := sizeutil.ParseBytes(s)
-				if err != nil {
-					return nil, fmt.Errorf("volume_size: %w", err)
-				}
-				capacity = c
-			}
-			// mode: manual is the single-drive station — one drive whose content the
-			// operator swaps from an offline room of reels (a ShelfStation). The default
-			// is the robotic library — many physical bays a robot switches between (a
-			// Library). They count different things, so they use different keys: `reels`
-			// (how many tapes are in the room) vs `bays` (positions).
-			if opts.Get("mode") == "manual" {
-				if opts.Get("bays") != "" {
-					return nil, fmt.Errorf("manual tape station has a single drive, not bays; use `reels` for how many tapes are in the room")
-				}
-				reels, err := atoiOpt(opts.Get("reels"), 1)
-				if err != nil {
-					return nil, fmt.Errorf("reels: %w", err)
-				}
-				mc, err := openManualStation(opts.Get("dir"), capacity, reels)
-				if err != nil {
-					return nil, err
-				}
-				t := &tape{}
-				if dev, reel, ok := mc.loaded(); ok {
-					t.dev, t.bay = dev, reel
-				}
-				return &shelfChanger{tape: t, mc: mc}, nil
-			}
-			if opts.Get("reels") != "" {
-				return nil, fmt.Errorf("`reels` applies only to a manual tape station (mode: manual); a robotic library counts `bays`")
-			}
-			bays, err := atoiOpt(opts.Get("bays"), 1)
+	media.Register(media.Spec{
+		Type: "tape",
+		New:  newTapeVolume,
+		// A library of removable reels: capacity is known (volumes * volume_size) but
+		// reclamation is deferred to label rotation, so no concurrent-write capability —
+		// a serial, whole-volume medium.
+		Profile: media.NewVolumeProfile,
+		Params:  []string{"dir", "device", "bays", "volume_size", "mode", "reels", "part_size"},
+	})
+}
+
+// newTapeVolume constructs a tape Volume: a virtual library/station rooted at `dir`, or a
+// real drive at `device`.
+func newTapeVolume(opts media.Options) (media.Volume, error) {
+	switch {
+	case opts.Get("dir") != "":
+		// The emulated medium is finite: volume_size caps each tape so it fills
+		// like a real reel.
+		var capacity int64
+		if s := opts.Get("volume_size"); s != "" {
+			c, err := sizeutil.ParseBytes(s)
 			if err != nil {
-				return nil, fmt.Errorf("bays: %w", err)
+				return nil, fmt.Errorf("volume_size: %w", err)
 			}
-			dc, err := openDirChanger(opts.Get("dir"), capacity, bays)
+			capacity = c
+		}
+		// mode: manual is the single-drive station — one drive whose content the
+		// operator swaps from an offline room of reels (a ShelfStation). The default
+		// is the robotic library — many physical bays a robot switches between (a
+		// Library). They count different things, so they use different keys: `reels`
+		// (how many tapes are in the room) vs `bays` (positions).
+		if opts.Get("mode") == "manual" {
+			if opts.Get("bays") != "" {
+				return nil, fmt.Errorf("manual tape station has a single drive, not bays; use `reels` for how many tapes are in the room")
+			}
+			reels, err := atoiOpt(opts.Get("reels"), 1)
+			if err != nil {
+				return nil, fmt.Errorf("reels: %w", err)
+			}
+			mc, err := openManualStation(opts.Get("dir"), capacity, reels)
 			if err != nil {
 				return nil, err
 			}
 			t := &tape{}
-			if dev, bay, ok := dc.loaded(); ok {
-				t.dev, t.bay = dev, bay
+			if dev, reel, ok := mc.loaded(); ok {
+				t.dev, t.bay = dev, reel
 			}
-			return &roboticChanger{tape: t, ch: dc}, nil
-		case opts.Get("device") != "":
-			// A real standalone drive: one fixed device the operator loads by hand. It
-			// is a Station (report what is loaded), not a Library (no addressable bays).
-			var capacity int64
-			if s := opts.Get("volume_size"); s != "" {
-				c, err := sizeutil.ParseBytes(s)
-				if err != nil {
-					return nil, fmt.Errorf("volume_size: %w", err)
-				}
-				capacity = c
-			}
-			dev, err := openMT(opts.Get("device"))
-			if err != nil {
-				return nil, err
-			}
-			return &driveChanger{tape: &tape{dev: dev}, capacity: capacity}, nil
-		default:
-			return nil, fmt.Errorf("tape medium requires 'dir' (virtual tape library) or 'device' (real drive)")
+			return &shelfChanger{tape: t, mc: mc}, nil
 		}
-	})
-	media.RegisterProfile("tape", media.NewVolumeProfile)
-	media.RegisterParams("tape", "dir", "device", "bays", "volume_size", "mode", "reels", "part_size")
+		if opts.Get("reels") != "" {
+			return nil, fmt.Errorf("`reels` applies only to a manual tape station (mode: manual); a robotic library counts `bays`")
+		}
+		bays, err := atoiOpt(opts.Get("bays"), 1)
+		if err != nil {
+			return nil, fmt.Errorf("bays: %w", err)
+		}
+		dc, err := openDirChanger(opts.Get("dir"), capacity, bays)
+		if err != nil {
+			return nil, err
+		}
+		t := &tape{}
+		if dev, bay, ok := dc.loaded(); ok {
+			t.dev, t.bay = dev, bay
+		}
+		return &roboticChanger{tape: t, ch: dc}, nil
+	case opts.Get("device") != "":
+		// A real standalone drive: one fixed device the operator loads by hand. It
+		// is a Station (report what is loaded), not a Library (no addressable bays).
+		var capacity int64
+		if s := opts.Get("volume_size"); s != "" {
+			c, err := sizeutil.ParseBytes(s)
+			if err != nil {
+				return nil, fmt.Errorf("volume_size: %w", err)
+			}
+			capacity = c
+		}
+		dev, err := openMT(opts.Get("device"))
+		if err != nil {
+			return nil, err
+		}
+		return &driveChanger{tape: &tape{dev: dev}, capacity: capacity}, nil
+	default:
+		return nil, fmt.Errorf("tape medium requires 'dir' (virtual tape library) or 'device' (real drive)")
+	}
 }
 
 // atoiOpt parses an integer option, returning def when the value is empty.

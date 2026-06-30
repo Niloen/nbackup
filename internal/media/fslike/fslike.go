@@ -81,6 +81,18 @@ type Volume struct {
 	idx   map[int]entry
 }
 
+// Spec returns the registration facts every fslike-backed medium shares: the byte-budget
+// capacity model and the concurrent-write capability are consequences of the slot layout
+// itself, not of the backing Store. A medium (disk, cloud) starts from this and fills in
+// Type, New, Params, and any distinctive PartSize/Cost before calling media.Register, so
+// it cannot silently omit the size profile or the concurrent-write flag the layout gives.
+func Spec() media.Spec {
+	return media.Spec{
+		Profile:         media.NewSizeProfile,
+		ConcurrentWrite: true,
+	}
+}
+
 // Open builds a Volume on store and indexes it (the cheap, filename-only scan).
 func Open(store Store) (*Volume, error) {
 	v := &Volume{store: store, idx: map[int]entry{}}
