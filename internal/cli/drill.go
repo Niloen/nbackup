@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
@@ -260,22 +261,26 @@ func unattendedTag(unattended bool) string {
 }
 
 // stdinIsTerminal reports whether stdin is an interactive terminal (vs a pipe/cron),
-// so an unspecified `nb drill` defaults to unattended in a non-interactive context.
+// so an unspecified `nb drill` defaults to unattended in a non-interactive context and a
+// manual tape station only prompts when someone can answer. It uses a real TTY ioctl, not
+// an os.ModeCharDevice test: /dev/null (a common cron stdin) is itself a character device,
+// so the looser test wrongly reported `nb dump </dev/null` as interactive — printing a swap
+// prompt into the log and then erroring, instead of the clean unattended path.
 func stdinIsTerminal() bool {
-	fi, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice != 0
+	return isTerminal(os.Stdin.Fd())
+}
+
+// isTerminal reports whether fd refers to a real terminal, via the TCGETS ioctl that
+// underlies isatty(3). Unlike an os.ModeCharDevice test it returns false for /dev/null and
+// other character devices — only a tty answers TCGETS.
+func isTerminal(fd uintptr) bool {
+	_, err := unix.IoctlGetTermios(int(fd), unix.TCGETS)
+	return err == nil
 }
 
 // stderrIsTerminal reports whether stderr is an interactive terminal, so live
 // in-place progress is only painted when someone is watching (not into a pipe,
-// file, or cron log).
+// file, or cron log). Same real-TTY check as stdinIsTerminal (not os.ModeCharDevice).
 func stderrIsTerminal() bool {
-	fi, err := os.Stderr.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice != 0
+	return isTerminal(os.Stderr.Fd())
 }

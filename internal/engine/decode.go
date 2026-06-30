@@ -45,6 +45,23 @@ func (e *Engine) newDecoder() *decoder {
 	}
 }
 
+// decryptOptsFor resolves the decrypt key reference for a DLE's archives: the per-dumptype
+// encrypt block's passphrase_file/program when that DLE's dumptype sets one, else the
+// config-wide default. It mirrors the dump side, which resolves encryption per-dumptype —
+// without it a passphrase_file declared under a dumptype is silently dropped on read-back, so
+// recover / verify --deep / drill cannot decrypt a config the README and example.yaml both
+// document. A DLE no longer in the config falls back to the config-wide block.
+func (e *Engine) decryptOptsFor(dleName string) crypt.Options {
+	ec := e.cfg.Encrypt
+	for _, d := range e.cfg.DLEs() {
+		if d.Name() == dleName {
+			ec = e.cfg.EncryptionFor(d.DumpTypeName())
+			break
+		}
+	}
+	return crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile, Nice: e.cfg.Nice}
+}
+
 // DecodePlan is the engine-resolved recipe for reversing an archive's transforms on restore:
 // the schemes and their invocation opts, plus where decrypt runs. DecryptInSink is resolved by
 // the engine (policy) — true when the key is client-held and reached over `--to`, so decrypt
@@ -114,8 +131,8 @@ func (d *decoder) verifyChecksum(rc io.ReadCloser, sha string) (bool, error) {
 // listMembers decodes an archive's stream (a clerk endpoint, server-side filters) and lists its
 // members (`tar -t`) — the verify path's structural check. It returns the listed members and
 // the raw, role-tagged transfer error for the caller to classify and hint.
-func (d *decoder) listMembers(rc io.ReadCloser, compressScheme, encrypt string, arch archiver.Archiver) ([]string, error) {
-	decrypt, decompress, err := d.decodeFilters(compressScheme, encrypt)
+func (d *decoder) listMembers(rc io.ReadCloser, compressScheme, encrypt string, opts crypt.Options, arch archiver.Archiver) ([]string, error) {
+	decrypt, decompress, err := d.decodeFilters(compressScheme, encrypt, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -127,14 +144,18 @@ func (d *decoder) listMembers(rc io.ReadCloser, compressScheme, encrypt string, 
 }
 
 // decodeFilters returns the decrypt and decompress commands that reverse an archive's recorded
-// transforms, keyed by the decoder's default decode options. A none scheme yields an empty Cmd,
-// which a transfer skips.
-func (d *decoder) decodeFilters(compressScheme, encrypt string) (decrypt, decompress programs.Cmd, err error) {
+// transforms. The decrypt key reference (opts) is resolved per-DLE by the caller so a
+// per-dumptype passphrase_file is honored, falling back to the decoder's config-wide default.
+// A none scheme yields an empty Cmd, which a transfer skips.
+func (d *decoder) decodeFilters(compressScheme, encrypt string, opts crypt.Options) (decrypt, decompress programs.Cmd, err error) {
 	cf, err := compress.Filter(compressScheme, d.fopts)
 	if err != nil {
 		return programs.Cmd{}, programs.Cmd{}, err
 	}
-	ef, err := crypt.Filter(encrypt, d.dcopts)
+	if opts == (crypt.Options{}) {
+		opts = d.dcopts
+	}
+	ef, err := crypt.Filter(encrypt, opts)
 	if err != nil {
 		return programs.Cmd{}, programs.Cmd{}, err
 	}

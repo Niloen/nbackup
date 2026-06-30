@@ -113,12 +113,23 @@ func (g *gnutar) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource,
 	stderr := &bytes.Buffer{}
 	argv := g.createArgs(r, "-", work, indexPath)
 	stage := programs.Cmd{
-		Name:   argv[0],
-		Args:   argv[1:],
+		Name: argv[0],
+		Args: argv[1:],
+		// exit 1 = "some files changed as we read them" (a warning); exit 2 = a fatal tar
+		// error OR merely unreadable members — the two share an exit code, so accept it here
+		// and let finish classify the stderr (Amanda's "strange"/partial dump).
 		Stderr: stderr,
-		OKExit: []int{1}, // exit 1 = "some files changed as we read them" — a warning
+		OKExit: []int{1, 2},
 	}
 	finish := func() (*archiver.BackupResult, error) {
+		// tar continues past an unreadable file, writes a valid end-of-archive for what it
+		// could read, and exits 2; a genuinely fatal error (write failure, OOM) also exits 2
+		// but leaves a non-read-error line in stderr. Classify so a partial dump still commits
+		// (with the unreadable list) while a fatal one aborts.
+		unreadable, fatal := classifyTarStderr(stderr.String())
+		if fatal != nil {
+			return nil, fatal
+		}
 		members, rerr := g.readIndex(indexPath)
 		if rerr != nil {
 			return nil, rerr
@@ -127,6 +138,7 @@ func (g *gnutar) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource,
 			Uncompressed: parseTotals(stderr.String()),
 			FileCount:    countFiles(members),
 			Members:      members,
+			Unreadable:   unreadable,
 		}, nil
 	}
 	promote := func() error { return g.promoteSnapshot(r.DLE, r.Level) }
@@ -261,6 +273,65 @@ func (g *gnutar) readIndex(path string) ([]string, error) {
 func isWarning(err error) bool {
 	ee, ok := err.(interface{ ExitCode() int })
 	return ok && ee.ExitCode() == 1
+}
+
+// tarReadErrMarkers are the stderr substrings that mark a member tar could not read but
+// skipped past — a permission/metadata error that leaves the archive a valid (partial)
+// stream of what *was* readable. These do not corrupt the archive, so they downgrade a
+// fatal-looking exit 2 to a partial dump.
+var tarReadErrMarkers = []string{": Cannot open", ": Cannot stat", ": Cannot read", ": Cannot change ownership", ": Cannot change mode", ": Cannot utime", ": Permission denied"}
+
+// tarBenignInfo are informational/warning stderr lines tar emits in normal operation
+// (incremental directory notes, one-file-system skips, the totals/summary lines). They are
+// not errors and must not be mistaken for a fatal one.
+var tarBenignInfo = []string{"Directory is new", "Directory has been renamed", "Directory is on a different filesystem", "contains a cache directory tag", "Removing leading", "socket ignored", "file changed as we read it", "file is the archive; not dumped", "Total bytes written", "Total bytes read", "Exiting with failure status due to previous errors"}
+
+// classifyTarStderr separates a tar run's stderr into the paths it could not read (a
+// partial dump) and a fatal error (anything unrecognized on a non-zero exit). It is
+// deliberately conservative: an unrecognized line is treated as fatal, so the dump fails
+// exactly as before rather than risk committing a genuinely broken archive — only a stderr
+// made up solely of known read errors and benign info yields a partial commit.
+func classifyTarStderr(stderr string) (unreadable []string, fatal error) {
+	for _, raw := range strings.Split(stderr, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || containsAny(line, tarBenignInfo) {
+			continue
+		}
+		if path, ok := tarReadError(line); ok {
+			if path != "" {
+				unreadable = append(unreadable, path)
+			}
+			continue
+		}
+		return nil, fmt.Errorf("%s", line)
+	}
+	return unreadable, nil
+}
+
+// tarReadError reports whether line is a read/permission error and, if so, the offending
+// path (parsed from `tar: <path>: Cannot open: …`); the path is "" when tar named none.
+func tarReadError(line string) (string, bool) {
+	for _, m := range tarReadErrMarkers {
+		i := strings.Index(line, m)
+		if i < 0 {
+			continue
+		}
+		head := line[:i] // "tar: <path>"
+		if j := strings.Index(head, ": "); j >= 0 {
+			return strings.TrimSpace(head[j+2:]), true
+		}
+		return "", true
+	}
+	return "", false
+}
+
+func containsAny(s string, subs []string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // scanMembers reads a newline-separated member listing (a tar --index-file, or `tar -t`

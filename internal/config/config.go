@@ -654,6 +654,9 @@ func (c *Config) Validate() error {
 	if err := c.validateArchivers(); err != nil {
 		return err
 	}
+	if err := c.validateDumpTypeArchivers(); err != nil {
+		return err
+	}
 	if err := c.validateHolding(); err != nil {
 		return err
 	}
@@ -665,6 +668,36 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateNotify(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateDumpTypeArchivers rejects a dumptype that names an archiver which is neither a
+// defined `archivers:` entry nor a registered bare type. Without this the bad reference falls
+// through to Open, whose "unknown archiver" lists the registered TYPE (gnutar) — useless when
+// a reference must name a *defined* archiver. The hint lists the names actually defined.
+func (c *Config) validateDumpTypeArchivers() error {
+	for name, dt := range c.DumpTypes {
+		ref := dt.Archiver
+		if ref == "" {
+			continue // empty resolves to DefaultArchiver, always registered
+		}
+		if _, defined := c.Archivers[ref]; defined {
+			continue
+		}
+		if _, isType := archiver.KnownOptions(ref); isType {
+			continue // an undeclared name that is itself a registered bare type is allowed
+		}
+		known := make([]string, 0, len(c.Archivers))
+		for n := range c.Archivers {
+			known = append(known, n)
+		}
+		sort.Strings(known)
+		hint := "none defined — add an archivers: entry, or use a registered type like " + DefaultArchiver
+		if len(known) > 0 {
+			hint = "defined: " + strings.Join(known, ", ")
+		}
+		return fmt.Errorf("dumptype %q: unknown archiver %q (%s)", name, ref, hint)
 	}
 	return nil
 }

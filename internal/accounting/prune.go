@@ -47,7 +47,7 @@ func (a *Accountant) Prune(mediumName string, now time.Time, apply bool, out log
 		if reason, ok := floor.ReasonArchive(ar.Slot, ar.DLE); ok {
 			out.Log("keep   %s %s  (%s)", ar.Slot, a.d.DisplayDLE(ar.DLE), reason)
 		} else {
-			out.Log("keep   %s %s  (fits capacity)", ar.Slot, a.d.DisplayDLE(ar.DLE))
+			out.Log("keep   %s %s  (dead, retained — fits capacity)", ar.Slot, a.d.DisplayDLE(ar.DLE))
 		}
 	}
 

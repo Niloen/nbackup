@@ -12,6 +12,7 @@ import (
 	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/transform/crypt"
 )
 
 // Verify is NBackup's atomic verification primitive: it checks
@@ -89,6 +90,7 @@ type verifier struct {
 	dec         *decoder                                               // checksum + structural decode
 	placements  func(slotID string) []catalog.Placement                // copies in read-preference order
 	archiverFor func(typeName, host string) (archiver.Archiver, error) // archiver for the structural list
+	decryptOpts func(dleName string) crypt.Options                     // per-DLE decrypt key reference (per-dumptype passphrase_file)
 }
 
 // newVerifier wires a verifier to the engine's catalog, data path, decoder, and resolution.
@@ -99,6 +101,7 @@ func (e *Engine) newVerifier() *verifier {
 		dec:         e.dec,
 		placements:  e.placementsFor,
 		archiverFor: e.restoreArchiver,
+		decryptOpts: e.decryptOptsFor,
 	}
 }
 
@@ -289,7 +292,7 @@ func (v *verifier) structuralCheck(id string, a record.Archive, open func() (io.
 	// Any fault — a media read, a decode child, or a not-a-tar List — is a Pipeline failure; a
 	// clean stream whose members differ from the seal is an Integrity failure. The decrypt
 	// hint keeps a lost-key failure from being mislabeled as corruption.
-	members, terr := v.dec.listMembers(rc, a.Compress, a.Encrypt, arch)
+	members, terr := v.dec.listMembers(rc, a.Compress, a.Encrypt, v.decryptOpts(a.DLE), arch)
 	if terr != nil {
 		return drill.ClassPipeline, decryptHint(a.Encrypt, terr).Error()
 	}

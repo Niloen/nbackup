@@ -917,7 +917,7 @@ func decryptHint(scheme string, err error) error {
 	if err == nil || scheme == "" || scheme == "none" {
 		return err
 	}
-	return fmt.Errorf("%w\n(this archive is %s-encrypted, so extraction needs the key: for a passphrase/symmetric dump add an `encrypt:` block with the same passphrase_file; for a public-key dump ensure its private key is in the gpg keyring)", err, scheme)
+	return fmt.Errorf("%w\n(this archive is %s-encrypted, so extraction needs the key: for a passphrase/symmetric dump make sure an `encrypt:` block — config-wide or on this DLE's dumptype — points at the right passphrase_file; for a public-key dump ensure its private key is in the gpg keyring)", err, scheme)
 }
 
 // OpenRecover builds a browsable filesystem of a DLE as of a date; see restorer.

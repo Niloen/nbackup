@@ -333,3 +333,34 @@ func assertContent(t *testing.T, path, want string) {
 		t.Errorf("%s = %q, want %q", path, got, want)
 	}
 }
+
+// TestClassifyTarStderr locks the partial/fatal split that lets an unreadable-file dump
+// commit (a partial archive) while a genuinely fatal tar error still aborts. It is the
+// careful core of the "commit partial rather than discard a usable backup" behavior.
+func TestClassifyTarStderr(t *testing.T) {
+	// Unreadable members + benign info → partial, with the paths captured; no fatal error.
+	stderr := "tar: .: Directory is new\n" +
+		"tar: ./secret.txt: Cannot open: Permission denied\n" +
+		"tar: ./priv/key: Cannot stat: Permission denied\n" +
+		"Total bytes written: 10240 (10KiB, 35MiB/s)\n" +
+		"tar: Exiting with failure status due to previous errors\n"
+	unreadable, fatal := classifyTarStderr(stderr)
+	if fatal != nil {
+		t.Fatalf("read-only errors should not be fatal: %v", fatal)
+	}
+	if len(unreadable) != 2 || unreadable[0] != "./secret.txt" || unreadable[1] != "./priv/key" {
+		t.Errorf("unreadable = %v, want [./secret.txt ./priv/key]", unreadable)
+	}
+
+	// A genuinely fatal line (write failure) → fatal, even mixed with a read error.
+	_, fatal = classifyTarStderr("tar: ./a: Cannot open: Permission denied\ntar: /dev/st0: Cannot write: No space left on device\n")
+	if fatal == nil {
+		t.Error("an unrecognized fatal line should make the dump fail")
+	}
+
+	// A clean / warning-only run → no partial, no fatal.
+	unreadable, fatal = classifyTarStderr("tar: ./log: file changed as we read it\nTotal bytes written: 512\n")
+	if fatal != nil || len(unreadable) != 0 {
+		t.Errorf("clean/warning run: unreadable=%v fatal=%v, want none", unreadable, fatal)
+	}
+}

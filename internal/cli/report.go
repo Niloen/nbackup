@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -202,9 +203,32 @@ func drillWhen(t time.Time) string {
 // verbatim: a failure to write the summary or send a notification is a stderr
 // warning, never the cause — nor a suppressor — of the run's own exit code (the
 // progress.NewFileSink contract).
+// skipRun, returned by a runReported build as its error, marks the command as not a
+// recordable run — an argument-validation failure or a no-op never "ran" in the recovery
+// sense, so it must not appear in nb report or fire a notification. runReported returns the
+// wrapped error (nil for a clean no-op) without writing a run record. Use it via skip(err).
+type skipRun struct{ err error }
+
+func (s skipRun) Error() string {
+	if s.err == nil {
+		return "no-op"
+	}
+	return s.err.Error()
+}
+func (s skipRun) Unwrap() error { return s.err }
+
+// skip marks a build's result as not worth recording (a no-op or arg-validation error).
+func skip(err error) error { return skipRun{err} }
+
 func (a *app) runReported(cfg *config.Config, seed report.Run, build func() (report.Run, error)) error {
 	start := time.Now().UTC()
 	rec, runErr := build()
+	// A no-op or argument-validation result is not a run: surface its error (nil for a clean
+	// no-op) but write no run record and fire no notification.
+	var sr skipRun
+	if errors.As(runErr, &sr) {
+		return sr.err
+	}
 	if rec.Command == "" {
 		rec.Command = seed.Command
 	}

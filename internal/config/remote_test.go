@@ -260,7 +260,7 @@ dumptypes:
       scheme: gzip
       level: 9
   plain:
-    archiver: default
+    archiver: gnutar
 sources:
   fast:
     localhost: [/a]
@@ -280,5 +280,50 @@ sources:
 	// An unknown dumptype also falls back to the default.
 	if got := c.CompressionFor("nope"); got.SchemeName() != "zstd" {
 		t.Errorf("CompressionFor(nope) = %+v, want the zstd default", got)
+	}
+}
+
+// TestDumpTypeArchiverReference locks the config-time validation of a dumptype's
+// `archiver:` reference: a defined name and a registered bare type both load; an
+// unknown reference is rejected at load with a hint listing the defined names (the
+// useless deferred "unknown archiver (known: [gnutar])" at Open is what this prevents).
+func TestDumpTypeArchiverReference(t *testing.T) {
+	// A defined archiver name resolves.
+	if _, err := loadYAML(t, baseMedia+`
+archivers:
+  myarch: { type: gnutar }
+dumptypes:
+  custom: { archiver: myarch }
+sources:
+  custom:
+    localhost: [/a]
+`); err != nil {
+		t.Errorf("defined archiver name should load: %v", err)
+	}
+	// A bare registered type needs no archivers block.
+	if _, err := loadYAML(t, baseMedia+`
+dumptypes:
+  custom: { archiver: gnutar }
+sources:
+  custom:
+    localhost: [/a]
+`); err != nil {
+		t.Errorf("registered bare type should load: %v", err)
+	}
+	// An unknown reference is rejected, naming the defined archivers.
+	_, err := loadYAML(t, baseMedia+`
+archivers:
+  myarch: { type: gnutar }
+dumptypes:
+  custom: { archiver: noarch }
+sources:
+  custom:
+    localhost: [/a]
+`)
+	if err == nil {
+		t.Fatal("unknown archiver reference should be rejected")
+	}
+	if !strings.Contains(err.Error(), "noarch") || !strings.Contains(err.Error(), "myarch") {
+		t.Errorf("error should name the bad ref and the defined names; got: %v", err)
 	}
 }

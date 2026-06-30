@@ -113,7 +113,7 @@ func (r *restorer) RestoreTo(slotID, dleName, destHost, destPath string, logf Lo
 func (r *restorer) restoreFrom(slotID, dleName, destDir, targetHost string, rollbackOnFail bool, logf Logf) error {
 	steps, err := restore.Chain(r.cat.Archives(), dleName, slotID)
 	if err != nil {
-		return err
+		return r.friendlyDLEErr(dleName, err)
 	}
 	// Decrypt placement: a `--to` restore of a DLE that keeps its key on the client decrypts
 	// on that client — the only way to read an untrusted-server / client-symmetric archive
@@ -201,10 +201,13 @@ func (r *restorer) extractInto(slotID, dle string, level int, compressScheme, en
 // server, with the server's default decrypt opts. The clerk just places the resolved plan.
 func (r *restorer) decodePlan(compressScheme, encrypt string, ec config.EncryptConfig, targetHost string) DecodePlan {
 	opts := r.dcopts
-	inSink := ec.At == "client" && targetHost != ""
-	if inSink {
-		opts = crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile}
+	// A per-dumptype encrypt block overrides the config-wide decrypt key reference, mirroring
+	// the dump side — otherwise a passphrase_file declared under a dumptype is dropped on
+	// read-back and a server-side restore cannot decrypt it.
+	if ec.PassphraseFile != "" || ec.Program != "" {
+		opts = crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile, Nice: r.dcopts.Nice}
 	}
+	inSink := ec.At == "client" && targetHost != ""
 	return DecodePlan{Compress: compressScheme, CompressOpts: r.fopts, Encrypt: encrypt, DecryptOpts: opts, DecryptInSink: inSink}
 }
 
@@ -258,6 +261,17 @@ func clientSideKeyRestore(ec config.EncryptConfig, dleName string) (hardErr erro
 
 // dleByName returns the configured DLE with the given catalog name, if it is still in the
 // config (an old slot's DLE may have been removed).
+// friendlyDLEErr rewrites a restore-chain error so the DLE reads as host:path — the form
+// the user passed and the surrounding output uses — rather than the internal catalog slug
+// the low-level restore package embeds. A DLE with no display mapping is left unchanged.
+func (r *restorer) friendlyDLEErr(dleName string, err error) error {
+	disp := r.displayDLE(dleName)
+	if disp == dleName || err == nil {
+		return err
+	}
+	return errors.New(strings.ReplaceAll(err.Error(), `"`+dleName+`"`, `"`+disp+`"`))
+}
+
 func (r *restorer) dleByName(name string) (config.DLE, bool) {
 	for _, d := range r.cfg.DLEs() {
 		if d.Name() == name {
@@ -376,7 +390,13 @@ func (r *restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 		if serr != nil {
 			return serr
 		}
-		plan := r.decodePlan(st.Compress, st.Encrypt, config.EncryptConfig{}, "")
+		// Resolve the per-dumptype encrypt block so a per-dumptype passphrase_file is honored on
+		// file-level recovery (server-side decode), not just the config-wide one.
+		var ec config.EncryptConfig
+		if d, ok := r.dleByName(st.DLE); ok {
+			ec = r.cfg.EncryptionFor(d.DumpTypeName())
+		}
+		plan := r.decodePlan(st.Compress, st.Encrypt, ec, "")
 		if err := decryptHint(st.Encrypt, r.dec.restoreArchive(rc, plan, st.Archiver, destDir, "", st.Members)); err != nil {
 			return err
 		}

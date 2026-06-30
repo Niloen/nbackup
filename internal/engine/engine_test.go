@@ -745,6 +745,93 @@ func TestTapeLabelVerify(t *testing.T) {
 	}
 }
 
+// TestDecryptOptsForPerDumptype locks the H1 fix: the decrypt key reference is resolved
+// per-DLE from its dumptype's encrypt block (a per-dumptype passphrase_file), falling back
+// to the config-wide block — mirroring the dump side. Without it a per-dumptype passphrase
+// is dropped on read-back and recover/verify --deep/drill cannot decrypt.
+func TestDecryptOptsForPerDumptype(t *testing.T) {
+	cfg := &config.Config{
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+		Encrypt:  config.EncryptConfig{Scheme: "gpg", PassphraseFile: "/keys/wide"},
+		DumpTypes: map[string]config.DumpType{
+			"secure": {Archiver: "gnutar", Encrypt: &config.EncryptConfig{Scheme: "gpg", PassphraseFile: "/keys/secure"}},
+		},
+		Sources: []config.DLE{
+			{Host: "localhost", Path: "/a", DumpType: "secure"},
+			{Host: "localhost", Path: "/b"}, // default dumptype → config-wide encrypt
+		},
+	}
+	cfg.Compress.Scheme = "none"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	secure := config.DLE{Host: "localhost", Path: "/a", DumpType: "secure"}
+	if got := eng.decryptOptsFor(secure.Name()); got.PassphraseFile != "/keys/secure" {
+		t.Errorf("per-dumptype DLE: passphrase = %q, want /keys/secure", got.PassphraseFile)
+	}
+	plain := config.DLE{Host: "localhost", Path: "/b"}
+	if got := eng.decryptOptsFor(plain.Name()); got.PassphraseFile != "/keys/wide" {
+		t.Errorf("default-dumptype DLE: passphrase = %q, want the config-wide /keys/wide", got.PassphraseFile)
+	}
+	// An unknown DLE falls back to the config-wide block.
+	if got := eng.decryptOptsFor("nope"); got.PassphraseFile != "/keys/wide" {
+		t.Errorf("unknown DLE: passphrase = %q, want the config-wide /keys/wide", got.PassphraseFile)
+	}
+}
+
+// TestRelabelRefusesForeignPool locks the guard that a `nb label --relabel` of a
+// readable NBackup reel from another pool is refused without --force — the same foreign
+// reel the dump write-path refuses. Without the guard the relabel would silently clobber
+// a wrong-pool tape, contradicting the "a foreign or wrong-pool reel is never clobbered"
+// promise (the corrupt/non-NBackup guards miss it because the label parses cleanly).
+func TestRelabelRefusesForeignPool(t *testing.T) {
+	tapeDir := t.TempDir()
+	cfg := &config.Config{
+		Landing:  "lto",
+		Media:    map[string]config.Media{"lto": {Type: "tape", Params: map[string]string{"dir": tapeDir}}},
+		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Label it once so the landing volume is open (it opens lazily), then plant a
+	// readable label from a different pool directly on the loaded volume.
+	if err := eng.LabelVolume("lto", "lto-0001", false, false, time.Now().UTC(), nil); err != nil {
+		t.Fatalf("initial label: %v", err)
+	}
+	lv := eng.vol.(media.Labeled)
+	if err := lv.WriteLabel(record.Label{Name: "FOREIGN-01", Pool: "otherpool", Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A relabel without --force must refuse it, naming the foreign pool.
+	err = eng.LabelVolume("lto", "STOLEN-01", true, false, time.Now().UTC(), nil)
+	if err == nil {
+		t.Fatal("relabel of a wrong-pool reel should be refused without --force")
+	}
+	if !strings.Contains(err.Error(), "otherpool") {
+		t.Errorf("refusal should name the foreign pool; got: %v", err)
+	}
+
+	// --force is the documented escape hatch and proceeds.
+	if err := eng.LabelVolume("lto", "STOLEN-01", true, true, time.Now().UTC(), nil); err != nil {
+		t.Fatalf("relabel --force should proceed: %v", err)
+	}
+	if got, ok, err := lv.ReadLabel(); err != nil || !ok || got.Name != "STOLEN-01" || got.Pool != "lto" {
+		t.Errorf("after --force relabel: got %+v ok=%v err=%v, want STOLEN-01 in pool lto", got, ok, err)
+	}
+}
+
 // TestCopyRecordsPlacementAndFailover dumps to disk, copies to a second medium,
 // confirms the slot now has two placements, then physically removes the primary
 // copy and restores — proving restore falls over to the recorded copy.

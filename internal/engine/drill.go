@@ -288,7 +288,7 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		// Build the decode filters first (a bad scheme fails before any media is opened), then
 		// open the copy-selected source — an open fault (missing copy/volume) is classifiable
 		// here, before bytes flow.
-		decrypt, decompress, derr := e.dec.decodeFilters(step.Compress, step.Encrypt)
+		decrypt, decompress, derr := e.dec.decodeFilters(step.Compress, step.Encrypt, e.decryptOptsFor(step.DLE))
 		if derr != nil {
 			return drill.ClassPipeline, derr.Error()
 		}
@@ -354,7 +354,7 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 		return classifyOpenErr(terr), terr.Error()
 	}
 
-	script, err := stockPipeline(step.Encrypt, step.Compress)
+	script, err := stockPipeline(step.Encrypt, step.Compress, e.decryptOptsFor(step.DLE).PassphraseFile)
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
@@ -375,16 +375,28 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 	return drill.ClassNone, ""
 }
 
+// shSingleQuote wraps s in single quotes for safe interpolation into an `sh -c` script,
+// escaping any embedded single quote. Used for the passphrase-file path in the stock one-liner.
+func shSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // stockPipeline builds the documented restore one-liner for an archive's
 // (encrypt, compress): decrypt (gpg) then decompress (zstd/gzip) then untar with
 // listed-incremental, reading stdin and extracting into "$1". It is deliberately the
 // README's stock command, not NBackup's own filter/crypt/method code.
-func stockPipeline(encrypt, compress string) (string, error) {
+func stockPipeline(encrypt, compress, passphraseFile string) (string, error) {
 	var stages []string
 	switch encrypt {
 	case "", "none":
 	case "gpg":
-		stages = append(stages, "gpg -d --batch --yes --no-tty")
+		// A symmetric dump records no key id, so the documented one-liner pins the
+		// passphrase file (a public-key dump auto-discovers its private key from the keyring).
+		gpg := "gpg -d --batch --yes --no-tty"
+		if passphraseFile != "" {
+			gpg = "gpg --passphrase-file " + shSingleQuote(passphraseFile) + " -d --batch --yes --no-tty"
+		}
+		stages = append(stages, gpg)
 	default:
 		return "", fmt.Errorf("stock drill: unknown encryption scheme %q", encrypt)
 	}
