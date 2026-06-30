@@ -5,8 +5,10 @@ import (
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/conductor"
+	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/logf"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 )
@@ -34,6 +36,28 @@ func (e *Engine) openWriter(medium string, spec archiveio.SlotSpec, now time.Tim
 	}, nil
 }
 
+// landingFor resolves the medium a DLE lands on: its dumptype's `landing` override, else the run's
+// default landing (e.mediumName). The override is validated against `media` at config load, so a
+// resolve error or empty result falls back to the default.
+func (e *Engine) landingFor(d config.DLE) string {
+	if name, err := e.cfg.LandingFor(d); err == nil && name != "" {
+		return name
+	}
+	return e.mediumName
+}
+
+// landingForDLEName resolves the landing of a DLE named by its catalog slug (DLE.Name()) — what a
+// staged archive's placement carries — for the crash-recovery flush. A DLE no longer in config (the
+// config changed since the crash) drains to the default landing.
+func (e *Engine) landingForDLEName(slug string) string {
+	for _, d := range e.cfg.DLEs() {
+		if d.Name() == slug {
+			return e.landingFor(d)
+		}
+	}
+	return e.mediumName
+}
+
 // newConductor wires a per-run conductor.Conductor to the engine's dumper, plan
 // lane, landing volume, and write/flush machinery. Plan binds to the scheduler's
 // method (not the engine's own planWith) so the run lane reads its plan from the
@@ -54,6 +78,7 @@ func (e *Engine) newConductor() *conductor.Conductor {
 		Workers:           e.cfg.Workers(),
 		NewFileSink:       func() progress.Sink { return progress.NewFileSink(e.cfg.WorkdirPath(), time.Now) },
 		Landing:           e.mediumName,
+		LandingFor:        func(it planner.Item) string { return e.landingFor(it.DLE) },
 		RunSink:           e.runSink,
 		EstimateSink:      e.estimateSink,
 	})

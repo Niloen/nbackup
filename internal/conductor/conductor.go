@@ -52,6 +52,7 @@ type Deps struct {
 	Workers           int
 	NewFileSink       func() progress.Sink
 	Landing           string
+	LandingFor        func(item planner.Item) string // the medium an item's DLE lands on (dumptype override, else Landing)
 	RunSink           progress.Sink
 	EstimateSink      progress.Sink
 }

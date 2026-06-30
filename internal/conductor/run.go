@@ -100,43 +100,17 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 	spec := archiveio.SlotSpec{ID: slotID, CreatedAt: now}
 
 	// The producers dump every DLE; the drain consumes them — buffering each onto a holding disk
-	// (one or more media marked `holding: true`) and copying it to the authoritative landing, or,
-	// when no disk fits or none is configured, writing it straight to the landing. Holding disks let
-	// the producers run flat out while the landing's drive drains at its own pace.
+	// (one or more media marked `holding: true`) and copying it to its landing, or, when no disk fits
+	// or none is configured, writing it straight to its landing. Holding disks let the producers run
+	// flat out while a landing's drive drains at its own pace. A run may write several landings at once
+	// (per-dumptype routing): the spool opens a backing per distinct landing — see runOrchestrated.
 	holdingNames := c.d.HoldingMedia
-	buffering := len(holdingNames) > 0
 
-	// Open the landing writer here (over the medium's real sink — the spool routes a producer's sink
-	// calls to its orchestrator, so no proxy is needed). Opening it now also lets a serial single
-	// drive clamp the workers.
-	landPW, err := c.d.OpenWriter(c.d.Landing, spec, now, logf)
-	if err != nil {
-		return nil, err
-	}
-
-	// landingSlots is how many landing writes may run at once: one while buffering (the drain copies
-	// serially, and a direct write shares that single timeline), one for a serial single-drive medium
-	// (tape — a single drive writes one archive at a time, which on the direct path also clamps the
-	// workers), and all of them for a concurrent-write medium (disk or cloud, which write each archive
-	// as independent objects/files — fully parallel even when an archive is split into parts).
-	//
-	// The clamp keys on Serial alone, not on whether an archive spans: part contiguity on the shared
-	// drive is already guaranteed by landingSlots=1 (a direct write holds the backing permit across its
-	// whole archive), and with no holding buffer a second producer cannot start until the first closes,
-	// so extra workers never pipeline — they only sit blocked. Splitting an archive into parts is the
-	// writer's concern (part sizing, Header.Split), not the conductor's.
+	// No global worker clamp: per-backing Slots in the spool serialize a serial landing (a single drive
+	// writes one archive at a time), so a worker dumping a DLE bound for a serial tape parks on its
+	// backing's permit without blocking a worker dumping a DLE bound for cloud. Acquiring the target
+	// happens off the dumper's gate, so a parked producer holds no worker slot.
 	workers := c.d.Workers
-	landingSlots := 1
-	if !buffering {
-		if landPW.Serial {
-			if workers > 1 {
-				logf.Log("medium %q writes serially; running 1 worker (a single drive writes one archive at a time)", c.d.Landing)
-				workers = 1
-			}
-		} else {
-			landingSlots = workers
-		}
-	}
 
 	tr, runLogf := c.progressTracker(slotID, workers, plan.Items, fileSink, logf)
 	// Caught here it covers a cancel during the estimate/preflight prelude (above), before any
@@ -145,7 +119,7 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 		tr.SetPhase(progress.PhaseCanceled)
 		return nil, ErrCanceled
 	}
-	sealed, err := c.runOrchestrated(ctx, plan, workers, landingSlots, spec, holdingNames, landPW, tr, now, runLogf)
+	sealed, err := c.runOrchestrated(ctx, plan, workers, spec, holdingNames, tr, now, runLogf)
 	if err != nil {
 		return nil, err
 	}
@@ -159,10 +133,11 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 	return sealed, nil
 }
 
-// runOrchestrated executes a dump: it opens the holding disks (the buffer the producers stage onto),
-// builds the spool over the already-opened landing writer, runs the producers, and seals the
-// landing the spool authored. The spool is the run's sole catalog writer.
-func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, workers, landingSlots int, spec archiveio.SlotSpec, holdingNames []string, landPW PreparedWriter, tr *progress.Tracker, now time.Time, lf logf.Logf) (*catalog.Slot, error) {
+// runOrchestrated executes a dump: it opens the holding disks (the buffer the producers stage onto)
+// and a writer per distinct landing the plan routes to, builds the spool over them, runs the
+// producers (each routed to its DLE's landing), and drains onto those landings. The spool is the run's
+// sole catalog writer.
+func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, workers int, spec archiveio.SlotSpec, holdingNames []string, tr *progress.Tracker, now time.Time, lf logf.Logf) (*catalog.Slot, error) {
 	disks := make([]spool.Disk, len(holdingNames))
 	for i, name := range holdingNames {
 		pw, err := c.d.OpenWriter(name, spec, now, lf)
@@ -173,12 +148,31 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 		disks[i] = spool.Disk{Name: name, Storage: pw.Store, Capacity: pw.Capacity}
 	}
 
-	sp := spool.New(ctx, spool.Config{
-		Holding: spool.NewPool(disks), Tracker: tr, Logf: lf,
-		Backing: spool.Backing{Name: c.d.Landing, Storage: landPW.Store, Slots: landingSlots},
-	})
+	// One backing per distinct landing the plan routes to. Slots is how many writes to it may run at
+	// once: one while buffering (the drain copies serially) or for a serial single-drive medium (tape),
+	// else the worker count for a concurrent-write medium (disk/cloud — independent objects/files).
+	buffering := len(holdingNames) > 0
+	landings := distinctLandings(plan.Items, c.d.LandingFor)
+	backings := make([]spool.Backing, 0, len(landings))
+	for _, name := range landings {
+		pw, err := c.d.OpenWriter(name, spec, now, lf)
+		if err != nil {
+			tr.SetPhase(progress.PhaseFailed)
+			return nil, fmt.Errorf("open landing %q: %w", name, err)
+		}
+		slots := 1
+		if !buffering && !pw.Serial {
+			slots = workers
+		}
+		backings = append(backings, spool.Backing{Name: name, Storage: pw.Store, Slots: slots})
+	}
 
-	dumpErr := c.d.Dmp.Run(ctx, plan.Items, workers, sp, tr, lf)
+	sp := spool.New(ctx, spool.Config{
+		Backings: backings, Holding: spool.NewPool(disks), Tracker: tr, Logf: lf,
+	})
+	route := func(it planner.Item) archiveio.ArchiveWriteStore { return sp.Store(c.d.LandingFor(it)) }
+
+	dumpErr := c.d.Dmp.Run(ctx, plan.Items, workers, route, tr, lf)
 
 	// A canceled run is not a failure to seal: stop the spool (it aborted on the same ctx, so
 	// Drain just joins it without flushing the queued copies — those flush on the next run),
@@ -205,6 +199,21 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 		slot = &catalog.Slot{ID: spec.ID}
 	}
 	return slot, nil
+}
+
+// distinctLandings returns the distinct landing media the plan's items route to, in first-seen order
+// (so the open order is stable). An empty plan yields none — an empty run opens no landing writer.
+func distinctLandings(items []planner.Item, landingFor func(planner.Item) string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, it := range items {
+		l := landingFor(it)
+		if !seen[l] {
+			seen[l] = true
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // firstErr returns the first non-nil error, in order.

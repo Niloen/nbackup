@@ -38,14 +38,15 @@ func (*fakeWriter) Close() error { return nil }
 // backing permit, so the next direct write can acquire the single slot instead of blocking forever.
 func TestDirectPermitReleasedOnCloseWithoutCommit(t *testing.T) {
 	sp := New(context.Background(), Config{
-		Backing: Backing{Name: "landing", Storage: fakeStore{}, Slots: 1},
-		Holding: NewPool(nil), // no holding disks => every write routes direct
+		Backings: []Backing{{Name: "landing", Storage: fakeStore{}, Slots: 1}},
+		Holding:  NewPool(nil), // no holding disks => every write routes direct
 	})
+	store := sp.Store("landing")
 	spec := archiveio.ArchiveSpec{DLE: "localhost:/data", Host: "localhost", Path: "/data"}
 
 	// First direct write takes the only permit, then faults before commit — Close (not Commit) must
 	// hand the permit back.
-	sink1, err := sp.NewArchive(spec, 1<<40)
+	sink1, err := store.NewArchive(spec, 1<<40)
 	if err != nil {
 		t.Fatalf("first NewArchive: %v", err)
 	}
@@ -57,7 +58,7 @@ func TestDirectPermitReleasedOnCloseWithoutCommit(t *testing.T) {
 	// is leaked and this NewArchive never returns.
 	done := make(chan error, 1)
 	go func() {
-		sink2, err := sp.NewArchive(spec, 1<<40)
+		sink2, err := store.NewArchive(spec, 1<<40)
 		if err == nil {
 			_ = sink2.Close()
 		}

@@ -298,6 +298,14 @@ dumptypes:
   no-logs:
     archiver: default
     exclude: ["*.log", "*.tmp"]
+  # A dumptype can route its DLEs to a different landing medium than the config-wide
+  # `landing` above, so heterogeneous sources reach heterogeneous storage within one
+  # run — e.g. bulky media to cheap cloud, databases to fast disk + tape. The medium
+  # must be a defined, non-holding medium. Sync still adds offsite COPIES; `landing`
+  # decides where a DLE's authoritative copy is WRITTEN (and withheld from elsewhere).
+  # bulk-media:
+  #   archiver: default
+  #   landing: cloud            # this dumptype's DLEs land on `cloud`, not the default
   # A dumptype can override the default compression and/or encryption wholesale
   # (no field merge — restate the whole block). E.g. a stricter key, or a cheaper
   # scheme for already-compressed data:

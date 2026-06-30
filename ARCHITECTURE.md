@@ -314,6 +314,28 @@ scan**: `nb flush` (and an auto-flush at the next `nb dump`) gathers the staged 
 every holding disk and drains them to the landing. The default direct-to-landing path is
 untouched (no holding disk = no drainer, no goroutine hand-off, record-at-`Finish` as before).
 
+**A run may write several landings at once — per-DLE routing (`dumptypes.<t>.landing`).** A
+dumptype can name a `landing` medium (validated against `media`, holding media rejected) that
+overrides the config-wide `landing` for its DLEs (`config.LandingFor`), so heterogeneous sources reach
+heterogeneous storage in one run — bulky media to cheap cloud, databases to fast disk/tape. This fills
+a gap `nb sync` cannot: sync *adds* offsite copies, but only a landing override *withholds* a big DLE
+from an expensive medium. The slot stays **run-shaped**: one slot id across every landing, each
+archive recorded as a per-medium `Placement` (the `Entry`/`Placement` split already models a slot whose
+archives live on different media — routing is the easy case where each archive has exactly one home).
+The spool generalizes from one backing to a **set of backings keyed by landing**: the dumper resolves
+each DLE's landing and asks the spool for `Store(landing)`; per-backing state (permit `Slots`, pending
+copies/permits) lives on a `*backing` value object the **one** orchestrator owns exclusively — still
+the sole catalog writer across every landing, no per-backing goroutine, no map lookups on the hot path
+(each request carries its `*backing`). Drain copies to independent landings run in parallel (a copy
+goroutine per dispatch, bounded by each backing's `Slots`); the global worker clamp is gone — a serial
+tape's single permit parks its producers (off the dumper's gate, holding no worker) while cloud-bound
+producers run. Crash-recovery `nb flush` re-resolves each staged archive's landing from config
+(`landingForDLEName`) so a multi-landing crash drains each DLE back to its own medium. *Deferred*: a
+manual tape swap mid-roll still freezes the orchestrator (hence all landings) because the librarian
+fuses the operator prompt with the catalog reconcile in one critical section; the non-blocking fix
+(invert `archiveio.VolumeSink`→`UseVolume` so the orchestrator drives a parkable roll, with a
+spool-side operator goroutine serializing prompts) is planned but not built.
+
 **One mutating `nb` per config at a time** (`internal/lock`). Rather than make the
 catalog concurrently writable, we serialize the whole mutating run: every command that
 writes the catalog or media (`dump`, `copy`, `label`, `load`, `rebuild`, `prune`) takes
