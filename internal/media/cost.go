@@ -50,17 +50,11 @@ func (c Cost) ReadCost(bytes, objects int64) float64 {
 // any cost overrides).
 type CostFactory func(Options) (Cost, error)
 
-var costFactories = map[string]CostFactory{}
-
-// RegisterCost registers a Cost implementation under a medium type name, exactly as
-// RegisterProfile does for capacity.
-func RegisterCost(typ string, f CostFactory) { costFactories[typ] = f }
-
 // OpenCost builds the Cost for a medium type. A type with no registered factory is
 // unpriced (the zero Cost), mirroring how an unregistered profile is unbounded.
 func OpenCost(typ string, opts Options) (Cost, error) {
-	f, ok := costFactories[typ]
-	if !ok {
+	f := specs[typ].Cost
+	if f == nil {
 		return Cost{}, nil
 	}
 	return f(opts)

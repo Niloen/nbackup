@@ -160,18 +160,12 @@ type PartSizePolicy struct {
 	MaxNote string // appended to the over-max error to explain the medium's limit
 }
 
-// partSizePolicies records each medium type's PartSizePolicy. A medium declares it next
-// to RegisterVolume; an unregistered type has the zero policy (no default, no bound).
-var partSizePolicies = map[string]PartSizePolicy{}
-
-// RegisterPartSize records a medium type's part-size default and bound. The cloud
-// medium uses it to default to a moderate object size and cap the object below the
-// object store's multipart-upload ceiling; the generic layer never hardcodes a type.
-func RegisterPartSize(typ string, p PartSizePolicy) { partSizePolicies[typ] = p }
-
 // PartSizeFor returns a medium type's PartSizePolicy (the zero policy when none is
-// registered). The engine consults it to default and bound a medium's part_size.
-func PartSizeFor(typ string) PartSizePolicy { return partSizePolicies[typ] }
+// registered). The engine consults it to default and bound a medium's part_size. The
+// cloud medium declares one to default to a moderate object size and cap the object
+// below the object store's multipart-upload ceiling; the generic layer never hardcodes
+// a type.
+func PartSizeFor(typ string) PartSizePolicy { return specs[typ].PartSize }
 
 // FileWriter is the payload writer AppendFile hands back: write the payload, then Close to commit
 // (or cancel the AppendFile ctx before Close to abort). Pos reports the file's on-volume position and
@@ -274,61 +268,74 @@ func WalkReadable(vol Volume, fn func(Volume) error) error {
 // VolumeFactory constructs a Volume from options.
 type VolumeFactory func(Options) (Volume, error)
 
-var volumeFactories = map[string]VolumeFactory{}
+// Spec is everything the media layer knows about one medium type, declared in a single
+// registration. Bundling the facts — the Volume constructor, the capacity Profile and
+// pricing Cost factories, the accepted inline Params, the part-size policy, and the
+// concurrent-write capability — keeps a medium's registration cohesive: all of its
+// properties live in one struct literal next to the constructor, and a capability like
+// ConcurrentWrite is a named field with a visible default rather than a separate call a
+// medium can silently forget. Media built on a shared layout (disk and cloud over
+// fslike) start from that layer's base Spec (fslike.Spec) and fill in only what is
+// distinctive to the backing store.
+type Spec struct {
+	Type string // the config `type:` name (e.g. "disk", "cloud", "tape")
 
-// RegisterVolume registers a Volume implementation under a medium type name.
-func RegisterVolume(typ string, f VolumeFactory) { volumeFactories[typ] = f }
+	// New constructs the Volume from its options. Required.
+	New VolumeFactory
+	// Profile builds the capacity/reclamation model. Nil is treated as unbounded.
+	Profile ProfileFactory
+	// Cost builds the pricing model. Nil means unpriced (local disk, tape).
+	Cost CostFactory
 
-// concurrentWrite records medium types whose Volume accepts concurrent appends from parallel
-// writers and reclaims per file — the address-identified object stores (disk, cloud). A serial,
-// whole-volume medium (tape) shares one rolling volume and reclaims by relabel, so it is absent.
-var concurrentWrite = map[string]bool{}
+	// Params are the inline option keys the type accepts. The common fields (type,
+	// capacity, minimum_age, appendable) are struct fields, not inline params, so they
+	// are not listed. Keys a type recognizes but rejects (part_size on an unbounded
+	// medium) should still be listed, so the factory's specific error is what the
+	// operator sees, not a blanket "unknown option".
+	Params []string
+	// PartSize is the type's posture toward the part_size knob (the zero policy means
+	// unset-means-unbounded, bounded only by the shared lower limit).
+	PartSize PartSizePolicy
+	// ConcurrentWrite marks a medium safe for concurrent appends and per-file reclaim —
+	// the capability a holding disk requires (disk, cloud). The false default is a
+	// serial, whole-volume medium (tape) that shares one rolling volume.
+	ConcurrentWrite bool
+}
 
-// RegisterConcurrentWrite marks a medium type as safe for concurrent writes and per-file reclaim.
-// A medium declares it next to RegisterVolume; the unregistered default is false (serial,
-// whole-volume — tape). It is the capability a holding disk requires.
-func RegisterConcurrentWrite(typ string) { concurrentWrite[typ] = true }
+// specs is the single medium registry: one Spec per type, populated by Register from each
+// medium's init(). It replaces the former per-property maps so a type's facts live in one
+// place rather than being scattered across several registration calls.
+var specs = map[string]Spec{}
 
-// ConcurrentWrite reports whether a medium type accepts concurrent writes and per-file reclaim —
-// the property a holding disk needs: parallel dumpers share its write sink, and the taper
-// reclaims each archive as it drains to the landing. A serial, whole-volume medium returns false.
-func ConcurrentWrite(typ string) bool { return concurrentWrite[typ] }
+// Register records a medium type's Spec. Each medium calls it once from init().
+func Register(s Spec) { specs[s.Type] = s }
+
+// ConcurrentWrite reports whether a medium type accepts concurrent writes and per-file
+// reclaim — the property a holding disk needs: parallel dumpers share its write sink, and
+// the taper reclaims each archive as it drains to the landing. A serial, whole-volume
+// medium returns false.
+func ConcurrentWrite(typ string) bool { return specs[typ].ConcurrentWrite }
 
 // OpenVolume constructs the Volume registered for the given medium type.
 func OpenVolume(typ string, opts Options) (Volume, error) {
-	f, ok := volumeFactories[typ]
-	if !ok {
+	s, ok := specs[typ]
+	if !ok || s.New == nil {
 		return nil, fmt.Errorf("unknown medium type %q (known: %v)", typ, VolumeTypes())
 	}
-	return f(opts)
-}
-
-// paramKeys records the inline option keys each medium type accepts. Each medium
-// implementation declares its own (next to RegisterVolume), so the source of truth
-// for a type's options lives with that type — and a typo'd or unknown key is
-// rejected at config load instead of being silently ignored.
-var paramKeys = map[string]map[string]bool{}
-
-// RegisterParams records the inline option keys a medium type accepts. The common
-// fields (type, capacity, minimum_age, appendable) are struct fields, not inline
-// params, so they are not listed here. Keys a type recognizes but rejects (e.g.
-// part_size on an unbounded medium) should still be listed, so the factory's
-// specific error is what the operator sees, not a blanket "unknown option".
-func RegisterParams(typ string, keys ...string) {
-	set := make(map[string]bool, len(keys))
-	for _, k := range keys {
-		set[k] = true
-	}
-	paramKeys[typ] = set
+	return s.New(opts)
 }
 
 // ValidateParams checks a medium's inline params against the keys its type accepts,
 // returning an error naming the unknown key(s) and the accepted ones. A type with
 // no registered keys is not validated (lenient, like OpenProfile for an unknown type).
 func ValidateParams(typ string, params map[string]string) error {
-	known, ok := paramKeys[typ]
-	if !ok {
+	s, ok := specs[typ]
+	if !ok || len(s.Params) == 0 {
 		return nil
+	}
+	known := make(map[string]bool, len(s.Params))
+	for _, k := range s.Params {
+		known[k] = true
 	}
 	var unknown []string
 	for k := range params {
@@ -340,10 +347,7 @@ func ValidateParams(typ string, params map[string]string) error {
 		return nil
 	}
 	sort.Strings(unknown)
-	allowed := make([]string, 0, len(known))
-	for k := range known {
-		allowed = append(allowed, k)
-	}
+	allowed := append([]string(nil), s.Params...)
 	sort.Strings(allowed)
 	// capacity/minimum_age are common struct fields on every medium (not inline
 	// params), so name them too — a typo'd `capacity` otherwise sees a list that
@@ -356,15 +360,17 @@ func ValidateParams(typ string, params map[string]string) error {
 // check distinct from runtime readiness, so `nb check` can fail an unknown type
 // (a config error) rather than treating it as a transient reachability warning.
 func KnownVolumeType(typ string) bool {
-	_, ok := volumeFactories[typ]
-	return ok
+	s, ok := specs[typ]
+	return ok && s.New != nil
 }
 
-// VolumeTypes lists registered medium types.
+// VolumeTypes lists registered (constructable) medium types.
 func VolumeTypes() []string {
-	out := make([]string, 0, len(volumeFactories))
-	for k := range volumeFactories {
-		out = append(out, k)
+	out := make([]string, 0, len(specs))
+	for k, s := range specs {
+		if s.New != nil {
+			out = append(out, k)
+		}
 	}
 	sort.Strings(out)
 	return out

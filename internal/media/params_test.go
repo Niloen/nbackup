@@ -6,7 +6,7 @@ import (
 )
 
 func TestValidateParams(t *testing.T) {
-	RegisterParams("widget", "path", "size")
+	Register(Spec{Type: "widget", Params: []string{"path", "size"}})
 
 	// A known key is accepted; an unknown one is rejected, naming it and the allowed set.
 	if err := ValidateParams("widget", map[string]string{"path": "/x"}); err != nil {

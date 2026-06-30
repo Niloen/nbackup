@@ -7,11 +7,8 @@ import (
 	"github.com/Niloen/nbackup/internal/media"
 )
 
-func init() {
-	// A cloud medium prices itself: it reads its bucket URL scheme to pick a provider
-	// rate table, mirroring how it registers NewSizeProfile for capacity.
-	media.RegisterCost("cloud", newCost)
-}
+// A cloud medium prices itself: newCost (wired as the Spec's Cost factory in cloud.go)
+// reads the bucket URL scheme to pick a provider rate table.
 
 // providerRates holds the built-in list-price ESTIMATES per provider (US-region,
 // standard/hot storage), in $/GiB-month, $/GiB egress, and $/1000 GET. The provider

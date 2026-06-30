@@ -60,15 +60,10 @@ type Reclamation struct {
 // ProfileFactory constructs a Profile from generic options.
 type ProfileFactory func(Options) (Profile, error)
 
-var profileFactories = map[string]ProfileFactory{}
-
-// RegisterProfile registers a Profile implementation under a medium type.
-func RegisterProfile(typ string, f ProfileFactory) { profileFactories[typ] = f }
-
 // OpenProfile constructs the Profile registered for the medium type.
 func OpenProfile(typ string, opts Options) (Profile, error) {
-	f, ok := profileFactories[typ]
-	if !ok {
+	f := specs[typ].Profile
+	if f == nil {
 		// A medium without a registered profile is treated as unbounded.
 		return sizeProfile{}, nil
 	}
