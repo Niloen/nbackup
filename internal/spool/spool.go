@@ -294,7 +294,15 @@ type backingHandle struct {
 var _ archiveio.Ingest = backingHandle{}
 
 func (h backingHandle) NewArchive(spec archiveio.ArchiveSpec, est int64) (*archiveio.ArchiveWriter, error) {
-	return h.sp.newArchive(h.b, spec, est)
+	return h.sp.ingest(h.b, spec.Host+":"+spec.Path, est, func(a *archiveio.Author) *archiveio.ArchiveWriter {
+		return a.NewArchive(spec)
+	})
+}
+
+func (h backingHandle) NewCopy(arch record.Archive, est int64) (*archiveio.ArchiveWriter, error) {
+	return h.sp.ingest(h.b, arch.Host+":"+arch.Path, est, func(a *archiveio.Author) *archiveio.ArchiveWriter {
+		return a.NewCopy(arch)
+	})
 }
 
 // writerOver authors a concurrent writer over store: a fresh archiveio.Author whose WriteStore is
@@ -304,13 +312,14 @@ func (sp *Spool) writerOver(store archiveio.WriteStore, lim *ratelimit.Limiter) 
 	return archiveio.NewAuthor(&routedWriteStore{real: store, orch: sp.orch}, sp.spec, lim, sp.now)
 }
 
-// newArchive reserves ingestion for an archive bound for backing b, estimated at est bytes, and
-// returns the archiveio writer to transfer it into. It blocks for back-pressure: a holding write waits
-// while every fitting disk is over capacity; a direct write (no disk fits, or none configured) waits
-// for a free writer on b. The writer's control calls route onto the orchestrator (it is built over a
-// routedWriteStore), and its Close hook releases whatever the write leased. It returns the run's error if
-// the spool has aborted.
-func (sp *Spool) newArchive(b *backing, spec archiveio.ArchiveSpec, est int64) (*archiveio.ArchiveWriter, error) {
+// ingest reserves ingestion for one archive bound for backing b, identified by dleID and estimated at
+// est bytes, and returns the archiveio writer to transfer it into — built by build over the leased
+// store's Author (NewArchive for a dump, NewCopy for a copy/sync; only the writer differs). It blocks
+// for back-pressure: a holding write waits while every fitting disk is over capacity; a direct write (no
+// disk fits, or none configured) waits for a free drive on b. The writer's control calls route onto the
+// orchestrator, and its Close hook releases whatever the write leased. It returns the run's error if the
+// spool has aborted.
+func (sp *Spool) ingest(b *backing, dleID string, est int64, build func(*archiveio.Author) *archiveio.ArchiveWriter) (*archiveio.ArchiveWriter, error) {
 	if err := sp.Aborted(); err != nil {
 		return nil, err
 	}
@@ -321,7 +330,7 @@ func (sp *Spool) newArchive(b *backing, spec archiveio.ArchiveSpec, est int64) (
 	if direct {
 		// No holding disk fits: write straight to the landing, leasing one of b's drives for the write.
 		i := b.lease()
-		aw := sp.writerOver(b.stores[i], b.lim).NewArchive(spec)
+		aw := build(sp.writerOver(b.stores[i], b.lim))
 		aw.SetCloser(func() error {
 			// Surface the landing volume(s) this drive wrote to, so `nb status` shows the
 			// multi-drive spread (each DLE on its own tape). A faulted write never committed.
@@ -335,9 +344,9 @@ func (sp *Spool) newArchive(b *backing, spec archiveio.ArchiveSpec, est int64) (
 	}
 	// Stage onto holding disk idx; a drain copies it to b later.
 	if sp.tr != nil {
-		sp.tr.MarkToHolding(spec.Host + ":" + spec.Path)
+		sp.tr.MarkToHolding(dleID)
 	}
-	aw := sp.writerOver(sp.pool.Storage(idx), sp.pool.Lim(idx)).NewArchive(spec)
+	aw := build(sp.writerOver(sp.pool.Storage(idx), sp.pool.Lim(idx)))
 	aw.SetCloser(func() error {
 		// On commit the archive occupies the disk until its drain copies it off: charge the landed
 		// bytes (so a later Acquire back-pressures on the drain backlog) and launch the drain to b. A

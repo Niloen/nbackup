@@ -133,33 +133,64 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 	return sealed, nil
 }
 
-// runOrchestrated executes a dump: it opens the holding disks (the buffer the producers stage onto)
-// and a writer per distinct landing the plan routes to, builds the spool over them, runs the
-// producers (each routed to its DLE's landing), and drains onto those landings. The spool is the run's
-// sole catalog writer.
+// runOrchestrated executes a dump: it runs the dumper as the producer over a spool spanning every
+// distinct landing the plan routes to (each DLE routed to its landing), and reports the sealed run. The
+// spool wiring — holding disks, per-landing backings, the drain lifecycle — is withSpool, shared with
+// copy/sync so that machinery lives in one place.
 func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, workers int, spec archiveio.RunSpec, holdingNames []string, tr *progress.Tracker, now time.Time, lf logf.Logf) (*catalog.Run, error) {
+	landings := distinctLandings(plan.Items, c.d.LandingFor)
+	err := c.withSpool(ctx, landings, holdingNames, spec, workers, tr, now, lf, func(sp *spool.Spool) error {
+		route := func(it planner.Item) archiveio.Ingest { return sp.Ingest(c.d.LandingFor(it)) }
+		return c.d.Dmp.Run(ctx, plan.Items, workers, route, tr, lf)
+	})
+	if err != nil {
+		return nil, err
+	}
+	// The run is its committed archives, read from the catalog (the cache each archive recorded into
+	// as it committed). An empty run committed nothing, so the catalog has no entry — report the empty
+	// run the run authored.
+	run, rerr := c.d.Cat.ReadRun(spec.ID)
+	if rerr != nil {
+		run = &catalog.Run{ID: spec.ID}
+	}
+	return run, nil
+}
+
+// withSpool wires a spool from a set of landing media plus the holding disks, runs the producer (run)
+// over it, and drains — the one place holding-disk gathering, per-landing backing/writer construction, and
+// the drain/cancel/seal lifecycle live. Dump passes the plan's landings and a dumper producer; copy and
+// sync pass a single target landing and a copier producer. run builds its own route from sp (so this
+// helper never sees the producer's item type). It returns nil on a sealed run, ErrCanceled on a cancel,
+// or the first producer/drain error.
+func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []string, spec archiveio.RunSpec, workers int, tr *progress.Tracker, now time.Time, lf logf.Logf, run func(sp *spool.Spool) error) error {
+	// A copy/sync run has no progress tracker (it reports through its own report), so phase
+	// transitions are a no-op there; a dump always has one.
+	setPhase := func(p progress.Phase) {
+		if tr != nil {
+			tr.SetPhase(p)
+		}
+	}
 	disks := make([]spool.Disk, len(holdingNames))
 	for i, name := range holdingNames {
 		pw, err := c.d.OpenWriter(name, spec, now, lf)
 		if err != nil {
-			tr.SetPhase(progress.PhaseFailed)
-			return nil, fmt.Errorf("open holding disk %q: %w", name, err)
+			setPhase(progress.PhaseFailed)
+			return fmt.Errorf("open holding disk %q: %w", name, err)
 		}
 		disks[i] = spool.Disk{Name: name, Storage: pw.Stores[0], Capacity: pw.Capacity, Lim: pw.Lim}
 	}
 
-	// One backing per distinct landing the plan routes to. Writers is how many writes to it may run at
-	// once: one while buffering (the drain copies serially), else the worker count for a concurrent-write
-	// medium (disk/cloud — independent objects/files) or the drive count for a serial multi-drive tape
-	// library (one archive per drive), each capped by the worker count.
+	// One backing per landing. Writers is how many writes to it may run at once: one while buffering (the
+	// drain copies serially), else the worker count for a concurrent-write medium (disk/cloud —
+	// independent objects/files) or the drive count for a serial multi-drive tape library (one archive
+	// per drive), each capped by the worker count.
 	buffering := len(holdingNames) > 0
-	landings := distinctLandings(plan.Items, c.d.LandingFor)
 	backings := make([]spool.Backing, 0, len(landings))
 	for _, name := range landings {
 		pw, err := c.d.OpenWriter(name, spec, now, lf)
 		if err != nil {
-			tr.SetPhase(progress.PhaseFailed)
-			return nil, fmt.Errorf("open landing %q: %w", name, err)
+			setPhase(progress.PhaseFailed)
+			return fmt.Errorf("open landing %q: %w", name, err)
 		}
 		writers := 1
 		switch {
@@ -185,35 +216,35 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 		Spec: spec, Now: func() time.Time { return now },
 		Tracker: tr, Logf: lf,
 	})
-	route := func(it planner.Item) archiveio.Ingest { return sp.Ingest(c.d.LandingFor(it)) }
 
-	dumpErr := c.d.Dmp.Run(ctx, plan.Items, workers, route, tr, lf)
+	runErr := run(sp)
 
-	// A canceled run is not a failure to seal: stop the spool (it aborted on the same ctx, so
-	// Drain just joins it without flushing the queued copies — those flush on the next run),
-	// mark the status canceled, and seal nothing. Leftover holding archives are reclaimed by
-	// the amflush-on-next-dump path.
+	// A canceled run is not a failure to seal: stop the spool (it aborted on the same ctx, so Drain just
+	// joins it without flushing the queued copies — those flush on the next run), mark the status
+	// canceled, and seal nothing. Leftover holding archives are reclaimed by the amflush-on-next path.
 	if ctx.Err() != nil {
 		_ = sp.Drain()
-		tr.SetPhase(progress.PhaseCanceled)
+		setPhase(progress.PhaseCanceled)
 		lf.Log("run canceled — nothing sealed; any buffered archives flush on the next run")
-		return nil, ErrCanceled
+		return ErrCanceled
 	}
 
-	tr.SetPhase(progress.PhaseSealing)
-	if err := firstErr(dumpErr, sp.Drain()); err != nil {
-		tr.SetPhase(progress.PhaseFailed)
-		return nil, err
+	setPhase(progress.PhaseSealing)
+	if err := firstErr(runErr, sp.Drain()); err != nil {
+		setPhase(progress.PhaseFailed)
+		return err
 	}
-	tr.SetPhase(progress.PhaseDone)
-	// The run is its committed archives, read from the catalog (the cache each archive recorded into
-	// as it committed). An empty run committed nothing, so the catalog has no entry — report the empty
-	// run the run authored.
-	run, err := c.d.Cat.ReadRun(spec.ID)
-	if err != nil {
-		run = &catalog.Run{ID: spec.ID}
-	}
-	return run, nil
+	setPhase(progress.PhaseDone)
+	return nil
+}
+
+// CopyRun runs a copier producer over a spool that writes to a single target landing (no holding
+// buffer), for nb copy / nb sync — the same spool wiring a dump uses, so the target's drives are leased
+// one per concurrent copy. run drives the transfers (it builds its route from sp); there is no progress
+// tracker (the caller reports through its own report). spec.ID tags the member index each copied archive
+// records under, and spec.CreatedAt stamps the run's authoring time.
+func (c *Conductor) CopyRun(ctx context.Context, target string, spec archiveio.RunSpec, workers int, now time.Time, lf logf.Logf, run func(sp *spool.Spool) error) error {
+	return c.withSpool(ctx, []string{target}, nil, spec, workers, nil, now, lf, run)
 }
 
 // distinctLandings returns the distinct landing media the plan's items route to, in first-seen order

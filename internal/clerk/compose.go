@@ -53,7 +53,10 @@ func (s *Session) Bounded() bool { return s.sink.Bounded() }
 func (s *Session) Record(r archiveio.CommitResult) error {
 	arch := r.Archive
 	if len(arch.Members) > 0 {
-		_ = s.clerk.mindex.Store(s.runID, arch.DLE, arch.Level, arch.Members)
+		// Key the member index on the archive's own run, not the session's, so a session that carries
+		// archives from several source runs (a cross-run sync through one spool) files each under the
+		// right run. For a dump or a per-run copy the two are identical, so this changes nothing there.
+		_ = s.clerk.mindex.Store(arch.Run, arch.DLE, arch.Level, arch.Members)
 	}
 	return s.clerk.cat.AddArchive(arch, s.medium, r.Pos)
 }
