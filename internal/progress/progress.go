@@ -62,6 +62,7 @@ type DLE struct {
 	FileCount  int       `json:"file_count"`
 	Holding    string    `json:"holding,omitempty"`    // holding disk it buffered on, set the moment its dump commits there (empty for a direct dump)
 	ToHolding  bool      `json:"to_holding,omitempty"` // dump is routed to a holding disk, set when ingestion is acquired there — before it commits; marks the staging window until Holding is set
+	Volume     string    `json:"volume,omitempty"`     // the landing volume(s) its archive committed to — the volume's label (or several, comma-joined, when it spanned volumes or, on a multi-drive library, drives); empty for an address-identified landing that carries no label
 	StartedAt  time.Time `json:"started_at,omitempty"`
 	EndedAt    time.Time `json:"ended_at,omitempty"`
 	Err        string    `json:"err,omitempty"`

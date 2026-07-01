@@ -145,12 +145,13 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 			tr.SetPhase(progress.PhaseFailed)
 			return nil, fmt.Errorf("open holding disk %q: %w", name, err)
 		}
-		disks[i] = spool.Disk{Name: name, Storage: pw.Store, Capacity: pw.Capacity, Lim: pw.Lim}
+		disks[i] = spool.Disk{Name: name, Storage: pw.Stores[0], Capacity: pw.Capacity, Lim: pw.Lim}
 	}
 
 	// One backing per distinct landing the plan routes to. Slots is how many writes to it may run at
-	// once: one while buffering (the drain copies serially) or for a serial single-drive medium (tape),
-	// else the worker count for a concurrent-write medium (disk/cloud — independent objects/files).
+	// once: one while buffering (the drain copies serially), else the worker count for a concurrent-write
+	// medium (disk/cloud — independent objects/files) or the drive count for a serial multi-drive tape
+	// library (one archive per drive), each capped by the worker count.
 	buffering := len(holdingNames) > 0
 	landings := distinctLandings(plan.Items, c.d.LandingFor)
 	backings := make([]spool.Backing, 0, len(landings))
@@ -161,10 +162,22 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 			return nil, fmt.Errorf("open landing %q: %w", name, err)
 		}
 		slots := 1
-		if !buffering && !pw.Serial {
+		switch {
+		case buffering:
+			// The drain copies serially onto the landing (parallel drains are deferred).
+		case pw.Serial:
+			slots = len(pw.Stores) // one archive per drive on a serial multi-drive library
+		default:
+			slots = workers // concurrent medium: independent files
+		}
+		if slots > workers {
 			slots = workers
 		}
-		backings = append(backings, spool.Backing{Name: name, Storage: pw.Store, Slots: slots, Lim: pw.Lim})
+		stores := make([]archiveio.WriteStore, len(pw.Stores))
+		for i, s := range pw.Stores {
+			stores[i] = s // a Store is a WriteStore; the spool only writes backings
+		}
+		backings = append(backings, spool.Backing{Name: name, Stores: stores, Slots: slots, Lim: pw.Lim})
 	}
 
 	sp := spool.New(ctx, spool.Config{

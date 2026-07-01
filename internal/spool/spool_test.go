@@ -24,7 +24,7 @@ func (fakeStore) Record(archiveio.CommitResult) error                  { return 
 // backing permit, so the next direct write can acquire the single slot instead of blocking forever.
 func TestDirectPermitReleasedOnCloseWithoutCommit(t *testing.T) {
 	sp := New(context.Background(), Config{
-		Backings: []Backing{{Name: "landing", Storage: fakeStore{}, Slots: 1}},
+		Backings: []Backing{{Name: "landing", Stores: []archiveio.WriteStore{fakeStore{}}, Slots: 1}},
 		Holding:  NewPool(nil), // no holding disks => every write routes direct
 	})
 	store := sp.Ingest("landing")
