@@ -394,10 +394,15 @@ func (c *tapeChanger) Drives() ([]media.DriveStatus, error) {
 // device so its Volume operations act on the new cartridge.
 func (c *tapeChanger) Load(slot, drive int) error {
 	dev, barcode, err := c.ld.load(slot, drive)
+	d := c.drives[drive]
 	if err != nil {
+		// A failed load can leave the drive empty — a real loader (mtx) unloads the
+		// occupant before loading, so a rejected cartridge (e.g. a wrong-generation reel)
+		// leaves nothing mounted. Clear the binding so the drive reports empty rather than
+		// a phantom tape whose device open would then fail with "no medium".
+		d.dev, d.barcode, d.fromSlot = nil, "", -1
 		return err
 	}
-	d := c.drives[drive]
 	d.dev, d.barcode, d.fromSlot = dev, barcode, slot
 	return nil
 }

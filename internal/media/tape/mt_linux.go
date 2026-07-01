@@ -175,7 +175,17 @@ func (m *mtDevice) count() (int, error) {
 	if err := mtIoctlOp(f.Fd(), mtEOM, 0); err != nil {
 		return 0, fmt.Errorf("mt eom on %s: %w", m.dev, err)
 	}
-	return mtFileno(f.Fd())
+	n, err := mtFileno(f.Fd())
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 {
+		// The st driver reports fileno -1 when the position is undefined — a blank tape
+		// after MTEOM sits at BOT with no files. Report 0 rather than let a negative count
+		// reach a make([]…, 0, n) (which panics) or a file-scan loop.
+		return 0, nil
+	}
+	return n, nil
 }
 
 // bytesUsed is unknowable for a real drive: software cannot see a tape's fill

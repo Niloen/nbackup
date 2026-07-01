@@ -31,7 +31,12 @@ import (
 // splits a large archive into parts. Whether an archive is split is the writer's concern,
 // not the conductor's, so it does not appear here.
 type PreparedWriter struct {
-	Store    archiveio.Store
+	// Stores is one authored slot store per concurrent writer the medium supports: a single store for a
+	// single-drive tape or a directly-addressed medium, or one per drive for a robotic multi-drive
+	// library (each bound to its own drive so two archives write independent tapes). A concurrent-write
+	// medium (disk, cloud) has one store shared by all its writers (independent files, orchestrator-
+	// serialised control); a serial multi-drive one has a distinct store per drive.
+	Stores   []archiveio.Store
 	Serial   bool
 	Capacity int64
 	Lim      *ratelimit.Limiter // the medium's byte-rate cap; the spool authors its concurrent writers with it

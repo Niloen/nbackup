@@ -6,6 +6,7 @@ import (
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/conductor"
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/logf"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
@@ -20,21 +21,51 @@ import (
 // runOrchestrated makes (clerk.OpenSlot, Media.CapacityBytes) so the types line up —
 // folding that machinery here keeps the conductor free of the clerk/librarian packages.
 func (e *Engine) openWriter(medium string, spec archiveio.SlotSpec, now time.Time, lf logf.Logf) (conductor.PreparedWriter, error) {
-	wt, err := e.prepareWriter(medium, spec, now, lf)
+	stores, err := e.landingStores(medium, spec, now, lf)
 	if err != nil {
 		return conductor.PreparedWriter{}, err
 	}
 	capB, _ := e.cfg.Media[medium].CapacityBytes()
 	return conductor.PreparedWriter{
-		Store: wt.session,
-		Lim:   e.limiters[medium],
+		Stores: stores,
+		Lim:    e.limiters[medium],
 		// Serial keys off the concurrent-write capability: a serial medium (tape) shares one
-		// rolling drive and writes one archive at a time, while a concurrent-write object
-		// store/disk writes archives as independent objects/files and stays parallel — even
+		// rolling drive per store and writes one archive at a time on it, while a concurrent-write
+		// object store/disk writes archives as independent objects/files and stays parallel — even
 		// when it splits a large archive into parts. So part_size on cloud never clamps workers.
 		Serial:   !media.ConcurrentWrite(e.cfg.Media[medium].Type),
 		Capacity: capB,
 	}, nil
+}
+
+// landingStores opens the slot stores a landing is written through: one per tape drive for a robotic
+// multi-drive library (each a lazy per-drive sink that loads its own tape on first write, so the
+// concurrent writers land on independent drives), or a single store for a single-drive tape, a manual
+// drive, or a directly-addressed medium (disk/cloud — its own concurrency is independent files).
+func (e *Engine) landingStores(medium string, spec archiveio.SlotSpec, now time.Time, lf logf.Logf) ([]archiveio.Store, error) {
+	lib, def, _, err := e.librarianFor(medium)
+	if err != nil {
+		return nil, err
+	}
+	if !lib.Parallel() {
+		wt, err := e.prepareWriter(medium, spec, now, lf) // eager single store (existing contract)
+		if err != nil {
+			return nil, err
+		}
+		return []archiveio.Store{wt.session}, nil
+	}
+	partSize, err := e.partSizeFor(medium)
+	if err != nil {
+		return nil, err
+	}
+	exp := e.expectedVolumeFor(medium, now)
+	announceExpectation(medium, exp, lf)
+	sinks := lib.LazyDriveSinks(def.IsAppendable(), exp.Label, partSize, now, librarian.Logf(lf))
+	stores := make([]archiveio.Store, len(sinks))
+	for i, sink := range sinks {
+		stores[i] = e.clerk.OpenSlot(sink, medium, lib.Volume(), spec.ID)
+	}
+	return stores, nil
 }
 
 // landingFor resolves the medium a DLE lands on: its dumptype's `landing` override, else the run's

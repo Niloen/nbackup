@@ -168,6 +168,22 @@ func (t *Tracker) StageHolding(name, holding string) {
 	t.flush(true)
 }
 
+// LandVolume records which landing volume(s) a DLE's archive committed to — the volume's label (or
+// several, comma-joined, when the archive spanned volumes or, on a multi-drive library, drives). This
+// is what surfaces the multi-drive spread in `nb status`: each DLE shows the volume its data reached. A
+// no-op for an unknown DLE or an empty volume id (an address-identified landing carries no label).
+func (t *Tracker) LandVolume(name, volume string) {
+	if volume == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if d := t.dle(name); d != nil {
+		d.Volume = volume
+	}
+	t.flush(true)
+}
+
 // StartFlush marks a DLE as draining from the holding disk it landed on (holding) to the landing
 // (the second phase after its dump committed). Recording the disk lets a multi-disk run show where
 // each DLE buffered. A no-op for an unknown DLE.

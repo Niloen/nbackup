@@ -109,6 +109,18 @@ type Librarian struct {
 	changer   media.Changer // the tape changer, or directChanger for disk/s3
 	isChanger bool          // vol is a real media.Changer (tape) — not the adapter, so it can span
 	manual    bool          // changer.Manual(): a human loads (prompt the operator) vs a robot loads
+
+	// drive is which data-transfer element this librarian handle drives. A base librarian
+	// (drive 0) does reads, labels, and single-drive writes; forDrive(i) returns a sibling
+	// bound to drive i for concurrent multi-drive writing. All hardcoded "drive 0" in the
+	// write path reads l.drive instead.
+	drive int
+	// reserved is the run-shared set of volume labels a drive has selected to write this
+	// run. Siblings from forDrive share the one map (it survives the shallow copy), so a
+	// tape one drive is writing is excluded from another drive's selection — no two drives
+	// ever pick the same cartridge. Access is serialised by the spool's single orchestrator
+	// (every roll/select crosses it), so the map needs no lock.
+	reserved map[string]bool
 }
 
 // New constructs a librarian for a medium's open volume. cat is the catalog the
@@ -122,7 +134,8 @@ type Librarian struct {
 // so the rest of the librarian has one shape. A tape changer's Manual() says whether a
 // human loads it (prompt the operator) or a robot does (load unattended).
 func New(vol media.Volume, medium string, cat *catalog.Catalog, op Operator, autoLabel bool, minAge time.Duration) *Librarian {
-	l := &Librarian{vol: vol, medium: medium, cat: cat, op: op, autoLabel: autoLabel, minAge: minAge}
+	l := &Librarian{vol: vol, medium: medium, cat: cat, op: op, autoLabel: autoLabel, minAge: minAge,
+		reserved: map[string]bool{}}
 	if ch, ok := vol.(media.Changer); ok {
 		l.changer, l.isChanger, l.manual = ch, true, ch.Manual()
 	} else {
@@ -131,9 +144,47 @@ func New(vol media.Volume, medium string, cat *catalog.Catalog, op Operator, aut
 	return l
 }
 
-// loaded reports the cartridge in the working drive (drive 0). It is the one-drive
-// view the librarian uses today; multi-drive scheduling would pass a drive index.
-func (l *Librarian) loaded() (media.VolumeStatus, bool) { return l.changer.Drive(0).Loaded() }
+// loaded reports the cartridge in this handle's drive.
+func (l *Librarian) loaded() (media.VolumeStatus, bool) { return l.changer.Drive(l.drive).Loaded() }
+
+// driveVol is the volume in this handle's drive — what the write path reads a label from,
+// verifies, and rolls. For the base handle (drive 0) it is the same cartridge l.vol proxies;
+// forDrive(i) points it at drive i so two drives write independent tapes.
+func (l *Librarian) driveVol() media.Volume { return l.changer.Drive(l.drive) }
+
+// Drives reports how many data-transfer elements the medium's changer has — the write
+// parallelism width for a serial medium (one archive writer per drive). It is 1 for a
+// single-drive changer, a directly-addressed medium, or on any inventory error.
+func (l *Librarian) Drives() int {
+	ds, err := l.changer.Drives()
+	if err != nil || len(ds) == 0 {
+		return 1
+	}
+	return len(ds)
+}
+
+// Parallel reports whether this medium can host several archive writers at once on
+// distinct drives: a robotic (non-manual) changer with more than one drive. A manual
+// single drive and a directly-addressed medium are not (a directly-addressed medium is
+// concurrent by other means — independent files — handled above the librarian).
+func (l *Librarian) Parallel() bool { return l.isChanger && !l.manual && l.Drives() > 1 }
+
+// forDrive returns a sibling librarian bound to drive i for concurrent writing: a shallow
+// copy sharing the changer, catalog, and reservation set, differing only in which drive
+// its write path loads and reads. The base handle stays drive 0 for reads and labels.
+func (l *Librarian) forDrive(i int) *Librarian {
+	c := *l
+	c.drive = i
+	return &c
+}
+
+// reserve marks a volume label as claimed by a drive for this run, so another drive's
+// selection (oldestReusable, the advance scan) skips it. Shared across forDrive siblings.
+func (l *Librarian) reserve(name string) {
+	if name != "" {
+		l.reserved[name] = true
+	}
+}
 
 // directChanger adapts a directly-addressed Volume (disk, s3) to media.Changer: one
 // drive permanently loaded with the one volume, no slots, no robot. Load/Unload are
@@ -178,7 +229,7 @@ func (l *Librarian) ReadFileAt(volume string, epoch, pos int) (record.Header, io
 	if err := l.MountForRead(volume, epoch); err != nil {
 		return record.Header{}, nil, err
 	}
-	return l.vol.ReadFile(pos)
+	return l.driveVol().ReadFile(pos) // MountForRead set l.drive to whichever drive holds it
 }
 
 // PrepareWrite enforces the label protocol on the loaded volume before writing,
@@ -188,6 +239,7 @@ func (l *Librarian) ReadFileAt(volume string, epoch, pos int) (record.Header, io
 func (l *Librarian) PrepareWrite(appendable bool, expect string, now time.Time, logf Logf) (string, int, error) {
 	name, epoch, err := l.verifyWritable(appendable, now)
 	if err == nil {
+		l.reserve(name) // the loaded tape is writable; claim it against concurrent recycling
 		return name, epoch, nil
 	}
 	if !isReloadable(err) {
@@ -236,6 +288,7 @@ func (l *Librarian) PrepareWrite(appendable bool, expect string, now time.Time, 
 			}
 			name, epoch, _, rerr := l.acceptOrRecycle(appendable, tried, now, logf)
 			if rerr == nil {
+				l.reserve(name)
 				return name, epoch, nil
 			}
 			if !isReloadable(rerr) {
@@ -283,7 +336,7 @@ func (l *Librarian) resolveLabel(lv media.Labeled, now time.Time) (record.Label,
 // wrong-tape protection — records the accepted label, and returns the volume
 // identity to record in a placement.
 func (l *Librarian) verifyWritable(appendable bool, now time.Time) (volName string, epoch int, err error) {
-	lv, ok := l.vol.(media.Labeled)
+	lv, ok := l.driveVol().(media.Labeled)
 	if !ok {
 		return "", 0, nil // address-identified: no label — the medium is its own volume
 	}
@@ -371,7 +424,7 @@ func (l *Librarian) advanceViaLibrary(appendable bool, tried map[string]bool, no
 			continue
 		}
 		tried[key] = true
-		if err := l.changer.Load(s.Slot, 0); err != nil {
+		if err := l.changer.Load(s.Slot, l.drive); err != nil {
 			lastErr = err // a cartridge this drive can't load (wrong generation, dud): try the next slot
 			continue
 		}
@@ -380,10 +433,11 @@ func (l *Librarian) advanceViaLibrary(appendable bool, tried map[string]bool, no
 			lastErr = verr // wrong pool / holds runs / blank with autoLabel off: try the next slot
 			continue
 		}
-		if tried[name] {
-			continue // already used this run — the full tape we span from, or an earlier roll
+		if tried[name] || l.reserved[name] {
+			continue // already used this run, or another drive is writing it right now
 		}
 		tried[name] = true // never re-select this volume by name during a multi-volume write
+		l.reserve(name)    // claim it so a concurrent drive's selection skips it
 		empty := len(l.cat.SlotsOnLabel(name)) == 0
 		logf.log("medium %q: rolled to slot %d (volume %q)", l.medium, s.Slot, name)
 		return name, epoch, empty, nil
@@ -394,6 +448,7 @@ func (l *Librarian) advanceViaLibrary(appendable bool, tried map[string]bool, no
 	// recycle keeps the same label name, advancing only the epoch (and physically wiping
 	// the tape via WriteLabel's reset).
 	if rec, ok := l.oldestReusable(tried, now); ok {
+		l.reserve(rec.Label.Name) // claim before the robot move so a concurrent drive skips it
 		if err := l.recycleViaLibrary(rec, now, logf); err != nil {
 			return "", 0, false, err
 		}
@@ -468,8 +523,8 @@ func (l *Librarian) advanceViaShelf(appendable bool, tried map[string]bool, expe
 func (l *Librarian) oldestReusable(tried map[string]bool, now time.Time) (catalog.VolumeRecord, bool) {
 	var pool []catalog.VolumeRecord
 	for _, v := range l.cat.Volumes() {
-		if v.Label.Pool == l.medium && !tried[v.Label.Name] {
-			pool = append(pool, v)
+		if v.Label.Pool == l.medium && !tried[v.Label.Name] && !l.reserved[v.Label.Name] {
+			pool = append(pool, v) // skip a tape another drive is already writing this run
 		}
 	}
 	sort.Slice(pool, func(i, j int) bool { return pool[i].Label.WrittenAt.Before(pool[j].Label.WrittenAt) })
@@ -523,48 +578,62 @@ func (l *Librarian) acceptOrRecycle(appendable bool, tried map[string]bool, now 
 // place — the robotic-library half of the rotation, where the software (not an operator)
 // loads the aged-out tape. The caller has already confirmed rec is Floor-cleared.
 func (l *Librarian) recycleViaLibrary(rec catalog.VolumeRecord, now time.Time, logf Logf) error {
-	_, ok, err := l.findSlot(rec.Label.Name)
+	slot, drive, ok, err := l.findSlot(rec.Label.Name)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return fmt.Errorf("medium %q: volume %q (the oldest reusable tape) is not in the library; load it with `nb load %s <slot>` or relabel a blank one", l.medium, rec.Label.Name, l.medium)
 	}
-	return l.recycle(rec.Label, now, logf) // findSlot left it loaded in drive 0
+	if drive != l.drive {
+		// A prior run left this reusable tape in another drive (a tape this run is writing is
+		// reserved, so oldestReusable never returns one). Move it into this write drive to
+		// recycle it here. Selection is orchestrator-serialised, so the other drive is idle.
+		if err := l.changer.Unload(drive); err != nil {
+			return err
+		}
+		if err := l.changer.Load(slot, l.drive); err != nil {
+			return err
+		}
+	}
+	return l.recycle(rec.Label, now, logf) // now loaded in this write drive
 }
 
-// findSlot locates the slot holding the cartridge labeled name by loading each
-// occupied slot into drive 0 and reading its label, leaving the match loaded. A real
-// library would map barcode→label from the catalog to skip the scan; the file-backed
-// changer reads labels directly. ok is false when no slot holds that label.
-func (l *Librarian) findSlot(name string) (int, bool, error) {
-	// The wanted cartridge may already be in a drive — its slot then reports empty,
-	// so the scan below would miss it. Check the drives' loaded labels first.
+// findSlot locates the cartridge labeled name and reports the slot it came from and the
+// drive it is now in — already loaded in some drive (a multi-drive run leaves tapes in
+// their drives), or loaded into this handle's drive by scanning each occupied slot and
+// reading its label. The drive it returns is where a reader must read from; a real library
+// would map barcode→label from the catalog to skip the scan. ok is false when no cartridge
+// holds that label.
+func (l *Librarian) findSlot(name string) (slot, drive int, ok bool, err error) {
+	// The wanted cartridge may already be in a drive — its slot then reports empty, so the
+	// scan below would miss it. Check the drives' loaded labels first, and read from wherever
+	// it is (drive 0 for a single-drive medium; any drive after a multi-drive dump).
 	drives, err := l.changer.Drives()
 	if err != nil {
-		return 0, false, err
+		return 0, 0, false, err
 	}
 	for _, d := range drives {
 		if d.Loaded && d.Volume.Label == name {
-			return d.FromSlot, true, nil
+			return d.FromSlot, d.Drive, true, nil
 		}
 	}
 	slots, err := l.changer.Slots()
 	if err != nil {
-		return 0, false, err
+		return 0, 0, false, err
 	}
 	for _, s := range slots {
 		if !s.Full || s.ImportExport {
 			continue
 		}
-		if err := l.changer.Load(s.Slot, 0); err != nil {
+		if err := l.changer.Load(s.Slot, l.drive); err != nil {
 			continue // a cartridge this drive can't load holds no label we can read
 		}
 		if n, labeled, _ := l.readVolumeLabel(); labeled && n == name {
-			return s.Slot, true, nil
+			return s.Slot, l.drive, true, nil
 		}
 	}
-	return 0, false, nil
+	return 0, 0, false, nil
 }
 
 // recycle rewrites the loaded volume's label in place for reuse: same name and pool,
@@ -574,7 +643,7 @@ func (l *Librarian) findSlot(name string) (int, bool, error) {
 // its last copy leaves the catalog), reusing the same path `nb label --relabel` does.
 // The caller owns the safety gate (the tape must be Floor-cleared) and having it loaded.
 func (l *Librarian) recycle(prev record.Label, now time.Time, logf Logf) error {
-	lv, ok := l.vol.(media.Labeled)
+	lv, ok := l.driveVol().(media.Labeled)
 	if !ok {
 		return fmt.Errorf("medium %q is address-identified and cannot recycle volumes", l.medium)
 	}
@@ -590,7 +659,7 @@ func (l *Librarian) recycle(prev record.Label, now time.Time, logf Logf) error {
 // readLoadedLabel reads the loaded volume's full label (name, pool, epoch), or
 // labeled=false for a blank or address-identified medium.
 func (l *Librarian) readLoadedLabel() (record.Label, bool, error) {
-	lv, ok := l.vol.(media.Labeled)
+	lv, ok := l.driveVol().(media.Labeled)
 	if !ok {
 		return record.Label{}, false, nil
 	}
@@ -656,8 +725,14 @@ func (l *Librarian) Remaining() (int64, bool) {
 
 // WriteSink drives a multi-part, possibly multi-volume write for the archiveio writer:
 // it sizes each part to the loaded volume's remaining capacity (capped by part_size),
-// rolls onto a fresh volume when the loaded one fills, and places the seal record. It
-// is created after PrepareWrite has mounted and accepted the first volume.
+// rolls onto a fresh volume when the loaded one fills, and places the seal record.
+//
+// A sink is bound to its librarian handle's drive (l.drive), so LazyDriveSinks vends one
+// per drive for concurrent writing. It starts either eagerly — over the volume PrepareWrite
+// already accepted (the serial path) — or lazily: started=false, so its first NextPart runs
+// PrepareWrite itself, loading a writable tape into its drive. The lazy start is what lets
+// the initial per-drive load cross the spool's orchestrator on the same path as a roll,
+// keeping the robot single-writer without a separate mount step.
 type WriteSink struct {
 	l          *Librarian
 	appendable bool
@@ -667,21 +742,57 @@ type WriteSink struct {
 	tried      map[string]bool
 	volume     string
 	epoch      int
+	started    bool   // the first volume has been accepted (PrepareWrite has run)
+	expect     string // the label the run expects to (re)use, for a lazy first load
 }
 
-// WriteSink builds a sink starting on the volume PrepareWrite accepted (its label and
-// epoch). partSize (0 = none) caps each part for media whose remaining capacity is
+// WriteSink builds an eager sink starting on the volume PrepareWrite accepted (its label
+// and epoch). partSize (0 = none) caps each part for media whose remaining capacity is
 // unknowable or to bound part size deliberately.
 func (l *Librarian) WriteSink(volume string, epoch int, appendable bool, partSize int64, now time.Time, logf Logf) *WriteSink {
-	// Seed tried with the starting volume's name so a spanning roll never recycles the
-	// tape this write is already on: its fresh content is not yet in the catalog, so the
-	// retention Floor would otherwise see it as empty and reusable.
-	tried := map[string]bool{}
-	if volume != "" {
-		tried[volume] = true
+	s := &WriteSink{l: l, appendable: appendable, partSize: partSize, now: now, logf: logf,
+		tried: map[string]bool{}, volume: volume, epoch: epoch, started: true}
+	s.seed(volume)
+	return s
+}
+
+// LazyDriveSinks vends one lazy WriteSink per drive, each bound to its own drive and
+// sharing the run reservation set — the concurrent multi-drive write source. len == Drives().
+// Each sink loads its first tape on its first NextPart, so the spool can lease a drive per
+// writer and the initial loads serialise on its orchestrator like any roll.
+func (l *Librarian) LazyDriveSinks(appendable bool, expect string, partSize int64, now time.Time, logf Logf) []*WriteSink {
+	sinks := make([]*WriteSink, l.Drives())
+	for i := range sinks {
+		li := l.forDrive(i)
+		sinks[i] = &WriteSink{l: li, appendable: appendable, partSize: partSize, now: now, logf: logf,
+			tried: map[string]bool{}, expect: expect}
 	}
-	return &WriteSink{l: l, appendable: appendable, partSize: partSize, now: now, logf: logf,
-		tried: tried, volume: volume, epoch: epoch}
+	return sinks
+}
+
+// seed records the starting volume as tried and reserved so a spanning roll never recycles
+// the tape this write is already on (its fresh content is not yet in the catalog) and a
+// concurrent drive never selects it.
+func (s *WriteSink) seed(volume string) {
+	if volume != "" {
+		s.tried[volume] = true
+		s.l.reserve(volume)
+	}
+}
+
+// ensureStarted runs the lazy first load: PrepareWrite selects and loads a writable tape
+// into this sink's drive, then the starting volume is seeded. A no-op once started.
+func (s *WriteSink) ensureStarted() error {
+	if s.started {
+		return nil
+	}
+	name, epoch, err := s.l.PrepareWrite(s.appendable, s.expect, s.now, s.logf)
+	if err != nil {
+		return err
+	}
+	s.volume, s.epoch, s.started = name, epoch, true
+	s.seed(name)
+	return nil
 }
 
 // maxPart is the payload bytes the next part may carry on the loaded volume: its
@@ -718,24 +829,30 @@ func (s *WriteSink) advance() error {
 // NextPart implements archiveio.VolumeSink: it rolls onto a fresh volume if the loaded
 // one cannot hold a header plus a byte, then returns the volume and the part's byte cap.
 func (s *WriteSink) NextPart() (media.Volume, int64, string, int, error) {
+	if err := s.ensureStarted(); err != nil {
+		return nil, 0, "", 0, err
+	}
 	for max := s.maxPart(); max >= 0 && max < 1; max = s.maxPart() {
 		if err := s.advance(); err != nil {
 			return nil, 0, "", 0, err
 		}
 	}
-	return s.l.vol, s.maxPart(), s.volume, s.epoch, nil
+	return s.l.driveVol(), s.maxPart(), s.volume, s.epoch, nil
 }
 
 // PlaceRecord implements archiveio.VolumeSink: it rolls first if the record (one whole file
 // of the given payload size — an archive's index or commit footer) will not fit the loaded
 // volume.
 func (s *WriteSink) PlaceRecord(size int64) (media.Volume, string, int, error) {
+	if err := s.ensureStarted(); err != nil {
+		return nil, "", 0, err
+	}
 	if room, known := s.l.Remaining(); known && room-record.HeaderBlock < size {
 		if err := s.advance(); err != nil {
 			return nil, "", 0, err
 		}
 	}
-	return s.l.vol, s.volume, s.epoch, nil
+	return s.l.driveVol(), s.volume, s.epoch, nil
 }
 
 // Bounded implements archiveio.VolumeSink: it reports whether a part's size is ever capped —
@@ -871,15 +988,18 @@ func (l *Librarian) mount(volume string) error {
 	if l.manual {
 		return l.mountViaShelf(volume)
 	}
-	// A robot loads the slot holding the needed label.
-	_, ok, err := l.findSlot(volume)
+	// A robot loads the slot holding the needed label, into whichever drive holds it. The
+	// read drive is set so the read accessors (driveVol) act on that cartridge — a
+	// multi-drive dump can leave the wanted tape in a drive other than 0.
+	_, drive, ok, err := l.findSlot(volume)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return fmt.Errorf("%w: volume %q (holding a copy of the slot on %q) is not in the library; load it with `nb load %s <slot>`", ErrVolumeUnavailable, volume, l.medium, l.medium)
 	}
-	return nil // findSlot left the matching slot loaded in drive 0
+	l.drive = drive
+	return nil
 }
 
 // mountViaShelf loads the named reel on a single-drive station: if it is not already
@@ -905,7 +1025,7 @@ func (l *Librarian) mountViaShelf(volume string) error {
 // assertVolume confirms the volume mounted on the medium matches the recorded
 // identity (label name + epoch) of a part to read, before reading from it.
 func (l *Librarian) assertVolume(volume string, epoch int) error {
-	lv, ok := l.vol.(media.Labeled)
+	lv, ok := l.driveVol().(media.Labeled)
 	if !ok {
 		return nil // address-identified: identity is the medium itself
 	}
@@ -923,7 +1043,7 @@ func (l *Librarian) assertVolume(volume string, epoch int) error {
 // readVolumeLabel reads the loaded volume's label name, if any. It is a no-op for
 // address-identified media that carry no label.
 func (l *Librarian) readVolumeLabel() (name string, labeled bool, err error) {
-	lv, ok := l.vol.(media.Labeled)
+	lv, ok := l.driveVol().(media.Labeled)
 	if !ok {
 		return "", false, nil
 	}
@@ -1158,7 +1278,7 @@ func (l *Librarian) Load(target string, byLabel bool, logf Logf) error {
 		return fmt.Errorf("medium %q has no changer to load (it is addressed directly, not by loading volumes)", l.medium)
 	}
 	if byLabel {
-		slot, ok, err := l.findSlot(target)
+		slot, _, ok, err := l.findSlot(target)
 		if err != nil {
 			return err
 		}

@@ -38,11 +38,26 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 	// three size columns read as the dump's progression: EST is the planner estimate DUMPED
 	// (the uncompressed source size) races toward, and VOLUME is what has landed authoritatively.
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "DLE\tLEVEL\tSTATE\tDUMP\tFLUSH\tEST\tDUMPED\tVOLUME")
+	// The VOLUME column names the volume(s) each DLE's data reached — a removable medium's
+	// self-identity (a tape label; several comma-joined when the archive spanned volumes or,
+	// on a multi-drive library, drives). It is medium-neutral but only printed when the landing
+	// identifies its volumes by label; an address-identified landing (disk, cloud) is its own
+	// sole volume and carries none, so the column is dropped. LANDED is the bytes on the
+	// authoritative volume so far.
+	labeled := anyVolume(s.DLEs)
+	if labeled {
+		fmt.Fprintln(tw, "DLE\tLEVEL\tSTATE\tDUMP\tFLUSH\tEST\tDUMPED\tLANDED\tVOLUME")
+	} else {
+		fmt.Fprintln(tw, "DLE\tLEVEL\tSTATE\tDUMP\tFLUSH\tEST\tDUMPED\tLANDED")
+	}
 	for _, d := range s.DLEs {
-		fmt.Fprintf(tw, "%s\tL%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\tL%d\t%s\t%s\t%s\t%s\t%s\t%s",
 			d.Name, d.Level, stateCell(d), dumpCell(d), drainCell(d),
 			estCell(d), sizeutil.FormatBytes(d.DoneBytes), sizeutil.FormatBytes(d.OnVolume()))
+		if labeled {
+			fmt.Fprintf(tw, "\t%s", volumeCell(d))
+		}
+		fmt.Fprintln(tw)
 	}
 	tw.Flush()
 
@@ -87,6 +102,26 @@ func renderEstimating(w io.Writer, s Snapshot, now time.Time) {
 	fmt.Fprintf(w, "  started:  %s  (elapsed %s)\n", s.StartedAt.Local().Format("2006-01-02 15:04:05"), sizeutil.FormatElapsed(s.Elapsed(now)))
 	fmt.Fprintf(w, "  sizing:   %d of %d DLEs measured\n", sized, len(s.DLEs))
 	fmt.Fprintf(w, "  estimate: ~%s so far\n", sizeutil.FormatBytes(s.TotalDone()))
+}
+
+// anyVolume reports whether any DLE has landed on a labelled volume, so the VOLUME column
+// is worth printing (a removable-medium run) rather than a column of dashes (a disk/cloud
+// landing, which is its own sole address-identified volume).
+func anyVolume(dles []DLE) bool {
+	for _, d := range dles {
+		if d.Volume != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// volumeCell renders the landing volume(s) a DLE reached, or a dash before it has committed.
+func volumeCell(d DLE) string {
+	if d.Volume == "" {
+		return "-"
+	}
+	return d.Volume
 }
 
 // stateCell renders a DLE's state, annotating a draining DLE with the holding disk it

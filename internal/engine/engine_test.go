@@ -385,6 +385,77 @@ func TestParallelWorkers(t *testing.T) {
 	}
 }
 
+// TestMultiDriveTapeConcurrentWrite dumps several DLEs straight onto a multi-drive tape
+// library (landing = the library, no holding disk): the run must spread the archives
+// across the drives (so a single run's slot lands on more than one tape), and every DLE
+// must restore byte-for-byte — exercising both the concurrent per-drive write path and
+// the cross-drive read that follows (a tape may be left in a drive other than 0).
+func TestMultiDriveTapeConcurrentWrite(t *testing.T) {
+	cfg := &config.Config{
+		Landing:   "lib",
+		AutoLabel: true, // the robot labels each fresh tape it rolls onto
+		Cycle:     "1d", // every run a fresh full, so each DLE carries its own payload
+		Media: map[string]config.Media{
+			// Two drives fed from four slots; tapes big enough that each drive's share
+			// fits without spanning, so the split we observe is across drives, not rolls.
+			"lib": {Type: "tape", Params: map[string]string{
+				"dir": t.TempDir(), "slots": "4", "drives": "2", "volume_size": "1048576"}},
+		},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	cfg.Parallelism.Workers = 2
+
+	names := []string{"alpha", "bravo", "charlie", "delta"}
+	bodies := map[string]string{}
+	for i, n := range names {
+		dir := t.TempDir()
+		body := strings.Repeat(string(rune('a'+i)), 20*1024) // distinct, non-trivial payloads
+		write(t, filepath.Join(dir, n+".txt"), body)
+		bodies[n] = body
+		cfg.Sources = append(cfg.Sources, config.DLE{Host: "localhost", Path: dir})
+	}
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("multi-drive run: %v", err)
+	}
+	if len(s.Archives) != len(cfg.Sources) {
+		t.Fatalf("expected %d archives, got %d", len(cfg.Sources), len(s.Archives))
+	}
+
+	// The run's archives must be spread across at least two tapes — proof both drives
+	// were used concurrently rather than everything serialising onto one.
+	vols := map[string]bool{}
+	for _, p := range eng.cat.Placements(s.ID) {
+		for _, v := range p.Labels() {
+			vols[v] = true
+		}
+	}
+	if len(vols) < 2 {
+		t.Fatalf("expected the run to span >= 2 tapes (one per drive), got %d: %v", len(vols), vols)
+	}
+
+	// Every DLE restores byte-for-byte, including any whose tape the robot must relocate
+	// from a non-zero drive to read.
+	for i, d := range cfg.Sources {
+		dest := t.TempDir()
+		if err := eng.Restore(s.ID, d.Name(), dest, false, nil); err != nil {
+			t.Fatalf("restore %s: %v", d.Name(), err)
+		}
+		assertContent(t, filepath.Join(dest, names[i]+".txt"), bodies[names[i]])
+	}
+}
+
 // TestPlanWithProgress verifies the estimate phase reports progress: the sink sees
 // every DLE start and finish and a terminal snapshot, and the plan still estimates
 // each source's size (the parallel estimate produces the same result as serial).
