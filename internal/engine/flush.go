@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
-	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/spool"
 )
@@ -26,12 +25,12 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 			vol, _, _, err := e.mediumVolume(name)
 			return vol, err
 		},
-		OpenBacking: func(landing string, spec archiveio.SlotSpec) (*clerk.Session, error) {
+		OpenBacking: func(landing string, spec archiveio.SlotSpec) (*archiveio.Author, error) {
 			wt, err := e.prepareWriter(landing, spec, now, logf)
 			if err != nil {
 				return nil, err
 			}
-			return e.clerk.OpenSlot(wt.w, landing, wt.lib.Volume()), nil
+			return wt.writer, nil
 		},
 		DisplayDLE: e.DisplayDLE,
 		Logf:       logf,

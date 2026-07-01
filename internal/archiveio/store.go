@@ -4,17 +4,13 @@ import (
 	"io"
 
 	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// store.go defines the slot-write surface the producer and the spool drive, one level above the raw
-// xfer.Sink: an ArchiveStore hands out per-archive ArchiveWriters and owns reading a committed
-// archive back / dropping it. These interfaces live here, below xfer, so they can reference the
-// record-free ArchiveSpec (xfer stays pure byte plumbing and imports neither). The spool depends only
-// on these (one backing store, an array of holding ones) and never imports the catalog or the clerk
-// that implements them. There is no "finish": a slot is its committed archives — each durable via its
-// own footer and indexed in the catalog as it commits — so the run's slot is read from the catalog,
-// not produced by sealing.
+// store.go defines the surfaces above the raw writer: a Store (a medium end you write to, read back,
+// and reclaim) and an Ingest (a producer's source of ArchiveWriters). They live here, below
+// xfer, so they can reference the record-free ArchiveSpec. Neither is a factory-cum-store: writers
+// are always built by NewAuthor over a WriteStore; a Store is the medium end, and the only thing that
+// hands out writers is the spool (an Ingest), which is not a WriteStore.
 
 // ArchiveSpec is the record-free description of a new archive to write: its DLE and identity
 // (host/path), the archiver that produced it, the scheme it was encoded with, its level, and the slot
@@ -31,43 +27,30 @@ type ArchiveSpec struct {
 	BaseSlot string
 }
 
-// ArchiveWriter is one archive's write handle. A transfer drives it as an xfer.Sink (NextPart +
-// Commit), and the caller reads the committed archive and its on-medium position from Result
-// afterwards — e.g. to queue a holding->backing copy or to reclaim the staged copy once it has
-// landed. Commit records the placement; Result is valid only after a successful Commit.
-//
-// Close releases the handle's resources — for a routing store (the spool) the backing permit a
-// direct write holds — whether or not Commit ran. The producer defers it once, right after
-// acquiring the writer, so a faulted transfer (which never reaches Commit) still frees the permit;
-// it is a no-op for a leaf medium's writer. Close lives here, not on xfer.Sink: the resource it
-// frees is a store-layer concept, so the release pairs with NewArchive's acquire at this layer,
-// leaving xfer.Sink the pure byte-plumbing primitive whose only fault unwind is ctx-cancel.
-type ArchiveWriter interface {
-	xfer.Sink
-	io.Closer
-	Result() (record.Archive, record.ArchivePos)
+// CommitResult is the assembled outcome of writing one archive: the record and where it landed. The
+// writer builds it in Commit and reports it to its WriteStore (WriteStore.Record) — the whole
+// worker→coordinator crossing, a single value passed by copy, never shared writer state.
+type CommitResult struct {
+	Archive record.Archive
+	Pos     record.ArchivePos
 }
 
-// ArchiveWriteStore is the slot-write surface the producer drives: NewArchive reserves a per-archive
-// ArchiveWriter (whose Commit records the placement), blocking for back-pressure and returning the
-// run's error if the store has failed. est is the producer's size estimate — a routing store (the
-// spool) uses it to pick a medium; a leaf medium ignores it. For live byte progress the caller wraps
-// the returned writer with MeterArchive; the store itself carries no progress concern. The dumper
-// points at either a spool (buffered, concurrency-safe over a backing + holding media) or a single
-// medium's store, never caring which.
-type ArchiveWriteStore interface {
-	NewArchive(spec ArchiveSpec, est int64) (ArchiveWriter, error)
-}
-
-// ArchiveStore is a single medium's slot store: an ArchiveWriteStore that additionally re-authors an
-// already-committed archive (NewCopy — raw bytes, checksum verified, source identity preserved), reads
-// a committed archive's payload back (OpenArchive), and drops it (Reclaim). The latter two are the
-// read/delete a holding->backing drain needs to move a staged archive to the backing and free the
-// holding disk; NewCopy is the write side of that drain (and of `nb copy` / crash-recovery Flush). The
-// spool composes these (one backing, an array of holding); the clerk implements them.
-type ArchiveStore interface {
-	ArchiveWriteStore
-	NewCopy(arch record.Archive) (ArchiveWriter, error)
+// Store is one authored slot seen through its medium end: it is a WriteStore — a writer built over it (a
+// serial one, or the spool's routed one) authors archives to it — and it can read a committed archive's
+// payload back (OpenArchive) and drop it (Reclaim). It is not a factory: archive writers are made by
+// NewAuthor over the WriteStore, never by the Store. A landing needs only the WriteStore; a holding disk is a
+// full Store, since the drain reads its staged archives back and reclaims them. The clerk implements it.
+type Store interface {
+	WriteStore
 	OpenArchive(arch record.Archive, pos record.ArchivePos) (io.ReadCloser, error)
 	Reclaim(arch record.Archive, pos record.ArchivePos) error
+}
+
+// Ingest is the producer's source of ArchiveWriters: NewArchive reserves a per-archive
+// writer, blocking for back-pressure and returning the run's error if it has failed. est is the size
+// estimate — the spool (the only implementer) uses it to pick a medium. It is deliberately not a
+// WriteStore: it manufactures writers (over whatever WriteStore it chooses), it is not itself written to. The
+// dumper points at one and drives the writers it hands back.
+type Ingest interface {
+	NewArchive(spec ArchiveSpec, est int64) (*ArchiveWriter, error)
 }

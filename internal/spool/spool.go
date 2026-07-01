@@ -3,527 +3,384 @@ package spool
 import (
 	"context"
 	"fmt"
-	"io"
 	"sync"
+	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/progress"
+	"github.com/Niloen/nbackup/internal/ratelimit"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// spool.go is the consuming half of a dump: the run's buffered, concurrency-safe archive store over
-// one or more landing backings plus holding disks. A producer ingests each archive into a Sink the
-// Spool hands out for the archive's landing (Store(landing).NewArchive → transfer → commit); the Spool
-// decides per archive whether to buffer it on a holding disk (then copy it to that landing later) or —
-// when no disk fits, or none is configured — write it straight to the landing.
+// spool.go is the consuming half of a dump: the run's concurrency-safe archive store over one or more
+// landing backings plus holding disks. It models Amanda's driver/taper split, in one process:
 //
-// Routing is the caller's: the dumper resolves each DLE's landing (its dumptype's `landing` override,
-// else the config-wide one) and asks the Spool for that backing's store. The Spool never picks a
-// landing itself; it just owns the concurrency. The sink it hands a producer is a remoteSink: its
-// NextPart and Commit are control calls that run on the orchestrator goroutine (the librarian that may
-// roll/change volumes and the sole catalog writer), while the payload bytes the producer writes into
-// each part stay on the producer's goroutine. So every volume roll and every placement record (which
-// an ArchiveWriter's Commit does) lands single-threaded on the orchestrator, with no bytes flowing
-// through it — across all backings.
+//   - Each producer (and each drain) writes bytes on its own goroutine, driving an archiveio writer
+//     the clerk built over a landing's (or holding disk's) Session. All byte I/O — part headers,
+//     payload, footer, member index, SHA — happens there.
+//   - A single orchestrator goroutine is the Coordinator every Session's control calls route through:
+//     volume alloc/roll (the librarian) and the catalog Record. So across every backing, rolls and
+//     placements serialize onto one goroutine (the sole catalog writer), with no bulk bytes flowing
+//     through it — a slow drive can't block it.
 //
-// Concurrency, all private here:
-//   - the orchestrator goroutine (orchestrate): the sole catalog writer. It runs each remoteSink's
-//     NextPart/Commit (so rolls + placement records serialize across every backing), dispatches each
-//     backing's holding→landing copies copies-first, grants its backing permits, and finalizes drains.
-//     Per-backing state (permits, pending copies/permits) lives on a *backing value object the
-//     orchestrator owns exclusively — no map lookups on the hot path, every request carries its *backing.
-//   - a copy goroutine per dispatched drain (copyWorker): streams one holding→landing copy — itself a
-//     remoteSink write — while the orchestrator stays free to serve its control calls. Up to a backing's
-//     Slots copies run at once, so independent landings (a tape and a cloud) drain in parallel.
-//   - the producer's own goroutines (external): a direct write runs on the producer goroutine that
-//     holds its backing's permit, routing its control calls to the orchestrator.
-//
-// A backing is a single serial writer when its medium writes serially — a single rolling drive (tape),
-// where a copy and a direct write must not interleave parts — modelled as a permit of Slots: 1 when
-// buffering or for a serial medium, else the worker count (a concurrent-write object store/disk admits
-// parallel writes even when it splits archives into parts). The caller sets Slots; the spool just
-// honors it. Holding back-pressure is the Pool's (shared across backings); a backing failure aborts the
-// run so the producers stop and the run fails — never dropping data — and a rerun fills in.
+// Routing is the caller's: the dumper resolves each DLE's landing and asks the spool for that
+// backing's store. The spool decides per archive whether to stage it on a holding disk (then drain it
+// to the landing later) or, when no disk fits or none is configured, write it straight to the landing.
+// Per-backing Slots serialize a serial medium (a tape writes one archive at a time); a concurrent
+// medium (cloud/disk) runs Slots writers at once. Holding back-pressure is the Pool's. A backing
+// failure aborts the run so producers stop and the run fails — never dropping data — and a rerun fills
+// in.
 
-// Backing is one landing the spool drains (or writes) archives to: its medium name, the ArchiveStore
-// authoring it, and Slots — how many writes to it may run at once (1 while buffering or for a serial
+// Backing is one landing the spool drains (or writes) archives to: its medium name, the WriteStore it
+// lands on (the clerk Session, which the spool wraps in a routing WriteStore), the medium's byte-rate
+// Limiter, and Slots — how many writes to it may run at once (1 while buffering or for a serial
 // single-drive medium, else the worker count).
 type Backing struct {
 	Name    string
-	Storage archiveio.ArchiveStore
+	Storage archiveio.WriteStore // the landing is only written; the spool wraps it and builds writers
 	Slots   int
+	Lim     *ratelimit.Limiter
 }
 
-// Config is what the engine wires a Spool from: the Backings it drains to (the run's landings), the
-// Holding disks (empty = never buffer), and the run's progress + log seams.
+// Config is what the conductor wires a Spool from: the Backings it drains to (the run's landings), the
+// Holding Pool (empty = never buffer), the SlotSpec + clock the spool authors concurrent writers with,
+// and the run's progress + log seams.
 type Config struct {
 	Backings []Backing
-	Holding  *Pool // holding disks; empty = no buffering (every archive goes direct)
+	Holding  *Pool
+	Spec     archiveio.SlotSpec
+	Now      func() time.Time
 	Tracker  *progress.Tracker
 	Logf     func(format string, args ...any)
 }
 
-// backing is one landing's lane state, owned EXCLUSIVELY by the orchestrate goroutine — no mutex,
-// because only that goroutine reads or writes these fields. Per-backing isolation is structural: each
-// landing is its own object, not a key in a map, and every routed request carries a *backing so the
-// orchestrator does b.inUse++ rather than a name lookup.
+// backing is one landing's lane: its Session (the WriteStore the spool wraps), the medium's rate limiter,
+// and a slot semaphore bounding concurrent writes to it (direct writes + drains).
 type backing struct {
-	name       string
-	store      archiveio.ArchiveStore
-	slots      int
-	inUse      int         // writes in flight to this backing (direct writes + drain copies)
-	pendCopy   []handoff   // staged archives waiting to drain to this backing
-	pendPermit []permitReq // direct writers waiting for a permit on this backing
+	name  string
+	store archiveio.WriteStore
+	lim   *ratelimit.Limiter
+	slots chan struct{}
 }
 
-// Spool is the consuming side of a dump — the run's archive store over its backings (see the file
-// comment). Build it with New, route a producer to a backing with Store(name).NewArchive + transfer/
-// commit, and close it with Drain.
+// orchestrator is the single-goroutine Coordinator (archiveio.Coordinator): it runs each routed
+// control call — a librarian alloc/roll (NextPart/PlaceRecord), a catalog Record, or a holding drain's
+// reclaim — to completion, serially, so those single-owner resources need no lock. It runs only these
+// typed operations, never arbitrary work, and carries no bulk bytes.
+type orchestrator struct {
+	vol     chan volReq
+	record  chan recordReq
+	reclaim chan reclaimReq
+	stop    chan struct{}
+}
+
+// volReq asks the orchestrator to run real's NextPart (or PlaceRecord, when place) and reply with the
+// allocated volume; recordReq runs real's Record; reclaimReq runs store's Reclaim.
+type volReq struct {
+	real  archiveio.WriteStore
+	place bool
+	size  int64
+	reply chan volResp
+}
+type volResp struct {
+	vol   media.Volume
+	max   int64
+	name  string
+	epoch int
+	err   error
+}
+type recordReq struct {
+	real  archiveio.WriteStore
+	res   archiveio.CommitResult
+	reply chan error
+}
+type reclaimReq struct {
+	store archiveio.Store
+	arch  record.Archive
+	pos   record.ArchivePos
+	reply chan error
+}
+
+func newOrchestrator() *orchestrator {
+	o := &orchestrator{
+		vol:     make(chan volReq),
+		record:  make(chan recordReq),
+		reclaim: make(chan reclaimReq),
+		stop:    make(chan struct{}),
+	}
+	go o.loop()
+	return o
+}
+
+func (o *orchestrator) loop() {
+	for {
+		select {
+		case r := <-o.vol:
+			var resp volResp
+			if r.place {
+				resp.max = -1
+				resp.vol, resp.name, resp.epoch, resp.err = r.real.PlaceRecord(r.size)
+			} else {
+				resp.vol, resp.max, resp.name, resp.epoch, resp.err = r.real.NextPart()
+			}
+			r.reply <- resp
+		case r := <-o.record:
+			r.reply <- r.real.Record(r.res)
+		case r := <-o.reclaim:
+			r.reply <- r.store.Reclaim(r.arch, r.pos)
+		case <-o.stop:
+			return
+		}
+	}
+}
+
+func (o *orchestrator) shutdown() { close(o.stop) }
+
+// routedWriteStore is a Session's WriteStore with its control calls hopped onto the orchestrator; the
+// returned volume's AppendFile and byte writes stay on the caller's goroutine. Bounded is a constant,
+// so it never crosses.
+type routedWriteStore struct {
+	real archiveio.WriteStore
+	orch *orchestrator
+}
+
+func (r *routedWriteStore) NextPart() (media.Volume, int64, string, int, error) {
+	reply := make(chan volResp, 1)
+	r.orch.vol <- volReq{real: r.real, reply: reply}
+	x := <-reply
+	return x.vol, x.max, x.name, x.epoch, x.err
+}
+
+func (r *routedWriteStore) PlaceRecord(size int64) (media.Volume, string, int, error) {
+	reply := make(chan volResp, 1)
+	r.orch.vol <- volReq{real: r.real, place: true, size: size, reply: reply}
+	x := <-reply
+	return x.vol, x.name, x.epoch, x.err
+}
+
+func (r *routedWriteStore) Bounded() bool { return r.real.Bounded() }
+
+func (r *routedWriteStore) Record(res archiveio.CommitResult) error {
+	reply := make(chan error, 1)
+	r.orch.record <- recordReq{real: r.real, res: res, reply: reply}
+	return <-reply
+}
+
+// reclaimOn drops a staged archive from store on the orchestrator (Reclaim's catalog RemoveArchive is
+// single-owner, like Record).
+func (o *orchestrator) reclaimOn(store archiveio.Store, arch record.Archive, pos record.ArchivePos) error {
+	reply := make(chan error, 1)
+	o.reclaim <- reclaimReq{store: store, arch: arch, pos: pos, reply: reply}
+	return <-reply
+}
+
+// Spool is the consuming side of a dump (see the file comment). Build it with New, route a producer to
+// a backing with Store(name).NewArchive, and close it with Drain.
 type Spool struct {
+	orch     *orchestrator
 	backings map[string]*backing
 	pool     *Pool
+	spec     archiveio.SlotSpec // authors concurrent writers with the run's slot id
+	now      func() time.Time
 	tr       *progress.Tracker
 	logf     func(format string, args ...any)
 	ctx      context.Context
 
-	reqCh       chan sinkReq   // a remoteSink's NextPart/Commit, served on the orchestrator
-	permitReqCh chan permitReq // a direct write waiting for its backing's permit
-	releaseCh   chan release   // a direct write returning its backing permit (remoteSink.Close)
-	copyDoneCh  chan copyResult
-	shutdownCh  chan struct{} // closed by Drain: no more producers
-	finished    chan struct{} // closed when the orchestrator goroutine exits
+	drains sync.WaitGroup // in-flight holding->landing drains
 
 	mu       sync.Mutex
 	abortErr error
+	closed   chan struct{} // closed by Drain; stops the cancel watcher
 }
 
-// New builds a Spool from cfg and starts its orchestrator goroutine. A producer may call
-// Store(name).NewArchive concurrently; Drain stops it. Canceling ctx aborts the run: the orchestrator
-// stops dispatching queued holding→landing copies (the leftovers flush on the next run) so a canceled
-// dump does not block flushing everything it had buffered — it governs the lifetime of the goroutines
-// New starts, which is why it is a parameter here rather than in Config.
+// New builds a Spool from cfg and starts its orchestrator — the single goroutine every write's control
+// calls (alloc + Record) route onto, so rolls and placements serialize there across all backings.
+// Canceling ctx aborts the run: a watcher aborts the Pool so producers blocked on holding back-pressure
+// wake and stop.
 func New(ctx context.Context, cfg Config) *Spool {
-	d := &Spool{
-		ctx:         ctx,
-		backings:    make(map[string]*backing, len(cfg.Backings)),
-		pool:        cfg.Holding,
-		tr:          cfg.Tracker,
-		logf:        cfg.Logf,
-		reqCh:       make(chan sinkReq),
-		permitReqCh: make(chan permitReq),
-		releaseCh:   make(chan release),
-		copyDoneCh:  make(chan copyResult),
-		shutdownCh:  make(chan struct{}),
-		finished:    make(chan struct{}),
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	now := cfg.Now
+	if now == nil {
+		now = time.Now
+	}
+	sp := &Spool{
+		orch:     newOrchestrator(),
+		backings: make(map[string]*backing, len(cfg.Backings)),
+		pool:     cfg.Holding,
+		spec:     cfg.Spec,
+		now:      now,
+		tr:       cfg.Tracker,
+		logf:     cfg.Logf,
+		ctx:      ctx,
+		closed:   make(chan struct{}),
+	}
+	if sp.logf == nil {
+		sp.logf = func(string, ...any) {}
 	}
 	for _, b := range cfg.Backings {
-		d.backings[b.Name] = &backing{name: b.Name, store: b.Storage, slots: b.Slots}
+		slots := b.Slots
+		if slots < 1 {
+			slots = 1
+		}
+		sp.backings[b.Name] = &backing{name: b.Name, store: b.Storage, lim: b.Lim, slots: make(chan struct{}, slots)}
 	}
-	if d.logf == nil {
-		d.logf = func(string, ...any) {}
+	if ctx.Done() != nil {
+		go func() {
+			select {
+			case <-ctx.Done():
+				sp.setAbort(ctx.Err())
+			case <-sp.closed:
+			}
+		}()
 	}
-	if d.ctx == nil {
-		d.ctx = context.Background()
-	}
-	go d.orchestrate()
-	return d
+	return sp
 }
 
-// Store returns the ArchiveWriteStore that routes archives to the named backing. The dumper resolves
-// each DLE's landing to one of these; the spool never picks a backing itself.
-func (d *Spool) Store(name string) archiveio.ArchiveWriteStore {
-	return backingHandle{d: d, b: d.backings[name]}
+// Ingest returns the writer source for the named landing. The dumper resolves each DLE's landing to
+// one of these and pulls writers from it; the spool never picks a landing itself.
+func (sp *Spool) Ingest(name string) archiveio.Ingest {
+	return backingHandle{sp: sp, b: sp.backings[name]}
 }
 
-// backingHandle is a producer's view of one landing — an archiveio.ArchiveWriteStore bound to a
-// *backing, so NewArchive routes there without the spool re-deciding the landing.
+// backingHandle is a producer's view of one landing — an Ingest bound to a backing, so NewArchive
+// routes there without the spool re-deciding the landing.
 type backingHandle struct {
-	d *Spool
-	b *backing
+	sp *Spool
+	b  *backing
 }
 
-var _ archiveio.ArchiveWriteStore = backingHandle{}
+var _ archiveio.Ingest = backingHandle{}
 
-func (h backingHandle) NewArchive(spec archiveio.ArchiveSpec, est int64) (archiveio.ArchiveWriter, error) {
-	return h.d.newArchive(h.b, spec, est)
+func (h backingHandle) NewArchive(spec archiveio.ArchiveSpec, est int64) (*archiveio.ArchiveWriter, error) {
+	return h.sp.newArchive(h.b, spec, est)
 }
 
-// Aborted reports the run's failure so the producer stops scheduling. It is spool-wide: a backing
-// failure fails the run (a rerun fills in), so every backing's store reports the same abort.
-func (h backingHandle) Aborted() error { return h.d.Aborted() }
+// writerOver authors a concurrent slot writer over store: a fresh archiveio.Author whose WriteStore is
+// store wrapped in a routedWriteStore, so its alloc + Record hop to the orchestrator while its byte I/O
+// runs on the caller's goroutine. Cheap enough to build per write.
+func (sp *Spool) writerOver(store archiveio.WriteStore, lim *ratelimit.Limiter) *archiveio.Author {
+	return archiveio.NewAuthor(&routedWriteStore{real: store, orch: sp.orch}, sp.spec, lim, sp.now)
+}
 
 // newArchive reserves ingestion for an archive bound for backing b, estimated at est bytes, and
-// returns the ArchiveWriter to transfer it into — a remoteSink over the chosen medium's ArchiveWriter.
-// It blocks for back-pressure: a holding write waits while every fitting disk is over capacity; a
-// direct write (no disk fits, or none is configured) waits for a free permit on b. It returns the
-// run's error if the spool has aborted.
-func (d *Spool) newArchive(b *backing, spec archiveio.ArchiveSpec, est int64) (archiveio.ArchiveWriter, error) {
-	idx, direct, err := d.pool.Acquire(est)
+// returns the archiveio writer to transfer it into. It blocks for back-pressure: a holding write waits
+// while every fitting disk is over capacity; a direct write (no disk fits, or none configured) waits
+// for a free slot on b. The writer's control calls route onto the orchestrator (it is built over a
+// routedWriteStore), and its Close hook releases whatever the write leased. It returns the run's error if
+// the spool has aborted.
+func (sp *Spool) newArchive(b *backing, spec archiveio.ArchiveSpec, est int64) (*archiveio.ArchiveWriter, error) {
+	if err := sp.Aborted(); err != nil {
+		return nil, err
+	}
+	idx, direct, err := sp.pool.Acquire(est)
 	if err != nil {
 		return nil, err
 	}
-	if !direct {
-		if d.tr != nil {
-			// The dump is bound for this holding disk: mark it staging now, before any bytes commit, so
-			// live status shows it staging to holding (not yet on the volume) rather than mistaking the
-			// in-flight dump for a direct write to the landing.
-			d.tr.MarkToHolding(spec.Host + ":" + spec.Path)
-		}
-		real, err := d.pool.Storage(idx).NewArchive(spec, est)
-		if err != nil {
-			return nil, err
-		}
-		return &remoteSink{d: d, b: b, real: real, kind: writeHolding, disk: idx, est: est}, nil
+	if direct {
+		// No holding disk fits: write straight to the landing, holding one of b's slots for the write.
+		b.slots <- struct{}{}
+		aw := sp.writerOver(b.store, b.lim).NewArchive(spec)
+		aw.SetCloser(func() error { <-b.slots; return nil })
+		return aw, nil
 	}
-	reply := make(chan error, 1)
-	d.permitReqCh <- permitReq{b: b, reply: reply}
-	if err := <-reply; err != nil {
-		return nil, err
+	// Stage onto holding disk idx; a drain copies it to b later.
+	if sp.tr != nil {
+		sp.tr.MarkToHolding(spec.Host + ":" + spec.Path)
 	}
-	real, err := b.store.NewArchive(spec, est)
+	aw := sp.writerOver(sp.pool.Storage(idx), sp.pool.Lim(idx)).NewArchive(spec)
+	aw.SetCloser(func() error {
+		// On commit the archive occupies the disk until its drain copies it off: charge the landed
+		// bytes (so a later Acquire back-pressures on the drain backlog) and launch the drain to b. A
+		// faulted transfer never committed, so there is nothing to drain — just free the estimate.
+		if res, ok := aw.Committed(); ok {
+			sp.pool.Charge(idx, res.Archive.Compressed)
+			if sp.tr != nil {
+				sp.tr.StageHolding(res.Archive.Host+":"+res.Archive.Path, sp.pool.Name(idx))
+			}
+			sp.drains.Add(1)
+			go sp.drain(idx, res, b)
+		}
+		sp.pool.Release(idx, est)
+		return nil
+	})
+	return aw, nil
+}
+
+// drain copies one staged archive from holding disk idx to backing b, then reclaims the holding copy.
+// It runs on its own goroutine, holding one of b's slots for the copy so it serializes with direct
+// writes and other drains to b. A failure aborts the run.
+func (sp *Spool) drain(idx int, hres archiveio.CommitResult, b *backing) {
+	defer sp.drains.Done()
+	dleID := hres.Archive.Host + ":" + hres.Archive.Path
+	if sp.tr != nil {
+		sp.tr.StartFlush(dleID, sp.pool.Name(idx))
+	}
+	b.slots <- struct{}{}
+	defer func() { <-b.slots }()
+	if err := sp.copyOne(idx, hres, b, dleID); err != nil {
+		sp.setAbort(err)
+	}
+}
+
+// copyOne reads a staged archive off its holding disk (on this goroutine) and streams it to b through
+// a fresh copy writer — its volume rolls and its placement Record route onto the orchestrator, while
+// the bytes flow here. The copy's Commit records the landing placement; then the holding copy is
+// reclaimed on the orchestrator (files + placement, the catalog write) and its disk bytes freed.
+func (sp *Spool) copyOne(idx int, hres archiveio.CommitResult, b *backing, dleID string) error {
+	rc, err := sp.pool.Storage(idx).OpenArchive(hres.Archive, hres.Pos)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("flush %s L%d: read holding disk: %w", dleID, hres.Archive.Level, err)
 	}
-	return &remoteSink{d: d, b: b, real: real, kind: writeDirect}, nil
-}
-
-// writeKind tells the orchestrator how to follow up a remoteSink's Commit, after the ArchiveWriter has
-// recorded the placement.
-type writeKind int
-
-const (
-	writeHolding writeKind = iota // staged on a holding disk: queue a holding→landing copy
-	writeDirect                   // straight to the landing: holds a backing permit (released on Close)
-	writeCopy                     // the drain's copy to the landing: nothing (finalizeDrain reclaims)
-)
-
-// remoteSink is a producer's (or a copy goroutine's) xfer.Sink whose NextPart/Commit run on the
-// orchestrator — the librarian (which may roll/change volumes) and the sole catalog writer. The
-// payload bytes the caller writes into the part writer NextPart returns stay on the caller's
-// goroutine; only the control calls cross to the orchestrator. real is the medium's per-archive
-// ArchiveWriter the orchestrator runs the calls on; b is the landing it writes to.
-type remoteSink struct {
-	d    *Spool
-	b    *backing
-	real archiveio.ArchiveWriter
-	kind writeKind
-	disk int   // holding disk index (writeHolding)
-	est  int64 // in-flight reservation Acquire took on disk (writeHolding); the producer frees it on Close
-}
-
-func (r *remoteSink) NextPart(ctx context.Context) (io.WriteCloser, int64, error) {
-	reply := make(chan sinkResp, 1)
-	r.d.reqCh <- sinkReq{b: r.b, sink: r.real, ctx: ctx, reply: reply}
-	s := <-reply
-	return s.w, s.max, s.err
-}
-
-func (r *remoteSink) Commit(ctx context.Context, p xfer.SourceStats) error {
-	reply := make(chan sinkResp, 1)
-	r.d.reqCh <- sinkReq{b: r.b, sink: r.real, commit: true, ctx: ctx, produced: p, kind: r.kind, disk: r.disk, reply: reply}
-	return (<-reply).err
-}
-
-// Result delegates to the medium's writer so a remoteSink satisfies archiveio.ArchiveWriter. The producer
-// driving it never reads the position (the orchestrator records the placement inside Commit); it is
-// the orchestrator that reads Result, off the real writer, when it queues a holding→landing copy.
-func (r *remoteSink) Result() (record.Archive, record.ArchivePos) { return r.real.Result() }
-
-// Close releases what this archive held while it was being written, on every path — whether the
-// transfer committed or faulted before commit. A direct write holds its backing's permit; return it to
-// the orchestrator here (not in Commit) so a faulted direct write — which never reaches Commit —
-// frees its slot too, instead of leaking it and stalling the next direct writer forever. A holding
-// write holds the in-flight disk reservation Acquire took; free it here. If the dump committed, its
-// landed bytes were charged separately (on the Commit follow-up) and the drain frees those, so this
-// release is unconditional and never double-frees. The producer defers Close right after NewArchive,
-// so it runs on every path. The orchestrator is always serving when Close runs (every Close happens
-// before Drain), so the synchronous hand-off cannot block on a stopped server.
-func (r *remoteSink) Close() error {
-	err := r.real.Close()
-	switch r.kind {
-	case writeDirect:
-		ack := make(chan struct{}, 1)
-		r.d.releaseCh <- release{b: r.b, ack: ack}
-		<-ack
-	case writeHolding:
-		r.d.pool.Release(r.disk, r.est)
+	cw := sp.writerOver(b.store, b.lim).NewCopy(hres.Archive)
+	if sp.tr != nil {
+		archiveio.MeterArchive(cw, func(copied int64) { sp.tr.AddDrainBytes(dleID, copied) })
 	}
-	return err
-}
-
-// sinkReq is a routed remoteSink call served on the orchestrator: commit selects Commit(produced)
-// over NextPart, kind/disk carry the follow-up bookkeeping (only meaningful for a commit), b names the
-// landing it writes to.
-type sinkReq struct {
-	b        *backing
-	sink     archiveio.ArchiveWriter
-	commit   bool
-	ctx      context.Context
-	produced xfer.SourceStats
-	kind     writeKind
-	disk     int
-	reply    chan sinkResp
-}
-
-// sinkResp is the orchestrator's reply: NextPart's writer+cap, or just the error for a commit.
-type sinkResp struct {
-	w   io.WriteCloser
-	max int64
-	err error
-}
-
-// Aborted returns the run's error once the drain has failed (so producers can stop scheduling), or
-// nil while healthy.
-func (d *Spool) Aborted() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.abortErr
-}
-
-// Drain signals that the producers are done and waits for the orchestrator to flush every queued
-// holding→landing copy across every backing, returning the run's error if the drain failed. There is
-// no slot to return — each backing's committed archives are already in the catalog (recorded as they
-// committed), so the run's slot is read from there.
-func (d *Spool) Drain() error {
-	close(d.shutdownCh)
-	<-d.finished
-	return d.Aborted()
-}
-
-func (d *Spool) setAbort(err error) {
-	d.mu.Lock()
-	if d.abortErr == nil {
-		d.abortErr = err
+	// Transfer streams the raw payload and has the copy writer Commit it (footer + routed Record); it
+	// closes rc.
+	if _, err := xfer.Transfer(sp.ctx, xfer.Reader(rc), xfer.NewFilters(), cw); err != nil {
+		return fmt.Errorf("flush %s L%d to %q: %w", dleID, hres.Archive.Level, b.name, err)
 	}
-	d.mu.Unlock()
-	d.pool.Abort(err) // wake producers blocked on holding back-pressure
-}
-
-// orchestrate is the server and the sole catalog writer across every backing. Its select multiplexes
-// the producers' (and the copies') routed sink calls, the permit waiters and releases, and the copy
-// goroutines so control never blocks on a byte stream; after each event it dispatches each backing's
-// pending work copies-first (draining the disks keeps the Pool from stalling producers), up to that
-// backing's Slots. A direct write takes a permit when granted and returns it on Close (committed or
-// faulted), so a failed dump never leaks its slot. On error it aborts every backing and replies the
-// error to every waiter, then drains the in-flight copies and exits once Drain has signalled no more
-// producers.
-func (d *Spool) orchestrate() {
-	defer close(d.finished)
-
-	var (
-		failErr        error
-		copiesInFlight int
-		shutting       bool
-	)
-	shutdownCh := d.shutdownCh
-	cancelCh := d.ctx.Done()
-	pendingCopies := func() int {
-		n := 0
-		for _, b := range d.backings {
-			n += len(b.pendCopy)
-		}
-		return n
-	}
-	for {
-		if shutting && copiesInFlight == 0 && pendingCopies() == 0 {
-			return
-		}
-		select {
-		case <-cancelCh:
-			// The run was canceled: abort like a backing failure so queued copies are dropped
-			// (they flush on the next run) and every waiter is released, instead of flushing
-			// everything buffered. In-flight copies are left to finish; Drain then joins us.
-			if failErr == nil {
-				failErr = context.Canceled
-			}
-			cancelCh = nil // a closed Done channel is always ready; stop selecting it
-		case req := <-d.reqCh:
-			if !req.commit {
-				if failErr != nil {
-					req.reply <- sinkResp{err: failErr}
-					break
-				}
-				w, max, err := req.sink.NextPart(req.ctx)
-				req.reply <- sinkResp{w: w, max: max, err: err}
-				break
-			}
-			if failErr != nil {
-				req.reply <- sinkResp{err: failErr}
-				break
-			}
-			if err := req.sink.Commit(req.ctx, req.produced); err != nil {
-				failErr = err
-				req.reply <- sinkResp{err: err}
-				break
-			}
-			if req.kind == writeHolding {
-				arch, pos := req.sink.Result()
-				// The staged archive now occupies the disk until the drain copies it off; charge its
-				// landed bytes so a later Acquire back-pressures on the drain backlog. The dump's
-				// in-flight estimate is still reserved until the producer closes the sink — the two
-				// briefly overlap, which only over-reserves.
-				d.pool.Charge(req.disk, arch.Compressed)
-				if d.tr != nil {
-					// The dump committed to this disk: record where it staged so the queued DLE shows a
-					// 0% flush bar (and which disk) while it waits behind other drains — taking over from
-					// the "staging" mark its in-flight dump carried.
-					d.tr.StageHolding(arch.Host+":"+arch.Path, d.pool.Name(req.disk))
-				}
-				req.b.pendCopy = append(req.b.pendCopy, handoff{arch: arch, pos: pos, disk: req.disk, b: req.b})
-			}
-			req.reply <- sinkResp{}
-		case pr := <-d.permitReqCh:
-			if failErr != nil {
-				pr.reply <- failErr
-				break
-			}
-			pr.b.pendPermit = append(pr.b.pendPermit, pr)
-		case rel := <-d.releaseCh:
-			// A direct write finished (remoteSink.Close) — committed or faulted before commit — and
-			// returns its backing permit. Releasing here, not in the Commit handler, is what frees a
-			// faulted direct write's slot; the dispatch below then grants a waiting writer.
-			rel.b.inUse--
-			rel.ack <- struct{}{}
-		case res := <-d.copyDoneCh:
-			copiesInFlight--
-			res.it.b.inUse--
-			if res.err != nil {
-				failErr = res.err
-			} else if err := d.finalizeDrain(res.it); err != nil {
-				failErr = err
-			}
-		case <-shutdownCh:
-			shutting = true
-			shutdownCh = nil // a closed channel is always ready; stop selecting it
-		}
-
-		if failErr != nil {
-			d.setAbort(failErr)
-			for _, b := range d.backings {
-				for _, pr := range b.pendPermit {
-					pr.reply <- failErr
-				}
-				b.pendPermit = nil
-				b.pendCopy = nil // a failed run leaves the holding placements for the next run's flush
-			}
-			continue
-		}
-
-		// Dispatch every backing, copies-first: a copy drains the holding backlog (keeping the Pool from
-		// stalling producers); otherwise hand the free permits to waiting direct writers. Independent
-		// backings dispatch independently — a tape at Slots 1 and a cloud at Slots N do not gate each other.
-		for _, b := range d.backings {
-			copiesInFlight += d.dispatch(b)
-		}
-	}
-}
-
-// dispatch grants backing b's free permits — copies first, then waiting direct writers — up to b.slots,
-// returning how many copies it launched (so the orchestrator tracks them for shutdown). It runs only on
-// the orchestrator goroutine, on b's own fields.
-func (d *Spool) dispatch(b *backing) int {
-	launched := 0
-	for b.inUse < b.slots {
-		switch {
-		case len(b.pendCopy) > 0:
-			j := b.pendCopy[0]
-			b.pendCopy = b.pendCopy[1:]
-			b.inUse++
-			launched++
-			go d.copyWorker(j)
-		case len(b.pendPermit) > 0:
-			pr := b.pendPermit[0]
-			b.pendPermit = b.pendPermit[1:]
-			b.inUse++
-			pr.reply <- nil
-		default:
-			return launched
-		}
-	}
-	return launched
-}
-
-// copyWorker streams one dispatched copy on its own goroutine, reporting the result back to the
-// orchestrator. Up to a backing's Slots run at once; different backings run concurrently.
-func (d *Spool) copyWorker(j handoff) {
-	d.copyDoneCh <- copyResult{it: j, err: d.copyOne(j)}
-}
-
-// copyOne reads one staged archive from its holding disk and streams it to its landing through a
-// remoteSink — so its volume rolls and its placement record land on the orchestrator, while the bytes
-// flow on this copy goroutine. The landing's NewCopy writer re-checksums the payload against the
-// recorded digest (catching holding-disk corruption) and preserves the source's identity. The
-// placement record and the holding reclaim are the orchestrator's (the landing commit records the
-// former; finalizeDrain does the latter).
-func (d *Spool) copyOne(j handoff) error {
-	holding := d.pool.Name(j.disk)
-	dleID := j.arch.Host + ":" + j.arch.Path
-	if d.tr != nil {
-		d.tr.StartFlush(dleID, holding)
-	}
-	rc, err := d.pool.Storage(j.disk).OpenArchive(j.arch, j.pos)
-	if err != nil {
-		return fmt.Errorf("flush %s L%d: read holding disk: %w", dleID, j.arch.Level, err)
-	}
-	real, err := j.b.store.NewCopy(j.arch)
-	if err != nil {
-		return fmt.Errorf("flush %s L%d to %q: %w", dleID, j.arch.Level, j.b.name, err)
-	}
-	if d.tr != nil {
-		real = archiveio.MeterArchive(real, func(copied int64) { d.tr.AddDrainBytes(dleID, copied) })
-	}
-	rs := &remoteSink{d: d, b: j.b, real: real, kind: writeCopy}
-	if _, err := xfer.Transfer(d.ctx, xfer.Reader(rc), xfer.Filters{}, rs); err != nil {
-		return fmt.Errorf("flush %s L%d to %q: %w", dleID, j.arch.Level, j.b.name, err)
-	}
-	return nil
-}
-
-// finalizeDrain reclaims the holding copy (files + placement, via the holding ArchiveStore) and
-// releases its back-pressure once the archive has landed on its backing. It runs on the orchestrator.
-// The landing placement was already recorded by the copy's commit, so the archive is never absent
-// from the catalog.
-func (d *Spool) finalizeDrain(it handoff) error {
-	dleID := it.arch.Host + ":" + it.arch.Path
-	if err := d.pool.Storage(it.disk).Reclaim(it.arch, it.pos); err != nil {
+	if err := sp.orch.reclaimOn(sp.pool.Storage(idx), hres.Archive, hres.Pos); err != nil {
 		return fmt.Errorf("flush %s: reclaim holding disk: %w", dleID, err)
 	}
-	d.pool.Release(it.disk, it.arch.Compressed)
-	if d.tr != nil {
-		d.tr.FinishFlush(dleID)
+	sp.pool.Release(idx, hres.Archive.Compressed)
+	if sp.tr != nil {
+		sp.tr.FinishFlush(dleID)
 	}
-	d.logf("flushed %s L%d to %q", dleID, it.arch.Level, it.b.name)
+	sp.logf("flushed %s L%d to %q", dleID, hres.Archive.Level, b.name)
 	return nil
 }
 
-// handoff is one committed holding archive the orchestrator queues to copy: its metadata, its
-// positions on the holding disk, which disk it landed on (so the copy reads, reclaims, and releases
-// the right one), and which backing it drains to.
-type handoff struct {
-	arch record.Archive
-	pos  record.ArchivePos
-	disk int
-	b    *backing
+// Drain signals the producers are done and waits for every queued holding->landing drain to finish,
+// then stops the orchestrator, returning the run's error if any drain (or a backing) failed. There is
+// no slot to return — each backing's committed archives are already in the catalog (recorded as they
+// committed), so the run's slot is read from there.
+func (sp *Spool) Drain() error {
+	sp.drains.Wait()
+	close(sp.closed)
+	sp.orch.shutdown()
+	return sp.Aborted()
 }
 
-// permitReq is a direct write waiting for backing b's permit; reply is sent the run's error or nil
-// once granted.
-type permitReq struct {
-	b     *backing
-	reply chan error
+// Aborted returns the run's error once a drain or backing has failed (so producers stop scheduling), or
+// nil while healthy.
+func (sp *Spool) Aborted() error {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	return sp.abortErr
 }
 
-// release is a direct write returning backing b's permit on Close; ack is closed-back once the
-// orchestrator has decremented the count, so the producer's Close blocks until the slot is free.
-type release struct {
-	b   *backing
-	ack chan struct{}
-}
-
-// copyResult is one finished (or failed) copy a copy goroutine hands back to the orchestrator, which
-// reclaims the holding copy on success (finalizeDrain).
-type copyResult struct {
-	it  handoff
-	err error
+func (sp *Spool) setAbort(err error) {
+	sp.mu.Lock()
+	if sp.abortErr == nil {
+		sp.abortErr = err
+	}
+	sp.mu.Unlock()
+	if sp.pool != nil {
+		sp.pool.Abort(err) // wake producers blocked on holding back-pressure
+	}
 }

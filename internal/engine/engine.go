@@ -516,28 +516,22 @@ func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
 	return e.cat.Rebuild(vols)
 }
 
-// writeTarget bundles a medium prepared for writing: a librarian whose first volume
-// is mounted and label-verified, and the archiveio writer streaming the slot onto it.
+// writeTarget bundles a medium prepared for writing: a librarian whose first volume is mounted and
+// label-verified, the clerk Session (the slot's archiveio.Store — the medium end), and a serial writer
+// authored over it (for the direct CopySlot/Flush paths; the spool builds its own over the Session).
 type writeTarget struct {
-	lib *librarian.Librarian
-	w   *archiveio.Writer
+	lib     *librarian.Librarian
+	session *clerk.Session
+	writer  *archiveio.Author
 }
 
 // prepareWriter resolves a medium, enforces the label protocol on its loaded volume
-// (prompting a swap on a manual single drive), and builds a archiveio writer that
-// authors the slot described by spec onto it. It is the one place the PrepareWrite
-// -> WriteSink -> NewWriter contract lives, shared by a dump (Run) and a copy/sync
-// (CopySlot).
+// (prompting a swap on a manual single drive), and opens a clerk Session authoring the slot
+// described by spec onto it. The Session builds the archiveio writer over itself, so each
+// committed archive reports straight to the catalog; the spool later routes those control
+// calls onto its orchestrator via SetCoordinator. It is the one place the PrepareWrite ->
+// WriteSink -> OpenSlot contract lives, shared by a dump (Run) and a copy/sync (CopySlot).
 func (e *Engine) prepareWriter(medium string, spec archiveio.SlotSpec, now time.Time, logf Logf) (*writeTarget, error) {
-	return e.prepareWriterWith(medium, spec, now, logf, nil)
-}
-
-// prepareWriterWith is prepareWriter with a seam to wrap the medium's volume sink before the
-// Writer is built over it (wrap nil is the identity). The drain uses it to substitute an
-// orchestrator-client proxy sink for the librarian's control calls — NextPart/PlaceRecord, where a
-// volume roll touches the catalog — routing them to the orchestrator, while the byte-copy runs on the
-// spool's copy goroutine. Wrapping here keeps the single PrepareWrite→WriteSink→NewWriter contract in one place.
-func (e *Engine) prepareWriterWith(medium string, spec archiveio.SlotSpec, now time.Time, logf Logf, wrap func(archiveio.VolumeSink) archiveio.VolumeSink) (*writeTarget, error) {
 	lib, def, _, err := e.librarianFor(medium)
 	if err != nil {
 		return nil, err
@@ -553,12 +547,10 @@ func (e *Engine) prepareWriterWith(medium string, spec archiveio.SlotSpec, now t
 	if err != nil {
 		return nil, err
 	}
-	var sink archiveio.VolumeSink = lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
-	if wrap != nil {
-		sink = wrap(sink)
-	}
-	w := archiveio.NewWriter(sink, spec, e.limiters[medium], func() time.Time { return now })
-	return &writeTarget{lib: lib, w: w}, nil
+	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
+	session := e.clerk.OpenSlot(sink, medium, lib.Volume(), spec.ID)
+	writer := archiveio.NewAuthor(session, spec, e.limiters[medium], func() time.Time { return now })
+	return &writeTarget{lib: lib, session: session, writer: writer}, nil
 }
 
 // announceExpectation logs which labeled volume a write will use before it starts —

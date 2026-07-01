@@ -26,7 +26,8 @@ func (e *Engine) openWriter(medium string, spec archiveio.SlotSpec, now time.Tim
 	}
 	capB, _ := e.cfg.Media[medium].CapacityBytes()
 	return conductor.PreparedWriter{
-		Store: e.clerk.OpenSlot(wt.w, medium, wt.lib.Volume()),
+		Store: wt.session,
+		Lim:   e.limiters[medium],
 		// Serial keys off the concurrent-write capability: a serial medium (tape) shares one
 		// rolling drive and writes one archive at a time, while a concurrent-write object
 		// store/disk writes archives as independent objects/files and stays parallel — even

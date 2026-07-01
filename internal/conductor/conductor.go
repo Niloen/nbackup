@@ -16,6 +16,7 @@ import (
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
+	"github.com/Niloen/nbackup/internal/ratelimit"
 )
 
 // PreparedWriter is the folded view of a medium opened for writing: the slot store the
@@ -30,9 +31,10 @@ import (
 // splits a large archive into parts. Whether an archive is split is the writer's concern,
 // not the conductor's, so it does not appear here.
 type PreparedWriter struct {
-	Store    archiveio.ArchiveStore
+	Store    archiveio.Store
 	Serial   bool
 	Capacity int64
+	Lim      *ratelimit.Limiter // the medium's byte-rate cap; the spool authors its concurrent writers with it
 }
 
 // Deps is the slice of the orchestrator a single run needs. The closures bind to the
