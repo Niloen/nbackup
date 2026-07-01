@@ -20,7 +20,7 @@ Disk, tape, and cloud object stores — three medium types behind one self-descr
 ## The `media:` map
 
 Storage is a map of **named definitions**. Each entry has a `type` and a set of
-type-specific parameters; `landing:` names the medium that new slots are written
+type-specific parameters; `landing:` names the medium that new runs are written
 to:
 
 ```yaml
@@ -42,7 +42,7 @@ it landed on a filesystem, a tape, or an object store. Adding a new medium type
 is a code-level registration; it needs no change to the config structure.
 
 Any medium can also be a **replication target**: dump to one, then mirror sealed
-slots onto another with [Replication](replication). Capacity and retention are set
+runs onto another with [Replication](replication). Capacity and retention are set
 per medium, not globally.
 
 ## Disk
@@ -51,14 +51,14 @@ per medium, not globally.
 media:
   disk:
     type: disk
-    path: /var/lib/nbackup/catalog   # where slots are written (local dir or NFS)
+    path: /var/lib/nbackup/catalog   # where runs are written (local dir or NFS)
     capacity: 20TB                   # space NBackup may use here
 ```
 
 A disk medium is **address-identified**: a file's path names it, so there are no
 labels, swaps, or inventory. Each archive lands as a clean payload object plus a
 small `.hdr` sidecar, in a human-friendly directory layout you can browse with
-`ls` — one slot is a directory, one archive is three numbered files (payload,
+`ls` — one run is a directory, one archive is three numbered files (payload,
 member index, commit footer). A plain copy of the payload restores with `tar`.
 
 ## Cloud
@@ -72,7 +72,7 @@ media:
     capacity: 50TB
 ```
 
-A cloud medium stores slots in an **object store**. The `url` scheme selects the
+A cloud medium stores runs in an **object store**. The `url` scheme selects the
 backend:
 
 | Scheme | Backend |
@@ -82,9 +82,9 @@ backend:
 | `azblob://` | Azure Blob Storage |
 
 Like disk, a cloud medium is **address-identified** — no labels, no swap prompts,
-nothing to inventory. It just lands and reclaims slots within its `capacity`. The
+nothing to inventory. It just lands and reclaims runs within its `capacity`. The
 on-store layout is **disk's, verbatim**: each archive is a clean `.tar.<scheme>`
-object plus a header sidecar, so a slot streams disk↔cloud unchanged and a plain
+object plus a header sidecar, so a run streams disk↔cloud unchanged and a plain
 GET yields an archive any stock tool can restore.
 
 ### S3-compatible custom endpoints
@@ -180,8 +180,8 @@ A tape medium's capacity derives as `slots × volume_size` (`0` = unbounded).
 ## Inspecting media
 
 ```bash
-nb medium          # overview: each medium's type, slots, usage / capacity, volume
-nb medium lto      # one medium's volume + slots (incl. drives + slots for tape)
+nb medium          # overview: each medium's type, runs, usage / capacity, volume
+nb medium lto      # one medium's volume + runs (incl. drives + slots for tape)
 ```
 
 `nb medium` with no argument lists every medium; with a name it details that one
@@ -201,7 +201,7 @@ media:
 Disk and cloud spell it directly (`capacity: 20TB`); a tape changer derives it as
 `slots × volume_size`. The planner fills free capacity with promoted fulls, and
 pruning reclaims to stay within it. An optional `minimum_age` is a per-medium
-safety floor (defaults to one cycle) below which a slot is never retired. See
+safety floor (defaults to one cycle) below which a run is never retired. See
 [Planning](planning) and [Pruning](pruning) for how each consumes capacity.
 
 ## Bandwidth politeness (per medium)

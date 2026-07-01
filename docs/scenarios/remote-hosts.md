@@ -39,7 +39,7 @@ compress:
   scheme: zstd
   level: 3
 
-# A single disk landing on the backup server. Slots from every host — local and
+# A single disk landing on the backup server. Runs from every host — local and
 # remote — are written here.
 media:
   disk:
@@ -123,8 +123,8 @@ surfaces as a clear error instead of a failed dump.
 
 - For each remote DLE, NBackup opens an SSH connection, runs stock `tar` (plus the
   compressor / `gpg` if the dumptype runs them client-side) on the client, and
-  streams the archive back to the server, where it lands as a slot on `disk`.
-- `localhost` DLEs are dumped locally in the same run — one slot covers the whole
+  streams the archive back to the server, where it lands as a run on `disk`.
+- `localhost` DLEs are dumped locally in the same run — one run covers the whole
   fleet.
 - Each host's incremental chain is tracked independently against its own `.snar`
   state, so levels and bumps are decided per host.
@@ -132,7 +132,7 @@ surfaces as a clear error instead of a failed dump.
 ## What to watch
 
 - **Combine with offsite replication.** This scenario lands everything on one disk;
-  add a cloud medium and a `sync:` rule to push those slots offsite. See
+  add a cloud medium and a `sync:` rule to push those runs offsite. See
   [Disk → S3](disk-to-s3).
 - **Client-side encryption is available.** A dumptype can run compression and
   encryption on the *client* so only ciphertext crosses the wire and plaintext never

@@ -340,7 +340,7 @@ func TestValidatePlan(t *testing.T) {
 }
 
 // TestParallelWorkers runs several DLEs with workers > 1, exercising concurrent
-// writes into one slot, and verifies every archive is present and restorable.
+// writes into one run, and verifies every archive is present and restorable.
 func TestParallelWorkers(t *testing.T) {
 	catalogDir := t.TempDir()
 	cfg := &config.Config{
@@ -387,7 +387,7 @@ func TestParallelWorkers(t *testing.T) {
 
 // TestMultiDriveTapeConcurrentWrite dumps several DLEs straight onto a multi-drive tape
 // library (landing = the library, no holding disk): the run must spread the archives
-// across the drives (so a single run's slot lands on more than one tape), and every DLE
+// across the drives (so a single run's run lands on more than one tape), and every DLE
 // must restore byte-for-byte — exercising both the concurrent per-drive write path and
 // the cross-drive read that follows (a tape may be left in a drive other than 0).
 func TestMultiDriveTapeConcurrentWrite(t *testing.T) {
@@ -396,7 +396,7 @@ func TestMultiDriveTapeConcurrentWrite(t *testing.T) {
 		AutoLabel: true, // the robot labels each fresh tape it rolls onto
 		Cycle:     "1d", // every run a fresh full, so each DLE carries its own payload
 		Media: map[string]config.Media{
-			// Two drives fed from four slots; tapes big enough that each drive's share
+			// Two drives fed from four runs; tapes big enough that each drive's share
 			// fits without spanning, so the split we observe is across drives, not rolls.
 			"lib": {Type: "tape", Params: map[string]string{
 				"dir": t.TempDir(), "slots": "4", "drives": "2", "volume_size": "1048576"}},
@@ -526,7 +526,7 @@ func TestPlanWithProgress(t *testing.T) {
 // the run-status file is written during the estimate prelude (phase "estimating")
 // and — crucially — never reads terminal there, so a `nb status --watch` does not
 // stop before the dump it is waiting for begins. The file ends terminal only once
-// the slot is sealed.
+// the run is sealed.
 func TestRunStatusSpansEstimatePhase(t *testing.T) {
 	workdir := t.TempDir()
 	cfg := &config.Config{
@@ -584,8 +584,8 @@ func TestRunStatusSpansEstimatePhase(t *testing.T) {
 	if snap.Phase != progress.PhaseDone {
 		t.Errorf("final phase = %q, want done", snap.Phase)
 	}
-	if snap.SlotID != s.ID {
-		t.Errorf("final slot = %q, want %q", snap.SlotID, s.ID)
+	if snap.RunID != s.ID {
+		t.Errorf("final run = %q, want %q", snap.RunID, s.ID)
 	}
 }
 
@@ -643,7 +643,7 @@ func TestThroughputCapThrottlesDump(t *testing.T) {
 	}
 }
 
-// TestThroughputCapThrottlesRestore verifies the read side honors the cap: a slot
+// TestThroughputCapThrottlesRestore verifies the read side honors the cap: a run
 // dumped uncapped, then restored through an engine whose medium carries a cap, is
 // paced to that cap (the read peer of the dump throttle).
 func TestThroughputCapThrottlesRestore(t *testing.T) {
@@ -698,8 +698,8 @@ func TestThroughputCapThrottlesRestore(t *testing.T) {
 	}
 }
 
-// TestCopyToTapeAndRestore dumps to disk, copies the slot to a (virtual) tape
-// medium, then restores it from the tape alone — exercising CopySlot and a tape
+// TestCopyToTapeAndRestore dumps to disk, copies the run to a (virtual) tape
+// medium, then restores it from the tape alone — exercising CopyRun and a tape
 // Volume end to end.
 func TestCopyToTapeAndRestore(t *testing.T) {
 	src := t.TempDir()
@@ -735,7 +735,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 	if err := eng.LabelVolume("tape", "tape-0001", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label tape: %v", err)
 	}
-	if err := eng.CopySlot(s.ID, "", "tape", false, nil); err != nil {
+	if err := eng.CopyRun(s.ID, "", "tape", false, nil); err != nil {
 		t.Fatalf("copy to tape: %v", err)
 	}
 
@@ -904,7 +904,7 @@ func TestRelabelRefusesForeignPool(t *testing.T) {
 }
 
 // TestCopyRecordsPlacementAndFailover dumps to disk, copies to a second medium,
-// confirms the slot now has two placements, then physically removes the primary
+// confirms the run now has two placements, then physically removes the primary
 // copy and restores — proving restore falls over to the recorded copy.
 func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 	src := t.TempDir()
@@ -933,15 +933,15 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
-	if err := eng.CopySlot(s.ID, "", "archive", false, nil); err != nil {
+	if err := eng.CopyRun(s.ID, "", "archive", false, nil); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
 
 	// A second copy to the same medium is refused (idempotent) unless forced.
-	if err := eng.CopySlot(s.ID, "", "archive", false, nil); err == nil {
+	if err := eng.CopyRun(s.ID, "", "archive", false, nil); err == nil {
 		t.Fatal("expected re-copy to the same medium to be refused without --force")
 	}
-	if err := eng.CopySlot(s.ID, "", "archive", true, nil); err != nil {
+	if err := eng.CopyRun(s.ID, "", "archive", true, nil); err != nil {
 		t.Fatalf("forced re-copy: %v", err)
 	}
 
@@ -954,7 +954,7 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 
 	// Physically remove the primary copy but leave its placement recorded: restore
 	// must try it, fail, and fall over to the archive copy.
-	removeSlotFiles(t, eng, s.ID)
+	removeRunFiles(t, eng, s.ID)
 	dest := t.TempDir()
 	name := config.DLE{Host: "localhost", Path: src}.Name()
 	if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
@@ -964,7 +964,7 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 }
 
 // TestRunWritesStatus confirms a dump leaves a terminal run-status file in the
-// catalog workdir, reflecting the sealed slot — the input `nb status` reads.
+// catalog workdir, reflecting the sealed run — the input `nb status` reads.
 func TestRunWritesStatus(t *testing.T) {
 	src := t.TempDir()
 	workdir := t.TempDir()
@@ -995,8 +995,8 @@ func TestRunWritesStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load status: %v", err)
 	}
-	if snap.SlotID != s.ID {
-		t.Errorf("status slot = %q, want %q", snap.SlotID, s.ID)
+	if snap.RunID != s.ID {
+		t.Errorf("status run = %q, want %q", snap.RunID, s.ID)
 	}
 	if snap.Phase != progress.PhaseDone {
 		t.Errorf("status phase = %s, want done", snap.Phase)
@@ -1011,10 +1011,10 @@ func TestRunWritesStatus(t *testing.T) {
 
 func boolp(b bool) *bool { return &b }
 
-// removeSlotFiles deletes every file of a slot from the landing volume by position —
-// the test peer of a whole-slot reclamation now that the Volume seam is per-file. Used
+// removeRunFiles deletes every file of a run from the landing volume by position —
+// the test peer of a whole-run reclamation now that the Volume seam is per-file. Used
 // to simulate a copy going missing from one medium.
-func removeSlotFiles(t *testing.T, eng *Engine, slotID string) {
+func removeRunFiles(t *testing.T, eng *Engine, runID string) {
 	t.Helper()
 	vol, err := eng.landing()
 	if err != nil {
@@ -1025,7 +1025,7 @@ func removeSlotFiles(t *testing.T, eng *Engine, slotID string) {
 		t.Fatal(err)
 	}
 	for _, f := range files {
-		if f.Header.Slot != slotID {
+		if f.Header.Run != runID {
 			continue
 		}
 		if err := vol.RemoveFile(f.Pos); err != nil {
@@ -1034,12 +1034,12 @@ func removeSlotFiles(t *testing.T, eng *Engine, slotID string) {
 	}
 }
 
-// TestTapeLibraryRestore copies two slots onto two different tapes in a library,
+// TestTapeLibraryRestore copies two runs onto two different tapes in a library,
 // removes the disk copies, then restores both — proving the changer auto-mounts
-// the bay holding each slot's tape on the read side.
+// the bay holding each run's tape on the read side.
 // TestHoldingDiskBuffersTape exercises the holding-disk path: a disk marked holding: true
 // buffers a tape landing. Several DLEs dump to the disk in parallel; the drain copies each to
-// tape and reclaims the disk; afterward the disk is empty, the slot lives on tape, and the
+// tape and reclaims the disk; afterward the disk is empty, the run lives on tape, and the
 // chain restores from tape alone.
 func TestHoldingDiskBuffersTape(t *testing.T) {
 	srcA := t.TempDir()
@@ -1178,8 +1178,8 @@ func TestHoldingDisksSpread(t *testing.T) {
 }
 
 // TestHoldingDisksFlush drains leftover archives staged across TWO holding disks. It builds the
-// post-crash state directly — two slots, one stranded on each disk — then runs Flush and confirms
-// it gathers the slots across both disks (the union), drains each from the right disk, reclaims
+// post-crash state directly — two runs, one stranded on each disk — then runs Flush and confirms
+// it gathers the runs across both disks (the union), drains each from the right disk, reclaims
 // both, and the chains restore from tape. This exercises the multi-disk Flush path (per-disk holdVol
 // resolution, per-disk placement reclaim) that a single-disk Flush cannot.
 func TestHoldingDisksFlush(t *testing.T) {
@@ -1189,9 +1189,9 @@ func TestHoldingDisksFlush(t *testing.T) {
 	write(t, filepath.Join(src1, "one.txt"), "stranded on disk one")
 	write(t, filepath.Join(src2, "two.txt"), "stranded on disk two")
 
-	// Stage: dump each DLE onto its own scratch disk acting as a landing, leaving a catalogued slot
+	// Stage: dump each DLE onto its own scratch disk acting as a landing, leaving a catalogued run
 	// stranded on each — the state a crashed multi-disk holding run leaves behind.
-	stage := func(disk, path string, src config.DLE, date time.Time) *catalog.Slot {
+	stage := func(disk, path string, src config.DLE, date time.Time) *catalog.Run {
 		cfg := &config.Config{
 			Landing:  disk,
 			Media:    map[string]config.Media{disk: {Type: "disk", Params: map[string]string{"path": path}}},
@@ -1253,7 +1253,7 @@ func TestHoldingDisksFlush(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct {
-		s    *catalog.Slot
+		s    *catalog.Run
 		src  string
 		file string
 		want string
@@ -1500,7 +1500,7 @@ func TestHoldingDiskFlush(t *testing.T) {
 	stateDir := t.TempDir()
 	sources := []config.DLE{{Host: "localhost", Path: src}}
 
-	// Stage: dump onto the scratch disk as a landing (leaves a catalogued slot on scratch —
+	// Stage: dump onto the scratch disk as a landing (leaves a catalogued run on scratch —
 	// the state a holding-disk run leaves behind when it crashes before flushing).
 	stageCfg := &config.Config{
 		Landing:  "scratch",
@@ -1596,8 +1596,8 @@ func TestHoldingDiskLandingDownFails(t *testing.T) {
 	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil); err == nil {
 		t.Fatal("holding-disk run must fail when the landing is unwritable")
 	}
-	if len(eng.cat.Slots()) != 0 {
-		t.Errorf("a failed holding-disk run must record no slot, got %d", len(eng.cat.Slots()))
+	if len(eng.cat.Runs()) != 0 {
+		t.Errorf("a failed holding-disk run must record no run, got %d", len(eng.cat.Runs()))
 	}
 }
 
@@ -1635,14 +1635,14 @@ func TestDumpContinuesPastFailedDLE(t *testing.T) {
 	}
 
 	// The good DLE committed despite the earlier failure: exactly one archive landed.
-	slots := eng.cat.Slots()
-	if len(slots) != 1 {
-		t.Fatalf("expected the good DLE to commit one slot, got %d", len(slots))
+	runs := eng.cat.Runs()
+	if len(runs) != 1 {
+		t.Fatalf("expected the good DLE to commit one run, got %d", len(runs))
 	}
-	if got := len(slots[0].Archives); got != 1 {
+	if got := len(runs[0].Archives); got != 1 {
 		t.Fatalf("expected 1 committed archive (the good DLE), got %d", got)
 	}
-	if got := slots[0].Archives[0].DLE; !strings.Contains(got, filepath.Base(good)) {
+	if got := runs[0].Archives[0].DLE; !strings.Contains(got, filepath.Base(good)) {
 		t.Errorf("committed archive should be the good DLE, got %q", got)
 	}
 }
@@ -1678,7 +1678,7 @@ func TestTapeLibraryRestore(t *testing.T) {
 	if err := eng.LabelVolume("lib", "Tape1", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label Tape1: %v", err)
 	}
-	if err := eng.CopySlot(s1.ID, "", "lib", false, nil); err != nil {
+	if err := eng.CopyRun(s1.ID, "", "lib", false, nil); err != nil {
 		t.Fatalf("copy s1: %v", err)
 	}
 
@@ -1695,7 +1695,7 @@ func TestTapeLibraryRestore(t *testing.T) {
 	if err := eng.LabelVolume("lib", "Tape2", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label Tape2: %v", err)
 	}
-	if err := eng.CopySlot(s2.ID, "", "lib", false, nil); err != nil {
+	if err := eng.CopyRun(s2.ID, "", "lib", false, nil); err != nil {
 		t.Fatalf("copy s2: %v", err)
 	}
 
@@ -1705,8 +1705,8 @@ func TestTapeLibraryRestore(t *testing.T) {
 	}
 
 	// Drop the disk copies so restore must fall over to the tapes (different bays).
-	removeSlotFiles(t, eng, s1.ID)
-	removeSlotFiles(t, eng, s2.ID)
+	removeRunFiles(t, eng, s1.ID)
+	removeRunFiles(t, eng, s2.ID)
 
 	name := config.DLE{Host: "localhost", Path: src}.Name()
 	d1 := t.TempDir()
@@ -1762,18 +1762,18 @@ func TestTapeAppendableFalse(t *testing.T) {
 	if err := eng.LabelVolume("lib", "Tape1", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label Tape1: %v", err)
 	}
-	if err := eng.CopySlot(s1.ID, "", "lib", false, nil); err != nil {
+	if err := eng.CopyRun(s1.ID, "", "lib", false, nil); err != nil {
 		t.Fatalf("copy s1 to fresh tape: %v", err)
 	}
 	// Tape1 now holds a run; a non-appendable medium refuses a second run on it.
-	if err := eng.CopySlot(s2.ID, "", "lib", false, nil); err == nil {
+	if err := eng.CopyRun(s2.ID, "", "lib", false, nil); err == nil {
 		t.Fatal("expected copy onto a non-appendable tape that already holds a run to be refused")
 	}
 	// A fresh tape accepts it.
 	if err := eng.LabelVolume("lib", "Tape2", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label Tape2: %v", err)
 	}
-	if err := eng.CopySlot(s2.ID, "", "lib", false, nil); err != nil {
+	if err := eng.CopyRun(s2.ID, "", "lib", false, nil); err != nil {
 		t.Fatalf("copy s2 to fresh tape: %v", err)
 	}
 }
@@ -1836,7 +1836,7 @@ func TestManualStationWriteSwap(t *testing.T) {
 		t.Fatalf("dump: %v", err)
 	}
 	// The drive is empty: the copy must prompt for a reel, then auto-label it.
-	if err := eng.CopySlot(s.ID, "", "lto", false, logfDiscard); err != nil {
+	if err := eng.CopyRun(s.ID, "", "lto", false, logfDiscard); err != nil {
 		t.Fatalf("copy to manual station: %v", err)
 	}
 	if op.swaps == 0 {
@@ -1849,11 +1849,11 @@ func TestManualStationWriteSwap(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("slot should have a placement on the manual station")
+		t.Fatal("run should have a placement on the manual station")
 	}
 }
 
-// TestManualStationReadSwap: two slots land on two reels of a single-drive station;
+// TestManualStationReadSwap: two runs land on two reels of a single-drive station;
 // with the disk copies gone, restoring each prompts the operator to swap the reel
 // holding it into the one drive — the read-side swap path.
 func TestManualStationReadSwap(t *testing.T) {
@@ -1891,7 +1891,7 @@ func TestManualStationReadSwap(t *testing.T) {
 	if err := eng.LabelVolume("lto", "Reel-A", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label Reel-A: %v", err)
 	}
-	if err := eng.CopySlot(s1.ID, "", "lto", false, logfDiscard); err != nil {
+	if err := eng.CopyRun(s1.ID, "", "lto", false, logfDiscard); err != nil {
 		t.Fatalf("copy s1: %v", err)
 	}
 
@@ -1912,13 +1912,13 @@ func TestManualStationReadSwap(t *testing.T) {
 	if err := eng.LabelVolume("lto", "Reel-B", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("label Reel-B: %v", err)
 	}
-	if err := eng.CopySlot(s2.ID, "", "lto", false, logfDiscard); err != nil {
+	if err := eng.CopyRun(s2.ID, "", "lto", false, logfDiscard); err != nil {
 		t.Fatalf("copy s2: %v", err)
 	}
 
 	// Drop the disk copies so restore must read from the reels.
-	removeSlotFiles(t, eng, s1.ID)
-	removeSlotFiles(t, eng, s2.ID)
+	removeRunFiles(t, eng, s1.ID)
+	removeRunFiles(t, eng, s2.ID)
 
 	op := &scriptedOperator{}
 	eng.SetOperator(op)
@@ -1977,7 +1977,7 @@ func TestManualStationLandingLabel(t *testing.T) {
 }
 
 // tapeEngine builds an engine over a single-drive (manual) tape landing medium
-// with the given appendability and minimum age, with no slots or volumes yet.
+// with the given appendability and minimum age, with no runs or volumes yet.
 func tapeEngine(t *testing.T, appendable bool, minAge string) *Engine {
 	t.Helper()
 	cfg := &config.Config{
@@ -2020,10 +2020,10 @@ func recordFullOn(t *testing.T, eng *Engine, date, dle, volume string) {
 func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, bytes int64) {
 	t.Helper()
 	id := record.IDFromParts(date, 1)
-	// Stamp the archive's CreatedAt at the slot's own date, not wall-clock: retention measures age
+	// Stamp the archive's CreatedAt at the run's own date, not wall-clock: retention measures age
 	// per archive from its landing instant, so one meant to read as dated `date` must land then.
 	at, _ := record.ParseDateField(date)
-	arch := record.Archive{Slot: id, DLE: dle, Level: 0, Compressed: bytes, CreatedAt: at}
+	arch := record.Archive{Run: id, DLE: dle, Level: 0, Compressed: bytes, CreatedAt: at}
 	pos := catalog.ArchivePos{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: volume, Epoch: 1, Pos: 1}}, Commit: catalog.FilePos{Label: volume, Epoch: 1, Pos: 2}}
 	if err := eng.cat.AddArchive(arch, "lto", pos); err != nil {
 		t.Fatal(err)
@@ -2036,7 +2036,7 @@ func recordFullOnOtherMedium(t *testing.T, eng *Engine, date, dle, medium string
 	t.Helper()
 	id := record.IDFromParts(date, 1)
 	at, _ := record.ParseDateField(date)
-	arch := record.Archive{Slot: id, DLE: dle, Level: 0, CreatedAt: at}
+	arch := record.Archive{Run: id, DLE: dle, Level: 0, CreatedAt: at}
 	pos := catalog.ArchivePos{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: medium, Pos: 1}}, Commit: catalog.FilePos{Label: medium, Pos: 2}}
 	if err := eng.cat.AddArchive(arch, medium, pos); err != nil {
 		t.Fatal(err)
@@ -2189,24 +2189,24 @@ func TestExpectedTapeDiskHasNone(t *testing.T) {
 
 func logfDiscard(string, ...any) {}
 
-// labelOnMedium returns the (first) volume label a slot's copy on a medium occupies.
-func labelOnMedium(t *testing.T, eng *Engine, slotID, medium string) string {
+// labelOnMedium returns the (first) volume label a run's copy on a medium occupies.
+func labelOnMedium(t *testing.T, eng *Engine, runID, medium string) string {
 	t.Helper()
-	for _, p := range eng.cat.Placements(slotID) {
+	for _, p := range eng.cat.Placements(runID) {
 		if p.Medium == medium {
 			if ls := p.Labels(); len(ls) > 0 {
 				return ls[0]
 			}
 		}
 	}
-	t.Fatalf("slot %s has no labeled copy on %q", slotID, medium)
+	t.Fatalf("run %s has no labeled copy on %q", runID, medium)
 	return ""
 }
 
 // TestTapeRecyclesOldestOnWrite: a non-appendable tape library whose pool is full
 // (every bay holds a run) reuses the oldest Label the retention Floor clears on the
 // next run — same Name, epoch+1 — rather than refusing. The recycled run's placement
-// goes dead and, being that slot's only copy, the slot leaves the catalog. The run
+// goes dead and, being that run's only copy, the run leaves the catalog. The run
 // announces the Label it recycles, and a rebuild from the media reflects the new epoch
 // only. This is the closed gap: hands-off whole-volume tape rotation (Amanda tapecycle).
 func TestTapeRecyclesOldestOnWrite(t *testing.T) {
@@ -2266,9 +2266,9 @@ func TestTapeRecyclesOldestOnWrite(t *testing.T) {
 	if v, ok := eng.cat.Volume(l1); !ok || v.Label.Epoch != 2 {
 		t.Fatalf("recycled volume %q should be at epoch 2, got %+v (ok=%v)", l1, v, ok)
 	}
-	// The recycled run's only copy was on l1; the slot leaves the catalog.
-	if _, err := eng.cat.ReadSlot(s1.ID); err == nil {
-		t.Fatalf("recycled slot %s should no longer be in the catalog", s1.ID)
+	// The recycled run's only copy was on l1; the run leaves the catalog.
+	if _, err := eng.cat.ReadRun(s1.ID); err == nil {
+		t.Fatalf("recycled run %s should no longer be in the catalog", s1.ID)
 	}
 	// The run announced the Label it wanted.
 	joined := strings.Join(logs, "\n")
@@ -2290,13 +2290,13 @@ func TestTapeRecyclesOldestOnWrite(t *testing.T) {
 	if v, ok := freshEng.cat.Volume(l1); !ok || v.Label.Epoch != 2 {
 		t.Fatalf("rebuilt volume %q should be epoch 2, got %+v (ok=%v)", l1, v, ok)
 	}
-	if _, err := freshEng.cat.ReadSlot(s1.ID); err == nil {
-		t.Fatalf("rebuilt catalog should not contain the wiped slot %s", s1.ID)
+	if _, err := freshEng.cat.ReadRun(s1.ID); err == nil {
+		t.Fatalf("rebuilt catalog should not contain the wiped run %s", s1.ID)
 	}
-	if _, err := freshEng.cat.ReadSlot(s3.ID); err != nil {
-		t.Fatalf("rebuilt catalog should contain the recycled-tape slot %s: %v", s3.ID, err)
+	if _, err := freshEng.cat.ReadRun(s3.ID); err != nil {
+		t.Fatalf("rebuilt catalog should contain the recycled-tape run %s: %v", s3.ID, err)
 	}
-	if _, err := freshEng.cat.ReadSlot(s2.ID); err != nil {
+	if _, err := freshEng.cat.ReadRun(s2.ID); err != nil {
 		t.Fatalf("rebuilt catalog should still contain %s: %v", s2.ID, err)
 	}
 }
@@ -2345,7 +2345,7 @@ func TestTapeRecycleRefusedWhenAllKept(t *testing.T) {
 	if !strings.Contains(err.Error(), "within retention") {
 		t.Fatalf("error should explain every tape is still within retention; got: %v", err)
 	}
-	if _, rerr := eng.cat.ReadSlot("slot-2026-06-03.001"); rerr == nil {
+	if _, rerr := eng.cat.ReadRun("run-2026-06-03.001"); rerr == nil {
 		t.Fatal("the refused run must not be recorded")
 	}
 }
@@ -2431,7 +2431,7 @@ func contains(ss []string, s string) bool {
 
 // TestDumpSpansArchiveAcrossTapes dumps a source larger than one tape directly onto
 // a tape library, so a single DLE's archive must split into parts across several
-// auto-labeled bays. It then verifies the slot and restores it, exercising the read
+// auto-labeled bays. It then verifies the run and restores it, exercising the read
 // path mounting each bay in sequence to reassemble the spanned archive.
 func TestDumpSpansArchiveAcrossTapes(t *testing.T) {
 	src := t.TempDir()
@@ -2536,7 +2536,7 @@ func TestCopySpansArchiveAcrossTapes(t *testing.T) {
 	if err := eng.LoadVolume("lib", "1", false, nil); err != nil {
 		t.Fatalf("load bay-01: %v", err)
 	}
-	if err := eng.CopySlot(s.ID, "", "lib", false, nil); err != nil {
+	if err := eng.CopyRun(s.ID, "", "lib", false, nil); err != nil {
 		t.Fatalf("copy disk->lib: %v", err)
 	}
 
@@ -2551,7 +2551,7 @@ func TestCopySpansArchiveAcrossTapes(t *testing.T) {
 	}
 
 	// Drop the disk copy so restore must read the spanned tape copy.
-	removeSlotFiles(t, eng, s.ID)
+	removeRunFiles(t, eng, s.ID)
 	if _, err := eng.cat.RemovePlacement(s.ID, "disk"); err != nil {
 		t.Fatal(err)
 	}
@@ -2626,9 +2626,9 @@ func write(t *testing.T, path, content string) {
 }
 
 // pruneSweepEngine wires a disk-landing engine over a fresh source + catalog and runs a
-// level-0 dump, returning the engine, the committed slot, the disk root, and the live
+// level-0 dump, returning the engine, the committed run, the disk root, and the live
 // source dir. Shared by the orphan-sweep tests below.
-func pruneSweepEngine(t *testing.T) (*Engine, *catalog.Slot, string, string) {
+func pruneSweepEngine(t *testing.T) (*Engine, *catalog.Run, string, string) {
 	t.Helper()
 	src := t.TempDir()
 	catalogDir := t.TempDir()
@@ -2670,7 +2670,7 @@ func TestPruneSweepsCrashOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	fw, err := vol.AppendFile(context.Background(),
-		record.Header{Slot: "slot-2026-06-20.001", Kind: record.KindArchive, DLE: "ghost", Compress: "none"})
+		record.Header{Run: "run-2026-06-20.001", Kind: record.KindArchive, DLE: "ghost", Compress: "none"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2681,7 +2681,7 @@ func TestPruneSweepsCrashOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	// (b) a torn append: a payload object at a conforming position with no .hdr sidecar.
-	tornDir := filepath.Join(catalogDir, "slots", "slot-2026-06-19.001")
+	tornDir := filepath.Join(catalogDir, "runs", "run-2026-06-19.001")
 	if err := os.MkdirAll(tornDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2756,9 +2756,9 @@ func TestPruneSweepKeepsCommittedWhenCacheLost(t *testing.T) {
 	assertContent(t, filepath.Join(dest, "keep.txt"), "v1")
 }
 
-// placedOnLanding reports whether the slot has a placement for dle on the engine's landing medium.
-func placedOnLanding(e *Engine, slotID, dle string) bool {
-	for _, p := range e.cat.Placements(slotID) {
+// placedOnLanding reports whether the run has a placement for dle on the engine's landing medium.
+func placedOnLanding(e *Engine, runID, dle string) bool {
+	for _, p := range e.cat.Placements(runID) {
 		if p.Medium != e.mediumName {
 			continue
 		}

@@ -40,7 +40,7 @@ compress:
   scheme: zstd
   level: 3
 
-# One disk medium: a directory NBackup writes slots into, with a capacity it
+# One disk medium: a directory NBackup writes runs into, with a capacity it
 # stays within (pruning reclaims the oldest to fit).
 media:
   disk:
@@ -48,7 +48,7 @@ media:
     path: /mnt/backup/nbackup        # your backup disk or NAS mount
     capacity: 2TB                    # space NBackup may use here
 
-# Slots are created on the disk medium.
+# Runs are created on the disk medium.
 landing: disk
 
 # One gnutar archiver. one-file-system keeps a dump from wandering across mount
@@ -82,12 +82,12 @@ sources:
 ```bash
 nb check                 # validate the config and confirm the disk is reachable
 nb plan                  # preview today's run: levels per DLE, capacity usage
-nb dump                  # run the backup, committing one slot
+nb dump                  # run the backup, committing one run
 
 nb status                # progress of the running (or most recent) dump
-nb slot                  # list the slots on disk
+nb run                   # list the runs on disk
 
-nb verify --all          # re-hash every slot's archives against their checksums
+nb verify --all          # re-hash every run's archives against their checksums
 nb drill                 # actually restore a risk-biased sample and discard it
 
 # Whole-DLE restore as of a date, into an empty directory:
@@ -102,7 +102,7 @@ nb recover --dle localhost:/home --date 2026-06-21 --all --dest /tmp/restore
   fulls forward onto lighter days so the lock-step of day one spreads out, while
   taking incrementals in between. You don't tune this; see
   [Planning](../features/planning).
-- **The disk fills, then holds steady.** Once slots reach the `minimum_age`
+- **The disk fills, then holds steady.** Once runs reach the `minimum_age`
   floor (one cycle by default) and a newer full supersedes them, `nb prune disk`
   reclaims the oldest to stay within `capacity`.
 

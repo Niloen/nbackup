@@ -11,9 +11,9 @@ import (
 
 // TestPerDumptypeLandingRoutes drives one run with two DLEs whose dumptypes route them to
 // different landing media (the config-wide default vs a dumptype `landing:` override), then asserts
-// each DLE's archive landed on its own medium — one slot, two placements, disjoint archive sets —
+// each DLE's archive landed on its own medium — one run, two placements, disjoint archive sets —
 // and that both restore. This is the per-DLE landing feature: heterogeneous sources to heterogeneous
-// media within a single run, recorded as the medium-independent slot the catalog already models.
+// media within a single run, recorded as the medium-independent run the catalog already models.
 func TestPerDumptypeLandingRoutes(t *testing.T) {
 	srcMain := t.TempDir()
 	write(t, filepath.Join(srcMain, "main.txt"), "lands on main")
@@ -54,7 +54,7 @@ func TestPerDumptypeLandingRoutes(t *testing.T) {
 	mainDLE := config.DLE{Host: "localhost", Path: srcMain}.Name()
 	bulkDLE := config.DLE{Host: "localhost", Path: srcBulk}.Name()
 
-	// One slot, a placement per medium, each holding only its routed DLE.
+	// One run, a placement per medium, each holding only its routed DLE.
 	got := map[string][]string{} // medium -> DLEs landed there
 	for _, p := range eng.Catalog().Placements(s.ID) {
 		for _, a := range p.Archives {

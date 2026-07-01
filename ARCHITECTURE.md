@@ -6,7 +6,7 @@ vision. This document carries what the code and README don't make obvious: how t
 concepts nest, the load-bearing decisions and *why*, and the conventions for working
 in this repo.
 
-NBackup is a slot-based backup system in Go whose design descends from Amanda. It
+NBackup is a run-based backup system in Go whose design descends from Amanda. It
 orchestrates external tools (GNU tar, a compressor) as child processes rather than
 reimplementing them, and produces immutable, self-describing artifacts that restore
 with stock tools. The package map below maps NBackup concepts to their Amanda
@@ -16,28 +16,30 @@ of this document otherwise describes NBackup in its own terms.
 ## Vocabulary (how the concepts nest)
 
 - **DLE** — a backup source (`host` + `path`).
-- **Run** — one planner execution (typically daily).
-- **Slot** — the primary artifact: one **Run** produces exactly one Slot, an
-  immutable, sealed set of archives. Addressable unit for copy / restore / list.
-  (`slot-YYYY-MM-DD.NNN` — the run's local calendar date plus a fixed-width,
-  zero-padded sequence: `.001` for the day's first run, `.002`/`.003` for reruns.
-  Fixed width so the ids sort chronologically even as an object-store key.)
-- **Archive** — one **DLE** image at one level inside a Slot. The unit of
+- **Run** — one planner execution (typically daily) *and* the immutable, sealed set
+  of archives it produces: the primary artifact, the addressable unit for copy /
+  restore / list. (The verb and its result share one name because they map one-to-one
+  — "last night's run" is both.) (`run-YYYY-MM-DD.NNN` — the run's local calendar date
+  plus a fixed-width, zero-padded sequence: `.001` for the day's first run, `.002`/`.003`
+  for reruns. Fixed width so the ids sort chronologically even as an object-store key.)
+- **Archive** — one **DLE** image at one level inside a Run. The unit of
   **retention/pruning**: the floor and disk/cloud reclamation are per-archive, so an
-  old slot can shed one DLE's image while keeping a slot-mate the chain needs. Browse
+  old run can shed one DLE's image while keeping a run-mate the chain needs. Browse
   the per-DLE timeline with `nb dle`.
 - **Cycle** — the safety/scheduling boundary: every DLE is fulled once per cycle.
 - **Medium** — a named storage definition; opens as a **Volume**.
 - **Volume** — an ordered sequence of header-framed, self-describing files
   addressed by position. Disk, tape, object stores all map to it.
-- **Catalog Entry / Placement / Part** — the catalog separates *what a slot is* (one
+- **Catalog Entry / Placement / Part** — the catalog separates *what a run is* (one
   medium-independent `Entry`, from the seal) from *where its copies live* (N
   `Placement`s, one per medium). A placement holds each archive's ordered **parts**
   (a part = `volume + position`; one part unless the archive spanned volumes) plus the
   seal's location.
 - **Label** — logical identity written on a labeled volume's file 0 (magic, name,
   pool, epoch). A *capability* (`media.Labeled`); address-identified media skip it.
-- **Slot / Drive / Barcode** — a tape changer's physical elements. A **slot** (storage
+- **Slot / Drive / Barcode** — a tape changer's physical elements (unrelated to a
+  **Run** — this is the Amanda/library sense of "slot", the only place the word
+  survives). A **slot** (storage
   element) holds one cartridge; a **drive** (data-transfer element) reads/writes the
   cartridge currently loaded in it; a robot (or a human) moves cartridges between them.
   Each slot reports a physical **barcode** — the scanner's identity, read *without*
@@ -54,12 +56,12 @@ registry registration, not a conditional in the core.
 | Package | Responsibility | Amanda analogue |
 |---|---|---|
 | `config` | config + domain entities: `DLE`, `Media`, `DumpType` | disklist / dumptype / storage |
-| `record` | the self-describing on-medium artifact records: `Header` framing + `Label` (volume id record) + `Archive` (commit-footer metadata, self-locating via its `Slot` tag) + the slot-id vocabulary (`IDFromParts`/`ParseID`/`SlotIDLess`) + the per-archive member index (`EncodeIndex`) + their (de)serialization | dumpfile_t / amar |
-| `archiveio` | maps a slot's archives onto a `Volume`'s files — meter + split a payload into parts then write its index + commit footer (`WriteArchive`/`Commit`/`Finish`); concatenate + assert parts on read (`Expect`); knows nothing of compress/encrypt | taper / amrestore |
+| `record` | the self-describing on-medium artifact records: `Header` framing + `Label` (volume id record) + `Archive` (commit-footer metadata, self-locating via its `Run` tag) + the run-id vocabulary (`IDFromParts`/`ParseID`/`RunIDLess`) + the per-archive member index (`EncodeIndex`) + their (de)serialization | dumpfile_t / amar |
+| `archiveio` | maps a run's archives onto a `Volume`'s files — meter + split a payload into parts then write its index + commit footer (`WriteArchive`/`Commit`/`Finish`); concatenate + assert parts on read (`Expect`); knows nothing of compress/encrypt | taper / amrestore |
 | `media` | `Volume` + `Labeled` + `Drive`/`Changer` (slots + drives, `Load`/`Unload`/`Manual`) + `Profile` + registry; reads/writes `record` artifacts | Device API |
 | `librarian` | operates a medium's `Changer` + label protocol (make-writable, advance, load-for-read, label, load); prompts an operator when the changer is `Manual` | changer / amtape |
 | `media/disk`, `media/tape`, `media/cloud` | Volume impls (disk sidecar headers; tape library; object store via gocloud.dev/blob) | vfs / tape / s3 devices |
-| `media/fslike` | the slot layout shared by the address-identified media — clean payloads + `.hdr` sidecars over a small `Store` seam (disk = a directory, cloud = a bucket), so disk↔cloud copies are byte-identical | — |
+| `media/fslike` | the run layout shared by the address-identified media — clean payloads + `.hdr` sidecars over a small `Store` seam (disk = a directory, cloud = a bucket), so disk↔cloud copies are byte-identical | — |
 | `archiver` + `archiver/gnutar` | `Archiver` interface + registry + named definitions; owns its incremental-state library; GNU tar impl | Application API / amgtar |
 | `transform/compress` | external compressor child processes (zstd/gzip/none) + registry; `Filter(scheme)` returns the forward/reverse `programs.Cmd` | compress |
 | `transform/crypt` | external encryptor child processes (gpg/none) + registry; `Filter(scheme)` returns the forward/reverse `programs.Cmd` | amcrypt/amgpgcrypt |
@@ -69,16 +71,16 @@ registry registration, not a conditional in the core.
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `report` | per-run history record + JSONL/summary file I/O + digest render | amreport |
 | `notify` | pluggable alert backends (smtp/sendmail/webhook) + registry + dispatch | amreport mailto |
-| `catalog` | local cache of slot index + volume registry; owns the in-memory `Slot` grouping (id + its archives, with derived `Date`/`TotalBytes`/`LastArchiveAt`) and exposes archive projections (`Archives`/`ArchivesOn`) for the policy layer; derives `History` | catalog / curinfo / tapelist |
-| `retention` | retention safety floor: protected archives — `Compute` over `[]record.Archive` returns a per-`(slot,DLE)` `Floor` (`.KeepsArchive`, plus slot-level `.Keeps`/`.First`) (pure) | policy |
-| `restore` | the archive chain to rebuild a DLE as of a slot (pure) | amrestore |
+| `catalog` | local cache of run index + volume registry; owns the in-memory `Run` grouping (id + its archives, with derived `Date`/`TotalBytes`/`LastArchiveAt`) and exposes archive projections (`Archives`/`ArchivesOn`) for the policy layer; derives `History` | catalog / curinfo / tapelist |
+| `retention` | retention safety floor: protected archives — `Compute` over `[]record.Archive` returns a per-`(run,DLE)` `Floor` (`.KeepsArchive`, plus run-level `.Keeps`/`.First`) (pure) | policy |
+| `restore` | the archive chain to rebuild a DLE as of a run (pure) | amrestore |
 | `recovery` | as-of-date browse tree + per-archive file selection (pure) | amrecover |
 | `drill` | recovery-drill ledger + risk-biased selection + failure taxonomy (pure) | amverify (orchestrated) |
 | `planner` | multilevel level scheduling (pure) | planner |
 | `accounting` | medium capacity/retention/prune arithmetic: what a medium holds against its capacity, the protected residual a prune can't reclaim, per-run room, and the prune/reclaim mutators (distinct from the dollar-cost overlay in `engine/cost.go`) | (driver, capacity half) |
 | `scheduler` | the engine-side **driver** that feeds the pure `planner` its config/history/capacity inputs + the parallel size estimates, then applies the impure force-full post-pass `planner` can't (it probes the archiver's on-disk incremental state); also validates a run's config for previews | driver (planner front-end) |
-| `conductor` | the backup-run lane: executes one plan into one sealed slot — flush leftovers, pre-flight tools, alloc slot id, open the landing writer, run the `dumper` + `spool`, seal | driver (dump half) |
-| `engine` | the driver: composes the leaf operations, owns the slot session (open/finish/placement) and drill selection, and wires planner→`clerk`→media→catalog; delegates capacity to `accounting`, planning/estimation to `scheduler`, the dump run to `conductor`, and each operation's data movement to the `clerk` | driver |
+| `conductor` | the backup-run lane: executes one plan into one sealed run — flush leftovers, pre-flight tools, alloc run id, open the landing writer, run the `dumper` + `spool`, seal | driver (dump half) |
+| `engine` | the driver: composes the leaf operations, owns the run session (open/finish/placement) and drill selection, and wires planner→`clerk`→media→catalog; delegates capacity to `accounting`, planning/estimation to `scheduler`, the dump run to `conductor`, and each operation's data movement to the `clerk` | driver |
 | `cli` | thin command wiring | amdump / amadmin |
 
 Dependencies flow one way: `cli → engine → {planner, retention, archiver, xfer,
@@ -99,17 +101,17 @@ below.)
 
 ## Load-bearing decisions (the *why*)
 
-**The archive is the commit unit; the slot is a grouping.** Each archive is made
+**The archive is the commit unit; the run is a grouping.** Each archive is made
 durable by its own **commit footer** (`KindCommit`), written last — after its parts
 and its member index — so the footer's presence proves the whole archive landed.
 The footer holds the per-archive **integrity** the framing headers omit (`SHA256`,
 sizes, part count); the member list rides in a separate per-archive **index**
 (`KindIndex`, gzip), kept out of the footer so a scan reads only small footers. There
-is **no per-slot seal**: a slot is just the run-id its archives carry (the `Slot` tag
+is **no per-run seal**: a run is just the run-id its archives carry (the `Run` tag
 on every header and commit footer), reconstructed by grouping committed archives. The
-`Slot` grouping itself is an in-memory `catalog` type, not an on-medium record; the
+`Run` grouping itself is an in-memory `catalog` type, not an on-medium record; the
 policy layer (retention/restore/recovery/drill/reclaim) reasons over the self-locating
-`[]record.Archive` directly, so a slot is purely a catalog + tagging concept. This drops all-or-nothing run
+`[]record.Archive` directly, so a run is purely a catalog + tagging concept. This drops all-or-nothing run
 atomicity (we considered and rejected keeping the seal): a crashed run keeps every
 *committed* archive, a rerun fills in the rest — "run complete?" is a derivation (did
 every planned DLE commit?), not a stored bit.
@@ -136,11 +138,11 @@ Integrity of files a footer *does* commit (bit-rot) is verify's job, not the reb
 **The catalog is a cache; the media are the source of truth.** Every file is
 self-describing (header), every archive carries its own commit footer, every labeled
 volume carries its label — so one `Files()` scan rebuilds everything (`nb rebuild`):
-commit footers + indexes → archives grouped into slots, labels → volume registry. The
+commit footers + indexes → archives grouped into runs, labels → volume registry. The
 catalog lives in its **own `workdir`** (default `nbackup-catalog`), a cache over the
-whole pool *independent of any medium*. The `Entry`/`Placement` model means a slot
+whole pool *independent of any medium*. The `Entry`/`Placement` model means a run
 copied disk→tape is one Entry with two Placements; restore/verify pick any available
-copy. Run `History` is *derived* from cached slots (no second source to drift) — the
+copy. Run `History` is *derived* from cached runs (no second source to drift) — the
 catalog holds **no** precious state, every byte rebuildable from the media. (The one
 piece of non-derivable local state — an archiver's incremental-state library — belongs
 to the **archiver**; see next.)
@@ -207,12 +209,12 @@ so losing one does not break the chain. A level-`L` dump bases on the `L-1` snap
 so repeating a level just re-derives `L`.snar from the unchanged `L-1`.snar.
 `restore.Chain` is a **per-level restore**: it replays exactly one archive per level —
 the tip (most recent dump at or before the target) walked back along each incremental's
-recorded `BaseSlot` to the full — so a redundant same-level repeat is skipped. This is
+recorded `BaseRun` to the full — so a redundant same-level repeat is skipped. This is
 not merely non-minimal: GNU tar's directory directives (rename, delete) are *not*
 idempotent across independent incremental extractions, so a second cumulative `L1`
 carrying the same `rename old → new` would abort the chain (`tar: Cannot rename …`).
-Walking `BaseSlot` keeps the chain *consistent* (each step's base is the exact dump it
-derives from), and a `BaseSlot` whose slot has been pruned is a **broken-chain error**,
+Walking `BaseRun` keeps the chain *consistent* (each step's base is the exact dump it
+derives from), and a `BaseRun` whose run has been pruned is a **broken-chain error**,
 never a silent partial restore. The overlap-redundancy property (fall back to an
 earlier cumulative incremental when the tip's copy is unreadable) is a deferred
 recovery feature, not the normal restore path.
@@ -234,7 +236,7 @@ index records additions, not deletions — that lives in the snapshot).
 
 **Verify is the primitive; drill is the orchestration (`nb drill` = recoverability,
 not just integrity).** `nb verify` stays atomic and **stateless** — it checks
-individual slots/archives against the seal and writes nothing, keeps no ledger, makes
+individual runs/archives against the seal and writes nothing, keeps no ledger, makes
 no selection. Its one `--deep` structural mode streams an archive through the real read
 pipeline (decrypt → decompress → `tar -t`, list not extract) and asserts the pipeline
 completes and the members match the seal — proving the bytes are a valid *restorable
@@ -266,16 +268,16 @@ Cost: an encrypted+compressed archive is all-or-nothing to read, so an offsite d
 spends the full bytes in egress — routine offsite drills default to the no-write
 `structural` tier, and the dry-run forecasts the egress.
 
-**Sync is batch copy, not a new subsystem (`nb sync`).** A single-slot `CopySlot`
-already streams a slot from one medium to a target and records a second `Placement`
-(idempotent: a slot already on the target is skipped). `nb sync` is that looped over a
-*selection* of source slots — every slot the target is missing, **oldest-first** (a
-contiguous, replayable offsite copy; a slot's full lands before its incrementals). It
-reuses `CopySlot` verbatim — same label verification, placement record, per-slot
+**Sync is batch copy, not a new subsystem (`nb sync`).** A single-run `CopyRun`
+already streams a run from one medium to a target and records a second `Placement`
+(idempotent: a run already on the target is skipped). `nb sync` is that looped over a
+*selection* of source runs — every run the target is missing, **oldest-first** (a
+contiguous, replayable offsite copy; a run's full lands before its incrementals). It
+reuses `CopyRun` verbatim — same label verification, placement record, per-run
 atomicity — so an interrupted or repeated sync resumes for free, and it **stops at the
 first hard error** (a full or offline target won't fix itself by continuing). The
 source defaults to the landing medium but is configurable (`--from` / rule `from:`):
-`CopySlot` resolves the source placement and mounts it via the same
+`CopyRun` resolves the source placement and mounts it via the same
 `Librarian.MountForRead` path `readerFor` uses, so a tape/S3 source works (un-vaulting
 tape→disk, or a second offsite tier), and copy-to-landing is allowed (the old "target
 is the source" guard became a `from == to` guard). The config `sync:` rules are the
@@ -312,7 +314,7 @@ stay on one goroutine. Since the dumpers only queue (never touch the catalog), t
 already assumes (the flock still serializes *processes*). The orchestrator records each archive's
 **holding placement** as it commits and removes it on drain, so the holding disk is **visible in
 the catalog live** and a crashed run's un-flushed archives are recoverable **without a media
-scan**: `nb flush` (and an auto-flush at the next `nb dump`) gathers the staged slots across
+scan**: `nb flush` (and an auto-flush at the next `nb dump`) gathers the staged runs across
 every holding disk and drains them to the landing. The default direct-to-landing path is
 untouched (no holding disk = no drainer, no goroutine hand-off, record-at-`Finish` as before).
 
@@ -321,15 +323,15 @@ dumptype can name a `landing` medium (validated against `media`, holding media r
 overrides the config-wide `landing` for its DLEs (`config.LandingFor`), so heterogeneous sources reach
 heterogeneous storage in one run — bulky media to cheap cloud, databases to fast disk/tape. This fills
 a gap `nb sync` cannot: sync *adds* offsite copies, but only a landing override *withholds* a big DLE
-from an expensive medium. The slot stays **run-shaped**: one slot id across every landing, each
-archive recorded as a per-medium `Placement` (the `Entry`/`Placement` split already models a slot whose
+from an expensive medium. The run keeps **one identity**: one run id across every landing, each
+archive recorded as a per-medium `Placement` (the `Entry`/`Placement` split already models a run whose
 archives live on different media — routing is the easy case where each archive has exactly one home).
 The spool generalizes from one backing to a **set of backings keyed by landing**: the dumper resolves
-each DLE's landing and asks the spool for `Store(landing)`; per-backing state (permit `Slots`, pending
+each DLE's landing and asks the spool for `Store(landing)`; per-backing state (permit `Writers`, pending
 copies/permits) lives on a `*backing` value object the **one** orchestrator owns exclusively — still
 the sole catalog writer across every landing, no per-backing goroutine, no map lookups on the hot path
 (each request carries its `*backing`). Drain copies to independent landings run in parallel (a copy
-goroutine per dispatch, bounded by each backing's `Slots`); the global worker clamp is gone — a serial
+goroutine per dispatch, bounded by each backing's `Writers`); the global worker clamp is gone — a serial
 tape's single permit parks its producers (off the dumper's gate, holding no worker) while cloud-bound
 producers run. Crash-recovery `nb flush` re-resolves each staged archive's landing from config
 (`landingForDLEName`) so a multi-landing crash drains each DLE back to its own medium. *Deferred*: a
@@ -358,9 +360,9 @@ reversible `Filter` (a forward/reverse `programs.Cmd`) the engine places into a
 transfer. Three decisions carry their weight:
 - **Outermost placement is load-bearing.** Because encryption sits *inside* the
   `xfer.Meter`, the seal's `SHA256` covers the *ciphertext* that lands on the volume.
-  So checksum `nb verify` and `CopySlot`/`nb sync` all operate on ciphertext and stay
+  So checksum `nb verify` and `CopyRun`/`nb sync` all operate on ciphertext and stay
   **keyless** — vaulting offsite, verifying integrity, and the medium-independent
-  `Entry`/`Placement` identity (one slot, N byte-identical copies) are untouched. Only
+  `Entry`/`Placement` identity (one run, N byte-identical copies) are untouched. Only
   *extraction* — and `nb verify --deep`, which decrypts to list the stream — needs the
   key.
 - **Record the scheme name, never the key.** Each archive's header/seal carries
@@ -368,7 +370,7 @@ transfer. Three decisions carry their weight:
   it from the artifact alone — config-free, the same rebuild-from-media property
   compression has. The **key is never stored**: with a gpg public-key recipient the
   key-id travels inside the ciphertext and gpg resolves the private key from the
-  operator's keyring, so a slot with archives under different keys (per-dumptype) just
+  operator's keyring, so a run with archives under different keys (per-dumptype) just
   restores. Selection is config (`encrypt:` block, config-wide default or a whole-block
   per-dumptype override — no field merge); the *cipher* is a compiled scheme so the
   artifact never depends on config to be read.
@@ -392,9 +394,9 @@ covers S3, GCS, Azure Blob, and any S3-compatible store, via the Go CDK
 network or credentials. It is **address-identified, like disk** — a bucket+key names a
 volume unambiguously, so it implements none of `Labeled`/`Drive`/`Changer` and
 runs no label/swap machinery, and registers `NewSizeProfile` (a byte budget reclaimed
-per slot). The on-store layout is the disk medium's verbatim —
-`slots/<slot>/<NNNNNN>-<dle>-L<n>.tar.<ext>` clean payload objects plus a `.hdr`
-sidecar — so a slot streams disk↔cloud unchanged and a plain GET yields a
+per run). The on-store layout is the disk medium's verbatim —
+`runs/<run>/<NNNNNN>-<dle>-L<n>.tar.<ext>` clean payload objects plus a `.hdr`
+sidecar — so a run streams disk↔cloud unchanged and a plain GET yields a
 stock-tool-restorable archive. Atomicity is the same: payload object first, sidecar
 last, a failed upload aborted (not committed), so an interrupted write leaves a
 sidecar-less orphan that scan/rebuild ignores. Credentials come from each SDK's ambient
@@ -418,7 +420,7 @@ rolling**: splitting (`CanSpan` / part_size) is independent of being a *serial
 single-drive* medium (`Serial`, keyed off `media.ConcurrentWrite`). Cloud is
 part-splitting but **not serial** — its parts are independent objects with ascending
 positions on the one logical volume — so it stays **fully concurrent** (workers are not
-clamped to 1, landing slots stay = workers), unlike a tape drive that splits *and* rolls
+clamped to 1, landing writers stay = workers), unlike a tape drive that splits *and* rolls
 one shared reel serially. `part_size` defaults and is bounded by a per-medium
 `media.PartSizePolicy` (cloud: 10 GB default, 40 GB max, the cap enforced so the knob
 can't silently reproduce the 10000-part failure); disk stays single-file (unbounded,
@@ -481,7 +483,7 @@ tape emulator) — one drive, no addressable slots, a human loads it.
   **reuses the oldest reusable tape automatically** rather than refusing: it rewrites
   that volume's file-0 label in place — same `Name` and `Pool`, `++Epoch`, fresh
   `WrittenAt` — physically wiping it (`WriteLabel` resets first), and reconciles the
-  catalog (prior-epoch placements are dead, dropped; a slot that loses its last copy
+  catalog (prior-epoch placements are dead, dropped; a run that loses its last copy
   leaves). Because placements pin `record.FilePos{Label, Epoch, Pos}`, the epoch bump
   alone retires every prior-epoch placement; the physical reset means a rebuild sees the
   new epoch only. This lives entirely in `package librarian` (the media-shape seam):
@@ -495,7 +497,7 @@ tape emulator) — one drive, no addressable slots, a human loads it.
   oldest ages out on …") rather than overwriting one — recoverability outranks capacity.
   `nb label --relabel` remains the manual early-recycle override. The selection applies
   the **same rule** as the Expected-tape announcement (`retention.Compute` over the
-  medium's own slots, pool oldest-`WrittenAt` first), so the tape a run recycles is the
+  medium's own runs, pool oldest-`WrittenAt` first), so the tape a run recycles is the
   one `nb plan` said it would; the in-progress write tape is held out of the candidate
   set so a span never recycles the cartridge it is writing.
 - **Barcode (physical) vs Label (logical) are distinct.** A `Changer` is
@@ -513,7 +515,7 @@ tape emulator) — one drive, no addressable slots, a human loads it.
   tape until full; `appendable: false` writes one run per tape. Real tapes are
   physically appendable; one-run-per-tape is a deliberate retention choice, not a
   hardware limit.
-- **Spanning: a slot (and one archive) can cross volumes, proactively.** Both a
+- **Spanning: a run (and one archive) can cross volumes, proactively.** Both a
   **dump** and a **copy/sync** split work across tapes mid-archive — one DLE's
   compressed byte stream may itself span several tapes. The unit is the **part**: a
   contiguous byte-range of an archive's payload, its own self-describing file (header
@@ -612,7 +614,7 @@ minus the daemon, which fits "state lives in inspectable files." It needs no eng
 media scan), so it is cheap to poll, and the final `done`/`failed` snapshot is left in
 place as the last-run record. The file spans the **whole** cycle: a run opens it in the
 `estimating` phase (sizing every DLE — a slow archiver pass the operator would otherwise
-watch in silence), then the dump phase takes over the same file under the real slot ID
+watch in silence), then the dump phase takes over the same file under the real run ID
 (`running` → `sealing` → `done`/`failed`). The estimate phase is deliberately non-terminal
 so a `--watch` poll never stops on the gap between sizing and the first dumped byte; the
 estimate tracker's terminal "done" (which a live display uses to erase its region) is
@@ -663,37 +665,37 @@ someone. The choices, all mirroring existing stances:
 - **Per-DLE dump report.** A dump's record carries a per-DLE `DumpStats` row (level,
   original/output size, files — from the seal — plus dump time read from the
   just-flushed `run-status.json`), captured by the CLI at seal time so the report is
-  historical, not just the last live run. `nb report --dump` (latest, or `--slot <id>`)
+  historical, not just the last live run. `nb report --dump` (latest, or `--run <id>`)
   renders the per-DLE table — sizes, compression %, time, rate, full/incremental totals
   — via the one `report` renderer the dump *notification* also uses, so a configured
-  dump alert *is* the nightly report, not a bare "it worked". (A slot older than the
-  history shows sizes via `nb slot <id>`.)
+  dump alert *is* the nightly report, not a bare "it worked". (A run older than the
+  history shows sizes via `nb run <id>`.)
 
 **Reclamation asymmetry, and it is per-archive.** Disk/S3 reclaim per **archive**
-(a DLE's image within a slot), not per slot; tape reclaims a whole volume — by label
+(a DLE's image within a run), not per run; tape reclaims a whole volume — by label
 rotation **on write** (the oldest Floor-cleared tape recycled when a run needs a fresh
 volume; see "Whole-volume recycle on write") or a manual `nb label --relabel` — never by
 a prune pass: `tape.RemoveFile` errors, and `volumeProfile.Reclaim` deliberately returns
 nothing, so `nb prune` never deletes from a tape (tape capacity is structural — the depth
 of the label pool *is* the retention). Per-archive is the granularity the **floor already uses**:
-`retention.Compute` returns a floor keyed by `(slot, DLE)` (younger than `minimum_age`,
+`retention.Compute` returns a floor keyed by `(run, DLE)` (younger than `minimum_age`,
 or part of a DLE's **live recovery chain** — its last full plus every later incremental,
-since `restore.Chain` replays them all; a recent slot also pins the older base its
+since `restore.Chain` replays them all; a recent run also pins the older base its
 restore needs, so reclamation never breaks a chain it leaves restorable). Because a
-DLE's chain is independent of its slot-mates', an old slot routinely holds one DLE
+DLE's chain is independent of its run-mates', an old run routinely holds one DLE
 whose chain has moved past it (reclaimable) beside another the chain still needs —
 walking archives oldest-first (`sizeProfile.Reclaim`) frees exactly the dead ones,
-where a slot-granular pass would strand them behind a single still-pinned DLE. The
-floor still answers slot-level queries (`Keeps`/`First` = "is *any* archive pinned")
+where a run-granular pass would strand them behind a single still-pinned DLE. The
+floor still answers run-level queries (`Keeps`/`First` = "is *any* archive pinned")
 for the whole-volume reclaimers (tape relabel, `ExpectedTape`) and the cost forecast.
 Both floor and capacity strategy are per-medium: the rule is shared but judged over one
-medium's own slots, so a copy on another medium never makes an archive reclaimable.
+medium's own runs, so a copy on another medium never makes an archive reclaimable.
 The `Volume` seam stays purely positional — one `RemoveFile(pos)` (the peer of
 `ReadFile`); the engine resolves an archive's positions from the catalog and removes
-them one by one, and fslike reclaims an emptied slot directory itself, so the medium
-interface never names "slot" or "archive". `nb dle` browses the same catalog grouped by
-DLE (one row per source, then its archive timeline across slots) — the per-DLE view of
-what `nb slot` groups by run.
+them one by one, and fslike reclaims an emptied run directory itself, so the medium
+interface never names "run" or "archive". `nb dle` browses the same catalog grouped by
+DLE (one row per source, then its archive timeline across runs) — the per-DLE
+counterpart of the run-grouped `nb run` view.
 
 **Capacity model (`media.Profile`).** A profile exposes two numbers that the
 planner keeps distinct. `TotalBytes` is the **pool** — the retainable capacity
@@ -764,10 +766,10 @@ decisions carry it:
 - **Test environment:** `zstd` is **not** installed — tests use scheme `none`;
   `tar`, `gzip`, `nice` are present. Tests that need GNU tar `t.Skip` when absent.
 - **CLI:** flags may appear before or after positionals (`parseArgs`). The convention is
-  **inspect with a noun** (`nb slot`, `nb dle`, `nb medium`), **act with a flat verb**
+  **inspect with a noun** (`nb run`, `nb dle`, `nb medium`), **act with a flat verb**
   (`nb dump`, `nb check`, `nb verify`, `nb drill`, `nb prune`, `nb rebuild`, …) — so every
   mutation is a top-level verb. Each inspection noun is bare-noun + optional positional:
-  no argument lists, an id details that one (`nb slot <id>`, `nb dle <dle>`, `nb medium <name>`),
+  no argument lists, an id details that one (`nb run <id>`, `nb dle <dle>`, `nb medium <name>`),
   rather than `list`/`show` subcommands — uniform across the three (matches restic's
   `snapshots`, kubectl's name-presence). Per-medium status (incl. drives + slots)
   lives in `nb medium <name>`; `nb load` is the one physical action verb (sibling of

@@ -7,7 +7,7 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-// TestLocalDay pins the slot-date rule: a slot is dated the run instant's *local*
+// TestLocalDay pins the run-date rule: a run is dated the run instant's *local*
 // calendar day, so the same UTC instant yields a different date either side of
 // midnight depending on the zone's offset.
 func TestLocalDay(t *testing.T) {

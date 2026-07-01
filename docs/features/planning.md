@@ -98,7 +98,7 @@ Capacity is the one number you give a medium, and it binds at two scopes:
 
 | Scope | What must fit | How it's bounded |
 |---|---|---|
-| **Per run** | A single run's peak size. | **Promotion** is capped at the room left before pruning would evict a *protected* slot (`capacity − protected set`), tightened further by the landing volume's free space. No room → no promotion. A run can still be lumpy when a big DLE hits its *own* deadline — that full is mandatory, not promoted. |
+| **Per run** | A single run's peak size. | **Promotion** is capped at the room left before pruning would evict a *protected* run (`capacity − protected set`), tightened further by the landing volume's free space. No room → no promotion. A run can still be lumpy when a big DLE hits its *own* deadline — that full is mandatory, not promoted. |
 | **Per cycle** | A **complete recovery set**: one full of every DLE. They coexist while `minimum_age ≥ cycle`, so `Σ full_est` must fit capacity. | Structural — no scheduling can change the cycle's fixed full demand. |
 
 When `Σ full_est` exceeds capacity, the plan carries a **warning**: recoverability
@@ -134,5 +134,5 @@ a disk, a tape library, or an object store.
 ---
 
 Next: [Cost forecasting](cost) turns these byte forecasts into `$/month` for cloud
-media; [Pruning & retention](pruning) covers how slots are reclaimed to stay within
-capacity; [Storage media](media) covers where slots land.
+media; [Pruning & retention](pruning) covers how runs are reclaimed to stay within
+capacity; [Storage media](media) covers where runs land.

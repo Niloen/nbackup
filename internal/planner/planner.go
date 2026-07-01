@@ -27,7 +27,7 @@
 // for its own deadline rather than being re-fulled early to chase an average (and a
 // tiny DLE merely sharing that deadline can no longer inflate the peak enough to
 // unlock the move) — and (c) it fits the per-run room left before pruning would
-// evict a protected slot.
+// evict a protected run.
 //
 // Promotion is also *paced*: a cluster of N fulls sharing a deadline D days out is
 // not destaggered all at once but one per run, and only once the runway can no
@@ -119,7 +119,7 @@ type Item struct {
 	EstBytes  int64  // estimated size of the chosen dump
 	FullBytes int64  // estimated size of a full dump (the cycle-deadline cost), shown so a small incremental does not hide a large pending full
 	Reason    string // human-readable explanation
-	BaseSlot  string // slot whose state an incremental builds on
+	BaseRun   string // run whose state an incremental builds on
 }
 
 type cand struct {
@@ -195,7 +195,7 @@ func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, fo
 			it.Level, it.EstBytes = 0, c.estFull
 		} else {
 			it.Level, it.BaseLevel, it.EstBytes = c.incrLevel, c.incrLevel-1, c.estIncr
-			it.BaseSlot = c.st.SlotAtLevel(c.incrLevel - 1)
+			it.BaseRun = c.st.RunAtLevel(c.incrLevel - 1)
 		}
 		plan.Items = append(plan.Items, it)
 	}
@@ -239,7 +239,7 @@ func chooseIncrLevel(st *catalog.DLEState, e Estimate, bumpPercent float64) (lev
 // history is untouched.
 //
 // Estimates and params are sampled once and held constant across the window: this
-// forecasts the *level schedule* from today's sizes, not capacity drift as slots
+// forecasts the *level schedule* from today's sizes, not capacity drift as runs
 // accumulate. The per-day EstBytes therefore tracks the chosen levels, not a
 // reclamation timeline. The bump decision likewise weighs today's level sizes, so
 // a forecast past a simulated bump approximates the deeper level's size with the
@@ -263,9 +263,9 @@ func Simulate(dles []config.DLE, hist *catalog.History, est map[string]Estimate,
 		// Advance the cloned history as if this day's run had been sealed, so the
 		// next day's DaysSinceFull / LastLevel / RunsAtCurrentLevel see it.
 		day := date.Format("2006-01-02")
-		slotID := record.IDFromParts(day, 1) // simulated id; mirrors the real run's padded shape
+		runID := record.IDFromParts(day, 1) // simulated id; mirrors the real run's padded shape
 		for _, it := range plan.Items {
-			h.RecordRun(it.Name, slotID, day, it.Level)
+			h.RecordRun(it.Name, runID, day, it.Level)
 		}
 	}
 	return plans
@@ -348,7 +348,7 @@ func promote(cands []*cand, cycle int, room int64) {
 		}
 		// Don't rush: a cluster of N fulls sharing a deadline D days out can be
 		// spread one per day across its runway (today plus D future runs = D+1
-		// slots). While the runway still holds the whole cluster on distinct days
+		// runs). While the runway still holds the whole cluster on distinct days
 		// (D >= N), pulling one forward now only wastes freshness — a later run,
 		// closer to the deadline, can place it instead. So relieve a peak only once
 		// its runway can no longer absorb the wait: days-left < cluster-size. Defer

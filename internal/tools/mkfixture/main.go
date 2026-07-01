@@ -32,7 +32,7 @@ import (
 const fixtureDir = "internal/engine/testdata/format"
 
 // manifest describes one fixture: how to open its medium and what every recorded
-// slot must restore to. The format-survival test reads it; keep the JSON tags in
+// run must restore to. The format-survival test reads it; keep the JSON tags in
 // sync with the reader in internal/engine/format_fixture_test.go.
 type manifest struct {
 	Name       string        `json:"name"`
@@ -44,7 +44,7 @@ type manifest struct {
 }
 
 type restoreCase struct {
-	Slot   string            `json:"slot"`
+	Run    string            `json:"run"`
 	DLE    string            `json:"dle"`
 	Files  map[string]string `json:"files"`
 	Absent []string          `json:"absent,omitempty"`
@@ -126,8 +126,8 @@ func makeDiskFixture() error {
 	man := manifest{
 		Name: "disk-none-v1", MediumType: "disk", Landing: "disk", ParamKey: "path", Compress: "none",
 		Restores: []restoreCase{
-			{Slot: s1id, DLE: dle, Files: map[string]string{"keep.txt": "v1", "gone.txt": "temp", "sub/nested.txt": "hi"}},
-			{Slot: s2id, DLE: dle, Files: map[string]string{"keep.txt": "v2", "sub/nested.txt": "hi"}, Absent: []string{"gone.txt"}},
+			{Run: s1id, DLE: dle, Files: map[string]string{"keep.txt": "v1", "gone.txt": "temp", "sub/nested.txt": "hi"}},
+			{Run: s2id, DLE: dle, Files: map[string]string{"keep.txt": "v2", "sub/nested.txt": "hi"}, Absent: []string{"gone.txt"}},
 		},
 	}
 	return writeFixture("disk-none-v1", mediumDir, man)
@@ -135,7 +135,7 @@ func makeDiskFixture() error {
 
 // makeTapeFixture mints a tape volume (a labeled file-0 plus an inline-header
 // archive and seal), locking the tape framing — the 32 KB inline header block the
-// disk medium never writes. It dumps to disk, then copies the slot onto the tape.
+// disk medium never writes. It dumps to disk, then copies the run onto the tape.
 func makeTapeFixture() error {
 	tmp, err := os.MkdirTemp("", "mkfixture-tape")
 	if err != nil {
@@ -176,7 +176,7 @@ func makeTapeFixture() error {
 		if err := eng.LabelVolume("tape", "tape-0001", false, false, time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
 			return fmt.Errorf("label tape: %w", err)
 		}
-		if err := eng.CopySlot(s.ID, "", "tape", false, nil); err != nil {
+		if err := eng.CopyRun(s.ID, "", "tape", false, nil); err != nil {
 			return fmt.Errorf("copy to tape: %w", err)
 		}
 		return nil
@@ -188,7 +188,7 @@ func makeTapeFixture() error {
 	man := manifest{
 		Name: "tape-none-v1", MediumType: "tape", Landing: "tape", ParamKey: "dir", Compress: "none",
 		Restores: []restoreCase{
-			{Slot: sid, DLE: dle, Files: map[string]string{"keep.txt": "v1", "sub/nested.txt": "hi"}},
+			{Run: sid, DLE: dle, Files: map[string]string{"keep.txt": "v1", "sub/nested.txt": "hi"}},
 		},
 	}
 	return writeFixture("tape-none-v1", tapeDir, man)

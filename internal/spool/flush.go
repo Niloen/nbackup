@@ -24,7 +24,7 @@ import (
 // FlushDeps is what Flush needs from the host: the catalog and data path it reads/reclaims through,
 // the holding medium names, and four host-bound seams — resolving a staged archive's landing (its
 // dumptype's `landing`, so a crashed multi-landing run drains each DLE back to its own medium),
-// resolving a holding disk's volume, opening a backing session for a (landing, slot), and the DLE
+// resolving a holding disk's volume, opening a backing session for a (landing, run), and the DLE
 // display id — plus an optional log.
 type FlushDeps struct {
 	Cat         *catalog.Catalog
@@ -32,14 +32,14 @@ type FlushDeps struct {
 	LandingFor  func(dle string) string
 	Holdings    []string
 	HoldVol     func(name string) (media.Volume, error)
-	OpenBacking func(landing string, spec archiveio.SlotSpec) (*archiveio.Author, error)
+	OpenBacking func(landing string, spec archiveio.RunSpec) (*archiveio.Author, error)
 	DisplayDLE  func(dle string) string
 	Logf        func(format string, args ...any)
 }
 
 // Flush drains a crashed run's leftover archives from the holding disks to the backing. It reads the
 // stranded holding placements from the catalog (no medium scan), copies each archive to the backing,
-// removes the holding placement, reclaims the disk, and seals the slot. It is idempotent and a no-op
+// removes the holding placement, reclaims the disk, and seals the run. It is idempotent and a no-op
 // when no holding disk is configured or nothing is staged.
 func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 	logf := d.Logf
@@ -49,34 +49,34 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 	if len(d.Holdings) == 0 {
 		return 0, nil
 	}
-	// Resolve each holding disk's volume once, and collect the union of slots staged across them —
-	// a single crashed slot may have placements spread over several holding disks. Drain each slot
+	// Resolve each holding disk's volume once, and collect the union of runs staged across them —
+	// a single crashed run may have placements spread over several holding disks. Drain each run
 	// once (one backing session, one seal), copying every holding disk's portion of it.
 	holdVols := make(map[string]media.Volume, len(d.Holdings))
-	slotSet := map[string]*catalog.Slot{}
+	runSet := map[string]*catalog.Run{}
 	for _, h := range d.Holdings {
 		vol, err := d.HoldVol(h)
 		if err != nil {
 			return 0, err
 		}
 		holdVols[h] = vol
-		for _, s := range d.Cat.SlotsOn(h) {
-			slotSet[s.ID] = s
+		for _, s := range d.Cat.RunsOn(h) {
+			runSet[s.ID] = s
 		}
 	}
-	if len(slotSet) == 0 {
+	if len(runSet) == 0 {
 		return 0, nil
 	}
-	ids := make([]string, 0, len(slotSet))
-	for id := range slotSet {
+	ids := make([]string, 0, len(runSet))
+	for id := range runSet {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 
 	for _, id := range ids {
-		s := slotSet[id]
-		spec := archiveio.SlotSpec{ID: s.ID, CreatedAt: s.LastArchiveAt()}
-		// One backing writer per landing this slot's staged archives route to, opened lazily — a
+		s := runSet[id]
+		spec := archiveio.RunSpec{ID: s.ID, CreatedAt: s.LastArchiveAt()}
+		// One backing writer per landing this run's staged archives route to, opened lazily — a
 		// multi-landing run may have staged DLEs bound for different media onto one holding disk.
 		writers := map[string]*archiveio.Author{}
 		writerFor := func(landing string) (*archiveio.Author, error) {
@@ -98,7 +98,7 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 			}
 			holdVol := holdVols[holding]
 			for _, ap := range hp.Archives {
-				ref := clerk.Ref{Slot: s.ID, DLE: ap.DLE, Level: ap.Level}
+				ref := clerk.Ref{Run: s.ID, DLE: ap.DLE, Level: ap.Level}
 				dleID := d.DisplayDLE(ap.DLE)
 				landing := d.LandingFor(ap.DLE)
 				// A crash between recording the landing placement and reclaiming the holding one
@@ -138,9 +138,9 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 	return flushed, nil
 }
 
-// placementOn returns the slot's placement on the named medium, if any.
-func placementOn(cat *catalog.Catalog, slotID, medium string) (catalog.Placement, bool) {
-	for _, p := range cat.Placements(slotID) {
+// placementOn returns the run's placement on the named medium, if any.
+func placementOn(cat *catalog.Catalog, runID, medium string) (catalog.Placement, bool) {
+	for _, p := range cat.Placements(runID) {
 		if p.Medium == medium {
 			return p, true
 		}
@@ -148,9 +148,9 @@ func placementOn(cat *catalog.Catalog, slotID, medium string) (catalog.Placement
 	return catalog.Placement{}, false
 }
 
-// archiveOnBacking reports whether the slot's backing placement already holds (dle, level).
-func archiveOnBacking(cat *catalog.Catalog, backing, slotID, dle string, level int) bool {
-	p, ok := placementOn(cat, slotID, backing)
+// archiveOnBacking reports whether the run's backing placement already holds (dle, level).
+func archiveOnBacking(cat *catalog.Catalog, backing, runID, dle string, level int) bool {
+	p, ok := placementOn(cat, runID, backing)
 	if !ok {
 		return false
 	}
@@ -164,14 +164,14 @@ func archiveOnBacking(cat *catalog.Catalog, backing, slotID, dle string, level i
 
 // catalogArchive returns a holding-disk archive's metadata for a re-copy: the catalogued record
 // (checksum, sizes, scheme) plus its member list from the on-medium index.
-func catalogArchive(cat *catalog.Catalog, ck *clerk.Clerk, slotID, dle string, level int) (record.Archive, error) {
-	s, err := cat.ReadSlot(slotID)
+func catalogArchive(cat *catalog.Catalog, ck *clerk.Clerk, runID, dle string, level int) (record.Archive, error) {
+	s, err := cat.ReadRun(runID)
 	if err != nil {
 		return record.Archive{}, err
 	}
 	for _, a := range s.Archives {
 		if a.DLE == dle && a.Level == level {
-			a.Members, _ = ck.Members(clerk.Ref{Slot: slotID, DLE: dle, Level: level})
+			a.Members, _ = ck.Members(clerk.Ref{Run: runID, DLE: dle, Level: level})
 			return a, nil
 		}
 	}

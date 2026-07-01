@@ -3,12 +3,12 @@
 // index so planning, listing, restore-location, pruning, and capacity reporting
 // never touch the media.
 //
-// Its model separates what a slot *is* from where its copies *are*: an Entry pairs
-// one medium-independent slot (its content, from the seal record) with the set of
+// Its model separates what a run *is* from where its copies *are*: an Entry pairs
+// one medium-independent run (its content, from the seal record) with the set of
 // Placements that hold a copy — each a volume plus the file position of every
 // archive on it. The media remain the source of truth (every file self-describing,
-// every slot sealed, every labeled volume identified), so the whole cache rebuilds
-// by scanning: seals -> slots, labels -> the volume registry.
+// every run sealed, every labeled volume identified), so the whole cache rebuilds
+// by scanning: seals -> runs, labels -> the volume registry.
 //
 // The package has two faces. This file is the store: an in-memory index of Entries
 // and VolumeRecords with queries, insert/update/delete, and JSON persistence — the
@@ -39,13 +39,13 @@ import (
 const CacheFile = "catalog.json"
 
 // VolumeRecord is the catalog's cached identity of a labeled volume. "Which
-// slots are on it" and "is it reusable" are derived from placements + retention,
+// runs are on it" and "is it reusable" are derived from placements + retention,
 // not stored here.
 type VolumeRecord struct {
 	Label record.Label `json:"label"`
 }
 
-// Catalog is a local cache of slot entries plus a registry of labeled volumes. It
+// Catalog is a local cache of run entries plus a registry of labeled volumes. It
 // holds no long-lived volume reference; volumes are passed in only to (re)scan.
 type Catalog struct {
 	workdir string
@@ -89,8 +89,8 @@ func Open(workdir string) (*Catalog, error) {
 }
 
 // AddArchive merges one archive's content and its placement position into the catalog and
-// persists — the catalog's single write path. A slot is only a grouping of committed
-// archives, so there is no "add a slot": the entry is created from the archive's slot
+// persists — the catalog's single write path. A run is only a grouping of committed
+// archives, so there is no "add a run": the entry is created from the archive's run
 // identity the first time one of its archives lands, and archives accrete into it one at a
 // time. Both a dump (its Finish records each committed archive), a copy/sync, a rebuild scan,
 // and the holding-disk taper write through here; reclaim is the symmetric RemoveArchive.
@@ -103,19 +103,19 @@ func (c *Catalog) AddArchive(arch record.Archive, medium string, pos ArchivePos)
 	return c.persist()
 }
 
-// addArchive is the in-memory merge AddArchive wraps: it creates the slot entry from the
-// archive's own slot tag (arch.Slot) on first sight and merges the archive's content +
+// addArchive is the in-memory merge AddArchive wraps: it creates the run entry from the
+// archive's own run tag (arch.Run) on first sight and merges the archive's content +
 // placement position, but neither sorts nor persists — for a bulk caller (a rebuild scan)
 // that persists once at the end. The catalog cache holds no member lists (they live in the
 // member-index cache + the on-medium index), so members are cleared here.
 func (c *Catalog) addArchive(arch record.Archive, medium string, pos ArchivePos) {
-	e := c.entryByID(arch.Slot)
+	e := c.entryByID(arch.Run)
 	if e == nil {
-		e = &Entry{Slot: &Slot{ID: arch.Slot}}
+		e = &Entry{Run: &Run{ID: arch.Run}}
 		c.entries = append(c.entries, e)
 	}
 	arch.Members = nil
-	e.Slot.addArchive(arch)
+	e.Run.addArchive(arch)
 	e.addPlacementPos(medium, pos)
 	c.loaded = true
 }
@@ -143,10 +143,10 @@ func mergeArchivePos(list []ArchivePos, pos ArchivePos) []ArchivePos {
 	return append(list, pos)
 }
 
-// RemovePlacement drops the copy of a slot on one medium. When the last copy is
-// gone the whole entry is removed (gone=true) — the slot no longer exists anywhere.
-func (c *Catalog) RemovePlacement(slotID, medium string) (gone bool, err error) {
-	e := c.entryByID(slotID)
+// RemovePlacement drops the copy of a run on one medium. When the last copy is
+// gone the whole entry is removed (gone=true) — the run no longer exists anywhere.
+func (c *Catalog) RemovePlacement(runID, medium string) (gone bool, err error) {
+	e := c.entryByID(runID)
 	if e == nil {
 		return false, nil
 	}
@@ -158,22 +158,22 @@ func (c *Catalog) RemovePlacement(slotID, medium string) (gone bool, err error) 
 	}
 	e.Placements = kept
 	if len(e.Placements) == 0 {
-		c.removeEntry(slotID)
+		c.removeEntry(runID)
 		gone = true
 	}
 	return gone, c.persist()
 }
 
-// RemoveArchive drops one archive (a DLE's image) from the copy of a slot on one
+// RemoveArchive drops one archive (a DLE's image) from the copy of a run on one
 // medium — the per-archive peer of RemovePlacement. It removes that DLE's ArchivePos
 // from the medium's placement; when the placement keeps no archives the whole
-// placement goes (placementGone), and when that was the slot's last copy the entry
-// goes too (entryGone) — the slot no longer exists anywhere. When no remaining
-// placement holds this DLE, the slot's medium-independent content
-// (Entry.Slot.Archives) drops it too: the slot stops advertising an image no
+// placement goes (placementGone), and when that was the run's last copy the entry
+// goes too (entryGone) — the run no longer exists anywhere. When no remaining
+// placement holds this DLE, the run's medium-independent content
+// (Entry.Run.Archives) drops it too: the run stops advertising an image no
 // medium holds, even while it keeps other DLEs' images on surviving copies.
-func (c *Catalog) RemoveArchive(slotID, medium, dle string) (placementGone, entryGone bool, err error) {
-	e := c.entryByID(slotID)
+func (c *Catalog) RemoveArchive(runID, medium, dle string) (placementGone, entryGone bool, err error) {
+	e := c.entryByID(runID)
 	if e == nil {
 		return false, false, nil
 	}
@@ -208,10 +208,10 @@ func (c *Catalog) RemoveArchive(slotID, medium, dle string) (placementGone, entr
 	}
 	e.Placements = kept
 	if !dleStillHeld {
-		e.Slot.dropArchive(dle)
+		e.Run.dropArchive(dle)
 	}
 	if len(e.Placements) == 0 {
-		c.removeEntry(slotID)
+		c.removeEntry(runID)
 		entryGone = true
 	}
 	return placementGone, entryGone, c.persist()
@@ -243,50 +243,50 @@ func (c *Catalog) RemoveVolume(name string) error {
 	return c.persist()
 }
 
-// Slots returns the cached slots in run order.
-func (c *Catalog) Slots() []*Slot {
-	out := make([]*Slot, 0, len(c.entries))
+// Runs returns the cached runs in run order.
+func (c *Catalog) Runs() []*Run {
+	out := make([]*Run, 0, len(c.entries))
 	for _, e := range c.entries {
-		out = append(out, e.Slot)
+		out = append(out, e.Run)
 	}
 	return out
 }
 
-// ReadSlot returns a cached slot by ID.
-func (c *Catalog) ReadSlot(id string) (*Slot, error) {
+// ReadRun returns a cached run by ID.
+func (c *Catalog) ReadRun(id string) (*Run, error) {
 	if e := c.entryByID(id); e != nil {
-		return e.Slot, nil
+		return e.Run, nil
 	}
-	return nil, fmt.Errorf("slot %s not in catalog (run `nb rebuild` if it exists on media)", id)
+	return nil, fmt.Errorf("run %s not in catalog (run `nb rebuild` if it exists on media)", id)
 }
 
-// Placements returns the copies of a slot, for a reader to choose among.
-func (c *Catalog) Placements(slotID string) []Placement {
-	if e := c.entryByID(slotID); e != nil {
+// Placements returns the copies of a run, for a reader to choose among.
+func (c *Catalog) Placements(runID string) []Placement {
+	if e := c.entryByID(runID); e != nil {
 		return e.Placements
 	}
 	return nil
 }
 
-// SlotsOn returns the slots with a copy on the named medium, in run order.
-func (c *Catalog) SlotsOn(medium string) []*Slot {
-	var out []*Slot
+// RunsOn returns the runs with a copy on the named medium, in run order.
+func (c *Catalog) RunsOn(medium string) []*Run {
+	var out []*Run
 	for _, e := range c.entries {
 		if e.placedOn(medium) {
-			out = append(out, e.Slot)
+			out = append(out, e.Run)
 		}
 	}
 	return out
 }
 
-// SlotsOnLabel returns the slots with a copy on the volume with the given label,
+// RunsOnLabel returns the runs with a copy on the volume with the given label,
 // in run order — used to tell whether a tape already holds a run.
-func (c *Catalog) SlotsOnLabel(label string) []*Slot {
-	var out []*Slot
+func (c *Catalog) RunsOnLabel(label string) []*Run {
+	var out []*Run
 	for _, e := range c.entries {
 		for _, p := range e.Placements {
 			if p.OnLabel(label) {
-				out = append(out, e.Slot)
+				out = append(out, e.Run)
 				break
 			}
 		}
@@ -294,37 +294,37 @@ func (c *Catalog) SlotsOnLabel(label string) []*Slot {
 	return out
 }
 
-// Archives returns every cached archive (each carrying its slot tag), across all slots, in
+// Archives returns every cached archive (each carrying its run tag), across all runs, in
 // run order — the corpus the policy layer (restore, recovery, drill) reasons over.
 func (c *Catalog) Archives() []record.Archive {
 	var out []record.Archive
 	for _, e := range c.entries {
-		out = append(out, e.Slot.Archives...)
+		out = append(out, e.Run.Archives...)
 	}
 	return out
 }
 
-// ArchivesOn returns the archives of every slot with a copy on the named medium — the
-// per-medium corpus retention and reclamation reason over. The slot's content is its archives
-// across media, scoped here to slots present on the medium (matching SlotsOn).
+// ArchivesOn returns the archives of every run with a copy on the named medium — the
+// per-medium corpus retention and reclamation reason over. The run's content is its archives
+// across media, scoped here to runs present on the medium (matching RunsOn).
 func (c *Catalog) ArchivesOn(medium string) []record.Archive {
 	var out []record.Archive
 	for _, e := range c.entries {
 		if e.placedOn(medium) {
-			out = append(out, e.Slot.Archives...)
+			out = append(out, e.Run.Archives...)
 		}
 	}
 	return out
 }
 
-// SlotIDsOnLabel returns the ids of the slots with a copy on the volume with the given label,
+// RunIDsOnLabel returns the ids of the runs with a copy on the volume with the given label,
 // in run order — what a volume's reusability check (retention.Floor.First) consults.
-func (c *Catalog) SlotIDsOnLabel(label string) []string {
+func (c *Catalog) RunIDsOnLabel(label string) []string {
 	var out []string
 	for _, e := range c.entries {
 		for _, p := range e.Placements {
 			if p.OnLabel(label) {
-				out = append(out, e.Slot.ID)
+				out = append(out, e.Run.ID)
 				break
 			}
 		}
@@ -332,12 +332,12 @@ func (c *Catalog) SlotIDsOnLabel(label string) []string {
 	return out
 }
 
-// MediumBytes sums the stored bytes of slots with a copy on the named medium.
+// MediumBytes sums the stored bytes of runs with a copy on the named medium.
 func (c *Catalog) MediumBytes(medium string) int64 {
 	var total int64
 	for _, e := range c.entries {
 		if e.placedOn(medium) {
-			total += e.Slot.TotalBytes()
+			total += e.Run.TotalBytes()
 		}
 	}
 	return total
@@ -363,7 +363,7 @@ func (c *Catalog) Volume(name string) (VolumeRecord, bool) {
 
 func (c *Catalog) entryByID(id string) *Entry {
 	for _, e := range c.entries {
-		if e.Slot.ID == id {
+		if e.Run.ID == id {
 			return e
 		}
 	}
@@ -373,7 +373,7 @@ func (c *Catalog) entryByID(id string) *Entry {
 func (c *Catalog) removeEntry(id string) {
 	kept := c.entries[:0:0]
 	for _, e := range c.entries {
-		if e.Slot.ID != id {
+		if e.Run.ID != id {
 			kept = append(kept, e)
 		}
 	}
@@ -381,7 +381,7 @@ func (c *Catalog) removeEntry(id string) {
 }
 
 func (c *Catalog) sortEntries() {
-	sort.Slice(c.entries, func(i, j int) bool { return record.SlotIDLess(c.entries[i].Slot.ID, c.entries[j].Slot.ID) })
+	sort.Slice(c.entries, func(i, j int) bool { return record.RunIDLess(c.entries[i].Run.ID, c.entries[j].Run.ID) })
 }
 
 func (c *Catalog) persist() error {

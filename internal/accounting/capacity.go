@@ -86,7 +86,7 @@ func (a *Accountant) MediumProtectionIsAgeBound(name string, now time.Time) bool
 	archives := a.d.Cat.ArchivesOn(name)
 	floor := retention.Compute(archives, a.d.Cfg.MinAgeFor(def), now)
 	for _, ar := range archives {
-		reason, ok := floor.ReasonArchive(ar.Slot, ar.DLE)
+		reason, ok := floor.ReasonArchive(ar.Run, ar.DLE)
 		if ok && !strings.Contains(reason, "minimum age") {
 			return false // a recovery-chain pin that shortening minimum_age can't release
 		}
@@ -115,10 +115,10 @@ func (a *Accountant) PoolRoom(now time.Time) int64 {
 	if capacity <= 0 {
 		return -1
 	}
-	slots := a.d.Cat.SlotsOn(a.d.Landing)
+	runs := a.d.Cat.RunsOn(a.d.Landing)
 	floor := retention.Compute(a.d.Cat.ArchivesOn(a.d.Landing), a.d.LandingMinAge, now)
 	var keptBytes int64
-	for _, s := range slots {
+	for _, s := range runs {
 		if floor.Keeps(s.ID) {
 			keptBytes += s.TotalBytes()
 		}

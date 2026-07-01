@@ -7,7 +7,7 @@
 // A scheme is a registered name (gpg, none) that knows how to build the argv for
 // encrypting and decrypting. The archive records which scheme produced it (the
 // name only, never a key), so restore reverses the exact transform — resolved
-// from this compiled registry, not from config, so a slot restores even with the
+// from this compiled registry, not from config, so a run restores even with the
 // config gone. It is the peer of a compression scheme, one transform further out: on
 // write a payload is compressed and then encrypted; on read it is decrypted and
 // then decompressed.

@@ -12,7 +12,7 @@ import (
 	"github.com/Niloen/nbackup/internal/ratelimit"
 )
 
-// Disk is one disk in the holding Pool: the slot Storage the producer stages onto (and the drain
+// Disk is one disk in the holding Pool: the run Storage the producer stages onto (and the drain
 // reads back + reclaims through), plus its capacity budget. used sums two reservations against the
 // disk — each dump's in-flight estimate (Acquire→Close) and each committed archive's landed bytes
 // (Commit→drain) — guarded by Pool.mu.

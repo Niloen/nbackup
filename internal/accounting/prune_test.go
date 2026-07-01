@@ -45,7 +45,7 @@ func TestSweepOrphansMinimumAgeAndWORM(t *testing.T) {
 	now := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
 	orphan := func(createdAt time.Time) []record.FileInfo {
 		return []record.FileInfo{{Pos: 5, Header: record.Header{
-			Slot: "slot-2026-06-30.001", Kind: record.KindArchive, DLE: "app", CreatedAt: createdAt,
+			Run: "run-2026-06-30.001", Kind: record.KindArchive, DLE: "app", CreatedAt: createdAt,
 		}}}
 	}
 	acct := func(v media.Volume) *Accountant {
@@ -114,7 +114,7 @@ func TestArchivePositionsCommitFirst(t *testing.T) {
 			t.Fatalf("position[%d] = %d, want %d (full order %v, want %v)", i, got[i], want[i], got, want)
 		}
 	}
-	// An archive with no member index omits that slot, still commit-first.
+	// An archive with no member index omits that run, still commit-first.
 	ps[0].Archives[0].Index = record.FilePos{}
 	if got := archivePositions(ps, "disk", "app"); len(got) != 3 || got[0] != 3 {
 		t.Fatalf("without index, order = %v, want [3 0 1] (commit first)", got)

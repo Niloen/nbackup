@@ -5,7 +5,7 @@ DLEs whose data lives on another host, with **no NBackup software on the client*
 the transport and stock GNU tar (plus, optionally, the compressor and gpg) is the "agent."
 It also specifies the **Amanda-faithful configurable encryption/compression point**
 (`client` vs `server`) and the three trust postures that fall out of it. See
-[ARCHITECTURE.md](../../ARCHITECTURE.md) for the vocabulary (DLE / Archive / Slot /
+[ARCHITECTURE.md](../../ARCHITECTURE.md) for the vocabulary (DLE / Archive / Run /
 Archiver / incremental state / seal / filter / crypt / xfer.Meter).
 
 **Ergonomics (implemented).** A source host is remote **by default** — anything but
@@ -25,7 +25,7 @@ are the same code.
 package (`Executor` with `RunPipe` + filesystem ops; `Local` and `SSH` implementations)
 injected into archivers and the compress/encrypt stages, so a backup is **one** pipeline
 of program stages — `tar → compress → encrypt` — each carrying the host it runs on, with
-same-host adjacent stages fused (`internal/slotio.Writer.WriteArchive`). A `hosts:` config
+same-host adjacent stages fused (`internal/archiveio.Writer.WriteArchive`). A `hosts:` config
 block, the `compress`/`encrypt.at` `server|client` selectors, and estimate/dump over SSH are
 in. Restore is opt-in onto a client (`nb recover --all --to host:path`); for an
 `encrypt.at: client` DLE the **decode runs on that client** (`gpg -d | … | tar -x` fused
@@ -116,7 +116,7 @@ leads to a design that "passes argv unchanged" and then can't build the seal.
 
 4. **The meter + checksum cannot move off the server.** The seal's `SHA256` must cover
    *exactly the bytes that land on the volume* — that is what keeps `nb verify`,
-   `CopySlot`, and `nb sync` **keyless** and makes one slot = N byte-identical copies
+   `CopyRun`, and `nb sync` **keyless** and makes one run = N byte-identical copies
    (ARCHITECTURE.md:230). So wherever compress/encrypt run, `meter → volume` stays
    server-side. The network cut therefore lands **at or before the meter**.
 
@@ -240,7 +240,7 @@ sources:
   <recipient>`. The engine composes the remote command from the gnutar tar args + the
   `filter` scheme args + the `crypt` scheme args (the only place these three meet for a
   remote dump).
-- **`slotio.Writer` "pre-transformed" mode:** when the produce side already delivers
+- **`archiveio.Writer` "pre-transformed" mode:** when the produce side already delivers
   final bytes, the Writer **skips its internal filter/crypt wrap** and runs only
   `meter → volume`, while **still recording `Compress`/`Encrypt` scheme names** from config
   so restore reverses them from the artifact (ARCHITECTURE.md:236). This is the one

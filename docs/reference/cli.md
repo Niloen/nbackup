@@ -21,16 +21,16 @@ Every `nb` command, its purpose, and its key flags.
 
 NBackup has one binary, `nb`, and a single naming rule:
 
-- **Inspect with a noun.** `nb slot`, `nb dle`, and `nb medium` each list with no
+- **Inspect with a noun.** `nb run`, `nb dle`, and `nb medium` each list with no
   argument and detail one item when given an id — there are no `list`/`show`
-  subcommands. `nb slot` lists slots; `nb slot slot-2026-06-21.001` details that
+  subcommands. `nb run` lists runs; `nb run run-2026-06-21.001` details that
   one. `nb medium` lists media; `nb medium lto` details that one.
 - **Act with a flat verb.** Every mutation is a top-level verb — `nb dump`,
   `nb recover`, `nb prune`, `nb verify`, `nb drill`, `nb sync`, … — never nested
   under a noun.
 
 Flags may appear **before or after** the subcommand and its positional
-arguments; `nb slot --catalog /x lto` and `nb --catalog /x slot lto` are
+arguments; `nb run --catalog /x lto` and `nb --catalog /x run lto` are
 equivalent.
 
 ## Commands
@@ -42,19 +42,19 @@ equivalent.
 | `nb dump` | Execute a run and commit its archives |
 | `nb status` | Show progress of the current (or most recent) run |
 | `nb report` | Summarize recent runs, or print one dump's per-DLE report |
-| `nb slot` | List slots, or detail one (`nb slot <id>`: archives + copies) |
-| `nb dle` | List DLEs, or detail one's archive timeline across slots |
+| `nb run` | List runs, or detail one (`nb run <id>`: archives + copies) |
+| `nb dle` | List DLEs, or detail one's archive timeline across runs |
 | `nb medium` | List media, or detail one (incl. drives + slots) |
-| `nb verify` | Verify slot integrity: checksums, or `--deep` structure |
+| `nb verify` | Verify run integrity: checksums, or `--deep` structure |
 | `nb drill` | Rehearse recovery: prove backups are restorable |
 | `nb recover` | Recover as of a date: browse + pick files, or `--all` for a whole DLE |
-| `nb copy` | Copy one slot between media (`--from`/`--to`, e.g. disk → tape) |
-| `nb sync` | Mirror one medium's slots onto another (disk → tape/s3) |
+| `nb copy` | Copy one run between media (`--from`/`--to`, e.g. disk → tape) |
+| `nb sync` | Mirror one medium's runs onto another (disk → tape/s3) |
 | `nb label` | Label a volume (required for tape before its first dump) |
 | `nb load` | Load a slot into a medium's drive (by slot number or `--label`) |
-| `nb prune <medium>` | Delete a medium's slots past its cycle/capacity limits |
+| `nb prune <medium>` | Delete a medium's runs past its cycle/capacity limits |
 | `nb reset <dle>` | Schedule a DLE for a full on its next run (fresh chain) |
-| `nb rebuild` | Rebuild the local slot-index cache from media |
+| `nb rebuild` | Rebuild the local run-index cache from media |
 
 ## Global flags
 
@@ -91,14 +91,14 @@ Each noun lists with no argument and details one item when given an id.
 
 | Command | Key flags | Purpose |
 |---|---|---|
-| `nb slot [id]` | — | List slots (with a COPIES column), or detail one slot's archives and every copy's positions. |
-| `nb dle [dle]` | — | List DLEs, or detail one DLE's archive timeline across slots. |
+| `nb run [id]` | — | List runs (with a COPIES column), or detail one run's archives and every copy's positions. |
+| `nb dle [dle]` | — | List DLEs, or detail one DLE's archive timeline across runs. |
 | `nb medium [name]` | — | List media, or detail one (its drives + slots). |
 | `nb status` | `--watch <interval>` | Show the running (or most recent) run; `--watch` refreshes until it finishes. |
 
 ```bash
-nb slot
-nb slot slot-2026-06-21.001
+nb run
+nb run run-2026-06-21.001
 nb dle app01:/home
 nb medium lto
 nb status --watch 2s
@@ -110,7 +110,7 @@ See [Monitoring](../features/monitoring).
 
 | Command | Key flags | Purpose |
 |---|---|---|
-| `nb verify` | `--all`, `--deep` | Re-hash archive checksums; `--all` every slot, `--deep` adds a structural decrypt → decompress → `tar -t` check. |
+| `nb verify` | `--all`, `--deep` | Re-hash archive checksums; `--all` every run, `--deep` adds a structural decrypt → decompress → `tar -t` check. |
 | `nb drill` | `--dry-run`, `--from <medium>`, `--tier <tier>`, `--as-of <date>`, `--unattended` | Rehearse recovery by restoring a risk-biased sample to scratch. |
 
 ```bash
@@ -156,8 +156,8 @@ See [Recovery](../features/recovery).
 
 | Command | Key flags | Purpose |
 |---|---|---|
-| `nb copy` | `--from <medium>`, `--to <medium>` | Copy one slot between media (e.g. disk → tape). |
-| `nb sync` | `--to <medium>`, `--from <medium>`, `--last N`, `--dry-run` | Mirror one medium's slots onto another, oldest-first; no `--to` runs every config `sync:` rule. |
+| `nb copy` | `--from <medium>`, `--to <medium>` | Copy one run between media (e.g. disk → tape). |
+| `nb sync` | `--to <medium>`, `--from <medium>`, `--last N`, `--dry-run` | Mirror one medium's runs onto another, oldest-first; no `--to` runs every config `sync:` rule. |
 
 ```bash
 nb sync --to lto --dry-run
@@ -174,11 +174,11 @@ The source defaults to the landing medium; `--from` overrides it. See
 
 | Command | Key flags | Purpose |
 |---|---|---|
-| `nb prune <medium>` | `-n, --dry-run` | Delete the named medium's slots past its cycle/capacity limits; `-n` previews. |
+| `nb prune <medium>` | `-n, --dry-run` | Delete the named medium's runs past its cycle/capacity limits; `-n` previews. |
 | `nb label` | `--relabel` | Label a volume (required for tape before its first dump); `--relabel` recycles an aged-out tape. |
 | `nb load` | — | Load a slot into a medium's drive (by slot number, or `--label`). |
 | `nb reset <dle>` | — | Schedule a DLE for a full on its next run (fresh chain). |
-| `nb rebuild` | — | Rebuild the local slot-index cache from media. |
+| `nb rebuild` | — | Rebuild the local run-index cache from media. |
 | `nb flush` | — | Drain a holding disk's staged archives to the landing. |
 
 ```bash
@@ -198,14 +198,14 @@ The medium is named explicitly because retention is per-medium. See
 
 | Command | Key flags | Purpose |
 |---|---|---|
-| `nb report` | `--last N`, `--json`, `--dump`, `--slot <id>`, `--notify` | Summarize recent runs and recovery health; `--dump` prints one dump's per-DLE report. |
+| `nb report` | `--last N`, `--json`, `--dump`, `--run <id>`, `--notify` | Summarize recent runs and recovery health; `--dump` prints one dump's per-DLE report. |
 
 ```bash
 nb report
 nb report --last 30
 nb report --json
 nb report --dump
-nb report --dump --slot slot-2026-06-21.001
+nb report --dump --run run-2026-06-21.001
 nb report --notify
 ```
 

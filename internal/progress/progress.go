@@ -106,7 +106,7 @@ func pct(done, total int64) float64 {
 // Snapshot is the whole run's state at one instant — what gets persisted and
 // rendered. It is a value type; the Tracker hands out copies.
 type Snapshot struct {
-	SlotID    string    `json:"slot_id"`
+	RunID     string    `json:"run_id"`
 	Phase     Phase     `json:"phase"`
 	Workers   int       `json:"workers"` // configured parallelism
 	StartedAt time.Time `json:"started_at"`

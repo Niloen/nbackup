@@ -19,7 +19,7 @@ If `$ARGUMENTS` is non-empty, focus the review on those packages/areas (e.g.
 
 1. Read `ARCHITECTURE.md` end to end — especially the **Package map**, the
    **Load-bearing decisions** (each states what a package *should* and *should
-   not* know), the **vocabulary** (DLE / Run / Slot / Archive / Cycle /
+   not* know), the **vocabulary** (DLE / Run / Archive / Cycle /
    Medium=Volume / Entry+Placement+Part / Label / Bay / reel / Drive / Changer /
    Shelf), and the **medium-neutral vocabulary** rule (the generic
    media/changer/config layer must not say "tape"). The architecture is the
@@ -40,7 +40,7 @@ grouping (adjust to the current tree / to `$ARGUMENTS`):
 
 1. **engine** — `internal/engine/*.go` (the driver; the biggest file). Check it
    stays medium-shape-agnostic (dispatch belongs in `librarian`) and look for
-   duplicated write-target/read-path setup between `Run`/`CopySlot`/`Verify`.
+   duplicated write-target/read-path setup between `Run`/`CopyRun`/`Verify`.
 2. **cli** — `internal/cli/*.go`. Test the "thin command wiring" claim: business
    logic leaking into the CLI, duplicated arg/flag/output handling, long handlers.
 3. **media core** — `internal/librarian/*.go`, `internal/media/{media,profile}.go`.
@@ -50,8 +50,8 @@ grouping (adjust to the current tree / to `$ARGUMENTS`):
 4. **media impls** — `internal/media/{disk,cloud}/*.go`, `internal/media/tape/*.go`.
    The architecture says cloud's layout is the disk medium's *verbatim* — check for
    actual disk↔cloud duplication. Is the dir/manual/mt split inside tape clear?
-5. **persistence** — `internal/{slot,slotio,catalog}/*.go`. Is the
-   Entry/Placement/Part/Archive/Slot model clear in code? Duplication between
+5. **persistence** — `internal/{record,archiveio,catalog}/*.go`. Is the
+   Entry/Placement/Part/Archive/Run model clear in code? Duplication between
    writer/reader and the scan rebuild path? Parallel position-types + converters?
 6. **adapters + pure domain** — `internal/{method,method/gnutar,filter,crypt,xfer}`
    and the pure `internal/{planner,policy,restore,recovery}`. The architecture says

@@ -7,7 +7,7 @@ import (
 )
 
 // TestMain pins the test binary's local zone to UTC so tests that drive Run with a
-// fixed instant assert a stable slot date. Slot dates are the run's *local* calendar
+// fixed instant assert a stable run date. Run dates are the run's *local* calendar
 // day (see localDay); fixing the zone keeps that day deterministic regardless of the
 // machine the suite runs on. TestLocalDay covers the cross-zone behavior directly.
 func TestMain(m *testing.M) {

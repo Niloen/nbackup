@@ -34,28 +34,28 @@ type ArchivePos struct {
 }
 
 // Archive describes a single DLE dump — the commit footer that marks the dump complete
-// and the metadata a catalog caches. It is self-locating: Slot, DLE, and Level together
-// name it uniquely on a volume, so an archive read off the medium carries the slot it
+// and the metadata a catalog caches. It is self-locating: Run, DLE, and Level together
+// name it uniquely on a volume, so an archive read off the medium carries the run it
 // belongs to without a separate grouping record (its physical position is held by the
-// catalog, not here, so the metadata stays portable across volumes). A "slot" is just the
-// shared Slot tag a run's archives carry — there is no slot record on the medium.
+// catalog, not here, so the metadata stays portable across volumes). A "run" is just the
+// shared Run tag a run's archives carry — there is no run record on the medium.
 type Archive struct {
-	Slot         string    `json:"slot"`                // the slot (run) this dump belongs to, e.g. "slot-2026-06-21.001"
-	DLE          string    `json:"dle"`                 // DLE name, e.g. "app01-home"
-	Host         string    `json:"host"`                // source host
-	Path         string    `json:"path"`                // source path
-	Archiver     string    `json:"archiver"`            // archiver type that produced it
-	Compress     string    `json:"compress"`            // compression scheme (zstd|gzip|none); reversed on restore
-	Encrypt      string    `json:"encrypt"`             // encryption scheme (gpg|none); reversed on restore. "none" = plaintext — always concrete, the peer of Compress, so the two transforms describe their off-state identically. The key is never stored — restore resolves it from the operator's keyring.
-	Level        int       `json:"level"`               // 0 = full, >=1 = incremental
-	Compressed   int64     `json:"compressed"`          // payload size on the volume
-	Uncompressed int64     `json:"uncompressed"`        // archive stream size before compression
-	FileCount    int       `json:"file_count"`          // number of member entries archived
-	SHA256       string    `json:"sha256"`              // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
-	Parts        int       `json:"parts,omitempty"`     // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
-	BaseSlot     string    `json:"base_slot,omitempty"` // for level>=1, the slot whose state this builds on (a full omits it)
-	CreatedAt    time.Time `json:"created_at"`          // when this archive committed (landed) — per-archive, the basis for retention age and the "last archive added" display
-	Members      []string  `json:"members,omitempty"`   // member paths archived: slash-separated, directories with a trailing slash (the archiver-neutral convention recovery browses); the raw token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
+	Run          string    `json:"run"`                // the run (run) this dump belongs to, e.g. "run-2026-06-21.001"
+	DLE          string    `json:"dle"`                // DLE name, e.g. "app01-home"
+	Host         string    `json:"host"`               // source host
+	Path         string    `json:"path"`               // source path
+	Archiver     string    `json:"archiver"`           // archiver type that produced it
+	Compress     string    `json:"compress"`           // compression scheme (zstd|gzip|none); reversed on restore
+	Encrypt      string    `json:"encrypt"`            // encryption scheme (gpg|none); reversed on restore. "none" = plaintext — always concrete, the peer of Compress, so the two transforms describe their off-state identically. The key is never stored — restore resolves it from the operator's keyring.
+	Level        int       `json:"level"`              // 0 = full, >=1 = incremental
+	Compressed   int64     `json:"compressed"`         // payload size on the volume
+	Uncompressed int64     `json:"uncompressed"`       // archive stream size before compression
+	FileCount    int       `json:"file_count"`         // number of member entries archived
+	SHA256       string    `json:"sha256"`             // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
+	Parts        int       `json:"parts,omitempty"`    // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
+	BaseRun      string    `json:"base_run,omitempty"` // for level>=1, the run whose state this builds on (a full omits it)
+	CreatedAt    time.Time `json:"created_at"`         // when this archive committed (landed) — per-archive, the basis for retention age and the "last archive added" display
+	Members      []string  `json:"members,omitempty"`  // member paths archived: slash-separated, directories with a trailing slash (the archiver-neutral convention recovery browses); the raw token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
 }
 
 // DLEID returns the host:path identity for display, falling back to
@@ -67,61 +67,61 @@ func (a Archive) DLEID() string {
 	return a.Host + ":" + a.Path
 }
 
-// A slot is a run's grouping of archives, named by a slot id the run's archives all carry
-// (Archive.Slot). It is not a record on the medium: each archive is made durable by its own
-// commit footer, so a run is reconstructed by grouping committed archives that share a slot id
+// A run is a grouping of archives, named by a run id the run's archives all carry
+// (Archive.Run). It is not a record on the medium: each archive is made durable by its own
+// commit footer, so a run is reconstructed by grouping committed archives that share a run id
 // (a crashed run keeps its committed archives; uncommitted parts are orphans). The id is the
-// slot's whole identity: "slot-" + Date + a fixed-width ".NNN" sequence (".001" for the day's
-// first run) — see IDFromParts. The natural key is a date, so the "slot-" tag is what keeps it
-// from reading as a plain date wherever it appears bare: catalog JSON, logs, Archive.BaseSlot
-// references, and the on-disk slots/<id>/ directory. The system's other ids need no such tag
+// run's whole identity: "run-" + Date + a fixed-width ".NNN" sequence (".001" for the day's
+// first run) — see IDFromParts. The natural key is a date, so the "run-" tag is what keeps it
+// from reading as a plain date wherever it appears bare: catalog JSON, logs, Archive.BaseRun
+// references, and the on-disk runs/<id>/ directory. The system's other ids need no such tag
 // because they are already distinctive words (labels "<medium>-<date>", DLEs "<host>-<path>"),
 // not bare dates.
 
-// IDFromParts builds a slot ID from a date string and sequence number. Every run
+// IDFromParts builds a run ID from a date string and sequence number. Every run
 // is suffixed with a fixed-width, zero-padded sequence (".001" for the day's first
 // run) so the ids sort chronologically under a plain lexical compare — even as an
-// object-store key with a trailing "/". A bare "slot-DATE" first run would instead
+// object-store key with a trailing "/". A bare "run-DATE" first run would instead
 // sort *after* its same-day reruns there, since "." (0x2E) precedes "/" (0x2F); the
 // fixed width likewise keeps ".10" from sorting before ".2". The three digits cap a
-// day at 999 runs, which a daily backup never approaches. The "slot-" prefix tags an
+// day at 999 runs, which a daily backup never approaches. The "run-" prefix tags an
 // otherwise date-shaped key so it never reads as a plain date; ParseID strips it back off.
 func IDFromParts(date string, seq int) string {
-	return fmt.Sprintf("slot-%s.%03d", date, seq)
+	return fmt.Sprintf("run-%s.%03d", date, seq)
 }
 
-// DateString formats a date the way slots use it.
+// DateString formats a date the way runs use it.
 func DateString(date time.Time) string {
 	return date.Format("2006-01-02")
 }
 
-// ParseDateField parses a slot's date (YYYY-MM-DD).
+// ParseDateField parses a run's date (YYYY-MM-DD).
 func ParseDateField(s string) (time.Time, error) {
 	return time.Parse("2006-01-02", s)
 }
 
-// ParseID extracts the date and sequence from a slot ID. Every slot id carries an
+// ParseID extracts the date and sequence from a run ID. Every run id carries an
 // explicit, zero-padded sequence (IDFromParts is the sole producer), so a
-// sequence-less "slot-DATE" is not a valid id and is rejected — there is one
+// sequence-less "run-DATE" is not a valid id and is rejected — there is one
 // canonical id shape, not a tolerated short form.
 func ParseID(id string) (date string, seq int, err error) {
-	rest, ok := strings.CutPrefix(id, "slot-")
+	rest, ok := strings.CutPrefix(id, "run-")
 	if !ok {
-		return "", 0, fmt.Errorf("not a slot id: %q", id)
+		return "", 0, fmt.Errorf("not a run id: %q", id)
 	}
 	date, seqStr, hasSeq := strings.Cut(rest, ".")
 	if !hasSeq {
-		return "", 0, fmt.Errorf("slot id %q has no sequence (want slot-DATE.NNN)", id)
+		return "", 0, fmt.Errorf("run id %q has no sequence (want run-DATE.NNN)", id)
 	}
 	seq, err = strconv.Atoi(seqStr)
 	if err != nil {
-		return "", 0, fmt.Errorf("bad sequence in slot id %q: %w", id, err)
+		return "", 0, fmt.Errorf("bad sequence in run id %q: %w", id, err)
 	}
 	return date, seq, nil
 }
 
-// SlotDate returns the date (YYYY-MM-DD) encoded in a slot id, or "" if it does not parse.
-func SlotDate(id string) string {
+// RunDate returns the date (YYYY-MM-DD) encoded in a run id, or "" if it does not parse.
+func RunDate(id string) string {
 	date, _, err := ParseID(id)
 	if err != nil {
 		return ""
@@ -129,11 +129,11 @@ func SlotDate(id string) string {
 	return date
 }
 
-// SlotIDLess reports whether slot id a comes before b in run order, keyed by date then
-// sequence (so "slot-DATE.10" correctly follows "slot-DATE.2"). The padded ids sort this
+// RunIDLess reports whether run id a comes before b in run order, keyed by date then
+// sequence (so "run-DATE.10" correctly follows "run-DATE.2"). The padded ids sort this
 // way lexically too; parsing makes the intent explicit. An id that does not parse (not a
-// canonical slot id) falls back to a plain lexical compare.
-func SlotIDLess(a, b string) bool {
+// canonical run id) falls back to a plain lexical compare.
+func RunIDLess(a, b string) bool {
 	da, sa, ea := ParseID(a)
 	db, sb, eb := ParseID(b)
 	if ea != nil || eb != nil {

@@ -55,8 +55,8 @@ tokens are load-bearing for correctness: a shard *cannot* be expressed outside i
 > - Incremental-state ownership moved into the archiver (`Archiver.HasBase(dle, level)`,
 >   archiver-neutral); the snapshot-continuity argument below is restated against
 >   `HasBase` rather than naming a `.snar`.
-> - Retention's `policy.Protected` is now `retention.Floor` (`.Keeps(id)`); the slot
->   type is `format.Slot`. Neither is on this spec's path.
+> - Retention's `policy.Protected` is now `retention.Floor` (`.Keeps(id)`); the run
+>   grouping type is `catalog.Run`. Neither is on this spec's path.
 
 ## Go types
 

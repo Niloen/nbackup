@@ -54,7 +54,7 @@ encrypt:
   recipient: backups@example.com
 
 media:
-  # Copy 1 — fast local landing, kept deliberately lean so old slots leave disk on
+  # Copy 1 — fast local landing, kept deliberately lean so old runs leave disk on
   # disk's own budget.
   disk:
     type: disk
@@ -76,7 +76,7 @@ media:
     capacity: 200TB
     throughput: 50MB/s
 
-# Slots are created on disk first.
+# Runs are created on disk first.
 landing: disk
 
 # Replication: mirror disk -> offsite, then chain offsite -> deep-archive. The
@@ -123,7 +123,7 @@ sources:
     localhost: [/srv/www, /var/log]
 ```
 
-A third *media type* — robotic tape — slots straight in. Add an `lto` medium
+A third *media type* — robotic tape — fits straight in. Add an `lto` medium
 (`type: tape`) and a `sync` rule targeting it; LTO WORM is detected by the same
 probe as Object Lock. See [Media types](../features/media).
 
@@ -146,7 +146,7 @@ offsite → deep-archive.
 ## How each digit is satisfied
 
 - **3 copies** — `disk` (landing), `offsite`, and `deep-archive`. The two `sync`
-  rules fan a slot out to all three.
+  rules fan a run out to all three.
 - **2 media types** — local disk and an object store. Add an `lto` tape medium for
   a third, genuinely different medium.
 - **1 offsite** — the `offsite` cloud bucket (and `deep-archive` beyond it).
@@ -160,7 +160,7 @@ offsite → deep-archive.
 
 ## What to watch
 
-- **Each medium prunes on its own terms.** A slot leaves `disk` when *disk's*
+- **Each medium prunes on its own terms.** A run leaves `disk` when *disk's*
   capacity and cycle say so — never merely because a copy reached `offsite` or
   `deep-archive`. That independence is what keeps the three copies genuinely
   separate. See [Pruning](../features/pruning) and [Replication](../features/replication).

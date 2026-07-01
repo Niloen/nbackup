@@ -15,7 +15,7 @@ import (
 )
 
 // TestCloudLandingRoundTrip drives the full engine against a cloud medium (the
-// file:// gocloud driver, so no network or credentials): land a slot, verify it
+// file:// gocloud driver, so no network or credentials): land a run, verify it
 // (reads every archive back and re-hashes), and restore it. This exercises the
 // cloud Volume's AppendFile/ReadFile/Files through dump → verify → restore exactly
 // as a real S3/GCS bucket would, proving the medium plugs into the engine like any
@@ -143,7 +143,7 @@ func TestCloudPartSizeStaysConcurrent(t *testing.T) {
 
 	// White-box: the prepared writer is not serial, so the conductor's clamp (keyed on
 	// Serial alone) never fires even though part_size splits each archive into parts.
-	spec := archiveio.SlotSpec{ID: record.IDFromParts(record.DateString(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)), 1), CreatedAt: time.Now()}
+	spec := archiveio.RunSpec{ID: record.IDFromParts(record.DateString(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)), 1), CreatedAt: time.Now()}
 	pw, err := eng.openWriter("cloud", spec, time.Now(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -253,13 +253,13 @@ func TestSyncDiskToCloud(t *testing.T) {
 		t.Fatalf("copied = %d, want 1", report.Copied())
 	}
 	if !eng.placedOn(s.ID, "cloud") {
-		t.Fatalf("slot %s not on cloud after sync", s.ID)
+		t.Fatalf("run %s not on cloud after sync", s.ID)
 	}
 	if got := len(eng.cat.Placements(s.ID)); got != 2 {
-		t.Fatalf("slot %s placements = %d, want 2 (disk + cloud)", s.ID, got)
+		t.Fatalf("run %s placements = %d, want 2 (disk + cloud)", s.ID, got)
 	}
 
-	// Re-sync is a no-op: the slot already exists on the cloud target.
+	// Re-sync is a no-op: the run already exists on the cloud target.
 	report, err = eng.SyncTo("", "cloud", SyncSelection{}, true, false, nil)
 	if err != nil {
 		t.Fatalf("re-sync: %v", err)

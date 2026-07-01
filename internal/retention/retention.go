@@ -1,17 +1,17 @@
 // Package retention judges which backups must be kept. It does not hold a policy:
 // the knobs live in config (a medium's minimum_age) and the recovery-chain rule is
-// an invariant, not a tunable. Compute applies those rules to one medium's slots at
-// a moment in time and returns a Floor — the slots reclamation must never delete
-// (slots younger than the medium's minimum age, and every slot in a DLE's live
+// an invariant, not a tunable. Compute applies those rules to one medium's runs at
+// a moment in time and returns a Floor — the runs reclamation must never delete
+// (runs younger than the medium's minimum age, and every run in a DLE's live
 // recovery chain: its last full plus the later incrementals a restore replays),
 // each with the reason it is pinned. Callers build the Floor once and query it,
 // rather than threading a raw map around. It is pure and does no I/O.
 //
-// Retention is per-medium: callers pass the slots of a single medium, so "last
+// Retention is per-medium: callers pass the runs of a single medium, so "last
 // recovery path" is judged within that medium alone. A copy on another medium
-// never makes a slot reclaimable here — double storage exists for redundancy,
+// never makes a run reclaimable here — double storage exists for redundancy,
 // and each medium retains against its own capacity and cycle. The rule's shape
-// is medium-neutral; only the slot set it is applied to is medium-scoped.
+// is medium-neutral; only the run set it is applied to is medium-scoped.
 package retention
 
 import (
@@ -24,93 +24,93 @@ import (
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
-// archiveRef identifies one archive within the floor: a slot and the DLE whose
-// image it holds. A run dumps each DLE once at one level, so (slot, DLE) names an
+// archiveRef identifies one archive within the floor: a run and the DLE whose
+// image it holds. A run dumps each DLE once at one level, so (run, DLE) names an
 // archive uniquely — the floor pins protection at this granularity, finer than the
-// slot, so an old slot may keep one DLE's archive while another DLE's is reclaimed.
-type archiveRef struct{ slot, dle string }
+// run, so an old run may keep one DLE's archive while another DLE's is reclaimed.
+type archiveRef struct{ run, dle string }
 
-// Floor is the retention floor computed for one medium's slots: the archives
+// Floor is the retention floor computed for one medium's runs: the archives
 // reclamation must never delete, each with the reason it is pinned. Build it once
-// with Compute, then query it — per archive (KeepsArchive, ReasonArchive), per slot
-// (Keeps, Reason — "is any archive of the slot pinned"), or by "is any of these
-// slots pinned" (First). The zero Floor keeps nothing.
+// with Compute, then query it — per archive (KeepsArchive, ReasonArchive), per run
+// (Keeps, Reason — "is any archive of the run pinned"), or by "is any of these
+// runs pinned" (First). The zero Floor keeps nothing.
 //
 // The floor is per-archive because reclamation on address-identified media (disk,
-// cloud) is per-archive; the slot-level queries report a slot as kept when any of
+// cloud) is per-archive; the run-level queries report a run as kept when any of
 // its archives is pinned, which is what the whole-volume reclaimers (tape relabel,
 // ExpectedTape) and the cost forecast still reason in.
 type Floor struct {
-	reasons map[archiveRef]string // (slot,DLE) -> reason; absent ⇒ reclaimable
+	reasons map[archiveRef]string // (run,DLE) -> reason; absent ⇒ reclaimable
 }
 
-// Compute applies a medium's retention rules to its slots and returns the floor —
-// the slots reclamation must never delete. Three rules combine:
+// Compute applies a medium's retention rules to its runs and returns the floor —
+// the runs reclamation must never delete. Three rules combine:
 //
-//  1. Age: a slot younger than minAge is kept, whatever its level.
+//  1. Age: a run younger than minAge is kept, whatever its level.
 //  2. Last recovery path: the last full of each DLE is kept, so at least one
 //     recovery path for it never ages out.
 //  3. Recovery chain: an incremental restore replays its full PLUS every later
-//     incremental up to the target (see restore.Chain), so a kept slot pins the
-//     whole chain its restore needs. Each DLE's latest slot pins the live chain
-//     after the last full (the tip and every point in between); each young slot
+//     incremental up to the target (see restore.Chain), so a kept run pins the
+//     whole chain its restore needs. Each DLE's latest run pins the live chain
+//     after the last full (the tip and every point in between); each young run
 //     pins the older base its restore depends on. So reclamation can never orphan
 //     an incremental or break a chain it leaves restorable — an incremental is
 //     kept because a chain needs it, never on its own.
 //
-// Pass one medium's slots to get that medium's floor.
+// Pass one medium's runs to get that medium's floor.
 //
 // Note: once verification status is tracked, the successor requirement should
 // tighten from "a newer full exists" to "a newer verified full exists".
 func Compute(archives []record.Archive, minAge time.Duration, now time.Time) Floor {
 	reasons := map[archiveRef]string{}
-	pin := func(slot, dle, reason string) {
-		if _, ok := reasons[archiveRef{slot, dle}]; !ok {
-			reasons[archiveRef{slot, dle}] = reason
+	pin := func(run, dle, reason string) {
+		if _, ok := reasons[archiveRef{run, dle}]; !ok {
+			reasons[archiveRef{run, dle}] = reason
 		}
 	}
 	youngArchive := func(a record.Archive) bool {
-		// Age is measured per archive from when it committed (CreatedAt), not the slot's
+		// Age is measured per archive from when it committed (CreatedAt), not the run's
 		// date: the date is day-granular, so comparing it would collapse every minimum_age
 		// under 24h to a whole-day step. CreatedAt is the real landing instant, so a sub-day
 		// minimum_age keeps only archives actually that recent. A zero CreatedAt (older media)
 		// reads as not-young, i.e. reclaimable.
 		return minAge > 0 && !a.CreatedAt.IsZero() && now.Sub(a.CreatedAt) < minAge
 	}
-	// slotYoung[id] reports whether any archive of the slot is within the minimum age — the
-	// slot-level view the recovery-chain rule anchors on.
-	slotYoung := map[string]bool{}
+	// runYoung[id] reports whether any archive of the run is within the minimum age — the
+	// run-level view the recovery-chain rule anchors on.
+	runYoung := map[string]bool{}
 	for _, a := range archives {
 		if youngArchive(a) {
-			slotYoung[a.Slot] = true
+			runYoung[a.Run] = true
 		}
 	}
 	// 1) Age floor: pin each archive still within the minimum age (per archive).
 	for _, a := range archives {
 		if youngArchive(a) {
-			pin(a.Slot, a.DLE, fmt.Sprintf("within minimum age (%s)", sizeutil.FormatDuration(minAge)))
+			pin(a.Run, a.DLE, fmt.Sprintf("within minimum age (%s)", sizeutil.FormatDuration(minAge)))
 		}
 	}
 	// 2) Last-recovery floor (kept distinct so an archive that is a DLE's last full
-	// is reported by that full, not a mere incremental the slot also carries).
+	// is reported by that full, not a mere incremental the run also carries).
 	for _, a := range archives {
-		if a.Level == 0 && !hasNewerFull(archives, a.DLE, a.Slot) {
+		if a.Level == 0 && !hasNewerFull(archives, a.DLE, a.Run) {
 			// The reason omits the DLE: callers render it in the line's path
 			// column (as host:path), so repeating the internal slug here is
 			// redundant and inconsistent.
-			pin(a.Slot, a.DLE, "last recovery path")
+			pin(a.Run, a.DLE, "last recovery path")
 		}
 	}
 	// 3) Recovery-chain floor.
 	for _, dle := range dleNames(archives) {
-		ds := archivesOf(archives, dle) // the dle's archives in run order, one per slot
+		ds := archivesOf(archives, dle) // the dle's archives in run order, one per run
 		anchors := map[int]bool{}
 		if n := len(ds); n > 0 {
-			anchors[n-1] = true // the latest slot: keeps the live chain (and its full)
+			anchors[n-1] = true // the latest run: keeps the live chain (and its full)
 		}
 		for i, a := range ds {
-			if slotYoung[a.Slot] {
-				anchors[i] = true // a recent slot: keep the base its restore needs
+			if runYoung[a.Run] {
+				anchors[i] = true // a recent run: keep the base its restore needs
 			}
 		}
 		for ai := range anchors {
@@ -124,7 +124,7 @@ func Compute(archives []record.Archive, minAge time.Duration, now time.Time) Flo
 				continue // no full at or before the anchor (cannot happen for a real chain)
 			}
 			for j := full; j <= ai; j++ {
-				pin(ds[j].Slot, dle, "in this DLE's recovery chain")
+				pin(ds[j].Run, dle, "in this DLE's recovery chain")
 			}
 		}
 	}
@@ -145,8 +145,8 @@ func dleNames(archives []record.Archive) []string {
 	return out
 }
 
-// archivesOf returns the archives of dle, in run order (by slot). A run dumps each DLE once,
-// so there is one archive per slot.
+// archivesOf returns the archives of dle, in run order (by run). A run dumps each DLE once,
+// so there is one archive per run.
 func archivesOf(archives []record.Archive, dle string) []record.Archive {
 	var out []record.Archive
 	for _, a := range archives {
@@ -154,41 +154,41 @@ func archivesOf(archives []record.Archive, dle string) []record.Archive {
 			out = append(out, a)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return record.SlotIDLess(out[i].Slot, out[j].Slot) })
+	sort.Slice(out, func(i, j int) bool { return record.RunIDLess(out[i].Run, out[j].Run) })
 	return out
 }
 
-// KeepsArchive reports whether the floor pins one archive (slot+DLE), so per-archive
+// KeepsArchive reports whether the floor pins one archive (run+DLE), so per-archive
 // reclamation must not delete it. It is the predicate a medium's Reclaim consults.
-func (f Floor) KeepsArchive(slot, dle string) bool {
-	_, ok := f.reasons[archiveRef{slot, dle}]
+func (f Floor) KeepsArchive(run, dle string) bool {
+	_, ok := f.reasons[archiveRef{run, dle}]
 	return ok
 }
 
 // ReasonArchive returns why the floor pins one archive, and whether it pins it.
-func (f Floor) ReasonArchive(slot, dle string) (reason string, ok bool) {
-	r, ok := f.reasons[archiveRef{slot, dle}]
+func (f Floor) ReasonArchive(run, dle string) (reason string, ok bool) {
+	r, ok := f.reasons[archiveRef{run, dle}]
 	return r, ok
 }
 
-// Keeps reports whether the floor pins any archive of slot id — the slot-level view
+// Keeps reports whether the floor pins any archive of run id — the run-level view
 // the whole-volume reclaimers (tape relabel, ExpectedTape) and the cost forecast
-// reason in: a slot is kept if reclaiming it would destroy any pinned archive.
+// reason in: a run is kept if reclaiming it would destroy any pinned archive.
 func (f Floor) Keeps(id string) bool {
 	_, ok := f.Reason(id)
 	return ok
 }
 
-// Reason returns why the floor pins slot id, and whether it pins any archive at all.
-// When several archives pin the slot it reports the strongest reason — age, then a
-// DLE's last recovery path (its full), then a recovery chain — so a slot that holds a
+// Reason returns why the floor pins run id, and whether it pins any archive at all.
+// When several archives pin the run it reports the strongest reason — age, then a
+// DLE's last recovery path (its full), then a recovery chain — so a run that holds a
 // DLE's last full is reported by that full, not by a mere incremental it also carries
-// (the precedence Compute applies per archive, projected to the slot). Ties within a
+// (the precedence Compute applies per archive, projected to the run). Ties within a
 // rank break by DLE for a stable message.
 func (f Floor) Reason(id string) (reason string, ok bool) {
 	bestRank, bestDLE := 0, ""
 	for ref, r := range f.reasons {
-		if ref.slot != id {
+		if ref.run != id {
 			continue
 		}
 		rk := reasonRank(r)
@@ -200,7 +200,7 @@ func (f Floor) Reason(id string) (reason string, ok bool) {
 }
 
 // reasonRank orders the floor's reason kinds by strength (lower = stronger), so the
-// slot-level Reason reports the same precedence Compute uses per archive.
+// run-level Reason reports the same precedence Compute uses per archive.
 func reasonRank(reason string) int {
 	switch {
 	case strings.HasPrefix(reason, "within minimum age"):
@@ -212,16 +212,16 @@ func reasonRank(reason string) int {
 	}
 }
 
-// First returns the first of the given slot ids that the floor pins, with the reason — the
-// medium-wide floor projected onto one volume's slots. The caller computes the Floor over a
+// First returns the first of the given run ids that the floor pins, with the reason — the
+// medium-wide floor projected onto one volume's runs. The caller computes the Floor over a
 // whole medium (so "a newer full exists" is judged medium-wide), then passes the ids of the
-// slots that have a part on the one volume being considered for reclamation — tape recycling
-// or relabel. Because a spanned slot has a placement on every tape it touches, it is reported
-// for each of them: reclaiming any one tape would destroy the slot, even the tapes that hold
+// runs that have a part on the one volume being considered for reclamation — tape recycling
+// or relabel. Because a spanned run has a placement on every tape it touches, it is reported
+// for each of them: reclaiming any one tape would destroy the run, even the tapes that hold
 // no seal record. Shared by the prune/recycle path and `nb label --relabel` so both judge a
 // volume's reusability identically.
-func (f Floor) First(slotIDs []string) (slotID, reason string, ok bool) {
-	for _, id := range slotIDs {
+func (f Floor) First(runIDs []string) (runID, reason string, ok bool) {
+	for _, id := range runIDs {
 		if r, p := f.Reason(id); p {
 			return id, r, true
 		}
@@ -229,10 +229,10 @@ func (f Floor) First(slotIDs []string) (slotID, reason string, ok bool) {
 	return "", "", false
 }
 
-func hasNewerFull(archives []record.Archive, dle, targetSlot string) bool {
+func hasNewerFull(archives []record.Archive, dle, targetRun string) bool {
 	for _, a := range archives {
-		if a.DLE == dle && a.Level == 0 && record.SlotIDLess(targetSlot, a.Slot) {
-			return true // a full of dle in a strictly later slot
+		if a.DLE == dle && a.Level == 0 && record.RunIDLess(targetRun, a.Run) {
+			return true // a full of dle in a strictly later run
 		}
 	}
 	return false

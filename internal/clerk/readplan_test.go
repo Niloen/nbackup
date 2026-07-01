@@ -6,9 +6,9 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-func item(slot, dle string, level int, medium, label string, pos int) ReadItem {
+func item(run, dle string, level int, medium, label string, pos int) ReadItem {
 	return ReadItem{
-		Ref:      Ref{Slot: slot, DLE: dle, Level: level},
+		Ref:      Ref{Run: run, DLE: dle, Level: level},
 		Medium:   medium,
 		FirstPos: record.FilePos{Label: label, Pos: pos},
 	}

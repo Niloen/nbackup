@@ -48,13 +48,13 @@ func New(cfg Config) *Dumper {
 }
 
 // dumpGate bounds how many DLEs run the heavy transfer (the tar source + encode pipeline) at once.
-// A DLE acquires its target (the store's NewArchive — a holding-disk slot or the backing permit)
+// A DLE acquires its target (the store's NewArchive — a holding-disk run or the backing permit)
 // before entering the gate, so a DLE parked waiting on a full holding disk or a busy landing holds
-// no slot, and `workers` counts dumps actually running rather than waiters. acquire blocks for a
-// slot and returns the matching release.
+// no run, and `workers` counts dumps actually running rather than waiters. acquire blocks for a
+// run and returns the matching release.
 type dumpGate func() (release func())
 
-// noGate runs the transfer unbounded — the serial path (a single worker, or a single DLE) needs no slot.
+// noGate runs the transfer unbounded — the serial path (a single worker, or a single DLE) needs no run.
 var noGate = dumpGate(func() func() { return func() {} })
 
 // Run archives every item into the store route maps it to: for each it opens an ingestion Sink
@@ -62,7 +62,7 @@ var noGate = dumpGate(func() func() { return func() {} })
 // DLE's landing (its dumptype's `landing` override, else the config-wide one) to that backing's store,
 // so different sources land on different media within one run; the dumper itself never decides where an
 // archive is stored. With workers > 1 it runs one goroutine per DLE, each acquiring its target before
-// borrowing one of `workers` transfer slots (a dumpGate), so the bound counts dumps actually running,
+// borrowing one of `workers` transfer runs (a dumpGate), so the bound counts dumps actually running,
 // not DLEs waiting on a holding disk or a landing. A single DLE's failure (its source or its upload)
 // does not stop the others — every DLE is attempted and the per-DLE errors are joined into the return
 // value, so the archives that succeeded still commit while the run reports failure. Only a backing-store
@@ -107,7 +107,7 @@ func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, rou
 
 	// One goroutine per DLE. Each acquires its target inside dumpItem (off the gate, so a DLE waiting
 	// for a holding disk or the backing permit parks here without holding a worker) and then borrows
-	// a slot through gate for the transfer only — so `workers` bounds dumps actually running.
+	// a run through gate for the transfer only — so `workers` bounds dumps actually running.
 	sem := make(chan struct{}, workers)
 	gate := dumpGate(func() func() { sem <- struct{}{}; return func() { <-sem } })
 	var (

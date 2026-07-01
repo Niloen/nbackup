@@ -70,7 +70,7 @@ selector (`server`/`client`) chooses where compression runs for a
 ## media
 
 A map of named storage definitions. Each entry has a `type` and type-specific
-parameters; `landing` (below) names the one slots are written to. Adding a
+parameters; `landing` (below) names the one runs are written to. Adding a
 medium type is a registry registration — no config struct changes.
 
 ### Common keys
@@ -79,7 +79,7 @@ medium type is a registry registration — no config struct changes.
 |---|---|---|
 | `type` | all | `disk`, `tape`, or `cloud`. |
 | `capacity` | disk, cloud | Space NBackup may use here; `nb prune` reclaims oldest to fit. |
-| `minimum_age` | all | Retention floor before a slot may be retired. Defaults to **one cycle**. |
+| `minimum_age` | all | Retention floor before a run may be retired. Defaults to **one cycle**. |
 | `throughput` | all | Bandwidth cap, e.g. `50MB/s` (bytes/sec, `/s` optional; default uncapped). Symmetric on reads; concurrent workers share it. |
 | `holding` | disk, cloud | `true` marks a scratch buffer the dump flows through (see [Holding disk](../features/holding-disk)). |
 | `cost` | cloud | Optional per-medium rate overrides (below). |
@@ -95,7 +95,7 @@ A filesystem directory (local or NFS).
 media:
   fast-disk:
     type: disk
-    path: /var/lib/nbackup/catalog   # where slots are written
+    path: /var/lib/nbackup/catalog   # where runs are written
     capacity: 20TB
     # minimum_age: 30d
 ```
@@ -177,7 +177,7 @@ instead of `volume_size`, since end-of-tape is only hit, not read. `auto_label`
 
 ## landing
 
-Which medium new slots are created on.
+Which medium new runs are created on.
 
 ```yaml
 landing: fast-disk
@@ -342,14 +342,14 @@ file first.
 
 ## sync
 
-Replication rules — each mirrors one medium's sealed slots onto another, the
+Replication rules — each mirrors one medium's sealed runs onto another, the
 batch idempotent form of `nb copy`. `nb sync` with no `--to` runs every rule.
 
 ```yaml
 sync:
   - to: cloud           # mirror landing -> object store
   - to: lto
-    last: 4             # copy only the 4 most recent slots
+    last: 4             # copy only the 4 most recent runs
   - from: lto           # second tier: source need not be the landing
     to: deep-archive
 ```
@@ -358,7 +358,7 @@ sync:
 |---|---|
 | `to` | Target medium (required). |
 | `from` | Source medium (defaults to the landing medium). |
-| `last` | Copy only the N most recent slots (does not trim older copies — `nb prune` does that). |
+| `last` | Copy only the N most recent runs (does not trim older copies — `nb prune` does that). |
 
 See [Replication](../features/replication).
 

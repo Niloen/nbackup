@@ -5,7 +5,7 @@ DLEs too large to schedule, dump, or full as one unit. It proposes a *shape-awar
 splitter driven by the existing catalog + estimate machinery. Nothing here is built;
 the point is to record the load-bearing constraints and the decision tree so an
 eventual implementation starts from the right place. See
-[ARCHITECTURE.md](../../ARCHITECTURE.md) for the vocabulary (DLE / Slot / Archive /
+[ARCHITECTURE.md](../../ARCHITECTURE.md) for the vocabulary (DLE / Run / Archive /
 snapshot / Estimate / planner).
 
 > **Superseded where they disagree:** the **config mechanism** is now specified in

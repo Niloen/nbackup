@@ -16,7 +16,7 @@ goroutine.
 
 Concurrency is nothing but **which `WriteStore` the Author was handed**:
 
-- **Serial** — the Author is built straight over a `clerk.Session`; its calls run inline. (`CopySlot`,
+- **Serial** — the Author is built straight over a `clerk.Session`; its calls run inline. (`CopyRun`,
   `Flush`, and any single-writer path.)
 - **Concurrent** — the spool builds the Author over a *routing* `WriteStore` that wraps a `Session`; its
   three calls hop to one orchestrator goroutine. (Dumps.)
@@ -39,7 +39,7 @@ VolumeSink   —  hand out volumes / roll                 (the librarian's chang
 One goroutine per run. It serves exactly the operations that must be single-writer — a volume
 alloc/roll and a catalog `Record` (plus the drain's reclaim) — each as a small typed message, and
 nothing else. No bulk bytes ever cross it, so a slow drive's payload can't block it; that flows on the
-worker. Per-medium **slots** (a semaphore) bound concurrent writers to a medium: 1 for a serial tape, N
+worker. Per-medium **writer permits** (a semaphore) bound concurrent writers to a medium: 1 for a serial tape, N
 for a concurrent medium like cloud.
 
 ## Holding disks

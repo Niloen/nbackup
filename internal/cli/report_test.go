@@ -21,7 +21,7 @@ func TestRunReportedSuccessRecordsRun(t *testing.T) {
 
 	// The seed carries the failure ExitClass to use only if the body fails.
 	err := a.runReported(cfg, report.Run{Command: report.CommandDump, ExitClass: "dump-failed"}, func() (report.Run, error) {
-		return report.Run{Command: report.CommandDump, SlotID: "slot-x", Archives: 2, BytesMoved: 100}, nil
+		return report.Run{Command: report.CommandDump, RunID: "run-x", Archives: 2, BytesMoved: 100}, nil
 	})
 	if err != nil {
 		t.Fatalf("runReported returned error on success: %v", err)
@@ -30,8 +30,8 @@ func TestRunReportedSuccessRecordsRun(t *testing.T) {
 	if lerr != nil || len(runs) != 1 {
 		t.Fatalf("Load = %v, %v; want 1 run", runs, lerr)
 	}
-	if runs[0].Outcome != report.OutcomeSuccess || runs[0].SlotID != "slot-x" {
-		t.Errorf("recorded run = %+v, want success/slot-x", runs[0])
+	if runs[0].Outcome != report.OutcomeSuccess || runs[0].RunID != "run-x" {
+		t.Errorf("recorded run = %+v, want success/run-x", runs[0])
 	}
 	if runs[0].ExitClass != "" {
 		t.Errorf("success record carries exit_class %q; the seed's failure class must not leak", runs[0].ExitClass)

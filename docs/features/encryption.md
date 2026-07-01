@@ -110,12 +110,12 @@ touches the key:
 See [Verification & drills](verification) for how `--deep` and `nb drill`
 exercise the key + scheme end to end.
 
-## Per-dumptype keys in one slot
+## Per-dumptype keys in one run
 
-A slot can hold archives encrypted under **different keys** — each dumptype with
+A run can hold archives encrypted under **different keys** — each dumptype with
 its own `recipient` — and still restores cleanly. Each public-key archive carries
 its own key-id in its ciphertext, so gpg resolves the right private key per
-archive; nothing in the slot assumes a single key.
+archive; nothing in the run assumes a single key.
 
 ## Where it sits in the pipeline
 

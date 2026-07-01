@@ -16,11 +16,11 @@ import (
 
 // openWriter folds the engine's clerk/librarian write machinery into the medium-
 // neutral conductor.PreparedWriter the run lane needs: it prepares the writer (the
-// shared PrepareWrite→WriteSink→NewWriter contract), opens the slot store over it,
+// shared PrepareWrite→WriteSink→NewWriter contract), opens the run store over it,
 // and reports whether the medium is serial and its capacity. It mirrors the calls
-// runOrchestrated makes (clerk.OpenSlot, Media.CapacityBytes) so the types line up —
+// runOrchestrated makes (clerk.OpenRun, Media.CapacityBytes) so the types line up —
 // folding that machinery here keeps the conductor free of the clerk/librarian packages.
-func (e *Engine) openWriter(medium string, spec archiveio.SlotSpec, now time.Time, lf logf.Logf) (conductor.PreparedWriter, error) {
+func (e *Engine) openWriter(medium string, spec archiveio.RunSpec, now time.Time, lf logf.Logf) (conductor.PreparedWriter, error) {
 	stores, err := e.landingStores(medium, spec, now, lf)
 	if err != nil {
 		return conductor.PreparedWriter{}, err
@@ -38,11 +38,11 @@ func (e *Engine) openWriter(medium string, spec archiveio.SlotSpec, now time.Tim
 	}, nil
 }
 
-// landingStores opens the slot stores a landing is written through: one per tape drive for a robotic
+// landingStores opens the run stores a landing is written through: one per tape drive for a robotic
 // multi-drive library (each a lazy per-drive sink that loads its own tape on first write, so the
 // concurrent writers land on independent drives), or a single store for a single-drive tape, a manual
 // drive, or a directly-addressed medium (disk/cloud — its own concurrency is independent files).
-func (e *Engine) landingStores(medium string, spec archiveio.SlotSpec, now time.Time, lf logf.Logf) ([]archiveio.Store, error) {
+func (e *Engine) landingStores(medium string, spec archiveio.RunSpec, now time.Time, lf logf.Logf) ([]archiveio.Store, error) {
 	lib, def, _, err := e.librarianFor(medium)
 	if err != nil {
 		return nil, err
@@ -63,7 +63,7 @@ func (e *Engine) landingStores(medium string, spec archiveio.SlotSpec, now time.
 	sinks := lib.LazyDriveSinks(def.IsAppendable(), exp.Label, partSize, now, librarian.Logf(lf))
 	stores := make([]archiveio.Store, len(sinks))
 	for i, sink := range sinks {
-		stores[i] = e.clerk.OpenSlot(sink, medium, lib.Volume(), spec.ID)
+		stores[i] = e.clerk.OpenRun(sink, medium, lib.Volume(), spec.ID)
 	}
 	return stores, nil
 }
@@ -93,7 +93,7 @@ func (e *Engine) landingForDLEName(slug string) string {
 // newConductor wires a per-run conductor.Conductor to the engine's dumper, plan
 // lane, landing volume, and write/flush machinery. Plan binds to the scheduler's
 // method (not the engine's own planWith) so the run lane reads its plan from the
-// scheduler. The engine's Backup/PlannedSlotID methods build one of these per run
+// scheduler. The engine's Backup/PlannedRunID methods build one of these per run
 // and delegate to it (see internal/conductor).
 func (e *Engine) newConductor() *conductor.Conductor {
 	return conductor.New(conductor.Deps{

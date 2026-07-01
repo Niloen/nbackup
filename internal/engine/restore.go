@@ -26,7 +26,7 @@ import (
 // reads encryption posture and host config per DLE — so it holds the config alongside the
 // catalog, data path, and decoder, rather than a fan of narrow accessors.
 type restorer struct {
-	cat        *catalog.Catalog         // slot list (chains, as-of resolution, browse)
+	cat        *catalog.Catalog         // run list (chains, as-of resolution, browse)
 	clerk      *clerk.Clerk             // byte endpoints + member index
 	dec        *decoder                 // decode→extract pipeline
 	cfg        *config.Config           // encryption posture + remote-host resolution per DLE
@@ -51,13 +51,13 @@ func (e *Engine) newRestorer() *restorer {
 	}
 }
 
-// Restore reconstructs a DLE as of a slot into destDir. A whole-DLE restore
+// Restore reconstructs a DLE as of a run into destDir. A whole-DLE restore
 // replays the chain with GNU tar's listed-incremental extraction, which makes
 // each restored directory match the archive's census — deleting anything on disk
 // not in it. Pointed at a populated destDir that prunes unrelated files, so unless
 // force is set Restore refuses a non-empty destination rather than silently
 // destroying its contents. It reads from any available copy (own medium first).
-func (r *restorer) Restore(slotID, dleName, destDir string, force bool, logf Logf) error {
+func (r *restorer) Restore(runID, dleName, destDir string, force bool, logf Logf) error {
 	if !force {
 		if err := errNonEmptyDest(destDir); err != nil {
 			return err
@@ -66,7 +66,7 @@ func (r *restorer) Restore(slotID, dleName, destDir string, force bool, logf Log
 	// When the guard ensured an empty dest, a failed chain leaves only files this
 	// restore wrote — so it can be rolled back to leave no half-restored tree. With
 	// --force the dest held the operator's own content, so never auto-delete it.
-	return r.restoreFrom(slotID, dleName, destDir, "", !force, logf)
+	return r.restoreFrom(runID, dleName, destDir, "", !force, logf)
 }
 
 // RestoreTo restores a DLE onto a remote client:
@@ -76,7 +76,7 @@ func (r *restorer) Restore(slotID, dleName, destDir string, force bool, logf Log
 // restores with the documented stock one-liner. destHost must be configured under hosts:.
 // The non-empty-destination guard is the operator's to honor here (the path is remote),
 // so a whole-DLE restore over --to assumes an empty/new client directory.
-func (r *restorer) RestoreTo(slotID, dleName, destHost, destPath string, logf Logf) error {
+func (r *restorer) RestoreTo(runID, dleName, destHost, destPath string, logf Logf) error {
 	// Validate the target host up front: RemoteHost() treats every non-localhost name
 	// as remote, so a typo'd host would otherwise sail past here and fail mid-restore
 	// with a raw SSH "exit status 255". A valid target appears under hosts: or as a
@@ -102,7 +102,7 @@ func (r *restorer) RestoreTo(slotID, dleName, destHost, destPath string, logf Lo
 		}
 		return fmt.Errorf("--to host %q is not a configured host (name it under hosts: or as a source host); known: %s", destHost, hint)
 	}
-	return r.restoreFrom(slotID, dleName, destPath, destHost, false, logf)
+	return r.restoreFrom(runID, dleName, destPath, destHost, false, logf)
 }
 
 // restoreFrom replays a DLE's restore chain into destDir. targetHost "" extracts
@@ -110,8 +110,8 @@ func (r *restorer) RestoreTo(slotID, dleName, destHost, destPath string, logf Lo
 // client and destDir is a client path — and, for a client-held key, decode runs there
 // too. The exported Restore/RestoreTo are thin wrappers; reads fail over across copies
 // (medium-scoped reads are the drill's own path, drillChain).
-func (r *restorer) restoreFrom(slotID, dleName, destDir, targetHost string, rollbackOnFail bool, logf Logf) error {
-	steps, err := restore.Chain(r.cat.Archives(), dleName, slotID)
+func (r *restorer) restoreFrom(runID, dleName, destDir, targetHost string, rollbackOnFail bool, logf Logf) error {
+	steps, err := restore.Chain(r.cat.Archives(), dleName, runID)
 	if err != nil {
 		return r.friendlyDLEErr(dleName, err)
 	}
@@ -131,9 +131,9 @@ func (r *restorer) restoreFrom(slotID, dleName, destDir, targetHost string, roll
 		return err
 	}
 	for _, step := range steps {
-		logf.Log("extracting %s %s L%d -> %s", step.SlotID, r.displayDLE(step.DLE), step.Level, destDir)
+		logf.Log("extracting %s %s L%d -> %s", step.RunID, r.displayDLE(step.DLE), step.Level, destDir)
 		if err := r.extractStep(step, destDir, targetHost, ec); err != nil {
-			wrapped := fmt.Errorf("extract %s %s L%d: %w", step.SlotID, step.DLE, step.Level, err)
+			wrapped := fmt.Errorf("extract %s %s L%d: %w", step.RunID, step.DLE, step.Level, err)
 			// The destination could not even be created — nothing landed, so report the
 			// failure without the misleading "partial restore" warning (or a rollback of
 			// a tree that was never written).
@@ -178,7 +178,7 @@ func clearDirContents(dir string) error {
 // while a server-held key decrypts on the server and ships compressed plaintext (never
 // inflated) to a remote target. targetHost "" extracts server-side.
 func (r *restorer) extractStep(step restore.Step, destDir, targetHost string, ec config.EncryptConfig) error {
-	return r.extractInto(step.SlotID, step.DLE, step.Level, step.Compress, step.Encrypt, step.Archiver, destDir, targetHost, ec, nil)
+	return r.extractInto(step.RunID, step.DLE, step.Level, step.Compress, step.Encrypt, step.Archiver, destDir, targetHost, ec, nil)
 }
 
 // extractInto streams an archive's raw parts through the decode→extract pipeline into
@@ -187,8 +187,8 @@ func (r *restorer) extractStep(step restore.Step, destDir, targetHost string, ec
 // whole-archive listed-incremental chain restore. It is the engine's one extraction path —
 // whole-DLE restore, `--to` client restore, and file-level recover all run through it; it
 // adds the decrypt hint to whatever the data path surfaces.
-func (r *restorer) extractInto(slotID, dle string, level int, compressScheme, encrypt, archiverType, destDir, targetHost string, ec config.EncryptConfig, members []string) error {
-	src, err := r.clerk.Open(clerk.Ref{Slot: slotID, DLE: dle, Level: level}, r.preferMedium)
+func (r *restorer) extractInto(runID, dle string, level int, compressScheme, encrypt, archiverType, destDir, targetHost string, ec config.EncryptConfig, members []string) error {
+	src, err := r.clerk.Open(clerk.Ref{Run: runID, DLE: dle, Level: level}, r.preferMedium)
 	if err != nil {
 		return decryptHint(encrypt, err)
 	}
@@ -260,7 +260,7 @@ func clientSideKeyRestore(ec config.EncryptConfig, dleName string) (hardErr erro
 }
 
 // dleByName returns the configured DLE with the given catalog name, if it is still in the
-// config (an old slot's DLE may have been removed).
+// config (an old run's DLE may have been removed).
 // friendlyDLEErr rewrites a restore-chain error so the DLE reads as host:path — the form
 // the user passed and the surrounding output uses — rather than the internal catalog slug
 // the low-level restore package embeds. A DLE with no display mapping is left unchanged.
@@ -283,8 +283,8 @@ func (r *restorer) dleByName(name string) (config.DLE, bool) {
 
 // RestoreAsOf reconstructs a whole DLE as of a date (YYYY-MM-DD) into destDir —
 // the deletion-accurate, whole-DLE counterpart to file-level recover. It resolves
-// the date to the most recent slot on or before it (the same resolution recover's
-// browse uses), then replays that DLE's chain. So a bare date means the same slot
+// the date to the most recent run on or before it (the same resolution recover's
+// browse uses), then replays that DLE's chain. So a bare date means the same run
 // for both the browse view and a full restore.
 func (r *restorer) RestoreAsOf(dle, asOf, destDir, from string, force bool, logf Logf) error {
 	reset, err := r.useMedium(from)
@@ -299,7 +299,7 @@ func (r *restorer) RestoreAsOf(dle, asOf, destDir, from string, force bool, logf
 	return r.Restore(target, dle, destDir, force, logf)
 }
 
-// RestoreAsOfTo is RestoreAsOf onto a remote client: it resolves the date to a slot and
+// RestoreAsOfTo is RestoreAsOf onto a remote client: it resolves the date to a run and
 // restores the DLE's chain to destPath on destHost over SSH (see RestoreTo).
 func (r *restorer) RestoreAsOfTo(dle, asOf, destHost, destPath, from string, logf Logf) error {
 	reset, err := r.useMedium(from)
@@ -349,8 +349,8 @@ func errNonEmptyDest(destDir string) error {
 // the recover entry point. Member lists are loaded lazily via the clerk (cache, or the
 // on-medium index on a miss), so a fully-cached browse touches no media until extract.
 func (r *restorer) OpenRecover(dle, asOf string) (*recovery.Tree, error) {
-	return recovery.BuildTree(r.cat.Archives(), dle, asOf, func(slotID string, level int) ([]string, error) {
-		return r.clerk.Members(clerk.Ref{Slot: slotID, DLE: dle, Level: level})
+	return recovery.BuildTree(r.cat.Archives(), dle, asOf, func(runID string, level int) ([]string, error) {
+		return r.clerk.Members(clerk.Ref{Run: runID, DLE: dle, Level: level})
 	})
 }
 
@@ -372,7 +372,7 @@ func (r *restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 	stepByRef := make(map[clerk.Ref]recovery.ExtractStep, len(steps))
 	refs := make([]clerk.Ref, 0, len(steps))
 	for _, st := range steps {
-		ref := clerk.Ref{Slot: st.SlotID, DLE: st.DLE, Level: st.Level}
+		ref := clerk.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level}
 		stepByRef[ref] = st
 		refs = append(refs, ref)
 	}
@@ -385,7 +385,7 @@ func (r *restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 		if countFiles(st.Members) == 0 {
 			return nil
 		}
-		logf.Log("extracting %d file(s) from %s %s L%d", countFiles(st.Members), st.SlotID, r.displayDLE(st.DLE), st.Level)
+		logf.Log("extracting %d file(s) from %s %s L%d", countFiles(st.Members), st.RunID, r.displayDLE(st.DLE), st.Level)
 		rc, serr := open()
 		if serr != nil {
 			return serr

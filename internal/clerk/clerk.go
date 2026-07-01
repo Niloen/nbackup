@@ -8,10 +8,10 @@
 //   - read:  Open → an io.ReadCloser over one archive's raw on-medium bytes (copy-selected);
 //     ReadArchives → the same, but the clerk drives an ordered one-pass read and calls back
 //     per archive.
-//   - write: a Session is an archiveio.Store — the medium end for a slot. A writer authored over it
+//   - write: a Session is an archiveio.Store — the medium end for a run. A writer authored over it
 //     (by the engine for a copy/flush, by the spool for a concurrent dump) lands each archive's
 //     footer + index and, on Commit, reports the placement via the Session's Record; OpenArchive/Reclaim
-//     read a staged archive back and drop it. There is no seal: a slot is its committed archives.
+//     read a staged archive back and drop it. There is no seal: a run is its committed archives.
 //   - Members(ref) → the archive's member list (cache → on-medium index).
 //
 // What it deliberately does NOT do: schemes, tar, or composing transfers. The decode/encode and
@@ -33,32 +33,32 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-// Ref is the logical identity of one archive: which slot, DLE, and level. The data path
+// Ref is the logical identity of one archive: which run, DLE, and level. The data path
 // resolves it to physical parts on a copy.
 type Ref struct {
-	Slot  string
+	Run   string
 	DLE   string
 	Level int
 }
 
 func (r Ref) expect() archiveio.Expect {
-	return archiveio.Expect{Slot: r.Slot, DLE: r.DLE, Level: r.Level}
+	return archiveio.Expect{Run: r.Run, DLE: r.DLE, Level: r.Level}
 }
 
 // Map is the clerk's slice of the catalog — the archive map (the inode/extent table). The
-// clerk resolves it on read (which copies of a slot, and where each archive's parts live) and
+// clerk resolves it on read (which copies of a run, and where each archive's parts live) and
 // records it on write (where a run's archives landed). It is the one role through which the
 // clerk owns map I/O; the engine implements it (and keeps the directory/retention/volume
 // slices). PlacementsFor returns copies in read-preference order (the engine's own first).
 type Map interface {
-	PlacementsFor(slotID string) []catalog.Placement
+	PlacementsFor(runID string) []catalog.Placement
 	// AddArchive records one committed archive's content + its on-medium position — the
-	// catalog's single write path. The slot entry is created from the archive's own slot tag
-	// (arch.Slot), never added wholesale; there is no completion step — a slot is its archives.
+	// catalog's single write path. The run entry is created from the archive's own run tag
+	// (arch.Run), never added wholesale; there is no completion step — a run is its archives.
 	AddArchive(arch record.Archive, medium string, pos record.ArchivePos) error
-	// RemoveArchive drops one archive's placement on a medium (and its slot entry if that was the
+	// RemoveArchive drops one archive's placement on a medium (and its run entry if that was the
 	// last copy) — the reclaim path when a staged archive has landed on the backing.
-	RemoveArchive(slotID, medium, dle string) (placementGone, entryGone bool, err error)
+	RemoveArchive(runID, medium, dle string) (placementGone, entryGone bool, err error)
 }
 
 // Mounter is the clerk's data-path slice of the librarian (the volume manager): mount the
@@ -81,7 +81,7 @@ type Deps interface {
 }
 
 // ErrMissingCopy marks a read failure where the catalog knows of no available copy of the
-// requested slot/archive. Callers classify it via errors.Is, so classification does not
+// requested run/archive. Callers classify it via errors.Is, so classification does not
 // depend on the message wording.
 var ErrMissingCopy = errors.New("no available copy")
 
@@ -106,12 +106,12 @@ func New(cat Map, deps Deps, mindex *catalog.MemberIndex) *Clerk {
 // reading the on-medium index (via a copy's recorded index position) and re-caching it. A nil
 // list is a valid "no members" answer (an archive with no files records no index).
 func (c *Clerk) Members(ref Ref) ([]string, error) {
-	if members, ok, err := c.mindex.Load(ref.Slot, ref.DLE, ref.Level); err != nil {
+	if members, ok, err := c.mindex.Load(ref.Run, ref.DLE, ref.Level); err != nil {
 		return nil, err
 	} else if ok {
 		return members, nil
 	}
-	for _, p := range c.cat.PlacementsFor(ref.Slot) {
+	for _, p := range c.cat.PlacementsFor(ref.Run) {
 		pos, ok := indexPosOf(p, ref.DLE, ref.Level)
 		if !ok {
 			continue
@@ -120,7 +120,7 @@ func (c *Clerk) Members(ref Ref) ([]string, error) {
 		if err != nil {
 			continue // try another copy
 		}
-		_ = c.mindex.Store(ref.Slot, ref.DLE, ref.Level, members)
+		_ = c.mindex.Store(ref.Run, ref.DLE, ref.Level, members)
 		return members, nil
 	}
 	return nil, nil
@@ -176,7 +176,7 @@ func (c *Clerk) partOpener(medium string) (archiveio.PartOpener, error) {
 }
 
 // readIndex reads an archive's member index off a medium — the lazy fallback when the
-// server-side member cache misses (a rebuilt slot not yet browsed). It mounts the volume the
+// server-side member cache misses (a rebuilt run not yet browsed). It mounts the volume the
 // index lives on and decodes it.
 func (c *Clerk) readIndex(medium string, pos record.FilePos) ([]string, error) {
 	mounter, err := c.deps.MounterFor(medium)
@@ -191,20 +191,20 @@ func (c *Clerk) readIndex(medium string, pos record.FilePos) ([]string, error) {
 	return record.DecodeIndex(rc)
 }
 
-// eachPlacement resolves the placements holding ref's slot (all copies, or only those on
+// eachPlacement resolves the placements holding ref's run (all copies, or only those on
 // medium when set), then tries each that carries the archive — opening it via open — until
 // one succeeds, so a read fails over to another copy. It is the one place the raw read paths
 // share copy selection and the missing-copy errors (ErrMissingCopy).
 func (c *Clerk) eachPlacement(ref Ref, medium string, open func(parts []record.FilePos, p catalog.Placement) (io.ReadCloser, error)) (io.ReadCloser, error) {
-	placements := c.cat.PlacementsFor(ref.Slot)
+	placements := c.cat.PlacementsFor(ref.Run)
 	if medium != "" {
 		placements = onMedium(placements, medium)
 	}
 	if len(placements) == 0 {
 		if medium != "" {
-			return nil, fmt.Errorf("%w: slot %s has no copy on medium %q", ErrMissingCopy, ref.Slot, medium)
+			return nil, fmt.Errorf("%w: run %s has no copy on medium %q", ErrMissingCopy, ref.Run, medium)
 		}
-		return nil, fmt.Errorf("%w: slot %s not in catalog (run `nb rebuild`)", ErrMissingCopy, ref.Slot)
+		return nil, fmt.Errorf("%w: run %s not in catalog (run `nb rebuild`)", ErrMissingCopy, ref.Run)
 	}
 	var lastErr error
 	for _, p := range placements {
@@ -220,7 +220,7 @@ func (c *Clerk) eachPlacement(ref Ref, medium string, open func(parts []record.F
 		return rc, nil
 	}
 	if lastErr == nil {
-		lastErr = fmt.Errorf("%w of %s %s L%d in the catalog", ErrMissingCopy, ref.Slot, ref.DLE, ref.Level)
+		lastErr = fmt.Errorf("%w of %s %s L%d in the catalog", ErrMissingCopy, ref.Run, ref.DLE, ref.Level)
 	}
 	return nil, lastErr
 }

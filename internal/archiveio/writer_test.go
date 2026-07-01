@@ -227,7 +227,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	v1, v2, v3 := newMemVolume("v1", cap), newMemVolume("v2", cap), newMemVolume("v3", cap)
 	sink := &memSink{vols: []*memVolume{v1, v2, v3}}
 
-	spec := SlotSpec{ID: "slot-2026-06-21.001", CreatedAt: time.Unix(0, 0).UTC()}
+	spec := RunSpec{ID: "run-2026-06-21.001", CreatedAt: time.Unix(0, 0).UTC()}
 	w := NewAuthor(sink, spec, nil, nil) // bounded by volume capacity (spanning) → sink.Bounded()==true
 
 	body := []byte(strings.Repeat("abcdefgh", 25*1024/8*4)) // 100 KiB → spans v1+v2, last part on v3
@@ -250,7 +250,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 
 	// Read the archive back by concatenating its parts; it must equal the input.
 	r := NewReader()
-	rc, err := r.Open(parts, Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v1, v2, v3))
+	rc, err := r.Open(parts, Expect{Run: spec.ID, DLE: "dle1", Level: 0}, openerOver(v1, v2, v3))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	}
 
 	// VerifyParts must confirm the recorded checksum over the concatenation.
-	ok, err := r.VerifyParts(parts, Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, arch.SHA256, openerOver(v1, v2, v3))
+	ok, err := r.VerifyParts(parts, Expect{Run: spec.ID, DLE: "dle1", Level: 0}, arch.SHA256, openerOver(v1, v2, v3))
 	if err != nil || !ok {
 		t.Fatalf("VerifyParts ok=%v err=%v", ok, err)
 	}
@@ -277,7 +277,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	v := newMemVolume("only", 0) // unbounded
 	sink := &memSink{vols: []*memVolume{v}, partCap: 10 * 1024}
 
-	spec := SlotSpec{ID: "slot-x", CreatedAt: time.Unix(0, 0).UTC()}
+	spec := RunSpec{ID: "run-x", CreatedAt: time.Unix(0, 0).UTC()}
 	w := NewAuthor(sink, spec, nil, nil)         // bounded by partCap (intra-volume split) → sink.Bounded()==true
 	body := []byte(strings.Repeat("z", 55*1024)) // 55 KiB / 10 KiB ≈ 6 parts
 	arch, apos := writeOneArchive(t, w, sink, "dle1", body)
@@ -285,7 +285,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 		t.Fatalf("Parts = %d, want >= 5", arch.Parts)
 	}
 	r := NewReader()
-	rc, err := r.Open(apos.Parts, Expect{Slot: spec.ID, DLE: "dle1", Level: 0}, openerOver(v))
+	rc, err := r.Open(apos.Parts, Expect{Run: spec.ID, DLE: "dle1", Level: 0}, openerOver(v))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +302,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 func TestRollFailureNoDeadlock(t *testing.T) {
 	v := newMemVolume("v1", 96*1024) // one small volume, no room to roll
 	sink := &memSink{vols: []*memVolume{v}}
-	spec := SlotSpec{ID: "slot-y", CreatedAt: time.Unix(0, 0).UTC()}
+	spec := RunSpec{ID: "run-y", CreatedAt: time.Unix(0, 0).UTC()}
 	w := NewAuthor(sink, spec, nil, nil)
 
 	body := []byte(strings.Repeat("q", 200*1024)) // far bigger than one volume

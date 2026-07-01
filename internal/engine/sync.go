@@ -9,16 +9,16 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-// SyncSelection bounds which landing slots a sync considers. The zero value
-// selects every slot on the landing medium.
+// SyncSelection bounds which landing runs a sync considers. The zero value
+// selects every run on the landing medium.
 type SyncSelection struct {
-	Last  int       // 0 = all; else only the N most recent landing slots
-	Since time.Time // zero = no lower bound; else only slots created at/after this
+	Last  int       // 0 = all; else only the N most recent landing runs
+	Since time.Time // zero = no lower bound; else only runs created at/after this
 }
 
-// SyncItem is one slot in a sync's backlog: a copy that the target is missing.
+// SyncItem is one run in a sync's backlog: a copy that the target is missing.
 type SyncItem struct {
-	SlotID   string
+	RunID    string
 	Archives int
 	Bytes    int64 // compressed size on the volume
 	Copied   bool  // set true once a real run copies it
@@ -29,7 +29,7 @@ type SyncItem struct {
 type SyncReport struct {
 	From  string
 	To    string
-	Items []SyncItem // slots on From not yet on To, oldest-first, after selection
+	Items []SyncItem // runs on From not yet on To, oldest-first, after selection
 
 	// TargetCapacity is the target medium's retainable capacity (0 = unbounded), and
 	// ProjectedBytes is what the target would hold once this backlog lands (its
@@ -66,7 +66,7 @@ func (r *SyncReport) Copied() int {
 	return n
 }
 
-// CopiedBytes is the total bytes of the slots actually copied this run (Bytes() is the
+// CopiedBytes is the total bytes of the runs actually copied this run (Bytes() is the
 // whole backlog, copied or not), for the run record's BytesMoved.
 func (r *SyncReport) CopiedBytes() int64 {
 	var n int64
@@ -78,18 +78,18 @@ func (r *SyncReport) CopiedBytes() int64 {
 	return n
 }
 
-// SyncTo mirrors a source medium's sealed slots onto target: every slot with a
+// SyncTo mirrors a source medium's sealed runs onto target: every run with a
 // copy on the source but not yet recorded on target, oldest-first. Oldest first
-// means an interrupted sync makes contiguous, replayable progress and a slot's
+// means an interrupted sync makes contiguous, replayable progress and a run's
 // full lands before the incrementals that build on it. The source defaults to the
 // landing medium when from is ""; any other medium is allowed (e.g. tape -> disk).
 //
 // With apply==false it only computes the backlog (a dry run). With apply==true it
-// copies each slot via CopySlot — the same label-verified, placement-recording
+// copies each run via CopyRun — the same label-verified, placement-recording
 // path as `nb copy` — stopping at the first error and returning the report so far
 // alongside it (a full or offline target won't fix itself by continuing). Each
-// slot is atomic, so re-running resumes where an interrupted sync left off. With
-// force==true already-present slots are re-copied (CopySlot --force).
+// run is atomic, so re-running resumes where an interrupted sync left off. With
+// force==true already-present runs are re-copied (CopyRun --force).
 func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force bool, logf Logf) (*SyncReport, error) {
 	if from == "" {
 		from = e.mediumName
@@ -105,12 +105,12 @@ func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force boo
 	}
 
 	report := &SyncReport{From: from, To: target}
-	for _, s := range applySelection(e.cat.SlotsOn(from), sel) {
+	for _, s := range applySelection(e.cat.RunsOn(from), sel) {
 		if !force && e.placedOn(s.ID, target) {
 			continue // idempotent: already on the target
 		}
 		report.Items = append(report.Items, SyncItem{
-			SlotID:   s.ID,
+			RunID:    s.ID,
 			Archives: len(s.Archives),
 			Bytes:    s.TotalBytes(),
 		})
@@ -126,8 +126,8 @@ func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force boo
 	}
 	for i := range report.Items {
 		it := &report.Items[i]
-		if err := e.CopySlot(it.SlotID, from, target, force, logf); err != nil {
-			return report, fmt.Errorf("sync %s -> %q: %w", it.SlotID, target, err)
+		if err := e.CopyRun(it.RunID, from, target, force, logf); err != nil {
+			return report, fmt.Errorf("sync %s -> %q: %w", it.RunID, target, err)
 		}
 		it.Copied = true
 	}
@@ -138,29 +138,29 @@ func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force boo
 // `nb sync` is invoked without an explicit --to.
 func (e *Engine) SyncRules() []config.SyncRule { return e.cfg.Sync }
 
-// placedOn reports whether a slot already has a copy recorded on the medium.
-func (e *Engine) placedOn(slotID, medium string) bool {
-	_, ok := e.placementOn(slotID, medium)
+// placedOn reports whether a run already has a copy recorded on the medium.
+func (e *Engine) placedOn(runID, medium string) bool {
+	_, ok := e.placementOn(runID, medium)
 	return ok
 }
 
-// applySelection narrows landing slots (oldest-first) to the selection window.
-func applySelection(slots []*catalog.Slot, sel SyncSelection) []*catalog.Slot {
+// applySelection narrows landing runs (oldest-first) to the selection window.
+func applySelection(runs []*catalog.Run, sel SyncSelection) []*catalog.Run {
 	if !sel.Since.IsZero() {
-		kept := slots[:0:0]
-		for _, s := range slots {
-			// Filter on the slot's logical date (the day it backs up), not its
-			// physical CreatedAt seal time — otherwise back-dated or imported slots,
+		kept := runs[:0:0]
+		for _, s := range runs {
+			// Filter on the run's logical date (the day it backs up), not its
+			// physical CreatedAt seal time — otherwise back-dated or imported runs,
 			// whose CreatedAt is "now", all slip past any --since bound.
 			d, _ := record.ParseDateField(s.Date())
 			if !d.Before(sel.Since) {
 				kept = append(kept, s)
 			}
 		}
-		slots = kept
+		runs = kept
 	}
-	if sel.Last > 0 && len(slots) > sel.Last {
-		slots = slots[len(slots)-sel.Last:] // most recent N (slots are oldest-first)
+	if sel.Last > 0 && len(runs) > sel.Last {
+		runs = runs[len(runs)-sel.Last:] // most recent N (runs are oldest-first)
 	}
-	return slots
+	return runs
 }

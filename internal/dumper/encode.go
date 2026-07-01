@@ -25,13 +25,13 @@ import (
 // records it. The scheme and tar live here; the store only lands and records bytes.
 
 // BackupSpec describes one archive to back up: the resolved archiver and its request, plus the
-// identity bits not in the request (the DLE's host, the base slot for an incremental, and the
+// identity bits not in the request (the DLE's host, the base run for an incremental, and the
 // dumptype that selects the transform placement). Pure intent — no storage record.
 type BackupSpec struct {
 	Archiver archiver.Archiver
 	Request  archiver.BackupRequest
 	Host     string
-	BaseSlot string
+	BaseRun  string
 	DumpType string
 }
 
@@ -55,8 +55,8 @@ func (d *Dumper) dumpItem(ctx context.Context, fs archiveio.Ingest, item planner
 	// The progress tracker keys and displays DLEs by their host:path identity; the
 	// seal and filenames keep the internal slug.
 	pname := item.DLE.ID()
-	// Flip to "dumping" only when a transfer slot is actually in hand. A DLE acquires its target
-	// (a holding-disk slot or the backing permit) and then borrows a worker through the gate before
+	// Flip to "dumping" only when a transfer run is actually in hand. A DLE acquires its target
+	// (a holding-disk run or the backing permit) and then borrows a worker through the gate before
 	// any bytes move — both can block. Marking it "dumping" up here, as we used to, made every DLE
 	// merely queued for a worker claim progress it had not started. Wrap the gate so the transition
 	// fires at the one instant the heavy work begins; until then the DLE stays "pending". This also
@@ -178,7 +178,7 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 		Archiver: ar,
 		Request:  req,
 		Host:     item.DLE.Host,
-		BaseSlot: item.BaseSlot,
+		BaseRun:  item.BaseRun,
 		DumpType: item.DLE.DumpTypeName(),
 	}, nil
 }
@@ -212,7 +212,7 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.Ingest, est int64
 		Compress: pl.CompressScheme,
 		Encrypt:  pl.EncryptScheme,
 		Level:    spec.Request.Level,
-		BaseSlot: spec.BaseSlot,
+		BaseRun:  spec.BaseRun,
 	}
 
 	var unc, comp atomic.Int64
@@ -248,7 +248,7 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.Ingest, est int64
 	}).OnCleanup(bs.Cleanup)
 
 	// Create the ingestion Sink before entering the gate, so the wait for the target (a full holding
-	// disk, or the backing permit) holds no transfer slot — only the heavy work below is gated. The
+	// disk, or the backing permit) holds no transfer run — only the heavy work below is gated. The
 	// store meters the bytes that land itself (it must, for the checksum + size).
 	sink, err := fs.NewArchive(aspec, est)
 	if err != nil {
@@ -263,7 +263,7 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.Ingest, est int64
 	// failure. The resource is held from NewArchive, so without this a failed dump would leak it;
 	// Close is the symmetric counterpart to that acquire, independent of whether Commit ran.
 	defer sink.Close()
-	// Borrow a transfer slot only now — the target is secured, so the gate bounds dumps that are
+	// Borrow a transfer run only now — the target is secured, so the gate bounds dumps that are
 	// actually running tar + the encode pipeline. release runs before sink.Close (defer LIFO), so the
 	// worker is handed back the instant the transfer ends, ahead of returning the target resource.
 	release := gate()

@@ -25,7 +25,7 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 			vol, _, _, err := e.mediumVolume(name)
 			return vol, err
 		},
-		OpenBacking: func(landing string, spec archiveio.SlotSpec) (*archiveio.Author, error) {
+		OpenBacking: func(landing string, spec archiveio.RunSpec) (*archiveio.Author, error) {
 			wt, err := e.prepareWriter(landing, spec, now, logf)
 			if err != nil {
 				return nil, err

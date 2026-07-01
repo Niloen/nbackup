@@ -7,9 +7,9 @@
 // Like the disk medium, an object store is ADDRESS-IDENTIFIED: a bucket+key names
 // a volume unambiguously, so it carries no on-medium label and runs none of the
 // label-verify / changer / spanning machinery (it does not implement media.Labeled,
-// Drive, Changer or Shelf). The slot layout — clean payloads plus JSON header
-// sidecars under slots/<slot>/ — lives in package fslike, shared with the disk
-// medium, so a slot streams disk<->cloud unchanged; this package supplies only the
+// Drive, Changer or Shelf). The run layout — clean payloads plus JSON header
+// sidecars under runs/<run>/ — lives in package fslike, shared with the disk
+// medium, so a run streams disk<->cloud unchanged; this package supplies only the
 // object-store storage primitives.
 package cloud
 
@@ -70,9 +70,9 @@ func init() {
 	media.Register(s)
 }
 
-// slotsPrefix is the key prefix under which all slot files live, mirroring the
-// disk medium's slots/ subdirectory.
-const slotsPrefix = "slots/"
+// runsPrefix is the key prefix under which all run files live, mirroring the
+// disk medium's runs/ subdirectory.
+const runsPrefix = "runs/"
 
 func open(url, prefix string) (media.Volume, error) {
 	ctx := context.Background()
@@ -97,13 +97,13 @@ func open(url, prefix string) (media.Volume, error) {
 }
 
 // blobStore is a fslike.Store over a gocloud blob bucket. Keys are object keys
-// under slots/.
+// under runs/.
 type blobStore struct {
 	ctx    context.Context
 	bucket *blob.Bucket
 }
 
-func (s blobStore) Key(slot, name string) string { return path.Join(slotsPrefix, slot, name) }
+func (s blobStore) Key(run, name string) string { return path.Join(runsPrefix, run, name) }
 
 // Writer opens a streaming writer bound to ctx: Close commits the object; canceling ctx before Close
 // abandons the (possibly multipart) upload — gocloud discards any buffered parts — so the caller's
@@ -122,8 +122,8 @@ func (s blobStore) Open(key string) (io.ReadCloser, error) {
 	return s.bucket.NewReader(s.ctx, key, nil)
 }
 
-func (s blobStore) RemoveTree(slot string) error {
-	prefix := path.Join(slotsPrefix, slot) + "/"
+func (s blobStore) RemoveTree(run string) error {
+	prefix := path.Join(runsPrefix, run) + "/"
 	iter := s.bucket.List(&blob.ListOptions{Prefix: prefix})
 	for {
 		obj, err := iter.Next(s.ctx)
@@ -151,7 +151,7 @@ func (s blobStore) Remove(key string) error {
 }
 
 func (s blobStore) List() ([]fslike.Object, error) {
-	iter := s.bucket.List(&blob.ListOptions{Prefix: slotsPrefix})
+	iter := s.bucket.List(&blob.ListOptions{Prefix: runsPrefix})
 	var out []fslike.Object
 	for {
 		obj, err := iter.Next(s.ctx)
@@ -164,13 +164,13 @@ func (s blobStore) List() ([]fslike.Object, error) {
 		if obj.IsDir {
 			continue
 		}
-		// Keys are slots/<slot>/<base>; the slot is the element after slotsPrefix.
-		rel := strings.TrimPrefix(obj.Key, slotsPrefix)
-		slot := rel
+		// Keys are runs/<run>/<base>; the run is the element after runsPrefix.
+		rel := strings.TrimPrefix(obj.Key, runsPrefix)
+		run := rel
 		if i := strings.IndexByte(rel, '/'); i >= 0 {
-			slot = rel[:i]
+			run = rel[:i]
 		}
-		out = append(out, fslike.Object{Key: obj.Key, Slot: slot, Base: path.Base(obj.Key)})
+		out = append(out, fslike.Object{Key: obj.Key, Run: run, Base: path.Base(obj.Key)})
 	}
 	return out, nil
 }

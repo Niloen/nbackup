@@ -3,13 +3,13 @@ title: Disk → S3 offsite
 layout: default
 parent: Scenarios
 nav_order: 2
-description: "Land fast on local disk, then replicate every slot to S3 for the offsite copy. No holding disk."
+description: "Land fast on local disk, then replicate every run to S3 for the offsite copy. No holding disk."
 ---
 
 # Disk → S3 offsite
 {: .no_toc }
 
-Dump fast to a local disk, then mirror every slot to S3 so there's always an offsite copy.
+Dump fast to a local disk, then mirror every run to S3 so there's always an offsite copy.
 {: .fs-6 .fw-300 }
 
 1. TOC
@@ -21,7 +21,7 @@ Dump fast to a local disk, then mirror every slot to S3 so there's always an off
 
 This is the common modern shape: a fast, online local copy for everyday restores
 plus a cheap, durable offsite copy for disaster recovery. Because S3 replication
-is **asynchronous** — `nb sync` copies committed slots after the dump finishes —
+is **asynchronous** — `nb sync` copies committed runs after the dump finishes —
 you do **not** need a holding disk here. The dump lands on local disk at disk
 speed; the slow uplink is paid off afterward in the background.
 
@@ -38,7 +38,7 @@ compress:
   level: 3
 
 media:
-  # Fast local landing. A tighter capacity keeps disk lean — old slots leave
+  # Fast local landing. A tighter capacity keeps disk lean — old runs leave
   # disk on disk's own budget, independent of what S3 holds.
   disk:
     type: disk
@@ -53,10 +53,10 @@ media:
     capacity: 50TB
     throughput: 50MB/s
 
-# Slots are created on disk first.
+# Runs are created on disk first.
 landing: disk
 
-# Replication rule: mirror the landing's sealed slots to S3. A cron `nb sync`
+# Replication rule: mirror the landing's sealed runs to S3. A cron `nb sync`
 # (no --to) runs every rule here.
 sync:
   - to: offsite
@@ -88,8 +88,8 @@ standard AWS SDK environment — `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`,
 ## Commands
 
 ```bash
-nb dump                          # land a slot on disk
-nb sync --to offsite --dry-run   # preview: which slots disk has that S3 doesn't
+nb dump                          # land a run on disk
+nb sync --to offsite --dry-run   # preview: which runs disk has that S3 doesn't
 nb sync --to offsite             # copy the backlog to S3, oldest first
 
 # Hands-off cron line: dump, push offsite, prove a restore, then mail the digest.
@@ -105,15 +105,15 @@ nb drill --from offsite --tier structural
 
 ## What happens
 
-- `nb dump` writes the slot to disk at local speed.
-- `nb sync` copies each missing slot to S3 atomically, oldest first, and records a
+- `nb dump` writes the run to disk at local speed.
+- `nb sync` copies each missing run to S3 atomically, oldest first, and records a
   second placement — so an interrupted sync resumes where it stopped.
 - A restore reads from **whichever copy is reachable**: disk when it's online, S3
   when disk is gone.
 
 ## What to watch
 
-- **Disk and S3 prune independently.** A slot leaves disk when *disk's* capacity
+- **Disk and S3 prune independently.** A run leaves disk when *disk's* capacity
   and cycle say so — never merely because a copy reached S3. Both copies are kept,
   each retained on its own terms. Give disk the tighter `capacity` and let S3 be
   the deep retention tier. See [Pruning](../features/pruning) and

@@ -2,14 +2,14 @@ package catalog
 
 import "github.com/Niloen/nbackup/internal/record"
 
-// Entry is the catalog's per-slot record: one logical slot plus every place a
+// Entry is the catalog's per-run record: one logical run plus every place a
 // copy of it lives.
 type Entry struct {
-	Slot       *Slot       `json:"slot"`       // medium-independent content, grouped from the archives' commit footers
+	Run        *Run        `json:"run"`        // medium-independent content, grouped from the archives' commit footers
 	Placements []Placement `json:"placements"` // one per medium holding a copy
 }
 
-// Placement is one copy of a slot on one medium. The copy's archives may span
+// Placement is one copy of a run on one medium. The copy's archives may span
 // several of the medium's volumes (tape spanning): each archive names the volumes
 // and positions its parts landed on, plus where its per-archive commit footer and
 // member index live (the commit footer is the marker, written last).

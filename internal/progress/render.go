@@ -20,7 +20,7 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 	}
 	active, done, failed, pending := s.Counts()
 
-	fmt.Fprintf(w, "Run %s  [%s]\n", s.SlotID, s.Phase)
+	fmt.Fprintf(w, "Run %s  [%s]\n", s.RunID, s.Phase)
 	fmt.Fprintf(w, "  started:  %s  (elapsed %s)\n", s.StartedAt.Local().Format("2006-01-02 15:04:05"), sizeutil.FormatElapsed(s.Elapsed(now)))
 	fmt.Fprintf(w, "  workers:  %d configured, %d active\n", s.Workers, active)
 	fmt.Fprintf(w, "  dles:     %d done, %d active, %d pending", done, active, pending)
@@ -98,7 +98,7 @@ func renderEstimating(w io.Writer, s Snapshot, now time.Time) {
 			sized++
 		}
 	}
-	fmt.Fprintf(w, "Run %s  [%s]\n", s.SlotID, s.Phase)
+	fmt.Fprintf(w, "Run %s  [%s]\n", s.RunID, s.Phase)
 	fmt.Fprintf(w, "  started:  %s  (elapsed %s)\n", s.StartedAt.Local().Format("2006-01-02 15:04:05"), sizeutil.FormatElapsed(s.Elapsed(now)))
 	fmt.Fprintf(w, "  sizing:   %d of %d DLEs measured\n", sized, len(s.DLEs))
 	fmt.Fprintf(w, "  estimate: ~%s so far\n", sizeutil.FormatBytes(s.TotalDone()))

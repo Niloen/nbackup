@@ -58,10 +58,10 @@ func TestPartSizePolicy(t *testing.T) {
 	}
 }
 
-func appendArchive(t *testing.T, v media.Volume, slot, dle string, level int, payload string) int {
+func appendArchive(t *testing.T, v media.Volume, run, dle string, level int, payload string) int {
 	t.Helper()
 	pos, err := writeFileT(v,
-		record.Header{Slot: slot, Kind: record.KindArchive, DLE: dle, Level: level, Compress: "none"},
+		record.Header{Run: run, Kind: record.KindArchive, DLE: dle, Level: level, Compress: "none"},
 		func(w io.Writer) error { _, e := w.Write([]byte(payload)); return e },
 	)
 	if err != nil {
@@ -73,7 +73,7 @@ func appendArchive(t *testing.T, v media.Volume, slot, dle string, level int, pa
 func TestVolumeRoundTrip(t *testing.T) {
 	v := openVol(t)
 
-	pos := appendArchive(t, v, "slot-2026-06-22.001", "h-data", 0, "hello world")
+	pos := appendArchive(t, v, "run-2026-06-22.001", "h-data", 0, "hello world")
 
 	h, rc, err := v.ReadFile(pos)
 	if err != nil {
@@ -93,7 +93,7 @@ func TestVolumeRoundTrip(t *testing.T) {
 }
 
 // TestCleanPayloadObject confirms the payload object is a clean archive (no header
-// to skip) under the expected slots/<slot>/ key, with a separate .hdr sidecar —
+// to skip) under the expected runs/<run>/ key, with a separate .hdr sidecar —
 // so a plain GET yields a stock-tool-usable file, exactly as the disk medium does.
 func TestCleanPayloadObject(t *testing.T) {
 	// Drive the blob store directly so the on-bucket object keys can be inspected.
@@ -107,7 +107,7 @@ func TestCleanPayloadObject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	appendArchive(t, v, "slot-2026-06-22.001", "h-data", 0, "hello world")
+	appendArchive(t, v, "run-2026-06-22.001", "h-data", 0, "hello world")
 
 	var payloadKey, hdrKey string
 	iter := bucket.List(nil)
@@ -126,8 +126,8 @@ func TestCleanPayloadObject(t *testing.T) {
 			payloadKey = obj.Key
 		}
 	}
-	if !strings.HasPrefix(payloadKey, "slots/slot-2026-06-22.001/") {
-		t.Errorf("payload key = %q, want slots/slot-2026-06-22.001/…​.tar", payloadKey)
+	if !strings.HasPrefix(payloadKey, "runs/run-2026-06-22.001/") {
+		t.Errorf("payload key = %q, want runs/run-2026-06-22.001/…​.tar", payloadKey)
 	}
 	if hdrKey == "" {
 		t.Errorf("no .hdr sidecar object written")
@@ -150,7 +150,7 @@ func TestReopenRescans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pos := appendArchive(t, v, "slot-a", "h-data", 0, "payload")
+	pos := appendArchive(t, v, "run-a", "h-data", 0, "payload")
 
 	v2, err := media.OpenVolume("cloud", media.Options{"url": url, "prefix": "reopen-test/"})
 	if err != nil {
@@ -179,7 +179,7 @@ func TestConcurrentAppend(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			positions[i] = appendArchive(t, v, "slot-x", fmt.Sprintf("dle-%d", i), 0, fmt.Sprintf("payload-%d", i))
+			positions[i] = appendArchive(t, v, "run-x", fmt.Sprintf("dle-%d", i), 0, fmt.Sprintf("payload-%d", i))
 		}(i)
 	}
 	wg.Wait()
@@ -207,8 +207,8 @@ func TestConcurrentAppend(t *testing.T) {
 
 func TestRemoveFile(t *testing.T) {
 	v := openVol(t)
-	posA := appendArchive(t, v, "slot-a", "h-data", 0, "a")
-	appendArchive(t, v, "slot-b", "h-data", 0, "b")
+	posA := appendArchive(t, v, "run-a", "h-data", 0, "a")
+	appendArchive(t, v, "run-b", "h-data", 0, "b")
 
 	if err := v.RemoveFile(posA); err != nil {
 		t.Fatal(err)
@@ -217,8 +217,8 @@ func TestRemoveFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 || files[0].Header.Slot != "slot-b" {
-		t.Fatalf("after RemoveFile(slot-a), files = %+v", files)
+	if len(files) != 1 || files[0].Header.Run != "run-b" {
+		t.Fatalf("after RemoveFile(run-a), files = %+v", files)
 	}
 	// Removing a position again is a no-op (idempotent).
 	if err := v.RemoveFile(posA); err != nil {
@@ -232,7 +232,7 @@ func TestRemoveFile(t *testing.T) {
 func TestAbortedWriteLeavesNoObject(t *testing.T) {
 	cv := openVol(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	fw, err := cv.AppendFile(ctx, record.Header{Slot: "slot-x", Kind: record.KindArchive, DLE: "h-data", Compress: "none"})
+	fw, err := cv.AppendFile(ctx, record.Header{Run: "run-x", Kind: record.KindArchive, DLE: "h-data", Compress: "none"})
 	if err != nil {
 		t.Fatal(err)
 	}

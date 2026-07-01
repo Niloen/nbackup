@@ -13,7 +13,7 @@ import (
 // hands out writers is the spool (an Ingest), which is not a WriteStore.
 
 // ArchiveSpec is the record-free description of a new archive to write: its DLE and identity
-// (host/path), the archiver that produced it, the scheme it was encoded with, its level, and the slot
+// (host/path), the archiver that produced it, the scheme it was encoded with, its level, and the run
 // its base lives in. Only archiveio turns a spec plus the metered bytes into a record.Archive, so
 // callers describe intent and never construct the storage record themselves.
 type ArchiveSpec struct {
@@ -24,7 +24,7 @@ type ArchiveSpec struct {
 	Compress string
 	Encrypt  string
 	Level    int
-	BaseSlot string
+	BaseRun  string
 }
 
 // CommitResult is the assembled outcome of writing one archive: the record and where it landed. The
@@ -35,7 +35,7 @@ type CommitResult struct {
 	Pos     record.ArchivePos
 }
 
-// Store is one authored slot seen through its medium end: it is a WriteStore — a writer built over it (a
+// Store is one authored run seen through its medium end: it is a WriteStore — a writer built over it (a
 // serial one, or the spool's routed one) authors archives to it — and it can read a committed archive's
 // payload back (OpenArchive) and drop it (Reclaim). It is not a factory: archive writers are made by
 // NewAuthor over the WriteStore, never by the Store. A landing needs only the WriteStore; a holding disk is a

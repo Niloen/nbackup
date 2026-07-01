@@ -1,16 +1,16 @@
 // Package fslike implements the media.Volume layout shared by the address-
 // identified media (disk, cloud): each file is two artifacts under
-// slots/<slot>/ — a clean payload (<NNNNNN>-<dle>-L<n>.tar.<ext>, directly usable
+// runs/<run>/ — a clean payload (<NNNNNN>-<dle>-L<n>.tar.<ext>, directly usable
 // with stock tools) and a JSON header sidecar (<NNNNNN>-…-L<n>.hdr). Positions are
 // volume-global file numbers paired by their numeric filename prefix. A split archive
 // (one written under a part_size cap) appends a .pNNN part-index suffix to the payload
 // (…-L<n>.tar.gz.p000, .p001, …) so the slices group and order by name and no fragment
 // poses as a standalone artifact; the sidecar keeps the plain .hdr name (see payloadExt).
 //
-// The layout (stems, extensions, slot subtrees, payload-first atomicity, the
+// The layout (stems, extensions, run subtrees, payload-first atomicity, the
 // scan that indexes by filename prefix) lives here once; a backing Store supplies
 // only the storage primitives (a local directory for disk, an object bucket for
-// cloud). Because both media share this code, a slot streams disk<->cloud byte-for-
+// cloud). Because both media share this code, a run streams disk<->cloud byte-for-
 // byte unchanged.
 package fslike
 
@@ -30,11 +30,11 @@ import (
 )
 
 // Object is one stored file as reported by Store.List: an opaque key the Store can
-// read/open, the slot it belongs to, and its basename (whose numeric prefix gives
+// read/open, the run it belongs to, and its basename (whose numeric prefix gives
 // the position).
 type Object struct {
 	Key  string
-	Slot string
+	Run  string
 	Base string
 }
 
@@ -42,8 +42,8 @@ type Object struct {
 // Store mints (via Key) and consumes; the fslike layer never parses them, so disk
 // (filesystem paths) and cloud (object keys) supply whatever form suits the backend.
 type Store interface {
-	// Key builds the storage key for a file named name (base+ext) in slot.
-	Key(slot, name string) string
+	// Key builds the storage key for a file named name (base+ext) in run.
+	Key(run, name string) string
 	// Writer opens a streaming writer for key. Close commits the file; if ctx is canceled the file
 	// must not commit (a cloud upload is abandoned; a local partial is left for the caller to discard),
 	// so an aborted append never leaves a committed payload.
@@ -56,23 +56,23 @@ type Store interface {
 	Open(key string) (io.ReadCloser, error)
 	// List returns every stored file, for the catalog-rebuild scan.
 	List() ([]Object, error)
-	// RemoveTree deletes every file belonging to slot.
-	RemoveTree(slot string) error
+	// RemoveTree deletes every file belonging to run.
+	RemoveTree(run string) error
 	// Remove deletes a single file by key (one archive's payload or sidecar). A
 	// missing key is not an error (idempotent reclamation).
 	Remove(key string) error
 }
 
-// entry pairs a file's header sidecar and payload keys with its slot. incomplete
+// entry pairs a file's header sidecar and payload keys with its run. incomplete
 // marks a position missing one of the two — an interrupted append leaves a payload
 // with no header sidecar; such an orphan is indexed but skipped, never read. It also
 // marks a position reserved by an in-flight AppendFile (both keys still empty): the
 // reservation keeps the index from lagging the directory so a concurrent reclaim sees
-// the slot is still in use (see AppendFile).
+// the run is still in use (see AppendFile).
 type entry struct {
 	hdr        string
 	payload    string
-	slot       string
+	run        string
 	incomplete bool
 }
 
@@ -85,7 +85,7 @@ type Volume struct {
 }
 
 // Spec returns the registration facts every fslike-backed medium shares: the byte-budget
-// capacity model and the concurrent-write capability are consequences of the slot layout
+// capacity model and the concurrent-write capability are consequences of the run layout
 // itself, not of the backing Store. A medium (disk, cloud) starts from this and fills in
 // Type, New, Params, and any distinctive PartSize/Cost before calling media.Register, so
 // it cannot silently omit the size profile or the concurrent-write flag the layout gives.
@@ -173,17 +173,17 @@ func (v *Volume) AppendFile(ctx context.Context, h record.Header) (media.FileWri
 	// Reserve the position before writing the files, so the index never lags the
 	// directory. A dumper creates the payload on disk before the position is indexed,
 	// and does the I/O outside the lock so appends run in parallel; without this
-	// reservation a concurrent RemoveFile reclaiming the slot's last file would judge
-	// the slot empty from the lagging index and RemoveTree the subtree — taking the
+	// reservation a concurrent RemoveFile reclaiming the run's last file would judge
+	// the run empty from the lagging index and RemoveTree the subtree — taking the
 	// freshly written, not-yet-indexed payload with it. The reservation makes that
 	// RemoveFile see the in-flight append and leave the directory alone. Finalized on
 	// the writer's Close once both artifacts have landed; dropped there on abort/error.
-	v.idx[pos] = entry{slot: h.Slot, incomplete: true}
+	v.idx[pos] = entry{run: h.Run, incomplete: true}
 	v.mu.Unlock()
 
 	base := stem(pos, h)
-	payloadKey := v.store.Key(h.Slot, base+payloadExt(h))
-	hdrKey := v.store.Key(h.Slot, base+".hdr")
+	payloadKey := v.store.Key(h.Run, base+payloadExt(h))
+	hdrKey := v.store.Key(h.Run, base+".hdr")
 
 	hb, err := json.Marshal(h)
 	if err != nil {
@@ -195,7 +195,7 @@ func (v *Volume) AppendFile(ctx context.Context, h record.Header) (media.FileWri
 		v.drop(pos)
 		return nil, err
 	}
-	return &fileWriter{v: v, ctx: ctx, pw: pw, pos: pos, slot: h.Slot, hdrKey: hdrKey, payloadKey: payloadKey, hdr: append(hb, '\n')}, nil
+	return &fileWriter{v: v, ctx: ctx, pw: pw, pos: pos, run: h.Run, hdrKey: hdrKey, payloadKey: payloadKey, hdr: append(hb, '\n')}, nil
 }
 
 // drop releases an in-flight position's reservation (an aborted or failed append).
@@ -213,7 +213,7 @@ type fileWriter struct {
 	ctx        context.Context
 	pw         io.WriteCloser
 	pos        int
-	slot       string
+	run        string
 	hdrKey     string
 	payloadKey string
 	hdr        []byte
@@ -238,7 +238,7 @@ func (f *fileWriter) Close() error {
 		return err
 	}
 	f.v.mu.Lock()
-	f.v.idx[f.pos] = entry{hdr: f.hdrKey, payload: f.payloadKey, slot: f.slot}
+	f.v.idx[f.pos] = entry{hdr: f.hdrKey, payload: f.payloadKey, run: f.run}
 	f.v.mu.Unlock()
 	return nil
 }
@@ -312,8 +312,8 @@ func (v *Volume) IncompleteFiles() ([]int, error) {
 }
 
 // RemoveFile deletes the payload and header sidecar at pos and drops them from the
-// index. The slot is read from the index entry; when removing this file empties the
-// slot's subtree, the now-empty directory is reclaimed too, leaving no stray
+// index. The run is read from the index entry; when removing this file empties the
+// run's subtree, the now-empty directory is reclaimed too, leaving no stray
 // directory behind. A position already gone is a no-op (idempotent).
 func (v *Volume) RemoveFile(pos int) error {
 	v.mu.Lock()
@@ -334,11 +334,11 @@ func (v *Volume) RemoveFile(pos int) error {
 	}
 	delete(v.idx, pos)
 	for _, other := range v.idx {
-		if other.slot == e.slot {
-			return nil // the slot still has files; keep its subtree
+		if other.run == e.run {
+			return nil // the run still has files; keep its subtree
 		}
 	}
-	return v.store.RemoveTree(e.slot) // last file in the slot: reclaim the empty directory
+	return v.store.RemoveTree(e.run) // last file in the run: reclaim the empty directory
 }
 
 // scan builds the position index from the Store's file listing only — it does not
@@ -356,7 +356,7 @@ func (v *Volume) scan() error {
 			continue
 		}
 		e := v.idx[pos]
-		e.slot = o.Slot
+		e.run = o.Run
 		if strings.HasSuffix(o.Base, ".hdr") {
 			e.hdr = o.Key
 		} else {
