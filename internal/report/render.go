@@ -94,13 +94,16 @@ func RenderRun(w io.Writer, r Run) {
 	// so an operator sees what was backed up and how it compressed — not just totals.
 	if r.Command == CommandDump && len(r.DumpStats) > 0 {
 		fmt.Fprintln(w)
+		renderStats(w, r.DumpStats, r.EndedAt.Sub(r.StartedAt))
+		fmt.Fprintln(w)
 		renderDumpTable(w, r.DumpStats)
 	}
 }
 
-// RenderDump writes a per-DLE dump report for one run: a header, the
-// per-DLE statistics table, and full/incremental totals. It is what `nb report
-// --dump` prints and shares renderDumpTable with the dump notification body.
+// RenderDump writes a dump report for one run: a header, a one-line headline, the
+// overall statistics grid (Total/Full/Incr), and the per-DLE statistics table. It
+// is what `nb report --dump` prints and shares renderStats/renderDumpTable with the
+// dump notification body.
 func RenderDump(w io.Writer, r Run) {
 	fmt.Fprintf(w, "DUMP REPORT  %s", r.SlotID)
 	if !r.StartedAt.IsZero() {
@@ -114,31 +117,134 @@ func RenderDump(w io.Writer, r Run) {
 		fmt.Fprintln(w, "no per-DLE statistics recorded for this run")
 		return
 	}
+	fmt.Fprintln(w, headline(r))
+	fmt.Fprintln(w)
+	renderStats(w, r.DumpStats, r.EndedAt.Sub(r.StartedAt))
+	fmt.Fprintln(w)
 	renderDumpTable(w, r.DumpStats)
 }
 
-// renderDumpTable writes the per-DLE statistics table plus full/incremental totals.
-// Rate is uncompressed bytes over dump time; a row with unknown
-// timing shows a dash for time and rate.
+// headline is the one-line "did it work" summary for a dump: DLE count, the
+// original->output roll-up with its compression, and wall-clock elapsed — the
+// first line an operator reads before the table. On a failed run it leads with
+// the failure so an alert says what broke before it says how big.
+func headline(r Run) string {
+	var a agg
+	for _, d := range r.DumpStats {
+		a.add(d)
+	}
+	sizes := fmt.Sprintf("%s -> %s (%s)", sizeutil.FormatBytes(a.orig), sizeutil.FormatBytes(a.out), compPct(a.orig, a.out))
+	elapsed := sizeutil.FormatElapsed(r.EndedAt.Sub(r.StartedAt))
+	if r.Failed() {
+		return fmt.Sprintf("%d DLE(s) dumped, run FAILED [%s] · %s · %s elapsed", a.n, r.ExitClass, sizes, elapsed)
+	}
+	return fmt.Sprintf("%d DLE(s) dumped OK · %s · %s elapsed", a.n, sizes, elapsed)
+}
+
+// agg accumulates one column of the statistics grid: how many DLEs, their
+// uncompressed/compressed bytes, files, and summed dump time.
+type agg struct {
+	n     int
+	orig  int64
+	out   int64
+	files int
+	secs  float64
+}
+
+func (a *agg) add(d DLEStat) {
+	a.n++
+	a.orig += d.Orig
+	a.out += d.Out
+	a.files += d.Files
+	a.secs += d.Seconds
+}
+
+// renderStats writes the overall statistics grid: each metric as a row, split
+// into Total / Full / Incr columns (Amanda's STATISTICS block). Dump time is the
+// *sum* of per-DLE dump times — it exceeds wall-clock run time under parallel
+// workers — while run time is the single wall-clock span, shown only in Total.
+func renderStats(w io.Writer, stats []DLEStat, wall time.Duration) {
+	var tot, full, incr agg
+	for _, d := range stats {
+		tot.add(d)
+		if d.Level == 0 {
+			full.add(d)
+		} else {
+			incr.add(d)
+		}
+	}
+
+	count := func(a agg) string {
+		if a.n == 0 {
+			return "-"
+		}
+		return fmt.Sprintf("%d", a.n)
+	}
+	size := func(a agg) string {
+		if a.n == 0 {
+			return "-"
+		}
+		return sizeutil.FormatBytes(a.orig)
+	}
+	out := func(a agg) string {
+		if a.n == 0 {
+			return "-"
+		}
+		return sizeutil.FormatBytes(a.out)
+	}
+	files := func(a agg) string {
+		if a.n == 0 {
+			return "-"
+		}
+		return fmt.Sprintf("%d", a.files)
+	}
+
+	rows := [][4]string{
+		{"DLEs dumped", count(tot), count(full), count(incr)},
+		{"Original size", size(tot), size(full), size(incr)},
+		{"Output size", out(tot), out(full), out(incr)},
+		{"Avg compression", compPct(tot.orig, tot.out), compPct(full.orig, full.out), compPct(incr.orig, incr.out)},
+		{"Files", files(tot), files(full), files(incr)},
+		{"Dump time (sum)", dumpTime(tot.secs), dumpTime(full.secs), dumpTime(incr.secs)},
+		{"Avg dump rate", dumpRate(tot.orig, tot.secs), dumpRate(full.orig, full.secs), dumpRate(incr.orig, incr.secs)},
+	}
+	if wall > 0 {
+		rows = append(rows, [4]string{"Run time (wall)", sizeutil.FormatElapsed(wall), "", ""})
+	}
+
+	// Column widths: the label column is left-justified, the three value columns
+	// right-justified so the numbers line up on their right edge (Amanda's grid).
+	header := [4]string{"STATISTICS", "Total", "Full", "Incr"}
+	var wLabel, w1, w2, w3 int
+	for _, r := range append([][4]string{header}, rows...) {
+		wLabel = max(wLabel, len(r[0]))
+		w1 = max(w1, len(r[1]))
+		w2 = max(w2, len(r[2]))
+		w3 = max(w3, len(r[3]))
+	}
+	line := func(r [4]string) {
+		s := fmt.Sprintf("%-*s  %*s  %*s  %*s", wLabel, r[0], w1, r[1], w2, r[2], w3, r[3])
+		fmt.Fprintln(w, strings.TrimRight(s, " "))
+	}
+	line(header)
+	for _, r := range rows {
+		line(r)
+	}
+}
+
+// renderDumpTable writes the per-DLE statistics table. The full/incremental
+// roll-up lives in the statistics grid (renderStats); this is the per-DLE detail.
+// Rate is uncompressed bytes over dump time; a row with unknown timing shows a
+// dash for time and rate.
 func renderDumpTable(w io.Writer, stats []DLEStat) {
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "DLE\tLVL\tORIG\tOUT\tCOMP%\tFILES\tTIME\tRATE")
-	var fOrig, fOut, iOrig, iOut int64
-	var fN, iN int
 	for _, d := range stats {
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\t%s\t%s\n",
 			d.ID(), d.Level, sizeutil.FormatBytes(d.Orig), sizeutil.FormatBytes(d.Out),
 			compPct(d.Orig, d.Out), d.Files, dumpTime(d.Seconds), dumpRate(d.Orig, d.Seconds))
-		if d.Level == 0 {
-			fOrig, fOut, fN = fOrig+d.Orig, fOut+d.Out, fN+1
-		} else {
-			iOrig, iOut, iN = iOrig+d.Orig, iOut+d.Out, iN+1
-		}
 	}
 	tw.Flush()
-	fmt.Fprintln(w, "--")
-	fmt.Fprintf(w, "FULL: %d dle(s), %s -> %s (%s)\n", fN, sizeutil.FormatBytes(fOrig), sizeutil.FormatBytes(fOut), compPct(fOrig, fOut))
-	fmt.Fprintf(w, "INCR: %d dle(s), %s -> %s (%s)\n", iN, sizeutil.FormatBytes(iOrig), sizeutil.FormatBytes(iOut), compPct(iOrig, iOut))
 }
 
 // compPct renders the compression ratio (output as a percent of original), or a dash

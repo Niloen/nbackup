@@ -352,19 +352,32 @@ DRILL COVERAGE
 
 `nb report --last 30` widens the window; `nb report --json` emits the raw records.
 
-For the classic per-DLE dump report, `nb report --dump`
-prints the latest dump in detail — each DLE's level, original/output size,
-compression %, files, dump time, and rate, with full/incremental totals:
+For the classic dump report, `nb report --dump` prints the latest dump in detail:
+a one-line headline, an overall statistics grid (Total / Full / Incr), and the
+per-DLE table — each DLE's level, original/output size, compression %, files, dump
+time, and rate:
 
 ```text
-DUMP REPORT  slot-2026-06-24.001  (2026-06-24 02:00)
+DUMP REPORT  slot-2026-06-24.001  (run 2026-06-24 02:00)
+2 DLE(s) dumped OK · 21.47 GB -> 5.37 GB (25%) · 12m00s elapsed
+
+STATISTICS            Total        Full         Incr
+DLEs dumped               2           1            1
+Original size      21.47 GB    21.47 GB    122.88 kB
+Output size         5.37 GB     5.37 GB     40.96 kB
+Avg compression         25%         25%          33%
+Files                  1249        1240            9
+Dump time (sum)      12m05s      12m04s           1s
+Avg dump rate    29.62 MB/s  29.66 MB/s  122.88 kB/s
+Run time (wall)      12m00s
+
 DLE          LVL  ORIG       OUT       COMP%  FILES  TIME    RATE
 app01:/home  0    21.47 GB   5.37 GB   25%    1240   12m04s  29.66 MB/s
-app01:/etc   1    122.88 kB  40.96 kB  33%    9      1s      …
---
-FULL: 1 dle(s), 21.47 GB -> 5.37 GB (25%)
-INCR: 1 dle(s), 122.88 kB -> 40.96 kB (33%)
+app01:/etc   1    122.88 kB  40.96 kB  33%    9      1s      122.88 kB/s
 ```
+
+Dump time is the *sum* of per-DLE dump times (it exceeds the wall-clock run time
+when workers run in parallel); run time is the single wall-clock span.
 
 `nb report --dump --slot slot-2026-06-21.001` reports a specific dump. (Sizes come from
 each archive's commit footer; the per-DLE timing comes from the run history, so a slot

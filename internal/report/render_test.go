@@ -95,15 +95,29 @@ func TestRenderDump(t *testing.T) {
 	out := sb.String()
 	for _, want := range []string{
 		"DUMP REPORT  slot-2026-06-24.001",
+		"3 DLE(s) dumped OK",                  // headline
+		"21.47 GB -> 5.37 GB (25%)",           // headline roll-up
+		"12m00s elapsed",                      // headline wall clock
+		"STATISTICS", "Total", "Full", "Incr", // stats grid
+		"DLEs dumped", "Original size", "Dump time (sum)", "Run time (wall)",
 		"DLE", "ORIG", "OUT", "COMP%", "FILES", "TIME", "RATE",
 		"app01-home", "21.47 GB", "1240",
 		"app01-etc",
-		"FULL: 2 dle(s)", // two level-0 archives (one empty)
-		"INCR: 1 dle(s)",
 		"db01-pg", // every DLE listed, even the empty one
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("dump report missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
+func TestHeadlineFailed(t *testing.T) {
+	r := dumpRunFixture()
+	r.Outcome, r.ExitClass, r.Error = OutcomeFailure, "dump-failed", "tar exited 2"
+	got := headline(r)
+	for _, want := range []string{"run FAILED [dump-failed]", "3 DLE(s) dumped", "elapsed"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("failed headline missing %q: %s", want, got)
 		}
 	}
 }
@@ -124,7 +138,7 @@ func TestRenderRunDumpIncludesTable(t *testing.T) {
 	if !strings.Contains(out, "dump OK") {
 		t.Errorf("RenderRun missing summary header:\n%s", out)
 	}
-	for _, want := range []string{"COMP%", "app01-home", "FULL:"} {
+	for _, want := range []string{"COMP%", "app01-home", "STATISTICS"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("dump notification body missing per-DLE detail %q\n---\n%s", want, out)
 		}
