@@ -5,7 +5,7 @@
 // scheme; it makes no assumptions about where the bytes live (that is a media
 // concern) or how a run is driven (that is the engine's). A volume is recoverable
 // on its own because every file leads with one of these records: scanning them
-// reconstructs the catalog. There is no per-slot seal — a slot is the grouping its
+// reconstructs the catalog. There is no per-run seal — a run is the grouping its
 // archives carry in their headers.
 //
 // Alongside the on-medium records it also defines the location types that *point at*
@@ -29,12 +29,12 @@ const (
 	KindArchive = "archive" // one DLE dump (one or more part files)
 	KindCommit  = "commit"  // a per-archive commit footer, written last — the archive's marker
 	KindIndex   = "index"   // a per-archive member index (gzip), written before the commit
-	KindLabel   = "label"   // a volume label (first file); not part of any slot
+	KindLabel   = "label"   // a volume label (first file); not part of any run
 )
 
 // Header is the self-describing block at the start of every file on a volume. It is
 // a *complete standalone identity record*: it carries the full identity of the file —
-// which slot/DLE/level it is, the schemes needed to reverse the payload, and the part
+// which run/DLE/level it is, the schemes needed to reverse the payload, and the part
 // index — so a single payload file is forensically self-describing on its own, even
 // detached from its commit footer. A human (or a stock-tool recovery) can read the
 // block and know exactly how to restore the bytes that follow: e.g. for an encrypted,
@@ -48,12 +48,12 @@ const (
 //
 // The footer (Archive) repeats most of these identity fields: that duplication is by
 // design, not redundancy to trim. NBackup's own read path groups parts and reconstructs
-// the catalog from a few header fields (Slot, Kind, DLE, Level, Part, and Compress for
+// the catalog from a few header fields (Run, Kind, DLE, Level, Part, and Compress for
 // the payload extension) and reads the rest of an archive's metadata from the footer;
-// the remaining header fields (Host, Path, Archiver, Encrypt, BaseSlot, Split, CreatedAt) exist
+// the remaining header fields (Host, Path, Archiver, Encrypt, BaseRun, Split, CreatedAt) exist
 // for the standalone/forensic story above, so a lone part file is never a mystery.
 type Header struct {
-	Slot      string    `json:"slot"`
+	Run       string    `json:"run"`
 	Kind      string    `json:"kind"`
 	DLE       string    `json:"dle,omitempty"`
 	Host      string    `json:"host,omitempty"`
@@ -62,10 +62,10 @@ type Header struct {
 	Compress  string    `json:"compress,omitempty"`
 	Encrypt   string    `json:"encrypt,omitempty"` // encryption scheme name (gpg|none); reversed on restore. "none" = plaintext (the peer of Compress, which is likewise always concrete). The key is never recorded — gpg resolves it from the ciphertext + keyring.
 	Level     int       `json:"level,omitempty"`
-	BaseSlot  string    `json:"base_slot,omitempty"`
+	BaseRun   string    `json:"base_run,omitempty"`
 	Part      int       `json:"part,omitempty"`  // 0-based index of this part within its archive (0 = first/only); the archive's total part count lives in its commit footer (Archive.Parts), not here
 	Split     bool      `json:"split,omitempty"` // true when this archive is written in size-bounded parts — under a part_size cap (cloud) or across a finite volume's capacity (a spanning reel) — so its payload is one slice (see Part) of a possibly-multi-part whole; concatenate the siblings in Part order before any stock-tool reversal. Set even when the archive needed only one part (the total is not known up front; it lands in the commit footer's Archive.Parts). false = a single standalone payload on an unbounded medium (disk).
-	CreatedAt time.Time `json:"created_at"`      // when the run that authored this file began — a per-run stamp shared by every file of a slot. NOT this archive's own landing time: that is Archive.CreatedAt in the commit footer (per-archive, the retention-age basis), which for a copied slot can differ from the source run's start recorded here.
+	CreatedAt time.Time `json:"created_at"`      // when the run that authored this file began — a per-run stamp shared by every file of a run. NOT this archive's own landing time: that is Archive.CreatedAt in the commit footer (per-archive, the retention-age basis), which for a copied run can differ from the source run's start recorded here.
 }
 
 // FileInfo is a file's position and header, as returned by Files().
@@ -79,7 +79,7 @@ type FileInfo struct {
 const LabelMagic = "nbackup"
 
 // Label is a volume's self-describing identity, stored as the payload of the
-// file-0 label record. It is to a volume what a seal record is to a slot: the
+// file-0 label record. It is to a volume what a seal record is to a run: the
 // on-medium fact a catalog caches. Only media whose physical mount is ambiguous
 // (tape — the reel behind the drive can be swapped) carry one; address-identified
 // media (disk, s3) do not. The (Pool, Name) pair is the volume's location-

@@ -26,28 +26,28 @@ type canceledError struct{}
 func (canceledError) Error() string { return "canceled by operator (Ctrl-C)" }
 func (canceledError) Unwrap() error { return context.Canceled }
 
-// Run executes the plan for a date, producing one sealed slot. Canceling ctx interrupts the
+// Run executes the plan for a date, producing one sealed run. Canceling ctx interrupts the
 // run: in-flight dumps are killed, the status is marked canceled, and it returns ErrCanceled.
-func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*catalog.Slot, error) {
-	// `now` is the run's single time source: the precise instant the slot is stamped
+func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*catalog.Run, error) {
+	// `now` is the run's single time source: the precise instant the run is stamped
 	// committed (CreatedAt) and the moment retention is judged against. The
-	// run date — the logical key for the slot id, planning, and restore ordering — is
+	// run date — the logical key for the run id, planning, and restore ordering — is
 	// just its day. Keeping the two distinct lets two runs on one day carry distinct
 	// commit instants, so a sub-day minimum_age can tell them apart.
 	//
 	// The day is the run's LOCAL calendar date — the day the operator sees on the wall
-	// clock, which is what the slot id carries. The commit instant itself is stamped in
+	// clock, which is what the run id carries. The commit instant itself is stamped in
 	// UTC (an absolute time for retention/age math); only the day shown in the id is local.
 	date := localDay(now, time.Local)
 	now = now.UTC()
-	// Guard the restore-order invariant: restore replays a DLE's slots in date order,
+	// Guard the restore-order invariant: restore replays a DLE's writers in date order,
 	// but the archiver's incremental snapshots advance in dump (wall-clock) order. A
-	// run dated earlier than a slot already sealed would splice an out-of-order
+	// run dated earlier than a run already sealed would splice an out-of-order
 	// archive into the chain whose snapshot has already moved past it — silently
 	// dropping files at restore. Reject it (a same-day rerun, equal date, is fine and
 	// takes the next .N). Backdating before today is already caught at the CLI.
-	if latest, ok := c.latestSlotDate(); ok && record.DateString(date) < latest {
-		return nil, fmt.Errorf("cannot dump for %s: slot(s) dated %s already exist; an earlier-dated run would corrupt the incremental restore order (snapshots have advanced past it) — dump on or after %s", record.DateString(date), latest, latest)
+	if latest, ok := c.latestRunDate(); ok && record.DateString(date) < latest {
+		return nil, fmt.Errorf("cannot dump for %s: run(s) dated %s already exist; an earlier-dated run would corrupt the incremental restore order (snapshots have advanced past it) — dump on or after %s", record.DateString(date), latest, latest)
 	}
 	// Drain any leftover archives a previous holding-disk run crashed before flushing, so the
 	// holding disk is clean before this run stages onto it (amflush-on-next-dump). A no-op
@@ -73,7 +73,7 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 		logf.Log("WARNING: %s", w)
 	}
 
-	// Pre-flight before creating a slot: the compressor binary and every archiver.
+	// Pre-flight before creating a run: the compressor binary and every archiver.
 	// Resolving every archiver here also populates the archiver cache, so the parallel
 	// workers below only read it (no concurrent writes).
 	if err := c.d.CheckCompress(); err != nil {
@@ -93,11 +93,11 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 		}
 	}
 
-	slotID, _, err := c.allocSlotID(date)
+	runID, _, err := c.allocRunID(date)
 	if err != nil {
 		return nil, err
 	}
-	spec := archiveio.SlotSpec{ID: slotID, CreatedAt: now}
+	spec := archiveio.RunSpec{ID: runID, CreatedAt: now}
 
 	// The producers dump every DLE; the drain consumes them — buffering each onto a holding disk
 	// (one or more media marked `holding: true`) and copying it to its landing, or, when no disk fits
@@ -106,13 +106,13 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 	// (per-dumptype routing): the spool opens a backing per distinct landing — see runOrchestrated.
 	holdingNames := c.d.HoldingMedia
 
-	// No global worker clamp: per-backing Slots in the spool serialize a serial landing (a single drive
+	// No global worker clamp: per-backing Writers in the spool serialize a serial landing (a single drive
 	// writes one archive at a time), so a worker dumping a DLE bound for a serial tape parks on its
 	// backing's permit without blocking a worker dumping a DLE bound for cloud. Acquiring the target
-	// happens off the dumper's gate, so a parked producer holds no worker slot.
+	// happens off the dumper's gate, so a parked producer holds no worker permit.
 	workers := c.d.Workers
 
-	tr, runLogf := c.progressTracker(slotID, workers, plan.Items, fileSink, logf)
+	tr, runLogf := c.progressTracker(runID, workers, plan.Items, fileSink, logf)
 	// Caught here it covers a cancel during the estimate/preflight prelude (above), before any
 	// dump starts; runOrchestrated catches one during the dump itself.
 	if ctx.Err() != nil {
@@ -137,7 +137,7 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 // and a writer per distinct landing the plan routes to, builds the spool over them, runs the
 // producers (each routed to its DLE's landing), and drains onto those landings. The spool is the run's
 // sole catalog writer.
-func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, workers int, spec archiveio.SlotSpec, holdingNames []string, tr *progress.Tracker, now time.Time, lf logf.Logf) (*catalog.Slot, error) {
+func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, workers int, spec archiveio.RunSpec, holdingNames []string, tr *progress.Tracker, now time.Time, lf logf.Logf) (*catalog.Run, error) {
 	disks := make([]spool.Disk, len(holdingNames))
 	for i, name := range holdingNames {
 		pw, err := c.d.OpenWriter(name, spec, now, lf)
@@ -148,7 +148,7 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 		disks[i] = spool.Disk{Name: name, Storage: pw.Stores[0], Capacity: pw.Capacity, Lim: pw.Lim}
 	}
 
-	// One backing per distinct landing the plan routes to. Slots is how many writes to it may run at
+	// One backing per distinct landing the plan routes to. Writers is how many writes to it may run at
 	// once: one while buffering (the drain copies serially), else the worker count for a concurrent-write
 	// medium (disk/cloud — independent objects/files) or the drive count for a serial multi-drive tape
 	// library (one archive per drive), each capped by the worker count.
@@ -161,23 +161,23 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 			tr.SetPhase(progress.PhaseFailed)
 			return nil, fmt.Errorf("open landing %q: %w", name, err)
 		}
-		slots := 1
+		writers := 1
 		switch {
 		case buffering:
 			// The drain copies serially onto the landing (parallel drains are deferred).
 		case pw.Serial:
-			slots = len(pw.Stores) // one archive per drive on a serial multi-drive library
+			writers = len(pw.Stores) // one archive per drive on a serial multi-drive library
 		default:
-			slots = workers // concurrent medium: independent files
+			writers = workers // concurrent medium: independent files
 		}
-		if slots > workers {
-			slots = workers
+		if writers > workers {
+			writers = workers
 		}
 		stores := make([]archiveio.WriteStore, len(pw.Stores))
 		for i, s := range pw.Stores {
 			stores[i] = s // a Store is a WriteStore; the spool only writes backings
 		}
-		backings = append(backings, spool.Backing{Name: name, Stores: stores, Slots: slots, Lim: pw.Lim})
+		backings = append(backings, spool.Backing{Name: name, Stores: stores, Writers: writers, Lim: pw.Lim})
 	}
 
 	sp := spool.New(ctx, spool.Config{
@@ -206,14 +206,14 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 		return nil, err
 	}
 	tr.SetPhase(progress.PhaseDone)
-	// The slot is its committed archives, read from the catalog (the cache each archive recorded into
+	// The run is its committed archives, read from the catalog (the cache each archive recorded into
 	// as it committed). An empty run committed nothing, so the catalog has no entry — report the empty
-	// slot the run authored.
-	slot, err := c.d.Cat.ReadSlot(spec.ID)
+	// run the run authored.
+	run, err := c.d.Cat.ReadRun(spec.ID)
 	if err != nil {
-		slot = &catalog.Slot{ID: spec.ID}
+		run = &catalog.Run{ID: spec.ID}
 	}
-	return slot, nil
+	return run, nil
 }
 
 // distinctLandings returns the distinct landing media the plan's items route to, in first-seen order

@@ -105,7 +105,7 @@ func RenderRun(w io.Writer, r Run) {
 // is what `nb report --dump` prints and shares renderStats/renderDumpTable with the
 // dump notification body.
 func RenderDump(w io.Writer, r Run) {
-	fmt.Fprintf(w, "DUMP REPORT  %s", r.SlotID)
+	fmt.Fprintf(w, "DUMP REPORT  %s", r.RunID)
 	if !r.StartedAt.IsZero() {
 		fmt.Fprintf(w, "  (run %s)", r.StartedAt.Local().Format("2006-01-02 15:04"))
 	}
@@ -283,17 +283,17 @@ func dumpRate(orig int64, secs float64) string {
 func detailCell(r Run) string {
 	switch r.Command {
 	case CommandDump:
-		if r.SlotID == "" {
+		if r.RunID == "" {
 			return "-"
 		}
-		return fmt.Sprintf("%s, %d archive(s), %s", r.SlotID, r.Archives, sizeutil.FormatBytes(r.BytesMoved))
+		return fmt.Sprintf("%s, %d archive(s), %s", r.RunID, r.Archives, sizeutil.FormatBytes(r.BytesMoved))
 	case CommandSync:
-		return fmt.Sprintf("%d slot(s) copied, %s", r.SlotsCopied, sizeutil.FormatBytes(r.BytesMoved))
+		return fmt.Sprintf("%d run(s) copied, %s", r.RunsCopied, sizeutil.FormatBytes(r.BytesMoved))
 	case CommandPrune:
-		return fmt.Sprintf("%d slot(s) pruned, %s freed", r.SlotsPruned, sizeutil.FormatBytes(r.BytesMoved))
+		return fmt.Sprintf("%d run(s) pruned, %s freed", r.RunsPruned, sizeutil.FormatBytes(r.BytesMoved))
 	case CommandVerify:
 		if r.Failures > 0 {
-			return fmt.Sprintf("%d slot(s) failed verification", r.Failures)
+			return fmt.Sprintf("%d run(s) failed verification", r.Failures)
 		}
 		return "all verified"
 	case CommandDrill:

@@ -1,6 +1,6 @@
 // Package recovery reconstructs a browsable virtual filesystem of a DLE as of a
 // given date and resolves a file selection into the minimal set of per-archive
-// extractions. It is pure: it works over slot metadata and a
+// extractions. It is pure: it works over run metadata and a
 // member-list loader, and returns what to extract; the engine performs the I/O.
 //
 // Browsing needs no separate index server: the "index" is each archive's
@@ -30,7 +30,7 @@ import (
 // Source identifies the archive a path's as-of-date content lives in, plus the
 // raw tar member name to hand to the extractor.
 type Source struct {
-	SlotID   string
+	RunID    string
 	DLE      string
 	Level    int
 	Archiver string
@@ -76,11 +76,11 @@ func (n *Node) Children() []*Node {
 
 // Tree is a DLE's reconstructed filesystem as of a target date.
 type Tree struct {
-	DLE        string
-	TargetSlot string // the slot resolved for the as-of date
-	AsOf       string // the requested as-of date (YYYY-MM-DD)
-	chainLen   int    // archives in the restore chain (1 = full only, no incrementals)
-	root       *Node
+	DLE       string
+	TargetRun string // the run resolved for the as-of date
+	AsOf      string // the requested as-of date (YYYY-MM-DD)
+	chainLen  int    // archives in the restore chain (1 = full only, no incrementals)
+	root      *Node
 }
 
 // HasIncrementals reports whether the restore chain includes any incremental beyond
@@ -89,37 +89,37 @@ type Tree struct {
 // note on it.
 func (t *Tree) HasIncrementals() bool { return t.chainLen > 1 }
 
-// AsOf resolves an as-of point to the target slot: the most recent slot at or
-// before it. Slots must be in run order. The point is either a plain date
-// (YYYY-MM-DD — the most recent slot whose run date is on or before it, the
+// AsOf resolves an as-of point to the target run: the most recent run at or
+// before it. Runs must be in run order. The point is either a plain date
+// (YYYY-MM-DD — the most recent run whose run date is on or before it, the
 // long-standing behavior) or a date with a time component (YYYY-MM-DD HH[:MM[:SS]],
-// interpreted in UTC) — the most recent slot committed at or before the end of that
+// interpreted in UTC) — the most recent run committed at or before the end of that
 // period, so an earlier same-day run is reachable by naming its time.
 func AsOf(archives []record.Archive, asOf string) (string, error) {
 	bound, hasTime, err := parseAsOf(asOf)
 	if err != nil {
 		return "", err
 	}
-	// Group the archives into slots, in run order, each with its commit time (the latest
+	// Group the archives into runs, in run order, each with its commit time (the latest
 	// archive that landed in it).
 	last := map[string]time.Time{}
 	var ids []string
 	for _, a := range archives {
-		if _, seen := last[a.Slot]; !seen {
-			ids = append(ids, a.Slot)
+		if _, seen := last[a.Run]; !seen {
+			ids = append(ids, a.Run)
 		}
-		if a.CreatedAt.After(last[a.Slot]) {
-			last[a.Slot] = a.CreatedAt
+		if a.CreatedAt.After(last[a.Run]) {
+			last[a.Run] = a.CreatedAt
 		}
 	}
-	sort.Slice(ids, func(i, j int) bool { return record.SlotIDLess(ids[i], ids[j]) })
+	sort.Slice(ids, func(i, j int) bool { return record.RunIDLess(ids[i], ids[j]) })
 	target := ""
 	for _, id := range ids {
 		if hasTime {
-			if !slotTime(id, last[id]).After(bound) { // committed at or before the period's end
+			if !runTime(id, last[id]).After(bound) { // committed at or before the period's end
 				target = id
 			}
-		} else if record.SlotDate(id) <= asOf {
+		} else if record.RunDate(id) <= asOf {
 			target = id
 		}
 	}
@@ -132,7 +132,7 @@ func AsOf(archives []record.Archive, asOf string) (string, error) {
 // parseAsOf interprets an as-of string. A bare YYYY-MM-DD selects by run date
 // (hasTime false). A date with an hour/minute/second selects by time: bound is the
 // exclusive end of the named period (the hour, minute, or second), so "2026-06-29 14"
-// matches the latest slot committed during or before hour 14.
+// matches the latest run committed during or before hour 14.
 func parseAsOf(asOf string) (bound time.Time, hasTime bool, err error) {
 	for _, p := range []struct {
 		layout string
@@ -152,22 +152,22 @@ func parseAsOf(asOf string) (bound time.Time, hasTime bool, err error) {
 	return time.Time{}, false, fmt.Errorf("invalid as-of %q: want YYYY-MM-DD or 'YYYY-MM-DD HH[:MM[:SS]]'", asOf)
 }
 
-// slotTime is a slot's effective recovery instant: when its last archive committed, falling
-// back to its run date at midnight UTC for a slot whose archives carry no commit time (e.g.
-// one rebuilt from older media). last is the latest CreatedAt across the slot's archives.
-func slotTime(slotID string, last time.Time) time.Time {
+// runTime is a run's effective recovery instant: when its last archive committed, falling
+// back to its run date at midnight UTC for a run whose archives carry no commit time (e.g.
+// one rebuilt from older media). last is the latest CreatedAt across the run's archives.
+func runTime(runID string, last time.Time) time.Time {
 	if !last.IsZero() {
 		return last
 	}
-	t, _ := time.ParseInLocation("2006-01-02", record.SlotDate(slotID), time.UTC)
+	t, _ := time.ParseInLocation("2006-01-02", record.RunDate(runID), time.UTC)
 	return t
 }
 
 // BuildTree reconstructs the filesystem of dle as of asOf (YYYY-MM-DD) by merging
 // the member lists of the restore chain in run order, so each path resolves to the
 // most recent archive that holds it. The member lists are loaded via members (the
-// catalog cache holds the slot index, not the member lists — those are loaded lazily).
-func BuildTree(archives []record.Archive, dle, asOf string, members func(slotID string, level int) ([]string, error)) (*Tree, error) {
+// catalog cache holds the run index, not the member lists — those are loaded lazily).
+func BuildTree(archives []record.Archive, dle, asOf string, members func(runID string, level int) ([]string, error)) (*Tree, error) {
 	target, err := AsOf(archives, asOf)
 	if err != nil {
 		return nil, err
@@ -177,20 +177,20 @@ func BuildTree(archives []record.Archive, dle, asOf string, members func(slotID 
 		return nil, err
 	}
 	t := &Tree{
-		DLE:        dle,
-		TargetSlot: target,
-		AsOf:       asOf,
-		chainLen:   len(steps),
-		root:       &Node{dir: true, children: map[string]*Node{}},
+		DLE:       dle,
+		TargetRun: target,
+		AsOf:      asOf,
+		chainLen:  len(steps),
+		root:      &Node{dir: true, children: map[string]*Node{}},
 	}
 	for _, st := range steps {
-		ms, err := members(st.SlotID, st.Level)
+		ms, err := members(st.RunID, st.Level)
 		if err != nil {
 			return nil, err
 		}
 		for _, m := range ms {
 			t.insert(m, &Source{
-				SlotID: st.SlotID, DLE: dle, Level: st.Level,
+				RunID: st.RunID, DLE: dle, Level: st.Level,
 				Archiver: st.Archiver, Compress: st.Compress, Encrypt: st.Encrypt, Member: m,
 			})
 		}
@@ -257,7 +257,7 @@ func (t *Tree) Lookup(p string) (*Node, bool) {
 // ExtractStep is one archive to extract, with the exact member names to pull from
 // it. A file selection groups into the fewest steps — one per source archive.
 type ExtractStep struct {
-	SlotID   string
+	RunID    string
 	DLE      string
 	Level    int
 	Archiver string
@@ -293,26 +293,26 @@ func (t *Tree) Collect(paths []string) ([]ExtractStep, error) {
 	}
 
 	type key struct {
-		slot  string
+		run   string
 		level int
 	}
 	steps := map[key]*ExtractStep{}
 	var order []key
 	for _, cp := range sortedKeys(chosen) {
 		s := chosen[cp]
-		k := key{s.SlotID, s.Level}
+		k := key{s.RunID, s.Level}
 		st, ok := steps[k]
 		if !ok {
-			st = &ExtractStep{SlotID: s.SlotID, DLE: s.DLE, Level: s.Level, Archiver: s.Archiver, Compress: s.Compress, Encrypt: s.Encrypt}
+			st = &ExtractStep{RunID: s.RunID, DLE: s.DLE, Level: s.Level, Archiver: s.Archiver, Compress: s.Compress, Encrypt: s.Encrypt}
 			steps[k] = st
 			order = append(order, k)
 		}
 		st.Members = append(st.Members, s.Member)
 	}
-	// Run order: by slot id (date-sortable), then level.
+	// Run order: by run id (date-sortable), then level.
 	sort.Slice(order, func(i, j int) bool {
-		if order[i].slot != order[j].slot {
-			return order[i].slot < order[j].slot
+		if order[i].run != order[j].run {
+			return order[i].run < order[j].run
 		}
 		return order[i].level < order[j].level
 	})

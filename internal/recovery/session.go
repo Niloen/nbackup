@@ -22,7 +22,7 @@ func NewSession(tree *Tree) *Session {
 	return &Session{tree: tree, sel: map[string]bool{}}
 }
 
-// Tree returns the underlying browse tree (e.g. for its TargetSlot).
+// Tree returns the underlying browse tree (e.g. for its TargetRun).
 func (s *Session) Tree() *Tree { return s.tree }
 
 // Cwd returns the current directory as a clean path from the DLE root ("" = root).

@@ -23,7 +23,7 @@ type Profile interface {
 	TotalBytes() int64
 	// VolumeSize is the physical capacity of a single volume for striped media —
 	// one tape reel. It is 0 for media that are not volume-structured (object
-	// stores, where a slot is bounded only by the pool budget). It is the basis of
+	// stores, where a run is bounded only by the pool budget). It is the basis of
 	// the planner's per-run ceiling: a run fills the volume it lands on before it
 	// must spill to the next, so a single run cannot exceed one reel without an
 	// operator (or robot) swap. Distinct from TotalBytes because a bare drive has a
@@ -33,8 +33,8 @@ type Profile interface {
 	// retention floor (what must never be reclaimed, computed by the retention
 	// package). It returns the reclamations to perform, in deletion order. The
 	// granularity is the medium's own: an object store reclaims per archive
-	// (slot+DLE); a whole-volume medium (tape) reclaims nothing here. It reasons over
-	// the medium's archives directly (each carrying its slot tag) — a slot is just
+	// (run+DLE); a whole-volume medium (tape) reclaims nothing here. It reasons over
+	// the medium's archives directly (each carrying its run tag) — a run is just
 	// their grouping, which reclamation does not need.
 	Reclaim(archives []record.Archive, keep Retention, now time.Time) []Reclamation
 }
@@ -44,17 +44,17 @@ type Profile interface {
 // depends on the test rather than on the retention package; retention.Floor
 // satisfies it.
 type Retention interface {
-	KeepsArchive(slot, dle string) bool
+	KeepsArchive(run, dle string) bool
 }
 
-// Reclamation is one archive (slot+DLE) chosen for reclamation. (A whole-volume
+// Reclamation is one archive (run+DLE) chosen for reclamation. (A whole-volume
 // medium would name a volume instead, but tape reclamation is deferred — only the
 // per-archive object-store path is live.)
 type Reclamation struct {
-	SlotID string
-	DLE    string
-	Bytes  int64
-	Note   string
+	RunID string
+	DLE   string
+	Bytes int64
+	Note  string
 }
 
 // ProfileFactory constructs a Profile from generic options.
@@ -84,16 +84,16 @@ type sizeProfile struct {
 
 func (p sizeProfile) TotalBytes() int64 { return p.capacity }
 
-// VolumeSize is 0: object stores are not volume-structured, so a slot is bounded
+// VolumeSize is 0: object stores are not volume-structured, so a run is bounded
 // only by the pool budget, never by a per-volume reel size.
 func (p sizeProfile) VolumeSize() int64 { return 0 }
 
 // Reclaim deletes the oldest non-protected archives until total <= capacity.
-// Reclamation is per archive (slot+DLE): because the retention floor is per-archive (a
-// DLE's chain is independent of its slot-mates'), an old slot often holds one DLE whose
+// Reclamation is per archive (run+DLE): because the retention floor is per-archive (a
+// DLE's chain is independent of its run-mates'), an old run often holds one DLE whose
 // chain has moved on — reclaimable — beside another the chain still needs. Walking
-// archives oldest-first reclaims exactly the dead ones, freeing space a slot-granular
-// pass would strand behind a single still-pinned DLE. Archives are ordered by their slot
+// archives oldest-first reclaims exactly the dead ones, freeing space a run-granular
+// pass would strand behind a single still-pinned DLE. Archives are ordered by their run
 // (run order, oldest first) then DLE for a deterministic plan.
 func (p sizeProfile) Reclaim(archives []record.Archive, keep Retention, now time.Time) []Reclamation {
 	if p.capacity <= 0 {
@@ -108,8 +108,8 @@ func (p sizeProfile) Reclaim(archives []record.Archive, keep Retention, now time
 	}
 	ordered := append([]record.Archive(nil), archives...)
 	sort.Slice(ordered, func(i, j int) bool {
-		if ordered[i].Slot != ordered[j].Slot {
-			return record.SlotIDLess(ordered[i].Slot, ordered[j].Slot) // oldest slot first
+		if ordered[i].Run != ordered[j].Run {
+			return record.RunIDLess(ordered[i].Run, ordered[j].Run) // oldest run first
 		}
 		return ordered[i].DLE < ordered[j].DLE
 	})
@@ -118,10 +118,10 @@ func (p sizeProfile) Reclaim(archives []record.Archive, keep Retention, now time
 		if total <= p.capacity {
 			return out
 		}
-		if keep.KeepsArchive(a.Slot, a.DLE) {
+		if keep.KeepsArchive(a.Run, a.DLE) {
 			continue
 		}
-		out = append(out, Reclamation{SlotID: a.Slot, DLE: a.DLE, Bytes: a.Compressed, Note: "over capacity"})
+		out = append(out, Reclamation{RunID: a.Run, DLE: a.DLE, Bytes: a.Compressed, Note: "over capacity"})
 		total -= a.Compressed
 	}
 	return out

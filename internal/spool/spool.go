@@ -29,32 +29,32 @@ import (
 // Routing is the caller's: the dumper resolves each DLE's landing and asks the spool for that
 // backing's store. The spool decides per archive whether to stage it on a holding disk (then drain it
 // to the landing later) or, when no disk fits or none is configured, write it straight to the landing.
-// Per-backing Slots serialize a serial medium (a tape writes one archive at a time); a concurrent
-// medium (cloud/disk) runs Slots writers at once. Holding back-pressure is the Pool's. A backing
+// Per-backing Writers serialize a serial medium (a tape writes one archive at a time); a concurrent
+// medium (cloud/disk) runs Writers writers at once. Holding back-pressure is the Pool's. A backing
 // failure aborts the run so producers stop and the run fails — never dropping data — and a rerun fills
 // in.
 
 // Backing is one landing the spool drains (or writes) archives to: its medium name, the WriteStore it
 // lands on (the clerk Session, which the spool wraps in a routing WriteStore), the medium's byte-rate
-// Limiter, and Slots — how many writes to it may run at once (1 while buffering or for a serial
+// Limiter, and Writers — how many writes to it may run at once (1 while buffering or for a serial
 // single-drive medium, else the worker count).
 type Backing struct {
 	Name string
 	// Stores is the landing's write stores, one per concurrent writer: a single store shared by all
 	// writers for a concurrent medium (disk/cloud), or one per drive for a serial multi-drive tape
 	// library. Each is only written; the spool wraps it and builds writers over it.
-	Stores []archiveio.WriteStore
-	Slots  int
-	Lim    *ratelimit.Limiter
+	Stores  []archiveio.WriteStore
+	Writers int
+	Lim     *ratelimit.Limiter
 }
 
 // Config is what the conductor wires a Spool from: the Backings it drains to (the run's landings), the
-// Holding Pool (empty = never buffer), the SlotSpec + clock the spool authors concurrent writers with,
+// Holding Pool (empty = never buffer), the RunSpec + clock the spool authors concurrent writers with,
 // and the run's progress + log seams.
 type Config struct {
 	Backings []Backing
 	Holding  *Pool
-	Spec     archiveio.SlotSpec
+	Spec     archiveio.RunSpec
 	Now      func() time.Time
 	Tracker  *progress.Tracker
 	Logf     func(format string, args ...any)
@@ -209,7 +209,7 @@ type Spool struct {
 	orch     *orchestrator
 	backings map[string]*backing
 	pool     *Pool
-	spec     archiveio.SlotSpec // authors concurrent writers with the run's slot id
+	spec     archiveio.RunSpec // authors concurrent writers with the run id
 	now      func() time.Time
 	tr       *progress.Tracker
 	logf     func(format string, args ...any)
@@ -249,15 +249,15 @@ func New(ctx context.Context, cfg Config) *Spool {
 		sp.logf = func(string, ...any) {}
 	}
 	for _, b := range cfg.Backings {
-		slots := b.Slots
-		if slots < 1 {
-			slots = 1
+		writers := b.Writers
+		if writers < 1 {
+			writers = 1
 		}
 		// free holds one entry per concurrent writer. A multi-store backing (a tape drive per store)
-		// hands out distinct indices 0..slots-1; a single-store backing (disk/cloud) hands out index 0
+		// hands out distinct indices 0..writers-1; a single-store backing (disk/cloud) hands out index 0
 		// repeated, so its writers share the one store (their control serialises on the orchestrator).
-		free := make(chan int, slots)
-		for k := 0; k < slots; k++ {
+		free := make(chan int, writers)
+		for k := 0; k < writers; k++ {
 			idx := k
 			if idx > len(b.Stores)-1 {
 				idx = len(b.Stores) - 1
@@ -297,7 +297,7 @@ func (h backingHandle) NewArchive(spec archiveio.ArchiveSpec, est int64) (*archi
 	return h.sp.newArchive(h.b, spec, est)
 }
 
-// writerOver authors a concurrent slot writer over store: a fresh archiveio.Author whose WriteStore is
+// writerOver authors a concurrent writer over store: a fresh archiveio.Author whose WriteStore is
 // store wrapped in a routedWriteStore, so its alloc + Record hop to the orchestrator while its byte I/O
 // runs on the caller's goroutine. Cheap enough to build per write.
 func (sp *Spool) writerOver(store archiveio.WriteStore, lim *ratelimit.Limiter) *archiveio.Author {
@@ -307,7 +307,7 @@ func (sp *Spool) writerOver(store archiveio.WriteStore, lim *ratelimit.Limiter) 
 // newArchive reserves ingestion for an archive bound for backing b, estimated at est bytes, and
 // returns the archiveio writer to transfer it into. It blocks for back-pressure: a holding write waits
 // while every fitting disk is over capacity; a direct write (no disk fits, or none configured) waits
-// for a free slot on b. The writer's control calls route onto the orchestrator (it is built over a
+// for a free writer on b. The writer's control calls route onto the orchestrator (it is built over a
 // routedWriteStore), and its Close hook releases whatever the write leased. It returns the run's error if
 // the spool has aborted.
 func (sp *Spool) newArchive(b *backing, spec archiveio.ArchiveSpec, est int64) (*archiveio.ArchiveWriter, error) {
@@ -357,7 +357,7 @@ func (sp *Spool) newArchive(b *backing, spec archiveio.ArchiveSpec, est int64) (
 }
 
 // drain copies one staged archive from holding disk idx to backing b, then reclaims the holding copy.
-// It runs on its own goroutine, holding one of b's slots for the copy so it serializes with direct
+// It runs on its own goroutine, holding one of b's writers for the copy so it serializes with direct
 // writes and other drains to b. A failure aborts the run.
 func (sp *Spool) drain(idx int, hres archiveio.CommitResult, b *backing) {
 	defer sp.drains.Done()
@@ -406,8 +406,8 @@ func (sp *Spool) copyOne(idx int, hres archiveio.CommitResult, b *backing, store
 
 // Drain signals the producers are done and waits for every queued holding->landing drain to finish,
 // then stops the orchestrator, returning the run's error if any drain (or a backing) failed. There is
-// no slot to return — each backing's committed archives are already in the catalog (recorded as they
-// committed), so the run's slot is read from there.
+// no run object to return — each backing's committed archives are already in the catalog (recorded as they
+// committed), so the run is read from there.
 func (sp *Spool) Drain() error {
 	sp.drains.Wait()
 	close(sp.closed)

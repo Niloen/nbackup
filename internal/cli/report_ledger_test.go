@@ -72,7 +72,7 @@ func TestRenderDrillLedgerAllHealthy(t *testing.T) {
 func TestReportCommand(t *testing.T) {
 	dir := t.TempDir()
 	for _, r := range []report.Run{
-		{Command: report.CommandDump, Outcome: report.OutcomeSuccess, SlotID: "slot-2026-06-24.001", BytesMoved: 2048,
+		{Command: report.CommandDump, Outcome: report.OutcomeSuccess, RunID: "run-2026-06-24.001", BytesMoved: 2048,
 			StartedAt: time.Now().Add(-time.Hour), EndedAt: time.Now().Add(-time.Hour)},
 		{Command: report.CommandSync, Outcome: report.OutcomeFailure, ExitClass: "sync-error", Error: "offline",
 			StartedAt: time.Now(), EndedAt: time.Now()},
@@ -89,7 +89,7 @@ func TestReportCommand(t *testing.T) {
 			t.Fatalf("report command: %v", err)
 		}
 	})
-	for _, want := range []string{"2 run(s)", "1 run(s) FAILED", "slot-2026-06-24.001", "sync-error", "offline"} {
+	for _, want := range []string{"2 run(s)", "1 run(s) FAILED", "run-2026-06-24.001", "sync-error", "offline"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report output missing %q\n---\n%s", want, out)
 		}
@@ -98,10 +98,10 @@ func TestReportCommand(t *testing.T) {
 
 func TestReportDumpCommand(t *testing.T) {
 	dir := t.TempDir()
-	older := report.Run{Command: report.CommandDump, Outcome: report.OutcomeSuccess, SlotID: "slot-2026-06-23.001",
+	older := report.Run{Command: report.CommandDump, Outcome: report.OutcomeSuccess, RunID: "run-2026-06-23.001",
 		StartedAt: time.Now().Add(-24 * time.Hour), EndedAt: time.Now().Add(-24 * time.Hour),
 		DumpStats: []report.DLEStat{{DLE: "old-dle", Level: 0, Orig: 1 << 20, Out: 1 << 19, Files: 5, Seconds: 2}}}
-	latest := report.Run{Command: report.CommandDump, Outcome: report.OutcomeSuccess, SlotID: "slot-2026-06-24.001",
+	latest := report.Run{Command: report.CommandDump, Outcome: report.OutcomeSuccess, RunID: "run-2026-06-24.001",
 		StartedAt: time.Now(), EndedAt: time.Now(),
 		DumpStats: []report.DLEStat{{DLE: "app01-home", Level: 0, Orig: 20 << 30, Out: 5 << 30, Files: 1240, Seconds: 724}}}
 	for _, r := range []report.Run{older, latest} {
@@ -118,30 +118,30 @@ func TestReportDumpCommand(t *testing.T) {
 			t.Fatalf("report --dump: %v", err)
 		}
 	})
-	if !strings.Contains(out, "slot-2026-06-24.001") || !strings.Contains(out, "app01-home") {
+	if !strings.Contains(out, "run-2026-06-24.001") || !strings.Contains(out, "app01-home") {
 		t.Errorf("--dump should report the latest dump, got:\n%s", out)
 	}
 	if strings.Contains(out, "old-dle") {
 		t.Errorf("--dump reported a stale dump:\n%s", out)
 	}
 
-	// --slot selects a specific (older) dump.
+	// --run selects a specific (older) dump.
 	out = captureStdout(t, func() {
 		root := NewRootCmd()
-		root.SetArgs([]string{"--catalog", dir, "report", "--slot", "slot-2026-06-23.001"})
+		root.SetArgs([]string{"--catalog", dir, "report", "--run", "run-2026-06-23.001"})
 		if err := root.Execute(); err != nil {
-			t.Fatalf("report --slot: %v", err)
+			t.Fatalf("report --run: %v", err)
 		}
 	})
-	if !strings.Contains(out, "slot-2026-06-23.001") || !strings.Contains(out, "old-dle") {
-		t.Errorf("--slot should report the named dump, got:\n%s", out)
+	if !strings.Contains(out, "run-2026-06-23.001") || !strings.Contains(out, "old-dle") {
+		t.Errorf("--run should report the named dump, got:\n%s", out)
 	}
 
-	// An unknown slot is a clear error pointing at `nb slot <id>`.
+	// An unknown run is a clear error pointing at `nb run <id>`.
 	root := NewRootCmd()
-	root.SetArgs([]string{"--catalog", dir, "report", "--slot", "slot-9999-99-99.001"})
-	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "nb slot slot-9999-99-99.001") {
-		t.Errorf("unknown --slot error = %v, want a pointer to `nb slot <id>`", err)
+	root.SetArgs([]string{"--catalog", dir, "report", "--run", "run-9999-99-99.001"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "nb run run-9999-99-99.001") {
+		t.Errorf("unknown --run error = %v, want a pointer to `nb run <id>`", err)
 	}
 }
 

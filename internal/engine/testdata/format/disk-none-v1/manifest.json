@@ -6,7 +6,7 @@
   "compress": "none",
   "restores": [
     {
-      "slot": "slot-2026-06-21.001",
+      "run": "run-2026-06-21.001",
       "dle": "localhost-data",
       "files": {
         "gone.txt": "temp",
@@ -15,7 +15,7 @@
       }
     },
     {
-      "slot": "slot-2026-06-22.001",
+      "run": "run-2026-06-22.001",
       "dle": "localhost-data",
       "files": {
         "keep.txt": "v2",

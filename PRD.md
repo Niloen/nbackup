@@ -1,7 +1,7 @@
 # PRD: NBackup (Working Title)
 
 This is the product vision: the goals and their priority order. *How* NBackup
-realizes them — the slot format, the planner, media, drills — lives in the
+realizes them — the run format, the planner, media, drills — lives in the
 [README](README.md) (user-facing) and [ARCHITECTURE.md](ARCHITECTURE.md)
 (internal). This document deliberately avoids that detail.
 

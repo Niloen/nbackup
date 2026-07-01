@@ -23,7 +23,7 @@ type memStore struct {
 
 func newMemStore() *memStore { return &memStore{files: map[string][]byte{}} }
 
-func (s *memStore) Key(slot, name string) string { return slot + "/" + name }
+func (s *memStore) Key(run, name string) string { return run + "/" + name }
 
 func (s *memStore) Writer(_ context.Context, key string) (io.WriteCloser, error) {
 	return &memWriter{s: s, key: key}, nil
@@ -76,17 +76,17 @@ func (s *memStore) List() ([]Object, error) {
 	defer s.mu.Unlock()
 	var out []Object
 	for key := range s.files {
-		slot, name, _ := strings.Cut(key, "/")
-		out = append(out, Object{Key: key, Slot: slot, Base: name})
+		run, name, _ := strings.Cut(key, "/")
+		out = append(out, Object{Key: key, Run: run, Base: name})
 	}
 	return out, nil
 }
 
-func (s *memStore) RemoveTree(slot string) error {
+func (s *memStore) RemoveTree(run string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key := range s.files {
-		if strings.HasPrefix(key, slot+"/") {
+		if strings.HasPrefix(key, run+"/") {
 			delete(s.files, key)
 		}
 	}
@@ -100,10 +100,10 @@ func (s *memStore) Remove(key string) error {
 	return nil
 }
 
-func appendArchive(t *testing.T, v *Volume, slot, dle, payload string) int {
+func appendArchive(t *testing.T, v *Volume, run, dle, payload string) int {
 	t.Helper()
 	fw, err := v.AppendFile(context.Background(),
-		record.Header{Slot: slot, Kind: record.KindArchive, DLE: dle, Level: 0, Compress: "none"})
+		record.Header{Run: run, Kind: record.KindArchive, DLE: dle, Level: 0, Compress: "none"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,8 +117,8 @@ func appendArchive(t *testing.T, v *Volume, slot, dle, payload string) int {
 }
 
 // TestReclaimSparesInFlightAppend reproduces the holding-disk corruption: dumpers
-// append into one slot directory while the drain reclaims drained archives from the
-// same slot. When a reclaim removed a slot's last *indexed* file, it used to RemoveTree
+// append into one run directory while the drain reclaims drained archives from the
+// same run. When a reclaim removed a run's last *indexed* file, it used to RemoveTree
 // the directory based on the lagging in-memory index — destroying a payload another
 // dumper had just written but not yet indexed. The position-reservation in AppendFile
 // must make the reclaim see the in-flight append and spare its directory.
@@ -129,9 +129,9 @@ func TestReclaimSparesInFlightAppend(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A previously drained archive's leftover file, the reclaim's target.
-	posA := appendArchive(t, v, "slot-x", "done", "AAA")
+	posA := appendArchive(t, v, "run-x", "done", "AAA")
 
-	// A second dumper begins appending into the same slot. Block inside Write — the
+	// A second dumper begins appending into the same run. Block inside Write — the
 	// in-flight payload is on disk but not yet finalized — until the reclaim has run.
 	reached := make(chan struct{})
 	release := make(chan struct{})
@@ -142,10 +142,10 @@ func TestReclaimSparesInFlightAppend(t *testing.T) {
 		}
 	}
 	done := make(chan int, 1)
-	go func() { done <- appendArchive(t, v, "slot-x", "inflight", "BBB") }()
+	go func() { done <- appendArchive(t, v, "run-x", "inflight", "BBB") }()
 
 	<-reached
-	// The drain reclaims slot-x's last indexed file while the second append is mid-flight.
+	// The drain reclaims run-x's last indexed file while the second append is mid-flight.
 	if err := v.RemoveFile(posA); err != nil {
 		t.Fatalf("RemoveFile: %v", err)
 	}
@@ -174,9 +174,9 @@ func TestIncompleteFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	appendArchive(t, v, "slot-x", "app", "AAA") // a complete pair (payload + .hdr)
+	appendArchive(t, v, "run-x", "app", "AAA") // a complete pair (payload + .hdr)
 	// A torn append: a payload object at a conforming position with no .hdr sidecar.
-	if err := st.WriteAll(context.Background(), "slot-x/7-torn.tar", []byte("BBB")); err != nil {
+	if err := st.WriteAll(context.Background(), "run-x/7-torn.tar", []byte("BBB")); err != nil {
 		t.Fatal(err)
 	}
 	// Reopen so scan() reindexes from the store and marks the torn position incomplete.

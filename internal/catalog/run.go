@@ -6,23 +6,23 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-// Slot is a run's grouping of archives, identified by its slot id — the tag every archive in
-// the run carries (record.Archive.Slot). It is the catalog's in-memory unit for storage and
+// Run is a run's grouping of archives, identified by its run id — the tag every archive in
+// the run carries (record.Archive.Run). It is the catalog's in-memory unit for storage and
 // display; it is not a record on the medium (the media carry only the per-archive commit
-// footers, which a scan groups back into slots by their shared id). Every fact about a slot
+// footers, which a scan groups back into runs by their shared id). Every fact about a run
 // derives from the id and its archives: the date from the id, the byte total and last-activity
 // time from the archives. The policy layer (retention, restore, recovery, drill, reclamation)
 // works on the archives directly and never needs this grouping.
-type Slot struct {
+type Run struct {
 	ID       string           `json:"id"`
 	Archives []record.Archive `json:"archives"`
 }
 
-// Date is the run date (YYYY-MM-DD) encoded in the slot id.
-func (s *Slot) Date() string { return record.SlotDate(s.ID) }
+// Date is the run date (YYYY-MM-DD) encoded in the run id.
+func (s *Run) Date() string { return record.RunDate(s.ID) }
 
-// TotalBytes sums the compressed sizes of the slot's archives.
-func (s *Slot) TotalBytes() int64 {
+// TotalBytes sums the compressed sizes of the run's archives.
+func (s *Run) TotalBytes() int64 {
 	var n int64
 	for _, a := range s.Archives {
 		n += a.Compressed
@@ -30,9 +30,9 @@ func (s *Slot) TotalBytes() int64 {
 	return n
 }
 
-// LastArchiveAt is when the slot's most recently committed archive landed — the slot's "last
-// activity", for display. Zero when the slot has no archives.
-func (s *Slot) LastArchiveAt() time.Time {
+// LastArchiveAt is when the run's most recently committed archive landed — the run's "last
+// activity", for display. Zero when the run has no archives.
+func (s *Run) LastArchiveAt() time.Time {
 	var last time.Time
 	for _, a := range s.Archives {
 		if a.CreatedAt.After(last) {
@@ -42,10 +42,10 @@ func (s *Slot) LastArchiveAt() time.Time {
 	return last
 }
 
-// addArchive merges a into the slot's content, replacing any prior archive of the same
+// addArchive merges a into the run's content, replacing any prior archive of the same
 // (DLE, level). The content is the union of every archive the run produces, independent of
 // which medium currently holds each copy.
-func (s *Slot) addArchive(a record.Archive) {
+func (s *Run) addArchive(a record.Archive) {
 	for i := range s.Archives {
 		if s.Archives[i].DLE == a.DLE && s.Archives[i].Level == a.Level {
 			s.Archives[i] = a
@@ -56,9 +56,9 @@ func (s *Slot) addArchive(a record.Archive) {
 }
 
 // dropArchive removes a DLE's archive, the inverse of addArchive. Used when the last copy of
-// that DLE's image has been reclaimed, so the slot's content no longer advertises an image no
+// that DLE's image has been reclaimed, so the run's content no longer advertises an image no
 // medium holds. Reports whether an archive was removed.
-func (s *Slot) dropArchive(dle string) bool {
+func (s *Run) dropArchive(dle string) bool {
 	kept := s.Archives[:0:0]
 	removed := false
 	for _, a := range s.Archives {

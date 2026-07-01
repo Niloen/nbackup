@@ -10,17 +10,17 @@ import (
 
 // progressTracker builds the run's dump-phase tracker and the log function to use under it. It
 // takes over fileSink — the run-status file the estimate phase opened — so `nb status` sees one
-// continuous dump cycle, now under the real slot ID. A live terminal sink (when attached) paints
+// continuous dump cycle, now under the real run ID. A live terminal sink (when attached) paints
 // the same snapshots and suppresses the per-DLE log lines (runLogf becomes nil) so they don't
 // scribble over the in-place region. Progress reporting never blocks or fails the backup.
-func (c *Conductor) progressTracker(slotID string, workers int, items []planner.Item, fileSink progress.Sink, lf logf.Logf) (*progress.Tracker, logf.Logf) {
+func (c *Conductor) progressTracker(runID string, workers int, items []planner.Item, fileSink progress.Sink, lf logf.Logf) (*progress.Tracker, logf.Logf) {
 	sink := fileSink
 	runLogf := lf
 	if c.d.RunSink != nil {
 		sink = progress.MultiSink(fileSink, c.d.RunSink)
 		runLogf = nil
 	}
-	return progress.NewTracker(slotID, progress.PhaseRunning, workers, planProgress(items), time.Now, sink), runLogf
+	return progress.NewTracker(runID, progress.PhaseRunning, workers, planProgress(items), time.Now, sink), runLogf
 }
 
 // keepEstimating adapts the estimate phase's status-file sink so the file stays

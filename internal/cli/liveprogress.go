@@ -47,7 +47,7 @@ func estimateLines(s progress.Snapshot) []string {
 // progress against estimate, and a running total.
 func runLines(s progress.Snapshot) []string {
 	active, done, failed, pending := s.Counts()
-	head := fmt.Sprintf("Dumping %s  %d done / %d active / %d pending", s.SlotID, done, active, pending)
+	head := fmt.Sprintf("Dumping %s  %d done / %d active / %d pending", s.RunID, done, active, pending)
 	if failed > 0 {
 		head += fmt.Sprintf(" / %d FAILED", failed)
 	}

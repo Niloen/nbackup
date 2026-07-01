@@ -1,6 +1,6 @@
 title: Niloen Backup
 description: >-
-  Niloen Backup (NBackup) — an Amanda-inspired, slot-based backup system with
+  Niloen Backup (NBackup) — an Amanda-inspired, run-based backup system with
   first-class disk, cloud, and tape storage. Backups are immutable, self-describing,
   and restore with stock tools.
 remote_theme: just-the-docs/just-the-docs

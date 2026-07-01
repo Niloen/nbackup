@@ -26,7 +26,7 @@ type Record struct {
 	Tier      string    `json:"tier"`             // drill.Tier token exercised
 	Medium    string    `json:"medium"`           // source medium the drill read from
 	AsOf      string    `json:"as_of"`            // point-in-time drilled (YYYY-MM-DD)
-	SlotID    string    `json:"slot_id"`          // target slot the chain restored to
+	RunID     string    `json:"run_id"`           // target run the chain restored to
 	OK        bool      `json:"ok"`               // passed
 	Class     string    `json:"class,omitempty"`  // failure class token when !OK
 	Detail    string    `json:"detail,omitempty"` // human-readable reason when !OK

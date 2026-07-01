@@ -30,7 +30,7 @@ func Fatalf(format string, args ...any) {
 }
 
 // today is today's date at local midnight — the run-date default and the
-// past/future boundary the plan/dump guards compare against. Slot dates are the
+// past/future boundary the plan/dump guards compare against. Run dates are the
 // operator's local calendar day (the day on the wall clock), so "today" and the
 // guards reason in that same local zone.
 func today() time.Time {
@@ -39,7 +39,7 @@ func today() time.Time {
 }
 
 // ParseDate parses a YYYY-MM-DD date in the local zone, or returns today (local)
-// when empty. Local so an explicit --date names the same calendar day the slot id
+// when empty. Local so an explicit --date names the same calendar day the run id
 // will carry.
 func ParseDate(s string) (time.Time, error) {
 	if s == "" {
@@ -65,7 +65,7 @@ func errPastPlan(date time.Time) error {
 
 // errPastDump rejects dumping for a date already behind today. Backdating a run
 // is not a supported use case: the planner only consults history strictly before
-// the run date, so a past date would mis-level the new slot (climbing the global
+// the run date, so a past date would mis-level the new run (climbing the global
 // incremental level rather than starting that date's own chain) and splice an
 // out-of-order archive into date-ordered restore chains. Today and future are fine.
 func errPastDump(date time.Time) error {
@@ -100,7 +100,7 @@ func loadConfigRO(cfgPath, catalogOverride string) (*config.Config, error) {
 		// A -c path the operator gave explicitly but that does not exist is a hard
 		// error: a typo'd path must not silently look like an empty catalog (exit 0)
 		// to a script or monitor. Only the *default* nbackup.yaml being absent is
-		// tolerated, so a bare `nb slot` can still browse a local catalog.
+		// tolerated, so a bare `nb run` can still browse a local catalog.
 		if cfgPath != DefaultConfigPath {
 			return nil, fmt.Errorf("no config file at %s — check the -c path", cfgPath)
 		}
@@ -118,7 +118,7 @@ func loadConfigRO(cfgPath, catalogOverride string) (*config.Config, error) {
 
 // loadConfigRORequire is loadConfigRO for read-only *assertion* commands (verify):
 // it never synthesizes a default catalog when no config file exists. A monitor that
-// scrapes the exit code must see a clear failure rather than a green "0 slot(s)
+// scrapes the exit code must see a clear failure rather than a green "0 run(s)
 // verified" in a directory that simply has no config. A --catalog override still
 // lets it inspect an existing catalog directly.
 func loadConfigRORequire(cfgPath, catalogOverride string) (*config.Config, error) {
@@ -272,7 +272,7 @@ func reelDesc(b media.VolumeStatus, medium string) string {
 	}
 	// reelDesc only surfaces the "full" case (decided before appendability matters),
 	// so the appendable flag is immaterial here; pass the common default. It has no
-	// catalog here, so pass hasSlots=true to keep the reclaimable-orphan branch (a
+	// catalog here, so pass hasRuns=true to keep the reclaimable-orphan branch (a
 	// catalog-derived inventory concern) out of the swap prompt.
 	label, status := volumeLabelStatus(b, medium, true, true)
 	if status == "full" {

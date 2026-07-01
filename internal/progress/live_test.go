@@ -45,11 +45,11 @@ func TestLiveSinkPaintsAndErases(t *testing.T) {
 	t.Setenv("COLUMNS", "80")
 	var buf strings.Builder
 	lines := func(s Snapshot) []string {
-		return []string{"head", "  row " + s.SlotID}
+		return []string{"head", "  row " + s.RunID}
 	}
 	sink := LiveSink(&buf, lines)
 
-	sink(Snapshot{SlotID: "a", Phase: PhaseRunning}, true)
+	sink(Snapshot{RunID: "a", Phase: PhaseRunning}, true)
 	out := buf.String()
 	if !strings.Contains(out, "head") || !strings.Contains(out, "row a") {
 		t.Fatalf("first frame missing content: %q", out)
@@ -59,7 +59,7 @@ func TestLiveSinkPaintsAndErases(t *testing.T) {
 	}
 
 	buf.Reset()
-	sink(Snapshot{SlotID: "b", Phase: PhaseRunning}, true)
+	sink(Snapshot{RunID: "b", Phase: PhaseRunning}, true)
 	out = buf.String()
 	if !strings.Contains(out, "\033[1A") { // rewind one row above the 2-line frame
 		t.Fatalf("repaint should rewind over previous frame: %q", out)
@@ -69,7 +69,7 @@ func TestLiveSinkPaintsAndErases(t *testing.T) {
 	}
 
 	buf.Reset()
-	sink(Snapshot{SlotID: "b", Phase: PhaseDone}, true)
+	sink(Snapshot{RunID: "b", Phase: PhaseDone}, true)
 	out = buf.String()
 	if !strings.Contains(out, "\033[J") || strings.Contains(out, "head") {
 		t.Fatalf("terminal phase should erase the region without repainting: %q", out)
@@ -82,11 +82,11 @@ func TestLiveSinkPaintsAndErases(t *testing.T) {
 func TestLiveSinkSingleLineFrameNeverMovesUp(t *testing.T) {
 	t.Setenv("COLUMNS", "80")
 	var buf strings.Builder
-	sink := LiveSink(&buf, func(s Snapshot) []string { return []string{"only one line " + s.SlotID} })
+	sink := LiveSink(&buf, func(s Snapshot) []string { return []string{"only one line " + s.RunID} })
 
-	sink(Snapshot{SlotID: "a", Phase: PhaseRunning}, true) // first paint of a 1-line frame
+	sink(Snapshot{RunID: "a", Phase: PhaseRunning}, true) // first paint of a 1-line frame
 	buf.Reset()
-	sink(Snapshot{SlotID: "b", Phase: PhaseRunning}, true) // repaint over the 1-line frame
+	sink(Snapshot{RunID: "b", Phase: PhaseRunning}, true) // repaint over the 1-line frame
 	if strings.Contains(buf.String(), "\033[0A") {
 		t.Fatalf("single-line repaint must not emit ESC[0A: %q", buf.String())
 	}
@@ -95,7 +95,7 @@ func TestLiveSinkSingleLineFrameNeverMovesUp(t *testing.T) {
 	}
 
 	buf.Reset()
-	sink(Snapshot{SlotID: "b", Phase: PhaseDone}, true) // terminal erase of the 1-line frame
+	sink(Snapshot{RunID: "b", Phase: PhaseDone}, true) // terminal erase of the 1-line frame
 	if strings.Contains(buf.String(), "\033[0A") {
 		t.Fatalf("single-line terminal erase must not emit ESC[0A: %q", buf.String())
 	}

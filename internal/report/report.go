@@ -54,12 +54,12 @@ type Run struct {
 
 	// What ran / moved. "Bytes moved" is uniform across commands: bytes sealed
 	// (dump), copied (sync), or freed (prune) by this run.
-	SlotID      string `json:"slot_id,omitempty"`      // dump: the sealed slot
-	Archives    int    `json:"archives,omitempty"`     // dump: archive count
-	BytesMoved  int64  `json:"bytes_moved,omitempty"`  // dump sealed / sync copied / prune freed
-	SlotsCopied int    `json:"slots_copied,omitempty"` // sync
-	SlotsPruned int    `json:"slots_pruned,omitempty"` // prune
-	Failures    int    `json:"failures,omitempty"`     // verify/drill failure count
+	RunID      string `json:"run_id,omitempty"`      // dump: the sealed run
+	Archives   int    `json:"archives,omitempty"`    // dump: archive count
+	BytesMoved int64  `json:"bytes_moved,omitempty"` // dump sealed / sync copied / prune freed
+	RunsCopied int    `json:"runs_copied,omitempty"` // sync
+	RunsPruned int    `json:"runs_pruned,omitempty"` // prune
+	Failures   int    `json:"failures,omitempty"`    // verify/drill failure count
 
 	// Drill-only coverage + per-DLE health, so a digest can flag trends.
 	DrillHealth  []DrillHealth `json:"drill_health,omitempty"`

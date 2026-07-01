@@ -31,10 +31,10 @@ func TestRejectsPartSize(t *testing.T) {
 	}
 }
 
-func appendArchive(t *testing.T, v media.Volume, slot, dle string, level int, payload string) int {
+func appendArchive(t *testing.T, v media.Volume, run, dle string, level int, payload string) int {
 	t.Helper()
 	pos, err := writeFileT(v,
-		record.Header{Slot: slot, Kind: record.KindArchive, DLE: dle, Level: level, Compress: "none"},
+		record.Header{Run: run, Kind: record.KindArchive, DLE: dle, Level: level, Compress: "none"},
 		func(w io.Writer) error { _, e := w.Write([]byte(payload)); return e },
 	)
 	if err != nil {
@@ -47,7 +47,7 @@ func TestVolumeRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	v := openVol(t, dir)
 
-	pos := appendArchive(t, v, "slot-2026-06-22.001", "h-data", 0, "hello world")
+	pos := appendArchive(t, v, "run-2026-06-22.001", "h-data", 0, "hello world")
 
 	h, rc, err := v.ReadFile(pos)
 	if err != nil {
@@ -67,8 +67,8 @@ func TestVolumeRoundTrip(t *testing.T) {
 
 	// The on-disk payload file is a CLEAN archive (no header to skip) and the
 	// header lives in a separate .hdr sidecar — usable directly with stock tools.
-	slotDir := filepath.Join(dir, "slots", "slot-2026-06-22.001")
-	entries, err := os.ReadDir(slotDir)
+	runDir := filepath.Join(dir, "runs", "run-2026-06-22.001")
+	entries, err := os.ReadDir(runDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestVolumeRoundTrip(t *testing.T) {
 	if hdrName == "" || payloadName == "" {
 		t.Fatalf("expected a payload + .hdr sidecar, got %v", entries)
 	}
-	raw, err := os.ReadFile(filepath.Join(slotDir, payloadName))
+	raw, err := os.ReadFile(filepath.Join(runDir, payloadName))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestConcurrentAppend(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			positions[i] = appendArchive(t, v, "slot-x", fmt.Sprintf("dle-%d", i), 0, fmt.Sprintf("payload-%d", i))
+			positions[i] = appendArchive(t, v, "run-x", fmt.Sprintf("dle-%d", i), 0, fmt.Sprintf("payload-%d", i))
 		}(i)
 	}
 	wg.Wait()
@@ -142,18 +142,18 @@ func TestConcurrentAppend(t *testing.T) {
 // TestOrphanPayloadIgnored simulates an interrupted dump: the payload is written
 // but the process dies before the .hdr sidecar. A later reopen must ignore the
 // orphan rather than index a header-less position — otherwise Files() reads an
-// empty header key and fails with "is a directory" on the slots root.
+// empty header key and fails with "is a directory" on the runs root.
 func TestOrphanPayloadIgnored(t *testing.T) {
 	dir := t.TempDir()
 	v := openVol(t, dir)
-	pos := appendArchive(t, v, "slot-2026-06-22.001", "h-data", 0, "good")
+	pos := appendArchive(t, v, "run-2026-06-22.001", "h-data", 0, "good")
 
-	// Drop a bare payload (no sidecar) into a fresh slot, as an aborted Write would.
-	orphanSlot := filepath.Join(dir, "slots", "slot-2026-06-25.001")
-	if err := os.MkdirAll(orphanSlot, 0o755); err != nil {
+	// Drop a bare payload (no sidecar) into a fresh run, as an aborted Write would.
+	orphanRun := filepath.Join(dir, "runs", "run-2026-06-25.001")
+	if err := os.MkdirAll(orphanRun, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(orphanSlot, "000000-h_data-L0.tar"), []byte("partial"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(orphanRun, "000000-h_data-L0.tar"), []byte("partial"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -174,17 +174,17 @@ func TestOrphanPayloadIgnored(t *testing.T) {
 func TestTornHeaderSkipped(t *testing.T) {
 	dir := t.TempDir()
 	v := openVol(t, dir)
-	pos := appendArchive(t, v, "slot-2026-06-22.001", "h-data", 0, "good")
+	pos := appendArchive(t, v, "run-2026-06-22.001", "h-data", 0, "good")
 
 	// A complete-looking pair (payload + .hdr) whose .hdr is garbage JSON.
-	slot := filepath.Join(dir, "slots", "slot-2026-06-25.001")
-	if err := os.MkdirAll(slot, 0o755); err != nil {
+	run := filepath.Join(dir, "runs", "run-2026-06-25.001")
+	if err := os.MkdirAll(run, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(slot, "000001-h_data-L0.tar"), []byte("payload"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(run, "000001-h_data-L0.tar"), []byte("payload"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(slot, "000001-h_data-L0.hdr"), []byte("{not json"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(run, "000001-h_data-L0.hdr"), []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -201,8 +201,8 @@ func TestTornHeaderSkipped(t *testing.T) {
 func TestRemoveFile(t *testing.T) {
 	dir := t.TempDir()
 	v := openVol(t, dir)
-	posA := appendArchive(t, v, "slot-a", "h-data", 0, "a")
-	appendArchive(t, v, "slot-b", "h-data", 0, "b")
+	posA := appendArchive(t, v, "run-a", "h-data", 0, "a")
+	appendArchive(t, v, "run-b", "h-data", 0, "b")
 
 	if err := v.RemoveFile(posA); err != nil {
 		t.Fatal(err)
@@ -211,12 +211,12 @@ func TestRemoveFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 || files[0].Header.Slot != "slot-b" {
-		t.Fatalf("after RemoveFile(slot-a), files = %+v", files)
+	if len(files) != 1 || files[0].Header.Run != "run-b" {
+		t.Fatalf("after RemoveFile(run-a), files = %+v", files)
 	}
-	// Removing the slot's last file reclaims its now-empty directory.
-	if _, err := os.Stat(filepath.Join(dir, "slots", "slot-a")); !os.IsNotExist(err) {
-		t.Fatalf("slot-a directory still present after its last file was removed: %v", err)
+	// Removing the run's last file reclaims its now-empty directory.
+	if _, err := os.Stat(filepath.Join(dir, "runs", "run-a")); !os.IsNotExist(err) {
+		t.Fatalf("run-a directory still present after its last file was removed: %v", err)
 	}
 	// Removing a position again is a no-op (idempotent).
 	if err := v.RemoveFile(posA); err != nil {
@@ -225,23 +225,23 @@ func TestRemoveFile(t *testing.T) {
 }
 
 // TestRemoveFileRaceWithAppend guards the concurrency the multi-holding-disk drain relies on:
-// a dump appends a new archive to a slot while the drain reclaims another archive's last file
-// from the SAME slot. RemoveFile reclaims a slot's directory when it empties — so the in-flight
+// a dump appends a new archive to a run while the drain reclaims another archive's last file
+// from the SAME run. RemoveFile reclaims a run's directory when it empties — so the in-flight
 // append must keep its directory from being swept out from under its just-written payload.
-// Each iteration starts a fresh slot with one file, then removes it concurrently with appending
-// a second to the same slot; the second file must survive and be readable.
+// Each iteration starts a fresh run with one file, then removes it concurrently with appending
+// a second to the same run; the second file must survive and be readable.
 func TestRemoveFileRaceWithAppend(t *testing.T) {
 	for i := 0; i < 300; i++ {
 		dir := t.TempDir()
 		v := openVol(t, dir)
-		slot := "slot-race"
-		posA := appendArchive(t, v, slot, "a", 0, "a-payload")
+		run := "run-race"
+		posA := appendArchive(t, v, run, "a", 0, "a-payload")
 
 		var wg sync.WaitGroup
 		wg.Add(2)
 		var posB int
 		go func() { defer wg.Done(); _ = v.RemoveFile(posA) }()
-		go func() { defer wg.Done(); posB = appendArchive(t, v, slot, "b", 0, "b-payload") }()
+		go func() { defer wg.Done(); posB = appendArchive(t, v, run, "b", 0, "b-payload") }()
 		wg.Wait()
 
 		_, rc, err := v.ReadFile(posB)

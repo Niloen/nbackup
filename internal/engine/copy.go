@@ -13,21 +13,21 @@ import (
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// copy.go is NBackup's copy operation: it re-authors a sealed slot
+// copy.go is NBackup's copy operation: it re-authors a sealed run
 // from one configured medium onto another, recording the new copy as a second placement. The
 // bytes are carried raw — no transform — so checksums and members carry over; only the part
 // layout changes to fit the target's volumes. It depends on a narrow slice of the orchestrator:
-// the catalog (slot metadata + where copies live), the clerk (the read/write data path), and the
+// the catalog (run metadata + where copies live), the clerk (the read/write data path), and the
 // shared write machinery (prepareWriter) — not the whole engine.
 type copier struct {
-	cat           *catalog.Catalog                                      // slot metadata
-	clerk         *clerk.Clerk                                          // read endpoints + write session
-	landing       string                                                // default source medium (the landing medium)
-	knownMedium   func(name string) bool                                // target is a configured medium
-	placementOn   func(slotID, medium string) (catalog.Placement, bool) // a slot's copy on a medium
-	openCheck     func(medium string) error                             // the source medium opens (fail fast before reading)
-	prepareWriter func(medium string, spec archiveio.SlotSpec, now time.Time, logf Logf) (*writeTarget, error)
-	reclaimCopy   func(slotID, medium string) error // drop a prior copy on a removable target before a forced re-copy
+	cat           *catalog.Catalog                                     // run metadata
+	clerk         *clerk.Clerk                                         // read endpoints + write session
+	landing       string                                               // default source medium (the landing medium)
+	knownMedium   func(name string) bool                               // target is a configured medium
+	placementOn   func(runID, medium string) (catalog.Placement, bool) // a run's copy on a medium
+	openCheck     func(medium string) error                            // the source medium opens (fail fast before reading)
+	prepareWriter func(medium string, spec archiveio.RunSpec, now time.Time, logf Logf) (*writeTarget, error)
+	reclaimCopy   func(runID, medium string) error // drop a prior copy on a removable target before a forced re-copy
 }
 
 // newCopier wires a copier to the engine's catalog, data path, and write machinery.
@@ -48,24 +48,24 @@ func (e *Engine) newCopier() *copier {
 }
 
 // CopyPlan is the resolved, validated outcome of a would-be copy, without writing:
-// the source/target the rules picked and whether the slot is already on the target.
+// the source/target the rules picked and whether the run is already on the target.
 type CopyPlan struct {
-	SlotID          string
+	RunID           string
 	From            string   // resolved source medium (landing when --from is unset)
 	To              string   // target medium
-	Archives        int      // archives in the slot
-	Bytes           int64    // the slot's total bytes
+	Archives        int      // archives in the run
+	Bytes           int64    // the run's total bytes
 	AlreadyOnTarget bool     // a copy already exists on To (skipped unless force)
 	TargetLabels    []string // the tape labels the existing target copy spans (empty for address-identified media)
 }
 
-// PlanCopy resolves and validates a copy the way CopySlot would, without writing —
-// the single source of the copy-eligibility rules, shared by CopySlot and the
+// PlanCopy resolves and validates a copy the way CopyRun would, without writing —
+// the single source of the copy-eligibility rules, shared by CopyRun and the
 // `nb copy` dry-run so the two never drift. It errors on the same unrunnable cases
-// (unknown slot, unknown target, source == target) and reports whether the slot is
+// (unknown run, unknown target, source == target) and reports whether the run is
 // already on the target (force plans the re-copy anyway).
-func (c *copier) PlanCopy(slotID, fromMedia, targetMedia string, force bool) (CopyPlan, error) {
-	s, err := c.cat.ReadSlot(slotID)
+func (c *copier) PlanCopy(runID, fromMedia, targetMedia string, force bool) (CopyPlan, error) {
+	s, err := c.cat.ReadRun(runID)
 	if err != nil {
 		return CopyPlan{}, err
 	}
@@ -84,9 +84,9 @@ func (c *copier) PlanCopy(slotID, fromMedia, targetMedia string, force bool) (Co
 	if fromMedia == targetMedia {
 		return CopyPlan{}, fmt.Errorf("copy source and target are the same medium %q", targetMedia)
 	}
-	plan := CopyPlan{SlotID: slotID, From: fromMedia, To: targetMedia, Archives: len(s.Archives), Bytes: s.TotalBytes()}
+	plan := CopyPlan{RunID: runID, From: fromMedia, To: targetMedia, Archives: len(s.Archives), Bytes: s.TotalBytes()}
 	if !force {
-		if p, ok := c.placementOn(slotID, targetMedia); ok {
+		if p, ok := c.placementOn(runID, targetMedia); ok {
 			plan.AlreadyOnTarget = true
 			plan.TargetLabels = p.Labels()
 		}
@@ -94,69 +94,69 @@ func (c *copier) PlanCopy(slotID, fromMedia, targetMedia string, force bool) (Co
 	return plan, nil
 }
 
-// CopySlot streams a sealed slot from one configured medium to another, then
+// CopyRun streams a sealed run from one configured medium to another, then
 // records the new copy in the catalog (a second placement). The source defaults to
-// the landing medium when fromMedia is ""; any other medium holding the slot is
+// the landing medium when fromMedia is ""; any other medium holding the run is
 // allowed (e.g. un-vaulting tape -> disk). Reading the source mounts the volume
-// that holds the slot (on a changer); the write to the target runs the same label
+// that holds the run (on a changer); the write to the target runs the same label
 // verification as a dump.
-func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, logf Logf) error {
-	plan, err := c.PlanCopy(slotID, fromMedia, targetMedia, force)
+func (c *copier) CopyRun(runID, fromMedia, targetMedia string, force bool, logf Logf) error {
+	plan, err := c.PlanCopy(runID, fromMedia, targetMedia, force)
 	if err != nil {
 		return err
 	}
 	if plan.AlreadyOnTarget {
-		// Idempotency: a slot already recorded on the target is not re-copied. On
+		// Idempotency: a run already recorded on the target is not re-copied. On
 		// append-only media a second copy would orphan the first (unreferenced files,
 		// reclaimable only by relabel); --force overrides for a deliberate re-copy.
 		where := ""
 		if len(plan.TargetLabels) > 0 {
 			where = fmt.Sprintf(" (volume(s) %v)", plan.TargetLabels)
 		}
-		return fmt.Errorf("slot %s is already on medium %q%s; use --force to copy again", slotID, targetMedia, where)
+		return fmt.Errorf("run %s is already on medium %q%s; use --force to copy again", runID, targetMedia, where)
 	}
 	fromMedia = plan.From
-	s, err := c.cat.ReadSlot(slotID)
+	s, err := c.cat.ReadRun(runID)
 	if err != nil {
 		return err
 	}
 	// Validate the source copy exists on fromMedia up front (a clear error before reading).
-	if err := c.copySource(slotID, fromMedia); err != nil {
+	if err := c.copySource(runID, fromMedia); err != nil {
 		return err
 	}
-	// A forced re-copy onto a target that already holds the slot must reclaim the
+	// A forced re-copy onto a target that already holds the run must reclaim the
 	// prior copy first; otherwise re-authoring lands new files and the catalog
 	// placement is overwritten, orphaning the old files (lost capacity). On removable
 	// media this deletes them; on tape it is a no-op (orphan-until-relabel, as documented).
 	if force {
-		if _, ok := c.placementOn(slotID, targetMedia); ok {
-			if err := c.reclaimCopy(slotID, targetMedia); err != nil {
+		if _, ok := c.placementOn(runID, targetMedia); ok {
+			if err := c.reclaimCopy(runID, targetMedia); err != nil {
 				return err
 			}
 		}
 	}
-	// Re-author the slot onto the target: each archive's already-compressed payload
+	// Re-author the run onto the target: each archive's already-compressed payload
 	// (the source copy's parts concatenated) is re-split into parts sized to the
 	// target's volumes, rolling onto a fresh volume mid-archive when one fills. The
 	// bytes are unchanged, so checksums and members carry over; only the part layout
 	// is new.
 	now := time.Now().UTC()
 	// Re-author under the source's identity so each copied archive's footer names the same
-	// logical slot; each archive keeps its own CreatedAt (NewCopy preserves it), so the header
+	// logical run; each archive keeps its own CreatedAt (NewCopy preserves it), so the header
 	// stamp here is just the run's last-activity time.
-	spec := archiveio.SlotSpec{ID: s.ID, CreatedAt: s.LastArchiveAt()}
+	spec := archiveio.RunSpec{ID: s.ID, CreatedAt: s.LastArchiveAt()}
 	wt, err := c.prepareWriter(targetMedia, spec, now, logf)
 	if err != nil {
 		return err
 	}
-	logf.Log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
+	logf.Log("copying %s from %q to %q", runID, fromMedia, targetMedia)
 	// Open the source copy's archives as a one-pass read (the clerk resolves their positions),
 	// then re-author each onto the target. Copy order is immaterial — archives are keyed by
 	// (dle, level) — so the physical ordering is a free win.
 	refs := make([]clerk.Ref, 0, len(s.Archives))
 	metaByRef := map[clerk.Ref]record.Archive{}
 	for _, a := range s.Archives {
-		ref := clerk.Ref{Slot: slotID, DLE: a.DLE, Level: a.Level}
+		ref := clerk.Ref{Run: runID, DLE: a.DLE, Level: a.Level}
 		refs = append(refs, ref)
 		metaByRef[ref] = a
 	}
@@ -181,19 +181,19 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		return err
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("source copy of %s on %q is missing one or more archives", slotID, fromMedia)
+		return fmt.Errorf("source copy of %s on %q is missing one or more archives", runID, fromMedia)
 	}
 	// No seal: each archive's copy recorded its placement on the target as it committed
 	// (NewCopy's Commit), so the copy is complete once every archive has landed.
-	logf.Log("copied %s (%d archive(s)) to %q", slotID, len(s.Archives), targetMedia)
+	logf.Log("copied %s (%d archive(s)) to %q", runID, len(s.Archives), targetMedia)
 	return nil
 }
 
-// copySource validates the read side of a copy: the slot has a copy on the source medium and
+// copySource validates the read side of a copy: the run has a copy on the source medium and
 // that medium opens, so an unrunnable copy fails with a clear error before any bytes flow.
-func (c *copier) copySource(slotID, fromMedia string) error {
-	if _, ok := c.placementOn(slotID, fromMedia); !ok {
-		return fmt.Errorf("slot %s has no copy on source medium %q", slotID, fromMedia)
+func (c *copier) copySource(runID, fromMedia string) error {
+	if _, ok := c.placementOn(runID, fromMedia); !ok {
+		return fmt.Errorf("run %s has no copy on source medium %q", runID, fromMedia)
 	}
 	if err := c.openCheck(fromMedia); err != nil {
 		return err

@@ -6,14 +6,14 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-// scenario builds two slots: a full on day 1 and an incremental on day 2 that
+// scenario builds two runs: a full on day 1 and an incremental on day 2 that
 // rewrites etc/hosts and adds etc/new.conf.
 // membersOf is a test member loader: it returns each archive's inline Members from the
-// scenario slots, standing in for the engine's lazy clerk-backed loader.
+// scenario runs, standing in for the engine's lazy clerk-backed loader.
 func membersOf(archives []record.Archive, dle string) func(string, int) ([]string, error) {
-	return func(slotID string, level int) ([]string, error) {
+	return func(runID string, level int) ([]string, error) {
 		for i := range archives {
-			if archives[i].Slot == slotID && archives[i].DLE == dle && archives[i].Level == level {
+			if archives[i].Run == runID && archives[i].DLE == dle && archives[i].Level == level {
 				return archives[i].Members, nil
 			}
 		}
@@ -23,29 +23,29 @@ func membersOf(archives []record.Archive, dle string) func(string, int) ([]strin
 
 func scenario() []record.Archive {
 	return []record.Archive{{
-		Slot: "slot-2026-06-21.001", DLE: "app", Level: 0, Archiver: "gnutar", Compress: "none",
+		Run: "run-2026-06-21.001", DLE: "app", Level: 0, Archiver: "gnutar", Compress: "none",
 		Members: []string{
 			"./", "./etc/", "./etc/hosts", "./etc/passwd",
 			"./var/", "./var/log/", "./var/log/a.log",
 		},
 	}, {
-		Slot: "slot-2026-06-22.001", DLE: "app", Level: 1, Archiver: "gnutar", Compress: "none",
+		Run: "run-2026-06-22.001", DLE: "app", Level: 1, Archiver: "gnutar", Compress: "none",
 		Members: []string{"./", "./etc/", "./etc/hosts", "./etc/new.conf"},
 	}}
 }
 
 func TestAsOf(t *testing.T) {
-	slots := scenario()
+	runs := scenario()
 	for _, tc := range []struct {
 		date, want string
 		wantErr    bool
 	}{
-		{"2026-06-22", "slot-2026-06-22.001", false},
-		{"2026-06-21", "slot-2026-06-21.001", false},
-		{"2026-06-25", "slot-2026-06-22.001", false}, // latest on/before
-		{"2026-06-20", "", true},                     // before all slots
+		{"2026-06-22", "run-2026-06-22.001", false},
+		{"2026-06-21", "run-2026-06-21.001", false},
+		{"2026-06-25", "run-2026-06-22.001", false}, // latest on/before
+		{"2026-06-20", "", true},                    // before all runs
 	} {
-		got, err := AsOf(slots, tc.date)
+		got, err := AsOf(runs, tc.date)
 		if tc.wantErr {
 			if err == nil {
 				t.Errorf("AsOf(%s): want error, got %q", tc.date, got)
@@ -63,18 +63,18 @@ func TestBuildTreeMostRecentWins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tree.TargetSlot != "slot-2026-06-22.001" {
-		t.Fatalf("target = %s", tree.TargetSlot)
+	if tree.TargetRun != "run-2026-06-22.001" {
+		t.Fatalf("target = %s", tree.TargetRun)
 	}
 
 	// hosts was rewritten on day 2 → sourced from the incremental.
 	hosts, ok := tree.Lookup("etc/hosts")
-	if !ok || hosts.src == nil || hosts.src.SlotID != "slot-2026-06-22.001" {
+	if !ok || hosts.src == nil || hosts.src.RunID != "run-2026-06-22.001" {
 		t.Fatalf("etc/hosts source = %+v", hosts)
 	}
 	// passwd was untouched → still sourced from the full.
 	passwd, ok := tree.Lookup("etc/passwd")
-	if !ok || passwd.src == nil || passwd.src.SlotID != "slot-2026-06-21.001" {
+	if !ok || passwd.src == nil || passwd.src.RunID != "run-2026-06-21.001" {
 		t.Fatalf("etc/passwd source = %+v", passwd)
 	}
 	// new.conf appeared on day 2.
@@ -94,7 +94,7 @@ func TestBuildTreeAsOfEarlierDate(t *testing.T) {
 	}
 	// As of day 1, hosts comes from the full and new.conf does not exist yet.
 	hosts, ok := tree.Lookup("etc/hosts")
-	if !ok || hosts.src.SlotID != "slot-2026-06-21.001" {
+	if !ok || hosts.src.RunID != "run-2026-06-21.001" {
 		t.Fatalf("etc/hosts should be from the full, got %+v", hosts.src)
 	}
 	if _, ok := tree.Lookup("etc/new.conf"); ok {
@@ -129,18 +129,18 @@ func TestCollectDirectoryGroupsByArchive(t *testing.T) {
 	}
 	// etc/hosts + etc/new.conf live on the incremental; etc/passwd on the full;
 	// the etc/ directory member itself comes from the incremental (most recent).
-	bySlot := map[string][]string{}
+	byRun := map[string][]string{}
 	for _, st := range steps {
-		bySlot[st.SlotID] = st.Members
+		byRun[st.RunID] = st.Members
 	}
 	if len(steps) != 2 {
 		t.Fatalf("want 2 archive steps, got %d: %+v", len(steps), steps)
 	}
-	if !contains(bySlot["slot-2026-06-22.001"], "./etc/hosts") || !contains(bySlot["slot-2026-06-22.001"], "./etc/new.conf") {
-		t.Errorf("incremental members = %v", bySlot["slot-2026-06-22.001"])
+	if !contains(byRun["run-2026-06-22.001"], "./etc/hosts") || !contains(byRun["run-2026-06-22.001"], "./etc/new.conf") {
+		t.Errorf("incremental members = %v", byRun["run-2026-06-22.001"])
 	}
-	if !contains(bySlot["slot-2026-06-21.001"], "./etc/passwd") {
-		t.Errorf("full members = %v", bySlot["slot-2026-06-21.001"])
+	if !contains(byRun["run-2026-06-21.001"], "./etc/passwd") {
+		t.Errorf("full members = %v", byRun["run-2026-06-21.001"])
 	}
 }
 

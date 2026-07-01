@@ -30,7 +30,7 @@ NBackup takes the opposite bet, inherited from **[Amanda](https://www.amanda.org
 > A backup administrator should be able to reason about backups by looking at a
 > sequence of immutable daily backup artifacts rather than a database of chunks.
 
-A backup is a thing you can hold: an immutable daily **slot**, stored as ordinary
+A backup is a thing you can hold: an immutable daily **run**, stored as ordinary
 `tar` archives, that you can copy, inspect, and restore with tools that ship in
 every Unix. The database (NBackup calls it the *catalog*) is a **cache** — delete
 it and one scan of the media rebuilds it. The media are the source of truth.
@@ -57,7 +57,7 @@ and tape equal targets**:
   Cloud Storage, and Azure Blob are deployment models, not adapters.
 - **Land fast, replicate offsite** is a built-in operation (`nb sync`), not
   something you assemble from cron and `rsync`.
-- **The same artifact everywhere.** A slot keeps its exact byte layout on disk, in
+- **The same artifact everywhere.** A run keeps its exact byte layout on disk, in
   a bucket, or on tape — so copies are interchangeable and a restore reads from
   whichever copy is reachable.
 - **Capacity-driven planning.** You give a medium a storage *capacity*, not a tape
@@ -70,7 +70,7 @@ and tape equal targets**:
 
 **Backups are the primary abstraction.** Not tapes, not chunks, not databases.
 You reason in terms of a sequence of daily backups and can answer "what happened
-on June 20?" by inspecting that day's slot — no running server required.
+on June 20?" by inspecting that day's run — no running server required.
 
 **Storage is secondary.** The same backup may live on disk, in the cloud, or on
 tape without changing format. Media are a placement detail, not the unit of thought.

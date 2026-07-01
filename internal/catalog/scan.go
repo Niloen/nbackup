@@ -35,8 +35,8 @@ func (c *Catalog) EnsureFresh(medium string, vol media.Volume) error {
 }
 
 // Rebuild rescans the given media (keyed by medium name) and replaces the cache.
-// A slot seen on several volumes yields several placements on one logical entry.
-// Returns the number of distinct slots indexed.
+// A run seen on several volumes yields several placements on one logical entry.
+// Returns the number of distinct runs indexed.
 func (c *Catalog) Rebuild(volumes map[string]media.Volume) (int, error) {
 	c.entries = nil
 	c.volumes = map[string]*VolumeRecord{}
@@ -58,11 +58,11 @@ func (c *Catalog) Rebuild(volumes map[string]media.Volume) (int, error) {
 // absorb merges one medium's scanned placements and volume labels into the store, without
 // persisting (the caller persists once). It is the seam between the importer and the store:
 // each scanned archive enters through the in-memory addArchive — the same single write path a
-// dump uses — so a slot seen on several media gathers several placements on one entry, and the
-// scanned slot's sealed identity creates the entry sealed. Each label upserts the volume registry.
+// dump uses — so a run seen on several media gathers several placements on one entry, and the
+// scanned run's sealed identity creates the entry sealed. Each label upserts the volume registry.
 func (c *Catalog) absorb(idx mediumIndex) {
 	for _, sp := range idx.placements {
-		for _, arch := range sp.slot.Archives {
+		for _, arch := range sp.run.Archives {
 			if pos, ok := findArchivePos(sp.p.Archives, arch.DLE, arch.Level); ok {
 				c.addArchive(arch, sp.p.Medium, pos)
 			}
@@ -83,22 +83,22 @@ func findArchivePos(aps []ArchivePos, dle string, level int) (ArchivePos, bool) 
 	return ArchivePos{}, false
 }
 
-// mediumIndex is the assembled result of scanning one medium: each sealed slot
+// mediumIndex is the assembled result of scanning one medium: each sealed run
 // with its placement on that medium, plus the labels of the volumes seen.
 type mediumIndex struct {
-	placements []slotPlacement
+	placements []runPlacement
 	labels     []record.Label
 }
 
-// slotPlacement pairs a slot's content with its placement on the scanned
+// runPlacement pairs a run's content with its placement on the scanned
 // medium, ready for the store to absorb.
-type slotPlacement struct {
-	slot *Slot
-	p    Placement
+type runPlacement struct {
+	run *Run
+	p   Placement
 }
 
 // scanMedium reads every readable volume of one medium and assembles its sealed
-// slots into placements. The shape walk — every non-blank bay of a robotic library,
+// runs into placements. The shape walk — every non-blank bay of a robotic library,
 // or just the loaded reel of a single-drive station — lives in media.WalkReadable,
 // so the catalog never type-asserts a Volume's shape itself.
 func scanMedium(medium string, vol media.Volume) (mediumIndex, error) {
@@ -124,18 +124,18 @@ func scanMedium(medium string, vol media.Volume) (mediumIndex, error) {
 // assemble turns one medium's accumulated parts, commit footers, and member indexes into
 // placements: each committed archive (one with a commit footer) gathers its parts (ordered by
 // part index) from across the medium's volumes, and the committed archives are grouped by
-// slot id into the in-memory slot. Parts with no commit footer are orphans (a crashed run) —
+// run id into the in-memory run. Parts with no commit footer are orphans (a crashed run) —
 // skipped. A part missing from the scan (a tape not present) leaves a short part list —
 // verify/restore reports the gap and fails over to another copy. Archives are ordered by
 // (dle, level) so a rebuild is deterministic.
-func assemble(medium string, acc *scanMaps) []slotPlacement {
+func assemble(medium string, acc *scanMaps) []runPlacement {
 	keys := make([]archiveKey, 0, len(acc.commits))
 	for k := range acc.commits {
 		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].slot != keys[j].slot {
-			return keys[i].slot < keys[j].slot
+		if keys[i].run != keys[j].run {
+			return keys[i].run < keys[j].run
 		}
 		if keys[i].dle != keys[j].dle {
 			return keys[i].dle < keys[j].dle
@@ -143,18 +143,18 @@ func assemble(medium string, acc *scanMaps) []slotPlacement {
 		return keys[i].level < keys[j].level
 	})
 
-	slots := map[string]*slotPlacement{}
-	var order []string // slot ids in first-seen order
+	runs := map[string]*runPlacement{}
+	var order []string // run ids in first-seen order
 	for _, key := range keys {
 		sc := acc.commits[key]
-		sa := slots[key.slot]
+		sa := runs[key.run]
 		if sa == nil {
-			sa = &slotPlacement{
-				slot: &Slot{ID: key.slot},
-				p:    Placement{Medium: medium},
+			sa = &runPlacement{
+				run: &Run{ID: key.run},
+				p:   Placement{Medium: medium},
 			}
-			slots[key.slot] = sa
-			order = append(order, key.slot)
+			runs[key.run] = sa
+			order = append(order, key.run)
 		}
 		n := sc.arch.Parts
 		if n < 1 {
@@ -162,7 +162,7 @@ func assemble(medium string, acc *scanMaps) []slotPlacement {
 		}
 		ap := ArchivePos{DLE: key.dle, Level: key.level, Commit: sc.loc}
 		for part := 0; part < n; part++ {
-			if loc, ok := acc.parts[partKey{slot: key.slot, dle: key.dle, level: key.level, part: part}]; ok {
+			if loc, ok := acc.parts[partKey{run: key.run, dle: key.dle, level: key.level, part: part}]; ok {
 				ap.Parts = append(ap.Parts, loc)
 			}
 		}
@@ -170,14 +170,14 @@ func assemble(medium string, acc *scanMaps) []slotPlacement {
 			ap.Index = ixLoc // note where the member index lives; members load lazily (browse/verify)
 		}
 		arch := *sc.arch
-		arch.Slot = key.slot // the header's slot tag is authoritative for grouping
-		sa.slot.addArchive(arch)
+		arch.Run = key.run // the header's run tag is authoritative for grouping
+		sa.run.addArchive(arch)
 		sa.p.Archives = append(sa.p.Archives, ap)
 	}
 
-	out := make([]slotPlacement, 0, len(order))
+	out := make([]runPlacement, 0, len(order))
 	for _, id := range order {
-		out = append(out, *slots[id])
+		out = append(out, *runs[id])
 	}
 	return out
 }
@@ -229,9 +229,9 @@ func OrphanFiles(vol media.Volume) ([]record.FileInfo, error) {
 	return orphans, nil
 }
 
-// ScanSlots reads a volume's committed slots without touching the cache — used to check a
+// ScanRuns reads a volume's committed runs without touching the cache — used to check a
 // volume's current contents (e.g. whether a tape is still active before relabel).
-func ScanSlots(vol media.Volume) ([]*Slot, error) {
+func ScanRuns(vol media.Volume) ([]*Run, error) {
 	res, err := scanVolume("", vol)
 	if err != nil {
 		return nil, err
@@ -239,23 +239,23 @@ func ScanSlots(vol media.Volume) ([]*Slot, error) {
 	acc := newScanMaps()
 	acc.add(res)
 	sps := assemble("", acc)
-	slots := make([]*Slot, 0, len(sps))
+	runs := make([]*Run, 0, len(sps))
 	for _, sp := range sps {
-		slots = append(slots, sp.slot)
+		runs = append(runs, sp.run)
 	}
-	return slots, nil
+	return runs, nil
 }
 
-// partKey identifies one archive part within a slot across a medium's volumes.
+// partKey identifies one archive part within a run across a medium's volumes.
 type partKey struct {
-	slot, dle   string
+	run, dle    string
 	level, part int
 }
 
-// archiveKey identifies one committed archive within a slot across a medium's volumes.
+// archiveKey identifies one committed archive within a run across a medium's volumes.
 type archiveKey struct {
-	slot, dle string
-	level     int
+	run, dle string
+	level    int
 }
 
 // scannedCommit is a committed archive found during a scan: its footer metadata (without
@@ -332,18 +332,18 @@ func scanVolume(medium string, vol media.Volume) (scanResult, error) {
 		loc := FilePos{Label: labelName, Epoch: epoch, Pos: f.Pos}
 		switch f.Header.Kind {
 		case record.KindArchive:
-			res.parts[partKey{slot: f.Header.Slot, dle: f.Header.DLE, level: f.Header.Level, part: f.Header.Part}] = loc
+			res.parts[partKey{run: f.Header.Run, dle: f.Header.DLE, level: f.Header.Level, part: f.Header.Part}] = loc
 		case record.KindCommit:
 			a, cerr := readCommit(vol, f.Pos)
 			if cerr != nil {
 				continue // unreadable footer: skip (the archive reads as uncommitted)
 			}
-			res.commits[archiveKey{slot: f.Header.Slot, dle: f.Header.DLE, level: f.Header.Level}] =
+			res.commits[archiveKey{run: f.Header.Run, dle: f.Header.DLE, level: f.Header.Level}] =
 				scannedCommit{arch: a, loc: loc}
 		case record.KindIndex:
 			// Note where the member index lives, but do NOT read it — members load lazily
 			// (browse / structural verify), so a rebuild reads only small commit footers.
-			res.indexes[archiveKey{slot: f.Header.Slot, dle: f.Header.DLE, level: f.Header.Level}] = loc
+			res.indexes[archiveKey{run: f.Header.Run, dle: f.Header.DLE, level: f.Header.Level}] = loc
 		}
 	}
 	return res, nil

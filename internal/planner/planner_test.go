@@ -65,11 +65,11 @@ func TestBumpDecision(t *testing.T) {
 	mkHist := func() *catalog.History {
 		return &catalog.History{DLEs: map[string]*catalog.DLEState{"h-data": {
 			LastFullDate: "2026-06-20",
-			LastFullSlot: "slot-2026-06-20.001",
+			LastFullRun:  "run-2026-06-20.001",
 			Runs: []catalog.RunRecord{
-				{Date: "2026-06-20", Slot: "slot-2026-06-20.001", Level: 0},
-				{Date: "2026-06-21", Slot: "slot-l1a", Level: 1},
-				{Date: "2026-06-22", Slot: "slot-l1b", Level: 1},
+				{Date: "2026-06-20", Run: "run-2026-06-20.001", Level: 0},
+				{Date: "2026-06-21", Run: "run-l1a", Level: 1},
+				{Date: "2026-06-22", Run: "run-l1b", Level: 1},
 			},
 		}}}
 	}
@@ -91,11 +91,11 @@ func TestBumpDecision(t *testing.T) {
 	if lvl := levelOf(build(Estimate{Full: 1000, Incr: 500}), "h-data"); lvl != 1 {
 		t.Errorf("with no next-level estimate the DLE must stay at L1, got L%d", lvl)
 	}
-	// A bumped L2 builds on the most recent L1 run's snapshot and slot.
+	// A bumped L2 builds on the most recent L1 run's snapshot and run.
 	p := build(Estimate{Full: 1000, Incr: 500, IncrNext: 100})
 	for _, it := range p.Items {
-		if it.Name == "h-data" && (it.BaseLevel != 1 || it.BaseSlot != "slot-l1b") {
-			t.Errorf("L2 base = L%d slot %q, want L1 slot slot-l1b", it.BaseLevel, it.BaseSlot)
+		if it.Name == "h-data" && (it.BaseLevel != 1 || it.BaseRun != "run-l1b") {
+			t.Errorf("L2 base = L%d run %q, want L1 run run-l1b", it.BaseLevel, it.BaseRun)
 		}
 	}
 }
@@ -106,10 +106,10 @@ func TestBumpDaysGuard(t *testing.T) {
 	today := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{"h-data": {
 		LastFullDate: "2026-06-20",
-		LastFullSlot: "slot-2026-06-20.001",
+		LastFullRun:  "run-2026-06-20.001",
 		Runs: []catalog.RunRecord{
-			{Date: "2026-06-20", Slot: "slot-2026-06-20.001", Level: 0},
-			{Date: "2026-06-21", Slot: "slot-l1a", Level: 1},
+			{Date: "2026-06-20", Run: "run-2026-06-20.001", Level: 0},
+			{Date: "2026-06-21", Run: "run-l1a", Level: 1},
 		},
 	}}}
 	est := map[string]Estimate{"h-data": {Full: 1000, Incr: 500, IncrNext: 1}}
@@ -132,7 +132,7 @@ func TestPromotionFillsLightRun(t *testing.T) {
 		// Last full 6 days ago: with a 7-day cycle the deadline is tomorrow.
 		hist.DLEs[d.Name()] = &catalog.DLEState{
 			LastFullDate: today.AddDate(0, 0, -6).Format("2006-01-02"),
-			Runs:         []catalog.RunRecord{{Date: "old", Slot: "slot-x", Level: 0}},
+			Runs:         []catalog.RunRecord{{Date: "old", Run: "run-x", Level: 0}},
 		}
 		dles = append(dles, d)
 		est[d.Name()] = Estimate{Full: 100, Incr: 10}
@@ -155,7 +155,7 @@ func TestPromotionBoundedByRoom(t *testing.T) {
 		d := dleNamed(h)
 		hist.DLEs[d.Name()] = &catalog.DLEState{
 			LastFullDate: today.AddDate(0, 0, -6).Format("2006-01-02"),
-			Runs:         []catalog.RunRecord{{Date: "old", Slot: "slot-x", Level: 0}},
+			Runs:         []catalog.RunRecord{{Date: "old", Run: "run-x", Level: 0}},
 		}
 		dles = append(dles, d)
 		est[d.Name()] = Estimate{Full: 100, Incr: 10}
@@ -178,7 +178,7 @@ func TestPromotionDoesNotChaseAverage(t *testing.T) {
 		"big-data": {
 			// Fulled yesterday: 6 days of cycle left, far from the deadline.
 			LastFullDate: today.AddDate(0, 0, -1).Format("2006-01-02"),
-			Runs:         []catalog.RunRecord{{Date: "old", Slot: "slot-x", Level: 0}},
+			Runs:         []catalog.RunRecord{{Date: "old", Run: "run-x", Level: 0}},
 		},
 	}}
 	est := map[string]Estimate{"big-data": {Full: 1_000_000_000, Incr: 1000}}
@@ -202,8 +202,8 @@ func TestPromotionTinyCoDeadlineDoesNotUnlockBigDLE(t *testing.T) {
 	day := func(n int) string { return today.AddDate(0, 0, -n).Format("2006-01-02") }
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{
 		// Both last fulled 3 days ago: deadline is 4 days out, and they share it.
-		"big-data":  {LastFullDate: day(3), Runs: []catalog.RunRecord{{Date: day(3), Slot: "slot-x", Level: 0}}},
-		"tiny-data": {LastFullDate: day(3), Runs: []catalog.RunRecord{{Date: day(3), Slot: "slot-x", Level: 0}}},
+		"big-data":  {LastFullDate: day(3), Runs: []catalog.RunRecord{{Date: day(3), Run: "run-x", Level: 0}}},
+		"tiny-data": {LastFullDate: day(3), Runs: []catalog.RunRecord{{Date: day(3), Run: "run-x", Level: 0}}},
 	}}
 	est := map[string]Estimate{
 		"big-data":  {Full: 3_640_000_000, Incr: 10_000},
@@ -225,8 +225,8 @@ func TestPromotionSkipsJustFulledDLE(t *testing.T) {
 	today := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
 	day0 := today.Format("2006-01-02")
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{
-		"downloads-data": {LastFullDate: day0, Runs: []catalog.RunRecord{{Date: day0, Slot: "slot-x", Level: 0}}},
-		"videos-data":    {LastFullDate: day0, Runs: []catalog.RunRecord{{Date: day0, Slot: "slot-x", Level: 0}}},
+		"downloads-data": {LastFullDate: day0, Runs: []catalog.RunRecord{{Date: day0, Run: "run-x", Level: 0}}},
+		"videos-data":    {LastFullDate: day0, Runs: []catalog.RunRecord{{Date: day0, Run: "run-x", Level: 0}}},
 	}}
 	est := map[string]Estimate{
 		"downloads-data": {Full: 3_640_000_000, Incr: 80_000},
@@ -284,8 +284,8 @@ func TestPromotionStaggersLockstepFulls(t *testing.T) {
 		d := dleNamed(h)
 		hist.DLEs[d.Name()] = &catalog.DLEState{
 			LastFullDate: day0,
-			LastFullSlot: "slot-x",
-			Runs:         []catalog.RunRecord{{Date: day0, Slot: "slot-x", Level: 0}},
+			LastFullRun:  "run-x",
+			Runs:         []catalog.RunRecord{{Date: day0, Run: "run-x", Level: 0}},
 		}
 		dles = append(dles, d)
 		est[d.Name()] = Estimate{Full: 3_300_000_000, Incr: 50_000}
@@ -328,8 +328,8 @@ func TestPromotionSpreadsClusterAcrossCycle(t *testing.T) {
 		d := dleNamed(h)
 		hist.DLEs[d.Name()] = &catalog.DLEState{
 			LastFullDate: day0,
-			LastFullSlot: "slot-x",
-			Runs:         []catalog.RunRecord{{Date: day0, Slot: "slot-x", Level: 0}},
+			LastFullRun:  "run-x",
+			Runs:         []catalog.RunRecord{{Date: day0, Run: "run-x", Level: 0}},
 		}
 		dles = append(dles, d)
 		est[d.Name()] = Estimate{Full: 1_000_000_000, Incr: 1000}
@@ -368,8 +368,8 @@ func TestPromotionPacesDestaggerByRunway(t *testing.T) {
 		d := dleNamed(h)
 		hist.DLEs[d.Name()] = &catalog.DLEState{
 			LastFullDate: day0,
-			LastFullSlot: "slot-x",
-			Runs:         []catalog.RunRecord{{Date: day0, Slot: "slot-x", Level: 0}},
+			LastFullRun:  "run-x",
+			Runs:         []catalog.RunRecord{{Date: day0, Run: "run-x", Level: 0}},
 		}
 		dles = append(dles, d)
 		est[d.Name()] = Estimate{Full: 1_000_000_000, Incr: 1000}

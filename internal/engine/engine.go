@@ -74,7 +74,7 @@ type Engine struct {
 	dec            *decoder                      // the read-side scheme operation (restore/verify/list); shares the engine's resolution + decode opts
 	dmp            *dumper.Dumper                // the producer (dump): workers + tar source + encode pipeline; the engine injects its resolution
 	ver            *verifier                     // the verification operation (verify/drill checks); shares catalog + data path + decoder
-	cop            *copier                       // the copy operation (PlanCopy/CopySlot); shares catalog + data path + write machinery
+	cop            *copier                       // the copy operation (PlanCopy/CopyRun); shares catalog + data path + write machinery
 	rst            *restorer                     // the restore/recover operation; shares catalog + data path + decoder + config
 	acct           *accounting.Accountant        // capacity/retention arithmetic; the engine's capacity methods delegate here
 	sched          *scheduler.Scheduler          // plan/estimate/validate lane; the engine's plan methods delegate here
@@ -116,7 +116,7 @@ func (e *Engine) librarianFor(name string) (lib *librarian.Librarian, def config
 // New constructs an Engine from configuration: it resolves the landing medium's
 // capacity profile via the media registry and loads the catalog cache. The landing
 // volume itself is opened lazily, the first time a command actually touches the
-// medium (see landing) — so a catalog-only command (report, slot, dle) never lists a
+// medium (see landing) — so a catalog-only command (report, run, dle) never lists a
 // bucket or mounts a tape. Archivers are opened lazily per dumptype.
 func New(cfg *config.Config) (*Engine, error) { return build(cfg) }
 
@@ -268,7 +268,7 @@ func (e *Engine) dumptypeCompressSchemes() []string {
 
 // landing opens the engine's own (landing) volume on first use and bootstraps the
 // catalog against it, memoizing the handle. Opening is deferred to here — never done
-// at construction — so a catalog-only command (report, slot, dle, status) never
+// at construction — so a catalog-only command (report, run, dle, status) never
 // touches the medium: no bucket LIST for a cloud landing, no physical mount for a
 // tape. The commands that genuinely need the medium (dump, restore, verify, prune,
 // rebuild, and `nb check`, which probes it on purpose) reach it through this, so the
@@ -359,7 +359,7 @@ func (e *Engine) Medium(name string) (MediumInfo, bool) { return e.acct.Medium(n
 
 // MediumMinAge returns a medium's effective retention floor — its configured
 // minimum_age, or the dump cycle when unset — the same value pruning enforces
-// before retiring a slot. An unknown name yields the default floor.
+// before retiring a run. An unknown name yields the default floor.
 func (e *Engine) MediumMinAge(name string) time.Duration {
 	return e.cfg.MinAgeFor(e.cfg.Media[name])
 }
@@ -494,7 +494,7 @@ func (e *Engine) archiverOptions(typeName string, options map[string]string, hos
 }
 
 // RebuildCatalog rescans every configured medium that can be opened and rewrites
-// the local cache, returning the number of distinct slots indexed. Media that
+// the local cache, returning the number of distinct runs indexed. Media that
 // can't be opened (e.g. an offline tape) are skipped with a warning.
 func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
 	vol, err := e.landing()
@@ -517,8 +517,8 @@ func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
 }
 
 // writeTarget bundles a medium prepared for writing: a librarian whose first volume is mounted and
-// label-verified, the clerk Session (the slot's archiveio.Store — the medium end), and a serial writer
-// authored over it (for the direct CopySlot/Flush paths; the spool builds its own over the Session).
+// label-verified, the clerk Session (the run's archiveio.Store — the medium end), and a serial writer
+// authored over it (for the direct CopyRun/Flush paths; the spool builds its own over the Session).
 type writeTarget struct {
 	lib     *librarian.Librarian
 	session *clerk.Session
@@ -526,12 +526,12 @@ type writeTarget struct {
 }
 
 // prepareWriter resolves a medium, enforces the label protocol on its loaded volume
-// (prompting a swap on a manual single drive), and opens a clerk Session authoring the slot
+// (prompting a swap on a manual single drive), and opens a clerk Session authoring the run
 // described by spec onto it. The Session builds the archiveio writer over itself, so each
 // committed archive reports straight to the catalog; the spool later routes those control
 // calls onto its orchestrator via SetCoordinator. It is the one place the PrepareWrite ->
-// WriteSink -> OpenSlot contract lives, shared by a dump (Run) and a copy/sync (CopySlot).
-func (e *Engine) prepareWriter(medium string, spec archiveio.SlotSpec, now time.Time, logf Logf) (*writeTarget, error) {
+// WriteSink -> OpenRun contract lives, shared by a dump (Run) and a copy/sync (CopyRun).
+func (e *Engine) prepareWriter(medium string, spec archiveio.RunSpec, now time.Time, logf Logf) (*writeTarget, error) {
 	lib, def, _, err := e.librarianFor(medium)
 	if err != nil {
 		return nil, err
@@ -548,7 +548,7 @@ func (e *Engine) prepareWriter(medium string, spec archiveio.SlotSpec, now time.
 		return nil, err
 	}
 	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
-	session := e.clerk.OpenSlot(sink, medium, lib.Volume(), spec.ID)
+	session := e.clerk.OpenRun(sink, medium, lib.Volume(), spec.ID)
 	writer := archiveio.NewAuthor(session, spec, e.limiters[medium], func() time.Time { return now })
 	return &writeTarget{lib: lib, session: session, writer: writer}, nil
 }
@@ -571,13 +571,13 @@ func announceExpectation(medium string, exp VolumeExpectation, logf Logf) {
 }
 
 // PlanCopy resolves and validates a copy without writing (the `nb copy` dry-run); see copier.
-func (e *Engine) PlanCopy(slotID, fromMedia, targetMedia string, force bool) (CopyPlan, error) {
-	return e.cop.PlanCopy(slotID, fromMedia, targetMedia, force)
+func (e *Engine) PlanCopy(runID, fromMedia, targetMedia string, force bool) (CopyPlan, error) {
+	return e.cop.PlanCopy(runID, fromMedia, targetMedia, force)
 }
 
-// CopySlot streams a sealed slot from one configured medium to another; see copier.
-func (e *Engine) CopySlot(slotID, fromMedia, targetMedia string, force bool, logf Logf) error {
-	return e.cop.CopySlot(slotID, fromMedia, targetMedia, force, logf)
+// CopyRun streams a sealed run from one configured medium to another; see copier.
+func (e *Engine) CopyRun(runID, fromMedia, targetMedia string, force bool, logf Logf) error {
+	return e.cop.CopyRun(runID, fromMedia, targetMedia, force, logf)
 }
 
 // partSizeFor resolves a medium's per-part chunk bound: the explicit part_size param
@@ -641,11 +641,11 @@ func (e *Engine) LoadVolume(mediumName, target string, byLabel bool, logf Logf) 
 // Catalog exposes the catalog for read-only commands.
 func (e *Engine) Catalog() *catalog.Catalog { return e.cat }
 
-// placementOn returns the slot's copy on the named medium, if any. It is the single
-// "does this slot have a copy here, and where" lookup shared by copy planning, the copy
+// placementOn returns the run's copy on the named medium, if any. It is the single
+// "does this run have a copy here, and where" lookup shared by copy planning, the copy
 // read side, and sync's skip check.
-func (e *Engine) placementOn(slotID, medium string) (catalog.Placement, bool) {
-	for _, p := range e.cat.Placements(slotID) {
+func (e *Engine) placementOn(runID, medium string) (catalog.Placement, bool) {
+	for _, p := range e.cat.Placements(runID) {
 		if p.Medium == medium {
 			return p, true
 		}
@@ -653,10 +653,10 @@ func (e *Engine) placementOn(slotID, medium string) (catalog.Placement, bool) {
 	return catalog.Placement{}, false
 }
 
-// placementsFor returns a slot's copies ordered for reading: the engine's own
+// placementsFor returns a run's copies ordered for reading: the engine's own
 // medium first (online/fast), then the rest.
-func (e *Engine) placementsFor(slotID string) []catalog.Placement {
-	ps := e.cat.Placements(slotID)
+func (e *Engine) placementsFor(runID string) []catalog.Placement {
+	ps := e.cat.Placements(runID)
 	sort.SliceStable(ps, func(i, j int) bool {
 		return ps[i].Medium == e.mediumName && ps[j].Medium != e.mediumName
 	})
@@ -700,7 +700,7 @@ func (e *Engine) ExpectedVolume(now time.Time) (VolumeExpectation, bool) {
 	// offers a whole reel (used stays 0).
 	exp.VolumeBytes = e.profile.VolumeSize()
 	if exp.Appendable && !exp.FreshVolume {
-		for _, s := range e.cat.SlotsOnLabel(exp.Label) {
+		for _, s := range e.cat.RunsOnLabel(exp.Label) {
 			exp.UsedBytes += s.TotalBytes()
 		}
 	}
@@ -733,14 +733,14 @@ func (e *Engine) expectedVolumeFor(medium string, now time.Time) VolumeExpectati
 	minAge := e.cfg.MinAgeFor(def)
 	// Retention is per-medium: a volume is reusable only when this medium no
 	// longer needs its runs, so protection is computed over this medium's own
-	// slots. Scoping to e.cat.Slots() (all media) would recycle a tape merely
+	// runs. Scoping to e.cat.Runs() (all media) would recycle a tape merely
 	// because a newer full landed on disk — discarding the offsite copy and the
 	// redundancy double storage exists to provide.
 	floor := retention.Compute(e.cat.ArchivesOn(medium), minAge, now)
 	for _, v := range pool {
-		held := e.cat.SlotIDsOnLabel(v.Label.Name)
+		held := e.cat.RunIDsOnLabel(v.Label.Name)
 		if _, _, ok := floor.First(held); ok {
-			continue // some slot on this tape is still kept — not reusable
+			continue // some run on this tape is still kept — not reusable
 		}
 		exp.Label, exp.WrittenAt, exp.Recycles = v.Label.Name, v.Label.WrittenAt, len(held)
 		return exp
@@ -828,13 +828,13 @@ func minRoom(a, b int64) int64 {
 	}
 }
 
-// Run executes the plan for a date, producing one sealed slot. It delegates to a
+// Run executes the plan for a date, producing one sealed run. It delegates to a
 // per-run conductor.Conductor (see internal/conductor and newConductor); the engine
 // just builds the run lane's dependency slice.
-func (e *Engine) Run(ctx context.Context, now time.Time, logf Logf) (*catalog.Slot, error) {
+func (e *Engine) Run(ctx context.Context, now time.Time, logf Logf) (*catalog.Run, error) {
 	// Open the landing now so newConductor captures the live handle (it snapshots
 	// e.vol into the run lane's deps) and a landing that won't open fails the run here
-	// rather than mid-stream. The dry-run peer (PlannedSlotID) reads only the catalog,
+	// rather than mid-stream. The dry-run peer (PlannedRunID) reads only the catalog,
 	// so it deliberately does not open the medium.
 	if _, err := e.landing(); err != nil {
 		return nil, err
@@ -842,35 +842,35 @@ func (e *Engine) Run(ctx context.Context, now time.Time, logf Logf) (*catalog.Sl
 	return e.newConductor().Run(ctx, now, logf)
 }
 
-// PlannedSlotID returns the slot id a real dump on date would seal next. Like Run, it
+// PlannedRunID returns the run id a real dump on date would seal next. Like Run, it
 // delegates to the per-run conductor.Conductor.
-func (e *Engine) PlannedSlotID(date time.Time) string {
-	return e.newConductor().PlannedSlotID(date)
+func (e *Engine) PlannedRunID(date time.Time) string {
+	return e.newConductor().PlannedRunID(date)
 }
 
-// Restore reconstructs a DLE as of a slot into destDir; see restorer.
-func (e *Engine) Restore(slotID, dleName, destDir string, force bool, logf Logf) error {
-	return e.rst.Restore(slotID, dleName, destDir, force, logf)
+// Restore reconstructs a DLE as of a run into destDir; see restorer.
+func (e *Engine) Restore(runID, dleName, destDir string, force bool, logf Logf) error {
+	return e.rst.Restore(runID, dleName, destDir, force, logf)
 }
 
 // RestoreTo restores a DLE onto a remote client over SSH; see restorer.
-func (e *Engine) RestoreTo(slotID, dleName, destHost, destPath string, logf Logf) error {
-	return e.rst.RestoreTo(slotID, dleName, destHost, destPath, logf)
+func (e *Engine) RestoreTo(runID, dleName, destHost, destPath string, logf Logf) error {
+	return e.rst.RestoreTo(runID, dleName, destHost, destPath, logf)
 }
 
 // The engine implements clerk.Deps: the data path's view of the orchestrator's
 // services (catalog placement, librarian mounting, executor/archiver resolution, and the
 // config-derived transform options/placement).
 
-// PlacementsFor returns a slot's copies in read-preference order (own medium first), and
+// PlacementsFor returns a run's copies in read-preference order (own medium first), and
 // AddArchive records a run's archives — together they are the clerk's Map role (the
 // engine keeps the catalog store + the directory/retention slices).
-func (e *Engine) PlacementsFor(slotID string) []catalog.Placement { return e.placementsFor(slotID) }
+func (e *Engine) PlacementsFor(runID string) []catalog.Placement { return e.placementsFor(runID) }
 func (e *Engine) AddArchive(arch record.Archive, medium string, pos record.ArchivePos) error {
 	return e.cat.AddArchive(arch, medium, pos)
 }
-func (e *Engine) RemoveArchive(slotID, medium, dle string) (placementGone, entryGone bool, err error) {
-	return e.cat.RemoveArchive(slotID, medium, dle)
+func (e *Engine) RemoveArchive(runID, medium, dle string) (placementGone, entryGone bool, err error) {
+	return e.cat.RemoveArchive(runID, medium, dle)
 }
 
 // MounterFor returns a read-mount onto a medium's volumes — the clerk's Mounter role, served
@@ -922,12 +922,12 @@ func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, 
 	return e.rst.ExtractSelection(steps, destDir, logf)
 }
 
-// DLENames returns the distinct DLE names recorded across all catalog slots,
+// DLENames returns the distinct DLE names recorded across all catalog runs,
 // sorted — the DLEs a recovery session can choose from.
 func (e *Engine) DLENames() []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, s := range e.cat.Slots() {
+	for _, s := range e.cat.Runs() {
 		for _, a := range s.Archives {
 			if !seen[a.DLE] {
 				seen[a.DLE] = true
@@ -948,7 +948,7 @@ func (e *Engine) dleDisplayMap() map[string]string {
 	for _, d := range e.cfg.DLEs() {
 		m[d.Name()] = d.ID()
 	}
-	for _, s := range e.cat.Slots() {
+	for _, s := range e.cat.Runs() {
 		for _, a := range s.Archives {
 			if a.Host == "" && a.Path == "" {
 				continue
@@ -1054,9 +1054,9 @@ func (e *Engine) ProjectedOverCapacity(name string, add int64) (over bool, proje
 }
 
 // Prune reconciles a named medium to its own retention model: it computes that
-// medium's protected slots (its own minimum_age and last-recovery-path floor) and
-// asks its retention strategy which non-protected slots to reclaim to fit its
-// capacity. Retention is per-medium, so each store is pruned against its own slots
+// medium's protected runs (its own minimum_age and last-recovery-path floor) and
+// asks its retention strategy which non-protected runs to reclaim to fit its
+// capacity. Retention is per-medium, so each store is pruned against its own runs
 // — pruning one medium never touches a copy on another. Any configured medium can
 // be pruned (not only the landing one), so an offsite tier can be trimmed too.
 func (e *Engine) Prune(mediumName string, now time.Time, apply bool, logf Logf) (eligible int, swept int, freed int64, err error) {

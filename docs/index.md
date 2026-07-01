@@ -2,14 +2,14 @@
 title: Introduction
 layout: default
 nav_order: 1
-description: "Niloen Backup (NBackup) — a slot-based backup system with first-class disk, cloud, and tape storage."
+description: "Niloen Backup (NBackup) — a run-based backup system with first-class disk, cloud, and tape storage."
 permalink: /
 ---
 
 # Niloen Backup
 {: .fs-9 }
 
-A slot-based backup system whose design comes from **Amanda** — balanced
+A run-based backup system whose design comes from **Amanda** — balanced
 multilevel scheduling, immutable daily artifacts, human-readable contents, and
 cycle-based safety — with **first-class disk and cloud storage** added on top.
 {: .fs-6 .fw-300 }
@@ -25,7 +25,7 @@ Go. It orchestrates GNU `tar` and a compressor as child processes and produces
 without NBackup installed.
 
 > A backup administrator should be able to reason about backups by looking at a
-> sequence of immutable daily backup slots rather than a database of chunks.
+> sequence of immutable daily backup runs rather than a database of chunks.
 
 Amanda is tape-first. NBackup treats local disk, virtual tape, and object stores
 (S3, GCS, Azure Blob) as **equal targets**, and makes the common modern shape —
@@ -33,7 +33,7 @@ land fast on disk, then replicate offsite — a first-class operation.
 
 ## What makes it different
 
-- **Backups you can read.** Each run produces exactly one **slot** — an immutable
+- **Backups you can read.** Each **run** is exactly one immutable
   directory (or tape span, or set of objects) you can list and understand without
   any NBackup-specific tooling. A full restores with one pipe:
 
@@ -47,7 +47,7 @@ land fast on disk, then replicate offsite — a first-class operation.
   format only it can open.
 
 - **Disk, cloud, and tape are equal.** The same artifact lives unchanged on any
-  medium. `nb copy` moves one slot between media; `nb sync` mirrors a whole
+  medium. `nb copy` moves one run between media; `nb sync` mirrors a whole
   medium offsite. Land on fast local disk, then replicate to S3 or tape.
 
 - **Capacity, not rotation.** You give a medium a storage *capacity* and a *cycle*
@@ -65,13 +65,13 @@ land fast on disk, then replicate offsite — a first-class operation.
 
 ## How a backup is shaped
 
-A **volume** is an ordered sequence of self-describing files. A **slot** is a run
+A **volume** is an ordered sequence of self-describing files. A **run** is a set
 of **archives**; each archive is its payload, a **member index** (its file list),
 and a **commit footer** (identity, sizes, checksums) written last — so the footer's
 presence proves the archive landed whole. On disk it looks like this:
 
 ```text
-slots/slot-2026-06-21.001/
+runs/run-2026-06-21.001/
   000000-app01-home-L0.tar.zst        # clean compressed tar (payload)
   000000-app01-home-L0.hdr            # JSON header sidecar
   000001-app01-home-L0-index.json.gz  # gzipped member list (browse without extracting)
@@ -89,7 +89,7 @@ for the full vocabulary and [Artifacts you can read](concepts#artifacts-you-can-
 |---|---|
 | Understand *why* NBackup is built this way | [Rationale](rationale) |
 | Install it and run your first backup | [Getting Started](getting-started) |
-| Learn the vocabulary (slot, DLE, cycle, …) | [Concepts](concepts) |
+| Learn the vocabulary (run, DLE, cycle, …) | [Concepts](concepts) |
 | Read about a specific capability | [Features](features) |
 | Copy a working setup for your situation | [Scenarios](scenarios) |
 | Look up a command or config key | [Reference](reference) |

@@ -55,7 +55,7 @@ type DrillOptions struct {
 type DrillResult struct {
 	DLE        string // internal slug (ledger key)
 	DLEDisplay string // host:path identity for display
-	SlotID     string
+	RunID      string
 	AsOf       string
 	Medium     string
 	Tier       drill.Tier
@@ -129,7 +129,7 @@ func (e *Engine) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 		var refs []archiveRef
 		for _, t := range targets {
 			for _, s := range t.Steps {
-				refs = append(refs, archiveRef{s.SlotID, s.DLE, s.Level})
+				refs = append(refs, archiveRef{s.RunID, s.DLE, s.Level})
 			}
 		}
 		est := e.estimateRead(refs, medium)
@@ -144,7 +144,7 @@ func (e *Engine) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 		for _, t := range targets {
 			b := e.chainBytes(t.Steps)
 			rep.Targets = append(rep.Targets, DrillResult{
-				DLE: t.DLE, DLEDisplay: e.DisplayDLE(t.DLE), SlotID: t.SlotID, AsOf: t.AsOf, Medium: medium, Tier: opts.Tier, Bytes: b,
+				DLE: t.DLE, DLEDisplay: e.DisplayDLE(t.DLE), RunID: t.RunID, AsOf: t.AsOf, Medium: medium, Tier: opts.Tier, Bytes: b,
 			})
 			rep.ForecastBytes += b
 		}
@@ -168,7 +168,7 @@ func (e *Engine) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 			}
 			ledger.Update(drill.Record{
 				DLE: t.DLE, LastDrill: opts.Now, Tier: opts.Tier.String(), Medium: medium,
-				AsOf: t.AsOf, SlotID: t.SlotID, OK: res.OK,
+				AsOf: t.AsOf, RunID: t.RunID, OK: res.OK,
 				Class: failureToken(res), Detail: res.Detail,
 			})
 			if err := ledger.Save(e.cfg.WorkdirPath()); err != nil {
@@ -192,7 +192,7 @@ func (e *Engine) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 // In unattended mode it first skips any target whose source copy a human would have
 // to load.
 func (e *Engine) drillTarget(t drill.Target, medium string, opts DrillOptions, logf Logf) DrillResult {
-	res := DrillResult{DLE: t.DLE, DLEDisplay: e.DisplayDLE(t.DLE), SlotID: t.SlotID, AsOf: t.AsOf, Medium: medium, Tier: opts.Tier, Bytes: e.chainBytes(t.Steps)}
+	res := DrillResult{DLE: t.DLE, DLEDisplay: e.DisplayDLE(t.DLE), RunID: t.RunID, AsOf: t.AsOf, Medium: medium, Tier: opts.Tier, Bytes: e.chainBytes(t.Steps)}
 	if opts.Unattended {
 		if ok, reason := e.unattendedReachable(medium, t.Steps); !ok {
 			res.Class, res.Detail = drill.ClassSkipped, reason
@@ -231,15 +231,15 @@ func (e *Engine) drillVerify(t drill.Target, medium string, checks VerifyChecks)
 	refs := make([]clerk.Ref, 0, len(t.Steps))
 	archByRef := make(map[clerk.Ref]record.Archive, len(t.Steps))
 	for _, step := range t.Steps {
-		s, err := e.cat.ReadSlot(step.SlotID)
+		s, err := e.cat.ReadRun(step.RunID)
 		if err != nil {
 			return drill.ClassMissing, err.Error()
 		}
 		a, ok := findArchive(s, step.DLE, step.Level)
 		if !ok {
-			return drill.ClassMissing, fmt.Sprintf("%s %s L%d missing from the slot's commit footers", step.SlotID, step.DLE, step.Level)
+			return drill.ClassMissing, fmt.Sprintf("%s %s L%d missing from the run's commit footers", step.RunID, step.DLE, step.Level)
 		}
-		ref := clerk.Ref{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}
+		ref := clerk.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}
 		refs = append(refs, ref)
 		archByRef[ref] = a
 	}
@@ -292,11 +292,11 @@ func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Cla
 		if derr != nil {
 			return drill.ClassPipeline, derr.Error()
 		}
-		src, err := e.clerk.Open(clerk.Ref{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, medium)
+		src, err := e.clerk.Open(clerk.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}, medium)
 		if err != nil {
 			return classifyOpenErr(err), err.Error()
 		}
-		logf.Log("drill-restoring %s %s L%d", step.SlotID, e.DisplayDLE(step.DLE), step.Level)
+		logf.Log("drill-restoring %s %s L%d", step.RunID, e.DisplayDLE(step.DLE), step.Level)
 		// The transfer: read → decode (server-side Filters) → tar -x extract. The transfer's
 		// role tags the fault: a Sink (tar) fault is a chain-composition failure (Chain); a
 		// Source/Filters fault — an unreadable part or a decrypt/decompress child — is a decode
@@ -343,7 +343,7 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 		return drill.ClassPipeline, err.Error()
 	}
 	defer os.Remove(tmp.Name())
-	src, err := e.clerk.Open(clerk.Ref{Slot: step.SlotID, DLE: step.DLE, Level: step.Level}, medium)
+	src, err := e.clerk.Open(clerk.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}, medium)
 	if err != nil {
 		tmp.Close()
 		return classifyOpenErr(err), err.Error()
@@ -368,7 +368,7 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 	cmd.Stdin = in
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
-	logf.Log("stock-restoring %s %s L%d via documented one-liner: %s", step.SlotID, step.DLE, step.Level, script)
+	logf.Log("stock-restoring %s %s L%d via documented one-liner: %s", step.RunID, step.DLE, step.Level, script)
 	if err := cmd.Run(); err != nil {
 		return drill.ClassPipeline, fmt.Sprintf("stock one-liner failed: %v\n%s", err, strings.TrimSpace(stderr.String()))
 	}
@@ -423,7 +423,7 @@ func (e *Engine) unattendedReachable(medium string, steps []restore.Step) (bool,
 		return true, "" // address-identified: nothing to mount
 	}
 	if !view.Manual {
-		return true, "" // a robot loads the right slot itself
+		return true, "" // a robot loads the right run itself
 	}
 	loaded := ""
 	if len(view.Drives) > 0 && view.Drives[0].Loaded {
@@ -443,7 +443,7 @@ func (e *Engine) chainLabels(steps []restore.Step, medium string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, step := range steps {
-		for _, p := range placementsOnMedium(e.placementsFor(step.SlotID), medium) {
+		for _, p := range placementsOnMedium(e.placementsFor(step.RunID), medium) {
 			for _, v := range p.Labels() {
 				if !seen[v] {
 					seen[v] = true
@@ -460,7 +460,7 @@ func (e *Engine) chainLabels(steps []restore.Step, medium string) []string {
 func (e *Engine) chainBytes(steps []restore.Step) int64 {
 	var n int64
 	for _, step := range steps {
-		s, err := e.cat.ReadSlot(step.SlotID)
+		s, err := e.cat.ReadRun(step.RunID)
 		if err != nil {
 			continue
 		}
@@ -471,7 +471,7 @@ func (e *Engine) chainBytes(steps []restore.Step) int64 {
 	return n
 }
 
-func findArchive(s *catalog.Slot, dle string, level int) (record.Archive, bool) {
+func findArchive(s *catalog.Run, dle string, level int) (record.Archive, bool) {
 	for _, a := range s.Archives {
 		if a.DLE == dle && a.Level == level {
 			return a, true
@@ -515,9 +515,9 @@ type WormResult struct {
 	Detail   string // human-readable explanation
 }
 
-// wormProbeSlot is the single, fixed probe object the drill reuses every run — so an
+// wormProbeRun is the single, fixed probe object the drill reuses every run — so an
 // immutable medium accumulates exactly one undeletable probe, not one per drill.
-const wormProbeSlot = "drill-worm-probe"
+const wormProbeRun = "drill-worm-probe"
 
 // wormProbe tests whether a medium enforces WORM/immutability the way NBackup relies
 // on for the 3-2-1-1-0 "1 immutable" digit: it keeps one fixed probe object on the
@@ -559,7 +559,7 @@ func (e *Engine) wormProbe(medium string, apply bool, now time.Time) WormResult 
 		return res
 	}
 	for _, f := range files {
-		if f.Header.Slot != wormProbeSlot {
+		if f.Header.Run != wormProbeRun {
 			continue
 		}
 		if err := vol.RemoveFile(f.Pos); err != nil {
@@ -581,11 +581,11 @@ func (e *Engine) ensureWormProbe(vol media.Volume, now time.Time) error {
 		return err
 	}
 	for _, f := range files {
-		if f.Header.Slot == wormProbeSlot {
+		if f.Header.Run == wormProbeRun {
 			return nil // reuse the existing probe
 		}
 	}
-	h := record.Header{Slot: wormProbeSlot, Kind: record.KindArchive, DLE: "worm-probe", CreatedAt: now}
+	h := record.Header{Run: wormProbeRun, Kind: record.KindArchive, DLE: "worm-probe", CreatedAt: now}
 	fw, err := vol.AppendFile(context.Background(), h)
 	if err != nil {
 		return err
@@ -631,7 +631,7 @@ type PostureCheck struct {
 // framing around the per-DLE drill outcomes.
 type Posture struct {
 	Checks    []PostureCheck
-	Copies    int // backup copies of the weakest-covered slot (the live source is the implicit +1)
+	Copies    int // backup copies of the weakest-covered run (the live source is the implicit +1)
 	Media     int // distinct media holding copies
 	Offsite   bool
 	Immutable bool
@@ -639,10 +639,10 @@ type Posture struct {
 
 // posture computes the recoverability audit. failures is this run's drill failures.
 func (e *Engine) posture(worm WormResult, failures int) Posture {
-	slots := e.cat.Slots()
+	runs := e.cat.Runs()
 	mediaSet := map[string]bool{}
 	minCopies := -1
-	for _, s := range slots {
+	for _, s := range runs {
 		ps := e.cat.Placements(s.ID)
 		if len(ps) == 0 {
 			continue
@@ -669,7 +669,7 @@ func (e *Engine) posture(worm WormResult, failures int) Posture {
 	}
 
 	// The live dump source is copy #1 in the canonical 3-2-1 rule (production data
-	// + 2 backups = 3), so a slot is compliant once it has 2 backup copies. We count
+	// + 2 backups = 3), so a run is compliant once it has 2 backup copies. We count
 	// catalog placements — the verifiable backup copies; the source is the implicit
 	// third NBackup can never drill, so it is never enough on its own.
 	switch {
@@ -678,7 +678,7 @@ func (e *Engine) posture(worm WormResult, failures int) Posture {
 	case minCopies == 1:
 		add("3 copies", PostureWarn, "source + 1 backup copy; 3-2-1 wants 2 backups")
 	default:
-		add("3 copies", PostureFail, "only the live source — no backup copy recorded for some slot")
+		add("3 copies", PostureFail, "only the live source — no backup copy recorded for some run")
 	}
 	if len(mediaSet) >= 2 {
 		add("2 media", PostureOK, fmt.Sprintf("%d media hold copies", len(mediaSet)))

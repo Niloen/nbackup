@@ -24,7 +24,7 @@ func NewReader() *Reader { return &Reader{} }
 // catch-all against a swapped volume or a stale catalog (the header is decoded
 // anyway).
 type Expect struct {
-	Slot  string
+	Run   string
 	DLE   string
 	Level int
 }
@@ -43,7 +43,7 @@ type PartOpener func(p record.FilePos) (record.Header, io.ReadCloser, error)
 // Each part's header is asserted as it is reached. The caller closes the returned reader.
 func (r *Reader) Open(parts []record.FilePos, want Expect, open PartOpener) (io.ReadCloser, error) {
 	if len(parts) == 0 {
-		return nil, fmt.Errorf("archive %s %s L%d has no parts", want.Slot, want.DLE, want.Level)
+		return nil, fmt.Errorf("archive %s %s L%d has no parts", want.Run, want.DLE, want.Level)
 	}
 	raw := &partsReader{parts: parts, want: want, open: open}
 	if err := raw.prime(); err != nil {
@@ -142,13 +142,13 @@ func assertPart(h record.Header, want Expect, part int) error {
 	if h.Kind != record.KindArchive {
 		return fmt.Errorf("position holds a %q record, not an archive", h.Kind)
 	}
-	if h.Slot != want.Slot || h.DLE != want.DLE || h.Level != want.Level {
+	if h.Run != want.Run || h.DLE != want.DLE || h.Level != want.Level {
 		return fmt.Errorf("position holds %s %s L%d, expected %s %s L%d (wrong volume or stale catalog — run `nb rebuild`)",
-			h.Slot, h.DLE, h.Level, want.Slot, want.DLE, want.Level)
+			h.Run, h.DLE, h.Level, want.Run, want.DLE, want.Level)
 	}
 	if h.Part != part {
 		return fmt.Errorf("position holds %s %s L%d part %d, expected part %d (wrong volume or stale catalog — run `nb rebuild`)",
-			h.Slot, h.DLE, h.Level, h.Part, part)
+			h.Run, h.DLE, h.Level, h.Part, part)
 	}
 	return nil
 }

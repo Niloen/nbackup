@@ -12,8 +12,8 @@ import (
 
 // TestSyncMirrorsLandingToTarget runs two backups onto disk, then exercises
 // `nb sync`: a dry-run reports the backlog without copying, a real run mirrors both
-// slots onto the archive medium (recording a second placement each), a re-sync is
-// a no-op (idempotent), and --last bounds the selection to the most recent slot.
+// runs onto the archive medium (recording a second placement each), a re-sync is
+// a no-op (idempotent), and --last bounds the selection to the most recent run.
 func TestSyncMirrorsLandingToTarget(t *testing.T) {
 	src := t.TempDir()
 	write(t, filepath.Join(src, "f.txt"), "sync me")
@@ -49,7 +49,7 @@ func TestSyncMirrorsLandingToTarget(t *testing.T) {
 		t.Fatalf("dump 2: %v", err)
 	}
 
-	// Dry-run reports both slots and copies nothing.
+	// Dry-run reports both runs and copies nothing.
 	report, err := eng.SyncTo("", "archive", SyncSelection{}, false, false, nil)
 	if err != nil {
 		t.Fatalf("sync dry-run: %v", err)
@@ -57,7 +57,7 @@ func TestSyncMirrorsLandingToTarget(t *testing.T) {
 	if len(report.Items) != 2 {
 		t.Fatalf("dry-run backlog = %d, want 2", len(report.Items))
 	}
-	if report.Items[0].SlotID != s1.ID || report.Items[1].SlotID != s2.ID {
+	if report.Items[0].RunID != s1.ID || report.Items[1].RunID != s2.ID {
 		t.Fatalf("backlog not oldest-first: %v", report.Items)
 	}
 	if eng.placedOn(s1.ID, "archive") {
@@ -74,10 +74,10 @@ func TestSyncMirrorsLandingToTarget(t *testing.T) {
 	}
 	for _, id := range []string{s1.ID, s2.ID} {
 		if !eng.placedOn(id, "archive") {
-			t.Fatalf("slot %s not on archive after sync", id)
+			t.Fatalf("run %s not on archive after sync", id)
 		}
 		if got := len(eng.cat.Placements(id)); got != 2 {
-			t.Fatalf("slot %s placements = %d, want 2", id, got)
+			t.Fatalf("run %s placements = %d, want 2", id, got)
 		}
 	}
 
@@ -91,7 +91,7 @@ func TestSyncMirrorsLandingToTarget(t *testing.T) {
 	}
 }
 
-// TestSyncSelectionLast checks --last keeps only the most recent N slots.
+// TestSyncSelectionLast checks --last keeps only the most recent N runs.
 func TestSyncSelectionLast(t *testing.T) {
 	src := t.TempDir()
 	write(t, filepath.Join(src, "f.txt"), "x")
@@ -128,12 +128,12 @@ func TestSyncSelectionLast(t *testing.T) {
 	if len(report.Items) != 1 {
 		t.Fatalf("--last 1 backlog = %d, want 1", len(report.Items))
 	}
-	if report.Items[0].SlotID != "slot-2026-06-23.001" {
-		t.Fatalf("--last 1 kept %q, want the newest slot", report.Items[0].SlotID)
+	if report.Items[0].RunID != "run-2026-06-23.001" {
+		t.Fatalf("--last 1 kept %q, want the newest run", report.Items[0].RunID)
 	}
 }
 
-// TestSyncFromNonLanding exercises an arbitrary --from: a slot is first mirrored
+// TestSyncFromNonLanding exercises an arbitrary --from: a run is first mirrored
 // disk -> archive, then re-mirrored archive -> cold with archive (not the landing
 // medium) as the source. The cold copy must read from archive and land sealed.
 func TestSyncFromNonLanding(t *testing.T) {
@@ -177,7 +177,7 @@ func TestSyncFromNonLanding(t *testing.T) {
 		t.Fatalf("unexpected report: from=%q to=%q copied=%d", report.From, report.To, report.Copied())
 	}
 	if !eng.placedOn(s.ID, "cold") {
-		t.Fatal("slot not on cold after archive->cold sync")
+		t.Fatal("run not on cold after archive->cold sync")
 	}
 
 	// The cold copy must restore on its own (proves the bytes came across intact).
@@ -194,10 +194,10 @@ func TestSyncFromNonLanding(t *testing.T) {
 	assertContent(t, filepath.Join(dest, "f.txt"), "tiered")
 }
 
-// TestSyncSpansLibraryVolumes syncs several disk slots onto a robotic tape library
+// TestSyncSpansLibraryVolumes syncs several disk runs onto a robotic tape library
 // whose tapes are too small to hold them all: the changer must roll itself onto a
-// fresh bay (auto-labeled) each time a tape fills, so every slot lands across
-// distinct volumes. Each slot must then restore from the library on its own — proof
+// fresh bay (auto-labeled) each time a tape fills, so every run lands across
+// distinct volumes. Each run must then restore from the library on its own — proof
 // the rolled-onto bytes are whole and the catalog points at the right tape.
 func TestSyncSpansLibraryVolumes(t *testing.T) {
 	src := t.TempDir()
@@ -205,14 +205,14 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 	cfg := &config.Config{
 		Landing:   "disk",
 		AutoLabel: true, // let the changer label each fresh tape it rolls onto
-		// A one-day cycle makes every run a fresh full, so each slot carries its own
+		// A one-day cycle makes every run a fresh full, so each run carries its own
 		// payload independently. (With incrementals the three same-second writes race
 		// GNU tar's second-granularity change detection: a missed change leaves the
 		// last incremental empty and the restore shows the previous day's contents.)
 		Cycle: "1d",
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
-			// Small tapes (256 KiB) across 4 bays: one slot fits, two do not.
+			// Small tapes (256 KiB) across 4 bays: one run fits, two do not.
 			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "4", "volume_size": "262144"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
@@ -229,8 +229,8 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	// Three slots, each ~90 KiB of payload (scheme none), so one fits on a 256 KiB
-	// tape but two do not — the second slot forces a roll onto a fresh bay.
+	// Three runs, each ~90 KiB of payload (scheme none), so one fits on a 256 KiB
+	// tape but two do not — the second run forces a roll onto a fresh bay.
 	payloads := map[string]string{}
 	var ids []string
 	for i, day := range []int{21, 22, 23} {
@@ -258,7 +258,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 		t.Fatalf("copied = %d, want 3", report.Copied())
 	}
 
-	// Every slot is on the library, and they are spread across more than one volume
+	// Every run is on the library, and they are spread across more than one volume
 	// (the whole point — a single tape could not hold them).
 	vols := map[string]bool{}
 	for _, id := range ids {
@@ -272,18 +272,18 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 			}
 		}
 		if !placed {
-			t.Fatalf("slot %s not on the library after sync", id)
+			t.Fatalf("run %s not on the library after sync", id)
 		}
 	}
 	if len(vols) < 2 {
-		t.Fatalf("all slots landed on a single volume %v; the changer did not roll", vols)
+		t.Fatalf("all runs landed on a single volume %v; the changer did not roll", vols)
 	}
 
 	// Drop the disk copies so restore must read from the library, exercising the
-	// changer auto-mounting the right bay for each slot.
+	// changer auto-mounting the right bay for each run.
 	name := config.DLE{Host: "localhost", Path: src}.Name()
 	for _, id := range ids {
-		removeSlotFiles(t, eng, id)
+		removeRunFiles(t, eng, id)
 		if _, err := eng.cat.RemovePlacement(id, "disk"); err != nil {
 			t.Fatal(err)
 		}
@@ -298,15 +298,15 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 }
 
 // TestRelabelRefusesProtectedSpanTape guards the relabel safety floor for spanned
-// slots. A slot's seal record lives only on the last tape of its span, so the head
+// runs. A run's seal record lives only on the last tape of its span, so the head
 // and middle tapes hold payload parts but no seal. The relabel guard must still
 // refuse them: it judges protection from the catalog (which records a placement on
-// every tape the slot touches), not by scanning the mounted reel — scanning a
+// every tape the run touches), not by scanning the mounted reel — scanning a
 // sealless tape would find nothing and wrongly allow the wipe, destroying the
 // spanned copy. --force remains the deliberate override.
 func TestRelabelRefusesProtectedSpanTape(t *testing.T) {
 	src := t.TempDir()
-	// ~600 KiB across 256 KiB tapes: one slot spans three bays.
+	// ~600 KiB across 256 KiB tapes: one run spans three bays.
 	write(t, filepath.Join(src, "f.txt"), strings.Repeat("x", 600*1024))
 
 	cfg := &config.Config{
@@ -351,21 +351,21 @@ func TestRelabelRefusesProtectedSpanTape(t *testing.T) {
 		}
 	}
 	if len(spanVols) < 2 {
-		t.Fatalf("slot did not span multiple tapes: %v", spanVols)
+		t.Fatalf("run did not span multiple tapes: %v", spanVols)
 	}
 	head := spanVols[0]
 
-	// now is inside the run's minimum-age window, so the slot is protected. Under the
+	// now is inside the run's minimum-age window, so the run is protected. Under the
 	// old reel-scanning guard the head tape looked empty and would be relabeled.
 	if err := eng.LoadVolume("lib", head, true, nil); err != nil {
 		t.Fatalf("load head tape %s: %v", head, err)
 	}
 	err = eng.LabelVolume("lib", head, true, false, day, nil)
 	if err == nil {
-		t.Fatalf("relabel of head span tape %s must be refused while the slot is protected", head)
+		t.Fatalf("relabel of head span tape %s must be refused while the run is protected", head)
 	}
 	if !strings.Contains(err.Error(), "protected") {
-		t.Fatalf("want a protected-slot refusal, got: %v", err)
+		t.Fatalf("want a protected-run refusal, got: %v", err)
 	}
 
 	// --force is the deliberate escape hatch and still works.
@@ -389,10 +389,10 @@ func TestRelabelRefusesProtectedSpanTape(t *testing.T) {
 	}
 }
 
-// TestSyncSlotOutOfTapes checks that a slot too big to fit even by spanning every
+// TestSyncRunOutOfTapes checks that a run too big to fit even by spanning every
 // available tape fails with an actionable "no further writable bay" error and is not
 // recorded — the orphaned, unsealed parts left behind are reclaimable by relabel.
-func TestSyncSlotOutOfTapes(t *testing.T) {
+func TestSyncRunOutOfTapes(t *testing.T) {
 	src := t.TempDir()
 	write(t, filepath.Join(src, "f.txt"), strings.Repeat("z", 200*1024)) // ~200 KiB
 
@@ -401,7 +401,7 @@ func TestSyncSlotOutOfTapes(t *testing.T) {
 		AutoLabel: true,
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
-			// One 64 KiB bay: far too small for the slot above, with no second bay to
+			// One 64 KiB bay: far too small for the run above, with no second bay to
 			// span onto.
 			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "1", "volume_size": "65536"}},
 		},
@@ -428,13 +428,13 @@ func TestSyncSlotOutOfTapes(t *testing.T) {
 
 	_, err = eng.SyncTo("", "lib", SyncSelection{}, true, false, nil)
 	if err == nil {
-		t.Fatal("expected sync of an oversized slot to fail")
+		t.Fatal("expected sync of an oversized run to fail")
 	}
 	if !strings.Contains(err.Error(), "no further writable bay") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if eng.placedOn(s.ID, "lib") {
-		t.Fatal("oversized slot must not be recorded on the library")
+		t.Fatal("oversized run must not be recorded on the library")
 	}
 }
 

@@ -34,8 +34,8 @@ func newRecoverCmd(a *app) *cobra.Command {
 			"  • whole-DLE (--all): rebuild an entire DLE (or every DLE) as of the date into --dest," +
 			" replaying the full plus later incrementals so deletions are applied. This prunes the" +
 			" destination to match the backup, so --dest must be empty unless --force.\n\n" +
-			"Paths are relative to the DLE root. A bare --date resolves to the most recent slot on" +
-			" or before it — the same slot the browse view and --all restore both use.",
+			"Paths are relative to the DLE root. A bare --date resolves to the most recent run on" +
+			" or before it — the same run the browse view and --all restore both use.",
 		Example: "  nb recover\n" +
 			"  nb recover --dle app01:/home --date 2026-06-20 --list --path /etc\n" +
 			"  nb recover --dle app01:/home --date 2026-06-20 --path /etc/hosts --dest /tmp/out\n" +
@@ -64,8 +64,8 @@ func newRecoverCmd(a *app) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dleName, "dle", "", "DLE to recover from (with --all, omit to restore every DLE)")
-	cmd.Flags().StringVar(&dateStr, "date", "", "as-of date YYYY-MM-DD (default today); resolves to the most recent slot on or before that day")
-	cmd.Flags().StringVar(&timeStr, "time", "", "as-of point-in-time 'YYYY-MM-DD HH[:MM[:SS]]' (UTC); resolves to the most recent slot committed in or before that period — reaches an earlier same-day run. Mutually exclusive with --date")
+	cmd.Flags().StringVar(&dateStr, "date", "", "as-of date YYYY-MM-DD (default today); resolves to the most recent run on or before that day")
+	cmd.Flags().StringVar(&timeStr, "time", "", "as-of point-in-time 'YYYY-MM-DD HH[:MM[:SS]]' (UTC); resolves to the most recent run committed in or before that period — reaches an earlier same-day run. Mutually exclusive with --date")
 	cmd.Flags().StringArrayVar(&paths, "path", nil, "file/dir to recover (repeatable); non-interactive")
 	cmd.Flags().StringVar(&dest, "dest", "", "destination directory for recovered files")
 	cmd.Flags().BoolVar(&listOnly, "list", false, "print a listing of --path (or the root) and exit")
@@ -188,7 +188,7 @@ func runRecoverBatch(eng *engine.Engine, dleName, dateStr, timeStr string, paths
 		if !ok {
 			return fmt.Errorf("not found: %s%s", target, pathRootHint(target))
 		}
-		fmt.Printf("# %s as of %s (%s)\n", eng.DisplayDLE(slug), tree.AsOf, tree.TargetSlot)
+		fmt.Printf("# %s as of %s (%s)\n", eng.DisplayDLE(slug), tree.AsOf, tree.TargetRun)
 		printListing(n)
 		if tree.HasIncrementals() {
 			fmt.Println(fileLevelDeletionNote)
@@ -370,7 +370,7 @@ func (sh *recoverShell) prompt() string {
 
 func (sh *recoverShell) banner() {
 	if sh.sess != nil {
-		fmt.Printf("disk %q as of %s (resolved to %s)\n", sh.eng.DisplayDLE(sh.dle), sh.date, sh.sess.Tree().TargetSlot)
+		fmt.Printf("disk %q as of %s (resolved to %s)\n", sh.eng.DisplayDLE(sh.dle), sh.date, sh.sess.Tree().TargetRun)
 		sh.noteDeletionOnce()
 		return
 	}

@@ -34,7 +34,7 @@ const (
 	// ClassChain is an incremental-composition fault: the individual archives read
 	// fine but the full+incrementals do not compose into a restorable filesystem.
 	ClassChain
-	// ClassMissing is a placement fault: the slot (or a needed archive) has no copy
+	// ClassMissing is a placement fault: the run (or a needed archive) has no copy
 	// on the requested medium — a lost offsite copy, a gap in replication.
 	ClassMissing
 	// ClassSkipped is not a failure: the target could not be drilled *unattended*

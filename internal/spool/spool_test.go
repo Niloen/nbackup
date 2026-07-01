@@ -11,7 +11,7 @@ import (
 
 // fakeStore is a no-op archiveio.WriteStore — a landing's write target. The spool builds a writer over it
 // but the test never drives it (NextPart/Commit), so the WriteStore calls never fire; the spool's Close
-// hook (the slot release) is what the test exercises.
+// hook (the run release) is what the test exercises.
 type fakeStore struct{}
 
 func (fakeStore) NextPart() (media.Volume, int64, string, int, error)  { return nil, 0, "", 0, nil }
@@ -21,10 +21,10 @@ func (fakeStore) Record(archiveio.CommitResult) error                  { return 
 
 // TestDirectPermitReleasedOnCloseWithoutCommit is the regression for the landing hang: a direct write
 // that faults before Commit (the producer's deferred Close runs, Commit never does) must return its
-// backing permit, so the next direct write can acquire the single slot instead of blocking forever.
+// backing permit, so the next direct write can acquire the single run instead of blocking forever.
 func TestDirectPermitReleasedOnCloseWithoutCommit(t *testing.T) {
 	sp := New(context.Background(), Config{
-		Backings: []Backing{{Name: "landing", Stores: []archiveio.WriteStore{fakeStore{}}, Slots: 1}},
+		Backings: []Backing{{Name: "landing", Stores: []archiveio.WriteStore{fakeStore{}}, Writers: 1}},
 		Holding:  NewPool(nil), // no holding disks => every write routes direct
 	})
 	store := sp.Ingest("landing")

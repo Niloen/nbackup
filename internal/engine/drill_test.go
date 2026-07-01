@@ -15,7 +15,7 @@ import (
 )
 
 // drillFixture builds a disk-landing engine with an offsite disk medium and a single
-// DLE, runs a full and (the next day) an incremental, and mirrors both slots offsite.
+// DLE, runs a full and (the next day) an incremental, and mirrors both runs offsite.
 // It returns the engine, the DLE name, the source dir, and each medium's path.
 type drillFixture struct {
 	eng        *Engine
@@ -63,23 +63,23 @@ func newDrillFixture(t *testing.T, scheme string) *drillFixture {
 	return &drillFixture{eng: eng, dle: config.DLE{Host: "localhost", Path: src}.Name(), src: src, diskDir: diskDir, offsiteDir: offsiteDir}
 }
 
-// payloadFile locates a slot's archive payload (not the .hdr sidecar) for a level on
+// payloadFile locates a run's archive payload (not the .hdr sidecar) for a level on
 // a disk medium, so a test can corrupt it.
-func payloadFile(t *testing.T, mediumDir, slotID string, level int) string {
+func payloadFile(t *testing.T, mediumDir, runID string, level int) string {
 	t.Helper()
-	all, _ := filepath.Glob(filepath.Join(mediumDir, "slots", slotID, "*"))
+	all, _ := filepath.Glob(filepath.Join(mediumDir, "runs", runID, "*"))
 	for _, f := range all {
 		base := filepath.Base(f)
 		if strings.Contains(base, fmt.Sprintf("-L%d.", level)) && !strings.HasSuffix(base, ".hdr") {
 			return f
 		}
 	}
-	t.Fatalf("no payload for %s L%d under %s (have %v)", slotID, level, mediumDir, all)
+	t.Fatalf("no payload for %s L%d under %s (have %v)", runID, level, mediumDir, all)
 	return ""
 }
 
 // TestVerifyDeepStructural exercises the structural (`--deep`) verify primitive: it
-// passes on a healthy slot (the pipeline completes and members match the seal), and a
+// passes on a healthy run (the pipeline completes and members match the seal), and a
 // payload corruption is caught — as an integrity fault at the checksum check, and as a
 // pipeline fault at the structural check when the scheme can no longer decode it.
 func TestVerifyDeepStructural(t *testing.T) {
@@ -95,18 +95,18 @@ func TestVerifyDeepStructural(t *testing.T) {
 		t.Fatalf("healthy deep verify failures = %d, want 0", rep.Failures)
 	}
 	// Every archive verdict carries a structural-checked OK.
-	for _, sv := range rep.Slots {
+	for _, sv := range rep.Runs {
 		for _, av := range sv.Archives {
 			if !av.OK {
-				t.Fatalf("archive %s %s L%d not OK: %s", av.Slot, av.DLE, av.Level, av.Detail)
+				t.Fatalf("archive %s %s L%d not OK: %s", av.Run, av.DLE, av.Level, av.Detail)
 			}
 		}
 	}
 
 	// Corrupt the full payload on the offsite copy: checksum verify scoped to offsite
 	// reports an integrity fault.
-	corrupt(t, payloadFile(t, f.offsiteDir, "slot-2026-06-21.001", 0))
-	rep, err = eng.Verify([]string{"slot-2026-06-21.001"}, VerifyOptions{Checks: CheckChecksum, Medium: "offsite"}, nil)
+	corrupt(t, payloadFile(t, f.offsiteDir, "run-2026-06-21.001", 0))
+	rep, err = eng.Verify([]string{"run-2026-06-21.001"}, VerifyOptions{Checks: CheckChecksum, Medium: "offsite"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,8 +129,8 @@ func TestVerifyStructuralPipelineFault(t *testing.T) {
 	eng := f.eng
 
 	// Garble the middle of the gzip payload so decompression fails outright.
-	corrupt(t, payloadFile(t, f.diskDir, "slot-2026-06-21.001", 0))
-	rep, err := eng.Verify([]string{"slot-2026-06-21.001"}, VerifyOptions{Checks: CheckStructural, Medium: "disk"}, nil)
+	corrupt(t, payloadFile(t, f.diskDir, "run-2026-06-21.001", 0))
+	rep, err := eng.Verify([]string{"run-2026-06-21.001"}, VerifyOptions{Checks: CheckStructural, Medium: "disk"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,13 +183,13 @@ func TestDrillTiersPass(t *testing.T) {
 	}
 }
 
-// TestDrillMissingCopy classifies a drill against a medium that lacks the slot as a
+// TestDrillMissingCopy classifies a drill against a medium that lacks the run as a
 // missing-copy fault.
 func TestDrillMissingCopy(t *testing.T) {
 	f := newDrillFixture(t, "none")
 	eng := f.eng
 	// Drop the offsite copy of the full so the chain is incomplete on offsite.
-	if _, err := eng.cat.RemovePlacement("slot-2026-06-21.001", "offsite"); err != nil {
+	if _, err := eng.cat.RemovePlacement("run-2026-06-21.001", "offsite"); err != nil {
 		t.Fatal(err)
 	}
 	rep, err := eng.Drill(DrillOptions{Tier: drill.TierStructural, Medium: "offsite", Sample: 1, Apply: true, Now: time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)}, nil)
@@ -208,7 +208,7 @@ func TestDrillBrokenChain(t *testing.T) {
 	eng := f.eng
 	// Garble the incremental payload on disk: the bytes are not a tar stream, so the
 	// chain restore (full then incremental) fails composing — a chain fault.
-	corrupt(t, payloadFile(t, f.diskDir, "slot-2026-06-22.001", 1))
+	corrupt(t, payloadFile(t, f.diskDir, "run-2026-06-22.001", 1))
 	rep, err := eng.Drill(DrillOptions{Tier: drill.TierChain, Medium: "disk", Sample: 1, Apply: true, Now: time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -233,7 +233,7 @@ func TestDrillWormProbeMutableDisk(t *testing.T) {
 	}
 	// A second probe also succeeds and never accumulates more than one probe object.
 	_ = eng.wormProbe("disk", true, time.Now().UTC())
-	probes, _ := filepath.Glob(filepath.Join(f.diskDir, "slots", wormProbeSlot))
+	probes, _ := filepath.Glob(filepath.Join(f.diskDir, "runs", wormProbeRun))
 	if len(probes) > 1 {
 		t.Fatalf("worm probe accumulated %d objects, want <=1", len(probes))
 	}
@@ -269,14 +269,14 @@ func TestDrillUnattendedSkipsSwap(t *testing.T) {
 	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
 		t.Fatalf("dump: %v", err)
 	}
-	// Load a blank reel and mirror the slot onto the station (auto-labeled).
+	// Load a blank reel and mirror the run onto the station (auto-labeled).
 	if err := eng.LoadVolume("station", "1", false, nil); err != nil {
 		t.Fatalf("load reel-01: %v", err)
 	}
 	if _, err := eng.SyncTo("", "station", SyncSelection{}, true, false, nil); err != nil {
 		t.Fatalf("sync to station: %v", err)
 	}
-	// Swap in a different blank reel, so the slot's reel is no longer in the drive.
+	// Swap in a different blank reel, so the run's reel is no longer in the drive.
 	if err := eng.LoadVolume("station", "2", false, nil); err != nil {
 		t.Fatalf("load reel-02: %v", err)
 	}
@@ -339,7 +339,7 @@ func corrupt(t *testing.T, path string) {
 
 // firstFailClass returns the class of the first failing archive verdict in a report.
 func firstFailClass(rep *VerifyReport) drill.Class {
-	for _, sv := range rep.Slots {
+	for _, sv := range rep.Runs {
 		for _, av := range sv.Archives {
 			if !av.OK {
 				return av.Class

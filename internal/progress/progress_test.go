@@ -30,7 +30,7 @@ func plan() []Plan {
 // the snapshot reflects each transition, including ordering by DLE name.
 func TestTrackerLifecycle(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot-2026-06-23.001", PhaseRunning, 2, plan(), c.now, nil)
+	tr := NewTracker("run-2026-06-23.001", PhaseRunning, 2, plan(), c.now, nil)
 
 	snap := tr.Snapshot()
 	if snap.Phase != PhaseRunning {
@@ -71,7 +71,7 @@ func TestTrackerLifecycle(t *testing.T) {
 // TestTrackerFailure records a failed DLE with its error message.
 func TestTrackerFailure(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot", PhaseRunning, 1, plan(), c.now, nil)
+	tr := NewTracker("run", PhaseRunning, 1, plan(), c.now, nil)
 	tr.StartDLE("bravo")
 	tr.FinishDLE("bravo", 0, 0, 0, errors.New("tar exploded"))
 
@@ -90,7 +90,7 @@ func TestTrackerFailure(t *testing.T) {
 // the live buckets, while the run's canceled phase is terminal.
 func TestTrackerCancel(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot", PhaseRunning, 2, plan(), c.now, nil)
+	tr := NewTracker("run", PhaseRunning, 2, plan(), c.now, nil)
 	tr.StartDLE("alpha")
 	tr.CancelDLE("alpha")
 	tr.SetPhase(PhaseCanceled)
@@ -116,7 +116,7 @@ func TestTrackerCancel(t *testing.T) {
 // remaining estimate.
 func TestRateAndETA(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot", PhaseRunning, 1, plan(), c.now, nil)
+	tr := NewTracker("run", PhaseRunning, 1, plan(), c.now, nil)
 	tr.StartDLE("alpha")
 	c.advance(10 * time.Second)
 	tr.AddBytes("alpha", 100, 40) // 100 of 400 bytes in 10s -> 10 B/s
@@ -142,7 +142,7 @@ func TestRateAndETA(t *testing.T) {
 func TestFileSinkRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	c := newClock()
-	tr := NewTracker("slot-x", PhaseRunning, 1, plan(), c.now, NewFileSink(dir, c.now))
+	tr := NewTracker("run-x", PhaseRunning, 1, plan(), c.now, NewFileSink(dir, c.now))
 
 	tr.StartDLE("alpha")
 	tr.FinishDLE("alpha", 1, 300, 100, nil)
@@ -152,7 +152,7 @@ func TestFileSinkRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if snap.SlotID != "slot-x" || snap.Phase != PhaseDone {
+	if snap.RunID != "run-x" || snap.Phase != PhaseDone {
 		t.Fatalf("loaded snapshot = %+v", snap)
 	}
 	if snap.EndedAt.IsZero() {
@@ -167,8 +167,8 @@ func TestFileSinkThrottle(t *testing.T) {
 	c := newClock()
 	sink := NewFileSink(dir, c.now)
 
-	tr := NewTracker("slot", PhaseRunning, 1, plan(), c.now, sink) // forced initial write
-	tr.StartDLE("alpha")                                           // forced
+	tr := NewTracker("run", PhaseRunning, 1, plan(), c.now, sink) // forced initial write
+	tr.StartDLE("alpha")                                          // forced
 
 	// Two byte updates within the throttle window: only the first should write.
 	tr.AddBytes("alpha", 10, 4)
@@ -201,7 +201,7 @@ func TestLoadMissing(t *testing.T) {
 // TestRender produces a human report mentioning the key facts.
 func TestRender(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot-2026-06-23.001", PhaseRunning, 2, plan(), c.now, nil)
+	tr := NewTracker("run-2026-06-23.001", PhaseRunning, 2, plan(), c.now, nil)
 	tr.StartDLE("alpha")
 	c.advance(5 * time.Second)
 	tr.AddBytes("alpha", 150, 60)
@@ -209,7 +209,7 @@ func TestRender(t *testing.T) {
 	var sb strings.Builder
 	Render(&sb, tr.Snapshot(), c.now())
 	out := sb.String()
-	for _, want := range []string{"slot-2026-06-23.001", "running", "alpha", "50%", "dumping"} {
+	for _, want := range []string{"run-2026-06-23.001", "running", "alpha", "50%", "dumping"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render missing %q in:\n%s", want, out)
 		}
@@ -220,7 +220,7 @@ func TestRender(t *testing.T) {
 // with the disk it landed on, so a multi-disk run shows where each buffered.
 func TestRenderDraining(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot-2026-06-23.001", PhaseRunning, 2, plan(), c.now, nil)
+	tr := NewTracker("run-2026-06-23.001", PhaseRunning, 2, plan(), c.now, nil)
 	tr.StartDLE("alpha")
 	tr.FinishDLE("alpha", 3, 300, 120, nil)
 	tr.StartFlush("alpha", "scratch2")
@@ -249,7 +249,7 @@ func TestRenderDraining(t *testing.T) {
 // drain rate is measured over its own window.
 func TestDrainProgressAndRates(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000}}, c.now, nil)
+	tr := NewTracker("run", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000}}, c.now, nil)
 
 	tr.StartDLE("alpha")
 	c.advance(10 * time.Second)
@@ -304,7 +304,7 @@ func TestDrainProgressAndRates(t *testing.T) {
 // draining — a 0% flush bar, not the misleading "direct" of a dump that bypassed holding.
 func TestStagedHoldingNotDirect(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000}}, c.now, nil)
+	tr := NewTracker("run", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000}}, c.now, nil)
 	tr.StartDLE("alpha")
 	tr.StageHolding("alpha", "scratch") // committed to holding...
 	tr.FinishDLE("alpha", 1, 1000, 800, nil)
@@ -331,7 +331,7 @@ func TestStagedHoldingNotDirect(t *testing.T) {
 // authoritative volume yet.
 func TestStagingToHolding(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000}}, c.now, nil)
+	tr := NewTracker("run", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000}}, c.now, nil)
 	tr.StartDLE("alpha")
 	tr.MarkToHolding("alpha")      // routed to holding...
 	tr.AddBytes("alpha", 500, 400) // ...still dumping there: 400 compressed on holding, not landed
@@ -359,7 +359,7 @@ func TestStagingToHolding(t *testing.T) {
 // drain phase: no Drain footer, "direct" in its drain cell, and volume = compressed out.
 func TestDirectDumpNoDrain(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("slot", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000}}, c.now, nil)
+	tr := NewTracker("run", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000}}, c.now, nil)
 	tr.StartDLE("alpha")
 	tr.FinishDLE("alpha", 1, 1000, 800, nil)
 
@@ -385,7 +385,7 @@ func TestDirectDumpNoDrain(t *testing.T) {
 func TestAtomicWriteNoTemp(t *testing.T) {
 	dir := t.TempDir()
 	c := newClock()
-	tr := NewTracker("slot", PhaseRunning, 1, plan(), c.now, NewFileSink(dir, c.now))
+	tr := NewTracker("run", PhaseRunning, 1, plan(), c.now, NewFileSink(dir, c.now))
 	tr.SetPhase(PhaseDone)
 	if _, err := Load(dir); err != nil {
 		t.Fatalf("status file missing: %v", err)

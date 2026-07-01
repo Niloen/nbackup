@@ -35,16 +35,16 @@ Replay **one archive per level** — the newest of each, from the last full forw
 dump is needed. Replaying an *older* same-level rerun re-applies GNU tar's
 rename/delete directives and aborts (`tar: Cannot rename …`).
 
-Order slots by date **then** same-day sequence. A plain glob mis-sorts a `.2`
+Order runs by date **then** same-day sequence. A plain glob mis-sorts a `.2`
 rerun before its own date (since `'.' < '/'`), so normalize first:
 
 ```bash
 dle=app01-home
-slots=$(ls -d slots/slot-* | sed -E 's#(/slot-[0-9-]+)$#\1.1#' \
+runs=$(ls -d runs/run-* | sed -E 's#(/run-[0-9-]+)$#\1.1#' \
           | sort -t. -k1,1 -k2,2n | sed -E 's#\.1$##')
-# keep only the slots from this DLE's most recent full onward:
-full=$(for d in $slots; do ls "$d"/0*-"$dle"-L0.tar* 2>/dev/null; done | tail -1)
-chain=$(printf '%s\n' "$slots" | sed -n "\#^$(dirname "$full")\$#,\$p")
+# keep only the runs from this DLE's most recent full onward:
+full=$(for d in $runs; do ls "$d"/0*-"$dle"-L0.tar* 2>/dev/null; done | tail -1)
+chain=$(printf '%s\n' "$runs" | sed -n "\#^$(dirname "$full")\$#,\$p")
 for lvl in $(seq 0 9); do
   a=$(for d in $chain; do ls "$d"/0*-"$dle"-L"$lvl".tar* 2>/dev/null; done | tail -1)
   [ -n "$a" ] && zstd -dc "$a" | tar --extract --listed-incremental=/dev/null
@@ -91,15 +91,15 @@ dd if=/dev/nst0 bs=256k skip=1 | zstd -dc | tar -xf -   # skip the 32 KB header 
 
 A **spanned** archive is split into parts written across several volumes. On a
 dir-backed library each volume is a `slot-NN/` directory whose file `000000` is the
-volume's identity label; the data files follow as `000001`, `000002`, …. `nb slot
-<slot>` prints the volume chain — in write order — and, per archive, the file
+volume's identity label; the data files follow as `000001`, `000002`, …. `nb run
+<run>` prints the volume chain — in write order — and, per archive, the file
 position of each part (a position of `1` is the file `000001`). Match each volume
 label to its `slot-NN/` directory by reading that directory's `000000` label file.
 Then read each part as `<dir>/slot-NN/<position>`, strip its 32 KB header, and
 concatenate the parts in chain order before decompressing:
 
 ```bash
-# one part per volume, in the chain order `nb slot` prints (positions here are 1):
+# one part per volume, in the chain order `nb run` prints (positions here are 1):
 for p in vtape/slot-08/000001 vtape/slot-01/000001 vtape/slot-02/000001; do
   dd bs=32k skip=1 < "$p"
 done | zstd -dc | tar -xf -

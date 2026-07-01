@@ -29,19 +29,19 @@ import (
 func newReportCmd(a *app) *cobra.Command {
 	var last int
 	var asJSON, notify, dump bool
-	var slotID string
+	var runID string
 	cmd := &cobra.Command{
 		Use:   "report",
 		Short: "Summarize recent runs, or print one dump's per-DLE report",
 		Long: "Render a digest of recent runs from the run history every dump/sync/verify/drill/prune " +
 			"writes: a per-run table, a failure summary, and a recovery-health section flagging DLEs whose " +
 			"drills are failing, degrading (passed before, failing now), stale, or never run. With --dump it " +
-			"instead prints a per-DLE report for one dump (the latest, or --slot <id>): each DLE's " +
+			"instead prints a per-DLE report for one dump (the latest, or --run <id>): each DLE's " +
 			"level, original/output size, compression %, files, dump time, and rate, with full/incremental " +
 			"totals. Reads only — no engine, no lock — so it is cheap to run from cron. With --notify it sends " +
 			"the digest through the config's `notify.digest` backends (e.g. a nightly email); with --json it " +
 			"emits the raw run records.",
-		Example: "  nb report\n  nb report --last 30\n  nb report --dump\n  nb report --dump --slot slot-2026-06-21.001\n  nb dump && nb sync && nb drill --unattended; nb report --notify",
+		Example: "  nb report\n  nb report --last 30\n  nb report --dump\n  nb report --dump --run run-2026-06-21.001\n  nb dump && nb sync && nb drill --unattended; nb report --notify",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.loadRO()
@@ -49,12 +49,12 @@ func newReportCmd(a *app) *cobra.Command {
 				return err
 			}
 			dir := cfg.WorkdirPath()
-			// --slot implies the per-dump report.
-			if slotID != "" {
+			// --run implies the per-dump report.
+			if runID != "" {
 				dump = true
 			}
 			if dump {
-				return runDumpReport(dir, slotID, asJSON)
+				return runDumpReport(dir, runID, asJSON)
 			}
 			runs, err := report.Last(dir, last)
 			if err != nil {
@@ -73,17 +73,17 @@ func newReportCmd(a *app) *cobra.Command {
 	}
 	cmd.Flags().IntVar(&last, "last", 10, "summarize the last N runs (0 = all)")
 	cmd.Flags().BoolVar(&dump, "dump", false, "print the per-DLE dump report for the latest dump")
-	cmd.Flags().StringVar(&slotID, "slot", "", "with --dump, report on this slot id instead of the latest")
+	cmd.Flags().StringVar(&runID, "run", "", "with --dump, report on this run id instead of the latest")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the raw run records as JSON instead of a text report")
 	cmd.Flags().BoolVar(&notify, "notify", false, "also send the digest through the config's notify.digest backends")
 	return cmd
 }
 
 // runDumpReport prints the per-DLE report for one dump from the run
-// history: the latest dump when slotID is empty, else the named slot. The per-DLE
-// timing it shows is only in the run history (not the seal), so a slot that predates
-// the history — or was compacted out — points the operator at `nb slot <id>`.
-func runDumpReport(dir, slotID string, asJSON bool) error {
+// history: the latest dump when runID is empty, else the named run. The per-DLE
+// timing it shows is only in the run history (not the seal), so a run that predates
+// the history — or was compacted out — points the operator at `nb run <id>`.
+func runDumpReport(dir, runID string, asJSON bool) error {
 	runs, err := report.Load(dir)
 	if err != nil {
 		return err
@@ -93,14 +93,14 @@ func runDumpReport(dir, slotID string, asJSON bool) error {
 		if runs[i].Command != report.CommandDump {
 			continue
 		}
-		if slotID == "" || runs[i].SlotID == slotID {
+		if runID == "" || runs[i].RunID == runID {
 			target = &runs[i]
 			break
 		}
 	}
 	if target == nil {
-		if slotID != "" {
-			return fmt.Errorf("no dump report for slot %q in the run history (try `nb slot %s` for its sizes)", slotID, slotID)
+		if runID != "" {
+			return fmt.Errorf("no dump report for run %q in the run history (try `nb run %s` for its sizes)", runID, runID)
 		}
 		return fmt.Errorf("no dump recorded yet")
 	}

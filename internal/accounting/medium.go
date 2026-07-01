@@ -14,7 +14,7 @@ import (
 type MediumInfo struct {
 	Name     string
 	Type     string
-	Slots    int
+	Runs     int
 	Used     int64
 	Capacity int64  // 0 = unbounded
 	Volume   string // label name; "" for address-identified media (disk, s3)
@@ -54,10 +54,10 @@ func (a *Accountant) Medium(name string) (MediumInfo, bool) {
 		return MediumInfo{}, false
 	}
 	info := MediumInfo{
-		Name:  name,
-		Type:  d.Type,
-		Slots: len(a.d.Cat.SlotsOn(name)),
-		Used:  a.d.Cat.MediumBytes(name),
+		Name: name,
+		Type: d.Type,
+		Runs: len(a.d.Cat.RunsOn(name)),
+		Used: a.d.Cat.MediumBytes(name),
 	}
 	if prof, err := media.OpenProfile(d.Type, media.Options(d.ProfileOptions())); err == nil {
 		info.Capacity = prof.TotalBytes()

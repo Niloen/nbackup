@@ -53,7 +53,7 @@ type ForecastPoint struct {
 }
 
 // ForecastCost projects the landing medium's monthly storage cost forward day by day,
-// reusing the planner's run simulation. It maintains a footprint of slots — appending
+// reusing the planner's run simulation. It maintains a footprint of runs — appending
 // each simulated run and evicting via the medium's own reclamation strategy and
 // retention floor (the same primitives `nb prune` uses) — and reprices the survivors
 // each day, so the curve reflects fulls/incrementals landing and pruning reclaiming.
@@ -67,12 +67,12 @@ func (e *Engine) ForecastCost(start time.Time, days int) []ForecastPoint {
 		ds := record.DateString(date)
 
 		// Synthesize the day's run as archives (sized from the plan's estimates), replacing
-		// any existing archives of the same slot id so a re-simulation is idempotent.
-		slotID := record.IDFromParts(ds, 1)
-		working = dropSlot(working, slotID)
+		// any existing archives of the same run id so a re-simulation is idempotent.
+		runID := record.IDFromParts(ds, 1)
+		working = dropRun(working, runID)
 		var runBytes int64
 		for _, it := range plan.Items {
-			working = append(working, record.Archive{Slot: slotID, DLE: it.Name, Level: it.Level, Compressed: it.EstBytes, CreatedAt: date})
+			working = append(working, record.Archive{Run: runID, DLE: it.Name, Level: it.Level, Compressed: it.EstBytes, CreatedAt: date})
 			runBytes += it.EstBytes
 		}
 
@@ -81,7 +81,7 @@ func (e *Engine) ForecastCost(start time.Time, days int) []ForecastPoint {
 		var reclaimed int64
 		for _, r := range e.profile.Reclaim(working, floor, date) {
 			reclaimed += r.Bytes
-			working = dropArchive(working, r.SlotID, r.DLE)
+			working = dropArchive(working, r.RunID, r.DLE)
 		}
 
 		var bytes int64
@@ -122,7 +122,7 @@ func (e *Engine) RestoreCost(dles []string, asOf string) ReadEstimate {
 			continue
 		}
 		for _, s := range steps {
-			refs = append(refs, archiveRef{s.SlotID, s.DLE, s.Level})
+			refs = append(refs, archiveRef{s.RunID, s.DLE, s.Level})
 		}
 	}
 	return e.estimateRead(refs, "")
@@ -133,16 +133,16 @@ func (e *Engine) RestoreCost(dles []string, asOf string) ReadEstimate {
 func (e *Engine) SelectionCost(steps []recovery.ExtractStep) ReadEstimate {
 	refs := make([]archiveRef, 0, len(steps))
 	for _, st := range steps {
-		refs = append(refs, archiveRef{st.SlotID, st.DLE, st.Level})
+		refs = append(refs, archiveRef{st.RunID, st.DLE, st.Level})
 	}
 	return e.estimateRead(refs, "")
 }
 
-// archiveRef names one archive to price (slot + DLE + level).
+// archiveRef names one archive to price (run + DLE + level).
 type archiveRef struct {
-	slotID string
-	dle    string
-	level  int
+	runID string
+	dle   string
+	level int
 }
 
 // estimateRead prices reading the referenced archives off a medium. With forceMedium
@@ -178,7 +178,7 @@ func (e *Engine) estimateRead(refs []archiveRef, forceMedium string) ReadEstimat
 // its catalog record. With forceMedium set it reads that medium's copy; otherwise it
 // picks the copy a restore prefers (landing first).
 func (e *Engine) locateArchive(r archiveRef, forceMedium string) (medium string, a record.Archive, ok bool) {
-	s, err := e.cat.ReadSlot(r.slotID)
+	s, err := e.cat.ReadRun(r.runID)
 	if err != nil {
 		return "", record.Archive{}, false
 	}
@@ -189,7 +189,7 @@ func (e *Engine) locateArchive(r archiveRef, forceMedium string) (medium string,
 	if forceMedium != "" {
 		return forceMedium, ar, true
 	}
-	for _, p := range e.placementsFor(r.slotID) {
+	for _, p := range e.placementsFor(r.runID) {
 		if _, has := p.Parts(r.dle, r.level); has {
 			return p.Medium, ar, true
 		}
@@ -221,23 +221,23 @@ func partCount(a record.Archive) int64 {
 	return 1
 }
 
-// dropSlot removes every archive of a slot id from the working set.
-func dropSlot(archives []record.Archive, id string) []record.Archive {
+// dropRun removes every archive of a run id from the working set.
+func dropRun(archives []record.Archive, id string) []record.Archive {
 	out := archives[:0:0]
 	for _, a := range archives {
-		if a.Slot != id {
+		if a.Run != id {
 			out = append(out, a)
 		}
 	}
 	return out
 }
 
-// dropArchive removes one DLE's archive from a slot in the working set (the
-// per-archive peer of dropSlot), so the cost forecast mirrors per-archive reclamation.
+// dropArchive removes one DLE's archive from a run in the working set (the
+// per-archive peer of dropRun), so the cost forecast mirrors per-archive reclamation.
 func dropArchive(archives []record.Archive, id, dle string) []record.Archive {
 	out := archives[:0:0]
 	for _, a := range archives {
-		if a.Slot == id && a.DLE == dle {
+		if a.Run == id && a.DLE == dle {
 			continue
 		}
 		out = append(out, a)

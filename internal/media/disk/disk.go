@@ -1,6 +1,6 @@
 // Package disk implements media.Volume backed by a filesystem directory (local or
-// networked, e.g. an NFS mount). The slot layout — clean payloads plus JSON header
-// sidecars under slots/<slot>/ — lives in package fslike, shared with the cloud
+// networked, e.g. an NFS mount). The run layout — clean payloads plus JSON header
+// sidecars under runs/<run>/ — lives in package fslike, shared with the cloud
 // medium; this package supplies only the filesystem storage primitives.
 package disk
 
@@ -33,12 +33,12 @@ func init() {
 		if err := media.RejectPartSize(opts, "disk"); err != nil {
 			return nil, err
 		}
-		// Create the slot root up front (like the tape library's openDir) so an
+		// Create the run root up front (like the tape library's openDir) so an
 		// uncreatable/unwritable path fails when the medium is opened — e.g. at
 		// `nb check` — rather than silently reporting "ready" and only failing once
 		// `nb dump` tries to write. fslike.Open's scan otherwise treats a missing
 		// root as an empty volume.
-		root := filepath.Join(path, "slots")
+		root := filepath.Join(path, "runs")
 		if err := os.MkdirAll(root, 0o755); err != nil {
 			return nil, err
 		}
@@ -47,11 +47,11 @@ func init() {
 	media.Register(s)
 }
 
-// fsStore is a fslike.Store over a local directory. Keys are slot-relative paths
-// (slot/filename); the root holds one subdirectory per slot.
+// fsStore is a fslike.Store over a local directory. Keys are run-relative paths
+// (run/filename); the root holds one subdirectory per run.
 type fsStore struct{ root string }
 
-func (s fsStore) Key(slot, name string) string { return filepath.Join(slot, name) }
+func (s fsStore) Key(run, name string) string { return filepath.Join(run, name) }
 
 func (s fsStore) full(key string) string { return filepath.Join(s.root, key) }
 
@@ -78,7 +78,7 @@ func (s fsStore) ReadAll(key string) ([]byte, error) { return os.ReadFile(s.full
 
 func (s fsStore) Open(key string) (io.ReadCloser, error) { return os.Open(s.full(key)) }
 
-func (s fsStore) RemoveTree(slot string) error { return os.RemoveAll(filepath.Join(s.root, slot)) }
+func (s fsStore) RemoveTree(run string) error { return os.RemoveAll(filepath.Join(s.root, run)) }
 
 func (s fsStore) Remove(key string) error {
 	if err := os.Remove(s.full(key)); err != nil && !os.IsNotExist(err) {
@@ -88,7 +88,7 @@ func (s fsStore) Remove(key string) error {
 }
 
 func (s fsStore) List() ([]fslike.Object, error) {
-	slots, err := os.ReadDir(s.root)
+	runs, err := os.ReadDir(s.root)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -96,7 +96,7 @@ func (s fsStore) List() ([]fslike.Object, error) {
 		return nil, err
 	}
 	var out []fslike.Object
-	for _, sd := range slots {
+	for _, sd := range runs {
 		if !sd.IsDir() {
 			continue
 		}
@@ -110,7 +110,7 @@ func (s fsStore) List() ([]fslike.Object, error) {
 			}
 			out = append(out, fslike.Object{
 				Key:  filepath.Join(sd.Name(), fe.Name()),
-				Slot: sd.Name(),
+				Run:  sd.Name(),
 				Base: fe.Name(),
 			})
 		}

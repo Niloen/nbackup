@@ -8,12 +8,12 @@ import (
 	"github.com/Niloen/nbackup/internal/restore"
 )
 
-// Target is a selected DLE to drill: the point-in-time slot whose restore chain the
+// Target is a selected DLE to drill: the point-in-time run whose restore chain the
 // drill will exercise, the chain itself (so the engine need not recompute it), and
 // the risk signals that ranked it.
 type Target struct {
 	DLE      string
-	SlotID   string         // newest slot at/before AsOf holding the DLE — the chain's tip
+	RunID    string         // newest run at/before AsOf holding the DLE — the chain's tip
 	AsOf     string         // point-in-time drilled (YYYY-MM-DD)
 	ChainLen int            // archives in the restore chain (longer chain = more to go wrong)
 	FullAge  int            // age in days of the relied-upon full (older = riskier)
@@ -29,18 +29,18 @@ type candidate struct {
 // Select picks the risk-biased subset of DLEs to drill as of asOf: it rotates DLEs
 // so each is covered within window (never-drilled and longest-overdue first), and
 // prioritizes the longest incremental chains and the oldest fulls still relied upon
-// (the most fragile recovery paths). It drills a point-in-time — the newest slot at
-// or before asOf for each DLE — not only the latest slot. At most `sample` targets
+// (the most fragile recovery paths). It drills a point-in-time — the newest run at
+// or before asOf for each DLE — not only the latest run. At most `sample` targets
 // are returned (sample <= 0 = every due DLE); a DLE already drilled OK within the
-// window is not reselected. The slots must be in run order (oldest first).
+// window is not reselected. The runs must be in run order (oldest first).
 func Select(dles []string, archives []record.Archive, asOf string, ledger *Ledger, window time.Duration, sample int, now time.Time) []Target {
 	var due []candidate
 	for _, dle := range dles {
-		targetSlot := newestSlotForDLE(archives, dle, asOf)
-		if targetSlot == "" {
+		targetRun := newestRunForDLE(archives, dle, asOf)
+		if targetRun == "" {
 			continue // no recovery point for this DLE as of the date
 		}
-		steps, err := restore.Chain(archives, dle, targetSlot)
+		steps, err := restore.Chain(archives, dle, targetRun)
 		if err != nil || len(steps) == 0 {
 			continue // no full at/before the date — nothing to compose
 		}
@@ -51,10 +51,10 @@ func Select(dles []string, archives []record.Archive, asOf string, ledger *Ledge
 		due = append(due, candidate{
 			t: Target{
 				DLE:      dle,
-				SlotID:   targetSlot,
+				RunID:    targetRun,
 				AsOf:     asOf,
 				ChainLen: len(steps),
-				FullAge:  fullAgeDays(steps[0].SlotID, asOf, now),
+				FullAge:  fullAgeDays(steps[0].RunID, asOf, now),
 				Steps:    steps,
 			},
 			lastDrill: rec.LastDrill,
@@ -91,16 +91,16 @@ func Select(dles []string, archives []record.Archive, asOf string, ledger *Ledge
 	return out
 }
 
-// newestSlotForDLE returns the id of the newest slot at or before asOf that holds an
+// newestRunForDLE returns the id of the newest run at or before asOf that holds an
 // archive for the DLE, or "" if none.
-func newestSlotForDLE(archives []record.Archive, dle, asOf string) string {
+func newestRunForDLE(archives []record.Archive, dle, asOf string) string {
 	id := ""
 	for _, a := range archives {
-		if a.DLE != dle || record.SlotDate(a.Slot) > asOf {
+		if a.DLE != dle || record.RunDate(a.Run) > asOf {
 			continue // wrong DLE, or strictly after the point-in-time
 		}
-		if id == "" || record.SlotIDLess(id, a.Slot) {
-			id = a.Slot
+		if id == "" || record.RunIDLess(id, a.Run) {
+			id = a.Run
 		}
 	}
 	return id
@@ -108,8 +108,8 @@ func newestSlotForDLE(archives []record.Archive, dle, asOf string) string {
 
 // fullAgeDays is the age in days of the full the chain relies on, measured to asOf
 // (the point being drilled). It falls back to now when asOf does not parse.
-func fullAgeDays(fullSlotID, asOf string, now time.Time) int {
-	fullDate, err := record.ParseDateField(record.SlotDate(fullSlotID))
+func fullAgeDays(fullRunID, asOf string, now time.Time) int {
+	fullDate, err := record.ParseDateField(record.RunDate(fullRunID))
 	if err != nil {
 		return 0
 	}

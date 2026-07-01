@@ -1,6 +1,6 @@
-// Package archiveio authors and reads slots on a media.Volume. It owns how a slot maps
+// Package archiveio authors and reads runs on a media.Volume. It owns how a run maps
 // onto a volume's files — one or more part files per archive plus a final seal record
-// carrying the slot's metadata — so the engine supplies only an already-transformed
+// carrying the run's metadata — so the engine supplies only an already-transformed
 // payload stream and descriptive metadata, never positions or filenames. archiveio knows
 // nothing of compression or encryption: it meters (checksum + size) the bytes that land
 // and splits them into parts. The transform pipeline (compress/encrypt) is the engine's
@@ -72,43 +72,43 @@ type WriteStore interface {
 	Record(result CommitResult) error
 }
 
-// SlotSpec is the identity of a slot to author: the slot id every archive in the run is
-// tagged with, plus when authoring began (stamped into each file's header). A slot is just
+// RunSpec is the identity of a run to author: the run id every archive in the run is
+// tagged with, plus when authoring began (stamped into each file's header). A run is just
 // that shared tag — the archives carry it and the catalog groups them back — so there is no
-// slot record for the Author to produce.
-type SlotSpec struct {
-	ID        string    // the slot's identity (see record.IDFromParts)
-	CreatedAt time.Time // when authoring began; a copy preserves the source slot's
+// run record for the Author to produce.
+type RunSpec struct {
+	ID        string    // the run's identity (see record.IDFromParts)
+	CreatedAt time.Time // when authoring began; a copy preserves the source run's
 }
 
-// Author authors a single slot onto a medium via a WriteStore. Callers stream each archive's
+// Author authors a single run onto a medium via a WriteStore. Callers stream each archive's
 // payload with NewArchive and finalize it with Commit (which writes the archive's member
 // index and its commit footer — the per-archive marker — then reports it via WriteStore.Record).
-// There is no slot-level seal: a slot is the grouping its archives carry in their headers, and a
+// There is no run-level seal: a run is the grouping its archives carry in their headers, and a
 // crashed run's committed archives survive (uncommitted parts are orphans a scan ignores). The
-// Author accumulates no slot state — each archive is durable and recorded the moment it commits —
+// Author accumulates no run state — each archive is durable and recorded the moment it commits —
 // so NewArchive is safe for concurrent use on an unbounded store (disk); a bounded,
 // spanning-capable store rolls one shared volume and must be driven serially.
 type Author struct {
 	store     WriteStore
 	lim       *ratelimit.Limiter // optional bandwidth cap on the bytes landing on the medium (nil = uncapped)
 	now       func() time.Time   // clock for per-archive commit timestamps (nil → time.Now)
-	slotID    string             // the slot tag every archive in this run carries; read-only after construction
+	runID     string             // the run tag every archive in this run carries; read-only after construction
 	createdAt time.Time          // when authoring began, stamped into each file's header
 }
 
-// NewAuthor begins authoring a new slot, described by spec, onto store. The Author holds only the
-// slot tag and creation time from spec. lim, when non-nil, caps the rate of bytes written to the
+// NewAuthor begins authoring a new run, described by spec, onto store. The Author holds only the
+// run tag and creation time from spec. lim, when non-nil, caps the rate of bytes written to the
 // medium (network politeness); a nil lim is uncapped. The same lim is shared across concurrent
 // NewArchive writers on an unbounded store, so several workers to one medium share its budget.
-func NewAuthor(store WriteStore, spec SlotSpec, lim *ratelimit.Limiter, now func() time.Time) *Author {
+func NewAuthor(store WriteStore, spec RunSpec, lim *ratelimit.Limiter, now func() time.Time) *Author {
 	if now == nil {
 		now = time.Now
 	}
-	return &Author{store: store, lim: lim, now: now, slotID: spec.ID, createdAt: spec.CreatedAt}
+	return &Author{store: store, lim: lim, now: now, runID: spec.ID, createdAt: spec.CreatedAt}
 }
 
-// NewArchive begins writing the archive described by spec onto the slot, pulled part-by-part by
+// NewArchive begins writing the archive described by spec onto the run, pulled part-by-part by
 // NextPart (the caller copies up to each part's cap into the returned writer, closes it, and asks for
 // the next until the payload is exhausted). Rolling to a fresh volume happens inside NextPart, so a
 // spanning medium's roll lands wherever the store routes it. The payload is metered (sha256 + size)
@@ -117,7 +117,7 @@ func NewAuthor(store WriteStore, spec SlotSpec, lim *ratelimit.Limiter, now func
 // landed byte count for live progress, attach a tap with MeterArchive.
 func (w *Author) NewArchive(spec ArchiveSpec) *ArchiveWriter {
 	meta := record.Archive{
-		Slot:     w.slotID,
+		Run:      w.runID,
 		DLE:      spec.DLE,
 		Host:     spec.Host,
 		Path:     spec.Path,
@@ -125,19 +125,19 @@ func (w *Author) NewArchive(spec ArchiveSpec) *ArchiveWriter {
 		Compress: spec.Compress,
 		Encrypt:  spec.Encrypt,
 		Level:    spec.Level,
-		BaseSlot: spec.BaseSlot,
+		BaseRun:  spec.BaseRun,
 	}
 	return &ArchiveWriter{w: w, base: w.archiveHeader(meta), meta: meta, h: sha256.New()}
 }
 
-// NewCopy begins re-authoring an already-committed archive onto the slot — the same path as
+// NewCopy begins re-authoring an already-committed archive onto the run — the same path as
 // NewArchive (pulled part-by-part by NextPart), but for a copy: the bytes are carried raw, so on
 // Commit the writer verifies the metered checksum against arch.SHA256 and preserves arch's stats,
 // members, and CreatedAt (a copy keeps the source's identity and age); only the part layout, sized to
 // this medium's volumes, is new. The spool's holding->backing drain, `nb copy`, and crash-recovery
 // Flush all share this one copy path. Attach a tap with MeterArchive for live progress.
 func (w *Author) NewCopy(arch record.Archive) *ArchiveWriter {
-	arch.Slot = w.slotID // re-authored under this writer's slot (the same id, by construction)
+	arch.Run = w.runID // re-authored under this writer's run (the same id, by construction)
 	return &ArchiveWriter{w: w, base: w.archiveHeader(arch), meta: arch, expectSHA: arch.SHA256, h: sha256.New()}
 }
 
@@ -166,7 +166,7 @@ type ArchiveWriter struct {
 	part      int
 	tap       func(int64)   // optional progress tap (MeterArchive); fired on the writing goroutine
 	committed *CommitResult // the assembled result, stashed by Commit (nil until then); read via Committed
-	onClose   func() error  // optional cleanup run by Close (the spool's per-write slot release); nil = none
+	onClose   func() error  // optional cleanup run by Close (the spool's per-write run release); nil = none
 }
 
 var _ xfer.Sink = (*ArchiveWriter)(nil)
@@ -182,7 +182,7 @@ func (a *ArchiveWriter) Committed() (CommitResult, bool) {
 }
 
 // SetCloser attaches a cleanup fn run by Close on every path — the spool uses it to release the
-// per-archive slot it leased, so a faulted transfer (which never reaches Commit) still frees it. A
+// per-archive run it leased, so a faulted transfer (which never reaches Commit) still frees it. A
 // leaf writer sets none.
 func (a *ArchiveWriter) SetCloser(fn func() error) { a.onClose = fn }
 
@@ -273,7 +273,7 @@ func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.SourceStats) error {
 	return nil
 }
 
-// Close runs the optional close hook (the spool's slot release) and returns its error; a leaf writer
+// Close runs the optional close hook (the spool's run release) and returns its error; a leaf writer
 // holds no resources between parts (each part self-closes, an aborted part is dropped via its canceled
 // ctx, and Commit is terminal), so with no hook it is a no-op. The producer defers Close on every
 // path, so a faulted transfer still runs the hook.
@@ -287,7 +287,7 @@ func (a *ArchiveWriter) Close() error {
 // Commit durably finalizes an archive (all fields final): it writes the member index (the
 // gzip'd Members) then the commit footer (the metadata without members) — the footer last,
 // so a crash before it leaves orphan parts a scan ignores. It returns the archive's on-medium
-// position (parts/footer/index) for the caller to record. The Author keeps no slot state — the
+// position (parts/footer/index) for the caller to record. The Author keeps no run state — the
 // footer makes the archive durable and the caller records it from the returned position — so
 // concurrent Commits on an unbounded store need no coordination here. Call it once the caller has
 // merged the producer's stats (FileCount/Uncompressed/Members) into the archive.
@@ -332,7 +332,7 @@ func (w *Author) writeRecord(ctx context.Context, kind string, a record.Archive,
 	if err != nil {
 		return record.FilePos{}, fmt.Errorf("place %s record: %w", kind, err)
 	}
-	h := record.Header{Slot: w.slotID, Kind: kind, DLE: a.DLE, Level: a.Level, CreatedAt: w.createdAt}
+	h := record.Header{Run: w.runID, Kind: kind, DLE: a.DLE, Level: a.Level, CreatedAt: w.createdAt}
 	fw, err := vol.AppendFile(ctx, h)
 	if err != nil {
 		return record.FilePos{}, err
@@ -353,7 +353,7 @@ func (w *Author) writeRecord(ctx context.Context, kind string, a record.Archive,
 // write), stamped so a multi-part payload's parts are named and read as slices, not standalone files.
 func (w *Author) archiveHeader(a record.Archive) record.Header {
 	return record.Header{
-		Slot:      w.slotID,
+		Run:       w.runID,
 		Kind:      record.KindArchive,
 		DLE:       a.DLE,
 		Host:      a.Host,
@@ -362,11 +362,11 @@ func (w *Author) archiveHeader(a record.Archive) record.Header {
 		Compress:  a.Compress,
 		Encrypt:   a.Encrypt,
 		Level:     a.Level,
-		BaseSlot:  a.BaseSlot,
+		BaseRun:   a.BaseRun,
 		Split:     w.store.Bounded(),
 		CreatedAt: w.createdAt,
 	}
 }
 
-// SlotID returns the id of the slot being authored.
-func (w *Author) SlotID() string { return w.slotID }
+// RunID returns the id of the run being authored.
+func (w *Author) RunID() string { return w.runID }

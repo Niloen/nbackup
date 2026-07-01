@@ -25,9 +25,9 @@ Per-medium retention with a safety floor that never deletes the last recovery pa
 and `minimum_age`. A copy on another medium never makes an archive prunable —
 double storage exists for redundancy, so each copy is retained on its own terms.
 
-The unit pruning reasons about is the **archive** (one DLE's image within a slot),
-not the whole slot. So an old slot can shed one DLE's image while keeping a
-slot-mate the recovery chain still needs.
+The unit pruning reasons about is the **archive** (one DLE's image within a run),
+not the whole run. So an old run can shed one DLE's image while keeping a
+run-mate the recovery chain still needs.
 
 Pruning has two layers.
 

@@ -26,13 +26,13 @@ the bytes on the medium and the checksum beside them, so it needs no decryption 
 and keeps no ledger.
 
 ```bash
-nb verify slot-2026-06-21.001   # re-hash one slot's archives
-nb verify --all                 # re-check every slot
+nb verify run-2026-06-21.001   # re-hash one run's archives
+nb verify --all                # re-check every run
 ```
 
-Because a slot can have several copies, `nb verify` audits **every** copy and tells
+Because a run can have several copies, `nb verify` audits **every** copy and tells
 you that an intact copy still exists when one is damaged — a damaged offsite reel
-does not condemn the slot if disk still holds a good copy.
+does not condemn the run if disk still holds a good copy.
 
 ### `--deep` — prove it is a restorable stream
 
@@ -43,7 +43,7 @@ the members — and asserts that the pipeline completes and that the members mat
 recorded index.
 
 ```bash
-nb verify --deep slot-2026-06-21.001
+nb verify --deep run-2026-06-21.001
 ```
 
 This proves the bytes are a valid *restorable stream* and exercises the encryption
@@ -84,7 +84,7 @@ broken or most expensive to lose. Selection:
   indefinitely);
 - **prioritizes** the longest incremental chains and the oldest fulls still relied
   upon (the targets where drift or a missing base hurts most);
-- drills a **point-in-time** (`--as-of`), not merely the latest slot — so a restore
+- drills a **point-in-time** (`--as-of`), not merely the latest run — so a restore
   *as it would have stood* on an earlier date is exercised too.
 
 ### Tiers
@@ -114,7 +114,7 @@ different fix:
 - **integrity** — corruption; a copy's bytes no longer match the checksum.
 - **pipeline** — the archive would not decrypt/decompress/untar; a lost key or a
   drifted scheme/`tar`.
-- **chain** — the incremental composition is broken; a base slot is missing or a
+- **chain** — the incremental composition is broken; a base run is missing or a
   level does not replay.
 - **missing-copy** — no readable copy of the target could be reached.
 

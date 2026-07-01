@@ -41,7 +41,7 @@ func (s *Scheduler) forceFullWhereBaseMissing(plan *planner.Plan) {
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf(
 			"DLE %s: the L%d incremental state is missing or unusable (a prior dump may have been interrupted, or state_dir moved) — forcing a full (L0)",
 			it.DLE.ID(), it.BaseLevel))
-		it.Level, it.BaseLevel, it.BaseSlot = 0, -1, ""
+		it.Level, it.BaseLevel, it.BaseRun = 0, -1, ""
 		it.EstBytes = it.FullBytes
 		it.Reason = "forced full: incremental base missing or unusable"
 	}

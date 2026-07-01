@@ -27,15 +27,15 @@ cycle: 7d
 # bump_percent: 5
 
 # Named storage definitions. Each is a Volume with a `type`, its own capacity and
-# retention, plus type-specific connection parameters. Slots can be copied
-# between media with `nb copy` (e.g. `nb copy <slot> --to lto`).
+# retention, plus type-specific connection parameters. Runs can be copied
+# between media with `nb copy` (e.g. `nb copy <run> --to lto`).
 # (These /var/lib/nbackup paths need root — see the FIRST RUN note at the top.)
 media:
   fast-disk:
     type: disk          # a filesystem directory (local or NFS)
-    path: /var/lib/nbackup/slots   # where slot files live (distinct from the workdir)
+    path: /var/lib/nbackup/runs   # where run files live (distinct from the workdir)
     capacity: 20TB      # space NBackup may use here; `nb prune` reclaims oldest to fit
-    # minimum_age: 30d  # retention floor before a slot may be retired (default: one cycle)
+    # minimum_age: 30d  # retention floor before a run may be retired (default: one cycle)
   lto:
     type: tape          # a LIBRARY: drives (data-transfer elements) fed from slots
     dir: /var/lib/nbackup/vtape   # a file-backed virtual library (no hardware)
@@ -89,7 +89,7 @@ media:
                         #   azblob://container     Azure Blob
     # prefix: nbackup/  # optional: confine all keys under this folder in the bucket
     capacity: 50TB      # space NBackup may use here; `nb prune` reclaims oldest to fit
-    # minimum_age: 30d  # retention floor before a slot may be retired (default: one cycle)
+    # minimum_age: 30d  # retention floor before a run may be retired (default: one cycle)
     throughput: 50MB/s  # bandwidth cap to/from this medium (default: uncapped). Network
                         # politeness — the read/write peer of `nice` — so a dump or sync
                         # doesn't saturate the office uplink, and a restore/drill download
@@ -113,7 +113,7 @@ media:
     #   egress_per_gb: 0.05         # $/GiB transferred out (read off the medium)
     #   get_per_1000: 0.0004        # $ per 1000 read requests
 
-# Which medium slots are created on (the landing).
+# Which medium runs are created on (the landing).
 landing: fast-disk
 
 # HOLDING DISK (Amanda's holding disk). Mark a fast disk/cloud medium `holding: true` and it
@@ -134,7 +134,7 @@ landing: fast-disk
 # run's un-flushed archives stay recorded on the holding disk in the catalog; `nb dump`
 # auto-drains them on the next run, or run `nb flush` to drain them explicitly.
 
-# Replication (Amanda's vaulting). Each rule mirrors one medium's sealed slots onto
+# Replication (Amanda's vaulting). Each rule mirrors one medium's sealed runs onto
 # another — the batch, idempotent form of `nb copy`. A cron line of
 # `nb dump && nb sync` lands fast on disk, then pushes copies offsite.
 # `nb sync` (no --to) runs every rule; `nb sync --to lto` syncs one ad-hoc target.
@@ -144,7 +144,7 @@ landing: fast-disk
 # sync:
 #   - to: cloud           # mirror landing -> object store
 #   - to: lto
-#     last: 4             # copy only the 4 most recent slots (does NOT remove older
+#     last: 4             # copy only the 4 most recent runs (does NOT remove older
 #                         # ones already on tape — use `nb prune` to trim)
 #   - from: lto           # second tier: tape -> deep archive (source need not be landing)
 #     to: deep-archive

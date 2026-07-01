@@ -1,6 +1,6 @@
-# Niloen Backup - Slot-based backup system in Go
+# Niloen Backup - Run-based backup system in Go
 
-A slot-based backup system in Go. Its design comes from **[Amanda][amanda]** —
+A run-based backup system in Go. Its design comes from **[Amanda][amanda]** —
 balanced multilevel scheduling, immutable daily artifacts, human-readable
 contents, and cycle-based safety. What NBackup adds is **first-class disk and
 cloud storage**: Amanda is tape-first, while NBackup treats local disk, virtual
@@ -9,7 +9,7 @@ common modern shape — land fast on disk, then replicate offsite — a first-cl
 operation.
 
 > A backup administrator should be able to reason about backups by looking at a
-> sequence of immutable daily backup slots rather than a database of chunks.
+> sequence of immutable daily backup runs rather than a database of chunks.
 
 Its artifacts are portable: every backup restores with standard tools, no
 NBackup required. This is a first version — see [PRD.md](PRD.md) for the full
@@ -18,24 +18,24 @@ calls it out again only where a specific mechanism is worth tracing back.)
 
 ## Core ideas
 
-- **Slot** — the primary artifact. One run produces exactly one slot, an
-  immutable directory you can copy, inspect, and understand without NBackup.
+- **Run** — one planner execution (typically daily) and the primary artifact it
+  seals: one immutable directory of archives you can copy, inspect, and
+  understand without NBackup.
 - **DLE** — a backup source (`host` + `path`).
-- **Run** — one planner execution, typically daily.
 - **Cycle** — the dump cycle: the target and hard-max time between fulls of each
   DLE, and the window retention protects.
-- **Volume** — where slots live: local disk, a virtual tape, or a cloud object
-  store (S3/GCS/Azure). Slots stream between volumes (`nb copy` for one, `nb sync`
+- **Volume** — where runs live: local disk, a virtual tape, or a cloud object
+  store (S3/GCS/Azure). Runs stream between volumes (`nb copy` for one, `nb sync`
   for many) — e.g. land fast on disk, then replicate offsite to tape or the cloud.
 
 ## Artifacts you can read
 
 A **volume** is an ordered sequence of self-describing files, each carrying an
-identity **header** (slot, DLE, level, scheme, …) and addressed by position.
-A **slot** is a run of archives; each archive is its payload followed by a
+identity **header** (run, DLE, level, scheme, …) and addressed by position.
+A **run** is one sealed set of archives; each archive is its payload followed by a
 **member index** (its file list) and a **commit footer** (its identity, sizes,
 and checksums), the footer written last so its presence proves the archive landed
-whole. A slot is complete once every archive it planned has committed. The same
+whole. A run is complete once every archive it planned has committed. The same
 shape maps to disk, an object store, or tape; each medium frames the header its
 own way.
 
@@ -44,7 +44,7 @@ archive, and the files are human-friendly — one archive is three numbered file
 (payload, index, commit):
 
 ```text
-slots/slot-2026-06-21.001/
+runs/run-2026-06-21.001/
   000000-app01-home-L0.tar.zst        # clean compressed tar (payload)
   000000-app01-home-L0.hdr            # JSON header sidecar
   000001-app01-home-L0-index.json.gz  # gzipped member list (browse without extracting)
@@ -60,8 +60,8 @@ slots/slot-2026-06-21.001/
 ```
 
 The `NNNNNN` prefix is the file's position on the volume — a running counter, so
-it keeps climbing across the slots that share a volume rather than resetting to
-`000000` each slot. Each archive's **commit footer is its last file**; its
+it keeps climbing across the runs that share a volume rather than resetting to
+`000000` each run. Each archive's **commit footer is its last file**; its
 **payload is always the first** of the three, which is all the stock-tool restore
 below needs (it globs the `…-L<n>.tar*` payloads and ignores the index/commit).
 (A zero-change incremental — a DLE with nothing new since its base — writes just the
@@ -90,7 +90,7 @@ exactly as `nb recover` does — and `nb drill --tier stock` rehearses that
 bare-tools path for you and prints the commands. (Encrypted archives carry a
 `.gpg` suffix on the payload — `…-L0.tar.zst.gpg` — and just add a `gpg -d` at the
 front of the pipe; spanned tape parts are listed by
-`nb slot <id>`.) The full by-hand procedure is in
+`nb run <id>`.) The full by-hand procedure is in
 [docs/restore-by-hand.md](docs/restore-by-hand.md).
 
 ### Encryption
@@ -121,9 +121,9 @@ go install ./cmd/nb
 ```
 
 This produces a single `nb` binary. The convention: you **inspect** with a noun
-(`nb slot`, `nb dle`, `nb medium`) and **act** with a flat verb (`nb dump`,
+(`nb run`, `nb dle`, `nb medium`) and **act** with a flat verb (`nb dump`,
 `nb recover`, `nb prune`, …). Each inspection noun lists with no argument and
-details one item when given an id (`nb slot slot-2026-06-21.001`, `nb medium lto`).
+details one item when given an id (`nb run run-2026-06-21.001`, `nb medium lto`).
 
 | Command              | Purpose                                                  |
 |----------------------|----------------------------------------------------------|
@@ -132,20 +132,20 @@ details one item when given an id (`nb slot slot-2026-06-21.001`, `nb medium lto
 | `nb dump`            | Execute a run and commit its archives                    |
 | `nb status`          | Show progress of the current (or most recent) run        |
 | `nb report`          | Summarize recent runs, or print one dump's per-DLE report |
-| `nb slot`            | List slots, or detail one (`nb slot <id>`: archives + copies) |
-| `nb dle`             | List DLEs, or detail one's archive timeline across slots |
+| `nb run`             | List runs, or detail one (`nb run <id>`: archives + copies) |
+| `nb dle`             | List DLEs, or detail one's archive timeline across runs |
 | `nb medium`          | List media, or detail one (incl. drives + slots)          |
-| `nb verify`          | Verify slot integrity: checksums, or `--deep` structure  |
+| `nb verify`          | Verify run integrity: checksums, or `--deep` structure  |
 | `nb drill`           | Rehearse recovery: prove backups are restorable          |
 | `nb recover`         | Recover as of a date: browse + pick files, or `--all` for a whole DLE |
-| `nb copy`            | Copy one slot between media (`--from`/`--to`, e.g. disk → tape) |
-| `nb sync`            | Mirror one medium's slots onto another (disk → tape/s3)  |
+| `nb copy`            | Copy one run between media (`--from`/`--to`, e.g. disk → tape) |
+| `nb sync`            | Mirror one medium's runs onto another (disk → tape/s3)  |
 | `nb label`           | Label a volume (required for tape before its first dump) |
 | `nb load`            | Load a slot into a medium's drive (by number or `--label`) |
-| `nb prune <medium>`  | Delete a medium's slots past its cycle/capacity limits  |
+| `nb prune <medium>`  | Delete a medium's runs past its cycle/capacity limits  |
 | `nb reset <dle>`     | Schedule a DLE for a full on its next run (fresh chain)  |
 | `nb flush`           | Drain a holding disk's un-flushed archives to the landing |
-| `nb rebuild`         | Rebuild the local slot-index cache from media            |
+| `nb rebuild`         | Rebuild the local run-index cache from media            |
 
 Run `nb help <command>` (or `nb <command> --help`) for per-command usage and
 examples, and `nb completion <shell>` to generate shell completion.
@@ -157,14 +157,14 @@ cp nbackup.example.yaml nbackup.yaml   # edit sources + catalog path
 
 nb plan                # preview today's plan, capacity usage, and $/month cost (cloud media)
 nb plan --days 30      # forecast the next 30 daily runs + the $/month cost curve (cloud media)
-nb dump                # run the backup, committing one slot's archives
+nb dump                # run the backup, committing one run's archives
 nb dump --dry-run --date 2026-07-15    # plan that day's run; writes nothing
 nb status              # progress of the running (or most recent) dump
-nb slot                # list slots (with a COPIES column: where each lives)
-nb slot slot-2026-06-21.001   # archives + every copy's volume and file positions
-nb medium              # media overview: type, slots, usage / capacity, volume
-nb medium lto          # one medium's volume and the slots it holds
-nb verify --all        # re-check every slot's archive checksums
+nb run                 # list runs (with a COPIES column: where each lives)
+nb run run-2026-06-21.001     # archives + every copy's volume and file positions
+nb medium              # media overview: type, runs, usage / capacity, volume
+nb medium lto          # one medium's volume and the runs it holds
+nb verify --all        # re-check every run's archive checksums
 nb recover --dle app01:/home --date 2026-06-21 --all --dest /tmp/out   # whole-DLE restore
 ```
 
@@ -222,7 +222,7 @@ Capacity is the one number you give a medium, and it binds at two scopes:
 
 | Scope | What must fit | How it's bounded |
 |-------|---------------|------------------|
-| **Per run** | A single run's peak. | **Promotion** is capped at the room left before pruning would evict a *protected* slot (`capacity − protected set`, tightened by the landing volume's free space). No room → no promotion; a run may still be lumpy when a big DLE hits its own deadline. |
+| **Per run** | A single run's peak. | **Promotion** is capped at the room left before pruning would evict a *protected* run (`capacity − protected set`, tightened by the landing volume's free space). No room → no promotion; a run may still be lumpy when a big DLE hits its own deadline. |
 | **Per cycle** | A **complete recovery set**: one full of every DLE — they coexist when `minimum_age ≥ cycle`, so `Σ full_est` must fit capacity. | Structural — no scheduling can change the cycle's fixed full demand. |
 
 When `Σ full_est` exceeds capacity the plan carries a **warning** —
@@ -259,13 +259,13 @@ egress carries a `$`. Pricing is a flat estimate (storage + egress + request —
 NBackup does not model Glacier/Deep-Archive lifecycle tiers) and **fully offline**:
 a calculation over the catalog and a rate table, no billing API.
 
-### Slot naming and multiple runs per day
+### Run naming and multiple runs per day
 
-A slot is named for its run's local calendar date plus a sequence: the first run
-of a day is `slot-YYYY-MM-DD.001`, and running again the same day gives `.002`,
-`.003`, … The sequence is fixed-width so sorting slot ids as plain text orders them
-in time — in an `ls`, a log, or an object-store listing. Each slot stays immutable;
-a committed run is never overwritten. Restores and pruning order slots by date
+A run is named for its local calendar date plus a sequence: the first run
+of a day is `run-YYYY-MM-DD.001`, and running again the same day gives `.002`,
+`.003`, … The sequence is fixed-width so sorting run ids as plain text orders them
+in time — in an `ls`, a log, or an object-store listing. Each run stays immutable;
+a committed run is never overwritten. Restores and pruning order runs by date
 **then** sequence.
 
 ### Committing
@@ -273,7 +273,7 @@ a committed run is never overwritten. Restores and pruning order slots by date
 A run writes each archive's payload, verifies its checksum against what landed on
 the volume, then appends the archive's **member index** and, last, its **commit
 footer** (identity, sizes, checksum, part count). Written last, the footer's
-presence marks that archive complete and immutable. There is no slot-level seal:
+presence marks that archive complete and immutable. There is no run-level seal:
 "run complete?" is *derived* — did every planned DLE commit? — not a stored flag,
 so a crashed run keeps every committed archive and a rerun fills in the rest.
 
@@ -284,7 +284,7 @@ in the catalog workdir. From any other shell, `nb status` reads it and prints an
 at-a-glance report:
 
 ```text
-Run slot-2026-06-21.001  [running]
+Run run-2026-06-21.001  [running]
   started:  2026-06-21 02:00:03  (elapsed 4m12s)
   workers:  2 configured, 2 active
   dles:     1 done, 2 active, 1 pending
@@ -338,8 +338,8 @@ NBackup report — 3 run(s) from 2026-06-23 02:00 to 2026-06-23 02:25
 
 WHEN              COMMAND  OUTCOME  DETAIL
 2026-06-23 02:25  drill    FAILED   1 failure(s), 1 overdue
-2026-06-23 02:13  sync     OK       1 slot(s) copied, 5.37 GB
-2026-06-23 02:00  dump     OK       slot-2026-06-23, 3 archive(s), 5.37 GB
+2026-06-23 02:13  sync     OK       1 run(s) copied, 5.37 GB
+2026-06-23 02:00  dump     OK       run-2026-06-23, 3 archive(s), 5.37 GB
 
 FAILURES
   2026-06-23 02:25 drill [drill-failures]: 1 drill failure(s) — recovery is at risk
@@ -358,7 +358,7 @@ per-DLE table — each DLE's level, original/output size, compression %, files, 
 time, and rate:
 
 ```text
-DUMP REPORT  slot-2026-06-24.001  (run 2026-06-24 02:00)
+DUMP REPORT  run-2026-06-24.001  (run 2026-06-24 02:00)
 2 DLE(s) dumped OK · 21.47 GB -> 5.37 GB (25%) · 12m00s elapsed
 
 STATISTICS            Total        Full         Incr
@@ -379,9 +379,9 @@ app01:/etc   1    122.88 kB  40.96 kB  33%    9      1s      122.88 kB/s
 Dump time is the *sum* of per-DLE dump times (it exceeds the wall-clock run time
 when workers run in parallel); run time is the single wall-clock span.
 
-`nb report --dump --slot slot-2026-06-21.001` reports a specific dump. (Sizes come from
-each archive's commit footer; the per-DLE timing comes from the run history, so a slot
-dumped before this was recorded shows sizes via `nb slot <id>` instead.)
+`nb report --dump --run run-2026-06-21.001` reports a specific dump. (Sizes come from
+each archive's commit footer; the per-DLE timing comes from the run history, so a run
+dumped before this was recorded shows sizes via `nb run <id>` instead.)
 
 To push failures to a human, add a `notify:` block (see `nbackup.example.yaml`).
 Backends are pluggable — built-in **email (SMTP)** and a generic **webhook**
@@ -504,7 +504,7 @@ nb dump && nb sync && nb drill --unattended; nb report --notify   # hands-off cr
 
 A drill **selects** risk-first: it rotates DLEs so each is drilled within a window,
 prioritizes the longest incremental chains and the oldest fulls still relied upon,
-and drills a **point-in-time** (`--as-of`), not just the latest slot. Each target is
+and drills a **point-in-time** (`--as-of`), not just the latest run. Each target is
 exercised at a **tier** — `checksum`, `structural`, a real `chain` restore, or
 `stock` (the documented one-liner) — and the outcome is appended to an inspectable
 **ledger** (`drill-ledger.json`) in the workdir: per DLE its last drill, tier,
@@ -537,8 +537,8 @@ operator-side on the storage; least privilege keeps NBackup unable to turn it of
 `nb prune offsite`): each store is pruned against its own archives, capacity, and
 `minimum_age` — a copy on another medium never makes an archive prunable, because
 double storage exists for redundancy. The unit pruning reasons about is the
-**archive** (one DLE's image within a slot), not the whole slot, so an old slot can
-shed one DLE's image while keeping a slot-mate the chain still needs. Pruning has
+**archive** (one DLE's image within a run), not the whole run, so an old run can
+shed one DLE's image while keeping a run-mate the chain still needs. Pruning has
 two layers:
 
 1. **Safety floor**: an archive is *protected* if it is younger than the medium's
@@ -564,25 +564,25 @@ two layers:
 ### Replication / tiered storage
 
 The common operational shape is **land fast, replicate offsite**: dump to local
-disk (cheap, fast, online), then mirror committed slots to tape or S3 for the
-offsite copy. `nb sync` is the batch form of `nb copy`: it copies every slot the
+disk (cheap, fast, online), then mirror committed runs to tape or S3 for the
+offsite copy. `nb sync` is the batch form of `nb copy`: it copies every run the
 target medium is missing, **oldest first** (so an interrupted sync makes
 contiguous, replayable progress and a full lands before its incrementals).
 
 ```bash
 nb sync --to lto --dry-run  # preview: what disk has that tape doesn't
 nb sync --to lto            # copy the backlog
-nb sync --to glacier --last 4   # only the 4 most recent slots
+nb sync --to glacier --last 4   # only the 4 most recent runs
 nb sync                     # run every rule in the config's `sync:` block
 nb sync --from lto --to disk    # un-vault: restage tape back to disk
 ```
 
 The source defaults to the landing medium; **`--from` overrides it**, so the same
 command both pushes offsite (disk → tape/S3) and pulls back (tape → disk) —
-reading a tape source mounts the volume holding each slot, just like a restore.
+reading a tape source mounts the volume holding each run, just like a restore.
 
 It **copies by default** (pass `--dry-run`/`-n` to preview) and is **idempotent**:
-each slot copies atomically and records a second placement, so re-running resumes
+each run copies atomically and records a second placement, so re-running resumes
 where an interrupted sync left off and a fully-mirrored target reports "up to date".
 On a hard error (target full or offline) it stops and reports progress. Declare
 recurring targets in the config so a cron line is just `nb dump && nb sync`:
@@ -591,18 +591,18 @@ recurring targets in the config so a cron line is just `nb dump && nb sync`:
 sync:
   - to: glacier        # mirror everything to the object store
   - to: lto
-    last: 4            # copy only the 4 most recent slots (does not remove older
+    last: 4            # copy only the 4 most recent runs (does not remove older
                        # ones already on tape — `nb prune` trims)
   - from: lto          # second tier: tape -> deep-archive (source need not be landing)
     to: deep-archive
 ```
 
 Replication and pruning are independent: each medium prunes against its own
-retention, so a slot leaves disk when **disk's** capacity and cycle say so — never
+retention, so a run leaves disk when **disk's** capacity and cycle say so — never
 merely because a copy reached S3 or tape. Both copies are kept, each retained on its
 own terms. To use a cheap offsite tier as bulk retention while disk stays lean, give
 disk a tighter `capacity` (or shorter `minimum_age`) than the tier; `nb sync` mirrors
-slots offsite and `nb prune` independently trims disk back to its budget.
+runs offsite and `nb prune` independently trims disk back to its budget.
 
 ## Configuration
 
@@ -616,12 +616,12 @@ cycle: 7d                            # target & hard-max time between fulls per 
 compress:
   scheme: zstd                        # zstd | gzip | none
 
-# Named storage definitions; `landing` selects which one slots are created on.
+# Named storage definitions; `landing` selects which one runs are created on.
 # Capacity is per-medium; minimum_age is optional (defaults to one cycle).
 media:
   disk:
     type: disk
-    path: /var/lib/nbackup/catalog   # where slots are written
+    path: /var/lib/nbackup/catalog   # where runs are written
     capacity: 20TB                   # the space NBackup may use here
 landing: disk
 
@@ -662,7 +662,7 @@ sources:
 ```
 
 - **Media** is a map of named definitions, each with a `type` and type-specific
-  parameters; `landing` names the one slots are written to. Adding a medium type is
+  parameters; `landing` names the one runs are written to. Adding a medium type is
   a registry registration — no config struct changes.
 - **Archivers** are named definitions of the dump program plus its content-
   independent options — the tar binary, `one-file-system`. Most setups need just one;
@@ -682,12 +682,12 @@ cloud spell it directly (`capacity: 20TB`); a tape changer derives it as
 `slots × volume_size` (`0` = unbounded). Capacity is the headline knob: the planner
 uses it — promotion fills free space, pruning reclaims to stay within it.
 `minimum_age` is an optional per-medium safety floor (defaults to one cycle) — long
-enough that yesterday's run never overwrites a slot still inside the recovery window.
+enough that yesterday's backup never overwrites a run still inside the recovery window.
 
 Balancing dumps over time is **not** a medium property — it's a global, temporal
 planning concern (an S3 bucket has no meaningful per-run size), so the planner
 spreads fulls across the cycle on its own (see [Planning](#planning)). Pruning
-consumes only capacity; the reclamation difference (delete a slot vs reclaim a whole
+consumes only capacity; the reclamation difference (delete a run vs reclaim a whole
 tape) lives in the medium's retention strategy.
 
 ### Bandwidth politeness is per-medium
@@ -740,7 +740,7 @@ them all to the landing.
 
 ## Status & limitations (first version)
 
-Implemented: disk, tape, and cloud (S3/GCS/Azure) Volumes, **copying slots between
+Implemented: disk, tape, and cloud (S3/GCS/Azure) Volumes, **copying runs between
 media** (`nb copy`, e.g. disk → tape or disk → cloud) with the copy **recorded as a
 second placement** so a restore reads from any available copy (and `nb verify` audits
 *every* copy, reporting that an intact copy remains when one is damaged), balanced
@@ -772,13 +772,13 @@ with `nb medium <name>` (its drives and slots), and load a tape with `nb load`.
 Each slot reports a physical **barcode** (read without loading); the on-tape
 **label** is read after a load. Tapes carry that self-describing label, which
 NBackup **verifies before every write**, so a foreign or wrong-pool reel is never
-clobbered. Relabeling a tape that still holds **protected** slots (within
-`minimum_age`, or a DLE's last recovery path — so a slot spanned across tapes
+clobbered. Relabeling a tape that still holds **protected** runs (within
+`minimum_age`, or a DLE's last recovery path — so a run spanned across tapes
 protects every tape it touches) is refused unless you pass `--force`.
 
 ### Cloud (object stores)
 
-The `cloud` medium stores slots in an object store via the Go CDK
+The `cloud` medium stores runs in an object store via the Go CDK
 ([gocloud.dev/blob][gocloud]). One type covers many backends — the `url` scheme
 selects which:
 
@@ -815,9 +815,9 @@ from the config file.
 **Credentials are not in the config** — they come from each SDK's standard
 environment (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_*`). An object store
 is **address-identified** like disk: no labels, no swap prompts, nothing to
-inventory — it just lands and reclaims slots within its `capacity`. Each archive is
+inventory — it just lands and reclaims runs within its `capacity`. Each archive is
 stored as a clean `.tar.<scheme>` object (a plain GET restores it with stock tools)
-plus a small header sidecar, so a slot streams disk↔cloud unchanged. (Google Drive
+plus a small header sidecar, so a run streams disk↔cloud unchanged. (Google Drive
 and other file-API stores are out of scope — `gocloud.dev/blob` is an object-store
 abstraction.)
 

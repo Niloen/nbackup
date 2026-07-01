@@ -200,7 +200,7 @@ func printDrillReport(r *engine.DrillReport) {
 		fmt.Printf("%s %d DLE(s) (window %s, sample of the riskiest):\n", verb, len(r.Targets), sizeutil.FormatDuration(r.Window))
 		tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 		if r.Apply {
-			fmt.Fprintln(tw, "  DLE\tAS-OF\tSLOT\tEGRESS\tRESULT")
+			fmt.Fprintln(tw, "  DLE\tAS-OF\tRUN\tEGRESS\tRESULT")
 			for _, t := range r.Targets {
 				result := "OK"
 				if t.Class == drill.ClassSkipped {
@@ -208,12 +208,12 @@ func printDrillReport(r *engine.DrillReport) {
 				} else if !t.OK {
 					result = fmt.Sprintf("FAIL [%s]: %s", t.Class, t.Detail)
 				}
-				fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n", t.DLEDisplay, t.AsOf, t.SlotID, sizeutil.FormatBytes(t.Bytes), result)
+				fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n", t.DLEDisplay, t.AsOf, t.RunID, sizeutil.FormatBytes(t.Bytes), result)
 			}
 		} else {
-			fmt.Fprintln(tw, "  DLE\tAS-OF\tSLOT\tEGRESS")
+			fmt.Fprintln(tw, "  DLE\tAS-OF\tRUN\tEGRESS")
 			for _, t := range r.Targets {
-				fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", t.DLEDisplay, t.AsOf, t.SlotID, sizeutil.FormatBytes(t.Bytes))
+				fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", t.DLEDisplay, t.AsOf, t.RunID, sizeutil.FormatBytes(t.Bytes))
 			}
 		}
 		tw.Flush()

@@ -110,11 +110,11 @@ compressed, which is always safe). An unbounded holding disk in the pool ⇒ not
 direct.
 
 **The holding disk is catalogued live; crash recovery needs no scan.** The orchestrator records
-each archive's holding placement as it commits and removes it on drain, so `nb slot`/`nb dle` show
+each archive's holding placement as it commits and removes it on drain, so `nb run`/`nb dle` show
 the disks' contents during a run, and a crash leaves the un-flushed archives recorded on the
 holding media in the catalog. `nb flush` (Amanda's `amflush`) — and an auto-flush at the start of
-the next `nb dump` — gathers the staged slots across **every** holding disk (no media scan), opens
-the landing once per slot, copies each disk's archives to the landing, reclaims the disks, and
+the next `nb dump` — gathers the staged runs across **every** holding disk (no media scan), opens
+the landing once per run, copies each disk's archives to the landing, reclaims the disks, and
 seals. The self-describing disks remain the `nb rebuild` backstop.
 
 ## Constraints & acceptance

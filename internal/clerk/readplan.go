@@ -11,7 +11,7 @@ import (
 // physical place of its first part (the copy's medium and the first part's position). It is
 // what OrderForOnePass needs to sequence a selection into a one-pass read.
 type ReadItem struct {
-	Ref      Ref            // Slot, DLE, Level
+	Ref      Ref            // Run, DLE, Level
 	Medium   string         // the copy's medium
 	FirstPos record.FilePos // the archive's first part — orders the read within a medium
 }
@@ -110,7 +110,7 @@ func (c *Clerk) ReadArchives(refs []Ref, medium string, fn func(ref Ref, open fu
 		}
 		ref := it.Ref
 		open := func() (io.ReadCloser, error) {
-			want := archiveio.Expect{Slot: ref.Slot, DLE: ref.DLE, Level: ref.Level}
+			want := archiveio.Expect{Run: ref.Run, DLE: ref.DLE, Level: ref.Level}
 			return c.reader.Open(l.parts, want, op)
 		}
 		if e := fn(ref, open); e != nil {
@@ -124,7 +124,7 @@ func (c *Clerk) ReadArchives(refs []Ref, medium string, fn func(ref Ref, open fu
 // the first placement in read-preference order (the engine's own copy first) that has the
 // archive's parts.
 func (c *Clerk) locate(ref Ref, medium string) (string, []record.FilePos, bool) {
-	for _, p := range c.cat.PlacementsFor(ref.Slot) {
+	for _, p := range c.cat.PlacementsFor(ref.Run) {
 		if medium != "" && p.Medium != medium {
 			continue
 		}

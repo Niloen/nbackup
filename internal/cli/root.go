@@ -20,10 +20,10 @@ import (
 // build stamps a real tag.
 const Version = "0.1.0-dev"
 
-const rootLong = `NBackup - immutable, slot-based backups.
+const rootLong = `NBackup - immutable, run-based backups.
 
-NBackup produces one immutable slot per run: a directory of self-describing
-archive files you can copy, inspect, and restore with standard tools. Slots live
+NBackup produces one immutable run per execution: a directory of self-describing
+archive files you can copy, inspect, and restore with standard tools. Runs live
 on a Volume (local disk, a virtual tape, or S3) and stream between volumes with
 "nb copy" (e.g. disk -> tape).
 
@@ -44,7 +44,7 @@ func NewRootCmd() *cobra.Command {
 	a := &app{}
 	root := &cobra.Command{
 		Use:     "nb",
-		Short:   "Immutable, slot-based backups",
+		Short:   "Immutable, run-based backups",
 		Long:    rootLong,
 		Version: Version,
 		// Subcommands return errors that main turns into a non-zero exit via
@@ -82,13 +82,13 @@ func NewRootCmd() *cobra.Command {
 	pf.StringVar(&a.catalog, "catalog", "", "catalog directory (overrides config)")
 	pf.BoolVarP(&a.quiet, "quiet", "q", false, "suppress progress output")
 
-	// Convention: inspect with a noun (`slot`, `medium`), act with a flat verb.
+	// Convention: inspect with a noun (`run`, `medium`), act with a flat verb.
 	root.AddCommand(
 		newPlanCmd(a),
 		newCheckCmd(a),
 		newDumpCmd(a),
 		newStatusCmd(a),
-		newSlotCmd(a),
+		newRunCmd(a),
 		newDleCmd(a),
 		newMediumCmd(a),
 		newVerifyCmd(a),

@@ -29,11 +29,11 @@ new piece (per-drive tape selection).
 
 - **The orchestrator** — one goroutine per run serving volume roll + catalog `Record` + drain reclaim as
   typed messages; all byte I/O stays on the worker (`spool`).
-- **The per-backing semaphore** — `spool/spool.go`, `backing.slots` (a channel). A writer takes a slot to
-  write, releases it on close. Set in `conductor/run.go`:
+- **The per-backing semaphore** — `spool/spool.go`, `backing.free` (a channel sized to `Backing.Writers`).
+  A writer leases a store index to write, releases it on close. Set in `conductor/run.go`:
   ```go
-  slots := 1
-  if !buffering && !pw.Serial { slots = workers }   // serial (tape) → 1
+  writers := 1
+  if !buffering && !pw.Serial { writers = workers }   // serial (tape) → 1
   ```
 - **The holding Pool** already leases a resource per writer (`pool.Acquire(est)` → a disk index, author
   over `pool.Storage(idx)`). Leasing a **drive** is structurally identical.
@@ -45,7 +45,7 @@ So the pre-spool plan's big chunks — generalise the orchestrator to N drainers
 
 `VolumeSink.NextPart()` (`archiveio/writer.go`) returns **one** `media.Volume` — the medium's single
 loaded tape (the librarian's drive-0 proxy). The orchestrator serves *every* concurrent writer for a
-backing from that one sink. Bumping `slots` to N alone would make N writers fight over one tape. The fix
+backing from that one sink. Bumping `writers` to N alone would make N writers fight over one tape. The fix
 is: **the medium must vend N independent rolling volumes, one per drive.**
 
 ## The design — three changes
@@ -54,7 +54,7 @@ is: **the medium must vend N independent rolling volumes, one per drive.**
 
 - `conductor.PreparedWriter` gains `Drives int` (1 for a single-drive changer, disk, or cloud) beside
   the existing `Serial bool`.
-- `conductor/run.go`: `if pw.Serial { slots = min(workers, pw.Drives) }` (concurrent media stay
+- `conductor/run.go`: `if pw.Serial { writers = min(workers, pw.Drives) }` (concurrent media stay
   `workers`; buffered runs stay 1 for now — see *Deferred*).
 - `engine/conduct.go` fills `Drives` from the changer (`len(changer.Drives())`, 1 for `directChanger`).
 
@@ -77,10 +77,10 @@ drive-scoped sink per drive, each rolling *its own* tape. Three internal reworks
 
 ### 3. The spool binds one writer per drive
 
-A serial backing holds **N drive-`Store`s** (N `clerk.OpenSlot`s, one over each drive-sink) instead of
-one shared `b.store`. `newArchive`'s direct path leases a free drive index — the semaphore slot *is* the
+A serial backing holds **N drive-`Store`s** (N `clerk.OpenRun`s, one over each drive-sink) instead of
+one shared store. `newArchive`'s direct path leases a free drive index — the leased index *is* the
 drive reservation — and authors over `b.stores[idx]`. Exactly the shape `pool.Acquire` already uses for
-holding disks. No new orchestrator message type; a drive is just a backing slot that is a physical drive.
+holding disks. No new orchestrator message type; a drive is just a backing writer that is a physical drive.
 
 ## The robot and finding tapes (barcode↔label)
 
@@ -130,13 +130,13 @@ within-one-library work below does not depend on it and is not invalidated by it
 1. Barcode↔label cache (change in *The robot* above) — unblocks safe concurrent `findSlot`.
 2. Librarian drive pool + drive-scoped sinks + collision-free selection (change 2) — the crux; test on
    the emulator (4 drives) with a single writer first (drive parameter = 0 must stay a no-op change).
-3. `PreparedWriter.Drives` + `conductor` slot bound (change 1) and the spool per-drive stores (change 3)
+3. `PreparedWriter.Drives` + `conductor` writer bound (change 1) and the spool per-drive stores (change 3)
    — wire concurrency on; validate two archives rolling on two drives in parallel, cross-drive recover
    byte-identical.
 
 ## Deferred
 
-- **Parallel drains** — a buffered run still drains serially (`slots=1` when buffering). Multi-drive can
+- **Parallel drains** — a buffered run still drains serially (`writers=1` when buffering). Multi-drive can
   drain to N drives with the same `min(workers, drives)` lever; separable, same mechanism.
 - **Parallel restore reads** — `MountForRead` stays on one drive; correctness of parallel *writes*
   first.

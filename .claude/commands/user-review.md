@@ -34,7 +34,7 @@ fast and independent. Each agent acts as a new user, follows the
 README, and reports findings. Cover at least these areas, but explore other usecases as well:
 
 1. **Core lifecycle (disk):** quick-start config, `plan` / `plan --days`, `dump`,
-   inspect the slot dir, `slot` / `slot <id>` / `medium` / `status`, `verify`
+   inspect the run dir, `run` / `run <id>` / `medium` / `status`, `verify`
    (corrupt a byte and confirm it's caught), incrementals across dates (L0→L1→L2),
    same-day `.N` sequencing + immutability, stock-tool portability (`tar`/`gzip` with no `nb`).
 2. **Recover / restore:** `recover --all` whole-DLE restore (deletion-accurate,
@@ -43,7 +43,7 @@ README, and reports findings. Cover at least these areas, but explore other usec
    verify restored trees against ground truth you control.
 3. **Tape (file-backed):** label / relabel / overwrite guard / foreign-bay detection;
    `load`; `medium` inventory; dump landing on tape; auto_label on/off; **spanning** a
-   slot across volumes (tiny `volume_size`) + restore/verify of the spanned slot;
+   run across volumes (tiny `volume_size`) + restore/verify of the spanned run;
    unattended runs must **error cleanly, never hang**; manual-station swap prompts.
 4. **Replication & pruning:** `copy` (copies by default + `--dry-run`/`-n`), `sync`
    (`--to`/`--from`/`--last`/`--since`, config `sync:` rules, idempotency),
@@ -51,7 +51,7 @@ README, and reports findings. Cover at least these areas, but explore other usec
    independence between media).
 5. **Encryption (gpg):** symmetric (`passphrase_file`) and public-key (`recipient`);
    payload actually encrypted; seal/header carry only the scheme name, never a key;
-   keyless `verify`/`slot <id>`/`copy`/`sync`; restore needs the key and fails clearly
+   keyless `verify`/`run <id>`/`copy`/`sync`; restore needs the key and fails clearly
    without it; stock-tool `gpg -d | … | tar` portability; no secret leaks in args/logs.
 6. **Planning / config / help / errors:** first-run with no config; the example config
    verbatim; a minimal config from the README; broken configs (bad YAML, unknown

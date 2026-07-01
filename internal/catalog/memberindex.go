@@ -23,18 +23,18 @@ func OpenMemberIndex(workdir string) *MemberIndex {
 	return &MemberIndex{dir: filepath.Join(workdir, "member-index")}
 }
 
-func (m *MemberIndex) path(slot, dle string, level int) string {
-	name := indexSlug.ReplaceAllString(slot, "_") + "__" +
+func (m *MemberIndex) path(run, dle string, level int) string {
+	name := indexSlug.ReplaceAllString(run, "_") + "__" +
 		indexSlug.ReplaceAllString(dle, "_") + "__L" + strconv.Itoa(level) + ".idx.gz"
 	return filepath.Join(m.dir, name)
 }
 
 // Store writes an archive's member list to the cache (atomic temp+rename).
-func (m *MemberIndex) Store(slot, dle string, level int, members []string) error {
+func (m *MemberIndex) Store(run, dle string, level int, members []string) error {
 	if err := os.MkdirAll(m.dir, 0o755); err != nil {
 		return err
 	}
-	p := m.path(slot, dle, level)
+	p := m.path(run, dle, level)
 	tmp := p + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
@@ -53,8 +53,8 @@ func (m *MemberIndex) Store(slot, dle string, level int, members []string) error
 }
 
 // Load reads an archive's cached member list, reporting whether it was present.
-func (m *MemberIndex) Load(slot, dle string, level int) ([]string, bool, error) {
-	f, err := os.Open(m.path(slot, dle, level))
+func (m *MemberIndex) Load(run, dle string, level int) ([]string, bool, error) {
+	f, err := os.Open(m.path(run, dle, level))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil

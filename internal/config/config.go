@@ -61,7 +61,7 @@ type Config struct {
 	// Default DefaultBumpPercent. See package planner.
 	BumpPct float64 `yaml:"bump_percent"`
 
-	// Landing names the media definition where slots are created.
+	// Landing names the media definition where runs are created.
 	Landing string `yaml:"landing"`
 
 	// Workdir holds the catalog's local cache, independent of any storage medium.
@@ -111,7 +111,7 @@ type Config struct {
 	Archivers map[string]Archiver `yaml:"archivers"`
 
 	// Sync declares replication rules: each mirrors the landing medium's sealed
-	// slots onto a target medium. `nb sync` with no --to runs
+	// runs onto a target medium. `nb sync` with no --to runs
 	// every rule; `nb sync --to X` is the ad-hoc form and needs no rule.
 	Sync []SyncRule `yaml:"sync"`
 
@@ -307,7 +307,7 @@ func (s *Sources) UnmarshalYAML(node *yaml.Node) error {
 type Media struct {
 	Type       string `yaml:"type"`
 	Capacity   string `yaml:"capacity"`    // space NBackup may use here, e.g. "20TB" ("" = unbounded)
-	MinimumAge string `yaml:"minimum_age"` // retention floor before a slot may be retired here (default: one cycle)
+	MinimumAge string `yaml:"minimum_age"` // retention floor before a run may be retired here (default: one cycle)
 	// Holding marks this medium as a holding disk: a fast scratch buffer the dump flows
 	// through on the way to the landing. Dumps land here in parallel, then a single taper
 	// copies each committed archive to the landing and reclaims it — so the landing's drive
@@ -411,14 +411,14 @@ func (m Media) MinAge() (time.Duration, error) {
 	return sizeutil.ParseDuration(m.MinimumAge)
 }
 
-// SyncRule mirrors one medium's slots onto another. Selection bounds keep an
+// SyncRule mirrors one medium's runs onto another. Selection bounds keep an
 // expensive target (tape, object store) to a recent window; an unbounded rule
 // replicates everything. The source defaults to the landing medium (the same
 // medium `nb copy` streams from) but may be any other medium via `from`.
 type SyncRule struct {
 	To   string `yaml:"to"`   // target medium name (required; must differ from the source)
 	From string `yaml:"from"` // source medium name ("" = the landing medium)
-	Last int    `yaml:"last"` // copy only the N most recent slots (0 = all)
+	Last int    `yaml:"last"` // copy only the N most recent runs (0 = all)
 }
 
 // DumpType names an archiver and carries per-DLE policy, referenced by DLEs. The
@@ -1125,7 +1125,7 @@ func (c *Config) BumpPercent() float64 {
 
 // MinAgeFor returns a medium's effective retention floor: its configured
 // minimum_age, or the dump cycle when unset. Defaulting to one cycle keeps the
-// "yesterday must not overwrite last month" safety without a knob — a slot stays
+// "yesterday must not overwrite last month" safety without a knob — a run stays
 // retainable for at least the window in which it is still a recovery base.
 func (c *Config) MinAgeFor(m Media) time.Duration {
 	// Validate already parsed m.MinimumAge and rejected a non-positive explicit
@@ -1138,7 +1138,7 @@ func (c *Config) MinAgeFor(m Media) time.Duration {
 	return c.CycleDuration()
 }
 
-// WorkdirPath returns the catalog's own operational-state directory (the slot
+// WorkdirPath returns the catalog's own operational-state directory (the run
 // cache), independent of any storage medium. It defaults to DefaultWorkdir when
 // `workdir` is unset.
 func (c *Config) WorkdirPath() string {

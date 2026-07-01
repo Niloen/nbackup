@@ -1,11 +1,11 @@
 # NBackup — agent guide
 
-NBackup is an Amanda-inspired, slot-based backup system in Go (module
+NBackup is an Amanda-inspired, run-based backup system in Go (module
 `github.com/Niloen/nbackup`). It orchestrates GNU tar + a compressor as child
 processes and produces immutable, self-describing artifacts.
 
 **Read [ARCHITECTURE.md](ARCHITECTURE.md) first** — it is the internal map: the
-concept vocabulary (DLE / Run / Slot / Archive / Cycle / Medium=Volume /
+concept vocabulary (DLE / Run / Archive / Cycle / Medium=Volume /
 catalog Entry+Placement / Label / Bay), the load-bearing decisions and their
 rationale, and the conventions below in full. [README.md](README.md) is the
 user-facing front page; [PRD.md](PRD.md) is the product vision.
