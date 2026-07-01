@@ -53,4 +53,8 @@ type Store interface {
 // dumper points at one and drives the writers it hands back.
 type Ingest interface {
 	NewArchive(spec ArchiveSpec, est int64) (*ArchiveWriter, error)
+	// NewCopy reserves a per-archive writer that re-authors an already-sealed archive (a copy or
+	// sync), preserving its identity, checksum, and members rather than producing a fresh one. Like
+	// NewArchive it blocks for back-pressure and leases a drive; only the writer it builds differs.
+	NewCopy(arch record.Archive, est int64) (*ArchiveWriter, error)
 }

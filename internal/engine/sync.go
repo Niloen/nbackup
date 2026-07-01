@@ -124,12 +124,17 @@ func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force boo
 	if !apply {
 		return report, nil
 	}
+	runIDs := make([]string, len(report.Items))
 	for i := range report.Items {
-		it := &report.Items[i]
-		if err := e.CopyRun(it.RunID, from, target, force, logf); err != nil {
-			return report, fmt.Errorf("sync %s -> %q: %w", it.RunID, target, err)
-		}
-		it.Copied = true
+		runIDs[i] = report.Items[i].RunID
+	}
+	// Copy every selected run in one spool pass, so a multi-drive target stays saturated across run
+	// boundaries. A failure aborts the sync (a partial sync is safe to re-run — it is idempotent).
+	if err := e.CopyRuns(runIDs, from, target, force, logf); err != nil {
+		return report, fmt.Errorf("sync -> %q: %w", target, err)
+	}
+	for i := range report.Items {
+		report.Items[i].Copied = true
 	}
 	return report, nil
 }

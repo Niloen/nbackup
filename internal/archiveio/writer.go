@@ -137,7 +137,9 @@ func (w *Author) NewArchive(spec ArchiveSpec) *ArchiveWriter {
 // this medium's volumes, is new. The spool's holding->backing drain, `nb copy`, and crash-recovery
 // Flush all share this one copy path. Attach a tap with MeterArchive for live progress.
 func (w *Author) NewCopy(arch record.Archive) *ArchiveWriter {
-	arch.Run = w.runID // re-authored under this writer's run (the same id, by construction)
+	// arch keeps its own run — a copy preserves the source archive's identity, so one writer can
+	// re-author archives from several source runs (a cross-run sync) and file each under its own run.
+	// For a per-run copy the writer's run is that same id, so this is unchanged there.
 	return &ArchiveWriter{w: w, base: w.archiveHeader(arch), meta: arch, expectSHA: arch.SHA256, h: sha256.New()}
 }
 
@@ -332,7 +334,7 @@ func (w *Author) writeRecord(ctx context.Context, kind string, a record.Archive,
 	if err != nil {
 		return record.FilePos{}, fmt.Errorf("place %s record: %w", kind, err)
 	}
-	h := record.Header{Run: w.runID, Kind: kind, DLE: a.DLE, Level: a.Level, CreatedAt: w.createdAt}
+	h := record.Header{Run: a.Run, Kind: kind, DLE: a.DLE, Level: a.Level, CreatedAt: w.createdAt}
 	fw, err := vol.AppendFile(ctx, h)
 	if err != nil {
 		return record.FilePos{}, err
@@ -353,7 +355,7 @@ func (w *Author) writeRecord(ctx context.Context, kind string, a record.Archive,
 // write), stamped so a multi-part payload's parts are named and read as slices, not standalone files.
 func (w *Author) archiveHeader(a record.Archive) record.Header {
 	return record.Header{
-		Run:       w.runID,
+		Run:       a.Run,
 		Kind:      record.KindArchive,
 		DLE:       a.DLE,
 		Host:      a.Host,

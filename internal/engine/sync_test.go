@@ -297,6 +297,178 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 	}
 }
 
+// TestMultiDriveCopyToTape copies one slot (several archives) from disk onto a multi-drive tape
+// library and checks the copy spread the archives across the drives — the slot's target placement
+// spans more than one tape — and that every DLE restores byte-for-byte from the library. It proves
+// copy/sync go through the spool (drive per concurrent copy), not the old single-drive writer.
+func TestMultiDriveCopyToTape(t *testing.T) {
+	cfg := &config.Config{
+		Landing:   "disk",
+		AutoLabel: true,
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			// Two drives fed from four slots; tapes big enough that each drive's share fits
+			// without spanning, so the spread we observe is across drives, not rolls.
+			"lib": {Type: "tape", Params: map[string]string{
+				"dir": t.TempDir(), "slots": "4", "drives": "2", "volume_size": "1048576"}},
+		},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	cfg.Parallelism.Workers = 2
+
+	names := []string{"alpha", "bravo", "charlie", "delta"}
+	bodies := map[string]string{}
+	src := map[string]string{}
+	for i, n := range names {
+		dir := t.TempDir()
+		body := strings.Repeat(string(rune('a'+i)), 20*1024)
+		write(t, filepath.Join(dir, n+".txt"), body)
+		bodies[n] = body
+		src[n] = dir
+		cfg.Sources = append(cfg.Sources, config.DLE{Host: "localhost", Path: dir})
+	}
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump to disk: %v", err)
+	}
+
+	// Copy the whole slot onto the library — the concurrent, multi-drive copy path.
+	if err := eng.CopyRun(s.ID, "disk", "lib", false, nil); err != nil {
+		t.Fatalf("copy disk->lib: %v", err)
+	}
+
+	// The copy landed on more than one tape (one per drive).
+	vols := map[string]bool{}
+	for _, p := range eng.cat.Placements(s.ID) {
+		if p.Medium == "lib" {
+			for _, v := range p.Labels() {
+				vols[v] = true
+			}
+		}
+	}
+	if len(vols) < 2 {
+		t.Fatalf("expected the copy to span >= 2 tapes (one per drive), got %d: %v", len(vols), vols)
+	}
+
+	// Drop the disk copies so restore must read the library — each DLE byte-for-byte, including
+	// any whose tape sits in a non-zero drive.
+	removeRunFiles(t, eng, s.ID)
+	if _, err := eng.cat.RemovePlacement(s.ID, "disk"); err != nil {
+		t.Fatal(err)
+	}
+	for i, d := range cfg.Sources {
+		dest := t.TempDir()
+		if err := eng.Restore(s.ID, d.Name(), dest, false, nil); err != nil {
+			t.Fatalf("restore %s from library: %v", d.Name(), err)
+		}
+		assertContent(t, filepath.Join(dest, names[i]+".txt"), bodies[names[i]])
+	}
+	_ = src
+}
+
+// TestMultiDriveSyncCrossRun syncs several single-archive runs onto a multi-drive tape library in
+// one spool run and checks the archives spread across the drives (more than one tape holds copies) —
+// proving sync saturates the drives across slot boundaries, not one archive per slot serially — and
+// that every run restores byte-for-byte from the library. It also guards the cross-run keying:
+// each archive must record under its own run, not a shared sync id.
+func TestMultiDriveSyncCrossRun(t *testing.T) {
+	src := t.TempDir()
+	cfg := &config.Config{
+		Landing:   "disk",
+		AutoLabel: true,
+		Cycle:     "1d", // each run a fresh full, so each slot carries its own payload independently
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"lib": {Type: "tape", Params: map[string]string{
+				"dir": t.TempDir(), "slots": "6", "drives": "2", "volume_size": "1048576"}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	cfg.Parallelism.Workers = 2
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	// Three separate runs → three single-archive runs on disk, each with distinct content.
+	payloads := map[string]string{}
+	var ids []string
+	for i, day := range []int{21, 22, 23} {
+		body := strings.Repeat(string(rune('a'+i)), 20*1024)
+		write(t, filepath.Join(src, "f.txt"), body)
+		s, err := eng.Run(context.Background(), time.Date(2026, 6, day, 0, 0, 0, 0, time.UTC), nil)
+		if err != nil {
+			t.Fatalf("dump %d: %v", day, err)
+		}
+		ids = append(ids, s.ID)
+		payloads[s.ID] = body
+	}
+
+	// Sync all three runs to the library in one spool pass (the cross-run path).
+	report, err := eng.SyncTo("", "lib", SyncSelection{}, true, false, nil)
+	if err != nil {
+		t.Fatalf("sync disk->lib: %v", err)
+	}
+	if report.Copied() != 3 {
+		t.Fatalf("copied = %d, want 3", report.Copied())
+	}
+
+	// The slots' copies are spread across more than one tape — the drives were used across slots,
+	// and each archive filed under its own slot (not a shared sync id).
+	vols := map[string]bool{}
+	for _, id := range ids {
+		on := false
+		for _, p := range eng.cat.Placements(id) {
+			if p.Medium == "lib" {
+				on = true
+				for _, v := range p.Labels() {
+					vols[v] = true
+				}
+			}
+		}
+		if !on {
+			t.Fatalf("slot %s not recorded on the library after sync", id)
+		}
+	}
+	if len(vols) < 2 {
+		t.Fatalf("expected the sync to use >= 2 tapes (drives), got %d: %v", len(vols), vols)
+	}
+
+	// Drop the disk copies so restore reads the library, each slot byte-for-byte.
+	name := config.DLE{Host: "localhost", Path: src}.Name()
+	for _, id := range ids {
+		removeRunFiles(t, eng, id)
+		if _, err := eng.cat.RemovePlacement(id, "disk"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range ids {
+		dest := t.TempDir()
+		if err := eng.Restore(id, name, dest, false, nil); err != nil {
+			t.Fatalf("restore %s from library: %v", id, err)
+		}
+		assertContent(t, filepath.Join(dest, "f.txt"), payloads[id])
+	}
+}
+
 // TestRelabelRefusesProtectedSpanTape guards the relabel safety floor for spanned
 // runs. A run's seal record lives only on the last tape of its span, so the head
 // and middle tapes hold payload parts but no seal. The relabel guard must still

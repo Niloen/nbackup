@@ -580,6 +580,12 @@ func (e *Engine) CopyRun(runID, fromMedia, targetMedia string, force bool, logf 
 	return e.cop.CopyRun(runID, fromMedia, targetMedia, force, logf)
 }
 
+// CopySlots streams several sealed slots onto a target in one spool run (drives stay saturated across
+// slots); see copier. Used by sync.
+func (e *Engine) CopyRuns(slotIDs []string, fromMedia, targetMedia string, force bool, logf Logf) error {
+	return e.cop.CopyRuns(slotIDs, fromMedia, targetMedia, force, logf)
+}
+
 // partSizeFor resolves a medium's per-part chunk bound: the explicit part_size param
 // when set, otherwise the medium type's registered default (10 GB for cloud, none for
 // disk/tape). An explicit value must be at least two header blocks so a part can carry
