@@ -51,7 +51,7 @@ type EncodePlacement struct {
 // dumpItem archives a single DLE into the store: it acquires an ingestion Sink, transfers the
 // encoded archive into it, and commits it — driving the run tracker from the committed record. It
 // owns the run-tracker lifecycle and describes the backup; the store lands and records the bytes.
-func (d *Dumper) dumpItem(ctx context.Context, fs archiveio.ArchiveWriteStore, item planner.Item, gate dumpGate, tr *progress.Tracker, logf func(format string, args ...any)) (err error) {
+func (d *Dumper) dumpItem(ctx context.Context, fs archiveio.Ingest, item planner.Item, gate dumpGate, tr *progress.Tracker, logf func(format string, args ...any)) (err error) {
 	// The progress tracker keys and displays DLEs by their host:path identity; the
 	// seal and filenames keep the internal slug.
 	pname := item.DLE.ID()
@@ -188,7 +188,7 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 // server-side as local Filters) → an ingestion xfer.Sink the store hands out, which the transfer
 // seals on commit. prog, if non-nil, receives running (uncompressed, compressed) counts. It returns
 // the archive record with its final sizes + file count for the caller's tracker and log.
-func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.ArchiveWriteStore, est int64, spec BackupSpec, gate dumpGate, prog func(uncompressed, compressed int64)) (record.Archive, []string, error) {
+func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.Ingest, est int64, spec BackupSpec, gate dumpGate, prog func(uncompressed, compressed int64)) (record.Archive, []string, error) {
 	var unreadable []string // source paths the archiver could not read (a partial dump)
 	pl := d.placement(spec.DumpType)
 	compF, err := compress.Filter(pl.CompressScheme, pl.CompressOpts)
@@ -286,6 +286,6 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.ArchiveWriteStore
 	// The store sealed the archive and recorded the authoritative catalog record itself; the caller
 	// needs only the final tallies for its tracker + log, so read them straight off the committed
 	// record rather than rebuilding it from the progress counters.
-	arch, _ := sink.Result()
-	return arch, unreadable, nil
+	res, _ := sink.Committed()
+	return res.Archive, unreadable, nil
 }

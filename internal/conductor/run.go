@@ -145,7 +145,7 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 			tr.SetPhase(progress.PhaseFailed)
 			return nil, fmt.Errorf("open holding disk %q: %w", name, err)
 		}
-		disks[i] = spool.Disk{Name: name, Storage: pw.Store, Capacity: pw.Capacity}
+		disks[i] = spool.Disk{Name: name, Storage: pw.Store, Capacity: pw.Capacity, Lim: pw.Lim}
 	}
 
 	// One backing per distinct landing the plan routes to. Slots is how many writes to it may run at
@@ -164,13 +164,15 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 		if !buffering && !pw.Serial {
 			slots = workers
 		}
-		backings = append(backings, spool.Backing{Name: name, Storage: pw.Store, Slots: slots})
+		backings = append(backings, spool.Backing{Name: name, Storage: pw.Store, Slots: slots, Lim: pw.Lim})
 	}
 
 	sp := spool.New(ctx, spool.Config{
-		Backings: backings, Holding: spool.NewPool(disks), Tracker: tr, Logf: lf,
+		Backings: backings, Holding: spool.NewPool(disks),
+		Spec: spec, Now: func() time.Time { return now },
+		Tracker: tr, Logf: lf,
 	})
-	route := func(it planner.Item) archiveio.ArchiveWriteStore { return sp.Store(c.d.LandingFor(it)) }
+	route := func(it planner.Item) archiveio.Ingest { return sp.Ingest(c.d.LandingFor(it)) }
 
 	dumpErr := c.d.Dmp.Run(ctx, plan.Items, workers, route, tr, lf)
 

@@ -32,7 +32,7 @@ type FlushDeps struct {
 	LandingFor  func(dle string) string
 	Holdings    []string
 	HoldVol     func(name string) (media.Volume, error)
-	OpenBacking func(landing string, spec archiveio.SlotSpec) (*clerk.Session, error)
+	OpenBacking func(landing string, spec archiveio.SlotSpec) (*archiveio.Author, error)
 	DisplayDLE  func(dle string) string
 	Logf        func(format string, args ...any)
 }
@@ -76,19 +76,19 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 	for _, id := range ids {
 		s := slotSet[id]
 		spec := archiveio.SlotSpec{ID: s.ID, CreatedAt: s.LastArchiveAt()}
-		// One backing session per landing this slot's staged archives route to, opened lazily — a
+		// One backing writer per landing this slot's staged archives route to, opened lazily — a
 		// multi-landing run may have staged DLEs bound for different media onto one holding disk.
-		sessions := map[string]*clerk.Session{}
-		sessionFor := func(landing string) (*clerk.Session, error) {
-			if sess, ok := sessions[landing]; ok {
-				return sess, nil
+		writers := map[string]*archiveio.Author{}
+		writerFor := func(landing string) (*archiveio.Author, error) {
+			if w, ok := writers[landing]; ok {
+				return w, nil
 			}
-			sess, err := d.OpenBacking(landing, spec)
+			w, err := d.OpenBacking(landing, spec)
 			if err != nil {
 				return nil, fmt.Errorf("flush %s: open landing %q: %w", s.ID, landing, err)
 			}
-			sessions[landing] = sess
-			return sess, nil
+			writers[landing] = w
+			return w, nil
 		}
 
 		for _, holding := range d.Holdings {
@@ -108,7 +108,7 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 					if err != nil {
 						return flushed, fmt.Errorf("flush %s %s: %w", s.ID, dleID, err)
 					}
-					backingSession, err := sessionFor(landing)
+					backingWriter, err := writerFor(landing)
 					if err != nil {
 						return flushed, err
 					}
@@ -117,11 +117,7 @@ func Flush(d FlushDeps, now time.Time) (flushed int, err error) {
 						return flushed, fmt.Errorf("flush %s %s: read holding disk: %w", s.ID, dleID, err)
 					}
 					// NewCopy records the landing placement on its Commit; xfer.Reader closes rc.
-					cw, err := backingSession.NewCopy(arch)
-					if err != nil {
-						rc.Close()
-						return flushed, fmt.Errorf("flush %s %s to %q: %w", s.ID, dleID, landing, err)
-					}
+					cw := backingWriter.NewCopy(arch)
 					if _, err := xfer.Transfer(context.Background(), xfer.Reader(rc), xfer.NewFilters(), cw); err != nil {
 						return flushed, fmt.Errorf("flush %s %s to %q: %w", s.ID, dleID, landing, err)
 					}

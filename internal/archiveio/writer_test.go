@@ -90,7 +90,15 @@ func (v *memVolume) RemoveFile(pos int) error {
 type memSink struct {
 	vols    []*memVolume
 	idx     int
-	partCap int64 // 0 = no extra cap
+	partCap int64        // 0 = no extra cap
+	last    CommitResult // the most recent archive reported via Record (stands in for the old Result())
+}
+
+// Record captures the committed archive so a test can read it back, standing in for the serial
+// clerk's catalog write (this memSink is a WriteStore, not just a VolumeSink).
+func (s *memSink) Record(r CommitResult) error {
+	s.last = r
+	return nil
 }
 
 // room is the max payload bytes for the next part on the loaded volume: >=0 when
@@ -162,7 +170,7 @@ func openerOver(vols ...*memVolume) PartOpener {
 	}
 }
 
-func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) (record.Archive, record.ArchivePos) {
+func writeOneArchive(t *testing.T, w *Author, sink *memSink, dle string, body []byte) (record.Archive, record.ArchivePos) {
 	t.Helper()
 	spec := ArchiveSpec{DLE: dle, Host: "localhost", Path: "/p", Archiver: "m", Level: 0, Compress: "none"}
 	aw := w.NewArchive(spec)
@@ -172,13 +180,12 @@ func writeOneArchive(t *testing.T, w *Writer, dle string, body []byte) (record.A
 	if err := aw.Commit(context.Background(), xfer.SourceStats{FileCount: 1, Uncompressed: int64(len(body)), Members: []string{dle}}); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
-	arch, pos := aw.Result()
-	return arch, pos
+	return sink.last.Archive, sink.last.Pos
 }
 
 // driveArchive mimics xfer.Transfer's pull loop: copy body into parts (rolling between) until the
 // stream is exhausted. It returns the first NextPart/copy/Close error so a test can assert on it.
-func driveArchive(aw ArchiveWriter, body []byte) error {
+func driveArchive(aw *ArchiveWriter, body []byte) error {
 	r := bufio.NewReader(bytes.NewReader(body))
 	for {
 		pw, max, err := aw.NextPart(context.Background())
@@ -221,10 +228,10 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	sink := &memSink{vols: []*memVolume{v1, v2, v3}}
 
 	spec := SlotSpec{ID: "slot-2026-06-21.001", CreatedAt: time.Unix(0, 0).UTC()}
-	w := NewWriter(sink, spec, nil, nil) // bounded by volume capacity (spanning) → sink.Bounded()==true
+	w := NewAuthor(sink, spec, nil, nil) // bounded by volume capacity (spanning) → sink.Bounded()==true
 
 	body := []byte(strings.Repeat("abcdefgh", 25*1024/8*4)) // 100 KiB → spans v1+v2, last part on v3
-	arch, apos := writeOneArchive(t, w, "dle1", body)
+	arch, apos := writeOneArchive(t, w, sink, "dle1", body)
 	if arch.Parts < 2 {
 		t.Fatalf("Parts = %d, want >= 2 (the archive must span)", arch.Parts)
 	}
@@ -271,9 +278,9 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	sink := &memSink{vols: []*memVolume{v}, partCap: 10 * 1024}
 
 	spec := SlotSpec{ID: "slot-x", CreatedAt: time.Unix(0, 0).UTC()}
-	w := NewWriter(sink, spec, nil, nil)         // bounded by partCap (intra-volume split) → sink.Bounded()==true
+	w := NewAuthor(sink, spec, nil, nil)         // bounded by partCap (intra-volume split) → sink.Bounded()==true
 	body := []byte(strings.Repeat("z", 55*1024)) // 55 KiB / 10 KiB ≈ 6 parts
-	arch, apos := writeOneArchive(t, w, "dle1", body)
+	arch, apos := writeOneArchive(t, w, sink, "dle1", body)
 	if arch.Parts < 5 {
 		t.Fatalf("Parts = %d, want >= 5", arch.Parts)
 	}
@@ -296,7 +303,7 @@ func TestRollFailureNoDeadlock(t *testing.T) {
 	v := newMemVolume("v1", 96*1024) // one small volume, no room to roll
 	sink := &memSink{vols: []*memVolume{v}}
 	spec := SlotSpec{ID: "slot-y", CreatedAt: time.Unix(0, 0).UTC()}
-	w := NewWriter(sink, spec, nil, nil)
+	w := NewAuthor(sink, spec, nil, nil)
 
 	body := []byte(strings.Repeat("q", 200*1024)) // far bigger than one volume
 	err := driveArchive(w.NewArchive(ArchiveSpec{DLE: "dle1", Level: 0}), body)

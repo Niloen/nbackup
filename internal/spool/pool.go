@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/ratelimit"
 )
 
 // Disk is one disk in the holding Pool: the slot Storage the producer stages onto (and the drain
@@ -17,8 +18,9 @@ import (
 // (Commit→drain) — guarded by Pool.mu.
 type Disk struct {
 	Name     string
-	Storage  archiveio.ArchiveStore
-	Capacity int64 // bytes; 0 = unbounded (no back-pressure)
+	Storage  archiveio.Store    // a holding disk is staged to, then read back + reclaimed by the drain
+	Capacity int64              // bytes; 0 = unbounded (no back-pressure)
+	Lim      *ratelimit.Limiter // byte-rate cap for staging writes to this disk (nil = uncapped)
 	used     int64
 }
 
@@ -130,6 +132,7 @@ func (p *Pool) Err() error {
 	return p.aborted
 }
 
-// Name and Storage resolve a disk by index (these read immutable fields, no lock).
-func (p *Pool) Name(idx int) string                    { return p.disks[idx].Name }
-func (p *Pool) Storage(idx int) archiveio.ArchiveStore { return p.disks[idx].Storage }
+// Name, Storage and Lim resolve a disk by index (these read immutable fields, no lock).
+func (p *Pool) Name(idx int) string             { return p.disks[idx].Name }
+func (p *Pool) Storage(idx int) archiveio.Store { return p.disks[idx].Storage }
+func (p *Pool) Lim(idx int) *ratelimit.Limiter  { return p.disks[idx].Lim }

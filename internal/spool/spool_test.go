@@ -2,36 +2,22 @@ package spool
 
 import (
 	"context"
-	"io"
 	"testing"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
-	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/xfer"
+	"github.com/Niloen/nbackup/internal/media"
 )
 
-// fakeStore is a backing archiveio.ArchiveStore that hands out no-op writers — enough to exercise the
-// spool's permit accounting without any real medium I/O.
+// fakeStore is a no-op archiveio.WriteStore — a landing's write target. The spool builds a writer over it
+// but the test never drives it (NextPart/Commit), so the WriteStore calls never fire; the spool's Close
+// hook (the slot release) is what the test exercises.
 type fakeStore struct{}
 
-func (fakeStore) NewArchive(archiveio.ArchiveSpec, int64) (archiveio.ArchiveWriter, error) {
-	return &fakeWriter{}, nil
-}
-func (fakeStore) NewCopy(record.Archive) (archiveio.ArchiveWriter, error) { return &fakeWriter{}, nil }
-func (fakeStore) OpenArchive(record.Archive, record.ArchivePos) (io.ReadCloser, error) {
-	return nil, nil
-}
-func (fakeStore) Reclaim(record.Archive, record.ArchivePos) error { return nil }
-
-type fakeWriter struct{}
-
-func (*fakeWriter) NextPart(context.Context) (io.WriteCloser, int64, error) { return nil, 0, nil }
-func (*fakeWriter) Commit(context.Context, xfer.SourceStats) error          { return nil }
-func (*fakeWriter) Result() (record.Archive, record.ArchivePos) {
-	return record.Archive{}, record.ArchivePos{}
-}
-func (*fakeWriter) Close() error { return nil }
+func (fakeStore) NextPart() (media.Volume, int64, string, int, error)  { return nil, 0, "", 0, nil }
+func (fakeStore) PlaceRecord(int64) (media.Volume, string, int, error) { return nil, "", 0, nil }
+func (fakeStore) Bounded() bool                                        { return false }
+func (fakeStore) Record(archiveio.CommitResult) error                  { return nil }
 
 // TestDirectPermitReleasedOnCloseWithoutCommit is the regression for the landing hang: a direct write
 // that faults before Commit (the producer's deferred Close runs, Commit never does) must return its
@@ -41,7 +27,7 @@ func TestDirectPermitReleasedOnCloseWithoutCommit(t *testing.T) {
 		Backings: []Backing{{Name: "landing", Storage: fakeStore{}, Slots: 1}},
 		Holding:  NewPool(nil), // no holding disks => every write routes direct
 	})
-	store := sp.Store("landing")
+	store := sp.Ingest("landing")
 	spec := archiveio.ArchiveSpec{DLE: "localhost:/data", Host: "localhost", Path: "/data"}
 
 	// First direct write takes the only permit, then faults before commit — Close (not Commit) must

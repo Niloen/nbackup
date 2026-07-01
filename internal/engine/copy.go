@@ -149,7 +149,6 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 	if err != nil {
 		return err
 	}
-	w := wt.w
 	logf.Log("copying %s from %q to %q", slotID, fromMedia, targetMedia)
 	// Open the source copy's archives as a one-pass read (the clerk resolves their positions),
 	// then re-author each onto the target. Copy order is immaterial — archives are keyed by
@@ -161,7 +160,6 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		refs = append(refs, ref)
 		metaByRef[ref] = a
 	}
-	session := c.clerk.OpenSlot(w, targetMedia, wt.lib.Volume())
 	missing, err := c.clerk.ReadArchives(refs, fromMedia, func(ref clerk.Ref, open func() (io.ReadCloser, error)) error {
 		rc, serr := open()
 		if serr != nil {
@@ -173,10 +171,7 @@ func (c *copier) CopySlot(slotID, fromMedia, targetMedia string, force bool, log
 		// its Commit records the new placement on the target.
 		meta := metaByRef[ref]
 		meta.Members, _ = c.clerk.Members(ref)
-		cw, werr := session.NewCopy(meta)
-		if werr != nil {
-			return fmt.Errorf("copy %s L%d to %q: %w", ref.DLE, ref.Level, targetMedia, werr)
-		}
+		cw := wt.writer.NewCopy(meta)
 		if _, werr := xfer.Transfer(context.Background(), xfer.Reader(rc), xfer.NewFilters(), cw); werr != nil {
 			return fmt.Errorf("copy %s L%d to %q: %w", ref.DLE, ref.Level, targetMedia, werr)
 		}

@@ -19,7 +19,7 @@ import (
 	"github.com/Niloen/nbackup/internal/progress"
 )
 
-// The producer ingests into an archiveio.ArchiveWriteStore: for each archive it calls NewArchive for a
+// The producer ingests into an archiveio.Ingest: for each archive it calls NewArchive for a
 // write handle (an xfer.Sink, back-pressuring), transfers the encoded stream into it, and the handle's
 // commit seals the stored archive. The clerk implements a serial store; the spool a concurrency-safe,
 // buffered one. The producer never sees the session, the medium, or the catalog — only the store.
@@ -34,7 +34,7 @@ type Config struct {
 	Threads     int
 }
 
-// Dumper archives planned items into an archiveio.ArchiveWriteStore. Build it with New and drive it with Run.
+// Dumper archives planned items into an archiveio.Ingest. Build it with New and drive it with Run.
 type Dumper struct {
 	archiverFor func(dumpType, host string) (archiver.Archiver, error)
 	exclude     func(dumpType string) []string
@@ -67,21 +67,21 @@ var noGate = dumpGate(func() func() { return func() {} })
 // does not stop the others — every DLE is attempted and the per-DLE errors are joined into the return
 // value, so the archives that succeeded still commit while the run reports failure. Only a backing-store
 // abort (a landing is unreachable, so nothing more can land) stops scheduling new DLEs.
-func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, route func(planner.Item) archiveio.ArchiveWriteStore, tr *progress.Tracker, logf func(format string, args ...any)) error {
+func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, route func(planner.Item) archiveio.Ingest, tr *progress.Tracker, logf func(format string, args ...any)) error {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
 	// A backing-store abort is fatal — once a landing is unreachable no further archive can land,
 	// so stop scheduling. A DLE's own failure is not: it is recorded and the rest carry on. The Spool
 	// exposes Aborted(); a single-medium store (the clerk) does not, so there it never aborts here.
-	aborted := func(fs archiveio.ArchiveWriteStore) bool {
+	aborted := func(fs archiveio.Ingest) bool {
 		a, ok := fs.(interface{ Aborted() error })
 		return ok && a.Aborted() != nil
 	}
 	// Stop scheduling once the run is canceled (ctx) or a backing has aborted. An
 	// in-flight dump's processes are killed through ctx (programs.RunPipe); this just keeps
 	// no further DLE from starting.
-	stop := func(fs archiveio.ArchiveWriteStore) bool { return ctx.Err() != nil || aborted(fs) }
+	stop := func(fs archiveio.Ingest) bool { return ctx.Err() != nil || aborted(fs) }
 	if workers <= 1 || len(items) <= 1 {
 		var errs []error
 		for _, item := range items {
@@ -121,7 +121,7 @@ func (d *Dumper) Run(ctx context.Context, items []planner.Item, workers int, rou
 			break
 		}
 		wg.Add(1)
-		go func(it planner.Item, fs archiveio.ArchiveWriteStore) {
+		go func(it planner.Item, fs archiveio.Ingest) {
 			defer wg.Done()
 			if err := d.dumpItem(ctx, fs, it, gate, tr, logf); err != nil {
 				mu.Lock()
