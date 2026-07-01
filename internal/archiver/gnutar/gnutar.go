@@ -284,7 +284,11 @@ var tarReadErrMarkers = []string{": Cannot open", ": Cannot stat", ": Cannot rea
 // tarBenignInfo are informational/warning stderr lines tar emits in normal operation
 // (incremental directory notes, one-file-system skips, the totals/summary lines). They are
 // not errors and must not be mistaken for a fatal one.
-var tarBenignInfo = []string{"Directory is new", "Directory has been renamed", "Directory is on a different filesystem", "contains a cache directory tag", "Removing leading", "socket ignored", "file changed as we read it", "file is the archive; not dumped", "Total bytes written", "Total bytes read", "Exiting with failure status due to previous errors"}
+// The volatile-file warnings ("file changed as we read it", "File removed before we read
+// it", "File shrunk by … bytes") are all exit-1 notices that a live file mutated during the
+// walk — the archive stays valid, so they are benign, not fatal. This is what stops a dump
+// from aborting merely because a file was removed or rewritten while tar scanned it.
+var tarBenignInfo = []string{"Directory is new", "Directory has been renamed", "Directory is on a different filesystem", "contains a cache directory tag", "Removing leading", "socket ignored", "file changed as we read it", "File removed before we read it", "File shrunk by", "file is the archive; not dumped", "Total bytes written", "Total bytes read", "Exiting with failure status due to previous errors"}
 
 // classifyTarStderr separates a tar run's stderr into the paths it could not read (a
 // partial dump) and a fatal error (anything unrecognized on a non-zero exit). It is

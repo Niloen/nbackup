@@ -358,8 +358,13 @@ func TestClassifyTarStderr(t *testing.T) {
 		t.Error("an unrecognized fatal line should make the dump fail")
 	}
 
-	// A clean / warning-only run → no partial, no fatal.
-	unreadable, fatal = classifyTarStderr("tar: ./log: file changed as we read it\nTotal bytes written: 512\n")
+	// A clean / warning-only run → no partial, no fatal. The volatile-file warnings
+	// (changed / removed / shrunk) all describe a file that mutated mid-walk; the archive
+	// stays valid, so none of them may abort the dump.
+	unreadable, fatal = classifyTarStderr("tar: ./log: file changed as we read it\n" +
+		"tar: ./state/L0.snar.new: File removed before we read it\n" +
+		"tar: ./db: File shrunk by 4096 bytes, padding with zeros\n" +
+		"Total bytes written: 512\n")
 	if fatal != nil || len(unreadable) != 0 {
 		t.Errorf("clean/warning run: unreadable=%v fatal=%v, want none", unreadable, fatal)
 	}
