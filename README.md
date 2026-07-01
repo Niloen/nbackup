@@ -134,14 +134,14 @@ details one item when given an id (`nb slot slot-2026-06-21.001`, `nb medium lto
 | `nb report`          | Summarize recent runs, or print one dump's per-DLE report |
 | `nb slot`            | List slots, or detail one (`nb slot <id>`: archives + copies) |
 | `nb dle`             | List DLEs, or detail one's archive timeline across slots |
-| `nb medium`          | List media, or detail one (incl. bays / drive + shelf)    |
+| `nb medium`          | List media, or detail one (incl. drives + slots)          |
 | `nb verify`          | Verify slot integrity: checksums, or `--deep` structure  |
 | `nb drill`           | Rehearse recovery: prove backups are restorable          |
 | `nb recover`         | Recover as of a date: browse + pick files, or `--all` for a whole DLE |
 | `nb copy`            | Copy one slot between media (`--from`/`--to`, e.g. disk → tape) |
 | `nb sync`            | Mirror one medium's slots onto another (disk → tape/s3)  |
 | `nb label`           | Label a volume (required for tape before its first dump) |
-| `nb load`            | Load a volume into a medium's drive (bay or shelf reel)   |
+| `nb load`            | Load a slot into a medium's drive (by number or `--label`) |
 | `nb prune <medium>`  | Delete a medium's slots past its cycle/capacity limits  |
 | `nb reset <dle>`     | Schedule a DLE for a full on its next run (fresh chain)  |
 | `nb flush`           | Drain a holding disk's un-flushed archives to the landing |
@@ -665,8 +665,8 @@ sources:
 ### Capacity and retention are per-medium
 
 Each medium declares its **capacity** — the space NBackup may use there. Disk and
-cloud spell it directly (`capacity: 20TB`); a tape library derives it as
-`bays × volume_size` (`0` = unbounded). Capacity is the headline knob: the planner
+cloud spell it directly (`capacity: 20TB`); a tape changer derives it as
+`slots × volume_size` (`0` = unbounded). Capacity is the headline knob: the planner
 uses it — promotion fills free space, pruning reclaims to stay within it.
 `minimum_age` is an optional per-medium safety floor (defaults to one cycle) — long
 enough that yesterday's run never overwrites a slot still inside the recovery window.
@@ -700,7 +700,7 @@ runs at disk speed and a small disk feeds a much larger tape.
 ```yaml
 landing: lto
 media:
-  lto:     { type: tape, dir: /var/lib/nbackup/vtape, bays: 20, volume_size: 6TB }
+  lto:     { type: tape, dir: /var/lib/nbackup/vtape, slots: 20, volume_size: 6TB }
   scratch: { type: disk, path: /var/spool/nbackup, capacity: 500GB, holding: true }
 parallelism: { workers: 4 }
 ```
@@ -740,21 +740,26 @@ DLE host runs stock tar on the client — no NBackup software or open port there
 
 ### Tape
 
-The `tape` medium comes in shapes that differ in *who changes the tape*:
+The `tape` medium is a **changer**: drives (data-transfer elements) fed from
+slots (storage elements that hold cartridges). It comes in shapes that differ in
+*who loads the tape*:
 
-- A **robotic library** (`dir:` file-backed) has `bays: N` physical positions,
-  each a finite `volume_size` tape, and a command moves which bay is mounted.
-- A **single drive you change by hand** — the disk-emulated station (`mode:
-  manual`), or a real drive (`device:` via `mt`) — shows only the reel currently
-  in the drive; the emulated station also lists the other reels on a shelf you
-  can load.
+- A **changer with a robot** (`dir:` file-backed) has `slots: N` cartridges and
+  `drives: K` (default 1), each cartridge a finite `volume_size` tape, and a
+  command loads a slot into a drive unattended.
+- A **single drive you load by hand** — a file-backed sim (`manual: true`), or a
+  real drive (`device:`, with `block_size:` for the tape record size) — shows only
+  the cartridge currently in the drive; the sim also lists the other cartridges in
+  its slots you can load.
 
-When a backup or restore needs a different tape, NBackup **prompts you to swap it
-in and waits** (an unattended run errors instead of hanging). Either way you label
-a blank tape (`nb label`), inventory a medium with `nb medium <name>` (its bays, or
-the drive and shelf), and load a tape with `nb load`. Tapes carry a self-describing
-label that NBackup **verifies before every write**, so a foreign or wrong-pool reel
-is never clobbered. Relabeling a tape that still holds **protected** slots (within
+When a backup or restore needs a different tape, a robot loads it; a manual or
+real drive **prompts you to load it and waits** (an unattended run errors instead
+of hanging). Either way you label a blank tape (`nb label`), inventory a medium
+with `nb medium <name>` (its drives and slots), and load a tape with `nb load`.
+Each slot reports a physical **barcode** (read without loading); the on-tape
+**label** is read after a load. Tapes carry that self-describing label, which
+NBackup **verifies before every write**, so a foreign or wrong-pool reel is never
+clobbered. Relabeling a tape that still holds **protected** slots (within
 `minimum_age`, or a DLE's last recovery path — so a slot spanned across tapes
 protects every tape it touches) is refused unless you pass `--force`.
 
@@ -804,16 +809,16 @@ and other file-API stores are out of scope — `gocloud.dev/blob` is an object-s
 abstraction.)
 
 `appendable: true` (default) packs many runs per tape; `appendable: false` uses
-one run per tape. Restore mounts (robot) or prompts for (manual) whichever tape
+one run per tape. Restore loads (robot) or prompts for (manual) whichever tape
 holds the copy it needs. A run that **fills a tape mid-write spans onto the next
 automatically** — for both `nb dump` and `nb copy`/`nb sync`, splitting even a
-single large archive: a robotic library mounts the next writable bay (auto-labeling
-a blank, or — when no blank is left — recycling the oldest tape past retention), a
-manual drive prompts for a swap. Spanning is **proactive** — set
-`volume_size` so NBackup sizes each chunk to fit *before* writing it (a real drive
-with no readable capacity can instead set `part_size`); if a chunk still overflows,
-the run fails with a clear message rather than guessing. A restore reassembles a
-spanned archive by mounting its tapes in order. (Internals:
+single large archive: a robot loads the next writable slot (auto-labeling a blank,
+or — when no blank is left — recycling the oldest tape past retention), a manual
+drive prompts for a swap. Spanning is **proactive** — set `volume_size` so NBackup
+sizes each chunk to fit *before* writing it (a real drive with no readable capacity
+can instead set `part_size`); if a chunk still overflows, the run fails with a
+clear message rather than guessing. A restore reassembles a spanned archive by
+loading its tapes in order. (Internals:
 [ARCHITECTURE.md](ARCHITECTURE.md).)
 
 ### Remote sources over SSH

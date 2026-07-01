@@ -251,7 +251,7 @@ func TestDrillUnattendedSkipsSwap(t *testing.T) {
 		AutoLabel: true,
 		Media: map[string]config.Media{
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
-			"station": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "3", "volume_size": "1048576"}},
+			"station": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "manual": "true", "slots": "3", "volume_size": "1048576"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -270,14 +270,14 @@ func TestDrillUnattendedSkipsSwap(t *testing.T) {
 		t.Fatalf("dump: %v", err)
 	}
 	// Load a blank reel and mirror the slot onto the station (auto-labeled).
-	if err := eng.LoadVolume("station", "reel-01", false, nil); err != nil {
+	if err := eng.LoadVolume("station", "1", false, nil); err != nil {
 		t.Fatalf("load reel-01: %v", err)
 	}
 	if _, err := eng.SyncTo("", "station", SyncSelection{}, true, false, nil); err != nil {
 		t.Fatalf("sync to station: %v", err)
 	}
 	// Swap in a different blank reel, so the slot's reel is no longer in the drive.
-	if err := eng.LoadVolume("station", "reel-02", false, nil); err != nil {
+	if err := eng.LoadVolume("station", "2", false, nil); err != nil {
 		t.Fatalf("load reel-02: %v", err)
 	}
 

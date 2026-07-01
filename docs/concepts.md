@@ -29,7 +29,7 @@ The vocabulary you need to read everything else — and how the concepts nest.
 | **Medium** | A named **storage definition** (disk, tape, cloud). Opens as a *Volume*. |
 | **Volume** | An ordered sequence of self-describing files addressed by position. Disk, tape, and object stores all map to it. |
 | **Label** | The logical identity written on a labeled volume (tape). Address-identified media (disk, cloud) need none. |
-| **Bay / Reel** | Physical positions in tape media — a robotic library's `bay-01…`, or the `reel-01…` an operator keeps on a shelf. |
+| **Slot / Drive** | A tape changer's physical elements: **slots** hold cartridges (each with a scanner-read barcode), **drives** read/write a loaded one. A robot loads slots into drives; a manual drive a human loads. |
 | **Catalog** | The local **cache** of slot index + volume registry. It holds no precious state; one media scan (`nb rebuild`) recreates it. |
 
 ### How they nest
@@ -81,8 +81,9 @@ three medium types:
   labels, no swaps.
 - **cloud** — an object store (S3/compatible, GCS, Azure Blob) via
   `gocloud.dev/blob`. Also address-identified (a bucket + key names an object).
-- **tape** — volumes behind one drive: a robotic library, or a single drive you
-  change by hand. Tapes carry a **label** NBackup verifies before every write.
+- **tape** — a changer: drives fed from slots that hold cartridges, whether a
+  file-backed library, a robot, or a single drive you change by hand. Tapes carry
+  a **label** NBackup verifies before every write.
 
 The **landing** medium (config key `landing:`) is where new slots are created. Any
 medium can also be a replication target. See [Storage media](features/media).

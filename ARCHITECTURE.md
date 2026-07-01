@@ -37,11 +37,13 @@ of this document otherwise describes NBackup in its own terms.
   seal's location.
 - **Label** — logical identity written on a labeled volume's file 0 (magic, name,
   pool, epoch). A *capability* (`media.Labeled`); address-identified media skip it.
-- **Bay** — a physical position in a robotic tape library (`bay-01…`), the durable
-  cartridge identity. Distinct from the Label written inside it. A single-drive
-  station has no bay inventory — its one mountable position is the drive itself, and
-  its off-drive cartridges are **reels** (`reel-01…`) on a **shelf** (the
-  environment, `media.Shelf`), loaded by an operator rather than a robot.
+- **Slot / Drive / Barcode** — a tape changer's physical elements. A **slot** (storage
+  element) holds one cartridge; a **drive** (data-transfer element) reads/writes the
+  cartridge currently loaded in it; a robot (or a human) moves cartridges between them.
+  Each slot reports a physical **barcode** — the scanner's identity, read *without*
+  loading — distinct from the Label written inside the cartridge (read only once it is
+  in a drive). A real single drive a human hand-loads (`device:`) has no addressable
+  slots — its off-drive cartridges sit on a shelf the software cannot see.
 
 ## Package map
 
@@ -54,8 +56,8 @@ registry registration, not a conditional in the core.
 | `config` | config + domain entities: `DLE`, `Media`, `DumpType` | disklist / dumptype / storage |
 | `record` | the self-describing on-medium artifact records: `Header` framing + `Label` (volume id record) + `Archive` (commit-footer metadata, self-locating via its `Slot` tag) + the slot-id vocabulary (`IDFromParts`/`ParseID`/`SlotIDLess`) + the per-archive member index (`EncodeIndex`) + their (de)serialization | dumpfile_t / amar |
 | `archiveio` | maps a slot's archives onto a `Volume`'s files — meter + split a payload into parts then write its index + commit footer (`WriteArchive`/`Commit`/`Finish`); concatenate + assert parts on read (`Expect`); knows nothing of compress/encrypt | taper / amrestore |
-| `media` | `Volume` + `Labeled` + `Drive`/`Changer` (device) + `Shelf` (environment) + `Profile` + registry; reads/writes `record` artifacts | Device API |
-| `librarian` | operates a medium's `Changer`/`Shelf` + label protocol (make-writable, advance, mount, label, load) | changer / amtape |
+| `media` | `Volume` + `Labeled` + `Drive`/`Changer` (slots + drives, `Load`/`Unload`/`Manual`) + `Profile` + registry; reads/writes `record` artifacts | Device API |
+| `librarian` | operates a medium's `Changer` + label protocol (make-writable, advance, load-for-read, label, load); prompts an operator when the changer is `Manual` | changer / amtape |
 | `media/disk`, `media/tape`, `media/cloud` | Volume impls (disk sidecar headers; tape library; object store via gocloud.dev/blob) | vfs / tape / s3 devices |
 | `media/fslike` | the slot layout shared by the address-identified media — clean payloads + `.hdr` sidecars over a small `Store` seam (disk = a directory, cloud = a bucket), so disk↔cloud copies are byte-identical | — |
 | `archiver` + `archiver/gnutar` | `Archiver` interface + registry + named definitions; owns its incremental-state library; GNU tar impl | Application API / amgtar |
@@ -388,7 +390,7 @@ covers S3, GCS, Azure Blob, and any S3-compatible store, via the Go CDK
 (`gocloud.dev/blob`); the backend is chosen by the bucket `url` scheme (`s3://`,
 `gs://`, `azblob://`), with `file://`/`mem://` drivers making it fully testable with no
 network or credentials. It is **address-identified, like disk** — a bucket+key names a
-volume unambiguously, so it implements none of `Labeled`/`Drive`/`Changer`/`Shelf` and
+volume unambiguously, so it implements none of `Labeled`/`Drive`/`Changer` and
 runs no label/swap machinery, and registers `NewSizeProfile` (a byte budget reclaimed
 per slot). The on-store layout is the disk medium's verbatim —
 `slots/<slot>/<NNNNNN>-<dle>-L<n>.tar.<ext>` clean payload objects plus a `.hdr`
@@ -422,50 +424,50 @@ one shared reel serially. `part_size` defaults and is bounded by a per-medium
 can't silently reproduce the 10000-part failure); disk stays single-file (unbounded,
 one stock-usable payload) and still rejects `part_size`.
 
-**Tape = volumes behind one drive.** The `device` seam (the `mt` analogue, one
-mounted tape) is shared by all shapes; the positioning surface differs and is what
-the three medium-neutral interfaces capture. `dir:` is a directory-backed library
-(each bay a subdir, finite per-bay `volume_size`, fully tested); `dir:` +
-`mode: manual` is the disk-emulated single-drive station (reels are subdirs);
-`device:` is a real single drive (`mt`+`/dev/nst0`; structurally complete, untested
-without hardware).
+**Tape = a changer: drives fed from slots.** The `device` seam (the per-cartridge I/O
+core — positioning + block I/O of one mounted tape) is shared by every backend; what
+differs is the **loader** that inventories cartridges and binds one to a drive. `dir:`
+is a file-backed library (`slots: N` subdirectories, `drives: K` persisted load-pointers,
+fully tested) — add `manual: true` to make it behave like a hand-loaded drive while still
+loading in-process, so the operator-swap UX is exercisable without hardware. `device:` is
+a real single drive (Linux st(4) ioctls + `/dev/nstN`, variable-block; validated against a
+tape emulator) — one drive, no addressable slots, a human loads it.
 
-- **Device vs environment — `Drive`, `Changer`, `Shelf`.** The shapes split on what
-  *real hardware's software* can do, across three small seams. `media.Drive` is the
-  device read both changer shapes share — `Loaded` (what volume is in the drive),
-  embedding `media.Volume`. `media.Changer` **is** the robotic library: a `Drive` that
-  also enumerates its bays and positions the robot (`Bays` + `Mount`). The shape is
-  **one assertion** — *a `Changer` is a robotic library; anything else is a single-drive
-  station or a plain volume.* A single drive is **not** a `Changer`: no robot, no bays,
-  so it is a `Drive` plus a `Shelf`. `media.Shelf` is the **environment** — the
-  operator-managed room (`Shelf` to enumerate the reels, `Insert` to load one) — because
-  loading a reel a human keeps on a shelf is a physical act with no device API. The
-  librarian consults `Shelf` **only to do a swap** (prompt over the room, then `Insert`
-  the choice), never as a shape marker. The disk-emulated station (`mode: manual`)
-  implements `Shelf` functionally (reels are subdirs it enumerates and inserts
-  in-process); a real `device:` drive degenerately (empty room, `Insert` errors). Reels
-  are addressed by their own ids (`reel-01…`), never a synthetic "drive" position —
-  `"drive"` is CLI presentation only. Media-shape dispatch lives behind the `media`
-  shape interfaces: the librarian owns *positioning* (mount / advance / swap with the
-  label protocol), and the one read-only *walk* the catalog rebuild needs — "every
-  non-blank bay, else the loaded reel" — is `media.WalkReadable`, kept next to the
-  `Changer`/`Drive` interfaces it asserts on so the catalog never type-asserts a
-  `Volume` itself. The rest of the engine stays shape-agnostic.
+- **`Drive`, `Changer`, and the `Manual` capability.** A tape medium is one
+  `media.Changer`: a set of **drives** fed from a set of **slots**. `media.Drive` is a
+  drive's byte handle — `Loaded` (the cartridge in it, by barcode/label/fill), embedding
+  `media.Volume` — and a later `Load` rebinds the bytes under the same handle, so a write
+  sink spans cartridges without being re-pointed. `media.Changer` adds the logistics —
+  `Slots` (each cartridge's barcode, read without loading), `Drives`, `Drive(i)`,
+  `Load(slot, drive)`, `Unload(drive)`, `Manual()` — and never reads the on-tape label
+  (that needs a load). The shape is **one assertion**: *a `Volume` that is also a
+  `Changer` is a tape library; anything else (disk, s3) is a single directly-addressed
+  volume.* The `tapeChanger` is also a `Volume` (it embeds drive 0), so the medium handle
+  is a `Volume` above the librarian while the librarian uses the `Changer` facet below. A
+  directly-addressed medium is wrapped (librarian-internal) in a trivial one-drive
+  `directChanger`, so the librarian has one shape for everything. `Manual()` is the cue
+  to prompt an operator rather than load a slot itself: a real drive returns it true (and
+  `Load` returns `media.ErrManualLoad` — only a human moves the reel); a robot returns it
+  false. The one read-only *walk* the catalog rebuild needs — "every loaded drive, then
+  (for a robot) each occupied slot loaded in turn" — is `media.WalkReadable`, kept next to
+  the `Changer` interface it asserts on so the catalog never type-asserts a `Volume`
+  itself. The rest of the engine stays shape-agnostic.
 - **Librarian — the operator-facing changer service.** Package `librarian` turns
-  intents (make writable, advance, mount-for-read, label, load, inventory) into
-  positioning, and runs the label protocol on top. One algorithm — *try the mountable
-  `Bays`, else ask the operator over the `Shelf`* — produces both experiences from the
-  inventory data: a robotic library iterates its many bays and rarely prompts; a single
-  drive has one bay, so it prompts immediately. It is a shared service (dump, copy/sync,
-  restore, rebuild, label, load all use it), so the future sub-engine split is
-  mechanical.
-- **Operator seam.** A single-drive station can't change its own tape, so when the
-  loaded reel won't do, the librarian asks a `librarian.Operator` (CLI: stdin) to
-  swap and retries — on writes (`PrepareWrite`/`Advance`: blank/foreign/wrong-pool/
-  full → load a writable reel, auto-labeled if `auto_label`) and on reads
-  (`MountForRead`: load the reel holding the needed label). Unattended (no operator)
-  it degrades to an actionable error instead of blocking. A `reloadable` error marks
-  the cases a swap can fix (vs a stale catalog, which a swap can't).
+  intents (make writable, advance, load-for-read, label, load, inventory) into
+  positioning, and runs the label protocol on top. One algorithm — *load the next
+  writable slot yourself, else ask the operator* — produces both experiences from the
+  changer's `Manual()`: a robot iterates its slots and rarely prompts; a hand-loaded
+  drive prompts immediately. It is a shared service (dump, copy/sync, restore, rebuild,
+  label, load all use it), so the future sub-engine split is mechanical.
+- **Operator seam.** A hand-loaded drive can't change its own tape, so when the loaded
+  cartridge won't do, the librarian asks a `librarian.Operator` (CLI: stdin) to swap and
+  retries — on writes (`PrepareWrite`/`Advance`: blank/foreign/wrong-pool/full → load a
+  writable cartridge, auto-labeled if `auto_label`) and on reads (`MountForRead`: load the
+  cartridge holding the needed label). The file-backed sim effects the operator's choice
+  in-process; a real drive's choice is the human's physical insert, which the librarian
+  re-reads. Unattended (no operator) it degrades to an actionable error instead of
+  blocking. A `reloadable` error marks the cases a swap can fix (vs a stale catalog, which
+  a swap can't).
 - **Expected tape.** `Engine.ExpectedTape` names the volume the next run will write
   to, derived from the catalog's volume registry and `retention.Compute`, never from
   a physical scan: a one-run-per-tape (non-appendable) run reuses the **oldest volume
@@ -483,9 +485,9 @@ without hardware).
   leaves). Because placements pin `record.FilePos{Label, Epoch, Pos}`, the epoch bump
   alone retires every prior-epoch placement; the physical reset means a rebuild sees the
   new epoch only. This lives entirely in `package librarian` (the media-shape seam):
-  `advanceViaLibrary` recycles a robotic library's oldest Floor-cleared bay after its
-  blank/empty bays are exhausted; `acceptOrRecycle` recycles an aged-out reel a
-  single-drive operator loads; both reuse the `nb label --relabel` reconcile path. The
+  `advanceViaLibrary` recycles a robot's oldest Floor-cleared cartridge after its
+  blank/empty slots are exhausted; `acceptOrRecycle` recycles an aged-out cartridge a
+  hand-loaded-drive operator loads; both reuse the `nb label --relabel` reconcile path. The
   **retention `Floor` is the safety gate** — a tape holding *any* kept archive (counting
   spanned parts) is never reusable — so reuse is **automatic and unconfigured** (the
   floor makes it safe). If every tape is still protected and none is blank, the run
@@ -495,12 +497,15 @@ without hardware).
   the **same rule** as the Expected-tape announcement (`retention.Compute` over the
   medium's own slots, pool oldest-`WrittenAt` first), so the tape a run recycles is the
   one `nb plan` said it would; the in-progress write tape is held out of the candidate
-  set so a span never recycles the reel it is writing.
-- **Bay/reel (physical) vs Label (logical) are distinct.** A `Changer` is
-  **label-agnostic** — like a real robot it mounts bays and reads barcodes, never
-  the magnetic label; the librarian reads the label *after* mounting. A blank
-  cartridge has a bay but no label; relabel rewrites the label, same bay. The
-  catalog references **labels** (durable data identity); bays/reels stay internal.
+  set so a span never recycles the cartridge it is writing.
+- **Barcode (physical) vs Label (logical) are distinct.** A `Changer` is
+  **label-agnostic** — like a real library it reports each slot's barcode without
+  loading, never the magnetic label; the librarian reads the label *after* loading the
+  cartridge into a drive. A blank cartridge has a barcode but no label; relabel rewrites
+  the label, same barcode. The catalog references **labels** (durable data identity);
+  slots and barcodes stay internal. (To locate a label among the slots the librarian
+  loads each occupied slot and reads it — a real library would instead cache
+  barcode→label to skip the scan; that cache is a future optimization.)
 - **Finite volumes.** A write past `volume_size` hits `media.ErrVolumeFull`
   (end-of-tape), the partial file is discarded. Spanning sizes each part to fit
   *before* writing, so this is a backstop, not the normal path (see Spanning below).
@@ -517,10 +522,10 @@ without hardware).
   **proactive**: the operator sets `volume_size`, so the writer (`archiveio.Writer` via
   a `librarian.WriteSink`) sizes each part to the loaded volume's known remaining
   capacity (optionally capped by `part_size`) and rolls onto the next writable volume
-  *between* parts — a robotic library mounts the next writable bay (blank → auto-labeled,
+  *between* parts — a robot loads the next writable slot (blank → auto-labeled,
   or an empty in-pool tape, or — once blanks are exhausted — the oldest Floor-cleared
-  tape, recycled in place; never a tape holding a *kept* run); a single-drive station
-  prompts for a reel swap; an unbounded or changer-less medium writes one part. There is **no
+  tape, recycled in place; never a tape holding a *kept* run); a hand-loaded drive
+  prompts for a cartridge swap; an unbounded or changer-less medium writes one part. There is **no
   reactive "keep what fit on EOT"** and no holding-disk buffer (the one-pass stream
   means a part already on tape cannot be re-read to rewrite it). If a sized part *still*
   overflows (a wrong estimate, or a real drive whose remaining capacity software cannot
@@ -533,8 +538,8 @@ without hardware).
   concatenating reader drains part *k* before mounting *k+1*, then reverses the scheme
   over the concatenation. The roll/mount lives in `package librarian` (`WriteSink`,
   `Advance`, `MountForRead`), the one place that dispatches on medium shape. Real-drive
-  (`device:`) spanning is proactive-via-`part_size` only and structurally complete but
-  untested; the `dir:`-emulated library/station spans and is tested.
+  (`device:`) spanning is proactive-via-`part_size` only (a drive cannot see its own
+  fill); the `dir:`-backed library spans on `volume_size` and is tested.
 
 **Labels as a capability.** Verified before every write (refuse foreign / blank
 unless `auto_label` / wrong-pool / relabeled-since-cached). Address-identified
@@ -561,10 +566,11 @@ medium-neutral — it lives in `ratelimit` (wired in by `engine`), never a mediu
 time-of-day awareness — a tighter cap during business hours.)
 
 **Medium-neutral vocabulary.** The generic media/changer/config layer must not say
-"tape": `bays`, `volume_size`, `throughput`, `media.ErrNoVolume`,
-`media.Drive`/`Changer`/`Shelf`/`VolumeStatus`, `nb medium`, `nb load`.
-Tape specifics (`type: tape`, the `tape` package, `mt`, `vtape`, the `reel`
-vocabulary) stay local, so a future `usb`/removable-disk medium reuses the vocabulary.
+"tape": `slots`, `drives`, `volume_size`, `throughput`, `media.ErrNoVolume`,
+`media.ErrManualLoad`, `media.Drive`/`Changer`/`SlotStatus`/`DriveStatus`/`VolumeStatus`,
+`nb medium`, `nb load`. Tape specifics (`type: tape`, the `tape` package, the st(4)
+ioctls, `vtape`, the `reel`/`cartridge` vocabulary) stay local, so a future
+`usb`/removable-disk medium reuses the vocabulary.
 
 **Archiver-neutral vocabulary (the same discipline, one layer up).** The generic
 `archiver`/`catalog`/`engine`/`planner` layer must not say "tar" or "snapshot":
@@ -698,11 +704,10 @@ a run fills the reel it lands on before spilling to the next, so a single run ca
 never exceed one reel. The engine's `capacityRoom` feeds the planner the tighter
 of the two — pool free room (`capacity − protected`) and the landing reel's
 remaining room (`volume_size −` what's already on it). They are truly
-separate: a **bare drive** (`type: tape`, `device:`) has an unbounded pool (the
+separate: a **real drive** (`type: tape`, `device:`) has an unbounded pool (the
 operator's shelf is unknowable, `TotalBytes == 0`) but a finite reel. The volume
-profile reads the same count key the changer does — `bays` for a library, `reels`
-for a manual single-drive station — so the planner's capacity never disagrees with
-the medium it lands on.
+profile reads the same count key the changer does — `slots` for a file-backed library —
+so the planner's capacity never disagrees with the medium it lands on.
 
 **Cost model (`media.Cost`) — a medium prices itself, in dollars, offline.** The
 persona reasons in dollars per month, not bytes, and the bill's surprises are the
@@ -764,7 +769,7 @@ decisions carry it:
   mutation is a top-level verb. Each inspection noun is bare-noun + optional positional:
   no argument lists, an id details that one (`nb slot <id>`, `nb dle <dle>`, `nb medium <name>`),
   rather than `list`/`show` subcommands — uniform across the three (matches restic's
-  `snapshots`, kubectl's name-presence). Per-medium status (incl. bays / drive + shelf)
+  `snapshots`, kubectl's name-presence). Per-medium status (incl. drives + slots)
   lives in `nb medium <name>`; `nb load` is the one physical action verb (sibling of
   `nb label`). `--catalog` has no short flag (a case-only `-C`/`-c` pair is too easy to
   slip).

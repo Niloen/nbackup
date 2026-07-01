@@ -19,7 +19,7 @@ If `$ARGUMENTS` is non-empty, focus the review on that area (e.g. "tape",
    - This machine has **no `zstd`** — use `codec: none` or `codec: gzip` in every config.
    - `tar`, `gzip`, `gpg`, `nice` are present; `gtar` and `mt` are not.
    - No cloud credentials and no real tape hardware: test cloud only if creds exist;
-     test tape with the **file-backed** forms (`dir:` robotic library, `dir:` + `mode: manual` station).
+     test tape with the **file-backed** forms (`dir:` library with `slots:`/`drives:`, or `dir:` + `manual: true`).
    - Any command that might block on an interactive tape swap: run it under `timeout 30`
      so you never hang. Note anywhere it hangs instead of erroring cleanly.
    - Work entirely inside fresh `mktemp -d` dirs; never touch the repo working tree.

@@ -25,7 +25,7 @@ to spread the dumps across spindles.
 ```yaml
 landing: lto
 media:
-  lto:     { type: tape, dir: /var/lib/nbackup/vtape, bays: 20, volume_size: 6TB }
+  lto:     { type: tape, dir: /var/lib/nbackup/vtape, slots: 20, volume_size: 6TB }
   scratch: { type: disk, path: /var/spool/nbackup, capacity: 500GB, holding: true }
 parallelism: { workers: 4 }
 ```

@@ -1,6 +1,7 @@
 package tape
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -11,31 +12,156 @@ import (
 	"github.com/Niloen/nbackup/internal/media"
 )
 
-// bayPrefix names a library's physical positions: bay-01, bay-02, …
-const bayPrefix = "bay-"
+// slotName is the directory name of storage slot i (1-based): slot-01, slot-02, …
+func slotName(i int) string { return fmt.Sprintf("slot-%02d", i) }
 
-// bayName is the directory name of physical position i (1-based): bay-01, bay-02…
-func bayName(i int) string { return fmt.Sprintf("%s%02d", bayPrefix, i) }
+// simBarcode is a slot's stable simulated VolumeTag — the physical barcode a real
+// library's scanner reads, deliberately distinct from the on-tape label so the
+// barcode-vs-label split is exercised without hardware.
+func simBarcode(slot int) string { return fmt.Sprintf("SIM%04d", slot) }
 
-// dirChanger emulates a tape library as a directory of bays (subdirectories),
-// each holding one cartridge (a dirDevice). It is label-agnostic: it mounts bays
-// by name and reports a bay's label only as a convenience inventory (a stand-in
-// for a barcode reader), exactly the seam a real autochanger exposes. It is a thin
-// wrapper over the shared dirLibrary core, exposing every bay as inventory.
-type dirChanger struct{ *dirLibrary }
+// driveBindFile records which slot each drive currently holds, so a load survives
+// across CLI invocations (each opens a fresh handle).
+const driveBindFile = ".drives"
 
-func openDirChanger(root string, capacity int64, tapes int) (*dirChanger, error) {
-	lib, err := openDirLibrary(root, capacity, bayPrefix, tapes)
-	if err != nil {
-		return nil, err
-	}
-	return &dirChanger{lib}, nil
+// dirLoader is the file-backed changer backend: nSlots cartridges (slot-NN
+// subdirectories, each a dirDevice) fed into nDrives drives. A drive holds a slot's
+// cartridge by pointing at its directory; "loading" sets that pointer (a real robot
+// moves the cartridge, the sim just binds). With manual set it reports Manual() so
+// the librarian runs the operator-prompt path, yet load() still effects the chosen
+// cartridge — simulating a hand-loaded drive without hardware.
+type dirLoader struct {
+	root     string
+	capacity int64
+	nSlots   int
+	nDrives  int
+	isManual bool
+
+	mu   sync.Mutex
+	bind []int // drive -> slot (1-based; -1 = empty), persisted in driveBindFile
 }
 
-func (c *dirChanger) loaded() (device, string, bool) { return c.loadedDevice() }
+// openDirLoader stocks root with nSlots blank cartridges and reads the persisted
+// drive bindings. nSlots and nDrives are floored at 1.
+func openDirLoader(root string, capacity int64, nSlots, nDrives int, manual bool) (*dirLoader, error) {
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, err
+	}
+	if nSlots < 1 {
+		nSlots = 1
+	}
+	if nDrives < 1 {
+		nDrives = 1
+	}
+	for i := 1; i <= nSlots; i++ {
+		if err := os.MkdirAll(filepath.Join(root, slotName(i)), 0o755); err != nil {
+			return nil, err
+		}
+	}
+	l := &dirLoader{root: root, capacity: capacity, nSlots: nSlots, nDrives: nDrives, isManual: manual}
+	l.bind = make([]int, nDrives)
+	for i := range l.bind {
+		l.bind[i] = -1
+	}
+	if b, err := os.ReadFile(filepath.Join(root, driveBindFile)); err == nil {
+		var saved []int
+		if json.Unmarshal(b, &saved) == nil {
+			for i := 0; i < nDrives && i < len(saved); i++ {
+				if saved[i] >= 1 && saved[i] <= nSlots {
+					l.bind[i] = saved[i]
+				}
+			}
+		}
+	}
+	return l, nil
+}
 
-// bays inventories every bay in the library.
-func (c *dirChanger) bays() ([]media.VolumeStatus, error) { return c.entries(false) }
+func (l *dirLoader) driveCount() int { return l.nDrives }
+func (l *dirLoader) manual() bool    { return l.isManual }
+
+// loadedIn reports the drive currently holding slot s, or -1. Caller holds l.mu.
+func (l *dirLoader) loadedIn(s int) int {
+	for d, b := range l.bind {
+		if b == s {
+			return d
+		}
+	}
+	return -1
+}
+
+func (l *dirLoader) persist() error {
+	b, err := json.Marshal(l.bind)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(l.root, driveBindFile), b, 0o644)
+}
+
+// slots inventories the storage elements. A slot whose cartridge is currently in a
+// drive reports empty, as a real library shows a slot vacated by a load.
+func (l *dirLoader) slots() ([]media.SlotStatus, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]media.SlotStatus, 0, l.nSlots)
+	for s := 1; s <= l.nSlots; s++ {
+		full := l.loadedIn(s) < 0
+		bc := ""
+		if full {
+			bc = simBarcode(s)
+		}
+		out = append(out, media.SlotStatus{Slot: s, Barcode: bc, Full: full})
+	}
+	return out, nil
+}
+
+// load binds slot's cartridge directory to drive and persists the choice.
+func (l *dirLoader) load(slot, drive int) (device, string, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if drive < 0 || drive >= l.nDrives {
+		return nil, "", fmt.Errorf("no drive %d (the changer has %d)", drive, l.nDrives)
+	}
+	if slot < 1 || slot > l.nSlots {
+		return nil, "", fmt.Errorf("no slot %d (the changer has %d)", slot, l.nSlots)
+	}
+	if d := l.loadedIn(slot); d >= 0 && d != drive {
+		return nil, "", fmt.Errorf("slot %d is already loaded in drive %d", slot, d)
+	}
+	dev, err := openDir(filepath.Join(l.root, slotName(slot)), l.capacity)
+	if err != nil {
+		return nil, "", err
+	}
+	l.bind[drive] = slot
+	if err := l.persist(); err != nil {
+		return nil, "", err
+	}
+	return dev, simBarcode(slot), nil
+}
+
+func (l *dirLoader) unload(drive int) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if drive < 0 || drive >= l.nDrives {
+		return fmt.Errorf("no drive %d (the changer has %d)", drive, l.nDrives)
+	}
+	l.bind[drive] = -1
+	return l.persist()
+}
+
+// loaded reports drive's current binding by re-opening the bound slot's directory.
+func (l *dirLoader) loaded(drive int) (device, string, int, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if drive < 0 || drive >= l.nDrives || l.bind[drive] < 0 {
+		return nil, "", -1, false
+	}
+	slot := l.bind[drive]
+	dev, err := openDir(filepath.Join(l.root, slotName(slot)), l.capacity)
+	if err != nil {
+		return nil, "", -1, false
+	}
+	return dev, simBarcode(slot), slot, true
+}
 
 // dirDevice emulates a tape with a directory of numbered files. It is the
 // fully-testable backend and the default for setups without a real drive.

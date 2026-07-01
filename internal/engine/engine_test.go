@@ -980,7 +980,7 @@ func TestHoldingDiskBuffersTape(t *testing.T) {
 	cfg := &config.Config{
 		Landing: "lto",
 		Media: map[string]config.Media{
-			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "4"}},
+			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "4"}},
 			"scratch": {Type: "disk", Holding: true, Capacity: "500MB", Params: map[string]string{"path": scratchDir}},
 		},
 		Sources: []config.DLE{
@@ -1055,7 +1055,7 @@ func TestHoldingDisksSpread(t *testing.T) {
 	cfg := &config.Config{
 		Landing: "lto",
 		Media: map[string]config.Media{
-			"lto": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "4"}},
+			"lto": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "4"}},
 			"s1":  {Type: "disk", Holding: true, Capacity: "500MB", Params: map[string]string{"path": t.TempDir()}},
 			"s2":  {Type: "disk", Holding: true, Capacity: "500MB", Params: map[string]string{"path": t.TempDir()}},
 		},
@@ -1150,7 +1150,7 @@ func TestHoldingDisksFlush(t *testing.T) {
 	flushCfg := &config.Config{
 		Landing: "lto",
 		Media: map[string]config.Media{
-			"lto": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
+			"lto": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "2"}},
 			"s1":  {Type: "disk", Holding: true, Params: map[string]string{"path": d1}},
 			"s2":  {Type: "disk", Holding: true, Params: map[string]string{"path": d2}},
 		},
@@ -1218,7 +1218,7 @@ func TestHoldingDiskDrainSpansVolumes(t *testing.T) {
 		Landing:   "lto",
 		AutoLabel: true,
 		Media: map[string]config.Media{
-			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "12", "volume_size": "163840"}},
+			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "12", "volume_size": "163840"}},
 			"scratch": {Type: "disk", Holding: true, Capacity: "500MB", Params: map[string]string{"path": scratchDir}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: srcA}, {Host: "localhost", Path: srcB}},
@@ -1293,7 +1293,7 @@ func TestHoldingDiskRoutesOversizedDirect(t *testing.T) {
 		Landing:   "lto",
 		AutoLabel: true,
 		Media: map[string]config.Media{
-			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "4"}},
+			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "4"}},
 			"scratch": {Type: "disk", Holding: true, Capacity: "512KB", Params: map[string]string{"path": scratchDir}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: srcSmall}, {Host: "localhost", Path: srcBig}},
@@ -1362,7 +1362,7 @@ func TestHoldingDiskAllDirect(t *testing.T) {
 		Landing:   "lto",
 		AutoLabel: true,
 		Media: map[string]config.Media{
-			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "4"}},
+			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "4"}},
 			"scratch": {Type: "disk", Holding: true, Capacity: "1KB", Params: map[string]string{"path": t.TempDir()}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: srcA}, {Host: "localhost", Path: srcB}},
@@ -1456,7 +1456,7 @@ func TestHoldingDiskFlush(t *testing.T) {
 	flushCfg := &config.Config{
 		Landing: "lto",
 		Media: map[string]config.Media{
-			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
+			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "2"}},
 			"scratch": {Type: "disk", Holding: true, Params: map[string]string{"path": scratchDir}},
 		},
 		Sources:   sources,
@@ -1505,7 +1505,7 @@ func TestHoldingDiskLandingDownFails(t *testing.T) {
 	cfg := &config.Config{
 		Landing: "lto",
 		Media: map[string]config.Media{
-			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "1"}},
+			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "1"}},
 			"scratch": {Type: "disk", Holding: true, Params: map[string]string{"path": t.TempDir()}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
@@ -1584,7 +1584,7 @@ func TestTapeLibraryRestore(t *testing.T) {
 		Landing: "disk",
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
-			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
+			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "2"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -1660,7 +1660,7 @@ func TestTapeAppendableFalse(t *testing.T) {
 		Landing: "disk",
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
-			"lib":  {Type: "tape", Appendable: boolp(false), Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
+			"lib":  {Type: "tape", Appendable: boolp(false), Params: map[string]string{"dir": t.TempDir(), "slots": "2"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -1741,7 +1741,7 @@ func TestManualStationWriteSwap(t *testing.T) {
 		Landing: "disk",
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
-			"lto":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "1"}},
+			"lto":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "manual": "true", "slots": "1"}},
 		},
 		Sources:   []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:   t.TempDir(),
@@ -1793,7 +1793,7 @@ func TestManualStationReadSwap(t *testing.T) {
 		Landing: "disk",
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
-			"lto":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "2"}},
+			"lto":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "manual": "true", "slots": "2"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -1814,7 +1814,7 @@ func TestManualStationReadSwap(t *testing.T) {
 		t.Fatalf("dump 1: %v", err)
 	}
 	// Reel A: load it, label it, copy s1 (the loaded reel is usable — no swap).
-	if err := eng.LoadVolume("lto", "reel-01", false, logfDiscard); err != nil {
+	if err := eng.LoadVolume("lto", "1", false, logfDiscard); err != nil {
 		t.Fatalf("load reel-01: %v", err)
 	}
 	if err := eng.LabelVolume("lto", "Reel-A", false, false, time.Now().UTC(), nil); err != nil {
@@ -1835,7 +1835,7 @@ func TestManualStationReadSwap(t *testing.T) {
 		t.Fatalf("dump 2: %v", err)
 	}
 	// Reel B: load (swaps A out of the one drive), label, copy s2.
-	if err := eng.LoadVolume("lto", "reel-02", false, logfDiscard); err != nil {
+	if err := eng.LoadVolume("lto", "2", false, logfDiscard); err != nil {
 		t.Fatalf("load reel-02: %v", err)
 	}
 	if err := eng.LabelVolume("lto", "Reel-B", false, false, time.Now().UTC(), nil); err != nil {
@@ -1879,7 +1879,7 @@ func TestManualStationLandingLabel(t *testing.T) {
 	cfg := &config.Config{
 		Landing: "vtape",
 		Media: map[string]config.Media{
-			"vtape": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "3"}},
+			"vtape": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "manual": "true", "slots": "3"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
 		Workdir:  t.TempDir(),
@@ -1892,7 +1892,7 @@ func TestManualStationLandingLabel(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A reel must be in the drive to label it.
-	if err := eng.LoadVolume("vtape", "reel-01", false, logfDiscard); err != nil {
+	if err := eng.LoadVolume("vtape", "1", false, logfDiscard); err != nil {
 		t.Fatalf("load reel-01: %v", err)
 	}
 	// Labeling the landing medium triggers a catalog rebuild against the loaded reel;
@@ -1916,7 +1916,7 @@ func tapeEngine(t *testing.T, appendable bool, minAge string) *Engine {
 				Type:       "tape",
 				MinimumAge: minAge,
 				Appendable: &appendable,
-				Params:     map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "4"},
+				Params:     map[string]string{"dir": t.TempDir(), "manual": "true", "slots": "4"},
 			},
 		},
 		Workdir:  t.TempDir(),
@@ -2069,7 +2069,7 @@ func TestExpectedTapeReportsReelFill(t *testing.T) {
 			"lto": {
 				Type:       "tape",
 				Appendable: &appendable,
-				Params:     map[string]string{"dir": t.TempDir(), "mode": "manual", "reels": "2", "volume_size": "1000"},
+				Params:     map[string]string{"dir": t.TempDir(), "manual": "true", "slots": "2", "volume_size": "1000"},
 			},
 		},
 		Workdir:  t.TempDir(),
@@ -2147,7 +2147,7 @@ func TestTapeRecyclesOldestOnWrite(t *testing.T) {
 		AutoLabel: true,
 		Cycle:     "1d", // full every run, so each run supersedes the prior — no live chain pins the old tape
 		Media: map[string]config.Media{
-			"lib": {Type: "tape", Appendable: boolp(false), Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
+			"lib": {Type: "tape", Appendable: boolp(false), Params: map[string]string{"dir": t.TempDir(), "slots": "2"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -2242,7 +2242,7 @@ func TestTapeRecycleRefusedWhenAllKept(t *testing.T) {
 		AutoLabel: true,
 		Cycle:     "30d", // incrementals between fulls — the first full stays a recovery base
 		Media: map[string]config.Media{
-			"lib": {Type: "tape", Appendable: boolp(false), MinimumAge: "365d", Params: map[string]string{"dir": t.TempDir(), "bays": "2"}},
+			"lib": {Type: "tape", Appendable: boolp(false), MinimumAge: "365d", Params: map[string]string{"dir": t.TempDir(), "slots": "2"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -2291,7 +2291,7 @@ func TestDumpSpanRecyclesReusableTape(t *testing.T) {
 		Cycle:     "1d", // full every run, so older fulls clear the Floor
 		Media: map[string]config.Media{
 			// Three bays, each a small reel: two fill with superseded runs, one starts blank.
-			"lib": {Type: "tape", Appendable: boolp(false), Params: map[string]string{"dir": t.TempDir(), "bays": "3", "volume_size": "262144"}},
+			"lib": {Type: "tape", Appendable: boolp(false), Params: map[string]string{"dir": t.TempDir(), "slots": "3", "volume_size": "262144"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -2373,7 +2373,7 @@ func TestDumpSpansArchiveAcrossTapes(t *testing.T) {
 		Landing:   "lib",
 		AutoLabel: true,
 		Media: map[string]config.Media{
-			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "6", "volume_size": "163840"}},
+			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "6", "volume_size": "163840"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -2390,7 +2390,7 @@ func TestDumpSpansArchiveAcrossTapes(t *testing.T) {
 	}
 	// Seed a blank bay in the drive so the run has somewhere to start; it auto-labels
 	// and rolls onto the rest as each fills.
-	if err := eng.LoadVolume("lib", "bay-01", false, nil); err != nil {
+	if err := eng.LoadVolume("lib", "1", false, nil); err != nil {
 		t.Fatalf("load bay-01: %v", err)
 	}
 
@@ -2443,7 +2443,7 @@ func TestCopySpansArchiveAcrossTapes(t *testing.T) {
 		AutoLabel: true,
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
-			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "6", "volume_size": "163840"}},
+			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "6", "volume_size": "163840"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -2462,7 +2462,7 @@ func TestCopySpansArchiveAcrossTapes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dump: %v", err)
 	}
-	if err := eng.LoadVolume("lib", "bay-01", false, nil); err != nil {
+	if err := eng.LoadVolume("lib", "1", false, nil); err != nil {
 		t.Fatalf("load bay-01: %v", err)
 	}
 	if err := eng.CopySlot(s.ID, "", "lib", false, nil); err != nil {
@@ -2506,7 +2506,7 @@ func TestPartSizeSplitsWithinTape(t *testing.T) {
 		AutoLabel: true,
 		Media: map[string]config.Media{
 			// One roomy 4 MiB bay, but part_size caps each part at 64 KiB.
-			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "bays": "1", "volume_size": "4194304", "part_size": "65536"}},
+			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "1", "volume_size": "4194304", "part_size": "65536"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -2521,7 +2521,7 @@ func TestPartSizeSplitsWithinTape(t *testing.T) {
 	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
-	if err := eng.LoadVolume("lib", "bay-01", false, nil); err != nil {
+	if err := eng.LoadVolume("lib", "1", false, nil); err != nil {
 		t.Fatalf("load bay-01: %v", err)
 	}
 	s, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)

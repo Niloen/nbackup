@@ -44,14 +44,14 @@ equivalent.
 | `nb report` | Summarize recent runs, or print one dump's per-DLE report |
 | `nb slot` | List slots, or detail one (`nb slot <id>`: archives + copies) |
 | `nb dle` | List DLEs, or detail one's archive timeline across slots |
-| `nb medium` | List media, or detail one (incl. bays / drive + shelf) |
+| `nb medium` | List media, or detail one (incl. drives + slots) |
 | `nb verify` | Verify slot integrity: checksums, or `--deep` structure |
 | `nb drill` | Rehearse recovery: prove backups are restorable |
 | `nb recover` | Recover as of a date: browse + pick files, or `--all` for a whole DLE |
 | `nb copy` | Copy one slot between media (`--from`/`--to`, e.g. disk → tape) |
 | `nb sync` | Mirror one medium's slots onto another (disk → tape/s3) |
 | `nb label` | Label a volume (required for tape before its first dump) |
-| `nb load` | Load a volume into a medium's drive (bay or shelf reel) |
+| `nb load` | Load a slot into a medium's drive (by slot number or `--label`) |
 | `nb prune <medium>` | Delete a medium's slots past its cycle/capacity limits |
 | `nb reset <dle>` | Schedule a DLE for a full on its next run (fresh chain) |
 | `nb rebuild` | Rebuild the local slot-index cache from media |
@@ -93,7 +93,7 @@ Each noun lists with no argument and details one item when given an id.
 |---|---|---|
 | `nb slot [id]` | — | List slots (with a COPIES column), or detail one slot's archives and every copy's positions. |
 | `nb dle [dle]` | — | List DLEs, or detail one DLE's archive timeline across slots. |
-| `nb medium [name]` | — | List media, or detail one (its bays, or drive + shelf). |
+| `nb medium [name]` | — | List media, or detail one (its drives + slots). |
 | `nb status` | `--watch <interval>` | Show the running (or most recent) run; `--watch` refreshes until it finishes. |
 
 ```bash
@@ -176,7 +176,7 @@ The source defaults to the landing medium; `--from` overrides it. See
 |---|---|---|
 | `nb prune <medium>` | `-n, --dry-run` | Delete the named medium's slots past its cycle/capacity limits; `-n` previews. |
 | `nb label` | `--relabel` | Label a volume (required for tape before its first dump); `--relabel` recycles an aged-out tape. |
-| `nb load` | — | Load a volume into a medium's drive (a bay, or a shelf reel). |
+| `nb load` | — | Load a slot into a medium's drive (by slot number, or `--label`). |
 | `nb reset <dle>` | — | Schedule a DLE for a full on its next run (fresh chain). |
 | `nb rebuild` | — | Rebuild the local slot-index cache from media. |
 | `nb flush` | — | Drain a holding disk's staged archives to the landing. |
@@ -186,7 +186,7 @@ nb prune disk -n
 nb prune disk
 nb label lto lto-0001
 nb label --relabel lto lto-0042
-nb load lto bay-02
+nb load lto 2
 nb reset app01:/home
 nb rebuild
 ```

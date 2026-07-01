@@ -141,30 +141,35 @@ See [Media](../features/media) and [Cost](../features/cost).
 
 ### type: tape
 
-A tape medium comes in shapes that differ in *who changes the tape*. A robotic
-library uses `dir:` with `bays:`; a hand-changed single drive uses `dir:` +
-`mode: manual` (file-backed station) or `device:` (a real `mt` drive).
+A tape medium is a **changer**: drives (data-transfer elements) fed from slots
+(storage elements that hold cartridges). A file-backed library uses `dir:` with
+`slots:` (and optionally `drives:`); a hand-changed single drive uses `dir:` +
+`manual: true` (a file-backed sim) or `device:` (a real no-rewind `st` drive).
 
 ```yaml
 media:
   lto:
     type: tape
     dir: /var/lib/nbackup/vtape   # a file-backed virtual library
-    # device: /dev/nst0           # OR a real single no-rewind drive
-    bays: 20                      # physical bays (dir-backed library)
-    volume_size: 6TB              # per-volume capacity; a write past it hits EOT
+    # device: /dev/nst0           # OR a real single no-rewind drive (`slots`/
+    #                             # `drives`/`manual` do not apply)
+    slots: 20                     # storage slots (dir-backed library)
+    drives: 1                     # data-transfer drives a robot loads slots into
+    volume_size: 6TB              # per-cartridge capacity; a write past it hits EOT
     # part_size: 6TB              # use instead of volume_size on a real drive
+    # block_size: 64k             # (device: only) tape record size; default 64k, 32k–256k
     minimum_age: 180d
     appendable: true              # pack many runs per tape; false = one run per tape
   desk-drive:
     type: tape
     dir: /var/lib/nbackup/station
-    mode: manual                  # one drive the operator swaps by hand
+    manual: true                  # a human loads the drive; NBackup prompts and waits
+    slots: 6                      # cartridges the operator can choose from (sim only)
     volume_size: 6TB
     appendable: false
 ```
 
-**Tape capacity = `bays × volume_size`** (`0` = unbounded — e.g. a bare
+**Tape capacity = `slots × volume_size`** (`0` = unbounded — e.g. a bare
 `device:` drive whose shelf is unknowable). A real drive sets `part_size`
 instead of `volume_size`, since end-of-tape is only hit, not read. `auto_label`
 (global, below) lets a dump label a blank tape automatically. See

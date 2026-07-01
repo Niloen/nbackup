@@ -1352,48 +1352,58 @@ func mediumDetail(eng *engine.Engine, name string) error {
 	return nil
 }
 
-// printInventory shows a medium's physical inventory beneath its `nb medium`
-// detail: a robotic library's bays, or a single-drive station's drive and the
-// reels on its shelf. Media with no changer (disk, s3) print nothing.
+// printInventory shows a tape medium's physical inventory beneath its `nb medium`
+// detail: each drive and what is loaded (with its label and fill), then the occupied
+// slots by barcode (a real library reports barcodes without loading; the on-tape label
+// is known only once a cartridge is in a drive). Media with no changer (disk, s3)
+// print nothing.
 func printInventory(eng *engine.Engine, name string) {
 	view, err := eng.ChangerView(name)
 	if err != nil {
 		return // address-identified medium: nothing physical to inventory
 	}
 	appendable := eng.MediumAppendable(name)
-	if view.Library {
-		tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(tw, "\n\tBAY\tLABEL\tSTATUS\tON VOLUME\tCAPACITY\tFILES")
-		for _, b := range view.Bays {
-			mark := " "
-			if b.ID == view.Loaded {
-				mark = "*"
-			}
-			label, status := volumeLabelStatus(b, name, appendable, volumeHasSlots(eng, b.Label))
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\n", mark, b.ID, label, status,
-				sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
+
+	dw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(dw, "\n\tDRIVE\tBARCODE\tLABEL\tSTATUS\tON VOLUME\tFILES")
+	for _, d := range view.Drives {
+		if !d.Loaded {
+			fmt.Fprintf(dw, "\t%d\t(empty)\t-\t-\t-\t-\n", d.Drive)
+			continue
 		}
-		tw.Flush()
-		return
+		label, status := volumeLabelStatus(d.Volume, name, appendable, volumeHasSlots(eng, d.Volume.Label))
+		fmt.Fprintf(dw, "\t%d\t%s\t%s\t%s\t%s\t%d\n", d.Drive, barcodeOr(d.Volume.Barcode), label, status,
+			sizeutil.FormatBytes(d.Volume.Used), d.Volume.Files)
 	}
-	if view.DriveOK {
-		label, status := volumeLabelStatus(view.Drive, name, appendable, volumeHasSlots(eng, view.Drive.Label))
-		fmt.Printf("  drive:   %s (%s, %s on volume, %d files)\n", label, status,
-			sizeutil.FormatBytes(view.Drive.Used), view.Drive.Files)
-	} else {
-		fmt.Println("  drive:   (empty)")
-	}
-	if len(view.Shelf) > 0 {
-		fmt.Println("\nIn the room (load with `nb load`, or when prompted):")
-		rw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(rw, "  REEL\tLABEL\tSTATUS\tON VOLUME\tCAPACITY\tFILES")
-		for _, b := range view.Shelf {
-			label, status := volumeLabelStatus(b, name, appendable, volumeHasSlots(eng, b.Label))
-			fmt.Fprintf(rw, "  %s\t%s\t%s\t%s\t%s\t%d\n", b.ID, label, status,
-				sizeutil.FormatBytes(b.Used), capacityStr(b.Capacity), b.Files)
+	dw.Flush()
+
+	var occupied []media.SlotStatus
+	for _, s := range view.Slots {
+		if s.Full && !s.ImportExport {
+			occupied = append(occupied, s)
 		}
-		rw.Flush()
 	}
+	if len(occupied) > 0 {
+		heading := "Slots"
+		if view.Manual {
+			heading = "In the room (load with `nb load`, or when prompted)"
+		}
+		fmt.Printf("\n%s:\n", heading)
+		sw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		fmt.Fprintln(sw, "  SLOT\tBARCODE")
+		for _, s := range occupied {
+			fmt.Fprintf(sw, "  %d\t%s\n", s.Slot, s.Barcode)
+		}
+		sw.Flush()
+	}
+}
+
+// barcodeOr renders a barcode, or a dash when the changer has no scanner.
+func barcodeOr(bc string) string {
+	if bc == "" {
+		return "-"
+	}
+	return bc
 }
 
 func capacityStr(c int64) string {

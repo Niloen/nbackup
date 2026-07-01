@@ -422,12 +422,12 @@ func (e *Engine) unattendedReachable(medium string, steps []restore.Step) (bool,
 	if err != nil {
 		return true, "" // address-identified: nothing to mount
 	}
-	if view.Library {
-		return true, "" // robotic library mounts the right bay itself
+	if !view.Manual {
+		return true, "" // a robot loads the right slot itself
 	}
 	loaded := ""
-	if view.DriveOK {
-		loaded = view.Drive.Label
+	if len(view.Drives) > 0 && view.Drives[0].Loaded {
+		loaded = view.Drives[0].Volume.Label
 	}
 	for _, v := range e.chainLabels(steps, medium) {
 		if v != loaded {

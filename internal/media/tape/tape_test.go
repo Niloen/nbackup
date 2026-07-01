@@ -13,17 +13,23 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 )
 
+// loadSlot loads slot s (1-based) into drive 0 of a changer-medium handle.
+func loadSlot(t *testing.T, v media.Volume, s int) {
+	t.Helper()
+	if err := v.(media.Changer).Load(s, 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func openTape(t *testing.T, dir string) media.Volume {
 	t.Helper()
 	v, err := media.OpenVolume("tape", media.Options{"dir": dir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A library starts with the drive empty; mount the first bay to exercise the
-	// single-tape Volume semantics.
-	if err := v.(media.Changer).Mount("bay-01"); err != nil {
-		t.Fatal(err)
-	}
+	// A library starts with the drive empty; load the first slot to exercise the
+	// single-cartridge Volume semantics.
+	loadSlot(t, v, 1)
 	return v
 }
 
@@ -85,7 +91,7 @@ func TestTapeSequential(t *testing.T) {
 }
 
 // TestTapeLabel covers the label lifecycle: blank, write, read-back, relabel
-// (which resets the volume and bumps nothing here), and foreign detection.
+// (which resets the volume), and foreign detection.
 func TestTapeLabel(t *testing.T) {
 	dir := t.TempDir()
 	v := openTape(t, dir)
@@ -127,7 +133,7 @@ func TestTapeLabel(t *testing.T) {
 	}
 }
 
-// TestTapeFull: a finite emulated tape (tape_size) refuses a write past its
+// TestTapeFull: a finite emulated tape (volume_size) refuses a write past its
 // capacity with ErrVolumeFull, discards the partial file, and — once relabeled —
 // is reusable from the start (the directory analogue of overwriting an old reel).
 func TestTapeFull(t *testing.T) {
@@ -139,9 +145,7 @@ func TestTapeFull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := v.(media.Changer).Mount("bay-01"); err != nil {
-		t.Fatal(err)
-	}
+	loadSlot(t, v, 1)
 	lv := v.(media.Labeled)
 	if err := lv.WriteLabel(record.Label{Name: "t1", Pool: "p", Epoch: 1}); err != nil {
 		t.Fatal(err)
@@ -172,145 +176,130 @@ func TestTapeFull(t *testing.T) {
 	}
 }
 
-// TestTapeLibrary covers the changer: a library is stocked with N blank bays,
-// bays mount independently, the loaded marker survives reopen, and inventory
-// reports each bay's label (its barcode stand-in).
+// TestTapeLibrary covers the robotic changer: a library is stocked with N blank slots
+// (each reporting a simulated barcode), a slot loads into a drive, the load persists
+// across reopen, and a loaded slot reports empty in the inventory.
 func TestTapeLibrary(t *testing.T) {
 	dir := t.TempDir()
-	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "bays": "3"})
+	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "slots": "3"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ch := v.(media.Changer)
+	if ch.Manual() {
+		t.Fatal("a dir library without manual: true should be a robot (Manual()==false)")
+	}
 
-	bays, err := ch.Bays()
+	slots, err := ch.Slots()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bays) != 3 {
-		t.Fatalf("expected 3 bays, got %d", len(bays))
+	if len(slots) != 3 {
+		t.Fatalf("expected 3 slots, got %d", len(slots))
 	}
-	for _, b := range bays {
-		if !b.Blank || b.Label != "" {
-			t.Fatalf("fresh bay %s should be blank, got %+v", b.ID, b)
+	for _, s := range slots {
+		if !s.Full || s.Barcode != simBarcode(s.Slot) {
+			t.Fatalf("fresh slot %d should be full with a barcode, got %+v", s.Slot, s)
 		}
 	}
-	if _, ok := ch.Loaded(); ok {
-		t.Fatal("a fresh library should have an empty drive")
+	if drs, _ := ch.Drives(); len(drs) != 1 || drs[0].Loaded {
+		t.Fatalf("a fresh library should have one empty drive, got %+v", drs)
 	}
 
-	// Mount bay-01 and label it.
-	if err := ch.Mount("bay-01"); err != nil {
+	// Load slot 1 and label it, then slot 2 — slots are independent cartridges.
+	if err := ch.Load(1, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := v.(media.Labeled).WriteLabel(record.Label{Name: "VOL-A", Pool: "p", Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
-	// Mount bay-02 and label it differently — bays are independent cartridges.
-	if err := ch.Mount("bay-02"); err != nil {
+	if err := ch.Load(2, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := v.(media.Labeled).WriteLabel(record.Label{Name: "VOL-B", Pool: "p", Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
 
-	// Reopen: the loaded marker persists (bay-02), and inventory maps bays→labels.
-	v2, err := media.OpenVolume("tape", media.Options{"dir": dir, "bays": "3"})
+	// A loaded slot (2) reports empty in the slot inventory; the others stay full.
+	slots, _ = ch.Slots()
+	for _, s := range slots {
+		if s.Slot == 2 && s.Full {
+			t.Fatalf("slot 2 is in a drive and should report empty: %+v", s)
+		}
+		if s.Slot != 2 && !s.Full {
+			t.Fatalf("slot %d should be full: %+v", s.Slot, s)
+		}
+	}
+
+	// Reopen: the drive binding persists (slot 2 / VOL-B), and loading slot 1 yields VOL-A.
+	v2, err := media.OpenVolume("tape", media.Options{"dir": dir, "slots": "3"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st, ok := v2.(media.Changer).Loaded(); !ok || st.ID != "bay-02" {
-		t.Fatalf("loaded after reopen = %q (ok=%v), want bay-02", st.ID, ok)
+	ch2 := v2.(media.Changer)
+	if st, ok := ch2.Drive(0).Loaded(); !ok || st.Label != "VOL-B" {
+		t.Fatalf("loaded after reopen = %q (ok=%v), want VOL-B", st.Label, ok)
 	}
-	got := map[string]string{}
-	bays2, _ := v2.(media.Changer).Bays()
-	for _, b := range bays2 {
-		got[b.ID] = b.Label
+	if err := ch2.Load(1, 0); err != nil {
+		t.Fatal(err)
 	}
-	if got["bay-01"] != "VOL-A" || got["bay-02"] != "VOL-B" || got["bay-03"] != "" {
-		t.Fatalf("inventory labels wrong: %+v", got)
+	if name, _, _ := readVolumeName(v2); name != "VOL-A" {
+		t.Fatalf("slot 1 holds %q, want VOL-A", name)
 	}
 }
 
-// TestManualStation covers the single-drive (mode: manual) station: only the reel
-// in the drive is visible (Loaded, by its own reel id), the others sit on the shelf,
-// and inserting a reel changes the one drive's content. The loaded reel survives
-// reopen. It is a media.Changer AND a media.Shelf (a single drive with a room).
-func TestManualStation(t *testing.T) {
+// TestManualChanger covers the hand-loaded single drive (manual: true): the drive
+// starts empty, the cartridges sit in slots the operator picks from, a Load simulates
+// the operator's hands, and the loaded cartridge survives reopen. Manual() is true so
+// the librarian runs the operator-prompt path.
+func TestManualChanger(t *testing.T) {
 	dir := t.TempDir()
-	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "mode": "manual", "reels": "3"})
+	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "manual": "true", "slots": "3"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	mc, ok := v.(media.Shelf)
+	ch, ok := v.(media.Changer)
 	if !ok {
-		t.Fatal("mode: manual should yield a media.Shelf (single-drive station)")
+		t.Fatal("a manual tape medium is still a media.Changer")
 	}
-	drv, ok := v.(media.Drive)
-	if !ok {
-		t.Fatal("a single-drive station is a media.Drive (it has a loaded volume)")
-	}
-	if _, isLib := v.(media.Changer); isLib {
-		t.Fatal("a single-drive station must NOT be a media.Changer (no robot, no bays)")
+	if !ch.Manual() {
+		t.Fatal("manual: true should report Manual()==true")
 	}
 
-	// The drive is empty to start; all three reels are in the room.
-	if _, ok := drv.Loaded(); ok {
-		t.Fatal("a fresh station should have an empty drive")
+	// The drive is empty to start; all three cartridges are in slots.
+	if st, ok := ch.Drive(0).Loaded(); ok {
+		t.Fatalf("a fresh manual drive should be empty, got %+v", st)
 	}
-	if shelf, _ := mc.Shelf(); len(shelf) != 3 {
-		t.Fatalf("expected 3 reels in the room, got %d", len(shelf))
+	if slots, _ := ch.Slots(); len(slots) != 3 {
+		t.Fatalf("expected 3 slots, got %d", len(slots))
 	}
 
-	// Load a reel and label it; the drive's content is now that reel, reported by
-	// its own reel id (not a synthetic "drive").
-	if err := mc.Insert("reel-01"); err != nil {
+	// The operator loads a cartridge and labels it.
+	if err := ch.Load(1, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := v.(media.Labeled).WriteLabel(record.Label{Name: "VOL-A", Pool: "p", Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if st, ok := drv.Loaded(); !ok || st.ID != "reel-01" || st.Label != "VOL-A" {
-		t.Fatalf("drive should hold reel-01/VOL-A, got %+v ok=%v", st, ok)
-	}
-	// reel-01 is in the drive, so the room now lists only the other two.
-	shelf, _ := mc.Shelf()
-	if len(shelf) != 2 {
-		t.Fatalf("expected 2 reels in the room after loading one, got %+v", shelf)
-	}
-	for _, b := range shelf {
-		if b.ID == "reel-01" {
-			t.Fatalf("the loaded reel should not appear on the shelf: %+v", shelf)
-		}
+	if st, ok := ch.Drive(0).Loaded(); !ok || st.Label != "VOL-A" {
+		t.Fatalf("drive should hold VOL-A, got %+v ok=%v", st, ok)
 	}
 
-	// Swap in a different reel: the one drive changes content.
-	if err := mc.Insert("reel-02"); err != nil {
+	// Swap to a different cartridge: the one drive changes content.
+	if err := ch.Load(2, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := v.(media.Labeled).WriteLabel(record.Label{Name: "VOL-B", Pool: "p", Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if st, ok := drv.Loaded(); !ok || st.ID != "reel-02" || st.Label != "VOL-B" {
-		t.Fatalf("after swap the drive should hold reel-02/VOL-B, got %+v ok=%v", st, ok)
-	}
 
-	// Reopen: the loaded reel persists, and the room reports the set-aside reels.
-	v2, err := media.OpenVolume("tape", media.Options{"dir": dir, "mode": "manual", "reels": "3"})
+	// Reopen: the loaded cartridge persists.
+	v2, err := media.OpenVolume("tape", media.Options{"dir": dir, "manual": "true", "slots": "3"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	mc2 := v2.(media.Shelf)
-	if b2, _, _ := readVolumeName(v2); b2 != "VOL-B" {
-		t.Fatalf("after reopen the drive should still hold VOL-B, got %q", b2)
-	}
-	room := map[string]string{}
-	shelf2, _ := mc2.Shelf()
-	for _, b := range shelf2 {
-		room[b.ID] = b.Label
-	}
-	if room["reel-01"] != "VOL-A" || room["reel-03"] != "" {
-		t.Fatalf("room labels wrong: %+v", room)
+	if name, _, _ := readVolumeName(v2); name != "VOL-B" {
+		t.Fatalf("after reopen the drive should hold VOL-B, got %q", name)
 	}
 }
 
@@ -353,7 +342,7 @@ func TestTapeTornTailSkipped(t *testing.T) {
 	}
 
 	// Plant a torn trailing record: a numbered file too short to hold a header block.
-	torn := filepath.Join(dir, "bay-01", "000002")
+	torn := filepath.Join(dir, slotName(1), "000002")
 	if err := os.WriteFile(torn, []byte("torn"), 0o644); err != nil {
 		t.Fatal(err)
 	}
