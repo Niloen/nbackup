@@ -63,23 +63,30 @@ func (s *Session) Record(r archiveio.CommitResult) error {
 
 // OpenArchive reads a committed archive's payload back by concatenating its parts straight off the
 // session's volume (whose index the producer keeps current) — the drain's read seam, for copying a
-// staged archive to the backing.
+// staged archive to the landing.
 func (s *Session) OpenArchive(arch record.Archive, pos record.ArchivePos) (io.ReadCloser, error) {
 	exp := archiveio.Expect{Run: s.runID, DLE: arch.DLE, Level: arch.Level}
 	return archiveio.NewReader().Open(pos.Parts, exp,
 		func(p record.FilePos) (record.Header, io.ReadCloser, error) { return s.vol.ReadFile(p.Pos) })
 }
 
-// Reclaim drops a staged archive once it has landed on the backing: it removes the archive's files
-// from the medium's volume (the commit footer first, so an interrupted reclaim un-commits before
-// dropping parts) then drops its placement from the catalog.
+// Reclaim drops a staged archive once it has landed on the landing; see Clerk.ReclaimStaged.
 func (s *Session) Reclaim(arch record.Archive, pos record.ArchivePos) error {
+	return s.clerk.ReclaimStaged(s.medium, s.vol, s.runID, arch.DLE, pos)
+}
+
+// ReclaimStaged drops a staged archive from a holding medium once it has landed: it removes the
+// archive's files from vol (the commit footer first, so an interrupted reclaim un-commits before
+// dropping parts) then drops its placement from the catalog. The live drain reaches it through
+// Session.Reclaim; the crash-recovery flush (conductor.Flush) calls it directly — the footer-first
+// invariant lives only here.
+func (c *Clerk) ReclaimStaged(medium string, vol media.Volume, runID, dle string, pos record.ArchivePos) error {
 	for _, p := range archivePosFiles(pos) {
-		if err := s.vol.RemoveFile(p); err != nil {
+		if err := vol.RemoveFile(p); err != nil {
 			return err
 		}
 	}
-	_, _, err := s.clerk.cat.RemoveArchive(s.runID, s.medium, arch.DLE)
+	_, _, err := c.cat.RemoveArchive(runID, medium, dle)
 	return err
 }
 

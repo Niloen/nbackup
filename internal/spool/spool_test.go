@@ -21,7 +21,7 @@ func (fakeStore) Record(archiveio.CommitResult) error                  { return 
 
 // TestDirectPermitReleasedOnCloseWithoutCommit is the regression for the landing hang: a direct write
 // that faults before Commit (the producer's deferred Close runs, Commit never does) must return its
-// backing permit, so the next direct write can acquire the single run instead of blocking forever.
+// lane permit, so the next direct write can acquire the single run instead of blocking forever.
 func TestDirectPermitReleasedOnCloseWithoutCommit(t *testing.T) {
 	sp := New(context.Background(), Config{
 		Backings: []Backing{{Name: "landing", Stores: []archiveio.WriteStore{fakeStore{}}, Writers: 1}},
@@ -56,7 +56,7 @@ func TestDirectPermitReleasedOnCloseWithoutCommit(t *testing.T) {
 			t.Fatalf("second NewArchive: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("second direct write blocked: the backing permit leaked on Close without Commit")
+		t.Fatal("second direct write blocked: the lane permit leaked on Close without Commit")
 	}
 
 	if err := sp.Drain(); err != nil {

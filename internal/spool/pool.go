@@ -1,8 +1,3 @@
-// Package spool is the holding disks' drain: the consuming half of a dump. A dump's producer
-// stages each committed archive onto a holding disk; the drain copies it to the authoritative
-// backing and reclaims the disk. A Pool spreads the staged dumps across the disks and, sized to
-// each disk's capacity, back-pressures the producer; a backing failure aborts it so the producer
-// stops and the run fails — never dropping data.
 package spool
 
 import (
@@ -11,6 +6,10 @@ import (
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/ratelimit"
 )
+
+// pool.go is the holding-disk side of the spool: Disk + Pool, the capacity/writer back-pressure
+// and round-robin allocator the spool stages dumps through before their drains copy them to the
+// landing. See Acquire for the routing rule (too big for every disk ⇒ direct to the landing).
 
 // Disk is one disk in the holding Pool: the run Storage the producer stages onto (and the drain
 // reads back + reclaims through), plus its capacity budget. used sums two reservations against the
@@ -31,7 +30,7 @@ type Disk struct {
 // the DLE's estimate against that disk for its in-flight write; the next acquire blocks while every
 // eligible disk is over capacity. The producer frees that reservation when it closes the sink; a
 // committed archive's landed bytes are charged until the drain copies them off and reclaims them,
-// waking a blocked producer. A backing failure aborts the pool, waking blocked producers (which
+// waking a blocked producer. A landing failure aborts the pool, waking blocked producers (which
 // then stop) so the run fails rather than overfilling. With a single disk it is a plain byte gate.
 type Pool struct {
 	mu      sync.Mutex
@@ -62,7 +61,7 @@ func (d *Disk) hasWriterSlot() bool { return d.Writers == 0 || d.writing < d.Wri
 // Acquire picks a holding disk for a DLE estimated at est bytes, blocking while every disk that
 // could fit it is over capacity. It returns direct=true when no disk can ever fit est (the DLE is
 // too big for the largest disk and there is no unbounded one) — the caller dumps it straight to the
-// backing. Allocation is round-robin from the cursor, skipping disks that can't fit est or have no
+// landing. Allocation is round-robin from the cursor, skipping disks that can't fit est or have no
 // room right now, so successive dumps spread across spindles. On success it reserves est against the
 // chosen disk's budget for the dump's in-flight write — freed when the producer closes the sink — so
 // the many producers that acquire up front cannot collectively overfill a disk while writing. It
@@ -133,7 +132,7 @@ func (p *Pool) Release(idx int, n int64) {
 	p.mu.Unlock()
 }
 
-// Abort wakes every blocked producer — the backing is unreachable, so the run must fail rather than
+// Abort wakes every blocked producer — the landing is unreachable, so the run must fail rather than
 // wait for space that will never free.
 func (p *Pool) Abort(err error) {
 	p.mu.Lock()
