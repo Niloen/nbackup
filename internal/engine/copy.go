@@ -206,7 +206,7 @@ func (c *copier) runCopy(targetMedia, fromMedia string, spec archiveio.RunSpec, 
 // copyJob is one archive to re-author onto the target: its read ref, its metadata (identity, checksum,
 // members — preserved by NewCopy), and its compressed size (the spool's back-pressure estimate).
 type copyJob struct {
-	ref  clerk.Ref
+	ref  archiveio.Ref
 	meta record.Archive
 	est  int64
 }
@@ -216,7 +216,7 @@ type copyJob struct {
 func (c *copier) jobsForRun(runID string, archives []record.Archive) []copyJob {
 	jobs := make([]copyJob, 0, len(archives))
 	for _, a := range archives {
-		ref := clerk.Ref{Run: runID, DLE: a.DLE, Level: a.Level}
+		ref := archiveio.Ref{Run: runID, DLE: a.DLE, Level: a.Level}
 		a.Members, _ = c.clerk.Members(ref)
 		jobs = append(jobs, copyJob{ref: ref, meta: a, est: a.Compressed})
 	}

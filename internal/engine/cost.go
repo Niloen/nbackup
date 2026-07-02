@@ -7,7 +7,6 @@ import (
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
-	"github.com/Niloen/nbackup/internal/restore"
 	"github.com/Niloen/nbackup/internal/retention"
 )
 
@@ -117,7 +116,7 @@ func (e *Engine) RestoreCost(dles []string, asOf string) ReadEstimate {
 	}
 	var refs []archiveRef
 	for _, dle := range dles {
-		steps, err := restore.Chain(e.cat.Archives(), dle, target)
+		steps, err := recovery.Chain(e.cat.Archives(), dle, target)
 		if err != nil {
 			continue
 		}

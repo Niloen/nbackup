@@ -269,7 +269,7 @@ sources:
 written, a remote-sourced archive is byte-identical to a local one — same `Entry`/
 `Placement`, same ciphertext `SHA256`, same member list; nothing records "this came over
 SSH." So `nb verify` (checksum + `--deep` structural) and drill selection are unchanged.
-And **restore never touches the client or its `.snar`** (`restore.Chain` rebuilds from the
+And **restore never touches the client or its `.snar`** (`recovery.Chain` rebuilds from the
 *archive's* dumpdir with `--listed-incremental=/dev/null`), so a lost client never weakens
 recoverability — it only forces a future *dump* to a full. The stateful-client choice costs
 nothing on the drill axis.

@@ -11,7 +11,7 @@ import (
 // physical place of its first part (the copy's medium and the first part's position). It is
 // what OrderForOnePass needs to sequence a selection into a one-pass read.
 type ReadItem struct {
-	Ref      Ref            // Run, DLE, Level
+	Ref      archiveio.Ref  // Run, DLE, Level
 	Medium   string         // the copy's medium
 	FirstPos record.FilePos // the archive's first part — orders the read within a medium
 }
@@ -64,16 +64,20 @@ func OrderForOnePass(items []ReadItem) []ReadItem {
 // archive's ref and an open func for a Source over its bytes. fn composes the per-archive
 // transfer (decode → sink) and may open more than once (verify reads twice). Reading stops at
 // the first error fn returns. medium "" copy-selects per ref; a set medium pins to that copy.
+// An open fails over like Open does: the located copy orders the pass, but if it will not
+// open (a damaged or missing file behind a live catalog entry) every other eligible copy is
+// tried before the fault surfaces — a set medium still confines that to its own placements,
+// so a pinned read is never masked by another medium's copy.
 //
 // Refs with no available copy are not read; they are returned as missing for the caller to
 // handle (a broken chain, a position-missing verdict). An opener that cannot be acquired
 // (medium not in this config) is the error.
-func (c *Clerk) ReadArchives(refs []Ref, medium string, fn func(ref Ref, open func() (io.ReadCloser, error)) error) (missing []Ref, err error) {
+func (c *Clerk) ReadArchives(refs []archiveio.Ref, medium string, fn func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error) (missing []archiveio.Ref, err error) {
 	type loc struct {
 		medium string
 		parts  []record.FilePos
 	}
-	locs := map[Ref]loc{}
+	locs := map[archiveio.Ref]loc{}
 	items := make([]ReadItem, 0, len(refs))
 	for _, ref := range refs {
 		m, parts, ok := c.locate(ref, medium)
@@ -110,8 +114,14 @@ func (c *Clerk) ReadArchives(refs []Ref, medium string, fn func(ref Ref, open fu
 		}
 		ref := it.Ref
 		open := func() (io.ReadCloser, error) {
-			want := archiveio.Expect{Run: ref.Run, DLE: ref.DLE, Level: ref.Level}
-			return c.reader.Open(l.parts, want, op)
+			rc, err := c.reader.Open(l.parts, ref, op)
+			if err == nil {
+				return rc, nil
+			}
+			// The located copy would not open (the eager first-part prime failed —
+			// wrong volume, or a file gone behind its catalog entry): fail over
+			// through every eligible copy, as a single-archive Open would.
+			return c.openRaw(ref, medium)
 		}
 		if e := fn(ref, open); e != nil {
 			return missing, e
@@ -123,7 +133,7 @@ func (c *Clerk) ReadArchives(refs []Ref, medium string, fn func(ref Ref, open fu
 // locate resolves a ref to the copy that holds it: a set medium pins to that copy; "" takes
 // the first placement in read-preference order (the engine's own copy first) that has the
 // archive's parts.
-func (c *Clerk) locate(ref Ref, medium string) (string, []record.FilePos, bool) {
+func (c *Clerk) locate(ref archiveio.Ref, medium string) (string, []record.FilePos, bool) {
 	for _, p := range c.cat.PlacementsFor(ref.Run) {
 		if medium != "" && p.Medium != medium {
 			continue

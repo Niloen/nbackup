@@ -10,17 +10,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
-	"github.com/Niloen/nbackup/internal/clerk"
-	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/librarian"
-	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/restore"
+	"github.com/Niloen/nbackup/internal/recovery"
+	"github.com/Niloen/nbackup/internal/restorer"
 	"github.com/Niloen/nbackup/internal/sizeutil"
-	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
@@ -228,8 +225,8 @@ func (e *Engine) drillTarget(t drill.Target, medium string, opts DrillOptions, l
 // drillVerify exercises a target's chain archives with the verify primitive on the
 // chosen medium (checksum, or checksum+structural). It stops at the first fault.
 func (e *Engine) drillVerify(t drill.Target, medium string, checks VerifyChecks) (drill.Class, string) {
-	refs := make([]clerk.Ref, 0, len(t.Steps))
-	archByRef := make(map[clerk.Ref]record.Archive, len(t.Steps))
+	refs := make([]archiveio.Ref, 0, len(t.Steps))
+	archByRef := make(map[archiveio.Ref]record.Archive, len(t.Steps))
 	for _, step := range t.Steps {
 		s, err := e.cat.ReadRun(step.RunID)
 		if err != nil {
@@ -239,7 +236,7 @@ func (e *Engine) drillVerify(t drill.Target, medium string, checks VerifyChecks)
 		if !ok {
 			return drill.ClassMissing, fmt.Sprintf("%s %s L%d missing from the run's commit footers", step.RunID, step.DLE, step.Level)
 		}
-		ref := clerk.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}
+		ref := archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}
 		refs = append(refs, ref)
 		archByRef[ref] = a
 	}
@@ -247,7 +244,7 @@ func (e *Engine) drillVerify(t drill.Target, medium string, checks VerifyChecks)
 	// whole). A failing verdict is carried out via a sentinel error.
 	var bad ArchiveVerdict
 	errStop := errors.New("drill: archive failed")
-	missing, err := e.clerk.ReadArchives(refs, medium, func(ref clerk.Ref, open func() (io.ReadCloser, error)) error {
+	missing, err := e.clerk.ReadArchives(refs, medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
 		v := e.ver.verifyArchive(archByRef[ref], ref, medium, VerifyOptions{Checks: checks, Medium: medium}, open, nil)
 		if !v.OK {
 			bad = v
@@ -268,52 +265,37 @@ func (e *Engine) drillVerify(t drill.Target, medium string, checks VerifyChecks)
 }
 
 // drillChain performs a real point-in-time chain restore of the DLE into a scratch
-// dir, then discards it — the strong proof. It uses the deletion-faithful
-// listed-incremental path (NOT the recover/member path), reading from the chosen
-// medium. A decrypt/decompress fault is Pipeline; a tar composition fault is Chain.
+// dir, then discards it — the strong proof. It calls the same restorer.Extract that
+// `nb recover --all` runs (deletion-faithful listed-incremental, one-pass read off
+// the chosen medium): the drill rehearses the actual restore path, not a copy of
+// it. The outcome is classified from the returned error alone — the restorer's
+// documented contract. Driving the proof on the client for a client-only key is
+// the documented follow-on — see the design note.
 func (e *Engine) drillChain(t drill.Target, medium string, logf Logf) (drill.Class, string) {
 	dir, err := os.MkdirTemp("", "nbackup-drill-chain-*")
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
 	defer os.RemoveAll(dir)
-	for _, step := range t.Steps {
-		// The chain restores to a server-side scratch dir (decode + extract server-side),
-		// so the archiver runs locally (host ""). Driving the recoverability proof on the
-		// client for a client-only key is the documented follow-on — see the design note.
-		arch, err := e.restoreArchiver(step.Archiver, "")
-		if err != nil {
-			return drill.ClassPipeline, err.Error()
-		}
-		// Build the decode filters first (a bad scheme fails before any media is opened), then
-		// open the copy-selected source — an open fault (missing copy/volume) is classifiable
-		// here, before bytes flow.
-		decrypt, decompress, derr := e.dec.decodeFilters(step.Compress, step.Encrypt, e.decryptOptsFor(step.DLE))
-		if derr != nil {
-			return drill.ClassPipeline, derr.Error()
-		}
-		src, err := e.clerk.Open(clerk.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}, medium)
-		if err != nil {
-			return classifyOpenErr(err), err.Error()
-		}
-		logf.Log("drill-restoring %s %s L%d", step.RunID, e.DisplayDLE(step.DLE), step.Level)
-		// The transfer: read → decode (server-side Filters) → tar -x extract. The transfer's
-		// role tags the fault: a Sink (tar) fault is a chain-composition failure (Chain); a
-		// Source/Filters fault — an unreadable part or a decrypt/decompress child — is a decode
-		// failure (Pipeline). Driving the proof on the client for a client-only key is the
-		// documented follow-on — see the design note.
-		sink := xfer.NewProgramChain(programs.Local()).Add(arch.RestoreStage(dir, nil))
-		_, filters := xfer.SplitTransforms(xfer.Transform{Cmd: decrypt}, xfer.Transform{Cmd: decompress})
-		_, terr := xfer.Transfer(context.Background(), xfer.Reader(src), filters, sink)
-		if terr != nil {
-			var xe *xfer.Error
-			if errors.As(terr, &xe) && xe.Role == xfer.RoleSink {
-				return drill.ClassChain, terr.Error()
-			}
-			return drill.ClassPipeline, decryptHint(step.Encrypt, terr).Error()
-		}
+	if err := e.rst.Extract(restorer.Request{DLE: t.DLE, RunID: t.RunID, Dest: dir, Medium: medium}, logf); err != nil {
+		return classifyRestoreErr(err), err.Error()
 	}
 	return drill.ClassNone, ""
+}
+
+// classifyRestoreErr maps a failed restorer.Extract to a drill class via the
+// restorer's error contract: a missing copy/volume (sentinels, via errors.Is) is
+// Missing; a role-tagged Sink fault (tar could not compose the stream) is Chain;
+// anything else — an unreadable part or a decrypt/decompress child — is Pipeline.
+func classifyRestoreErr(err error) drill.Class {
+	if errors.Is(err, archiveio.ErrMissingCopy) || errors.Is(err, librarian.ErrVolumeUnavailable) {
+		return drill.ClassMissing
+	}
+	var xe *xfer.Error
+	if errors.As(err, &xe) && xe.Role == xfer.RoleSink {
+		return drill.ClassChain
+	}
+	return drill.ClassPipeline
 }
 
 // drillStock validates the documented "recovery never requires NBackup" one-liner:
@@ -334,7 +316,7 @@ func (e *Engine) drillStock(t drill.Target, medium string, logf Logf) (drill.Cla
 	return drill.ClassNone, ""
 }
 
-func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf Logf) (drill.Class, string) {
+func (e *Engine) stockExtractStep(step recovery.Step, dest, medium string, logf Logf) (drill.Class, string) {
 	// Fetch the raw (still-encrypted/compressed) payload to a temp file as a transfer whose
 	// sink is just the file — NBackup is used only to move bytes off the medium (unavoidable
 	// for tape/cloud); the decode is done entirely by the documented stock tools below.
@@ -343,7 +325,7 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 		return drill.ClassPipeline, err.Error()
 	}
 	defer os.Remove(tmp.Name())
-	src, err := e.clerk.Open(clerk.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}, medium)
+	src, err := e.clerk.Open(archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}, medium)
 	if err != nil {
 		tmp.Close()
 		return classifyOpenErr(err), err.Error()
@@ -354,7 +336,7 @@ func (e *Engine) stockExtractStep(step restore.Step, dest, medium string, logf L
 		return classifyOpenErr(terr), terr.Error()
 	}
 
-	script, err := stockPipeline(step.Encrypt, step.Compress, e.decryptOptsFor(step.DLE).PassphraseFile)
+	script, err := stockPipeline(step.Encrypt, step.Compress, e.rst.DecryptOptsFor(step.DLE).PassphraseFile)
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
@@ -417,7 +399,7 @@ func stockPipeline(encrypt, compress, passphraseFile string) (string, error) {
 // human loading a tape. Address-identified media (disk/cloud) and robotic libraries
 // (which auto-mount) are always reachable; a single-drive station is reachable only
 // when every needed volume is already the one loaded in its drive.
-func (e *Engine) unattendedReachable(medium string, steps []restore.Step) (bool, string) {
+func (e *Engine) unattendedReachable(medium string, steps []recovery.Step) (bool, string) {
 	view, err := e.ChangerView(medium)
 	if err != nil {
 		return true, "" // address-identified: nothing to mount
@@ -439,7 +421,7 @@ func (e *Engine) unattendedReachable(medium string, steps []restore.Step) (bool,
 
 // chainLabels is the distinct set of volume labels a chain's copies occupy on the
 // medium — the tapes an unattended drill would need mounted.
-func (e *Engine) chainLabels(steps []restore.Step, medium string) []string {
+func (e *Engine) chainLabels(steps []recovery.Step, medium string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, step := range steps {
@@ -457,7 +439,7 @@ func (e *Engine) chainLabels(steps []restore.Step, medium string) []string {
 
 // chainBytes sums a chain's stored (compressed) payload bytes — the egress a drill of
 // this target would read off the medium, the basis of the offsite cost forecast.
-func (e *Engine) chainBytes(steps []restore.Step) int64 {
+func (e *Engine) chainBytes(steps []recovery.Step) int64 {
 	var n int64
 	for _, step := range steps {
 		s, err := e.cat.ReadRun(step.RunID)
@@ -486,7 +468,7 @@ func findArchive(s *catalog.Run, dle string, level int) (record.Archive, bool) {
 // catalog read path, librarian.ErrVolumeUnavailable from the mount path) via errors.Is,
 // so reclassification does not silently follow a reworded message.
 func classifyOpenErr(err error) drill.Class {
-	if errors.Is(err, clerk.ErrMissingCopy) || errors.Is(err, librarian.ErrVolumeUnavailable) {
+	if errors.Is(err, archiveio.ErrMissingCopy) || errors.Is(err, librarian.ErrVolumeUnavailable) {
 		return drill.ClassMissing
 	}
 	return drill.ClassPipeline
@@ -505,284 +487,4 @@ func failureToken(r DrillResult) string {
 // computation lives in the leaf with the ledger, so `nb report` reuses it too.
 func coverage(dles []string, ledger *drill.Ledger, window time.Duration, now time.Time) (never []string, overdue int) {
 	return ledger.Coverage(dles, window, now)
-}
-
-// WormResult is the outcome of the WORM/immutability probe against a medium.
-type WormResult struct {
-	Medium   string
-	Tested   bool   // an active write+delete probe ran (apply, address-identified medium)
-	Enforced bool   // deletion was refused — the storage enforces immutability
-	Detail   string // human-readable explanation
-}
-
-// wormProbeRun is the single, fixed probe object the drill reuses every run — so an
-// immutable medium accumulates exactly one undeletable probe, not one per drill.
-const wormProbeRun = "drill-worm-probe"
-
-// wormProbe tests whether a medium enforces WORM/immutability the way NBackup relies
-// on for the 3-2-1-1-0 "1 immutable" digit: it keeps one fixed probe object on the
-// medium and, each run, attempts to delete that same object. A refused delete proves
-// immutability is enforced (the probe persists — that is the proof); a successful
-// delete proves it is not (the probe is recreated next run). Immutability is
-// configured operator-side (S3 Object Lock, LTO WORM); NBackup only detects it, never
-// sets it. Append-only media (tape) are immutable by construction and are reported
-// without writing a probe. The active probe is skipped in --dry-run.
-func (e *Engine) wormProbe(medium string, apply bool, now time.Time) WormResult {
-	res := WormResult{Medium: medium}
-	lib, _, _, err := e.librarianFor(medium)
-	if err != nil {
-		res.Detail = err.Error()
-		return res
-	}
-	if lib.AppendOnly() {
-		// Tape and other labeled media are append-only: a file once written cannot be
-		// rewritten or individually deleted, so the medium is immutable by construction.
-		// Writing a probe would advance/relabel the reel, so report rather than write.
-		res.Enforced = true
-		res.Detail = "append-only medium: written files are not individually rewritable"
-		return res
-	}
-	vol := lib.Volume()
-	if !apply {
-		res.Detail = "not probed (dry-run / --worm off); pass --worm (without --dry-run) to test immutability"
-		return res
-	}
-	if err := e.ensureWormProbe(vol, now); err != nil {
-		res.Detail = fmt.Sprintf("could not write probe: %v", err)
-		return res
-	}
-	res.Tested = true
-	// Delete the probe's file(s) by position — a refused delete proves WORM/Object-Lock.
-	files, err := vol.Files()
-	if err != nil {
-		res.Detail = fmt.Sprintf("could not enumerate probe: %v", err)
-		return res
-	}
-	for _, f := range files {
-		if f.Header.Run != wormProbeRun {
-			continue
-		}
-		if err := vol.RemoveFile(f.Pos); err != nil {
-			res.Enforced = true
-			res.Detail = fmt.Sprintf("delete of probe refused (%v) — immutability ENFORCED", err)
-			return res
-		}
-	}
-	res.Detail = "delete of probe succeeded — storage is MUTABLE (no WORM/Object-Lock)"
-	return res
-}
-
-// ensureWormProbe writes the fixed probe object if it is not already present (an
-// unsealed orphan the catalog scanner ignores), so the same object is reused across
-// drills.
-func (e *Engine) ensureWormProbe(vol media.Volume, now time.Time) error {
-	files, err := vol.Files()
-	if err != nil {
-		return err
-	}
-	for _, f := range files {
-		if f.Header.Run == wormProbeRun {
-			return nil // reuse the existing probe
-		}
-	}
-	h := record.Header{Run: wormProbeRun, Kind: record.KindArchive, DLE: "worm-probe", CreatedAt: now}
-	fw, err := vol.AppendFile(context.Background(), h)
-	if err != nil {
-		return err
-	}
-	_, werr := io.WriteString(fw, "nbackup recovery-drill WORM probe — delete attempts test immutability\n")
-	if cerr := fw.Close(); werr == nil {
-		werr = cerr
-	}
-	return werr
-}
-
-// PostureStatus is a posture check's verdict.
-type PostureStatus int
-
-const (
-	PostureOK PostureStatus = iota
-	PostureWarn
-	PostureFail
-)
-
-func (s PostureStatus) String() string {
-	switch s {
-	case PostureOK:
-		return "OK"
-	case PostureWarn:
-		return "WARN"
-	case PostureFail:
-		return "FAIL"
-	default:
-		return "?"
-	}
-}
-
-// PostureCheck is one line of the recoverability audit.
-type PostureCheck struct {
-	Name   string
-	Status PostureStatus
-	Detail string
-}
-
-// Posture is the 3-2-1-1-0 recoverability audit derived from the catalog, config,
-// incremental-state library, capacity, and the WORM probe — the best-practice
-// framing around the per-DLE drill outcomes.
-type Posture struct {
-	Checks    []PostureCheck
-	Copies    int // backup copies of the weakest-covered run (the live source is the implicit +1)
-	Media     int // distinct media holding copies
-	Offsite   bool
-	Immutable bool
-}
-
-// posture computes the recoverability audit. failures is this run's drill failures.
-func (e *Engine) posture(worm WormResult, failures int) Posture {
-	runs := e.cat.Runs()
-	mediaSet := map[string]bool{}
-	minCopies := -1
-	for _, s := range runs {
-		ps := e.cat.Placements(s.ID)
-		if len(ps) == 0 {
-			continue
-		}
-		if minCopies < 0 || len(ps) < minCopies {
-			minCopies = len(ps)
-		}
-		for _, p := range ps {
-			mediaSet[p.Medium] = true
-		}
-	}
-	if minCopies < 0 {
-		minCopies = 0
-	}
-	offsite := false
-	for m := range mediaSet {
-		if m != e.mediumName {
-			offsite = true
-		}
-	}
-	p := Posture{Copies: minCopies, Media: len(mediaSet), Offsite: offsite, Immutable: worm.Enforced}
-	add := func(name string, st PostureStatus, detail string) {
-		p.Checks = append(p.Checks, PostureCheck{Name: name, Status: st, Detail: detail})
-	}
-
-	// The live dump source is copy #1 in the canonical 3-2-1 rule (production data
-	// + 2 backups = 3), so a run is compliant once it has 2 backup copies. We count
-	// catalog placements — the verifiable backup copies; the source is the implicit
-	// third NBackup can never drill, so it is never enough on its own.
-	switch {
-	case minCopies >= 2:
-		add("3 copies", PostureOK, fmt.Sprintf("source + %d backup copies (3-2-1 satisfied)", minCopies))
-	case minCopies == 1:
-		add("3 copies", PostureWarn, "source + 1 backup copy; 3-2-1 wants 2 backups")
-	default:
-		add("3 copies", PostureFail, "only the live source — no backup copy recorded for some run")
-	}
-	if len(mediaSet) >= 2 {
-		add("2 media", PostureOK, fmt.Sprintf("%d media hold copies", len(mediaSet)))
-	} else {
-		add("2 media", PostureWarn, "only one medium holds copies")
-	}
-	if offsite {
-		add("1 offsite", PostureOK, "a non-landing medium holds copies")
-	} else {
-		add("1 offsite", PostureWarn, "no offsite copy (only the landing medium)")
-	}
-	switch {
-	case worm.Enforced:
-		add("1 immutable", PostureOK, worm.Detail)
-	default:
-		add("1 immutable", PostureWarn, worm.Detail)
-	}
-	if failures == 0 {
-		add("0 errors", PostureOK, "no drill failures this run")
-	} else {
-		add("0 errors", PostureFail, fmt.Sprintf("%d drill failure(s) this run", failures))
-	}
-
-	// Extras beyond the 3-2-1-1-0 core.
-	add(e.postureKey())
-	add(e.postureIncrementalState())
-	add(e.postureCapacity())
-	return p
-}
-
-// postureKey checks that, where encryption is configured, the decryptor binary and
-// key reference are present — the lost-key failure mode checksum verification can't
-// see. (A real end-to-end key test happens when a structural/chain drill of an
-// encrypted archive runs.)
-func (e *Engine) postureKey() (string, PostureStatus, string) {
-	names := []string{config.DefaultDumpType}
-	for n := range e.cfg.DumpTypes {
-		names = append(names, n)
-	}
-	configured := false
-	for _, n := range names {
-		scheme, opts := e.encryptionFor(n)
-		if scheme == "" || scheme == "none" {
-			continue
-		}
-		configured = true
-		if err := crypt.Check(scheme, opts); err != nil {
-			return "key reachable", PostureWarn, fmt.Sprintf("encryption %q configured but not ready: %v", scheme, err)
-		}
-	}
-	if !configured {
-		return "key reachable", PostureOK, "no encryption configured"
-	}
-	return "key reachable", PostureOK, "encryptor + key reference present"
-}
-
-// postureIncrementalState checks the precious, non-derivable incremental-state
-// library each archiver owns: a DLE missing the base state its next incremental
-// builds on will be forced to a full (recoverable, but a signal). The archiver
-// answers whether the base is present (HasBase), so this stays archiver-neutral.
-func (e *Engine) postureIncrementalState() (string, PostureStatus, string) {
-	hist := e.cat.History()
-	missing := 0
-	for _, d := range e.cfg.DLEs() {
-		name := d.Name()
-		st := hist.DLE(name)
-		if st.LastFullDate == "" {
-			continue // never fulled yet; nothing relied upon
-		}
-		arch, err := e.archiverFor(d.DumpTypeName(), d.Host)
-		if err != nil {
-			continue // unresolvable archiver surfaces elsewhere (pre-flight / estimate)
-		}
-		// The next incremental sits at level L (1 right after a full, else the last
-		// level) and builds on the L-1 state; without it the DLE is forced to a full.
-		lvl := st.LastLevel()
-		if lvl < 1 {
-			lvl = 1
-		}
-		if !arch.HasBase(name, lvl-1) {
-			missing++
-		}
-	}
-	if missing == 0 {
-		return "incremental state present", PostureOK, "incremental-state library intact"
-	}
-	return "incremental state present", PostureWarn, fmt.Sprintf("%d DLE(s) missing base incremental state (next backup forces a full)", missing)
-}
-
-// postureCapacity reflects whether the landing medium is within its capacity budget.
-func (e *Engine) postureCapacity() (string, PostureStatus, string) {
-	if e.Capacity() <= 0 {
-		return "capacity OK", PostureOK, "unbounded"
-	}
-	over, pct := e.CapacityStatus(e.StoredBytes())
-	if over {
-		return "capacity OK", PostureWarn, fmt.Sprintf("over capacity (%.0f%% used); run `nb prune`", pct)
-	}
-	return "capacity OK", PostureOK, fmt.Sprintf("%.0f%% used", pct)
-}
-
-func reelOrEmpty(label string) string {
-	if label == "" {
-		return "(empty)"
-	}
-	return fmt.Sprintf("%q", label)
 }

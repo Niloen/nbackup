@@ -842,15 +842,15 @@ func TestDecryptOptsForPerDumptype(t *testing.T) {
 	}
 
 	secure := config.DLE{Host: "localhost", Path: "/a", DumpType: "secure"}
-	if got := eng.decryptOptsFor(secure.Name()); got.PassphraseFile != "/keys/secure" {
+	if got := eng.rst.DecryptOptsFor(secure.Name()); got.PassphraseFile != "/keys/secure" {
 		t.Errorf("per-dumptype DLE: passphrase = %q, want /keys/secure", got.PassphraseFile)
 	}
 	plain := config.DLE{Host: "localhost", Path: "/b"}
-	if got := eng.decryptOptsFor(plain.Name()); got.PassphraseFile != "/keys/wide" {
+	if got := eng.rst.DecryptOptsFor(plain.Name()); got.PassphraseFile != "/keys/wide" {
 		t.Errorf("default-dumptype DLE: passphrase = %q, want the config-wide /keys/wide", got.PassphraseFile)
 	}
 	// An unknown DLE falls back to the config-wide block.
-	if got := eng.decryptOptsFor("nope"); got.PassphraseFile != "/keys/wide" {
+	if got := eng.rst.DecryptOptsFor("nope"); got.PassphraseFile != "/keys/wide" {
 		t.Errorf("unknown DLE: passphrase = %q, want the config-wide /keys/wide", got.PassphraseFile)
 	}
 }

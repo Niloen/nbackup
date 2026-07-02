@@ -7,11 +7,12 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
-	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/restorer"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 )
 
@@ -86,8 +87,8 @@ type VerifyReport struct {
 // so the same path serves `nb verify` and a drill's per-archive check.
 type verifier struct {
 	cat         *catalog.Catalog                                       // run list + metadata
-	clerk       *clerk.Clerk                                           // byte endpoints + member index
-	dec         *decoder                                               // checksum + structural decode
+	store       archiveio.ReadStore                                    // byte endpoints + member index (the read face of the archive fs)
+	rst         *restorer.Restorer                                     // checksum + structural decode primitives
 	placements  func(runID string) []catalog.Placement                 // copies in read-preference order
 	archiverFor func(typeName, host string) (archiver.Archiver, error) // archiver for the structural list
 	decryptOpts func(dleName string) crypt.Options                     // per-DLE decrypt key reference (per-dumptype passphrase_file)
@@ -97,11 +98,11 @@ type verifier struct {
 func (e *Engine) newVerifier() *verifier {
 	return &verifier{
 		cat:         e.cat,
-		clerk:       e.clerk,
-		dec:         e.dec,
+		store:       e.clerk,
+		rst:         e.rst,
 		placements:  e.placementsFor,
 		archiverFor: e.restoreArchiver,
-		decryptOpts: e.decryptOptsFor,
+		decryptOpts: e.rst.DecryptOptsFor,
 	}
 }
 
@@ -170,17 +171,17 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 	var goodCopies, badCopies, skippedCopies []string
 	for _, p := range placements {
 		copyOK := true
-		archByRef := make(map[clerk.Ref]record.Archive, len(s.Archives))
-		refs := make([]clerk.Ref, len(s.Archives))
+		archByRef := make(map[archiveio.Ref]record.Archive, len(s.Archives))
+		refs := make([]archiveio.Ref, len(s.Archives))
 		for i, a := range s.Archives {
-			ref := clerk.Ref{Run: id, DLE: a.DLE, Level: a.Level}
+			ref := archiveio.Ref{Run: id, DLE: a.DLE, Level: a.Level}
 			refs[i] = ref
 			archByRef[ref] = a
 		}
 		// The clerk drives the one-pass read of this copy, calling back per archive; verify
 		// every one (never stop early), collecting verdicts.
-		verdicts := make(map[clerk.Ref]ArchiveVerdict, len(refs))
-		_, err := v.clerk.ReadArchives(refs, p.Medium, func(ref clerk.Ref, open func() (io.ReadCloser, error)) error {
+		verdicts := make(map[archiveio.Ref]ArchiveVerdict, len(refs))
+		_, err := v.store.ReadArchives(refs, p.Medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
 			verdicts[ref] = v.verifyArchive(archByRef[ref], ref, p.Medium, opts, open, logf)
 			return nil
 		})
@@ -203,7 +204,7 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 			continue
 		}
 		for _, a := range s.Archives {
-			v, ok := verdicts[clerk.Ref{Run: id, DLE: a.DLE, Level: a.Level}]
+			v, ok := verdicts[archiveio.Ref{Run: id, DLE: a.DLE, Level: a.Level}]
 			if !ok {
 				logf.Log("%s [%s]: %s L%d POSITION MISSING", id, p.Medium, a.DLEID(), a.Level)
 				v = ArchiveVerdict{Run: id, DLE: a.DLE, Level: a.Level, Medium: p.Medium, OK: false,
@@ -240,7 +241,7 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 
 // verifyArchive runs the requested checks against one archive, opening its stream via open
 // (each check reads it afresh).
-func (v *verifier) verifyArchive(a record.Archive, ref clerk.Ref, medium string, opts VerifyOptions, open func() (io.ReadCloser, error), logf Logf) ArchiveVerdict {
+func (v *verifier) verifyArchive(a record.Archive, ref archiveio.Ref, medium string, opts VerifyOptions, open func() (io.ReadCloser, error), logf Logf) ArchiveVerdict {
 	id := ref.Run
 	vd := ArchiveVerdict{Run: id, DLE: a.DLE, Level: a.Level, Medium: medium, OK: true}
 
@@ -251,7 +252,7 @@ func (v *verifier) verifyArchive(a record.Archive, ref clerk.Ref, medium string,
 			vd.OK, vd.Class, vd.Detail = false, drill.ClassPipeline, serr.Error()
 			return vd
 		}
-		good, err := v.dec.verifyChecksum(rc, a.SHA256)
+		good, err := v.rst.VerifyChecksum(rc, a.SHA256)
 		if err != nil {
 			logf.Log("%s [%s]: %s L%d ERROR %v", id, medium, a.DLEID(), a.Level, err)
 			vd.OK, vd.Class, vd.Detail = false, drill.ClassPipeline, err.Error()
@@ -292,12 +293,12 @@ func (v *verifier) structuralCheck(id string, a record.Archive, open func() (io.
 	// Any fault — a media read, a decode child, or a not-a-tar List — is a Pipeline failure; a
 	// clean stream whose members differ from the seal is an Integrity failure. The decrypt
 	// hint keeps a lost-key failure from being mislabeled as corruption.
-	members, terr := v.dec.listMembers(rc, a.Compress, a.Encrypt, v.decryptOpts(a.DLE), arch)
+	members, terr := v.rst.ListMembers(rc, a.Compress, a.Encrypt, v.decryptOpts(a.DLE), arch)
 	if terr != nil {
-		return drill.ClassPipeline, decryptHint(a.Encrypt, terr).Error()
+		return drill.ClassPipeline, restorer.DecryptHint(a.Encrypt, terr).Error()
 	}
 	// The recorded member list (the catalog is member-free) is loaded via the clerk.
-	recorded, err := v.clerk.Members(clerk.Ref{Run: id, DLE: a.DLE, Level: a.Level})
+	recorded, err := v.store.Members(archiveio.Ref{Run: id, DLE: a.DLE, Level: a.Level})
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,8 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
+	"github.com/Niloen/nbackup/internal/librarian"
+	"github.com/Niloen/nbackup/internal/xfer"
 )
 
 // drillFixture builds a disk-landing engine with an offsite disk medium and a single
@@ -347,4 +351,28 @@ func firstFailClass(rep *VerifyReport) drill.Class {
 		}
 	}
 	return drill.ClassNone
+}
+
+// TestClassifyRestoreErr pins the drill's classification of a failed chain
+// restore to the restorer's error contract: the sentinels survive wrapping
+// (errors.Is) and the xfer role survives wrapping (errors.As) — exactly what a
+// wrapped Extract failure carries.
+func TestClassifyRestoreErr(t *testing.T) {
+	wrap := func(err error) error { return fmt.Errorf("extract run-x dle L0: %w", err) }
+	cases := []struct {
+		name string
+		err  error
+		want drill.Class
+	}{
+		{"missing copy", wrap(fmt.Errorf("%w of run x", archiveio.ErrMissingCopy)), drill.ClassMissing},
+		{"volume unavailable", wrap(fmt.Errorf("mount: %w", librarian.ErrVolumeUnavailable)), drill.ClassMissing},
+		{"tar composition (sink role)", wrap(&xfer.Error{Role: xfer.RoleSink, Err: errors.New("tar: rename conflict")}), drill.ClassChain},
+		{"decode child (filters role)", wrap(&xfer.Error{Role: xfer.RoleFilters, Err: errors.New("gpg: no secret key")}), drill.ClassPipeline},
+		{"plain read fault", wrap(errors.New("read: i/o error")), drill.ClassPipeline},
+	}
+	for _, tc := range cases {
+		if got := classifyRestoreErr(tc.err); got != tc.want {
+			t.Errorf("%s: classified %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }

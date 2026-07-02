@@ -250,7 +250,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 
 	// Read the archive back by concatenating its parts; it must equal the input.
 	r := NewReader()
-	rc, err := r.Open(parts, Expect{Run: spec.ID, DLE: "dle1", Level: 0}, openerOver(v1, v2, v3))
+	rc, err := r.Open(parts, Ref{Run: spec.ID, DLE: "dle1", Level: 0}, openerOver(v1, v2, v3))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	}
 
 	// VerifyParts must confirm the recorded checksum over the concatenation.
-	ok, err := r.VerifyParts(parts, Expect{Run: spec.ID, DLE: "dle1", Level: 0}, arch.SHA256, openerOver(v1, v2, v3))
+	ok, err := r.VerifyParts(parts, Ref{Run: spec.ID, DLE: "dle1", Level: 0}, arch.SHA256, openerOver(v1, v2, v3))
 	if err != nil || !ok {
 		t.Fatalf("VerifyParts ok=%v err=%v", ok, err)
 	}
@@ -285,7 +285,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 		t.Fatalf("Parts = %d, want >= 5", arch.Parts)
 	}
 	r := NewReader()
-	rc, err := r.Open(apos.Parts, Expect{Run: spec.ID, DLE: "dle1", Level: 0}, openerOver(v))
+	rc, err := r.Open(apos.Parts, Ref{Run: spec.ID, DLE: "dle1", Level: 0}, openerOver(v))
 	if err != nil {
 		t.Fatal(err)
 	}
