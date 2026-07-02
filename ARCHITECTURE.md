@@ -79,7 +79,8 @@ registry registration, not a conditional in the core.
 | `planner` | multilevel level scheduling (pure) | planner |
 | `accounting` | medium capacity/retention/prune arithmetic: what a medium holds against its capacity, the protected residual a prune can't reclaim, per-run room, and the prune/reclaim mutators (distinct from the dollar-cost overlay in `engine/cost.go`) | (driver, capacity half) |
 | `scheduler` | the engine-side **driver** that feeds the pure `planner` its config/history/capacity inputs + the parallel size estimates, then applies the impure force-full post-pass `planner` can't (it probes the archiver's on-disk incremental state); also validates a run's config for previews | driver (planner front-end) |
-| `conductor` | the backup-run lane: executes one plan into one sealed run — flush leftovers, pre-flight tools, alloc run id, open the landing writer, run the `dumper` + `spool`, seal | driver (dump half) |
+| `spool` | the run's concurrent write seam: routes each archive direct to its landing or through the holding-disk `Pool`, per-landing `writers` permits, one orchestrator goroutine as the sole catalog writer | taper (holding-disk half) |
+| `conductor` | the backup-run lane: executes one plan into one sealed run — flush leftovers (`Flush`, the crash-recovery drain), pre-flight tools, alloc run id, open the landing writer, run the `dumper` + `spool`, seal | driver (dump half) / amflush |
 | `engine` | the driver: composes the leaf operations, owns the run session (open/finish/placement) and drill selection, and wires planner→`clerk`→media→catalog; delegates capacity to `accounting`, planning/estimation to `scheduler`, the dump run to `conductor`, and each operation's data movement to the `clerk` | driver |
 | `cli` | thin command wiring | amdump / amadmin |
 
@@ -299,7 +300,7 @@ the committed archives over a channel and handing each to a **drainer** goroutin
 copies it to the landing (the medium's `writers` cap — one write-concurrency lever per medium,
 shared by drains, direct dumps, and holding-disk staging alike; default: a serial library's
 drive count, else the worker count — bounds how many write it at once); the orchestrator
-then records the landing placement and reclaims the disk copy. With several holding disks a **`holdingPool`** allocates a disk per dump round-robin,
+then records the landing placement and reclaims the disk copy. With several holding disks the **`spool.Pool`** allocates a disk per dump round-robin,
 so the dumpers spread across spindles (more aggregate write bandwidth + a larger combined
 buffer); the handoff carries which disk so the drainer reads, reclaims, and releases the right
 one. The pool, sized to each disk's `capacity`, back-pressures the dumpers (the next allocation
@@ -328,12 +329,12 @@ a gap `nb sync` cannot: sync *adds* offsite copies, but only a landing override 
 from an expensive medium. The run keeps **one identity**: one run id across every landing, each
 archive recorded as a per-medium `Placement` (the `Entry`/`Placement` split already models a run whose
 archives live on different media — routing is the easy case where each archive has exactly one home).
-The spool generalizes from one backing to a **set of backings keyed by landing**: the dumper resolves
-each DLE's landing and asks the spool for `Store(landing)`; per-backing state (permit `Writers`, pending
-copies/permits) lives on a `*backing` value object the **one** orchestrator owns exclusively — still
-the sole catalog writer across every landing, no per-backing goroutine, no map lookups on the hot path
-(each request carries its `*backing`). Drain copies to independent landings run in parallel (a copy
-goroutine per dispatch, bounded by each backing's `Writers`); the global worker clamp is gone — a serial
+The spool generalizes from one landing to a **set of landing lanes**: the dumper resolves
+each DLE's landing and asks the spool for `Ingest(landing)`; per-landing state (permit `Writers`, pending
+copies/permits) lives on a `*lane` value object the **one** orchestrator owns exclusively — still
+the sole catalog writer across every landing, no per-lane goroutine, no map lookups on the hot path
+(each request carries its `*lane`). Drain copies to independent landings run in parallel (a copy
+goroutine per dispatch, bounded by each lane's `Writers`); the global worker clamp is gone — a serial
 tape's single permit parks its producers (off the dumper's gate, holding no worker) while cloud-bound
 producers run. Crash-recovery `nb flush` re-resolves each staged archive's landing from config
 (`landingForDLEName`) so a multi-landing crash drains each DLE back to its own medium. *Deferred*: a
