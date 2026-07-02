@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/restore"
+	"github.com/Niloen/nbackup/internal/recovery"
 )
 
 // Target is a selected DLE to drill: the point-in-time run whose restore chain the
@@ -13,11 +13,11 @@ import (
 // the risk signals that ranked it.
 type Target struct {
 	DLE      string
-	RunID    string         // newest run at/before AsOf holding the DLE — the chain's tip
-	AsOf     string         // point-in-time drilled (YYYY-MM-DD)
-	ChainLen int            // archives in the restore chain (longer chain = more to go wrong)
-	FullAge  int            // age in days of the relied-upon full (older = riskier)
-	Steps    []restore.Step // the restore chain, full → incrementals, in run order
+	RunID    string          // newest run at/before AsOf holding the DLE — the chain's tip
+	AsOf     string          // point-in-time drilled (YYYY-MM-DD)
+	ChainLen int             // archives in the restore chain (longer chain = more to go wrong)
+	FullAge  int             // age in days of the relied-upon full (older = riskier)
+	Steps    []recovery.Step // the restore chain, full → incrementals, in run order
 }
 
 // candidate is a DLE's pre-ranking selection signals.
@@ -40,7 +40,7 @@ func Select(dles []string, archives []record.Archive, asOf string, ledger *Ledge
 		if targetRun == "" {
 			continue // no recovery point for this DLE as of the date
 		}
-		steps, err := restore.Chain(archives, dle, targetRun)
+		steps, err := recovery.Chain(archives, dle, targetRun)
 		if err != nil || len(steps) == 0 {
 			continue // no full at/before the date — nothing to compose
 		}

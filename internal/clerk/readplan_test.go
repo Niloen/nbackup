@@ -3,12 +3,13 @@ package clerk
 import (
 	"testing"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
 func item(run, dle string, level int, medium, label string, pos int) ReadItem {
 	return ReadItem{
-		Ref:      Ref{Run: run, DLE: dle, Level: level},
+		Ref:      archiveio.Ref{Run: run, DLE: dle, Level: level},
 		Medium:   medium,
 		FirstPos: record.FilePos{Label: label, Pos: pos},
 	}

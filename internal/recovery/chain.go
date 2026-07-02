@@ -1,7 +1,7 @@
-// Package restore computes the ordered chain of archives needed to reconstruct a
-// DLE as of a target run. It is pure: it works over archive metadata and returns
-// the steps; the engine performs the I/O and extraction.
-package restore
+// chain.go computes the ordered chain of archives needed to reconstruct a DLE as
+// of a target run. It is pure: it works over archive metadata and returns the
+// steps; the restorer performs the I/O and extraction.
+package recovery
 
 import (
 	"fmt"

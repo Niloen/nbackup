@@ -1,7 +1,10 @@
-// Package recovery reconstructs a browsable virtual filesystem of a DLE as of a
-// given date and resolves a file selection into the minimal set of per-archive
-// extractions. It is pure: it works over run metadata and a
-// member-list loader, and returns what to extract; the engine performs the I/O.
+// Package recovery is NBackup's pure recovery planning: everything needed to decide
+// *what to extract* to get data back, working over archive metadata only — the I/O
+// and extraction live in the restorer. It computes the restore chain of a DLE as of
+// a target run (chain.go), resolves an as-of date/time to that run (asof.go),
+// reconstructs a browsable virtual filesystem and turns a file selection into the
+// minimal per-archive extractions (this file), and holds the navigable state of an
+// interactive browse (session.go).
 //
 // Browsing needs no separate index server: the "index" is each archive's
 // per-archive member index (a gzip file on the medium, cached server-side and loaded
@@ -21,22 +24,15 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/restore"
 )
 
 // Source identifies the archive a path's as-of-date content lives in, plus the
 // raw tar member name to hand to the extractor.
 type Source struct {
-	RunID    string
-	DLE      string
-	Level    int
-	Archiver string
-	Compress string
-	Encrypt  string
-	Member   string // the producing archiver's verbatim member token, replayed to it on extract (e.g. "./etc/hosts")
+	Step
+	Member string // the producing archiver's verbatim member token, replayed to it on extract (e.g. "./etc/hosts")
 }
 
 // Node is a file or directory in the reconstructed virtual filesystem. A node has
@@ -89,80 +85,6 @@ type Tree struct {
 // note on it.
 func (t *Tree) HasIncrementals() bool { return t.chainLen > 1 }
 
-// AsOf resolves an as-of point to the target run: the most recent run at or
-// before it. Runs must be in run order. The point is either a plain date
-// (YYYY-MM-DD — the most recent run whose run date is on or before it, the
-// long-standing behavior) or a date with a time component (YYYY-MM-DD HH[:MM[:SS]],
-// interpreted in UTC) — the most recent run committed at or before the end of that
-// period, so an earlier same-day run is reachable by naming its time.
-func AsOf(archives []record.Archive, asOf string) (string, error) {
-	bound, hasTime, err := parseAsOf(asOf)
-	if err != nil {
-		return "", err
-	}
-	// Group the archives into runs, in run order, each with its commit time (the latest
-	// archive that landed in it).
-	last := map[string]time.Time{}
-	var ids []string
-	for _, a := range archives {
-		if _, seen := last[a.Run]; !seen {
-			ids = append(ids, a.Run)
-		}
-		if a.CreatedAt.After(last[a.Run]) {
-			last[a.Run] = a.CreatedAt
-		}
-	}
-	sort.Slice(ids, func(i, j int) bool { return record.RunIDLess(ids[i], ids[j]) })
-	target := ""
-	for _, id := range ids {
-		if hasTime {
-			if !runTime(id, last[id]).After(bound) { // committed at or before the period's end
-				target = id
-			}
-		} else if record.RunDate(id) <= asOf {
-			target = id
-		}
-	}
-	if target == "" {
-		return "", fmt.Errorf("no backup on or before %s", asOf)
-	}
-	return target, nil
-}
-
-// parseAsOf interprets an as-of string. A bare YYYY-MM-DD selects by run date
-// (hasTime false). A date with an hour/minute/second selects by time: bound is the
-// exclusive end of the named period (the hour, minute, or second), so "2026-06-29 14"
-// matches the latest run committed during or before hour 14.
-func parseAsOf(asOf string) (bound time.Time, hasTime bool, err error) {
-	for _, p := range []struct {
-		layout string
-		window time.Duration
-	}{
-		{"2006-01-02 15:04:05", time.Second},
-		{"2006-01-02 15:04", time.Minute},
-		{"2006-01-02 15", time.Hour},
-	} {
-		if t, e := time.ParseInLocation(p.layout, asOf, time.UTC); e == nil {
-			return t.Add(p.window), true, nil
-		}
-	}
-	if _, e := time.ParseInLocation("2006-01-02", asOf, time.UTC); e == nil {
-		return time.Time{}, false, nil
-	}
-	return time.Time{}, false, fmt.Errorf("invalid as-of %q: want YYYY-MM-DD or 'YYYY-MM-DD HH[:MM[:SS]]'", asOf)
-}
-
-// runTime is a run's effective recovery instant: when its last archive committed, falling
-// back to its run date at midnight UTC for a run whose archives carry no commit time (e.g.
-// one rebuilt from older media). last is the latest CreatedAt across the run's archives.
-func runTime(runID string, last time.Time) time.Time {
-	if !last.IsZero() {
-		return last
-	}
-	t, _ := time.ParseInLocation("2006-01-02", record.RunDate(runID), time.UTC)
-	return t
-}
-
 // BuildTree reconstructs the filesystem of dle as of asOf (YYYY-MM-DD) by merging
 // the member lists of the restore chain in run order, so each path resolves to the
 // most recent archive that holds it. The member lists are loaded via members (the
@@ -172,7 +94,7 @@ func BuildTree(archives []record.Archive, dle, asOf string, members func(runID s
 	if err != nil {
 		return nil, err
 	}
-	steps, err := restore.Chain(archives, dle, target)
+	steps, err := Chain(archives, dle, target)
 	if err != nil {
 		return nil, err
 	}
@@ -189,10 +111,7 @@ func BuildTree(archives []record.Archive, dle, asOf string, members func(runID s
 			return nil, err
 		}
 		for _, m := range ms {
-			t.insert(m, &Source{
-				RunID: st.RunID, DLE: dle, Level: st.Level,
-				Archiver: st.Archiver, Compress: st.Compress, Encrypt: st.Encrypt, Member: m,
-			})
+			t.insert(m, &Source{Step: st, Member: m})
 		}
 	}
 	return t, nil
@@ -257,13 +176,8 @@ func (t *Tree) Lookup(p string) (*Node, bool) {
 // ExtractStep is one archive to extract, with the exact member names to pull from
 // it. A file selection groups into the fewest steps — one per source archive.
 type ExtractStep struct {
-	RunID    string
-	DLE      string
-	Level    int
-	Archiver string
-	Compress string
-	Encrypt  string
-	Members  []string // raw tar member names
+	Step
+	Members []string // raw tar member names
 }
 
 // Collect resolves a set of selected paths (files or directories) into the
@@ -303,7 +217,7 @@ func (t *Tree) Collect(paths []string) ([]ExtractStep, error) {
 		k := key{s.RunID, s.Level}
 		st, ok := steps[k]
 		if !ok {
-			st = &ExtractStep{RunID: s.RunID, DLE: s.DLE, Level: s.Level, Archiver: s.Archiver, Compress: s.Compress, Encrypt: s.Encrypt}
+			st = &ExtractStep{Step: s.Step}
 			steps[k] = st
 			order = append(order, k)
 		}

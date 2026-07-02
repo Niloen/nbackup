@@ -65,7 +65,7 @@ func (s *Session) Record(r archiveio.CommitResult) error {
 // session's volume (whose index the producer keeps current) — the drain's read seam, for copying a
 // staged archive to the landing.
 func (s *Session) OpenArchive(arch record.Archive, pos record.ArchivePos) (io.ReadCloser, error) {
-	exp := archiveio.Expect{Run: s.runID, DLE: arch.DLE, Level: arch.Level}
+	exp := archiveio.Ref{Run: s.runID, DLE: arch.DLE, Level: arch.Level}
 	return archiveio.NewReader().Open(pos.Parts, exp,
 		func(p record.FilePos) (record.Header, io.ReadCloser, error) { return s.vol.ReadFile(p.Pos) })
 }

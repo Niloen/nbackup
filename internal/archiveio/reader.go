@@ -19,11 +19,12 @@ type Reader struct{}
 // NewReader returns a Reader.
 func NewReader() *Reader { return &Reader{} }
 
-// Expect is the identity a caller believes an archive's parts hold, asserted against
-// each part file's actual header before its bytes are trusted. It is the cheap
-// catch-all against a swapped volume or a stale catalog (the header is decoded
-// anyway).
-type Expect struct {
+// Ref is the logical identity of one archive — the archive fs's "filename": which
+// run, DLE, and level. The write side records it (part headers, catalog); the read
+// side resolves it to physical parts and asserts it against each part file's actual
+// header before its bytes are trusted — the cheap catch-all against a swapped
+// volume or a stale catalog (the header is decoded anyway).
+type Ref struct {
 	Run   string
 	DLE   string
 	Level int
@@ -41,7 +42,7 @@ type PartOpener func(p record.FilePos) (record.Header, io.ReadCloser, error)
 // first part eagerly so a missing/wrong volume errors here, letting a copy-selecting caller
 // fail over to another copy rather than discovering the fault only once bytes are pulled.
 // Each part's header is asserted as it is reached. The caller closes the returned reader.
-func (r *Reader) Open(parts []record.FilePos, want Expect, open PartOpener) (io.ReadCloser, error) {
+func (r *Reader) Open(parts []record.FilePos, want Ref, open PartOpener) (io.ReadCloser, error) {
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("archive %s %s L%d has no parts", want.Run, want.DLE, want.Level)
 	}
@@ -54,7 +55,7 @@ func (r *Reader) Open(parts []record.FilePos, want Expect, open PartOpener) (io.
 
 // VerifyParts asserts each part's header against want, then re-hashes the
 // concatenated raw payloads and compares to sha.
-func (r *Reader) VerifyParts(parts []record.FilePos, want Expect, sha string, open PartOpener) (bool, error) {
+func (r *Reader) VerifyParts(parts []record.FilePos, want Ref, sha string, open PartOpener) (bool, error) {
 	raw := &partsReader{parts: parts, want: want, open: open}
 	defer raw.Close()
 	got, err := xfer.SHA256(raw)
@@ -69,7 +70,7 @@ func (r *Reader) VerifyParts(parts []record.FilePos, want Expect, sha string, op
 // asserts each part's header (identity + ascending part index) before its bytes flow.
 type partsReader struct {
 	parts []record.FilePos
-	want  Expect
+	want  Ref
 	open  PartOpener
 	idx   int
 	cur   io.ReadCloser
@@ -138,7 +139,7 @@ func (pr *partsReader) Close() error {
 // assertPart confirms a part file's header is the archive part the catalog expected:
 // the right archive identity and the right index in the sequence. A mismatch means
 // the wrong volume is mounted or the catalog is stale.
-func assertPart(h record.Header, want Expect, part int) error {
+func assertPart(h record.Header, want Ref, part int) error {
 	if h.Kind != record.KindArchive {
 		return fmt.Errorf("position holds a %q record, not an archive", h.Kind)
 	}

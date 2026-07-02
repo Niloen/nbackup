@@ -30,6 +30,7 @@ import (
 	"github.com/Niloen/nbackup/internal/ratelimit"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
+	"github.com/Niloen/nbackup/internal/restorer"
 	"github.com/Niloen/nbackup/internal/retention"
 	"github.com/Niloen/nbackup/internal/scheduler"
 	"github.com/Niloen/nbackup/internal/sizeutil"
@@ -71,11 +72,10 @@ type Engine struct {
 	runSink        progress.Sink                 // optional: live run-progress sink (nil = status file only)
 	estimateSink   progress.Sink                 // optional: live estimate-progress sink (nil = status file only)
 	limiters       map[string]*ratelimit.Limiter // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
-	dec            *decoder                      // the read-side scheme operation (restore/verify/list); shares the engine's resolution + decode opts
 	dmp            *dumper.Dumper                // the producer (dump): workers + tar source + encode pipeline; the engine injects its resolution
-	ver            *verifier                     // the verification operation (verify/drill checks); shares catalog + data path + decoder
+	ver            *verifier                     // the verification operation (verify/drill checks); shares catalog + data path + the restorer's decode
 	cop            *copier                       // the copy operation (PlanCopy/CopyRun); shares catalog + data path + write machinery
-	rst            *restorer                     // the restore/recover operation; shares catalog + data path + decoder + config
+	rst            *restorer.Restorer            // the read-side operation package (restore/recover; the drill's chain tier rehearses it)
 	acct           *accounting.Accountant        // capacity/retention arithmetic; the engine's capacity methods delegate here
 	sched          *scheduler.Scheduler          // plan/estimate/validate lane; the engine's plan methods delegate here
 }
@@ -209,7 +209,17 @@ func build(cfg *config.Config) (*Engine, error) {
 		limiters:       limiters,
 	}
 	e.clerk = clerk.New(e, e, catalog.OpenMemberIndex(cfg.WorkdirPath()))
-	e.dec = e.newDecoder()
+	e.rst = restorer.New(restorer.Deps{
+		Store:         e.clerk,
+		Archives:      e.cat.Archives,
+		Exec:          e.Executor,
+		ArchiverFor:   e.restoreArchiver,
+		EncryptionFor: e.dleEncryption,
+		KnownHosts:    e.knownHosts,
+		DisplayDLE:    e.DisplayDLE,
+		CompressOpts:  fopts,
+		DecryptOpts:   dcopts,
+	})
 	e.dmp = dumper.New(dumper.Config{
 		ArchiverFor: e.archiverFor,
 		Exclude:     func(dt string) []string { return e.cfg.ResolveDumpType(dt).Exclude },
@@ -220,7 +230,6 @@ func build(cfg *config.Config) (*Engine, error) {
 	e.acct = e.newLedger()
 	e.sched = e.newScheduler()
 	e.cop = e.newCopier()
-	e.rst = e.newRestorer()
 	return e, nil
 }
 
@@ -854,14 +863,14 @@ func (e *Engine) PlannedRunID(date time.Time) string {
 	return e.newConductor().PlannedRunID(date)
 }
 
-// Restore reconstructs a DLE as of a run into destDir; see restorer.
+// Restore reconstructs a DLE as of a run into destDir; see restorer.Extract.
 func (e *Engine) Restore(runID, dleName, destDir string, force bool, logf Logf) error {
-	return e.rst.Restore(runID, dleName, destDir, force, logf)
+	return e.rst.Extract(restorer.Request{DLE: dleName, RunID: runID, Dest: destDir, Force: force}, logf)
 }
 
-// RestoreTo restores a DLE onto a remote client over SSH; see restorer.
+// RestoreTo restores a DLE onto a remote client over SSH; see restorer.Extract.
 func (e *Engine) RestoreTo(runID, dleName, destHost, destPath string, logf Logf) error {
-	return e.rst.RestoreTo(runID, dleName, destHost, destPath, logf)
+	return e.rst.Extract(restorer.Request{DLE: dleName, RunID: runID, Dest: destPath, Host: destHost}, logf)
 }
 
 // The engine implements clerk.Deps: the data path's view of the orchestrator's
@@ -889,33 +898,67 @@ func (e *Engine) MounterFor(medium string) (clerk.Mounter, error) {
 // Limiter returns a medium's shared bandwidth cap (nil = uncapped).
 func (e *Engine) Limiter(medium string) *ratelimit.Limiter { return e.limiters[medium] }
 
-// Executor returns the transport that runs programs on a host — used by the engine's own
-// restore composition (transfer.go).
+// Executor returns the transport that runs programs on a host — the restorer's Exec dep.
 func (e *Engine) Executor(host string) programs.Executor {
 	return e.executorFor(host)
 }
 
-// RestoreAsOf reconstructs a whole DLE as of a date into destDir; see restorer. A
-// non-empty from pins the read to that medium's copy (else any copy, with fail-over).
+// RestoreAsOf reconstructs a whole DLE as of a date into destDir; see restorer.Extract.
+// A non-empty from pins the read to that medium's copy (else any copy, with fail-over).
 func (e *Engine) RestoreAsOf(dle, asOf, destDir, from string, force bool, logf Logf) error {
-	return e.rst.RestoreAsOf(dle, asOf, destDir, from, force, logf)
-}
-
-// RestoreAsOfTo is RestoreAsOf onto a remote client over SSH; see restorer.
-func (e *Engine) RestoreAsOfTo(dle, asOf, destHost, destPath, from string, logf Logf) error {
-	return e.rst.RestoreAsOfTo(dle, asOf, destHost, destPath, from, logf)
-}
-
-// decryptHint augments an extraction failure on an encrypted archive with the
-// actionable cause restore-time decryption needs. gpg's raw "No secret key" is
-// misleading for a symmetric (passphrase) dump — the real fix is to supply the
-// passphrase the run had — so name both possibilities rather than leaving the
-// operator with gpg's message alone. A nil error or a plaintext archive pass through.
-func decryptHint(scheme string, err error) error {
-	if err == nil || scheme == "" || scheme == "none" {
+	if err := e.checkFromMedium(from); err != nil {
 		return err
 	}
-	return fmt.Errorf("%w\n(this archive is %s-encrypted, so extraction needs the key: for a passphrase/symmetric dump make sure an `encrypt:` block — config-wide or on this DLE's dumptype — points at the right passphrase_file; for a public-key dump ensure its private key is in the gpg keyring)", err, scheme)
+	return e.rst.Extract(restorer.Request{DLE: dle, AsOf: asOf, Dest: destDir, Medium: from, Force: force}, logf)
+}
+
+// RestoreAsOfTo is RestoreAsOf onto a remote client over SSH; see restorer.Extract.
+func (e *Engine) RestoreAsOfTo(dle, asOf, destHost, destPath, from string, logf Logf) error {
+	if err := e.checkFromMedium(from); err != nil {
+		return err
+	}
+	return e.rst.Extract(restorer.Request{DLE: dle, AsOf: asOf, Dest: destPath, Host: destHost, Medium: from}, logf)
+}
+
+// checkFromMedium validates a `--from` medium pin against the config ("" is the
+// default: any copy).
+func (e *Engine) checkFromMedium(from string) error {
+	if from != "" {
+		if _, ok := e.cfg.Media[from]; !ok {
+			return fmt.Errorf("unknown medium %q (--from)", from)
+		}
+	}
+	return nil
+}
+
+// dleEncryption resolves a DLE's configured encryption posture (the restorer's
+// EncryptionFor dep); ok is false when the DLE is no longer in the config.
+func (e *Engine) dleEncryption(name string) (config.EncryptConfig, bool) {
+	for _, d := range e.cfg.DLEs() {
+		if d.Name() == name {
+			return e.cfg.EncryptionFor(d.DumpTypeName()), true
+		}
+	}
+	return config.EncryptConfig{}, false
+}
+
+// knownHosts are the names a `--to` restore may target: hosts: entries plus
+// configured source hosts.
+func (e *Engine) knownHosts() []string {
+	seen := map[string]bool{}
+	for h := range e.cfg.Hosts {
+		seen[h] = true
+	}
+	for _, d := range e.cfg.DLEs() {
+		if d.Host != "" && d.Host != "localhost" {
+			seen[d.Host] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for h := range seen {
+		out = append(out, h)
+	}
+	return out
 }
 
 // OpenRecover builds a browsable filesystem of a DLE as of a date; see restorer.

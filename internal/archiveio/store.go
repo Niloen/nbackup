@@ -1,6 +1,7 @@
 package archiveio
 
 import (
+	"errors"
 	"io"
 
 	"github.com/Niloen/nbackup/internal/record"
@@ -57,4 +58,28 @@ type Ingest interface {
 	// sync), preserving its identity, checksum, and members rather than producing a fresh one. Like
 	// NewArchive it blocks for back-pressure and leases a drive; only the writer it builds differs.
 	NewCopy(arch record.Archive, est int64) (*ArchiveWriter, error)
+}
+
+// ErrMissingCopy marks a read failure where no available copy of the requested archive
+// exists (not in the catalog, or no copy on the pinned medium). Part of the ReadStore
+// contract: callers classify it via errors.Is, so classification never depends on the
+// message wording.
+var ErrMissingCopy = errors.New("no available copy")
+
+// ReadStore is the read face of the archive fs — the mirror of WriteStore: a logical Ref
+// resolved to its raw on-medium bytes. It speaks only refs and bytes; the schemes, the far-end
+// tar, and the transfers live in the operations (the Restorer, the Verifier), exactly as on the
+// write side. The clerk implements it (copy selection over the catalog, mounting via the
+// librarian); tests implement it with a fake, so the read operations never need real media.
+type ReadStore interface {
+	// Open returns one archive's raw part stream, copy-selected: medium "" tries every copy
+	// (preferring the caller's own) with fail-over; a set medium reads only that copy, so a
+	// fault on it is not masked by another. The open is eager — a missing copy errors here.
+	Open(ref Ref, medium string) (io.ReadCloser, error)
+	// ReadArchives reads a selection in one ordered pass (levels ascending per DLE, physically
+	// forward otherwise), calling fn per archive with an open func over its bytes; fn may open
+	// more than once. Refs with no available copy are skipped and returned as missing.
+	ReadArchives(refs []Ref, medium string, fn func(ref Ref, open func() (io.ReadCloser, error)) error) (missing []Ref, err error)
+	// Members returns an archive's member list (cache, else the on-medium index).
+	Members(ref Ref) ([]string, error)
 }

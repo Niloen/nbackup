@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
-	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/conductor"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
@@ -36,10 +35,10 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 		LandingFor: e.landingForDLEName,
 		Holdings:   e.cfg.HoldingMedia(),
 		Open: func(runID, dle string, level int, medium string) (io.ReadCloser, error) {
-			return e.clerk.Open(clerk.Ref{Run: runID, DLE: dle, Level: level}, medium)
+			return e.clerk.Open(archiveio.Ref{Run: runID, DLE: dle, Level: level}, medium)
 		},
 		Members: func(runID, dle string, level int) ([]string, error) {
-			return e.clerk.Members(clerk.Ref{Run: runID, DLE: dle, Level: level})
+			return e.clerk.Members(archiveio.Ref{Run: runID, DLE: dle, Level: level})
 		},
 		Reclaim: func(holding, runID, dle string, pos record.ArchivePos) error {
 			vol, err := holdVol(holding)
