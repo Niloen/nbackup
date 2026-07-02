@@ -115,12 +115,12 @@ func (a *Accountant) PoolRoom(now time.Time) int64 {
 	if capacity <= 0 {
 		return -1
 	}
-	runs := a.d.Cat.RunsOn(a.d.Landing)
-	floor := retention.Compute(a.d.Cat.ArchivesOn(a.d.Landing), a.d.LandingMinAge, now)
+	archives := a.d.Cat.ArchivesOn(a.d.Landing)
+	floor := retention.Compute(archives, a.d.LandingMinAge, now)
 	var keptBytes int64
-	for _, s := range runs {
-		if floor.Keeps(s.ID) {
-			keptBytes += s.TotalBytes()
+	for _, ar := range archives {
+		if floor.KeepsArchive(ar.Run, ar.DLE) {
+			keptBytes += ar.Compressed
 		}
 	}
 	if room := capacity - keptBytes; room > 0 {

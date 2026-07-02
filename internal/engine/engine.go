@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -1037,7 +1038,11 @@ func (e *Engine) DLEDisplay() []string {
 
 // ResolveDLE maps a user-supplied DLE reference — a host:path identity or the raw
 // internal slug — to the internal slug, or ("", false) if no catalog DLE matches.
+// Trailing slashes are shell noise (tab completion appends them), so
+// "host:/path/" matches the catalog's "host:/path"; a root path ("host:/") keeps
+// its slash — it is the path, not a suffix.
 func (e *Engine) ResolveDLE(arg string) (string, bool) {
+	arg = trimDLESlash(arg)
 	disp := e.dleDisplayMap()
 	for _, slug := range e.DLENames() {
 		if slug == arg || disp[slug] == arg {
@@ -1045,6 +1050,15 @@ func (e *Engine) ResolveDLE(arg string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// trimDLESlash strips trailing slashes from a DLE reference, but never the slash
+// of a root path ("/" or "host:/").
+func trimDLESlash(arg string) string {
+	for strings.HasSuffix(arg, "/") && arg != "/" && !strings.HasSuffix(arg, ":/") {
+		arg = strings.TrimSuffix(arg, "/")
+	}
+	return arg
 }
 
 // ForceFull schedules a configured DLE for a full on its next run, the archiver-independent

@@ -116,10 +116,10 @@ func loadConfigRO(cfgPath, catalogOverride string) (*config.Config, error) {
 	return cfg, nil
 }
 
-// loadConfigRORequire is loadConfigRO for read-only *assertion* commands (verify):
-// it never synthesizes a default catalog when no config file exists. A monitor that
-// scrapes the exit code must see a clear failure rather than a green "0 run(s)
-// verified" in a directory that simply has no config. A --catalog override still
+// loadConfigRORequire is loadConfigRO for read-only *assertion* commands (verify,
+// status): it never synthesizes a default catalog when no config file exists. A
+// monitor that scrapes the exit code must see a clear failure rather than a green
+// "0 run(s) verified" in a directory that simply has no config. A --catalog override still
 // lets it inspect an existing catalog directly.
 func loadConfigRORequire(cfgPath, catalogOverride string) (*config.Config, error) {
 	if catalogOverride != "" {
@@ -128,7 +128,7 @@ func loadConfigRORequire(cfgPath, catalogOverride string) (*config.Config, error
 		return cfg, nil
 	}
 	if _, err := os.Stat(cfgPath); err != nil {
-		return nil, fmt.Errorf("no config file at %s — copy nbackup.example.yaml to %s and edit it, pass -c <path>, or --catalog <dir> to inspect an existing catalog", cfgPath, cfgPath)
+		return nil, fmt.Errorf("no config file at %s — copy nbackup.example.yaml to %s and edit it, run nb init, pass -c <path>, or --catalog <dir> to inspect an existing catalog", cfgPath, cfgPath)
 	}
 	cfg, err := config.Load(cfgPath)
 	if err != nil {

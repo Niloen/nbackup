@@ -298,6 +298,7 @@ func WalkReadable(vol Volume, fn func(Volume) error) error {
 	if err != nil {
 		return err
 	}
+	scanned := false
 	for _, s := range slots {
 		if !s.Full || s.ImportExport {
 			continue
@@ -307,12 +308,19 @@ func WalkReadable(vol Volume, fn func(Volume) error) error {
 			// nothing readable for the catalog — skip it rather than abort the scan.
 			continue
 		}
+		scanned = true
 		if err := fn(ch.Drive(0)); err != nil {
 			return err
 		}
 	}
 	if restore >= 0 {
 		if err := ch.Load(restore, 0); err != nil {
+			return err
+		}
+	} else if scanned {
+		// The drive started empty; leave it that way rather than holding
+		// whichever slot the scan happened to visit last.
+		if err := ch.Unload(0); err != nil {
 			return err
 		}
 	}

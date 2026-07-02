@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,65 @@ import (
 
 	"github.com/Niloen/nbackup/internal/config"
 )
+
+// scriptStdin points the shared prompt reader at a scripted interview and
+// restores the real stdin reader afterwards. (captureStdout, the output-side
+// peer, lives in report_ledger_test.go.)
+func scriptStdin(t *testing.T, lines ...string) {
+	t.Helper()
+	old := stdinReader
+	stdinReader = bufio.NewReader(strings.NewReader(strings.Join(lines, "\n") + "\n"))
+	t.Cleanup(func() { stdinReader = old })
+}
+
+// TestInterviewReasksOnInvalidAnswer is the regression for the wizard aborting
+// on the first bad answer: an invalid capacity, cycle, and notify choice must
+// each print the format hint and re-ask, keeping every answer given so far.
+func TestInterviewReasksOnInvalidAnswer(t *testing.T) {
+	scriptStdin(t,
+		"/srv/data", // paths
+		"/backups",  // where runs land
+		"lots",      // capacity: invalid -> re-ask
+		"500GB",     // capacity, corrected
+		"whenever",  // cycle: invalid -> re-ask
+		"14d",       // cycle, corrected
+		"7d",        // notify: invalid -> re-ask
+		"none",      // notify, corrected
+	)
+	var ans initAnswers
+	var err error
+	out := captureStdout(t, func() { err = interview(&ans) })
+	if err != nil {
+		t.Fatalf("interview aborted on invalid answers instead of re-asking: %v", err)
+	}
+	if len(ans.Sources) != 1 || ans.Sources[0] != "/srv/data" {
+		t.Errorf("earlier answers discarded: sources = %v", ans.Sources)
+	}
+	if ans.To != "/backups" || ans.Capacity != "500GB" || ans.Cycle != "14d" || ans.Notify != "" {
+		t.Errorf("corrected answers not kept: %+v", ans)
+	}
+	for _, hint := range []string{
+		`answer a size like 500GB or 1.5TB, or leave empty for unbounded — got "lots"`,
+		`answer a duration like 7d or 12h — got "whenever"`,
+		`answer none, email, or webhook — got "7d"`,
+	} {
+		if !strings.Contains(out, hint) {
+			t.Errorf("missing re-ask hint %q in output:\n%s", hint, out)
+		}
+	}
+}
+
+// TestInterviewAbortsOnEOF: a scripted pipe that ends mid-re-ask must abort with
+// an error, never loop forever re-asking a closed stdin.
+func TestInterviewAbortsOnEOF(t *testing.T) {
+	scriptStdin(t, "/srv", "/backups", "lots") // invalid capacity, then EOF
+	var ans initAnswers
+	var err error
+	captureStdout(t, func() { err = interview(&ans) })
+	if err == nil || !strings.Contains(err.Error(), "stdin closed") {
+		t.Fatalf("want stdin-closed abort, got %v", err)
+	}
+}
 
 // runInit executes `nb init` with the given args against a config path in a temp
 // dir and returns the path plus any error. The test binary's stdin is not a TTY,
@@ -98,6 +158,15 @@ func TestInitNoTTYNoFlagsFails(t *testing.T) {
 	_, err := runInit(t)
 	if err == nil || !strings.Contains(err.Error(), "nbackup.example.yaml") {
 		t.Fatalf("want no-TTY pointer to nbackup.example.yaml, got %v", err)
+	}
+}
+
+// TestInitFlagCapacityFailsFast: scripted (flag) mode has no prompt to re-ask
+// on, so a bad --capacity must stay a hard error.
+func TestInitFlagCapacityFailsFast(t *testing.T) {
+	_, err := runInit(t, "--source", "/srv", "--to", "/runs", "--capacity", "lots")
+	if err == nil || !strings.Contains(err.Error(), "capacity") {
+		t.Fatalf("want capacity parse error, got %v", err)
 	}
 }
 

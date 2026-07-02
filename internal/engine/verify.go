@@ -169,11 +169,23 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 	// Track which whole copies passed so a failure can still reassure the operator
 	// that an intact copy remains (redundancy is the point of more than one).
 	var goodCopies, badCopies, skippedCopies []string
+	checked := map[archiveio.Ref]bool{} // distinct archives verified on at least one copy
 	for _, p := range placements {
 		copyOK := true
-		archByRef := make(map[archiveio.Ref]record.Archive, len(s.Archives))
-		refs := make([]archiveio.Ref, len(s.Archives))
-		for i, a := range s.Archives {
+		// A copy is archive-granular: a per-archive prune may have reclaimed some of
+		// the run's archives from this medium (the placement then simply doesn't hold
+		// them). Judge each copy against what it records, not the run's whole content
+		// — an absent archive here is by design, not a missing position; its surviving
+		// copies on other media are verified on their own placements.
+		expected := make([]record.Archive, 0, len(s.Archives))
+		for _, a := range s.Archives {
+			if p.Holds(a.DLE, a.Level) {
+				expected = append(expected, a)
+			}
+		}
+		archByRef := make(map[archiveio.Ref]record.Archive, len(expected))
+		refs := make([]archiveio.Ref, len(expected))
+		for i, a := range expected {
 			ref := archiveio.Ref{Run: id, DLE: a.DLE, Level: a.Level}
 			refs[i] = ref
 			archByRef[ref] = a
@@ -203,13 +215,15 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 			})
 			continue
 		}
-		for _, a := range s.Archives {
-			v, ok := verdicts[archiveio.Ref{Run: id, DLE: a.DLE, Level: a.Level}]
+		for _, a := range expected {
+			ref := archiveio.Ref{Run: id, DLE: a.DLE, Level: a.Level}
+			v, ok := verdicts[ref]
 			if !ok {
 				logf.Log("%s [%s]: %s L%d POSITION MISSING", id, p.Medium, a.DLEID(), a.Level)
 				v = ArchiveVerdict{Run: id, DLE: a.DLE, Level: a.Level, Medium: p.Medium, OK: false,
 					Class: drill.ClassMissing, Detail: "archive position missing on this copy"}
 			}
+			checked[ref] = true
 			sv.Archives = append(sv.Archives, v)
 			if !v.OK {
 				sv.OK = false
@@ -228,7 +242,9 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 		// actually checked, so say so rather than reporting a misleading "OK".
 		logf.Log("%s: SKIPPED — copies only on media not in this config: %s", id, strings.Join(skippedCopies, ", "))
 	case sv.OK:
-		logf.Log("%s: OK (%d archive(s), %d cop(ies))", id, len(s.Archives), len(goodCopies))
+		// checked counts the distinct archives verified on at least one copy — with a
+		// medium pin (or a partially-pruned copy) that may be fewer than the run holds.
+		logf.Log("%s: OK (%d archive(s), %d cop(ies))", id, len(checked), len(goodCopies))
 	case len(goodCopies) > 0:
 		// Surface that an intact copy remains, and which medium to re-copy from.
 		logf.Log("%s: FAILED on %s, but an intact copy remains on %s (re-copy to repair)",

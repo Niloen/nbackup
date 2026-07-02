@@ -259,6 +259,7 @@ func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.SourceStats) error {
 	} else {
 		arch.SHA256 = hex.EncodeToString(a.h.Sum(nil))
 		arch.FileCount = p.FileCount
+		arch.Unreadable = len(p.Unreadable) // a PARTIAL dump's omitted-file count, durable in the footer so a rebuild preserves it
 		arch.Uncompressed = p.Uncompressed
 		arch.Members = p.Members
 		arch.CreatedAt = a.w.now() // the archive's landing time (per-archive)

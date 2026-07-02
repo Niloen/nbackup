@@ -309,9 +309,25 @@ func newDumpCmd(a *app) *cobra.Command {
 					if errors.Is(err, conductor.ErrCanceled) {
 						return report.Run{Command: report.CommandDump, ExitClass: "canceled"}, err
 					}
-					return report.Run{}, err
+					// A failed run may still have committed archives (a partial dump commits a
+					// valid archive of what was readable). Record what landed — run id and per-DLE
+					// stats — so `nb report --dump --run <id>` finds the run in the history.
+					rec := report.Run{Command: report.CommandDump}
+					if s != nil && len(s.Archives) > 0 {
+						rec.RunID = s.ID
+						rec.Archives = len(s.Archives)
+						rec.BytesMoved = s.TotalBytes()
+						rec.DumpStats = dumpStats(s, cfg.WorkdirPath())
+					}
+					return rec, err
 				}
-				fmt.Printf("\nCommitted %s: %d archive(s), %s total\n", s.ID, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes()))
+				// The blank line separates the commit line from the progress stream
+				// above it; --quiet printed no stream, so don't lead with one.
+				sep := "\n"
+				if a.quiet {
+					sep = ""
+				}
+				fmt.Printf(sep+"Committed %s: %d archive(s), %s total\n", s.ID, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes()))
 				return report.Run{
 					Command:    report.CommandDump,
 					RunID:      s.ID,
@@ -395,7 +411,11 @@ func newStatusCmd(a *app) *cobra.Command {
 		Example: "  nb status\n  nb status --watch 2s",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := a.loadRO()
+			// Like plan/dump/check, a missing config is a hard error: a synthesized
+			// default catalog would report "no run in progress" (exit 0) from a
+			// directory nothing ever dumps to — reading as "backups idle" to a
+			// monitor. --catalog still points status at an existing catalog directly.
+			cfg, err := a.loadRORequire()
 			if err != nil {
 				return err
 			}
@@ -559,11 +579,20 @@ func runRunList(a *app) error {
 		if t := s.LastArchiveAt(); !t.IsZero() {
 			committed = t.Format("2006-01-02 15:04")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", s.ID, "committed", len(s.Archives),
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", s.ID, runStatus(s), len(s.Archives),
 			sizeutil.FormatBytes(s.TotalBytes()), committed, copiesSummary(eng.Catalog().Placements(s.ID)))
 	}
 	tw.Flush()
 	return nil
+}
+
+// runStatus renders a run's status cell: every cataloged run is committed (the archive
+// is the commit unit), with a partial marker when any archive omitted unreadable files.
+func runStatus(s *catalog.Run) string {
+	if s.Partial() {
+		return "committed (partial)"
+	}
+	return "committed"
 }
 
 // copiesSummary renders a run's placements as a compact comma list, naming the
@@ -602,7 +631,7 @@ func runRunShow(a *app, runID string) error {
 		}
 		return err
 	}
-	fmt.Printf("Run %s  (%s)\n", s.ID, "committed")
+	fmt.Printf("Run %s  (%s)\n", s.ID, runStatus(s))
 	fmt.Printf("  date:    %s\n", s.Date())
 	fmt.Printf("  committed: %s\n", s.LastArchiveAt().Format("2006-01-02 15:04:05 MST"))
 	fmt.Printf("  total:   %s\n\n", sizeutil.FormatBytes(s.TotalBytes()))
@@ -613,7 +642,13 @@ func runRunShow(a *app, runID string) error {
 		if enc == "" {
 			enc = "none"
 		}
-		fmt.Fprintf(tw, "%s\tL%d\t%d\t%s\t%s\t%s\n", ar.DLEID(), ar.Level, ar.FileCount, sizeutil.FormatBytes(ar.Compressed), ar.Compress, enc)
+		// A PARTIAL archive committed a valid backup of what was readable but omitted
+		// unreadable source files — flag it so the gap is visible after the fact.
+		partial := ""
+		if ar.Partial() {
+			partial = fmt.Sprintf("\tPARTIAL (%d file(s) unreadable, omitted)", ar.Unreadable)
+		}
+		fmt.Fprintf(tw, "%s\tL%d\t%d\t%s\t%s\t%s%s\n", ar.DLEID(), ar.Level, ar.FileCount, sizeutil.FormatBytes(ar.Compressed), ar.Compress, enc, partial)
 	}
 	tw.Flush()
 
@@ -908,7 +943,7 @@ func newPruneCmd(a *app) *cobra.Command {
 					fmt.Printf("%s: swept %d crash leftover(s) (orphaned by an interrupted run, no commit footer)\n", args[0], swept)
 				}
 				warnIfOverCapacity(eng, args[0], now)
-				return report.Run{Command: report.CommandPrune, RunsPruned: eligible, BytesMoved: freed}, nil
+				return report.Run{Command: report.CommandPrune, ArchivesPruned: eligible, BytesMoved: freed}, nil
 			})
 		},
 	}
@@ -922,10 +957,11 @@ func newPruneCmd(a *app) *cobra.Command {
 // this is the explicit, attended form.
 func newFlushCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "flush",
-		Short: "Drain leftover holding-disk archives to the landing",
-		Long:  "Copy any archives a crashed holding-disk run left on the holding disk to the landing, then reclaim the disk. The catalog already records what is on the holding disk, so no media scan is needed. `nb dump` runs this automatically before each run; use `nb flush` to drain explicitly. A no-op without a holding disk or when nothing is staged.",
-		Args:  cobra.NoArgs,
+		Use:     "flush",
+		Short:   "Drain leftover holding-disk archives to the landing",
+		Long:    "Copy any archives a crashed holding-disk run left on the holding disk to the landing, then reclaim the disk. The catalog already records what is on the holding disk, so no media scan is needed. `nb dump` runs this automatically before each run; use `nb flush` to drain explicitly. A no-op without a holding disk or when nothing is staged.",
+		Example: "  nb flush   # after a crashed dump, before the next scheduled run",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.load()
 			if err != nil {
@@ -1390,9 +1426,15 @@ func printInventory(eng *engine.Engine, name string) {
 		}
 		fmt.Printf("\n%s:\n", heading)
 		sw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(sw, "  SLOT\tBARCODE")
+		fmt.Fprintln(sw, "  SLOT\tBARCODE\tLABEL")
 		for _, s := range occupied {
-			fmt.Fprintf(sw, "  %d\t%s\n", s.Slot, s.Barcode)
+			// The volume last seen on this cartridge — the catalog's learned
+			// barcode↔label memory, not a fresh read; "-" until it has been loaded.
+			lbl := "-"
+			if name, ok := view.SlotLabels[s.Slot]; ok {
+				lbl = name
+			}
+			fmt.Fprintf(sw, "  %d\t%s\t%s\n", s.Slot, s.Barcode, lbl)
 		}
 		sw.Flush()
 	}
@@ -1516,10 +1558,11 @@ func newLoadCmd(a *app) *cobra.Command {
 // rescanning the self-describing media.
 func newRebuildCmd(a *app) *cobra.Command {
 	return &cobra.Command{
-		Use:   "rebuild",
-		Short: "Rebuild the catalog cache by rescanning media",
-		Long:  "Rescan every configured medium and rebuild the local catalog cache (run index and volume registry) from the commit footers and labels found there.",
-		Args:  cobra.NoArgs,
+		Use:     "rebuild",
+		Short:   "Rebuild the catalog cache by rescanning media",
+		Long:    "Rescan every configured medium and rebuild the local catalog cache (run index and volume registry) from the commit footers and labels found there.",
+		Example: "  nb rebuild   # e.g. after losing the workdir on a new server",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.loadRO()
 			if err != nil {

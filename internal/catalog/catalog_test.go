@@ -229,6 +229,118 @@ func TestRemoveArchiveDropsCopylessDLE(t *testing.T) {
 	}
 }
 
+// TestPerMediumQueriesAreArchiveGranular pins the copy record's granularity: after a
+// per-archive prune reclaims one DLE's image from ONE medium (RemoveArchive), the
+// per-medium projections — ArchivesOn and MediumBytes, which drive prune candidacy,
+// retention floors, and `nb medium` usage — must stop attributing the pruned archive
+// to that medium, while the surviving copy on another medium keeps advertising it.
+// (The regression: a run-level "placedOn" attribution re-listed the pruned archive on
+// the pruned medium forever — a non-idempotent prune and an "(over!)" usage figure.)
+func TestPerMediumQueriesAreArchiveGranular(t *testing.T) {
+	dir := t.TempDir()
+	vol := newVolume(t, dir)
+
+	putRun(t, vol, committedRun("run-2026-06-20.001", "2026-06-20", 1,
+		record.Archive{DLE: "h-pruned", Level: 0, Compressed: 300},
+		record.Archive{DLE: "h-kept", Level: 0, Compressed: 100}))
+
+	cat, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.EnsureFresh("disk", vol); err != nil {
+		t.Fatal(err)
+	}
+	// A second copy of both archives on another medium (a sync target), so the run
+	// still holds h-pruned somewhere after the disk copy sheds it.
+	for _, a := range cat.Runs()[0].Archives {
+		pos, ok := findArchivePos(cat.Placements("run-2026-06-20.001")[0].Archives, a.DLE, a.Level)
+		if !ok {
+			t.Fatalf("no disk position for %s", a.DLE)
+		}
+		if err := cat.AddArchive(a, "mirror", pos); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, _, err := cat.RemoveArchive("run-2026-06-20.001", "disk", "h-pruned"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The pruned medium: only the surviving archive counts.
+	on := cat.ArchivesOn("disk")
+	if len(on) != 1 || on[0].DLE != "h-kept" {
+		t.Errorf("ArchivesOn(disk) = %+v, want only h-kept", on)
+	}
+	if b := cat.MediumBytes("disk"); b != 100 {
+		t.Errorf("MediumBytes(disk) = %d, want 100 (h-pruned's 300 must not count)", b)
+	}
+	// The surviving copy still advertises both.
+	if got := len(cat.ArchivesOn("mirror")); got != 2 {
+		t.Errorf("ArchivesOn(mirror) = %d archives, want 2", got)
+	}
+	if b := cat.MediumBytes("mirror"); b != 400 {
+		t.Errorf("MediumBytes(mirror) = %d, want 400", b)
+	}
+	// The run's medium-independent content keeps h-pruned (the mirror holds it).
+	run, err := cat.ReadRun("run-2026-06-20.001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Archives) != 2 {
+		t.Errorf("run content = %+v, want both archives (a copy of h-pruned survives)", run.Archives)
+	}
+	// Holds mirrors the record: the disk copy no longer claims h-pruned.
+	for _, p := range cat.Placements("run-2026-06-20.001") {
+		if p.Medium == "disk" && p.Holds("h-pruned", 0) {
+			t.Errorf("disk placement still claims h-pruned")
+		}
+		if p.Medium == "mirror" && !p.Holds("h-pruned", 0) {
+			t.Errorf("mirror placement lost h-pruned")
+		}
+	}
+}
+
+// TestRebuildReflectsPartiallyPrunedMedium pins symptom (d) of the prune desync: a
+// rebuild scans the media themselves, so a medium a per-archive prune partially
+// reclaimed must come back holding exactly the archives physically present — the
+// pruned archive re-enters the catalog only via the medium that still holds it.
+func TestRebuildReflectsPartiallyPrunedMedium(t *testing.T) {
+	full := newVolume(t, t.TempDir())    // the sync target: still holds both archives
+	partial := newVolume(t, t.TempDir()) // the pruned landing: h-pruned's files are gone
+
+	putRun(t, full, committedRun("run-2026-06-20.001", "2026-06-20", 1,
+		record.Archive{DLE: "h-pruned", Level: 0, Compressed: 300},
+		record.Archive{DLE: "h-kept", Level: 0, Compressed: 100}))
+	putRun(t, partial, committedRun("run-2026-06-20.001", "2026-06-20", 1,
+		record.Archive{DLE: "h-kept", Level: 0, Compressed: 100}))
+
+	cat, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.Rebuild(map[string]media.Volume{"mirror": full, "disk": partial}); err != nil {
+		t.Fatal(err)
+	}
+
+	if on := cat.ArchivesOn("disk"); len(on) != 1 || on[0].DLE != "h-kept" {
+		t.Errorf("ArchivesOn(disk) after rebuild = %+v, want only h-kept (what the medium holds)", on)
+	}
+	if b := cat.MediumBytes("disk"); b != 100 {
+		t.Errorf("MediumBytes(disk) after rebuild = %d, want 100", b)
+	}
+	if got := len(cat.ArchivesOn("mirror")); got != 2 {
+		t.Errorf("ArchivesOn(mirror) after rebuild = %d archives, want 2", got)
+	}
+	run, err := cat.ReadRun("run-2026-06-20.001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Archives) != 2 {
+		t.Errorf("run content after rebuild = %+v, want both archives", run.Archives)
+	}
+}
+
 // writePart writes one archive part (with its part index) onto the mounted volume.
 func writePart(t *testing.T, v media.Volume, runID, dle string, level, part int) int {
 	t.Helper()
@@ -358,4 +470,51 @@ func writeFileT(v media.Volume, h record.Header, write func(io.Writer) error) (i
 		return 0, err
 	}
 	return fw.Pos(), nil
+}
+
+// TestSetVolumeBarcode locks the learned barcode↔label memory behind slot-inventory
+// display: the pairing is recorded when a label is actually read, follows a cartridge
+// when its label moves (one volume per cartridge), and survives an identity upsert
+// (a recycle bumps the epoch without forgetting where the tape lives).
+func TestSetVolumeBarcode(t *testing.T) {
+	cat, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.RecordVolume(record.Label{Name: "T-A", Pool: "lto", Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.RecordVolume(record.Label{Name: "T-B", Pool: "lto", Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.SetVolumeBarcode("T-A", "SIM0001"); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := cat.Volume("T-A"); v.Barcode != "SIM0001" {
+		t.Fatalf("T-A barcode = %q, want SIM0001", v.Barcode)
+	}
+	// Unknown volume and empty barcode are no-ops.
+	if err := cat.SetVolumeBarcode("nope", "SIM0002"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.SetVolumeBarcode("T-B", ""); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := cat.Volume("T-B"); v.Barcode != "" {
+		t.Fatalf("T-B barcode = %q, want empty", v.Barcode)
+	}
+	// A cartridge holds one volume: relabeling it to T-B moves the barcode.
+	if err := cat.SetVolumeBarcode("T-B", "SIM0001"); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := cat.Volume("T-A"); v.Barcode != "" {
+		t.Fatalf("T-A should have lost SIM0001, still has %q", v.Barcode)
+	}
+	// An identity upsert (recycle: epoch bump) keeps the learned pairing.
+	if err := cat.RecordVolume(record.Label{Name: "T-B", Pool: "lto", Epoch: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := cat.Volume("T-B"); v.Barcode != "SIM0001" || v.Label.Epoch != 2 {
+		t.Fatalf("T-B after recycle = %+v, want barcode SIM0001 epoch 2", v)
+	}
 }

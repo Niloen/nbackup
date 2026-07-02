@@ -2,11 +2,13 @@ package engine
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 )
 
@@ -627,4 +629,362 @@ func TestSyncTargetIsLanding(t *testing.T) {
 	if _, err := eng.SyncTo("", "disk", SyncSelection{}, false, false, nil); err == nil {
 		t.Fatal("expected error syncing the landing medium to itself")
 	}
+}
+
+// TestSyncResumesPartialTargetCopy locks the archive-granular presence rule: a run
+// whose target copy holds only SOME of the archives the source copy holds is still in
+// the backlog (never "up to date"), and the re-sync copies exactly the missing
+// archives — leaving the already-committed ones untouched.
+func TestSyncResumesPartialTargetCopy(t *testing.T) {
+	srcA, srcB := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(srcA, "a.txt"), "alpha")
+	write(t, filepath.Join(srcB, "b.txt"), "bravo")
+
+	cfg := &config.Config{
+		Landing: "disk",
+		Media: map[string]config.Media{
+			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: srcA}, {Host: "localhost", Path: srcB}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+	if len(s.Archives) != 2 {
+		t.Fatalf("run has %d archives, want 2", len(s.Archives))
+	}
+	if _, err := eng.SyncTo("", "archive", SyncSelection{}, true, false, nil); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+
+	// Simulate an interrupted copy: drop one archive from the target placement (the
+	// same partial state a mid-run failure leaves — each archive records its placement
+	// as it commits, so the failed one is simply absent).
+	gone, kept := s.Archives[0], s.Archives[1]
+	if _, _, err := eng.cat.RemoveArchive(s.ID, "archive", gone.DLE); err != nil {
+		t.Fatal(err)
+	}
+	keptPosBefore := archivePosOn(t, eng, s.ID, "archive", kept.DLE)
+
+	// The run must be back in the backlog, sized to the one missing archive.
+	report, err := eng.SyncTo("", "archive", SyncSelection{}, false, false, nil)
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if len(report.Items) != 1 {
+		t.Fatalf("backlog = %d item(s), want 1 (partial copy must not read as up to date)", len(report.Items))
+	}
+	if it := report.Items[0]; it.RunID != s.ID || it.Archives != 1 || it.Bytes != gone.Compressed {
+		t.Fatalf("backlog item = %+v, want run %s with 1 archive of %d bytes", it, s.ID, gone.Compressed)
+	}
+
+	// The re-sync completes the copy — copying only the missing archive.
+	report, err = eng.SyncTo("", "archive", SyncSelection{}, true, false, nil)
+	if err != nil {
+		t.Fatalf("resume sync: %v", err)
+	}
+	if report.Copied() != 1 {
+		t.Fatalf("copied = %d, want 1", report.Copied())
+	}
+	p, ok := placementOf(eng, s.ID, "archive")
+	if !ok || !p.Holds(gone.DLE, gone.Level) || !p.Holds(kept.DLE, kept.Level) {
+		t.Fatalf("target copy incomplete after resume: %+v", p)
+	}
+	if got := archivePosOn(t, eng, s.ID, "archive", kept.DLE); got.Commit != keptPosBefore.Commit {
+		t.Fatalf("resume re-copied the already-present archive: commit %+v -> %+v", keptPosBefore.Commit, got.Commit)
+	}
+
+	// And now the mirror is genuinely complete.
+	report, err = eng.SyncTo("", "archive", SyncSelection{}, true, false, nil)
+	if err != nil {
+		t.Fatalf("re-sync: %v", err)
+	}
+	if len(report.Items) != 0 {
+		t.Fatalf("backlog = %d, want 0 (up to date)", len(report.Items))
+	}
+}
+
+// placementOf returns a run's copy on a medium.
+func placementOf(eng *Engine, runID, medium string) (catalog.Placement, bool) {
+	for _, p := range eng.cat.Placements(runID) {
+		if p.Medium == medium {
+			return p, true
+		}
+	}
+	return catalog.Placement{}, false
+}
+
+// archivePosOn returns one archive's recorded position on a run's copy on a medium.
+func archivePosOn(t *testing.T, eng *Engine, runID, medium, dle string) catalog.ArchivePos {
+	t.Helper()
+	p, ok := placementOf(eng, runID, medium)
+	if !ok {
+		t.Fatalf("run %s has no copy on %q", runID, medium)
+	}
+	for _, a := range p.Archives {
+		if a.DLE == dle {
+			return a
+		}
+	}
+	t.Fatalf("archive %s not on %q copy of %s", dle, medium, runID)
+	return catalog.ArchivePos{}
+}
+
+// TestSyncStopsAfterFirstSinkError locks the fail-fast contract: a hard sink error
+// (target unwritable) stops the sync at the first failing archive instead of
+// attempting every remaining run and reporting the same error once per archive.
+func TestSyncStopsAfterFirstSinkError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission failures cannot be simulated")
+	}
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "x")
+	targetPath := t.TempDir()
+
+	cfg := &config.Config{
+		Landing: "disk",
+		Media: map[string]config.Media{
+			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"archive": {Type: "disk", Params: map[string]string{"path": targetPath}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	for d := 21; d <= 22; d++ {
+		if _, err := eng.Run(context.Background(), time.Date(2026, 6, d, 0, 0, 0, 0, time.UTC), nil); err != nil {
+			t.Fatalf("dump %d: %v", d, err)
+		}
+	}
+
+	// Make the target unwritable so every archive copy would fail the same way.
+	runsDir := filepath.Join(targetPath, "runs")
+	if err := os.MkdirAll(runsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(runsDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(runsDir, 0o755) })
+
+	report, err := eng.SyncTo("", "archive", SyncSelection{}, true, false, nil)
+	if err == nil {
+		t.Fatal("sync to an unwritable target must fail")
+	}
+	if got := strings.Count(err.Error(), "permission denied"); got != 1 {
+		t.Fatalf("error reports %d failures, want 1 (stop at the first hard sink error): %v", got, err)
+	}
+	if report.Copied() != 0 {
+		t.Fatalf("copied = %d, want 0", report.Copied())
+	}
+}
+
+// TestSyncTapeMidRunFailureResumes is the end-to-end regression for the "failed tape
+// sync reads as up to date" bug: syncing two runs onto a one-tape pool fails mid-run
+// when the tape fills and no writable bay remains. That failure must (a) report the
+// run that DID complete as copied, (b) leave the target's partial copy resumable —
+// never counted present — with label-correct positions, (c) keep a retry from
+// touching the blank reels or claiming "up to date", and (d) once a second tape is
+// labeled, copy exactly the missing archive so verify goes green and a further sync
+// reports a genuinely complete mirror.
+func TestSyncTapeMidRunFailureResumes(t *testing.T) {
+	srcA, srcB := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(srcA, "a.txt"), strings.Repeat("a", 5*1024))
+	write(t, filepath.Join(srcB, "b.txt"), strings.Repeat("b", 5*1024))
+	tapeDir := t.TempDir()
+
+	cfg := &config.Config{
+		Landing: "disk",
+		// One-day cycle: every run is a full, so the second run's payload sizes are
+		// deterministic (no incremental change-detection races).
+		Cycle: "1d",
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			// Three bays, 512 KB reels, no auto_label: with one labeled tape the first
+			// run's copy fits, the second run's first archive fits, and its second
+			// archive needs a roll that finds no writable bay — the mid-run failure.
+			"tapes": {Type: "tape", Params: map[string]string{"dir": tapeDir, "slots": "3", "volume_size": "512000"}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: srcA}, {Host: "localhost", Path: srcB}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	s1, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump 1: %v", err)
+	}
+	// Grow one DLE so the second run cannot fit alongside the first on one reel.
+	write(t, filepath.Join(srcA, "big.bin"), strings.Repeat("x", 100*1024))
+	s2, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump 2: %v", err)
+	}
+
+	if err := eng.LabelVolume("tapes", "T-1", false, false, time.Date(2026, 6, 22, 1, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("label T-1: %v", err)
+	}
+
+	// The sync fails mid-run: run 1 mirrors whole, run 2 lands only one of its two
+	// archives before the roll finds no writable bay.
+	report, err := eng.SyncTo("", "tapes", SyncSelection{}, true, false, nil)
+	if err == nil {
+		t.Fatal("sync onto a single filling tape should fail (no writable bay for the roll)")
+	}
+	if report.Copied() != 1 {
+		t.Fatalf("copied = %d, want 1 (run 1 completed before the failure)", report.Copied())
+	}
+	p1, ok := placementOf(eng, s1.ID, "tapes")
+	if !ok || len(p1.Archives) != len(s1.Archives) {
+		t.Fatalf("run 1 should be whole on tapes, got %+v", p1)
+	}
+	p2, ok := placementOf(eng, s2.ID, "tapes")
+	if !ok || len(p2.Archives) != 1 {
+		t.Fatalf("run 2 should have exactly its committed archive on tapes, got %+v (archives=%d)", p2, len(p2.Archives))
+	}
+	assertLabeledPositions(t, p1, "T-1")
+	assertLabeledPositions(t, p2, "T-1")
+	partialPos := p2.Archives[0]
+
+	// The retry must NOT report up to date — the missing archive is in the backlog —
+	// and, still having no writable bay, must fail without touching the blank reels
+	// or the recorded placements.
+	dry, err := eng.SyncTo("", "tapes", SyncSelection{}, false, false, nil)
+	if err != nil {
+		t.Fatalf("dry-run after failure: %v", err)
+	}
+	if len(dry.Items) != 1 || dry.Items[0].RunID != s2.ID || dry.Items[0].Archives != 1 {
+		t.Fatalf("backlog after failed sync = %+v, want run %s with 1 missing archive", dry.Items, s2.ID)
+	}
+	if _, err := eng.SyncTo("", "tapes", SyncSelection{}, true, false, nil); err == nil {
+		t.Fatal("retry without a writable bay should still fail, not silently succeed")
+	}
+	if p, _ := placementOf(eng, s2.ID, "tapes"); len(p.Archives) != 1 {
+		t.Fatalf("failed retry changed the target placement: %+v", p)
+	}
+	if n := tapesWithFiles(t, tapeDir); n != 1 {
+		t.Fatalf("%d cartridges hold files, want 1 — a failed roll must never write an unverified/blank reel", n)
+	}
+
+	// Label a second tape; the retry now copies exactly the missing archive.
+	if err := eng.LabelVolume("tapes", "T-2", false, false, time.Date(2026, 6, 22, 2, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("label T-2: %v", err)
+	}
+	report, err = eng.SyncTo("", "tapes", SyncSelection{}, true, false, nil)
+	if err != nil {
+		t.Fatalf("resume sync after labeling T-2: %v", err)
+	}
+	if report.Copied() != 1 {
+		t.Fatalf("resume copied = %d run(s), want 1", report.Copied())
+	}
+	p2, ok = placementOf(eng, s2.ID, "tapes")
+	if !ok || len(p2.Archives) != len(s2.Archives) {
+		t.Fatalf("run 2 still incomplete on tapes after resume: %+v", p2)
+	}
+	assertLabeledPositions(t, p2, "T-1", "T-2")
+	for _, a := range p2.Archives {
+		if a.DLE == partialPos.DLE && a.Level == partialPos.Level && a.Commit != partialPos.Commit {
+			t.Fatalf("resume re-copied the archive already on tape: commit %+v -> %+v", partialPos.Commit, a.Commit)
+		}
+	}
+
+	// The copies must actually read back at their recorded positions.
+	vr, err := eng.Verify(nil, VerifyOptions{Medium: "tapes"}, nil)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if vr.Failures != 0 {
+		t.Fatalf("verify on tapes reports %d failure(s): %+v", vr.Failures, vr.Runs)
+	}
+
+	// And the mirror is now genuinely complete.
+	dry, err = eng.SyncTo("", "tapes", SyncSelection{}, false, false, nil)
+	if err != nil {
+		t.Fatalf("final dry-run: %v", err)
+	}
+	if len(dry.Items) != 0 {
+		t.Fatalf("mirror should be up to date, backlog = %+v", dry.Items)
+	}
+}
+
+// assertLabeledPositions checks every recorded position of a tape placement names one
+// of the allowed volume labels — never an empty or stale label (the wrong-position
+// symptom of writing an unverified reel).
+func assertLabeledPositions(t *testing.T, p catalog.Placement, allowed ...string) {
+	t.Helper()
+	ok := func(l string) bool {
+		for _, a := range allowed {
+			if l == a {
+				return true
+			}
+		}
+		return false
+	}
+	for _, a := range p.Archives {
+		for _, pt := range a.Parts {
+			if !ok(pt.Label) {
+				t.Fatalf("archive %s part on volume %q, want one of %v", a.DLE, pt.Label, allowed)
+			}
+		}
+		if !ok(a.Commit.Label) {
+			t.Fatalf("archive %s commit on volume %q, want one of %v", a.DLE, a.Commit.Label, allowed)
+		}
+		if a.Index != (catalog.FilePos{}) && !ok(a.Index.Label) {
+			t.Fatalf("archive %s index on volume %q, want one of %v", a.DLE, a.Index.Label, allowed)
+		}
+	}
+}
+
+// tapesWithFiles counts the emulated cartridges (slot directories) holding any file.
+func tapesWithFiles(t *testing.T, tapeDir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(tapeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "slot-") {
+			continue
+		}
+		files, err := os.ReadDir(filepath.Join(tapeDir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(files) > 0 {
+			n++
+		}
+	}
+	return n
 }

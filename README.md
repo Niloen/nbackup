@@ -179,7 +179,7 @@ details one item when given an id (`nb run run-2026-06-21.001`, `nb medium lto`)
 | `nb copy`            | Copy one run between media (`--from`/`--to`, e.g. disk → tape) |
 | `nb sync`            | Mirror one medium's runs onto another (disk → tape/s3)  |
 | `nb label`           | Label a volume (required for tape before its first dump) |
-| `nb load`            | Load a slot into a medium's drive (by number or `--label`) |
+| `nb load`            | Load a bay/reel into a medium's drive (by id or `--label`) |
 | `nb prune <medium>`  | Delete a medium's runs past its cycle/capacity limits  |
 | `nb reset <dle>`     | Schedule a DLE for a full on its next run (fresh chain)  |
 | `nb flush`           | Drain a holding disk's un-flushed archives to the landing |
@@ -621,9 +621,11 @@ command both pushes offsite (disk → tape/S3) and pulls back (tape → disk) �
 reading a tape source mounts the volume holding each run, just like a restore.
 
 It **copies by default** (pass `--dry-run`/`-n` to preview) and is **idempotent**:
-each run copies atomically and records a second placement, so re-running resumes
-where an interrupted sync left off and a fully-mirrored target reports "up to date".
-On a hard error (target full or offline) it stops and reports progress. Declare
+each archive copies atomically and records its placement as it commits, and a run
+counts as mirrored only once the target holds every archive of it — so re-running
+resumes exactly where an interrupted sync left off (copying only the archives still
+missing) and a fully-mirrored target reports "up to date". On a hard error (target
+full or offline) it stops at the first failure and reports progress. Declare
 recurring targets in the config so a cron line is just `nb dump && nb sync`:
 
 ```yaml

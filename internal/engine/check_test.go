@@ -139,3 +139,40 @@ func TestCheckWarnsOnRelativePaths(t *testing.T) {
 		t.Errorf("expected a relative-state_dir advisory: %+v", local.Lines)
 	}
 }
+
+// TestCheckMissingCompressorIsOneLineWithRemedy is the regression for the
+// triple-redundant zstd failure line: the missing-binary case must state the
+// problem once and append the remedy, not nest compress.Check's wrapped
+// LookPath error ("compression zstd: scheme zstd needs zstd on PATH: exec: zstd:
+// executable file not found in $PATH").
+func TestCheckMissingCompressorIsOneLineWithRemedy(t *testing.T) {
+	cfg := &config.Config{
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
+		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "zstd"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir()) // deterministically no zstd, wherever this runs
+
+	rep := &CheckReport{}
+	eng.checkServer(rep)
+	var line string
+	for _, l := range rep.Server {
+		if strings.Contains(l.Msg, `compression "zstd"`) {
+			line = l.Msg
+		}
+	}
+	want := `compression "zstd": binary not found on PATH (install zstd, or set compress.scheme: gzip or none)`
+	if line != want {
+		t.Errorf("compression line = %q, want %q", line, want)
+	}
+	if rep.Failures == 0 {
+		t.Errorf("missing compressor must stay a hard failure: %+v", rep)
+	}
+}

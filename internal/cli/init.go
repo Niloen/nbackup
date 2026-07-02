@@ -102,13 +102,13 @@ func interview(ans *initAnswers) error {
 	if kind, _ := destMedium(ans.To); kind == "tape" {
 		capQ = "Per-cartridge size (volume_size, e.g. 6TB; empty = unbounded)"
 	}
-	if ans.Capacity, err = ask(capQ, ""); err != nil {
+	if ans.Capacity, err = askValid(capQ, "", validCapacity); err != nil {
 		return err
 	}
-	if ans.Cycle, err = ask("Dump cycle: max time between full backups", "7d"); err != nil {
+	if ans.Cycle, err = askValid("Dump cycle: max time between full backups", "7d", validCycle); err != nil {
 		return err
 	}
-	if ans.Notify, err = ask("Alert on failures via email or webhook? (none/email/webhook)", "none"); err != nil {
+	if ans.Notify, err = askValid("Alert on failures via email or webhook? (none/email/webhook)", "none", validNotify); err != nil {
 		return err
 	}
 	switch ans.Notify {
@@ -127,10 +127,57 @@ func interview(ans *initAnswers) error {
 	case "webhook":
 		// The URL is usually a secret (Slack/Discord); only its env-var NAME is
 		// stored, so there is nothing to ask for here.
-	default:
-		return fmt.Errorf("answer none, email, or webhook — got %q", ans.Notify)
 	}
 	return nil
+}
+
+// Per-question validators: each rejection is the format hint askValid re-prompts
+// with, so a typo costs one line, not the whole interview.
+
+// validCapacity accepts an empty answer (unbounded) or anything sizeutil parses.
+func validCapacity(s string) error {
+	if s == "" {
+		return nil
+	}
+	if _, err := sizeutil.ParseBytes(s); err != nil {
+		return fmt.Errorf("answer a size like 500GB or 1.5TB, or leave empty for unbounded — got %q", s)
+	}
+	return nil
+}
+
+// validCycle accepts a positive duration in the config's cycle syntax.
+func validCycle(s string) error {
+	if d, err := sizeutil.ParseDuration(s); err != nil || d <= 0 {
+		return fmt.Errorf("answer a duration like 7d or 12h — got %q", s)
+	}
+	return nil
+}
+
+// validNotify accepts the three interview choices.
+func validNotify(s string) error {
+	switch s {
+	case "none", "email", "webhook":
+		return nil
+	}
+	return fmt.Errorf("answer none, email, or webhook — got %q", s)
+}
+
+// askValid asks until the answer validates, printing the validator's format hint
+// and re-asking on a bad answer — one typo must not abort the interview and
+// discard everything answered so far. A closed stdin still aborts (via ask), so
+// a scripted pipe can never loop forever.
+func askValid(question, def string, valid func(string) error) (string, error) {
+	for {
+		answer, err := ask(question, def)
+		if err != nil {
+			return "", err
+		}
+		if verr := valid(answer); verr != nil {
+			fmt.Println(verr)
+			continue
+		}
+		return answer, nil
+	}
 }
 
 // ask prompts with a default and reads one line from the shared stdin reader.

@@ -30,6 +30,17 @@ func (s *Run) TotalBytes() int64 {
 	return n
 }
 
+// Partial reports whether any of the run's archives is a PARTIAL dump (omitted
+// unreadable source files) — the run committed, but not everything it aimed at.
+func (s *Run) Partial() bool {
+	for _, a := range s.Archives {
+		if a.Partial() {
+			return true
+		}
+	}
+	return false
+}
+
 // LastArchiveAt is when the run's most recently committed archive landed — the run's "last
 // activity", for display. Zero when the run has no archives.
 func (s *Run) LastArchiveAt() time.Time {

@@ -74,10 +74,12 @@ type CopyPlan struct {
 // the single source of the copy-eligibility rules, shared by CopyRun and the
 // `nb copy` dry-run so the two never drift. It errors on the same unrunnable cases
 // (unknown run, unknown target, source == target) and reports whether the run is
-// already on the target (force plans the re-copy anyway).
+// already on the target (force plans the re-copy anyway). Presence is archive-
+// granular: the run is "already on the target" only when the target copy holds
+// every archive the source copy holds — a partial copy (an interrupted earlier
+// run) plans the missing remainder, so Archives/Bytes are what WOULD be copied.
 func (c *copier) PlanCopy(runID, fromMedia, targetMedia string, force bool) (CopyPlan, error) {
-	s, err := c.cat.ReadRun(runID)
-	if err != nil {
+	if _, err := c.cat.ReadRun(runID); err != nil {
 		return CopyPlan{}, err
 	}
 	if fromMedia == "" {
@@ -95,14 +97,58 @@ func (c *copier) PlanCopy(runID, fromMedia, targetMedia string, force bool) (Cop
 	if fromMedia == targetMedia {
 		return CopyPlan{}, fmt.Errorf("copy source and target are the same medium %q", targetMedia)
 	}
-	plan := CopyPlan{RunID: runID, From: fromMedia, To: targetMedia, Archives: len(s.Archives), Bytes: s.TotalBytes()}
-	if !force {
+	held, missing, err := c.copySets(runID, fromMedia, targetMedia)
+	if err != nil {
+		return CopyPlan{}, err
+	}
+	want := missing
+	if force {
+		want = held // a forced re-copy rewrites the source copy's whole content
+	}
+	plan := CopyPlan{RunID: runID, From: fromMedia, To: targetMedia, Archives: len(want), Bytes: archivesBytes(want)}
+	if !force && len(missing) == 0 {
 		if p, ok := c.placementOn(runID, targetMedia); ok {
 			plan.AlreadyOnTarget = true
 			plan.TargetLabels = p.Labels()
 		}
 	}
 	return plan, nil
+}
+
+// copySets resolves a copy archive-granularly: held is the archives the run's copy on
+// `from` actually holds (a per-archive prune may have reclaimed some of the run's
+// content there), and missing is the subset its copy on `target` does not hold yet —
+// the resume set of an interrupted copy. A run counts as present on the target only
+// when missing is empty; mere placement existence is not enough, because each archive
+// records its placement as it commits, so a copy that fails mid-run leaves a partial
+// placement behind. Sync's backlog and copy's already-on-target check both judge
+// presence through this one function, and the retry copies exactly `missing`.
+func (c *copier) copySets(runID, from, target string) (held, missing []record.Archive, err error) {
+	s, err := c.cat.ReadRun(runID)
+	if err != nil {
+		return nil, nil, err
+	}
+	src, srcOK := c.placementOn(runID, from)
+	tgt, _ := c.placementOn(runID, target) // a zero Placement holds nothing
+	for _, a := range s.Archives {
+		if !srcOK || !src.Holds(a.DLE, a.Level) {
+			continue
+		}
+		held = append(held, a)
+		if !tgt.Holds(a.DLE, a.Level) {
+			missing = append(missing, a)
+		}
+	}
+	return held, missing, nil
+}
+
+// archivesBytes sums the archives' stored (compressed) sizes.
+func archivesBytes(archives []record.Archive) int64 {
+	var n int64
+	for _, a := range archives {
+		n += a.Compressed
+	}
+	return n
 }
 
 // CopyRun streams a sealed run from one configured medium to another, then
@@ -173,25 +219,31 @@ func (c *copier) CopyRuns(runIDs []string, fromMedia, targetMedia string, force 
 }
 
 // prepareRun validates one run's copy (its source copy exists; on --force a prior target copy is
-// reclaimed first) and returns the per-archive jobs to transfer. Reclaiming a prior copy before
-// re-authoring keeps a forced re-copy from orphaning the old files (on removable media it deletes them;
-// on tape it is a no-op — orphan-until-relabel).
+// reclaimed first) and returns the per-archive jobs to transfer: the archives the source copy holds
+// that the target copy is still missing (all of them on --force) — so retrying an interrupted copy
+// transfers exactly what has not landed, never duplicating an archive already committed on the
+// target. Reclaiming a prior copy before re-authoring keeps a forced re-copy from orphaning the old
+// files (on removable media it deletes them; on tape it is a no-op — orphan-until-relabel).
 func (c *copier) prepareRun(runID, fromMedia, targetMedia string, force bool) ([]copyJob, error) {
-	s, err := c.cat.ReadRun(runID)
-	if err != nil {
-		return nil, err
-	}
 	if err := c.copySource(runID, fromMedia); err != nil {
 		return nil, err
 	}
+	held, missing, err := c.copySets(runID, fromMedia, targetMedia)
+	if err != nil {
+		return nil, err
+	}
+	archives := missing
 	if force {
+		// A forced re-copy rewrites the whole source copy; the reclaim (where the medium
+		// supports it) drops the prior target files so they are not orphaned.
 		if _, ok := c.placementOn(runID, targetMedia); ok {
 			if err := c.reclaimCopy(runID, targetMedia); err != nil {
 				return nil, err
 			}
 		}
+		archives = held
 	}
-	return c.jobsForRun(runID, s.Archives), nil
+	return c.jobsForRun(runID, archives), nil
 }
 
 // runCopy drives a set of copy jobs onto the target through the spool (shared with dump): one archive
@@ -241,8 +293,24 @@ func (c *copier) transfer(ctx context.Context, jobs []copyJob, fromMedia, target
 		mu  sync.Mutex
 		fst error
 	)
+	failed := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return fst != nil
+	}
 	for _, job := range jobs {
 		sem <- struct{}{}
+		// Stop scheduling after the first error — checked after the semaphore, so a
+		// serial lane has seen its previous transfer finish: a hard sink fault (target
+		// full or offline) will not fix itself for the next archive, and pressing on
+		// would only pile the same failure onto every remaining job (and, on tape, keep
+		// prodding a drive in a failed state). In-flight transfers finish; each
+		// committed archive already recorded its placement, so the retry resumes from
+		// what landed.
+		if failed() {
+			<-sem
+			break
+		}
 		wg.Add(1)
 		go func(job copyJob) {
 			defer wg.Done()
