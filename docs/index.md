@@ -9,9 +9,8 @@ permalink: /
 # Niloen Backup
 {: .fs-9 }
 
-A run-based backup system whose design comes from **Amanda** — balanced
-multilevel scheduling, immutable daily artifacts, human-readable contents, and
-cycle-based safety — with **first-class disk and cloud storage** added on top.
+Backups you can **read**, restore with **stock tools**, and **prove** restorable
+— to disk, cloud, and tape as equal targets.
 {: .fs-6 .fw-300 }
 
 [Get started](getting-started){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
@@ -22,16 +21,25 @@ cycle-based safety — with **first-class disk and cloud storage** added on top.
 **Niloen Backup** (short: **NBackup**) is an open-source backup system written in
 Go. It orchestrates GNU `tar` and a compressor as child processes and produces
 **immutable, self-describing artifacts** that you can copy, inspect, and restore
-without NBackup installed.
+without NBackup installed — and it doesn't just store your backups, it
+**rehearses restoring them** (`nb drill`) and pages you when one fails.
 
 > A backup administrator should be able to reason about backups by looking at a
 > sequence of immutable daily backup runs rather than a database of chunks.
 
-Amanda is tape-first. NBackup treats local disk, virtual tape, and object stores
-(S3, GCS, Azure Blob) as **equal targets**, and makes the common modern shape —
-land fast on disk, then replicate offsite — a first-class operation.
+The design descends from **Amanda** — balanced multilevel scheduling, immutable
+daily artifacts, cycle-based safety — modernized: Amanda is tape-first, while
+NBackup treats local disk, virtual tape, and object stores (S3, GCS, Azure Blob)
+as **equal targets**, and makes the common modern shape — land fast on disk,
+then replicate offsite — a first-class operation. One static binary, driven by
+cron: no daemons, no database (the catalog is a cache one media scan rebuilds).
 
 ## What makes it different
+
+- **Recoverability is proven, not assumed.** `nb drill` actually restores a
+  risk-biased sample of your data and throws it away, delivering the **"0
+  errors"** digit of [3-2-1-1-0](https://www.veeam.com/blog/321-backup-rule.html).
+  An unattended failure is loud — it exits non-zero and can email or page you.
 
 - **Backups you can read.** Each **run** is exactly one immutable
   directory (or tape span, or set of objects) you can list and understand without
@@ -54,14 +62,21 @@ land fast on disk, then replicate offsite — a first-class operation.
   (how often each source is fully backed up). The planner chooses backup levels,
   full frequency, and retention to fit — no balancing knobs to tune.
 
-- **Recoverability is proven, not assumed.** `nb drill` actually restores a
-  risk-biased sample of your data and throws it away, delivering the **"0 errors"**
-  digit of [3-2-1-1-0](https://www.veeam.com/blog/321-backup-rule.html). An
-  unattended failure is loud — it exits non-zero and can email or page you.
-
 - **Encryption that keeps copies interchangeable.** A dump is encrypted once at the
   source (via `gpg`); verifying integrity and replicating offsite never need the
   key.
+
+## Is NBackup right for you?
+
+NBackup deliberately trades storage efficiency for operational transparency:
+there is **no cross-backup deduplication** and no chunk store. If you back up
+many similar machines or keep long, dense snapshot histories, a chunk-store tool
+(restic, Borg, Kopia) will store the same data in far less space. What it can't
+give you is what NBackup exists for: artifacts a human can read, restores that
+need no special tool or intact repository, first-class tape alongside disk and
+cloud, and drills that prove your backups restore. See
+[How NBackup compares](rationale#how-nbackup-compares) for an honest look at
+both sides.
 
 ## How a backup is shaped
 

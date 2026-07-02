@@ -2,7 +2,7 @@
 title: Rationale
 layout: default
 nav_order: 2
-description: "Why NBackup exists, its Amanda lineage, design philosophy, priority order, and non-goals."
+description: "Why NBackup exists, its Amanda lineage, design philosophy, priority order, non-goals, and how it compares to restic/Borg/Kopia and Bacula/Bareos."
 ---
 
 # Rationale
@@ -111,6 +111,58 @@ NBackup deliberately does **not** do these things:
   transitions (Glacier / Deep Archive). Which tier bytes sit in is configured
   operator-side; a flat [cost estimate](features/cost) is the honest one NBackup
   can deliver.
+
+## How NBackup compares
+
+An honest map of the field — including where the other tool is the better
+choice.
+
+### vs. chunk-store tools (restic, Borg, Kopia)
+
+These are excellent tools, and for some workloads the right ones. They slice
+data into content-addressed chunks and deduplicate across every backup and
+(often) every machine, so **they win decisively on storage efficiency**: backing
+up fifty similar servers, or keeping ninety daily snapshots of slowly-changing
+data, they may store a small fraction of what NBackup would. They also fetch
+only the blocks a single-file restore needs, where NBackup must read an archive
+stream from the start.
+
+What you trade for that efficiency is exactly what NBackup refuses to trade:
+
+- **The repository is opaque.** You can't `ls` a restic repo and understand it;
+  every restore needs the tool, a compatible version, and an intact chunk
+  database. A damaged index or a subtle repo corruption can put *every* backup
+  at risk at once — NBackup's runs are independent files, so damage stays local.
+- **No tape.** Chunk stores assume random-access storage; NBackup treats a tape
+  library (robot or hand-fed drive, spanning, label rotation) as a first-class
+  target.
+- **No rehearsed recovery.** `nb drill` restores real samples on a schedule,
+  classifies failures, and audits your 3-2-1-1-0 posture; checksum
+  verification is where the chunk-store tools stop.
+
+Pick restic/Borg/Kopia when storage efficiency dominates (many similar machines,
+laptop fleets, tight cloud budgets with dense histories). Pick NBackup when
+transparency, tape, longevity, and proven restorability dominate.
+
+### vs. the Amanda / Bacula / Bareos generation
+
+This is NBackup's lineage, and the comparison is friendlier: same operational
+philosophy, less machinery. Amanda pioneered balanced scheduling and portable
+artifacts, but is tape-first with cloud as a bolt-on and shows its age.
+Bacula/Bareos are capable but heavy: a director daemon, storage daemons, file
+daemons on every client, and a SQL catalog that is precious state to operate
+and back up. NBackup is **one binary, no daemons, no database** — the catalog
+is a disposable cache, clients need only `sshd` and `tar` — while keeping the
+parts that made that generation trustworthy: balanced fulls, cycle safety,
+real tape support, and a nightly report in your inbox.
+
+### vs. filesystem snapshots and `rsync`-style mirrors
+
+ZFS/Btrfs send-receive and rsync snapshots are great building blocks, but they
+are *mirrors*, not managed backups: no scheduling brain, no retention safety
+floor, no restore drills, no capacity planning, and the format is tied to the
+filesystem. NBackup happily backs *up* such filesystems while adding the
+management layer they lack.
 
 ---
 

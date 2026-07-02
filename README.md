@@ -1,20 +1,33 @@
-# Niloen Backup - Run-based backup system in Go
+# NBackup — backups you can read, restore, and prove
 
-A run-based backup system in Go. Its design comes from **[Amanda][amanda]** —
-balanced multilevel scheduling, immutable daily artifacts, human-readable
-contents, and cycle-based safety. What NBackup adds is **first-class disk and
-cloud storage**: Amanda is tape-first, while NBackup treats local disk, virtual
-tape, and object stores (S3, GCS, Azure Blob) as equal targets, and makes the
+NBackup backs up Unix machines to **local disk, cloud object stores (S3, GCS,
+Azure Blob), and tape**, treating all three as equal targets and making the
 common modern shape — land fast on disk, then replicate offsite — a first-class
-operation.
+operation. It is built on three promises:
+
+- **Backups you can read.** Each daily **run** is one immutable set of ordinary
+  tar archives you can list, copy, and understand without NBackup — no chunk
+  database, no repository format.
+- **Recovery never requires NBackup.** Every archive restores with the stock
+  tools that wrote it (`tar`, `zstd`/`gzip`, optionally `gpg`) — one pipe from
+  any rescue shell, even if NBackup and its config are long gone.
+- **Recoverability is proven, not assumed.** `nb drill` actually restores a
+  risk-biased sample of your data on a schedule, audits your 3-2-1-1-0 posture,
+  and pages you when a restore fails — the "0 errors" guarantee checksums alone
+  can't give.
 
 > A backup administrator should be able to reason about backups by looking at a
 > sequence of immutable daily backup runs rather than a database of chunks.
 
-Its artifacts are portable: every backup restores with standard tools, no
-NBackup required. This is a first version — see [PRD.md](PRD.md) for the full
-product vision. (The rest of this page assumes the Amanda lineage above and
-calls it out again only where a specific mechanism is worth tracing back.)
+The design descends from **[Amanda][amanda]** — balanced multilevel scheduling,
+immutable daily artifacts, and cycle-based safety — modernized: object storage
+is a peer of tape, and the whole system is one static Go binary driven by cron,
+with no daemons and no database (the catalog is a cache one media scan
+rebuilds). This is a first version — see [PRD.md](PRD.md) for the product
+vision, and the [docs site](docs/index.md) for the full manual (concepts,
+features, scenarios, reference). (The rest of this page assumes the Amanda
+lineage above and calls it out again only where a specific mechanism is worth
+tracing back.)
 
 ## Core ideas
 
@@ -27,6 +40,19 @@ calls it out again only where a specific mechanism is worth tracing back.)
 - **Volume** — where runs live: local disk, a virtual tape, or a cloud object
   store (S3/GCS/Azure). Runs stream between volumes (`nb copy` for one, `nb sync`
   for many) — e.g. land fast on disk, then replicate offsite to tape or the cloud.
+
+## Is NBackup for you?
+
+NBackup deliberately trades storage efficiency for operational transparency:
+there is **no cross-backup deduplication** and no content-addressed chunk store.
+If you back up many similar machines, or keep long dense snapshot histories, a
+chunk-store tool (restic, Borg, Kopia) will store the same data in far less
+space — and NBackup's own `nb plan` cost forecast will honestly show you the
+difference. What a chunk store can't give you is what NBackup exists for:
+artifacts a human (or an auditor) can read, restores that need no special tool
+or intact repository, first-class tape alongside disk and cloud, and automated
+recovery drills that *prove* the backups restore. Choose NBackup when being
+certain you can restore in ten years matters more than squeezing bytes today.
 
 ## Artifacts you can read
 
