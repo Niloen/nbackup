@@ -40,23 +40,28 @@ type ArchivePos struct {
 // catalog, not here, so the metadata stays portable across volumes). A "run" is just the
 // shared Run tag a run's archives carry — there is no run record on the medium.
 type Archive struct {
-	Run          string    `json:"run"`                // the run (run) this dump belongs to, e.g. "run-2026-06-21.001"
-	DLE          string    `json:"dle"`                // DLE name, e.g. "app01-home"
-	Host         string    `json:"host"`               // source host
-	Path         string    `json:"path"`               // source path
-	Archiver     string    `json:"archiver"`           // archiver type that produced it
-	Compress     string    `json:"compress"`           // compression scheme (zstd|gzip|none); reversed on restore
-	Encrypt      string    `json:"encrypt"`            // encryption scheme (gpg|none); reversed on restore. "none" = plaintext — always concrete, the peer of Compress, so the two transforms describe their off-state identically. The key is never stored — restore resolves it from the operator's keyring.
-	Level        int       `json:"level"`              // 0 = full, >=1 = incremental
-	Compressed   int64     `json:"compressed"`         // payload size on the volume
-	Uncompressed int64     `json:"uncompressed"`       // archive stream size before compression
-	FileCount    int       `json:"file_count"`         // number of member entries archived
-	SHA256       string    `json:"sha256"`             // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
-	Parts        int       `json:"parts,omitempty"`    // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
-	BaseRun      string    `json:"base_run,omitempty"` // for level>=1, the run whose state this builds on (a full omits it)
-	CreatedAt    time.Time `json:"created_at"`         // when this archive committed (landed) — per-archive, the basis for retention age and the "last archive added" display
-	Members      []string  `json:"members,omitempty"`  // member paths archived: slash-separated, directories with a trailing slash (the archiver-neutral convention recovery browses); the raw token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
+	Run          string    `json:"run"`                  // the run (run) this dump belongs to, e.g. "run-2026-06-21.001"
+	DLE          string    `json:"dle"`                  // DLE name, e.g. "app01-home"
+	Host         string    `json:"host"`                 // source host
+	Path         string    `json:"path"`                 // source path
+	Archiver     string    `json:"archiver"`             // archiver type that produced it
+	Compress     string    `json:"compress"`             // compression scheme (zstd|gzip|none); reversed on restore
+	Encrypt      string    `json:"encrypt"`              // encryption scheme (gpg|none); reversed on restore. "none" = plaintext — always concrete, the peer of Compress, so the two transforms describe their off-state identically. The key is never stored — restore resolves it from the operator's keyring.
+	Level        int       `json:"level"`                // 0 = full, >=1 = incremental
+	Compressed   int64     `json:"compressed"`           // payload size on the volume
+	Uncompressed int64     `json:"uncompressed"`         // archive stream size before compression
+	FileCount    int       `json:"file_count"`           // number of member entries archived
+	Unreadable   int       `json:"unreadable,omitempty"` // source files the producer could not read, omitted from the archive (a PARTIAL dump — Amanda's "strange"); 0 = complete
+	SHA256       string    `json:"sha256"`               // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
+	Parts        int       `json:"parts,omitempty"`      // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
+	BaseRun      string    `json:"base_run,omitempty"`   // for level>=1, the run whose state this builds on (a full omits it)
+	CreatedAt    time.Time `json:"created_at"`           // when this archive committed (landed) — per-archive, the basis for retention age and the "last archive added" display
+	Members      []string  `json:"members,omitempty"`    // member paths archived: slash-separated, directories with a trailing slash (the archiver-neutral convention recovery browses); the raw token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
 }
+
+// Partial reports whether the archive omitted source files it could not read (a PARTIAL
+// dump): valid and restorable for what was readable, but not a complete image of the source.
+func (a Archive) Partial() bool { return a.Unreadable > 0 }
 
 // DLEID returns the host:path identity for display, falling back to
 // the internal DLE slug when host/path were not recorded.

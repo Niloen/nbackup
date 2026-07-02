@@ -40,9 +40,14 @@ const CacheFile = "catalog.json"
 
 // VolumeRecord is the catalog's cached identity of a labeled volume. "Which
 // runs are on it" and "is it reusable" are derived from placements + retention,
-// not stored here.
+// not stored here. Barcode is the cartridge the label was last seen on — learned
+// whenever a load or label actually reads the tape (Amanda's chg-robot keeps the
+// same barcode map in its statefile), so inventory can show which slot holds a
+// known volume without loading it. It is a cached observation, stale if cartridges
+// are swapped outside NBackup, and "" until the volume has been seen in a drive.
 type VolumeRecord struct {
-	Label record.Label `json:"label"`
+	Label   record.Label `json:"label"`
+	Barcode string       `json:"barcode,omitempty"`
 }
 
 // Catalog is a local cache of run entries plus a registry of labeled volumes. It
@@ -228,8 +233,30 @@ func (c *Catalog) RecordVolume(lbl record.Label) error {
 // the in-memory write path shared by RecordVolume and the importer's absorb (which
 // persists once at the end of a scan).
 func (c *Catalog) upsertVolume(lbl record.Label) {
-	c.volumes[lbl.Name] = &VolumeRecord{Label: lbl}
+	rec := &VolumeRecord{Label: lbl}
+	if old, ok := c.volumes[lbl.Name]; ok {
+		rec.Barcode = old.Barcode // identity update; the learned cartridge stays
+	}
+	c.volumes[lbl.Name] = rec
 	c.loaded = true
+}
+
+// SetVolumeBarcode records which cartridge (barcode) a volume's label was last
+// read from — the learned barcode↔label map behind slot-inventory display. A
+// cartridge holds one volume, so the barcode is dropped from any other record
+// first. A no-op for an unknown volume or an empty barcode (no scanner).
+func (c *Catalog) SetVolumeBarcode(name, barcode string) error {
+	rec, ok := c.volumes[name]
+	if !ok || barcode == "" || rec.Barcode == barcode {
+		return nil
+	}
+	for _, other := range c.volumes {
+		if other.Barcode == barcode {
+			other.Barcode = ""
+		}
+	}
+	rec.Barcode = barcode
+	return c.persist()
 }
 
 // RemoveVolume drops a labeled volume from the registry. A relabel overwrites a
@@ -304,14 +331,22 @@ func (c *Catalog) Archives() []record.Archive {
 	return out
 }
 
-// ArchivesOn returns the archives of every run with a copy on the named medium — the
-// per-medium corpus retention and reclamation reason over. The run's content is its archives
-// across media, scoped here to runs present on the medium (matching RunsOn).
+// ArchivesOn returns the archives whose copy actually lives on the named medium — the
+// per-medium corpus retention, reclamation, and usage accounting reason over. It is
+// archive-granular, matching the placement record: a per-archive prune leaves a run's
+// copy holding only some of its archives, and the pruned ones no longer count against
+// (or get re-pruned from) this medium even while the run keeps them on other media.
 func (c *Catalog) ArchivesOn(medium string) []record.Archive {
 	var out []record.Archive
 	for _, e := range c.entries {
-		if e.placedOn(medium) {
-			out = append(out, e.Run.Archives...)
+		p, ok := e.placementOn(medium)
+		if !ok {
+			continue
+		}
+		for _, a := range e.Run.Archives {
+			if p.Holds(a.DLE, a.Level) {
+				out = append(out, a)
+			}
 		}
 	}
 	return out
@@ -332,12 +367,20 @@ func (c *Catalog) RunIDsOnLabel(label string) []string {
 	return out
 }
 
-// MediumBytes sums the stored bytes of runs with a copy on the named medium.
+// MediumBytes sums the stored bytes of the archives with a copy on the named medium.
+// Archive-granular like ArchivesOn: an archive pruned from this medium stops counting
+// here even while its run's other archives (or its own copies elsewhere) remain.
 func (c *Catalog) MediumBytes(medium string) int64 {
 	var total int64
 	for _, e := range c.entries {
-		if e.placedOn(medium) {
-			total += e.Run.TotalBytes()
+		p, ok := e.placementOn(medium)
+		if !ok {
+			continue
+		}
+		for _, a := range e.Run.Archives {
+			if p.Holds(a.DLE, a.Level) {
+				total += a.Compressed
+			}
 		}
 	}
 	return total

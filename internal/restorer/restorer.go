@@ -237,9 +237,15 @@ func onMediumSuffix(medium string) string {
 }
 
 // clearDirContents removes everything inside dir, leaving the (empty) dir itself.
+// A dir that does not exist is already clean: a restore can fail before ever
+// creating its destination, and complaining "could not clean" about a directory
+// that was never written would bury the real error in noise.
 func clearDirContents(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
 	for _, e := range entries {

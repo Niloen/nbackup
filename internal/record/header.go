@@ -61,7 +61,7 @@ type Header struct {
 	Archiver  string    `json:"archiver,omitempty"`
 	Compress  string    `json:"compress,omitempty"`
 	Encrypt   string    `json:"encrypt,omitempty"` // encryption scheme name (gpg|none); reversed on restore. "none" = plaintext (the peer of Compress, which is likewise always concrete). The key is never recorded — gpg resolves it from the ciphertext + keyring.
-	Level     int       `json:"level,omitempty"`
+	Level     int       `json:"level"`             // always emitted, 0 included — the README promises the header carries the level, and a level-0 full must say so explicitly
 	BaseRun   string    `json:"base_run,omitempty"`
 	Part      int       `json:"part,omitempty"`  // 0-based index of this part within its archive (0 = first/only); the archive's total part count lives in its commit footer (Archive.Parts), not here
 	Split     bool      `json:"split,omitempty"` // true when this archive is written in size-bounded parts — under a part_size cap (cloud) or across a finite volume's capacity (a spanning reel) — so its payload is one slice (see Part) of a possibly-multi-part whole; concatenate the siblings in Part order before any stock-tool reversal. Set even when the archive needed only one part (the total is not known up front; it lands in the commit footer's Archive.Parts). false = a single standalone payload on an unbounded medium (disk).

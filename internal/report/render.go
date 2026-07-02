@@ -290,7 +290,7 @@ func detailCell(r Run) string {
 	case CommandSync:
 		return fmt.Sprintf("%d run(s) copied, %s", r.RunsCopied, sizeutil.FormatBytes(r.BytesMoved))
 	case CommandPrune:
-		return fmt.Sprintf("%d run(s) pruned, %s freed", r.RunsPruned, sizeutil.FormatBytes(r.BytesMoved))
+		return fmt.Sprintf("%d archive(s) pruned, %s freed", r.ArchivesPruned, sizeutil.FormatBytes(r.BytesMoved))
 	case CommandVerify:
 		if r.Failures > 0 {
 			return fmt.Sprintf("%d run(s) failed verification", r.Failures)

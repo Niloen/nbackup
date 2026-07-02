@@ -21,6 +21,7 @@ type recoverShell struct {
 	sess  *recovery.Session
 	dest  string
 	noted bool // whether the file-level deletion note has been shown this session
+	tty   bool // stdin is a real terminal, so prompting for missing input is safe
 }
 
 // runRecoverShell drives the interactive recovery prompt. It reuses the shared
@@ -30,7 +31,7 @@ func runRecoverShell(eng *engine.Engine, dleName, dateStr, timeStr, dest string)
 	if err != nil {
 		return err
 	}
-	sh := &recoverShell{eng: eng, date: asOf, dest: dest}
+	sh := &recoverShell{eng: eng, date: asOf, dest: dest, tty: stdinIsTerminal()}
 	if dleName != "" {
 		if slug, ok := eng.ResolveDLE(dleName); ok {
 			sh.dle = slug
@@ -43,9 +44,8 @@ func runRecoverShell(eng *engine.Engine, dleName, dateStr, timeStr, dest string)
 	}
 	fmt.Println("nb recover — type 'help' for commands, 'quit' to exit.")
 	sh.banner()
-	tty := stdinIsTerminal() // suppress the prompt when stdin is piped (avoids interleaved echo)
 	for {
-		if tty {
+		if sh.tty { // suppress the prompt when stdin is piped (avoids interleaved echo)
 			fmt.Print(sh.prompt())
 		}
 		line, rerr := stdinReader.ReadString('\n')
@@ -57,7 +57,7 @@ func runRecoverShell(eng *engine.Engine, dleName, dateStr, timeStr, dest string)
 			}
 			continue
 		}
-		if !tty {
+		if !sh.tty {
 			// Piped/scripted input isn't echoed by a terminal, so a transcript would
 			// show output with no commands. Echo the prompt + command ourselves so a
 			// scripted session reads top-to-bottom.
@@ -214,11 +214,22 @@ func (sh *recoverShell) setDate(args []string) {
 	}
 	if err := sh.rebrowse(d); err != nil {
 		// A date with no backup is reported but leaves the current disk,
-		// selection, and browse position intact — like a bad-format date.
-		fmt.Printf("note: %v\n", err)
+		// selection, and browse position intact — like a bad-format date. Restate
+		// what was kept so "nothing changed" is explicit, not inferred.
+		fmt.Printf("note: %v%s\n", err, sh.keptSuffix())
 		return
 	}
 	sh.banner()
+}
+
+// keptSuffix names the as-of state a failed rebrowse left in place ("— keeping
+// <date> (<run>)"), so a setdate/settime to a backup-less date says what it kept
+// instead of silently staying put.
+func (sh *recoverShell) keptSuffix() string {
+	if sh.sess == nil {
+		return ""
+	}
+	return fmt.Sprintf(" — keeping %s (%s)", sh.date, sh.sess.Tree().TargetRun)
 }
 
 // setTime sets the as-of point-in-time, then rebrowses. Unlike setdate it accepts a
@@ -242,7 +253,7 @@ func (sh *recoverShell) setTime(args []string) {
 	if err := sh.rebrowse(when); err != nil {
 		// A time with no backup is reported but leaves the current disk,
 		// selection, and browse position intact — like a bad-format time.
-		fmt.Printf("note: %v\n", err)
+		fmt.Printf("note: %v%s\n", err, sh.keptSuffix())
 		return
 	}
 	sh.banner()
@@ -358,6 +369,12 @@ func (sh *recoverShell) extract(args []string) {
 		sh.dest = args[0]
 	}
 	if sh.dest == "" {
+		// Only a real terminal may be prompted: with piped/scripted input the reply
+		// would swallow the next command (e.g. a literal "quit" becomes ./quit).
+		if !sh.tty {
+			fmt.Println("error: no destination set (use 'dest <dir>' or 'extract <dir>')")
+			return
+		}
 		fmt.Print("destination directory: ")
 		line, _ := stdinReader.ReadString('\n')
 		sh.dest = strings.TrimSpace(line)

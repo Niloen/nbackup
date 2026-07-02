@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 
@@ -86,7 +88,18 @@ func (e *Engine) checkServer(rep *CheckReport) {
 		}
 		checkedScheme[scheme] = true
 		if err := compress.Check(scheme, e.fopts); err != nil {
-			rep.add(&rep.Server, false, false, fmt.Sprintf("compression %q: %v", scheme, err))
+			msg := fmt.Sprintf("compression %q: %v", scheme, err)
+			// The common failure is simply a missing binary; compress.Check's wrapped
+			// LookPath error restates the name three times with no way out. One
+			// statement, plus the remedy.
+			if errors.Is(err, exec.ErrNotFound) {
+				alternatives := "gzip or none"
+				if scheme == "gzip" {
+					alternatives = "none"
+				}
+				msg = fmt.Sprintf("compression %q: binary not found on PATH (install %s, or set compress.scheme: %s)", scheme, scheme, alternatives)
+			}
+			rep.add(&rep.Server, false, false, msg)
 		} else {
 			rep.add(&rep.Server, true, false, fmt.Sprintf("compression %q available", scheme))
 		}

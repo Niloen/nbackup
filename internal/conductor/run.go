@@ -2,6 +2,7 @@ package conductor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -121,7 +122,10 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 	}
 	sealed, err := c.runOrchestrated(ctx, plan, workers, spec, holdingNames, tr, now, runLogf)
 	if err != nil {
-		return nil, err
+		// A failed run may still have committed archives (a partial dump, or one DLE
+		// failing while its run-mates landed) — pass the committed run through so the
+		// caller's failure record carries the run id and per-DLE stats, not a blank.
+		return sealed, err
 	}
 	// The run sealed, so every planned DLE — including every forced one, which the planner
 	// scheduled at L0 — has been dumped. Consume the force-full directives now; a failed run
@@ -144,6 +148,15 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 		return c.d.Dmp.Run(ctx, plan.Items, workers, route, tr, lf)
 	})
 	if err != nil {
+		// Even a failed run keeps every archive that committed (the archive is the commit
+		// unit; there is no run-level rollback). Return what the catalog holds alongside the
+		// error — a partial dump commits a valid archive, so its run id and stats belong in
+		// the failure record. A cancel seals nothing on purpose, so it stays bare.
+		if !errors.Is(err, ErrCanceled) {
+			if run, rerr := c.d.Cat.ReadRun(spec.ID); rerr == nil {
+				return run, err
+			}
+		}
 		return nil, err
 	}
 	// The run is its committed archives, read from the catalog (the cache each archive recorded into

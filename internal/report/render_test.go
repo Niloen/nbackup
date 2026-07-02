@@ -64,6 +64,25 @@ func TestRenderEmpty(t *testing.T) {
 	}
 }
 
+// TestRenderPruneSummarySaysArchives pins prune's summary unit: prune reclaims
+// archives (a DLE's image within a run), not runs — 5 pruned archives may come
+// from 3 runs, so "run(s) pruned" misstated what happened.
+func TestRenderPruneSummarySaysArchives(t *testing.T) {
+	r := Run{
+		Command: CommandPrune, Outcome: OutcomeSuccess, ArchivesPruned: 5, BytesMoved: 1 << 20,
+		StartedAt: time.Now(), EndedAt: time.Now().Add(time.Minute),
+	}
+	var sb strings.Builder
+	Render(&sb, []Run{r}, time.Now())
+	out := sb.String()
+	if !strings.Contains(out, "5 archive(s) pruned") {
+		t.Errorf("prune summary missing %q:\n%s", "5 archive(s) pruned", out)
+	}
+	if strings.Contains(out, "run(s) pruned") {
+		t.Errorf("prune summary still counts runs:\n%s", out)
+	}
+}
+
 func TestRenderRunFailure(t *testing.T) {
 	r := Run{
 		Command: CommandDump, Outcome: OutcomeFailure, ExitClass: "dump-failed", Error: "tar exited 2",

@@ -43,6 +43,21 @@ func (p Placement) Parts(dle string, level int) ([]FilePos, bool) {
 	return nil, false
 }
 
+// Holds reports whether this copy records the archive at all. A copy is
+// archive-granular: a per-archive prune can reclaim one DLE's image from one
+// medium while the run's other archives (and other media's copies) survive, so
+// a placement may hold only a subset of the run's content. (Unlike Parts, a
+// recorded archive whose parts were not all seen — a tape absent from a scan —
+// still counts as held: the copy claims it, so verify must judge it.)
+func (p Placement) Holds(dle string, level int) bool {
+	for _, a := range p.Archives {
+		if a.DLE == dle && a.Level == level {
+			return true
+		}
+	}
+	return false
+}
+
 // Labels returns the distinct volume labels this placement occupies — every
 // archive part's label plus the seal's — in first-seen order. It is what tells
 // which tapes a copy needs mounted. It is empty for address-identified media,
@@ -85,4 +100,14 @@ func (e *Entry) placedOn(medium string) bool {
 		}
 	}
 	return false
+}
+
+// placementOn returns the entry's copy on the named medium, if any.
+func (e *Entry) placementOn(medium string) (Placement, bool) {
+	for _, p := range e.Placements {
+		if p.Medium == medium {
+			return p, true
+		}
+	}
+	return Placement{}, false
 }

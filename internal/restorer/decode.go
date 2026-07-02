@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/programs"
@@ -171,5 +172,39 @@ func DecryptHint(scheme string, err error) error {
 	if err == nil || scheme == "" || scheme == "none" {
 		return err
 	}
-	return fmt.Errorf("%w\n(this archive is %s-encrypted, so extraction needs the key: for a passphrase/symmetric dump make sure an `encrypt:` block — config-wide or on this DLE's dumptype — points at the right passphrase_file; for a public-key dump ensure its private key is in the gpg keyring)", err, scheme)
+	return fmt.Errorf("%w\n(this archive is %s-encrypted, so extraction needs the key: for a passphrase/symmetric dump make sure an `encrypt:` block — config-wide or on this DLE's dumptype — points at the right passphrase_file; for a public-key dump ensure its private key is in the gpg keyring)", dropGpgAgentNoise(err), scheme)
 }
+
+// gpgAgentNoise is the stderr line gpg emits when its agent cannot open a
+// pinentry on a tty-less run (cron, a pipe). It is pure environment noise — the
+// actionable line ("decryption failed: No secret key") follows it — so surfacing
+// it above NBackup's hint only misdirects the operator toward the agent.
+const gpgAgentNoise = "gpg: problem with the agent: Inappropriate ioctl for device"
+
+// dropGpgAgentNoise removes the agent-noise line from a decrypt failure's message
+// while preserving the wrapped error chain (the drill and the CLI classify on
+// errors.Is/As through it). Only that exact line is dropped; every other gpg
+// stderr line survives.
+func dropGpgAgentNoise(err error) error {
+	if !strings.Contains(err.Error(), gpgAgentNoise) {
+		return err
+	}
+	var kept []string
+	for _, line := range strings.Split(err.Error(), "\n") {
+		if strings.TrimSpace(line) == gpgAgentNoise {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return &filteredErr{msg: strings.Join(kept, "\n"), cause: err}
+}
+
+// filteredErr rewords an error's message but keeps its chain intact for
+// errors.Is/As classification.
+type filteredErr struct {
+	msg   string
+	cause error
+}
+
+func (e *filteredErr) Error() string { return e.msg }
+func (e *filteredErr) Unwrap() error { return e.cause }

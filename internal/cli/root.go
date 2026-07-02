@@ -110,6 +110,24 @@ func NewRootCmd() *cobra.Command {
 		newRebuildCmd(a),
 		newVersionCmd(),
 	)
+
+	// Cobra's default `completion` group has no Run, so an unknown shell
+	// (`nb completion tcsh`) fell through to help and exited 0 — success, to a
+	// script. Materialize the default command now (the later auto-init sees it and
+	// backs off) and make a bogus shell a real error like any other bad subcommand,
+	// while a bare `nb completion` keeps printing the shell list.
+	root.InitDefaultCompletionCmd()
+	if compCmd, _, err := root.Find([]string{"completion"}); err == nil && compCmd.Name() == "completion" {
+		compCmd.Args = func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return nil
+			}
+			return fmt.Errorf("unknown shell %q for \"nb completion\" — supported: bash, zsh, fish, powershell", args[0])
+		}
+		compCmd.RunE = func(cmd *cobra.Command, args []string) error {
+			return cmd.Help()
+		}
+	}
 	return root
 }
 

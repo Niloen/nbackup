@@ -314,3 +314,68 @@ func TestRollFailureNoDeadlock(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// TestCommitRecordsUnreadable: a partial dump's omitted-file count (the producer's
+// Unreadable paths) must land in the commit footer on the medium — durable, so a
+// rebuild preserves the PARTIAL fact — and a copy (NewCopy) must carry it along.
+func TestCommitRecordsUnreadable(t *testing.T) {
+	v := newMemVolume("v1", 0)
+	sink := &memSink{vols: []*memVolume{v}}
+	spec := RunSpec{ID: "run-2026-06-21.001", CreatedAt: time.Unix(0, 0).UTC()}
+	w := NewAuthor(sink, spec, nil, nil)
+
+	body := []byte("payload of what was readable")
+	aw := w.NewArchive(ArchiveSpec{DLE: "dle1", Host: "localhost", Path: "/p", Archiver: "m", Level: 0, Compress: "none"})
+	if err := driveArchive(aw, body); err != nil {
+		t.Fatalf("driveArchive: %v", err)
+	}
+	stats := xfer.SourceStats{
+		FileCount:    2,
+		Uncompressed: int64(len(body)),
+		Members:      []string{"readable.txt"},
+		Unreadable:   []string{"/p/locked-a", "/p/locked-b"},
+	}
+	if err := aw.Commit(context.Background(), stats); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	arch := sink.last.Archive
+	if arch.Unreadable != 2 {
+		t.Fatalf("recorded Unreadable = %d, want 2", arch.Unreadable)
+	}
+	if !arch.Partial() {
+		t.Fatal("Partial() = false for an archive with unreadable files")
+	}
+
+	// The commit footer on the medium itself must carry the count (rebuild reads it there).
+	_, rc, err := v.ReadFile(sink.last.Pos.Commit.Pos)
+	if err != nil {
+		t.Fatalf("read commit footer: %v", err)
+	}
+	payload, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	footer, err := record.ParseCommit(payload)
+	if err != nil {
+		t.Fatalf("parse commit footer: %v", err)
+	}
+	if footer.Unreadable != 2 {
+		t.Fatalf("footer Unreadable = %d, want 2 (the marker must be durable on the medium)", footer.Unreadable)
+	}
+
+	// A copy preserves the source's PARTIAL marker (like its stats and CreatedAt).
+	v2 := newMemVolume("v2", 0)
+	sink2 := &memSink{vols: []*memVolume{v2}}
+	w2 := NewAuthor(sink2, spec, nil, nil)
+	cw := w2.NewCopy(arch)
+	if err := driveArchive(cw, body); err != nil {
+		t.Fatalf("copy driveArchive: %v", err)
+	}
+	if err := cw.Commit(context.Background(), xfer.SourceStats{}); err != nil {
+		t.Fatalf("copy Commit: %v", err)
+	}
+	if got := sink2.last.Archive.Unreadable; got != 2 {
+		t.Fatalf("copied archive Unreadable = %d, want 2", got)
+	}
+}

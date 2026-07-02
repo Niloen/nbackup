@@ -31,25 +31,33 @@ func newReportCmd(a *app) *cobra.Command {
 	var asJSON, notify, dump bool
 	var runID string
 	cmd := &cobra.Command{
-		Use:   "report",
+		Use:   "report [run-id]",
 		Short: "Summarize recent runs, or print one dump's per-DLE report",
 		Long: "Render a digest of recent runs from the run history every dump/sync/verify/drill/prune " +
 			"writes: a per-run table, a failure summary, and a recovery-health section flagging DLEs whose " +
 			"drills are failing, degrading (passed before, failing now), stale, or never run. With --dump it " +
-			"instead prints a per-DLE report for one dump (the latest, or --run <id>): each DLE's " +
+			"instead prints a per-DLE report for one dump (the latest, or a run id — positional or --run): each DLE's " +
 			"level, original/output size, compression %, files, dump time, and rate, with full/incremental " +
 			"totals. Reads only — no engine, no lock — so it is cheap to run from cron. With --notify it sends " +
 			"the digest through the config's `notify.digest` backends (e.g. a nightly email); with --json it " +
 			"emits the raw run records.",
-		Example: "  nb report\n  nb report --last 30\n  nb report --dump\n  nb report --dump --run run-2026-06-21.001\n  nb dump && nb sync && nb drill --unattended; nb report --notify",
-		Args:    cobra.NoArgs,
+		Example: "  nb report\n  nb report --last 30\n  nb report --dump\n  nb report --dump run-2026-06-21.001\n  nb dump && nb sync && nb drill --unattended; nb report --notify",
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.loadRO()
 			if err != nil {
 				return err
 			}
 			dir := cfg.WorkdirPath()
-			// --run implies the per-dump report.
+			// A positional run id is the inspection-noun form (`nb run <id>`, `nb verify <id>`),
+			// equivalent to --run; reject two ids that disagree rather than guessing.
+			if len(args) == 1 {
+				if runID != "" && runID != args[0] {
+					return fmt.Errorf("two different run ids given: %q (positional) and %q (--run); pass one", args[0], runID)
+				}
+				runID = args[0]
+			}
+			// A run id implies the per-dump report.
 			if runID != "" {
 				dump = true
 			}
@@ -73,7 +81,7 @@ func newReportCmd(a *app) *cobra.Command {
 	}
 	cmd.Flags().IntVar(&last, "last", 10, "summarize the last N runs (0 = all)")
 	cmd.Flags().BoolVar(&dump, "dump", false, "print the per-DLE dump report for the latest dump")
-	cmd.Flags().StringVar(&runID, "run", "", "with --dump, report on this run id instead of the latest")
+	cmd.Flags().StringVar(&runID, "run", "", "report on this run id instead of the latest (same as passing it positionally)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the raw run records as JSON instead of a text report")
 	cmd.Flags().BoolVar(&notify, "notify", false, "also send the digest through the config's notify.digest backends")
 	return cmd

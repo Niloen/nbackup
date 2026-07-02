@@ -33,7 +33,7 @@ cycle: 7d
 media:
   fast-disk:
     type: disk          # a filesystem directory (local or NFS)
-    path: /var/lib/nbackup/runs   # where run files live (distinct from the workdir)
+    path: /var/lib/nbackup   # NBackup creates runs/ under this (distinct from the workdir)
     capacity: 20TB      # space NBackup may use here; `nb prune` reclaims oldest to fit
     # minimum_age: 30d  # retention floor before a run may be retired (default: one cycle)
   lto:

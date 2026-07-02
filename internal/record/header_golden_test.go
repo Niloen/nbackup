@@ -57,6 +57,7 @@ func goldenArchive() record.Archive {
 		Compressed:   4096,
 		Uncompressed: 8192,
 		FileCount:    3,
+		Unreadable:   1,
 		SHA256:       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 		Parts:        2,
 		BaseRun:      "run-2026-01-01.001",
@@ -182,5 +183,21 @@ func TestHeaderBlockFraming(t *testing.T) {
 	}
 	if got != h {
 		t.Errorf("decoded header = %+v, want %+v", got, h)
+	}
+}
+
+// TestHeaderLevelAlwaysEmitted: the header promises the level (README's self-describing
+// story), so a level-0 full must carry an explicit "level":0 — the regression for the
+// omitempty tag that made L0 headers omit the key entirely.
+func TestHeaderLevelAlwaysEmitted(t *testing.T) {
+	h := goldenHeader()
+	h.Level = 0
+	h.BaseRun = "" // a full has no base
+	b, err := json.Marshal(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte(`"level":0`)) {
+		t.Errorf(`L0 header omits "level":0: %s`, b)
 	}
 }

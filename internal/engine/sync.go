@@ -16,12 +16,15 @@ type SyncSelection struct {
 	Since time.Time // zero = no lower bound; else only runs created at/after this
 }
 
-// SyncItem is one run in a sync's backlog: a copy that the target is missing.
+// SyncItem is one run in a sync's backlog: a copy the target is missing — entirely, or
+// in part (an interrupted earlier copy left some archives uncommitted there). Archives
+// and Bytes count only what this sync would copy: the archives the source copy holds
+// that the target copy does not.
 type SyncItem struct {
 	RunID    string
 	Archives int
-	Bytes    int64 // compressed size on the volume
-	Copied   bool  // set true once a real run copies it
+	Bytes    int64 // compressed size of the missing archives on the volume
+	Copied   bool  // set true once the target holds the run completely (checked after a real run)
 }
 
 // SyncReport is the backlog of one sync target (and, after a real run, what was
@@ -78,18 +81,22 @@ func (r *SyncReport) CopiedBytes() int64 {
 	return n
 }
 
-// SyncTo mirrors a source medium's sealed runs onto target: every run with a
-// copy on the source but not yet recorded on target, oldest-first. Oldest first
+// SyncTo mirrors a source medium's sealed runs onto target: every run whose copy on
+// the source holds archives the target copy does not, oldest-first. Oldest first
 // means an interrupted sync makes contiguous, replayable progress and a run's
 // full lands before the incrementals that build on it. The source defaults to the
 // landing medium when from is ""; any other medium is allowed (e.g. tape -> disk).
 //
 // With apply==false it only computes the backlog (a dry run). With apply==true it
-// copies each run via CopyRun — the same label-verified, placement-recording
+// copies the backlog via CopyRuns — the same label-verified, placement-recording
 // path as `nb copy` — stopping at the first error and returning the report so far
-// alongside it (a full or offline target won't fix itself by continuing). Each
-// run is atomic, so re-running resumes where an interrupted sync left off. With
-// force==true already-present runs are re-copied (CopyRun --force).
+// alongside it (a full or offline target won't fix itself by continuing). Presence
+// is archive-granular (see copier.copySets): each archive commits its target
+// placement atomically as it lands, and a run counts as mirrored only once the
+// target holds every archive its source copy does — so a sync that fails mid-run
+// leaves a resumable partial copy, never one that reads as "up to date", and
+// re-running copies exactly what is missing. With force==true already-present
+// runs are re-copied wholesale (CopyRun --force).
 func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force bool, logf Logf) (*SyncReport, error) {
 	if from == "" {
 		from = e.mediumName
@@ -106,13 +113,21 @@ func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force boo
 
 	report := &SyncReport{From: from, To: target}
 	for _, s := range applySelection(e.cat.RunsOn(from), sel) {
-		if !force && e.placedOn(s.ID, target) {
-			continue // idempotent: already on the target
+		held, missing, err := e.cop.copySets(s.ID, from, target)
+		if err != nil {
+			return nil, err
+		}
+		want := missing
+		if force {
+			want = held // a forced sync re-copies the source copy's whole content
+		}
+		if len(want) == 0 {
+			continue // idempotent: the target holds everything the source copy does
 		}
 		report.Items = append(report.Items, SyncItem{
 			RunID:    s.ID,
-			Archives: len(s.Archives),
-			Bytes:    s.TotalBytes(),
+			Archives: len(want),
+			Bytes:    archivesBytes(want),
 		})
 	}
 	// Capacity projection (sampled before any copy, so it reads the same for dry-run
@@ -130,11 +145,17 @@ func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force boo
 	}
 	// Copy every selected run in one spool pass, so a multi-drive target stays saturated across run
 	// boundaries. A failure aborts the sync (a partial sync is safe to re-run — it is idempotent).
-	if err := e.CopyRuns(runIDs, from, target, force, logf); err != nil {
-		return report, fmt.Errorf("sync -> %q: %w", target, err)
-	}
+	copyErr := e.CopyRuns(runIDs, from, target, force, logf)
+	// Mark what actually landed by re-reading the catalog, not by assuming success: a
+	// sync that failed partway still reports the runs that completed before the error
+	// (and the run record's BytesMoved counts them), instead of "copied 0 run(s)".
 	for i := range report.Items {
-		report.Items[i].Copied = true
+		if _, missing, err := e.cop.copySets(report.Items[i].RunID, from, target); err == nil && len(missing) == 0 {
+			report.Items[i].Copied = true
+		}
+	}
+	if copyErr != nil {
+		return report, fmt.Errorf("sync -> %q: %w", target, copyErr)
 	}
 	return report, nil
 }
