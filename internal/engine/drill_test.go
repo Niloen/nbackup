@@ -321,6 +321,105 @@ func TestDrillPostureAudit(t *testing.T) {
 	}
 }
 
+// TestStockPipeline covers the documented restore one-liner builder across its scheme
+// branches: plaintext/uncompressed, the gpg (symmetric, passphrase-pinned) and gzip/zstd
+// stages, and the unknown-scheme errors for both transforms.
+func TestStockPipeline(t *testing.T) {
+	// Plaintext, uncompressed: just the tar extract stage.
+	got, err := stockPipeline("none", "none", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "gpg") || strings.Contains(got, "gzip") || !strings.Contains(got, "tar --extract") {
+		t.Errorf("plaintext pipeline = %q, want only a tar stage", got)
+	}
+
+	// gpg (with a passphrase file) then gzip then tar.
+	got, err = stockPipeline("gpg", "gzip", "/keys/pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "--passphrase-file '/keys/pass'") {
+		t.Errorf("gpg pipeline should pin the passphrase file: %q", got)
+	}
+	if !strings.Contains(got, "gzip -dc") {
+		t.Errorf("pipeline should include the gzip stage: %q", got)
+	}
+
+	// gpg without a passphrase file (public-key dump) and a zstd stage.
+	got, err = stockPipeline("gpg", "zstd", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "--passphrase-file") {
+		t.Errorf("a keyring gpg pipeline should not pin a passphrase file: %q", got)
+	}
+	if !strings.Contains(got, "zstd -dc") {
+		t.Errorf("pipeline should include the zstd stage: %q", got)
+	}
+
+	// Unknown schemes are hard errors on both axes.
+	if _, err := stockPipeline("rot13", "none", ""); err == nil {
+		t.Error("an unknown encryption scheme should error")
+	}
+	if _, err := stockPipeline("none", "lzma", ""); err == nil {
+		t.Error("an unknown compression scheme should error")
+	}
+}
+
+// TestShSingleQuote checks the passphrase escaping used in the stock one-liner keeps an
+// embedded single quote from breaking out of the sh string.
+func TestShSingleQuote(t *testing.T) {
+	if got := shSingleQuote("simple"); got != "'simple'" {
+		t.Errorf("shSingleQuote(simple) = %q", got)
+	}
+	// An embedded quote closes, escapes, and reopens: it can never terminate the arg.
+	if got := shSingleQuote("a'b"); got != `'a'\''b'` {
+		t.Errorf("shSingleQuote(a'b) = %q, want the '\\'' escape", got)
+	}
+}
+
+// TestClassifyOpenErr mirrors TestClassifyRestoreErr for the stock drill's open-failure
+// classification: the missing-copy / unavailable-volume sentinels survive wrapping
+// (errors.Is), everything else is a pipeline fault.
+func TestClassifyOpenErr(t *testing.T) {
+	wrap := func(err error) error { return fmt.Errorf("open run-x dle L0: %w", err) }
+	cases := []struct {
+		name string
+		err  error
+		want drill.Class
+	}{
+		{"missing copy", wrap(fmt.Errorf("%w of run x", archiveio.ErrMissingCopy)), drill.ClassMissing},
+		{"volume unavailable", wrap(fmt.Errorf("mount: %w", librarian.ErrVolumeUnavailable)), drill.ClassMissing},
+		{"plain read fault", wrap(errors.New("read: i/o error")), drill.ClassPipeline},
+	}
+	for _, tc := range cases {
+		if got := classifyOpenErr(tc.err); got != tc.want {
+			t.Errorf("%s: classified %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestDrillStockGzip runs the stock tier against a real gzip-compressed chain, so the
+// documented `gzip -dc | tar` one-liner is exercised end-to-end through /bin/sh (not
+// only the uncompressed stock path the other tier tests cover).
+func TestDrillStockGzip(t *testing.T) {
+	if _, err := exec.LookPath("gzip"); err != nil {
+		t.Skip("gzip not available")
+	}
+	f := newDrillFixture(t, "gzip")
+	rep, err := f.eng.Drill(DrillOptions{Tier: drill.TierStock, Medium: "disk", Sample: 1, Apply: true, Now: time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)}, logfDiscard)
+	if err != nil {
+		t.Fatalf("stock gzip drill: %v", err)
+	}
+	if rep.Failures != 0 {
+		t.Fatalf("stock gzip drill failures = %d (%+v)", rep.Failures, rep.Targets)
+	}
+	if len(rep.Targets) != 1 || !rep.Targets[0].OK {
+		t.Fatalf("stock gzip drill target = %+v, want one OK", rep.Targets)
+	}
+}
+
 // corrupt overwrites a payload with garbage of the same length, so its checksum
 // fails and neither the scheme nor tar can decode it (a fatal error, not a warning).
 func corrupt(t *testing.T, path string) {

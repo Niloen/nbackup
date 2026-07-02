@@ -24,6 +24,27 @@ type mtxLoader struct {
 	control string      // the changer control device (sg node) passed to `mtx -f`
 	nodes   []string    // drive device nodes (/dev/nstN); index = drive number
 	devs    []*mtDevice // persistent byte handle per drive (the cartridge swaps under it)
+	runner  mtxRunner   // runs mtx subcommands (execMtxRunner in production; a fake in tests)
+}
+
+// mtxRunner runs one mtx(1) subcommand against a changer and returns its combined
+// output. It is the exec seam: production shells out (execMtxRunner) while tests
+// script the changer's responses without any mtx binary or hardware.
+type mtxRunner interface {
+	run(args ...string) (string, error)
+}
+
+// execMtxRunner runs mtx(1) against a control device via os/exec.
+type execMtxRunner struct {
+	control string
+}
+
+func (r execMtxRunner) run(args ...string) (string, error) {
+	out, err := exec.Command("mtx", append([]string{"-f", r.control}, args...)...).CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("mtx %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
 }
 
 // openMtxLoader builds an mtx-backed loader: one mtDevice per drive node, validated
@@ -43,7 +64,7 @@ func openMtxLoader(control string, nodes []string, block int) (loader, error) {
 		}
 		devs[i] = d
 	}
-	return &mtxLoader{control: control, nodes: nodes, devs: devs}, nil
+	return &mtxLoader{control: control, nodes: nodes, devs: devs, runner: execMtxRunner{control: control}}, nil
 }
 
 func (m *mtxLoader) driveCount() int { return len(m.nodes) }
@@ -51,11 +72,7 @@ func (m *mtxLoader) manual() bool    { return false }
 
 // mtx runs one mtx subcommand against the control device.
 func (m *mtxLoader) mtx(args ...string) (string, error) {
-	out, err := exec.Command("mtx", append([]string{"-f", m.control}, args...)...).CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("mtx %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return string(out), nil
+	return m.runner.run(args...)
 }
 
 func (m *mtxLoader) status() (mtxStatus, error) {

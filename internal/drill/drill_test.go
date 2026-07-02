@@ -127,6 +127,96 @@ func TestSelectPointInTime(t *testing.T) {
 	}
 }
 
+// TestClassRoundTrip pins the persisted contract the ledger relies on: every Class
+// serializes to a stable token and parses back to the same Class. This is what lets a
+// report recover the failure class recorded on disk and print its Remedy.
+func TestClassRoundTrip(t *testing.T) {
+	for _, c := range []Class{ClassNone, ClassIntegrity, ClassPipeline, ClassChain, ClassMissing, ClassSkipped} {
+		if got := ParseClass(c.String()); got != c {
+			t.Errorf("ParseClass(%q) = %v, want %v (round-trip broken)", c.String(), got, c)
+		}
+	}
+	// An unknown token (including "ok", the passing token) resolves to ClassNone.
+	for _, tok := range []string{"ok", "", "bogus"} {
+		if got := ParseClass(tok); got != ClassNone {
+			t.Errorf("ParseClass(%q) = %v, want ClassNone", tok, got)
+		}
+	}
+	// An out-of-range class stringifies to a diagnostic token, not a real one.
+	if s := Class(99).String(); s != "class(99)" {
+		t.Errorf("Class(99).String() = %q, want class(99)", s)
+	}
+}
+
+// TestClassIsFailureAndRemedy checks the failure taxonomy: the four hard faults fail a
+// drill and carry non-empty guidance; a pass fails nothing and has no remedy; a skip is
+// not a failure but still carries operator guidance.
+func TestClassIsFailureAndRemedy(t *testing.T) {
+	for _, c := range []Class{ClassIntegrity, ClassPipeline, ClassChain, ClassMissing} {
+		if !c.IsFailure() {
+			t.Errorf("%v should be a failure", c)
+		}
+		if c.Remedy() == "" {
+			t.Errorf("%v should have a remedy", c)
+		}
+	}
+	if ClassNone.IsFailure() || ClassSkipped.IsFailure() {
+		t.Error("ClassNone and ClassSkipped must not be failures")
+	}
+	if ClassNone.Remedy() != "" {
+		t.Error("ClassNone should have no remedy")
+	}
+	if ClassSkipped.Remedy() == "" {
+		t.Error("ClassSkipped should carry operator guidance even though it is not a failure")
+	}
+}
+
+// TestCoverage checks the pure coverage computation the drill audit and report share:
+// which configured DLEs have never been drilled, and how many are not covered within
+// the window (never-drilled, stale, or failing — anything Drilled rejects).
+func TestCoverage(t *testing.T) {
+	now := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
+	win := 30 * 24 * time.Hour
+	l := &Ledger{Records: map[string]Record{}}
+	l.Update(Record{DLE: "a", LastDrill: now, OK: true})                    // covered
+	l.Update(Record{DLE: "b", LastDrill: now.AddDate(0, 0, -40), OK: true}) // stale
+	l.Update(Record{DLE: "c", LastDrill: now, OK: false})                   // failing
+	l.Update(Record{DLE: "e", OK: true})                                    // recorded but zero LastDrill = never
+	// "d" is not recorded at all.
+
+	never, overdue := l.Coverage([]string{"a", "b", "c", "d", "e"}, win, now)
+	wantNever := []string{"d", "e"}
+	if len(never) != len(wantNever) {
+		t.Fatalf("never = %v, want %v", never, wantNever)
+	}
+	for i := range wantNever {
+		if never[i] != wantNever[i] {
+			t.Fatalf("never = %v, want %v", never, wantNever)
+		}
+	}
+	if overdue != 4 { // b (stale), c (fail), d (unrecorded), e (zero) — a is covered
+		t.Fatalf("overdue = %d, want 4", overdue)
+	}
+}
+
+// TestSorted confirms records render in stable DLE-name order regardless of map
+// iteration order.
+func TestSorted(t *testing.T) {
+	l := &Ledger{Records: map[string]Record{
+		"c": {DLE: "c"}, "a": {DLE: "a"}, "b": {DLE: "b"},
+	}}
+	got := l.Sorted()
+	want := []string{"a", "b", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("Sorted returned %d records, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].DLE != want[i] {
+			t.Fatalf("Sorted order = %v, want %v", got, want)
+		}
+	}
+}
+
 // TestParseTier covers the tier token mapping and its default.
 func TestParseTier(t *testing.T) {
 	cases := map[string]Tier{"": TierStructural, "checksum": TierChecksum, "structural": TierStructural, "chain": TierChain, "stock": TierStock}

@@ -251,6 +251,108 @@ func TestHasBaseRejectsEmptySnapshot(t *testing.T) {
 	}
 }
 
+// TestList verifies the deep-verify member lister: `tar -t` over a real archive returns
+// its members (the structural half of a verify), and the pipeline completing cleanly proves
+// the stream is a valid, listable archive.
+func TestList(t *testing.T) {
+	src := t.TempDir()
+	out := t.TempDir()
+	m := newArchiver(t, t.TempDir())
+	write(t, filepath.Join(src, "a.txt"), "alpha")
+	write(t, filepath.Join(src, "sub", "c.txt"), "gamma")
+
+	l0 := filepath.Join(out, "l0.tar")
+	backup(t, m, archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 0, BaseLevel: -1}, l0)
+
+	f, err := os.Open(l0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	members, err := m.List(f)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	got := map[string]bool{}
+	for _, mem := range members {
+		got[mem] = true
+	}
+	for _, want := range []string{"./a.txt", "./sub/", "./sub/c.txt"} {
+		if !got[want] {
+			t.Errorf("List missing member %q; got %v", want, members)
+		}
+	}
+}
+
+// TestListRejectsGarbage verifies List surfaces an error (rather than an empty success)
+// when the input is not a valid tar stream — the "did it decode" half of a deep verify.
+func TestListRejectsGarbage(t *testing.T) {
+	m := newArchiver(t, t.TempDir())
+	_, err := m.List(strings.NewReader("this is not a tar archive at all, just noise\n"))
+	if err == nil {
+		t.Fatal("List must fail on a non-tar stream")
+	}
+}
+
+// TestEstimateIncompleteFloor verifies that when a source file cannot be read, Estimate
+// returns the running total as a FLOOR alongside an error naming the incompleteness — so
+// capacity planning warns rather than silently undercounting to ~0.
+func TestEstimateIncompleteFloor(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("runs as root: a chmod-000 directory is still traversable, so tar never reports it unreadable")
+	}
+	src := t.TempDir()
+	m := newArchiver(t, t.TempDir())
+	write(t, filepath.Join(src, "readable.bin"), strings.Repeat("x", 50000))
+	// A directory tar cannot open during the metadata walk (the /dev/null estimate stats
+	// bodies but must still enter directories) — an unreadable *file* would still be stat-able.
+	locked := filepath.Join(src, "locked")
+	write(t, filepath.Join(locked, "inner.bin"), strings.Repeat("y", 50000))
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o755) })
+
+	total, err := m.Estimate(archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 0, BaseLevel: -1})
+	if err == nil {
+		t.Fatal("an unreadable source must make Estimate report incompleteness")
+	}
+	if !strings.Contains(err.Error(), "incomplete") {
+		t.Errorf("error = %q, want it to name the incomplete estimate", err)
+	}
+	if total <= 0 {
+		t.Errorf("floor total = %d, want > 0 (the readable file's bytes, not a silent ~0)", total)
+	}
+}
+
+// TestSeedSnapshotCopyFailure verifies seedSnapshot surfaces the error when an incremental's
+// base snapshot is absent (CopyFile of a missing source) rather than silently seeding an
+// empty state — which would make the incremental re-dump everything.
+func TestSeedSnapshotCopyFailure(t *testing.T) {
+	stateRoot := t.TempDir()
+	m := newArchiver(t, stateRoot)
+	g := m.(*gnutar)
+	// Level 1 with base level 0 present nowhere: seedSnapshot must CopyFile the (missing)
+	// L0 snapshot and fail.
+	out := filepath.Join(t.TempDir(), "work.snar")
+	err := g.seedSnapshot(archiver.BackupRequest{DLE: "app", SourcePath: t.TempDir(), Level: 1, BaseLevel: 0}, out)
+	if err == nil {
+		t.Fatal("seeding an incremental with no base snapshot must fail")
+	}
+}
+
+// TestPromoteSnapshotRenameFailure verifies promoteSnapshot surfaces the rename error when
+// there is no work snapshot to promote (a dump that never wrote one) — the failure half of
+// the ".new"-then-rename promotion.
+func TestPromoteSnapshotRenameFailure(t *testing.T) {
+	stateRoot := t.TempDir()
+	m := newArchiver(t, stateRoot)
+	g := m.(*gnutar)
+	if err := g.promoteSnapshot("app", 0); err == nil {
+		t.Fatal("promoting with no work snapshot must fail (nothing to rename)")
+	}
+}
+
 // backup runs the archiver's backup pipeline source to outFile, the way the writer does
 // (run the tar stage, drain its stdout, finish), exercising the new BackupSource API.
 func backup(t *testing.T, m archiver.Archiver, req archiver.BackupRequest, outFile string) {

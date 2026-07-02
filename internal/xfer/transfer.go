@@ -58,6 +58,14 @@ const (
 	RoleSource Role = iota
 	RoleFilters
 	RoleSink
+	// RoleCommit is the sink's finalize-time verdict (Commit) — distinct from RoleSink's
+	// mid-copy fault. For a sink whose NextPart writer cannot itself fail (e.g. Hash, whose
+	// hash.Hash.Write never errors), every mid-copy RoleSink is necessarily an upstream read
+	// fault that surfaced while draining into that writer, while a RoleCommit is the sink's
+	// own judgment (a checksum mismatch, a tar child's exit status) — a caller that needs to
+	// tell "something failed feeding the sink" from "the sink pronounced a verdict" (like
+	// VerifyChecksum) checks this Role specifically.
+	RoleCommit
 )
 
 func (r Role) String() string {
@@ -66,6 +74,8 @@ func (r Role) String() string {
 		return "source"
 	case RoleFilters:
 		return "filters"
+	case RoleCommit:
+		return "commit"
 	default:
 		return "sink"
 	}
@@ -201,7 +211,7 @@ func Transfer(ctx context.Context, source Source, filters Filters, sink Sink) (S
 	// totals (writes the footer + records the placement, for a medium sink).
 	if err := sink.Commit(actx, stats); err != nil {
 		cancel()
-		return SourceStats{}, &Error{RoleSink, err}
+		return SourceStats{}, &Error{RoleCommit, err}
 	}
 	cancel()
 	return stats, nil

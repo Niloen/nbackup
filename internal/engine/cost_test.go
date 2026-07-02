@@ -3,10 +3,12 @@ package engine
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/recovery"
 )
 
 // cloudCostEngine lands one DLE on a file://-backed cloud medium (no network), with
@@ -113,6 +115,79 @@ func TestCostOverride(t *testing.T) {
 	wantEgress := float64(est.Bytes) / (1 << 30) * egress
 	if est.Cost < wantEgress {
 		t.Errorf("cost %v should be at least the overridden egress %v", est.Cost, wantEgress)
+	}
+}
+
+// TestSelectionCostEgress exercises SelectionCost: a file-level recovery is priced as
+// the egress of the archives its selected members are extracted from.
+func TestSelectionCostEgress(t *testing.T) {
+	runDate := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	eng, dle := cloudCostEngine(t, runDate, nil)
+
+	run := eng.cat.Runs()[0]
+	a := run.Archives[0]
+	steps := []recovery.ExtractStep{
+		{Step: recovery.Step{RunID: run.ID, DLE: dle, Level: a.Level}, Members: []string{"f.txt"}},
+	}
+
+	est := eng.SelectionCost(steps)
+	if !est.Priced {
+		t.Fatalf("a cloud selection recovery should be priced: %+v", est)
+	}
+	if est.Bytes <= 0 {
+		t.Errorf("selection cost should carry the archive's egress bytes: %+v", est)
+	}
+	if est.Cost <= 0 {
+		t.Errorf("a cloud selection recovery should cost egress: %v", est.Cost)
+	}
+}
+
+// TestForecastCostReclaims exercises the forecast's per-archive reclamation (dropArchive):
+// a small-capacity, daily-full landing must, over the projected days, reclaim superseded
+// fulls once they age past the retention floor — so at least one point reports reclaimed
+// bytes rather than a monotonically growing footprint.
+func TestForecastCostReclaims(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), strings.Repeat("forecast-reclaim-", 512)) // a non-trivial full
+
+	cfg := &config.Config{
+		Landing: "cloud",
+		Media: map[string]config.Media{
+			// A tiny capacity forces the forecast over budget, and a short floor lets
+			// superseded fulls be reclaimed rather than pinned.
+			"cloud": {Type: "cloud", Capacity: "100", MinimumAge: "1s", Params: map[string]string{"url": "file://" + t.TempDir()}},
+		},
+		Cycle:    "1d", // every simulated run is a fresh full, so older fulls become reclaimable
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	if _, err := eng.Run(context.Background(), start, nil); err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+
+	curve := eng.ForecastCost(start.AddDate(0, 0, 1), 6)
+	if len(curve) != 6 {
+		t.Fatalf("curve has %d points, want 6", len(curve))
+	}
+	reclaimedSomewhere := false
+	for _, p := range curve {
+		if p.Reclaimed > 0 {
+			reclaimedSomewhere = true
+		}
+	}
+	if !reclaimedSomewhere {
+		t.Fatalf("a capacity-bounded daily-full forecast should reclaim superseded fulls; curve=%+v", curve)
 	}
 }
 
