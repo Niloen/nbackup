@@ -36,7 +36,8 @@ compress:
 media:
   lto:
     type: tape
-    dir: /var/lib/nbackup/vtape    # a file-backed virtual library (no hardware)
+    dir: /var/lib/nbackup/vtape    # a virtual library (no hardware); also takes a
+                                   # bucket URL (s3://…) to put the library in a store
     slots: 20                      # storage slots; capacity = slots × volume_size = 120TB
     drives: 1                      # data-transfer drives a robot loads slots into
     volume_size: 6TB               # a write past this hits end-of-tape and spans

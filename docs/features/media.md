@@ -127,10 +127,11 @@ A tape medium is a **changer**: a set of **drives** (data-transfer elements) fed
 from a set of **slots** (storage elements that hold cartridges). It comes in
 shapes that differ in **who loads the tape**:
 
-- A **changer with a robot** — `dir:` (a file-backed virtual library), `slots: N`
-  cartridges, `drives: K` (default 1), a finite `volume_size` per cartridge. A
-  command loads a slot into a drive; the robot does it unattended.
-- A **single drive loaded by hand** — either a file-backed sim (`manual: true`, a
+- A **changer with a robot** — `dir:` (a virtual library in a local directory or,
+  via a bucket URL like `s3://…`, an object store), `slots: N` cartridges,
+  `drives: K` (default 1), a finite `volume_size` per cartridge. A command loads
+  a slot into a drive; the robot does it unattended.
+- A **single drive loaded by hand** — either an emulated sim (`manual: true`, a
   drive a human loads), or a real drive (`device:`, a one-drive changer with
   `block_size:` for the tape record size). It shows only the cartridge currently
   loaded.
