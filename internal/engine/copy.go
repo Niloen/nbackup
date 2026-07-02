@@ -253,8 +253,8 @@ func (c *copier) prepareRun(runID, fromMedia, targetMedia string, force bool) ([
 // per target drive, up to `workers`, so a multi-drive library re-authors several at once. Source reads
 // run concurrently only when the source medium allows it (disk/cloud); a tape source stays serial.
 func (c *copier) runCopy(targetMedia, fromMedia string, spec archiveio.RunSpec, jobs []copyJob, logf Logf) error {
-	return c.newConductor().CopyRun(context.Background(), targetMedia, spec, c.workers, spec.CreatedAt, logf, func(sp *spool.Spool) error {
-		return c.transfer(context.Background(), jobs, fromMedia, targetMedia, sp.Ingest(targetMedia), logf)
+	return c.newConductor().CopyRun(context.Background(), targetMedia, fromMedia, spec, c.workers, spec.CreatedAt, logf, func(sp *spool.Spool, ro archiveio.ReadStore) error {
+		return c.transfer(context.Background(), jobs, fromMedia, targetMedia, sp.Ingest(targetMedia), ro, logf)
 	})
 }
 
@@ -282,7 +282,10 @@ func (c *copier) jobsForRun(runID string, archives []record.Archive) []copyJob {
 // clamped to serial when the source cannot be read concurrently (a tape's one drive). Each transfer
 // opens the archive raw, leases a target drive via NewCopy, and streams it in; the spool's drive
 // semaphore bounds the target side, so the effective width is min(source reads, target drives).
-func (c *copier) transfer(ctx context.Context, jobs []copyJob, fromMedia, targetMedia string, ingest archiveio.Ingest, logf Logf) error {
+//
+// Source opens go through ro — the window's catalog snapshot — never the live clerk: the workers run
+// concurrently with the spool's orchestrator, which owns the live catalog for the window's duration.
+func (c *copier) transfer(ctx context.Context, jobs []copyJob, fromMedia, targetMedia string, ingest archiveio.Ingest, ro archiveio.ReadStore, logf Logf) error {
 	workers := c.workers
 	if !c.concurrentRead(fromMedia) {
 		workers = 1 // a serial source (tape) is read one archive at a time
@@ -318,7 +321,7 @@ func (c *copier) transfer(ctx context.Context, jobs []copyJob, fromMedia, target
 		go func(job copyJob) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if err := c.transferOne(ctx, job, fromMedia, targetMedia, ingest); err != nil {
+			if err := c.transferOne(ctx, job, fromMedia, targetMedia, ingest, ro); err != nil {
 				mu.Lock()
 				fst = errors.Join(fst, err)
 				mu.Unlock()
@@ -332,8 +335,8 @@ func (c *copier) transfer(ctx context.Context, jobs []copyJob, fromMedia, target
 // transferOne opens one source archive raw and re-authors it onto the target via NewCopy (which leases
 // a drive, preserves the source's identity/checksum/members, and records the new placement on Commit).
 // Transfer drives and closes the writer, so the drive is released whether or not the copy commits.
-func (c *copier) transferOne(ctx context.Context, job copyJob, fromMedia, targetMedia string, ingest archiveio.Ingest) error {
-	rc, err := c.clerk.Open(job.ref, fromMedia)
+func (c *copier) transferOne(ctx context.Context, job copyJob, fromMedia, targetMedia string, ingest archiveio.Ingest, ro archiveio.ReadStore) error {
+	rc, err := ro.Open(job.ref, fromMedia)
 	if err != nil {
 		return fmt.Errorf("copy %s L%d from %q: %w", job.ref.DLE, job.ref.Level, fromMedia, err)
 	}

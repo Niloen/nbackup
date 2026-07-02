@@ -1,9 +1,13 @@
 package engine
 
 import (
+	"errors"
+	"sort"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/conductor"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/librarian"
@@ -11,6 +15,7 @@ import (
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // openWriter folds the engine's clerk/librarian write machinery into the medium-
@@ -36,6 +41,62 @@ func (e *Engine) openWriter(medium string, spec archiveio.RunSpec, now time.Time
 		Capacity: capB,
 		Writers:  e.cfg.Media[medium].Writers,
 	}, nil
+}
+
+// openReader is the conductor's window-open read view: the archive fs's read face
+// (an archiveio.ReadStore — a clerk) over a snapshot of the catalog's placements,
+// taken while the window's single goroutine is still the only one running and pinned
+// to the kept media — the media the window's caller owns for reading. The view holds
+// only their placements, so a read cannot resolve onto a spool-owned medium at all:
+// the restriction is in the data, not a check. Inside a spool window the orchestrator
+// owns the live catalog (every write routes to it); readers work from this copy
+// instead, so a reader and the orchestrator never share the live entries. Serving
+// reads from a point-in-time copy is sound because a session never reads its own
+// writes through the catalog: everything written inside the window belongs to this
+// run, everything read (a copy's source placements) was recorded by a previous one,
+// and the one same-run read-back — a drain reopening a staged archive — travels by
+// value in CommitResult, not through the catalog.
+func (e *Engine) openReader(kept []string) archiveio.ReadStore {
+	keep := make(map[string]bool, len(kept))
+	for _, k := range kept {
+		keep[k] = true
+	}
+	snap := e.cat.SnapshotPlacements()
+	for id, ps := range snap {
+		owned := ps[:0]
+		for _, p := range ps {
+			if keep[p.Medium] {
+				owned = append(owned, p)
+			}
+		}
+		if len(owned) == 0 {
+			delete(snap, id)
+			continue
+		}
+		// The usual read preference: the engine's own medium first (see placementsFor).
+		sort.SliceStable(owned, func(i, j int) bool {
+			return owned[i].Medium == e.dep.landingName && owned[j].Medium != e.dep.landingName
+		})
+		snap[id] = owned
+	}
+	return clerk.New(snapshotMap{placements: snap}, clerkDeps{e}, catalog.OpenMemberIndex(e.cfg.WorkdirPath()))
+}
+
+// snapshotMap is the read-only clerk Map over a placements snapshot. The write
+// methods are unreachable — no Session is ever opened over a snapshot clerk — and
+// fail loudly if that ever changes.
+type snapshotMap struct {
+	placements map[string][]catalog.Placement
+}
+
+func (m snapshotMap) PlacementsFor(runID string) []catalog.Placement { return m.placements[runID] }
+
+func (m snapshotMap) AddArchive(record.Archive, string, record.ArchivePos) error {
+	return errors.New("catalog snapshot is read-only")
+}
+
+func (m snapshotMap) RemoveArchive(string, string, string) (bool, bool, error) {
+	return false, false, errors.New("catalog snapshot is read-only")
 }
 
 // landingStores opens the run stores a landing is written through: one per tape drive for a robotic
@@ -102,6 +163,7 @@ func (e *Engine) newConductor() *conductor.Conductor {
 		Plan:              e.sched.Plan,
 		Vol:               e.dep.vol,
 		OpenWriter:        e.openWriter,
+		OpenReader:        e.openReader,
 		CheckCompress:     e.tc.checkCompress,
 		ProbeReachable:    e.tc.probeReachable,
 		PreflightDumptype: e.tc.preflightDumptype,

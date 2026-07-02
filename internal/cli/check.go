@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/lock"
 )
 
 // newCheckCmd implements `nb check`: the preflight check. It verifies the server side and
@@ -31,6 +32,13 @@ func newCheckCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// check opens the landing medium for real (that is its point), so it takes
+			// the config lock like any medium-accessing command.
+			lk, err := lock.Acquire(cfg.WorkdirPath())
+			if err != nil {
+				return err
+			}
+			defer lk.Release()
 			// Tolerant build: a landing medium that won't open is collected as a check
 			// failure (not an early abort), so `nb check` reports every problem at once.
 			eng, err := engine.NewForCheck(cfg)

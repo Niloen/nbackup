@@ -42,6 +42,41 @@ nothing else. No bulk bytes ever cross it, so a slow drive's payload can't block
 worker. Per-medium **writer permits** (a semaphore) bound concurrent writers to a medium: 1 for a serial tape, N
 for a concurrent medium like cloud.
 
+## Reads
+
+Ownership inside a window is **per medium**: at window-open every medium gets exactly one owner.
+The media the run writes (landings and holding disks) transfer to the spool — its orchestrator
+owns them together with the live catalog, and may do what it likes with them (a holding disk is
+both staged onto and drained back by its one owner). The caller keeps the rest — for a copy/sync,
+the source medium — read-only. `withSpool` is the handover: it checks the two sets are disjoint
+(a medium cannot be both read and written in one run) and hands the run closure a read-only
+archive fs (`archiveio.ReadStore`, via `Deps.OpenReader`) built over a snapshot of the catalog's
+placements taken at that moment (one goroutine, before any writer exists) and **pinned to the kept
+media** — the view holds only their placements, so a read cannot resolve onto a spool-owned medium
+at all, not even via the `""` any-copy fail-over; the restriction is in the data, not a check. A
+dump keeps nothing (it writes media and reads only the host fs). So a reader and the orchestrator
+never share the live entries — even when both touch the same run's entry (a copy reads a run's
+source placement while writing its target placement) — and never share a medium either.
+
+The snapshot leans on an invariant: **a session never reads its own writes through the catalog.**
+Everything written inside the window belongs to this run; everything read (a copy's source
+placements) was recorded by a previous run — so the point-in-time view is never stale for its
+reader. The one same-run read-back — a drain reopening a staged archive — travels by value in
+`CommitResult`, not through the catalog.
+
+Per-medium ownership cannot cover the layer below media: two media may share one changer device
+(a tape library's robot). In-process the robot's serialization is the read-clamp, not the
+orchestrator — a reader needs the robot only when the source is tape, and a tape source clamps
+the transfer to one worker, whose reads and routed writes strictly alternate (the write call
+blocks its caller until the orchestrator replies). Cross-process it is the config lock: any
+command that accesses a medium takes it (see internal/lock), so a verify or recover never drives
+a robot mid-dump. If concurrent tape reads are ever built (a multi-drive library reading and
+writing at once), the robot needs its own per-device owner at the changer boundary — Amanda's
+chg-robot lockfile is the precedent — acquired as a leaf inside the changer op, never via the
+orchestrator (wrong scope: per-run vs per-device; and a minutes-long mount must not starve
+catalog writes). Note the read path is not purely reading either: loading a tape learns barcodes
+into the catalog, safe only under the same clamp.
+
 ## Holding disks
 
 When a landing is slow, a dump stages onto a holding disk (still an Author over a routing `WriteStore`),

@@ -45,10 +45,16 @@ func newRecoverCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eng, err := newEngine(cfg)
+			// Recovery reads media (extraction always; browsing too, when a member
+			// index misses the cache and falls back to the on-medium copy), so it
+			// takes the config lock like any medium-accessing command. An interactive
+			// session holds it for the session's duration — a recovery in progress
+			// outranks a cron dump.
+			eng, unlock, err := a.lockedEngine(cfg)
 			if err != nil {
 				return err
 			}
+			defer unlock()
 			attachOperator(eng)
 			if all {
 				if listOnly || len(paths) > 0 {
