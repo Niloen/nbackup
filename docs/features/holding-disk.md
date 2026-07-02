@@ -26,8 +26,8 @@ data does not arrive fast enough to keep it streaming.
 
 Amanda's **holding disk** fixes both. Mark a fast disk (or cloud) medium with
 `holding: true` and it becomes a scratch buffer the dump flows *through*. Dumps land on
-the buffer in **parallel**, then one drainer copies each finished archive to the landing
-and frees the disk. The drive runs at disk speed, and a small disk can feed a much
+the buffer in **parallel**, then drains copy each finished archive to the landing
+and free the disk. The drive runs at disk speed, and a small disk can feed a much
 larger tape.
 
 ## Configuration
@@ -40,8 +40,26 @@ media:
 parallelism: { workers: 4 }
 ```
 
-Here four workers dump in parallel onto the `scratch` disk while one drainer copies each
-completed archive onto `lto`.
+Here four workers dump in parallel onto the `scratch` disk while a drain copies each
+completed archive onto `lto` — one at a time, because a single tape drive takes one
+archive at a time.
+
+How many archives a medium accepts at once is its `writers` cap — one lever per medium,
+counted the same for every write path: a dumper's direct dump, a drain from the holding
+disk, and staging onto a holding disk. Unset, a medium takes its natural width — a serial
+library's `drives`, else the run's worker count. Cap it to protect a disk from
+interleaved writes:
+
+```yaml
+media:
+  vault:   { type: disk, path: /mnt/vault, capacity: 20TB, writers: 2 }
+  scratch: { type: disk, path: /var/spool/nbackup, capacity: 500GB, holding: true, writers: 1 }
+landing: vault
+```
+
+Here at most two archives write `vault` at once (drains and direct dumps combined), and
+the dumpers stage onto `scratch` one at a time. A serial tape library never exceeds its
+`drives` regardless (two archives cannot interleave on one tape).
 
 ## How it behaves
 
@@ -75,8 +93,10 @@ media:
 ```
 
 The dumpers spread their writes across all of them — more spindles means more aggregate
-write bandwidth and a larger combined buffer — and the one drainer copies them all to
-the landing.
+write bandwidth and a larger combined buffer — and the drains copy them all to the
+landing (up to its `writers` at a time). A per-disk `writers` cap makes the spread
+firm: a disk at its cap is skipped for the next one, rather than taking interleaved
+writes.
 
 ## When you need it
 

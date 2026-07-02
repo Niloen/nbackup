@@ -40,7 +40,7 @@ orchestrator (MAIN goroutine, sole catalog writer)
         │ ◄── proxy VolumeSink funnels the drainer's NextPart/PlaceRecord back here ─────┤ (control)
         ▼                                                                               ▼
    record landing placement ─► reclaim holding copy ─► release pool        drainer ── CopyArchive ─► landing
-                                                                           (byte I/O only, one serial writer)
+                                             (byte I/O only, the landing's `writers` permits at a time)
 
    back-pressure: every disk full ⇒ next acquire waits ⇒ (landing down) abort ⇒ run fails
 ```
@@ -77,8 +77,10 @@ unchanged.) The placement record and the holding reclaim are the orchestrator's 
 *unbounded* fslike sink (disk/cloud) — the only kind safe for concurrent `WriteArchive`: it never
 rolls volumes, so it never touches the librarian's shared rolling state; positions come from a
 mutex-guarded counter. A spanning sink (tape) is *not* safe, which is why a tape landing clamps to
-1 worker. The single drainer drives the spanning landing **serially**. So the two combinations
-used — dumpers→unbounded-disk, drainer→landing-serial — are the two the `archiveio.Writer` already
+1 worker. Each drainer drives a spanning landing's drive **serially** (the landing's writer permits
+— its `writers` cap, defaulting to the drive count for a serial library or the worker count for a
+concurrent medium — bound how many run at once). So the two combinations used —
+dumpers→unbounded-disk, drainer→landing-serial — are the two the `archiveio.Writer` already
 documents. Hence `holding: true` requires a disk/cloud medium (checked via the
 `media.ConcurrentWrite` capability, not a hardcoded type list).
 
@@ -89,7 +91,8 @@ emptiest" because bytes are charged only *after* the (long) dump commits, so an 
 policy would make all cold-start workers read the same all-equal free space and herd onto one
 disk; a round-robin cursor spreads writes across spindles regardless of charge timing. More disks
 buy **dump-side write bandwidth** and a **larger combined buffer** (burst absorption); they do not
-raise sustained landing throughput (the drain stays one serial writer). The handoff carries an
+raise sustained landing throughput by themselves (`writers` on the landing is that lever — more
+disks then also spread the parallel drains' reads). The handoff carries an
 **int disk index**, so the drainer reads, reclaims, and releases the disk the archive landed on.
 
 **Back-pressure is the pool; degraded mode refuses to proceed.** A disk's bytes are charged when a
