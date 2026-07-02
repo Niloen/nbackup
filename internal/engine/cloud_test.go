@@ -39,7 +39,7 @@ func TestCloudLandingRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -86,7 +86,7 @@ func TestCloudPartSizeSplitsAndRestores(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -137,7 +137,7 @@ func TestCloudPartSizeStaysConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -193,7 +193,7 @@ func TestCloudPartSizeDefaultAndBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := eng.partSizeFor("cloud")
+	got, err := eng.dep.partSizeFor("cloud")
 	if err != nil {
 		t.Fatalf("partSizeFor (unset): %v", err)
 	}
@@ -205,7 +205,7 @@ func TestCloudPartSizeDefaultAndBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := eng2.partSizeFor("cloud"); err == nil {
+	if _, err := eng2.dep.partSizeFor("cloud"); err == nil {
 		t.Fatal("part_size above the 40 GiB cap should be rejected")
 	} else if !strings.Contains(err.Error(), "exceeds the maximum") {
 		t.Errorf("error = %q, want it to explain the maximum", err)
@@ -236,7 +236,7 @@ func TestSyncDiskToCloud(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 

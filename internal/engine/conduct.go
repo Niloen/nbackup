@@ -11,7 +11,6 @@ import (
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
-	"github.com/Niloen/nbackup/internal/transform/compress"
 )
 
 // openWriter folds the engine's clerk/librarian write machinery into the medium-
@@ -28,7 +27,7 @@ func (e *Engine) openWriter(medium string, spec archiveio.RunSpec, now time.Time
 	capB, _ := e.cfg.Media[medium].CapacityBytes()
 	return conductor.PreparedWriter{
 		Stores: stores,
-		Lim:    e.limiters[medium],
+		Lim:    e.dep.limiter(medium),
 		// Serial keys off the concurrent-write capability: a serial medium (tape) shares one
 		// rolling drive per store and writes one archive at a time on it, while a concurrent-write
 		// object store/disk writes archives as independent objects/files and stays parallel — even
@@ -44,7 +43,7 @@ func (e *Engine) openWriter(medium string, spec archiveio.RunSpec, now time.Time
 // concurrent writers land on independent drives), or a single store for a single-drive tape, a manual
 // drive, or a directly-addressed medium (disk/cloud — its own concurrency is independent files).
 func (e *Engine) landingStores(medium string, spec archiveio.RunSpec, now time.Time, lf logf.Logf) ([]archiveio.Store, error) {
-	lib, def, _, err := e.librarianFor(medium)
+	lib, def, _, err := e.dep.librarianFor(medium)
 	if err != nil {
 		return nil, err
 	}
@@ -55,11 +54,11 @@ func (e *Engine) landingStores(medium string, spec archiveio.RunSpec, now time.T
 		}
 		return []archiveio.Store{wt.session}, nil
 	}
-	partSize, err := e.partSizeFor(medium)
+	partSize, err := e.dep.partSizeFor(medium)
 	if err != nil {
 		return nil, err
 	}
-	exp := e.expectedVolumeFor(medium, now)
+	exp := e.acct.ExpectedVolumeFor(medium, now)
 	announceExpectation(medium, exp, lf)
 	sinks := lib.LazyDriveSinks(def.IsAppendable(), exp.Label, partSize, now, librarian.Logf(lf))
 	stores := make([]archiveio.Store, len(sinks))
@@ -76,7 +75,7 @@ func (e *Engine) landingFor(d config.DLE) string {
 	if name, err := e.cfg.LandingFor(d); err == nil && name != "" {
 		return name
 	}
-	return e.mediumName
+	return e.dep.landingName
 }
 
 // landingForDLEName resolves the landing of a DLE named by its catalog slug (DLE.Name()) — what a
@@ -88,7 +87,7 @@ func (e *Engine) landingForDLEName(slug string) string {
 			return e.landingFor(d)
 		}
 	}
-	return e.mediumName
+	return e.dep.landingName
 }
 
 // newConductor wires a per-run conductor.Conductor to the engine's dumper, plan
@@ -101,16 +100,16 @@ func (e *Engine) newConductor() *conductor.Conductor {
 		Cat:               e.cat,
 		Dmp:               e.dmp,
 		Plan:              e.sched.Plan,
-		Vol:               e.vol,
+		Vol:               e.dep.vol,
 		OpenWriter:        e.openWriter,
-		CheckCompress:     func() error { return compress.Check(e.compressScheme, e.fopts) },
-		ProbeReachable:    e.probeReachable,
-		PreflightDumptype: e.preflightDumptype,
+		CheckCompress:     e.tc.checkCompress,
+		ProbeReachable:    e.tc.probeReachable,
+		PreflightDumptype: e.tc.preflightDumptype,
 		Flush:             e.Flush,
 		HoldingMedia:      e.cfg.HoldingMedia(),
 		Workers:           e.cfg.Workers(),
 		NewFileSink:       func() progress.Sink { return progress.NewFileSink(e.cfg.WorkdirPath(), time.Now) },
-		Landing:           e.mediumName,
+		Landing:           e.dep.landingName,
 		LandingFor:        func(it planner.Item) string { return e.landingFor(it.DLE) },
 		RunSink:           e.runSink,
 		EstimateSink:      e.estimateSink,

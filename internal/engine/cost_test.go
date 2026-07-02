@@ -32,7 +32,7 @@ func cloudCostEngine(t *testing.T, runDate time.Time, costCfg *config.CostConfig
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	if _, err := eng.Run(context.Background(), runDate, nil); err != nil {

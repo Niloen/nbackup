@@ -9,6 +9,10 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 )
 
+// sync.go is the copier's bulk front-end: `nb sync` mirrors a source medium's
+// sealed runs onto a target by computing the backlog (runs on the source the
+// target is missing) and copying it through the same CopyRuns path as `nb copy`.
+
 // SyncSelection bounds which landing runs a sync considers. The zero value
 // selects every run on the landing medium.
 type SyncSelection struct {
@@ -81,6 +85,15 @@ func (r *SyncReport) CopiedBytes() int64 {
 	return n
 }
 
+// SyncTo mirrors a source medium's sealed runs onto target; see copier.SyncTo.
+func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force bool, logf Logf) (*SyncReport, error) {
+	return e.cop.SyncTo(from, target, sel, apply, force, logf)
+}
+
+// SyncRules returns the configured replication rules, for the CLI to run when
+// `nb sync` is invoked without an explicit --to.
+func (e *Engine) SyncRules() []config.SyncRule { return e.cfg.Sync }
+
 // SyncTo mirrors a source medium's sealed runs onto target: every run whose copy on
 // the source holds archives the target copy does not, oldest-first. Oldest first
 // means an interrupted sync makes contiguous, replayable progress and a run's
@@ -97,23 +110,23 @@ func (r *SyncReport) CopiedBytes() int64 {
 // leaves a resumable partial copy, never one that reads as "up to date", and
 // re-running copies exactly what is missing. With force==true already-present
 // runs are re-copied wholesale (CopyRun --force).
-func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force bool, logf Logf) (*SyncReport, error) {
+func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force bool, logf Logf) (*SyncReport, error) {
 	if from == "" {
-		from = e.mediumName
+		from = c.landing
 	}
 	if from == target {
 		return nil, fmt.Errorf("sync source and target are the same medium %q", target)
 	}
-	if _, ok := e.cfg.Media[from]; !ok {
+	if !c.knownMedium(from) {
 		return nil, fmt.Errorf("unknown source medium %q", from)
 	}
-	if _, ok := e.cfg.Media[target]; !ok {
+	if !c.knownMedium(target) {
 		return nil, fmt.Errorf("unknown medium %q", target)
 	}
 
 	report := &SyncReport{From: from, To: target}
-	for _, s := range applySelection(e.cat.RunsOn(from), sel) {
-		held, missing, err := e.cop.copySets(s.ID, from, target)
+	for _, s := range applySelection(c.cat.RunsOn(from), sel) {
+		held, missing, err := c.copySets(s.ID, from, target)
 		if err != nil {
 			return nil, err
 		}
@@ -132,10 +145,10 @@ func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force boo
 	}
 	// Capacity projection (sampled before any copy, so it reads the same for dry-run
 	// and apply): current target usage plus the backlog about to land.
-	if prof, perr := e.acct.ProfileFor(target); perr == nil {
+	if prof, perr := c.profileFor(target); perr == nil {
 		report.TargetCapacity = prof.TotalBytes()
 	}
-	report.ProjectedBytes = e.cat.MediumBytes(target) + report.Bytes()
+	report.ProjectedBytes = c.cat.MediumBytes(target) + report.Bytes()
 	if !apply {
 		return report, nil
 	}
@@ -145,12 +158,12 @@ func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force boo
 	}
 	// Copy every selected run in one spool pass, so a multi-drive target stays saturated across run
 	// boundaries. A failure aborts the sync (a partial sync is safe to re-run — it is idempotent).
-	copyErr := e.CopyRuns(runIDs, from, target, force, logf)
+	copyErr := c.CopyRuns(runIDs, from, target, force, logf)
 	// Mark what actually landed by re-reading the catalog, not by assuming success: a
 	// sync that failed partway still reports the runs that completed before the error
 	// (and the run record's BytesMoved counts them), instead of "copied 0 run(s)".
 	for i := range report.Items {
-		if _, missing, err := e.cop.copySets(report.Items[i].RunID, from, target); err == nil && len(missing) == 0 {
+		if _, missing, err := c.copySets(report.Items[i].RunID, from, target); err == nil && len(missing) == 0 {
 			report.Items[i].Copied = true
 		}
 	}
@@ -158,16 +171,6 @@ func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force boo
 		return report, fmt.Errorf("sync -> %q: %w", target, copyErr)
 	}
 	return report, nil
-}
-
-// SyncRules returns the configured replication rules, for the CLI to run when
-// `nb sync` is invoked without an explicit --to.
-func (e *Engine) SyncRules() []config.SyncRule { return e.cfg.Sync }
-
-// placedOn reports whether a run already has a copy recorded on the medium.
-func (e *Engine) placedOn(runID, medium string) bool {
-	_, ok := e.placementOn(runID, medium)
-	return ok
 }
 
 // applySelection narrows landing runs (oldest-first) to the selection window.

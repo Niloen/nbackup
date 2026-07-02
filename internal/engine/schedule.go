@@ -4,7 +4,6 @@ import (
 	"os"
 
 	"github.com/Niloen/nbackup/internal/scheduler"
-	"github.com/Niloen/nbackup/internal/transform/compress"
 )
 
 // newScheduler wires a scheduler.Scheduler to the engine's config, catalog history,
@@ -16,16 +15,16 @@ func (e *Engine) newScheduler() *scheduler.Scheduler {
 		History:           e.cat.History,
 		ForcedFulls:       e.cat.ForcedFulls,
 		Workers:           e.cfg.Workers,
-		ArchiverFor:       e.archiverFor,
+		ArchiverFor:       e.tc.archiverFor,
 		ExcludeFor:        func(dt string) []string { return e.cfg.ResolveDumpType(dt).Exclude },
 		CycleDays:         e.cfg.CycleDays,
 		BumpPercent:       e.cfg.BumpPercent,
-		Capacity:          e.profile.TotalBytes,
-		CapacityRoom:      e.capacityRoom,
-		CompressCheck:     func() error { return compress.Check(e.compressScheme, e.fopts) },
-		PreflightDumptype: e.preflightDumptype,
+		Capacity:          e.dep.profile.TotalBytes,
+		CapacityRoom:      e.acct.CapacityRoom,
+		CompressCheck:     e.tc.checkCompress,
+		PreflightDumptype: e.tc.preflightDumptype,
 		RemoteHost:        e.cfg.RemoteHost,
 		StatSource:        func(p string) error { _, err := os.Stat(p); return err },
-		ProbeReachable:    e.probeReachable,
+		ProbeReachable:    e.tc.probeReachable,
 	})
 }

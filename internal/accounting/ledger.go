@@ -24,9 +24,16 @@ type Deps struct {
 	Cfg            *config.Config
 	Landing        string
 	LandingProfile media.Profile
+	LandingCost    media.Cost // the landing medium's pricing (dollar peer of the profile)
 	LandingMinAge  time.Duration
 	OpenVolume     func(name string) (media.Volume, error)
 	DisplayDLE     func(slug string) string
+	// LandingLabeled reports whether the landing medium carries volume labels (tape);
+	// address-identified media (disk, s3) have no tape to expect.
+	LandingLabeled func() bool
+	// PlacementsFor returns a run's copies in read-preference order (landing first);
+	// the read-cost estimator uses it to price the copy a restore would actually read.
+	PlacementsFor func(runID string) []catalog.Placement
 }
 
 // Accountant answers capacity, retention, and prune questions over a catalog and its

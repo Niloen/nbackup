@@ -62,7 +62,7 @@ func TestFormatSurvivesRestore(t *testing.T) {
 			if err != nil {
 				t.Fatalf("open engine on fixture: %v", err)
 			}
-			if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+			if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 				t.Skipf("GNU tar not available")
 			}
 			if _, err := eng.RebuildCatalog(nil); err != nil {

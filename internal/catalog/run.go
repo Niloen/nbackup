@@ -21,6 +21,16 @@ type Run struct {
 // Date is the run date (YYYY-MM-DD) encoded in the run id.
 func (s *Run) Date() string { return record.RunDate(s.ID) }
 
+// Archive returns the run's archive for a DLE at a level, if recorded.
+func (s *Run) Archive(dle string, level int) (record.Archive, bool) {
+	for _, a := range s.Archives {
+		if a.DLE == dle && a.Level == level {
+			return a, true
+		}
+	}
+	return record.Archive{}, false
+}
+
 // TotalBytes sums the compressed sizes of the run's archives.
 func (s *Run) TotalBytes() int64 {
 	var n int64

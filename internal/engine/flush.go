@@ -24,7 +24,7 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 		if v, ok := holdVols[name]; ok {
 			return v, nil
 		}
-		v, _, _, err := e.mediumVolume(name)
+		v, _, _, err := e.dep.mediumVolume(name)
 		if err == nil {
 			holdVols[name] = v
 		}

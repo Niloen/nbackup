@@ -101,7 +101,7 @@ func (e *Engine) newVerifier() *verifier {
 		store:       e.clerk,
 		rst:         e.rst,
 		placements:  e.placementsFor,
-		archiverFor: e.restoreArchiver,
+		archiverFor: e.tc.restoreArchiver,
 		decryptOpts: e.rst.DecryptOptsFor,
 	}
 }
