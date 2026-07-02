@@ -72,9 +72,10 @@ symmetric (`passphrase_file`) dump needs the same passphrase supplied to gpg.
 
 ## From tape
 
-Tape frames each payload with a fixed 32 KB inline header — skip it first. On a
-file-backed (dir-backed) library each volume is a `slot-NN/` directory of plain
-files, so a regular `dd` reads one:
+Tape frames each payload with a fixed 32 KB inline header — skip it first. On an
+emulated library each volume is a `slot-NN/` directory (or, with a bucket-URL
+`dir:`, key prefix) of plain files, so a regular `dd` reads one — download the
+object first if it lives in a bucket:
 
 ```bash
 dd bs=32k skip=1 < file | zstd -dc | tar -xf -

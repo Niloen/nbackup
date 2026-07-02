@@ -357,6 +357,58 @@ func TestTapeTornTailSkipped(t *testing.T) {
 	}
 }
 
+// TestTapeBucketURL: `dir` also accepts a gocloud bucket URL, so the emulated
+// library can live in an object store. mem:// exercises the pure-URL path in one
+// handle; a file:// URL (the same driver a cloud bucket would swap in for)
+// verifies the full lifecycle including persistence across reopen.
+func TestTapeBucketURL(t *testing.T) {
+	// mem://: label a slot and read it back through the changer facets.
+	v, err := media.OpenVolume("tape", media.Options{"dir": "mem://", "slots": "2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadSlot(t, v, 1)
+	if err := v.(media.Labeled).WriteLabel(record.Label{Name: "CLD-A", Pool: "p", Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if name, ok, err := readVolumeName(v); !ok || err != nil || name != "CLD-A" {
+		t.Fatalf("mem bucket label = %q ok=%v err=%v, want CLD-A", name, ok, err)
+	}
+
+	// file:// URL: same driver family, but durable — the load and the data survive reopen.
+	url := "file://" + t.TempDir() + "?metadata=skip"
+	v, err = media.OpenVolume("tape", media.Options{"dir": url, "slots": "2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadSlot(t, v, 2)
+	if err := v.(media.Labeled).WriteLabel(record.Label{Name: "CLD-B", Pool: "p", Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeFileT(v, record.Header{Run: "s", Kind: record.KindArchive, DLE: "d"},
+		func(w io.Writer) error { _, e := w.Write([]byte("payload")); return e }); err != nil {
+		t.Fatal(err)
+	}
+
+	v2, err := media.OpenVolume("tape", media.Options{"dir": url, "slots": "2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, ok := v2.(media.Changer).Drive(0).Loaded(); !ok || st.Label != "CLD-B" {
+		t.Fatalf("drive after reopen = %+v ok=%v, want CLD-B loaded", st, ok)
+	}
+	if name, ok, err := readVolumeName(v2); !ok || err != nil || name != "CLD-B" {
+		t.Fatalf("after reopen label = %q ok=%v err=%v, want CLD-B", name, ok, err)
+	}
+	files, err := v2.Files()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 || files[1].Header.DLE != "d" {
+		t.Fatalf("after reopen expected label+archive, got %+v", files)
+	}
+}
+
 // writeFileT bridges tests to the writer-based AppendFile (callback shape kept for brevity).
 func writeFileT(v media.Volume, h record.Header, write func(io.Writer) error) (int, error) {
 	fw, err := v.AppendFile(context.Background(), h)

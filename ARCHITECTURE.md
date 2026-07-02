@@ -432,8 +432,9 @@ one stock-usable payload) and still rejects `part_size`.
 **Tape = a changer: drives fed from slots.** The `device` seam (the per-cartridge I/O
 core — positioning + block I/O of one mounted tape) is shared by every backend; what
 differs is the **loader** that inventories cartridges and binds one to a drive. `dir:`
-is a file-backed library (`slots: N` subdirectories, `drives: K` persisted load-pointers,
-fully tested) — add `manual: true` to make it behave like a hand-loaded drive while still
+is an emulated library over a gocloud bucket — a plain directory or any bucket URL
+(`s3://`, `gs://`), with `slots: N` key prefixes and `drives: K` persisted load-pointers,
+fully tested — add `manual: true` to make it behave like a hand-loaded drive while still
 loading in-process, so the operator-swap UX is exercisable without hardware. `device:` is
 a real single drive (Linux st(4) ioctls + `/dev/nstN`, variable-block; validated against a
 tape emulator) — one drive, no addressable slots, a human loads it.
@@ -468,7 +469,7 @@ tape emulator) — one drive, no addressable slots, a human loads it.
   cartridge won't do, the librarian asks a `librarian.Operator` (CLI: stdin) to swap and
   retries — on writes (`PrepareWrite`/`Advance`: blank/foreign/wrong-pool/full → load a
   writable cartridge, auto-labeled if `auto_label`) and on reads (`MountForRead`: load the
-  cartridge holding the needed label). The file-backed sim effects the operator's choice
+  cartridge holding the needed label). The emulated sim effects the operator's choice
   in-process; a real drive's choice is the human's physical insert, which the librarian
   re-reads. Unattended (no operator) it degrades to an actionable error instead of
   blocking. A `reloadable` error marks the cases a swap can fix (vs a stale catalog, which
@@ -711,7 +712,7 @@ of the two — pool free room (`capacity − protected`) and the landing reel's
 remaining room (`volume_size −` what's already on it). They are truly
 separate: a **real drive** (`type: tape`, `device:`) has an unbounded pool (the
 operator's shelf is unknowable, `TotalBytes == 0`) but a finite reel. The volume
-profile reads the same count key the changer does — `slots` for a file-backed library —
+profile reads the same count key the changer does — `slots` for an emulated library —
 so the planner's capacity never disagrees with the medium it lands on.
 
 **Cost model (`media.Cost`) — a medium prices itself, in dollars, offline.** The

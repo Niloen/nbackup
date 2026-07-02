@@ -5,9 +5,10 @@
 // set of slots (storage elements). A `loader` is the changer's backend — it
 // inventories slots by barcode and binds a cartridge to a drive, producing the
 // `device` (the mt analogue: positioning + block I/O of one mounted cartridge) the
-// drive reads and writes. Two loaders exist: a file-backed one (dirLoader: slots are
-// subdirectories, drives are persisted load-pointers; it can simulate either a robot
-// or a hand-loaded drive), and a real single drive (realDriveLoader: one mtDevice, no
+// drive reads and writes. Two loaders exist: an emulated one (dirLoader: slots are
+// key prefixes in a gocloud bucket — a plain directory or any object-store URL —
+// and drives are persisted load-pointers; it can simulate either a robot or a
+// hand-loaded drive), and a real single drive (realDriveLoader: one mtDevice, no
 // slots, a human loads — media.ErrManualLoad). The changer (tapeChanger) is also a
 // media.Volume that proxies the active drive, so the medium handle is a Volume above
 // the librarian while the librarian uses the Changer facet for logistics.
@@ -37,8 +38,8 @@ func init() {
 	})
 }
 
-// newTapeVolume constructs a tape changer: a file-backed library/station rooted at
-// `dir`, or a real drive at `device`. Either way the result is a tapeChanger, which
+// newTapeVolume constructs a tape changer: an emulated library/station rooted at
+// `dir` (a directory path or bucket URL), or a real drive at `device`. Either way the result is a tapeChanger, which
 // is both a media.Changer (the librarian's logistics) and a media.Volume (the active
 // drive's cartridge, so the medium handle is a Volume above the librarian).
 func newTapeVolume(opts media.Options) (media.Volume, error) {
@@ -97,7 +98,7 @@ func newTapeVolume(opts media.Options) (media.Volume, error) {
 	case opts.Get("device") != "":
 		for _, k := range []string{"slots", "drives", "manual"} {
 			if opts.Get(k) != "" {
-				return nil, fmt.Errorf("`%s` applies only to a file-backed library (dir:); a real drive (device:) is a single hand-loaded drive", k)
+				return nil, fmt.Errorf("`%s` applies only to an emulated library (dir:); a real drive (device:) is a single hand-loaded drive", k)
 			}
 		}
 		block, err := blockOpt(opts.Get("block_size"))
@@ -110,7 +111,7 @@ func newTapeVolume(opts media.Options) (media.Volume, error) {
 		}
 		return newTapeChanger(&realDriveLoader{dev: dev}, capacity)
 	default:
-		return nil, fmt.Errorf("tape medium requires 'dir' (file-backed library) or 'device' (real drive)")
+		return nil, fmt.Errorf("tape medium requires 'dir' (emulated library: a directory or bucket URL) or 'device' (real drive)")
 	}
 }
 
@@ -143,8 +144,8 @@ func blockOpt(s string) (int, error) {
 }
 
 // device is the mt-level seam: one mounted tape as a sequence of files addressed
-// by number. Implementations emulate a directory (dirDevice) or drive a real tape
-// (mtDevice).
+// by number. Implementations emulate a bucket prefix (dirDevice) or drive a real
+// tape (mtDevice).
 type device interface {
 	// appendWriter begins a file at end-of-data and returns a writer for it, holding the device
 	// serially until the writer is committed or aborted (a tape is one-writer-at-a-time). Commit
@@ -320,8 +321,8 @@ func (t *tape) WriteLabel(lbl record.Label) error {
 
 // loader is a changer's backend: it inventories cartridges by slot/barcode and binds
 // a cartridge to a drive, producing the device the drive reads and writes. The
-// file-backed dirLoader maps slots to subdirectories; realDriveLoader is one real
-// drive a human loads (no slots). A future mtx loader would drive a SCSI robot.
+// emulated dirLoader maps slots to bucket key prefixes; realDriveLoader is one real
+// drive a human loads (no slots); mtxLoader drives a SCSI robot.
 type loader interface {
 	driveCount() int
 	manual() bool

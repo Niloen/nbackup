@@ -143,15 +143,18 @@ See [Media](../features/media) and [Cost](../features/cost).
 ### type: tape
 
 A tape medium is a **changer**: drives (data-transfer elements) fed from slots
-(storage elements that hold cartridges). A file-backed library uses `dir:` with
+(storage elements that hold cartridges). An emulated library uses `dir:` with
 `slots:` (and optionally `drives:`); a hand-changed single drive uses `dir:` +
-`manual: true` (a file-backed sim) or `device:` (a real no-rewind `st` drive).
+`manual: true` (an emulated sim) or `device:` (a real no-rewind `st` drive).
+`dir:` is a local directory or a bucket URL (`s3://`, `gs://`, `azblob://`), so
+the same virtual library can live in an object store.
 
 ```yaml
 media:
   lto:
     type: tape
-    dir: /var/lib/nbackup/vtape   # a file-backed virtual library
+    dir: /var/lib/nbackup/vtape   # an emulated virtual library
+    # dir: s3://backups?prefix=vtape/  # OR the same library in an object store
     # device: /dev/nst0           # OR a real single no-rewind drive (`slots`/
     #                             # `drives`/`manual` do not apply)
     slots: 20                     # storage slots (dir-backed library)

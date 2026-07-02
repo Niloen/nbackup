@@ -22,14 +22,9 @@ import (
 
 	"gocloud.dev/blob"
 	"gocloud.dev/gcerrors"
-	// Object-store drivers (URL schemes). Blank imports register them with gocloud.
-	_ "gocloud.dev/blob/azureblob" // azblob://
-	_ "gocloud.dev/blob/fileblob"  // file://  (local dir; also used in tests)
-	_ "gocloud.dev/blob/gcsblob"   // gs://
-	_ "gocloud.dev/blob/memblob"   // mem://   (in-memory; tests)
-	_ "gocloud.dev/blob/s3blob"    // s3://    (and S3-compatible)
 
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/media/bucket"
 	"github.com/Niloen/nbackup/internal/media/fslike"
 )
 
@@ -76,7 +71,7 @@ const runsPrefix = "runs/"
 
 func open(url, prefix string) (media.Volume, error) {
 	ctx := context.Background()
-	bucket, err := blob.OpenBucket(ctx, url)
+	b, err := bucket.Open(ctx, url)
 	if err != nil {
 		return nil, fmt.Errorf("open cloud bucket %q: %w", url, err)
 	}
@@ -86,11 +81,11 @@ func open(url, prefix string) (media.Volume, error) {
 		if !strings.HasSuffix(prefix, "/") {
 			prefix += "/"
 		}
-		bucket = blob.PrefixedBucket(bucket, prefix)
+		b = blob.PrefixedBucket(b, prefix)
 	}
-	v, err := fslike.Open(blobStore{ctx: ctx, bucket: bucket})
+	v, err := fslike.Open(blobStore{ctx: ctx, bucket: b})
 	if err != nil {
-		bucket.Close()
+		b.Close()
 		return nil, err
 	}
 	return v, nil
