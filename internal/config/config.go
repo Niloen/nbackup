@@ -43,14 +43,17 @@ const DefaultWorkdir = "nbackup-catalog"
 // local host and under the backup user's home on a client.
 const DefaultStateDir = "nbackup-state"
 
-// Config is the top-level NBackup configuration.
+// Config is the top-level NBackup configuration. Fields carry `omitempty` so a
+// programmatically built config (`nb init`) marshals to only what was chosen —
+// unset knobs stay absent and keep their documented defaults; loading is
+// unaffected.
 type Config struct {
 	// Cycle is the dump cycle: the target — and hard maximum — time between fulls
 	// for every DLE (e.g. "7d", the default). It is the one scheduling knob; how
 	// runs are balanced within it is automatic (see package planner). A full never
 	// ages past one cycle. Capacity-oriented retention (capacity, minimum_age)
 	// lives per-medium, since each store has its own space and reuse cadence.
-	Cycle string `yaml:"cycle"`
+	Cycle string `yaml:"cycle,omitempty"`
 
 	// BumpPct is the minimum saving — as a percentage of the full-dump size — an
 	// incremental must show before it climbs to the next level. A higher level
@@ -59,15 +62,15 @@ type Config struct {
 	// current level, re-dumping everything since the lower one (which also keeps
 	// consecutive incrementals overlapping, so losing one does not break the chain).
 	// Default DefaultBumpPercent. See package planner.
-	BumpPct float64 `yaml:"bump_percent"`
+	BumpPct float64 `yaml:"bump_percent,omitempty"`
 
 	// Landing names the media definition where runs are created.
-	Landing string `yaml:"landing"`
+	Landing string `yaml:"landing,omitempty"`
 
 	// Workdir holds the catalog's local cache, independent of any storage medium.
 	// Defaults to DefaultWorkdir. (An archiver's incremental state lives under the host's
 	// state_dir — a dedicated location beside the workdir, not beneath it; see StateDir.)
-	Workdir string `yaml:"workdir"`
+	Workdir string `yaml:"workdir,omitempty"`
 
 	// StateDir is the fleet-wide default root for archivers' incremental-state libraries
 	// (gnutar's .snar files, a future archiver's dump database, …). It is a host-level,
@@ -75,71 +78,71 @@ type Config struct {
 	// own state beneath it. A per-host `hosts.<h>.state_dir` overrides it; unset, it
 	// falls back to DefaultStateDir. The location is the host's, not a format property,
 	// so it is not an archiver option.
-	StateDir string `yaml:"state_dir"`
+	StateDir string `yaml:"state_dir,omitempty"`
 
 	// Compress configures the external compressor archives are piped through. It is the
 	// config-wide default; a dumptype may replace it wholesale with its own `compress`
 	// block (see DumpType.Compress), exactly as encryption overrides.
-	Compress CompressConfig `yaml:"compress"`
+	Compress CompressConfig `yaml:"compress,omitempty"`
 
 	// Encrypt configures the external encryptor archives are piped through, after
 	// compression. It is the config-wide default; a dumptype may replace it wholesale
 	// with its own `encrypt` block (see DumpType.Encrypt). Unset = no encryption.
-	Encrypt EncryptConfig `yaml:"encrypt"`
+	Encrypt EncryptConfig `yaml:"encrypt,omitempty"`
 
 	// Nice runs orchestrated child processes under `nice -n Nice` for CPU
 	// politeness; 0 = no nice.
-	Nice int `yaml:"nice"`
+	Nice int `yaml:"nice,omitempty"`
 
 	// AutoLabel lets a dump label a blank tape automatically instead of requiring
 	// an explicit `nb label`. Off by default: explicit labeling is what makes the
 	// overwrite guard meaningful. It never clobbers foreign or non-blank media.
-	AutoLabel bool `yaml:"auto_label"`
+	AutoLabel bool `yaml:"auto_label,omitempty"`
 
 	// Parallelism bounds concurrent work within a run.
 	Parallelism struct {
-		Workers int `yaml:"workers"` // concurrent DLE dumps per run (default 1)
-	} `yaml:"parallelism"`
+		Workers int `yaml:"workers,omitempty"` // concurrent DLE dumps per run (default 1)
+	} `yaml:"parallelism,omitempty"`
 
 	// Media is a map of named storage definitions.
-	Media map[string]Media `yaml:"media"`
+	Media map[string]Media `yaml:"media,omitempty"`
 
 	// Archivers is a map of named archiver definitions: a
 	// registered archiver type plus its options, referenced by a dumptype. An
 	// undeclared name is treated as a bare archiver type with default options, so a
 	// zero-config `archiver: gnutar` needs no block here.
-	Archivers map[string]Archiver `yaml:"archivers"`
+	Archivers map[string]Archiver `yaml:"archivers,omitempty"`
 
 	// Sync declares replication rules: each mirrors the landing medium's sealed
 	// runs onto a target medium. `nb sync` with no --to runs
 	// every rule; `nb sync --to X` is the ad-hoc form and needs no rule.
-	Sync []SyncRule `yaml:"sync"`
+	Sync []SyncRule `yaml:"sync,omitempty"`
 
 	// Drill configures recovery drills (`nb drill`): the recoverability rehearsal
 	// layered on `nb verify`. It mirrors the sync block so a cron line can be
 	// `nb dump && nb sync && nb drill --unattended`.
-	Drill DrillConfig `yaml:"drill"`
+	Drill DrillConfig `yaml:"drill,omitempty"`
 
 	// Notify configures unattended alerting: which channels fire on a run's
 	// failure/success, and which receive `nb report --notify` digests. It is what
 	// makes a cron-driven backup loud — a failed dump/sync/verify/drill reaches a
 	// human. Secrets are referenced by environment variable, never stored here.
-	Notify NotifyConfig `yaml:"notify"`
+	Notify NotifyConfig `yaml:"notify,omitempty"`
 
 	// DumpTypes is a map of named dumptypes: an archiver reference plus per-DLE policy
 	// (encryption).
-	DumpTypes map[string]DumpType `yaml:"dumptypes"`
+	DumpTypes map[string]DumpType `yaml:"dumptypes,omitempty"`
 
 	// SSH holds the default SSH connection settings applied to every remote host.
 	// A per-host `hosts.<name>.ssh` block overrides
 	// individual fields; an undeclared remote host uses these as-is.
-	SSH SSHConfig `yaml:"ssh"`
+	SSH SSHConfig `yaml:"ssh,omitempty"`
 
 	// Hosts overrides the SSH defaults for specific source hosts. It is NOT what makes a
 	// host remote — any source host that is not `localhost` is remote by default and runs
 	// stock tools (tar, and optionally the compressor + gpg) on the client over SSH, with
 	// no NBackup software on the client. List a host here only to override its defaults.
-	Hosts map[string]HostConfig `yaml:"hosts"`
+	Hosts map[string]HostConfig `yaml:"hosts,omitempty"`
 
 	Sources Sources `yaml:"sources"`
 }
@@ -151,9 +154,9 @@ type Config struct {
 // per-host gnutar binary path is `archivers.gnutar.tar_path` — the seam that scales to
 // a future star/pgsql archiver without growing this struct.
 type HostConfig struct {
-	SSH       SSHConfig                    `yaml:"ssh"`
-	StateDir  string                       `yaml:"state_dir"` // this host's incremental-state root (overrides Config.StateDir)
-	Archivers map[string]map[string]string `yaml:"archivers"` // archiver-type → property overrides (e.g. gnutar: {tar_path: …})
+	SSH       SSHConfig                    `yaml:"ssh,omitempty"`
+	StateDir  string                       `yaml:"state_dir,omitempty"` // this host's incremental-state root (overrides Config.StateDir)
+	Archivers map[string]map[string]string `yaml:"archivers,omitempty"` // archiver-type → property overrides (e.g. gnutar: {tar_path: …})
 }
 
 // SSHConfig is the SSH connection to a client. NBackup stores no secret: the key comes
@@ -162,10 +165,10 @@ type HostConfig struct {
 // client-side tar path and the .snar library root are host/archiver concerns, set via
 // HostConfig.Archivers and HostConfig.StateDir respectively.
 type SSHConfig struct {
-	User         string   `yaml:"user"`
-	Port         string   `yaml:"port"`
-	IdentityFile string   `yaml:"identity_file"`
-	Options      []string `yaml:"options"` // extra raw ssh options, e.g. ["-o","StrictHostKeyChecking=accept-new"]
+	User         string   `yaml:"user,omitempty"`
+	Port         string   `yaml:"port,omitempty"`
+	IdentityFile string   `yaml:"identity_file,omitempty"`
+	Options      []string `yaml:"options,omitempty"` // extra raw ssh options, e.g. ["-o","StrictHostKeyChecking=accept-new"]
 }
 
 // RemoteHost returns the effective SSH connection for a host and true when it is remote.
@@ -206,12 +209,12 @@ func mergeSSH(base, over SSHConfig) SSHConfig {
 // DrillConfig is the `drill:` block: how often each DLE must be drilled, how many to
 // drill per run, which copy to read, and how deeply. CLI flags override these.
 type DrillConfig struct {
-	Window     string `yaml:"window"`     // each DLE drilled within this window (default 30d)
-	Sample     int    `yaml:"sample"`     // DLEs drilled per run (default 1)
-	From       string `yaml:"from"`       // source medium to drill ("" = the landing medium)
-	Tier       string `yaml:"tier"`       // checksum | structural | chain | stock (default structural)
-	Worm       bool   `yaml:"worm"`       // run the WORM/immutability probe
-	Unattended bool   `yaml:"unattended"` // cron mode: never prompt; skip swap-needing targets
+	Window     string `yaml:"window,omitempty"`     // each DLE drilled within this window (default 30d)
+	Sample     int    `yaml:"sample,omitempty"`     // DLEs drilled per run (default 1)
+	From       string `yaml:"from,omitempty"`       // source medium to drill ("" = the landing medium)
+	Tier       string `yaml:"tier,omitempty"`       // checksum | structural | chain | stock (default structural)
+	Worm       bool   `yaml:"worm,omitempty"`       // run the WORM/immutability probe
+	Unattended bool   `yaml:"unattended,omitempty"` // cron mode: never prompt; skip swap-needing targets
 }
 
 // validDrillTiers is the accepted set for the drill tier token (kept here so config
@@ -223,11 +226,11 @@ var validDrillTiers = map[string]bool{"": true, "checksum": true, "structural": 
 // backend fires on failure; success and digest notifications are opt-in. It mirrors
 // the declarative shape of the sync/drill blocks.
 type NotifyConfig struct {
-	OnFailure []string `yaml:"on_failure"` // backends to notify on a failed run ("" = all backends)
-	OnSuccess []string `yaml:"on_success"` // backends to notify on a successful run (default: none)
-	Digest    []string `yaml:"digest"`     // backends for `nb report --notify` (default: none)
+	OnFailure []string `yaml:"on_failure,omitempty"` // backends to notify on a failed run ("" = all backends)
+	OnSuccess []string `yaml:"on_success,omitempty"` // backends to notify on a successful run (default: none)
+	Digest    []string `yaml:"digest,omitempty"`     // backends for `nb report --notify` (default: none)
 
-	Backends map[string]NotifyBackend `yaml:"backends"`
+	Backends map[string]NotifyBackend `yaml:"backends,omitempty"`
 }
 
 // NotifyBackend is one named notification channel. Connection settings are explicit
@@ -236,24 +239,24 @@ type NotifyConfig struct {
 // Secrets are NEVER stored: they are named environment variables (password_env,
 // url_env) resolved at send time, mirroring crypt's orchestrate-don't-hoard stance.
 type NotifyBackend struct {
-	Type string `yaml:"type"` // smtp | sendmail | webhook (a registered notifier name)
+	Type string `yaml:"type,omitempty"` // smtp | sendmail | webhook (a registered notifier name)
 
 	// smtp / sendmail
-	Host        string   `yaml:"host"`
-	Port        int      `yaml:"port"`
-	From        string   `yaml:"from"`
-	To          []string `yaml:"to"`
-	Username    string   `yaml:"username"`
-	PasswordEnv string   `yaml:"password_env"` // env var holding the SMTP password (never the password itself)
+	Host        string   `yaml:"host,omitempty"`
+	Port        int      `yaml:"port,omitempty"`
+	From        string   `yaml:"from,omitempty"`
+	To          []string `yaml:"to,omitempty"`
+	Username    string   `yaml:"username,omitempty"`
+	PasswordEnv string   `yaml:"password_env,omitempty"` // env var holding the SMTP password (never the password itself)
 
 	// sendmail
-	SendmailPath string `yaml:"sendmail_path"` // path to the local sendmail binary (default /usr/sbin/sendmail)
+	SendmailPath string `yaml:"sendmail_path,omitempty"` // path to the local sendmail binary (default /usr/sbin/sendmail)
 
 	// webhook
-	URL      string            `yaml:"url"`      // a non-secret endpoint; prefer url_env for anything secret
-	URLEnv   string            `yaml:"url_env"`  // env var holding the webhook URL (Slack/Discord/PagerDuty secret)
-	Headers  map[string]string `yaml:"headers"`  // optional extra HTTP headers
-	Template string            `yaml:"template"` // optional payload field name for the message (default "text")
+	URL      string            `yaml:"url,omitempty"`      // a non-secret endpoint; prefer url_env for anything secret
+	URLEnv   string            `yaml:"url_env,omitempty"`  // env var holding the webhook URL (Slack/Discord/PagerDuty secret)
+	Headers  map[string]string `yaml:"headers,omitempty"`  // optional extra HTTP headers
+	Template string            `yaml:"template,omitempty"` // optional payload field name for the message (default "text")
 }
 
 // validNotifyTypes is the accepted set for a backend's type (kept here so config
@@ -300,23 +303,38 @@ func (s *Sources) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
+// MarshalYAML emits the grouped dumptype -> {host: [paths]} form UnmarshalYAML
+// reads, so a programmatically built config (`nb init`) round-trips through the
+// real loader instead of serializing the internal flat DLE list.
+func (s Sources) MarshalYAML() (any, error) {
+	grouped := map[string]map[string][]string{}
+	for _, d := range s {
+		dt := d.DumpTypeName()
+		if grouped[dt] == nil {
+			grouped[dt] = map[string][]string{}
+		}
+		grouped[dt][d.Host] = append(grouped[dt][d.Host], d.Path)
+	}
+	return grouped, nil
+}
+
 // Media is one named storage definition: a type, capacity/retention policy for
 // this medium, and type-specific connection parameters (e.g. disk has
 // "path", s3 has "bucket"). Capacity and retention are per-medium because each
 // store has its own space and reuse cadence.
 type Media struct {
-	Type       string `yaml:"type"`
-	Capacity   string `yaml:"capacity"`    // space NBackup may use here, e.g. "20TB" ("" = unbounded)
-	MinimumAge string `yaml:"minimum_age"` // retention floor before a run may be retired here (default: one cycle)
+	Type       string `yaml:"type,omitempty"`
+	Capacity   string `yaml:"capacity,omitempty"`    // space NBackup may use here, e.g. "20TB" ("" = unbounded)
+	MinimumAge string `yaml:"minimum_age,omitempty"` // retention floor before a run may be retired here (default: one cycle)
 	// Holding marks this medium as a holding disk: a fast scratch buffer the dump flows
 	// through on the way to the landing. Dumps land here in parallel, then drains copy
 	// each committed archive to the landing and reclaim it — so the landing's drive
 	// runs at disk speed and a small disk feeds a much larger landing. Must be a disk/cloud
 	// medium (per-archive reclaim, and the only sink safe for concurrent dumpers), never the
 	// landing itself. `capacity` bounds the in-flight back-pressure.
-	Holding    bool   `yaml:"holding"`
-	Appendable *bool  `yaml:"appendable"` // pack many runs per volume (default) vs one run per volume
-	Throughput string `yaml:"throughput"` // bandwidth cap to/from this medium, e.g. "50MB/s" ("" = uncapped); network politeness, the read/write peer of nice
+	Holding    bool   `yaml:"holding,omitempty"`
+	Appendable *bool  `yaml:"appendable,omitempty"` // pack many runs per volume (default) vs one run per volume
+	Throughput string `yaml:"throughput,omitempty"` // bandwidth cap to/from this medium, e.g. "50MB/s" ("" = uncapped); network politeness, the read/write peer of nice
 	// Writers caps how many archives may be written to this medium at once — one lever for
 	// the medium's write concurrency, counted the same whether the write is a dumper's
 	// direct dump, a drain copying a staged archive off the holding disk, or (for a holding
@@ -324,9 +342,9 @@ type Media struct {
 	// library's drive count, else the run's worker count. A serial library never exceeds its
 	// drives regardless (two archives cannot interleave on one rolling volume). Set 1 on a
 	// spinning disk to keep its writes sequential (Amanda's taper-parallel-write).
-	Writers int               `yaml:"writers"`
-	Cost    *CostConfig       `yaml:"cost"`    // optional pricing overrides; absent = inferred from type/url
-	Params  map[string]string `yaml:",inline"` // type-specific connection params (path, bucket, tapes, ...)
+	Writers int               `yaml:"writers,omitempty"`
+	Cost    *CostConfig       `yaml:"cost,omitempty"` // optional pricing overrides; absent = inferred from type/url
+	Params  map[string]string `yaml:",inline"`        // type-specific connection params (path, bucket, tapes, ...)
 }
 
 // CostConfig overrides a medium's inferred pricing. Every field is optional: an
@@ -424,9 +442,9 @@ func (m Media) MinAge() (time.Duration, error) {
 // replicates everything. The source defaults to the landing medium (the same
 // medium `nb copy` streams from) but may be any other medium via `from`.
 type SyncRule struct {
-	To   string `yaml:"to"`   // target medium name (required; must differ from the source)
-	From string `yaml:"from"` // source medium name ("" = the landing medium)
-	Last int    `yaml:"last"` // copy only the N most recent runs (0 = all)
+	To   string `yaml:"to,omitempty"`   // target medium name (required; must differ from the source)
+	From string `yaml:"from,omitempty"` // source medium name ("" = the landing medium)
+	Last int    `yaml:"last,omitempty"` // copy only the N most recent runs (0 = all)
 }
 
 // DumpType names an archiver and carries per-DLE policy, referenced by DLEs. The
@@ -435,11 +453,11 @@ type SyncRule struct {
 // split. Excludes live here, not on the archiver: skipping `*.log` is
 // a content decision about the source, not a property of how tar runs.
 type DumpType struct {
-	Archiver string          `yaml:"archiver"` // named archiver definition ("" = DefaultArchiver)
-	Exclude  []string        `yaml:"exclude"`  // patterns to skip (passed to the archiver per dump)
-	Encrypt  *EncryptConfig  `yaml:"encrypt"`  // nil = inherit the config-wide default; set = replace it wholesale (no field merge)
-	Compress *CompressConfig `yaml:"compress"` // nil = inherit the config-wide default; set = replace it wholesale (no field merge) — the peer of Encrypt
-	Landing  string          `yaml:"landing"`  // medium this dumptype's DLEs land on; "" = the config-wide `landing`. Routes different sources to different media (cheap cloud vs fast disk vs tape) within one run.
+	Archiver string          `yaml:"archiver"`           // named archiver definition ("" = DefaultArchiver)
+	Exclude  []string        `yaml:"exclude,omitempty"`  // patterns to skip (passed to the archiver per dump)
+	Encrypt  *EncryptConfig  `yaml:"encrypt,omitempty"`  // nil = inherit the config-wide default; set = replace it wholesale (no field merge)
+	Compress *CompressConfig `yaml:"compress,omitempty"` // nil = inherit the config-wide default; set = replace it wholesale (no field merge) — the peer of Encrypt
+	Landing  string          `yaml:"landing,omitempty"`  // medium this dumptype's DLEs land on; "" = the config-wide `landing`. Routes different sources to different media (cheap cloud vs fast disk vs tape) within one run.
 }
 
 // Archiver is a named dump-program definition: a
@@ -450,8 +468,8 @@ type DumpType struct {
 // and the incremental-state root is the host's state_dir — neither is an archiver
 // option.)
 type Archiver struct {
-	Type    string            `yaml:"type"`    // registered archiver type ("" = the definition's name)
-	Options map[string]string `yaml:",inline"` // archiver-specific options
+	Type    string            `yaml:"type,omitempty"` // registered archiver type ("" = the definition's name)
+	Options map[string]string `yaml:",inline"`        // archiver-specific options
 }
 
 // CompressConfig selects a compression scheme, its tuning, and where it runs. It is
@@ -461,16 +479,16 @@ type Archiver struct {
 // different location. The scheme is a compiled name (zstd|gzip|none), recorded
 // per-archive so restore reverses it from the artifact alone.
 type CompressConfig struct {
-	Scheme  string `yaml:"scheme"`  // zstd | gzip | none (default zstd)
-	Level   int    `yaml:"level"`   // compression level; 0 = scheme default
-	Threads int    `yaml:"threads"` // worker threads where supported; 0 = scheme default
-	Program string `yaml:"program"` // optional binary override (name or path)
+	Scheme  string `yaml:"scheme,omitempty"`  // zstd | gzip | none (default zstd)
+	Level   int    `yaml:"level,omitempty"`   // compression level; 0 = scheme default
+	Threads int    `yaml:"threads,omitempty"` // worker threads where supported; 0 = scheme default
+	Program string `yaml:"program,omitempty"` // optional binary override (name or path)
 
 	// At selects where compression runs, for a remote DLE: "server" (default — on the
 	// NBackup host) or "client" (on the source client, so only compressed bytes cross
 	// the wire). Encryption is downstream of compression, so an encrypt.at: client
 	// requires this to be "client" too (validated at load). Local DLEs ignore it.
-	At string `yaml:"at"`
+	At string `yaml:"at,omitempty"`
 }
 
 // SchemeName returns the configured scheme, defaulting to DefaultCompress (zstd).
@@ -485,10 +503,10 @@ func (cc CompressConfig) SchemeName() string {
 // a compiled name (gpg|none); the key reference (recipient or passphrase file) is
 // passed to the encryptor but never recorded — gpg owns the key material.
 type EncryptConfig struct {
-	Scheme         string `yaml:"scheme"`          // gpg | none (default none)
-	Recipient      string `yaml:"recipient"`       // gpg public-key recipient (asymmetric)
-	PassphraseFile string `yaml:"passphrase_file"` // gpg symmetric passphrase file
-	Program        string `yaml:"program"`         // optional binary override (name or path)
+	Scheme         string `yaml:"scheme,omitempty"`          // gpg | none (default none)
+	Recipient      string `yaml:"recipient,omitempty"`       // gpg public-key recipient (asymmetric)
+	PassphraseFile string `yaml:"passphrase_file,omitempty"` // gpg symmetric passphrase file
+	Program        string `yaml:"program,omitempty"`         // optional binary override (name or path)
 
 	// At selects where encryption runs, for a remote
 	// DLE: "server" (default — on the NBackup host) or "client" (on the source client,
@@ -497,7 +515,7 @@ type EncryptConfig struct {
 	// Compress=="client" (validated at load). With a public-key recipient only the
 	// public key need be on the client; the private key resolves the ciphertext wherever
 	// it lives (the asymmetric/untrusted-server postures).
-	At string `yaml:"at"`
+	At string `yaml:"at,omitempty"`
 }
 
 // SchemeName returns the configured scheme, defaulting to "none".
@@ -510,7 +528,7 @@ func (e EncryptConfig) SchemeName() string {
 
 // DLE is a backup source: a path on a host, dumped per a named dumptype.
 type DLE struct {
-	Host     string `yaml:"host"`
+	Host     string `yaml:"host,omitempty"`
 	Path     string `yaml:"path"`
 	DumpType string `yaml:"dumptype"`
 }

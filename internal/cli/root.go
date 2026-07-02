@@ -16,9 +16,13 @@ import (
 	"github.com/Niloen/nbackup/internal/lock"
 )
 
-// Version is reported by `nb --version`. A single pre-release marker until the
-// build stamps a real tag.
-const Version = "0.1.0-dev"
+// Version is reported by `nb --version`. It defaults to a pre-release marker and
+// is stamped by release builds via
+//
+//	-ldflags "-X github.com/Niloen/nbackup/internal/cli.Version=<tag>"
+//
+// (`make build` stamps `git describe`; GoReleaser stamps the release tag).
+var Version = "0.1.0-dev"
 
 const rootLong = `NBackup - immutable, run-based backups.
 
@@ -84,6 +88,7 @@ func NewRootCmd() *cobra.Command {
 
 	// Convention: inspect with a noun (`run`, `medium`), act with a flat verb.
 	root.AddCommand(
+		newInitCmd(a),
 		newPlanCmd(a),
 		newCheckCmd(a),
 		newDumpCmd(a),

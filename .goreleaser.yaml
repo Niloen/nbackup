@@ -1,0 +1,148 @@
+# GoReleaser config: GitHub Releases (archives + deb/rpm) and a ghcr.io image,
+# authenticated with the workflow's built-in GITHUB_TOKEN — no third-party
+# services or secrets. Run by .github/workflows/release.yml on a v* tag, after
+# `make man completions` has populated dist/ (archives and packages include the
+# generated man pages and shell completions).
+#
+# Local verification (no publishing):
+#   goreleaser check
+#   make man completions && goreleaser release --snapshot --clean --skip=docker
+version: 2
+
+# GoReleaser's own output dir. Not the default ./dist: `make man completions`
+# writes the packaged man pages and completions to dist/man and dist/completions,
+# and `release --clean` must not wipe them.
+dist: dist/goreleaser
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: nb
+    main: ./cmd/nb
+    binary: nb
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/Niloen/nbackup/internal/cli.Version={{.Version}}
+
+archives:
+  - id: nb
+    formats: [tar.gz]
+    files:
+      - LICENSE
+      - README.md
+      - nbackup.example.yaml
+      - src: dist/man/*.1
+        dst: man
+      - src: dist/completions/*
+        dst: completions
+
+nfpms:
+  - id: packages
+    package_name: nbackup
+    vendor: NBackup
+    homepage: https://github.com/Niloen/nbackup
+    maintainer: Marcus Nilsson <marcus.nilsson@niloen.com>
+    description: |-
+      Immutable, run-based backups you can read, restore, and prove.
+      Amanda-inspired: GNU tar + a stock compressor produce self-describing
+      archives on disk, tape, or object storage, restorable without NBackup.
+    license: GPL-3.0-or-later
+    formats:
+      - deb
+      - rpm
+    # GNU tar is the one hard runtime dependency (the archiver). The rest are
+    # recommends: only the default compressor (zstd), encryption (gnupg), and
+    # remote SSH sources need them — NBackup runs without any of them.
+    dependencies:
+      - tar
+    recommends:
+      - zstd
+      - gnupg
+    contents:
+      - src: dist/man/*.1
+        dst: /usr/share/man/man1/
+      - src: dist/completions/nb.bash
+        dst: /usr/share/bash-completion/completions/nb
+      - src: dist/completions/nb.fish
+        dst: /usr/share/fish/vendor_completions.d/nb.fish
+      - src: nbackup.example.yaml
+        dst: /usr/share/doc/nbackup/nbackup.example.yaml
+      - src: README.md
+        dst: /usr/share/doc/nbackup/README.md
+    overrides:
+      deb:
+        recommends:
+          - zstd
+          - gnupg
+          - openssh-client
+        contents:
+          - src: dist/man/*.1
+            dst: /usr/share/man/man1/
+          - src: dist/completions/nb.bash
+            dst: /usr/share/bash-completion/completions/nb
+          - src: dist/completions/_nb
+            dst: /usr/share/zsh/vendor-completions/_nb
+          - src: dist/completions/nb.fish
+            dst: /usr/share/fish/vendor_completions.d/nb.fish
+          - src: nbackup.example.yaml
+            dst: /usr/share/doc/nbackup/nbackup.example.yaml
+          - src: README.md
+            dst: /usr/share/doc/nbackup/README.md
+      rpm:
+        recommends:
+          - zstd
+          - gnupg
+          - openssh-clients
+        contents:
+          - src: dist/man/*.1
+            dst: /usr/share/man/man1/
+          - src: dist/completions/nb.bash
+            dst: /usr/share/bash-completion/completions/nb
+          - src: dist/completions/_nb
+            dst: /usr/share/zsh/site-functions/_nb
+          - src: dist/completions/nb.fish
+            dst: /usr/share/fish/vendor_completions.d/nb.fish
+          - src: nbackup.example.yaml
+            dst: /usr/share/doc/nbackup/nbackup.example.yaml
+          - src: README.md
+            dst: /usr/share/doc/nbackup/README.md
+
+dockers:
+  # ghcr.io only — no Docker Hub. Dockerfile.goreleaser wraps the goreleaser-built
+  # binary in the same runtime layer as the source-built ./Dockerfile (keep the two
+  # runtime layers in sync).
+  - id: ghcr
+    ids: [nb]
+    goos: linux
+    goarch: amd64
+    dockerfile: Dockerfile.goreleaser
+    image_templates:
+      - ghcr.io/niloen/nbackup:{{ .Version }}
+      - ghcr.io/niloen/nbackup:latest
+    extra_files:
+      - nbackup.example.yaml
+    build_flag_templates:
+      - --label=org.opencontainers.image.source=https://github.com/Niloen/nbackup
+      - --label=org.opencontainers.image.version={{ .Version }}
+      - --label=org.opencontainers.image.licenses=GPL-3.0-or-later
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github-native
+
+release:
+  # GitHub Releases via the built-in GITHUB_TOKEN; nothing external.
+  github:
+    owner: Niloen
+    name: nbackup
