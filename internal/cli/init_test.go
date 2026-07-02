@@ -1,0 +1,133 @@
+package cli
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/Niloen/nbackup/internal/config"
+)
+
+// runInit executes `nb init` with the given args against a config path in a temp
+// dir and returns the path plus any error. The test binary's stdin is not a TTY,
+// so anything short of full flags exercises the non-interactive paths.
+func runInit(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "nbackup.yaml")
+	root := NewRootCmd()
+	root.SetArgs(append([]string{"-c", out, "init"}, args...))
+	return out, root.Execute()
+}
+
+func TestInitWritesLoadableConfig(t *testing.T) {
+	out, err := runInit(t, "--source", "/srv/data", "--source", "/etc", "--to", "/backups/runs", "--capacity", "500GB", "--cycle", "14d")
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	cfg, err := config.Load(out)
+	if err != nil {
+		t.Fatalf("generated config does not load: %v", err)
+	}
+	if cfg.Landing != "disk" || cfg.Media["disk"].Params["path"] != "/backups/runs" || cfg.Media["disk"].Capacity != "500GB" {
+		t.Errorf("landing medium wrong: %+v", cfg.Media)
+	}
+	if cfg.Cycle != "14d" {
+		t.Errorf("cycle = %q, want 14d", cfg.Cycle)
+	}
+	if len(cfg.Sources) != 2 || cfg.Sources[0].Host != "localhost" {
+		t.Errorf("sources = %+v, want two localhost DLEs", cfg.Sources)
+	}
+	// The cron pitfall: both state roots must come out absolute.
+	if !filepath.IsAbs(cfg.WorkdirPath()) || !filepath.IsAbs(cfg.StatePath()) {
+		t.Errorf("workdir/state_dir not absolute: %q, %q", cfg.WorkdirPath(), cfg.StatePath())
+	}
+}
+
+func TestInitClassifiesDestination(t *testing.T) {
+	for _, tc := range []struct {
+		to, kind, param, want string
+	}{
+		{"s3://bucket?region=eu-north-1", "cloud", "url", "s3://bucket?region=eu-north-1"},
+		{"tape:/var/vtape", "tape", "dir", "/var/vtape"},
+		{"/dev/nst0", "tape", "device", "/dev/nst0"},
+		{"/backups/runs", "disk", "path", "/backups/runs"},
+	} {
+		kind, params := destMedium(tc.to)
+		if kind != tc.kind || params[tc.param] != tc.want {
+			t.Errorf("destMedium(%q) = %s %v, want %s {%s: %s}", tc.to, kind, params, tc.kind, tc.param, tc.want)
+		}
+	}
+}
+
+func TestInitTapeCapacityIsVolumeSize(t *testing.T) {
+	out, err := runInit(t, "--source", "/srv", "--to", "tape:/var/vtape", "--capacity", "6TB")
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	cfg, err := config.Load(out)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	m := cfg.Media["tape"]
+	if m.Params["volume_size"] != "6TB" || m.Capacity != "" {
+		t.Errorf("tape capacity should be volume_size, got params=%v capacity=%q", m.Params, m.Capacity)
+	}
+}
+
+func TestInitRefusesOverwrite(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "nbackup.yaml")
+	if err := os.WriteFile(out, []byte("cycle: 7d\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := NewRootCmd()
+	root.SetArgs([]string{"-c", out, "init", "--source", "/srv", "--to", "/runs"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("want refuse-to-overwrite error, got %v", err)
+	}
+	data, _ := os.ReadFile(out)
+	if string(data) != "cycle: 7d\n" {
+		t.Errorf("existing config was modified: %q", data)
+	}
+}
+
+func TestInitNoTTYNoFlagsFails(t *testing.T) {
+	// The test binary's stdin is not a terminal, so with no flags init must fail
+	// and point at the example config rather than guessing.
+	_, err := runInit(t)
+	if err == nil || !strings.Contains(err.Error(), "nbackup.example.yaml") {
+		t.Fatalf("want no-TTY pointer to nbackup.example.yaml, got %v", err)
+	}
+}
+
+func TestInitPartialFlagsFail(t *testing.T) {
+	_, err := runInit(t, "--to", "/runs")
+	if err == nil || !strings.Contains(err.Error(), "--source") {
+		t.Fatalf("want both-flags-required error, got %v", err)
+	}
+}
+
+func TestProbeCompressor(t *testing.T) {
+	// The probe walks zstd -> gzip -> none; make PATH deterministic instead of
+	// depending on what this machine has. (The documented test env has no zstd,
+	// but a runner might.)
+	bin := t.TempDir()
+	gzip, err := os.ReadFile("/bin/true")
+	if err != nil {
+		t.Skipf("no /bin/true to stand in as a binary: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "gzip"), gzip, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", bin)
+	if scheme, note := probeCompressor(); scheme != "gzip" || note == "" {
+		t.Errorf("PATH with only gzip: got %q (note %q), want gzip with a fallback note", scheme, note)
+	}
+
+	t.Setenv("PATH", t.TempDir())
+	if scheme, note := probeCompressor(); scheme != "none" || note == "" {
+		t.Errorf("empty PATH: got %q (note %q), want none with a note", scheme, note)
+	}
+}

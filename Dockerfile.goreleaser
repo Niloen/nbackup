@@ -1,0 +1,12 @@
+# Release-image Dockerfile used by GoReleaser (see .goreleaser.yaml `dockers:`):
+# GoReleaser copies its prebuilt `nb` binary into the build context, so this is
+# just the runtime layer. Keep it in sync with the runtime stage of ./Dockerfile
+# (the source-build variant, which also documents the `docker run` usage).
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        tar zstd gnupg openssh-client ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY nb /usr/local/bin/nb
+COPY nbackup.example.yaml /usr/share/doc/nbackup/nbackup.example.yaml
+ENTRYPOINT ["nb"]

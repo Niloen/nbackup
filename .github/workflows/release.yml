@@ -1,0 +1,91 @@
+# Release: GoReleaser publishes the GitHub Release (archives, deb/rpm,
+# checksums) and the ghcr.io image — all inside GitHub, authenticated with the
+# built-in GITHUB_TOKEN. No third-party secrets or upload targets.
+#
+# Two ways in:
+#   - push a version tag (`git tag v1.0.0 && git push origin v1.0.0`), or
+#   - Actions → Release → "Run workflow": the run bumps the latest v* tag
+#     (patch by default; pick minor/major from the dropdown, e.g.
+#     v1.2.3 → v1.2.4 / v1.3.0 / v2.0.0), tags the chosen branch's head, and
+#     releases in the same run. (A GITHUB_TOKEN-pushed tag never triggers
+#     workflows, so this cannot double-release.)
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semver digit to bump from the latest tag (v1.2.3 → patch: v1.2.4, minor: v1.3.0, major: v2.0.0)"
+        type: choice
+        default: patch
+        options: [patch, minor, major]
+      version:
+        description: "Or an explicit version (e.g. v1.0.0) — overrides bump; use for the first release"
+        required: false
+        type: string
+
+permissions:
+  contents: write # create the tag (manual runs) and the GitHub Release
+  packages: write # push the image to ghcr.io
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags + history for the version and changelog
+
+      # Manual runs only: compute the next version from the latest v* tag (or
+      # take the explicit override) and mint the tag GoReleaser will release.
+      # Fails (and stops the release) if the result is malformed or already tagged.
+      - name: Create and push tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          BUMP: ${{ inputs.bump }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ -z "$VERSION" ]; then
+            latest="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+            latest="${latest:-v0.0.0}"
+            IFS=. read -r major minor patch <<< "${latest#v}"
+            case "$BUMP" in
+              major) VERSION="v$((major + 1)).0.0" ;;
+              minor) VERSION="v${major}.$((minor + 1)).0" ;;
+              patch) VERSION="v${major}.${minor}.$((patch + 1))" ;;
+              *) echo "unknown bump: $BUMP" >&2; exit 1 ;;
+            esac
+            echo "latest tag $latest, bump $BUMP -> $VERSION"
+          fi
+          case "$VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "version must look like v1.0.0, got: $VERSION" >&2; exit 1 ;;
+          esac
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin "$VERSION"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate man pages and completions
+        run: make man completions
+
+      - name: GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

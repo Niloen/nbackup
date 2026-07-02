@@ -140,19 +140,31 @@ stream — needs the key.
 
 ## Install
 
+Prebuilt binaries, `.deb`/`.rpm` packages (with man pages and shell completions),
+and a container image are published per release:
+
+- **[GitHub Releases](https://github.com/Niloen/nbackup/releases)** — tarballs
+  for Linux/macOS (amd64/arm64) plus `deb`/`rpm` packages
+- **`ghcr.io/niloen/nbackup`** — Docker image (GNU tar, zstd, gnupg included);
+  entrypoint is `nb`, scheduling stays your host's cron
+- `nb init` writes a starting config interactively (see Quick start)
+
+Or build from source:
+
 ```bash
 make build          # builds ./bin/nb
 # or
 go install ./cmd/nb
 ```
 
-This produces a single `nb` binary. The convention: you **inspect** with a noun
+Either way you get a single `nb` binary. The convention: you **inspect** with a noun
 (`nb run`, `nb dle`, `nb medium`) and **act** with a flat verb (`nb dump`,
 `nb recover`, `nb prune`, …). Each inspection noun lists with no argument and
 details one item when given an id (`nb run run-2026-06-21.001`, `nb medium lto`).
 
 | Command              | Purpose                                                  |
 |----------------------|----------------------------------------------------------|
+| `nb init`            | Write a starting nbackup.yaml (interactive, or via flags) |
 | `nb check`           | Verify the config and reach every source host           |
 | `nb plan`            | Show what the next run would do                          |
 | `nb dump`            | Execute a run and commit its archives                    |
@@ -179,6 +191,7 @@ examples, and `nb completion <shell>` to generate shell completion.
 ## Quick start
 
 ```bash
+nb init                                # interactive config wizard, or:
 cp nbackup.example.yaml nbackup.yaml   # edit sources + catalog path
 
 nb plan                # preview today's plan, capacity usage, and $/month cost (cloud media)

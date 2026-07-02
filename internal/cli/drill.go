@@ -270,11 +270,12 @@ func stdinIsTerminal() bool {
 	return isTerminal(os.Stdin.Fd())
 }
 
-// isTerminal reports whether fd refers to a real terminal, via the TCGETS ioctl that
-// underlies isatty(3). Unlike an os.ModeCharDevice test it returns false for /dev/null and
-// other character devices — only a tty answers TCGETS.
+// isTerminal reports whether fd refers to a real terminal, via the get-termios ioctl
+// that underlies isatty(3) (TCGETS on Linux, TIOCGETA on darwin/BSD — see tty_*.go).
+// Unlike an os.ModeCharDevice test it returns false for /dev/null and other character
+// devices — only a tty answers it.
 func isTerminal(fd uintptr) bool {
-	_, err := unix.IoctlGetTermios(int(fd), unix.TCGETS)
+	_, err := unix.IoctlGetTermios(int(fd), ioctlGetTermios)
 	return err == nil
 }
 
