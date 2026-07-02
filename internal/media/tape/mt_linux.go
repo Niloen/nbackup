@@ -362,24 +362,40 @@ func (r *mtReader) Read(p []byte) (int, error) {
 // fill reads the next whole record into r.buf, growing and retrying when the driver
 // reports the buffer was too small for the record.
 func (r *mtReader) fill() error {
+	buf, n, err := growReadRecord(r.f.Read, r.buf)
+	r.buf = buf
+	if err != nil {
+		return err
+	}
+	r.off, r.end = 0, n
+	return nil
+}
+
+// growReadRecord reads one whole variable-block record via read, growing buf (up to
+// maxTapeBlock) and retrying whenever the st(4) driver reports the buffer was too
+// small for the record on tape. It returns the possibly-reallocated buffer and the
+// record length; n==0 with io.EOF is the trailing filemark (end of the file). A
+// failed too-small read leaves the tape position unchanged, so the retry re-reads the
+// same record into the larger buffer. This is the pure core of mtReader.fill, split
+// out so the grow-and-retry can be exercised without a real drive.
+func growReadRecord(read func([]byte) (int, error), buf []byte) ([]byte, int, error) {
 	for {
-		n, err := r.f.Read(r.buf)
+		n, err := read(buf)
 		if n > 0 {
-			r.off, r.end = 0, n
-			return nil
+			return buf, n, nil
 		}
 		if err == nil || errors.Is(err, io.EOF) {
-			return io.EOF // a zero-length read is the trailing filemark: end of this file
+			return buf, 0, io.EOF // a zero-length read is the trailing filemark: end of this file
 		}
-		if isSmallReadBuffer(err) && len(r.buf) < maxTapeBlock {
-			grown := len(r.buf) * 2
+		if isSmallReadBuffer(err) && len(buf) < maxTapeBlock {
+			grown := len(buf) * 2
 			if grown > maxTapeBlock {
 				grown = maxTapeBlock
 			}
-			r.buf = make([]byte, grown)
+			buf = make([]byte, grown)
 			continue
 		}
-		return err
+		return buf, 0, err
 	}
 }
 

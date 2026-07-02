@@ -329,14 +329,15 @@ func (d *driller) drillChain(t drill.Target, medium string, logf Logf) (drill.Cl
 
 // classifyRestoreErr maps a failed restorer.Extract to a drill class via the
 // restorer's error contract: a missing copy/volume (sentinels, via errors.Is) is
-// Missing; a role-tagged Sink fault (tar could not compose the stream) is Chain;
-// anything else — an unreadable part or a decrypt/decompress child — is Pipeline.
+// Missing; a role-tagged Sink or Commit fault (tar could not compose the stream,
+// or its exit status was bad) is Chain; anything else — an unreadable part or a
+// decrypt/decompress child — is Pipeline.
 func classifyRestoreErr(err error) drill.Class {
 	if errors.Is(err, archiveio.ErrMissingCopy) || errors.Is(err, librarian.ErrVolumeUnavailable) {
 		return drill.ClassMissing
 	}
 	var xe *xfer.Error
-	if errors.As(err, &xe) && xe.Role == xfer.RoleSink {
+	if errors.As(err, &xe) && (xe.Role == xfer.RoleSink || xe.Role == xfer.RoleCommit) {
 		return drill.ClassChain
 	}
 	return drill.ClassPipeline

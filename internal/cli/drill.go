@@ -266,7 +266,9 @@ func unattendedTag(unattended bool) string {
 // an os.ModeCharDevice test: /dev/null (a common cron stdin) is itself a character device,
 // so the looser test wrongly reported `nb dump </dev/null` as interactive — printing a swap
 // prompt into the log and then erroring, instead of the clean unattended path.
-func stdinIsTerminal() bool {
+// A var (not a plain func) so tests can script the interactive-vs-cron decision
+// the prompt paths (confirmRead, the swap operator) gate on.
+var stdinIsTerminal = func() bool {
 	return isTerminal(os.Stdin.Fd())
 }
 

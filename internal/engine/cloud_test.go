@@ -212,6 +212,49 @@ func TestCloudPartSizeDefaultAndBound(t *testing.T) {
 	}
 }
 
+// TestPartSizeForBounds covers partSizeFor's error branches: a value below the
+// two-header floor is rejected, a malformed value surfaces the parse error, and an
+// unknown medium name errors — the guards that keep a bad part_size from a run.
+func TestPartSizeForBounds(t *testing.T) {
+	base := func(p map[string]string) *config.Config {
+		return &config.Config{
+			Landing:  "cloud",
+			Media:    map[string]config.Media{"cloud": {Type: "cloud", Params: p}},
+			Workdir:  t.TempDir(),
+			StateDir: t.TempDir(),
+		}
+	}
+
+	// Too small: below 2 * record.HeaderBlock a part cannot carry payload.
+	eng, err := New(base(map[string]string{"url": "mem://", "part_size": "1024"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.dep.partSizeFor("cloud"); err == nil {
+		t.Error("a sub-two-header part_size should be rejected")
+	} else if !strings.Contains(err.Error(), "too small") {
+		t.Errorf("error = %q, want it to say the value is too small", err)
+	}
+
+	// Malformed value: the ParseBytes error is surfaced. Injected after New so the
+	// factory's own param validation does not pre-empt partSizeFor's parse.
+	eng2, err := New(base(map[string]string{"url": "mem://"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng2.cfg.Media["cloud"] = config.Media{Type: "cloud", Params: map[string]string{"url": "mem://", "part_size": "not-a-size"}}
+	if _, err := eng2.dep.partSizeFor("cloud"); err == nil {
+		t.Error("a malformed part_size should surface a parse error")
+	} else if !strings.Contains(err.Error(), "part_size") {
+		t.Errorf("error = %q, want it to name part_size", err)
+	}
+
+	// Unknown medium.
+	if _, err := eng2.dep.partSizeFor("nope"); err == nil {
+		t.Error("partSizeFor of an unknown medium should error")
+	}
+}
+
 // TestSyncDiskToCloud lands on disk and mirrors offsite to a cloud medium, the
 // canonical "land fast, replicate offsite" flow. It asserts the copy is recorded
 // as a second placement and that a re-sync is idempotent.

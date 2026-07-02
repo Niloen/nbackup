@@ -1,9 +1,40 @@
 package record
 
 import (
+	"reflect"
 	"sort"
 	"testing"
+	"time"
 )
+
+// TestCommitRoundTrip pins that a commit footer marshals and parses back to an equal
+// archive — the marker that makes a dump durable must survive a write/read cycle
+// intact. A malformed footer is a parse error, not a zero-value archive.
+func TestCommitRoundTrip(t *testing.T) {
+	a := Archive{
+		Run: "run-2026-06-21.001", DLE: "app01-home", Host: "app01", Path: "/home",
+		Archiver: "gnutar", Compress: "none", Encrypt: "none", Level: 1,
+		Compressed: 1024, Uncompressed: 2048, FileCount: 7, SHA256: "deadbeef",
+		Parts: 2, BaseRun: "run-2026-06-20.001",
+		CreatedAt: time.Date(2026, 6, 21, 14, 30, 0, 0, time.UTC),
+		Members:   []string{"./", "./etc/hosts"},
+	}
+	data, err := MarshalCommit(a)
+	if err != nil {
+		t.Fatalf("MarshalCommit: %v", err)
+	}
+	got, err := ParseCommit(data)
+	if err != nil {
+		t.Fatalf("ParseCommit: %v", err)
+	}
+	if !reflect.DeepEqual(*got, a) {
+		t.Errorf("round-trip mismatch:\n got %+v\nwant %+v", *got, a)
+	}
+
+	if _, err := ParseCommit([]byte("{not valid json")); err == nil {
+		t.Error("ParseCommit of malformed input should error")
+	}
+}
 
 func TestIDAndParse(t *testing.T) {
 	cases := []struct {

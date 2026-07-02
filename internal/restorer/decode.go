@@ -89,12 +89,16 @@ func (d *decoder) restoreArchive(rc io.ReadCloser, plan decodePlan, archiverType
 // VerifyChecksum hashes an archive's raw stream (a ReadStore endpoint) and
 // reports whether it matches the recorded sha — a transfer with no decode
 // (source → Hash sink). A clean read whose hash differs returns (false, nil); a
-// read fault returns (false, err).
+// read fault returns (false, err). The Hash sink's part writer is a
+// hash.Hash, whose Write never errors, so any transfer error tagged RoleCommit
+// is necessarily the sink's own Commit-time verdict (the checksum comparison)
+// — every other role (a mid-copy RoleSink included, since it can only mean the
+// upstream read faulted while draining into that writer) is a genuine fault.
 func (r *Restorer) VerifyChecksum(rc io.ReadCloser, sha string) (bool, error) {
 	_, terr := xfer.Transfer(context.Background(), xfer.Reader(rc), xfer.NewFilters(), xfer.Hash(sha))
 	if terr != nil {
 		var xe *xfer.Error
-		if errors.As(terr, &xe) && xe.Role == xfer.RoleSink {
+		if errors.As(terr, &xe) && xe.Role == xfer.RoleCommit {
 			return false, nil // clean read, hash differs
 		}
 		return false, terr

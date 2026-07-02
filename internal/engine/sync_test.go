@@ -135,6 +135,97 @@ func TestSyncSelectionLast(t *testing.T) {
 	}
 }
 
+// TestSyncSelectionSince exercises applySelection's Since filter: only runs whose
+// logical date is at or after the bound are in the backlog (the older run is excluded),
+// filtering on the run's backup date rather than its physical seal time.
+func TestSyncSelectionSince(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "x")
+
+	cfg := &config.Config{
+		Landing: "disk",
+		Media: map[string]config.Media{
+			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	for d := 21; d <= 23; d++ {
+		if _, err := eng.Run(context.Background(), time.Date(2026, 6, d, 0, 0, 0, 0, time.UTC), nil); err != nil {
+			t.Fatalf("dump %d: %v", d, err)
+		}
+	}
+
+	// Since 2026-06-22 keeps the 22nd and 23rd runs, excluding the 21st.
+	report, err := eng.SyncTo("", "archive", SyncSelection{Since: time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)}, false, false, nil)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(report.Items) != 2 {
+		t.Fatalf("--since backlog = %d, want 2 (the 22nd and 23rd)", len(report.Items))
+	}
+	if report.Items[0].RunID != "run-2026-06-22.001" {
+		t.Fatalf("oldest kept run = %q, want run-2026-06-22.001", report.Items[0].RunID)
+	}
+}
+
+// TestSyncOverCapacityStillCopies exercises the capacity projection: syncing a backlog
+// bigger than the target's capacity surfaces the overshoot (OverCapacity, ProjectedBytes)
+// yet still copies — sync does not prune — recording CopiedBytes for the run record.
+func TestSyncOverCapacityStillCopies(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), strings.Repeat("payload-", 4096)) // ~32 KiB, well past a 10-byte cap
+
+	cfg := &config.Config{
+		Landing: "disk",
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			// A cloud target with a 10-byte capacity: any real run overshoots it.
+			"tiny": {Type: "cloud", Capacity: "10", Params: map[string]string{"url": "file://" + t.TempDir()}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+
+	report, err := eng.SyncTo("", "tiny", SyncSelection{}, true, false, nil)
+	if err != nil {
+		t.Fatalf("sync should copy despite overshoot: %v", err)
+	}
+	if !report.OverCapacity() {
+		t.Errorf("backlog should overshoot the 10-byte target: projected=%d cap=%d", report.ProjectedBytes, report.TargetCapacity)
+	}
+	if report.ProjectedBytes <= report.TargetCapacity {
+		t.Errorf("projected bytes %d should exceed capacity %d", report.ProjectedBytes, report.TargetCapacity)
+	}
+	if report.Copied() != 1 || report.CopiedBytes() <= 0 {
+		t.Errorf("sync must still copy: copied=%d bytes=%d", report.Copied(), report.CopiedBytes())
+	}
+}
+
 // TestSyncFromNonLanding exercises an arbitrary --from: a run is first mirrored
 // disk -> archive, then re-mirrored archive -> cold with archive (not the landing
 // medium) as the source. The cold copy must read from archive and land sealed.

@@ -9,7 +9,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"gocloud.dev/blob"
+
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/media/bucket"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
@@ -407,6 +410,135 @@ func TestTapeBucketURL(t *testing.T) {
 	if len(files) != 2 || files[1].Header.DLE != "d" {
 		t.Fatalf("after reopen expected label+archive, got %+v", files)
 	}
+}
+
+// TestTapeCorruptLabelForeign: file 0 exists but is too short to decode a header (a
+// torn/truncated LABEL, distinct from the torn-tail test which plants a non-zero
+// file). readLabel must surface it as an error and deviceStatus must classify the
+// volume foreign — never blank and never crash — so the overwrite guard refuses it
+// until a forced relabel.
+func TestTapeCorruptLabelForeign(t *testing.T) {
+	dir := t.TempDir()
+
+	// Plant a truncated file 0: a numbered key (so it is counted, not "foreign keys")
+	// whose bytes cannot decode a header block.
+	slotDir := filepath.Join(dir, slotName(1))
+	if err := os.MkdirAll(slotDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(slotDir, "000000"), []byte("torn-label"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Open so the device scans and counts the planted file.
+	v2 := openTape(t, dir)
+	if _, ok, err := v2.(media.Labeled).ReadLabel(); ok || err == nil {
+		t.Fatalf("corrupt file-0 label: ok=%v err=%v, want ok=false with an error", ok, err)
+	}
+	// The Drive status derives from deviceStatus, which must mark it foreign (not blank).
+	st, ok := v2.(media.Changer).Drive(0).Loaded()
+	if !ok {
+		t.Fatal("drive should report loaded (a cartridge is present, just corrupt)")
+	}
+	if !st.Foreign || st.Blank {
+		t.Fatalf("corrupt label status = %+v, want Foreign && !Blank", st)
+	}
+}
+
+// fakeLoader is a minimal loader whose per-slot load behaviour a test dictates, so the
+// changer's load-failure cleanup and WalkReadable's skip-and-continue can be exercised
+// without a real changer backend.
+type fakeLoader struct {
+	nDrives  int
+	slotList []media.SlotStatus
+	// loadFn binds slot->drive; returning an error simulates an unloadable cartridge.
+	loadFn func(slot, drive int) (device, string, error)
+}
+
+func (f *fakeLoader) driveCount() int                    { return f.nDrives }
+func (f *fakeLoader) manual() bool                       { return false }
+func (f *fakeLoader) slots() ([]media.SlotStatus, error) { return f.slotList, nil }
+func (f *fakeLoader) load(slot, drive int) (device, string, error) {
+	return f.loadFn(slot, drive)
+}
+func (f *fakeLoader) unload(int) error { return nil }
+func (f *fakeLoader) loaded(int) (device, string, int, bool) {
+	return nil, "", -1, false
+}
+
+// TestChangerLoadFailureClearsBinding: a load that errors (a rejected/unloadable
+// cartridge) must leave the drive reporting empty, not a phantom tape whose later
+// device open would fail with "no medium".
+func TestChangerLoadFailureClearsBinding(t *testing.T) {
+	ld := &fakeLoader{
+		nDrives: 1,
+		loadFn: func(slot, drive int) (device, string, error) {
+			return nil, "", errors.New("wrong-generation cartridge")
+		},
+	}
+	c, err := newTapeChanger(ld, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Load(1, 0); err == nil {
+		t.Fatal("Load should surface the loader error")
+	}
+	if _, ok := c.Drive(0).Loaded(); ok {
+		t.Fatal("a failed load must leave the drive empty, not a phantom binding")
+	}
+}
+
+// TestWalkReadableSkipsUnloadable: WalkReadable loads each occupied slot into drive 0
+// in turn; a slot whose load fails is skipped (it holds nothing readable), and the
+// scan still visits the slots that do load.
+func TestWalkReadableSkipsUnloadable(t *testing.T) {
+	// A dir-backed device for the slot that loads successfully.
+	good, err := openDir(context.Background(), memBucket(t), "ok/", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ld := &fakeLoader{
+		nDrives: 1,
+		slotList: []media.SlotStatus{
+			{Slot: 1, Full: true},
+			{Slot: 2, Full: true},
+			{Slot: 3, Full: false},                    // empty: never attempted
+			{Slot: 4, Full: true, ImportExport: true}, // mailslot: skipped
+		},
+		loadFn: func(slot, drive int) (device, string, error) {
+			if slot == 1 {
+				return nil, "", errors.New("stuck cartridge")
+			}
+			return good, "BC", nil
+		},
+	}
+	c, err := newTapeChanger(ld, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var visited int
+	if err := media.WalkReadable(c, func(media.Volume) error {
+		visited++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Only slot 2 loads: slot 1 errors (skipped), 3 is empty, 4 is a mailslot.
+	if visited != 1 {
+		t.Fatalf("WalkReadable visited %d cartridges, want 1 (slot 2 only)", visited)
+	}
+}
+
+// memBucket opens a throwaway in-memory bucket for device fixtures.
+func memBucket(t *testing.T) *blob.Bucket {
+	t.Helper()
+	b, err := bucket.Open(context.Background(), "mem://")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { b.Close() })
+	return b
 }
 
 // writeFileT bridges tests to the writer-based AppendFile (callback shape kept for brevity).

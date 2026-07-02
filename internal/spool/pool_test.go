@@ -108,6 +108,38 @@ func TestPoolAbortWakesBlocked(t *testing.T) {
 	}
 }
 
+// Charge holds a committed archive's landed bytes against the disk until its drain copies it off, so
+// the *drain backlog* itself back-pressures the next producer — not just the dumps still writing. Here
+// the in-flight estimate is freed (Release) but the charged landed bytes keep the disk full, so the
+// next acquire still blocks until the drain releases them.
+func TestPoolChargeBackpressuresOnDrainBacklog(t *testing.T) {
+	p := NewPool([]Disk{{Capacity: 100}})
+	idx, direct, err := p.Acquire(80) // reserves 80 of 100 for the in-flight write
+	if err != nil || direct || idx != 0 {
+		t.Fatalf("acquire = (%d,%v,%v); want (0,false,nil)", idx, direct, err)
+	}
+	p.Charge(0, 80)  // the archive committed: 80 landed bytes now occupy the disk (used = 160)
+	p.Release(0, 80) // the producer frees its in-flight estimate on Close (used = 80, still the backlog)
+
+	acquired := make(chan struct{}, 1)
+	go func() {
+		p.Acquire(30) // 80 + 30 > 100: must block on the drain backlog
+		acquired <- struct{}{}
+	}()
+	select {
+	case <-acquired:
+		t.Fatal("acquire must block while a charged (not-yet-drained) archive fills the disk")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	p.Release(0, 80) // the drain copied the archive off and freed its landed bytes
+	select {
+	case <-acquired:
+	case <-time.After(time.Second):
+		t.Fatal("releasing the drained bytes must wake the blocked acquire")
+	}
+}
+
 // Allocation is round-robin across the disks, so successive dumps spread across spindles.
 func TestPoolRoundRobin(t *testing.T) {
 	p := NewPool([]Disk{{Capacity: 1000}, {Capacity: 1000}, {Capacity: 1000}})
