@@ -19,6 +19,25 @@ Core philosophy:
 > A backup administrator should be able to reason about backups by looking at a
 > sequence of immutable daily backup artifacts rather than a database of chunks.
 
+## Audience
+
+The operator NBackup serves values certainty of recovery over storage
+efficiency:
+
+- **The small-fleet sysadmin or MSP** — a handful to a few dozen Unix servers,
+  one pair of hands, cron and an inbox; wants provable restores without
+  operating a daemon constellation or a catalog database.
+- **The tape user** — from a homelab LTO drive to a library with a robot;
+  underserved by the chunk-store generation, which assumes random-access
+  storage.
+- **Compliance and archival contexts** — where "readable in fifteen years with
+  standard tools" and verifiable immutability beat deduplication ratios.
+- **The Amanda operator** — same philosophy, modern storage, less machinery.
+
+Not the target: dedup-heavy fleets (many similar machines, laptop backup),
+Windows sources, and anyone for whom storage efficiency is the deciding factor
+— a chunk-store tool serves them better, and the docs say so plainly.
+
 ---
 
 # Goals
