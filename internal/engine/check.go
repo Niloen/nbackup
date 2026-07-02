@@ -39,16 +39,31 @@ type HostCheck struct {
 	Lines  []CheckLine
 }
 
+// checker is the `nb check` health-probe lane. It reads config and probes tools,
+// media, and hosts through the two resolution services — the toolchain (executors,
+// archivers, transform options) and the depot (medium opens) — and never writes
+// backup data. It is stateless; the engine builds one per Check call.
+type checker struct {
+	cfg *config.Config
+	tc  *toolchain
+	dep *depot
+}
+
 // Check verifies the configuration is runnable: the server side always, and each source
 // host. Every probe runs through the host's executor — `Local` for a `localhost` DLE, SSH
 // for a remote one — so the same code checks both; the only difference is that a remote
 // host is skipped (not probed) when connect is false (the `--offline` view). It never
 // writes backup data.
 func (e *Engine) Check(connect bool) *CheckReport {
+	return (&checker{cfg: e.cfg, tc: e.tc, dep: e.dep}).Check(connect)
+}
+
+// Check runs the full server + per-host probe; see the Engine facade for the contract.
+func (c *checker) Check(connect bool) *CheckReport {
 	rep := &CheckReport{}
-	e.checkServer(rep)
-	for _, host := range e.dleHostsInOrder() {
-		rep.Hosts = append(rep.Hosts, e.checkHost(rep, host, connect))
+	c.checkServer(rep)
+	for _, host := range c.dleHostsInOrder() {
+		rep.Hosts = append(rep.Hosts, c.checkHost(rep, host, connect))
 	}
 	return rep
 }
@@ -64,10 +79,10 @@ func (rep *CheckReport) add(lines *[]CheckLine, ok, warn bool, msg string) {
 	}
 }
 
-func (e *Engine) checkServer(rep *CheckReport) {
-	e.checkMedia(rep)
+func (c *checker) checkServer(rep *CheckReport) {
+	c.checkMedia(rep)
 
-	wd := e.cfg.WorkdirPath()
+	wd := c.cfg.WorkdirPath()
 	if err := writableDir(wd); err != nil {
 		rep.add(&rep.Server, false, false, fmt.Sprintf("workdir %s not writable: %v", wd, err))
 	} else {
@@ -82,12 +97,12 @@ func (e *Engine) checkServer(rep *CheckReport) {
 	// decompression of any scheme a dumptype records, so check every distinct scheme a
 	// missing binary is a real problem even with client-side dumps.
 	checkedScheme := map[string]bool{}
-	for _, scheme := range append([]string{e.cfg.CompressScheme()}, e.dumptypeCompressSchemes()...) {
+	for _, scheme := range append([]string{c.cfg.CompressScheme()}, c.tc.dumptypeCompressSchemes()...) {
 		if checkedScheme[scheme] {
 			continue
 		}
 		checkedScheme[scheme] = true
-		if err := compress.Check(scheme, e.fopts); err != nil {
+		if err := compress.Check(scheme, c.tc.fopts); err != nil {
 			msg := fmt.Sprintf("compression %q: %v", scheme, err)
 			// The common failure is simply a missing binary; compress.Check's wrapped
 			// LookPath error restates the name three times with no way out. One
@@ -106,13 +121,13 @@ func (e *Engine) checkServer(rep *CheckReport) {
 	}
 
 	checked := map[string]bool{}
-	for _, d := range e.cfg.DLEs() {
+	for _, d := range c.cfg.DLEs() {
 		dt := d.DumpTypeName()
 		if checked[dt] {
 			continue
 		}
 		checked[dt] = true
-		scheme, opts := e.encryptionFor(dt)
+		scheme, opts := c.tc.encryptionFor(dt)
 		if scheme == "" || scheme == "none" {
 			continue
 		}
@@ -135,10 +150,10 @@ func (e *Engine) checkServer(rep *CheckReport) {
 // which a `check` that ignored it would let the operator discover only at sync time. A
 // cloud medium's reachability needs credentials/network, so it is reported as
 // configured-but-unprobed (it is validated at first use) rather than opened here.
-func (e *Engine) checkMedia(rep *CheckReport) {
-	landing := e.Landing()
-	names := make([]string, 0, len(e.cfg.Media))
-	for n := range e.cfg.Media {
+func (c *checker) checkMedia(rep *CheckReport) {
+	landing := c.dep.landingName
+	names := make([]string, 0, len(c.cfg.Media))
+	for n := range c.cfg.Media {
 		names = append(names, n)
 	}
 	sort.Strings(names)
@@ -151,8 +166,8 @@ func (e *Engine) checkMedia(rep *CheckReport) {
 		// An unknown medium type is a config error, not a transient readiness issue,
 		// so it is a hard failure even for a non-landing medium — otherwise `nb check`
 		// green-lights a config whose sync/copy target can never be constructed.
-		if !media.KnownVolumeType(e.cfg.Media[name].Type) {
-			rep.add(&rep.Server, false, false, fmt.Sprintf("%s has unknown type %q (known: %v)", label, e.cfg.Media[name].Type, media.VolumeTypes()))
+		if !media.KnownVolumeType(c.cfg.Media[name].Type) {
+			rep.add(&rep.Server, false, false, fmt.Sprintf("%s has unknown type %q (known: %v)", label, c.cfg.Media[name].Type, media.VolumeTypes()))
 			continue
 		}
 		// The landing is where dumps must go, so `nb check` opens it for real (the one
@@ -161,7 +176,7 @@ func (e *Engine) checkMedia(rep *CheckReport) {
 		// credentials or an unreachable bucket surface; opening it also bootstraps the
 		// catalog, so a clean open means the landing is genuinely runnable.
 		if isLanding {
-			if _, err := e.landing(); err != nil {
+			if _, err := c.dep.landing(); err != nil {
 				rep.add(&rep.Server, false, false, fmt.Sprintf("%s not ready: %v", label, err))
 			} else {
 				rep.add(&rep.Server, true, false, fmt.Sprintf("%s ready", label))
@@ -171,11 +186,11 @@ func (e *Engine) checkMedia(rep *CheckReport) {
 		// A non-landing cloud tier is a sync/copy target validated at first use: probing
 		// it here would force credentials/network for a medium the local backup doesn't
 		// need, so report it as configured-but-unprobed.
-		if e.cfg.Media[name].Type == "cloud" {
+		if c.cfg.Media[name].Type == "cloud" {
 			rep.add(&rep.Server, false, true, fmt.Sprintf("%s (cloud) configured — reachability checked at first use, not here", label))
 			continue
 		}
-		if _, _, _, err := e.mediumVolume(name); err != nil {
+		if _, _, _, err := c.dep.mediumVolume(name); err != nil {
 			rep.add(&rep.Server, false, true, fmt.Sprintf("%s not ready: %v", label, err))
 		} else {
 			rep.add(&rep.Server, true, false, fmt.Sprintf("%s ready", label))
@@ -183,8 +198,8 @@ func (e *Engine) checkMedia(rep *CheckReport) {
 	}
 }
 
-func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostCheck {
-	ssh, remote := e.cfg.RemoteHost(host)
+func (c *checker) checkHost(rep *CheckReport, host string, connect bool) HostCheck {
+	ssh, remote := c.cfg.RemoteHost(host)
 	hc := HostCheck{Host: host, Remote: remote}
 	if remote {
 		hc.Target = sshTarget(host, ssh)
@@ -194,7 +209,7 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 		}
 	}
 
-	ex := e.executorFor(host) // Local() for a local host, SSH for a remote one
+	ex := c.tc.executorFor(host) // Local() for a local host, SSH for a remote one
 	if remote {
 		if err := ex.Command("true").Run(); err != nil {
 			rep.add(&hc.Lines, false, false, fmt.Sprintf("unreachable over SSH: %v", err))
@@ -203,7 +218,7 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 		rep.add(&hc.Lines, true, false, "reachable over SSH")
 	}
 
-	dles := e.dlesForHost(host)
+	dles := c.dlesForHost(host)
 	seen := map[string]bool{}
 	for _, d := range dles {
 		dt := d.DumpTypeName()
@@ -211,7 +226,7 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 			continue
 		}
 		seen[dt] = true
-		arch, err := e.archiverFor(dt, host)
+		arch, err := c.tc.archiverFor(dt, host)
 		if err == nil {
 			err = arch.Check()
 		}
@@ -220,7 +235,7 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 		} else {
 			rep.add(&hc.Lines, true, false, fmt.Sprintf("GNU tar present (dumptype %q)", dt))
 		}
-		e.checkClientTools(rep, &hc, ex, dt)
+		c.checkClientTools(rep, &hc, ex, dt)
 	}
 
 	for _, d := range dles {
@@ -234,7 +249,7 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 	// The incremental-state library lives on the host where the archiver runs (the client
 	// for a remote DLE, the server for a local one) and is now distinct from the catalog
 	// workdir, so verify it for every host.
-	stateDir := e.cfg.StateDirFor(host)
+	stateDir := c.cfg.StateDirFor(host)
 	if err := ex.MkdirAll(stateDir); err != nil {
 		rep.add(&hc.Lines, false, false, fmt.Sprintf("state_dir %s not creatable: %v", stateDir, err))
 	} else {
@@ -252,22 +267,22 @@ func (e *Engine) checkHost(rep *CheckReport, host string, connect bool) HostChec
 // checkClientTools probes the compressor / gpg on the host when a dumptype runs them there
 // (compress/encrypt: client). For a server-side transform there is nothing to check here —
 // the server-side tools are covered in checkServer.
-func (e *Engine) checkClientTools(rep *CheckReport, hc *HostCheck, ex programs.Executor, dt string) {
-	if e.cfg.CompressionFor(dt).At == "client" {
-		scheme, opts := e.compressionFor(dt)
+func (c *checker) checkClientTools(rep *CheckReport, hc *HostCheck, ex programs.Executor, dt string) {
+	if c.cfg.CompressionFor(dt).At == "client" {
+		scheme, opts := c.tc.compressionFor(dt)
 		if cmd, ok, err := compress.CompressCmd(scheme, opts); err == nil && ok {
-			e.probeTool(rep, hc, ex, cmd.Name, "compressor")
+			c.probeTool(rep, hc, ex, cmd.Name, "compressor")
 		}
 	}
-	if e.cfg.EncryptionFor(dt).At == "client" {
-		scheme, opts := e.encryptionFor(dt)
+	if c.cfg.EncryptionFor(dt).At == "client" {
+		scheme, opts := c.tc.encryptionFor(dt)
 		if cmd, ok, err := crypt.EncryptCmd(scheme, opts); err == nil && ok {
-			e.probeTool(rep, hc, ex, cmd.Name, "encryptor")
+			c.probeTool(rep, hc, ex, cmd.Name, "encryptor")
 		}
 	}
 }
 
-func (e *Engine) probeTool(rep *CheckReport, hc *HostCheck, ex programs.Executor, bin, role string) {
+func (c *checker) probeTool(rep *CheckReport, hc *HostCheck, ex programs.Executor, bin, role string) {
 	if err := ex.Command(bin, "--version").Run(); err != nil {
 		rep.add(&hc.Lines, false, false, fmt.Sprintf("client %s %q: %v", role, bin, err))
 	} else {
@@ -276,10 +291,10 @@ func (e *Engine) probeTool(rep *CheckReport, hc *HostCheck, ex programs.Executor
 }
 
 // dleHostsInOrder returns the distinct DLE hosts in config order.
-func (e *Engine) dleHostsInOrder() []string {
+func (c *checker) dleHostsInOrder() []string {
 	var order []string
 	seen := map[string]bool{}
-	for _, d := range e.cfg.DLEs() {
+	for _, d := range c.cfg.DLEs() {
 		if !seen[d.Host] {
 			seen[d.Host] = true
 			order = append(order, d.Host)
@@ -289,9 +304,9 @@ func (e *Engine) dleHostsInOrder() []string {
 }
 
 // dlesForHost returns the DLEs on a host, in config order.
-func (e *Engine) dlesForHost(host string) []config.DLE {
+func (c *checker) dlesForHost(host string) []config.DLE {
 	var out []config.DLE
-	for _, d := range e.cfg.DLEs() {
+	for _, d := range c.cfg.DLEs() {
 		if d.Host == host {
 			out = append(out, d)
 		}

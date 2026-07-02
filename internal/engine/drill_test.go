@@ -50,7 +50,7 @@ func newDrillFixture(t *testing.T, scheme string) *drillFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skip("GNU tar not available")
 	}
 
@@ -228,7 +228,7 @@ func TestDrillWormProbeMutableDisk(t *testing.T) {
 	f := newDrillFixture(t, "none")
 	eng := f.eng
 
-	res := eng.wormProbe("disk", true, time.Now().UTC())
+	res := eng.drl.wormProbe("disk", true, time.Now().UTC())
 	if !res.Tested || res.Enforced {
 		t.Fatalf("disk worm probe = %+v, want tested & not enforced (mutable)", res)
 	}
@@ -236,7 +236,7 @@ func TestDrillWormProbeMutableDisk(t *testing.T) {
 		t.Fatalf("worm detail = %q", res.Detail)
 	}
 	// A second probe also succeeds and never accumulates more than one probe object.
-	_ = eng.wormProbe("disk", true, time.Now().UTC())
+	_ = eng.drl.wormProbe("disk", true, time.Now().UTC())
 	probes, _ := filepath.Glob(filepath.Join(f.diskDir, "runs", wormProbeRun))
 	if len(probes) > 1 {
 		t.Fatalf("worm probe accumulated %d objects, want <=1", len(probes))
@@ -267,7 +267,7 @@ func TestDrillUnattendedSkipsSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skip("GNU tar not available")
 	}
 	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {

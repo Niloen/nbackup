@@ -35,6 +35,8 @@ type copier struct {
 	newConductor   func() *conductor.Conductor // builds the per-run conductor (for CopyRun's spool wiring)
 	workers        int                         // copy concurrency (source reads / target drives)
 	concurrentRead func(medium string) bool    // whether a medium's archives can be read concurrently (disk/cloud yes, tape no)
+
+	profileFor func(medium string) (media.Profile, error) // a medium's capacity profile (sync's target projection)
 }
 
 // newCopier wires a copier to the engine's catalog, data path, and the conductor's spool machinery
@@ -44,17 +46,18 @@ func (e *Engine) newCopier() *copier {
 	return &copier{
 		cat:         e.cat,
 		clerk:       e.clerk,
-		landing:     e.mediumName,
+		landing:     e.dep.landingName,
 		knownMedium: func(name string) bool { _, ok := e.cfg.Media[name]; return ok },
 		placementOn: e.placementOn,
 		openCheck: func(medium string) error {
-			_, _, _, err := e.librarianFor(medium)
+			_, _, _, err := e.dep.librarianFor(medium)
 			return err
 		},
 		reclaimCopy:    e.acct.ReclaimCopy,
 		newConductor:   e.newConductor,
 		workers:        e.cfg.Workers(),
 		concurrentRead: func(medium string) bool { return media.ConcurrentWrite(e.cfg.Media[medium].Type) },
+		profileFor:     e.acct.ProfileFor,
 	}
 }
 

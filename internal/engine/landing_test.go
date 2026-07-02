@@ -42,7 +42,7 @@ func TestPerDumptypeLandingRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 
@@ -114,7 +114,7 @@ func TestFlushRoutesPerDumptypeLanding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := stageEng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+	if m, err := stageEng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 		t.Skipf("GNU tar not available")
 	}
 	s, err := stageEng.Run(context.Background(), time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC), nil)
@@ -163,7 +163,7 @@ func TestFlushRoutesPerDumptypeLanding(t *testing.T) {
 		t.Errorf("medium bulk: got %v, want [%s]", got["bulk"], bulkDLE)
 	}
 	// The holding disk is empty after the flush drained both.
-	scratchVol, _, _, err := flushEng.mediumVolume("scratch")
+	scratchVol, _, _, err := flushEng.dep.mediumVolume("scratch")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -13,13 +13,19 @@ func (e *Engine) newLedger() *accounting.Accountant {
 	return accounting.New(accounting.Deps{
 		Cat:            e.cat,
 		Cfg:            e.cfg,
-		Landing:        e.mediumName,
-		LandingProfile: e.profile,
-		LandingMinAge:  e.minAge,
+		Landing:        e.dep.landingName,
+		LandingProfile: e.dep.profile,
+		LandingCost:    e.landingCost,
+		LandingMinAge:  e.dep.minAge,
 		OpenVolume: func(n string) (media.Volume, error) {
-			v, _, _, err := e.mediumVolume(n)
+			v, _, _, err := e.dep.mediumVolume(n)
 			return v, err
 		},
-		DisplayDLE: e.DisplayDLE,
+		DisplayDLE:    e.DisplayDLE,
+		PlacementsFor: e.placementsFor,
+		LandingLabeled: func() bool {
+			lib, _, _, err := e.dep.librarianFor(e.dep.landingName)
+			return err == nil && lib.Labeled()
+		},
 	})
 }

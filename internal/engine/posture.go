@@ -1,6 +1,7 @@
 // posture.go is the recoverability audit around the drill: the WORM/immutability
 // probe (detected, never configured) and the 3-2-1-1-0 posture checks a drill
-// report carries. Pure presentation of engine state — no tier execution here.
+// report carries. Pure presentation of catalog/config/accountant state — no tier
+// execution here; it rides on the driller with the tiers it frames.
 package engine
 
 import (
@@ -35,9 +36,9 @@ const wormProbeRun = "drill-worm-probe"
 // configured operator-side (S3 Object Lock, LTO WORM); NBackup only detects it, never
 // sets it. Append-only media (tape) are immutable by construction and are reported
 // without writing a probe. The active probe is skipped in --dry-run.
-func (e *Engine) wormProbe(medium string, apply bool, now time.Time) WormResult {
+func (d *driller) wormProbe(medium string, apply bool, now time.Time) WormResult {
 	res := WormResult{Medium: medium}
-	lib, _, _, err := e.librarianFor(medium)
+	lib, _, _, err := d.dep.librarianFor(medium)
 	if err != nil {
 		res.Detail = err.Error()
 		return res
@@ -55,7 +56,7 @@ func (e *Engine) wormProbe(medium string, apply bool, now time.Time) WormResult 
 		res.Detail = "not probed (dry-run / --worm off); pass --worm (without --dry-run) to test immutability"
 		return res
 	}
-	if err := e.ensureWormProbe(vol, now); err != nil {
+	if err := ensureWormProbe(vol, now); err != nil {
 		res.Detail = fmt.Sprintf("could not write probe: %v", err)
 		return res
 	}
@@ -83,7 +84,7 @@ func (e *Engine) wormProbe(medium string, apply bool, now time.Time) WormResult 
 // ensureWormProbe writes the fixed probe object if it is not already present (an
 // unsealed orphan the catalog scanner ignores), so the same object is reused across
 // drills.
-func (e *Engine) ensureWormProbe(vol media.Volume, now time.Time) error {
+func ensureWormProbe(vol media.Volume, now time.Time) error {
 	files, err := vol.Files()
 	if err != nil {
 		return err
@@ -146,12 +147,12 @@ type Posture struct {
 }
 
 // posture computes the recoverability audit. failures is this run's drill failures.
-func (e *Engine) posture(worm WormResult, failures int) Posture {
-	runs := e.cat.Runs()
+func (d *driller) posture(worm WormResult, failures int) Posture {
+	runs := d.cat.Runs()
 	mediaSet := map[string]bool{}
 	minCopies := -1
 	for _, s := range runs {
-		ps := e.cat.Placements(s.ID)
+		ps := d.cat.Placements(s.ID)
 		if len(ps) == 0 {
 			continue
 		}
@@ -167,7 +168,7 @@ func (e *Engine) posture(worm WormResult, failures int) Posture {
 	}
 	offsite := false
 	for m := range mediaSet {
-		if m != e.mediumName {
+		if m != d.dep.landingName {
 			offsite = true
 		}
 	}
@@ -211,9 +212,9 @@ func (e *Engine) posture(worm WormResult, failures int) Posture {
 	}
 
 	// Extras beyond the 3-2-1-1-0 core.
-	add(e.postureKey())
-	add(e.postureIncrementalState())
-	add(e.postureCapacity())
+	add(d.postureKey())
+	add(d.postureIncrementalState())
+	add(d.postureCapacity())
 	return p
 }
 
@@ -221,14 +222,14 @@ func (e *Engine) posture(worm WormResult, failures int) Posture {
 // key reference are present — the lost-key failure mode checksum verification can't
 // see. (A real end-to-end key test happens when a structural/chain drill of an
 // encrypted archive runs.)
-func (e *Engine) postureKey() (string, PostureStatus, string) {
+func (d *driller) postureKey() (string, PostureStatus, string) {
 	names := []string{config.DefaultDumpType}
-	for n := range e.cfg.DumpTypes {
+	for n := range d.cfg.DumpTypes {
 		names = append(names, n)
 	}
 	configured := false
 	for _, n := range names {
-		scheme, opts := e.encryptionFor(n)
+		scheme, opts := d.tc.encryptionFor(n)
 		if scheme == "" || scheme == "none" {
 			continue
 		}
@@ -247,16 +248,16 @@ func (e *Engine) postureKey() (string, PostureStatus, string) {
 // library each archiver owns: a DLE missing the base state its next incremental
 // builds on will be forced to a full (recoverable, but a signal). The archiver
 // answers whether the base is present (HasBase), so this stays archiver-neutral.
-func (e *Engine) postureIncrementalState() (string, PostureStatus, string) {
-	hist := e.cat.History()
+func (d *driller) postureIncrementalState() (string, PostureStatus, string) {
+	hist := d.cat.History()
 	missing := 0
-	for _, d := range e.cfg.DLEs() {
-		name := d.Name()
+	for _, dle := range d.cfg.DLEs() {
+		name := dle.Name()
 		st := hist.DLE(name)
 		if st.LastFullDate == "" {
 			continue // never fulled yet; nothing relied upon
 		}
-		arch, err := e.archiverFor(d.DumpTypeName(), d.Host)
+		arch, err := d.tc.archiverFor(dle.DumpTypeName(), dle.Host)
 		if err != nil {
 			continue // unresolvable archiver surfaces elsewhere (pre-flight / estimate)
 		}
@@ -277,11 +278,11 @@ func (e *Engine) postureIncrementalState() (string, PostureStatus, string) {
 }
 
 // postureCapacity reflects whether the landing medium is within its capacity budget.
-func (e *Engine) postureCapacity() (string, PostureStatus, string) {
-	if e.Capacity() <= 0 {
+func (d *driller) postureCapacity() (string, PostureStatus, string) {
+	if d.acct.Capacity() <= 0 {
 		return "capacity OK", PostureOK, "unbounded"
 	}
-	over, pct := e.CapacityStatus(e.StoredBytes())
+	over, pct := d.acct.CapacityStatus(d.acct.StoredBytes())
 	if over {
 		return "capacity OK", PostureWarn, fmt.Sprintf("over capacity (%.0f%% used); run `nb prune`", pct)
 	}

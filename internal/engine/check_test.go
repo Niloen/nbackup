@@ -57,7 +57,7 @@ func TestCheckOfflineProbesLocalSkipsRemote(t *testing.T) {
 		{Host: "localhost", Path: src},
 		{Host: "app01", Path: "/data"},
 	})
-	if m, err := eng.archiverFor(config.DefaultDumpType, "localhost"); err != nil || m.Check() != nil {
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, "localhost"); err != nil || m.Check() != nil {
 		t.Skip("GNU tar not available")
 	}
 
@@ -85,7 +85,7 @@ func TestCheckOfflineProbesLocalSkipsRemote(t *testing.T) {
 // locally, no network).
 func TestCheckFlagsUnreadableSource(t *testing.T) {
 	eng := newCheckEngine(t, []config.DLE{{Host: "localhost", Path: filepath.Join(t.TempDir(), "does-not-exist")}})
-	if m, err := eng.archiverFor(config.DefaultDumpType, "localhost"); err != nil || m.Check() != nil {
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, "localhost"); err != nil || m.Check() != nil {
 		t.Skip("GNU tar not available")
 	}
 	rep := eng.Check(true)
@@ -124,7 +124,7 @@ func TestCheckWarnsOnRelativePaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := eng.archiverFor(config.DefaultDumpType, "localhost"); err != nil || m.Check() != nil {
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, "localhost"); err != nil || m.Check() != nil {
 		t.Skip("GNU tar not available")
 	}
 	rep := eng.Check(true)
@@ -161,7 +161,7 @@ func TestCheckMissingCompressorIsOneLineWithRemedy(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // deterministically no zstd, wherever this runs
 
 	rep := &CheckReport{}
-	eng.checkServer(rep)
+	(&checker{cfg: eng.cfg, tc: eng.tc, dep: eng.dep}).checkServer(rep)
 	var line string
 	for _, l := range rep.Server {
 		if strings.Contains(l.Msg, `compression "zstd"`) {

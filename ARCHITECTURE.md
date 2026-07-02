@@ -77,11 +77,11 @@ registry registration, not a conditional in the core.
 | `restorer` | the read-side operation package (mirror of `dumper`): `Extract(Request)` — the one whole-DLE chain restore behind `nb recover --all` *and* the drill's chain tier — plus `ExtractSelection` (file-level recovery) and the decode primitives verify reuses. Written over `archiveio.ReadStore` + narrow resolution funcs, so it tests over fakes | amrestore / amrecover (execution) |
 | `drill` | recovery-drill ledger + risk-biased selection + failure taxonomy (pure) | amverify (orchestrated) |
 | `planner` | multilevel level scheduling (pure) | planner |
-| `accounting` | medium capacity/retention/prune arithmetic: what a medium holds against its capacity, the protected residual a prune can't reclaim, per-run room, and the prune/reclaim mutators (distinct from the dollar-cost overlay in `engine/cost.go`) | (driver, capacity half) |
+| `accounting` | medium capacity/retention/prune arithmetic: what a medium holds against its capacity, the protected residual a prune can't reclaim, the expected next volume + per-run room, and the prune/reclaim mutators — plus the dollar-cost overlay (`accounting/cost.go`) that prices the same bytes | (driver, capacity half) |
 | `scheduler` | the engine-side **driver** that feeds the pure `planner` its config/history/capacity inputs + the parallel size estimates, then applies the impure force-full post-pass `planner` can't (it probes the archiver's on-disk incremental state); also validates a run's config for previews | driver (planner front-end) |
 | `spool` | the run's concurrent write seam: routes each archive direct to its landing or through the holding-disk `Pool`, per-landing `writers` permits, one orchestrator goroutine as the sole catalog writer | taper (holding-disk half) |
 | `conductor` | the backup-run lane: executes one plan into one sealed run — flush leftovers (`Flush`, the crash-recovery drain), pre-flight tools, alloc run id, open the landing writer, run the `dumper` + `spool`, seal | driver (dump half) / amflush |
-| `engine` | the driver: composes the leaf operations, owns the run session (open/finish/placement) and drill selection, and wires planner→`clerk`→media→catalog; delegates capacity to `accounting`, planning/estimation to `scheduler`, the dump run to `conductor`, and each operation's data movement to the `clerk` | driver |
+| `engine` | the composition root + command facade: wires everything and owns almost no behavior. Two in-package resolution services — the `toolchain` (hosts/executors/archivers/transform options) and the `depot` (media/volumes/librarians/write knobs) — serve in-package lanes (`verifier`, `copier` incl. sync, `driller` incl. posture, `checker`) and the split-out lanes (`accounting`, `scheduler`, `conductor`, `dumper`, `restorer`, `clerk`) | driver |
 | `cli` | thin command wiring | amdump / amadmin |
 
 Dependencies flow one way: `cli → engine → {planner, retention, archiver, xfer,
@@ -256,7 +256,7 @@ Pipeline); `stock` runs the documented one-liner, deliberately *not* NBackup's c
 modes are documented user-side in the README.) Pure parts (ledger, selection, taxonomy)
 live in package `drill` (a leaf, like `retention`/`recovery`); the tier I/O runs
 through `restorer` and the verifier, orchestrated by `engine` (which imports `drill`);
-the WORM probe + posture audit live in `engine/posture.go`. The
+the tier orchestration is the engine's in-package `driller` lane; the WORM probe + posture audit ride with it in `engine/posture.go`. The
 architectural point of the two run modes: an unattended drill that would need a tape
 swap *skips* (coverage warning) rather than exiting non-zero, so a sampled nightly drill
 rotates the fleet without paging on a tape that isn't loaded.
@@ -712,7 +712,7 @@ planner keeps distinct. `TotalBytes` is the **pool** — the retainable capacity
 drives reclamation and the structural cycle check (can a complete recovery set be
 retained at all). `VolumeSize` is one **reel**, the basis of the per-run ceiling:
 a run fills the reel it lands on before spilling to the next, so a single run can
-never exceed one reel. The engine's `capacityRoom` feeds the planner the tighter
+never exceed one reel. The accountant's `CapacityRoom` feeds the planner the tighter
 of the two — pool free room (`capacity − protected`) and the landing reel's
 remaining room (`volume_size −` what's already on it). They are truly
 separate: a **real drive** (`type: tape`, `device:`) has an unbounded pool (the
@@ -751,7 +751,7 @@ decisions carry it:
   pure calculation over the catalog and the rate table — **no billing API** — so it
   runs wherever planning runs and never touches a slow/offline volume (the provider
   invoice stays authoritative; the tables are list-price estimates). The dollar
-  overlay lives in `engine/cost.go` (`CostSummary`, `ForecastCost`,
+  overlay lives in `accounting/cost.go` (`CostSummary`, `ForecastCost`,
   `RestoreCost`/`SelectionCost`), mirroring the capacity overlay
   (`StoredBytes`/`CapacityStatus`). `ForecastCost` walks the existing run simulation
   day by day, growing a footprint with each simulated run and evicting it with the
