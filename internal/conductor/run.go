@@ -177,14 +177,10 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 			setPhase(progress.PhaseFailed)
 			return fmt.Errorf("open holding disk %q: %w", name, err)
 		}
-		disks[i] = spool.Disk{Name: name, Storage: pw.Stores[0], Capacity: pw.Capacity, Lim: pw.Lim}
+		disks[i] = spool.Disk{Name: name, Storage: pw.Stores[0], Capacity: pw.Capacity, Lim: pw.Lim, Writers: pw.Writers}
 	}
 
-	// One backing per landing. Writers is how many writes to it may run at once: one while buffering (the
-	// drain copies serially), else the worker count for a concurrent-write medium (disk/cloud —
-	// independent objects/files) or the drive count for a serial multi-drive tape library (one archive
-	// per drive), each capped by the worker count.
-	buffering := len(holdingNames) > 0
+	// One backing per landing; landingWriters decides how many writes to it may run at once.
 	backings := make([]spool.Backing, 0, len(landings))
 	for _, name := range landings {
 		pw, err := c.d.OpenWriter(name, spec, now, lf)
@@ -192,18 +188,7 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 			setPhase(progress.PhaseFailed)
 			return fmt.Errorf("open landing %q: %w", name, err)
 		}
-		writers := 1
-		switch {
-		case buffering:
-			// The drain copies serially onto the landing (parallel drains are deferred).
-		case pw.Serial:
-			writers = len(pw.Stores) // one archive per drive on a serial multi-drive library
-		default:
-			writers = workers // concurrent medium: independent files
-		}
-		if writers > workers {
-			writers = workers
-		}
+		writers := landingWriters(pw, workers)
 		stores := make([]archiveio.WriteStore, len(pw.Stores))
 		for i, s := range pw.Stores {
 			stores[i] = s // a Store is a WriteStore; the spool only writes backings
@@ -245,6 +230,30 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 // records under, and spec.CreatedAt stamps the run's authoring time.
 func (c *Conductor) CopyRun(ctx context.Context, target string, spec archiveio.RunSpec, workers int, now time.Time, lf logf.Logf, run func(sp *spool.Spool) error) error {
 	return c.withSpool(ctx, []string{target}, nil, spec, workers, nil, now, lf, run)
+}
+
+// landingWriters is how many writes to one landing may run at once — the medium's `writers`
+// cap, whichever path the write takes (a dumper's direct dump and a drain copying a staged
+// archive lease the same permits). Unset, the medium's natural width applies: one archive per
+// drive on a serial multi-drive library, else the worker count (a concurrent-write disk/cloud
+// absorbs independent files). A serial medium never exceeds its drives either way — two
+// archives cannot interleave on one rolling volume.
+func landingWriters(pw PreparedWriter, workers int) int {
+	writers := pw.Writers
+	if writers == 0 {
+		if pw.Serial {
+			writers = len(pw.Stores)
+		} else {
+			writers = workers
+		}
+	}
+	if pw.Serial && writers > len(pw.Stores) {
+		writers = len(pw.Stores)
+	}
+	if writers < 1 {
+		writers = 1
+	}
+	return writers
 }
 
 // distinctLandings returns the distinct landing media the plan's items route to, in first-seen order

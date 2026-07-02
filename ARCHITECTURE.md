@@ -295,9 +295,11 @@ the dump just flows *through* the holding disk(s). In a holding-disk run the **d
 become background goroutines** that write each archive to a holding disk (an unbounded fslike
 sink — the only kind safe for concurrent `WriteArchive`; that is also why the medium must be
 disk/cloud, not a spanning tape), and the **run's main goroutine is the orchestrator** consuming
-the committed archives over a channel and handing each to a single **drainer** goroutine that
-copies it to the landing; the orchestrator then records the landing placement and reclaims the
-disk copy. With several holding disks a **`holdingPool`** allocates a disk per dump round-robin,
+the committed archives over a channel and handing each to a **drainer** goroutine that
+copies it to the landing (the medium's `writers` cap — one write-concurrency lever per medium,
+shared by drains, direct dumps, and holding-disk staging alike; default: a serial library's
+drive count, else the worker count — bounds how many write it at once); the orchestrator
+then records the landing placement and reclaims the disk copy. With several holding disks a **`holdingPool`** allocates a disk per dump round-robin,
 so the dumpers spread across spindles (more aggregate write bandwidth + a larger combined
 buffer); the handoff carries which disk so the drainer reads, reclaims, and releases the right
 one. The pool, sized to each disk's `capacity`, back-pressures the dumpers (the next allocation

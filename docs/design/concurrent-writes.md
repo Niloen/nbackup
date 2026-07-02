@@ -47,7 +47,12 @@ for a concurrent medium like cloud.
 When a landing is slow, a dump stages onto a holding disk (still an Author over a routing `WriteStore`),
 and a drain goroutine later copies it to the landing and reclaims the staged copy. The disk decouples
 dumping from the drive — a stalled or waiting tape blocks only its own drain, never the dumps; a crash
-leaves the staged copies recorded, and the next run flushes them.
+leaves the staged copies recorded, and the next run flushes them. The drains share the landing's writer
+permits with direct writes: the medium's `writers` cap (defaulting to its natural width — a serial
+library's drive count, else the worker count) — so a concurrent-write landing absorbs several drains at
+once while a single tape drive still takes one archive at a time. The same cap gates staging onto a
+holding disk (the pool skips a disk at its cap), so `writers` is one lever for a medium's write
+concurrency wherever it sits in the flow.
 
 ## Lineage
 

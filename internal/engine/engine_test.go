@@ -1106,6 +1106,79 @@ func TestHoldingDiskBuffersTape(t *testing.T) {
 	}
 }
 
+// TestHoldingDiskParallelDrains exercises the writers lever: a holding disk buffers a
+// concurrent-write disk landing with writers: 3, so several drains copy staged archives onto the
+// landing at once (under -race this covers the concurrent commit/reclaim path). Every DLE must land,
+// the holding disk must end empty, and every DLE must restore from the landing alone.
+func TestHoldingDiskParallelDrains(t *testing.T) {
+	var sources []config.DLE
+	bodies := map[string]string{} // src dir -> expected content of f.txt
+	for _, n := range []string{"a", "b", "c", "d"} {
+		src := t.TempDir()
+		body := strings.Repeat(n, 64)
+		write(t, filepath.Join(src, "f.txt"), body)
+		sources = append(sources, config.DLE{Host: "localhost", Path: src})
+		bodies[src] = body
+	}
+	scratchDir := t.TempDir()
+
+	cfg := &config.Config{
+		Landing: "vault",
+		Media: map[string]config.Media{
+			"vault":   {Type: "disk", Writers: 3, Params: map[string]string{"path": t.TempDir()}},
+			"scratch": {Type: "disk", Holding: true, Capacity: "500MB", Params: map[string]string{"path": scratchDir}},
+		},
+		Sources:  sources,
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	cfg.Parallelism.Workers = 4
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	s, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("parallel-drain dump: %v", err)
+	}
+
+	// Everything drained: the run is placed on the landing, the holding disk holds nothing.
+	landed := false
+	for _, p := range eng.cat.Placements(s.ID) {
+		switch p.Medium {
+		case "scratch":
+			t.Errorf("holding disk should hold no placement after the run, got %v", p)
+		case "vault":
+			landed = true
+		}
+	}
+	if !landed {
+		t.Error("run has no placement on the landing")
+	}
+	scratchVol, _, _, err := eng.mediumVolume("scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files, _ := scratchVol.Files(); len(files) != 0 {
+		t.Errorf("holding disk must be empty after the run, has %d file(s)", len(files))
+	}
+
+	for src, body := range bodies {
+		dest := t.TempDir()
+		name := config.DLE{Host: "localhost", Path: src}.Name()
+		if err := eng.Restore(s.ID, name, dest, false, nil); err != nil {
+			t.Fatalf("restore %s from the landing: %v", name, err)
+		}
+		assertContent(t, filepath.Join(dest, "f.txt"), body)
+	}
+}
+
 // TestHoldingDisksSpread runs a buffered dump across TWO holding disks: the dumpers spread their
 // archives over both (round-robin), the single drainer copies each from the disk it landed on, and
 // both disks are reclaimed. Capacities are sized so neither disk alone could hold all the DLEs, so

@@ -36,8 +36,9 @@ import (
 
 // Backing is one landing the spool drains (or writes) archives to: its medium name, the WriteStore it
 // lands on (the clerk Session, which the spool wraps in a routing WriteStore), the medium's byte-rate
-// Limiter, and Writers — how many writes to it may run at once (1 while buffering or for a serial
-// single-drive medium, else the worker count).
+// Limiter, and Writers — how many writes to it may run at once, direct writes and drains alike (the
+// medium's `writers` cap, defaulting to its drive count for a serial medium or the worker count for
+// a concurrent one; see conductor.landingWriters).
 type Backing struct {
 	Name string
 	// Stores is the landing's write stores, one per concurrent writer: a single store shared by all
@@ -360,6 +361,7 @@ func (sp *Spool) ingest(b *backing, dleID string, est int64, build func(*archive
 			go sp.drain(idx, res, b)
 		}
 		sp.pool.Release(idx, est)
+		sp.pool.ReleaseWriter(idx)
 		return nil
 	})
 	return aw, nil

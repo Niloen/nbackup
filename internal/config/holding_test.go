@@ -50,6 +50,44 @@ sources:
 	}
 }
 
+// writers loads on any medium — landing and holding disk alike (it is the medium's
+// write-concurrency cap, whatever path writes it); 0 stays 0 (unset = natural width).
+func TestHolding_WritersLoads(t *testing.T) {
+	c, err := loadYAML(t, `
+landing: vault
+media:
+  vault:   { type: disk, path: /tmp/v, writers: 3 }
+  scratch: { type: disk, path: /tmp/s, capacity: 500GB, holding: true, writers: 1 }
+sources:
+  default:
+    localhost: [/home]
+`)
+	if err != nil {
+		t.Fatalf("writers must load on landing and holding media, got %v", err)
+	}
+	if got := c.Media["vault"].Writers; got != 3 {
+		t.Errorf("vault Writers = %d; want 3", got)
+	}
+	if got := c.Media["scratch"].Writers; got != 1 {
+		t.Errorf("scratch Writers = %d; want 1", got)
+	}
+}
+
+// A negative writers is a mistake, not a request for the default.
+func TestHolding_RejectsNegativeWriters(t *testing.T) {
+	_, err := loadYAML(t, `
+landing: vault
+media:
+  vault: { type: disk, path: /tmp/v, writers: -1 }
+sources:
+  default:
+    localhost: [/home]
+`)
+	if err == nil || !strings.Contains(err.Error(), "writers must be positive") {
+		t.Fatalf("want writers-negative error, got %v", err)
+	}
+}
+
 // The holding disk may not be the landing.
 func TestHolding_RejectsLanding(t *testing.T) {
 	_, err := loadYAML(t, `

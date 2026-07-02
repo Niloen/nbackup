@@ -40,6 +40,10 @@ type PreparedWriter struct {
 	Serial   bool
 	Capacity int64
 	Lim      *ratelimit.Limiter // the medium's byte-rate cap; the spool authors its concurrent writers with it
+	// Writers is the medium's write-concurrency cap (its `writers` key; 0 = unset). It bounds
+	// every write to the medium the same — direct dumps and drains alike. Unset, the medium's
+	// natural width applies: its drive count when serial, else the run's worker count.
+	Writers int
 }
 
 // Deps is the slice of the orchestrator a single run needs. The closures bind to the

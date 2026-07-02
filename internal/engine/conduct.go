@@ -35,6 +35,7 @@ func (e *Engine) openWriter(medium string, spec archiveio.RunSpec, now time.Time
 		// when it splits a large archive into parts. So part_size on cloud never clamps workers.
 		Serial:   !media.ConcurrentWrite(e.cfg.Media[medium].Type),
 		Capacity: capB,
+		Writers:  e.cfg.Media[medium].Writers,
 	}, nil
 }
 

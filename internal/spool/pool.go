@@ -21,7 +21,9 @@ type Disk struct {
 	Storage  archiveio.Store    // a holding disk is staged to, then read back + reclaimed by the drain
 	Capacity int64              // bytes; 0 = unbounded (no back-pressure)
 	Lim      *ratelimit.Limiter // byte-rate cap for staging writes to this disk (nil = uncapped)
+	Writers  int                // max concurrent staging writes (the medium's `writers`; 0 = uncapped)
 	used     int64
+	writing  int // staging writes in flight (Acquire→ReleaseWriter), counted against Writers
 }
 
 // Pool is the capacity back-pressure and disk allocator across one or more holding disks. The
@@ -54,6 +56,9 @@ func (d *Disk) fits(est int64) bool { return d.Capacity == 0 || est < d.Capacity
 // budget (always true unbounded).
 func (d *Disk) hasRoomFor(est int64) bool { return d.Capacity == 0 || d.used+est <= d.Capacity }
 
+// hasWriterSlot reports whether disk d may take another concurrent staging write.
+func (d *Disk) hasWriterSlot() bool { return d.Writers == 0 || d.writing < d.Writers }
+
 // Acquire picks a holding disk for a DLE estimated at est bytes, blocking while every disk that
 // could fit it is over capacity. It returns direct=true when no disk can ever fit est (the DLE is
 // too big for the largest disk and there is no unbounded one) — the caller dumps it straight to the
@@ -83,8 +88,9 @@ func (p *Pool) Acquire(est int64) (idx int, direct bool, err error) {
 		for n := 0; n < len(p.disks); n++ {
 			i := p.cursor % len(p.disks)
 			p.cursor = (p.cursor + 1) % len(p.disks)
-			if p.disks[i].fits(est) && p.disks[i].hasRoomFor(est) {
+			if p.disks[i].fits(est) && p.disks[i].hasRoomFor(est) && p.disks[i].hasWriterSlot() {
 				p.disks[i].used += est // reserve the in-flight write; the producer frees it on Close
+				p.disks[i].writing++   // take a writer slot; the producer frees it on Close (ReleaseWriter)
 				return i, false, nil
 			}
 		}
@@ -101,6 +107,18 @@ func (p *Pool) Acquire(est int64) (idx int, direct bool, err error) {
 func (p *Pool) Charge(idx int, n int64) {
 	p.mu.Lock()
 	p.disks[idx].used += n
+	p.mu.Unlock()
+}
+
+// ReleaseWriter returns disk idx's writer slot when the producer closes its staging sink, waking
+// any producer blocked on the disk's `writers` cap. It pairs with Acquire, like the estimate
+// reservation (which Release frees separately — a committed archive's bytes outlive the write).
+func (p *Pool) ReleaseWriter(idx int) {
+	p.mu.Lock()
+	if p.disks[idx].writing > 0 {
+		p.disks[idx].writing--
+	}
+	p.cond.Broadcast()
 	p.mu.Unlock()
 }
 

@@ -309,16 +309,24 @@ type Media struct {
 	Capacity   string `yaml:"capacity"`    // space NBackup may use here, e.g. "20TB" ("" = unbounded)
 	MinimumAge string `yaml:"minimum_age"` // retention floor before a run may be retired here (default: one cycle)
 	// Holding marks this medium as a holding disk: a fast scratch buffer the dump flows
-	// through on the way to the landing. Dumps land here in parallel, then a single taper
-	// copies each committed archive to the landing and reclaims it — so the landing's drive
+	// through on the way to the landing. Dumps land here in parallel, then drains copy
+	// each committed archive to the landing and reclaim it — so the landing's drive
 	// runs at disk speed and a small disk feeds a much larger landing. Must be a disk/cloud
 	// medium (per-archive reclaim, and the only sink safe for concurrent dumpers), never the
 	// landing itself. `capacity` bounds the in-flight back-pressure.
-	Holding    bool              `yaml:"holding"`
-	Appendable *bool             `yaml:"appendable"` // pack many runs per volume (default) vs one run per volume
-	Throughput string            `yaml:"throughput"` // bandwidth cap to/from this medium, e.g. "50MB/s" ("" = uncapped); network politeness, the read/write peer of nice
-	Cost       *CostConfig       `yaml:"cost"`       // optional pricing overrides; absent = inferred from type/url
-	Params     map[string]string `yaml:",inline"`    // type-specific connection params (path, bucket, tapes, ...)
+	Holding    bool   `yaml:"holding"`
+	Appendable *bool  `yaml:"appendable"` // pack many runs per volume (default) vs one run per volume
+	Throughput string `yaml:"throughput"` // bandwidth cap to/from this medium, e.g. "50MB/s" ("" = uncapped); network politeness, the read/write peer of nice
+	// Writers caps how many archives may be written to this medium at once — one lever for
+	// the medium's write concurrency, counted the same whether the write is a dumper's
+	// direct dump, a drain copying a staged archive off the holding disk, or (for a holding
+	// medium) a dumper staging onto it. 0 (unset) means the medium's natural width: a serial
+	// library's drive count, else the run's worker count. A serial library never exceeds its
+	// drives regardless (two archives cannot interleave on one rolling volume). Set 1 on a
+	// spinning disk to keep its writes sequential (Amanda's taper-parallel-write).
+	Writers int               `yaml:"writers"`
+	Cost    *CostConfig       `yaml:"cost"`    // optional pricing overrides; absent = inferred from type/url
+	Params  map[string]string `yaml:",inline"` // type-specific connection params (path, bucket, tapes, ...)
 }
 
 // CostConfig overrides a medium's inferred pricing. Every field is optional: an
@@ -650,6 +658,9 @@ func (c *Config) Validate() error {
 		}
 		if _, err := m.ThroughputBytes(); err != nil {
 			return fmt.Errorf("media %s: throughput: %w", name, err)
+		}
+		if m.Writers < 0 {
+			return fmt.Errorf("media %s: writers must be positive (omit it to default to the medium's natural width)", name)
 		}
 	}
 	if err := c.validateArchivers(); err != nil {

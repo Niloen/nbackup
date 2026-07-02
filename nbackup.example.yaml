@@ -119,7 +119,7 @@ landing: fast-disk
 # HOLDING DISK (Amanda's holding disk). Mark a fast disk/cloud medium `holding: true` and it
 # becomes a scratch buffer the dump flows THROUGH on the way to the landing — "here's some
 # disk you can use for performance". Dumps land on it in PARALLEL (no single-drive clamp),
-# then one taper drains each committed archive to the landing and reclaims the disk, so a
+# then drains copy each committed archive to the landing and reclaim the disk, so a
 # slow tape drive runs at disk speed and a small disk feeds a much larger tape. The landing
 # (e.g. `lto`) stays the authoritative tier; the holding disk is transient.
 #
@@ -128,6 +128,11 @@ landing: fast-disk
 #     scratch: { type: disk, path: /var/spool/nbackup, capacity: 500GB, holding: true }
 #   landing: lto
 #   parallelism: { workers: 4 }   # dumps run parallel onto the holding disk
+#
+# `writers: N` on any medium caps how many archives are written to it at once — direct dumps,
+# drains from the holding disk, and staging onto a holding disk all count the same. Unset, a
+# medium takes its natural width: a serial library's `drives`, else the run's worker count.
+# Set `writers: 1` on a spinning disk (landing or holding) to keep its writes sequential.
 #
 # `capacity` bounds the in-flight back-pressure (a slow tape ⇒ dumpers wait, never overfill).
 # The holding disk must be disk/cloud, not the landing, and there is at most one. A crashed

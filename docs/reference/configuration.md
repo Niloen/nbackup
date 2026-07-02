@@ -82,6 +82,7 @@ medium type is a registry registration — no config struct changes.
 | `minimum_age` | all | Retention floor before a run may be retired. Defaults to **one cycle**. |
 | `throughput` | all | Bandwidth cap, e.g. `50MB/s` (bytes/sec, `/s` optional; default uncapped). Symmetric on reads; concurrent workers share it. |
 | `holding` | disk, cloud | `true` marks a scratch buffer the dump flows through (see [Holding disk](../features/holding-disk)). |
+| `writers` | all | Max archives written to this medium at once — direct dumps, drains from the holding disk, and staging onto a holding disk all count. Default: the medium's natural width (a serial library's `drives`, else `parallelism.workers`). Set `1` to keep a spinning disk's writes sequential. |
 | `cost` | cloud | Optional per-medium rate overrides (below). |
 
 **Capacity is per-medium.** A copy on another medium never makes an archive

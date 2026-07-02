@@ -39,6 +39,45 @@ func TestPoolBlocksUntilReleased(t *testing.T) {
 	}
 }
 
+// A holding disk's `writers` cap gates staging concurrency: with writers: 1 a second acquire
+// blocks — even with plenty of capacity — until the first write closes (ReleaseWriter). With two
+// disks, the acquire spills to the disk with a free slot instead of blocking.
+func TestPoolWritersCapGatesStaging(t *testing.T) {
+	p := NewPool([]Disk{{Capacity: 100, Writers: 1}})
+	if idx, direct, err := p.Acquire(10); err != nil || direct || idx != 0 {
+		t.Fatalf("first acquire = (%d,%v,%v); want (0,false,nil)", idx, direct, err)
+	}
+
+	acquired := make(chan int, 1)
+	go func() {
+		i, _, _ := p.Acquire(10) // must block: the only disk is at its writer cap
+		acquired <- i
+	}()
+	select {
+	case <-acquired:
+		t.Fatal("acquire must block while the only disk is at its writers cap")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	p.ReleaseWriter(0) // the first write closed: the waiter proceeds
+	select {
+	case i := <-acquired:
+		if i != 0 {
+			t.Fatalf("woke onto disk %d, want 0", i)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReleaseWriter must wake the blocked acquire")
+	}
+
+	// Two disks: a disk at its cap is skipped, not waited on.
+	p2 := NewPool([]Disk{{Capacity: 100, Writers: 1}, {Capacity: 100, Writers: 1}})
+	first, _, _ := p2.Acquire(10)
+	second, direct, err := p2.Acquire(10)
+	if err != nil || direct || second == first {
+		t.Fatalf("second acquire = (%d,%v,%v); want the other disk than %d", second, direct, err, first)
+	}
+}
+
 // A landing failure aborts the pool, so every blocked producer wakes and fails fast instead of
 // waiting for space that will never free.
 func TestPoolAbortWakesBlocked(t *testing.T) {
