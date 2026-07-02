@@ -295,6 +295,27 @@ func (c *Catalog) Placements(runID string) []Placement {
 	return nil
 }
 
+// SnapshotPlacements deep-copies every run's placements, keyed by run ID — a point-in-time
+// read view for readers that must not touch the live entries while a concurrent-write window
+// owns them (see docs/design/concurrent-writes.md). The copy goes down to each archive's part
+// list, so a writer merging new positions into a live entry never shares an array with it.
+func (c *Catalog) SnapshotPlacements() map[string][]Placement {
+	snap := make(map[string][]Placement, len(c.entries))
+	for _, e := range c.entries {
+		ps := make([]Placement, len(e.Placements))
+		for i, p := range e.Placements {
+			archives := make([]ArchivePos, len(p.Archives))
+			for j, a := range p.Archives {
+				a.Parts = append([]record.FilePos(nil), a.Parts...)
+				archives[j] = a
+			}
+			ps[i] = Placement{Medium: p.Medium, Archives: archives}
+		}
+		snap[e.Run.ID] = ps
+	}
+	return snap
+}
+
 // RunsOn returns the runs with a copy on the named medium, in run order.
 func (c *Catalog) RunsOn(medium string) []*Run {
 	var out []*Run

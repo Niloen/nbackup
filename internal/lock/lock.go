@@ -1,13 +1,16 @@
-// Package lock provides a per-config exclusive lock so that only one mutating
-// nb process operates on a catalog workdir (and the media it lands on) at a
-// time. Rather than making the catalog concurrently writable, it serializes the
-// whole mutating run.
+// Package lock provides a per-config exclusive lock so that only one nb
+// process operates on a catalog workdir and its media at a time. Rather than
+// making the catalog concurrently writable, it serializes the whole operation.
 //
 // The lock is an advisory flock(2) on a `lock` file in the workdir. flock is
 // tied to the open file description, so the kernel releases it automatically if
-// the process exits or crashes — no stale lockfiles to clean up. Read-only
-// commands do not take the lock: catalog writes land via atomic rename, so a
-// reader always sees a complete old-or-new cache.
+// the process exits or crashes — no stale lockfiles to clean up.
+//
+// The policy: any command that accesses a medium takes the lock, mutating or
+// not — even a pure read mounts volumes and moves a changer that another
+// process may be driving (verify, recover, check, a changer inventory). A
+// command that reads only the cached catalog does not: catalog writes land via
+// atomic rename, so such a reader always sees a complete old-or-new cache.
 //
 // Caveat: flock semantics are unreliable over NFS. A catalog workdir is expected
 // to live on a local filesystem.

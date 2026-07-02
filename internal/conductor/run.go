@@ -143,9 +143,9 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 // copy/sync so that machinery lives in one place.
 func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, workers int, spec archiveio.RunSpec, holdingNames []string, tr *progress.Tracker, now time.Time, lf logf.Logf) (*catalog.Run, error) {
 	landings := distinctLandings(plan.Items, c.d.LandingFor)
-	err := c.withSpool(ctx, landings, holdingNames, spec, workers, tr, now, lf, func(sp *spool.Spool) error {
+	err := c.withSpool(ctx, landings, holdingNames, nil, spec, workers, tr, now, lf, func(sp *spool.Spool, _ archiveio.ReadStore) error {
 		route := func(it planner.Item) archiveio.Ingest { return sp.Ingest(c.d.LandingFor(it)) }
-		return c.d.Dmp.Run(ctx, plan.Items, workers, route, tr, lf)
+		return c.d.Dmp.Run(ctx, plan.Items, workers, route, tr, lf) // a dump keeps no media: it only writes, and reads no medium
 	})
 	if err != nil {
 		// Even a failed run keeps every archive that committed (the archive is the commit
@@ -175,7 +175,30 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 // sync pass a single target landing and a copier producer. run builds its own route from sp (so this
 // helper never sees the producer's item type). It returns nil on a sealed run, ErrCanceled on a cancel,
 // or the first producer/drain error.
-func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []string, spec archiveio.RunSpec, workers int, tr *progress.Tracker, now time.Time, lf logf.Logf, run func(sp *spool.Spool) error) error {
+//
+// withSpool is also the window's ownership handover: at window-open every medium gets exactly one
+// owner. The media being written (landings + holding disks) transfer to the spool, whose
+// orchestrator owns the live catalog with them; the caller keeps the kept media, read-only,
+// through ro — the archive fs snapshotted here and pinned to that set (Deps.OpenReader). The two
+// sets must be disjoint, checked below; a producer that reads (copy/sync opening its source
+// archives) reads only kept media, only through the snapshot, never the live fs.
+func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames, kept []string, spec archiveio.RunSpec, workers int, tr *progress.Tracker, now time.Time, lf logf.Logf, run func(sp *spool.Spool, ro archiveio.ReadStore) error) error {
+	// The ownership split: a medium the spool writes cannot also be kept for reading.
+	for _, k := range kept {
+		for _, name := range landings {
+			if k == name {
+				return fmt.Errorf("medium %q cannot be both read and written in one run", k)
+			}
+		}
+		for _, name := range holdingNames {
+			if k == name {
+				return fmt.Errorf("medium %q cannot be both a holding disk and a read source in one run", k)
+			}
+		}
+	}
+	// The read snapshot is taken here — before the spool (and its orchestrator and drains)
+	// exists, while this goroutine is the only one touching the catalog.
+	ro := c.d.OpenReader(kept)
 	// A copy/sync run has no progress tracker (it reports through its own report), so phase
 	// transitions are a no-op there; a dump always has one.
 	setPhase := func(p progress.Phase) {
@@ -215,7 +238,7 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 		Tracker: tr, Logf: lf,
 	})
 
-	runErr := run(sp)
+	runErr := run(sp, ro)
 
 	// A canceled run is not a failure to seal: stop the spool (it aborted on the same ctx, so Drain just
 	// joins it without flushing the queued copies — those flush on the next run), mark the status
@@ -240,9 +263,10 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 // buffer), for nb copy / nb sync — the same spool wiring a dump uses, so the target's drives are leased
 // one per concurrent copy. run drives the transfers (it builds its route from sp); there is no progress
 // tracker (the caller reports through its own report). spec.ID tags the member index each copied archive
-// records under, and spec.CreatedAt stamps the run's authoring time.
-func (c *Conductor) CopyRun(ctx context.Context, target string, spec archiveio.RunSpec, workers int, now time.Time, lf logf.Logf, run func(sp *spool.Spool) error) error {
-	return c.withSpool(ctx, []string{target}, nil, spec, workers, nil, now, lf, run)
+// records under, and spec.CreatedAt stamps the run's authoring time. source is the medium the caller
+// keeps for reading — the read side of the window's per-medium ownership split (see withSpool).
+func (c *Conductor) CopyRun(ctx context.Context, target, source string, spec archiveio.RunSpec, workers int, now time.Time, lf logf.Logf, run func(sp *spool.Spool, ro archiveio.ReadStore) error) error {
+	return c.withSpool(ctx, []string{target}, nil, []string{source}, spec, workers, nil, now, lf, run)
 }
 
 // landingWriters is how many writes to one landing may run at once — the medium's `writers`

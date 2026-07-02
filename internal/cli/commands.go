@@ -494,10 +494,13 @@ func newVerifyCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eng, err := newEngine(cfg)
+			// Verify mounts media, so it takes the config lock like any medium-accessing
+			// command — a verify mid-dump would fight the run for drives and the robot.
+			eng, unlock, err := a.lockedEngine(cfg)
 			if err != nil {
 				return err
 			}
+			defer unlock()
 			// Verifying reads media, so a spanned run on a single-drive station needs
 			// reel swaps — give it the operator so it prompts (and reassembles a spanned
 			// run) just like restore, rather than failing at the first volume boundary.
@@ -1321,12 +1324,20 @@ func newMediumCmd(a *app) *cobra.Command {
 				fmt.Println("no media (no backup config found — copy nbackup.example.yaml to nbackup.yaml and edit it, or pass -c <config>)")
 				return nil
 			}
+			// The detail view inventories the changer (drive/slot status) — a device
+			// access, so it locks like any medium-accessing command. The bare listing
+			// reads only the cached catalog and stays lock-free.
+			if len(args) >= 1 {
+				eng, unlock, err := a.lockedEngine(cfg)
+				if err != nil {
+					return err
+				}
+				defer unlock()
+				return mediumDetail(eng, args[0])
+			}
 			eng, err := newEngine(cfg)
 			if err != nil {
 				return err
-			}
-			if len(args) >= 1 {
-				return mediumDetail(eng, args[0])
 			}
 			return mediumList(eng)
 		},
