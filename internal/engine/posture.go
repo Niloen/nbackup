@@ -38,12 +38,13 @@ const wormProbeRun = "drill-worm-probe"
 // without writing a probe. The active probe is skipped in --dry-run.
 func (d *driller) wormProbe(medium string, apply bool, now time.Time) WormResult {
 	res := WormResult{Medium: medium}
-	lib, _, _, err := d.dep.librarianFor(medium)
+	am, _, err := d.dep.OpenAdmin(medium)
 	if err != nil {
 		res.Detail = err.Error()
 		return res
 	}
-	if lib.AppendOnly() {
+	defer am.Close()
+	if am.AppendOnly() {
 		// Tape and other labeled media are append-only: a file once written cannot be
 		// rewritten or individually deleted, so the medium is immutable by construction.
 		// Writing a probe would advance/relabel the reel, so report rather than write.
@@ -51,7 +52,7 @@ func (d *driller) wormProbe(medium string, apply bool, now time.Time) WormResult
 		res.Detail = "append-only medium: written files are not individually rewritable"
 		return res
 	}
-	vol := lib.Volume()
+	vol := am.Volume()
 	if !apply {
 		res.Detail = "not probed (dry-run / --worm off); pass --worm (without --dry-run) to test immutability"
 		return res

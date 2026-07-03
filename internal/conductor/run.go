@@ -177,21 +177,16 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 // or the first producer/drain error.
 //
 // withSpool is also the window's ownership handover: at window-open every medium the run writes
-// gets exactly one owner. The written media (landings + holding disks) are write-claimed for the
-// window (Deps.ClaimWrites) — a read-mount onto one is refused for the window's duration, so a
-// producer that reads (copy/sync opening its source archives) can only reach media the window
-// does not write, failing over past a written copy like any unavailable one. The catalog splits
-// the same way: the run mutates the live catalog while the closure reads the window's View copy
+// gets exactly one owner. Opening a medium's writer (Deps.OpenWriter) takes its write claim; the
+// deferred PreparedWriter.Release calls below give the claims back at window end. A read-mount
+// onto a claimed medium is refused for the window's duration, so a producer that reads
+// (copy/sync opening its source archives) can only reach media the window does not write,
+// failing over past a written copy like any unavailable one. The catalog splits the same way:
+// the run mutates the live catalog while the closure reads the window's View copy
 // (Deps.OpenReader; sound because a session never reads its own writes). The window closes
 // unconditionally when withSpool returns — every archive recorded before then is already
 // persisted (the archive is the commit unit).
 func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []string, spec archiveio.RunSpec, workers int, tr *progress.Tracker, now time.Time, lf logf.Logf, run func(sp *spool.Spool, ro archiveio.ReadStore) error) (err error) {
-	// The ownership claim: the written media belong to this window until it ends.
-	release, err := c.d.ClaimWrites(append(append([]string(nil), landings...), holdingNames...))
-	if err != nil {
-		return err
-	}
-	defer release()
 	// The window opens here — before the spool (and its orchestrator and drains) exists,
 	// while this goroutine is the only one touching the catalog.
 	view, win, err := c.d.Cat.OpenWindow()
@@ -211,6 +206,13 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 			tr.SetPhase(p)
 		}
 	}
+	// Each OpenWriter takes its medium's write claim; the deferred Release returns it at
+	// window end — after the drain has joined, so the claim spans every write.
+	releaseWriter := func(pw PreparedWriter) {
+		if pw.Release != nil {
+			pw.Release()
+		}
+	}
 	disks := make([]spool.Disk, len(holdingNames))
 	for i, name := range holdingNames {
 		pw, err := c.d.OpenWriter(name, spec, now, lf)
@@ -218,6 +220,7 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 			setPhase(progress.PhaseFailed)
 			return fmt.Errorf("open holding disk %q: %w", name, err)
 		}
+		defer releaseWriter(pw)
 		disks[i] = spool.Disk{Name: name, Storage: pw.Stores[0], Capacity: pw.Capacity, Lim: pw.Lim, Writers: pw.Writers}
 	}
 
@@ -229,6 +232,7 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 			setPhase(progress.PhaseFailed)
 			return fmt.Errorf("open landing %q: %w", name, err)
 		}
+		defer releaseWriter(pw)
 		writers := landingWriters(pw, workers)
 		stores := make([]archiveio.WriteStore, len(pw.Stores))
 		for i, s := range pw.Stores {

@@ -36,39 +36,91 @@ type depot struct {
 	op       librarian.Operator            // optional: handles manual tape swaps (nil = unattended)
 
 	// writeHeld is the run window's medium-ownership table: the media the open window is
-	// writing (its landings + holding disks). A read-mount (MounterFor) onto one is refused,
-	// so a window reader fails over to another copy instead of touching a drive the run is
-	// writing — the medium-access half of the window's one-owner-per-medium split (see
+	// writing (its landings + holding disks). OpenForWrite takes the claim, the handle's
+	// Close releases it, and OpenForRead/OpenAdmin refuse a held medium — so a window
+	// reader fails over to another copy instead of touching a drive the run is writing:
+	// the medium-access half of the window's one-owner-per-medium split (see
 	// docs/design/catalog-window.md). Claims are made before the window's producers start
 	// and released after they have joined, so the map is never written concurrently with a
 	// read; the process runs one command, so no lock is needed.
 	writeHeld map[string]bool
 }
 
-// claimWrites marks the named media write-owned for the duration of a run window and
-// returns the release. A medium already held is a wiring bug (two windows, or one medium
-// listed as both a landing and a holding disk) and fails the claim.
-func (d *depot) claimWrites(names []string) (release func(), err error) {
-	claimed := make([]string, 0, len(names))
-	free := func() {
-		for _, n := range claimed {
-			delete(d.writeHeld, n)
-		}
+// OpenForRead opens a medium for reading archive data — the only mint of the librarian's
+// read face. Refused while a run window write-owns the medium; the clerk's copy selection
+// treats that like any unavailable copy and fails over. Read opens are not tracked (many
+// readers may share a medium), so Close is a no-op kept for lifecycle symmetry.
+func (d *depot) OpenForRead(name string) (librarian.ReadMedium, error) {
+	if d.writeHeld[name] {
+		return nil, fmt.Errorf("medium %q is write-owned by the running window", name)
 	}
-	for _, n := range names {
-		if d.writeHeld[n] {
-			free()
-			return nil, fmt.Errorf("medium %q is already write-claimed by this run", n)
-		}
-		d.writeHeld[n] = true
-		claimed = append(claimed, n)
+	lib, _, err := d.buildLibrarian(name)
+	if err != nil {
+		return nil, err
 	}
-	return free, nil
+	return readMedium{lib}, nil
 }
 
-// writeBlocked reports whether a run window currently write-owns the medium — the read
-// side's refusal check.
-func (d *depot) writeBlocked(name string) bool { return d.writeHeld[name] }
+// OpenForWrite opens a medium for run authoring and takes the window's exclusive write
+// claim — the only mint of the librarian's write face. A medium already held is a wiring
+// bug (two windows, or one medium as both landing and holding disk). Close releases the
+// claim. The medium's config definition rides along for the write-path knobs
+// (appendable, min_age).
+func (d *depot) OpenForWrite(name string) (librarian.WriteMedium, config.Media, error) {
+	if d.writeHeld[name] {
+		return nil, config.Media{}, fmt.Errorf("medium %q is already write-claimed by this run", name)
+	}
+	lib, def, err := d.buildLibrarian(name)
+	if err != nil {
+		return nil, config.Media{}, err
+	}
+	d.writeHeld[name] = true
+	return &writeMedium{Librarian: lib, name: name, d: d}, def, nil
+}
+
+// OpenAdmin opens a medium's operator face (label, load, inventory, introspection) —
+// refused while a run window write-owns it, for the same reason reads are.
+func (d *depot) OpenAdmin(name string) (librarian.AdminMedium, config.Media, error) {
+	if d.writeHeld[name] {
+		return nil, config.Media{}, fmt.Errorf("medium %q is write-owned by the running window", name)
+	}
+	lib, def, err := d.buildLibrarian(name)
+	if err != nil {
+		return nil, config.Media{}, err
+	}
+	return adminMedium{lib}, def, nil
+}
+
+// readMedium / writeMedium / adminMedium narrow the librarian to one face. The embedded
+// *Librarian satisfies the face's methods; the static interface type is what keeps the
+// rest of the surface out of reach at the call sites.
+type readMedium struct{ *librarian.Librarian }
+
+func (readMedium) Close() error { return nil }
+
+type adminMedium struct{ *librarian.Librarian }
+
+func (adminMedium) Close() error { return nil }
+
+type writeMedium struct {
+	*librarian.Librarian
+	name   string
+	d      *depot
+	closed bool
+}
+
+func (m *writeMedium) Name() string { return m.name }
+
+// Close releases the window's write claim. Idempotent — a window may close its
+// PreparedWriters through deferred releases that can run more than once on error paths.
+func (m *writeMedium) Close() error {
+	if m.closed {
+		return nil
+	}
+	m.closed = true
+	delete(m.d.writeHeld, m.name)
+	return nil
+}
 
 // ErrUnknownMedium marks a medium name absent from the current config — a copy
 // recorded in the catalog on a medium this config does not define. It is a scoping
@@ -140,16 +192,16 @@ func (d *depot) mediumVolume(name string) (vol media.Volume, def config.Media, o
 	return v, md, false, err
 }
 
-// librarianFor builds a librarian for a configured medium's open volume. For the
-// depot's own medium it wraps the already-open landing handle (own=true), so its
-// cached state stays coherent and the catalog — which caches exactly this medium —
-// can be rebuilt against it.
-func (d *depot) librarianFor(name string) (lib *librarian.Librarian, def config.Media, own bool, err error) {
-	vol, md, own, err := d.mediumVolume(name)
+// buildLibrarian builds a librarian for a configured medium's open volume — the shared
+// core behind the three Open faces. For the depot's own medium it wraps the already-open
+// landing handle, so its cached state stays coherent and the catalog — which caches
+// exactly this medium — can be rebuilt against it.
+func (d *depot) buildLibrarian(name string) (lib *librarian.Librarian, def config.Media, err error) {
+	vol, md, _, err := d.mediumVolume(name)
 	if err != nil {
-		return nil, config.Media{}, false, err
+		return nil, config.Media{}, err
 	}
-	return librarian.New(vol, name, d.cat, d.op, d.cfg.AutoLabel, d.cfg.MinAgeFor(md)), md, own, nil
+	return librarian.New(vol, name, d.cat, d.op, d.cfg.AutoLabel, d.cfg.MinAgeFor(md)), md, nil
 }
 
 // limiter returns a medium's shared bandwidth cap (nil = uncapped).

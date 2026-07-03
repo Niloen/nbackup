@@ -151,6 +151,7 @@ func TestCloudPartSizeStaysConcurrent(t *testing.T) {
 	if pw.Serial {
 		t.Errorf("cloud is a concurrent-write medium; Serial must be false even with part_size")
 	}
+	pw.Release() // give back the white-box probe's write claim so the real dump below can take it
 
 	var mu sync.Mutex
 	var clamped bool

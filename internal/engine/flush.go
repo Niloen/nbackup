@@ -6,6 +6,8 @@ import (
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/conductor"
+	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
 )
@@ -30,6 +32,18 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 		}
 		return v, err
 	}
+	// One opened write face per landing, shared across the crashed runs being drained —
+	// conductor.Flush opens a writer per run×landing, but the write claim is per medium,
+	// so the handle is memoized here and every run's Session is authored over it. Flush
+	// takes no claim on the holding disks it reads: it is their sole owner in both
+	// directions (it reads staged archives AND reclaims them), and its reclaim writes go
+	// through the raw volume, not the librarian.
+	landers := map[string]landerHandle{}
+	defer func() {
+		for _, lh := range landers {
+			_ = lh.wm.Close()
+		}
+	}()
 	return conductor.Flush(conductor.FlushDeps{
 		Cat:        e.cat,
 		LandingFor: e.landingForDLEName,
@@ -48,7 +62,16 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 			return e.clerk.ReclaimStaged(e.cat, holding, vol, runID, dle, pos)
 		},
 		OpenLanding: func(landing string, spec archiveio.RunSpec) (*archiveio.Author, error) {
-			wt, err := e.prepareWriter(landing, spec, now, logf)
+			lh, ok := landers[landing]
+			if !ok {
+				wm, def, err := e.dep.OpenForWrite(landing)
+				if err != nil {
+					return nil, err
+				}
+				lh = landerHandle{wm: wm, def: def}
+				landers[landing] = lh
+			}
+			wt, err := e.prepareWriterOn(lh.wm, lh.def, spec, now, logf)
 			if err != nil {
 				return nil, err
 			}
@@ -57,4 +80,11 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 		DisplayDLE: e.DisplayDLE,
 		Logf:       logf,
 	})
+}
+
+// landerHandle pairs a landing's opened write face with its config definition, so Flush
+// can author one Session per crashed run over a single per-landing claim.
+type landerHandle struct {
+	wm  librarian.WriteMedium
+	def config.Media
 }

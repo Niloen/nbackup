@@ -445,11 +445,12 @@ func stockPipeline(encrypt, compress, passphraseFile string) (string, error) {
 // (which auto-mount) are always reachable; a single-drive station is reachable only
 // when every needed volume is already the one loaded in its drive.
 func (d *driller) unattendedReachable(medium string, steps []recovery.Step) (bool, string) {
-	lib, _, _, err := d.dep.librarianFor(medium)
+	am, _, err := d.dep.OpenAdmin(medium)
 	if err != nil {
 		return true, "" // address-identified: nothing to mount
 	}
-	view, err := lib.View()
+	defer am.Close()
+	view, err := am.View()
 	if err != nil {
 		return true, "" // address-identified: nothing to mount
 	}

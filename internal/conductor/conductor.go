@@ -44,6 +44,11 @@ type PreparedWriter struct {
 	// every write to the medium the same — direct dumps and drains alike. Unset, the medium's
 	// natural width applies: its drive count when serial, else the run's worker count.
 	Writers int
+	// Release gives back the medium's write claim (taken when the writer was opened).
+	// withSpool defers it to window end, so the claim spans exactly the window — a
+	// read-mount onto the medium is refused for that duration and fails over. Nil-safe
+	// for tests that fake a PreparedWriter.
+	Release func()
 }
 
 // Deps is the slice of the orchestrator a single run needs. The closures bind to the
@@ -61,12 +66,7 @@ type Deps struct {
 	// catalog; the closure reads the View's copy (sound because a session never reads
 	// its own writes). Which media it may mount is the media layer's business: a mount
 	// onto a window-written medium is refused and the read fails over to another copy.
-	OpenReader func(view *catalog.View) archiveio.ReadStore
-	// ClaimWrites marks the written media (landings + holding disks) owned by the run
-	// window for its duration and returns the release. A read-mount onto a claimed
-	// medium is refused while the window is open — the disjointness of reads and writes
-	// is this exclusivity, not a list check.
-	ClaimWrites       func(names []string) (release func(), err error)
+	OpenReader        func(view *catalog.View) archiveio.ReadStore
 	CheckCompress     func() error
 	ProbeReachable    func(host string) error
 	PreflightDumptype func(dt, host string, checkArchiver bool, checked map[string]bool) error

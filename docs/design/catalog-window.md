@@ -1,4 +1,4 @@
-# Two separations: catalog read/write, media write-claims
+# Two separations: catalog read/write, media faces opened at the depot
 
 Status: implemented 2026-07-03 (this doc is the decision record; see Dropped/Deferred
 for the roads not taken). Builds on docs/design/concurrent-writes.md.
@@ -41,16 +41,33 @@ state because they read the View's copy.
 
 The clerk's catalog seam split accordingly (`clerk.Map` → `ReadMap` + `Writer`):
 the Clerk holds only `ReadMap`; a `Session` records through an explicit
-`clerk.Writer` passed to `OpenRun` (the live catalog). `ReclaimStaged` takes the
+`clerk.WriteMap` passed to `OpenRun` (the live catalog). `ReclaimStaged` takes the
 Writer too. `archiveio` did not change at all.
 
-### Media: window write-claims (engine/depot.go)
+### Media: typed faces, opened at the depot (librarian/faces.go, engine/depot.go)
 
-The depot keeps `writeHeld`, the run window's medium-ownership table. At window
-open `withSpool` claims every written medium (landings + holding disks) via
-`Deps.ClaimWrites` and releases at window end. `clerkDeps.MounterFor` refuses a
-read-mount onto a claimed medium, and `eachPlacement` treats that like any
-unavailable copy — the read fails over. So:
+Opening a medium is the acquisition. The depot mints the librarian's three
+faces — the ONLY ways to reach a medium — and each face's method set IS the
+access rule:
+
+- `OpenForRead` → `librarian.ReadMedium` (ReadFileAt, MountForRead, Close):
+  archive-data reads. The clerk's `MounterFor` is exactly this open. Cannot
+  label, advance, or author — the methods don't exist on the type.
+- `OpenForWrite` → `librarian.WriteMedium` (Name, Volume, Parallel,
+  PrepareWrite, WriteSink, LazyDriveSinks, Close): run authoring. Opening takes
+  the window's exclusive claim in the depot's `writeHeld` table; `Close`
+  releases it (idempotent). A `clerk.Session` carries this handle (the clerk's
+  `Medium` role: Name+Volume), so "which medium a write records against" has
+  one source of truth — the loose medium string through the write path is gone.
+- `OpenAdmin` → `librarian.AdminMedium` (Label, Load, View, Labeled,
+  AppendOnly, Volume, Close): the operator face plus the passive introspection
+  that posture/ledger/drill reporting needs.
+
+`OpenForRead`/`OpenAdmin` are refused while a window write-holds the medium;
+read opens are otherwise untracked (many readers share). The claim's lifecycle
+is the handle's: `openWriter` wires `WriteMedium.Close` into
+`PreparedWriter.Release`, and `withSpool` defers the releases to window end —
+after the drain joins, so the claim spans every write. So:
 
 - The `kept` list is GONE from `withSpool`/`OpenReader`. Nothing declares a read
   set; conflicts surface where media are touched. Copy/sync still pins its reads
@@ -65,10 +82,14 @@ unavailable copy — the read fails over. So:
 **The Flush exception (found during implementation):** flush legitimately reads
 AND writes the same holding medium — it drains staged archives off it and
 reclaims them. "One owner per medium" means one *owner*, not one access mode;
-flush is that owner. Claims are therefore window-scoped (spool windows only),
-and Flush, which runs outside any window, claims nothing. The in-window drain
-reads staged archives via `Session.OpenArchive` (by value through
-`CommitResult`), bypassing `MounterFor`, so the claim never blocks it.
+flush is that owner. Flush therefore takes no claim on its holding disks (its
+reclaim writes go through the raw volume, not the librarian) and shares one
+`WriteMedium` per landing across the crashed runs it drains (`conductor.Flush`
+opens a writer per run×landing, but the claim is per medium — the engine
+memoizes the handle and authors each run's Session over it via
+`prepareWriterOn`). The in-window drain reads staged archives via
+`Session.OpenArchive` (by value through `CommitResult`), bypassing `MounterFor`,
+so a window's own holding claim never blocks it.
 
 ## Dropped
 
@@ -94,11 +115,9 @@ reads staged archives via `Session.OpenArchive` (by value through
 
 ## Deferred (possible follow-ups, deliberately not built)
 
-- **Full open-handle plumbing** (`OpenForRead`/`OpenForWrite` returning typed
-  handles, `Session` carrying a `WriteHandle` instead of a medium string,
-  admin ops opening their media). The claim table delivers the enforcement; the
-  handle types would add compile-time medium identity on the write path. Worth
-  revisiting if the string threading ever causes a real bug.
+- **`OpenExclusive` (read+write in one handle)** — sketched for Flush's holding
+  disks, then found unnecessary: Flush's holding writes go through the raw
+  volume, never the librarian, so no combined face exists to mint.
 - **Read-refusal caching in the clerk** — refusals are a map lookup, so per-read
   probing of a claimed medium costs nothing today.
 

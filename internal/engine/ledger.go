@@ -24,8 +24,12 @@ func (e *Engine) newLedger() *accounting.Accountant {
 		DisplayDLE:    e.DisplayDLE,
 		PlacementsFor: e.placementsFor,
 		LandingLabeled: func() bool {
-			lib, _, _, err := e.dep.librarianFor(e.dep.landingName)
-			return err == nil && lib.Labeled()
+			am, _, err := e.dep.OpenAdmin(e.dep.landingName)
+			if err != nil {
+				return false
+			}
+			defer am.Close()
+			return am.Labeled()
 		},
 	})
 }

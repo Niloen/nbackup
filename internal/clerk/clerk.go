@@ -41,10 +41,10 @@ type ReadMap interface {
 	PlacementsFor(runID string) []catalog.Placement
 }
 
-// Writer is the clerk's write slice of the catalog — where a Session records a run's
-// archives. The catalog implements it (journaled while a run window is open); the read-only
-// window clerk has none, so its read face is read-only by type, not by convention.
-type Writer interface {
+// WriteMap is the clerk's write slice of the catalog — the ReadMap's mirror, where a
+// Session records a run's archives. The catalog implements it; the read-only window
+// clerk has none, so its read face is read-only by type, not by convention.
+type WriteMap interface {
 	// AddArchive records one committed archive's content + its on-medium position — the
 	// catalog's single write path. The run entry is created from the archive's own run tag
 	// (arch.Run), never added wholesale; there is no completion step — a run is its archives.

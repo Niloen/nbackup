@@ -23,14 +23,15 @@ import (
 // runOrchestrated makes (clerk.OpenRun, Media.CapacityBytes) so the types line up —
 // folding that machinery here keeps the conductor free of the clerk/librarian packages.
 func (e *Engine) openWriter(medium string, spec archiveio.RunSpec, now time.Time, lf logf.Logf) (conductor.PreparedWriter, error) {
-	stores, err := e.landingStores(medium, spec, now, lf)
+	stores, wm, err := e.landingStores(medium, spec, now, lf)
 	if err != nil {
 		return conductor.PreparedWriter{}, err
 	}
 	capB, _ := e.cfg.Media[medium].CapacityBytes()
 	return conductor.PreparedWriter{
-		Stores: stores,
-		Lim:    e.dep.limiter(medium),
+		Stores:  stores,
+		Lim:     e.dep.limiter(medium),
+		Release: func() { _ = wm.Close() },
 		// Serial keys off the concurrent-write capability: a serial medium (tape) shares one
 		// rolling drive per store and writes one archive at a time on it, while a concurrent-write
 		// object store/disk writes archives as independent objects/files and stays parallel — even
@@ -77,30 +78,34 @@ func (m readView) PlacementsFor(runID string) []catalog.Placement {
 // multi-drive library (each a lazy per-drive sink that loads its own tape on first write, so the
 // concurrent writers land on independent drives), or a single store for a single-drive tape, a manual
 // drive, or a directly-addressed medium (disk/cloud — its own concurrency is independent files).
-func (e *Engine) landingStores(medium string, spec archiveio.RunSpec, now time.Time, lf logf.Logf) ([]archiveio.Store, error) {
-	lib, def, _, err := e.dep.librarianFor(medium)
+// The one OpenForWrite here takes the window's claim on the medium; the returned handle's Close
+// (wired into PreparedWriter.Release) gives it back at window end.
+func (e *Engine) landingStores(medium string, spec archiveio.RunSpec, now time.Time, lf logf.Logf) ([]archiveio.Store, librarian.WriteMedium, error) {
+	wm, def, err := e.dep.OpenForWrite(medium)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if !lib.Parallel() {
-		wt, err := e.prepareWriter(medium, spec, now, lf) // eager single store (existing contract)
+	if !wm.Parallel() {
+		wt, err := e.prepareWriterOn(wm, def, spec, now, lf) // eager single store (existing contract)
 		if err != nil {
-			return nil, err
+			_ = wm.Close()
+			return nil, nil, err
 		}
-		return []archiveio.Store{wt.session}, nil
+		return []archiveio.Store{wt.session}, wm, nil
 	}
 	partSize, err := e.dep.partSizeFor(medium)
 	if err != nil {
-		return nil, err
+		_ = wm.Close()
+		return nil, nil, err
 	}
 	exp := e.acct.ExpectedVolumeFor(medium, now)
 	announceExpectation(medium, exp, lf)
-	sinks := lib.LazyDriveSinks(def.IsAppendable(), exp.Label, partSize, now, librarian.Logf(lf))
+	sinks := wm.LazyDriveSinks(def.IsAppendable(), exp.Label, partSize, now, librarian.Logf(lf))
 	stores := make([]archiveio.Store, len(sinks))
 	for i, sink := range sinks {
-		stores[i] = e.clerk.OpenRun(sink, e.cat, medium, lib.Volume(), spec.ID)
+		stores[i] = e.clerk.OpenRun(sink, e.cat, wm, spec.ID)
 	}
-	return stores, nil
+	return stores, wm, nil
 }
 
 // landingFor resolves the medium a DLE lands on: its dumptype's `landing` override, else the run's
@@ -138,7 +143,6 @@ func (e *Engine) newConductor() *conductor.Conductor {
 		Vol:               e.dep.vol,
 		OpenWriter:        e.openWriter,
 		OpenReader:        e.openReader,
-		ClaimWrites:       e.dep.claimWrites,
 		CheckCompress:     e.tc.checkCompress,
 		ProbeReachable:    e.tc.probeReachable,
 		PreflightDumptype: e.tc.preflightDumptype,
