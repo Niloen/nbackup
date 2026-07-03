@@ -475,20 +475,19 @@ func (e *Engine) Simulate(start time.Time, days int) []*planner.Plan {
 // per-run conductor.Conductor (see internal/conductor and newConductor); the engine
 // just builds the run lane's dependency slice.
 func (e *Engine) Run(ctx context.Context, now time.Time, logf Logf) (*catalog.Run, error) {
-	// Open the landing now so newConductor captures the live handle (it snapshots
-	// the depot's volume into the run lane's deps) and a landing that won't open fails
-	// the run here rather than mid-stream. The dry-run peer (PlannedRunID) reads only
-	// the catalog, so it deliberately does not open the medium.
+	// Open the landing now so a landing that won't open fails the run here rather
+	// than mid-stream. The dry-run peer (PlannedRunID) reads only the catalog, so it
+	// deliberately does not open the medium.
 	if _, err := e.dep.landing(); err != nil {
 		return nil, err
 	}
 	return e.newConductor().Run(ctx, now, logf)
 }
 
-// PlannedRunID returns the run id a real dump on date would seal next. Like Run, it
+// PlannedRunID returns the run id a real dump at instant would mint. Like Run, it
 // delegates to the per-run conductor.Conductor.
-func (e *Engine) PlannedRunID(date time.Time) string {
-	return e.newConductor().PlannedRunID(date)
+func (e *Engine) PlannedRunID(instant time.Time) string {
+	return e.newConductor().PlannedRunID(instant)
 }
 
 // Restore reconstructs a DLE as of a run into destDir; see restorer.Extract.

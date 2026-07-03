@@ -2092,10 +2092,10 @@ func recordFullOn(t *testing.T, eng *Engine, date, dle, volume string) {
 // given payload size, so a reel's fill can be asserted.
 func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, bytes int64) {
 	t.Helper()
-	id := record.IDFromParts(date, 1)
 	// Stamp the archive's CreatedAt at the run's own date, not wall-clock: retention measures age
 	// per archive from its landing instant, so one meant to read as dated `date` must land then.
 	at, _ := record.ParseDateField(date)
+	id := record.IDFromTime(at)
 	arch := record.Archive{Run: id, DLE: dle, Level: 0, Compressed: bytes, CreatedAt: at}
 	pos := catalog.ArchivePos{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: volume, Epoch: 1, Pos: 1}}, Commit: catalog.FilePos{Label: volume, Epoch: 1, Pos: 2}}
 	if err := eng.cat.AddArchive(arch, "lto", pos); err != nil {
@@ -2107,8 +2107,8 @@ func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, byte
 // a medium other than the tape pool — used to prove retention is judged per-medium.
 func recordFullOnOtherMedium(t *testing.T, eng *Engine, date, dle, medium string) {
 	t.Helper()
-	id := record.IDFromParts(date, 1)
 	at, _ := record.ParseDateField(date)
+	id := record.IDFromTime(at)
 	arch := record.Archive{Run: id, DLE: dle, Level: 0, CreatedAt: at}
 	pos := catalog.ArchivePos{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: medium, Pos: 1}}, Commit: catalog.FilePos{Label: medium, Pos: 2}}
 	if err := eng.cat.AddArchive(arch, medium, pos); err != nil {
@@ -2418,7 +2418,7 @@ func TestTapeRecycleRefusedWhenAllKept(t *testing.T) {
 	if !strings.Contains(err.Error(), "within retention") {
 		t.Fatalf("error should explain every tape is still within retention; got: %v", err)
 	}
-	if _, rerr := eng.cat.ReadRun("run-2026-06-03.001"); rerr == nil {
+	if _, rerr := eng.cat.ReadRun("run-2026-06-03.000000"); rerr == nil {
 		t.Fatal("the refused run must not be recorded")
 	}
 }
@@ -2743,7 +2743,7 @@ func TestPruneSweepsCrashOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	fw, err := vol.AppendFile(context.Background(),
-		record.Header{Run: "run-2026-06-20.001", Kind: record.KindArchive, DLE: "ghost", Compress: "none"})
+		record.Header{Run: "run-2026-06-20.000000", Kind: record.KindArchive, DLE: "ghost", Compress: "none"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2754,7 +2754,7 @@ func TestPruneSweepsCrashOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	// (b) a torn append: a payload object at a conforming position with no .hdr sidecar.
-	tornDir := filepath.Join(catalogDir, "runs", "run-2026-06-19.001")
+	tornDir := filepath.Join(catalogDir, "runs", "run-2026-06-19.000000")
 	if err := os.MkdirAll(tornDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

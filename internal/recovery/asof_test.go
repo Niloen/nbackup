@@ -11,10 +11,10 @@ import (
 // with a time component can pick the earlier one that a bare date cannot distinguish.
 func timedRuns() []record.Archive {
 	return []record.Archive{{
-		Run: "run-2026-06-29.001", DLE: "app", Level: 0,
+		Run: "run-2026-06-29.103000", DLE: "app", Level: 0,
 		CreatedAt: time.Date(2026, 6, 29, 10, 30, 0, 0, time.UTC),
 	}, {
-		Run: "run-2026-06-29.002", DLE: "app", Level: 1,
+		Run: "run-2026-06-29.160000", DLE: "app", Level: 1,
 		CreatedAt: time.Date(2026, 6, 29, 16, 0, 0, 0, time.UTC),
 	}}
 }
@@ -27,11 +27,11 @@ func TestAsOfTimeComponent(t *testing.T) {
 	for _, tc := range []struct {
 		asOf, want string
 	}{
-		{"2026-06-29 14", "run-2026-06-29.001"},       // hour 14: only the 10:30 run has committed
-		{"2026-06-29 16", "run-2026-06-29.002"},       // hour 16: the 16:00 run is in-window
-		{"2026-06-29 10:30", "run-2026-06-29.001"},    // minute precision
-		{"2026-06-29 10:30:00", "run-2026-06-29.001"}, // second precision
-		{"2026-06-29 16:00:00", "run-2026-06-29.002"}, // second precision, later run
+		{"2026-06-29 14", "run-2026-06-29.103000"},       // hour 14: only the 10:30 run has committed
+		{"2026-06-29 16", "run-2026-06-29.160000"},       // hour 16: the 16:00 run is in-window
+		{"2026-06-29 10:30", "run-2026-06-29.103000"},    // minute precision
+		{"2026-06-29 10:30:00", "run-2026-06-29.103000"}, // second precision
+		{"2026-06-29 16:00:00", "run-2026-06-29.160000"}, // second precision, later run
 	} {
 		got, err := AsOf(runs, tc.asOf)
 		if err != nil || got != tc.want {
@@ -52,10 +52,10 @@ func TestAsOfTimeComponentBeforeAll(t *testing.T) {
 // time-component as-of: an archive with no commit time falls back to its run date at
 // midnight UTC, so it is still reachable by naming a later time the same day.
 func TestAsOfTimeComponentZeroCreatedAt(t *testing.T) {
-	runs := []record.Archive{{Run: "run-2026-06-29.001", DLE: "app", Level: 0}} // zero CreatedAt
+	runs := []record.Archive{{Run: "run-2026-06-29.103000", DLE: "app", Level: 0}} // zero CreatedAt
 	got, err := AsOf(runs, "2026-06-29 14")
-	if err != nil || got != "run-2026-06-29.001" {
-		t.Errorf("AsOf(%q) with zero CreatedAt = %q, %v; want run-2026-06-29.001", "2026-06-29 14", got, err)
+	if err != nil || got != "run-2026-06-29.103000" {
+		t.Errorf("AsOf(%q) with zero CreatedAt = %q, %v; want run-2026-06-29.103000", "2026-06-29 14", got, err)
 	}
 }
 
@@ -63,11 +63,11 @@ func TestAsOfTimeComponentZeroCreatedAt(t *testing.T) {
 // a zero last falls back to the run's date at midnight UTC.
 func TestRunTime(t *testing.T) {
 	last := time.Date(2026, 6, 29, 16, 0, 0, 0, time.UTC)
-	if got := runTime("run-2026-06-29.001", last); !got.Equal(last) {
+	if got := runTime("run-2026-06-29.103000", last); !got.Equal(last) {
 		t.Errorf("runTime with non-zero last = %v, want %v", got, last)
 	}
 	wantMidnight := time.Date(2026, 6, 29, 0, 0, 0, 0, time.UTC)
-	if got := runTime("run-2026-06-29.001", time.Time{}); !got.Equal(wantMidnight) {
+	if got := runTime("run-2026-06-29.103000", time.Time{}); !got.Equal(wantMidnight) {
 		t.Errorf("runTime fallback = %v, want %v", got, wantMidnight)
 	}
 }

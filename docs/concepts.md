@@ -21,7 +21,7 @@ The vocabulary you need to read everything else — and how the concepts nest.
 | Term | What it is |
 |---|---|
 | **DLE** | A **backup source**: a `host` + `path` (e.g. `app01:/home`). The thing you choose to back up. (From Amanda: *Disk List Entry*.) |
-| **Run** | One planner execution, typically daily — and its **primary artifact**. A run decides what to back up and at what level, then dumps it, sealing one immutable set of archives. Named `run-YYYY-MM-DD.NNN`. The addressable unit for copy / restore / list. |
+| **Run** | One planner execution, typically daily — and its **primary artifact**. A run decides what to back up and at what level, then dumps it, sealing one immutable set of archives. Named `run-YYYY-MM-DD.HHMMSS`. The addressable unit for copy / restore / list. |
 | **Archive** | One **DLE's image at one level** inside a run. The unit of **retention and pruning**: an old run can shed one DLE's image while keeping a run-mate the chain still needs. |
 | **Cycle** | The **dump cycle**: the target and hard-max time between full backups of each DLE, and the window retention protects. |
 | **Level** | The backup level, 0–9. Level 0 is a **full**; higher levels are **incrementals** relative to a lower level. |
@@ -49,13 +49,14 @@ how long its backups are protected.
 
 ## Runs and naming
 
-A run is named for its **local calendar date** plus a sequence: the first
-run of a day is `run-2026-06-21.001`; running again the same day gives `.002`,
-`.003`, … The sequence is fixed-width, so sorting run ids as plain text orders
-them in time — in an `ls`, a log, or an object-store listing.
+A run is named for its **local calendar date** plus its start time: a run
+started at 02:00 on June 21st is `run-2026-06-21.020000`; running again the same
+day just mints a later time. The suffix is fixed-width, so sorting run ids as
+plain text orders them in time — in an `ls`, a log, or an object-store listing.
 
-Each run is **immutable**: a committed run is never overwritten. Restores and
-pruning order runs by date, then sequence.
+Each run is **immutable**: a committed run is never overwritten, and its id is
+never reused — even after the run is pruned. Restores and pruning order runs by
+date, then start time.
 
 ## Archives, levels, and chains
 
@@ -100,7 +101,7 @@ On **disk**, the header is a separate `.hdr` sidecar so the payload stays a clea
 archive. One archive is three numbered files:
 
 ```text
-runs/run-2026-06-21.001/
+runs/run-2026-06-21.020000/
   000000-app01-home-L0.tar.zst        # clean compressed tar (payload)
   000000-app01-home-L0.hdr            # JSON header sidecar
   000001-app01-home-L0-index.json.gz  # gzipped member list (browse without extracting)

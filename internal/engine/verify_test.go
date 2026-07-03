@@ -76,10 +76,10 @@ func TestVerifyIntactCopyRemains(t *testing.T) {
 	eng := f.eng
 
 	// Corrupt only the disk copy of the full; the offsite copy stays intact.
-	corrupt(t, payloadFile(t, f.diskDir, "run-2026-06-21.001", 0))
+	corrupt(t, payloadFile(t, f.diskDir, "run-2026-06-21.000000", 0))
 
 	cap := &capturingLogf{}
-	rep, err := eng.Verify([]string{"run-2026-06-21.001"}, VerifyOptions{}, cap.log)
+	rep, err := eng.Verify([]string{"run-2026-06-21.000000"}, VerifyOptions{}, cap.log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestVerifyMediumScopedRespectsArchiveGranularity(t *testing.T) {
 func TestVerifySkipsCopyOnUnknownMedium(t *testing.T) {
 	f := newDrillFixture(t, "none")
 	eng := f.eng
-	id := "run-2026-06-21.001"
+	id := "run-2026-06-21.000000"
 
 	// Leave only the offsite copy, then drop offsite from the config so it is unknown.
 	if _, err := eng.cat.RemovePlacement(id, "disk"); err != nil {
@@ -163,7 +163,7 @@ func TestVerifySkipsCopyOnUnknownMedium(t *testing.T) {
 func TestVerifyCopyOpenErrorIsPipeline(t *testing.T) {
 	f := newDrillFixture(t, "none")
 	eng := f.eng
-	id := "run-2026-06-21.001"
+	id := "run-2026-06-21.000000"
 
 	// Leave only the offsite copy, then redefine offsite as an unreachable cloud medium
 	// — still known to the config, so opening it is a genuine failure, not a skip.

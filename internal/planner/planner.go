@@ -263,7 +263,7 @@ func Simulate(dles []config.DLE, hist *catalog.History, est map[string]Estimate,
 		// Advance the cloned history as if this day's run had been sealed, so the
 		// next day's DaysSinceFull / LastLevel / RunsAtCurrentLevel see it.
 		day := date.Format("2006-01-02")
-		runID := record.IDFromParts(day, 1) // simulated id; mirrors the real run's padded shape
+		runID := record.IDFromTime(date) // simulated id; mirrors the real run's shape
 		for _, it := range plan.Items {
 			h.RecordRun(it.Name, runID, day, it.Level)
 		}

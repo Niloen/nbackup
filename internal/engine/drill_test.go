@@ -109,8 +109,8 @@ func TestVerifyDeepStructural(t *testing.T) {
 
 	// Corrupt the full payload on the offsite copy: checksum verify scoped to offsite
 	// reports an integrity fault.
-	corrupt(t, payloadFile(t, f.offsiteDir, "run-2026-06-21.001", 0))
-	rep, err = eng.Verify([]string{"run-2026-06-21.001"}, VerifyOptions{Checks: CheckChecksum, Medium: "offsite"}, nil)
+	corrupt(t, payloadFile(t, f.offsiteDir, "run-2026-06-21.000000", 0))
+	rep, err = eng.Verify([]string{"run-2026-06-21.000000"}, VerifyOptions{Checks: CheckChecksum, Medium: "offsite"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,8 +133,8 @@ func TestVerifyStructuralPipelineFault(t *testing.T) {
 	eng := f.eng
 
 	// Garble the middle of the gzip payload so decompression fails outright.
-	corrupt(t, payloadFile(t, f.diskDir, "run-2026-06-21.001", 0))
-	rep, err := eng.Verify([]string{"run-2026-06-21.001"}, VerifyOptions{Checks: CheckStructural, Medium: "disk"}, nil)
+	corrupt(t, payloadFile(t, f.diskDir, "run-2026-06-21.000000", 0))
+	rep, err := eng.Verify([]string{"run-2026-06-21.000000"}, VerifyOptions{Checks: CheckStructural, Medium: "disk"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestDrillMissingCopy(t *testing.T) {
 	f := newDrillFixture(t, "none")
 	eng := f.eng
 	// Drop the offsite copy of the full so the chain is incomplete on offsite.
-	if _, err := eng.cat.RemovePlacement("run-2026-06-21.001", "offsite"); err != nil {
+	if _, err := eng.cat.RemovePlacement("run-2026-06-21.000000", "offsite"); err != nil {
 		t.Fatal(err)
 	}
 	rep, err := eng.Drill(DrillOptions{Tier: drill.TierStructural, Medium: "offsite", Sample: 1, Apply: true, Now: time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)}, nil)
@@ -212,7 +212,7 @@ func TestDrillBrokenChain(t *testing.T) {
 	eng := f.eng
 	// Garble the incremental payload on disk: the bytes are not a tar stream, so the
 	// chain restore (full then incremental) fails composing — a chain fault.
-	corrupt(t, payloadFile(t, f.diskDir, "run-2026-06-22.001", 1))
+	corrupt(t, payloadFile(t, f.diskDir, "run-2026-06-22.000000", 1))
 	rep, err := eng.Drill(DrillOptions{Tier: drill.TierChain, Medium: "disk", Sample: 1, Apply: true, Now: time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)}, nil)
 	if err != nil {
 		t.Fatal(err)

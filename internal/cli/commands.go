@@ -268,6 +268,15 @@ func newDumpCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// The run's single time source: the instant it is stamped committed, the
+			// moment retention is judged against, and the wall clock its id is minted
+			// from. An explicit --date pins the instant to that date's midnight — a
+			// coarse but reproducible override; the run date (used for guards and
+			// planning) is only the instant's day.
+			now := date
+			if dateStr == "" {
+				now = time.Now().UTC()
+			}
 			if dryRun {
 				if err := errPastPlan(date); err != nil {
 					return err
@@ -280,7 +289,7 @@ func newDumpCmd(a *app) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return runDumpDryRun(eng, date, warnings)
+				return runDumpDryRun(eng, date, now, warnings)
 			}
 			if err := errPastDump(date); err != nil {
 				return err
@@ -293,14 +302,6 @@ func newDumpCmd(a *app) *cobra.Command {
 			attachOperator(eng)
 			eng.SetEstimateProgress(estimateProgress(a.quiet))
 			eng.SetRunProgress(runProgress(a.quiet))
-			// Stamp the run at the real commit instant so retention can measure its
-			// age to sub-day precision; the run date (above, used for guards and
-			// planning) is only its day. An explicit --date pins the instant to that
-			// date's midnight — a coarse but reproducible override.
-			now := date
-			if dateStr == "" {
-				now = time.Now().UTC()
-			}
 			return a.runReported(cfg, report.Run{Command: report.CommandDump, ExitClass: "dump-failed"}, func() (report.Run, error) {
 				s, err := eng.Run(cmd.Context(), now, a.logf())
 				if err != nil {
@@ -379,8 +380,10 @@ func dumpStats(s *catalog.Run, workdir string) []report.DLEStat {
 
 // runDumpDryRun previews the dump on `date` without writing: it plans that run
 // exactly as `nb dump --date <date>` would — against the current catalog, the same
-// decision logic a real run uses — and prints it. Nothing is sealed.
-func runDumpDryRun(eng *engine.Engine, date time.Time, validationWarnings []string) error {
+// decision logic a real run uses — and prints it. Nothing is sealed. `now` is the
+// instant the run id is minted from (see newDumpCmd); a real run started later
+// would carry a later time suffix.
+func runDumpDryRun(eng *engine.Engine, date, now time.Time, validationWarnings []string) error {
 	plan := eng.Plan(date)
 
 	fmt.Println("DRY RUN — no data is written.")
@@ -395,7 +398,7 @@ func runDumpDryRun(eng *engine.Engine, date time.Time, validationWarnings []stri
 
 	estTotal := fprintPlanItems(os.Stdout, plan)
 	fmt.Printf("\nThis run (estimated): ~%s\n", sizeutil.FormatBytes(estTotal))
-	fmt.Printf("Would commit %s. Run without --dry-run to execute.\n", eng.PlannedRunID(date))
+	fmt.Printf("Would commit %s. Run without --dry-run to execute.\n", eng.PlannedRunID(now))
 	return nil
 }
 

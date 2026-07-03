@@ -143,7 +143,7 @@ func TestCloudPartSizeStaysConcurrent(t *testing.T) {
 
 	// White-box: the prepared writer is not serial, so the conductor's clamp (keyed on
 	// Serial alone) never fires even though part_size splits each archive into parts.
-	spec := archiveio.RunSpec{ID: record.IDFromParts(record.DateString(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)), 1), CreatedAt: time.Now()}
+	spec := archiveio.RunSpec{ID: record.IDFromTime(time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)), CreatedAt: time.Now()}
 	pw, err := eng.openWriter("cloud", spec, time.Now(), nil)
 	if err != nil {
 		t.Fatal(err)

@@ -46,132 +46,64 @@ func addArchive(t *testing.T, c *catalog.Catalog, id, medium, dle string, level 
 	}
 }
 
-// fakeVol is a media.Volume whose Files()/RemoveFile() are the only methods allocRunID calls; the byte
-// methods panic so a test proves allocRunID never touches them.
-type fakeVol struct {
-	files     []record.FileInfo
-	filesErr  error
-	removed   []int
-	removeErr error
-}
-
-func (v *fakeVol) Files() ([]record.FileInfo, error) { return v.files, v.filesErr }
-func (v *fakeVol) RemoveFile(pos int) error {
-	if v.removeErr != nil {
-		return v.removeErr
-	}
-	v.removed = append(v.removed, pos)
-	return nil
-}
-func (v *fakeVol) AppendFile(context.Context, record.Header) (media.FileWriter, error) {
-	panic("AppendFile: allocRunID must not write")
-}
-func (v *fakeVol) ReadFile(int) (record.Header, io.ReadCloser, error) {
-	panic("ReadFile: allocRunID must not read payloads")
-}
-
-const runDay = "2026-07-02"
-
 var day = time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
 
-// --- allocRunID branches ---------------------------------------------------
+// --- mintRunID branches ------------------------------------------------------
 
-// TestAllocRunIDFirstOfDay: an empty catalog and empty drive give the day's first id.
-func TestAllocRunIDFirstOfDay(t *testing.T) {
-	c := &Conductor{d: Deps{Cat: newCatalog(t), Vol: &fakeVol{}}}
-	id, seq, err := c.allocRunID(day)
-	if err != nil || seq != 1 || id != record.IDFromParts(runDay, 1) {
-		t.Fatalf("allocRunID = (%q,%d,%v); want the day's .001", id, seq, err)
+// TestMintRunIDFromClock: with no colliding run in the catalog, the id is the start
+// instant's local wall clock, verbatim. Minting takes no volume — nothing here can
+// scan a tape (the conductor's Deps has no media handle at all).
+func TestMintRunIDFromClock(t *testing.T) {
+	c := &Conductor{d: Deps{Cat: newCatalog(t)}}
+	if id := c.mintRunID(day, time.UTC); id != "run-2026-07-02.120000" {
+		t.Fatalf("mintRunID = %q; want the instant's own id", id)
+	}
+	// Existing earlier runs don't move a later instant's id.
+	c2 := newCatalog(t)
+	addArchive(t, c2, "run-2026-07-02.020000", "disk", "h:/p", 0, record.Archive{})
+	cd := &Conductor{d: Deps{Cat: c2}}
+	if id := cd.mintRunID(day, time.UTC); id != "run-2026-07-02.120000" {
+		t.Fatalf("mintRunID = %q; want the clock id, unmoved by earlier runs", id)
 	}
 }
 
-// TestAllocRunIDEmptyDriveTolerated: a changer with nothing loaded (ErrNoVolume from Files) is not a
-// failure — the id is still allocated pool-globally from the catalog so a first dump can proceed.
-func TestAllocRunIDEmptyDriveTolerated(t *testing.T) {
-	c := &Conductor{d: Deps{Cat: newCatalog(t), Vol: &fakeVol{filesErr: media.ErrNoVolume}}}
-	id, _, err := c.allocRunID(day)
-	if err != nil || id != record.IDFromParts(runDay, 1) {
-		t.Fatalf("allocRunID with empty drive = (%q,%v); want .001 tolerated", id, err)
+// TestMintRunIDLocalZone: the id carries the instant's wall clock in the given zone,
+// so the same instant mints different ids (and even dates) across zones.
+func TestMintRunIDLocalZone(t *testing.T) {
+	c := &Conductor{d: Deps{Cat: newCatalog(t)}}
+	inst := time.Date(2026, 7, 2, 23, 30, 0, 0, time.UTC)
+	if id := c.mintRunID(inst, time.FixedZone("east", 2*3600)); id != "run-2026-07-03.013000" {
+		t.Fatalf("mintRunID east = %q; want the zone's own wall clock", id)
 	}
 }
 
-// TestAllocRunIDFilesErrorSurfaces: any Files() error other than ErrNoVolume is a hard failure.
-func TestAllocRunIDFilesErrorSurfaces(t *testing.T) {
-	boom := errors.New("scan boom")
-	c := &Conductor{d: Deps{Cat: newCatalog(t), Vol: &fakeVol{filesErr: boom}}}
-	if _, _, err := c.allocRunID(day); !errors.Is(err, boom) {
-		t.Fatalf("allocRunID = %v; want the Files() error surfaced", err)
-	}
-}
-
-// TestAllocRunIDSkipsSealedID: a sealed run already holds .001 (in the catalog), so a same-day rerun
-// takes the next free .002 rather than shadowing it — even though the loaded volume carries nothing.
-func TestAllocRunIDSkipsSealedID(t *testing.T) {
+// TestMintRunIDBumpsPastLatest is the monotonicity guard: an instant at or below the
+// latest catalog id (a --date run pinned to midnight when the day already has runs, or
+// a clock stepped backwards) mints one second past that id instead — never at or below
+// it, and never reusing a pruned id's slot, so "run ids sort as time" holds.
+func TestMintRunIDBumpsPastLatest(t *testing.T) {
 	c := newCatalog(t)
-	addArchive(t, c, record.IDFromParts(runDay, 1), "disk", "h:/p", 0, record.Archive{})
-	cd := &Conductor{d: Deps{Cat: c, Vol: &fakeVol{}}}
-	id, seq, err := cd.allocRunID(day)
-	if err != nil || seq != 2 || id != record.IDFromParts(runDay, 2) {
-		t.Fatalf("allocRunID = (%q,%d,%v); want .002 after a sealed .001", id, seq, err)
+	addArchive(t, c, "run-2026-07-02.140000", "disk", "h:/p", 0, record.Archive{})
+	cd := &Conductor{d: Deps{Cat: c}}
+	// 12:00 is behind the sealed 14:00 run: bump to 14:00:01.
+	if id := cd.mintRunID(day, time.UTC); id != "run-2026-07-02.140001" {
+		t.Fatalf("mintRunID behind latest = %q; want one second past the latest id", id)
+	}
+	// The exact same second collides: same bump.
+	inst := time.Date(2026, 7, 2, 14, 0, 0, 0, time.UTC)
+	if id := cd.mintRunID(inst, time.UTC); id != "run-2026-07-02.140001" {
+		t.Fatalf("mintRunID same second = %q; want one second past the latest id", id)
 	}
 }
 
-// orphanFiles builds a loaded-volume Files() listing for an uncommitted orphan of id: an archive part
-// with no commit footer (a failed attempt), so its id is reclaimable.
-func orphanFiles(id string, pos int) []record.FileInfo {
-	return []record.FileInfo{{Pos: pos, Header: record.Header{Run: id, Kind: record.KindArchive}}}
-}
-
-// TestAllocRunIDReclaimsOrphan: the loaded volume carries an uncommitted orphan the catalog never
-// recorded; allocRunID reclaims its files and reuses the id.
-func TestAllocRunIDReclaimsOrphan(t *testing.T) {
-	id := record.IDFromParts(runDay, 1)
-	vol := &fakeVol{files: orphanFiles(id, 7)}
-	cd := &Conductor{d: Deps{Cat: newCatalog(t), Vol: vol}}
-	got, seq, err := cd.allocRunID(day)
-	if err != nil || seq != 1 || got != id {
-		t.Fatalf("allocRunID = (%q,%d,%v); want the orphan's .001 reclaimed", got, seq, err)
-	}
-	if len(vol.removed) != 1 || vol.removed[0] != 7 {
-		t.Fatalf("orphan files removed = %v; want [7]", vol.removed)
-	}
-}
-
-// TestAllocRunIDCommittedOrphanNeverReused: an orphan that DID commit (a real recovery point) keeps
-// its id — allocRunID skips to the next sequence rather than reclaiming a committed archive.
-func TestAllocRunIDCommittedOrphanNeverReused(t *testing.T) {
-	id := record.IDFromParts(runDay, 1)
-	vol := &fakeVol{files: []record.FileInfo{{Pos: 3, Header: record.Header{Run: id, Kind: record.KindCommit}}}}
-	cd := &Conductor{d: Deps{Cat: newCatalog(t), Vol: vol}}
-	got, seq, err := cd.allocRunID(day)
-	if err != nil || seq != 2 || got != record.IDFromParts(runDay, 2) {
-		t.Fatalf("allocRunID = (%q,%d,%v); want .002 (a committed id is never reused)", got, seq, err)
-	}
-	if len(vol.removed) != 0 {
-		t.Fatalf("a committed archive must never be removed, removed = %v", vol.removed)
-	}
-}
-
-// TestAllocRunIDNoFileRemovalSkips: a medium that cannot delete an individual file (tape) leaves the
-// orphan in place and takes the next id instead of failing.
-func TestAllocRunIDNoFileRemovalSkips(t *testing.T) {
-	id := record.IDFromParts(runDay, 1)
-	vol := &fakeVol{files: orphanFiles(id, 7), removeErr: media.ErrNoFileRemoval}
-	cd := &Conductor{d: Deps{Cat: newCatalog(t), Vol: vol}}
-	got, seq, err := cd.allocRunID(day)
-	if err != nil || seq != 2 || got != record.IDFromParts(runDay, 2) {
-		t.Fatalf("allocRunID = (%q,%d,%v); want .002 when the orphan can't be removed", got, seq, err)
-	}
-}
-
-// TestAllocRunIDRemoveErrorSurfaces: a real removal error (not ErrNoFileRemoval) is a hard failure.
-func TestAllocRunIDRemoveErrorSurfaces(t *testing.T) {
-	id := record.IDFromParts(runDay, 1)
-	boom := errors.New("remove boom")
-	vol := &fakeVol{files: orphanFiles(id, 7), removeErr: boom}
-	cd := &Conductor{d: Deps{Cat: newCatalog(t), Vol: vol}}
-	if _, _, err := cd.allocRunID(day); !errors.Is(err, boom) {
-		t.Fatalf("allocRunID = %v; want the removal error surfaced", err)
+// TestMintRunIDNonCanonicalLatest: a non-canonical id in the catalog cannot anchor
+// the bump; the clock-minted id is used rather than failing the run.
+func TestMintRunIDNonCanonicalLatest(t *testing.T) {
+	c := newCatalog(t)
+	addArchive(t, c, "zz-not-a-run-id", "disk", "h:/p", 0, record.Archive{})
+	cd := &Conductor{d: Deps{Cat: c}}
+	if id := cd.mintRunID(day, time.UTC); id != "run-2026-07-02.120000" {
+		t.Fatalf("mintRunID with junk latest = %q; want the clock id", id)
 	}
 }
 
@@ -183,7 +115,7 @@ func TestAllocRunIDRemoveErrorSurfaces(t *testing.T) {
 func TestRunRejectsBackdatedRun(t *testing.T) {
 	c := newCatalog(t)
 	// A run already sealed for tomorrow.
-	addArchive(t, c, record.IDFromParts("2026-07-03", 1), "disk", "h:/p", 0, record.Archive{})
+	addArchive(t, c, "run-2026-07-03.020000", "disk", "h:/p", 0, record.Archive{})
 	cd := &Conductor{d: Deps{Cat: c}}
 	// Dump for today (before the sealed run) — must be rejected.
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.Local)
@@ -253,7 +185,7 @@ func (s *memFlushStore) Record(archiveio.CommitResult) error { return nil }
 // landing) — and simply drop the stale holding copy.
 func TestFlushDoubleCrashReclaimsOnly(t *testing.T) {
 	c := newCatalog(t)
-	id := record.IDFromParts(runDay, 1)
+	id := "run-2026-07-02.020000"
 	// The same archive recorded on both the holding disk and its landing.
 	addArchive(t, c, id, "hd0", "h:/p", 0, record.Archive{})
 	addArchive(t, c, id, "landing", "h:/p", 0, record.Archive{})
@@ -291,7 +223,7 @@ func TestFlushDoubleCrashReclaimsOnly(t *testing.T) {
 // copy reclaimed.
 func TestFlushCopiesAndReclaims(t *testing.T) {
 	c := newCatalog(t)
-	id := record.IDFromParts(runDay, 1)
+	id := "run-2026-07-02.020000"
 	body := []byte("staged but never flushed")
 	addArchive(t, c, id, "hd0", "h:/p", 0, record.Archive{SHA256: shaOf(body), Compress: "none", Uncompressed: int64(len(body))})
 

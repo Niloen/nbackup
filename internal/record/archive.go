@@ -76,23 +76,39 @@ func (a Archive) DLEID() string {
 // (Archive.Run). It is not a record on the medium: each archive is made durable by its own
 // commit footer, so a run is reconstructed by grouping committed archives that share a run id
 // (a crashed run keeps its committed archives; uncommitted parts are orphans). The id is the
-// run's whole identity: "run-" + Date + a fixed-width ".NNN" sequence (".001" for the day's
-// first run) — see IDFromParts. The natural key is a date, so the "run-" tag is what keeps it
-// from reading as a plain date wherever it appears bare: catalog JSON, logs, Archive.BaseRun
-// references, and the on-disk runs/<id>/ directory. The system's other ids need no such tag
-// because they are already distinctive words (labels "<medium>-<date>", DLEs "<host>-<path>"),
-// not bare dates.
+// run's whole identity: "run-" + the run's local calendar date + a fixed-width ".HHMMSS"
+// start-of-run time — see IDFromTime. Like Amanda's dump datestamp (YYYYMMDDHHMMSS), the id
+// comes from the clock, so it is never allocated against existing state and never reused:
+// a pruned run's id stays retired, and ids sort as time by construction. The natural key is
+// a timestamp, so the "run-" tag is what keeps it from reading as a plain date wherever it
+// appears bare: catalog JSON, logs, Archive.BaseRun references, and the on-disk runs/<id>/
+// directory. The system's other ids need no such tag because they are already distinctive
+// words (labels "<medium>-<date>", DLEs "<host>-<path>"), not bare dates.
 
-// IDFromParts builds a run ID from a date string and sequence number. Every run
-// is suffixed with a fixed-width, zero-padded sequence (".001" for the day's first
-// run) so the ids sort chronologically under a plain lexical compare — even as an
-// object-store key with a trailing "/". A bare "run-DATE" first run would instead
-// sort *after* its same-day reruns there, since "." (0x2E) precedes "/" (0x2F); the
-// fixed width likewise keeps ".10" from sorting before ".2". The three digits cap a
-// day at 999 runs, which a daily backup never approaches. The "run-" prefix tags an
-// otherwise date-shaped key so it never reads as a plain date; ParseID strips it back off.
-func IDFromParts(date string, seq int) string {
-	return fmt.Sprintf("run-%s.%03d", date, seq)
+// IDFromTime builds a run ID from the run's start instant, in that instant's own
+// location (the caller picks the zone; runs use the operator's local wall clock).
+// Every id carries a fixed-width ".HHMMSS" suffix so ids sort chronologically under
+// a plain lexical compare — even as an object-store key with a trailing "/". A bare
+// "run-DATE" form would instead sort *after* its same-day peers there, since "."
+// (0x2E) precedes "/" (0x2F); the fixed width keeps every suffix the same length.
+// The "run-" prefix tags an otherwise date-shaped key so it never reads as a plain
+// date; ParseID strips it back off.
+func IDFromTime(t time.Time) string {
+	return "run-" + t.Format("2006-01-02.150405")
+}
+
+// IDTime parses a run id back to the instant IDFromTime built it from, interpreted
+// in loc (ids carry no zone; runs stamp them in the operator's local zone).
+func IDTime(id string, loc *time.Location) (time.Time, error) {
+	rest, ok := strings.CutPrefix(id, "run-")
+	if !ok {
+		return time.Time{}, fmt.Errorf("not a run id: %q", id)
+	}
+	t, err := time.ParseInLocation("2006-01-02.150405", rest, loc)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("bad run id %q: %w", id, err)
+	}
+	return t, nil
 }
 
 // DateString formats a date the way runs use it.
@@ -105,24 +121,25 @@ func ParseDateField(s string) (time.Time, error) {
 	return time.Parse("2006-01-02", s)
 }
 
-// ParseID extracts the date and sequence from a run ID. Every run id carries an
-// explicit, zero-padded sequence (IDFromParts is the sole producer), so a
-// sequence-less "run-DATE" is not a valid id and is rejected — there is one
-// canonical id shape, not a tolerated short form.
-func ParseID(id string) (date string, seq int, err error) {
+// ParseID extracts the date and the time-of-day suffix (HHMMSS as an integer, so
+// 02:00:05 parses as 20005) from a run ID. Every run id carries an explicit,
+// fixed-width suffix (IDFromTime is the sole producer), so a suffix-less
+// "run-DATE" is not a valid id and is rejected — there is one canonical id
+// shape, not a tolerated short form.
+func ParseID(id string) (date string, timeOfDay int, err error) {
 	rest, ok := strings.CutPrefix(id, "run-")
 	if !ok {
 		return "", 0, fmt.Errorf("not a run id: %q", id)
 	}
-	date, seqStr, hasSeq := strings.Cut(rest, ".")
-	if !hasSeq {
-		return "", 0, fmt.Errorf("run id %q has no sequence (want run-DATE.NNN)", id)
+	date, suffix, hasSuffix := strings.Cut(rest, ".")
+	if !hasSuffix {
+		return "", 0, fmt.Errorf("run id %q has no time suffix (want run-DATE.HHMMSS)", id)
 	}
-	seq, err = strconv.Atoi(seqStr)
+	timeOfDay, err = strconv.Atoi(suffix)
 	if err != nil {
-		return "", 0, fmt.Errorf("bad sequence in run id %q: %w", id, err)
+		return "", 0, fmt.Errorf("bad time suffix in run id %q: %w", id, err)
 	}
-	return date, seq, nil
+	return date, timeOfDay, nil
 }
 
 // RunDate returns the date (YYYY-MM-DD) encoded in a run id, or "" if it does not parse.
@@ -135,9 +152,9 @@ func RunDate(id string) string {
 }
 
 // RunIDLess reports whether run id a comes before b in run order, keyed by date then
-// sequence (so "run-DATE.10" correctly follows "run-DATE.2"). The padded ids sort this
-// way lexically too; parsing makes the intent explicit. An id that does not parse (not a
-// canonical run id) falls back to a plain lexical compare.
+// time-of-day suffix. The fixed-width ids sort this way lexically too; parsing makes
+// the intent explicit. An id that does not parse (not a canonical run id) falls back
+// to a plain lexical compare.
 func RunIDLess(a, b string) bool {
 	da, sa, ea := ParseID(a)
 	db, sb, eb := ParseID(b)

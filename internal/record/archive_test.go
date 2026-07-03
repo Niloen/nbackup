@@ -12,10 +12,10 @@ import (
 // intact. A malformed footer is a parse error, not a zero-value archive.
 func TestCommitRoundTrip(t *testing.T) {
 	a := Archive{
-		Run: "run-2026-06-21.001", DLE: "app01-home", Host: "app01", Path: "/home",
+		Run: "run-2026-06-21.020000", DLE: "app01-home", Host: "app01", Path: "/home",
 		Archiver: "gnutar", Compress: "none", Encrypt: "none", Level: 1,
 		Compressed: 1024, Uncompressed: 2048, FileCount: 7, SHA256: "deadbeef",
-		Parts: 2, BaseRun: "run-2026-06-20.001",
+		Parts: 2, BaseRun: "run-2026-06-20.020000",
 		CreatedAt: time.Date(2026, 6, 21, 14, 30, 0, 0, time.UTC),
 		Members:   []string{"./", "./etc/hosts"},
 	}
@@ -36,59 +36,70 @@ func TestCommitRoundTrip(t *testing.T) {
 	}
 }
 
+// TestIDAndParse pins the id shape (run-DATE.HHMMSS from the run's start instant)
+// and that ParseID and IDTime both recover what IDFromTime encoded.
 func TestIDAndParse(t *testing.T) {
+	loc := time.FixedZone("east", 2*3600)
 	cases := []struct {
-		date string
-		seq  int
-		id   string
+		instant   time.Time
+		id        string
+		date      string
+		timeOfDay int
 	}{
-		{"2026-06-21", 1, "run-2026-06-21.001"},
-		{"2026-06-21", 2, "run-2026-06-21.002"},
-		{"2026-06-21", 10, "run-2026-06-21.010"},
+		{time.Date(2026, 6, 21, 2, 0, 0, 0, loc), "run-2026-06-21.020000", "2026-06-21", 20000},
+		{time.Date(2026, 6, 21, 14, 30, 5, 0, loc), "run-2026-06-21.143005", "2026-06-21", 143005},
+		{time.Date(2026, 6, 21, 0, 0, 0, 0, loc), "run-2026-06-21.000000", "2026-06-21", 0},
 	}
 	for _, c := range cases {
-		if got := IDFromParts(c.date, c.seq); got != c.id {
-			t.Errorf("IDFromParts(%q,%d) = %q, want %q", c.date, c.seq, got, c.id)
+		if got := IDFromTime(c.instant); got != c.id {
+			t.Errorf("IDFromTime(%s) = %q, want %q", c.instant, got, c.id)
 		}
 		d, s, err := ParseID(c.id)
 		if err != nil {
 			t.Fatalf("ParseID(%q): %v", c.id, err)
 		}
-		if d != c.date || s != c.seq {
-			t.Errorf("ParseID(%q) = (%q,%d), want (%q,%d)", c.id, d, s, c.date, c.seq)
+		if d != c.date || s != c.timeOfDay {
+			t.Errorf("ParseID(%q) = (%q,%d), want (%q,%d)", c.id, d, s, c.date, c.timeOfDay)
+		}
+		back, err := IDTime(c.id, loc)
+		if err != nil {
+			t.Fatalf("IDTime(%q): %v", c.id, err)
+		}
+		if !back.Equal(c.instant) {
+			t.Errorf("IDTime(%q) = %s, want %s", c.id, back, c.instant)
 		}
 	}
+	if _, err := IDTime("run-2026-06-21.9999", time.UTC); err == nil {
+		t.Error("IDTime of a malformed suffix should error")
+	}
+	if _, err := IDTime("2026-06-21.020000", time.UTC); err == nil {
+		t.Error("IDTime without the run- prefix should error")
+	}
 }
 
-// TestParseIDRejectsSequenceless pins the single canonical id shape: a sequence-less
+// TestParseIDRejectsSuffixless pins the single canonical id shape: a suffix-less
 // "run-DATE" is not a valid id and is rejected, so a bare date can never masquerade
-// as the day's first run. A present-but-unpadded sequence (".8") still parses — the
-// padding is only the producer's sort-stability discipline, not a parse requirement.
-func TestParseIDRejectsSequenceless(t *testing.T) {
+// as a run id.
+func TestParseIDRejectsSuffixless(t *testing.T) {
 	if _, _, err := ParseID("run-2026-06-21"); err == nil {
-		t.Errorf("ParseID(%q) succeeded; want a sequence-less id to be rejected", "run-2026-06-21")
+		t.Errorf("ParseID(%q) succeeded; want a suffix-less id to be rejected", "run-2026-06-21")
 	}
-	d, s, err := ParseID("run-2026-06-21.8")
-	if err != nil {
-		t.Fatalf("ParseID(%q): %v", "run-2026-06-21.8", err)
-	}
-	if d != "2026-06-21" || s != 8 {
-		t.Errorf("ParseID(%q) = (%q,%d), want (%q,8)", "run-2026-06-21.8", d, s, "2026-06-21")
+	if _, _, err := ParseID("2026-06-21.020000"); err == nil {
+		t.Errorf("ParseID without the run- prefix should be rejected")
 	}
 }
 
-// TestIDSortsLexically is the regression test for the original bug: the old scheme
-// left the day's first run a bare "run-DATE" and used unpadded sequences, so once
-// a delimiter followed the id — an object-store key "runs/<id>/…", '/' = 0x2F — the
-// bare run sorted *after* its same-day reruns ('.' = 0x2E precedes '/'), and ".10"
-// sorted before ".2". A fixed-width, always-suffixed id sorts in run order under a
-// plain string compare, with or without a trailing delimiter.
+// TestIDSortsLexically is the regression test for the original bug: an id scheme
+// with a bare or unpadded suffix breaks lexical ordering once a delimiter follows
+// the id — an object-store key "runs/<id>/…", '/' = 0x2F — because '.' (0x2E)
+// precedes '/'. A fixed-width, always-suffixed id sorts in run order under a plain
+// string compare, with or without a trailing delimiter.
 func TestIDSortsLexically(t *testing.T) {
 	chronological := []string{
-		IDFromParts("2026-06-21", 1),  // first run of the 21st
-		IDFromParts("2026-06-21", 2),  // same-day rerun
-		IDFromParts("2026-06-21", 10), // the 10th run — must follow the 2nd, not precede it
-		IDFromParts("2026-06-22", 1),  // next day
+		IDFromTime(time.Date(2026, 6, 21, 2, 0, 0, 0, time.UTC)),   // first run of the 21st
+		IDFromTime(time.Date(2026, 6, 21, 9, 15, 30, 0, time.UTC)), // same-day rerun
+		IDFromTime(time.Date(2026, 6, 21, 23, 5, 0, 0, time.UTC)),  // late same-day run
+		IDFromTime(time.Date(2026, 6, 22, 2, 0, 0, 0, time.UTC)),   // next day
 	}
 	for _, suffix := range []string{"", "/"} {
 		keys := make([]string, len(chronological))
@@ -106,22 +117,21 @@ func TestIDSortsLexically(t *testing.T) {
 	}
 }
 
-// TestRunIDLess ensures same-day run ids order by numeric sequence, not
-// lexicographically (so .010 follows .002), and that a non-run-shaped id falls back
-// to a plain lexical compare.
+// TestRunIDLess ensures run ids order by date then time-of-day, and that a
+// non-run-shaped id falls back to a plain lexical compare.
 func TestRunIDLess(t *testing.T) {
 	ids := []string{
-		IDFromParts("2026-06-21", 10),
-		IDFromParts("2026-06-21", 2),
-		IDFromParts("2026-06-20", 1),
-		IDFromParts("2026-06-21", 1),
+		IDFromTime(time.Date(2026, 6, 21, 23, 5, 0, 0, time.UTC)),
+		IDFromTime(time.Date(2026, 6, 21, 9, 15, 30, 0, time.UTC)),
+		IDFromTime(time.Date(2026, 6, 20, 2, 0, 0, 0, time.UTC)),
+		IDFromTime(time.Date(2026, 6, 21, 2, 0, 0, 0, time.UTC)),
 	}
 	sort.Slice(ids, func(i, j int) bool { return RunIDLess(ids[i], ids[j]) })
 	want := []string{
-		IDFromParts("2026-06-20", 1),
-		IDFromParts("2026-06-21", 1),
-		IDFromParts("2026-06-21", 2),
-		IDFromParts("2026-06-21", 10),
+		"run-2026-06-20.020000",
+		"run-2026-06-21.020000",
+		"run-2026-06-21.091530",
+		"run-2026-06-21.230500",
 	}
 	for i := range want {
 		if ids[i] != want[i] {

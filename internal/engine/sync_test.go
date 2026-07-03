@@ -130,7 +130,7 @@ func TestSyncSelectionLast(t *testing.T) {
 	if len(report.Items) != 1 {
 		t.Fatalf("--last 1 backlog = %d, want 1", len(report.Items))
 	}
-	if report.Items[0].RunID != "run-2026-06-23.001" {
+	if report.Items[0].RunID != "run-2026-06-23.000000" {
 		t.Fatalf("--last 1 kept %q, want the newest run", report.Items[0].RunID)
 	}
 }
@@ -175,8 +175,8 @@ func TestSyncSelectionSince(t *testing.T) {
 	if len(report.Items) != 2 {
 		t.Fatalf("--since backlog = %d, want 2 (the 22nd and 23rd)", len(report.Items))
 	}
-	if report.Items[0].RunID != "run-2026-06-22.001" {
-		t.Fatalf("oldest kept run = %q, want run-2026-06-22.001", report.Items[0].RunID)
+	if report.Items[0].RunID != "run-2026-06-22.000000" {
+		t.Fatalf("oldest kept run = %q, want run-2026-06-22.000000", report.Items[0].RunID)
 	}
 }
 

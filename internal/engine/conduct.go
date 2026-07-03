@@ -140,7 +140,6 @@ func (e *Engine) newConductor() *conductor.Conductor {
 		Cat:               e.cat,
 		Dmp:               e.dmp,
 		Plan:              e.sched.Plan,
-		Vol:               e.dep.vol,
 		OpenWriter:        e.openWriter,
 		OpenReader:        e.openReader,
 		CheckCompress:     e.tc.checkCompress,

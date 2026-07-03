@@ -46,7 +46,7 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 	// run dated earlier than a run already sealed would splice an out-of-order
 	// archive into the chain whose snapshot has already moved past it — silently
 	// dropping files at restore. Reject it (a same-day rerun, equal date, is fine and
-	// takes the next .N). Backdating before today is already caught at the CLI.
+	// mints a later time suffix). Backdating before today is already caught at the CLI.
 	if latest, ok := c.latestRunDate(); ok && record.DateString(date) < latest {
 		return nil, fmt.Errorf("cannot dump for %s: run(s) dated %s already exist; an earlier-dated run would corrupt the incremental restore order (snapshots have advanced past it) — dump on or after %s", record.DateString(date), latest, latest)
 	}
@@ -94,10 +94,7 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 		}
 	}
 
-	runID, _, err := c.allocRunID(date)
-	if err != nil {
-		return nil, err
-	}
+	runID := c.mintRunID(now, time.Local)
 	spec := archiveio.RunSpec{ID: runID, CreatedAt: now}
 
 	// The producers dump every DLE; the drain consumes them — buffering each onto a holding disk

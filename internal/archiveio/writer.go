@@ -77,7 +77,7 @@ type WriteStore interface {
 // that shared tag — the archives carry it and the catalog groups them back — so there is no
 // run record for the Author to produce.
 type RunSpec struct {
-	ID        string    // the run's identity (see record.IDFromParts)
+	ID        string    // the run's identity (see record.IDFromTime)
 	CreatedAt time.Time // when authoring began; a copy preserves the source run's
 }
 

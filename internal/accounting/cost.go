@@ -67,7 +67,7 @@ func (a *Accountant) ForecastCost(start time.Time, plans []*planner.Plan) []Fore
 
 		// Synthesize the day's run as archives (sized from the plan's estimates), replacing
 		// any existing archives of the same run id so a re-simulation is idempotent.
-		runID := record.IDFromParts(ds, 1)
+		runID := record.IDFromTime(date)
 		working = dropRun(working, runID)
 		var runBytes int64
 		for _, it := range plan.Items {

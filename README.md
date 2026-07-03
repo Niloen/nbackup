@@ -70,7 +70,7 @@ archive, and the files are human-friendly — one archive is three numbered file
 (payload, index, commit):
 
 ```text
-runs/run-2026-06-21.001/
+runs/run-2026-06-21.020000/
   000000-app01-home-L0.tar.zst        # clean compressed tar (payload)
   000000-app01-home-L0.hdr            # JSON header sidecar
   000001-app01-home-L0-index.json.gz  # gzipped member list (browse without extracting)
@@ -160,7 +160,7 @@ go install ./cmd/nb
 Either way you get a single `nb` binary. The convention: you **inspect** with a noun
 (`nb run`, `nb dle`, `nb medium`) and **act** with a flat verb (`nb dump`,
 `nb recover`, `nb prune`, …). Each inspection noun lists with no argument and
-details one item when given an id (`nb run run-2026-06-21.001`, `nb medium lto`).
+details one item when given an id (`nb run run-2026-06-21.020000`, `nb medium lto`).
 
 | Command              | Purpose                                                  |
 |----------------------|----------------------------------------------------------|
@@ -200,7 +200,7 @@ nb dump                # run the backup, committing one run's archives
 nb dump --dry-run --date 2026-07-15    # plan that day's run; writes nothing
 nb status              # progress of the running (or most recent) dump
 nb run                 # list runs (with a COPIES column: where each lives)
-nb run run-2026-06-21.001     # archives + every copy's volume and file positions
+nb run run-2026-06-21.020000     # archives + every copy's volume and file positions
 nb medium              # media overview: type, runs, usage / capacity, volume
 nb medium lto          # one medium's volume and the runs it holds
 nb verify --all        # re-check every run's archive checksums
@@ -300,12 +300,13 @@ a calculation over the catalog and a rate table, no billing API.
 
 ### Run naming and multiple runs per day
 
-A run is named for its local calendar date plus a sequence: the first run
-of a day is `run-YYYY-MM-DD.001`, and running again the same day gives `.002`,
-`.003`, … The sequence is fixed-width so sorting run ids as plain text orders them
-in time — in an `ls`, a log, or an object-store listing. Each run stays immutable;
-a committed run is never overwritten. Restores and pruning order runs by date
-**then** sequence.
+A run is named for its local calendar date plus its start time: a run started
+at 02:00 on June 21st is `run-2026-06-21.020000`, and running again the same day
+just mints a later time. The suffix is fixed-width so sorting run ids as plain
+text orders them in time — in an `ls`, a log, or an object-store listing. Each run
+stays immutable; a committed run is never overwritten, and its id is never reused —
+even after the run is pruned. Restores and pruning order runs by date **then**
+start time.
 
 ### Committing
 
@@ -323,7 +324,7 @@ in the catalog workdir. From any other shell, `nb status` reads it and prints an
 at-a-glance report:
 
 ```text
-Run run-2026-06-21.001  [running]
+Run run-2026-06-21.020000  [running]
   started:  2026-06-21 02:00:03  (elapsed 4m12s)
   workers:  2 configured, 2 active
   dles:     1 done, 2 active, 1 pending
@@ -397,7 +398,7 @@ per-DLE table — each DLE's level, original/output size, compression %, files, 
 time, and rate:
 
 ```text
-DUMP REPORT  run-2026-06-24.001  (run 2026-06-24 02:00)
+DUMP REPORT  run-2026-06-24.020000  (run 2026-06-24 02:00)
 2 DLE(s) dumped OK · 21.47 GB -> 5.37 GB (25%) · 12m00s elapsed
 
 STATISTICS            Total        Full         Incr
@@ -418,7 +419,7 @@ app01:/etc   1    122.88 kB  40.96 kB  33%    9      1s      122.88 kB/s
 Dump time is the *sum* of per-DLE dump times (it exceeds the wall-clock run time
 when workers run in parallel); run time is the single wall-clock span.
 
-`nb report --dump --run run-2026-06-21.001` reports a specific dump. (Sizes come from
+`nb report --dump --run run-2026-06-21.020000` reports a specific dump. (Sizes come from
 each archive's commit footer; the per-DLE timing comes from the run history, so a run
 dumped before this was recorded shows sizes via `nb run <id>` instead.)
 

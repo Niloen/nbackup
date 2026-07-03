@@ -45,7 +45,7 @@ This produces a single `nb` binary.
 NBackup has one convention you'll lean on constantly:
 
 - **Inspect with a noun** — `nb run`, `nb dle`, `nb medium`. With no argument it
-  lists; with an id it details one item (`nb run run-2026-06-21.001`,
+  lists; with an id it details one item (`nb run run-2026-06-21.020000`,
   `nb medium lto`).
 - **Act with a flat verb** — `nb dump`, `nb recover`, `nb prune`, `nb sync`, …
 
@@ -115,7 +115,7 @@ planner staggers those fulls apart so daily volume evens out. See
 
 ```bash
 nb run                         # list runs, with a COPIES column
-nb run run-2026-06-21.001      # archives in one run + every copy's location
+nb run run-2026-06-21.020000      # archives in one run + every copy's location
 nb dle                         # list sources and their archive timelines
 nb dle app01:/home             # one source's history across runs
 nb verify --all                # re-check every run's archive checksums

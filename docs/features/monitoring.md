@@ -24,7 +24,7 @@ in the catalog workdir. From any other shell, `nb status` reads it and prints an
 at-a-glance report:
 
 ```text
-Run run-2026-06-21.001  [running]
+Run run-2026-06-21.020000  [running]
   started:  2026-06-21 02:00:03  (elapsed 4m12s)
   workers:  2 configured, 2 active
   dles:     1 done, 2 active, 1 pending
@@ -104,7 +104,7 @@ the per-DLE table — each DLE's level, original/output size, compression %, fil
 dump time, and rate:
 
 ```text
-DUMP REPORT  run-2026-06-24.001  (run 2026-06-24 02:00)
+DUMP REPORT  run-2026-06-24.020000  (run 2026-06-24 02:00)
 2 DLE(s) dumped OK · 21.47 GB -> 5.37 GB (25%) · 12m00s elapsed
 
 STATISTICS            Total        Full         Incr
@@ -125,7 +125,7 @@ app01:/etc   1    122.88 kB  40.96 kB  33%    9      1s      122.88 kB/s
 Dump time is the *sum* of per-DLE dump times (it exceeds the wall-clock run time
 when workers run in parallel); run time is the single wall-clock span.
 
-`nb report --dump --run run-2026-06-21.001` reports a specific dump.
+`nb report --dump --run run-2026-06-21.020000` reports a specific dump.
 
 ## Alerting (notify)
 

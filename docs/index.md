@@ -86,7 +86,7 @@ and a **commit footer** (identity, sizes, checksums) written last — so the foo
 presence proves the archive landed whole. On disk it looks like this:
 
 ```text
-runs/run-2026-06-21.001/
+runs/run-2026-06-21.020000/
   000000-app01-home-L0.tar.zst        # clean compressed tar (payload)
   000000-app01-home-L0.hdr            # JSON header sidecar
   000001-app01-home-L0-index.json.gz  # gzipped member list (browse without extracting)

@@ -26,7 +26,7 @@ the bytes on the medium and the checksum beside them, so it needs no decryption 
 and keeps no ledger.
 
 ```bash
-nb verify run-2026-06-21.001   # re-hash one run's archives
+nb verify run-2026-06-21.020000   # re-hash one run's archives
 nb verify --all                # re-check every run
 ```
 
@@ -43,7 +43,7 @@ the members — and asserts that the pipeline completes and that the members mat
 recorded index.
 
 ```bash
-nb verify --deep run-2026-06-21.001
+nb verify --deep run-2026-06-21.020000
 ```
 
 This proves the bytes are a valid *restorable stream* and exercises the encryption

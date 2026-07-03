@@ -23,7 +23,7 @@ NBackup has one binary, `nb`, and a single naming rule:
 
 - **Inspect with a noun.** `nb run`, `nb dle`, and `nb medium` each list with no
   argument and detail one item when given an id — there are no `list`/`show`
-  subcommands. `nb run` lists runs; `nb run run-2026-06-21.001` details that
+  subcommands. `nb run` lists runs; `nb run run-2026-06-21.020000` details that
   one. `nb medium` lists media; `nb medium lto` details that one.
 - **Act with a flat verb.** Every mutation is a top-level verb — `nb dump`,
   `nb recover`, `nb prune`, `nb verify`, `nb drill`, `nb sync`, … — never nested
@@ -98,7 +98,7 @@ Each noun lists with no argument and details one item when given an id.
 
 ```bash
 nb run
-nb run run-2026-06-21.001
+nb run run-2026-06-21.020000
 nb dle app01:/home
 nb medium lto
 nb status --watch 2s
@@ -205,7 +205,7 @@ nb report
 nb report --last 30
 nb report --json
 nb report --dump
-nb report --dump --run run-2026-06-21.001
+nb report --dump --run run-2026-06-21.020000
 nb report --notify
 ```
 

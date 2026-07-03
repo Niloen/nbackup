@@ -19,9 +19,10 @@ of this document otherwise describes NBackup in its own terms.
 - **Run** — one planner execution (typically daily) *and* the immutable, sealed set
   of archives it produces: the primary artifact, the addressable unit for copy /
   restore / list. (The verb and its result share one name because they map one-to-one
-  — "last night's run" is both.) (`run-YYYY-MM-DD.NNN` — the run's local calendar date
-  plus a fixed-width, zero-padded sequence: `.001` for the day's first run, `.002`/`.003`
-  for reruns. Fixed width so the ids sort chronologically even as an object-store key.)
+  — "last night's run" is both.) (`run-YYYY-MM-DD.HHMMSS` — the run's local calendar
+  date plus its fixed-width start-of-run wall-clock time, Amanda's dump datestamp. Minted
+  from the clock, never allocated: a pruned run's id is never reused, and the ids sort
+  chronologically as plain text even as an object-store key.)
 - **Archive** — one **DLE** image at one level inside a Run. The unit of
   **retention/pruning**: the floor and disk/cloud reclamation are per-archive, so an
   old run can shed one DLE's image while keeping a run-mate the chain needs. Browse
@@ -56,7 +57,7 @@ registry registration, not a conditional in the core.
 | Package | Responsibility | Amanda analogue |
 |---|---|---|
 | `config` | config + domain entities: `DLE`, `Media`, `DumpType` | disklist / dumptype / storage |
-| `record` | the self-describing on-medium artifact records: `Header` framing + `Label` (volume id record) + `Archive` (commit-footer metadata, self-locating via its `Run` tag) + the run-id vocabulary (`IDFromParts`/`ParseID`/`RunIDLess`) + the per-archive member index (`EncodeIndex`) + their (de)serialization | dumpfile_t / amar |
+| `record` | the self-describing on-medium artifact records: `Header` framing + `Label` (volume id record) + `Archive` (commit-footer metadata, self-locating via its `Run` tag) + the run-id vocabulary (`IDFromTime`/`ParseID`/`RunIDLess`) + the per-archive member index (`EncodeIndex`) + their (de)serialization | dumpfile_t / amar |
 | `archiveio` | the archive fs contracts + block mechanics: `Ref` (an archive's logical identity — the fs "filename"), the write face (`WriteStore`/`Store`/`Ingest` + the `ArchiveWriter` SDK) and the read face (`ReadStore`); maps a run's archives onto a `Volume`'s files — meter + split a payload into parts then write its index + commit footer, concatenate + assert parts on read; knows nothing of compress/encrypt | taper / amrestore |
 | `media` | `Volume` + `Labeled` + `Drive`/`Changer` (slots + drives, `Load`/`Unload`/`Manual`) + `Profile` + registry; reads/writes `record` artifacts | Device API |
 | `librarian` | operates a medium's `Changer` + label protocol (make-writable, advance, load-for-read, label, load); prompts an operator when the changer is `Manual` | changer / amtape |
