@@ -1,0 +1,68 @@
+{{define "content"}}
+{{$d := .Data}}
+<h1>Overview</h1>
+
+{{with $d.Live}}
+<div class="panel" style="margin-bottom:1rem">
+  <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:.5rem;align-items:baseline">
+    <strong>Run in progress · {{.Snap.RunID}}</strong>
+    <span class="pill {{if eq (print .Snap.Phase) "failed"}}bad{{else if eq (print .Snap.Phase) "canceled"}}warn{{else}}ok{{end}}">{{.Snap.Phase}}</span>
+  </div>
+  <div class="bar"><span style="width:{{pct .Snap.Pct}}"></span></div>
+  <div class="muted" style="margin-top:.4rem;font-size:.85rem">
+    {{pct .Snap.Pct}} · {{.Done}} done · {{.Active}} active · {{.Pending}} pending{{if .Failed}} · <span class="bad">{{.Failed}} failed</span>{{end}}
+    · <a href="/status">details →</a>
+  </div>
+</div>
+{{end}}
+
+<div class="cards">
+  <div class="card"><div class="k">Runs</div><div class="v">{{$d.RunCount}}</div></div>
+  <div class="card"><div class="k">Cataloged</div><div class="v">{{bytes $d.TotalBytes}}</div></div>
+  {{with $d.LastDump}}
+  <div class="card">
+    <div class="k">Last backup</div>
+    <div class="v {{if .Failed}}bad{{else}}ok{{end}}">{{if .Failed}}failed{{else}}ok{{end}}</div>
+    <div class="muted" style="font-size:.82rem">{{stamp .EndedAt}}</div>
+  </div>
+  <div class="card"><div class="k">Last backup size</div><div class="v">{{bytes .BytesMoved}}</div>
+    <div class="muted" style="font-size:.82rem">{{.Archives}} archive(s)</div></div>
+  {{else}}
+  <div class="card"><div class="k">Last backup</div><div class="v muted">—</div></div>
+  {{end}}
+</div>
+
+<h2>Media</h2>
+<div class="panel scroll">
+{{if $d.Media}}
+<table>
+  <tr><th>Medium</th><th>Type</th><th class="num">Runs</th><th class="num">Used</th><th class="num">Capacity</th></tr>
+  {{range $d.Media}}
+  <tr>
+    <td>{{.Name}}</td><td class="muted">{{.Type}}</td>
+    <td class="num">{{.Runs}}</td><td class="num">{{bytes .Used}}</td>
+    <td class="num">{{if .Capacity}}{{bytes .Capacity}}{{else}}<span class="muted">∞</span>{{end}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<div class="empty">No media configured.</div>{{end}}
+</div>
+
+<h2>Recent activity</h2>
+<div class="panel scroll">
+{{if $d.History}}
+<table>
+  <tr><th>When</th><th>Command</th><th>Outcome</th><th class="num">Bytes</th><th>Detail</th></tr>
+  {{range $d.History}}
+  <tr>
+    <td>{{stamp .EndedAt}}</td>
+    <td>{{.Command}}</td>
+    <td class="{{if .Failed}}bad{{else}}ok{{end}}">{{if .Failed}}failure{{else}}success{{end}}</td>
+    <td class="num">{{bytes .BytesMoved}}</td>
+    <td class="muted">{{if .RunID}}{{.RunID}}{{end}}{{if .Error}} · {{.Error}}{{end}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<div class="empty">No runs recorded yet.</div>{{end}}
+</div>
+{{end}}

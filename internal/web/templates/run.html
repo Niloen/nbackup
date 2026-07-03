@@ -1,0 +1,46 @@
+{{define "content"}}
+{{with .Data}}
+{{if .NotFound}}
+<h1>Run not found</h1>
+<div class="panel"><div class="empty">No run <code>{{.ID}}</code> in the catalog. <a href="/runs">All runs →</a></div></div>
+{{else}}
+<h1>{{.ID}}</h1>
+<div class="cards">
+  <div class="card"><div class="k">Status</div><div class="v {{if .Partial}}warn{{else}}ok{{end}}">{{if .Partial}}partial{{else}}committed{{end}}</div></div>
+  <div class="card"><div class="k">Date</div><div class="v" style="font-size:1rem">{{.Date}}</div></div>
+  <div class="card"><div class="k">Committed</div><div class="v" style="font-size:1rem">{{stampsec .At}}</div></div>
+  <div class="card"><div class="k">Total</div><div class="v">{{bytes .Bytes}}</div></div>
+</div>
+
+<h2>Archives</h2>
+<div class="panel">
+<div class="dles">
+  {{range .Archives}}
+  <div class="dle">
+    <div class="dle-head">
+      <span class="dle-name">{{.DLEID}}</span>
+      <span class="pill dim">{{level .Level}}</span>
+    </div>
+    <div class="dle-meta">{{.FileCount}} file(s) · {{bytes .Compressed}} · {{.Compress}} · {{encrypt .Encrypt}} encryption</div>
+    {{if .Partial}}<div class="dle-meta"><span class="warn">PARTIAL — {{.Unreadable}} file(s) unreadable, omitted</span></div>{{end}}
+  </div>
+  {{end}}
+</div>
+</div>
+
+<h2>Copies ({{len .Copies}})</h2>
+<div class="panel">
+{{if .Copies}}
+<div class="dles">
+  {{range .Copies}}
+  <div class="dle">
+    <div class="dle-head"><span class="dle-name">{{.Medium}}</span></div>
+    {{if .Labels}}<div class="dle-meta">volume · {{.Labels}}</div>{{end}}
+  </div>
+  {{end}}
+</div>
+{{else}}<div class="empty">No copies recorded.</div>{{end}}
+</div>
+{{end}}
+{{end}}
+{{end}}

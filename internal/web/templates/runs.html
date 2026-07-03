@@ -1,0 +1,20 @@
+{{define "content"}}
+<h1>Runs</h1>
+<div class="panel scroll">
+{{if .Data}}
+<table>
+  <tr><th>Run</th><th>Status</th><th class="num">Archives</th><th class="num">Size</th><th>Committed</th><th>Copies</th></tr>
+  {{range .Data}}
+  <tr>
+    <td><a href="/runs/{{.ID}}">{{.ID}}</a></td>
+    <td>{{if .Partial}}<span class="warn">committed (partial)</span>{{else}}committed{{end}}</td>
+    <td class="num">{{.Archives}}</td>
+    <td class="num">{{bytes .Bytes}}</td>
+    <td>{{stamp .At}}</td>
+    <td class="muted">{{.Copies}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<div class="empty">No runs in catalog.</div>{{end}}
+</div>
+{{end}}

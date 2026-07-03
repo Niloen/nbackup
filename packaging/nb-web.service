@@ -1,0 +1,45 @@
+# NBackup read-only status website.
+#
+# This unit is INSTALLED BUT NOT ENABLED — backups themselves run from cron, not
+# systemd (see the README). `nb web` is the one long-lived piece, and only if you
+# want an always-on dashboard. Turn it on with:
+#
+#   sudoedit /etc/nbackup/nbackup.yaml         # point it at your real catalog
+#   sudo systemctl enable --now nb-web
+#   # then browse http://<this-host>:8080
+#
+# It is read-only: it never starts, prunes, or alters a backup, and takes no lock,
+# so it is safe to run alongside a scheduled dump.
+[Unit]
+Description=NBackup read-only status website
+Documentation=man:nb(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# Bind address and config. Defaults bind :8080 on all interfaces, reachable from the
+# LAN with NO authentication or TLS — expose it only on a trusted network. For remote
+# access, set NB_WEB_ADDR=127.0.0.1:8080 and front it with a reverse proxy or a VPN
+# (e.g. Tailscale). Override without editing this file:
+#   sudo systemctl edit nb-web
+#   [Service]
+#   Environment=NB_WEB_ADDR=127.0.0.1:8080
+Environment=NB_WEB_ADDR=:8080
+Environment=NB_CONFIG=/etc/nbackup/nbackup.yaml
+ExecStart=/usr/bin/nb --config ${NB_CONFIG} web --addr ${NB_WEB_ADDR}
+Restart=on-failure
+RestartSec=5
+
+# It only reads the catalog, so run it sandboxed. Set User= to the account that owns
+# your catalog/workdir (typically the one your backup cron runs as); root is the
+# default only because that is the common cron-backup setup.
+User=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

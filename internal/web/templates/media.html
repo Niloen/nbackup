@@ -1,0 +1,21 @@
+{{define "content"}}
+<h1>Media</h1>
+<div class="panel scroll">
+{{if .Data}}
+<table>
+  <tr><th>Medium</th><th>Type</th><th class="num">Runs</th><th class="num">Used</th><th class="num">Capacity</th><th class="num">Volumes</th><th>Volume</th></tr>
+  {{range .Data}}
+  <tr>
+    <td>{{.Name}}</td>
+    <td class="muted">{{.Type}}</td>
+    <td class="num">{{.Runs}}</td>
+    <td class="num">{{bytes .Used}}</td>
+    <td class="num">{{if .Capacity}}{{bytes .Capacity}}{{else}}<span class="muted">∞</span>{{end}}</td>
+    <td class="num">{{if .Volumes}}{{.Volumes}}{{else}}<span class="muted">—</span>{{end}}</td>
+    <td class="muted">{{if .Volume}}{{.Volume}}{{else}}—{{end}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<div class="empty">No media configured.</div>{{end}}
+</div>
+{{end}}

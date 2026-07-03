@@ -1,0 +1,89 @@
+{{define "base.html"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{{if .Refresh}}<meta http-equiv="refresh" content="{{.Refresh}}">{{end}}
+<title>{{.Title}} · Niloen Backup</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --line: #262b36; --fg: #e6e9ef;
+    --muted: #9aa4b2; --accent: #4f9cff; --ok: #3fb950; --warn: #d29922; --bad: #f85149;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --fg:#1a1d22; --muted:#5c6470; --accent:#0969da; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem 1.2rem;
+    padding: .8rem 1rem; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header .brand { font-weight: 700; letter-spacing: .02em; }
+  header .brand a { color: var(--fg); text-decoration: none; }
+  nav { display: flex; flex-wrap: wrap; gap: .1rem .3rem; }
+  nav a { color: var(--muted); text-decoration: none; padding: .2rem .6rem; border-radius: 6px; }
+  nav a.on, nav a:hover { color: var(--fg); background: var(--line); }
+  main { max-width: 960px; margin: 0 auto; padding: 1rem; }
+  h1 { font-size: 1.25rem; margin: .3rem 0 1rem; }
+  h2 { font-size: 1rem; margin: 1.6rem 0 .6rem; color: var(--muted); font-weight: 600; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .7rem; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: .8rem 1rem; }
+  .card .k { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+  .card .v { font-size: 1.35rem; font-weight: 650; margin-top: .2rem; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 1rem; }
+  table { width: 100%; border-collapse: collapse; }
+  .scroll { overflow-x: auto; }
+  th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: .82rem; text-transform: uppercase; letter-spacing: .03em; }
+  tr:last-child td { border-bottom: none; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  a { color: var(--accent); }
+  .pill { display: inline-block; padding: .05rem .5rem; border-radius: 999px; font-size: .78rem; font-weight: 600; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .pill.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); }
+  .pill.bad { background: color-mix(in srgb, var(--bad) 18%, transparent); }
+  .pill.warn { background: color-mix(in srgb, var(--warn) 18%, transparent); }
+  .pill.active { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+  .pill.dim { background: var(--line); color: var(--muted); }
+  .bar { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; margin-top: .35rem; }
+  .bar > span { display: block; height: 100%; background: var(--accent); }
+  /* Live per-DLE progress: a stacked list, not a table, so it never scrolls sideways
+     on a phone — each DLE gets a full-width bar and its name truncates rather than
+     forcing horizontal overflow. */
+  .dles { display: flex; flex-direction: column; }
+  .dle { padding: .65rem 0; border-bottom: 1px solid var(--line); }
+  .dle:first-child { padding-top: .2rem; }
+  .dle:last-child { border-bottom: none; padding-bottom: .2rem; }
+  .dle-head { display: flex; align-items: center; gap: .5rem; }
+  .dle-name { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dle-head .pill { flex: none; }
+  .dle-meta { color: var(--muted); font-size: .82rem; margin-top: .35rem; font-variant-numeric: tabular-nums; }
+  /* Run-level dump/flush/volume rollup: a stacked label→value list that wraps its
+     value on a phone rather than overflowing. */
+  .stats { display: flex; flex-direction: column; gap: .3rem; margin-top: .7rem;
+    border-top: 1px solid var(--line); padding-top: .6rem; }
+  .stats > div { display: flex; flex-wrap: wrap; gap: .2rem .6rem; align-items: baseline; }
+  .stats .k { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; min-width: 5.5rem; }
+  .stats .v { font-variant-numeric: tabular-nums; }
+  .muted { color: var(--muted); }
+  .empty { color: var(--muted); padding: 1.5rem; text-align: center; }
+  footer { color: var(--muted); font-size: .8rem; text-align: center; padding: 1.5rem 1rem; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand"><a href="/">Niloen Backup</a></span>
+  <nav>
+    <a href="/"{{if eq .Active "home"}} class="on"{{end}}>Overview</a>
+    <a href="/status"{{if eq .Active "status"}} class="on"{{end}}>Status</a>
+    <a href="/runs"{{if eq .Active "runs"}} class="on"{{end}}>Runs</a>
+    <a href="/media"{{if eq .Active "media"}} class="on"{{end}}>Media</a>
+    <a href="/report"{{if eq .Active "report"}} class="on"{{end}}>History</a>
+  </nav>
+</header>
+<main>
+{{block "content" .}}{{end}}
+</main>
+<footer>read-only status · {{stampsec .Now}}</footer>
+</body>
+</html>{{end}}

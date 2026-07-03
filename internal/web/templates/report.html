@@ -1,0 +1,20 @@
+{{define "content"}}
+<h1>History</h1>
+<div class="panel scroll">
+{{if .Data}}
+<table>
+  <tr><th>Ended</th><th>Command</th><th>Outcome</th><th class="num">Bytes</th><th class="num">Archives</th><th>Detail</th></tr>
+  {{range .Data}}
+  <tr>
+    <td>{{stampsec .EndedAt}}</td>
+    <td>{{.Command}}</td>
+    <td class="{{if .Failed}}bad{{else}}ok{{end}}">{{if .Failed}}failure{{else}}success{{end}}</td>
+    <td class="num">{{bytes .BytesMoved}}</td>
+    <td class="num">{{if .Archives}}{{.Archives}}{{else}}<span class="muted">—</span>{{end}}</td>
+    <td class="muted">{{if .RunID}}{{.RunID}}{{end}}{{if .ExitClass}} · {{.ExitClass}}{{end}}{{if .Error}} · {{.Error}}{{end}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<div class="empty">No runs recorded yet.</div>{{end}}
+</div>
+{{end}}

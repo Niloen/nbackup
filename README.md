@@ -185,9 +185,29 @@ details one item when given an id (`nb run run-2026-06-21.020000`, `nb medium lt
 | `nb reset <dle>`     | Schedule a DLE for a full on its next run (fresh chain)  |
 | `nb flush`           | Drain a holding disk's un-flushed archives to the landing |
 | `nb rebuild`         | Rebuild the local run-index cache from media            |
+| `nb web`             | Serve a read-only status website (overview, runs, media, history) |
 
 Run `nb help <command>` (or `nb <command> --help`) for per-command usage and
 examples, and `nb completion <shell>` to generate shell completion.
+
+### Status website
+
+For glancing at backup health from a browser or phone when you don't have shell
+access, `nb web` serves the same information as `nb run`/`nb medium`/`nb report`/
+`nb status` as a small, mobile-friendly website. It is **read-only** — it never
+starts, prunes, or alters anything and takes no lock, so it is safe to run
+alongside a scheduled dump.
+
+```bash
+nb web                       # serve on :8080 (reachable on the LAN)
+nb web --addr 127.0.0.1:8080 # loopback only, e.g. behind a reverse proxy / VPN
+```
+
+There is no authentication or TLS, so expose it only on a trusted network — or
+bind it to `127.0.0.1` and front it with a reverse proxy or a VPN (e.g.
+Tailscale) for remote access. The deb/rpm packages ship an optional
+`nb-web.service`; enable it with `systemctl enable --now nb-web` to keep the
+dashboard always-on (backups themselves stay on cron).
 
 ## Quick start
 

@@ -1,0 +1,50 @@
+{{define "content"}}
+<h1>Status</h1>
+{{with .Data}}
+{{$p := print .Snap.Phase}}
+<div class="panel">
+  <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:.5rem;align-items:baseline">
+    <strong>{{.Snap.RunID}}</strong>
+    <span class="pill {{if eq $p "failed"}}bad{{else if eq $p "canceled"}}warn{{else if eq $p "done"}}ok{{else}}ok{{end}}">{{.Snap.Phase}}</span>
+  </div>
+  <div class="bar"><span style="width:{{pct .Snap.Pct}}"></span></div>
+  <div class="muted" style="margin-top:.4rem;font-size:.85rem">
+    {{pct .Snap.Pct}} · {{.Done}} done · {{.Active}} active · {{.Pending}} pending{{if .Failed}} · <span class="bad">{{.Failed}} failed</span>{{end}}
+    · {{.Snap.Workers}} worker(s) · elapsed {{.Elapsed}}
+  </div>
+  <div class="stats">
+    <div><span class="k">Dump</span><span class="v">{{bytes .DumpDone}} of ~{{bytes .DumpEst}}{{if .DumpRate}} · {{bytes .DumpRate}}/s{{end}}</span></div>
+    {{if .HasFlush}}<div><span class="k">Flush</span><span class="v">{{bytes .Drained}} of {{bytes .ToDrain}} ({{pct .DrainPct}}){{if .DrainRate}} · {{bytes .DrainRate}}/s{{end}}</span></div>{{end}}
+    <div><span class="k">On volume</span><span class="v">{{bytes .OnVolume}}{{if .ETA}} · ETA {{.ETA}}{{end}}</span></div>
+  </div>
+</div>
+
+<h2>Per-DLE</h2>
+<div class="panel">
+<div class="dles">
+  {{range .Snap.DLEs}}
+  {{$st := print .State}}
+  <div class="dle">
+    <div class="dle-head">
+      <span class="dle-name">{{.Name}}</span>
+      <span class="pill {{if eq $st "done"}}ok{{else if eq $st "failed"}}bad{{else if eq $st "canceled"}}warn{{else if or (eq $st "dumping") (eq $st "flushing")}}active{{else}}dim{{end}}">{{.State}}</span>
+    </div>
+    {{/* DUMP bar: source -> holding/landing, metered against the estimate. */}}
+    <div class="bar"><span style="width:{{pct .Pct}}"></span></div>
+    <div class="dle-meta">dump · {{level .Level}} · {{pct .Pct}}{{if .DoneBytes}} · {{bytes .DoneBytes}}{{if .EstBytes}} of {{bytes .EstBytes}}{{end}}{{end}}</div>
+    {{if .Drains}}
+    {{/* FLUSH bar: holding disk -> landing, metered against the staged (compressed) size. */}}
+    <div class="bar" style="margin-top:.5rem"><span style="width:{{pct .DrainPct}}"></span></div>
+    <div class="dle-meta">flush · {{pct .DrainPct}} · {{bytes .DrainBytes}} of {{bytes .OutBytes}} to landing{{if .Holding}} · from {{.Holding}}{{end}}</div>
+    {{else if .ToHolding}}
+    <div class="dle-meta">staging to holding disk…</div>
+    {{end}}
+    {{if .Err}}<div class="dle-meta"><span class="bad">{{.Err}}</span></div>{{end}}
+  </div>
+  {{end}}
+</div>
+</div>
+{{else}}
+<div class="panel"><div class="empty">No run in progress.<br><span style="font-size:.85rem">The last completed run is under <a href="/runs">Runs</a>.</span></div></div>
+{{end}}
+{{end}}

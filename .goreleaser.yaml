@@ -78,6 +78,10 @@ nfpms:
         dst: /usr/share/doc/nbackup/nbackup.example.yaml
       - src: README.md
         dst: /usr/share/doc/nbackup/README.md
+      # Optional read-only status webui unit — installed, not enabled (see the file's
+      # header). `systemctl enable --now nb-web` to turn it on.
+      - src: packaging/nb-web.service
+        dst: /usr/lib/systemd/system/nb-web.service
     overrides:
       deb:
         recommends:
@@ -97,6 +101,9 @@ nfpms:
             dst: /usr/share/doc/nbackup/nbackup.example.yaml
           - src: README.md
             dst: /usr/share/doc/nbackup/README.md
+          # Debian ships units under /lib/systemd/system.
+          - src: packaging/nb-web.service
+            dst: /lib/systemd/system/nb-web.service
       rpm:
         recommends:
           - zstd
@@ -115,6 +122,8 @@ nfpms:
             dst: /usr/share/doc/nbackup/nbackup.example.yaml
           - src: README.md
             dst: /usr/share/doc/nbackup/README.md
+          - src: packaging/nb-web.service
+            dst: /usr/lib/systemd/system/nb-web.service
 
 dockers:
   # ghcr.io only — no Docker Hub. Dockerfile.goreleaser wraps the goreleaser-built

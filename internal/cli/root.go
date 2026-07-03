@@ -99,6 +99,7 @@ func NewRootCmd() *cobra.Command {
 		newVerifyCmd(a),
 		newDrillCmd(a),
 		newReportCmd(a),
+		newWebCmd(a),
 		newRecoverCmd(a),
 		newCopyCmd(a),
 		newSyncCmd(a),
