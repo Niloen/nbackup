@@ -49,7 +49,7 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 		LandingFor: e.landingForDLEName,
 		Holdings:   e.cfg.HoldingMedia(),
 		Open: func(runID, dle string, level int, medium string) (io.ReadCloser, error) {
-			return e.fs.Open(archiveio.Ref{Run: runID, DLE: dle, Level: level}, medium)
+			return e.fs.OpenArchive(archiveio.Ref{Run: runID, DLE: dle, Level: level}, medium)
 		},
 		Members: func(runID, dle string, level int) ([]string, error) {
 			return e.fs.Members(archiveio.Ref{Run: runID, DLE: dle, Level: level})

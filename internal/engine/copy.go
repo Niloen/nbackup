@@ -368,7 +368,7 @@ func (c *copier) transfer(ctx context.Context, jobs []copyJob, fromMedia, target
 // a drive, preserves the source's identity/checksum/members, and records the new placement on Commit).
 // Transfer drives and closes the writer, so the drive is released whether or not the copy commits.
 func (c *copier) transferOne(ctx context.Context, job copyJob, fromMedia, targetMedia string, ingest archivefs.Ingest, ro archivefs.ReadStore) error {
-	rc, err := ro.Open(job.ref, fromMedia)
+	rc, err := ro.OpenArchive(job.ref, fromMedia)
 	if err != nil {
 		return fmt.Errorf("copy %s L%d from %q: %w", job.ref.DLE, job.ref.Level, fromMedia, err)
 	}

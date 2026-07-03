@@ -56,42 +56,24 @@ func OrderForOnePass(items []ReadItem) []ReadItem {
 	return out
 }
 
-// ReadArchives reads a selection of archives in one ordered pass and drives the read
+// OpenArchives reads a selection of archives in one ordered pass and drives the read
 // itself. It resolves each ref to a copy and positions, orders them physically
 // (OrderForOnePass), then reads them one at a time on a shared mounting opener (consecutive
 // same-volume archives reuse the mount) — calling fn for each, in read order, with the
 // archive's ref and an open func for a Source over its bytes. fn composes the per-archive
 // transfer (decode → sink) and may open more than once (verify reads twice). Reading stops at
 // the first error fn returns. medium "" copy-selects per ref; a set medium pins to that copy.
-// An open fails over like Open does: the located copy orders the pass, but if it will not
-// open (a damaged or missing file behind a live catalog entry) every other eligible copy is
-// tried before the fault surfaces — a set medium still confines that to its own placements,
-// so a pinned read is never masked by another medium's copy.
+// Each open is copy-selecting with fail-over (openRef): the located copy orders the pass, but
+// the open re-runs selection over every eligible copy, so a damaged or missing file behind a
+// live catalog entry fails over to another copy before the fault surfaces — a set medium still
+// confines that to its own placements, so a pinned read is never masked by another medium's copy.
 //
 // Refs with no available copy are not read; they are returned as missing for the caller to
-// handle (a broken chain, a position-missing verdict). An opener that cannot be acquired
-// (medium not in this config) is the error.
-func (fs *FS) ReadArchives(refs []archiveio.Ref, medium string, fn func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error) (missing []archiveio.Ref, err error) {
-	type loc struct {
-		medium string
-		parts  []archiveio.FilePos
-	}
-	locs := map[archiveio.Ref]loc{}
-	items := make([]ReadItem, 0, len(refs))
-	for _, ref := range refs {
-		m, parts, ok := fs.locate(ref, medium)
-		if !ok {
-			missing = append(missing, ref)
-			continue
-		}
-		locs[ref] = loc{medium: m, parts: parts}
-		first := archiveio.FilePos{}
-		if len(parts) > 0 {
-			first = parts[0]
-		}
-		items = append(items, ReadItem{Ref: ref, Medium: m, FirstPos: first})
-	}
-
+// handle (a broken chain, a position-missing verdict). A copy whose medium cannot be acquired
+// (not in this config, or refused because the open write-window holds it) is failed over like
+// any unavailable copy; the fault surfaces only if no copy opens. OpenArchive is the single-ref
+// special case of this.
+func (fs *FS) OpenArchives(refs []archiveio.Ref, medium string, fn func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error) (missing []archiveio.Ref, err error) {
 	readers := map[string]*archiveio.Reader{}
 	readerFor := func(m string) (*archiveio.Reader, error) {
 		if r, ok := readers[m]; ok {
@@ -105,23 +87,25 @@ func (fs *FS) ReadArchives(refs []archiveio.Ref, medium string, fn func(ref arch
 		return r, nil
 	}
 
-	for _, it := range OrderForOnePass(items) {
-		l := locs[it.Ref]
-		r, e := readerFor(l.medium)
+	items := make([]ReadItem, 0, len(refs))
+	for _, ref := range refs {
+		m, first, ok, e := fs.planRead(ref, medium, readerFor)
 		if e != nil {
+			// The ref is catalogued but no copy's medium acquires (not in this config, or
+			// a definitive fault): surface it as the pass error, distinct from a missing
+			// ref, so a caller (verify) can classify an out-of-scope medium as a skip.
 			return missing, e
 		}
-		ref := it.Ref
-		open := func() (io.ReadCloser, error) {
-			rc, err := r.Open(ref, l.parts)
-			if err == nil {
-				return rc, nil
-			}
-			// The located copy would not open (the eager first-part prime failed —
-			// wrong volume, or a file gone behind its catalog entry): fail over
-			// through every eligible copy, as a single-archive Open would.
-			return fs.Open(ref, medium)
+		if !ok {
+			missing = append(missing, ref)
+			continue
 		}
+		items = append(items, ReadItem{Ref: ref, Medium: m, FirstPos: first})
+	}
+
+	for _, it := range OrderForOnePass(items) {
+		ref := it.Ref
+		open := func() (io.ReadCloser, error) { return fs.openRef(ref, medium, readerFor) }
 		if e := fn(ref, open); e != nil {
 			return missing, e
 		}
@@ -129,19 +113,31 @@ func (fs *FS) ReadArchives(refs []archiveio.Ref, medium string, fn func(ref arch
 	return missing, nil
 }
 
-// locate resolves a ref to the copy that holds it: a set medium pins to that copy; "" takes
-// the first placement in read-preference order (the engine's own copy first) that has the
-// archive's parts.
-func (fs *FS) locate(ref archiveio.Ref, medium string) (string, []archiveio.FilePos, bool) {
+// planRead resolves a ref to the copy the pass will order by: a set medium pins to that copy,
+// "" takes read-preference order (the engine's own first). It returns the first placement that
+// both carries the archive and whose medium acquires — priming the pooled reader so the read
+// loop reuses the mount — so a copy whose medium is refused (window-held) or unknown is passed
+// over just as a damaged file is failed over at read time. Three outcomes: (ok=true) an
+// acquirable copy, ordered by its first part; (ok=false, err=nil) no copy carries the archive —
+// the caller records it as missing; (err!=nil) a copy carries it but no carrying copy's medium
+// acquires — a definitive read error the caller surfaces rather than a silent skip.
+func (fs *FS) planRead(ref archiveio.Ref, medium string, readerFor func(string) (*archiveio.Reader, error)) (m string, first archiveio.FilePos, ok bool, err error) {
+	var acqErr error
 	for _, p := range fs.cat.PlacementsFor(ref.Run) {
 		if medium != "" && p.Medium != medium {
 			continue
 		}
-		if parts, ok := p.Parts(ref.DLE, ref.Level); ok {
-			return p.Medium, parts, true
+		parts, has := p.Parts(ref.DLE, ref.Level)
+		if !has {
+			continue
 		}
+		if _, e := readerFor(p.Medium); e != nil {
+			acqErr = e // carries the archive but the medium won't open — try the next copy
+			continue
+		}
+		return p.Medium, parts[0], true, nil
 	}
-	return "", nil, false
+	return "", archiveio.FilePos{}, false, acqErr
 }
 
 // physicallyBefore orders two archives by where their first part lies: medium, then the

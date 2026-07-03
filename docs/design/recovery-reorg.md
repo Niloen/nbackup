@@ -92,7 +92,7 @@ type Request struct {
 implementations is one level down (`ReadStore`: FS vs. test fake); up here the
 sharpness is the request type.
 
-`Extract` drives the chain through `ReadArchives` (mount reuse across steps;
+`Extract` drives the chain through `OpenArchives` (mount reuse across steps;
 per-DLE level order is guaranteed, so a chain can never apply out of order). A
 `missing` ref from a chain read is a hard broken-chain error, never a skip.
 Medium is a parameter end to end.

@@ -28,7 +28,7 @@ type fakeStore struct {
 	opened   []archiveio.Ref // refs actually opened, in order
 }
 
-func (f *fakeStore) Open(ref archiveio.Ref, medium string) (io.ReadCloser, error) {
+func (f *fakeStore) OpenArchive(ref archiveio.Ref, medium string) (io.ReadCloser, error) {
 	b, ok := f.payloads[ref]
 	if !ok {
 		return nil, fmt.Errorf("%w of %s %s L%d", archivefs.ErrMissingCopy, ref.Run, ref.DLE, ref.Level)
@@ -37,7 +37,7 @@ func (f *fakeStore) Open(ref archiveio.Ref, medium string) (io.ReadCloser, error
 	return io.NopCloser(bytes.NewReader(b)), nil
 }
 
-func (f *fakeStore) ReadArchives(refs []archiveio.Ref, medium string, fn func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error) (missing []archiveio.Ref, err error) {
+func (f *fakeStore) OpenArchives(refs []archiveio.Ref, medium string, fn func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error) (missing []archiveio.Ref, err error) {
 	for _, ref := range refs {
 		if _, ok := f.payloads[ref]; !ok {
 			missing = append(missing, ref)
@@ -48,7 +48,7 @@ func (f *fakeStore) ReadArchives(refs []archiveio.Ref, medium string, fn func(re
 		if _, ok := f.payloads[ref]; !ok {
 			continue
 		}
-		if e := fn(ref, func() (io.ReadCloser, error) { return f.Open(ref, medium) }); e != nil {
+		if e := fn(ref, func() (io.ReadCloser, error) { return f.OpenArchive(ref, medium) }); e != nil {
 			return missing, e
 		}
 	}

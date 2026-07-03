@@ -227,7 +227,7 @@ func (v *verifier) verifyCopy(s *catalog.Run, p catalog.Placement, opts VerifyOp
 	// The fs drives the one-pass read of this copy, calling back per archive; verify
 	// every one (never stop early), collecting verdicts.
 	verdicts := make(map[archiveio.Ref]ArchiveVerdict, len(refs))
-	_, err := v.store.ReadArchives(refs, p.Medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
+	_, err := v.store.OpenArchives(refs, p.Medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
 		verdicts[ref] = v.verifyArchive(archByRef[ref], ref, p.Medium, opts, open, logf)
 		return nil
 	})

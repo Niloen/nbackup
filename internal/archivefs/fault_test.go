@@ -275,7 +275,7 @@ func TestReclaimStagedFileFaultKeepsCatalog(t *testing.T) {
 	}
 }
 
-// --- read-side eachPlacement / Open tests ----------------------------------
+// --- read-side openRef / OpenArchive tests ---------------------------------
 
 func archiveHeader(run, dle string, level, part int) record.Header {
 	return record.Header{Kind: record.KindArchive, Run: run, DLE: dle, Level: level, Part: part}
@@ -288,20 +288,20 @@ func placementWith(medium, run, dle string, level, pos int) catalog.Placement {
 	}}}
 }
 
-// TestOpenMissingCopy covers the three missing-copy verdicts eachPlacement emits — all classified by
+// TestOpenMissingCopy covers the three missing-copy verdicts openRef emits — all classified by
 // errors.Is(ErrMissingCopy) regardless of wording.
 func TestOpenMissingCopy(t *testing.T) {
 	ref := archiveio.Ref{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0}
 	t.Run("run not in catalog", func(t *testing.T) {
 		c := New(&fakeMap{}, &fakeDeps{}, catalog.OpenMemberIndex(t.TempDir()))
-		if _, err := c.Open(ref, ""); !errors.Is(err, ErrMissingCopy) {
+		if _, err := c.OpenArchive(ref, ""); !errors.Is(err, ErrMissingCopy) {
 			t.Fatalf("err = %v; want ErrMissingCopy", err)
 		}
 	})
 	t.Run("no copy on the pinned medium", func(t *testing.T) {
 		m := &fakeMap{placements: []catalog.Placement{placementWith("disk", ref.Run, ref.DLE, 0, 0)}}
 		c := New(m, &fakeDeps{}, catalog.OpenMemberIndex(t.TempDir()))
-		if _, err := c.Open(ref, "tape"); !errors.Is(err, ErrMissingCopy) {
+		if _, err := c.OpenArchive(ref, "tape"); !errors.Is(err, ErrMissingCopy) {
 			t.Fatalf("err = %v; want ErrMissingCopy for a medium with no copy", err)
 		}
 	})
@@ -310,7 +310,7 @@ func TestOpenMissingCopy(t *testing.T) {
 		// attempted and lastErr stays nil: the final ErrMissingCopy fires.
 		m := &fakeMap{placements: []catalog.Placement{placementWith("disk", ref.Run, "other:/x", 0, 0)}}
 		c := New(m, &fakeDeps{}, catalog.OpenMemberIndex(t.TempDir()))
-		if _, err := c.Open(ref, ""); !errors.Is(err, ErrMissingCopy) {
+		if _, err := c.OpenArchive(ref, ""); !errors.Is(err, ErrMissingCopy) {
 			t.Fatalf("err = %v; want ErrMissingCopy when the archive is absent from every copy", err)
 		}
 	})
@@ -330,9 +330,9 @@ func TestOpenFailsOver(t *testing.T) {
 		placementWith("good", ref.Run, ref.DLE, 0, 7),
 	}}
 	c := New(m, deps, catalog.OpenMemberIndex(t.TempDir()))
-	rc, err := c.Open(ref, "")
+	rc, err := c.OpenArchive(ref, "")
 	if err != nil {
-		t.Fatalf("Open must fail over to the good copy, got %v", err)
+		t.Fatalf("OpenArchive must fail over to the good copy, got %v", err)
 	}
 	got, _ := io.ReadAll(rc)
 	rc.Close()
@@ -355,15 +355,15 @@ func TestOpenPinnedMediumNotMasked(t *testing.T) {
 		placementWith("good", ref.Run, ref.DLE, 0, 7),
 	}}
 	c := New(m, deps, catalog.OpenMemberIndex(t.TempDir()))
-	if _, err := c.Open(ref, "broken"); err == nil {
+	if _, err := c.OpenArchive(ref, "broken"); err == nil {
 		t.Fatal("a pinned read must surface its own copy's fault, not fail over to another medium")
 	}
 }
 
-// TestReadArchivesOrdersReadsAndReportsMissing drives the one-pass read: two present archives are
+// TestOpenArchivesOrdersReadsAndReportsMissing drives the one-pass read: two present archives are
 // read (in level/position order) with their bytes available through the open callback, while a ref
 // with no copy is returned as missing rather than read.
-func TestReadArchivesOrdersReadsAndReportsMissing(t *testing.T) {
+func TestOpenArchivesOrdersReadsAndReportsMissing(t *testing.T) {
 	run := "run-2026-07-02.001"
 	body0, body1 := []byte("L0 bytes"), []byte("L1 bytes")
 	deps := &fakeDeps{mounters: map[string]*memMounter{
@@ -384,7 +384,7 @@ func TestReadArchivesOrdersReadsAndReportsMissing(t *testing.T) {
 		{Run: run, DLE: "gone:/x", Level: 0}, // no copy
 	}
 	var gotLevels []int
-	missing, err := c.ReadArchives(refs, "", func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
+	missing, err := c.OpenArchives(refs, "", func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
 		gotLevels = append(gotLevels, ref.Level)
 		rc, e := open()
 		if e != nil {
@@ -394,7 +394,7 @@ func TestReadArchivesOrdersReadsAndReportsMissing(t *testing.T) {
 		return rc.Close()
 	})
 	if err != nil {
-		t.Fatalf("ReadArchives: %v", err)
+		t.Fatalf("OpenArchives: %v", err)
 	}
 	if len(gotLevels) != 2 || gotLevels[0] != 0 || gotLevels[1] != 1 {
 		t.Fatalf("read levels = %v; want ascending [0 1]", gotLevels)

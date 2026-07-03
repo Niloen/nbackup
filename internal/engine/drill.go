@@ -286,7 +286,7 @@ func (d *driller) drillVerify(t drill.Target, medium string, checks VerifyChecks
 	// whole). A failing verdict is carried out via a sentinel error.
 	var bad ArchiveVerdict
 	errStop := errors.New("drill: archive failed")
-	missing, err := d.fs.ReadArchives(refs, medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
+	missing, err := d.fs.OpenArchives(refs, medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
 		v := d.ver.verifyArchive(archByRef[ref], ref, medium, VerifyOptions{Checks: checks, Medium: medium}, open, nil)
 		if !v.OK {
 			bad = v
@@ -368,7 +368,7 @@ func (d *driller) stockExtractStep(step recovery.Step, dest, medium string, logf
 		return drill.ClassPipeline, err.Error()
 	}
 	defer os.Remove(tmp.Name())
-	src, err := d.fs.Open(archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}, medium)
+	src, err := d.fs.OpenArchive(archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}, medium)
 	if err != nil {
 		tmp.Close()
 		return classifyOpenErr(err), err.Error()

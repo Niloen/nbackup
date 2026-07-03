@@ -512,7 +512,7 @@ func (c fsDeps) PlacementsFor(runID string) []catalog.Placement {
 // MounterFor returns a read-mount onto a medium's volumes — the fs's Mounter role,
 // served by the depot's read face. A medium the open run window is writing is refused at
 // the open: the window owns its drives, so a reader fails over to another copy
-// (eachPlacement treats this like any unavailable copy) instead of mounting mid-write.
+// (openRef treats this like any unavailable copy) instead of mounting mid-write.
 // Outside a window nothing is held and every medium opens.
 func (c fsDeps) MounterFor(medium string) (archivefs.Mounter, error) {
 	return c.e.dep.OpenForRead(medium)

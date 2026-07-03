@@ -181,7 +181,7 @@ func (r *Restorer) extractChain(runID string, req Request, rollbackOnFail bool, 
 	// extracted over a missing base would fabricate a wrong tree. Resolve
 	// availability first (a no-op pass touches only the catalog, no media), so a
 	// missing copy fails the restore before a single byte lands.
-	if missing, err := r.deps.Store.ReadArchives(refs, req.Medium, func(archiveio.Ref, func() (io.ReadCloser, error)) error { return nil }); err != nil {
+	if missing, err := r.deps.Store.OpenArchives(refs, req.Medium, func(archiveio.Ref, func() (io.ReadCloser, error)) error { return nil }); err != nil {
 		return err
 	} else if len(missing) > 0 {
 		m := missing[0]
@@ -189,7 +189,7 @@ func (r *Restorer) extractChain(runID string, req Request, rollbackOnFail bool, 
 	}
 
 	d := dest{exec: r.deps.Exec(req.Host), host: req.Host, dir: req.Dest}
-	_, err = r.deps.Store.ReadArchives(refs, req.Medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
+	_, err = r.deps.Store.OpenArchives(refs, req.Medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
 		step := stepByRef[ref]
 		log.Log("extracting %s %s L%d -> %s", step.RunID, r.deps.DisplayDLE(step.DLE), step.Level, req.Dest)
 		rc, oerr := open()

@@ -57,7 +57,7 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 	}
 	files := 0
 	archives := 0
-	missing, err := r.deps.Store.ReadArchives(refs, "", func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
+	missing, err := r.deps.Store.OpenArchives(refs, "", func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
 		st := stepByRef[ref]
 		// An archive in the chain that holds none of the selected files contributes
 		// nothing — skip it silently rather than logging a noisy "extracting 0 file(s)".

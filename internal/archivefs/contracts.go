@@ -27,14 +27,15 @@ var ErrMissingCopy = errors.New("no available copy")
 // Verifier), exactly as on the write side. The FS implements it (copy selection over the
 // catalog, mounting via opened read media).
 type ReadStore interface {
-	// Open returns one archive's raw part stream, copy-selected: medium "" tries every copy
+	// OpenArchive returns one archive's raw part stream, copy-selected: medium "" tries every copy
 	// (preferring the caller's own) with fail-over; a set medium reads only that copy, so a
-	// fault on it is not masked by another. The open is eager — a missing copy errors here.
-	Open(ref archiveio.Ref, medium string) (io.ReadCloser, error)
-	// ReadArchives reads a selection in one ordered pass (levels ascending per DLE, physically
+	// fault on it is not masked by another. The open is eager — a missing copy errors here. It is
+	// the single-archive special case of OpenArchives.
+	OpenArchive(ref archiveio.Ref, medium string) (io.ReadCloser, error)
+	// OpenArchives reads a selection in one ordered pass (levels ascending per DLE, physically
 	// forward otherwise), calling fn per archive with an open func over its bytes; fn may open
 	// more than once. Refs with no available copy are skipped and returned as missing.
-	ReadArchives(refs []archiveio.Ref, medium string, fn func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error) (missing []archiveio.Ref, err error)
+	OpenArchives(refs []archiveio.Ref, medium string, fn func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error) (missing []archiveio.Ref, err error)
 	// Members returns an archive's member list (cache, else the on-medium index).
 	Members(ref archiveio.Ref) ([]string, error)
 }
@@ -49,7 +50,7 @@ type ReadStore interface {
 //
 // The read-back and reclaim are positional, not logical: the caller already holds the
 // archive's positions (its ArchivePos, straight off the writer's CommitResult), so there is
-// no catalog resolution or copy-selection like ReadStore.Open — ref names which archive
+// no catalog resolution or copy-selection like ReadStore.OpenArchive — ref names which archive
 // (asserted against the part headers as ever), pos says where its files sit.
 type WriteStore interface {
 	archiveio.Recorder

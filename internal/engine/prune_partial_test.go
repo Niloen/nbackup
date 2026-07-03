@@ -129,7 +129,7 @@ func TestPartialPruneKeepsCatalogArchiveGranular(t *testing.T) {
 	}
 
 	// Restore falls back to the medium that still holds the archive.
-	rc, err := eng2.fs.Open(archiveio.Ref{Run: run1.ID, DLE: prunedDLE, Level: 0}, "")
+	rc, err := eng2.fs.OpenArchive(archiveio.Ref{Run: run1.ID, DLE: prunedDLE, Level: 0}, "")
 	if err != nil {
 		t.Fatalf("open pruned archive via surviving copy: %v", err)
 	}
