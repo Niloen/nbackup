@@ -75,29 +75,37 @@ func (s *Session) OpenArchiveAt(ref archiveio.Ref, pos archiveio.ArchivePos) (io
 	return archiveio.NewReader(open, nil).Open(ref, pos.Parts)
 }
 
-// ReclaimAt drops a staged archive once it has landed on the landing; see ReclaimStaged.
+// ReclaimAt deletes one archive's copy on the session's medium: it removes the archive's
+// files from the volume (the commit footer first, so an interrupted reclaim un-commits
+// before dropping parts) then drops its placement from the catalog. It is how any
+// archive's copy dies on a per-file medium — the drain and the crash-recovery flush drop
+// a staged archive once it has landed, prune reclaims retention-expired archives, and a
+// forced re-copy reclaims the copy it supersedes — so the footer-first invariant lives
+// only here. Positional like the read-back: ref names the archive, pos its files.
 func (s *Session) ReclaimAt(ref archiveio.Ref, pos archiveio.ArchivePos) error {
-	return ReclaimStaged(s.w, s.m.Name(), s.m.Volume(), ref, pos)
-}
-
-// ReclaimStaged drops a staged archive from a holding medium once it has landed: it removes the
-// archive's files from vol (the commit footer first, so an interrupted reclaim un-commits before
-// dropping parts) then drops its placement from the catalog via w. The live drain reaches it
-// through Session.ReclaimAt; the crash-recovery flush (conductor.Flush) calls it directly — the
-// footer-first invariant lives only here. Positional like the read-back: ref names the archive,
-// pos its files. A package function: it touches only its arguments, never the fs.
-func ReclaimStaged(w WriteMap, medium string, vol media.Volume, ref archiveio.Ref, pos archiveio.ArchivePos) error {
 	for _, p := range archivePosFiles(pos) {
-		if err := vol.RemoveFile(p); err != nil {
+		if err := s.m.Volume().RemoveFile(p); err != nil {
 			return err
 		}
 	}
-	_, _, err := w.RemoveArchive(ref.Run, medium, ref.DLE)
+	_, _, err := s.w.RemoveArchive(ref.Run, s.m.Name(), ref.DLE)
 	return err
 }
 
-// archivePosFiles lists an archive's file positions for reclamation, the commit footer (the marker)
-// first so an interrupted reclaim un-commits before dropping parts.
+// archivePosFiles lists an archive's file positions in safe removal order: the commit
+// footer first, then the member index, then the parts.
+//
+// The order is crash-safety-critical and mirrors the write order in reverse. An archive
+// is made durable by its commit footer, written LAST (after its parts and index); the
+// footer's presence is what proves the whole archive landed, and a catalog rebuild
+// assembles only archives that have a footer (assemble iterates the commits — parts
+// without one are orphans it ignores). So removing the footer FIRST "un-commits" the
+// archive: a crash mid-reclaim then leaves parts/index as orphans with no footer, which a
+// rebuild skips. Removing parts first would leave a footer whose parts are gone — which a
+// rebuild would resurrect into the catalog as a committed-but-unreadable archive (the
+// exact "we think it's committed but it's only partly there" hazard). Removal is one
+// os.Remove per file, so the ordering holds at the same level the write path relies on
+// (no fsync either side).
 func archivePosFiles(a archiveio.ArchivePos) []int {
 	pos := make([]int, 0, len(a.Parts)+2)
 	pos = append(pos, a.Commit.Pos)

@@ -169,7 +169,7 @@ var ErrUnknownMedium = errors.New("unknown medium")
 // Landing (with MediumVolume, which wraps it) is the deliberate claim-EXEMPT path:
 // the typed faces (OpenForRead/OpenForWrite/OpenAdmin) are the claim-checked access
 // rule, while this bare handle serves the bootstrap and maintenance flows — rebuild,
-// the ledger, `nb check`, the holding-disk flush — that run single-owner with no run
+// the ledger (including prune), `nb check` — that run single-owner with no run
 // window open, so there is no concurrent writer for a claim to guard against. New
 // access paths should open a face, not this.
 //
@@ -224,7 +224,7 @@ func (d *Depot) Landing() (media.Volume, error) {
 //
 // Like Landing, MediumVolume is the deliberate claim-EXEMPT scan/bootstrap path: it
 // skips the writeHeld check the typed faces enforce, because its callers (rebuild,
-// ledger, check, flush) run single-owner outside a run window. The faces are the
+// ledger, check) run single-owner outside a run window. The faces are the
 // access rule; this is the documented exemption — do not add callers that could
 // coexist with an open window.
 func (d *Depot) MediumVolume(name string) (vol media.Volume, def config.Media, own bool, err error) {

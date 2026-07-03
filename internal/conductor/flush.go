@@ -25,14 +25,18 @@ import (
 // holding medium names, and the host-bound seams — resolving a staged archive's landing (its
 // dumptype's `landing`, so a crashed multi-landing run drains each DLE back to its own medium),
 // reading a staged archive's payload (Open) and member list (Members), reclaiming a staged archive
-// (Reclaim: files + catalog placement, the clerk's footer-first invariant), opening a landing
-// writer for a (landing, run), and the DLE display id — plus an optional log.
+// (Reclaim), opening a landing writer for a (landing, run), and the DLE display id — plus an
+// optional log. The engine binds Open/Reclaim to a write session on each holding disk (the same
+// handle the live drain uses), so they are positional like the session's own read-back: the
+// catalog's staged placement supplies ref, pos, and the index position.
 type FlushDeps struct {
-	Cat         *catalog.Catalog
-	LandingFor  func(dle string) string
-	Holdings    []string
-	Open        func(runID, dle string, level int, medium string) (io.ReadCloser, error)
-	Members     func(runID, dle string, level int) ([]string, error)
+	Cat        *catalog.Catalog
+	LandingFor func(dle string) string
+	Holdings   []string
+	Open       func(holding string, ref archiveio.Ref, pos archiveio.ArchivePos) (io.ReadCloser, error)
+	// Members returns an archive's member list, given where its index sits on the holding —
+	// the host serves it from its member cache when it can, else reads the index there.
+	Members     func(holding string, ref archiveio.Ref, index archiveio.FilePos) ([]string, error)
 	Reclaim     func(holding string, ref archiveio.Ref, pos archiveio.ArchivePos) error
 	OpenLanding func(landing string, spec archiveio.RunSpec) (*archiveio.Writer, error)
 	DisplayDLE  func(dle string) string
@@ -99,10 +103,14 @@ func Flush(d FlushDeps) (flushed int, err error) {
 				// A crash between recording the landing placement and reclaiming the holding one
 				// leaves an archive on both; in that case just reclaim, don't re-copy.
 				if !archiveOnLanding(d.Cat, landing, s.ID, ap.DLE, ap.Level) {
-					arch, err := catalogArchive(d.Cat, d.Members, s.ID, ap.DLE, ap.Level)
+					arch, err := catalogArchive(d.Cat, s.ID, ap.DLE, ap.Level)
 					if err != nil {
 						return flushed, fmt.Errorf("flush %s %s: %w", s.ID, dleID, err)
 					}
+					// Best-effort like the live drain's member cache: a copy without its member
+					// list is still restorable, just not browsable, so an unreadable index does
+					// not fail the flush.
+					arch.Members, _ = d.Members(holding, ref, ap.Index)
 					landingWriter, err := writerFor(landing)
 					if err != nil {
 						return flushed, err
@@ -110,7 +118,7 @@ func Flush(d FlushDeps) (flushed int, err error) {
 					// CopyStaged (shared with the live drain) opens the staged payload and streams it
 					// into the copy writer, whose Commit records the landing placement.
 					label := fmt.Sprintf("flush %s %s", s.ID, dleID)
-					open := func() (io.ReadCloser, error) { return d.Open(s.ID, ap.DLE, ap.Level, holding) }
+					open := func() (io.ReadCloser, error) { return d.Open(holding, ref, ap.Pos()) }
 					if err := spool.CopyStaged(context.Background(), label, open, landingWriter.NewCopy(arch), landing); err != nil {
 						return flushed, err
 					}
@@ -150,16 +158,15 @@ func archiveOnLanding(cat *catalog.Catalog, landing, runID, dle string, level in
 	return false
 }
 
-// catalogArchive returns a holding-disk archive's metadata for a re-copy: the catalogued record
-// (checksum, sizes, scheme) plus its member list from the on-medium index.
-func catalogArchive(cat *catalog.Catalog, members func(runID, dle string, level int) ([]string, error), runID, dle string, level int) (record.Archive, error) {
+// catalogArchive returns a holding-disk archive's catalogued record (checksum, sizes,
+// scheme); the caller fills Members through the d.Members seam.
+func catalogArchive(cat *catalog.Catalog, runID, dle string, level int) (record.Archive, error) {
 	s, err := cat.ReadRun(runID)
 	if err != nil {
 		return record.Archive{}, err
 	}
 	for _, a := range s.Archives {
 		if a.DLE == dle && a.Level == level {
-			a.Members, _ = members(runID, dle, level)
 			return a, nil
 		}
 	}

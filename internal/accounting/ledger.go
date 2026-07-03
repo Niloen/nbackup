@@ -27,7 +27,11 @@ type Deps struct {
 	LandingCost    media.Cost // the landing medium's pricing (dollar peer of the profile)
 	LandingMinAge  time.Duration
 	OpenVolume     func(name string) (media.Volume, error)
-	DisplayDLE     func(slug string) string
+	// OpenReclaimer opens the fs's delete handle on a medium — the one mechanism by which
+	// an archive's copy dies (files footer-first, then its catalog placement). The engine
+	// binds it to an archivefs session; Prune and ReclaimCopy decide *what* dies, never how.
+	OpenReclaimer func(medium string) (Reclaimer, error)
+	DisplayDLE    func(slug string) string
 	// LandingLabeled reports whether the landing medium carries volume labels (tape);
 	// address-identified media (disk, s3) have no tape to expect.
 	LandingLabeled func() bool

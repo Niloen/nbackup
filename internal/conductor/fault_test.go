@@ -196,11 +196,11 @@ func TestFlushDoubleCrashReclaimsOnly(t *testing.T) {
 		Cat:        c,
 		LandingFor: func(string) string { return "landing" },
 		Holdings:   []string{"hd0"},
-		Open: func(string, string, int, string) (io.ReadCloser, error) {
+		Open: func(string, archiveio.Ref, archiveio.ArchivePos) (io.ReadCloser, error) {
 			opened = true
 			return nil, errors.New("Open must not be called on the reclaim-only path")
 		},
-		Members: func(string, string, int) ([]string, error) { return nil, nil },
+		Members: func(string, archiveio.Ref, archiveio.FilePos) ([]string, error) { return nil, nil },
 		Reclaim: func(string, archiveio.Ref, archiveio.ArchivePos) error { reclaimed++; return nil },
 		OpenLanding: func(string, archiveio.RunSpec) (*archiveio.Writer, error) {
 			return nil, errors.New("OpenLanding must not be called on the reclaim-only path")
@@ -232,10 +232,10 @@ func TestFlushCopiesAndReclaims(t *testing.T) {
 		Cat:        c,
 		LandingFor: func(string) string { return "landing" },
 		Holdings:   []string{"hd0"},
-		Open: func(runID, dle string, level int, medium string) (io.ReadCloser, error) {
+		Open: func(string, archiveio.Ref, archiveio.ArchivePos) (io.ReadCloser, error) {
 			return io.NopCloser(bytes.NewReader(body)), nil
 		},
-		Members: func(string, string, int) ([]string, error) { return nil, nil },
+		Members: func(string, archiveio.Ref, archiveio.FilePos) ([]string, error) { return nil, nil },
 		Reclaim: func(string, archiveio.Ref, archiveio.ArchivePos) error { reclaimed++; return nil },
 		OpenLanding: func(landing string, spec archiveio.RunSpec) (*archiveio.Writer, error) {
 			ms := &memFlushStore{vol: newFlushVol()}

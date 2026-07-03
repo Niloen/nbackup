@@ -21,6 +21,17 @@ func (e *Engine) newLedger() *accounting.Accountant {
 			v, _, _, err := e.dep.MediumVolume(n)
 			return v, err
 		},
+		// The fs's delete handle on a medium: a session over the raw volume. Prune runs
+		// single-owner outside any run window (the claim guards in-process windows only),
+		// so like the rest of the ledger it uses the claim-exempt volume; the footer-first
+		// delete mechanics still live in the one place, the session's ReclaimAt.
+		OpenReclaimer: func(n string) (accounting.Reclaimer, error) {
+			v, _, _, err := e.dep.MediumVolume(n)
+			if err != nil {
+				return nil, err
+			}
+			return e.fs.OpenRun(e.cat, rawMedium{name: n, vol: v}), nil
+		},
 		DisplayDLE:    e.DisplayDLE,
 		PlacementsFor: e.placementsFor,
 		LandingLabeled: func() bool {
@@ -33,3 +44,14 @@ func (e *Engine) newLedger() *accounting.Accountant {
 		},
 	})
 }
+
+// rawMedium adapts a claim-exempt raw volume to the archivefs write session's Medium —
+// the ledger's maintenance flows (prune, forced-re-copy reclaim) hold no run window,
+// so they session over the bare handle rather than an opened write face.
+type rawMedium struct {
+	name string
+	vol  media.Volume
+}
+
+func (m rawMedium) Name() string         { return m.name }
+func (m rawMedium) Volume() media.Volume { return m.vol }

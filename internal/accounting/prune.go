@@ -51,10 +51,10 @@ func (a *Accountant) Prune(mediumName string, now time.Time, apply bool, out log
 		}
 	}
 
-	// Open the medium's volume only when there is something to actually delete.
-	var vol media.Volume
+	// Open the fs's delete handle only when there is something to actually delete.
+	var rec Reclaimer
 	if apply && len(reclaim) > 0 {
-		if vol, err = a.d.OpenVolume(mediumName); err != nil {
+		if rec, err = a.d.OpenReclaimer(mediumName); err != nil {
 			return eligible, swept, freed, err
 		}
 	}
@@ -65,16 +65,10 @@ func (a *Accountant) Prune(mediumName string, now time.Time, apply bool, out log
 		}
 		eligible++
 		if apply {
-			// Reclaim this archive's copy on this medium only — its files, one
-			// position at a time; the run (and the archive's copies elsewhere)
-			// survives in the catalog.
-			for _, pos := range archivePositions(a.d.Cat.Placements(ar.Run), mediumName, ar.DLE) {
-				if err := vol.RemoveFile(pos); err != nil {
-					return eligible, swept, freed, fmt.Errorf("delete %s %s: %w", ar.Run, ar.DLE, err)
-				}
-			}
-			if _, _, err := a.d.Cat.RemoveArchive(ar.Run, mediumName, ar.DLE); err != nil {
-				return eligible, swept, freed, fmt.Errorf("update catalog cache: %w", err)
+			// Reclaim this archive's copy on this medium only; the run (and the
+			// archive's copies elsewhere) survives in the catalog.
+			if err := a.reclaimArchive(rec, mediumName, ar.Run, ar.DLE, ar.Level); err != nil {
+				return eligible, swept, freed, fmt.Errorf("delete %s %s: %w", ar.Run, ar.DLE, err)
 			}
 			freed += r.Bytes
 			out.Log("DELETE %s %s  (%s freed, %s)", ar.Run, a.d.DisplayDLE(ar.DLE), sizeutil.FormatBytes(r.Bytes), r.Note)
@@ -186,56 +180,41 @@ func (a *Accountant) ReclaimCopy(runID, mediumName string) error {
 	if err != nil {
 		return err
 	}
-	vol, err := a.d.OpenVolume(mediumName)
+	rec, err := a.d.OpenReclaimer(mediumName)
 	if err != nil {
 		return err
 	}
+	// Per archive; the catalog drops the placement with its last archive, and the run
+	// entry with its last placement, so no separate placement removal is needed.
 	for _, ar := range s.Archives {
-		for _, pos := range archivePositions(a.d.Cat.Placements(runID), mediumName, ar.DLE) {
-			if err := vol.RemoveFile(pos); err != nil {
-				return fmt.Errorf("reclaim prior copy of %s %s on %q: %w", runID, ar.DLE, mediumName, err)
-			}
+		if err := a.reclaimArchive(rec, mediumName, runID, ar.DLE, ar.Level); err != nil {
+			return fmt.Errorf("reclaim prior copy of %s %s on %q: %w", runID, ar.DLE, mediumName, err)
 		}
-	}
-	if _, err := a.d.Cat.RemovePlacement(runID, mediumName); err != nil {
-		return fmt.Errorf("update catalog cache: %w", err)
 	}
 	return nil
 }
 
-// archivePositions gathers the volume file positions of one archive (a DLE's image)
-// in the copy of a run on medium, in safe removal order: commit footer first, then
-// the member index, then the parts.
-//
-// The order is crash-safety-critical and mirrors the write order in reverse. An
-// archive is made durable by its commit footer, written LAST (after its parts and
-// index); the footer's presence is what proves the whole archive landed, and a
-// catalog rebuild assembles only archives that have a footer (assemble iterates the
-// commits — parts without one are orphans it ignores). So removing the footer FIRST
-// "un-commits" the archive: a crash mid-prune then leaves parts/index as orphans with
-// no footer, which a rebuild skips. Removing parts first would leave a footer whose
-// parts are gone — which a rebuild would resurrect into the catalog as a committed-
-// but-unreadable archive (the exact "we think it's committed but it's only partly
-// there" hazard). Removal is one os.Remove per file, so the ordering holds at the same
-// level the write path relies on (no fsync either side).
-func archivePositions(ps []catalog.Placement, medium, dle string) []int {
-	for _, p := range ps {
+// Reclaimer is the accountant's slice of the fs's delete handle on one medium:
+// ReclaimAt deletes an archive's copy there — its files footer-first, then its
+// catalog placement (archivefs.Session implements it; the engine binds Deps.
+// OpenReclaimer). The accountant only decides which archives die; how one dies
+// lives in the fs.
+type Reclaimer interface {
+	ReclaimAt(ref archiveio.Ref, pos archiveio.ArchivePos) error
+}
+
+// reclaimArchive deletes one archive's copy on medium through rec, resolving the
+// archive's recorded positions from its catalog placement. An archive the placement
+// does not hold is a no-op (a partial copy being replaced, for instance).
+func (a *Accountant) reclaimArchive(rec Reclaimer, medium, runID, dle string, level int) error {
+	for _, p := range a.d.Cat.Placements(runID) {
 		if p.Medium != medium {
 			continue
 		}
-		for _, a := range p.Archives {
-			if a.DLE != dle {
-				continue
+		for _, pa := range p.Archives {
+			if pa.DLE == dle {
+				return rec.ReclaimAt(archiveio.Ref{Run: runID, DLE: dle, Level: level}, pa.Pos())
 			}
-			pos := make([]int, 0, len(a.Parts)+2)
-			pos = append(pos, a.Commit.Pos) // the marker: un-commit first
-			if a.Index != (archiveio.FilePos{}) {
-				pos = append(pos, a.Index.Pos)
-			}
-			for _, pt := range a.Parts {
-				pos = append(pos, pt.Pos)
-			}
-			return pos
 		}
 	}
 	return nil
