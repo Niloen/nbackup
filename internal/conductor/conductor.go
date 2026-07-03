@@ -44,6 +44,11 @@ type PreparedWriter struct {
 	// every write to the medium the same — direct dumps and drains alike. Unset, the medium's
 	// natural width applies: its drive count when serial, else the run's worker count.
 	Writers int
+	// Release gives back the medium's write claim (taken when the writer was opened).
+	// withSpool defers it to window end, so the claim spans exactly the window — a
+	// read-mount onto the medium is refused for that duration and fails over. Nil-safe
+	// for tests that fake a PreparedWriter.
+	Release func()
 }
 
 // Deps is the slice of the orchestrator a single run needs. The closures bind to the
@@ -55,14 +60,13 @@ type Deps struct {
 	Plan       func(date time.Time, sink progress.Sink) *planner.Plan
 	Vol        media.Volume
 	OpenWriter func(medium string, spec archiveio.RunSpec, now time.Time, lf logf.Logf) (PreparedWriter, error)
-	// OpenReader returns the read face of the archive fs over a snapshot of the catalog,
-	// taken at the moment of the call and pinned to the kept media: the view holds only
-	// their placements, so a read can never resolve onto a spool-owned medium — not even
-	// via the "" any-copy fail-over. withSpool calls it once at window-open — while no
-	// concurrent writer exists yet — and hands it to the run closure: inside the window
-	// the orchestrator owns the live catalog and the written media; the closure owns the
-	// kept media through this view (sound because a session never reads its own writes).
-	OpenReader        func(kept []string) archiveio.ReadStore
+	// OpenReader returns the read face of the archive fs over the run window's catalog
+	// View. withSpool calls it once at window-open — while no concurrent writer exists
+	// yet — and hands it to the run closure: inside the window the run mutates the live
+	// catalog; the closure reads the View's copy (sound because a session never reads
+	// its own writes). Which media it may mount is the media layer's business: a mount
+	// onto a window-written medium is refused and the read fails over to another copy.
+	OpenReader        func(view *catalog.View) archiveio.ReadStore
 	CheckCompress     func() error
 	ProbeReachable    func(host string) error
 	PreflightDumptype func(dt, host string, checkArchiver bool, checked map[string]bool) error

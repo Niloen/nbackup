@@ -30,7 +30,6 @@ import (
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/ratelimit"
-	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/restorer"
 	"github.com/Niloen/nbackup/internal/scheduler"
@@ -165,6 +164,7 @@ func build(cfg *config.Config) (*Engine, error) {
 			profile:     profile,
 			minAge:      cfg.MinAgeFor(mediaDef),
 			limiters:    limiters,
+			writeHeld:   map[string]bool{},
 		},
 		cat:         cat,
 		dles:        &dleDirectory{cfg: cfg, cat: cat},
@@ -252,26 +252,42 @@ func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
 	return e.cat.Rebuild(vols)
 }
 
-// writeTarget bundles a medium prepared for writing: a librarian whose first volume is mounted and
-// label-verified, the clerk Session (the run's archiveio.Store — the medium end), and a serial writer
-// authored over it (for the direct CopyRun/Flush paths; the spool builds its own over the Session).
+// writeTarget bundles a medium prepared for writing: the opened write face (whose Close
+// releases the window's claim), the clerk Session (the run's archiveio.Store — the medium
+// end), and a serial writer authored over it (for the direct CopyRun/Flush paths; the
+// spool builds its own over the Session).
 type writeTarget struct {
-	lib     *librarian.Librarian
+	wm      librarian.WriteMedium
 	session *clerk.Session
 	writer  *archiveio.Author
 }
 
-// prepareWriter resolves a medium, enforces the label protocol on its loaded volume
-// (prompting a swap on a manual single drive), and opens a clerk Session authoring the run
-// described by spec onto it. The Session builds the archiveio writer over itself, so each
-// committed archive reports straight to the catalog; the spool later routes those control
-// calls onto its orchestrator via SetCoordinator. It is the one place the PrepareWrite ->
-// WriteSink -> OpenRun contract lives, shared by a dump (Run) and a copy/sync (CopyRun).
+// prepareWriter opens a medium for writing (taking the window's claim), enforces the label
+// protocol on its loaded volume, and opens a clerk Session authoring the run onto it. The
+// caller owns the claim: writeTarget.wm.Close() releases it. On error the claim is
+// released here.
 func (e *Engine) prepareWriter(medium string, spec archiveio.RunSpec, now time.Time, logf Logf) (*writeTarget, error) {
-	lib, def, _, err := e.dep.librarianFor(medium)
+	wm, def, err := e.dep.OpenForWrite(medium)
 	if err != nil {
 		return nil, err
 	}
+	wt, err := e.prepareWriterOn(wm, def, spec, now, logf)
+	if err != nil {
+		_ = wm.Close()
+		return nil, err
+	}
+	return wt, nil
+}
+
+// prepareWriterOn authors over an already-opened write face — the shared core behind
+// prepareWriter and Flush (which keeps one open handle per landing across the crashed
+// runs it drains, building a fresh Session per run over it). It is the one place the
+// PrepareWrite -> WriteSink -> OpenRun contract lives, shared by a dump (Run) and a
+// copy/sync (CopyRun). The Session builds the archiveio writer over itself, so each
+// committed archive reports straight to the catalog; the spool later routes those
+// control calls onto its orchestrator.
+func (e *Engine) prepareWriterOn(wm librarian.WriteMedium, def config.Media, spec archiveio.RunSpec, now time.Time, logf Logf) (*writeTarget, error) {
+	medium := wm.Name()
 	partSize, err := e.dep.partSizeFor(medium)
 	if err != nil {
 		return nil, err
@@ -279,14 +295,14 @@ func (e *Engine) prepareWriter(medium string, spec archiveio.RunSpec, now time.T
 	appendable := def.IsAppendable()
 	exp := e.acct.ExpectedVolumeFor(medium, now)
 	announceExpectation(medium, exp, logf)
-	volName, epoch, err := lib.PrepareWrite(appendable, exp.Label, now, librarian.Logf(logf))
+	volName, epoch, err := wm.PrepareWrite(appendable, exp.Label, now, librarian.Logf(logf))
 	if err != nil {
 		return nil, err
 	}
-	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
-	session := e.clerk.OpenRun(sink, medium, lib.Volume(), spec.ID)
+	sink := wm.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
+	session := e.clerk.OpenRun(sink, e.cat, wm, spec.ID)
 	writer := archiveio.NewAuthor(session, spec, e.dep.limiter(medium), func() time.Time { return now })
-	return &writeTarget{lib: lib, session: session, writer: writer}, nil
+	return &writeTarget{wm: wm, session: session, writer: writer}, nil
 }
 
 // announceExpectation logs which labeled volume a write will use before it starts —
@@ -325,30 +341,33 @@ func (e *Engine) CopyRuns(slotIDs []string, fromMedia, targetMedia string, force
 // LabelVolume writes (or rewrites) the identity label of a medium's volume — the
 // deliberate operator act that makes a tape writable.
 func (e *Engine) LabelVolume(mediumName, name string, relabel, force bool, now time.Time, logf Logf) error {
-	lib, def, _, err := e.dep.librarianFor(mediumName)
+	am, def, err := e.dep.OpenAdmin(mediumName)
 	if err != nil {
 		return err
 	}
+	defer am.Close()
 	minAge, _ := def.MinAge()
-	return lib.Label(name, relabel, force, minAge, now, librarian.Logf(logf))
+	return am.Label(name, relabel, force, minAge, now, librarian.Logf(logf))
 }
 
 // ChangerView inventories a changer medium for `nb medium <name>`.
 func (e *Engine) ChangerView(mediumName string) (librarian.View, error) {
-	lib, _, _, err := e.dep.librarianFor(mediumName)
+	am, _, err := e.dep.OpenAdmin(mediumName)
 	if err != nil {
 		return librarian.View{}, err
 	}
-	return lib.View()
+	defer am.Close()
+	return am.View()
 }
 
 // LoadVolume mounts a volume on a changer medium, by bay/reel id or (byLabel) label.
 func (e *Engine) LoadVolume(mediumName, target string, byLabel bool, logf Logf) error {
-	lib, _, _, err := e.dep.librarianFor(mediumName)
+	am, _, err := e.dep.OpenAdmin(mediumName)
 	if err != nil {
 		return err
 	}
-	return lib.Load(target, byLabel, librarian.Logf(logf))
+	defer am.Close()
+	return am.Load(target, byLabel, librarian.Logf(logf))
 }
 
 // Catalog exposes the catalog for read-only commands.
@@ -467,29 +486,25 @@ func (e *Engine) RestoreTo(runID, dleName, destHost, destPath string, logf Logf)
 	return e.rst.Extract(restorer.Request{DLE: dleName, RunID: runID, Dest: destPath, Host: destHost}, logf)
 }
 
-// clerkDeps adapts the engine's services to the clerk's Map and Deps roles — the data
+// clerkDeps adapts the engine's services to the clerk's ReadMap and Deps roles — the data
 // path's view of the orchestrator (catalog placement, librarian read-mounts, bandwidth
-// caps) — so that contract stays off the Engine's public API.
+// caps) — so that contract stays off the Engine's public API. The write face is the
+// catalog itself, passed to OpenRun as the clerk.WriteMap.
 type clerkDeps struct{ e *Engine }
 
-// PlacementsFor returns a run's copies in read-preference order (own medium first), and
-// AddArchive records a run's archives — together they are the clerk's Map role (the
-// engine keeps the catalog store + the directory/retention slices).
+// PlacementsFor returns a run's copies in read-preference order (own medium first) — the
+// clerk's ReadMap role (the engine keeps the catalog store + the directory/retention slices).
 func (c clerkDeps) PlacementsFor(runID string) []catalog.Placement {
 	return c.e.placementsFor(runID)
 }
-func (c clerkDeps) AddArchive(arch record.Archive, medium string, pos record.ArchivePos) error {
-	return c.e.cat.AddArchive(arch, medium, pos)
-}
-func (c clerkDeps) RemoveArchive(runID, medium, dle string) (placementGone, entryGone bool, err error) {
-	return c.e.cat.RemoveArchive(runID, medium, dle)
-}
 
-// MounterFor returns a read-mount onto a medium's volumes — the clerk's Mounter role, served
-// by the medium's librarian (whose admin face stays with the label/load operations).
+// MounterFor returns a read-mount onto a medium's volumes — the clerk's Mounter role,
+// served by the depot's read face. A medium the open run window is writing is refused at
+// the open: the window owns its drives, so a reader fails over to another copy
+// (eachPlacement treats this like any unavailable copy) instead of mounting mid-write.
+// Outside a window nothing is held and every medium opens.
 func (c clerkDeps) MounterFor(medium string) (clerk.Mounter, error) {
-	lib, _, _, err := c.e.dep.librarianFor(medium)
-	return lib, err
+	return c.e.dep.OpenForRead(medium)
 }
 
 // Limiter returns a medium's shared bandwidth cap (nil = uncapped).

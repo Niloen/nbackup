@@ -58,6 +58,7 @@ type Catalog struct {
 	volumes map[string]*VolumeRecord // by volume label name
 	dles    map[string]*DLEMeta      // per-DLE operator/planner metadata, by slug
 	loaded  bool
+	win     *Window // the open run window, if any — mutations journal instead of persisting
 }
 
 type cacheFile struct {
@@ -295,11 +296,10 @@ func (c *Catalog) Placements(runID string) []Placement {
 	return nil
 }
 
-// SnapshotPlacements deep-copies every run's placements, keyed by run ID — a point-in-time
-// read view for readers that must not touch the live entries while a concurrent-write window
-// owns them (see docs/design/concurrent-writes.md). The copy goes down to each archive's part
+// snapshotPlacements deep-copies every run's placements, keyed by run ID — the View's
+// point-in-time data, taken at OpenWindow. The copy goes down to each archive's part
 // list, so a writer merging new positions into a live entry never shares an array with it.
-func (c *Catalog) SnapshotPlacements() map[string][]Placement {
+func (c *Catalog) snapshotPlacements() map[string][]Placement {
 	snap := make(map[string][]Placement, len(c.entries))
 	for _, e := range c.entries {
 		ps := make([]Placement, len(e.Placements))

@@ -32,13 +32,19 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-// Map is the clerk's slice of the catalog — the archive map (the inode/extent table). The
-// clerk resolves it on read (which copies of a run, and where each archive's parts live) and
-// records it on write (where a run's archives landed). It is the one role through which the
-// clerk owns map I/O; the engine implements it (and keeps the directory/retention/volume
-// slices). PlacementsFor returns copies in read-preference order (the engine's own first).
-type Map interface {
+// ReadMap is the clerk's read slice of the catalog — the archive map (the inode/extent
+// table) resolved on read: which copies of a run, and where each archive's parts live.
+// The engine implements it over the live catalog (and keeps the directory/retention/volume
+// slices); a run window's read-only clerk implements it over the window's catalog.View.
+// PlacementsFor returns copies in read-preference order (the engine's own first).
+type ReadMap interface {
 	PlacementsFor(runID string) []catalog.Placement
+}
+
+// WriteMap is the clerk's write slice of the catalog — the ReadMap's mirror, where a
+// Session records a run's archives. The catalog implements it; the read-only window
+// clerk has none, so its read face is read-only by type, not by convention.
+type WriteMap interface {
 	// AddArchive records one committed archive's content + its on-medium position — the
 	// catalog's single write path. The run entry is created from the archive's own run tag
 	// (arch.Run), never added wholesale; there is no completion step — a run is its archives.
@@ -73,14 +79,14 @@ type Deps interface {
 // regardless of which operation needs it.
 type Clerk struct {
 	deps   Deps
-	cat    Map
+	cat    ReadMap
 	reader *archiveio.Reader
 	mindex *catalog.MemberIndex
 }
 
 // New returns a data path over the archive map and the orchestrator's services, using mindex
 // as the server-side member cache.
-func New(cat Map, deps Deps, mindex *catalog.MemberIndex) *Clerk {
+func New(cat ReadMap, deps Deps, mindex *catalog.MemberIndex) *Clerk {
 	return &Clerk{deps: deps, cat: cat, reader: archiveio.NewReader(), mindex: mindex}
 }
 

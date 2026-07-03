@@ -50,7 +50,10 @@ func (e *Engine) newCopier() *copier {
 		knownMedium: func(name string) bool { _, ok := e.cfg.Media[name]; return ok },
 		placementOn: e.placementOn,
 		openCheck: func(medium string) error {
-			_, _, _, err := e.dep.librarianFor(medium)
+			rm, err := e.dep.OpenForRead(medium)
+			if err == nil {
+				_ = rm.Close()
+			}
 			return err
 		},
 		reclaimCopy:    e.acct.ReclaimCopy,

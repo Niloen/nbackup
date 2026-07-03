@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"errors"
 	"sort"
 	"time"
 
@@ -15,7 +14,6 @@ import (
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
-	"github.com/Niloen/nbackup/internal/record"
 )
 
 // openWriter folds the engine's clerk/librarian write machinery into the medium-
@@ -25,14 +23,15 @@ import (
 // runOrchestrated makes (clerk.OpenRun, Media.CapacityBytes) so the types line up —
 // folding that machinery here keeps the conductor free of the clerk/librarian packages.
 func (e *Engine) openWriter(medium string, spec archiveio.RunSpec, now time.Time, lf logf.Logf) (conductor.PreparedWriter, error) {
-	stores, err := e.landingStores(medium, spec, now, lf)
+	stores, wm, err := e.landingStores(medium, spec, now, lf)
 	if err != nil {
 		return conductor.PreparedWriter{}, err
 	}
 	capB, _ := e.cfg.Media[medium].CapacityBytes()
 	return conductor.PreparedWriter{
-		Stores: stores,
-		Lim:    e.dep.limiter(medium),
+		Stores:  stores,
+		Lim:     e.dep.limiter(medium),
+		Release: func() { _ = wm.Close() },
 		// Serial keys off the concurrent-write capability: a serial medium (tape) shares one
 		// rolling drive per store and writes one archive at a time on it, while a concurrent-write
 		// object store/disk writes archives as independent objects/files and stays parallel — even
@@ -43,90 +42,70 @@ func (e *Engine) openWriter(medium string, spec archiveio.RunSpec, now time.Time
 	}, nil
 }
 
-// openReader is the conductor's window-open read view: the archive fs's read face
-// (an archiveio.ReadStore — a clerk) over a snapshot of the catalog's placements,
-// taken while the window's single goroutine is still the only one running and pinned
-// to the kept media — the media the window's caller owns for reading. The view holds
-// only their placements, so a read cannot resolve onto a spool-owned medium at all:
-// the restriction is in the data, not a check. Inside a spool window the orchestrator
-// owns the live catalog (every write routes to it); readers work from this copy
-// instead, so a reader and the orchestrator never share the live entries. Serving
-// reads from a point-in-time copy is sound because a session never reads its own
-// writes through the catalog: everything written inside the window belongs to this
-// run, everything read (a copy's source placements) was recorded by a previous one,
-// and the one same-run read-back — a drain reopening a staged archive — travels by
-// value in CommitResult, not through the catalog.
-func (e *Engine) openReader(kept []string) archiveio.ReadStore {
-	keep := make(map[string]bool, len(kept))
-	for _, k := range kept {
-		keep[k] = true
-	}
-	snap := e.cat.SnapshotPlacements()
-	for id, ps := range snap {
-		owned := ps[:0]
-		for _, p := range ps {
-			if keep[p.Medium] {
-				owned = append(owned, p)
-			}
-		}
-		if len(owned) == 0 {
-			delete(snap, id)
-			continue
-		}
-		// The usual read preference: the engine's own medium first (see placementsFor).
-		sort.SliceStable(owned, func(i, j int) bool {
-			return owned[i].Medium == e.dep.landingName && owned[j].Medium != e.dep.landingName
-		})
-		snap[id] = owned
-	}
-	return clerk.New(snapshotMap{placements: snap}, clerkDeps{e}, catalog.OpenMemberIndex(e.cfg.WorkdirPath()))
+// openReader is the run window's read face: a read-only clerk over the window's
+// catalog.View (the committed placements as of window-open). The View's copy means a
+// reader and the window's writer never share the live entries; which media a read may
+// MOUNT is the media layer's business — MounterFor refuses a window-written medium,
+// so copy selection fails over past such a placement like any unavailable copy.
+// Serving reads from a point-in-time view is sound because a session never reads its
+// own writes through the catalog: everything written inside the window belongs to
+// this run, everything read (a copy's source placements) was recorded by a previous
+// one, and the one same-run read-back — a drain reopening a staged archive — travels
+// by value in CommitResult, not through the catalog.
+func (e *Engine) openReader(view *catalog.View) archiveio.ReadStore {
+	m := readView{view: view, own: e.dep.landingName}
+	return clerk.New(m, clerkDeps{e}, catalog.OpenMemberIndex(e.cfg.WorkdirPath()))
 }
 
-// snapshotMap is the read-only clerk Map over a placements snapshot. The write
-// methods are unreachable — no Session is ever opened over a snapshot clerk — and
-// fail loudly if that ever changes.
-type snapshotMap struct {
-	placements map[string][]catalog.Placement
+// readView is the window clerk's ReadMap: the View's placements in the usual
+// read-preference order (the engine's own medium first, see placementsFor). It has no
+// write methods — the window's read face is read-only by type.
+type readView struct {
+	view *catalog.View
+	own  string
 }
 
-func (m snapshotMap) PlacementsFor(runID string) []catalog.Placement { return m.placements[runID] }
-
-func (m snapshotMap) AddArchive(record.Archive, string, record.ArchivePos) error {
-	return errors.New("catalog snapshot is read-only")
-}
-
-func (m snapshotMap) RemoveArchive(string, string, string) (bool, bool, error) {
-	return false, false, errors.New("catalog snapshot is read-only")
+func (m readView) PlacementsFor(runID string) []catalog.Placement {
+	all := m.view.PlacementsFor(runID)
+	ordered := append([]catalog.Placement(nil), all...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].Medium == m.own && ordered[j].Medium != m.own
+	})
+	return ordered
 }
 
 // landingStores opens the run stores a landing is written through: one per tape drive for a robotic
 // multi-drive library (each a lazy per-drive sink that loads its own tape on first write, so the
 // concurrent writers land on independent drives), or a single store for a single-drive tape, a manual
 // drive, or a directly-addressed medium (disk/cloud — its own concurrency is independent files).
-func (e *Engine) landingStores(medium string, spec archiveio.RunSpec, now time.Time, lf logf.Logf) ([]archiveio.Store, error) {
-	lib, def, _, err := e.dep.librarianFor(medium)
+// The one OpenForWrite here takes the window's claim on the medium; the returned handle's Close
+// (wired into PreparedWriter.Release) gives it back at window end.
+func (e *Engine) landingStores(medium string, spec archiveio.RunSpec, now time.Time, lf logf.Logf) ([]archiveio.Store, librarian.WriteMedium, error) {
+	wm, def, err := e.dep.OpenForWrite(medium)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if !lib.Parallel() {
-		wt, err := e.prepareWriter(medium, spec, now, lf) // eager single store (existing contract)
+	if !wm.Parallel() {
+		wt, err := e.prepareWriterOn(wm, def, spec, now, lf) // eager single store (existing contract)
 		if err != nil {
-			return nil, err
+			_ = wm.Close()
+			return nil, nil, err
 		}
-		return []archiveio.Store{wt.session}, nil
+		return []archiveio.Store{wt.session}, wm, nil
 	}
 	partSize, err := e.dep.partSizeFor(medium)
 	if err != nil {
-		return nil, err
+		_ = wm.Close()
+		return nil, nil, err
 	}
 	exp := e.acct.ExpectedVolumeFor(medium, now)
 	announceExpectation(medium, exp, lf)
-	sinks := lib.LazyDriveSinks(def.IsAppendable(), exp.Label, partSize, now, librarian.Logf(lf))
+	sinks := wm.LazyDriveSinks(def.IsAppendable(), exp.Label, partSize, now, librarian.Logf(lf))
 	stores := make([]archiveio.Store, len(sinks))
 	for i, sink := range sinks {
-		stores[i] = e.clerk.OpenRun(sink, medium, lib.Volume(), spec.ID)
+		stores[i] = e.clerk.OpenRun(sink, e.cat, wm, spec.ID)
 	}
-	return stores, nil
+	return stores, wm, nil
 }
 
 // landingFor resolves the medium a DLE lands on: its dumptype's `landing` override, else the run's

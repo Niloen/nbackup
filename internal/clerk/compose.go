@@ -16,24 +16,36 @@ import (
 // own over a routed wrapper. The clerk never sees a scheme or a transfer; it takes plain bytes through
 // whatever writer is driven over it.
 
-// Session authors one run onto medium and is its archiveio.Store. vol is the medium's volume, used to
-// read and reclaim staged archives on a single-volume medium (a holding disk); a landing passes its
-// loaded volume, which OpenArchive/Reclaim are never called on.
+// Medium is the write session's slice of its opened medium: its identity (where the
+// catalog placement pins) and its volume (the staged-archive read-back on a holding
+// disk). The engine's opened write face (librarian.WriteMedium) satisfies it — a
+// Session holds the handle the run opened, not a loose name, so "which medium" has one
+// source of truth.
+type Medium interface {
+	Name() string
+	Volume() media.Volume
+}
+
+// Session authors one run onto its medium and is its archiveio.Store. w is the catalog's
+// write face the session records into; m identifies the opened medium and serves the
+// volume reads on a single-volume medium (a holding disk) — a landing's volume is never
+// read back through OpenArchive/Reclaim.
 type Session struct {
-	clerk  *Clerk
-	sink   archiveio.VolumeSink // the medium's librarian — the VolumeSink half of WriteStore
-	medium string
-	vol    media.Volume
-	runID  string // the run tag every archive carries (for the catalog + member index)
+	clerk *Clerk
+	sink  archiveio.VolumeSink // the medium's librarian — the VolumeSink half of WriteStore
+	w     WriteMap
+	m     Medium
+	runID string // the run tag every archive carries (for the catalog + member index)
 }
 
 var _ archiveio.Store = (*Session)(nil)
 
-// OpenRun starts a write session for run runID on medium over the medium's librarian sink. It builds
-// no writer — a writer is authored over the returned Session with archiveio.NewAuthor (the engine does
-// so for a dump/copy; the spool wraps the Session and builds its own).
-func (c *Clerk) OpenRun(sink archiveio.VolumeSink, medium string, vol media.Volume, runID string) *Session {
-	return &Session{clerk: c, sink: sink, medium: medium, vol: vol, runID: runID}
+// OpenRun starts a write session for run runID on the opened medium m over the medium's
+// librarian sink, recording into w. It builds no writer — a writer is authored over the
+// returned Session with archiveio.NewAuthor (the engine does so for a dump/copy; the
+// spool wraps the Session and builds its own).
+func (c *Clerk) OpenRun(sink archiveio.VolumeSink, w WriteMap, m Medium, runID string) *Session {
+	return &Session{clerk: c, sink: sink, w: w, m: m, runID: runID}
 }
 
 // NextPart, PlaceRecord, Bounded and Record are the Session's WriteStore — the real, inline operations a
@@ -58,7 +70,7 @@ func (s *Session) Record(r archiveio.CommitResult) error {
 		// right run. For a dump or a per-run copy the two are identical, so this changes nothing there.
 		_ = s.clerk.mindex.Store(arch.Run, arch.DLE, arch.Level, arch.Members)
 	}
-	return s.clerk.cat.AddArchive(arch, s.medium, r.Pos)
+	return s.w.AddArchive(arch, s.m.Name(), r.Pos)
 }
 
 // OpenArchive reads a committed archive's payload back by concatenating its parts straight off the
@@ -67,26 +79,26 @@ func (s *Session) Record(r archiveio.CommitResult) error {
 func (s *Session) OpenArchive(arch record.Archive, pos record.ArchivePos) (io.ReadCloser, error) {
 	exp := archiveio.Ref{Run: s.runID, DLE: arch.DLE, Level: arch.Level}
 	return archiveio.NewReader().Open(pos.Parts, exp,
-		func(p record.FilePos) (record.Header, io.ReadCloser, error) { return s.vol.ReadFile(p.Pos) })
+		func(p record.FilePos) (record.Header, io.ReadCloser, error) { return s.m.Volume().ReadFile(p.Pos) })
 }
 
 // Reclaim drops a staged archive once it has landed on the landing; see Clerk.ReclaimStaged.
 func (s *Session) Reclaim(arch record.Archive, pos record.ArchivePos) error {
-	return s.clerk.ReclaimStaged(s.medium, s.vol, s.runID, arch.DLE, pos)
+	return s.clerk.ReclaimStaged(s.w, s.m.Name(), s.m.Volume(), s.runID, arch.DLE, pos)
 }
 
 // ReclaimStaged drops a staged archive from a holding medium once it has landed: it removes the
 // archive's files from vol (the commit footer first, so an interrupted reclaim un-commits before
-// dropping parts) then drops its placement from the catalog. The live drain reaches it through
-// Session.Reclaim; the crash-recovery flush (conductor.Flush) calls it directly — the footer-first
-// invariant lives only here.
-func (c *Clerk) ReclaimStaged(medium string, vol media.Volume, runID, dle string, pos record.ArchivePos) error {
+// dropping parts) then drops its placement from the catalog via w. The live drain reaches it
+// through Session.Reclaim; the crash-recovery flush (conductor.Flush) calls it directly — the
+// footer-first invariant lives only here.
+func (c *Clerk) ReclaimStaged(w WriteMap, medium string, vol media.Volume, runID, dle string, pos record.ArchivePos) error {
 	for _, p := range archivePosFiles(pos) {
 		if err := vol.RemoveFile(p); err != nil {
 			return err
 		}
 	}
-	_, _, err := c.cat.RemoveArchive(runID, medium, dle)
+	_, _, err := w.RemoveArchive(runID, medium, dle)
 	return err
 }
 
