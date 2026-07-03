@@ -191,7 +191,7 @@ func TestSessionRecord(t *testing.T) {
 	m := &fakeMap{}
 	mindex := catalog.OpenMemberIndex(t.TempDir())
 	c := New(m, &fakeDeps{}, mindex)
-	sess := c.OpenRun(nil, "disk", nil, "run-2026-07-02.001")
+	sess := c.OpenRun(nil, m, "disk", nil, "run-2026-07-02.001")
 
 	arch := record.Archive{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0, Members: []string{"a", "b"}}
 	pos := record.ArchivePos{DLE: "h:/p", Level: 0}
@@ -214,8 +214,9 @@ func TestSessionOpenArchive(t *testing.T) {
 	body := []byte("staged archive payload")
 	arch, pos := authorArchive(t, vol, "run-2026-07-02.001", "h:/p", 0, body)
 
-	c := New(&fakeMap{}, &fakeDeps{}, catalog.OpenMemberIndex(t.TempDir()))
-	sess := c.OpenRun(nil, "hd0", vol, "run-2026-07-02.001")
+	m := &fakeMap{}
+	c := New(m, &fakeDeps{}, catalog.OpenMemberIndex(t.TempDir()))
+	sess := c.OpenRun(nil, m, "hd0", vol, "run-2026-07-02.001")
 	rc, err := sess.OpenArchive(arch, pos)
 	if err != nil {
 		t.Fatalf("OpenArchive: %v", err)
@@ -238,7 +239,7 @@ func TestReclaimStagedFooterFirst(t *testing.T) {
 
 	m := &fakeMap{}
 	c := New(m, &fakeDeps{}, catalog.OpenMemberIndex(t.TempDir()))
-	sess := c.OpenRun(nil, "hd0", vol, "run-2026-07-02.001")
+	sess := c.OpenRun(nil, m, "hd0", vol, "run-2026-07-02.001")
 	if err := sess.Reclaim(arch, pos); err != nil {
 		t.Fatalf("Reclaim: %v", err)
 	}
@@ -264,7 +265,7 @@ func TestReclaimStagedFileFaultKeepsCatalog(t *testing.T) {
 
 	m := &fakeMap{}
 	c := New(m, &fakeDeps{}, catalog.OpenMemberIndex(t.TempDir()))
-	sess := c.OpenRun(nil, "hd0", vol, "run-2026-07-02.001")
+	sess := c.OpenRun(nil, m, "hd0", vol, "run-2026-07-02.001")
 	if err := sess.Reclaim(arch, pos); err == nil {
 		t.Fatal("Reclaim must surface the file-removal fault")
 	}

@@ -45,7 +45,7 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 			if err != nil {
 				return err
 			}
-			return e.clerk.ReclaimStaged(holding, vol, runID, dle, pos)
+			return e.clerk.ReclaimStaged(e.cat, holding, vol, runID, dle, pos)
 		},
 		OpenLanding: func(landing string, spec archiveio.RunSpec) (*archiveio.Author, error) {
 			wt, err := e.prepareWriter(landing, spec, now, logf)

@@ -55,14 +55,18 @@ type Deps struct {
 	Plan       func(date time.Time, sink progress.Sink) *planner.Plan
 	Vol        media.Volume
 	OpenWriter func(medium string, spec archiveio.RunSpec, now time.Time, lf logf.Logf) (PreparedWriter, error)
-	// OpenReader returns the read face of the archive fs over a snapshot of the catalog,
-	// taken at the moment of the call and pinned to the kept media: the view holds only
-	// their placements, so a read can never resolve onto a spool-owned medium — not even
-	// via the "" any-copy fail-over. withSpool calls it once at window-open — while no
-	// concurrent writer exists yet — and hands it to the run closure: inside the window
-	// the orchestrator owns the live catalog and the written media; the closure owns the
-	// kept media through this view (sound because a session never reads its own writes).
-	OpenReader        func(kept []string) archiveio.ReadStore
+	// OpenReader returns the read face of the archive fs over the run window's catalog
+	// View. withSpool calls it once at window-open — while no concurrent writer exists
+	// yet — and hands it to the run closure: inside the window the run mutates the live
+	// catalog; the closure reads the View's copy (sound because a session never reads
+	// its own writes). Which media it may mount is the media layer's business: a mount
+	// onto a window-written medium is refused and the read fails over to another copy.
+	OpenReader func(view *catalog.View) archiveio.ReadStore
+	// ClaimWrites marks the written media (landings + holding disks) owned by the run
+	// window for its duration and returns the release. A read-mount onto a claimed
+	// medium is refused while the window is open — the disjointness of reads and writes
+	// is this exclusivity, not a list check.
+	ClaimWrites       func(names []string) (release func(), err error)
 	CheckCompress     func() error
 	ProbeReachable    func(host string) error
 	PreflightDumptype func(dt, host string, checkArchiver bool, checked map[string]bool) error

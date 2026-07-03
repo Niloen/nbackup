@@ -30,7 +30,6 @@ import (
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/ratelimit"
-	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/restorer"
 	"github.com/Niloen/nbackup/internal/scheduler"
@@ -165,6 +164,7 @@ func build(cfg *config.Config) (*Engine, error) {
 			profile:     profile,
 			minAge:      cfg.MinAgeFor(mediaDef),
 			limiters:    limiters,
+			writeHeld:   map[string]bool{},
 		},
 		cat:         cat,
 		dles:        &dleDirectory{cfg: cfg, cat: cat},
@@ -284,7 +284,7 @@ func (e *Engine) prepareWriter(medium string, spec archiveio.RunSpec, now time.T
 		return nil, err
 	}
 	sink := lib.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
-	session := e.clerk.OpenRun(sink, medium, lib.Volume(), spec.ID)
+	session := e.clerk.OpenRun(sink, e.cat, medium, lib.Volume(), spec.ID)
 	writer := archiveio.NewAuthor(session, spec, e.dep.limiter(medium), func() time.Time { return now })
 	return &writeTarget{lib: lib, session: session, writer: writer}, nil
 }
@@ -467,27 +467,27 @@ func (e *Engine) RestoreTo(runID, dleName, destHost, destPath string, logf Logf)
 	return e.rst.Extract(restorer.Request{DLE: dleName, RunID: runID, Dest: destPath, Host: destHost}, logf)
 }
 
-// clerkDeps adapts the engine's services to the clerk's Map and Deps roles — the data
+// clerkDeps adapts the engine's services to the clerk's ReadMap and Deps roles — the data
 // path's view of the orchestrator (catalog placement, librarian read-mounts, bandwidth
-// caps) — so that contract stays off the Engine's public API.
+// caps) — so that contract stays off the Engine's public API. The write face is the
+// catalog itself, passed to OpenRun as the clerk.Writer.
 type clerkDeps struct{ e *Engine }
 
-// PlacementsFor returns a run's copies in read-preference order (own medium first), and
-// AddArchive records a run's archives — together they are the clerk's Map role (the
-// engine keeps the catalog store + the directory/retention slices).
+// PlacementsFor returns a run's copies in read-preference order (own medium first) — the
+// clerk's ReadMap role (the engine keeps the catalog store + the directory/retention slices).
 func (c clerkDeps) PlacementsFor(runID string) []catalog.Placement {
 	return c.e.placementsFor(runID)
 }
-func (c clerkDeps) AddArchive(arch record.Archive, medium string, pos record.ArchivePos) error {
-	return c.e.cat.AddArchive(arch, medium, pos)
-}
-func (c clerkDeps) RemoveArchive(runID, medium, dle string) (placementGone, entryGone bool, err error) {
-	return c.e.cat.RemoveArchive(runID, medium, dle)
-}
 
 // MounterFor returns a read-mount onto a medium's volumes — the clerk's Mounter role, served
-// by the medium's librarian (whose admin face stays with the label/load operations).
+// by the medium's librarian (whose admin face stays with the label/load operations). A medium
+// the open run window is writing is refused: the window owns its drives, so a reader fails
+// over to another copy (eachPlacement treats this like any unavailable copy) instead of
+// mounting mid-write. Outside a window nothing is held and every medium mounts.
 func (c clerkDeps) MounterFor(medium string) (clerk.Mounter, error) {
+	if c.e.dep.writeBlocked(medium) {
+		return nil, fmt.Errorf("medium %q is write-owned by the running window", medium)
+	}
 	lib, _, _, err := c.e.dep.librarianFor(medium)
 	return lib, err
 }

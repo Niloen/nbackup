@@ -34,7 +34,41 @@ type depot struct {
 
 	limiters map[string]*ratelimit.Limiter // per-medium bandwidth cap (nil entry = uncapped); shared so a medium's concurrent streams share one budget
 	op       librarian.Operator            // optional: handles manual tape swaps (nil = unattended)
+
+	// writeHeld is the run window's medium-ownership table: the media the open window is
+	// writing (its landings + holding disks). A read-mount (MounterFor) onto one is refused,
+	// so a window reader fails over to another copy instead of touching a drive the run is
+	// writing — the medium-access half of the window's one-owner-per-medium split (see
+	// docs/design/catalog-window.md). Claims are made before the window's producers start
+	// and released after they have joined, so the map is never written concurrently with a
+	// read; the process runs one command, so no lock is needed.
+	writeHeld map[string]bool
 }
+
+// claimWrites marks the named media write-owned for the duration of a run window and
+// returns the release. A medium already held is a wiring bug (two windows, or one medium
+// listed as both a landing and a holding disk) and fails the claim.
+func (d *depot) claimWrites(names []string) (release func(), err error) {
+	claimed := make([]string, 0, len(names))
+	free := func() {
+		for _, n := range claimed {
+			delete(d.writeHeld, n)
+		}
+	}
+	for _, n := range names {
+		if d.writeHeld[n] {
+			free()
+			return nil, fmt.Errorf("medium %q is already write-claimed by this run", n)
+		}
+		d.writeHeld[n] = true
+		claimed = append(claimed, n)
+	}
+	return free, nil
+}
+
+// writeBlocked reports whether a run window currently write-owns the medium — the read
+// side's refusal check.
+func (d *depot) writeBlocked(name string) bool { return d.writeHeld[name] }
 
 // ErrUnknownMedium marks a medium name absent from the current config — a copy
 // recorded in the catalog on a medium this config does not define. It is a scoping
