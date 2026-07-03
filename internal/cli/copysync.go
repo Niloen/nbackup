@@ -230,6 +230,6 @@ func printSyncReport(r *engine.SyncReport, apply bool) {
 	// Sync copies regardless, but a target it pushes past capacity is worth flagging:
 	// otherwise the overshoot only surfaces later, at the next `nb plan`/`nb prune`.
 	if r.OverCapacity() {
-		warnMediumOverCapacity(r.To, r.ProjectedBytes, r.TargetCapacity, true)
+		warnMediumOverCapacity(r.To, r.ProjectedBytes, r.TargetCapacity, !apply)
 	}
 }

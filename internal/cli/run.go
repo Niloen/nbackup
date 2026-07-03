@@ -45,7 +45,7 @@ func runRunList(a *app) error {
 		// A bare config (no sources) means no backup config was found — read-only
 		// commands fall back to the default local catalog (see noConfigHint).
 		if len(cfg.Sources) == 0 {
-			fmt.Println(noConfigHint("no runs in catalog"))
+			fmt.Println(noConfigHint("no runs in catalog", a.catalog))
 		} else {
 			fmt.Println("no runs in catalog")
 		}

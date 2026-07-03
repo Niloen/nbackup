@@ -65,7 +65,7 @@ func newMediumCmd(a *app) *cobra.Command {
 			// commands fall back to a synthesized default catalog, so don't present its
 			// phantom default disk medium as if storage were configured (matching `nb run`).
 			if len(cfg.Sources) == 0 {
-				fmt.Println(noConfigHint("no media"))
+				fmt.Println(noConfigHint("no media", a.catalog))
 				return nil
 			}
 			// The detail view inventories the changer (drive/slot status) — a device

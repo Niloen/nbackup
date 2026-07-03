@@ -44,7 +44,7 @@ func runDleList(a *app) error {
 	sums := eng.DLESummaries()
 	if len(sums) == 0 {
 		if len(cfg.Sources) == 0 {
-			fmt.Println(noConfigHint("no DLEs in catalog"))
+			fmt.Println(noConfigHint("no DLEs in catalog", a.catalog))
 		} else {
 			fmt.Println("no DLEs in catalog")
 		}

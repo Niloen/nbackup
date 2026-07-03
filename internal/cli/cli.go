@@ -184,7 +184,13 @@ func newTab(w io.Writer) *tabwriter.Writer {
 // distinguishing "configured but nothing dumped yet" from "no config at all", so a
 // newcomer isn't left with the false impression that an unconfigured listing
 // succeeded meaningfully. `what` is the command's own empty-listing phrase.
-func noConfigHint(what string) string {
+// `catalogOverride` set means --catalog pointed at this (empty) directory directly,
+// bypassing any config file entirely — the empty listing is about that directory,
+// not a missing config, so the hint must not blame a config that may well exist.
+func noConfigHint(what, catalogOverride string) string {
+	if catalogOverride != "" {
+		return fmt.Sprintf("%s (catalog directory %q has no runs yet)", what, catalogOverride)
+	}
 	return what + " (no backup config found — copy nbackup.example.yaml to nbackup.yaml and edit it, or pass -c <config>)"
 }
 
