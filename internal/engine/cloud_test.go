@@ -194,7 +194,7 @@ func TestCloudPartSizeDefaultAndBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := eng.dep.partSizeFor("cloud")
+	got, err := eng.dep.PartSizeFor("cloud")
 	if err != nil {
 		t.Fatalf("partSizeFor (unset): %v", err)
 	}
@@ -206,7 +206,7 @@ func TestCloudPartSizeDefaultAndBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := eng2.dep.partSizeFor("cloud"); err == nil {
+	if _, err := eng2.dep.PartSizeFor("cloud"); err == nil {
 		t.Fatal("part_size above the 40 GiB cap should be rejected")
 	} else if !strings.Contains(err.Error(), "exceeds the maximum") {
 		t.Errorf("error = %q, want it to explain the maximum", err)
@@ -231,7 +231,7 @@ func TestPartSizeForBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := eng.dep.partSizeFor("cloud"); err == nil {
+	if _, err := eng.dep.PartSizeFor("cloud"); err == nil {
 		t.Error("a sub-two-header part_size should be rejected")
 	} else if !strings.Contains(err.Error(), "too small") {
 		t.Errorf("error = %q, want it to say the value is too small", err)
@@ -244,14 +244,14 @@ func TestPartSizeForBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	eng2.cfg.Media["cloud"] = config.Media{Type: "cloud", Params: map[string]string{"url": "mem://", "part_size": "not-a-size"}}
-	if _, err := eng2.dep.partSizeFor("cloud"); err == nil {
+	if _, err := eng2.dep.PartSizeFor("cloud"); err == nil {
 		t.Error("a malformed part_size should surface a parse error")
 	} else if !strings.Contains(err.Error(), "part_size") {
 		t.Errorf("error = %q, want it to name part_size", err)
 	}
 
 	// Unknown medium.
-	if _, err := eng2.dep.partSizeFor("nope"); err == nil {
+	if _, err := eng2.dep.PartSizeFor("nope"); err == nil {
 		t.Error("partSizeFor of an unknown medium should error")
 	}
 }

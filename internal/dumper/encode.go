@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/planner"
@@ -51,7 +52,7 @@ type EncodePlacement struct {
 // dumpItem archives a single DLE into the store: it acquires an ingestion Sink, transfers the
 // encoded archive into it, and commits it — driving the run tracker from the committed record. It
 // owns the run-tracker lifecycle and describes the backup; the store lands and records the bytes.
-func (d *Dumper) dumpItem(ctx context.Context, fs archiveio.Ingest, item planner.Item, gate dumpGate, tr *progress.Tracker, logf func(format string, args ...any)) (err error) {
+func (d *Dumper) dumpItem(ctx context.Context, fs archivefs.Ingest, item planner.Item, gate dumpGate, tr *progress.Tracker, logf func(format string, args ...any)) (err error) {
 	// The progress tracker keys and displays DLEs by their host:path identity; the
 	// seal and filenames keep the internal slug.
 	pname := item.DLE.ID()
@@ -188,7 +189,7 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 // server-side as local Filters) → an ingestion xfer.Sink the store hands out, which the transfer
 // seals on commit. prog, if non-nil, receives running (uncompressed, compressed) counts. It returns
 // the archive record with its final sizes + file count for the caller's tracker and log.
-func (d *Dumper) dumpArchive(ctx context.Context, fs archiveio.Ingest, est int64, spec BackupSpec, gate dumpGate, prog func(uncompressed, compressed int64)) (record.Archive, []string, error) {
+func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64, spec BackupSpec, gate dumpGate, prog func(uncompressed, compressed int64)) (record.Archive, []string, error) {
 	var unreadable []string // source paths the archiver could not read (a partial dump)
 	pl := d.placement(spec.DumpType)
 	compF, err := compress.Filter(pl.CompressScheme, pl.CompressOpts)

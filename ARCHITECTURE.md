@@ -57,10 +57,11 @@ registry registration, not a conditional in the core.
 | Package | Responsibility | Amanda analogue |
 |---|---|---|
 | `config` | config + domain entities: `DLE`, `Media`, `DumpType` | disklist / dumptype / storage |
-| `record` | the self-describing on-medium artifact records: `Header` framing + `Label` (volume id record) + `Archive` (commit-footer metadata, self-locating via its `Run` tag) + the run-id vocabulary (`IDFromTime`/`ParseID`/`RunIDLess`) + the per-archive member index (`EncodeIndex`) + their (de)serialization | dumpfile_t / amar |
-| `archiveio` | the archive fs contracts + block mechanics: `Ref` (an archive's logical identity — the fs "filename"), the write face (`WriteStore`/`Store`/`Ingest` + the `ArchiveWriter` SDK) and the read face (`ReadStore`); maps a run's archives onto a `Volume`'s files — meter + split a payload into parts then write its index + commit footer, concatenate + assert parts on read; knows nothing of compress/encrypt | taper / amrestore |
+| `record` | the self-describing on-medium artifact records: `Header` framing + `Label` (volume id record) + `Archive` (commit-footer metadata, self-locating via its `Run` tag) + `Ref` (an archive's logical identity — the fs "filename", asserted by the block layer and resolved by the fs) + the run-id vocabulary (`IDFromTime`/`ParseID`/`RunIDLess`) + the per-archive member index (`EncodeIndex`) + their (de)serialization | dumpfile_t / amar |
+| `archiveio` | the block layer: maps a run's archives onto a `Volume`'s files. Two bound ends — `Writer` (one run's write end, bound to a `PartAllocator` + `Recorder`; `NewArchive` → the `ArchiveWriter` SDK) and `Reader` (one medium's read end, bound to a `PartOpener`; `Open(ref, parts)` → `io.ReadCloser`) — that meter + split a payload into parts then write its index + commit footer, and concatenate + assert parts on read; knows nothing of compress/encrypt | taper / amrestore |
 | `media` | `Volume` + `Labeled` + `Drive`/`Changer` (slots + drives, `Load`/`Unload`/`Manual`) + `Profile` + registry; reads/writes `record` artifacts | Device API |
-| `librarian` | operates a medium's `Changer` + label protocol (make-writable, advance, load-for-read, label, load); prompts an operator when the changer is `Manual` | changer / amtape |
+| `librarian` | operates a medium's `Changer` + label protocol (make-writable, advance, load-for-read, label, load); prompts an operator when the changer is `Manual`; its drive-bound `Allocator` implements `archiveio.PartAllocator` (part sizing + the volume roll) | changer / amtape |
+| `depot` | where media are opened — open(2) + the mount table: resolves a configured medium to a typed face (`ReadMedium`/`WriteMedium`/`AdminMedium`, the access rule as a method set), owns the run window's exclusive write claims, the lazily opened landing volume + one-time catalog bootstrap, and the per-medium write knobs (part size, bandwidth cap) | — |
 | `media/disk`, `media/tape`, `media/cloud` | Volume impls (disk sidecar headers; tape library; object store via gocloud.dev/blob) | vfs / tape / s3 devices |
 | `media/fslike` | the run layout shared by the address-identified media — clean payloads + `.hdr` sidecars over a small `Store` seam (disk = a directory, cloud = a bucket), so disk↔cloud copies are byte-identical | — |
 | `archiver` + `archiver/gnutar` | `Archiver` interface + registry + named definitions; owns its incremental-state library; GNU tar impl | Application API / amgtar |
@@ -68,36 +69,39 @@ registry registration, not a conditional in the core.
 | `transform/crypt` | external encryptor child processes (gpg/none) + registry; `Filter(scheme)` returns the forward/reverse `programs.Cmd` | amcrypt/amgpgcrypt |
 | `programs` | the base: a `Cmd` (external program to run) + an `Execution` transport that runs a pipe of commands on one host, transparently `Local` or `SSH`; the command/execution concept compress, crypt, and the archiver all build on | amandad (replaced by stock sshd) |
 | `xfer` | the data-movement primitive: `Transfer(source, filters, sink)` moves one stream through three zones — a `Source` (a client's tar, or a medium read), local `Filters` (compress/encrypt or decrypt/decompress), and a `Sink` (a medium, a target's tar, a hash) — tagging faults by zone | Amanda Xfer / netusage |
-| `clerk` | the archive fs implementation — a logical `Ref` to a byte endpoint and back, nothing more: read (`Open` with copy selection + fail-over, `ReadArchives` one-pass ordered reads, `Members`) implements `archiveio.ReadStore`; write (a run `Session` is an `archiveio.Store`). Mounts volumes via the librarian; owns the member index. No schemes, no tar, no transfers — those live in the operations (dumper, restorer, verifier) | Scribe + Recovery::Clerk |
+| `archivefs` | the archive fs (file layer): a logical `record.Ref` to a byte endpoint and back, nothing more. Its two faces live beside their implementations — `ReadStore` (implemented by `FS`: `Open` with copy selection + fail-over, `ReadArchives` one-pass ordered reads, `Members`) and `WriteStore` (implemented by `Session`, one run's write handle: `Record` + staged read-back/`Reclaim`) — plus `Ingest` (the producer's writer intake, implemented by the spool). Mounts volumes via depot read media; owns the member index. No schemes, no tar, no transfers — those live in the operations (dumper, restorer, verifier) | Scribe + Recovery::Clerk |
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `report` | per-run history record + JSONL/summary file I/O + digest render | amreport |
 | `notify` | pluggable alert backends (smtp/sendmail/webhook) + registry + dispatch | amreport mailto |
 | `catalog` | local cache of run index + volume registry; owns the in-memory `Run` grouping (id + its archives, with derived `Date`/`TotalBytes`/`LastArchiveAt`) and exposes archive projections (`Archives`/`ArchivesOn`) for the policy layer; derives `History` | catalog / curinfo / tapelist |
 | `retention` | retention safety floor: protected archives — `Compute` over `[]record.Archive` returns a per-`(run,DLE)` `Floor` (`.KeepsArchive`, plus run-level `.Keeps`/`.First`) (pure) | policy |
 | `recovery` | pure recovery planning: the archive chain to rebuild a DLE as of a run (`Chain`), as-of date/time resolution (`AsOf`), the browsable as-of tree + per-archive file selection, and the interactive browse session state | amrestore / amrecover (planning) |
-| `restorer` | the read-side operation package (mirror of `dumper`): `Extract(Request)` — the one whole-DLE chain restore behind `nb recover --all` *and* the drill's chain tier — plus `ExtractSelection` (file-level recovery) and the decode primitives verify reuses. Written over `archiveio.ReadStore` + narrow resolution funcs, so it tests over fakes | amrestore / amrecover (execution) |
+| `restorer` | the read-side operation package (mirror of `dumper`): `Extract(Request)` — the one whole-DLE chain restore behind `nb recover --all` *and* the drill's chain tier — plus `ExtractSelection` (file-level recovery) and the decode primitives verify reuses. Written over `archivefs.ReadStore` + narrow resolution funcs, so it tests over fakes | amrestore / amrecover (execution) |
 | `drill` | recovery-drill ledger + risk-biased selection + failure taxonomy (pure) | amverify (orchestrated) |
 | `planner` | multilevel level scheduling (pure) | planner |
 | `accounting` | medium capacity/retention/prune arithmetic: what a medium holds against its capacity, the protected residual a prune can't reclaim, the expected next volume + per-run room, and the prune/reclaim mutators — plus the dollar-cost overlay (`accounting/cost.go`) that prices the same bytes | (driver, capacity half) |
 | `scheduler` | the engine-side **driver** that feeds the pure `planner` its config/history/capacity inputs + the parallel size estimates, then applies the impure force-full post-pass `planner` can't (it probes the archiver's on-disk incremental state); also validates a run's config for previews | driver (planner front-end) |
 | `spool` | the run's concurrent write seam: routes each archive direct to its landing or through the holding-disk `Pool`, per-landing `writers` permits, one orchestrator goroutine as the sole catalog writer | taper (holding-disk half) |
 | `conductor` | the backup-run lane: executes one plan into one sealed run — flush leftovers (`Flush`, the crash-recovery drain), pre-flight tools, alloc run id, open the landing writer, run the `dumper` + `spool`, seal | driver (dump half) / amflush |
-| `engine` | the composition root + command facade: wires everything and owns almost no behavior. Two in-package resolution services — the `toolchain` (hosts/executors/archivers/transform options) and the `depot` (media/volumes/librarians/write knobs) — serve in-package lanes (`verifier`, `copier` incl. sync, `driller` incl. posture, `checker`) and the split-out lanes (`accounting`, `scheduler`, `conductor`, `dumper`, `restorer`, `clerk`) | driver |
+| `engine` | the composition root + command facade: wires everything and owns almost no behavior. One in-package resolution service — the `toolchain` (hosts/executors/archivers/transform options) — plus the constructed `depot` serve in-package lanes (`verifier`, `copier` incl. sync, `driller` incl. posture, `checker`) and the split-out lanes (`accounting`, `scheduler`, `conductor`, `dumper`, `restorer`, `archivefs`) | driver |
 | `cli` | thin command wiring | amdump / amadmin |
 
 Dependencies flow one way: `cli → engine → {planner, retention, archiver, xfer,
-clerk, archiveio, catalog, config, progress, recovery, restorer}` over leaf packages
-`{media, programs, sizeutil}`, all bottoming out on `record` (the on-medium artifact
-format that `media`, `archiveio`, and `catalog` read and write; `restorer` executes
-what `recovery` plans, over the `archiveio.ReadStore` the clerk implements). The reporting layer adds `cli → {report, notify}` with `notify → {report,
+archivefs, archiveio, depot, catalog, config, progress, recovery, restorer}` over leaf
+packages `{media, programs, sizeutil}`, all bottoming out on `record` (the on-medium
+artifact format that `media`, `archiveio`, and `catalog` read and write — and home of
+`Ref`, the archive identity both the block layer asserts and the fs resolves;
+`restorer` executes what `recovery` plans, over the `archivefs.ReadStore` the FS
+implements). The reporting layer adds `cli → {report, notify}` with `notify → {report,
 config}` — `report` is a pure leaf (record + render); the engine depends on neither.
 Domain packages stay pure; `archiver`/`media`/`transform/compress`/`transform/crypt`
 are pluggable adapters; `engine` is the only component aware of all of them. A backup
-is an **`xfer.Transfer`** the **`clerk`** composes (engine orchestrates, clerk moves
-the bytes): a **Source** (`tar`) → local **Filters** (compress/encrypt) → a **Sink**
-(the medium, via `archiveio` meter + split into parts); restore reverses it, and
-copy/verify/drill are Transfers with different endpoints — all composed by the `clerk`
-from the same two archiveio-coupled endpoints and the one `DecodeFilters` builder. (The
+is an **`xfer.Transfer`** composed over the **`archivefs`** endpoints (engine
+orchestrates, the fs moves the bytes): a **Source** (`tar`) → local **Filters**
+(compress/encrypt) → a **Sink** (the medium, via `archiveio` meter + split into parts);
+restore reverses it, and copy/verify/drill are Transfers with different endpoints — all
+composed from the same two archiveio-coupled endpoints and the one `DecodeFilters`
+builder. (The
 zone model and remote placement are detailed under "Execution is an injected transport"
 below.)
 
@@ -316,8 +320,8 @@ fails — never overfilling a disk or dropping data. A DLE estimated too big for
 oversized DLE never monopolizes the buffer. The load-bearing concurrency decision: **the
 orchestrator is the sole catalog writer.** The drainer does only catalog-free byte I/O; the
 landing Writer's control calls (`NextPart`/`PlaceRecord`, where a volume roll touches the
-catalog and drives the librarian) **funnel back to the orchestrator through a proxy
-`VolumeSink`**, so all catalog writes — holding placements, landing placements, volume labels —
+catalog and drives the librarian) **funnel back to the orchestrator through routed
+`PartAllocator`/`Recorder` seams**, so all catalog writes — holding placements, landing placements, volume labels —
 stay on one goroutine. Since the dumpers only queue (never touch the catalog), the catalog needs
 **no lock and no per-run actor**; it stays the single-threaded plain store "One mutating `nb`"
 already assumes (the flock still serializes *processes*). The orchestrator records each archive's
@@ -346,7 +350,7 @@ producers run. Crash-recovery `nb flush` re-resolves each staged archive's landi
 (`landingForDLEName`) so a multi-landing crash drains each DLE back to its own medium. *Deferred*: a
 manual tape swap mid-roll still freezes the orchestrator (hence all landings) because the librarian
 fuses the operator prompt with the catalog reconcile in one critical section; the non-blocking fix
-(invert `archiveio.VolumeSink`→`UseVolume` so the orchestrator drives a parkable roll, with a
+(invert `archiveio.PartAllocator`→`UseVolume` so the orchestrator drives a parkable roll, with a
 spool-side operator goroutine serializing prompts) is planned but not built.
 
 **One mutating `nb` per config at a time** (`internal/lock`). Rather than make the
@@ -532,7 +536,7 @@ tape emulator) — one drive, no addressable slots, a human loads it.
   carries the part *index*; the archive's commit footer carries the part *count*). An
   archive is always a list of parts (one in the common case). Splitting is
   **proactive**: the operator sets `volume_size`, so the writer (`archiveio.Writer` via
-  a `librarian.WriteSink`) sizes each part to the loaded volume's known remaining
+  a `librarian.Allocator`) sizes each part to the loaded volume's known remaining
   capacity (optionally capped by `part_size`) and rolls onto the next writable volume
   *between* parts — a robot loads the next writable slot (blank → auto-labeled,
   or an empty in-pool tape, or — once blanks are exhausted — the oldest Floor-cleared
@@ -548,7 +552,7 @@ tape emulator) — one drive, no addressable slots, a human loads it.
   cannot interleave two archives' parts, a spanning-capable landing **clamps workers to
   1**. Reads **auto-mount** the volume holding each part, in order — `archiveio`'s
   concatenating reader drains part *k* before mounting *k+1*, then reverses the scheme
-  over the concatenation. The roll/mount lives in `package librarian` (`WriteSink`,
+  over the concatenation. The roll/mount lives in `package librarian` (`Allocator`,
   `Advance`, `MountForRead`), the one place that dispatches on medium shape. Real-drive
   (`device:`) spanning is proactive-via-`part_size` only (a drive cannot see its own
   fill); the `dir:`-backed library spans on `volume_size` and is tested.

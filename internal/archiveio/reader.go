@@ -4,36 +4,36 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/Niloen/nbackup/internal/ratelimit"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// Reader reads an archive's part stream back from media. It holds no state and no volume:
-// an archive's parts may live on several volumes, so the caller supplies a PartOpener that
-// mounts and opens each part in turn. Reading is parts-only — concatenate, assert headers,
-// optionally re-hash. Reversing the payload's transforms (decrypt, decompress) is the
-// engine's job: it composes them as host-placed programs stages over Open's raw stream, so
-// decrypt runs where the key lives and decompress on the target.
-type Reader struct{}
+// PartOpener mounts the volume a part lives on and opens its file, returning the
+// file's header and a payload stream the caller closes. The fs implements it over an
+// opened read medium (mount the part's volume, then read its position). It is the
+// read side's device seam — addressed, not streaming: each call opens one named
+// part, which is why it is an Opener and not a Source (the write-side dual, the
+// PartAllocator, allocates instead: reads are random-access, writes append-ordered).
+type PartOpener func(p record.FilePos) (record.Header, io.ReadCloser, error)
 
-// NewReader returns a Reader.
-func NewReader() *Reader { return &Reader{} }
-
-// Ref is the logical identity of one archive — the archive fs's "filename": which
-// run, DLE, and level. The write side records it (part headers, catalog); the read
-// side resolves it to physical parts and asserts it against each part file's actual
-// header before its bytes are trusted — the cheap catch-all against a swapped
-// volume or a stale catalog (the header is decoded anyway).
-type Ref struct {
-	Run   string
-	DLE   string
-	Level int
+// Reader is one medium's read end — the mirror of Writer (one run's write end). It is
+// bound to the medium at construction: open is the device seam each part is opened
+// through, lim (nil = uncapped) paces the bytes read back, shared by every stream this
+// Reader opens so concurrent reads from one medium share its budget. Each Open is one
+// archive. Reading is parts-only — concatenate, assert headers, optionally re-hash.
+// Reversing the payload's transforms (decrypt, decompress) is the operations' job: they
+// compose them as host-placed program stages over Open's raw stream, so decrypt runs
+// where the key lives and decompress on the target.
+type Reader struct {
+	open PartOpener
+	lim  *ratelimit.Limiter
 }
 
-// PartOpener mounts the volume a part lives on and opens its file, returning the
-// file's header and a payload stream the caller closes. The engine implements it
-// over the librarian (mount the part's volume, then ReadFile its position).
-type PartOpener func(p record.FilePos) (record.Header, io.ReadCloser, error)
+// NewReader binds a Reader to a medium's part opener and its bandwidth cap.
+func NewReader(open PartOpener, lim *ratelimit.Limiter) *Reader {
+	return &Reader{open: open, lim: lim}
+}
 
 // Open returns an archive's payload as the ordered concatenation of its part files —
 // still in on-medium form (compressed/encrypted), untransformed. It is the single read
@@ -42,21 +42,21 @@ type PartOpener func(p record.FilePos) (record.Header, io.ReadCloser, error)
 // first part eagerly so a missing/wrong volume errors here, letting a copy-selecting caller
 // fail over to another copy rather than discovering the fault only once bytes are pulled.
 // Each part's header is asserted as it is reached. The caller closes the returned reader.
-func (r *Reader) Open(parts []record.FilePos, want Ref, open PartOpener) (io.ReadCloser, error) {
+func (r *Reader) Open(ref record.Ref, parts []record.FilePos) (io.ReadCloser, error) {
 	if len(parts) == 0 {
-		return nil, fmt.Errorf("archive %s %s L%d has no parts", want.Run, want.DLE, want.Level)
+		return nil, fmt.Errorf("archive %s %s L%d has no parts", ref.Run, ref.DLE, ref.Level)
 	}
-	raw := &partsReader{parts: parts, want: want, open: open}
+	raw := &partsReader{parts: parts, want: ref, open: r.openLimited}
 	if err := raw.prime(); err != nil {
 		return nil, err
 	}
 	return raw, nil
 }
 
-// VerifyParts asserts each part's header against want, then re-hashes the
-// concatenated raw payloads and compares to sha.
-func (r *Reader) VerifyParts(parts []record.FilePos, want Ref, sha string, open PartOpener) (bool, error) {
-	raw := &partsReader{parts: parts, want: want, open: open}
+// Verify asserts each part's header against ref, then re-hashes the concatenated raw
+// payloads and compares to sha.
+func (r *Reader) Verify(ref record.Ref, parts []record.FilePos, sha string) (bool, error) {
+	raw := &partsReader{parts: parts, want: ref, open: r.openLimited}
 	defer raw.Close()
 	got, err := xfer.SHA256(raw)
 	if err != nil {
@@ -65,12 +65,22 @@ func (r *Reader) VerifyParts(parts []record.FilePos, want Ref, sha string, open 
 	return got == sha, nil
 }
 
+// openLimited opens one part through the bound opener and paces its stream to the
+// medium's cap.
+func (r *Reader) openLimited(p record.FilePos) (record.Header, io.ReadCloser, error) {
+	h, rc, err := r.open(p)
+	if err != nil {
+		return h, rc, err
+	}
+	return h, r.lim.ReadCloser(rc), nil
+}
+
 // partsReader concatenates an archive's part payloads, opening each part lazily as
 // the previous one is exhausted so that only one volume is mounted at a time. It
 // asserts each part's header (identity + ascending part index) before its bytes flow.
 type partsReader struct {
 	parts []record.FilePos
-	want  Ref
+	want  record.Ref
 	open  PartOpener
 	idx   int
 	cur   io.ReadCloser
@@ -139,7 +149,7 @@ func (pr *partsReader) Close() error {
 // assertPart confirms a part file's header is the archive part the catalog expected:
 // the right archive identity and the right index in the sequence. A mismatch means
 // the wrong volume is mounted or the catalog is stale.
-func assertPart(h record.Header, want Ref, part int) error {
+func assertPart(h record.Header, want record.Ref, part int) error {
 	if h.Kind != record.KindArchive {
 		return fmt.Errorf("position holds a %q record, not an archive", h.Kind)
 	}

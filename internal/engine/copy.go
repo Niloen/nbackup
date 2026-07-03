@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
-	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/conductor"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
@@ -21,11 +21,11 @@ import (
 // from one configured medium onto another, recording the new copy as a second placement. The
 // bytes are carried raw — no transform — so checksums and members carry over; only the part
 // layout changes to fit the target's volumes. It depends on a narrow slice of the orchestrator:
-// the catalog (run metadata + where copies live), the clerk (the read/write data path), and the
+// the catalog (run metadata + where copies live), the fs (the read/write data path), and the
 // shared write machinery (prepareWriter) — not the whole engine.
 type copier struct {
 	cat         *catalog.Catalog                                     // run metadata
-	clerk       *clerk.Clerk                                         // read endpoints + write session
+	fs          *archivefs.FS                                        // read endpoints + write session
 	landing     string                                               // default source medium (the landing medium)
 	knownMedium func(name string) bool                               // target is a configured medium
 	mediaHint   func() string                                        // "(configured: a, b, c)" for an unknown-medium error
@@ -46,8 +46,8 @@ type copier struct {
 func (e *Engine) newCopier() *copier {
 	return &copier{
 		cat:         e.cat,
-		clerk:       e.clerk,
-		landing:     e.dep.landingName,
+		fs:          e.fs,
+		landing:     e.dep.LandingName(),
 		knownMedium: func(name string) bool { _, ok := e.cfg.Media[name]; return ok },
 		mediaHint:   func() string { return mediaNamesHint(e.cfg) },
 		placementOn: e.placementOn,
@@ -258,7 +258,7 @@ func (c *copier) prepareRun(runID, fromMedia, targetMedia string, force bool) ([
 // per target drive, up to `workers`, so a multi-drive library re-authors several at once. Source reads
 // run concurrently only when the source medium allows it (disk/cloud); a tape source stays serial.
 func (c *copier) runCopy(targetMedia, fromMedia string, spec archiveio.RunSpec, jobs []copyJob, logf Logf) error {
-	return c.newConductor().CopyRun(context.Background(), targetMedia, fromMedia, spec, c.workers, spec.CreatedAt, logf, func(sp *spool.Spool, ro archiveio.ReadStore) error {
+	return c.newConductor().CopyRun(context.Background(), targetMedia, fromMedia, spec, c.workers, spec.CreatedAt, logf, func(sp *spool.Spool, ro archivefs.ReadStore) error {
 		return c.transfer(context.Background(), jobs, fromMedia, targetMedia, sp.Ingest(targetMedia), ro, logf)
 	})
 }
@@ -266,7 +266,7 @@ func (c *copier) runCopy(targetMedia, fromMedia string, spec archiveio.RunSpec, 
 // copyJob is one archive to re-author onto the target: its read ref, its metadata (identity, checksum,
 // members — preserved by NewCopy), and its compressed size (the spool's back-pressure estimate).
 type copyJob struct {
-	ref  archiveio.Ref
+	ref  record.Ref
 	meta record.Archive
 	est  int64
 }
@@ -276,8 +276,8 @@ type copyJob struct {
 func (c *copier) jobsForRun(runID string, archives []record.Archive) []copyJob {
 	jobs := make([]copyJob, 0, len(archives))
 	for _, a := range archives {
-		ref := archiveio.Ref{Run: runID, DLE: a.DLE, Level: a.Level}
-		a.Members, _ = c.clerk.Members(ref)
+		ref := record.Ref{Run: runID, DLE: a.DLE, Level: a.Level}
+		a.Members, _ = c.fs.Members(ref)
 		jobs = append(jobs, copyJob{ref: ref, meta: a, est: a.Compressed})
 	}
 	return jobs
@@ -288,9 +288,9 @@ func (c *copier) jobsForRun(runID string, archives []record.Archive) []copyJob {
 // opens the archive raw, leases a target drive via NewCopy, and streams it in; the spool's drive
 // semaphore bounds the target side, so the effective width is min(source reads, target drives).
 //
-// Source opens go through ro — the window's catalog snapshot — never the live clerk: the workers run
+// Source opens go through ro — the window's catalog snapshot — never the live fs: the workers run
 // concurrently with the spool's orchestrator, which owns the live catalog for the window's duration.
-func (c *copier) transfer(ctx context.Context, jobs []copyJob, fromMedia, targetMedia string, ingest archiveio.Ingest, ro archiveio.ReadStore, logf Logf) error {
+func (c *copier) transfer(ctx context.Context, jobs []copyJob, fromMedia, targetMedia string, ingest archivefs.Ingest, ro archivefs.ReadStore, logf Logf) error {
 	workers := c.workers
 	if !c.concurrentRead(fromMedia) {
 		workers = 1 // a serial source (tape) is read one archive at a time
@@ -340,7 +340,7 @@ func (c *copier) transfer(ctx context.Context, jobs []copyJob, fromMedia, target
 // transferOne opens one source archive raw and re-authors it onto the target via NewCopy (which leases
 // a drive, preserves the source's identity/checksum/members, and records the new placement on Commit).
 // Transfer drives and closes the writer, so the drive is released whether or not the copy commits.
-func (c *copier) transferOne(ctx context.Context, job copyJob, fromMedia, targetMedia string, ingest archiveio.Ingest, ro archiveio.ReadStore) error {
+func (c *copier) transferOne(ctx context.Context, job copyJob, fromMedia, targetMedia string, ingest archivefs.Ingest, ro archivefs.ReadStore) error {
 	rc, err := ro.Open(job.ref, fromMedia)
 	if err != nil {
 		return fmt.Errorf("copy %s L%d from %q: %w", job.ref.DLE, job.ref.Level, fromMedia, err)

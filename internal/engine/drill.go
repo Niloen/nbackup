@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/accounting"
-	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/catalog"
-	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/depot"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/record"
@@ -94,7 +94,7 @@ type DrillReport struct {
 func (r *DrillReport) SLOMet() bool { return r.Failures == 0 }
 
 // driller is the drill operation. Like the verifier and copier it depends on a
-// narrow slice of the orchestrator — the catalog and ledger workdir, the clerk (the
+// narrow slice of the orchestrator — the catalog and ledger workdir, the fs (the
 // read data path), the verifier (per-archive checks), the restorer (the chain tier
 // rehearses the real restore path), the accountant (egress pricing + the posture's
 // capacity digit), the depot (source-medium librarians for the WORM probe and the
@@ -104,8 +104,8 @@ type driller struct {
 	cfg           *config.Config
 	cat           *catalog.Catalog
 	tc            *toolchain
-	dep           *depot
-	clerk         *clerk.Clerk
+	dep           *depot.Depot
+	fs            *archivefs.FS
 	ver           *verifier
 	rst           *restorer.Restorer
 	acct          *accounting.Accountant
@@ -120,7 +120,7 @@ func (e *Engine) newDriller() *driller {
 		cat:           e.cat,
 		tc:            e.tc,
 		dep:           e.dep,
-		clerk:         e.clerk,
+		fs:            e.fs,
 		ver:           e.ver,
 		rst:           e.rst,
 		acct:          e.acct,
@@ -144,7 +144,7 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 	}
 	medium := opts.Medium
 	if medium == "" {
-		medium = d.dep.landingName
+		medium = d.dep.LandingName()
 	}
 	if _, ok := d.cfg.Media[medium]; !ok {
 		return nil, fmt.Errorf("unknown drill medium %q", medium)
@@ -167,10 +167,10 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 	// honest cost of an offsite drill (an encrypted+compressed archive is all-or-
 	// nothing, so a structural/chain drill spends the full bytes).
 	if cm := d.acct.CostModelFor(medium); cm.Priced() {
-		var refs []archiveio.Ref
+		var refs []record.Ref
 		for _, t := range targets {
 			for _, s := range t.Steps {
-				refs = append(refs, archiveio.Ref{Run: s.RunID, DLE: s.DLE, Level: s.Level})
+				refs = append(refs, record.Ref{Run: s.RunID, DLE: s.DLE, Level: s.Level})
 			}
 		}
 		est := d.acct.EstimateRead(refs, medium)
@@ -269,8 +269,8 @@ func (d *driller) drillTarget(t drill.Target, medium string, opts DrillOptions, 
 // drillVerify exercises a target's chain archives with the verify primitive on the
 // chosen medium (checksum, or checksum+structural). It stops at the first fault.
 func (d *driller) drillVerify(t drill.Target, medium string, checks VerifyChecks) (drill.Class, string) {
-	refs := make([]archiveio.Ref, 0, len(t.Steps))
-	archByRef := make(map[archiveio.Ref]record.Archive, len(t.Steps))
+	refs := make([]record.Ref, 0, len(t.Steps))
+	archByRef := make(map[record.Ref]record.Archive, len(t.Steps))
 	for _, step := range t.Steps {
 		s, err := d.cat.ReadRun(step.RunID)
 		if err != nil {
@@ -280,7 +280,7 @@ func (d *driller) drillVerify(t drill.Target, medium string, checks VerifyChecks
 		if !ok {
 			return drill.ClassMissing, fmt.Sprintf("%s %s L%d missing from the run's commit footers", step.RunID, step.DLE, step.Level)
 		}
-		ref := archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}
+		ref := record.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}
 		refs = append(refs, ref)
 		archByRef[ref] = a
 	}
@@ -288,7 +288,7 @@ func (d *driller) drillVerify(t drill.Target, medium string, checks VerifyChecks
 	// whole). A failing verdict is carried out via a sentinel error.
 	var bad ArchiveVerdict
 	errStop := errors.New("drill: archive failed")
-	missing, err := d.clerk.ReadArchives(refs, medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
+	missing, err := d.fs.ReadArchives(refs, medium, func(ref record.Ref, open func() (io.ReadCloser, error)) error {
 		v := d.ver.verifyArchive(archByRef[ref], ref, medium, VerifyOptions{Checks: checks, Medium: medium}, open, nil)
 		if !v.OK {
 			bad = v
@@ -333,7 +333,7 @@ func (d *driller) drillChain(t drill.Target, medium string, logf Logf) (drill.Cl
 // or its exit status was bad) is Chain; anything else — an unreadable part or a
 // decrypt/decompress child — is Pipeline.
 func classifyRestoreErr(err error) drill.Class {
-	if errors.Is(err, archiveio.ErrMissingCopy) || errors.Is(err, librarian.ErrVolumeUnavailable) {
+	if errors.Is(err, archivefs.ErrMissingCopy) || errors.Is(err, librarian.ErrVolumeUnavailable) {
 		return drill.ClassMissing
 	}
 	var xe *xfer.Error
@@ -370,7 +370,7 @@ func (d *driller) stockExtractStep(step recovery.Step, dest, medium string, logf
 		return drill.ClassPipeline, err.Error()
 	}
 	defer os.Remove(tmp.Name())
-	src, err := d.clerk.Open(archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}, medium)
+	src, err := d.fs.Open(record.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}, medium)
 	if err != nil {
 		tmp.Close()
 		return classifyOpenErr(err), err.Error()
@@ -509,7 +509,7 @@ func (d *driller) chainBytes(steps []recovery.Step) int64 {
 // catalog read path, librarian.ErrVolumeUnavailable from the mount path) via errors.Is,
 // so reclassification does not silently follow a reworded message.
 func classifyOpenErr(err error) drill.Class {
-	if errors.Is(err, archiveio.ErrMissingCopy) || errors.Is(err, librarian.ErrVolumeUnavailable) {
+	if errors.Is(err, archivefs.ErrMissingCopy) || errors.Is(err, librarian.ErrVolumeUnavailable) {
 		return drill.ClassMissing
 	}
 	return drill.ClassPipeline

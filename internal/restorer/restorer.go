@@ -4,11 +4,11 @@
 // restore behind `nb recover --all` — and behind a chain drill, which rehearses
 // exactly this path), ExtractSelection extracts a browsed file selection, and
 // OpenRecover builds the browse tree. It is written over the archive fs's read
-// face (archiveio.ReadStore) plus narrow resolution funcs (Deps), never the
+// face (archivefs.ReadStore) plus narrow resolution funcs (Deps), never the
 // engine, so it needs no real media to test.
 //
 // Failure classification rides on the errors it returns, never a side channel:
-// archiveio.ErrMissingCopy / librarian.ErrVolumeUnavailable survive wrapping for
+// archivefs.ErrMissingCopy / librarian.ErrVolumeUnavailable survive wrapping for
 // errors.Is, and a role-tagged *xfer.Error surfaces for errors.As — a Sink fault
 // is a tar/composition failure, anything else a decode/read failure. The drill
 // depends on this contract.
@@ -23,7 +23,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/logf"
@@ -42,7 +42,7 @@ type Logf = logf.Logf
 // engine's resolution — hosts, archivers, per-DLE encryption posture. Funcs, not
 // the engine, so the operations stay testable over fakes.
 type Deps struct {
-	Store    archiveio.ReadStore     // raw archive bytes + member lists
+	Store    archivefs.ReadStore     // raw archive bytes + member lists
 	Archives func() []record.Archive // catalog archive metadata, run-ordered
 	Exec     func(host string) programs.Executor
 	// ArchiverFor resolves the archiver that reverses a recorded type, built for
@@ -169,10 +169,10 @@ func (r *Restorer) extractChain(runID string, req Request, rollbackOnFail bool, 
 		return err
 	}
 
-	stepByRef := make(map[archiveio.Ref]recovery.Step, len(steps))
-	refs := make([]archiveio.Ref, 0, len(steps))
+	stepByRef := make(map[record.Ref]recovery.Step, len(steps))
+	refs := make([]record.Ref, 0, len(steps))
 	for _, step := range steps {
-		ref := archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}
+		ref := record.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}
 		stepByRef[ref] = step
 		refs = append(refs, ref)
 	}
@@ -180,15 +180,15 @@ func (r *Restorer) extractChain(runID string, req Request, rollbackOnFail bool, 
 	// extracted over a missing base would fabricate a wrong tree. Resolve
 	// availability first (a no-op pass touches only the catalog, no media), so a
 	// missing copy fails the restore before a single byte lands.
-	if missing, err := r.deps.Store.ReadArchives(refs, req.Medium, func(archiveio.Ref, func() (io.ReadCloser, error)) error { return nil }); err != nil {
+	if missing, err := r.deps.Store.ReadArchives(refs, req.Medium, func(record.Ref, func() (io.ReadCloser, error)) error { return nil }); err != nil {
 		return err
 	} else if len(missing) > 0 {
 		m := missing[0]
-		return fmt.Errorf("%w: %s %s L%d has no copy%s — the chain cannot be replayed", archiveio.ErrMissingCopy, m.Run, m.DLE, m.Level, onMediumSuffix(req.Medium))
+		return fmt.Errorf("%w: %s %s L%d has no copy%s — the chain cannot be replayed", archivefs.ErrMissingCopy, m.Run, m.DLE, m.Level, onMediumSuffix(req.Medium))
 	}
 
 	d := dest{exec: r.deps.Exec(req.Host), host: req.Host, dir: req.Dest}
-	_, err = r.deps.Store.ReadArchives(refs, req.Medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
+	_, err = r.deps.Store.ReadArchives(refs, req.Medium, func(ref record.Ref, open func() (io.ReadCloser, error)) error {
 		step := stepByRef[ref]
 		log.Log("extracting %s %s L%d -> %s", step.RunID, r.deps.DisplayDLE(step.DLE), step.Level, req.Dest)
 		rc, oerr := open()

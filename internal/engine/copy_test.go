@@ -107,7 +107,7 @@ func TestCopyForceReclaimsThenRecopies(t *testing.T) {
 	assertContent(t, filepath.Join(dest, "f.txt"), "copy me")
 }
 
-// TestCopyTransferOpenFails exercises transferOne's clerk.Open error branch: when the
+// TestCopyTransferOpenFails exercises transferOne's archivefs.Open error branch: when the
 // source payload has gone missing (its placement is still recorded), opening the
 // archive to copy it fails with the source medium named.
 func TestCopyTransferOpenFails(t *testing.T) {

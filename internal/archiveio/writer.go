@@ -1,14 +1,14 @@
-// Package archiveio authors and reads runs on a media.Volume. It owns how a run maps
-// onto a volume's files — one or more part files per archive plus a final seal record
-// carrying the run's metadata — so the engine supplies only an already-transformed
-// payload stream and descriptive metadata, never positions or filenames. archiveio knows
-// nothing of compression or encryption: it meters (checksum + size) the bytes that land
-// and splits them into parts. The transform pipeline (compress/encrypt) is the engine's
-// to compose and run; archiveio drains its output.
+// Package archiveio is the block layer: it maps archives onto a media.Volume's files —
+// one or more part files per archive plus a final commit footer carrying the archive's
+// metadata — so the layers above supply only an already-transformed payload stream and
+// descriptive metadata, never positions or filenames. archiveio knows nothing of
+// compression or encryption: it meters (checksum + size) the bytes that land and splits
+// them into parts. The transform pipeline (compress/encrypt) is the operations' to
+// compose and run; archiveio drains its output.
 //
 // An archive may be split into several parts across volumes (tape spanning). The writer
 // drains the payload into parts sized to fit each volume's known remaining capacity,
-// rolling to the next volume (via a VolumeSink) between parts. The split is PROACTIVE —
+// rolling to the next volume (via the PartAllocator) between parts. The split is PROACTIVE —
 // each part is bounded before it is written — so a volume is never overfilled in the
 // normal path; the media.ErrVolumeFull backstop only fires when an estimate came up short,
 // and then the write fails rather than recovering.
@@ -30,92 +30,104 @@ import (
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// VolumeSink is the writer's view of a medium's changer: where the next part goes,
-// how much fits, and how to roll between volumes. The librarian implements it (it
-// owns the medium's shape and the roll). The writer never decides to roll — it asks
-// for a part and writes it; the sink rolls onto a fresh volume when the loaded one is
-// full, so the same call serves both "this volume has room for one more part" and
-// "this volume is full, here is the next one".
-type VolumeSink interface {
+// PartAllocator is the writer's device seam — the write-side dual of PartOpener,
+// named like it by the exchanged unit (a part slot), not by the implementer's scope.
+// It answers where the next part goes, how much fits, and rolls between volumes; no
+// bytes ever flow through it (the payload goes into the media.Volume it returns), so
+// it is an allocator, never a Sink — "Sink" is reserved for true byte sinks
+// (xfer.Sink). The librarian's drive-bound Allocator implements it (it owns the
+// medium's shape and the roll); the spool wraps one in a routed allocator so rolls
+// serialize on its orchestrator. The writer never decides to roll — it asks for a
+// part slot and writes it; the allocator rolls onto a fresh volume when the loaded
+// one is full, so the same call serves both "this volume has room for one more part"
+// and "this volume is full, here is the next one".
+type PartAllocator interface {
 	// NextPart returns the volume to write the next part to and the maximum payload
 	// bytes for it (its remaining capacity minus a file header, capped by part_size),
 	// rolling onto a fresh volume first if the loaded one is full. A max < 0 means
 	// unbounded — write the whole remaining stream as a single part. It errors when a
 	// roll is needed but no further writable volume is available.
 	NextPart() (vol media.Volume, max int64, volume string, epoch int, err error)
-	// PlaceRecord returns the volume to write a small whole record (an archive's member
+	// PlaceFile returns the volume to write a small whole file (an archive's member
 	// index or its commit footer) of the given payload size to, rolling first if it will
 	// not fit the loaded volume.
-	PlaceRecord(size int64) (vol media.Volume, volume string, epoch int, err error)
-	// Bounded reports whether this sink ever caps a part's size — by a configured part_size
-	// or by a finite volume's remaining capacity (the dual of NextPart's "max < 0 means
-	// unbounded"). When true an archive may land as several parts (cloud splitting under a
-	// part_size cap, or a finite reel spanning volumes mid-archive), so the writer stamps
-	// every part's Header.Split to mark it a slice of one whole — named and read as such,
-	// not as a standalone file. When false (disk: no cap, infinite room) each archive is a
-	// single, standalone part. It is a property of the medium, constant for the write, so the
-	// writer asks once. (This is the same predicate as the medium's spanning capability.)
+	PlaceFile(size int64) (vol media.Volume, volume string, epoch int, err error)
+	// Bounded reports whether this allocator ever caps a part's size — by a configured
+	// part_size or by a finite volume's remaining capacity (the dual of NextPart's "max < 0
+	// means unbounded"). When true an archive may land as several parts (cloud splitting
+	// under a part_size cap, or a finite reel spanning volumes mid-archive), so the writer
+	// stamps every part's Header.Split to mark it a slice of one whole — named and read as
+	// such, not as a standalone file. When false (disk: no cap, infinite room) each archive
+	// is a single, standalone part. It is a property of the medium, constant for the write,
+	// so the writer asks once. (This is the same predicate as the medium's spanning
+	// capability.)
 	Bounded() bool
 }
 
-// WriteStore is an archive writer's whole write store: it allocates volumes (VolumeSink) and
-// records each finished archive's placement. The clerk implements it serially — alloc reaches the
-// librarian, Record writes the catalog, both inline on the caller's goroutine — while the spool
-// wraps N of them, routing alloc and Record to its single orchestrator so a slow drive never blocks
-// the catalog. The ArchiveWriter SDK below is written once over this interface and is oblivious to
-// which implementation it holds; that is the whole serial-vs-concurrent seam. (Name provisional.)
-type WriteStore interface {
-	VolumeSink
-	// Record commits one finished archive's placement onto this store's medium — reported once
-	// Commit has assembled the record (Amanda's taper "DONE"). Inline for the serial impl; routed to
-	// the orchestrator for the concurrent one. It is the whole worker→coordinator crossing: one value.
+// Recorder is the writer's commit seam — where a finished archive's assembled
+// CommitResult crosses back to the file layer (Amanda's taper "DONE"). The fs Session
+// implements it (the single catalog write per archive); the spool wraps one in a
+// routed recorder so placements serialize on its orchestrator with the rolls. It is
+// the whole worker→coordinator crossing: one value, passed by copy, never shared
+// writer state. Allocation and recording are deliberately two seams, not one glued
+// interface: they have different owners (the device side allocates, the fs side
+// records), exactly as a real fs's block allocator is not part of the file handle.
+type Recorder interface {
 	Record(result CommitResult) error
 }
 
 // RunSpec is the identity of a run to author: the run id every archive in the run is
 // tagged with, plus when authoring began (stamped into each file's header). A run is just
 // that shared tag — the archives carry it and the catalog groups them back — so there is no
-// run record for the Author to produce.
+// run record for the Writer to produce.
 type RunSpec struct {
 	ID        string    // the run's identity (see record.IDFromTime)
 	CreatedAt time.Time // when authoring began; a copy preserves the source run's
 }
 
-// Author authors a single run onto a medium via a WriteStore. Callers stream each archive's
-// payload with NewArchive and finalize it with Commit (which writes the archive's member
-// index and its commit footer — the per-archive marker — then reports it via WriteStore.Record).
-// There is no run-level seal: a run is the grouping its archives carry in their headers, and a
-// crashed run's committed archives survive (uncommitted parts are orphans a scan ignores). The
-// Author accumulates no run state — each archive is durable and recorded the moment it commits —
-// so NewArchive is safe for concurrent use on an unbounded store (disk); a bounded,
-// spanning-capable store rolls one shared volume and must be driven serially.
-type Author struct {
-	store     WriteStore
+// Writer is one run's write end — the mirror of Reader (one medium's read end). It is
+// bound at construction to its two seams: alloc places parts on volumes, rec receives
+// each committed archive. Callers stream each archive's payload with NewArchive and
+// finalize it with Commit (which writes the archive's member index and its commit
+// footer — the per-archive marker — then reports it via rec.Record). There is no
+// run-level seal: a run is the grouping its archives carry in their headers, and a
+// crashed run's committed archives survive (uncommitted parts are orphans a scan
+// ignores). The Writer accumulates no run state — each archive is durable and recorded
+// the moment it commits — so NewArchive is safe for concurrent use on an unbounded
+// medium (disk); a bounded, spanning-capable allocator rolls one shared volume and must
+// be driven serially.
+type Writer struct {
+	alloc     PartAllocator
+	rec       Recorder
 	lim       *ratelimit.Limiter // optional bandwidth cap on the bytes landing on the medium (nil = uncapped)
 	now       func() time.Time   // clock for per-archive commit timestamps (nil → time.Now)
 	runID     string             // the run tag every archive in this run carries; read-only after construction
 	createdAt time.Time          // when authoring began, stamped into each file's header
 }
 
-// NewAuthor begins authoring a new run, described by spec, onto store. The Author holds only the
-// run tag and creation time from spec. lim, when non-nil, caps the rate of bytes written to the
-// medium (network politeness); a nil lim is uncapped. The same lim is shared across concurrent
-// NewArchive writers on an unbounded store, so several workers to one medium share its budget.
-func NewAuthor(store WriteStore, spec RunSpec, lim *ratelimit.Limiter, now func() time.Time) *Author {
+// NewWriter begins authoring a new run, described by spec, over its two seams: alloc (the
+// opened write medium's part allocator — serial: the librarian's drive-bound Allocator;
+// concurrent: the spool's routed one) and rec (the fs Session recording each commit —
+// inline to the catalog, or routed to the spool's orchestrator). The Writer holds only the
+// run tag and creation time from spec. lim, when non-nil, caps the rate of bytes written
+// to the medium (network politeness); a nil lim is uncapped. The same lim is shared across
+// concurrent NewArchive writers on an unbounded medium, so several workers to one medium
+// share its budget.
+func NewWriter(alloc PartAllocator, rec Recorder, spec RunSpec, lim *ratelimit.Limiter, now func() time.Time) *Writer {
 	if now == nil {
 		now = time.Now
 	}
-	return &Author{store: store, lim: lim, now: now, runID: spec.ID, createdAt: spec.CreatedAt}
+	return &Writer{alloc: alloc, rec: rec, lim: lim, now: now, runID: spec.ID, createdAt: spec.CreatedAt}
 }
 
 // NewArchive begins writing the archive described by spec onto the run, pulled part-by-part by
 // NextPart (the caller copies up to each part's cap into the returned writer, closes it, and asks for
 // the next until the payload is exhausted). Rolling to a fresh volume happens inside NextPart, so a
-// spanning medium's roll lands wherever the store routes it. The payload is metered (sha256 + size)
+// spanning medium's roll lands wherever the allocator routes it. The payload is metered (sha256 + size)
 // on the write path — so the metering runs on the caller's goroutine — and Commit finalizes the
-// footer with the producer's totals and reports the placement to the store. To observe the running
+// footer with the producer's totals and reports the placement to the recorder. To observe the running
 // landed byte count for live progress, attach a tap with MeterArchive.
-func (w *Author) NewArchive(spec ArchiveSpec) *ArchiveWriter {
+func (w *Writer) NewArchive(spec ArchiveSpec) *ArchiveWriter {
 	meta := record.Archive{
 		Run:      w.runID,
 		DLE:      spec.DLE,
@@ -136,7 +148,7 @@ func (w *Author) NewArchive(spec ArchiveSpec) *ArchiveWriter {
 // members, and CreatedAt (a copy keeps the source's identity and age); only the part layout, sized to
 // this medium's volumes, is new. The spool's holding->backing drain, `nb copy`, and crash-recovery
 // Flush all share this one copy path. Attach a tap with MeterArchive for live progress.
-func (w *Author) NewCopy(arch record.Archive) *ArchiveWriter {
+func (w *Writer) NewCopy(arch record.Archive) *ArchiveWriter {
 	// arch keeps its own run — a copy preserves the source archive's identity, so one writer can
 	// re-author archives from several source runs (a cross-run sync) and file each under its own run.
 	// For a per-run copy the writer's run is that same id, so this is unchanged there.
@@ -146,7 +158,7 @@ func (w *Author) NewCopy(arch record.Archive) *ArchiveWriter {
 // MeterArchive attaches a progress tap to aw — the running count of landed bytes, reported after
 // each write on the writing goroutine — and returns aw for chaining. A nil tap is a no-op. The count
 // is the same one the writer already meters for the archive's size, so this only exposes it; the
-// writer, store, spool, and clerk stay otherwise observability-free.
+// writer, session, spool, and fs stay otherwise observability-free.
 func MeterArchive(aw *ArchiveWriter, tap func(landed int64)) *ArchiveWriter {
 	aw.tap = tap
 	return aw
@@ -155,10 +167,10 @@ func MeterArchive(aw *ArchiveWriter, tap func(landed int64)) *ArchiveWriter {
 // ArchiveWriter is one archive's part-by-part write SDK (see NewArchive / NewCopy). A transfer drives
 // it as an xfer.Sink: NextPart/Commit do all the byte I/O — headers, payload, footer, member index,
 // SHA and size — on the caller's goroutine, and Commit assembles the record and reports it to the
-// Author's WriteStore (WriteStore.Record). It is a concrete client of WriteStore; the serial-vs-concurrent
-// choice lives entirely in which WriteStore the Author holds, never here.
+// Writer's Recorder. It is a concrete client of the Writer's two seams; the serial-vs-concurrent
+// choice lives entirely in which allocator and recorder the Writer holds, never here.
 type ArchiveWriter struct {
-	w         *Author
+	w         *Writer
 	base      record.Header
 	meta      record.Archive
 	expectSHA string // a copy's known digest to verify against ("" for a fresh dump)
@@ -191,10 +203,10 @@ func (a *ArchiveWriter) SetCloser(fn func() error) { a.onClose = fn }
 // NextPart rolls to the next volume and returns a writer for the next part plus its byte cap
 // (max < 0 = unbounded). The caller copies up to max bytes into it and Closes it; the part's position
 // is recorded on Close. Cancel ctx before Close to abort the part (no committed file). Only the
-// WriteStore.NextPart alloc may cross to the orchestrator; the AppendFile header and the payload writes
-// stay on this goroutine.
+// PartAllocator.NextPart alloc may cross to the orchestrator; the AppendFile header and the payload
+// writes stay on this goroutine.
 func (a *ArchiveWriter) NextPart(ctx context.Context) (io.WriteCloser, int64, error) {
-	vol, max, volName, epoch, err := a.w.store.NextPart()
+	vol, max, volName, epoch, err := a.w.alloc.NextPart()
 	if err != nil {
 		return nil, 0, err
 	}
@@ -240,8 +252,8 @@ func (p *archivePartWriter) Close() error {
 
 // Commit (xfer.Sink) finalizes the archive: it sets the metered compressed size and the new part
 // count, writes the footer + member index, assembles the CommitResult, and reports it to the
-// Author's WriteStore — inline to the catalog for the serial clerk, routed to the orchestrator for the
-// concurrent spool. That report is the whole worker→coordinator crossing: one value.
+// Writer's Recorder — inline to the catalog for the serial fs Session, routed to the orchestrator
+// for the concurrent spool. That report is the whole worker→coordinator crossing: one value.
 //
 // A fresh dump derives the rest from this writer and the producer's raw-stream totals (sha, file
 // count, uncompressed size, members) and stamps CreatedAt now. A copy (NewCopy) instead verifies the
@@ -276,7 +288,7 @@ func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.SourceStats) error {
 		return err
 	}
 	res := CommitResult{Archive: arch, Pos: pos}
-	if err := a.w.store.Record(res); err != nil {
+	if err := a.w.rec.Record(res); err != nil {
 		return err
 	}
 	a.committed = &res
@@ -297,11 +309,11 @@ func (a *ArchiveWriter) Close() error {
 // Commit durably finalizes an archive (all fields final): it writes the member index (the
 // gzip'd Members) then the commit footer (the metadata without members) — the footer last,
 // so a crash before it leaves orphan parts a scan ignores. It returns the archive's on-medium
-// position (parts/footer/index) for the caller to record. The Author keeps no run state — the
+// position (parts/footer/index) for the caller to record. The Writer keeps no run state — the
 // footer makes the archive durable and the caller records it from the returned position — so
-// concurrent Commits on an unbounded store need no coordination here. Call it once the caller has
+// concurrent Commits on an unbounded medium need no coordination here. Call it once the caller has
 // merged the producer's stats (FileCount/Uncompressed/Members) into the archive.
-func (w *Author) Commit(ctx context.Context, arch record.Archive, parts []record.FilePos) (record.ArchivePos, error) {
+func (w *Writer) Commit(ctx context.Context, arch record.Archive, parts []record.FilePos) (record.ArchivePos, error) {
 	var index record.FilePos
 	if len(arch.Members) > 0 {
 		var buf bytes.Buffer
@@ -337,8 +349,8 @@ func (w *Author) Commit(ctx context.Context, arch record.Archive, parts []record
 // writeRecord places and writes one small whole record (an index or a commit footer) for an
 // archive, returning where it landed. The header identifies the archive it belongs to so a
 // scan can correlate it with the archive's parts (which may be on other volumes).
-func (w *Author) writeRecord(ctx context.Context, kind string, a record.Archive, payload []byte) (record.FilePos, error) {
-	vol, volName, epoch, err := w.store.PlaceRecord(int64(len(payload)))
+func (w *Writer) writeRecord(ctx context.Context, kind string, a record.Archive, payload []byte) (record.FilePos, error) {
+	vol, volName, epoch, err := w.alloc.PlaceFile(int64(len(payload)))
 	if err != nil {
 		return record.FilePos{}, fmt.Errorf("place %s record: %w", kind, err)
 	}
@@ -359,9 +371,9 @@ func (w *Author) writeRecord(ctx context.Context, kind string, a record.Archive,
 
 // archiveHeader builds the base record.Header an archive's parts share (NextPart clones
 // it per part with an ascending Part index). Every framing field comes straight from the
-// archive's descriptive metadata; Split is the store's Bounded posture (constant for the
+// archive's descriptive metadata; Split is the allocator's Bounded posture (constant for the
 // write), stamped so a multi-part payload's parts are named and read as slices, not standalone files.
-func (w *Author) archiveHeader(a record.Archive) record.Header {
+func (w *Writer) archiveHeader(a record.Archive) record.Header {
 	return record.Header{
 		Run:       a.Run,
 		Kind:      record.KindArchive,
@@ -373,10 +385,10 @@ func (w *Author) archiveHeader(a record.Archive) record.Header {
 		Encrypt:   a.Encrypt,
 		Level:     a.Level,
 		BaseRun:   a.BaseRun,
-		Split:     w.store.Bounded(),
+		Split:     w.alloc.Bounded(),
 		CreatedAt: w.createdAt,
 	}
 }
 
 // RunID returns the id of the run being authored.
-func (w *Author) RunID() string { return w.runID }
+func (w *Writer) RunID() string { return w.runID }

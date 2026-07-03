@@ -19,7 +19,7 @@ func (e *Engine) newScheduler() *scheduler.Scheduler {
 		ExcludeFor:        func(dt string) []string { return e.cfg.ResolveDumpType(dt).Exclude },
 		CycleDays:         e.cfg.CycleDays,
 		BumpPercent:       e.cfg.BumpPercent,
-		Capacity:          e.dep.profile.TotalBytes,
+		Capacity:          e.dep.Profile().TotalBytes,
 		CapacityRoom:      e.acct.CapacityRoom,
 		CompressCheck:     e.tc.checkCompress,
 		PreflightDumptype: e.tc.preflightDumptype,

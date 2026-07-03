@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/librarian"
@@ -389,7 +389,7 @@ func TestClassifyOpenErr(t *testing.T) {
 		err  error
 		want drill.Class
 	}{
-		{"missing copy", wrap(fmt.Errorf("%w of run x", archiveio.ErrMissingCopy)), drill.ClassMissing},
+		{"missing copy", wrap(fmt.Errorf("%w of run x", archivefs.ErrMissingCopy)), drill.ClassMissing},
 		{"volume unavailable", wrap(fmt.Errorf("mount: %w", librarian.ErrVolumeUnavailable)), drill.ClassMissing},
 		{"plain read fault", wrap(errors.New("read: i/o error")), drill.ClassPipeline},
 	}
@@ -468,7 +468,7 @@ func TestClassifyRestoreErr(t *testing.T) {
 		err  error
 		want drill.Class
 	}{
-		{"missing copy", wrap(fmt.Errorf("%w of run x", archiveio.ErrMissingCopy)), drill.ClassMissing},
+		{"missing copy", wrap(fmt.Errorf("%w of run x", archivefs.ErrMissingCopy)), drill.ClassMissing},
 		{"volume unavailable", wrap(fmt.Errorf("mount: %w", librarian.ErrVolumeUnavailable)), drill.ClassMissing},
 		{"tar composition (sink role)", wrap(&xfer.Error{Role: xfer.RoleSink, Err: errors.New("tar: rename conflict")}), drill.ClassChain},
 		{"decode child (filters role)", wrap(&xfer.Error{Role: xfer.RoleFilters, Err: errors.New("gpg: no secret key")}), drill.ClassPipeline},

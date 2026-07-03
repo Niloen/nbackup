@@ -34,7 +34,7 @@ type FlushDeps struct {
 	Open        func(runID, dle string, level int, medium string) (io.ReadCloser, error)
 	Members     func(runID, dle string, level int) ([]string, error)
 	Reclaim     func(holding, runID, dle string, pos record.ArchivePos) error
-	OpenLanding func(landing string, spec archiveio.RunSpec) (*archiveio.Author, error)
+	OpenLanding func(landing string, spec archiveio.RunSpec) (*archiveio.Writer, error)
 	DisplayDLE  func(dle string) string
 	Logf        func(format string, args ...any)
 }
@@ -74,8 +74,8 @@ func Flush(d FlushDeps) (flushed int, err error) {
 		spec := archiveio.RunSpec{ID: s.ID, CreatedAt: s.LastArchiveAt()}
 		// One landing writer per landing this run's staged archives route to, opened lazily — a
 		// multi-landing run may have staged DLEs bound for different media onto one holding disk.
-		writers := map[string]*archiveio.Author{}
-		writerFor := func(landing string) (*archiveio.Author, error) {
+		writers := map[string]*archiveio.Writer{}
+		writerFor := func(landing string) (*archiveio.Writer, error) {
 			if w, ok := writers[landing]; ok {
 				return w, nil
 			}

@@ -169,7 +169,7 @@ func (d *driller) posture(worm WormResult, failures int) Posture {
 	}
 	offsite := false
 	for m := range mediaSet {
-		if m != d.dep.landingName {
+		if m != d.dep.LandingName() {
 			offsite = true
 		}
 	}

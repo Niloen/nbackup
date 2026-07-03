@@ -163,7 +163,7 @@ func TestFlushRoutesPerDumptypeLanding(t *testing.T) {
 		t.Errorf("medium bulk: got %v, want [%s]", got["bulk"], bulkDLE)
 	}
 	// The holding disk is empty after the flush drained both.
-	scratchVol, _, _, err := flushEng.dep.mediumVolume("scratch")
+	scratchVol, _, _, err := flushEng.dep.MediumVolume("scratch")
 	if err != nil {
 		t.Fatal(err)
 	}

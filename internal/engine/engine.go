@@ -20,10 +20,11 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/accounting"
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
-	"github.com/Niloen/nbackup/internal/clerk"
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/depot"
 	"github.com/Niloen/nbackup/internal/dumper"
 	"github.com/Niloen/nbackup/internal/librarian"
 	"github.com/Niloen/nbackup/internal/logf"
@@ -48,16 +49,16 @@ import (
 type Logf = logf.Logf
 
 // Engine holds the wired-up components for one configuration: the two resolution
-// services (toolchain, depot), the catalog cache, the archive data path (clerk),
+// services (toolchain, depot), the catalog cache, the archive data path (the fs),
 // and one lane per operation. Its methods are the command surface — thin
 // delegations; the behavior is in the lanes.
 type Engine struct {
 	cfg         *config.Config
-	tc          *toolchain // host/tool resolution: executors, archivers, transform options
-	dep         *depot     // medium resolution: volumes, librarians, write knobs
+	tc          *toolchain   // host/tool resolution: executors, archivers, transform options
+	dep         *depot.Depot // medium resolution: volumes, librarians, write knobs
 	cat         *catalog.Catalog
 	dles        *dleDirectory // DLE slug ↔ host:path identity mapping
-	clerk       *clerk.Clerk  // the archive data path (read+write composer)
+	fs          *archivefs.FS // the archive data path (read+write composer)
 	landingCost media.Cost    // landing medium's pricing (dollar peer of the depot's profile)
 
 	runSink      progress.Sink // optional: live run-progress sink (nil = status file only)
@@ -74,7 +75,7 @@ type Engine struct {
 
 // SetOperator attaches an operator so manual single-drive media can prompt for a
 // reel swap mid-command. Without one, manual swaps degrade to an actionable error.
-func (e *Engine) SetOperator(op librarian.Operator) { e.dep.op = op }
+func (e *Engine) SetOperator(op librarian.Operator) { e.dep.SetOperator(op) }
 
 // SetRunProgress attaches a live progress sink that receives run snapshots alongside
 // the run-status file, so `nb dump` can paint progress to the terminal without an
@@ -169,25 +170,16 @@ func build(cfg *config.Config) (*Engine, error) {
 		return nil, err
 	}
 	e := &Engine{
-		cfg: cfg,
-		tc:  newToolchain(cfg),
-		dep: &depot{
-			cfg:         cfg,
-			cat:         cat,
-			landingName: name,
-			landingDef:  mediaDef,
-			profile:     profile,
-			minAge:      cfg.MinAgeFor(mediaDef),
-			limiters:    limiters,
-			writeHeld:   map[string]bool{},
-		},
+		cfg:         cfg,
+		tc:          newToolchain(cfg),
+		dep:         depot.New(cfg, cat, name, mediaDef, profile, cfg.MinAgeFor(mediaDef), limiters),
 		cat:         cat,
 		dles:        &dleDirectory{cfg: cfg, cat: cat},
 		landingCost: costModel,
 	}
-	e.clerk = clerk.New(clerkDeps{e}, clerkDeps{e}, catalog.OpenMemberIndex(cfg.WorkdirPath()))
+	e.fs = archivefs.New(fsDeps{e}, fsDeps{e}, catalog.OpenMemberIndex(cfg.WorkdirPath()))
 	e.rst = restorer.New(restorer.Deps{
-		Store:         e.clerk,
+		Store:         e.fs,
 		Archives:      e.cat.Archives,
 		Exec:          e.tc.executorFor,
 		ArchiverFor:   e.tc.restoreArchiver,
@@ -248,16 +240,16 @@ func (e *Engine) MediumMinAge(name string) time.Duration {
 // the local cache, returning the number of distinct runs indexed. Media that
 // can't be opened (e.g. an offline tape) are skipped with a warning.
 func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
-	vol, err := e.dep.landing()
+	vol, err := e.dep.Landing()
 	if err != nil {
 		return 0, err
 	}
-	vols := map[string]media.Volume{e.dep.landingName: vol}
+	vols := map[string]media.Volume{e.dep.LandingName(): vol}
 	for name := range e.cfg.Media {
-		if name == e.dep.landingName {
+		if name == e.dep.LandingName() {
 			continue
 		}
-		vol, _, _, err := e.dep.mediumVolume(name)
+		vol, _, _, err := e.dep.MediumVolume(name)
 		if err != nil {
 			logf.Log("WARNING: skipping medium %q: %v", name, err)
 			continue
@@ -268,17 +260,18 @@ func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
 }
 
 // writeTarget bundles a medium prepared for writing: the opened write face (whose Close
-// releases the window's claim), the clerk Session (the run's archiveio.Store — the medium
-// end), and a serial writer authored over it (for the direct CopyRun/Flush paths; the
-// spool builds its own over the Session).
+// releases the window's claim), its drive-bound part allocator, the fs Session (the
+// run's archivefs.WriteStore — the fs write handle), and a serial writer bound to the two (for
+// the direct CopyRun/Flush paths; the spool binds its own over routed seams).
 type writeTarget struct {
-	wm      librarian.WriteMedium
-	session *clerk.Session
-	writer  *archiveio.Author
+	wm      depot.WriteMedium
+	alloc   *librarian.Allocator
+	session *archivefs.Session
+	writer  *archiveio.Writer
 }
 
 // prepareWriter opens a medium for writing (taking the window's claim), enforces the label
-// protocol on its loaded volume, and opens a clerk Session authoring the run onto it. The
+// protocol on its loaded volume, and opens an fs Session authoring the run onto it. The
 // caller owns the claim: writeTarget.wm.Close() releases it. On error the claim is
 // released here.
 func (e *Engine) prepareWriter(medium string, spec archiveio.RunSpec, now time.Time, logf Logf) (*writeTarget, error) {
@@ -297,13 +290,13 @@ func (e *Engine) prepareWriter(medium string, spec archiveio.RunSpec, now time.T
 // prepareWriterOn authors over an already-opened write face — the shared core behind
 // prepareWriter and Flush (which keeps one open handle per landing across the crashed
 // runs it drains, building a fresh Session per run over it). It is the one place the
-// PrepareWrite -> WriteSink -> OpenRun contract lives, shared by a dump (Run) and a
-// copy/sync (CopyRun). The Session builds the archiveio writer over itself, so each
-// committed archive reports straight to the catalog; the spool later routes those
-// control calls onto its orchestrator.
-func (e *Engine) prepareWriterOn(wm librarian.WriteMedium, def config.Media, spec archiveio.RunSpec, now time.Time, logf Logf) (*writeTarget, error) {
+// PrepareWrite -> Allocator -> OpenRun contract lives, shared by a dump (Run) and a
+// copy/sync (CopyRun). The writer is bound to the medium's allocator and the Session,
+// so each committed archive reports straight to the catalog; the spool later routes
+// both seams onto its orchestrator.
+func (e *Engine) prepareWriterOn(wm depot.WriteMedium, def config.Media, spec archiveio.RunSpec, now time.Time, logf Logf) (*writeTarget, error) {
 	medium := wm.Name()
-	partSize, err := e.dep.partSizeFor(medium)
+	partSize, err := e.dep.PartSizeFor(medium)
 	if err != nil {
 		return nil, err
 	}
@@ -314,10 +307,10 @@ func (e *Engine) prepareWriterOn(wm librarian.WriteMedium, def config.Media, spe
 	if err != nil {
 		return nil, err
 	}
-	sink := wm.WriteSink(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
-	session := e.clerk.OpenRun(sink, e.cat, wm, spec.ID)
-	writer := archiveio.NewAuthor(session, spec, e.dep.limiter(medium), func() time.Time { return now })
-	return &writeTarget{wm: wm, session: session, writer: writer}, nil
+	alloc := wm.Allocator(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
+	session := e.fs.OpenRun(e.cat, wm, spec.ID)
+	writer := archiveio.NewWriter(alloc, session, spec, e.dep.Limiter(medium), func() time.Time { return now })
+	return &writeTarget{wm: wm, alloc: alloc, session: session, writer: writer}, nil
 }
 
 // announceExpectation logs which labeled volume a write will use before it starts —
@@ -411,7 +404,7 @@ func (e *Engine) placedOn(runID, medium string) bool {
 func (e *Engine) placementsFor(runID string) []catalog.Placement {
 	ps := e.cat.Placements(runID)
 	sort.SliceStable(ps, func(i, j int) bool {
-		return ps[i].Medium == e.dep.landingName && ps[j].Medium != e.dep.landingName
+		return ps[i].Medium == e.dep.LandingName() && ps[j].Medium != e.dep.LandingName()
 	})
 	return ps
 }
@@ -421,7 +414,7 @@ func (e *Engine) StoredBytes() int64 { return e.acct.StoredBytes() }
 
 // Landing is the resolved name of the medium new dumps land on. Unlike the raw
 // config field it is never empty — it reflects the sole-medium fallback New applied.
-func (e *Engine) Landing() string { return e.dep.landingName }
+func (e *Engine) Landing() string { return e.dep.LandingName() }
 
 // VolumeExpectation describes the volume the next run on a labeled medium will
 // write to; see accounting (which owns the arithmetic).
@@ -478,7 +471,7 @@ func (e *Engine) Run(ctx context.Context, now time.Time, logf Logf) (*catalog.Ru
 	// Open the landing now so a landing that won't open fails the run here rather
 	// than mid-stream. The dry-run peer (PlannedRunID) reads only the catalog, so it
 	// deliberately does not open the medium.
-	if _, err := e.dep.landing(); err != nil {
+	if _, err := e.dep.Landing(); err != nil {
 		return nil, err
 	}
 	return e.newConductor().Run(ctx, now, logf)
@@ -500,29 +493,29 @@ func (e *Engine) RestoreTo(runID, dleName, destHost, destPath string, logf Logf)
 	return e.rst.Extract(restorer.Request{DLE: dleName, RunID: runID, Dest: destPath, Host: destHost}, logf)
 }
 
-// clerkDeps adapts the engine's services to the clerk's ReadMap and Deps roles — the data
+// fsDeps adapts the engine's services to the fs's ReadMap and Depot roles — the data
 // path's view of the orchestrator (catalog placement, librarian read-mounts, bandwidth
 // caps) — so that contract stays off the Engine's public API. The write face is the
-// catalog itself, passed to OpenRun as the clerk.WriteMap.
-type clerkDeps struct{ e *Engine }
+// catalog itself, passed to OpenRun as the archivefs.WriteMap.
+type fsDeps struct{ e *Engine }
 
 // PlacementsFor returns a run's copies in read-preference order (own medium first) — the
-// clerk's ReadMap role (the engine keeps the catalog store + the directory/retention slices).
-func (c clerkDeps) PlacementsFor(runID string) []catalog.Placement {
+// fs's ReadMap role (the engine keeps the catalog store + the directory/retention slices).
+func (c fsDeps) PlacementsFor(runID string) []catalog.Placement {
 	return c.e.placementsFor(runID)
 }
 
-// MounterFor returns a read-mount onto a medium's volumes — the clerk's Mounter role,
+// MounterFor returns a read-mount onto a medium's volumes — the fs's Mounter role,
 // served by the depot's read face. A medium the open run window is writing is refused at
 // the open: the window owns its drives, so a reader fails over to another copy
 // (eachPlacement treats this like any unavailable copy) instead of mounting mid-write.
 // Outside a window nothing is held and every medium opens.
-func (c clerkDeps) MounterFor(medium string) (clerk.Mounter, error) {
+func (c fsDeps) MounterFor(medium string) (archivefs.Mounter, error) {
 	return c.e.dep.OpenForRead(medium)
 }
 
 // Limiter returns a medium's shared bandwidth cap (nil = uncapped).
-func (c clerkDeps) Limiter(medium string) *ratelimit.Limiter { return c.e.dep.limiter(medium) }
+func (c fsDeps) Limiter(medium string) *ratelimit.Limiter { return c.e.dep.Limiter(medium) }
 
 // RestoreAsOf reconstructs a whole DLE as of a date into destDir; see restorer.Extract.
 // A non-empty from pins the read to that medium's copy (else any copy, with fail-over).

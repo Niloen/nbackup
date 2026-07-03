@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/config"
@@ -122,7 +123,7 @@ func (v *memVol) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
 func (v *memVol) Files() ([]record.FileInfo, error) { return nil, nil }
 func (v *memVol) RemoveFile(int) error              { return nil }
 
-// memStore is a single-volume, unbounded WriteStore. recordErr, when set, fails Record
+// memStore is a single-volume, unbounded allocator+recorder. recordErr, when set, fails Record
 // (an archive that streamed fine but could not be committed) — the hook for the
 // promote-only-after-commit invariant.
 type memStore struct {
@@ -149,7 +150,7 @@ func (s *memStore) Record(archiveio.CommitResult) error {
 func (s *memStore) NextPart() (media.Volume, int64, string, int, error) {
 	return s.vol, -1, "vol", 1, nil // unbounded single volume
 }
-func (s *memStore) PlaceRecord(int64) (media.Volume, string, int, error) {
+func (s *memStore) PlaceFile(int64) (media.Volume, string, int, error) {
 	return s.vol, "vol", 1, nil
 }
 func (s *memStore) Bounded() bool { return false }
@@ -157,7 +158,7 @@ func (s *memStore) Bounded() bool { return false }
 // --- fake Ingest ---------------------------------------------------------------------
 
 type fakeIngest struct {
-	author        *archiveio.Author
+	author        *archiveio.Writer
 	store         *memStore
 	newArchiveErr error         // NewArchive fails with this (target/sink-open failure)
 	park          chan struct{} // if non-nil, NewArchive blocks on it (a full holding disk)
@@ -166,7 +167,7 @@ type fakeIngest struct {
 
 func newFakeIngest() *fakeIngest {
 	st := &memStore{vol: newMemVol()}
-	a := archiveio.NewAuthor(st, archiveio.RunSpec{ID: "run-x", CreatedAt: time.Unix(0, 0).UTC()}, nil, nil)
+	a := archiveio.NewWriter(st, st, archiveio.RunSpec{ID: "run-x", CreatedAt: time.Unix(0, 0).UTC()}, nil, nil)
 	return &fakeIngest{author: a, store: st}
 }
 
@@ -425,7 +426,7 @@ func TestParkedDLEHoldsNoWorkerPermit(t *testing.T) {
 	freeIngest := newFakeIngest()
 	freeIngest.store.recCh = make(chan struct{}, 1)
 
-	route := func(it planner.Item) archiveio.Ingest {
+	route := func(it planner.Item) archivefs.Ingest {
 		switch it.DLE.Path {
 		case "/blocked1":
 			return bi1

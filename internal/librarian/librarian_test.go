@@ -185,7 +185,7 @@ func TestFailedAdvanceNeverWritesUnverified(t *testing.T) {
 	now := time.Unix(1, 0).UTC()
 	stampSlot(t, l, ch, cat, 1, "T-1", now) // the run's current tape, loaded
 
-	sink := l.WriteSink("T-1", 1, true, 0, now, nil)
+	sink := l.Allocator("T-1", 1, true, 0, now, nil)
 	if err := sink.advance(); err == nil {
 		t.Fatal("advance with only blank reels (auto_label off) should fail")
 	}

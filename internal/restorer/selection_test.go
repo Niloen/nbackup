@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
@@ -17,7 +17,7 @@ import (
 // where each path resolves to the archive that last held it — no media touched.
 func TestOpenRecoverBuildsTree(t *testing.T) {
 	dle := "app01-data"
-	store := &fakeStore{members: map[archiveio.Ref][]string{
+	store := &fakeStore{members: map[record.Ref][]string{
 		ref("run-2026-06-01.001", dle, 0): {"./etc/", "./etc/hosts"},
 		ref("run-2026-06-02.001", dle, 1): {"./var/", "./var/log"},
 	}}
@@ -59,7 +59,7 @@ func TestDecryptOptsForPerDumptype(t *testing.T) {
 // host:path form the user passed, not the internal catalog slug.
 func TestFriendlyDLEErrRewritesSlug(t *testing.T) {
 	dle := "app01-data"
-	store := &fakeStore{payloads: map[archiveio.Ref][]byte{}}
+	store := &fakeStore{payloads: map[record.Ref][]byte{}}
 	// The target run exists (another DLE is in it) but holds no backup for our DLE,
 	// so Chain fails with a message that quotes the DLE slug.
 	other := []record.Archive{{Run: "run-2026-06-02.001", DLE: "other-dle", Level: 0}}
@@ -98,7 +98,7 @@ func TestExtractSelectionSkipsEmptyStep(t *testing.T) {
 	dle := "app01-data"
 	emptyRef := ref("run-2026-06-01.001", dle, 0)
 	fileRef := ref("run-2026-06-02.001", dle, 1)
-	store := &fakeStore{payloads: map[archiveio.Ref][]byte{
+	store := &fakeStore{payloads: map[record.Ref][]byte{
 		emptyRef: []byte("l0"),
 		fileRef:  []byte("l1"),
 	}}
@@ -120,15 +120,15 @@ func TestExtractSelectionSkipsEmptyStep(t *testing.T) {
 }
 
 // TestExtractSelectionMissingCopy: a selected archive with no available copy fails
-// the whole recovery with archiveio.ErrMissingCopy (for the drill's classification),
+// the whole recovery with archivefs.ErrMissingCopy (for the drill's classification),
 // rather than silently extracting a partial set.
 func TestExtractSelectionMissingCopy(t *testing.T) {
 	dle := "app01-data"
-	store := &fakeStore{payloads: map[archiveio.Ref][]byte{}} // no copies
+	store := &fakeStore{payloads: map[record.Ref][]byte{}} // no copies
 	r := New(testDeps(store, chainArchives(dle)))
 	steps := []recovery.ExtractStep{extractStep("run-2026-06-02.001", dle, 1, "./var/x")}
 	_, err := r.ExtractSelection(steps, filepath.Join(t.TempDir(), "out"), nil)
-	if !errors.Is(err, archiveio.ErrMissingCopy) {
+	if !errors.Is(err, archivefs.ErrMissingCopy) {
 		t.Fatalf("want ErrMissingCopy for a selection with no available copy, got: %v", err)
 	}
 }
@@ -138,7 +138,7 @@ func TestExtractSelectionMissingCopy(t *testing.T) {
 // any media is read (browse stays keyless; only extraction needs the key).
 func TestExtractSelectionClientKeyGate(t *testing.T) {
 	dle := "app01-data"
-	store := &fakeStore{payloads: map[archiveio.Ref][]byte{
+	store := &fakeStore{payloads: map[record.Ref][]byte{
 		ref("run-2026-06-02.001", dle, 1): []byte("l1"),
 	}}
 	d := testDeps(store, chainArchives(dle))

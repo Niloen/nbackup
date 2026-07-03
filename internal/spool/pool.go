@@ -3,6 +3,7 @@ package spool
 import (
 	"sync"
 
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/ratelimit"
 )
@@ -17,10 +18,11 @@ import (
 // (Commit→drain) — guarded by Pool.mu.
 type Disk struct {
 	Name     string
-	Storage  archiveio.Store    // a holding disk is staged to, then read back + reclaimed by the drain
-	Capacity int64              // bytes; 0 = unbounded (no back-pressure)
-	Lim      *ratelimit.Limiter // byte-rate cap for staging writes to this disk (nil = uncapped)
-	Writers  int                // max concurrent staging writes (the medium's `writers`; 0 = uncapped)
+	Alloc    archiveio.PartAllocator // places staged parts on the disk's volume (the opened medium's allocator)
+	Storage  archivefs.WriteStore    // a holding disk is staged to, then read back + reclaimed by the drain
+	Capacity int64                   // bytes; 0 = unbounded (no back-pressure)
+	Lim      *ratelimit.Limiter      // byte-rate cap for staging writes to this disk (nil = uncapped)
+	Writers  int                     // max concurrent staging writes (the medium's `writers`; 0 = uncapped)
 	used     int64
 	writing  int // staging writes in flight (Acquire→ReleaseWriter), counted against Writers
 }
@@ -150,6 +152,9 @@ func (p *Pool) Err() error {
 }
 
 // Name, Storage and Lim resolve a disk by index (these read immutable fields, no lock).
-func (p *Pool) Name(idx int) string             { return p.disks[idx].Name }
-func (p *Pool) Storage(idx int) archiveio.Store { return p.disks[idx].Storage }
-func (p *Pool) Lim(idx int) *ratelimit.Limiter  { return p.disks[idx].Lim }
+func (p *Pool) Name(idx int) string                  { return p.disks[idx].Name }
+func (p *Pool) Storage(idx int) archivefs.WriteStore { return p.disks[idx].Storage }
+
+// Alloc resolves a disk's part allocator by index.
+func (p *Pool) Alloc(idx int) archiveio.PartAllocator { return p.disks[idx].Alloc }
+func (p *Pool) Lim(idx int) *ratelimit.Limiter        { return p.disks[idx].Lim }

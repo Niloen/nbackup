@@ -94,3 +94,16 @@ concurrency wherever it sits in the flow.
 The shape follows Amanda's driver/taper split — the byte-movers own the data and *report* results; one
 coordinator owns media hand-out and the log — adapted to a single process, where the crossings are
 shared memory and channels rather than pipes.
+
+## Amendment (2026-07-03, fs-restructure)
+
+The single glued `WriteStore` interface the Author was built over is gone. The
+writer (`Author` → `archiveio.Writer`) is now bound to its two seams separately —
+`archiveio.PartAllocator` (volume alloc/roll, from the opened `depot.WriteMedium`'s
+`librarian.Allocator`) and `archiveio.Recorder` (the commit crossing, the
+`archivefs.Session`) — because the glue joined seams with different owners: the
+device side allocates, the fs side records. The invariant this doc establishes is
+untouched: the spool routes *both* seams through its single orchestrator goroutine,
+which remains the sole owner of rolls and catalog writes. `clerk` is `archivefs`,
+`Session` no longer proxies allocation, and `Store` is `archivefs.WriteStore`.
+See docs/design/fs-restructure.md for the full rename map.

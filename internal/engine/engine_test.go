@@ -806,7 +806,7 @@ func TestTapeLabelVerify(t *testing.T) {
 	// Out-of-band relabel of the loaded tape (same name, bumped epoch) makes the
 	// catalog stale for it; a dump must refuse until `nb rebuild`. (Loading
 	// a genuinely different tape from the pool is not an error under a changer.)
-	lv := eng.dep.vol.(media.Labeled)
+	lv := eng.dep.LandingVolume().(media.Labeled)
 	if err := lv.WriteLabel(record.Label{Name: "lto-0001", Pool: "lto", Epoch: 2}); err != nil {
 		t.Fatal(err)
 	}
@@ -880,7 +880,7 @@ func TestRelabelRefusesForeignPool(t *testing.T) {
 	if err := eng.LabelVolume("lto", "lto-0001", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("initial label: %v", err)
 	}
-	lv := eng.dep.vol.(media.Labeled)
+	lv := eng.dep.LandingVolume().(media.Labeled)
 	if err := lv.WriteLabel(record.Label{Name: "FOREIGN-01", Pool: "otherpool", Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
@@ -1016,7 +1016,7 @@ func boolp(b bool) *bool { return &b }
 // to simulate a copy going missing from one medium.
 func removeRunFiles(t *testing.T, eng *Engine, runID string) {
 	t.Helper()
-	vol, err := eng.dep.landing()
+	vol, err := eng.dep.Landing()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1084,7 +1084,7 @@ func TestHoldingDiskBuffersTape(t *testing.T) {
 			t.Errorf("holding disk should hold no placement after the run, got %v", p)
 		}
 	}
-	scratchVol, _, _, err := eng.dep.mediumVolume("scratch")
+	scratchVol, _, _, err := eng.dep.MediumVolume("scratch")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1161,7 +1161,7 @@ func TestHoldingDiskParallelDrains(t *testing.T) {
 	if !landed {
 		t.Error("run has no placement on the landing")
 	}
-	scratchVol, _, _, err := eng.dep.mediumVolume("scratch")
+	scratchVol, _, _, err := eng.dep.MediumVolume("scratch")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1231,7 +1231,7 @@ func TestHoldingDisksSpread(t *testing.T) {
 		}
 	}
 	for _, h := range []string{"s1", "s2"} {
-		vol, _, _, err := eng.dep.mediumVolume(h)
+		vol, _, _, err := eng.dep.MediumVolume(h)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1317,7 +1317,7 @@ func TestHoldingDisksFlush(t *testing.T) {
 	}
 
 	for h := range map[string]struct{}{"s1": {}, "s2": {}} {
-		vol, _, _, err := flushEng.dep.mediumVolume(h)
+		vol, _, _, err := flushEng.dep.MediumVolume(h)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1402,7 +1402,7 @@ func TestHoldingDiskDrainSpansVolumes(t *testing.T) {
 			t.Fatalf("archive %s landed in %d part(s), want >= 2 (must span)", name, len(parts))
 		}
 	}
-	if scratchVol, _, _, err := eng.dep.mediumVolume("scratch"); err != nil {
+	if scratchVol, _, _, err := eng.dep.MediumVolume("scratch"); err != nil {
 		t.Fatal(err)
 	} else if files, _ := scratchVol.Files(); len(files) != 0 {
 		t.Errorf("holding disk must be empty after the run, has %d file(s)", len(files))
@@ -1477,7 +1477,7 @@ func TestHoldingDiskRoutesOversizedDirect(t *testing.T) {
 			t.Errorf("holding disk should hold no placement after the run, got %v", p)
 		}
 	}
-	if scratchVol, _, _, err := eng.dep.mediumVolume("scratch"); err != nil {
+	if scratchVol, _, _, err := eng.dep.MediumVolume("scratch"); err != nil {
 		t.Fatal(err)
 	} else if files, _ := scratchVol.Files(); len(files) != 0 {
 		t.Errorf("holding disk must be empty after the run, has %d file(s)", len(files))
@@ -1625,7 +1625,7 @@ func TestHoldingDiskFlush(t *testing.T) {
 	if !placedOnLanding(flushEng, s.ID, config.DLE{Host: "localhost", Path: src}.Name()) {
 		t.Errorf("archive must be on the tape landing after flush")
 	}
-	scratchVol, _, _, err := flushEng.dep.mediumVolume("scratch")
+	scratchVol, _, _, err := flushEng.dep.MediumVolume("scratch")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2832,7 +2832,7 @@ func TestPruneSweepKeepsCommittedWhenCacheLost(t *testing.T) {
 // placedOnLanding reports whether the run has a placement for dle on the engine's landing medium.
 func placedOnLanding(e *Engine, runID, dle string) bool {
 	for _, p := range e.cat.Placements(runID) {
-		if p.Medium != e.dep.landingName {
+		if p.Medium != e.dep.LandingName() {
 			continue
 		}
 		for _, a := range p.Archives {

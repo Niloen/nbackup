@@ -44,7 +44,11 @@ the Clerk holds only `ReadMap`; a `Session` records through an explicit
 `clerk.WriteMap` passed to `OpenRun` (the live catalog). `ReclaimStaged` takes the
 Writer too. `archiveio` did not change at all.
 
-### Media: typed faces, opened at the depot (librarian/faces.go, engine/depot.go)
+### Media: typed faces, opened at the depot (depot/faces.go, depot/depot.go)
+
+> 2026-07-03: the depot became its own package (`internal/depot`) and the faces
+> moved into it — see docs/design/fs-restructure.md. Interface names below read
+> `librarian.X` in the original; they are `depot.X` now.
 
 Opening a medium is the acquisition. The depot mints the librarian's three
 faces — the ONLY ways to reach a medium — and each face's method set IS the

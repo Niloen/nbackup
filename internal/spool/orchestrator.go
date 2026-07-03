@@ -1,15 +1,16 @@
 package spool
 
 import (
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
 // orchestrator.go is the routing seam of docs/design/concurrent-writes.md: the single coordinator
-// goroutine every concurrent writer's control calls hop onto, and the WriteStore wrapper
-// (routedWriteStore) that does the hopping. It knows nothing of lanes or holding disks — only
-// which calls must be single-writer.
+// goroutine every concurrent writer's control calls hop onto, and the seam wrappers
+// (routedAllocator, routedRecorder) that do the hopping. It knows nothing of lanes or holding
+// disks — only which calls must be single-writer.
 
 // orchestrator is the run's single-goroutine coordinator: it runs each routed control call — a
 // librarian alloc/roll (NextPart/PlaceRecord), a catalog Record, or a holding drain's reclaim — to
@@ -22,17 +23,17 @@ type orchestrator struct {
 	stop    chan struct{}
 }
 
-// volReq asks the orchestrator to run real's NextPart (or PlaceRecord, when place — size is the
-// record's payload size, used by that mode only) and reply with the allocated volume; recordReq
-// runs real's Record; reclaimReq runs store's Reclaim.
+// volReq asks the orchestrator to run alloc's NextPart (or PlaceFile, when place — size is the
+// file's payload size, used by that mode only) and reply with the allocated volume; recordReq
+// runs rec's Record; reclaimReq runs store's Reclaim.
 type volReq struct {
-	real  archiveio.WriteStore
+	alloc archiveio.PartAllocator
 	place bool
 	size  int64
 	reply chan volResp
 }
 
-// volResp carries either mode's result: max is filled by NextPart only (PlaceRecord replies -1);
+// volResp carries either mode's result: max is filled by NextPart only (PlaceFile replies -1);
 // the other fields are common to both.
 type volResp struct {
 	vol   media.Volume
@@ -42,12 +43,12 @@ type volResp struct {
 	err   error
 }
 type recordReq struct {
-	real  archiveio.WriteStore
+	rec   archiveio.Recorder
 	res   archiveio.CommitResult
 	reply chan error
 }
 type reclaimReq struct {
-	store archiveio.Store
+	store archivefs.WriteStore
 	arch  record.Archive
 	pos   record.ArchivePos
 	reply chan error
@@ -71,13 +72,13 @@ func (o *orchestrator) loop() {
 			var resp volResp
 			if r.place {
 				resp.max = -1
-				resp.vol, resp.name, resp.epoch, resp.err = r.real.PlaceRecord(r.size)
+				resp.vol, resp.name, resp.epoch, resp.err = r.alloc.PlaceFile(r.size)
 			} else {
-				resp.vol, resp.max, resp.name, resp.epoch, resp.err = r.real.NextPart()
+				resp.vol, resp.max, resp.name, resp.epoch, resp.err = r.alloc.NextPart()
 			}
 			r.reply <- resp
 		case r := <-o.record:
-			r.reply <- r.real.Record(r.res)
+			r.reply <- r.rec.Record(r.res)
 		case r := <-o.reclaim:
 			r.reply <- r.store.Reclaim(r.arch, r.pos)
 		case <-o.stop:
@@ -90,38 +91,45 @@ func (o *orchestrator) shutdown() { close(o.stop) }
 
 // reclaimOn drops a staged archive from store on the orchestrator (Reclaim's catalog RemoveArchive is
 // single-owner, like Record).
-func (o *orchestrator) reclaimOn(store archiveio.Store, arch record.Archive, pos record.ArchivePos) error {
+func (o *orchestrator) reclaimOn(store archivefs.WriteStore, arch record.Archive, pos record.ArchivePos) error {
 	reply := make(chan error, 1)
 	o.reclaim <- reclaimReq{store: store, arch: arch, pos: pos, reply: reply}
 	return <-reply
 }
 
-// routedWriteStore is a Session's WriteStore with its control calls hopped onto the orchestrator; the
-// returned volume's AppendFile and byte writes stay on the caller's goroutine. Bounded is a constant,
-// so it never crosses.
-type routedWriteStore struct {
-	real archiveio.WriteStore
+// routedAllocator is a medium's PartAllocator with its allocation calls hopped onto the
+// orchestrator; the returned volume's AppendFile and byte writes stay on the caller's goroutine.
+// Bounded is a constant, so it never crosses.
+type routedAllocator struct {
+	real archiveio.PartAllocator
 	orch *orchestrator
 }
 
-func (r *routedWriteStore) NextPart() (media.Volume, int64, string, int, error) {
+func (r *routedAllocator) NextPart() (media.Volume, int64, string, int, error) {
 	reply := make(chan volResp, 1)
-	r.orch.vol <- volReq{real: r.real, reply: reply}
+	r.orch.vol <- volReq{alloc: r.real, reply: reply}
 	x := <-reply
 	return x.vol, x.max, x.name, x.epoch, x.err
 }
 
-func (r *routedWriteStore) PlaceRecord(size int64) (media.Volume, string, int, error) {
+func (r *routedAllocator) PlaceFile(size int64) (media.Volume, string, int, error) {
 	reply := make(chan volResp, 1)
-	r.orch.vol <- volReq{real: r.real, place: true, size: size, reply: reply}
+	r.orch.vol <- volReq{alloc: r.real, place: true, size: size, reply: reply}
 	x := <-reply
 	return x.vol, x.name, x.epoch, x.err
 }
 
-func (r *routedWriteStore) Bounded() bool { return r.real.Bounded() }
+func (r *routedAllocator) Bounded() bool { return r.real.Bounded() }
 
-func (r *routedWriteStore) Record(res archiveio.CommitResult) error {
+// routedRecorder is a Session's Recorder with Record hopped onto the orchestrator — the sole
+// catalog writer during a concurrent run.
+type routedRecorder struct {
+	real archiveio.Recorder
+	orch *orchestrator
+}
+
+func (r *routedRecorder) Record(res archiveio.CommitResult) error {
 	reply := make(chan error, 1)
-	r.orch.record <- recordReq{real: r.real, res: res, reply: reply}
+	r.orch.record <- recordReq{rec: r.real, res: res, reply: reply}
 	return <-reply
 }

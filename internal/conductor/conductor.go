@@ -9,6 +9,7 @@ package conductor
 import (
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/dumper"
@@ -20,7 +21,7 @@ import (
 
 // PreparedWriter is the folded view of a medium opened for writing: the run store the
 // producers author into, whether the medium writes serially (which decides parallelism),
-// and the medium's capacity in bytes. The engine builds it from its clerk/librarian
+// and the medium's capacity in bytes. The engine builds it from its archivefs/librarian
 // machinery so the conductor stays free of those packages.
 //
 // Serial means a single physical drive that rolls one shared volume (tape): only one
@@ -30,12 +31,17 @@ import (
 // splits a large archive into parts. Whether an archive is split is the writer's concern,
 // not the conductor's, so it does not appear here.
 type PreparedWriter struct {
-	// Stores is one authored run store per concurrent writer the medium supports: a single store for a
-	// single-drive tape or a directly-addressed medium, or one per drive for a robotic multi-drive
-	// library (each bound to its own drive so two archives write independent tapes). A concurrent-write
-	// medium (disk, cloud) has one store shared by all its writers (independent files, orchestrator-
-	// serialised control); a serial multi-drive one has a distinct store per drive.
-	Stores   []archiveio.Store
+	// Allocs is one part allocator per concurrent writer the medium supports: a single allocator
+	// for a single-drive tape or a directly-addressed medium, or one per drive for a robotic
+	// multi-drive library (each bound to its own drive so two archives write independent tapes). A
+	// concurrent-write medium (disk, cloud) has one allocator shared by all its writers
+	// (independent files, orchestrator-serialised control); a serial multi-drive one has a
+	// distinct allocator per drive.
+	Allocs []archiveio.PartAllocator
+	// Store is the medium's run store (the fs Session): the Recorder every writer's commits are
+	// recorded through — one per medium regardless of drive count — plus the drain's read-back
+	// and reclaim on a holding disk.
+	Store    archivefs.WriteStore
 	Serial   bool
 	Capacity int64
 	Lim      *ratelimit.Limiter // the medium's byte-rate cap; the spool authors its concurrent writers with it
@@ -64,7 +70,7 @@ type Deps struct {
 	// catalog; the closure reads the View's copy (sound because a session never reads
 	// its own writes). Which media it may mount is the media layer's business: a mount
 	// onto a window-written medium is refused and the read fails over to another copy.
-	OpenReader        func(view *catalog.View) archiveio.ReadStore
+	OpenReader        func(view *catalog.View) archivefs.ReadStore
 	CheckCompress     func() error
 	ProbeReachable    func(host string) error
 	PreflightDumptype func(dt, host string, checkArchiver bool, checked map[string]bool) error

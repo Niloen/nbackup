@@ -775,17 +775,17 @@ func (l *Librarian) Remaining() (int64, bool) {
 	return st.Capacity - st.Used, true
 }
 
-// WriteSink drives a multi-part, possibly multi-volume write for the archiveio writer:
+// Allocator drives a multi-part, possibly multi-volume write for the archiveio writer:
 // it sizes each part to the loaded volume's remaining capacity (capped by part_size),
-// rolls onto a fresh volume when the loaded one fills, and places the seal record.
+// rolls onto a fresh volume when the loaded one fills, and places the whole-file commit records.
 //
-// A sink is bound to its librarian handle's drive (l.drive), so LazyDriveSinks vends one
+// An allocator is bound to its librarian handle's drive (l.drive), so LazyDriveAllocators vends one
 // per drive for concurrent writing. It starts either eagerly — over the volume PrepareWrite
 // already accepted (the serial path) — or lazily: started=false, so its first NextPart runs
 // PrepareWrite itself, loading a writable tape into its drive. The lazy start is what lets
 // the initial per-drive load cross the spool's orchestrator on the same path as a roll,
 // keeping the robot single-writer without a separate mount step.
-type WriteSink struct {
+type Allocator struct {
 	l          *Librarian
 	appendable bool
 	partSize   int64
@@ -798,34 +798,34 @@ type WriteSink struct {
 	expect     string // the label the run expects to (re)use, for a lazy first load
 }
 
-// WriteSink builds an eager sink starting on the volume PrepareWrite accepted (its label
+// Allocator builds an eager allocator starting on the volume PrepareWrite accepted (its label
 // and epoch). partSize (0 = none) caps each part for media whose remaining capacity is
 // unknowable or to bound part size deliberately.
-func (l *Librarian) WriteSink(volume string, epoch int, appendable bool, partSize int64, now time.Time, logf Logf) *WriteSink {
-	s := &WriteSink{l: l, appendable: appendable, partSize: partSize, now: now, logf: logf,
+func (l *Librarian) Allocator(volume string, epoch int, appendable bool, partSize int64, now time.Time, logf Logf) *Allocator {
+	s := &Allocator{l: l, appendable: appendable, partSize: partSize, now: now, logf: logf,
 		tried: map[string]bool{}, volume: volume, epoch: epoch, started: true}
 	s.seed(volume)
 	return s
 }
 
-// LazyDriveSinks vends one lazy WriteSink per drive, each bound to its own drive and
+// LazyDriveAllocators vends one lazy Allocator per drive, each bound to its own drive and
 // sharing the run reservation set — the concurrent multi-drive write source. len == Drives().
-// Each sink loads its first tape on its first NextPart, so the spool can lease a drive per
+// Each allocator loads its first tape on its first NextPart, so the spool can lease a drive per
 // writer and the initial loads serialise on its orchestrator like any roll.
-func (l *Librarian) LazyDriveSinks(appendable bool, expect string, partSize int64, now time.Time, logf Logf) []*WriteSink {
-	sinks := make([]*WriteSink, l.Drives())
-	for i := range sinks {
+func (l *Librarian) LazyDriveAllocators(appendable bool, expect string, partSize int64, now time.Time, logf Logf) []*Allocator {
+	allocs := make([]*Allocator, l.Drives())
+	for i := range allocs {
 		li := l.forDrive(i)
-		sinks[i] = &WriteSink{l: li, appendable: appendable, partSize: partSize, now: now, logf: logf,
+		allocs[i] = &Allocator{l: li, appendable: appendable, partSize: partSize, now: now, logf: logf,
 			tried: map[string]bool{}, expect: expect}
 	}
-	return sinks
+	return allocs
 }
 
 // seed records the starting volume as tried and reserved so a spanning roll never recycles
 // the tape this write is already on (its fresh content is not yet in the catalog) and a
 // concurrent drive never selects it.
-func (s *WriteSink) seed(volume string) {
+func (s *Allocator) seed(volume string) {
 	if volume != "" {
 		s.tried[volume] = true
 		s.l.reserve(volume)
@@ -833,8 +833,8 @@ func (s *WriteSink) seed(volume string) {
 }
 
 // ensureStarted runs the lazy first load: PrepareWrite selects and loads a writable tape
-// into this sink's drive, then the starting volume is seeded. A no-op once started.
-func (s *WriteSink) ensureStarted() error {
+// into this allocator's drive, then the starting volume is seeded. A no-op once started.
+func (s *Allocator) ensureStarted() error {
 	if s.started {
 		return nil
 	}
@@ -849,7 +849,7 @@ func (s *WriteSink) ensureStarted() error {
 
 // maxPart is the payload bytes the next part may carry on the loaded volume: its
 // remaining capacity minus a header, capped by part_size; -1 when unbounded.
-func (s *WriteSink) maxPart() int64 {
+func (s *Allocator) maxPart() int64 {
 	room, known := s.l.Remaining()
 	if !known {
 		if s.partSize > 0 {
@@ -869,12 +869,12 @@ func (s *WriteSink) maxPart() int64 {
 	return avail
 }
 
-func (s *WriteSink) advance() error {
+func (s *Allocator) advance() error {
 	volName, epoch, _, err := s.l.Advance(s.appendable, s.tried, "", s.now, s.logf)
 	if err != nil {
 		// A failed roll can leave an unverified cartridge in the drive (the scan's last
 		// candidate — possibly a blank reel). Drop back to unstarted so any further write
-		// on this sink re-runs PrepareWrite's label check instead of trusting the drive:
+		// on this allocator re-runs PrepareWrite's label check instead of trusting the drive:
 		// writing unverified would stamp archive data onto an unlabeled reel (poisoning
 		// it as foreign) while the placement claims the previous volume.
 		s.started = false
@@ -884,9 +884,9 @@ func (s *WriteSink) advance() error {
 	return nil
 }
 
-// NextPart implements archiveio.VolumeSink: it rolls onto a fresh volume if the loaded
+// NextPart implements archiveio.PartAllocator: it rolls onto a fresh volume if the loaded
 // one cannot hold a header plus a byte, then returns the volume and the part's byte cap.
-func (s *WriteSink) NextPart() (media.Volume, int64, string, int, error) {
+func (s *Allocator) NextPart() (media.Volume, int64, string, int, error) {
 	if err := s.ensureStarted(); err != nil {
 		return nil, 0, "", 0, err
 	}
@@ -898,10 +898,10 @@ func (s *WriteSink) NextPart() (media.Volume, int64, string, int, error) {
 	return s.l.driveVol(), s.maxPart(), s.volume, s.epoch, nil
 }
 
-// PlaceRecord implements archiveio.VolumeSink: it rolls first if the record (one whole file
+// PlaceFile implements archiveio.PartAllocator: it rolls first if the record (one whole file
 // of the given payload size — an archive's index or commit footer) will not fit the loaded
 // volume.
-func (s *WriteSink) PlaceRecord(size int64) (media.Volume, string, int, error) {
+func (s *Allocator) PlaceFile(size int64) (media.Volume, string, int, error) {
 	if err := s.ensureStarted(); err != nil {
 		return nil, "", 0, err
 	}
@@ -913,12 +913,12 @@ func (s *WriteSink) PlaceRecord(size int64) (media.Volume, string, int, error) {
 	return s.l.driveVol(), s.volume, s.epoch, nil
 }
 
-// Bounded implements archiveio.VolumeSink: it reports whether a part's size is ever capped —
+// Bounded implements archiveio.PartAllocator: it reports whether a part's size is ever capped —
 // by a configured part_size or by a finite volume's knowable remaining capacity — so an archive
 // may land as several parts (cloud splitting, or a reel spanning). The writer marks each such
 // part a slice (Header.Split). False only for an unbounded medium (disk: no part_size, no
 // software-visible capacity), where every archive is a single standalone part.
-func (s *WriteSink) Bounded() bool {
+func (s *Allocator) Bounded() bool {
 	if s.partSize > 0 {
 		return true
 	}

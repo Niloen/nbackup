@@ -10,8 +10,8 @@ import (
 // else its natural width — drives (serial) or workers (concurrent) — with a serial medium never
 // exceeding its drives.
 func TestLandingWriters(t *testing.T) {
-	pw := func(serial bool, stores, writers int) PreparedWriter {
-		return PreparedWriter{Stores: make([]archiveio.Store, stores), Serial: serial, Writers: writers}
+	pw := func(serial bool, allocs, writers int) PreparedWriter {
+		return PreparedWriter{Allocs: make([]archiveio.PartAllocator, allocs), Serial: serial, Writers: writers}
 	}
 	cases := []struct {
 		name    string
@@ -31,7 +31,7 @@ func TestLandingWriters(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := landingWriters(c.pw, c.workers); got != c.want {
 				t.Errorf("landingWriters(serial=%v stores=%d writers=%d, workers=%d) = %d; want %d",
-					c.pw.Serial, len(c.pw.Stores), c.pw.Writers, c.workers, got, c.want)
+					c.pw.Serial, len(c.pw.Allocs), c.pw.Writers, c.workers, got, c.want)
 			}
 		})
 	}

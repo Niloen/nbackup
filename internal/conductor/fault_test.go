@@ -173,7 +173,7 @@ type memFlushStore struct{ vol *memFlushVol }
 func (s *memFlushStore) NextPart() (media.Volume, int64, string, int, error) {
 	return s.vol, -1, "L", 1, nil
 }
-func (s *memFlushStore) PlaceRecord(int64) (media.Volume, string, int, error) {
+func (s *memFlushStore) PlaceFile(int64) (media.Volume, string, int, error) {
 	return s.vol, "L", 1, nil
 }
 func (s *memFlushStore) Bounded() bool                       { return false }
@@ -202,7 +202,7 @@ func TestFlushDoubleCrashReclaimsOnly(t *testing.T) {
 		},
 		Members: func(string, string, int) ([]string, error) { return nil, nil },
 		Reclaim: func(string, string, string, record.ArchivePos) error { reclaimed++; return nil },
-		OpenLanding: func(string, archiveio.RunSpec) (*archiveio.Author, error) {
+		OpenLanding: func(string, archiveio.RunSpec) (*archiveio.Writer, error) {
 			return nil, errors.New("OpenLanding must not be called on the reclaim-only path")
 		},
 		DisplayDLE: func(dle string) string { return dle },
@@ -237,8 +237,9 @@ func TestFlushCopiesAndReclaims(t *testing.T) {
 		},
 		Members: func(string, string, int) ([]string, error) { return nil, nil },
 		Reclaim: func(string, string, string, record.ArchivePos) error { reclaimed++; return nil },
-		OpenLanding: func(landing string, spec archiveio.RunSpec) (*archiveio.Author, error) {
-			return archiveio.NewAuthor(&memFlushStore{vol: newFlushVol()}, spec, nil, nil), nil
+		OpenLanding: func(landing string, spec archiveio.RunSpec) (*archiveio.Writer, error) {
+			ms := &memFlushStore{vol: newFlushVol()}
+			return archiveio.NewWriter(ms, ms, spec, nil, nil), nil
 		},
 		DisplayDLE: func(dle string) string { return dle },
 	})

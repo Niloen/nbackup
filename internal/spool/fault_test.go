@@ -127,8 +127,8 @@ func (v *memVolume) RemoveFile(pos int) error {
 	return nil
 }
 
-// memStore is an in-memory archiveio.Store (a landing's WriteStore or a holding disk's full Store),
-// backed by one memVolume. Its control calls (NextPart/PlaceRecord/Record) are the ones the spool
+// memStore is an in-memory archivefs.WriteStore plus PartAllocator (a landing's seams or a holding
+// disk's full store), backed by one memVolume. Its control calls (NextPart/PlaceFile/Record) are the ones the spool
 // routes onto the orchestrator; each optionally faults and each runs a concurrency probe so a test
 // can assert they never overlap. OpenArchive/Reclaim are the drain's read-back and drop, also
 // faultable.
@@ -173,7 +173,7 @@ func (s *memStore) NextPart() (media.Volume, int64, string, int, error) {
 	return s.vol, -1, s.name, 1, nil
 }
 
-func (s *memStore) PlaceRecord(int64) (media.Volume, string, int, error) {
+func (s *memStore) PlaceFile(int64) (media.Volume, string, int, error) {
 	defer s.enterCtl()()
 	return s.vol, s.name, 1, nil
 }
@@ -195,9 +195,9 @@ func (s *memStore) OpenArchive(arch record.Archive, pos record.ArchivePos) (io.R
 	if s.openErr != nil {
 		return nil, s.openErr
 	}
-	exp := archiveio.Ref{Run: arch.Run, DLE: arch.DLE, Level: arch.Level}
-	return archiveio.NewReader().Open(pos.Parts, exp,
-		func(p record.FilePos) (record.Header, io.ReadCloser, error) { return s.vol.ReadFile(p.Pos) })
+	exp := record.Ref{Run: arch.Run, DLE: arch.DLE, Level: arch.Level}
+	open := func(p record.FilePos) (record.Header, io.ReadCloser, error) { return s.vol.ReadFile(p.Pos) }
+	return archiveio.NewReader(open, nil).Open(exp, pos.Parts)
 }
 
 func (s *memStore) Reclaim(record.Archive, record.ArchivePos) error {
@@ -252,8 +252,8 @@ func TestDrainReadBackFaultAborts(t *testing.T) {
 	holding.openErr = boom
 	landing := newMemStore("landing")
 	sp := New(context.Background(), Config{
-		Backings: []Backing{{Name: "landing", Stores: []archiveio.WriteStore{landing}, Writers: 1}},
-		Holding:  NewPool([]Disk{{Name: "hd0", Storage: holding, Capacity: 0}}),
+		Backings: []Backing{{Name: "landing", Allocs: []archiveio.PartAllocator{landing}, Rec: landing, Writers: 1}},
+		Holding:  NewPool([]Disk{{Name: "hd0", Alloc: holding, Storage: holding, Capacity: 0}}),
 	})
 	err := stageOne(t, sp, []byte("payload"))
 	if !errors.Is(err, boom) {
@@ -273,8 +273,8 @@ func TestDrainLandingRecordFaultAborts(t *testing.T) {
 	landing := newMemStore("landing")
 	landing.recordErr = boom
 	sp := New(context.Background(), Config{
-		Backings: []Backing{{Name: "landing", Stores: []archiveio.WriteStore{landing}, Writers: 1}},
-		Holding:  NewPool([]Disk{{Name: "hd0", Storage: holding, Capacity: 0}}),
+		Backings: []Backing{{Name: "landing", Allocs: []archiveio.PartAllocator{landing}, Rec: landing, Writers: 1}},
+		Holding:  NewPool([]Disk{{Name: "hd0", Alloc: holding, Storage: holding, Capacity: 0}}),
 	})
 	err := stageOne(t, sp, []byte("payload"))
 	if !errors.Is(err, boom) {
@@ -297,8 +297,8 @@ func TestDrainReclaimFaultAborts(t *testing.T) {
 	holding.reclaimErr = boom
 	landing := newMemStore("landing")
 	sp := New(context.Background(), Config{
-		Backings: []Backing{{Name: "landing", Stores: []archiveio.WriteStore{landing}, Writers: 1}},
-		Holding:  NewPool([]Disk{{Name: "hd0", Storage: holding, Capacity: 0}}),
+		Backings: []Backing{{Name: "landing", Allocs: []archiveio.PartAllocator{landing}, Rec: landing, Writers: 1}},
+		Holding:  NewPool([]Disk{{Name: "hd0", Alloc: holding, Storage: holding, Capacity: 0}}),
 	})
 	err := stageOne(t, sp, []byte("payload"))
 	if !errors.Is(err, boom) {
@@ -315,8 +315,8 @@ func TestDrainSuccessReclaimsAndLands(t *testing.T) {
 	holding := newMemStore("holding")
 	landing := newMemStore("landing")
 	sp := New(context.Background(), Config{
-		Backings: []Backing{{Name: "landing", Stores: []archiveio.WriteStore{landing}, Writers: 1}},
-		Holding:  NewPool([]Disk{{Name: "hd0", Storage: holding, Capacity: 0}}),
+		Backings: []Backing{{Name: "landing", Allocs: []archiveio.PartAllocator{landing}, Rec: landing, Writers: 1}},
+		Holding:  NewPool([]Disk{{Name: "hd0", Alloc: holding, Storage: holding, Capacity: 0}}),
 	})
 	if err := stageOne(t, sp, []byte("the quick brown fox")); err != nil {
 		t.Fatalf("Drain: %v", err)
@@ -342,7 +342,7 @@ func TestOrchestratorSerializesControlCalls(t *testing.T) {
 	sp := New(context.Background(), Config{
 		// Writers: 2 over a single shared store => two producers write it at once; only the
 		// orchestrator serialises their control calls.
-		Backings: []Backing{{Name: "landing", Stores: []archiveio.WriteStore{landing}, Writers: 2}},
+		Backings: []Backing{{Name: "landing", Allocs: []archiveio.PartAllocator{landing}, Rec: landing, Writers: 2}},
 		Holding:  NewPool(nil), // no holding disk => every write goes direct to the landing
 	})
 	body := bytes.Repeat([]byte("abcdefgh"), 4096)
@@ -386,9 +386,11 @@ func TestOrchestratorSerializesControlCalls(t *testing.T) {
 // reports the cancel.
 func TestCancelAbortsViaWatcher(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	pool := NewPool([]Disk{{Name: "hd0", Storage: newMemStore("holding"), Capacity: 1 << 30}})
+	holding := newMemStore("holding")
+	pool := NewPool([]Disk{{Name: "hd0", Alloc: holding, Storage: holding, Capacity: 1 << 30}})
+	landing := newMemStore("landing")
 	sp := New(ctx, Config{
-		Backings: []Backing{{Name: "landing", Stores: []archiveio.WriteStore{newMemStore("landing")}, Writers: 1}},
+		Backings: []Backing{{Name: "landing", Allocs: []archiveio.PartAllocator{landing}, Rec: landing, Writers: 1}},
 		Holding:  pool,
 	})
 	cancel()
@@ -411,7 +413,7 @@ func TestCancelAbortsViaWatcher(t *testing.T) {
 func TestNewCopyRoutesAndCommits(t *testing.T) {
 	landing := newMemStore("landing")
 	sp := New(context.Background(), Config{
-		Backings: []Backing{{Name: "landing", Stores: []archiveio.WriteStore{landing}, Writers: 1}},
+		Backings: []Backing{{Name: "landing", Allocs: []archiveio.PartAllocator{landing}, Rec: landing, Writers: 1}},
 		Holding:  NewPool(nil),
 	})
 	body := []byte("copy me verbatim")
@@ -441,8 +443,9 @@ func TestNewCopyRoutesAndCommits(t *testing.T) {
 // gets the run's error from Ingest rather than starting a doomed write.
 func TestNewArchiveAfterAbortReturnsRunError(t *testing.T) {
 	boom := errors.New("already down")
+	landing := newMemStore("landing")
 	sp := New(context.Background(), Config{
-		Backings: []Backing{{Name: "landing", Stores: []archiveio.WriteStore{newMemStore("landing")}, Writers: 1}},
+		Backings: []Backing{{Name: "landing", Allocs: []archiveio.PartAllocator{landing}, Rec: landing, Writers: 1}},
 		Holding:  NewPool(nil),
 	})
 	sp.setAbort(boom)

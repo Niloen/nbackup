@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/programs"
@@ -59,7 +59,7 @@ func failStage(_ string, _ []string) programs.Cmd {
 // complete restore.
 func TestSecondArchiveFailsRollsBackEmptyDest(t *testing.T) {
 	dle := "app01-data"
-	store := &fakeStore{payloads: map[archiveio.Ref][]byte{
+	store := &fakeStore{payloads: map[record.Ref][]byte{
 		ref("run-2026-06-01.001", dle, 0): []byte("l0"),
 		ref("run-2026-06-02.001", dle, 1): []byte("l1"),
 	}}
@@ -89,7 +89,7 @@ func TestSecondArchiveFailsRollsBackEmptyDest(t *testing.T) {
 // the tree is partial and leaves it in place for the operator to discard.
 func TestSecondArchiveFailsForceWarnsLoud(t *testing.T) {
 	dle := "app01-data"
-	store := &fakeStore{payloads: map[archiveio.Ref][]byte{
+	store := &fakeStore{payloads: map[record.Ref][]byte{
 		ref("run-2026-06-01.001", dle, 0): []byte("l0"),
 		ref("run-2026-06-02.001", dle, 1): []byte("l1"),
 	}}
@@ -113,7 +113,7 @@ func TestSecondArchiveFailsForceWarnsLoud(t *testing.T) {
 // restore" warning nor a rollback of a tree that was never written.
 func TestExtractDestSetupFailureNoPartialWarning(t *testing.T) {
 	dle := "app01-data"
-	store := &fakeStore{payloads: map[archiveio.Ref][]byte{
+	store := &fakeStore{payloads: map[record.Ref][]byte{
 		ref("run-2026-06-01.001", dle, 0): []byte("l0"),
 	}}
 	r := New(scriptDeps(store, chainArchives(dle)[:1], drainStage))
@@ -150,7 +150,7 @@ func encChain(dle, scheme string) []record.Archive {
 // the point is the single warning fired first.
 func TestEnsureServerCanDecodeWarnsOnce(t *testing.T) {
 	dle := "app01-data"
-	store := &fakeStore{payloads: map[archiveio.Ref][]byte{}} // no copies: fail after the warn
+	store := &fakeStore{payloads: map[record.Ref][]byte{}} // no copies: fail after the warn
 	d := testDeps(store, encChain(dle, "gpg"))
 	d.EncryptionFor = func(string) (config.EncryptConfig, bool) {
 		return config.EncryptConfig{Scheme: "gpg", At: "client", Recipient: "ops@x"}, true
@@ -159,7 +159,7 @@ func TestEnsureServerCanDecodeWarnsOnce(t *testing.T) {
 	var logs []string
 	log := func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 	err := r.Extract(Request{DLE: dle, RunID: "run-2026-06-02.001", Dest: filepath.Join(t.TempDir(), "out")}, log)
-	if !errors.Is(err, archiveio.ErrMissingCopy) {
+	if !errors.Is(err, archivefs.ErrMissingCopy) {
 		t.Fatalf("expected a missing-copy failure after the warn, got: %v", err)
 	}
 	warns := 0
@@ -178,7 +178,7 @@ func TestEnsureServerCanDecodeWarnsOnce(t *testing.T) {
 // passphrase never leaves the client — so it fails fast before touching media.
 func TestEnsureServerCanDecodeHardError(t *testing.T) {
 	dle := "app01-data"
-	store := &fakeStore{payloads: map[archiveio.Ref][]byte{
+	store := &fakeStore{payloads: map[record.Ref][]byte{
 		ref("run-2026-06-01.001", dle, 0): []byte("l0"),
 		ref("run-2026-06-02.001", dle, 1): []byte("l1"),
 	}}

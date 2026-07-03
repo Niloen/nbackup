@@ -144,7 +144,7 @@ func (s *memSink) NextPart() (media.Volume, int64, string, int, error) {
 // volume capacity, so only a no-cap volume with no partCap is unbounded.
 func (s *memSink) Bounded() bool { return s.partCap > 0 || s.vols[s.idx].capacity > 0 }
 
-func (s *memSink) PlaceRecord(size int64) (media.Volume, string, int, error) {
+func (s *memSink) PlaceFile(size int64) (media.Volume, string, int, error) {
 	if r := s.room(); r >= 0 && size > r {
 		if err := s.advance(); err != nil {
 			return nil, "", 0, err
@@ -170,7 +170,7 @@ func openerOver(vols ...*memVolume) PartOpener {
 	}
 }
 
-func writeOneArchive(t *testing.T, w *Author, sink *memSink, dle string, body []byte) (record.Archive, record.ArchivePos) {
+func writeOneArchive(t *testing.T, w *Writer, sink *memSink, dle string, body []byte) (record.Archive, record.ArchivePos) {
 	t.Helper()
 	spec := ArchiveSpec{DLE: dle, Host: "localhost", Path: "/p", Archiver: "m", Level: 0, Compress: "none"}
 	aw := w.NewArchive(spec)
@@ -228,7 +228,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	sink := &memSink{vols: []*memVolume{v1, v2, v3}}
 
 	spec := RunSpec{ID: "run-2026-06-21.001", CreatedAt: time.Unix(0, 0).UTC()}
-	w := NewAuthor(sink, spec, nil, nil) // bounded by volume capacity (spanning) → sink.Bounded()==true
+	w := NewWriter(sink, sink, spec, nil, nil) // bounded by volume capacity (spanning) → sink.Bounded()==true
 
 	body := []byte(strings.Repeat("abcdefgh", 25*1024/8*4)) // 100 KiB → spans v1+v2, last part on v3
 	arch, apos := writeOneArchive(t, w, sink, "dle1", body)
@@ -249,8 +249,8 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	}
 
 	// Read the archive back by concatenating its parts; it must equal the input.
-	r := NewReader()
-	rc, err := r.Open(parts, Ref{Run: spec.ID, DLE: "dle1", Level: 0}, openerOver(v1, v2, v3))
+	r := NewReader(openerOver(v1, v2, v3), nil)
+	rc, err := r.Open(record.Ref{Run: spec.ID, DLE: "dle1", Level: 0}, parts)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -264,9 +264,9 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	}
 
 	// VerifyParts must confirm the recorded checksum over the concatenation.
-	ok, err := r.VerifyParts(parts, Ref{Run: spec.ID, DLE: "dle1", Level: 0}, arch.SHA256, openerOver(v1, v2, v3))
+	ok, err := r.Verify(record.Ref{Run: spec.ID, DLE: "dle1", Level: 0}, parts, arch.SHA256)
 	if err != nil || !ok {
-		t.Fatalf("VerifyParts ok=%v err=%v", ok, err)
+		t.Fatalf("Verify ok=%v err=%v", ok, err)
 	}
 }
 
@@ -278,14 +278,14 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	sink := &memSink{vols: []*memVolume{v}, partCap: 10 * 1024}
 
 	spec := RunSpec{ID: "run-x", CreatedAt: time.Unix(0, 0).UTC()}
-	w := NewAuthor(sink, spec, nil, nil)         // bounded by partCap (intra-volume split) → sink.Bounded()==true
+	w := NewWriter(sink, sink, spec, nil, nil)   // bounded by partCap (intra-volume split) → sink.Bounded()==true
 	body := []byte(strings.Repeat("z", 55*1024)) // 55 KiB / 10 KiB ≈ 6 parts
 	arch, apos := writeOneArchive(t, w, sink, "dle1", body)
 	if arch.Parts < 5 {
 		t.Fatalf("Parts = %d, want >= 5", arch.Parts)
 	}
-	r := NewReader()
-	rc, err := r.Open(apos.Parts, Ref{Run: spec.ID, DLE: "dle1", Level: 0}, openerOver(v))
+	r := NewReader(openerOver(v), nil)
+	rc, err := r.Open(record.Ref{Run: spec.ID, DLE: "dle1", Level: 0}, apos.Parts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestRollFailureNoDeadlock(t *testing.T) {
 	v := newMemVolume("v1", 96*1024) // one small volume, no room to roll
 	sink := &memSink{vols: []*memVolume{v}}
 	spec := RunSpec{ID: "run-y", CreatedAt: time.Unix(0, 0).UTC()}
-	w := NewAuthor(sink, spec, nil, nil)
+	w := NewWriter(sink, sink, spec, nil, nil)
 
 	body := []byte(strings.Repeat("q", 200*1024)) // far bigger than one volume
 	err := driveArchive(w.NewArchive(ArchiveSpec{DLE: "dle1", Level: 0}), body)
@@ -322,7 +322,7 @@ func TestCommitRecordsUnreadable(t *testing.T) {
 	v := newMemVolume("v1", 0)
 	sink := &memSink{vols: []*memVolume{v}}
 	spec := RunSpec{ID: "run-2026-06-21.001", CreatedAt: time.Unix(0, 0).UTC()}
-	w := NewAuthor(sink, spec, nil, nil)
+	w := NewWriter(sink, sink, spec, nil, nil)
 
 	body := []byte("payload of what was readable")
 	aw := w.NewArchive(ArchiveSpec{DLE: "dle1", Host: "localhost", Path: "/p", Archiver: "m", Level: 0, Compress: "none"})
@@ -367,7 +367,7 @@ func TestCommitRecordsUnreadable(t *testing.T) {
 	// A copy preserves the source's PARTIAL marker (like its stats and CreatedAt).
 	v2 := newMemVolume("v2", 0)
 	sink2 := &memSink{vols: []*memVolume{v2}}
-	w2 := NewAuthor(sink2, spec, nil, nil)
+	w2 := NewWriter(sink2, sink2, spec, nil, nil)
 	cw := w2.NewCopy(arch)
 	if err := driveArchive(cw, body); err != nil {
 		t.Fatalf("copy driveArchive: %v", err)

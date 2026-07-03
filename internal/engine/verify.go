@@ -7,9 +7,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/depot"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/restorer"
@@ -81,13 +82,13 @@ type VerifyReport struct {
 
 // verifier is NBackup's verification operation: the stateless integrity
 // primitive that checks runs/archives against the seal and writes nothing. It depends on a
-// narrow slice of the orchestrator — the catalog (run list + metadata), the clerk (byte
+// narrow slice of the orchestrator — the catalog (run list + metadata), the fs (byte
 // endpoints + recorded member list), the decoder (checksum + structural decode), the
 // read-preference placement order, and structural-archiver resolution — not the whole engine,
 // so the same path serves `nb verify` and a drill's per-archive check.
 type verifier struct {
 	cat         *catalog.Catalog                                       // run list + metadata
-	store       archiveio.ReadStore                                    // byte endpoints + member index (the read face of the archive fs)
+	store       archivefs.ReadStore                                    // byte endpoints + member index (the read face of the archive fs)
 	rst         *restorer.Restorer                                     // checksum + structural decode primitives
 	placements  func(runID string) []catalog.Placement                 // copies in read-preference order
 	archiverFor func(typeName, host string) (archiver.Archiver, error) // archiver for the structural list
@@ -98,7 +99,7 @@ type verifier struct {
 func (e *Engine) newVerifier() *verifier {
 	return &verifier{
 		cat:         e.cat,
-		store:       e.clerk,
+		store:       e.fs,
 		rst:         e.rst,
 		placements:  e.placementsFor,
 		archiverFor: e.tc.restoreArchiver,
@@ -169,7 +170,7 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 	// Track which whole copies passed so a failure can still reassure the operator
 	// that an intact copy remains (redundancy is the point of more than one).
 	var goodCopies, badCopies, skippedCopies []string
-	checked := map[archiveio.Ref]bool{} // distinct archives verified on at least one copy
+	checked := map[record.Ref]bool{} // distinct archives verified on at least one copy
 	for _, p := range placements {
 		copyOK := true
 		// A copy is archive-granular: a per-archive prune may have reclaimed some of
@@ -183,17 +184,17 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 				expected = append(expected, a)
 			}
 		}
-		archByRef := make(map[archiveio.Ref]record.Archive, len(expected))
-		refs := make([]archiveio.Ref, len(expected))
+		archByRef := make(map[record.Ref]record.Archive, len(expected))
+		refs := make([]record.Ref, len(expected))
 		for i, a := range expected {
-			ref := archiveio.Ref{Run: id, DLE: a.DLE, Level: a.Level}
+			ref := record.Ref{Run: id, DLE: a.DLE, Level: a.Level}
 			refs[i] = ref
 			archByRef[ref] = a
 		}
-		// The clerk drives the one-pass read of this copy, calling back per archive; verify
+		// The fs drives the one-pass read of this copy, calling back per archive; verify
 		// every one (never stop early), collecting verdicts.
-		verdicts := make(map[archiveio.Ref]ArchiveVerdict, len(refs))
-		_, err := v.store.ReadArchives(refs, p.Medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
+		verdicts := make(map[record.Ref]ArchiveVerdict, len(refs))
+		_, err := v.store.ReadArchives(refs, p.Medium, func(ref record.Ref, open func() (io.ReadCloser, error)) error {
 			verdicts[ref] = v.verifyArchive(archByRef[ref], ref, p.Medium, opts, open, logf)
 			return nil
 		})
@@ -201,7 +202,7 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 			// A copy on a medium this config does not define is out of scope, not
 			// damaged: skip it (with a note) rather than reporting a false integrity
 			// failure. Other errors (a configured medium that won't open) still fail.
-			if errors.Is(err, ErrUnknownMedium) {
+			if errors.Is(err, depot.ErrUnknownMedium) {
 				logf.Log("%s [%s]: skipped — medium not defined in this config", id, p.Medium)
 				skippedCopies = append(skippedCopies, p.Medium)
 				continue
@@ -216,7 +217,7 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 			continue
 		}
 		for _, a := range expected {
-			ref := archiveio.Ref{Run: id, DLE: a.DLE, Level: a.Level}
+			ref := record.Ref{Run: id, DLE: a.DLE, Level: a.Level}
 			v, ok := verdicts[ref]
 			if !ok {
 				logf.Log("%s [%s]: %s L%d POSITION MISSING", id, p.Medium, a.DLEID(), a.Level)
@@ -257,7 +258,7 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 
 // verifyArchive runs the requested checks against one archive, opening its stream via open
 // (each check reads it afresh).
-func (v *verifier) verifyArchive(a record.Archive, ref archiveio.Ref, medium string, opts VerifyOptions, open func() (io.ReadCloser, error), logf Logf) ArchiveVerdict {
+func (v *verifier) verifyArchive(a record.Archive, ref record.Ref, medium string, opts VerifyOptions, open func() (io.ReadCloser, error), logf Logf) ArchiveVerdict {
 	id := ref.Run
 	vd := ArchiveVerdict{Run: id, DLE: a.DLE, Level: a.Level, Medium: medium, OK: true}
 
@@ -305,7 +306,7 @@ func (v *verifier) structuralCheck(id string, a record.Archive, open func() (io.
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
-	// The clerk reads the parts → decodes (server-side Filters) → lists members (`tar -t`).
+	// The fs reads the parts → decodes (server-side Filters) → lists members (`tar -t`).
 	// Any fault — a media read, a decode child, or a not-a-tar List — is a Pipeline failure; a
 	// clean stream whose members differ from the seal is an Integrity failure. The decrypt
 	// hint keeps a lost-key failure from being mislabeled as corruption.
@@ -313,8 +314,8 @@ func (v *verifier) structuralCheck(id string, a record.Archive, open func() (io.
 	if terr != nil {
 		return drill.ClassPipeline, restorer.DecryptHint(a.Encrypt, terr).Error()
 	}
-	// The recorded member list (the catalog is member-free) is loaded via the clerk.
-	recorded, err := v.store.Members(archiveio.Ref{Run: id, DLE: a.DLE, Level: a.Level})
+	// The recorded member list (the catalog is member-free) is loaded via the archivefs.
+	recorded, err := v.store.Members(record.Ref{Run: id, DLE: a.DLE, Level: a.Level})
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}

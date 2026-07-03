@@ -3,7 +3,6 @@ package accounting
 import (
 	"time"
 
-	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/record"
@@ -114,14 +113,14 @@ func (a *Accountant) RestoreCost(dles []string, asOf string) ReadEstimate {
 	if err != nil {
 		return ReadEstimate{Priced: a.d.LandingCost.Priced(), Provider: a.d.LandingCost.Provider}
 	}
-	var refs []archiveio.Ref
+	var refs []record.Ref
 	for _, dle := range dles {
 		steps, err := recovery.Chain(a.d.Cat.Archives(), dle, target)
 		if err != nil {
 			continue
 		}
 		for _, s := range steps {
-			refs = append(refs, archiveio.Ref{Run: s.RunID, DLE: s.DLE, Level: s.Level})
+			refs = append(refs, record.Ref{Run: s.RunID, DLE: s.DLE, Level: s.Level})
 		}
 	}
 	return a.EstimateRead(refs, "")
@@ -130,9 +129,9 @@ func (a *Accountant) RestoreCost(dles []string, asOf string) ReadEstimate {
 // SelectionCost prices a file-level recovery: the egress of the archives its selected
 // members are extracted from.
 func (a *Accountant) SelectionCost(steps []recovery.ExtractStep) ReadEstimate {
-	refs := make([]archiveio.Ref, 0, len(steps))
+	refs := make([]record.Ref, 0, len(steps))
 	for _, st := range steps {
-		refs = append(refs, archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level})
+		refs = append(refs, record.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level})
 	}
 	return a.EstimateRead(refs, "")
 }
@@ -143,7 +142,7 @@ func (a *Accountant) SelectionCost(steps []recovery.ExtractStep) ReadEstimate {
 // so the estimate matches what a restore will actually pay. Payload bytes are
 // medium-independent (the same ciphertext lands on every copy), so they come from the
 // catalog regardless of which copy is read.
-func (a *Accountant) EstimateRead(refs []archiveio.Ref, forceMedium string) ReadEstimate {
+func (a *Accountant) EstimateRead(refs []record.Ref, forceMedium string) ReadEstimate {
 	var est ReadEstimate
 	for _, r := range refs {
 		medium, ar, ok := a.locateArchive(r, forceMedium)
@@ -169,7 +168,7 @@ func (a *Accountant) EstimateRead(refs []archiveio.Ref, forceMedium string) Read
 // locateArchive resolves an archive reference to the medium it will be read from and
 // its catalog record. With forceMedium set it reads that medium's copy; otherwise it
 // picks the copy a restore prefers (landing first).
-func (a *Accountant) locateArchive(r archiveio.Ref, forceMedium string) (medium string, ar record.Archive, ok bool) {
+func (a *Accountant) locateArchive(r record.Ref, forceMedium string) (medium string, ar record.Archive, ok bool) {
 	s, err := a.d.Cat.ReadRun(r.Run)
 	if err != nil {
 		return "", record.Archive{}, false

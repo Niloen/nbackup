@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/logf"
@@ -140,8 +141,8 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 // copy/sync so that machinery lives in one place.
 func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, workers int, spec archiveio.RunSpec, holdingNames []string, tr *progress.Tracker, now time.Time, lf logf.Logf) (*catalog.Run, error) {
 	landings := distinctLandings(plan.Items, c.d.LandingFor)
-	err := c.withSpool(ctx, landings, holdingNames, spec, workers, tr, now, lf, func(sp *spool.Spool, _ archiveio.ReadStore) error {
-		route := func(it planner.Item) archiveio.Ingest { return sp.Ingest(c.d.LandingFor(it)) }
+	err := c.withSpool(ctx, landings, holdingNames, spec, workers, tr, now, lf, func(sp *spool.Spool, _ archivefs.ReadStore) error {
+		route := func(it planner.Item) archivefs.Ingest { return sp.Ingest(c.d.LandingFor(it)) }
 		return c.d.Dmp.Run(ctx, plan.Items, workers, route, tr, lf) // a dump keeps no media: it only writes, and reads no medium
 	})
 	if err != nil {
@@ -183,7 +184,7 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 // (Deps.OpenReader; sound because a session never reads its own writes). The window closes
 // unconditionally when withSpool returns — every archive recorded before then is already
 // persisted (the archive is the commit unit).
-func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []string, spec archiveio.RunSpec, workers int, tr *progress.Tracker, now time.Time, lf logf.Logf, run func(sp *spool.Spool, ro archiveio.ReadStore) error) (err error) {
+func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []string, spec archiveio.RunSpec, workers int, tr *progress.Tracker, now time.Time, lf logf.Logf, run func(sp *spool.Spool, ro archivefs.ReadStore) error) (err error) {
 	// The window opens here — before the spool (and its orchestrator and drains) exists,
 	// while this goroutine is the only one touching the catalog.
 	view, win, err := c.d.Cat.OpenWindow()
@@ -218,7 +219,7 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 			return fmt.Errorf("open holding disk %q: %w", name, err)
 		}
 		defer releaseWriter(pw)
-		disks[i] = spool.Disk{Name: name, Storage: pw.Stores[0], Capacity: pw.Capacity, Lim: pw.Lim, Writers: pw.Writers}
+		disks[i] = spool.Disk{Name: name, Alloc: pw.Allocs[0], Storage: pw.Store, Capacity: pw.Capacity, Lim: pw.Lim, Writers: pw.Writers}
 	}
 
 	// One backing per landing; landingWriters decides how many writes to it may run at once.
@@ -231,11 +232,7 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 		}
 		defer releaseWriter(pw)
 		writers := landingWriters(pw, workers)
-		stores := make([]archiveio.WriteStore, len(pw.Stores))
-		for i, s := range pw.Stores {
-			stores[i] = s // a Store is a WriteStore; the spool only writes backings
-		}
-		backings = append(backings, spool.Backing{Name: name, Stores: stores, Writers: writers, Lim: pw.Lim})
+		backings = append(backings, spool.Backing{Name: name, Allocs: pw.Allocs, Rec: pw.Store, Writers: writers, Lim: pw.Lim})
 	}
 
 	sp := spool.New(ctx, spool.Config{
@@ -272,7 +269,7 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 // records under, and spec.CreatedAt stamps the run's authoring time. source is the medium the copier
 // reads; the window's write claim on target would refuse those reads anyway (see withSpool), but the
 // same-medium case is rejected here so the operator gets the direct message, not a failed-over read.
-func (c *Conductor) CopyRun(ctx context.Context, target, source string, spec archiveio.RunSpec, workers int, now time.Time, lf logf.Logf, run func(sp *spool.Spool, ro archiveio.ReadStore) error) error {
+func (c *Conductor) CopyRun(ctx context.Context, target, source string, spec archiveio.RunSpec, workers int, now time.Time, lf logf.Logf, run func(sp *spool.Spool, ro archivefs.ReadStore) error) error {
 	if source == target {
 		return fmt.Errorf("medium %q cannot be both read and written in one run", target)
 	}
@@ -289,13 +286,13 @@ func landingWriters(pw PreparedWriter, workers int) int {
 	writers := pw.Writers
 	if writers == 0 {
 		if pw.Serial {
-			writers = len(pw.Stores)
+			writers = len(pw.Allocs)
 		} else {
 			writers = workers
 		}
 	}
-	if pw.Serial && writers > len(pw.Stores) {
-		writers = len(pw.Stores)
+	if pw.Serial && writers > len(pw.Allocs) {
+		writers = len(pw.Allocs)
 	}
 	if writers < 1 {
 		writers = 1

@@ -9,6 +9,7 @@ import (
 	"sort"
 
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/depot"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/transform/compress"
@@ -46,7 +47,7 @@ type HostCheck struct {
 type checker struct {
 	cfg *config.Config
 	tc  *toolchain
-	dep *depot
+	dep *depot.Depot
 }
 
 // Check verifies the configuration is runnable: the server side always, and each source
@@ -151,7 +152,7 @@ func (c *checker) checkServer(rep *CheckReport) {
 // cloud medium's reachability needs credentials/network, so it is reported as
 // configured-but-unprobed (it is validated at first use) rather than opened here.
 func (c *checker) checkMedia(rep *CheckReport) {
-	landing := c.dep.landingName
+	landing := c.dep.LandingName()
 	names := make([]string, 0, len(c.cfg.Media))
 	for n := range c.cfg.Media {
 		names = append(names, n)
@@ -176,7 +177,7 @@ func (c *checker) checkMedia(rep *CheckReport) {
 		// credentials or an unreachable bucket surface; opening it also bootstraps the
 		// catalog, so a clean open means the landing is genuinely runnable.
 		if isLanding {
-			if _, err := c.dep.landing(); err != nil {
+			if _, err := c.dep.Landing(); err != nil {
 				rep.add(&rep.Server, false, false, fmt.Sprintf("%s not ready: %v", label, err))
 			} else {
 				rep.add(&rep.Server, true, false, fmt.Sprintf("%s ready", label))
@@ -190,7 +191,7 @@ func (c *checker) checkMedia(rep *CheckReport) {
 			rep.add(&rep.Server, false, true, fmt.Sprintf("%s (cloud) configured — reachability checked at first use, not here", label))
 			continue
 		}
-		if _, _, _, err := c.dep.mediumVolume(name); err != nil {
+		if _, _, _, err := c.dep.MediumVolume(name); err != nil {
 			rep.add(&rep.Server, false, true, fmt.Sprintf("%s not ready: %v", label, err))
 		} else {
 			rep.add(&rep.Server, true, false, fmt.Sprintf("%s ready", label))

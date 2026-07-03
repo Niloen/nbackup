@@ -1,15 +1,14 @@
-package clerk
+package archivefs
 
 import (
 	"testing"
 
-	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
 func item(run, dle string, level int, medium, label string, pos int) ReadItem {
 	return ReadItem{
-		Ref:      archiveio.Ref{Run: run, DLE: dle, Level: level},
+		Ref:      record.Ref{Run: run, DLE: dle, Level: level},
 		Medium:   medium,
 		FirstPos: record.FilePos{Label: label, Pos: pos},
 	}

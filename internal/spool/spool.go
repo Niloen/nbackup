@@ -3,9 +3,9 @@
 // docs/design/concurrent-writes.md):
 //
 //   - Each producer (and each drain) writes bytes on its own goroutine, driving an archiveio
-//     writer the clerk built over a landing's (or holding disk's) Session. All byte I/O — part
+//     writer bound over a landing's (or holding disk's) seams. All byte I/O — part
 //     headers, payload, footer, member index, SHA — happens there.
-//   - A single orchestrator goroutine runs every Session's control calls: volume alloc/roll (the
+//   - A single orchestrator goroutine runs every writer's control calls: volume alloc/roll (the
 //     librarian) and the catalog Record. So across every lane, rolls and placements serialize
 //     onto one goroutine (the sole catalog writer), with no bulk bytes flowing through it — a
 //     slow drive can't block it.
@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/ratelimit"
@@ -35,17 +36,22 @@ import (
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
-// Backing is one landing the spool drains (or writes) archives to: its medium name, the WriteStore it
-// lands on (the clerk Session, which the spool wraps in a routing WriteStore), the medium's byte-rate
-// Limiter, and Writers — how many writes to it may run at once, direct writes and drains alike (the
-// medium's `writers` cap, defaulting to its drive count for a serial medium or the worker count for
-// a concurrent one; see conductor.landingWriters). Each Backing configures one runtime lane.
+// Backing is one landing the spool drains (or writes) archives to: its medium name, its part
+// allocators and run store (the fs Session, whose Recorder the spool routes through its
+// orchestrator), the medium's byte-rate Limiter, and Writers — how many writes to it may run at
+// once, direct writes and drains alike (the medium's `writers` cap, defaulting to its drive count
+// for a serial medium or the worker count for a concurrent one; see conductor.landingWriters).
+// Each Backing configures one runtime lane.
 type Backing struct {
 	Name string
-	// Stores is the landing's write stores, one per concurrent writer: a single store shared by all
-	// writers for a concurrent medium (disk/cloud), or one per drive for a serial multi-drive tape
-	// library. Each is only written; the spool wraps it and builds writers over it.
-	Stores  []archiveio.WriteStore
+	// Allocs is the landing's part allocators, one per concurrent writer: a single allocator shared
+	// by all writers for a concurrent medium (disk/cloud), or one per drive for a serial multi-drive
+	// tape library (each bound to its own drive so two archives write independent tapes).
+	Allocs []archiveio.PartAllocator
+	// Rec is the landing's recorder — the fs Session every writer's commits are recorded
+	// through, one per medium regardless of drive count. (A landing is only recorded to;
+	// read-back and reclaim exist only on the holding Pool's Disks.)
+	Rec     archiveio.Recorder
 	Writers int
 	Lim     *ratelimit.Limiter
 }
@@ -62,21 +68,22 @@ type Config struct {
 	Logf     func(format string, args ...any)
 }
 
-// lane is one landing's runtime state (a Backing, wired up): its per-drive stores (the WriteStores
-// the spool wraps), the medium's rate limiter, and free — the lease that both bounds concurrency and
-// hands each writer a store index. free is buffered to the concurrency width; each buffered value is
-// a store index a write may use (a distinct drive for a multi-store tape library, or index 0 repeated
-// for a shared single store). A writer (a direct write or a drain) pops an index for the duration of
-// its write and pushes it back on close, so a drive is used by one archive at a time and the byte I/O
-// of the others runs in parallel.
+// lane is one landing's runtime state (a Backing, wired up): its per-drive allocators, its run
+// store, the medium's rate limiter, and free — the lease that both bounds concurrency and hands
+// each writer an allocator index. free is buffered to the concurrency width; each buffered value
+// is an allocator index a write may use (a distinct drive for a multi-drive tape library, or index
+// 0 repeated for a shared single allocator). A writer (a direct write or a drain) pops an index
+// for the duration of its write and pushes it back on close, so a drive is used by one archive at
+// a time and the byte I/O of the others runs in parallel.
 type lane struct {
 	name   string
-	stores []archiveio.WriteStore
+	allocs []archiveio.PartAllocator
+	rec    archiveio.Recorder
 	lim    *ratelimit.Limiter
 	free   chan int
 }
 
-// lease pops a free store index (blocking until one frees); release returns it.
+// lease pops a free allocator index (blocking until one frees); release returns it.
 func (l *lane) lease() int      { return <-l.free }
 func (l *lane) release(idx int) { l.free <- idx }
 
@@ -130,18 +137,19 @@ func New(ctx context.Context, cfg Config) *Spool {
 		if writers < 1 {
 			writers = 1
 		}
-		// free holds one entry per concurrent writer. A multi-store lane (a tape drive per store)
-		// hands out distinct indices 0..writers-1; a single-store lane (disk/cloud) hands out index 0
-		// repeated, so its writers share the one store (their control serialises on the orchestrator).
+		// free holds one entry per concurrent writer. A multi-allocator lane (a tape drive per
+		// allocator) hands out distinct indices 0..writers-1; a single-allocator lane (disk/cloud)
+		// hands out index 0 repeated, so its writers share the one allocator (their control
+		// serialises on the orchestrator).
 		free := make(chan int, writers)
 		for k := 0; k < writers; k++ {
 			idx := k
-			if idx > len(b.Stores)-1 {
-				idx = len(b.Stores) - 1
+			if idx > len(b.Allocs)-1 {
+				idx = len(b.Allocs) - 1
 			}
 			free <- idx
 		}
-		sp.lanes[b.Name] = &lane{name: b.Name, stores: b.Stores, lim: b.Lim, free: free}
+		sp.lanes[b.Name] = &lane{name: b.Name, allocs: b.Allocs, rec: b.Rec, lim: b.Lim, free: free}
 	}
 	if ctx.Done() != nil {
 		go func() {
@@ -158,7 +166,7 @@ func New(ctx context.Context, cfg Config) *Spool {
 // Ingest returns the writer source for the named landing, which must be one of Config.Backings — an
 // unknown name is a caller bug (the handle panics on first use). The dumper resolves each DLE's
 // landing to one of these and pulls writers from it; the spool never picks a landing itself.
-func (sp *Spool) Ingest(name string) archiveio.Ingest {
+func (sp *Spool) Ingest(name string) archivefs.Ingest {
 	return laneHandle{sp: sp, l: sp.lanes[name]}
 }
 
@@ -169,25 +177,25 @@ type laneHandle struct {
 	l  *lane
 }
 
-var _ archiveio.Ingest = laneHandle{}
+var _ archivefs.Ingest = laneHandle{}
 
 func (h laneHandle) NewArchive(spec archiveio.ArchiveSpec, est int64) (*archiveio.ArchiveWriter, error) {
-	return h.sp.ingest(h.l, spec.Host+":"+spec.Path, est, func(a *archiveio.Author) *archiveio.ArchiveWriter {
+	return h.sp.ingest(h.l, spec.Host+":"+spec.Path, est, func(a *archiveio.Writer) *archiveio.ArchiveWriter {
 		return a.NewArchive(spec)
 	})
 }
 
 func (h laneHandle) NewCopy(arch record.Archive, est int64) (*archiveio.ArchiveWriter, error) {
-	return h.sp.ingest(h.l, arch.Host+":"+arch.Path, est, func(a *archiveio.Author) *archiveio.ArchiveWriter {
+	return h.sp.ingest(h.l, arch.Host+":"+arch.Path, est, func(a *archiveio.Writer) *archiveio.ArchiveWriter {
 		return a.NewCopy(arch)
 	})
 }
 
-// writerOver authors a concurrent writer over store: a fresh archiveio.Author whose WriteStore is
-// store wrapped in a routedWriteStore, so its alloc + Record hop to the orchestrator while its byte I/O
-// runs on the caller's goroutine. Cheap enough to build per write.
-func (sp *Spool) writerOver(store archiveio.WriteStore, lim *ratelimit.Limiter) *archiveio.Author {
-	return archiveio.NewAuthor(&routedWriteStore{real: store, orch: sp.orch}, sp.spec, lim, sp.now)
+// writerOver builds a concurrent writer over a medium's two seams: a fresh archiveio.Writer whose
+// allocator and recorder are wrapped in routed seams, so rolls + Record hop to the orchestrator
+// while its byte I/O runs on the caller's goroutine. Cheap enough to build per write.
+func (sp *Spool) writerOver(alloc archiveio.PartAllocator, rec archiveio.Recorder, lim *ratelimit.Limiter) *archiveio.Writer {
+	return archiveio.NewWriter(&routedAllocator{real: alloc, orch: sp.orch}, &routedRecorder{real: rec, orch: sp.orch}, sp.spec, lim, sp.now)
 }
 
 // landingVolume names the distinct volume label(s) an archive's parts landed on: one volume normally,
@@ -212,7 +220,7 @@ func landingVolume(pos record.ArchivePos) string {
 // disk fits, or none configured) waits for a free drive on l. The writer's control calls route onto the
 // orchestrator, and its Close hook releases whatever the write leased. It returns the run's error if the
 // spool has aborted.
-func (sp *Spool) ingest(l *lane, dleID string, est int64, build func(*archiveio.Author) *archiveio.ArchiveWriter) (*archiveio.ArchiveWriter, error) {
+func (sp *Spool) ingest(l *lane, dleID string, est int64, build func(*archiveio.Writer) *archiveio.ArchiveWriter) (*archiveio.ArchiveWriter, error) {
 	if err := sp.Aborted(); err != nil {
 		return nil, err
 	}
@@ -222,15 +230,15 @@ func (sp *Spool) ingest(l *lane, dleID string, est int64, build func(*archiveio.
 	}
 	if direct {
 		// No holding disk fits: write straight to the landing, leasing one of l's drives for the write.
-		store := l.lease()
-		aw := build(sp.writerOver(l.stores[store], l.lim))
+		drive := l.lease()
+		aw := build(sp.writerOver(l.allocs[drive], l.rec, l.lim))
 		aw.SetCloser(func() error {
 			// Surface the landing volume(s) this drive wrote to, so `nb status` shows the
 			// multi-drive spread (each DLE on its own tape). A faulted write never committed.
 			if res, ok := aw.Committed(); ok && sp.tr != nil {
 				sp.tr.LandVolume(res.Archive.Host+":"+res.Archive.Path, landingVolume(res.Pos))
 			}
-			l.release(store)
+			l.release(drive)
 			return nil
 		})
 		return aw, nil
@@ -239,7 +247,7 @@ func (sp *Spool) ingest(l *lane, dleID string, est int64, build func(*archiveio.
 	if sp.tr != nil {
 		sp.tr.MarkToHolding(dleID)
 	}
-	aw := build(sp.writerOver(sp.pool.Storage(disk), sp.pool.Lim(disk)))
+	aw := build(sp.writerOver(sp.pool.Alloc(disk), sp.pool.Storage(disk), sp.pool.Lim(disk)))
 	aw.SetCloser(func() error {
 		// On commit the archive occupies the disk until its drain copies it off: charge the landed
 		// bytes (so a later Acquire back-pressures on the drain backlog) and launch the drain to l. A
@@ -268,24 +276,24 @@ func (sp *Spool) drain(disk int, hres archiveio.CommitResult, l *lane) {
 	if sp.tr != nil {
 		sp.tr.StartFlush(dleID, sp.pool.Name(disk))
 	}
-	store := l.lease()
-	defer l.release(store)
-	if err := sp.copyOne(disk, hres, l, store, dleID); err != nil {
+	drive := l.lease()
+	defer l.release(drive)
+	if err := sp.copyOne(disk, hres, l, drive, dleID); err != nil {
 		sp.setAbort(err)
 	}
 }
 
 // copyOne reads a staged archive off holding disk disk (on this goroutine) and streams it to l's
-// leased store through a fresh copy writer — its volume rolls and its placement Record route onto the
+// leased drive through a fresh copy writer — its volume rolls and its placement Record route onto the
 // orchestrator, while the bytes flow here. The copy's Commit records the landing placement; then the
 // holding copy is reclaimed on the orchestrator (files + placement, the catalog write) and its disk
 // bytes freed.
-func (sp *Spool) copyOne(disk int, hres archiveio.CommitResult, l *lane, store int, dleID string) error {
+func (sp *Spool) copyOne(disk int, hres archiveio.CommitResult, l *lane, drive int, dleID string) error {
 	rc, err := sp.pool.Storage(disk).OpenArchive(hres.Archive, hres.Pos)
 	if err != nil {
 		return fmt.Errorf("flush %s L%d: read holding disk: %w", dleID, hres.Archive.Level, err)
 	}
-	cw := sp.writerOver(l.stores[store], l.lim).NewCopy(hres.Archive)
+	cw := sp.writerOver(l.allocs[drive], l.rec, l.lim).NewCopy(hres.Archive)
 	if sp.tr != nil {
 		archiveio.MeterArchive(cw, func(copied int64) { sp.tr.AddDrainBytes(dleID, copied) })
 	}
