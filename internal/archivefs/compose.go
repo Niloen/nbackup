@@ -66,42 +66,42 @@ func (s *Session) Record(r archiveio.CommitResult) error {
 
 // OpenArchiveAt reads a staged archive's payload back by concatenating the parts at pos straight off
 // the session's volume (whose index the producer keeps current) — the drain's read seam, for copying
-// a staged archive to the landing. It is positional: pos carries the part locations and the archive's
-// DLE/Level, so only runID (the enclosing context ArchivePos omits) is passed, matching Record's
+// a staged archive to the landing. It is positional: no catalog resolution, just ref (asserted
+// against each part's header) and pos. ref carries the archive's own run, matching Record's
 // per-archive keying so a session carrying archives from several source runs (a cross-run sync) reads
 // each under the right run.
-func (s *Session) OpenArchiveAt(runID string, pos record.ArchivePos) (io.ReadCloser, error) {
-	open := func(p record.FilePos) (record.Header, io.ReadCloser, error) { return s.m.Volume().ReadFile(p.Pos) }
-	return archiveio.NewReader(open, nil).Open(record.Ref{Run: runID, DLE: pos.DLE, Level: pos.Level}, pos.Parts)
+func (s *Session) OpenArchiveAt(ref archiveio.Ref, pos archiveio.ArchivePos) (io.ReadCloser, error) {
+	open := func(p archiveio.FilePos) (record.Header, io.ReadCloser, error) { return s.m.Volume().ReadFile(p.Pos) }
+	return archiveio.NewReader(open, nil).Open(ref, pos.Parts)
 }
 
 // ReclaimAt drops a staged archive once it has landed on the landing; see ReclaimStaged.
-func (s *Session) ReclaimAt(runID string, pos record.ArchivePos) error {
-	return ReclaimStaged(s.w, s.m.Name(), s.m.Volume(), runID, pos)
+func (s *Session) ReclaimAt(ref archiveio.Ref, pos archiveio.ArchivePos) error {
+	return ReclaimStaged(s.w, s.m.Name(), s.m.Volume(), ref, pos)
 }
 
 // ReclaimStaged drops a staged archive from a holding medium once it has landed: it removes the
 // archive's files from vol (the commit footer first, so an interrupted reclaim un-commits before
 // dropping parts) then drops its placement from the catalog via w. The live drain reaches it
 // through Session.ReclaimAt; the crash-recovery flush (conductor.Flush) calls it directly — the
-// footer-first invariant lives only here. Positional like the read-back: pos carries the archive's
-// DLE, so only runID is passed. A package function: it touches only its arguments, never the fs.
-func ReclaimStaged(w WriteMap, medium string, vol media.Volume, runID string, pos record.ArchivePos) error {
+// footer-first invariant lives only here. Positional like the read-back: ref names the archive,
+// pos its files. A package function: it touches only its arguments, never the fs.
+func ReclaimStaged(w WriteMap, medium string, vol media.Volume, ref archiveio.Ref, pos archiveio.ArchivePos) error {
 	for _, p := range archivePosFiles(pos) {
 		if err := vol.RemoveFile(p); err != nil {
 			return err
 		}
 	}
-	_, _, err := w.RemoveArchive(runID, medium, pos.DLE)
+	_, _, err := w.RemoveArchive(ref.Run, medium, ref.DLE)
 	return err
 }
 
 // archivePosFiles lists an archive's file positions for reclamation, the commit footer (the marker)
 // first so an interrupted reclaim un-commits before dropping parts.
-func archivePosFiles(a record.ArchivePos) []int {
+func archivePosFiles(a archiveio.ArchivePos) []int {
 	pos := make([]int, 0, len(a.Parts)+2)
 	pos = append(pos, a.Commit.Pos)
-	if a.Index != (record.FilePos{}) {
+	if a.Index != (archiveio.FilePos{}) {
 		pos = append(pos, a.Index.Pos)
 	}
 	for _, pt := range a.Parts {

@@ -1,5 +1,5 @@
 // Package archivefs is NBackup's archive filesystem — the file layer that turns a logical
-// record.Ref into a byte endpoint and back, and nothing more. It is like a kernel VFS:
+// archiveio.Ref into a byte endpoint and back, and nothing more. It is like a kernel VFS:
 // it owns the archive map (resolve a copy's positions on read, record a run's placement
 // on write — the Map role), the member index, and read-mounting via opened read media
 // (the Mounter role). It speaks only io.* — plain byte endpoints, never a transfer — and
@@ -49,7 +49,7 @@ type WriteMap interface {
 	// AddArchive records one committed archive's content + its on-medium position — the
 	// catalog's single write path. The run entry is created from the archive's own run tag
 	// (arch.Run), never added wholesale; there is no completion step — a run is its archives.
-	AddArchive(arch record.Archive, medium string, pos record.ArchivePos) error
+	AddArchive(arch record.Archive, medium string, pos archiveio.ArchivePos) error
 	// RemoveArchive drops one archive's placement on a medium (and its run entry if that was the
 	// last copy) — the reclaim path when a staged archive has landed on the backing.
 	RemoveArchive(runID, medium, dle string) (placementGone, entryGone bool, err error)
@@ -93,7 +93,7 @@ func New(cat ReadMap, deps Depot, mindex *catalog.MemberIndex) *FS {
 // Members returns an archive's member list, lazily: from the member-index cache, else by
 // reading the on-medium index (via a copy's recorded index position) and re-caching it. A nil
 // list is a valid "no members" answer (an archive with no files records no index).
-func (fs *FS) Members(ref record.Ref) ([]string, error) {
+func (fs *FS) Members(ref archiveio.Ref) ([]string, error) {
 	if members, ok, err := fs.mindex.Load(ref.Run, ref.DLE, ref.Level); err != nil {
 		return nil, err
 	} else if ok {
@@ -116,13 +116,13 @@ func (fs *FS) Members(ref record.Ref) ([]string, error) {
 
 // indexPosOf finds an archive's recorded member-index position on a placement (the zero
 // position means the archive recorded no index — it had no members).
-func indexPosOf(p catalog.Placement, dle string, level int) (record.FilePos, bool) {
+func indexPosOf(p catalog.Placement, dle string, level int) (archiveio.FilePos, bool) {
 	for _, a := range p.Archives {
 		if a.DLE == dle && a.Level == level {
-			return a.Index, a.Index != (record.FilePos{})
+			return a.Index, a.Index != (archiveio.FilePos{})
 		}
 	}
-	return record.FilePos{}, false
+	return archiveio.FilePos{}, false
 }
 
 // Open opens an archive's raw (undecoded, on-medium) part stream as an io.ReadCloser, with
@@ -130,8 +130,8 @@ func indexPosOf(p catalog.Placement, dle string, level int) (record.FilePos, boo
 // medium reads only that copy so a fault on it is not masked by another. The open (and thus the
 // copy-selection fail-over) happens eagerly, so a missing copy is reported before bytes flow.
 // The caller wraps it for a transfer (xfer.Reader); the fs only hands back bytes.
-func (fs *FS) Open(ref record.Ref, medium string) (io.ReadCloser, error) {
-	return fs.eachPlacement(ref, medium, func(parts []record.FilePos, p catalog.Placement) (io.ReadCloser, error) {
+func (fs *FS) Open(ref archiveio.Ref, medium string) (io.ReadCloser, error) {
+	return fs.eachPlacement(ref, medium, func(parts []archiveio.FilePos, p catalog.Placement) (io.ReadCloser, error) {
 		r, err := fs.readerFor(p.Medium)
 		if err != nil {
 			return nil, err
@@ -149,7 +149,7 @@ func (fs *FS) readerFor(medium string) (*archiveio.Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	open := func(p record.FilePos) (record.Header, io.ReadCloser, error) {
+	open := func(p archiveio.FilePos) (record.Header, io.ReadCloser, error) {
 		return mounter.ReadFileAt(p.Label, p.Epoch, p.Pos)
 	}
 	return archiveio.NewReader(open, fs.deps.Limiter(medium)), nil
@@ -158,7 +158,7 @@ func (fs *FS) readerFor(medium string) (*archiveio.Reader, error) {
 // readIndex reads an archive's member index off a medium — the lazy fallback when the
 // server-side member cache misses (a rebuilt run not yet browsed). It mounts the volume the
 // index lives on and decodes it.
-func (fs *FS) readIndex(medium string, pos record.FilePos) ([]string, error) {
+func (fs *FS) readIndex(medium string, pos archiveio.FilePos) ([]string, error) {
 	mounter, err := fs.deps.MounterFor(medium)
 	if err != nil {
 		return nil, err
@@ -175,7 +175,7 @@ func (fs *FS) readIndex(medium string, pos record.FilePos) ([]string, error) {
 // medium when set), then tries each that carries the archive — opening it via open — until
 // one succeeds, so a read fails over to another copy. It is the one place the raw read paths
 // share copy selection and the missing-copy errors (ErrMissingCopy).
-func (fs *FS) eachPlacement(ref record.Ref, medium string, open func(parts []record.FilePos, p catalog.Placement) (io.ReadCloser, error)) (io.ReadCloser, error) {
+func (fs *FS) eachPlacement(ref archiveio.Ref, medium string, open func(parts []archiveio.FilePos, p catalog.Placement) (io.ReadCloser, error)) (io.ReadCloser, error) {
 	placements := fs.cat.PlacementsFor(ref.Run)
 	if medium != "" {
 		placements = onMedium(placements, medium)

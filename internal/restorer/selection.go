@@ -3,11 +3,11 @@ package restorer
 import (
 	"errors"
 	"fmt"
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"io"
 
 	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiver"
-	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
 )
 
@@ -17,7 +17,7 @@ import (
 // until extract.
 func (r *Restorer) OpenRecover(dle, asOf string) (*recovery.Tree, error) {
 	return recovery.BuildTree(r.deps.Archives(), dle, asOf, func(runID string, level int) ([]string, error) {
-		return r.deps.Store.Members(record.Ref{Run: runID, DLE: dle, Level: level})
+		return r.deps.Store.Members(archiveio.Ref{Run: runID, DLE: dle, Level: level})
 	})
 }
 
@@ -40,10 +40,10 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 	}
 	// Open the selected archives as one ordered, one-pass read (consecutive
 	// same-volume reads reuse the mount), then extract each.
-	stepByRef := make(map[record.Ref]recovery.ExtractStep, len(steps))
-	refs := make([]record.Ref, 0, len(steps))
+	stepByRef := make(map[archiveio.Ref]recovery.ExtractStep, len(steps))
+	refs := make([]archiveio.Ref, 0, len(steps))
 	for _, st := range steps {
-		ref := record.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level}
+		ref := archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level}
 		stepByRef[ref] = st
 		refs = append(refs, ref)
 	}
@@ -57,7 +57,7 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 	}
 	files := 0
 	archives := 0
-	missing, err := r.deps.Store.ReadArchives(refs, "", func(ref record.Ref, open func() (io.ReadCloser, error)) error {
+	missing, err := r.deps.Store.ReadArchives(refs, "", func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
 		st := stepByRef[ref]
 		// An archive in the chain that holds none of the selected files contributes
 		// nothing — skip it silently rather than logging a noisy "extracting 0 file(s)".

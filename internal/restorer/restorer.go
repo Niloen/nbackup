@@ -17,6 +17,7 @@ package restorer
 import (
 	"errors"
 	"fmt"
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"io"
 	"os"
 	"path/filepath"
@@ -169,10 +170,10 @@ func (r *Restorer) extractChain(runID string, req Request, rollbackOnFail bool, 
 		return err
 	}
 
-	stepByRef := make(map[record.Ref]recovery.Step, len(steps))
-	refs := make([]record.Ref, 0, len(steps))
+	stepByRef := make(map[archiveio.Ref]recovery.Step, len(steps))
+	refs := make([]archiveio.Ref, 0, len(steps))
 	for _, step := range steps {
-		ref := record.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}
+		ref := archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}
 		stepByRef[ref] = step
 		refs = append(refs, ref)
 	}
@@ -180,7 +181,7 @@ func (r *Restorer) extractChain(runID string, req Request, rollbackOnFail bool, 
 	// extracted over a missing base would fabricate a wrong tree. Resolve
 	// availability first (a no-op pass touches only the catalog, no media), so a
 	// missing copy fails the restore before a single byte lands.
-	if missing, err := r.deps.Store.ReadArchives(refs, req.Medium, func(record.Ref, func() (io.ReadCloser, error)) error { return nil }); err != nil {
+	if missing, err := r.deps.Store.ReadArchives(refs, req.Medium, func(archiveio.Ref, func() (io.ReadCloser, error)) error { return nil }); err != nil {
 		return err
 	} else if len(missing) > 0 {
 		m := missing[0]
@@ -188,7 +189,7 @@ func (r *Restorer) extractChain(runID string, req Request, rollbackOnFail bool, 
 	}
 
 	d := dest{exec: r.deps.Exec(req.Host), host: req.Host, dir: req.Dest}
-	_, err = r.deps.Store.ReadArchives(refs, req.Medium, func(ref record.Ref, open func() (io.ReadCloser, error)) error {
+	_, err = r.deps.Store.ReadArchives(refs, req.Medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
 		step := stepByRef[ref]
 		log.Log("extracting %s %s L%d -> %s", step.RunID, r.deps.DisplayDLE(step.DLE), step.Level, req.Dest)
 		rc, oerr := open()

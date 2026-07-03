@@ -30,7 +30,7 @@ type scriptOpener struct {
 	calls int
 }
 
-func (s *scriptOpener) open(record.FilePos) (record.Header, io.ReadCloser, error) {
+func (s *scriptOpener) open(FilePos) (record.Header, io.ReadCloser, error) {
 	i := s.calls
 	s.calls++
 	if i >= len(s.resp) {
@@ -40,7 +40,7 @@ func (s *scriptOpener) open(record.FilePos) (record.Header, io.ReadCloser, error
 	return r.h, r.rc, r.err
 }
 
-func archiveHeaderFor(want record.Ref, part int) record.Header {
+func archiveHeaderFor(want Ref, part int) record.Header {
 	return record.Header{Kind: record.KindArchive, Run: want.Run, DLE: want.DLE, Level: want.Level, Part: part}
 }
 
@@ -48,7 +48,7 @@ func archiveHeaderFor(want record.Ref, part int) record.Header {
 // header names a different archive (a swapped tape / stale catalog) is rejected
 // at prime time, before any bytes are trusted, with an actionable message.
 func TestAssertPartWrongVolume(t *testing.T) {
-	want := record.Ref{Run: "run-2026-06-01.001", DLE: "app01-data", Level: 0}
+	want := Ref{Run: "run-2026-06-01.001", DLE: "app01-data", Level: 0}
 	// The mounted part actually holds a DIFFERENT run — the classic swapped-volume fault.
 	wrong := record.Header{Kind: record.KindArchive, Run: "run-2025-01-01.001", DLE: "app01-data", Level: 0, Part: 0}
 	closed := false
@@ -62,7 +62,7 @@ func TestAssertPartWrongVolume(t *testing.T) {
 	// Wrap so we can observe the reader is closed on the rejection path.
 	so.resp[0].rc = closeSpy{ReadCloser: so.resp[0].rc, closed: &closed}
 
-	_, err := NewReader(so.open, nil).Open(want, []record.FilePos{{Pos: 0}})
+	_, err := NewReader(so.open, nil).Open(want, []FilePos{{Pos: 0}})
 	if err == nil {
 		t.Fatal("want a wrong-volume rejection at prime, got nil")
 	}
@@ -84,7 +84,7 @@ func (c closeSpy) Close() error { *c.closed = true; return c.ReadCloser.Close() 
 // TestAssertPartWrongKind rejects a position that holds a non-archive record
 // (e.g. a commit footer) where an archive part was expected.
 func TestAssertPartWrongKind(t *testing.T) {
-	want := record.Ref{Run: "run-2026-06-01.001", DLE: "d", Level: 0}
+	want := Ref{Run: "run-2026-06-01.001", DLE: "d", Level: 0}
 	so := &scriptOpener{resp: []struct {
 		h   record.Header
 		rc  io.ReadCloser
@@ -92,7 +92,7 @@ func TestAssertPartWrongKind(t *testing.T) {
 	}{
 		{h: record.Header{Kind: record.KindCommit, Run: want.Run, DLE: want.DLE, Level: want.Level}, rc: io.NopCloser(strings.NewReader(""))},
 	}}
-	_, err := NewReader(so.open, nil).Open(want, []record.FilePos{{Pos: 0}})
+	_, err := NewReader(so.open, nil).Open(want, []FilePos{{Pos: 0}})
 	if err == nil || !strings.Contains(err.Error(), "not an archive") {
 		t.Fatalf("want a not-an-archive rejection, got: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestAssertPartWrongKind(t *testing.T) {
 // SECOND part fails to open (a volume that won't mount mid-chain). The fault
 // surfaces from Read, not swallowed as EOF.
 func TestReadMidStreamOpenFailure(t *testing.T) {
-	want := record.Ref{Run: "run-2026-06-01.001", DLE: "d", Level: 0}
+	want := Ref{Run: "run-2026-06-01.001", DLE: "d", Level: 0}
 	mountErr := errors.New("mount failed: drive empty")
 	so := &scriptOpener{resp: []struct {
 		h   record.Header
@@ -112,7 +112,7 @@ func TestReadMidStreamOpenFailure(t *testing.T) {
 		{h: archiveHeaderFor(want, 0), rc: io.NopCloser(strings.NewReader("part0"))},
 		{err: mountErr}, // second part won't open
 	}}
-	rc, err := NewReader(so.open, nil).Open(want, []record.FilePos{{Pos: 0}, {Pos: 1}})
+	rc, err := NewReader(so.open, nil).Open(want, []FilePos{{Pos: 0}, {Pos: 1}})
 	if err != nil {
 		t.Fatalf("prime (part 0) should succeed: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestReadMidStreamOpenFailure(t *testing.T) {
 // holds the wrong part index (a stale catalog / reordered span) — rejected
 // mid-stream before its bytes are concatenated.
 func TestReadWrongPartIndex(t *testing.T) {
-	want := record.Ref{Run: "run-2026-06-01.001", DLE: "d", Level: 0}
+	want := Ref{Run: "run-2026-06-01.001", DLE: "d", Level: 0}
 	so := &scriptOpener{resp: []struct {
 		h   record.Header
 		rc  io.ReadCloser
@@ -136,7 +136,7 @@ func TestReadWrongPartIndex(t *testing.T) {
 		{h: archiveHeaderFor(want, 0), rc: io.NopCloser(strings.NewReader("part0"))},
 		{h: archiveHeaderFor(want, 7), rc: io.NopCloser(strings.NewReader("part1"))}, // wrong index (want 1)
 	}}
-	rc, err := NewReader(so.open, nil).Open(want, []record.FilePos{{Pos: 0}, {Pos: 1}})
+	rc, err := NewReader(so.open, nil).Open(want, []FilePos{{Pos: 0}, {Pos: 1}})
 	if err != nil {
 		t.Fatalf("prime should succeed: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestReadWrongPartIndex(t *testing.T) {
 // (an EOF with no trailing bytes) surfaces the close error rather than a silent
 // clean EOF — a torn read must not read as a complete archive.
 func TestReadPartCloseErrorPropagates(t *testing.T) {
-	want := record.Ref{Run: "run-2026-06-01.001", DLE: "d", Level: 0}
+	want := Ref{Run: "run-2026-06-01.001", DLE: "d", Level: 0}
 	closeErr := errors.New("short read on close")
 	so := &scriptOpener{resp: []struct {
 		h   record.Header
@@ -160,7 +160,7 @@ func TestReadPartCloseErrorPropagates(t *testing.T) {
 	}{
 		{h: archiveHeaderFor(want, 0), rc: errCloser{Reader: strings.NewReader("payload"), closeErr: closeErr}},
 	}}
-	rc, err := NewReader(so.open, nil).Open(want, []record.FilePos{{Pos: 0}})
+	rc, err := NewReader(so.open, nil).Open(want, []FilePos{{Pos: 0}})
 	if err != nil {
 		t.Fatalf("prime should succeed: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestReadPartCloseErrorPropagates(t *testing.T) {
 // TestOpenNoParts rejects an archive record that lists no parts (a corrupt
 // catalog entry) rather than returning an empty, silently-valid stream.
 func TestOpenNoParts(t *testing.T) {
-	_, err := NewReader(nil, nil).Open(record.Ref{Run: "r", DLE: "d", Level: 0}, nil)
+	_, err := NewReader(nil, nil).Open(Ref{Run: "r", DLE: "d", Level: 0}, nil)
 	if err == nil || !strings.Contains(err.Error(), "no parts") {
 		t.Fatalf("want a no-parts error, got: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestOpenNoParts(t *testing.T) {
 // TestVerifyPartsWrongVolume: VerifyParts over a swapped volume surfaces the
 // assertion fault as a read error (not a false checksum verdict).
 func TestVerifyPartsWrongVolume(t *testing.T) {
-	want := record.Ref{Run: "run-2026-06-01.001", DLE: "d", Level: 0}
+	want := Ref{Run: "run-2026-06-01.001", DLE: "d", Level: 0}
 	so := &scriptOpener{resp: []struct {
 		h   record.Header
 		rc  io.ReadCloser
@@ -191,7 +191,7 @@ func TestVerifyPartsWrongVolume(t *testing.T) {
 	}{
 		{h: record.Header{Kind: record.KindArchive, Run: "other", DLE: "d", Level: 0}, rc: io.NopCloser(strings.NewReader("x"))},
 	}}
-	ok, err := NewReader(so.open, nil).Verify(want, []record.FilePos{{Pos: 0}}, "deadbeef")
+	ok, err := NewReader(so.open, nil).Verify(want, []FilePos{{Pos: 0}}, "deadbeef")
 	if ok {
 		t.Fatal("VerifyParts must not report ok for a wrong-volume mount")
 	}

@@ -134,7 +134,10 @@ owner of rolls and catalog writes.
 - `archiveio.Ref` → **`record.Ref`**: it is precisely the identity stamped in
   every part header, and `record` already owns the run-id vocabulary, so both
   the block layer (header assert) and the fs (the "filename") share it from
-  below.
+  below. *(Reversed 2026-07-03: `Ref` is never serialized — `Header` carries
+  the fields flat — so it moved back to `archiveio` alongside `FilePos` and a
+  position-only `ArchivePos`; `record` keeps only on-medium records, and the
+  catalog persists its own `PlacedArchive` shape.)*
 - `archiveio`: `Author` → `Writer` (the dual of `Reader`; "Author" was a name
   dodge around `ArchiveWriter`, resolved by scope instead: unqualified
   `Writer`/`Reader` are the run/medium ends, `ArchiveWriter` is one archive's

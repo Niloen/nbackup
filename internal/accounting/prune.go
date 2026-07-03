@@ -2,12 +2,12 @@ package accounting
 
 import (
 	"fmt"
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/logf"
 	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/retention"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
@@ -33,15 +33,15 @@ func (a *Accountant) Prune(mediumName string, now time.Time, apply bool, out log
 
 	// Reclamation is per archive (run+DLE): a medium's Reclaim walks the oldest
 	// non-protected archives, so an old run can lose one DLE's image while keeping
-	// another the chain still needs. The map is keyed by record.Ref with Level left
+	// another the chain still needs. The map is keyed by archiveio.Ref with Level left
 	// zero on both sides — (run,DLE) already names an archive uniquely.
-	reclaim := map[record.Ref]media.Reclamation{}
+	reclaim := map[archiveio.Ref]media.Reclamation{}
 	for _, r := range profile.Reclaim(archives, floor, now) {
-		reclaim[record.Ref{Run: r.RunID, DLE: r.DLE}] = r
+		reclaim[archiveio.Ref{Run: r.RunID, DLE: r.DLE}] = r
 	}
 
 	for _, ar := range archives {
-		if _, ok := reclaim[record.Ref{Run: ar.Run, DLE: ar.DLE}]; ok {
+		if _, ok := reclaim[archiveio.Ref{Run: ar.Run, DLE: ar.DLE}]; ok {
 			continue // reported below
 		}
 		if reason, ok := floor.ReasonArchive(ar.Run, ar.DLE); ok {
@@ -59,7 +59,7 @@ func (a *Accountant) Prune(mediumName string, now time.Time, apply bool, out log
 		}
 	}
 	for _, ar := range archives {
-		r, ok := reclaim[record.Ref{Run: ar.Run, DLE: ar.DLE}]
+		r, ok := reclaim[archiveio.Ref{Run: ar.Run, DLE: ar.DLE}]
 		if !ok {
 			continue
 		}
@@ -229,7 +229,7 @@ func archivePositions(ps []catalog.Placement, medium, dle string) []int {
 			}
 			pos := make([]int, 0, len(a.Parts)+2)
 			pos = append(pos, a.Commit.Pos) // the marker: un-commit first
-			if a.Index != (record.FilePos{}) {
+			if a.Index != (archiveio.FilePos{}) {
 				pos = append(pos, a.Index.Pos)
 			}
 			for _, pt := range a.Parts {

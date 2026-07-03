@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/fsx"
 	"github.com/Niloen/nbackup/internal/record"
 )
@@ -105,7 +106,7 @@ func Open(workdir string) (*Catalog, error) {
 //
 // Every catalog mutation is single-threaded (a run routes all placement writes through one
 // goroutine), so no locking is needed.
-func (c *Catalog) AddArchive(arch record.Archive, medium string, pos record.ArchivePos) error {
+func (c *Catalog) AddArchive(arch record.Archive, medium string, pos archiveio.ArchivePos) error {
 	c.addArchive(arch, medium, pos)
 	c.sortEntries()
 	return c.persist()
@@ -116,7 +117,7 @@ func (c *Catalog) AddArchive(arch record.Archive, medium string, pos record.Arch
 // placement position, but neither sorts nor persists — for a bulk caller (a rebuild scan)
 // that persists once at the end. The catalog cache holds no member lists (they live in the
 // member-index cache + the on-medium index), so members are cleared here.
-func (c *Catalog) addArchive(arch record.Archive, medium string, pos record.ArchivePos) {
+func (c *Catalog) addArchive(arch record.Archive, medium string, pos archiveio.ArchivePos) {
 	e := c.entryByID(arch.Run)
 	if e == nil {
 		e = &Entry{Run: &Run{ID: arch.Run}}
@@ -124,31 +125,32 @@ func (c *Catalog) addArchive(arch record.Archive, medium string, pos record.Arch
 	}
 	arch.Members = nil
 	e.Run.addArchive(arch)
-	e.addPlacementPos(medium, pos)
+	// The archive's key comes from the archive record itself — pos is pure position.
+	e.addPlaced(medium, PlacedArchive{DLE: arch.DLE, Level: arch.Level, Parts: pos.Parts, Commit: pos.Commit, Index: pos.Index})
 	c.loaded = true
 }
 
-// addPlacementPos records archive position pos on the entry's copy on medium, creating the
-// placement if absent and replacing any prior position of the same (DLE, level).
-func (e *Entry) addPlacementPos(medium string, pos record.ArchivePos) {
+// addPlaced records a placed archive on the entry's copy on medium, creating the
+// placement if absent and replacing any prior record of the same (DLE, level).
+func (e *Entry) addPlaced(medium string, pa PlacedArchive) {
 	for i := range e.Placements {
 		if e.Placements[i].Medium == medium {
-			e.Placements[i].Archives = mergeArchivePos(e.Placements[i].Archives, pos)
+			e.Placements[i].Archives = mergePlaced(e.Placements[i].Archives, pa)
 			return
 		}
 	}
-	e.Placements = append(e.Placements, Placement{Medium: medium, Archives: []record.ArchivePos{pos}})
+	e.Placements = append(e.Placements, Placement{Medium: medium, Archives: []PlacedArchive{pa}})
 }
 
-// mergeArchivePos returns list with pos added, replacing any entry of the same (DLE, level).
-func mergeArchivePos(list []record.ArchivePos, pos record.ArchivePos) []record.ArchivePos {
+// mergePlaced returns list with pa added, replacing any entry of the same (DLE, level).
+func mergePlaced(list []PlacedArchive, pa PlacedArchive) []PlacedArchive {
 	for i := range list {
-		if list[i].DLE == pos.DLE && list[i].Level == pos.Level {
-			list[i] = pos
+		if list[i].DLE == pa.DLE && list[i].Level == pa.Level {
+			list[i] = pa
 			return list
 		}
 	}
-	return append(list, pos)
+	return append(list, pa)
 }
 
 // RemovePlacement drops the copy of a run on one medium. When the last copy is
@@ -173,7 +175,7 @@ func (c *Catalog) RemovePlacement(runID, medium string) (gone bool, err error) {
 }
 
 // RemoveArchive drops one archive (a DLE's image) from the copy of a run on one
-// medium — the per-archive peer of RemovePlacement. It removes that DLE's record.ArchivePos
+// medium — the per-archive peer of RemovePlacement. It removes that DLE's PlacedArchive
 // from the medium's placement; when the placement keeps no archives the whole
 // placement goes (placementGone), and when that was the run's last copy the entry
 // goes too (entryGone) — the run no longer exists anywhere. When no remaining
@@ -299,9 +301,9 @@ func (c *Catalog) snapshotPlacements() map[string][]Placement {
 	for _, e := range c.entries {
 		ps := make([]Placement, len(e.Placements))
 		for i, p := range e.Placements {
-			archives := make([]record.ArchivePos, len(p.Archives))
+			archives := make([]PlacedArchive, len(p.Archives))
 			for j, a := range p.Archives {
-				a.Parts = append([]record.FilePos(nil), a.Parts...)
+				a.Parts = append([]archiveio.FilePos(nil), a.Parts...)
 				archives[j] = a
 			}
 			ps[i] = Placement{Medium: p.Medium, Archives: archives}

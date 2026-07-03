@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"io"
 	"os"
 	"os/exec"
@@ -168,10 +169,10 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 	// honest cost of an offsite drill (an encrypted+compressed archive is all-or-
 	// nothing, so a structural/chain drill spends the full bytes).
 	if cm := d.acct.CostModelFor(medium); cm.Priced() {
-		var refs []record.Ref
+		var refs []archiveio.Ref
 		for _, t := range targets {
 			for _, s := range t.Steps {
-				refs = append(refs, record.Ref{Run: s.RunID, DLE: s.DLE, Level: s.Level})
+				refs = append(refs, archiveio.Ref{Run: s.RunID, DLE: s.DLE, Level: s.Level})
 			}
 		}
 		est := d.acct.EstimateRead(refs, medium)
@@ -266,8 +267,8 @@ func (d *driller) drillTarget(t drill.Target, medium string, opts DrillOptions, 
 // drillVerify exercises a target's chain archives with the verify primitive on the
 // chosen medium (checksum, or checksum+structural). It stops at the first fault.
 func (d *driller) drillVerify(t drill.Target, medium string, checks VerifyChecks) (drill.Class, string) {
-	refs := make([]record.Ref, 0, len(t.Steps))
-	archByRef := make(map[record.Ref]record.Archive, len(t.Steps))
+	refs := make([]archiveio.Ref, 0, len(t.Steps))
+	archByRef := make(map[archiveio.Ref]record.Archive, len(t.Steps))
 	for _, step := range t.Steps {
 		s, err := d.cat.ReadRun(step.RunID)
 		if err != nil {
@@ -277,7 +278,7 @@ func (d *driller) drillVerify(t drill.Target, medium string, checks VerifyChecks
 		if !ok {
 			return drill.ClassMissing, fmt.Sprintf("%s %s L%d missing from the run's commit footers", step.RunID, step.DLE, step.Level)
 		}
-		ref := record.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}
+		ref := archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}
 		refs = append(refs, ref)
 		archByRef[ref] = a
 	}
@@ -285,7 +286,7 @@ func (d *driller) drillVerify(t drill.Target, medium string, checks VerifyChecks
 	// whole). A failing verdict is carried out via a sentinel error.
 	var bad ArchiveVerdict
 	errStop := errors.New("drill: archive failed")
-	missing, err := d.fs.ReadArchives(refs, medium, func(ref record.Ref, open func() (io.ReadCloser, error)) error {
+	missing, err := d.fs.ReadArchives(refs, medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
 		v := d.ver.verifyArchive(archByRef[ref], ref, medium, VerifyOptions{Checks: checks, Medium: medium}, open, nil)
 		if !v.OK {
 			bad = v
@@ -367,7 +368,7 @@ func (d *driller) stockExtractStep(step recovery.Step, dest, medium string, logf
 		return drill.ClassPipeline, err.Error()
 	}
 	defer os.Remove(tmp.Name())
-	src, err := d.fs.Open(record.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}, medium)
+	src, err := d.fs.Open(archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}, medium)
 	if err != nil {
 		tmp.Close()
 		return classifyOpenErr(err), err.Error()

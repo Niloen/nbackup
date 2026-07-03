@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
-	"github.com/Niloen/nbackup/internal/record"
 )
 
 // TestSyncMirrorsLandingToTarget runs two backups onto disk, then exercises
@@ -820,7 +820,7 @@ func placementOf(eng *Engine, runID, medium string) (catalog.Placement, bool) {
 }
 
 // archivePosOn returns one archive's recorded position on a run's copy on a medium.
-func archivePosOn(t *testing.T, eng *Engine, runID, medium, dle string) record.ArchivePos {
+func archivePosOn(t *testing.T, eng *Engine, runID, medium, dle string) catalog.PlacedArchive {
 	t.Helper()
 	p, ok := placementOf(eng, runID, medium)
 	if !ok {
@@ -832,7 +832,7 @@ func archivePosOn(t *testing.T, eng *Engine, runID, medium, dle string) record.A
 		}
 	}
 	t.Fatalf("archive %s not on %q copy of %s", dle, medium, runID)
-	return record.ArchivePos{}
+	return catalog.PlacedArchive{}
 }
 
 // TestSyncStopsAfterFirstSinkError locks the fail-fast contract: a hard sink error
@@ -1052,7 +1052,7 @@ func assertLabeledPositions(t *testing.T, p catalog.Placement, allowed ...string
 		if !ok(a.Commit.Label) {
 			t.Fatalf("archive %s commit on volume %q, want one of %v", a.DLE, a.Commit.Label, allowed)
 		}
-		if a.Index != (record.FilePos{}) && !ok(a.Index.Label) {
+		if a.Index != (archiveio.FilePos{}) && !ok(a.Index.Label) {
 			t.Fatalf("archive %s index on volume %q, want one of %v", a.DLE, a.Index.Label, allowed)
 		}
 	}

@@ -1,16 +1,15 @@
 package archivefs
 
 import (
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"testing"
-
-	"github.com/Niloen/nbackup/internal/record"
 )
 
 func item(run, dle string, level int, medium, label string, pos int) ReadItem {
 	return ReadItem{
-		Ref:      record.Ref{Run: run, DLE: dle, Level: level},
+		Ref:      archiveio.Ref{Run: run, DLE: dle, Level: level},
 		Medium:   medium,
-		FirstPos: record.FilePos{Label: label, Pos: pos},
+		FirstPos: archiveio.FilePos{Label: label, Pos: pos},
 	}
 }
 

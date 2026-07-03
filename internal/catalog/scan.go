@@ -4,6 +4,7 @@ import (
 	"io"
 	"sort"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
 )
@@ -63,8 +64,8 @@ func (c *Catalog) Rebuild(volumes map[string]media.Volume) (int, error) {
 func (c *Catalog) absorb(idx mediumIndex) {
 	for _, sp := range idx.placements {
 		for _, arch := range sp.run.Archives {
-			if pos, ok := findArchivePos(sp.p.Archives, arch.DLE, arch.Level); ok {
-				c.addArchive(arch, sp.p.Medium, pos)
+			if pa, ok := findPlaced(sp.p.Archives, arch.DLE, arch.Level); ok {
+				c.addArchive(arch, sp.p.Medium, pa.Pos())
 			}
 		}
 	}
@@ -73,14 +74,14 @@ func (c *Catalog) absorb(idx mediumIndex) {
 	}
 }
 
-// findArchivePos returns the position of (dle, level) among a placement's archives.
-func findArchivePos(aps []record.ArchivePos, dle string, level int) (record.ArchivePos, bool) {
-	for _, ap := range aps {
-		if ap.DLE == dle && ap.Level == level {
-			return ap, true
+// findPlaced returns the placed archive of (dle, level) among a placement's archives.
+func findPlaced(pas []PlacedArchive, dle string, level int) (PlacedArchive, bool) {
+	for _, pa := range pas {
+		if pa.DLE == dle && pa.Level == level {
+			return pa, true
 		}
 	}
-	return record.ArchivePos{}, false
+	return PlacedArchive{}, false
 }
 
 // mediumIndex is the assembled result of scanning one medium: each run assembled from its
@@ -160,7 +161,7 @@ func assemble(medium string, acc *scanMaps) []runPlacement {
 		if n < 1 {
 			n = 1 // a single whole archive records Parts as 0 or 1
 		}
-		ap := record.ArchivePos{DLE: key.dle, Level: key.level, Commit: sc.loc}
+		ap := PlacedArchive{DLE: key.dle, Level: key.level, Commit: sc.loc}
 		for part := 0; part < n; part++ {
 			if loc, ok := acc.parts[partKey{run: key.run, dle: key.dle, level: key.level, part: part}]; ok {
 				ap.Parts = append(ap.Parts, loc)
@@ -214,7 +215,7 @@ func OrphanFiles(vol media.Volume) ([]record.FileInfo, error) {
 				referenced[pt.Pos] = true
 			}
 			referenced[ap.Commit.Pos] = true
-			if ap.Index != (record.FilePos{}) {
+			if ap.Index != (archiveio.FilePos{}) {
 				referenced[ap.Index.Pos] = true
 			}
 		}
@@ -262,7 +263,7 @@ type archiveKey struct {
 // members) and where the footer landed.
 type scannedCommit struct {
 	arch *record.Archive
-	loc  record.FilePos
+	loc  archiveio.FilePos
 }
 
 // scanMaps holds the file locations a scan collects, keyed for assembly: each archive part's
@@ -271,16 +272,16 @@ type scannedCommit struct {
 // them, since an archive's parts (and its commit/index) may straddle several of the medium's
 // volumes.
 type scanMaps struct {
-	parts   map[partKey]record.FilePos
+	parts   map[partKey]archiveio.FilePos
 	commits map[archiveKey]scannedCommit
-	indexes map[archiveKey]record.FilePos
+	indexes map[archiveKey]archiveio.FilePos
 }
 
 func newScanMaps() *scanMaps {
 	return &scanMaps{
-		parts:   map[partKey]record.FilePos{},
+		parts:   map[partKey]archiveio.FilePos{},
 		commits: map[archiveKey]scannedCommit{},
-		indexes: map[archiveKey]record.FilePos{},
+		indexes: map[archiveKey]archiveio.FilePos{},
 	}
 }
 
@@ -329,7 +330,7 @@ func scanVolume(vol media.Volume) (scanResult, error) {
 
 	res := scanResult{scanMaps: *newScanMaps(), label: label}
 	for _, f := range files {
-		loc := record.FilePos{Label: labelName, Epoch: epoch, Pos: f.Pos}
+		loc := archiveio.FilePos{Label: labelName, Epoch: epoch, Pos: f.Pos}
 		switch f.Header.Kind {
 		case record.KindArchive:
 			res.parts[partKey{run: f.Header.Run, dle: f.Header.DLE, level: f.Header.Level, part: f.Header.Part}] = loc

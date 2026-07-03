@@ -254,11 +254,11 @@ func TestPerMediumQueriesAreArchiveGranular(t *testing.T) {
 	// A second copy of both archives on another medium (a sync target), so the run
 	// still holds h-pruned somewhere after the disk copy sheds it.
 	for _, a := range cat.Runs()[0].Archives {
-		pos, ok := findArchivePos(cat.Placements("run-2026-06-20.001")[0].Archives, a.DLE, a.Level)
+		pa, ok := findPlaced(cat.Placements("run-2026-06-20.001")[0].Archives, a.DLE, a.Level)
 		if !ok {
 			t.Fatalf("no disk position for %s", a.DLE)
 		}
-		if err := cat.AddArchive(a, "mirror", pos); err != nil {
+		if err := cat.AddArchive(a, "mirror", pa.Pos()); err != nil {
 			t.Fatal(err)
 		}
 	}

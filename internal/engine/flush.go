@@ -10,7 +10,6 @@ import (
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/depot"
 	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/record"
 )
 
 // flush.go wires the engine's fs/catalog into conductor.Flush, the amflush analogue that drains
@@ -50,17 +49,17 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 		LandingFor: e.landingForDLEName,
 		Holdings:   e.cfg.HoldingMedia(),
 		Open: func(runID, dle string, level int, medium string) (io.ReadCloser, error) {
-			return e.fs.Open(record.Ref{Run: runID, DLE: dle, Level: level}, medium)
+			return e.fs.Open(archiveio.Ref{Run: runID, DLE: dle, Level: level}, medium)
 		},
 		Members: func(runID, dle string, level int) ([]string, error) {
-			return e.fs.Members(record.Ref{Run: runID, DLE: dle, Level: level})
+			return e.fs.Members(archiveio.Ref{Run: runID, DLE: dle, Level: level})
 		},
-		Reclaim: func(holding, runID string, pos record.ArchivePos) error {
+		Reclaim: func(holding string, ref archiveio.Ref, pos archiveio.ArchivePos) error {
 			vol, err := holdVol(holding)
 			if err != nil {
 				return err
 			}
-			return archivefs.ReclaimStaged(e.cat, holding, vol, runID, pos)
+			return archivefs.ReclaimStaged(e.cat, holding, vol, ref, pos)
 		},
 		OpenLanding: func(landing string, spec archiveio.RunSpec) (*archiveio.Writer, error) {
 			lh, ok := landers[landing]

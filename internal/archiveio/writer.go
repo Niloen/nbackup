@@ -176,7 +176,7 @@ type ArchiveWriter struct {
 	expectSHA string // a copy's known digest to verify against ("" for a fresh dump)
 	h         hash.Hash
 	n         int64
-	parts     []record.FilePos
+	parts     []FilePos
 	part      int
 	tap       func(int64)   // optional progress tap (MeterArchive); fired on the writing goroutine
 	committed *CommitResult // the assembled result, stashed by Commit (nil until then); read via Committed
@@ -246,7 +246,7 @@ func (p *archivePartWriter) Close() error {
 	if err := p.fw.Close(); err != nil {
 		return err
 	}
-	p.a.parts = append(p.a.parts, record.FilePos{Label: p.label, Epoch: p.epoch, Pos: p.fw.Pos()})
+	p.a.parts = append(p.a.parts, FilePos{Label: p.label, Epoch: p.epoch, Pos: p.fw.Pos()})
 	return nil
 }
 
@@ -313,16 +313,16 @@ func (a *ArchiveWriter) Close() error {
 // footer makes the archive durable and the caller records it from the returned position — so
 // concurrent Commits on an unbounded medium need no coordination here. Call it once the caller has
 // merged the producer's stats (FileCount/Uncompressed/Members) into the archive.
-func (w *Writer) finalize(ctx context.Context, arch record.Archive, parts []record.FilePos) (record.ArchivePos, error) {
-	var index record.FilePos
+func (w *Writer) finalize(ctx context.Context, arch record.Archive, parts []FilePos) (ArchivePos, error) {
+	var index FilePos
 	if len(arch.Members) > 0 {
 		var buf bytes.Buffer
 		if err := record.EncodeIndex(&buf, arch.Members); err != nil {
-			return record.ArchivePos{}, err
+			return ArchivePos{}, err
 		}
 		pos, err := w.writeRecord(ctx, record.KindIndex, arch, buf.Bytes())
 		if err != nil {
-			return record.ArchivePos{}, err
+			return ArchivePos{}, err
 		}
 		index = pos
 	}
@@ -331,16 +331,14 @@ func (w *Writer) finalize(ctx context.Context, arch record.Archive, parts []reco
 	footer.Members = nil
 	data, err := record.MarshalCommit(footer)
 	if err != nil {
-		return record.ArchivePos{}, err
+		return ArchivePos{}, err
 	}
 	commit, err := w.writeRecord(ctx, record.KindCommit, arch, data)
 	if err != nil {
-		return record.ArchivePos{}, err
+		return ArchivePos{}, err
 	}
-	return record.ArchivePos{
-		DLE:    arch.DLE,
-		Level:  arch.Level,
-		Parts:  append([]record.FilePos(nil), parts...),
+	return ArchivePos{
+		Parts:  append([]FilePos(nil), parts...),
 		Commit: commit,
 		Index:  index,
 	}, nil
@@ -349,24 +347,24 @@ func (w *Writer) finalize(ctx context.Context, arch record.Archive, parts []reco
 // writeRecord places and writes one small whole record (an index or a commit footer) for an
 // archive, returning where it landed. The header identifies the archive it belongs to so a
 // scan can correlate it with the archive's parts (which may be on other volumes).
-func (w *Writer) writeRecord(ctx context.Context, kind string, a record.Archive, payload []byte) (record.FilePos, error) {
+func (w *Writer) writeRecord(ctx context.Context, kind string, a record.Archive, payload []byte) (FilePos, error) {
 	vol, label, epoch, err := w.alloc.PlaceFile(int64(len(payload)))
 	if err != nil {
-		return record.FilePos{}, fmt.Errorf("place %s record: %w", kind, err)
+		return FilePos{}, fmt.Errorf("place %s record: %w", kind, err)
 	}
 	h := record.Header{Run: a.Run, Kind: kind, DLE: a.DLE, Level: a.Level, CreatedAt: w.createdAt}
 	fw, err := vol.AppendFile(ctx, h)
 	if err != nil {
-		return record.FilePos{}, err
+		return FilePos{}, err
 	}
 	_, werr := fw.Write(payload)
 	if cerr := fw.Close(); werr == nil {
 		werr = cerr
 	}
 	if werr != nil {
-		return record.FilePos{}, werr
+		return FilePos{}, werr
 	}
-	return record.FilePos{Label: label, Epoch: epoch, Pos: fw.Pos()}, nil
+	return FilePos{Label: label, Epoch: epoch, Pos: fw.Pos()}, nil
 }
 
 // archiveHeader builds the base record.Header an archive's parts share (NextPart clones

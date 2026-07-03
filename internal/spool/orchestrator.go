@@ -4,7 +4,6 @@ import (
 	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/record"
 )
 
 // orchestrator.go is the routing seam of docs/design/concurrent-writes.md: the single coordinator
@@ -49,8 +48,8 @@ type recordReq struct {
 }
 type reclaimReq struct {
 	store archivefs.WriteStore
-	runID string
-	pos   record.ArchivePos
+	ref   archiveio.Ref
+	pos   archiveio.ArchivePos
 	reply chan error
 }
 
@@ -80,7 +79,7 @@ func (o *orchestrator) loop() {
 		case r := <-o.record:
 			r.reply <- r.rec.Record(r.res)
 		case r := <-o.reclaim:
-			r.reply <- r.store.ReclaimAt(r.runID, r.pos)
+			r.reply <- r.store.ReclaimAt(r.ref, r.pos)
 		case <-o.stop:
 			return
 		}
@@ -91,9 +90,9 @@ func (o *orchestrator) shutdown() { close(o.stop) }
 
 // reclaimOn drops a staged archive from store on the orchestrator (Reclaim's catalog RemoveArchive is
 // single-owner, like Record).
-func (o *orchestrator) reclaimOn(store archivefs.WriteStore, runID string, pos record.ArchivePos) error {
+func (o *orchestrator) reclaimOn(store archivefs.WriteStore, ref archiveio.Ref, pos archiveio.ArchivePos) error {
 	reply := make(chan error, 1)
-	o.reclaim <- reclaimReq{store: store, runID: runID, pos: pos, reply: reply}
+	o.reclaim <- reclaimReq{store: store, ref: ref, pos: pos, reply: reply}
 	return <-reply
 }
 

@@ -28,5 +28,11 @@ type ArchiveSpec struct {
 // crossing, a single value passed by copy, never shared writer state.
 type CommitResult struct {
 	Archive record.Archive
-	Pos     record.ArchivePos
+	Pos     ArchivePos
+}
+
+// Ref returns the committed archive's logical identity — Pos is pure position, so a
+// caller acting on the result (the drain's read-back and reclaim) names it with this.
+func (r CommitResult) Ref() Ref {
+	return Ref{Run: r.Archive.Run, DLE: r.Archive.DLE, Level: r.Archive.Level}
 }

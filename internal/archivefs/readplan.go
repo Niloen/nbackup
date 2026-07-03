@@ -4,16 +4,15 @@ import (
 	"io"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
-	"github.com/Niloen/nbackup/internal/record"
 )
 
 // ReadItem is one archive in a multi-archive read selection: its logical identity plus the
 // physical place of its first part (the copy's medium and the first part's position). It is
 // what OrderForOnePass needs to sequence a selection into a one-pass read.
 type ReadItem struct {
-	Ref      record.Ref     // Run, DLE, Level
-	Medium   string         // the copy's medium
-	FirstPos record.FilePos // the archive's first part — orders the read within a medium
+	Ref      archiveio.Ref     // Run, DLE, Level
+	Medium   string            // the copy's medium
+	FirstPos archiveio.FilePos // the archive's first part — orders the read within a medium
 }
 
 // OrderForOnePass sequences a selection of archives into a one-pass read order: a topological
@@ -72,12 +71,12 @@ func OrderForOnePass(items []ReadItem) []ReadItem {
 // Refs with no available copy are not read; they are returned as missing for the caller to
 // handle (a broken chain, a position-missing verdict). An opener that cannot be acquired
 // (medium not in this config) is the error.
-func (fs *FS) ReadArchives(refs []record.Ref, medium string, fn func(ref record.Ref, open func() (io.ReadCloser, error)) error) (missing []record.Ref, err error) {
+func (fs *FS) ReadArchives(refs []archiveio.Ref, medium string, fn func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error) (missing []archiveio.Ref, err error) {
 	type loc struct {
 		medium string
-		parts  []record.FilePos
+		parts  []archiveio.FilePos
 	}
-	locs := map[record.Ref]loc{}
+	locs := map[archiveio.Ref]loc{}
 	items := make([]ReadItem, 0, len(refs))
 	for _, ref := range refs {
 		m, parts, ok := fs.locate(ref, medium)
@@ -86,7 +85,7 @@ func (fs *FS) ReadArchives(refs []record.Ref, medium string, fn func(ref record.
 			continue
 		}
 		locs[ref] = loc{medium: m, parts: parts}
-		first := record.FilePos{}
+		first := archiveio.FilePos{}
 		if len(parts) > 0 {
 			first = parts[0]
 		}
@@ -133,7 +132,7 @@ func (fs *FS) ReadArchives(refs []record.Ref, medium string, fn func(ref record.
 // locate resolves a ref to the copy that holds it: a set medium pins to that copy; "" takes
 // the first placement in read-preference order (the engine's own copy first) that has the
 // archive's parts.
-func (fs *FS) locate(ref record.Ref, medium string) (string, []record.FilePos, bool) {
+func (fs *FS) locate(ref archiveio.Ref, medium string) (string, []archiveio.FilePos, bool) {
 	for _, p := range fs.cat.PlacementsFor(ref.Run) {
 		if medium != "" && p.Medium != medium {
 			continue

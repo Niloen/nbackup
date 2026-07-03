@@ -8,31 +8,6 @@ import (
 	"time"
 )
 
-// FilePos is the location of one file on a volume: the label of the volume it is on
-// plus a file position. Label is the volume's global, device-independent identity (the
-// name on the cartridge); it is empty for address-identified media (disk, s3), which
-// carry no label — there the medium is its own sole volume, so no per-file volume id is
-// needed. It locates both an archive part (as the archiveio writer emits it) and a
-// placement's seal record (as the catalog persists it) — one type both layers share.
-type FilePos struct {
-	Label string `json:"label,omitempty"` // volume label name; "" for address-identified media
-	Epoch int    `json:"epoch,omitempty"` // label epoch when recorded; staleness check on read
-	Pos   int    `json:"pos"`
-}
-
-// ArchivePos is one archive's identity and the ordered locations of its parts, plus
-// where its commit footer and member index landed. An archive that fits one volume has a
-// single part; a spanned archive has its compressed payload split into several parts across
-// volumes, in order. Commit is the per-archive marker (written last, after the index);
-// Index locates the gzip'd member list, read lazily for browse.
-type ArchivePos struct {
-	DLE    string    `json:"dle"`
-	Level  int       `json:"level"`
-	Parts  []FilePos `json:"parts"`
-	Commit FilePos   `json:"commit"`          // the commit footer's location (the archive's marker)
-	Index  FilePos   `json:"index,omitempty"` // the member index's location ("" position = no members)
-}
-
 // Archive describes a single DLE dump — the commit footer that marks the dump complete
 // and the metadata a catalog caches. It is self-locating: Run, DLE, and Level together
 // name it uniquely on a volume, so an archive read off the medium carries the run it

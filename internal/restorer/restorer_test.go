@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"io"
 	"os"
 	"path/filepath"
@@ -22,12 +23,12 @@ import (
 // fakeStore is an in-memory archivefs.ReadStore: the restorer runs over it with
 // no media, catalog, or clerk — the point of the ReadStore seam.
 type fakeStore struct {
-	payloads map[record.Ref][]byte
-	members  map[record.Ref][]string
-	opened   []record.Ref // refs actually opened, in order
+	payloads map[archiveio.Ref][]byte
+	members  map[archiveio.Ref][]string
+	opened   []archiveio.Ref // refs actually opened, in order
 }
 
-func (f *fakeStore) Open(ref record.Ref, medium string) (io.ReadCloser, error) {
+func (f *fakeStore) Open(ref archiveio.Ref, medium string) (io.ReadCloser, error) {
 	b, ok := f.payloads[ref]
 	if !ok {
 		return nil, fmt.Errorf("%w of %s %s L%d", archivefs.ErrMissingCopy, ref.Run, ref.DLE, ref.Level)
@@ -36,7 +37,7 @@ func (f *fakeStore) Open(ref record.Ref, medium string) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(b)), nil
 }
 
-func (f *fakeStore) ReadArchives(refs []record.Ref, medium string, fn func(ref record.Ref, open func() (io.ReadCloser, error)) error) (missing []record.Ref, err error) {
+func (f *fakeStore) ReadArchives(refs []archiveio.Ref, medium string, fn func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error) (missing []archiveio.Ref, err error) {
 	for _, ref := range refs {
 		if _, ok := f.payloads[ref]; !ok {
 			missing = append(missing, ref)
@@ -54,7 +55,7 @@ func (f *fakeStore) ReadArchives(refs []record.Ref, medium string, fn func(ref r
 	return missing, nil
 }
 
-func (f *fakeStore) Members(ref record.Ref) ([]string, error) { return f.members[ref], nil }
+func (f *fakeStore) Members(ref archiveio.Ref) ([]string, error) { return f.members[ref], nil }
 
 // fakeArchiver implements only the read side (RestoreStage); the restorer never
 // touches the produce side.
@@ -85,8 +86,8 @@ func chainArchives(dle string) []record.Archive {
 	}
 }
 
-func ref(run, dle string, level int) record.Ref {
-	return record.Ref{Run: run, DLE: dle, Level: level}
+func ref(run, dle string, level int) archiveio.Ref {
+	return archiveio.Ref{Run: run, DLE: dle, Level: level}
 }
 
 // TestExtractChainHappyPath replays a full+incremental chain through the fake
@@ -94,7 +95,7 @@ func ref(run, dle string, level int) record.Ref {
 // succeeds — no media, no engine.
 func TestExtractChainHappyPath(t *testing.T) {
 	dle := "app01-data"
-	store := &fakeStore{payloads: map[record.Ref][]byte{
+	store := &fakeStore{payloads: map[archiveio.Ref][]byte{
 		ref("run-2026-06-01.001", dle, 0): []byte("l0"),
 		ref("run-2026-06-02.001", dle, 1): []byte("l1"),
 	}}
@@ -103,7 +104,7 @@ func TestExtractChainHappyPath(t *testing.T) {
 	if err := r.Extract(Request{DLE: dle, RunID: "run-2026-06-02.001", Dest: dest}, nil); err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
-	want := []record.Ref{ref("run-2026-06-01.001", dle, 0), ref("run-2026-06-02.001", dle, 1)}
+	want := []archiveio.Ref{ref("run-2026-06-01.001", dle, 0), ref("run-2026-06-02.001", dle, 1)}
 	if len(store.opened) != 2 || store.opened[0] != want[0] || store.opened[1] != want[1] {
 		t.Fatalf("opened %v, want %v (full first, then the incremental)", store.opened, want)
 	}
@@ -115,7 +116,7 @@ func TestExtractChainHappyPath(t *testing.T) {
 // must never be extracted over a missing base).
 func TestExtractBrokenChainIsMissingCopy(t *testing.T) {
 	dle := "app01-data"
-	store := &fakeStore{payloads: map[record.Ref][]byte{
+	store := &fakeStore{payloads: map[archiveio.Ref][]byte{
 		// Only the L1 is present; the L0 base has no copy.
 		ref("run-2026-06-02.001", dle, 1): []byte("l1"),
 	}}
@@ -136,7 +137,7 @@ func TestExtractBrokenChainIsMissingCopy(t *testing.T) {
 // prune: a non-empty local destination is refused without Force.
 func TestExtractRefusesNonEmptyDest(t *testing.T) {
 	dle := "app01-data"
-	store := &fakeStore{payloads: map[record.Ref][]byte{
+	store := &fakeStore{payloads: map[archiveio.Ref][]byte{
 		ref("run-2026-06-01.001", dle, 0): []byte("l0"),
 	}}
 	r := New(testDeps(store, chainArchives(dle)[:1]))
@@ -157,7 +158,7 @@ func TestExtractRefusesNonEmptyDest(t *testing.T) {
 // does not know, naming the known ones.
 func TestExtractUnknownToHost(t *testing.T) {
 	dle := "app01-data"
-	store := &fakeStore{payloads: map[record.Ref][]byte{}}
+	store := &fakeStore{payloads: map[archiveio.Ref][]byte{}}
 	r := New(testDeps(store, chainArchives(dle)))
 	err := r.Extract(Request{DLE: dle, RunID: "run-2026-06-02.001", Dest: "/restore", Host: "typo01"}, nil)
 	if err == nil || !strings.Contains(err.Error(), "not a configured host") {

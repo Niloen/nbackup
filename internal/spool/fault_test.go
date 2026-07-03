@@ -191,16 +191,15 @@ func (s *memStore) Record(r archiveio.CommitResult) error {
 	return nil
 }
 
-func (s *memStore) OpenArchiveAt(runID string, pos record.ArchivePos) (io.ReadCloser, error) {
+func (s *memStore) OpenArchiveAt(ref archiveio.Ref, pos archiveio.ArchivePos) (io.ReadCloser, error) {
 	if s.openErr != nil {
 		return nil, s.openErr
 	}
-	exp := record.Ref{Run: runID, DLE: pos.DLE, Level: pos.Level}
-	open := func(p record.FilePos) (record.Header, io.ReadCloser, error) { return s.vol.ReadFile(p.Pos) }
-	return archiveio.NewReader(open, nil).Open(exp, pos.Parts)
+	open := func(p archiveio.FilePos) (record.Header, io.ReadCloser, error) { return s.vol.ReadFile(p.Pos) }
+	return archiveio.NewReader(open, nil).Open(ref, pos.Parts)
 }
 
-func (s *memStore) ReclaimAt(string, record.ArchivePos) error {
+func (s *memStore) ReclaimAt(archiveio.Ref, archiveio.ArchivePos) error {
 	if s.reclaimErr != nil {
 		return s.reclaimErr
 	}
@@ -460,16 +459,16 @@ func TestNewArchiveAfterAbortReturnsRunError(t *testing.T) {
 func TestLandingVolume(t *testing.T) {
 	cases := []struct {
 		name  string
-		parts []record.FilePos
+		parts []archiveio.FilePos
 		want  string
 	}{
-		{"no labels (disk/cloud)", []record.FilePos{{Pos: 1}, {Pos: 2}}, ""},
-		{"single volume", []record.FilePos{{Label: "tape-1", Pos: 1}}, "tape-1"},
-		{"spanned, deduped in order", []record.FilePos{{Label: "tape-1"}, {Label: "tape-2"}, {Label: "tape-1"}}, "tape-1,tape-2"},
+		{"no labels (disk/cloud)", []archiveio.FilePos{{Pos: 1}, {Pos: 2}}, ""},
+		{"single volume", []archiveio.FilePos{{Label: "tape-1", Pos: 1}}, "tape-1"},
+		{"spanned, deduped in order", []archiveio.FilePos{{Label: "tape-1"}, {Label: "tape-2"}, {Label: "tape-1"}}, "tape-1,tape-2"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := landingVolume(record.ArchivePos{Parts: tc.parts}); got != tc.want {
+			if got := landingVolume(archiveio.ArchivePos{Parts: tc.parts}); got != tc.want {
 				t.Errorf("landingVolume = %q; want %q", got, tc.want)
 			}
 		})

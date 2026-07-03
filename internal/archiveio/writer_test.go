@@ -161,7 +161,7 @@ func openerOver(vols ...*memVolume) PartOpener {
 	for _, v := range vols {
 		byName[v.name] = v
 	}
-	return func(p record.FilePos) (record.Header, io.ReadCloser, error) {
+	return func(p FilePos) (record.Header, io.ReadCloser, error) {
 		v, ok := byName[p.Label]
 		if !ok {
 			return record.Header{}, nil, fmt.Errorf("no volume %q", p.Label)
@@ -170,7 +170,7 @@ func openerOver(vols ...*memVolume) PartOpener {
 	}
 }
 
-func writeOneArchive(t *testing.T, w *Writer, sink *memSink, dle string, body []byte) (record.Archive, record.ArchivePos) {
+func writeOneArchive(t *testing.T, w *Writer, sink *memSink, dle string, body []byte) (record.Archive, ArchivePos) {
 	t.Helper()
 	spec := ArchiveSpec{DLE: dle, Host: "localhost", Path: "/p", Archiver: "m", Level: 0, Compress: "none"}
 	aw := w.NewArchive(spec)
@@ -250,7 +250,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 
 	// Read the archive back by concatenating its parts; it must equal the input.
 	r := NewReader(openerOver(v1, v2, v3), nil)
-	rc, err := r.Open(record.Ref{Run: spec.ID, DLE: "dle1", Level: 0}, parts)
+	rc, err := r.Open(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, parts)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	}
 
 	// VerifyParts must confirm the recorded checksum over the concatenation.
-	ok, err := r.Verify(record.Ref{Run: spec.ID, DLE: "dle1", Level: 0}, parts, arch.SHA256)
+	ok, err := r.Verify(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, parts, arch.SHA256)
 	if err != nil || !ok {
 		t.Fatalf("Verify ok=%v err=%v", ok, err)
 	}
@@ -285,7 +285,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 		t.Fatalf("Parts = %d, want >= 5", arch.Parts)
 	}
 	r := NewReader(openerOver(v), nil)
-	rc, err := r.Open(record.Ref{Run: spec.ID, DLE: "dle1", Level: 0}, apos.Parts)
+	rc, err := r.Open(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, apos.Parts)
 	if err != nil {
 		t.Fatal(err)
 	}

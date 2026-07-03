@@ -33,12 +33,12 @@ type fakeMap struct {
 type addCall struct {
 	arch   record.Archive
 	medium string
-	pos    record.ArchivePos
+	pos    archiveio.ArchivePos
 }
 type removeCall struct{ runID, medium, dle string }
 
 func (m *fakeMap) PlacementsFor(string) []catalog.Placement { return m.placements }
-func (m *fakeMap) AddArchive(arch record.Archive, medium string, pos record.ArchivePos) error {
+func (m *fakeMap) AddArchive(arch record.Archive, medium string, pos archiveio.ArchivePos) error {
 	if m.addErr != nil {
 		return m.addErr
 	}
@@ -169,7 +169,7 @@ func (s *memWriteStore) Record(archiveio.CommitResult) error { return nil }
 
 // authorArchive writes one real archive (parts + commit footer) onto vol and returns its record and
 // on-volume positions, so the read-back and reclaim paths run over genuine framed files.
-func authorArchive(t *testing.T, vol *memVol, run, dle string, level int, body []byte) (record.Archive, record.ArchivePos) {
+func authorArchive(t *testing.T, vol *memVol, run, dle string, level int, body []byte) (record.Archive, archiveio.ArchivePos) {
 	t.Helper()
 	ws := &memWriteStore{vol: vol}
 	a := archiveio.NewWriter(ws, ws, archiveio.RunSpec{ID: run, CreatedAt: time.Unix(0, 0).UTC()}, nil, nil)
@@ -195,7 +195,7 @@ func TestSessionRecord(t *testing.T) {
 	sess := c.OpenRun(m, fakeMedium{name: "disk"})
 
 	arch := record.Archive{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0, Members: []string{"a", "b"}}
-	pos := record.ArchivePos{DLE: "h:/p", Level: 0}
+	pos := archiveio.ArchivePos{}
 	if err := sess.Record(archiveio.CommitResult{Archive: arch, Pos: pos}); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestSessionOpenArchive(t *testing.T) {
 	m := &fakeMap{}
 	c := New(m, &fakeDeps{}, catalog.OpenMemberIndex(t.TempDir()))
 	sess := c.OpenRun(m, fakeMedium{name: "hd0", vol: vol})
-	rc, err := sess.OpenArchiveAt(arch.Run, pos)
+	rc, err := sess.OpenArchiveAt(archiveio.Ref{Run: arch.Run, DLE: arch.DLE, Level: arch.Level}, pos)
 	if err != nil {
 		t.Fatalf("OpenArchiveAt: %v", err)
 	}
@@ -236,12 +236,12 @@ func TestReclaimStagedFooterFirst(t *testing.T) {
 	vol := newMemVol()
 	arch, pos := authorArchive(t, vol, "run-2026-07-02.001", "h:/p", 0, []byte("body"))
 	// Give the archive a synthetic index position so the footer/index/parts order is observable.
-	pos.Index = record.FilePos{Label: "vol", Pos: 999}
+	pos.Index = archiveio.FilePos{Label: "vol", Pos: 999}
 
 	m := &fakeMap{}
 	c := New(m, &fakeDeps{}, catalog.OpenMemberIndex(t.TempDir()))
 	sess := c.OpenRun(m, fakeMedium{name: "hd0", vol: vol})
-	if err := sess.ReclaimAt(arch.Run, pos); err != nil {
+	if err := sess.ReclaimAt(archiveio.Ref{Run: arch.Run, DLE: arch.DLE, Level: arch.Level}, pos); err != nil {
 		t.Fatalf("ReclaimAt: %v", err)
 	}
 	if len(vol.removed) == 0 || vol.removed[0] != pos.Commit.Pos {
@@ -267,7 +267,7 @@ func TestReclaimStagedFileFaultKeepsCatalog(t *testing.T) {
 	m := &fakeMap{}
 	c := New(m, &fakeDeps{}, catalog.OpenMemberIndex(t.TempDir()))
 	sess := c.OpenRun(m, fakeMedium{name: "hd0", vol: vol})
-	if err := sess.ReclaimAt(arch.Run, pos); err == nil {
+	if err := sess.ReclaimAt(archiveio.Ref{Run: arch.Run, DLE: arch.DLE, Level: arch.Level}, pos); err == nil {
 		t.Fatal("ReclaimAt must surface the file-removal fault")
 	}
 	if len(m.removed) != 0 {
@@ -283,15 +283,15 @@ func archiveHeader(run, dle string, level, part int) record.Header {
 
 // placementWith builds a placement whose one archive has a single part at pos.
 func placementWith(medium, run, dle string, level, pos int) catalog.Placement {
-	return catalog.Placement{Medium: medium, Archives: []record.ArchivePos{{
-		DLE: dle, Level: level, Parts: []record.FilePos{{Label: "v", Pos: pos}},
+	return catalog.Placement{Medium: medium, Archives: []catalog.PlacedArchive{{
+		DLE: dle, Level: level, Parts: []archiveio.FilePos{{Label: "v", Pos: pos}},
 	}}}
 }
 
 // TestOpenMissingCopy covers the three missing-copy verdicts eachPlacement emits — all classified by
 // errors.Is(ErrMissingCopy) regardless of wording.
 func TestOpenMissingCopy(t *testing.T) {
-	ref := record.Ref{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0}
+	ref := archiveio.Ref{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0}
 	t.Run("run not in catalog", func(t *testing.T) {
 		c := New(&fakeMap{}, &fakeDeps{}, catalog.OpenMemberIndex(t.TempDir()))
 		if _, err := c.Open(ref, ""); !errors.Is(err, ErrMissingCopy) {
@@ -319,7 +319,7 @@ func TestOpenMissingCopy(t *testing.T) {
 // TestOpenFailsOver proves copy fail-over: the first placement's copy will not open (a damaged file),
 // so the clerk tries the next eligible copy and returns its bytes rather than surfacing the fault.
 func TestOpenFailsOver(t *testing.T) {
-	ref := record.Ref{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0}
+	ref := archiveio.Ref{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0}
 	body := []byte("good copy bytes")
 	deps := &fakeDeps{mounters: map[string]*memMounter{
 		"broken": {files: map[int]memFile{5: {h: archiveHeader(ref.Run, ref.DLE, 0, 0), data: body}}, failPos: map[int]bool{5: true}},
@@ -344,7 +344,7 @@ func TestOpenFailsOver(t *testing.T) {
 // TestOpenPinnedMediumNotMasked confirms a medium-pinned read is confined to that medium: a fault on
 // the pinned copy surfaces rather than being masked by a healthy copy on another medium.
 func TestOpenPinnedMediumNotMasked(t *testing.T) {
-	ref := record.Ref{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0}
+	ref := archiveio.Ref{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0}
 	body := []byte("bytes")
 	deps := &fakeDeps{mounters: map[string]*memMounter{
 		"broken": {files: map[int]memFile{5: {h: archiveHeader(ref.Run, ref.DLE, 0, 0), data: body}}, failPos: map[int]bool{5: true}},
@@ -372,19 +372,19 @@ func TestReadArchivesOrdersReadsAndReportsMissing(t *testing.T) {
 			20: {h: archiveHeader(run, "h:/p", 1, 0), data: body1},
 		}},
 	}}
-	pl := catalog.Placement{Medium: "disk", Archives: []record.ArchivePos{
-		{DLE: "h:/p", Level: 0, Parts: []record.FilePos{{Label: "v", Pos: 10}}},
-		{DLE: "h:/p", Level: 1, Parts: []record.FilePos{{Label: "v", Pos: 20}}},
+	pl := catalog.Placement{Medium: "disk", Archives: []catalog.PlacedArchive{
+		{DLE: "h:/p", Level: 0, Parts: []archiveio.FilePos{{Label: "v", Pos: 10}}},
+		{DLE: "h:/p", Level: 1, Parts: []archiveio.FilePos{{Label: "v", Pos: 20}}},
 	}}
 	c := New(&fakeMap{placements: []catalog.Placement{pl}}, deps, catalog.OpenMemberIndex(t.TempDir()))
 
-	refs := []record.Ref{
+	refs := []archiveio.Ref{
 		{Run: run, DLE: "h:/p", Level: 1},
 		{Run: run, DLE: "h:/p", Level: 0},
 		{Run: run, DLE: "gone:/x", Level: 0}, // no copy
 	}
 	var gotLevels []int
-	missing, err := c.ReadArchives(refs, "", func(ref record.Ref, open func() (io.ReadCloser, error)) error {
+	missing, err := c.ReadArchives(refs, "", func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
 		gotLevels = append(gotLevels, ref.Level)
 		rc, e := open()
 		if e != nil {
@@ -410,7 +410,7 @@ func TestReadArchivesOrdersReadsAndReportsMissing(t *testing.T) {
 // the on-medium index (located via the placement's recorded Index position), decodes it, and
 // re-caches it so a second call hits the cache.
 func TestMembersOnMediumFallback(t *testing.T) {
-	ref := record.Ref{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0}
+	ref := archiveio.Ref{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0}
 	members := []string{"dir/", "dir/file"}
 	var idxBuf bytes.Buffer
 	if err := record.EncodeIndex(&idxBuf, members); err != nil {
@@ -420,8 +420,8 @@ func TestMembersOnMediumFallback(t *testing.T) {
 		"disk": {files: map[int]memFile{42: {h: record.Header{Kind: record.KindIndex}, data: idxBuf.Bytes()}}},
 	}}
 	// A placement whose archive records an index at pos 42.
-	pl := catalog.Placement{Medium: "disk", Archives: []record.ArchivePos{{
-		DLE: ref.DLE, Level: 0, Parts: []record.FilePos{{Label: "v", Pos: 1}}, Index: record.FilePos{Label: "v", Pos: 42},
+	pl := catalog.Placement{Medium: "disk", Archives: []catalog.PlacedArchive{{
+		DLE: ref.DLE, Level: 0, Parts: []archiveio.FilePos{{Label: "v", Pos: 1}}, Index: archiveio.FilePos{Label: "v", Pos: 42},
 	}}}
 	m := &fakeMap{placements: []catalog.Placement{pl}}
 	mindex := catalog.OpenMemberIndex(t.TempDir())
@@ -440,9 +440,9 @@ func TestMembersOnMediumFallback(t *testing.T) {
 // TestMembersNoIndexIsNil confirms an archive that recorded no index (the zero Index position) yields
 // a nil member list, not an error — indexPosOf reports "no index" and the fallback returns nothing.
 func TestMembersNoIndexIsNil(t *testing.T) {
-	ref := record.Ref{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0}
-	pl := catalog.Placement{Medium: "disk", Archives: []record.ArchivePos{{
-		DLE: ref.DLE, Level: 0, Parts: []record.FilePos{{Label: "v", Pos: 1}}, // no Index
+	ref := archiveio.Ref{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0}
+	pl := catalog.Placement{Medium: "disk", Archives: []catalog.PlacedArchive{{
+		DLE: ref.DLE, Level: 0, Parts: []archiveio.FilePos{{Label: "v", Pos: 1}}, // no Index
 	}}}
 	c := New(&fakeMap{placements: []catalog.Placement{pl}}, &fakeDeps{}, catalog.OpenMemberIndex(t.TempDir()))
 	got, err := c.Members(ref)

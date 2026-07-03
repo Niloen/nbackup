@@ -8,12 +8,10 @@
 // reconstructs the catalog. There is no per-run seal — a run is the grouping its
 // archives carry in their headers.
 //
-// Alongside the on-medium records it also defines the location types that *point at*
-// them — FilePos (a file's volume+position) and ArchivePos (an archive's parts,
-// commit, and index positions). These are catalog placements, not bytes on the
-// medium: the catalog persists them in its rebuildable workdir cache, and the scanner
-// reconstructs them by reading the records above. They live here so the writer (which
-// emits the positions) and the catalog (which stores them) share one type.
+// Everything here is bytes on a medium (or its direct (de)serialization). The value
+// objects that *point at* these records — archiveio.Ref (an archive's identity) and
+// archiveio.FilePos/ArchivePos (where its files landed) — live in the block layer
+// that mints them, and what a catalog persists is the catalog's own shape.
 package record
 
 import (

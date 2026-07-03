@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"io"
 	"path/filepath"
 	"strings"
@@ -9,7 +10,6 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/config"
-	"github.com/Niloen/nbackup/internal/record"
 )
 
 // TestPartialPruneKeepsCatalogArchiveGranular is the end-to-end regression for the
@@ -129,7 +129,7 @@ func TestPartialPruneKeepsCatalogArchiveGranular(t *testing.T) {
 	}
 
 	// Restore falls back to the medium that still holds the archive.
-	rc, err := eng2.fs.Open(record.Ref{Run: run1.ID, DLE: prunedDLE, Level: 0}, "")
+	rc, err := eng2.fs.Open(archiveio.Ref{Run: run1.ID, DLE: prunedDLE, Level: 0}, "")
 	if err != nil {
 		t.Fatalf("open pruned archive via surviving copy: %v", err)
 	}

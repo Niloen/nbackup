@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"io"
 	"os"
 	"path/filepath"
@@ -25,12 +26,10 @@ func TestOpenCorruptCache(t *testing.T) {
 	}
 }
 
-func archivePos(dle string, level, partPos, commitPos int) record.ArchivePos {
-	return record.ArchivePos{
-		DLE:    dle,
-		Level:  level,
-		Parts:  []record.FilePos{{Pos: partPos}},
-		Commit: record.FilePos{Pos: commitPos},
+func archivePos(partPos, commitPos int) archiveio.ArchivePos {
+	return archiveio.ArchivePos{
+		Parts:  []archiveio.FilePos{{Pos: partPos}},
+		Commit: archiveio.FilePos{Pos: commitPos},
 	}
 }
 
@@ -45,10 +44,10 @@ func TestRemovePlacementRoundTrip(t *testing.T) {
 	}
 	run := "run-2026-06-20.001"
 	arch := record.Archive{Run: run, DLE: "h-data", Level: 0, Compressed: 100}
-	if err := cat.AddArchive(arch, "disk", archivePos("h-data", 0, 0, 1)); err != nil {
+	if err := cat.AddArchive(arch, "disk", archivePos(0, 1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := cat.AddArchive(arch, "tape", archivePos("h-data", 0, 0, 1)); err != nil {
+	if err := cat.AddArchive(arch, "tape", archivePos(0, 1)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -146,7 +145,7 @@ func TestQueryProjections(t *testing.T) {
 	}
 	run := "run-2026-06-20.001"
 	arch := record.Archive{Run: run, DLE: "h-data", Level: 0, Compressed: 100}
-	pos := record.ArchivePos{DLE: "h-data", Level: 0, Parts: []record.FilePos{{Label: "vol-a", Pos: 0}}, Commit: record.FilePos{Label: "vol-a", Pos: 1}}
+	pos := archiveio.ArchivePos{Parts: []archiveio.FilePos{{Label: "vol-a", Pos: 0}}, Commit: archiveio.FilePos{Label: "vol-a", Pos: 1}}
 	if err := cat.AddArchive(arch, "tape", pos); err != nil {
 		t.Fatal(err)
 	}

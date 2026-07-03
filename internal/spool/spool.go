@@ -207,7 +207,7 @@ func (sp *Spool) writerOver(alloc archiveio.PartAllocator, rec archiveio.Recorde
 // landingVolume names the distinct volume label(s) an archive's parts landed on: one volume normally,
 // several comma-joined when it spanned volumes or, on a multi-drive library, drives. Empty for an
 // address-identified landing (no labels), which `nb status` then shows without a volume.
-func landingVolume(pos record.ArchivePos) string {
+func landingVolume(pos archiveio.ArchivePos) string {
 	var labels []string
 	seen := map[string]bool{}
 	for _, p := range pos.Parts {
@@ -308,14 +308,14 @@ func (sp *Spool) copyOne(disk *Disk, hres archiveio.CommitResult, l *lane, drive
 	cw := sp.writerOver(l.allocs[drive], l.rec, l.lim).NewCopy(hres.Archive)
 	archiveio.MeterArchive(cw, func(copied int64) { sp.tr.AddDrainBytes(dleID, copied) })
 	label := fmt.Sprintf("flush %s L%d", dleID, hres.Archive.Level)
-	open := func() (io.ReadCloser, error) { return disk.Storage.OpenArchiveAt(hres.Archive.Run, hres.Pos) }
+	open := func() (io.ReadCloser, error) { return disk.Storage.OpenArchiveAt(hres.Ref(), hres.Pos) }
 	if err := CopyStaged(sp.ctx, label, open, cw, l.name); err != nil {
 		return err
 	}
 	if res, ok := cw.Committed(); ok {
 		sp.tr.LandVolume(dleID, landingVolume(res.Pos)) // the landing tape the drain reached
 	}
-	if err := sp.orch.reclaimOn(disk.Storage, hres.Archive.Run, hres.Pos); err != nil {
+	if err := sp.orch.reclaimOn(disk.Storage, hres.Ref(), hres.Pos); err != nil {
 		return fmt.Errorf("flush %s: reclaim holding disk: %w", dleID, err)
 	}
 	sp.pool.Release(disk, hres.Archive.Compressed)

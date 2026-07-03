@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -222,7 +223,7 @@ func TestPostureCapacityOver(t *testing.T) {
 	// Record an archive well past capacity (no bucket is opened — this is catalog-only).
 	at := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	arch := record.Archive{Run: record.IDFromTime(at), DLE: "d", Level: 0, Compressed: 5000, CreatedAt: at}
-	pos := record.ArchivePos{DLE: "d", Level: 0, Parts: []record.FilePos{{Label: "cloud", Pos: 1}}, Commit: record.FilePos{Label: "cloud", Pos: 2}}
+	pos := archiveio.ArchivePos{Parts: []archiveio.FilePos{{Label: "cloud", Pos: 1}}, Commit: archiveio.FilePos{Label: "cloud", Pos: 2}}
 	if err := eng.cat.AddArchive(arch, "cloud", pos); err != nil {
 		t.Fatal(err)
 	}

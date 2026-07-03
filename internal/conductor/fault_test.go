@@ -40,7 +40,7 @@ func addArchive(t *testing.T, c *catalog.Catalog, id, medium, dle string, level 
 	if arch.CreatedAt.IsZero() {
 		arch.CreatedAt = time.Date(2026, 7, 2, 3, 0, 0, 0, time.UTC)
 	}
-	pos := record.ArchivePos{DLE: dle, Level: level, Parts: []record.FilePos{{Pos: 1}}, Commit: record.FilePos{Pos: 2}}
+	pos := archiveio.ArchivePos{Parts: []archiveio.FilePos{{Pos: 1}}, Commit: archiveio.FilePos{Pos: 2}}
 	if err := c.AddArchive(arch, medium, pos); err != nil {
 		t.Fatalf("AddArchive: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestFlushDoubleCrashReclaimsOnly(t *testing.T) {
 			return nil, errors.New("Open must not be called on the reclaim-only path")
 		},
 		Members: func(string, string, int) ([]string, error) { return nil, nil },
-		Reclaim: func(string, string, record.ArchivePos) error { reclaimed++; return nil },
+		Reclaim: func(string, archiveio.Ref, archiveio.ArchivePos) error { reclaimed++; return nil },
 		OpenLanding: func(string, archiveio.RunSpec) (*archiveio.Writer, error) {
 			return nil, errors.New("OpenLanding must not be called on the reclaim-only path")
 		},
@@ -236,7 +236,7 @@ func TestFlushCopiesAndReclaims(t *testing.T) {
 			return io.NopCloser(bytes.NewReader(body)), nil
 		},
 		Members: func(string, string, int) ([]string, error) { return nil, nil },
-		Reclaim: func(string, string, record.ArchivePos) error { reclaimed++; return nil },
+		Reclaim: func(string, archiveio.Ref, archiveio.ArchivePos) error { reclaimed++; return nil },
 		OpenLanding: func(landing string, spec archiveio.RunSpec) (*archiveio.Writer, error) {
 			ms := &memFlushStore{vol: newFlushVol()}
 			return archiveio.NewWriter(ms, ms, spec, nil, nil), nil

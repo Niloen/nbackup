@@ -33,7 +33,7 @@ type FlushDeps struct {
 	Holdings    []string
 	Open        func(runID, dle string, level int, medium string) (io.ReadCloser, error)
 	Members     func(runID, dle string, level int) ([]string, error)
-	Reclaim     func(holding, runID string, pos record.ArchivePos) error
+	Reclaim     func(holding string, ref archiveio.Ref, pos archiveio.ArchivePos) error
 	OpenLanding func(landing string, spec archiveio.RunSpec) (*archiveio.Writer, error)
 	DisplayDLE  func(dle string) string
 	Logf        func(format string, args ...any)
@@ -93,6 +93,7 @@ func Flush(d FlushDeps) (flushed int, err error) {
 				continue
 			}
 			for _, ap := range hp.Archives {
+				ref := archiveio.Ref{Run: s.ID, DLE: ap.DLE, Level: ap.Level}
 				dleID := d.DisplayDLE(ap.DLE)
 				landing := d.LandingFor(ap.DLE)
 				// A crash between recording the landing placement and reclaiming the holding one
@@ -114,7 +115,7 @@ func Flush(d FlushDeps) (flushed int, err error) {
 						return flushed, err
 					}
 				}
-				if err := d.Reclaim(holding, s.ID, ap); err != nil {
+				if err := d.Reclaim(holding, ref, ap.Pos()); err != nil {
 					return flushed, fmt.Errorf("flush %s %s: reclaim holding disk: %w", s.ID, dleID, err)
 				}
 				flushed++

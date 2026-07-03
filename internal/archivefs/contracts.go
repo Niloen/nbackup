@@ -20,7 +20,7 @@ import (
 var ErrMissingCopy = errors.New("no available copy")
 
 // ReadStore is the read face of the archive fs — the mirror of WriteStore: a logical
-// record.Ref resolved to its raw on-medium bytes. It is global (any committed archive, all
+// archiveio.Ref resolved to its raw on-medium bytes. It is global (any committed archive, all
 // media, copy-selected) where the write face is one opened run — inherent to any fs: you
 // read anywhere, you write through a handle you opened. It speaks only refs and bytes; the
 // schemes, the far-end tar, and the transfers live in the operations (the Restorer, the
@@ -30,13 +30,13 @@ type ReadStore interface {
 	// Open returns one archive's raw part stream, copy-selected: medium "" tries every copy
 	// (preferring the caller's own) with fail-over; a set medium reads only that copy, so a
 	// fault on it is not masked by another. The open is eager — a missing copy errors here.
-	Open(ref record.Ref, medium string) (io.ReadCloser, error)
+	Open(ref archiveio.Ref, medium string) (io.ReadCloser, error)
 	// ReadArchives reads a selection in one ordered pass (levels ascending per DLE, physically
 	// forward otherwise), calling fn per archive with an open func over its bytes; fn may open
 	// more than once. Refs with no available copy are skipped and returned as missing.
-	ReadArchives(refs []record.Ref, medium string, fn func(ref record.Ref, open func() (io.ReadCloser, error)) error) (missing []record.Ref, err error)
+	ReadArchives(refs []archiveio.Ref, medium string, fn func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error) (missing []archiveio.Ref, err error)
 	// Members returns an archive's member list (cache, else the on-medium index).
-	Members(ref record.Ref) ([]string, error)
+	Members(ref archiveio.Ref) ([]string, error)
 }
 
 // WriteStore is the write face of the archive fs — one run's medium end, the mirror of
@@ -49,12 +49,12 @@ type ReadStore interface {
 //
 // The read-back and reclaim are positional, not logical: the caller already holds the
 // archive's positions (its ArchivePos, straight off the writer's CommitResult), so there is
-// no catalog resolution or copy-selection like ReadStore.Open — only the run id is needed
-// as enclosing context, since ArchivePos is scoped to a (run, medium) and carries no run.
+// no catalog resolution or copy-selection like ReadStore.Open — ref names which archive
+// (asserted against the part headers as ever), pos says where its files sit.
 type WriteStore interface {
 	archiveio.Recorder
-	OpenArchiveAt(runID string, pos record.ArchivePos) (io.ReadCloser, error)
-	ReclaimAt(runID string, pos record.ArchivePos) error
+	OpenArchiveAt(ref archiveio.Ref, pos archiveio.ArchivePos) (io.ReadCloser, error)
+	ReclaimAt(ref archiveio.Ref, pos archiveio.ArchivePos) error
 }
 
 // Ingest is the producer's source of ArchiveWriters: NewArchive reserves a per-archive

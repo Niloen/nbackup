@@ -3,6 +3,7 @@ package accounting
 import (
 	"context"
 	"errors"
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"io"
 	"testing"
 	"time"
@@ -96,12 +97,12 @@ func TestSweepOrphansMinimumAgeAndWORM(t *testing.T) {
 func TestArchivePositionsCommitFirst(t *testing.T) {
 	ps := []catalog.Placement{{
 		Medium: "disk",
-		Archives: []record.ArchivePos{{
+		Archives: []catalog.PlacedArchive{{
 			DLE:    "app",
 			Level:  0,
-			Parts:  []record.FilePos{{Pos: 0}, {Pos: 1}},
-			Index:  record.FilePos{Pos: 2},
-			Commit: record.FilePos{Pos: 3},
+			Parts:  []archiveio.FilePos{{Pos: 0}, {Pos: 1}},
+			Index:  archiveio.FilePos{Pos: 2},
+			Commit: archiveio.FilePos{Pos: 3},
 		}},
 	}}
 	got := archivePositions(ps, "disk", "app")
@@ -115,7 +116,7 @@ func TestArchivePositionsCommitFirst(t *testing.T) {
 		}
 	}
 	// An archive with no member index omits that run, still commit-first.
-	ps[0].Archives[0].Index = record.FilePos{}
+	ps[0].Archives[0].Index = archiveio.FilePos{}
 	if got := archivePositions(ps, "disk", "app"); len(got) != 3 || got[0] != 3 {
 		t.Fatalf("without index, order = %v, want [3 0 1] (commit first)", got)
 	}

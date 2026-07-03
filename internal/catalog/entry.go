@@ -1,6 +1,6 @@
 package catalog
 
-import "github.com/Niloen/nbackup/internal/record"
+import "github.com/Niloen/nbackup/internal/archiveio"
 
 // Entry is the catalog's per-run record: one logical run plus every place a
 // copy of it lives.
@@ -19,19 +19,36 @@ type Placement struct {
 	// located by its label at mount time, so which drive holds a tape is resolved at
 	// runtime, not stored here.
 	Medium string `json:"medium"`
-	// Archives lists each archive and the positions of its parts, commit, and index.
-	// record.FilePos and record.ArchivePos are the file-location types the catalog
-	// persists: the very types the archiveio writer emits and the reader consumes,
-	// defined once in package record (the shared on-medium artifact vocabulary) so a
-	// writer's recorded positions become a placement with no field-by-field conversion.
-	// FilePos.Label is the volume's global, device-independent identity ("" for
-	// address-identified media, which carry no label); ArchivePos lists an archive's
-	// ordered parts (one unless it spanned).
-	Archives []record.ArchivePos `json:"archives"`
+	// Archives lists each archive held here and the positions of its parts, commit,
+	// and index — see PlacedArchive.
+	Archives []PlacedArchive `json:"archives"`
+}
+
+// PlacedArchive is the catalog's persisted record of one archive on one placement: the
+// archive's key within the run's copy (DLE, level — the run itself is the entry's) and
+// where its files landed. The location fields mirror archiveio.ArchivePos (the writer's
+// commit output; Pos() converts back for positional read-back/reclaim), but the
+// serialized shape is the catalog's own: the cache file's layout must not shift under a
+// refactor of the block layer's call vocabulary. archiveio.FilePos is the shared atom —
+// its Label is the volume's global, device-independent identity ("" for
+// address-identified media, which carry no label); Parts is ordered (one part unless
+// the archive spanned).
+type PlacedArchive struct {
+	DLE    string              `json:"dle"`
+	Level  int                 `json:"level"`
+	Parts  []archiveio.FilePos `json:"parts"`
+	Commit archiveio.FilePos   `json:"commit"`          // the commit footer's location (the archive's marker)
+	Index  archiveio.FilePos   `json:"index,omitempty"` // the member index's location (zero = no members)
+}
+
+// Pos returns the archive's location as the block layer's position value — what
+// positional read-back and reclaim (WriteStore.OpenArchiveAt/ReclaimAt) take.
+func (a PlacedArchive) Pos() archiveio.ArchivePos {
+	return archiveio.ArchivePos{Parts: a.Parts, Commit: a.Commit, Index: a.Index}
 }
 
 // Parts returns the ordered part locations of an archive on this placement.
-func (p Placement) Parts(dle string, level int) ([]record.FilePos, bool) {
+func (p Placement) Parts(dle string, level int) ([]archiveio.FilePos, bool) {
 	for _, a := range p.Archives {
 		if a.DLE == dle && a.Level == level {
 			return a.Parts, len(a.Parts) > 0

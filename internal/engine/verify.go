@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"io"
 	"sort"
 	"strings"
@@ -168,7 +169,7 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 	// Track which whole copies passed so a failure can still reassure the operator
 	// that an intact copy remains (redundancy is the point of more than one).
 	var goodCopies, badCopies, skippedCopies []string
-	checked := map[record.Ref]bool{} // distinct archives verified on at least one copy
+	checked := map[archiveio.Ref]bool{} // distinct archives verified on at least one copy
 	for _, p := range placements {
 		switch copyOK, skipped := v.verifyCopy(s, p, opts, sv, checked, logf); {
 		case skipped:
@@ -202,7 +203,7 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 // per-archive verdicts to sv (and marking each verified archive in checked). It
 // reports whether the whole copy passed, or that it was skipped because its medium is
 // not defined in this config (out of scope, not damaged).
-func (v *verifier) verifyCopy(s *catalog.Run, p catalog.Placement, opts VerifyOptions, sv *RunVerdict, checked map[record.Ref]bool, logf Logf) (copyOK, skipped bool) {
+func (v *verifier) verifyCopy(s *catalog.Run, p catalog.Placement, opts VerifyOptions, sv *RunVerdict, checked map[archiveio.Ref]bool, logf Logf) (copyOK, skipped bool) {
 	id := sv.Run
 	copyOK = true
 	// A copy is archive-granular: a per-archive prune may have reclaimed some of
@@ -216,17 +217,17 @@ func (v *verifier) verifyCopy(s *catalog.Run, p catalog.Placement, opts VerifyOp
 			expected = append(expected, a)
 		}
 	}
-	archByRef := make(map[record.Ref]record.Archive, len(expected))
-	refs := make([]record.Ref, len(expected))
+	archByRef := make(map[archiveio.Ref]record.Archive, len(expected))
+	refs := make([]archiveio.Ref, len(expected))
 	for i, a := range expected {
-		ref := record.Ref{Run: id, DLE: a.DLE, Level: a.Level}
+		ref := archiveio.Ref{Run: id, DLE: a.DLE, Level: a.Level}
 		refs[i] = ref
 		archByRef[ref] = a
 	}
 	// The fs drives the one-pass read of this copy, calling back per archive; verify
 	// every one (never stop early), collecting verdicts.
-	verdicts := make(map[record.Ref]ArchiveVerdict, len(refs))
-	_, err := v.store.ReadArchives(refs, p.Medium, func(ref record.Ref, open func() (io.ReadCloser, error)) error {
+	verdicts := make(map[archiveio.Ref]ArchiveVerdict, len(refs))
+	_, err := v.store.ReadArchives(refs, p.Medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
 		verdicts[ref] = v.verifyArchive(archByRef[ref], ref, p.Medium, opts, open, logf)
 		return nil
 	})
@@ -247,7 +248,7 @@ func (v *verifier) verifyCopy(s *catalog.Run, p catalog.Placement, opts VerifyOp
 		return false, false
 	}
 	for _, a := range expected {
-		ref := record.Ref{Run: id, DLE: a.DLE, Level: a.Level}
+		ref := archiveio.Ref{Run: id, DLE: a.DLE, Level: a.Level}
 		vd, ok := verdicts[ref]
 		if !ok {
 			logf.Log("%s [%s]: %s L%d POSITION MISSING", id, p.Medium, a.DLEID(), a.Level)
@@ -266,7 +267,7 @@ func (v *verifier) verifyCopy(s *catalog.Run, p catalog.Placement, opts VerifyOp
 
 // verifyArchive runs the requested checks against one archive, opening its stream via open
 // (each check reads it afresh).
-func (v *verifier) verifyArchive(a record.Archive, ref record.Ref, medium string, opts VerifyOptions, open func() (io.ReadCloser, error), logf Logf) ArchiveVerdict {
+func (v *verifier) verifyArchive(a record.Archive, ref archiveio.Ref, medium string, opts VerifyOptions, open func() (io.ReadCloser, error), logf Logf) ArchiveVerdict {
 	id := ref.Run
 	vd := ArchiveVerdict{Run: id, DLE: a.DLE, Level: a.Level, Medium: medium, OK: true}
 
@@ -334,7 +335,7 @@ func (v *verifier) structuralCheck(id string, a record.Archive, open func() (io.
 		return drill.ClassNone, ""
 	}
 	// The recorded member list (the catalog is member-free) is loaded via the archivefs.
-	recorded, err := v.store.Members(record.Ref{Run: id, DLE: a.DLE, Level: a.Level})
+	recorded, err := v.store.Members(archiveio.Ref{Run: id, DLE: a.DLE, Level: a.Level})
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}

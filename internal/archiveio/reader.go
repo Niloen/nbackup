@@ -15,7 +15,7 @@ import (
 // read side's device seam — addressed, not streaming: each call opens one named
 // part, which is why it is an Opener and not a Source (the write-side dual, the
 // PartAllocator, allocates instead: reads are random-access, writes append-ordered).
-type PartOpener func(p record.FilePos) (record.Header, io.ReadCloser, error)
+type PartOpener func(p FilePos) (record.Header, io.ReadCloser, error)
 
 // Reader is one medium's read end — the mirror of Writer (one run's write end). It is
 // bound to the medium at construction: open is the device seam each part is opened
@@ -42,7 +42,7 @@ func NewReader(open PartOpener, lim *ratelimit.Limiter) *Reader {
 // first part eagerly so a missing/wrong volume errors here, letting a copy-selecting caller
 // fail over to another copy rather than discovering the fault only once bytes are pulled.
 // Each part's header is asserted as it is reached. The caller closes the returned reader.
-func (r *Reader) Open(ref record.Ref, parts []record.FilePos) (io.ReadCloser, error) {
+func (r *Reader) Open(ref Ref, parts []FilePos) (io.ReadCloser, error) {
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("archive %s %s L%d has no parts", ref.Run, ref.DLE, ref.Level)
 	}
@@ -55,7 +55,7 @@ func (r *Reader) Open(ref record.Ref, parts []record.FilePos) (io.ReadCloser, er
 
 // Verify asserts each part's header against ref, then re-hashes the concatenated raw
 // payloads and compares to sha.
-func (r *Reader) Verify(ref record.Ref, parts []record.FilePos, sha string) (bool, error) {
+func (r *Reader) Verify(ref Ref, parts []FilePos, sha string) (bool, error) {
 	raw, err := r.Open(ref, parts)
 	if err != nil {
 		return false, err
@@ -70,7 +70,7 @@ func (r *Reader) Verify(ref record.Ref, parts []record.FilePos, sha string) (boo
 
 // openLimited opens one part through the bound opener and paces its stream to the
 // medium's cap.
-func (r *Reader) openLimited(p record.FilePos) (record.Header, io.ReadCloser, error) {
+func (r *Reader) openLimited(p FilePos) (record.Header, io.ReadCloser, error) {
 	h, rc, err := r.open(p)
 	if err != nil {
 		return h, rc, err
@@ -82,8 +82,8 @@ func (r *Reader) openLimited(p record.FilePos) (record.Header, io.ReadCloser, er
 // the previous one is exhausted so that only one volume is mounted at a time. It
 // asserts each part's header (identity + ascending part index) before its bytes flow.
 type partsReader struct {
-	parts []record.FilePos
-	want  record.Ref
+	parts []FilePos
+	want  Ref
 	open  PartOpener
 	idx   int
 	cur   io.ReadCloser
@@ -158,7 +158,7 @@ func (pr *partsReader) Close() error {
 // assertPart confirms a part file's header is the archive part the catalog expected:
 // the right archive identity and the right index in the sequence. A mismatch means
 // the wrong volume is mounted or the catalog is stale.
-func assertPart(h record.Header, want record.Ref, part int) error {
+func assertPart(h record.Header, want Ref, part int) error {
 	if h.Kind != record.KindArchive {
 		return fmt.Errorf("position holds a %q record, not an archive", h.Kind)
 	}

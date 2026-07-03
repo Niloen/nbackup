@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2105,7 +2106,7 @@ func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, byte
 	at, _ := record.ParseDateField(date)
 	id := record.IDFromTime(at)
 	arch := record.Archive{Run: id, DLE: dle, Level: 0, Compressed: bytes, CreatedAt: at}
-	pos := record.ArchivePos{DLE: dle, Level: 0, Parts: []record.FilePos{{Label: volume, Epoch: 1, Pos: 1}}, Commit: record.FilePos{Label: volume, Epoch: 1, Pos: 2}}
+	pos := archiveio.ArchivePos{Parts: []archiveio.FilePos{{Label: volume, Epoch: 1, Pos: 1}}, Commit: archiveio.FilePos{Label: volume, Epoch: 1, Pos: 2}}
 	if err := eng.cat.AddArchive(arch, "lto", pos); err != nil {
 		t.Fatal(err)
 	}
@@ -2118,7 +2119,7 @@ func recordFullOnOtherMedium(t *testing.T, eng *Engine, date, dle, medium string
 	at, _ := record.ParseDateField(date)
 	id := record.IDFromTime(at)
 	arch := record.Archive{Run: id, DLE: dle, Level: 0, CreatedAt: at}
-	pos := record.ArchivePos{DLE: dle, Level: 0, Parts: []record.FilePos{{Label: medium, Pos: 1}}, Commit: record.FilePos{Label: medium, Pos: 2}}
+	pos := archiveio.ArchivePos{Parts: []archiveio.FilePos{{Label: medium, Pos: 1}}, Commit: archiveio.FilePos{Label: medium, Pos: 2}}
 	if err := eng.cat.AddArchive(arch, medium, pos); err != nil {
 		t.Fatal(err)
 	}

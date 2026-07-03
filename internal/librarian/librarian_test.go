@@ -3,6 +3,7 @@ package librarian
 import (
 	"errors"
 	"fmt"
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"strconv"
 	"strings"
 	"testing"
@@ -126,9 +127,9 @@ func TestRelabelProtectionUsesLibrarianMinAge(t *testing.T) {
 	// the age floor (not the last-recovery-path rule) protects T-A's run.
 	addFull := func(label string, at time.Time) {
 		arch := record.Archive{Run: record.IDFromTime(at), DLE: "h:/data", Level: 0, Compressed: 100, CreatedAt: at}
-		pos := record.ArchivePos{DLE: "h:/data", Level: 0,
-			Parts:  []record.FilePos{{Label: label, Pos: 1}},
-			Commit: record.FilePos{Label: label, Pos: 2}}
+		pos := archiveio.ArchivePos{
+			Parts:  []archiveio.FilePos{{Label: label, Pos: 1}},
+			Commit: archiveio.FilePos{Label: label, Pos: 2}}
 		if err := cat.AddArchive(arch, "pool", pos); err != nil {
 			t.Fatal(err)
 		}

@@ -57,8 +57,8 @@ registry registration, not a conditional in the core.
 | Package | Responsibility | Amanda analogue |
 |---|---|---|
 | `config` | config + domain entities: `DLE`, `Media`, `DumpType` | disklist / dumptype / storage |
-| `record` | the self-describing on-medium artifact records: `Header` framing + `Label` (volume id record) + `Archive` (commit-footer metadata, self-locating via its `Run` tag) + `Ref` (an archive's logical identity — the fs "filename", asserted by the block layer and resolved by the fs) + the run-id vocabulary (`IDFromTime`/`ParseID`/`RunIDLess`) + the per-archive member index (`EncodeIndex`) + their (de)serialization | dumpfile_t / amar |
-| `archiveio` | the block layer: maps a run's archives onto a `Volume`'s files. Two bound ends — `Writer` (one run's write end, bound to a `PartAllocator` + `Recorder`; `NewArchive` → the `ArchiveWriter` SDK) and `Reader` (one medium's read end, bound to a `PartOpener`; `Open(ref, parts)` → `io.ReadCloser`) — that meter + split a payload into parts then write its index + commit footer, and concatenate + assert parts on read; knows nothing of compress/encrypt | taper / amrestore |
+| `record` | the self-describing on-medium artifact records: `Header` framing + `Label` (volume id record) + `Archive` (commit-footer metadata, self-locating via its `Run` tag) + the run-id vocabulary (`IDFromTime`/`ParseID`/`RunIDLess`) + the per-archive member index (`EncodeIndex`) + their (de)serialization — only what is bytes on a medium | dumpfile_t / amar |
+| `archiveio` | the block layer: maps a run's archives onto a `Volume`'s files. Two bound ends — `Writer` (one run's write end, bound to a `PartAllocator` + `Recorder`; `NewArchive` → the `ArchiveWriter` SDK) and `Reader` (one medium's read end, bound to a `PartOpener`; `Open(ref, parts)` → `io.ReadCloser`) — that meter + split a payload into parts then write its index + commit footer, and concatenate + assert parts on read; knows nothing of compress/encrypt. Home of the value objects `Ref` (an archive's logical identity — the fs "filename", asserted against part headers on read) and `FilePos`/`ArchivePos` (where an archive's files landed) | taper / amrestore |
 | `media` | `Volume` + `Labeled` + `Drive`/`Changer` (slots + drives, `Load`/`Unload`/`Manual`) + `Profile` + registry; reads/writes `record` artifacts | Device API |
 | `librarian` | operates a medium's `Changer` + label protocol (make-writable, advance, load-for-read, label, load); prompts an operator when the changer is `Manual`; its drive-bound `Allocator` implements `archiveio.PartAllocator` (part sizing + the volume roll) | changer / amtape |
 | `depot` | where media are opened — open(2) + the mount table: resolves a configured medium to a typed face (`ReadMedium`/`WriteMedium`/`AdminMedium`, the access rule as a method set), owns the run window's exclusive write claims, the lazily opened landing volume + one-time catalog bootstrap, and the per-medium write knobs (part size, bandwidth cap) | — |
@@ -69,7 +69,7 @@ registry registration, not a conditional in the core.
 | `transform/crypt` | external encryptor child processes (gpg/none) + registry; `Filter(scheme)` returns the forward/reverse `programs.Cmd` | amcrypt/amgpgcrypt |
 | `programs` | the base: a `Cmd` (external program to run) + an `Execution` transport that runs a pipe of commands on one host, transparently `Local` or `SSH`; the command/execution concept compress, crypt, and the archiver all build on | amandad (replaced by stock sshd) |
 | `xfer` | the data-movement primitive: `Transfer(source, filters, sink)` moves one stream through three zones — a `Source` (a client's tar, or a medium read), local `Filters` (compress/encrypt or decrypt/decompress), and a `Sink` (a medium, a target's tar, a hash) — tagging faults by zone | Amanda Xfer / netusage |
-| `archivefs` | the archive fs (file layer): a logical `record.Ref` to a byte endpoint and back, nothing more. Its two faces live beside their implementations — `ReadStore` (implemented by `FS`: `Open` with copy selection + fail-over, `ReadArchives` one-pass ordered reads, `Members`) and `WriteStore` (implemented by `Session`, one run's write handle: `Record` + staged read-back/`Reclaim`) — plus `Ingest` (the producer's writer intake, implemented by the spool). Mounts volumes via depot read media; owns the member index. No schemes, no tar, no transfers — those live in the operations (dumper, restorer, verifier) | Scribe + Recovery::Clerk |
+| `archivefs` | the archive fs (file layer): a logical `archiveio.Ref` to a byte endpoint and back, nothing more. Its two faces live beside their implementations — `ReadStore` (implemented by `FS`: `Open` with copy selection + fail-over, `ReadArchives` one-pass ordered reads, `Members`) and `WriteStore` (implemented by `Session`, one run's write handle: `Record` + staged read-back/`Reclaim`) — plus `Ingest` (the producer's writer intake, implemented by the spool). Mounts volumes via depot read media; owns the member index. No schemes, no tar, no transfers — those live in the operations (dumper, restorer, verifier) | Scribe + Recovery::Clerk |
 | `progress` | live run-status model + status-file I/O + render | amdump log / amstatus |
 | `report` | per-run history record + JSONL/summary file I/O + digest render | amreport |
 | `notify` | pluggable alert backends (smtp/sendmail/webhook) + registry + dispatch | amreport mailto |
@@ -89,10 +89,10 @@ registry registration, not a conditional in the core.
 Dependencies flow one way: `cli → engine → {planner, retention, archiver, xfer,
 archivefs, archiveio, depot, catalog, config, progress, recovery, restorer}` over leaf
 packages `{media, programs, sizeutil}`, all bottoming out on `record` (the on-medium
-artifact format that `media`, `archiveio`, and `catalog` read and write — and home of
-`Ref`, the archive identity both the block layer asserts and the fs resolves;
-`restorer` executes what `recovery` plans, over the `archivefs.ReadStore` the FS
-implements). The reporting layer adds `cli → {report, notify}` with `notify → {report,
+artifact format that `media`, `archiveio`, and `catalog` read and write; `archiveio`
+adds the value objects — `Ref`, the archive identity both the block layer asserts and
+the fs resolves, and `FilePos`/`ArchivePos`, its file locations; `restorer` executes
+what `recovery` plans, over the `archivefs.ReadStore` the FS implements). The reporting layer adds `cli → {report, notify}` with `notify → {report,
 config}` — `report` is a pure leaf (record + render); the engine depends on neither.
 Domain packages stay pure; `archiver`/`media`/`transform/compress`/`transform/crypt`
 are pluggable adapters; `engine` is the only component aware of all of them. A backup
@@ -498,7 +498,7 @@ tape emulator) — one drive, no addressable slots, a human loads it.
   that volume's file-0 label in place — same `Name` and `Pool`, `++Epoch`, fresh
   `WrittenAt` — physically wiping it (`WriteLabel` resets first), and reconciles the
   catalog (prior-epoch placements are dead, dropped; a run that loses its last copy
-  leaves). Because placements pin `record.FilePos{Label, Epoch, Pos}`, the epoch bump
+  leaves). Because placements pin `archiveio.FilePos{Label, Epoch, Pos}`, the epoch bump
   alone retires every prior-epoch placement; the physical reset means a rebuild sees the
   new epoch only. This lives entirely in `package librarian` (the media-shape seam):
   `advanceViaLibrary` recycles a robot's oldest Floor-cleared cartridge after its
