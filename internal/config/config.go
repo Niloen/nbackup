@@ -668,11 +668,11 @@ func (c *Config) Validate() error {
 		}
 		if age, err := m.MinAge(); err != nil {
 			return fmt.Errorf("media %s: minimum_age: %w", name, err)
-		} else if m.MinimumAge != "" && age <= 0 {
-			// A non-positive floor would fall through to the one-cycle default in
-			// MinAgeFor, silently ignoring the user's explicit value. Reject it so the
-			// mistake surfaces; omitting the key is the way to ask for the default.
-			return fmt.Errorf("medium %q: minimum_age must be positive (omit it to default to one cycle)", name)
+		} else if m.MinimumAge != "" && age < 0 {
+			// A negative floor is nonsense; 0 is allowed and means "no age floor —
+			// capacity-only retention" (only the live recovery chain still protects).
+			// Omitting the key is the way to ask for the one-cycle default.
+			return fmt.Errorf("medium %q: minimum_age must not be negative (use 0 for no age floor / capacity-only retention, or omit it to default to one cycle)", name)
 		}
 		if _, err := m.ThroughputBytes(); err != nil {
 			return fmt.Errorf("media %s: throughput: %w", name, err)
@@ -1157,11 +1157,12 @@ func (c *Config) BumpPercent() float64 {
 // "yesterday must not overwrite last month" safety without a knob — a run stays
 // retainable for at least the window in which it is still a recovery base.
 func (c *Config) MinAgeFor(m Media) time.Duration {
-	// Validate already parsed m.MinimumAge and rejected a non-positive explicit
-	// value, so MinAge here is either a positive floor or 0 (the key was omitted);
-	// 0 falls through to the one-cycle default.
-	age, _ := m.MinAge()
-	if age > 0 {
+	// An explicit minimum_age is honored as given — including 0, which means "no age
+	// floor / capacity-only retention" (only the live recovery chain still protects).
+	// An omitted key defaults to one cycle, keeping "yesterday must not overwrite last
+	// month" safe without a knob. Validate already rejected a negative value.
+	if m.MinimumAge != "" {
+		age, _ := m.MinAge()
 		return age
 	}
 	return c.CycleDuration()

@@ -435,6 +435,11 @@ func corrupt(t *testing.T, path string) {
 	for i := range garbage {
 		garbage[i] = 0xAA
 	}
+	// Committed payloads land read-only (immutability is OS-enforced); force it
+	// writable to simulate on-disk bit-rot, then overwrite in place.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, garbage, 0o644); err != nil {
 		t.Fatal(err)
 	}

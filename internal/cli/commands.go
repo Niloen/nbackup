@@ -1287,6 +1287,11 @@ func newLabelCmd(a *app) *cobra.Command {
 		Example: "  nb label tape DAILY-01\n  nb load lto bay-02\n  nb label --relabel lto DAILY-42   # recycle the loaded tape to a new name",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// An empty name would otherwise dead-end deep in the label protocol with a
+			// misleading "no blank slot available"; reject it up front for what it is.
+			if strings.TrimSpace(args[1]) == "" {
+				return fmt.Errorf("label name required, e.g. `nb label %s DAILY-01`", args[0])
+			}
 			cfg, err := a.load()
 			if err != nil {
 				return err

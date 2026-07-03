@@ -82,6 +82,15 @@ func loadConfig(cfgPath, catalogOverride string) (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// --catalog synthesizes a throwaway disk landing for read-only commands to browse
+	// a catalog directory with no config. On a command that writes (dump/copy/sync/…)
+	// combining it with a config that already defines media would SILENTLY redirect the
+	// backup into the catalog dir instead of the configured landing — a data-misroute
+	// with no warning. Refuse it: --catalog is an inspection flag, and `workdir:` is how
+	// you move the cache.
+	if catalogOverride != "" && (len(cfg.Media) > 0 || cfg.Landing != "") {
+		return nil, fmt.Errorf("--catalog cannot be combined with a config that defines media (it would redirect writes to %q instead of the configured landing) — drop --catalog, or set `workdir:` in the config to move the catalog cache", catalogOverride)
+	}
 	applyCatalog(cfg, catalogOverride)
 	return cfg, nil
 }

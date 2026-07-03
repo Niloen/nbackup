@@ -118,10 +118,10 @@ func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force boo
 		return nil, fmt.Errorf("sync source and target are the same medium %q", target)
 	}
 	if !c.knownMedium(from) {
-		return nil, fmt.Errorf("unknown source medium %q", from)
+		return nil, fmt.Errorf("unknown source medium %q %s", from, c.mediaHint())
 	}
 	if !c.knownMedium(target) {
-		return nil, fmt.Errorf("unknown medium %q", target)
+		return nil, fmt.Errorf("unknown medium %q %s", target, c.mediaHint())
 	}
 
 	report := &SyncReport{From: from, To: target}

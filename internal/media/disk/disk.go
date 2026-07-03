@@ -63,7 +63,11 @@ func (s fsStore) Writer(_ context.Context, key string) (io.WriteCloser, error) {
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return nil, err
 	}
-	return os.Create(full)
+	// Create the file read-only (0444) so a committed archive can't be silently
+	// overwritten in place — "immutable" is OS-enforced, not just an nb convention.
+	// The write here goes through the open fd (mode governs future opens, not this
+	// one); the run subdir stays writable so prune can still unlink the file.
+	return os.OpenFile(full, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o444)
 }
 
 func (s fsStore) WriteAll(_ context.Context, key string, b []byte) error {
@@ -71,7 +75,9 @@ func (s fsStore) WriteAll(_ context.Context, key string, b []byte) error {
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(full, b, 0o644)
+	// Read-only for the same reason as Writer: a sidecar/index/commit record is
+	// immutable once written; prune removes it by unlinking, which the dir permits.
+	return os.WriteFile(full, b, 0o444)
 }
 
 func (s fsStore) ReadAll(key string) ([]byte, error) { return os.ReadFile(s.full(key)) }

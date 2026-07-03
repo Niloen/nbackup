@@ -135,6 +135,10 @@ func TestCopyTransferMidStreamFails(t *testing.T) {
 	// Truncate the payload so the archive opens but its bytes no longer match the
 	// header-framed part lengths, faulting mid-transfer.
 	p := payloadFile(t, mediumRunDir(t, eng, "disk"), runID, 0)
+	// Committed payloads land read-only; force it writable to simulate corruption.
+	if err := os.Chmod(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Truncate(p, 4); err != nil {
 		t.Fatal(err)
 	}

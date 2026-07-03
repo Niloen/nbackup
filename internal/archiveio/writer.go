@@ -262,6 +262,13 @@ func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.SourceStats) error {
 		arch.Unreadable = len(p.Unreadable) // a PARTIAL dump's omitted-file count, durable in the footer so a rebuild preserves it
 		arch.Uncompressed = p.Uncompressed
 		arch.Members = p.Members
+		if p.FileCount == 0 {
+			// A zero-change incremental still carries tar's directory census (e.g.
+			// "./docs/") as members, but nothing actually changed. Per the documented
+			// artifact shape it records no member index — recover reads the base full's
+			// index for it — so drop the census members here and write payload+commit only.
+			arch.Members = nil
+		}
 		arch.CreatedAt = a.w.now() // the archive's landing time (per-archive)
 	}
 	pos, err := a.w.Commit(ctx, arch, a.parts)

@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/accounting"
@@ -92,7 +93,21 @@ func (e *Engine) SetEstimateProgress(sink progress.Sink) { e.estimateSink = sink
 // volume itself is opened lazily, the first time a command actually touches the
 // medium (see depot.landing) — so a catalog-only command (report, run, dle) never
 // lists a bucket or mounts a tape. Archivers are opened lazily per dumptype.
-func New(cfg *config.Config) (*Engine, error) { return build(cfg) }
+func New(cfg *config.Config) (*Engine, error) {
+	e, err := build(cfg)
+	if err != nil {
+		return nil, err
+	}
+	// A read-only preview (`nb plan`) never opens the landing volume, so an unknown
+	// landing type would otherwise slip through as an "unbounded" plan (exit 0) while
+	// `nb dump` fails the moment it opens the volume. Reject it here — the same hard
+	// error, surfaced early — so plan and dump agree. (`nb check` uses NewForCheck,
+	// which reports an unknown type as a collected finding instead of aborting.)
+	if name, lerr := cfg.LandingName(); lerr == nil && !media.KnownVolumeType(cfg.Media[name].Type) {
+		return nil, fmt.Errorf("landing medium %q has unknown type %q (known: %v)", name, cfg.Media[name].Type, media.VolumeTypes())
+	}
+	return e, nil
+}
 
 // NewForCheck builds an engine for `nb check`. It is identical to New now that the
 // landing volume opens lazily: `nb check` probes the landing explicitly (see
@@ -527,12 +542,23 @@ func (e *Engine) RestoreAsOfTo(dle, asOf, destHost, destPath, from string, logf 
 	return e.rst.Extract(restorer.Request{DLE: dle, AsOf: asOf, Dest: destPath, Host: destHost, Medium: from}, logf)
 }
 
+// mediaNamesHint renders "(configured: a, b, c)" for an unknown-medium error, so a
+// typo shows the operator the names they can actually use (mirroring `nb prune`).
+func mediaNamesHint(cfg *config.Config) string {
+	names := make([]string, 0, len(cfg.Media))
+	for n := range cfg.Media {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return "(configured: " + strings.Join(names, ", ") + ")"
+}
+
 // checkFromMedium validates a `--from` medium pin against the config ("" is the
 // default: any copy).
 func (e *Engine) checkFromMedium(from string) error {
 	if from != "" {
 		if _, ok := e.cfg.Media[from]; !ok {
-			return fmt.Errorf("unknown medium %q (--from)", from)
+			return fmt.Errorf("unknown medium %q %s (--from)", from, mediaNamesHint(e.cfg))
 		}
 	}
 	return nil

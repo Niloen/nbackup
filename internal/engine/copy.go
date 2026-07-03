@@ -28,6 +28,7 @@ type copier struct {
 	clerk       *clerk.Clerk                                         // read endpoints + write session
 	landing     string                                               // default source medium (the landing medium)
 	knownMedium func(name string) bool                               // target is a configured medium
+	mediaHint   func() string                                        // "(configured: a, b, c)" for an unknown-medium error
 	placementOn func(runID, medium string) (catalog.Placement, bool) // a run's copy on a medium
 	openCheck   func(medium string) error                            // the source medium opens (fail fast before reading)
 	reclaimCopy func(runID, medium string) error                     // drop a prior copy on a removable target before a forced re-copy
@@ -48,6 +49,7 @@ func (e *Engine) newCopier() *copier {
 		clerk:       e.clerk,
 		landing:     e.dep.landingName,
 		knownMedium: func(name string) bool { _, ok := e.cfg.Media[name]; return ok },
+		mediaHint:   func() string { return mediaNamesHint(e.cfg) },
 		placementOn: e.placementOn,
 		openCheck: func(medium string) error {
 			rm, err := e.dep.OpenForRead(medium)
@@ -95,10 +97,10 @@ func (c *copier) PlanCopy(runID, fromMedia, targetMedia string, force bool) (Cop
 	// fails with "unknown source medium" instead of slipping through to the
 	// already-on-target short-circuit and reporting a misleading no-copy-on-source.
 	if !c.knownMedium(fromMedia) {
-		return CopyPlan{}, fmt.Errorf("unknown source medium %q", fromMedia)
+		return CopyPlan{}, fmt.Errorf("unknown source medium %q %s", fromMedia, c.mediaHint())
 	}
 	if !c.knownMedium(targetMedia) {
-		return CopyPlan{}, fmt.Errorf("unknown medium %q", targetMedia)
+		return CopyPlan{}, fmt.Errorf("unknown medium %q %s", targetMedia, c.mediaHint())
 	}
 	if fromMedia == targetMedia {
 		return CopyPlan{}, fmt.Errorf("copy source and target are the same medium %q", targetMedia)

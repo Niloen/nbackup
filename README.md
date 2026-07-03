@@ -692,14 +692,16 @@ dumptypes:
 
 # The disklist: grouped by dumptype, then host, then paths. The host `localhost`
 # is backed up locally; any OTHER host name is a remote SSH client (see the
-# `ssh:`/`hosts:` config), so keep it `localhost` on a single machine.
+# `ssh:`/`hosts:` config), so keep it `localhost` on a single machine. List only
+# paths that exist on this box — `nb check` reports an unreadable source as a failure.
 sources:
   default:
     localhost: [/home]          # add /etc to also back up system config — but that
                                 # needs root; without it the run commits a PARTIAL
                                 # archive (unreadable files omitted, with a warning)
-  no-logs:
-    localhost: [/srv/www, /opt/app]
+  # no-logs:                    # the no-logs dumptype in action — point it at real
+  #   localhost: [/srv/www]     # paths on your host (shown commented so the minimal
+                                # config above checks green as-is)
 ```
 
 - **Media** is a map of named definitions, each with a `type` and type-specific

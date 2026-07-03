@@ -75,7 +75,7 @@ func TestValidateMinimumAge(t *testing.T) {
 	}{
 		{name: "omitted defaults to one cycle", minAge: ""},
 		{name: "positive value accepted", minAge: "14d"},
-		{name: "zero rejected", minAge: "0d", wantErr: `medium "disk": minimum_age must be positive`},
+		{name: "zero accepted (no age floor, capacity-only retention)", minAge: "0d"},
 		{name: "negative rejected by parser", minAge: "-3d", wantErr: `minimum_age: invalid duration`},
 	}
 	for _, tc := range cases {

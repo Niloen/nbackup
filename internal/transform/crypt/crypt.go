@@ -131,10 +131,27 @@ func Check(scheme string, o Options) error {
 	// mid-dump with gpg's cryptic "No name"/WKD-lookup message.
 	if o.Recipient != "" {
 		if out, err := exec.Command(bin, "--batch", "--no-tty", "--list-keys", o.Recipient).CombinedOutput(); err != nil {
-			return fmt.Errorf("encryption scheme %q: recipient %q not found in the gpg keyring: %s", scheme, o.Recipient, strings.TrimSpace(string(out)))
+			return fmt.Errorf("encryption scheme %q: recipient %q not found in the gpg keyring: %s", scheme, o.Recipient, lastGPGLine(out))
 		}
 	}
 	return nil
+}
+
+// lastGPGLine picks the meaningful tail of gpg's stderr for an error message,
+// dropping the "keybox '…' created" / "directory '…' created" setup noise gpg
+// prints on its first run against a fresh GNUPGHOME — so the message ends at the
+// actual failure (e.g. "gpg: error reading key: No public key") not the noise.
+func lastGPGLine(out []byte) string {
+	full := strings.TrimSpace(string(out))
+	lines := strings.Split(full, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := strings.TrimSpace(lines[i])
+		if l == "" || strings.Contains(l, "created") {
+			continue
+		}
+		return l
+	}
+	return full
 }
 
 // EncryptCmd returns the encryptor as a pipeline stage, or ok=false for the identity
