@@ -1,4 +1,4 @@
-# NBackup — backups you can read, restore, and prove
+# Niloen Backup (NBackup) — backups you can read, restore, and prove
 
 NBackup backs up Unix machines to **local disk, cloud object stores (S3, GCS,
 Azure Blob), and tape**, treating all three as equal targets and making the
