@@ -65,7 +65,7 @@ func (l Logf) log(format string, args ...any) {
 // rotation's safety backstop (recoverability outranks capacity). It is a sentinel so the
 // write path can surface this actionable verdict in preference to the loaded volume's
 // bare "won't do" reason, while still preferring that reason for a blank/foreign tape.
-var ErrAllVolumesProtected = errors.New("all volumes still within retention")
+var ErrAllVolumesProtected = errors.New("all volumes in the pool hold protected runs")
 
 // ErrVolumeUnavailable marks a read mount that could not place the needed volume in the
 // drive: a robotic library that does not hold it, or a single-drive station where no

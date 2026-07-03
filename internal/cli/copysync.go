@@ -21,7 +21,7 @@ func newCopyCmd(a *app) *cobra.Command {
 		Use:     "copy <run-id>",
 		Short:   "Copy a run from one medium to another (e.g. disk -> tape)",
 		Long:    "Stream a run from one configured medium to another. The destination is selected with --to; the source defaults to the landing medium and is overridden with --from (e.g. un-vault tape -> disk). Copies by default (like `nb sync`/`nb prune`); pass --dry-run (-n) to preview.",
-		Example: "  nb copy --to tape run-2026-06-21.001\n  nb copy --to tape --dry-run run-2026-06-21.001\n  nb copy --from tape --to disk run-2026-06-21.001",
+		Example: "  nb copy --to tape run-2026-06-21.020000\n  nb copy --to tape --dry-run run-2026-06-21.020000\n  nb copy --from tape --to disk run-2026-06-21.020000",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.loadForWrite()

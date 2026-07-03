@@ -392,12 +392,12 @@ func (sh *recoverShell) extract(args []string) {
 		return
 	}
 	sh.noteDeletionOnce()
-	n, err := sh.eng.ExtractSelection(steps, sh.dest, logfStdout)
+	n, archives, err := sh.eng.ExtractSelection(steps, sh.dest, logfStdout)
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
 		return
 	}
-	fmt.Printf("recovered %d file(s) from %d archive(s) into %s\n", n, len(steps), sh.dest)
+	fmt.Printf("recovered %d file(s) from %d archive(s) into %s\n", n, archives, sh.dest)
 }
 
 func recoverHelp() {

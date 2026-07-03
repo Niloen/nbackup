@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -116,7 +117,12 @@ func overMarker(used, capacity int64) string {
 func mediumDetail(eng *engine.Engine, name string) error {
 	m, ok := eng.Medium(name)
 	if !ok {
-		return fmt.Errorf("unknown medium %q", name)
+		names := make([]string, 0)
+		for _, mi := range eng.Media() {
+			names = append(names, mi.Name)
+		}
+		sort.Strings(names)
+		return fmt.Errorf("unknown medium %q (configured: %s)", name, strings.Join(names, ", "))
 	}
 	fmt.Printf("Medium %s  (%s)\n", m.Name, m.Type)
 	fmt.Printf("  volume:  %s\n", volumeStr(m))

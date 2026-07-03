@@ -322,6 +322,17 @@ func (v *verifier) structuralCheck(id string, a record.Archive, open func() (io.
 	if terr != nil {
 		return drill.ClassPipeline, restorer.DecryptHint(a.Encrypt, terr).Error()
 	}
+	// A zero-change incremental records no member index by design (it writes just the
+	// payload and commit; recover reads the base full's index for it — see README). Its
+	// payload is still a valid tar carrying GNU tar's directory census (./, ./sub/), so
+	// there is nothing to compare members against — the pipeline decoding cleanly and
+	// `tar -t` completing above IS the whole structural proof. Comparing that census to
+	// the empty recorded index would falsely flag a healthy archive as corrupt. An
+	// archive writes an index only when it has members, so FileCount==0 is exactly the
+	// no-recorded-index case.
+	if a.FileCount == 0 {
+		return drill.ClassNone, ""
+	}
 	// The recorded member list (the catalog is member-free) is loaded via the archivefs.
 	recorded, err := v.store.Members(record.Ref{Run: id, DLE: a.DLE, Level: a.Level})
 	if err != nil {

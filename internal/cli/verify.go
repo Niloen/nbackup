@@ -24,7 +24,7 @@ func newVerifyCmd(a *app) *cobra.Command {
 			"members match the recorded index, proving the bytes are a valid restorable stream and " +
 			"exercising the key and compression end-to-end. It writes nothing either way. Pass run ids " +
 			"to verify just those; with no ids it verifies every run (which may mount every volume in the pool).",
-		Example: "  nb verify run-2026-06-21.001\n  nb verify --deep run-2026-06-21.001\n  nb verify",
+		Example: "  nb verify run-2026-06-21.020000\n  nb verify --deep run-2026-06-21.020000\n  nb verify",
 		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if all && len(args) > 0 {

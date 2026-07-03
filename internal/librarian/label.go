@@ -30,7 +30,7 @@ func (l *Librarian) Label(name string, relabel, force bool, now time.Time, logf 
 	// (A relabel is checked after the target's current label is read: restamping the
 	// tape that already carries the name is the one legitimate reuse.)
 	if !relabel {
-		if err := l.duplicateLabelErr(name, "", force); err != nil {
+		if err := l.duplicateLabelErr(name, "", relabel, force); err != nil {
 			return err
 		}
 	}
@@ -98,7 +98,7 @@ func (l *Librarian) Label(name string, relabel, force bool, now time.Time, logf 
 	// blank/foreign one under --relabel) must not collide with a volume the catalog
 	// already knows. Restamping the tape that carries the name (cur.Name == name, the
 	// in-place recycle) is the legitimate reuse and passes.
-	if err := l.duplicateLabelErr(name, wiped, force); err != nil {
+	if err := l.duplicateLabelErr(name, wiped, relabel, force); err != nil {
 		return err
 	}
 
@@ -133,10 +133,18 @@ func (l *Librarian) Label(name string, relabel, force bool, now time.Time, logf 
 // in-place relabel/recycle). Two cartridges carrying one name would make every
 // placement on it ambiguous. --force is the stale-catalog escape hatch (e.g. the
 // recorded tape was physically destroyed).
-func (l *Librarian) duplicateLabelErr(name, current string, force bool) error {
+func (l *Librarian) duplicateLabelErr(name, current string, relabel, force bool) error {
 	known, ok := l.cat.Volume(name)
 	if !ok || current == name || force {
 		return nil
+	}
+	if relabel {
+		// A relabel acts on whatever tape is loaded, and the operator asked to rename it
+		// to a name another cartridge already carries — self-referential advice to "relabel
+		// <name>" would just re-run this. To recycle the tape that already holds the name,
+		// load THAT tape first (then --relabel bumps its epoch in place).
+		return fmt.Errorf("a volume labeled %q already exists (pool %q, epoch %d); relabel recycles the loaded tape, so renaming it to %q would duplicate that — to recycle the existing %q, load it first: `nb load --label %s %s`, then `nb label --relabel %s %s`; or pick a different name (--force overrides if that volume no longer exists)",
+			name, known.Label.Pool, known.Label.Epoch, name, name, l.medium, name, l.medium, name)
 	}
 	return fmt.Errorf("a volume labeled %q already exists (pool %q, epoch %d); labeling another tape %q would create a duplicate — pick a different name, or recycle the existing tape with `nb label --relabel %s %s` (--force overrides if that volume no longer exists)",
 		name, known.Label.Pool, known.Label.Epoch, name, l.medium, name)

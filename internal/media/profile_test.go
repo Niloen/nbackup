@@ -42,18 +42,22 @@ func TestSizeProfileReclaimsPerArchive(t *testing.T) {
 	}
 }
 
-// TestVolumeProfile: the pool is volumes * volume size; zero volumes means an
-// unbounded pool (a hand-loaded drive) with the reel still the per-run ceiling;
-// an unsized reel is unbounded.
+// TestVolumeProfile: the pool is volumes * usable reel bytes (each reel's payload
+// net of framing overhead); zero volumes means an unbounded pool (a hand-loaded
+// drive) with the reel still the per-run ceiling; an unsized reel is unbounded.
 func TestVolumeProfile(t *testing.T) {
 	cases := []struct {
 		name                string
 		volumes, volumeSize int64
 		wantTotal, wantReel int64
 	}{
-		{"library multiplies out", 3, 100, 300, 100},
-		{"unbounded pool, finite reel", 0, 100, 0, 100},
+		// TotalBytes nets the per-reel framing overhead (label + one part header) from
+		// each reel's payload; VolumeSize reports the raw reel ceiling. reel = 1 MiB
+		// (1048576) → usable 1048576-65536 = 983040 per reel.
+		{"library multiplies out", 3, 1048576, 3 * 983040, 1048576},
+		{"unbounded pool, finite reel", 0, 1048576, 0, 1048576},
 		{"unsized reel is unbounded", 3, 0, 0, 0},
+		{"reel smaller than its framing holds nothing usable", 3, 100, 0, 100},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -184,3 +184,57 @@ func TestVerifyCopyOpenErrorIsPipeline(t *testing.T) {
 		t.Fatalf("open-failure class = %s, want pipeline", cls)
 	}
 }
+
+// TestVerifyDeepStructuralZeroChangeIncremental locks the fix for the false-integrity
+// failure a zero-change incremental produced: a DLE unchanged since its base writes a
+// payload + commit but no member index (file_count 0), yet GNU tar's incremental payload
+// still carries a directory census (./, ./sub/). The structural check must treat the
+// clean decode + `tar -t` as the whole proof and NOT compare that census to the empty
+// recorded index — else it falsely reports the healthy archive as corrupt.
+func TestVerifyDeepStructuralZeroChangeIncremental(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "a.txt"), "full content")
+	diskDir := t.TempDir()
+	cfg := &config.Config{
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": diskDir}}},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skip("GNU tar not available")
+	}
+	// Full, then a second run with the source untouched → a zero-change incremental.
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("full dump: %v", err)
+	}
+	zc, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("zero-change dump: %v", err)
+	}
+	// Confirm the second run really is a no-index zero-change incremental (file_count 0).
+	var sawZeroChange bool
+	for _, a := range zc.Archives {
+		if a.Level >= 1 && a.FileCount == 0 {
+			sawZeroChange = true
+		}
+	}
+	if !sawZeroChange {
+		t.Fatalf("expected a zero-change incremental (level>=1, file_count 0) in %s; got %+v", zc.ID, zc.Archives)
+	}
+	// Deep (checksum + structural) verify must pass for every run — the zero-change one
+	// included; before the fix it reported a false integrity failure on that archive.
+	rep, err := eng.Verify(nil, VerifyOptions{Checks: CheckChecksum | CheckStructural}, nil)
+	if err != nil {
+		t.Fatalf("deep verify: %v", err)
+	}
+	if rep.Failures != 0 {
+		t.Fatalf("deep verify failures = %d, want 0 (zero-change incremental must not false-fail): %+v", rep.Failures, rep.Runs)
+	}
+}

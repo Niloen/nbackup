@@ -569,11 +569,15 @@ func TestVolumeProfileShapeAware(t *testing.T) {
 		wantTotal int64 // retainable pool (TotalBytes)
 		wantReel  int64 // per-run reel ceiling (VolumeSize)
 	}{
-		{"library counts cartridges", media.Options{"dir": "/x", "slots": "3", "volume_size": "100"}, 300, 100},
-		{"manual station counts reels", media.Options{"dir": "/x", "manual": "true", "slots": "4", "volume_size": "100"}, 400, 100},
-		{"bare drive: unbounded pool, finite reel", media.Options{"device": "/dev/nst0", "volume_size": "100"}, 0, 100},
-		{"count defaults to one", media.Options{"dir": "/x", "volume_size": "100"}, 100, 100},
+		// TotalBytes nets the per-reel framing overhead (label + one part header) from
+		// each reel's payload; VolumeSize reports the raw reel ceiling. reel = 1 MiB
+		// (1048576) → usable 1048576-65536 = 983040 per reel.
+		{"library counts cartridges", media.Options{"dir": "/x", "slots": "3", "volume_size": "1048576"}, 3 * 983040, 1048576},
+		{"manual station counts reels", media.Options{"dir": "/x", "manual": "true", "slots": "4", "volume_size": "1048576"}, 4 * 983040, 1048576},
+		{"bare drive: unbounded pool, finite reel", media.Options{"device": "/dev/nst0", "volume_size": "1048576"}, 0, 1048576},
+		{"count defaults to one", media.Options{"dir": "/x", "volume_size": "1048576"}, 983040, 1048576},
 		{"unsized reel is unbounded", media.Options{"dir": "/x", "slots": "3"}, 0, 0},
+		{"reel smaller than its framing holds nothing usable", media.Options{"dir": "/x", "slots": "3", "volume_size": "100"}, 0, 100},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -224,11 +224,11 @@ func runRecoverBatch(eng *engine.Engine, ra recoverArgs, logf engine.Logf) error
 	if tree.HasIncrementals() {
 		fmt.Println(fileLevelDeletionNote)
 	}
-	n, err := eng.ExtractSelection(steps, ra.dest, logf)
+	n, archives, err := eng.ExtractSelection(steps, ra.dest, logf)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("recovered %d file(s) from %d archive(s) into %s\n", n, len(steps), ra.dest)
+	fmt.Printf("recovered %d file(s) from %d archive(s) into %s\n", n, archives, ra.dest)
 	return nil
 }
 

@@ -20,7 +20,7 @@ func newRunCmd(a *app) *cobra.Command {
 		Use:     "run [run-id]",
 		Short:   "List runs, or detail one",
 		Long:    "Inspect the run catalog. With no argument it lists runs; pass a run id to show that run's archives and copies. (Reclaim runs with `nb prune`.)",
-		Example: "  nb run\n  nb run run-2026-06-21.001",
+		Example: "  nb run\n  nb run run-2026-06-21.020000",
 		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {

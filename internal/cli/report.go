@@ -39,7 +39,7 @@ func newReportCmd(a *app) *cobra.Command {
 			"totals. Reads only — no engine, no lock — so it is cheap to run from cron. With --notify it sends " +
 			"the digest through the config's `notify.digest` backends (e.g. a nightly email); with --json it " +
 			"emits the raw run records.",
-		Example: "  nb report\n  nb report --last 30\n  nb report --dump\n  nb report --dump run-2026-06-21.001\n  nb dump && nb sync && nb drill --unattended; nb report --notify",
+		Example: "  nb report\n  nb report --last 30\n  nb report --dump\n  nb report --dump run-2026-06-21.020000\n  nb dump && nb sync && nb drill --unattended; nb report --notify",
 		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.loadOrDefaultCatalog()

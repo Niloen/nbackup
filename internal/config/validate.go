@@ -241,16 +241,18 @@ func (c *Config) validateNotify() error {
 // source defaulting to the landing medium), and a non-negative `last` window.
 func (c *Config) validateSync() error {
 	for i, r := range c.Sync {
+		// Rules are numbered from 1 in messages — operators count list entries from one.
+		n := i + 1
 		if r.To == "" {
-			return fmt.Errorf("sync rule %d: `to` is required", i)
+			return fmt.Errorf("sync rule %d: `to` is required", n)
 		}
 		if len(c.Media) > 0 {
 			if _, ok := c.Media[r.To]; !ok {
-				return fmt.Errorf("sync rule %d: target %q is not a defined medium", i, r.To)
+				return fmt.Errorf("sync rule %d: target %q is not a defined medium", n, r.To)
 			}
 			if r.From != "" {
 				if _, ok := c.Media[r.From]; !ok {
-					return fmt.Errorf("sync rule %d: source %q is not a defined medium", i, r.From)
+					return fmt.Errorf("sync rule %d: source %q is not a defined medium", n, r.From)
 				}
 			}
 		}
@@ -259,10 +261,10 @@ func (c *Config) validateSync() error {
 			from = c.Landing
 		}
 		if from == r.To {
-			return fmt.Errorf("sync rule %d: source and target are the same medium %q", i, r.To)
+			return fmt.Errorf("sync rule %d: source and target are the same medium %q", n, r.To)
 		}
 		if r.Last < 0 {
-			return fmt.Errorf("sync rule %d: `last` must not be negative", i)
+			return fmt.Errorf("sync rule %d: `last` must not be negative", n)
 		}
 	}
 	return nil

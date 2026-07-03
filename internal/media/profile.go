@@ -143,7 +143,24 @@ type volumeProfile struct {
 	volumeSize int64
 }
 
-func (p volumeProfile) TotalBytes() int64 { return p.volumes * p.volumeSize }
+// volumeFramingOverhead is the bytes each reel spends on framing rather than payload,
+// so the planner's usable capacity is not overstated: a 32 KB identity label (file 0)
+// plus at least one 32 KB inline part header for the archive that lands on the reel. It
+// is negligible at real cartridge sizes (64 KB of a 6 TB LTO) but decisive for a tiny
+// file-backed sim, where ignoring it let `nb plan` report "fits, 0% used" for a run that
+// then filled every reel and failed mid-dump.
+const volumeFramingOverhead = 2 * record.HeaderBlock
+
+// usableVolumeBytes is a reel's payload capacity net of framing (never negative — a reel
+// smaller than its own framing holds nothing usable).
+func (p volumeProfile) usableVolumeBytes() int64 {
+	if p.volumeSize <= volumeFramingOverhead {
+		return 0
+	}
+	return p.volumeSize - volumeFramingOverhead
+}
+
+func (p volumeProfile) TotalBytes() int64 { return p.volumes * p.usableVolumeBytes() }
 
 func (p volumeProfile) VolumeSize() int64 { return p.volumeSize }
 

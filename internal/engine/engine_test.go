@@ -2423,8 +2423,8 @@ func TestTapeRecycleRefusedWhenAllKept(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a run with a full pool of protected tapes to fail, not overwrite")
 	}
-	if !strings.Contains(err.Error(), "within retention") {
-		t.Fatalf("error should explain every tape is still within retention; got: %v", err)
+	if !strings.Contains(err.Error(), "protected run") || !strings.Contains(err.Error(), "minimum age") {
+		t.Fatalf("error should explain every tape still holds a protected run (within minimum age); got: %v", err)
 	}
 	if _, rerr := eng.cat.ReadRun("run-2026-06-03.000000"); rerr == nil {
 		t.Fatal("the refused run must not be recorded")

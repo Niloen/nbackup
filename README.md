@@ -115,7 +115,8 @@ Restoring a full + its incrementals replays one archive per level in order,
 exactly as `nb recover` does — and `nb drill --tier stock` rehearses that
 bare-tools path for you and prints the commands. (Encrypted archives carry a
 `.gpg` suffix on the payload — `…-L0.tar.zst.gpg` — and just add a `gpg -d` at the
-front of the pipe; spanned tape parts are listed by
+front of the pipe for a public-key dump, or `gpg --passphrase-file <file> -d` for a
+symmetric one; spanned tape parts are listed by
 `nb run <id>`.) The full by-hand procedure is in
 [docs/restore-by-hand.md](docs/restore-by-hand.md).
 
@@ -329,11 +330,11 @@ Run run-2026-06-21.020000  [running]
   workers:  2 configured, 2 active
   dles:     1 done, 2 active, 1 pending
 
-DLE            LEVEL  STATE    DUMP               FLUSH   DUMPED     VOLUME
-app01:/etc     L1     done     [##########] 100%  direct  120.00 kB  41.00 kB
-app01:/home    L0     dumping  [####......]  42%   -       8.40 GB    2.90 GB
-db01:/pg       L0     dumping  [##........]  18%   -       3.60 GB    1.20 GB
-app01:/var     L1     pending  -                  -       0 B        0 B
+DLE            LEVEL  STATE    DUMP               FLUSH   EST        DUMPED     LANDED
+app01:/etc     L1     done     [##########] 100%  direct  120.00 kB  120.00 kB  41.00 kB
+app01:/home    L0     dumping  [####......]  42%   -       20.00 GB   8.40 GB    2.90 GB
+db01:/pg       L0     dumping  [##........]  18%   -       20.00 GB   3.60 GB    1.20 GB
+app01:/var     L1     pending  -                  -       80.00 kB   0 B        0 B
 
 Dump:     12.12 GB of ~62.12 GB  (20%)   48.10 MB/s
 Volume:   4.11 GB written
@@ -341,8 +342,9 @@ ETA:      17m18s
 ```
 
 The DUMP bar meters each DLE's source→volume progress (uncompressed bytes against the
-planner estimate); DUMPED is the uncompressed source read so far and VOLUME what has
-landed authoritatively. FLUSH is `direct` for a one-pass run that streams
+planner estimate); EST is that planner estimate, DUMPED is the uncompressed source read
+so far, and LANDED is what has landed authoritatively (a removable-medium run adds a
+VOLUME column naming the volume(s) each DLE reached). FLUSH is `direct` for a one-pass run that streams
 source→compressor→volume (a single `dumping` state per DLE, no separate dumper/taper
 queues); with a holding disk it becomes a second bar metering the drain from the
 holding disk to the landing. The report covers the whole cycle: a run
@@ -789,7 +791,7 @@ media** (`nb copy`, e.g. disk → tape or disk → cloud) with the copy **record
 second placement** so a restore reads from any available copy (and `nb verify` audits
 *every* copy, reporting that an intact copy remains when one is damaged), balanced
 **multilevel (L0–L9)** planning with a GNU tar snapshot library, immutable
-commit-footed archives with **sequence-suffixed** same-day runs, **deletion-aware** incremental
+commit-footed archives with **time-suffixed** same-day runs, **deletion-aware** incremental
 restore, checksum verification, point-in-time restore, per-medium capacity reporting,
 cycle-safe pruning, **unattended reporting and alerting** (`nb report`, pluggable
 email/webhook notifications), and **remote sources over SSH** (any non-`localhost`

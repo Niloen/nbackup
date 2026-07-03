@@ -596,7 +596,7 @@ func (e *Engine) OpenRecover(dle, asOf string) (*recovery.Tree, error) {
 }
 
 // ExtractSelection extracts a selected set of files into destDir; see restorer.
-func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, logf Logf) (int, error) {
+func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, logf Logf) (int, int, error) {
 	return e.rst.ExtractSelection(steps, destDir, logf)
 }
 

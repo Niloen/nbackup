@@ -1,6 +1,7 @@
 package restorer
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -25,11 +26,15 @@ func (r *Restorer) OpenRecover(dle, asOf string) (*recovery.Tree, error) {
 // Selected-file recovery extracts in plain mode (never deletes) and always
 // decodes server-side — a client-only key is infeasible here, so it fails fast
 // (browse stays keyless; only extraction needs the key).
-func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string, log Logf) (int, error) {
+// ExtractSelection extracts the selected files and returns how many files were
+// recovered and, second, from how many distinct archives — the archive count reflects
+// only the archives actually read (a chain step holding none of the selection is
+// skipped, so it is not counted), matching the "extracting …" lines it logs.
+func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string, log Logf) (int, int, error) {
 	for _, st := range steps {
 		if ec, ok := r.deps.EncryptionFor(st.DLE); ok {
 			if hardErr, _ := clientSideKeyRestore(ec, st.DLE); hardErr != nil {
-				return 0, hardErr
+				return 0, 0, hardErr
 			}
 		}
 	}
@@ -44,7 +49,14 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 	}
 
 	d := dest{exec: r.deps.Exec(""), dir: destDir}
+	// Create the destination up front, before any decode work, so an unwritable --dest
+	// fails cleanly as a setup error rather than after logging "extracting …" and
+	// appearing to have started (the whole-DLE Extract path validates it the same way).
+	if err := d.exec.MkdirAll(d.dir); err != nil {
+		return 0, 0, errors.Join(errDestSetup, err)
+	}
 	files := 0
+	archives := 0
 	missing, err := r.deps.Store.ReadArchives(refs, "", func(ref record.Ref, open func() (io.ReadCloser, error)) error {
 		st := stepByRef[ref]
 		// An archive in the chain that holds none of the selected files contributes
@@ -52,6 +64,7 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 		if archiver.CountFiles(st.Members) == 0 {
 			return nil
 		}
+		archives++
 		log.Log("extracting %d file(s) from %s %s L%d", archiver.CountFiles(st.Members), st.RunID, r.deps.DisplayDLE(st.DLE), st.Level)
 		rc, serr := open()
 		if serr != nil {
@@ -65,10 +78,10 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 		return nil
 	})
 	if err != nil {
-		return files, fmt.Errorf("recover: %w", err)
+		return files, archives, fmt.Errorf("recover: %w", err)
 	}
 	if len(missing) > 0 {
-		return files, fmt.Errorf("recover: %w — one or more selected archives have no available copy", archivefs.ErrMissingCopy)
+		return files, archives, fmt.Errorf("recover: %w — one or more selected archives have no available copy", archivefs.ErrMissingCopy)
 	}
-	return files, nil
+	return files, archives, nil
 }

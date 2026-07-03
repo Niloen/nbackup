@@ -395,19 +395,23 @@ func (l *Librarian) readLoadedLabel() (record.Label, bool, error) {
 // written this run (their fresh content is not yet in the catalog).
 func (l *Librarian) noReusableErr(tried map[string]bool, now time.Time, lastErr error) error {
 	protected := false
+	reason := ""
 	for _, v := range l.cat.Volumes() {
 		if v.Label.Pool != l.medium || tried[v.Label.Name] {
 			continue
 		}
-		if _, _, kept := l.protectedRun(v.Label.Name, l.minAge, now); kept {
+		if _, r, kept := l.protectedRun(v.Label.Name, l.minAge, now); kept {
 			protected = true
+			reason = r
 			break
 		}
 	}
 	if !protected {
 		return fmt.Errorf("medium %q has no further writable bay (load or relabel more volumes): %w", l.medium, lastErr)
 	}
-	msg := fmt.Sprintf("medium %q: no writable volume — every volume in the pool still holds runs within retention", l.medium)
+	// Name the actual protection: with minimum_age:0 the blocker is a DLE's live recovery
+	// chain, not age — "within retention" alone reads as minimum_age and misleads.
+	msg := fmt.Sprintf("medium %q: no writable volume — every volume in the pool still holds a protected run (%s)", l.medium, reason)
 	if l.minAge > 0 {
 		var soonest time.Time
 		for _, s := range l.cat.RunsOn(l.medium) {
