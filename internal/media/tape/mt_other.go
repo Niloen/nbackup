@@ -21,6 +21,7 @@ func openMT(dev string, block int) (*mtDevice, error) {
 
 func (m *mtDevice) count() (int, error)                     { return 0, errUnsupported }
 func (m *mtDevice) bytesUsed() int64                        { return 0 }
+func (m *mtDevice) foreign() bool                           { return false }
 func (m *mtDevice) reset() error                            { return errUnsupported }
 func (m *mtDevice) appendWriter() (deviceWriter, error)     { return nil, errUnsupported }
 func (m *mtDevice) readFile(pos int) (io.ReadCloser, error) { return nil, errUnsupported }

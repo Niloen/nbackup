@@ -2,7 +2,7 @@
 // an ordered sequence of self-describing files, each a record.Header followed by
 // a payload, addressed by position (file number). This one shape maps to a local
 // directory, an object store, or a tape (file marks + fast-forward). The medium
-// owns its physical layout — callers never construct filenames — so slots can be
+// owns its physical layout — callers never construct filenames — so runs can be
 // streamed between volumes (disk <-> tape) uniformly. Implementations register
 // themselves, so selecting a medium is a registry lookup. The on-medium artifact
 // format (headers, labels, seals) lives in package record; this package is the
@@ -20,8 +20,9 @@ import (
 )
 
 // Labeled is implemented by media that identify themselves on the medium (tape).
-// The engine type-asserts this to decide whether to run the label-verify protocol
-// before writing or reading; media that don't implement it are trusted by address.
+// The librarian (and the catalog's volume scan) type-assert this to decide whether
+// to run the label-verify protocol before writing or reading; the engine never sees
+// a Volume's shape. Media that don't implement it are trusted by address.
 type Labeled interface {
 	// ReadLabel returns the volume's label. ok is false only when the volume is
 	// blank (no files). A non-empty volume whose file 0 is not a valid NBackup
@@ -226,9 +227,10 @@ type Volume interface {
 	// artifact that is absent, truncated, or whose header will not parse is treated
 	// as uncommitted and skipped, so the rebuild always completes. What "committed"
 	// means at the file layer is medium-specific (fslike: a payload paired with its
-	// later-written header sidecar; tape: a fully-framed, decodable record); slot-
-	// level commit is the seal above this. Integrity of files the seal *does* commit
-	// (bit-rot) is verify's job, not enumeration's — Files never asserts it.
+	// later-written header sidecar; tape: a fully-framed, decodable record);
+	// archive-level commit is the commit footer above this. Integrity of files the
+	// footer *does* commit (bit-rot) is verify's job, not enumeration's — Files
+	// never asserts it.
 	Files() ([]record.FileInfo, error)
 	// RemoveFile reclaims the file at pos — the positional peer of ReadFile. It is how
 	// every reclaimer (per-archive pruning, orphan tidy-up, the drill WORM probe)

@@ -62,14 +62,14 @@ func drive0(t *testing.T, ch media.Changer) media.DriveStatus {
 func TestLabelRefusesDuplicateName(t *testing.T) {
 	l, _, ch := newTapeLib(t, 4, false)
 	now := time.Unix(1, 0).UTC()
-	if err := l.Label("T-A", false, false, 0, now, nil); err != nil {
+	if err := l.Label("T-A", false, false, now, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Pre-load a different, blank slot — the old early-return target.
 	if err := ch.Load(2, 0); err != nil {
 		t.Fatal(err)
 	}
-	err := l.Label("T-A", false, false, 0, now, nil)
+	err := l.Label("T-A", false, false, now, nil)
 	if err == nil {
 		t.Fatal("labeling a second tape T-A should fail")
 	}
@@ -81,7 +81,7 @@ func TestLabelRefusesDuplicateName(t *testing.T) {
 		t.Fatalf("loaded blank must stay blank after a refused label, got %q labeled=%v err=%v", name, labeled, lerr)
 	}
 	// --force is the stale-catalog escape hatch.
-	if err := l.Label("T-A", false, true, 0, now, nil); err != nil {
+	if err := l.Label("T-A", false, true, now, nil); err != nil {
 		t.Fatalf("--force should override the duplicate guard: %v", err)
 	}
 }
@@ -92,22 +92,61 @@ func TestLabelRefusesDuplicateName(t *testing.T) {
 func TestRelabelRefusesDuplicateName(t *testing.T) {
 	l, _, _ := newTapeLib(t, 3, false)
 	now := time.Unix(1, 0).UTC()
-	if err := l.Label("T-A", false, false, 0, now, nil); err != nil {
+	if err := l.Label("T-A", false, false, now, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := l.Label("T-B", false, false, 0, now, nil); err != nil {
+	if err := l.Label("T-B", false, false, now, nil); err != nil {
 		t.Fatal(err) // T-B's slot is left loaded
 	}
-	err := l.Label("T-A", true, false, 0, now, nil)
+	err := l.Label("T-A", true, false, now, nil)
 	if err == nil || !strings.Contains(err.Error(), `"T-A" already exists`) {
 		t.Fatalf("relabeling T-B as T-A should refuse the duplicate, got: %v", err)
 	}
 	// In-place recycle of the loaded tape under its own name is the legitimate reuse.
-	if err := l.Label("T-B", true, false, 0, now, nil); err != nil {
+	if err := l.Label("T-B", true, false, now, nil); err != nil {
 		t.Fatalf("in-place relabel of T-B should succeed: %v", err)
 	}
 	if lbl, ok, _ := l.vol.(media.Labeled).ReadLabel(); !ok || lbl.Name != "T-B" || lbl.Epoch != 2 {
 		t.Fatalf("in-place relabel should bump the epoch, got %+v ok=%v", lbl, ok)
+	}
+}
+
+// TestRelabelProtectionUsesLibrarianMinAge pins that Label judges relabel
+// protection with the librarian's own retention floor (the cfg.MinAgeFor value
+// the depot wires in, defaulted to one cycle when minimum_age is unset). There is
+// no caller-supplied floor to shadow it, so `nb label --relabel` and write-path
+// recycling apply the same rule.
+func TestRelabelProtectionUsesLibrarianMinAge(t *testing.T) {
+	l, cat, ch := newTapeLib(t, 3, false)
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	stampSlot(t, l, ch, cat, 2, "T-B", now)
+	stampSlot(t, l, ch, cat, 1, "T-A", now) // stamped last: T-A sits in the drive
+
+	// T-A holds a 2-day-old full; T-B holds a newer full of the same DLE, so only
+	// the age floor (not the last-recovery-path rule) protects T-A's run.
+	addFull := func(label string, at time.Time) {
+		arch := record.Archive{Run: record.IDFromTime(at), DLE: "h:/data", Level: 0, Compressed: 100, CreatedAt: at}
+		pos := record.ArchivePos{DLE: "h:/data", Level: 0,
+			Parts:  []record.FilePos{{Label: label, Pos: 1}},
+			Commit: record.FilePos{Label: label, Pos: 2}}
+		if err := cat.AddArchive(arch, "pool", pos); err != nil {
+			t.Fatal(err)
+		}
+	}
+	addFull("T-A", now.Add(-48*time.Hour))
+	addFull("T-B", now.Add(-24*time.Hour))
+
+	// With the librarian's floor at 7 days (what a defaulted one-cycle MinAgeFor
+	// yields), the 2-day-old run on T-A is still protected: relabel must refuse.
+	l.minAge = 7 * 24 * time.Hour
+	err := l.Label("T-A", true, false, now, nil)
+	if err == nil || !strings.Contains(err.Error(), "protected run") {
+		t.Fatalf("relabel within the librarian's min-age floor should refuse with a protected-run error, got: %v", err)
+	}
+	// With no floor the superseded full is reclaimable and the in-place recycle passes.
+	l.minAge = 0
+	if err := l.Label("T-A", true, false, now, nil); err != nil {
+		t.Fatalf("relabel with no age floor should succeed: %v", err)
 	}
 }
 
@@ -120,7 +159,7 @@ func TestFailedLabelRestoresLoadedSlot(t *testing.T) {
 	l, _, ch := newTapeLib(t, 3, false)
 	now := time.Unix(1, 0).UTC()
 	for _, name := range []string{"OLD-1", "OLD-2", "OLD-3"} {
-		if err := l.Label(name, false, false, 0, now, nil); err != nil {
+		if err := l.Label(name, false, false, now, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -129,7 +168,7 @@ func TestFailedLabelRestoresLoadedSlot(t *testing.T) {
 	}
 	orig := drive0(t, ch).FromSlot
 
-	err := l.Label("NEW-X", false, false, 0, now, nil)
+	err := l.Label("NEW-X", false, false, now, nil)
 	if err == nil || !strings.Contains(err.Error(), "no blank slot") {
 		t.Fatalf("labeling with no blank slot should fail, got: %v", err)
 	}
@@ -144,7 +183,7 @@ func TestFailedLabelRestoresLoadedSlot(t *testing.T) {
 	if err := ch.Unload(0); err != nil {
 		t.Fatal(err)
 	}
-	err = l.Label("NEW-Y", false, false, 0, now, nil)
+	err = l.Label("NEW-Y", false, false, now, nil)
 	if err == nil {
 		t.Fatal("labeling with no blank slot should fail")
 	}
@@ -212,7 +251,7 @@ func TestViewReportsSlotLabels(t *testing.T) {
 	if err := ch.Load(1, 0); err != nil { // a loaded blank is the label target
 		t.Fatal(err)
 	}
-	if err := l.Label("T-A", false, false, 0, now, nil); err != nil {
+	if err := l.Label("T-A", false, false, now, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := ch.Unload(0); err != nil { // return the cartridge so slot 1 is occupied

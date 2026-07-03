@@ -94,6 +94,8 @@ func open(url, prefix string) (media.Volume, error) {
 // blobStore is a fslike.Store over a gocloud blob bucket. Keys are object keys
 // under runs/.
 type blobStore struct {
+	// ctx in a struct is accepted debt, forced by media.Volume's ctx-less read path
+	// (revisit if Volume ever grows a ctx).
 	ctx    context.Context
 	bucket *blob.Bucket
 }
@@ -106,12 +108,6 @@ func (s blobStore) Key(run, name string) string { return path.Join(runsPrefix, r
 func (s blobStore) Writer(ctx context.Context, key string) (io.WriteCloser, error) {
 	return s.bucket.NewWriter(ctx, key, nil)
 }
-
-func (s blobStore) WriteAll(ctx context.Context, key string, b []byte) error {
-	return s.bucket.WriteAll(ctx, key, b, nil)
-}
-
-func (s blobStore) ReadAll(key string) ([]byte, error) { return s.bucket.ReadAll(s.ctx, key) }
 
 func (s blobStore) Open(key string) (io.ReadCloser, error) {
 	return s.bucket.NewReader(s.ctx, key, nil)

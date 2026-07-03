@@ -177,3 +177,13 @@ func FormatElapsed(d time.Duration) string {
 		return fmt.Sprintf("%ds", s)
 	}
 }
+
+// FormatStamp renders a timestamp in the table/summary form used across CLI and
+// report output: "2006-01-02 15:04". It formats t as given — callers that want
+// local wall-clock time convert with t.Local() first. Beside FormatElapsed (spans)
+// and FormatDaysHours (ages), this is the point-in-time member of the family.
+func FormatStamp(t time.Time) string { return t.Format("2006-01-02 15:04") }
+
+// FormatStampSec is FormatStamp with seconds ("2006-01-02 15:04:05"), for the
+// contexts where minute resolution is too coarse (live progress, per-run digests).
+func FormatStampSec(t time.Time) string { return t.Format("2006-01-02 15:04:05") }

@@ -9,8 +9,8 @@ import (
 )
 
 // scan.go is the catalog's importer: it reads the media (the source of truth) and
-// rebuilds the store from it. It speaks the media's vocabulary — bays, mounts,
-// archive parts, seals, labels — and ends by handing finished placements back to
+// rebuilds the store from it. It speaks the media's vocabulary — slots, mounts,
+// archive parts, commit footers, labels — and ends by handing finished placements back to
 // the store through absorb(); it never reaches into the store's fields. The store
 // (catalog.go) drives a rebuild via EnsureFresh / Rebuild below.
 
@@ -58,8 +58,8 @@ func (c *Catalog) Rebuild(volumes map[string]media.Volume) (int, error) {
 // absorb merges one medium's scanned placements and volume labels into the store, without
 // persisting (the caller persists once). It is the seam between the importer and the store:
 // each scanned archive enters through the in-memory addArchive — the same single write path a
-// dump uses — so a run seen on several media gathers several placements on one entry, and the
-// scanned run's sealed identity creates the entry sealed. Each label upserts the volume registry.
+// dump uses — so a run seen on several media gathers several placements on one entry, its
+// content taken from the archives' commit footers. Each label upserts the volume registry.
 func (c *Catalog) absorb(idx mediumIndex) {
 	for _, sp := range idx.placements {
 		for _, arch := range sp.run.Archives {
@@ -74,17 +74,17 @@ func (c *Catalog) absorb(idx mediumIndex) {
 }
 
 // findArchivePos returns the position of (dle, level) among a placement's archives.
-func findArchivePos(aps []ArchivePos, dle string, level int) (ArchivePos, bool) {
+func findArchivePos(aps []record.ArchivePos, dle string, level int) (record.ArchivePos, bool) {
 	for _, ap := range aps {
 		if ap.DLE == dle && ap.Level == level {
 			return ap, true
 		}
 	}
-	return ArchivePos{}, false
+	return record.ArchivePos{}, false
 }
 
-// mediumIndex is the assembled result of scanning one medium: each sealed run
-// with its placement on that medium, plus the labels of the volumes seen.
+// mediumIndex is the assembled result of scanning one medium: each run assembled from its
+// committed archives, with its placement on that medium, plus the labels of the volumes seen.
 type mediumIndex struct {
 	placements []runPlacement
 	labels     []record.Label
@@ -97,15 +97,15 @@ type runPlacement struct {
 	p   Placement
 }
 
-// scanMedium reads every readable volume of one medium and assembles its sealed
-// runs into placements. The shape walk — every non-blank bay of a robotic library,
+// scanMedium reads every readable volume of one medium and assembles its committed
+// archives into placements. The shape walk — every non-blank slot of a robotic library,
 // or just the loaded reel of a single-drive station — lives in media.WalkReadable,
 // so the catalog never type-asserts a Volume's shape itself.
 func scanMedium(medium string, vol media.Volume) (mediumIndex, error) {
 	acc := newScanMaps()
 	var labels []record.Label
 	err := media.WalkReadable(vol, func(v media.Volume) error {
-		res, err := scanVolume(medium, v)
+		res, err := scanVolume(v)
 		if err != nil {
 			return err
 		}
@@ -160,7 +160,7 @@ func assemble(medium string, acc *scanMaps) []runPlacement {
 		if n < 1 {
 			n = 1 // a single whole archive records Parts as 0 or 1
 		}
-		ap := ArchivePos{DLE: key.dle, Level: key.level, Commit: sc.loc}
+		ap := record.ArchivePos{DLE: key.dle, Level: key.level, Commit: sc.loc}
 		for part := 0; part < n; part++ {
 			if loc, ok := acc.parts[partKey{run: key.run, dle: key.dle, level: key.level, part: part}]; ok {
 				ap.Parts = append(ap.Parts, loc)
@@ -232,7 +232,7 @@ func OrphanFiles(vol media.Volume) ([]record.FileInfo, error) {
 // ScanRuns reads a volume's committed runs without touching the cache — used to check a
 // volume's current contents (e.g. whether a tape is still active before relabel).
 func ScanRuns(vol media.Volume) ([]*Run, error) {
-	res, err := scanVolume("", vol)
+	res, err := scanVolume(vol)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +262,7 @@ type archiveKey struct {
 // members) and where the footer landed.
 type scannedCommit struct {
 	arch *record.Archive
-	loc  FilePos
+	loc  record.FilePos
 }
 
 // scanMaps holds the file locations a scan collects, keyed for assembly: each archive part's
@@ -271,16 +271,16 @@ type scannedCommit struct {
 // them, since an archive's parts (and its commit/index) may straddle several of the medium's
 // volumes.
 type scanMaps struct {
-	parts   map[partKey]FilePos
+	parts   map[partKey]record.FilePos
 	commits map[archiveKey]scannedCommit
-	indexes map[archiveKey]FilePos
+	indexes map[archiveKey]record.FilePos
 }
 
 func newScanMaps() *scanMaps {
 	return &scanMaps{
-		parts:   map[partKey]FilePos{},
+		parts:   map[partKey]record.FilePos{},
 		commits: map[archiveKey]scannedCommit{},
-		indexes: map[archiveKey]FilePos{},
+		indexes: map[archiveKey]record.FilePos{},
 	}
 }
 
@@ -309,7 +309,7 @@ type scanResult struct {
 // plus the volume's label. It does not assemble placements — that happens per medium, after
 // every volume is scanned, because an archive's parts (and its commit/index) may sit on
 // different volumes.
-func scanVolume(medium string, vol media.Volume) (scanResult, error) {
+func scanVolume(vol media.Volume) (scanResult, error) {
 	files, err := vol.Files()
 	if err != nil {
 		return scanResult{}, err
@@ -329,7 +329,7 @@ func scanVolume(medium string, vol media.Volume) (scanResult, error) {
 
 	res := scanResult{scanMaps: *newScanMaps(), label: label}
 	for _, f := range files {
-		loc := FilePos{Label: labelName, Epoch: epoch, Pos: f.Pos}
+		loc := record.FilePos{Label: labelName, Epoch: epoch, Pos: f.Pos}
 		switch f.Header.Kind {
 		case record.KindArchive:
 			res.parts[partKey{run: f.Header.Run, dle: f.Header.DLE, level: f.Header.Level, part: f.Header.Part}] = loc

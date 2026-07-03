@@ -32,7 +32,7 @@ func Render(w io.Writer, runs []Run, now time.Time) {
 	}
 	first, last := runs[0].StartedAt, runs[len(runs)-1].StartedAt
 	fmt.Fprintf(w, "NBackup report — %d run(s) from %s to %s\n",
-		len(runs), first.Local().Format("2006-01-02 15:04"), last.Local().Format("2006-01-02 15:04"))
+		len(runs), sizeutil.FormatStamp(first.Local()), sizeutil.FormatStamp(last.Local()))
 	if failures > 0 {
 		fmt.Fprintf(w, "%d run(s) FAILED, %s moved\n\n", failures, sizeutil.FormatBytes(bytesMoved))
 	} else {
@@ -50,7 +50,7 @@ func Render(w io.Writer, runs []Run, now time.Time) {
 			outcome = "FAILED"
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
-			r.StartedAt.Local().Format("2006-01-02 15:04"), r.Command, outcome, detailCell(r))
+			sizeutil.FormatStamp(r.StartedAt.Local()), r.Command, outcome, detailCell(r))
 	}
 	tw.Flush()
 
@@ -66,7 +66,7 @@ func Render(w io.Writer, runs []Run, now time.Time) {
 		for i := len(failed) - 1; i >= 0; i-- {
 			r := failed[i]
 			fmt.Fprintf(w, "  %s %s [%s]: %s\n",
-				r.StartedAt.Local().Format("2006-01-02 15:04"), r.Command, r.ExitClass, r.Error)
+				sizeutil.FormatStamp(r.StartedAt.Local()), r.Command, r.ExitClass, r.Error)
 		}
 	}
 	// The recovery-health picture is rendered separately by the caller from the live
@@ -81,7 +81,7 @@ func RenderRun(w io.Writer, r Run) {
 	if r.Failed() {
 		outcome = "FAILED"
 	}
-	fmt.Fprintf(w, "%s %s — %s\n", r.Command, outcome, r.StartedAt.Local().Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(w, "%s %s — %s\n", r.Command, outcome, sizeutil.FormatStampSec(r.StartedAt.Local()))
 	fmt.Fprintf(w, "  elapsed: %s\n", sizeutil.FormatElapsed(r.EndedAt.Sub(r.StartedAt)))
 	if d := detailCell(r); d != "-" {
 		fmt.Fprintf(w, "  detail:  %s\n", d)
@@ -89,7 +89,7 @@ func RenderRun(w io.Writer, r Run) {
 	if r.Failed() {
 		fmt.Fprintf(w, "  error [%s]: %s\n", r.ExitClass, r.Error)
 	}
-	renderRecovery(w, &r)
+	renderRecovery(w, r)
 	// A dump notification carries the full per-DLE report,
 	// so an operator sees what was backed up and how it compressed — not just totals.
 	if r.Command == CommandDump && len(r.DumpStats) > 0 {
@@ -107,7 +107,7 @@ func RenderRun(w io.Writer, r Run) {
 func RenderDump(w io.Writer, r Run) {
 	fmt.Fprintf(w, "DUMP REPORT  %s", r.RunID)
 	if !r.StartedAt.IsZero() {
-		fmt.Fprintf(w, "  (run %s)", r.StartedAt.Local().Format("2006-01-02 15:04"))
+		fmt.Fprintf(w, "  (run %s)", sizeutil.FormatStamp(r.StartedAt.Local()))
 	}
 	fmt.Fprintln(w)
 	if r.Failed() {
@@ -311,11 +311,8 @@ func detailCell(r Run) string {
 
 // renderRecovery prints the recovery-health note for a drill run: DLEs degrading
 // (passed before, failing now), never drilled, or overdue — the "trending bad"
-// answer. It prints nothing when r is nil or carries no drill signal.
-func renderRecovery(w io.Writer, r *Run) {
-	if r == nil {
-		return
-	}
+// answer. It prints nothing when r carries no drill signal.
+func renderRecovery(w io.Writer, r Run) {
 	var degrading, failing []string
 	for _, h := range r.DrillHealth {
 		if !h.OK && h.Drilled {

@@ -229,6 +229,10 @@ func (e *Engine) Media() []MediumInfo { return e.acct.Media() }
 // is unknown.
 func (e *Engine) Medium(name string) (MediumInfo, bool) { return e.acct.Medium(name) }
 
+// DLESummaries returns the per-DLE catalog rollup behind `nb dle` — a thin facade
+// over catalog.DLESummaries, which owns the computation.
+func (e *Engine) DLESummaries() []catalog.DLESummary { return e.cat.DLESummaries() }
+
 // MediumMinAge returns a medium's effective retention floor — its configured
 // minimum_age, or the dump cycle when unset — the same value pruning enforces
 // before retiring a run. An unknown name yields the default floor.
@@ -270,47 +274,42 @@ type writeTarget struct {
 	writer  *archiveio.Writer
 }
 
-// prepareWriter opens a medium for writing (taking the window's claim), enforces the label
-// protocol on its loaded volume, and opens an fs Session authoring the run onto it. The
-// caller owns the claim: writeTarget.wm.Close() releases it. On error the claim is
-// released here.
-func (e *Engine) prepareWriter(medium string, spec archiveio.RunSpec, now time.Time, logf Logf) (*writeTarget, error) {
-	wm, def, err := e.dep.OpenForWrite(medium)
-	if err != nil {
-		return nil, err
-	}
-	wt, err := e.prepareWriterOn(wm, def, spec, now, logf)
-	if err != nil {
-		_ = wm.Close()
-		return nil, err
-	}
-	return wt, nil
-}
-
-// prepareWriterOn authors over an already-opened write face — the shared core behind
-// prepareWriter and Flush (which keeps one open handle per landing across the crashed
-// runs it drains, building a fresh Session per run over it). It is the one place the
-// PrepareWrite -> Allocator -> OpenRun contract lives, shared by a dump (Run) and a
-// copy/sync (CopyRun). The writer is bound to the medium's allocator and the Session,
-// so each committed archive reports straight to the catalog; the spool later routes
-// both seams onto its orchestrator.
+// prepareWriterOn authors over an already-opened write face. It has two callers: the
+// conductor's serial landing seam (landingSeams in conduct.go, when the medium has no
+// parallel drives) and Flush (which keeps one open handle per landing across the
+// crashed runs it drains, building a fresh Session per run over it). It is the one
+// place the PrepareWrite -> Allocator -> OpenRun contract lives. The writer is bound
+// to the medium's allocator and the Session, so each committed archive reports
+// straight to the catalog; the spool later routes both seams onto its orchestrator.
 func (e *Engine) prepareWriterOn(wm depot.WriteMedium, def config.Media, spec archiveio.RunSpec, now time.Time, logf Logf) (*writeTarget, error) {
 	medium := wm.Name()
-	partSize, err := e.dep.PartSizeFor(medium)
+	partSize, exp, err := e.writePrelude(medium, now, logf)
 	if err != nil {
 		return nil, err
 	}
 	appendable := def.IsAppendable()
-	exp := e.acct.ExpectedVolumeFor(medium, now)
-	announceExpectation(medium, exp, logf)
 	volName, epoch, err := wm.PrepareWrite(appendable, exp.Label, now, librarian.Logf(logf))
 	if err != nil {
 		return nil, err
 	}
 	alloc := wm.Allocator(volName, epoch, appendable, partSize, now, librarian.Logf(logf))
-	session := e.fs.OpenRun(e.cat, wm, spec.ID)
+	session := e.fs.OpenRun(e.cat, wm)
 	writer := archiveio.NewWriter(alloc, session, spec, e.dep.Limiter(medium), func() time.Time { return now })
 	return &writeTarget{wm: wm, alloc: alloc, session: session, writer: writer}, nil
+}
+
+// writePrelude resolves the shared prelude of every write path onto a medium: its
+// per-part chunk bound and the volume the accountant expects the write to use,
+// announced to the operator (see announceExpectation). Shared by prepareWriterOn and
+// the conductor's parallel landing seam (landingSeams in conduct.go).
+func (e *Engine) writePrelude(medium string, now time.Time, logf Logf) (partSize int64, exp VolumeExpectation, err error) {
+	partSize, err = e.dep.PartSizeFor(medium)
+	if err != nil {
+		return 0, VolumeExpectation{}, err
+	}
+	exp = e.acct.ExpectedVolumeFor(medium, now)
+	announceExpectation(medium, exp, logf)
+	return partSize, exp, nil
 }
 
 // announceExpectation logs which labeled volume a write will use before it starts —
@@ -322,7 +321,7 @@ func announceExpectation(medium string, exp VolumeExpectation, logf Logf) {
 	case exp.Appendable || (exp.Label == "" && !exp.FreshVolume):
 		// appendable extends in place; address-identified media carry no label.
 	case exp.FreshVolume:
-		logf.Log("medium %q: this run needs a fresh/blank volume (no reusable tape in the pool)", medium)
+		logf.Log("medium %q: this run needs a fresh/blank volume (no reusable volume in the pool)", medium)
 	case exp.Recycles > 0:
 		logf.Log("medium %q: this run expects volume %q — recycling %d aged-out run(s) past retention", medium, exp.Label, exp.Recycles)
 	default:
@@ -340,22 +339,21 @@ func (e *Engine) CopyRun(runID, fromMedia, targetMedia string, force bool, logf 
 	return e.cop.CopyRun(runID, fromMedia, targetMedia, force, logf)
 }
 
-// CopySlots streams several sealed slots onto a target in one spool run (drives stay saturated across
-// slots); see copier. Used by sync.
-func (e *Engine) CopyRuns(slotIDs []string, fromMedia, targetMedia string, force bool, logf Logf) error {
-	return e.cop.CopyRuns(slotIDs, fromMedia, targetMedia, force, logf)
+// CopyRuns streams several sealed runs onto a target in one spool run (drives stay saturated across
+// runs); see copier. Used by sync.
+func (e *Engine) CopyRuns(runIDs []string, fromMedia, targetMedia string, force bool, logf Logf) error {
+	return e.cop.CopyRuns(runIDs, fromMedia, targetMedia, force, logf)
 }
 
 // LabelVolume writes (or rewrites) the identity label of a medium's volume — the
 // deliberate operator act that makes a tape writable.
 func (e *Engine) LabelVolume(mediumName, name string, relabel, force bool, now time.Time, logf Logf) error {
-	am, def, err := e.dep.OpenAdmin(mediumName)
+	am, _, err := e.dep.OpenAdmin(mediumName)
 	if err != nil {
 		return err
 	}
 	defer am.Close()
-	minAge, _ := def.MinAge()
-	return am.Label(name, relabel, force, minAge, now, librarian.Logf(logf))
+	return am.Label(name, relabel, force, now, librarian.Logf(logf))
 }
 
 // ChangerView inventories a changer medium for `nb medium <name>`.
@@ -368,7 +366,7 @@ func (e *Engine) ChangerView(mediumName string) (librarian.View, error) {
 	return am.View()
 }
 
-// LoadVolume mounts a volume on a changer medium, by bay/reel id or (byLabel) label.
+// LoadVolume mounts a volume on a changer medium, by bay id or (byLabel) volume label.
 func (e *Engine) LoadVolume(mediumName, target string, byLabel bool, logf Logf) error {
 	am, _, err := e.dep.OpenAdmin(mediumName)
 	if err != nil {
@@ -385,7 +383,13 @@ func (e *Engine) Catalog() *catalog.Catalog { return e.cat }
 // "does this run have a copy here, and where" lookup shared by copy planning, the copy
 // read side, and sync's skip check.
 func (e *Engine) placementOn(runID, medium string) (catalog.Placement, bool) {
-	for _, p := range e.cat.Placements(runID) {
+	return placementOn(e.cat, runID, medium)
+}
+
+// placementOn is the catalog lookup behind Engine.placementOn, shared with the copier
+// (which holds the catalog directly).
+func placementOn(cat *catalog.Catalog, runID, medium string) (catalog.Placement, bool) {
+	for _, p := range cat.Placements(runID) {
 		if p.Medium == medium {
 			return p, true
 		}
@@ -420,9 +424,9 @@ func (e *Engine) Landing() string { return e.dep.LandingName() }
 // write to; see accounting (which owns the arithmetic).
 type VolumeExpectation = accounting.VolumeExpectation
 
-// ExpectedVolume reports the tape the next run on the landing medium will write to,
+// ExpectedVolume reports the volume the next run on the landing medium will write to,
 // or ok=false for address-identified media (disk, s3) that carry no label and so
-// have no tape to expect; see accounting.
+// have no volume to expect; see accounting.
 func (e *Engine) ExpectedVolume(now time.Time) (VolumeExpectation, bool) {
 	return e.acct.ExpectedVolume(now)
 }

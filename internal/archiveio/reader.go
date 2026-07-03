@@ -56,7 +56,10 @@ func (r *Reader) Open(ref record.Ref, parts []record.FilePos) (io.ReadCloser, er
 // Verify asserts each part's header against ref, then re-hashes the concatenated raw
 // payloads and compares to sha.
 func (r *Reader) Verify(ref record.Ref, parts []record.FilePos, sha string) (bool, error) {
-	raw := &partsReader{parts: parts, want: ref, open: r.openLimited}
+	raw, err := r.Open(ref, parts)
+	if err != nil {
+		return false, err
+	}
 	defer raw.Close()
 	got, err := xfer.SHA256(raw)
 	if err != nil {
@@ -86,18 +89,28 @@ type partsReader struct {
 	cur   io.ReadCloser
 }
 
+// openIdx opens part i and asserts its header (identity + part index) before its
+// bytes flow — shared by prime and the read loop.
+func (pr *partsReader) openIdx(i int) (io.ReadCloser, error) {
+	h, rc, err := pr.open(pr.parts[i])
+	if err != nil {
+		return nil, err
+	}
+	if err := assertPart(h, pr.want, i); err != nil {
+		rc.Close()
+		return nil, err
+	}
+	return rc, nil
+}
+
 // prime opens the first part so an open-time error (missing/wrong volume) surfaces
 // before any bytes are pulled, enabling the caller's copy-to-copy failover.
 func (pr *partsReader) prime() error {
 	if len(pr.parts) == 0 {
 		return nil
 	}
-	h, rc, err := pr.open(pr.parts[0])
+	rc, err := pr.openIdx(0)
 	if err != nil {
-		return err
-	}
-	if err := assertPart(h, pr.want, 0); err != nil {
-		rc.Close()
 		return err
 	}
 	pr.cur = rc
@@ -110,12 +123,8 @@ func (pr *partsReader) Read(p []byte) (int, error) {
 			if pr.idx >= len(pr.parts) {
 				return 0, io.EOF
 			}
-			h, rc, err := pr.open(pr.parts[pr.idx])
+			rc, err := pr.openIdx(pr.idx)
 			if err != nil {
-				return 0, err
-			}
-			if err := assertPart(h, pr.want, pr.idx); err != nil {
-				rc.Close()
 				return 0, err
 			}
 			pr.cur = rc

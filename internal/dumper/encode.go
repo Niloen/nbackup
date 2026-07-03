@@ -21,9 +21,9 @@ import (
 )
 
 // encode.go is the producer's write-side scheme work, the mirror of the engine's decode: it builds
-// the tar source and the encode filters, places each transform on the client or the server, and
-// transfers the stream into an ingestion Sink the store hands out — then Sink.Commit lands and
-// records it. The scheme and tar live here; the store only lands and records bytes.
+// the archiver's stage source and the encode filters, places each transform on the client or the
+// server, and transfers the stream into an ingestion Sink the store hands out — then Sink.Commit
+// lands and records it. The scheme and the stage live here; the store only lands and records bytes.
 
 // BackupSpec describes one archive to back up: the resolved archiver and its request, plus the
 // identity bits not in the request (the DLE's host, the base run for an incremental, and the
@@ -38,7 +38,7 @@ type BackupSpec struct {
 
 // EncodePlacement is the write-side transform recipe for one dumptype: which compress/encrypt
 // schemes to apply, their invocation options, and where each runs. A transform `at: client` rides
-// in the SOURCE (fused with tar on the client, so plaintext never leaves it); otherwise it is a
+// in the SOURCE (fused with the archiver's stage on the client, so plaintext never leaves it); otherwise it is a
 // local Filter (server-side).
 type EncodePlacement struct {
 	CompressScheme string
@@ -94,7 +94,7 @@ func (d *Dumper) dumpItem(ctx context.Context, fs archivefs.Ingest, item planner
 	var unreadable []string
 	committed, unreadable, err = d.dumpArchive(ctx, fs, item.EstBytes, spec, gate, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
 	if err != nil {
-		// A genuinely fatal tar error (write failure, OOM) — not a mere unreadable file,
+		// A genuinely fatal archiver error (write failure, OOM) — not a mere unreadable file,
 		// which now commits a partial archive below. Surface it plainly.
 		return fmt.Errorf("archive %s: %w", item.DLE.ID(), err)
 	}
@@ -104,10 +104,10 @@ func (d *Dumper) dumpItem(ctx context.Context, fs archivefs.Ingest, item planner
 		sizeLabel = "stored" // no compressor in the pipe; "compressed" would be a lie
 	}
 	if committed.FileCount == 0 {
-		// An incremental with nothing changed still writes tar's structural overhead
-		// (archive header/footer + directory census); say so rather than the puzzling
-		// "0 file(s), 10.24 kB stored".
-		logf("  no changed files (%s of tar metadata)", sizeutil.FormatBytes(committed.Compressed))
+		// An incremental with nothing changed still writes the archiver's structural
+		// overhead (e.g. tar's header/footer + directory census); say so rather than the
+		// puzzling "0 file(s), 10.24 kB stored".
+		logf("  no changed files (%s of archive metadata)", sizeutil.FormatBytes(committed.Compressed))
 	} else {
 		logf("  %d file(s), %s %s", committed.FileCount, sizeutil.FormatBytes(committed.Compressed), sizeLabel)
 	}
@@ -184,7 +184,7 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 	}, nil
 }
 
-// dumpArchive composes the encode transfer for one archive — the archiver's tar source (on its
+// dumpArchive composes the encode transfer for one archive — the archiver's stage source (on its
 // host) → the encode filters placed per the dumptype (client-side fused into the source,
 // server-side as local Filters) → an ingestion xfer.Sink the store hands out, which the transfer
 // seals on commit. prog, if non-nil, receives running (uncompressed, compressed) counts. It returns
@@ -227,15 +227,15 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 	if srcExec == nil {
 		srcExec = programs.Local()
 	}
-	tarCmd := bs.Stage
-	tarCmd.Tap = func(n int64) { unc.Store(n); report() } // uncompressed (honored when tar runs locally)
-	// Place each encode step: a client-side transform fuses with tar in the source (plaintext
-	// never leaves the client); a server-side one lands in the local filters.
+	stageCmd := bs.Stage
+	stageCmd.Tap = func(n int64) { unc.Store(n); report() } // uncompressed (honored when the stage runs locally)
+	// Place each encode step: a client-side transform fuses with the stage in the source
+	// (plaintext never leaves the client); a server-side one lands in the local filters.
 	fused, filters := xfer.SplitTransforms(
 		xfer.Transform{Cmd: compF.Forward, Fused: pl.CompressClient},
 		xfer.Transform{Cmd: encF.Forward, Fused: pl.EncryptClient},
 	)
-	src := xfer.NewProgramChain(srcExec).Add(tarCmd).Add(fused...)
+	src := xfer.NewProgramSource(srcExec).Add(stageCmd).Add(fused...)
 	src.Finishing(func() (xfer.SourceStats, error) {
 		res, ferr := bs.Finish()
 		if ferr != nil {
@@ -256,7 +256,7 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 		return record.Archive{}, nil, err
 	}
 	// Progress is layered on here, by the one caller that wants it: wrap the sink to tap the running
-	// compressed count for live `nb status` (symmetric with tarCmd.Tap's uncompressed side). The store
+	// compressed count for live `nb status` (symmetric with stageCmd.Tap's uncompressed side). The store
 	// stays observability-free.
 	sink = archiveio.MeterArchive(sink, func(n int64) { comp.Store(n); report() })
 	// Release the sink's resources (for a direct landing write, its backing permit; for a holding
@@ -265,7 +265,7 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 	// Close is the symmetric counterpart to that acquire, independent of whether Commit ran.
 	defer sink.Close()
 	// Borrow a transfer run only now — the target is secured, so the gate bounds dumps that are
-	// actually running tar + the encode pipeline. release runs before sink.Close (defer LIFO), so the
+	// actually running the archiver + the encode pipeline. release runs before sink.Close (defer LIFO), so the
 	// worker is handed back the instant the transfer ends, ahead of returning the target resource.
 	release := gate()
 	defer release()
@@ -278,7 +278,7 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 	// The archive is durably committed to the store; only now promote the archiver's new
 	// incremental state into its library (Amanda's rename-on-success). Until here the dump wrote a
 	// ".new" side file, so the transfer failing above left the base a retry builds on untouched —
-	// a killed tar can never corrupt the chain.
+	// a killed archiver can never corrupt the chain.
 	if bs.Promote != nil {
 		if err := bs.Promote(); err != nil {
 			return record.Archive{}, nil, fmt.Errorf("promote incremental state: %w", err)

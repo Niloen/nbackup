@@ -70,18 +70,6 @@ func (s fsStore) Writer(_ context.Context, key string) (io.WriteCloser, error) {
 	return os.OpenFile(full, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o444)
 }
 
-func (s fsStore) WriteAll(_ context.Context, key string, b []byte) error {
-	full := s.full(key)
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-		return err
-	}
-	// Read-only for the same reason as Writer: a sidecar/index/commit record is
-	// immutable once written; prune removes it by unlinking, which the dir permits.
-	return os.WriteFile(full, b, 0o444)
-}
-
-func (s fsStore) ReadAll(key string) ([]byte, error) { return os.ReadFile(s.full(key)) }
-
 func (s fsStore) Open(key string) (io.ReadCloser, error) { return os.Open(s.full(key)) }
 
 func (s fsStore) RemoveTree(run string) error { return os.RemoveAll(filepath.Join(s.root, run)) }

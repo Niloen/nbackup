@@ -3,9 +3,9 @@ package restorer
 import (
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/Niloen/nbackup/internal/archivefs"
+	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
 )
@@ -49,22 +49,19 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 		st := stepByRef[ref]
 		// An archive in the chain that holds none of the selected files contributes
 		// nothing — skip it silently rather than logging a noisy "extracting 0 file(s)".
-		if countFiles(st.Members) == 0 {
+		if archiver.CountFiles(st.Members) == 0 {
 			return nil
 		}
-		log.Log("extracting %d file(s) from %s %s L%d", countFiles(st.Members), st.RunID, r.deps.DisplayDLE(st.DLE), st.Level)
+		log.Log("extracting %d file(s) from %s %s L%d", archiver.CountFiles(st.Members), st.RunID, r.deps.DisplayDLE(st.DLE), st.Level)
 		rc, serr := open()
 		if serr != nil {
 			return serr
 		}
-		// Resolve the per-dumptype encrypt block so a per-dumptype passphrase_file is
-		// honored on file-level recovery (server-side decode), not just the config-wide one.
-		ec, _ := r.deps.EncryptionFor(st.DLE)
-		plan := r.planDecode(st.Compress, st.Encrypt, ec, "")
+		plan := r.planDecode(st.DLE, st.Compress, st.Encrypt, "")
 		if err := DecryptHint(st.Encrypt, r.dec.restoreArchive(rc, plan, st.Archiver, d, st.Members)); err != nil {
 			return err
 		}
-		files += countFiles(st.Members)
+		files += archiver.CountFiles(st.Members)
 		return nil
 	})
 	if err != nil {
@@ -74,18 +71,4 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 		return files, fmt.Errorf("recover: %w — one or more selected archives have no available copy", archivefs.ErrMissingCopy)
 	}
 	return files, nil
-}
-
-// countFiles counts the file members in a selection, excluding the parent
-// directories the extractor recreates to hold them (the archiver-neutral member
-// convention marks directories with a trailing slash). So recovering one nested
-// file reports 1, not "2 entries" once its parent dir is counted.
-func countFiles(members []string) int {
-	n := 0
-	for _, m := range members {
-		if !strings.HasSuffix(m, "/") {
-			n++
-		}
-	}
-	return n
 }

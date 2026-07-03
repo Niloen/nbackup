@@ -40,9 +40,7 @@ func newWebhook(b config.NotifyBackend) (Notifier, error) {
 			return nil, fmt.Errorf("webhook URL env %q is unset or empty", b.URLEnv)
 		}
 	}
-	if url == "" {
-		return nil, fmt.Errorf("webhook has no url or url_env")
-	}
+	// url_env/url presence is enforced at load by config's validateNotify.
 	field := b.Template
 	if field == "" {
 		field = "text"

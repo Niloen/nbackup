@@ -46,13 +46,6 @@ func (w *memWriter) Close() error {
 	return nil
 }
 
-func (s *memStore) WriteAll(_ context.Context, key string, b []byte) error {
-	s.mu.Lock()
-	s.files[key] = append([]byte(nil), b...)
-	s.mu.Unlock()
-	return nil
-}
-
 func (s *memStore) ReadAll(key string) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -136,7 +129,8 @@ func TestReclaimSparesInFlightAppend(t *testing.T) {
 	reached := make(chan struct{})
 	release := make(chan struct{})
 	st.onWrite = func(key string) {
-		if strings.Contains(key, "inflight") {
+		// The header sidecar also lands via Writer; block only on the payload.
+		if strings.Contains(key, "inflight") && !strings.HasSuffix(key, ".hdr") {
 			close(reached)
 			<-release
 		}
@@ -176,7 +170,7 @@ func TestIncompleteFiles(t *testing.T) {
 	}
 	appendArchive(t, v, "run-x", "app", "AAA") // a complete pair (payload + .hdr)
 	// A torn append: a payload object at a conforming position with no .hdr sidecar.
-	if err := st.WriteAll(context.Background(), "run-x/7-torn.tar", []byte("BBB")); err != nil {
+	if err := writeAll(context.Background(), st, "run-x/7-torn.tar", []byte("BBB")); err != nil {
 		t.Fatal(err)
 	}
 	// Reopen so scan() reindexes from the store and marks the torn position incomplete.

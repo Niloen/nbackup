@@ -95,7 +95,7 @@ type Executor interface {
 	ReadFile(path string) ([]byte, error)
 }
 
-// pipeResult wraps the final stdout so Close drains/closes it; wait (returned
+// pipeReader wraps the final stdout so Close drains/closes it; wait (returned
 // separately) reaps the children.
 type pipeReader struct {
 	io.Reader
@@ -128,13 +128,12 @@ func (c *countReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// Filter is a reversible stream transform: a named scheme with a forward (encode) and
-// reverse (decode) child command. A zero Forward/Reverse (Cmd.Name == "") is the
+// Filter is a reversible stream transform: a forward (encode) and reverse
+// (decode) child command. A zero Forward/Reverse (Cmd.Name == "") is the
 // identity — the "none" scheme — which contributes no stage to a pipeline. It is the
 // shared shape compress and crypt expose so the transform layer can chain and reverse
 // them uniformly.
 type Filter struct {
-	Name    string
 	Forward Cmd
 	Reverse Cmd
 }

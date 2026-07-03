@@ -37,12 +37,20 @@ func init() {
 		if ex == nil {
 			ex = programs.Local()
 		}
+		oneFS, err := opts.Bool("one-file-system", true)
+		if err != nil {
+			return nil, err
+		}
+		sparse, err := opts.Bool("sparse", true)
+		if err != nil {
+			return nil, err
+		}
 		return &gnutar{
 			bin:           bin,
 			ex:            ex,
 			stateDir:      stateRoot,
-			oneFileSystem: opts.Bool("one-file-system", true),
-			sparse:        opts.Bool("sparse", true),
+			oneFileSystem: oneFS,
+			sparse:        sparse,
 		}, nil
 	})
 }
@@ -136,7 +144,7 @@ func (g *gnutar) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource,
 		}
 		return &archiver.BackupResult{
 			Uncompressed: parseTotals(stderr.String()),
-			FileCount:    countFiles(members),
+			FileCount:    archiver.CountFiles(members),
 			Members:      members,
 			Unreadable:   unreadable,
 		}, nil
@@ -351,14 +359,4 @@ func scanMembers(r io.Reader) ([]string, error) {
 		}
 	}
 	return members, sc.Err()
-}
-
-func countFiles(members []string) int {
-	n := 0
-	for _, m := range members {
-		if !strings.HasSuffix(m, "/") {
-			n++
-		}
-	}
-	return n
 }

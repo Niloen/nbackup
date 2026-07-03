@@ -93,22 +93,22 @@ func New(cat ReadMap, deps Depot, mindex *catalog.MemberIndex) *FS {
 // Members returns an archive's member list, lazily: from the member-index cache, else by
 // reading the on-medium index (via a copy's recorded index position) and re-caching it. A nil
 // list is a valid "no members" answer (an archive with no files records no index).
-func (c *FS) Members(ref record.Ref) ([]string, error) {
-	if members, ok, err := c.mindex.Load(ref.Run, ref.DLE, ref.Level); err != nil {
+func (fs *FS) Members(ref record.Ref) ([]string, error) {
+	if members, ok, err := fs.mindex.Load(ref.Run, ref.DLE, ref.Level); err != nil {
 		return nil, err
 	} else if ok {
 		return members, nil
 	}
-	for _, p := range c.cat.PlacementsFor(ref.Run) {
+	for _, p := range fs.cat.PlacementsFor(ref.Run) {
 		pos, ok := indexPosOf(p, ref.DLE, ref.Level)
 		if !ok {
 			continue
 		}
-		members, err := c.readIndex(p.Medium, pos)
+		members, err := fs.readIndex(p.Medium, pos)
 		if err != nil {
 			continue // try another copy
 		}
-		_ = c.mindex.Store(ref.Run, ref.DLE, ref.Level, members)
+		_ = fs.mindex.Store(ref.Run, ref.DLE, ref.Level, members)
 		return members, nil
 	}
 	return nil, nil
@@ -130,14 +130,9 @@ func indexPosOf(p catalog.Placement, dle string, level int) (record.FilePos, boo
 // medium reads only that copy so a fault on it is not masked by another. The open (and thus the
 // copy-selection fail-over) happens eagerly, so a missing copy is reported before bytes flow.
 // The caller wraps it for a transfer (xfer.Reader); the fs only hands back bytes.
-func (c *FS) Open(ref record.Ref, medium string) (io.ReadCloser, error) {
-	return c.openRaw(ref, medium)
-}
-
-// openRaw opens an archive's raw on-medium part stream with copy selection and fail-over.
-func (c *FS) openRaw(ref record.Ref, medium string) (io.ReadCloser, error) {
-	return c.eachPlacement(ref, medium, func(parts []record.FilePos, p catalog.Placement) (io.ReadCloser, error) {
-		r, err := c.readerFor(p.Medium)
+func (fs *FS) Open(ref record.Ref, medium string) (io.ReadCloser, error) {
+	return fs.eachPlacement(ref, medium, func(parts []record.FilePos, p catalog.Placement) (io.ReadCloser, error) {
+		r, err := fs.readerFor(p.Medium)
 		if err != nil {
 			return nil, err
 		}
@@ -149,22 +144,22 @@ func (c *FS) openRaw(ref record.Ref, medium string) (io.ReadCloser, error) {
 // mounting opener for the medium's volumes, paced by its shared bandwidth cap. Callers that
 // drive a read loop themselves (ReadArchives) thread one Reader across all of a copy's
 // archives, so consecutive same-volume reads reuse the mount.
-func (c *FS) readerFor(medium string) (*archiveio.Reader, error) {
-	mounter, err := c.deps.MounterFor(medium)
+func (fs *FS) readerFor(medium string) (*archiveio.Reader, error) {
+	mounter, err := fs.deps.MounterFor(medium)
 	if err != nil {
 		return nil, err
 	}
 	open := func(p record.FilePos) (record.Header, io.ReadCloser, error) {
 		return mounter.ReadFileAt(p.Label, p.Epoch, p.Pos)
 	}
-	return archiveio.NewReader(open, c.deps.Limiter(medium)), nil
+	return archiveio.NewReader(open, fs.deps.Limiter(medium)), nil
 }
 
 // readIndex reads an archive's member index off a medium — the lazy fallback when the
 // server-side member cache misses (a rebuilt run not yet browsed). It mounts the volume the
 // index lives on and decodes it.
-func (c *FS) readIndex(medium string, pos record.FilePos) ([]string, error) {
-	mounter, err := c.deps.MounterFor(medium)
+func (fs *FS) readIndex(medium string, pos record.FilePos) ([]string, error) {
+	mounter, err := fs.deps.MounterFor(medium)
 	if err != nil {
 		return nil, err
 	}
@@ -180,8 +175,8 @@ func (c *FS) readIndex(medium string, pos record.FilePos) ([]string, error) {
 // medium when set), then tries each that carries the archive — opening it via open — until
 // one succeeds, so a read fails over to another copy. It is the one place the raw read paths
 // share copy selection and the missing-copy errors (ErrMissingCopy).
-func (c *FS) eachPlacement(ref record.Ref, medium string, open func(parts []record.FilePos, p catalog.Placement) (io.ReadCloser, error)) (io.ReadCloser, error) {
-	placements := c.cat.PlacementsFor(ref.Run)
+func (fs *FS) eachPlacement(ref record.Ref, medium string, open func(parts []record.FilePos, p catalog.Placement) (io.ReadCloser, error)) (io.ReadCloser, error) {
+	placements := fs.cat.PlacementsFor(ref.Run)
 	if medium != "" {
 		placements = onMedium(placements, medium)
 	}

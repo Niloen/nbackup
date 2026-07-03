@@ -17,26 +17,6 @@ import (
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 )
 
-// Verify is NBackup's atomic verification primitive: it checks
-// individual runs/archives against the seal and is **stateless** — it writes
-// nothing, keeps no ledger, and makes no selection or scheduling decision. Those
-// belong to the drill layer, which consumes the structured VerifyReport this
-// returns. Two checks compose:
-//
-//   - checksum (CheckChecksum, the default): re-hash the stored payload and compare
-//     to the seal's SHA256. Keyless — it reads the ciphertext as it lies on the
-//     volume, the same bytes a copy/sync carries.
-//   - structural (CheckStructural, `nb verify --deep`): stream the archive through
-//     the real read pipeline — decrypt → decompress → `tar -t` (LIST, not extract) —
-//     and assert both that the pipeline completes cleanly and that the listed members
-//     match the seal's recorded member list. It proves the bytes are a valid
-//     *restorable stream* and exercises the key + compression end-to-end, while writing
-//     nothing.
-//
-// VerifyChecks is a bitmask so a deep verify can request both. VerifyOptions.Medium,
-// when set, restricts verification to that one medium's copy (an offsite drill);
-// empty verifies every copy, so a corrupt copy is caught even when another is fine.
-
 // VerifyChecks selects which atomic checks a verify performs.
 type VerifyChecks int
 
@@ -80,12 +60,30 @@ type VerifyReport struct {
 	Failures int // runs with at least one failed archive
 }
 
-// verifier is NBackup's verification operation: the stateless integrity
-// primitive that checks runs/archives against the seal and writes nothing. It depends on a
-// narrow slice of the orchestrator — the catalog (run list + metadata), the fs (byte
-// endpoints + recorded member list), the decoder (checksum + structural decode), the
-// read-preference placement order, and structural-archiver resolution — not the whole engine,
-// so the same path serves `nb verify` and a drill's per-archive check.
+// verifier is NBackup's atomic verification operation: it checks individual
+// runs/archives against the seal and is **stateless** — it writes nothing, keeps no
+// ledger, and makes no selection or scheduling decision. Those belong to the drill
+// layer, which consumes the structured VerifyReport this returns. Two checks compose:
+//
+//   - checksum (CheckChecksum, the default): re-hash the stored payload and compare
+//     to the seal's SHA256. Keyless — it reads the ciphertext as it lies on the
+//     volume, the same bytes a copy/sync carries.
+//   - structural (CheckStructural, `nb verify --deep`): stream the archive through
+//     the real read pipeline — decrypt → decompress → `tar -t` (LIST, not extract) —
+//     and assert both that the pipeline completes cleanly and that the listed members
+//     match the seal's recorded member list. It proves the bytes are a valid
+//     *restorable stream* and exercises the key + compression end-to-end, while writing
+//     nothing.
+//
+// VerifyChecks is a bitmask so a deep verify can request both. VerifyOptions.Medium,
+// when set, restricts verification to that one medium's copy (an offsite drill);
+// empty verifies every copy, so a corrupt copy is caught even when another is fine.
+//
+// The verifier depends on a narrow slice of the orchestrator — the catalog (run list +
+// metadata), the fs (byte endpoints + recorded member list), the decoder (checksum +
+// structural decode), the read-preference placement order, and structural-archiver
+// resolution — not the whole engine, so the same path serves `nb verify` and a
+// drill's per-archive check.
 type verifier struct {
 	cat         *catalog.Catalog                                       // run list + metadata
 	store       archivefs.ReadStore                                    // byte endpoints + member index (the read face of the archive fs)
@@ -172,68 +170,12 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 	var goodCopies, badCopies, skippedCopies []string
 	checked := map[record.Ref]bool{} // distinct archives verified on at least one copy
 	for _, p := range placements {
-		copyOK := true
-		// A copy is archive-granular: a per-archive prune may have reclaimed some of
-		// the run's archives from this medium (the placement then simply doesn't hold
-		// them). Judge each copy against what it records, not the run's whole content
-		// — an absent archive here is by design, not a missing position; its surviving
-		// copies on other media are verified on their own placements.
-		expected := make([]record.Archive, 0, len(s.Archives))
-		for _, a := range s.Archives {
-			if p.Holds(a.DLE, a.Level) {
-				expected = append(expected, a)
-			}
-		}
-		archByRef := make(map[record.Ref]record.Archive, len(expected))
-		refs := make([]record.Ref, len(expected))
-		for i, a := range expected {
-			ref := record.Ref{Run: id, DLE: a.DLE, Level: a.Level}
-			refs[i] = ref
-			archByRef[ref] = a
-		}
-		// The fs drives the one-pass read of this copy, calling back per archive; verify
-		// every one (never stop early), collecting verdicts.
-		verdicts := make(map[record.Ref]ArchiveVerdict, len(refs))
-		_, err := v.store.ReadArchives(refs, p.Medium, func(ref record.Ref, open func() (io.ReadCloser, error)) error {
-			verdicts[ref] = v.verifyArchive(archByRef[ref], ref, p.Medium, opts, open, logf)
-			return nil
-		})
-		if err != nil {
-			// A copy on a medium this config does not define is out of scope, not
-			// damaged: skip it (with a note) rather than reporting a false integrity
-			// failure. Other errors (a configured medium that won't open) still fail.
-			if errors.Is(err, depot.ErrUnknownMedium) {
-				logf.Log("%s [%s]: skipped — medium not defined in this config", id, p.Medium)
-				skippedCopies = append(skippedCopies, p.Medium)
-				continue
-			}
-			logf.Log("%s [%s]: ERROR %v", id, p.Medium, err)
-			sv.OK = false
-			badCopies = append(badCopies, p.Medium)
-			sv.Archives = append(sv.Archives, ArchiveVerdict{
-				Run: id, Medium: p.Medium, OK: false,
-				Class: drill.ClassPipeline, Detail: err.Error(),
-			})
-			continue
-		}
-		for _, a := range expected {
-			ref := record.Ref{Run: id, DLE: a.DLE, Level: a.Level}
-			v, ok := verdicts[ref]
-			if !ok {
-				logf.Log("%s [%s]: %s L%d POSITION MISSING", id, p.Medium, a.DLEID(), a.Level)
-				v = ArchiveVerdict{Run: id, DLE: a.DLE, Level: a.Level, Medium: p.Medium, OK: false,
-					Class: drill.ClassMissing, Detail: "archive position missing on this copy"}
-			}
-			checked[ref] = true
-			sv.Archives = append(sv.Archives, v)
-			if !v.OK {
-				sv.OK = false
-				copyOK = false
-			}
-		}
-		if copyOK {
+		switch copyOK, skipped := v.verifyCopy(s, p, opts, sv, checked, logf); {
+		case skipped:
+			skippedCopies = append(skippedCopies, p.Medium)
+		case copyOK:
 			goodCopies = append(goodCopies, p.Medium)
-		} else {
+		default:
 			badCopies = append(badCopies, p.Medium)
 		}
 	}
@@ -254,6 +196,72 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 		logf.Log("%s: FAILED on all cop(ies): %s", id, strings.Join(badCopies, ", "))
 	}
 	return sv, nil
+}
+
+// verifyCopy checks one placement — the run's copy on one medium — appending its
+// per-archive verdicts to sv (and marking each verified archive in checked). It
+// reports whether the whole copy passed, or that it was skipped because its medium is
+// not defined in this config (out of scope, not damaged).
+func (v *verifier) verifyCopy(s *catalog.Run, p catalog.Placement, opts VerifyOptions, sv *RunVerdict, checked map[record.Ref]bool, logf Logf) (copyOK, skipped bool) {
+	id := sv.Run
+	copyOK = true
+	// A copy is archive-granular: a per-archive prune may have reclaimed some of
+	// the run's archives from this medium (the placement then simply doesn't hold
+	// them). Judge each copy against what it records, not the run's whole content
+	// — an absent archive here is by design, not a missing position; its surviving
+	// copies on other media are verified on their own placements.
+	expected := make([]record.Archive, 0, len(s.Archives))
+	for _, a := range s.Archives {
+		if p.Holds(a.DLE, a.Level) {
+			expected = append(expected, a)
+		}
+	}
+	archByRef := make(map[record.Ref]record.Archive, len(expected))
+	refs := make([]record.Ref, len(expected))
+	for i, a := range expected {
+		ref := record.Ref{Run: id, DLE: a.DLE, Level: a.Level}
+		refs[i] = ref
+		archByRef[ref] = a
+	}
+	// The fs drives the one-pass read of this copy, calling back per archive; verify
+	// every one (never stop early), collecting verdicts.
+	verdicts := make(map[record.Ref]ArchiveVerdict, len(refs))
+	_, err := v.store.ReadArchives(refs, p.Medium, func(ref record.Ref, open func() (io.ReadCloser, error)) error {
+		verdicts[ref] = v.verifyArchive(archByRef[ref], ref, p.Medium, opts, open, logf)
+		return nil
+	})
+	if err != nil {
+		// A copy on a medium this config does not define is out of scope, not
+		// damaged: skip it (with a note) rather than reporting a false integrity
+		// failure. Other errors (a configured medium that won't open) still fail.
+		if errors.Is(err, depot.ErrUnknownMedium) {
+			logf.Log("%s [%s]: skipped — medium not defined in this config", id, p.Medium)
+			return true, true
+		}
+		logf.Log("%s [%s]: ERROR %v", id, p.Medium, err)
+		sv.OK = false
+		sv.Archives = append(sv.Archives, ArchiveVerdict{
+			Run: id, Medium: p.Medium, OK: false,
+			Class: drill.ClassPipeline, Detail: err.Error(),
+		})
+		return false, false
+	}
+	for _, a := range expected {
+		ref := record.Ref{Run: id, DLE: a.DLE, Level: a.Level}
+		vd, ok := verdicts[ref]
+		if !ok {
+			logf.Log("%s [%s]: %s L%d POSITION MISSING", id, p.Medium, a.DLEID(), a.Level)
+			vd = ArchiveVerdict{Run: id, DLE: a.DLE, Level: a.Level, Medium: p.Medium, OK: false,
+				Class: drill.ClassMissing, Detail: "archive position missing on this copy"}
+		}
+		checked[ref] = true
+		sv.Archives = append(sv.Archives, vd)
+		if !vd.OK {
+			sv.OK = false
+			copyOK = false
+		}
+	}
+	return copyOK, false
 }
 
 // verifyArchive runs the requested checks against one archive, opening its stream via open

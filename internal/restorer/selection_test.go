@@ -2,6 +2,7 @@ package restorer
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,15 +35,23 @@ func TestOpenRecoverBuildsTree(t *testing.T) {
 	}
 }
 
-// TestDecryptOptsForPerDumptype: a per-dumptype passphrase_file is honored on
-// read-back (mirroring the dump side); a DLE not in the config falls back to the
-// config-wide decrypt reference.
-func TestDecryptOptsForPerDumptype(t *testing.T) {
+// TestDecryptOptsForPrecedence pins the one decrypt-key precedence rule
+// (decryptOptsFor, which the exported DecryptOptsFor and planDecode both
+// delegate to): a DLE whose encrypt config sets a passphrase_file or program
+// uses it (mirroring the dump side); a DLE whose encrypt config sets neither
+// (e.g. a recipient-only public-key block) and a DLE not in the config at all
+// both fall back to the config-wide decrypt reference — never a zero Options.
+func TestDecryptOptsForPrecedence(t *testing.T) {
 	d := testDeps(&fakeStore{}, nil)
 	d.DecryptOpts.PassphraseFile = "/config-wide/pass"
+	d.DecryptOpts.Program = "/config-wide/gpg"
 	d.EncryptionFor = func(dle string) (config.EncryptConfig, bool) {
-		if dle == "db01-pg" {
+		switch dle {
+		case "db01-pg":
 			return config.EncryptConfig{PassphraseFile: "/dumptype/pass"}, true
+		case "web01-pubkey":
+			// In the config, but with no decrypt key reference of its own.
+			return config.EncryptConfig{Scheme: "gpg", Recipient: "backup@example"}, true
 		}
 		return config.EncryptConfig{}, false
 	}
@@ -50,8 +59,21 @@ func TestDecryptOptsForPerDumptype(t *testing.T) {
 	if got := r.DecryptOptsFor("db01-pg").PassphraseFile; got != "/dumptype/pass" {
 		t.Fatalf("per-dumptype passphrase_file not honored: got %q", got)
 	}
-	if got := r.DecryptOptsFor("other-dle").PassphraseFile; got != "/config-wide/pass" {
-		t.Fatalf("a DLE not in config should fall back to the config-wide ref: got %q", got)
+	if got := r.DecryptOptsFor("db01-pg").Program; got != "" {
+		t.Fatalf("a per-dumptype block replaces the key reference wholesale: program = %q, want \"\"", got)
+	}
+	if got := r.DecryptOptsFor("web01-pubkey"); got != d.DecryptOpts {
+		t.Fatalf("a DLE with no per-dumptype key reference should use the config-wide opts, got: %+v", got)
+	}
+	if got := r.DecryptOptsFor("other-dle"); got != d.DecryptOpts {
+		t.Fatalf("a DLE not in config should fall back to the config-wide opts, got: %+v", got)
+	}
+	// planDecode routes through the same rule — the plan's decrypt opts match.
+	if got := r.planDecode("db01-pg", "none", "gpg", "").decryptOpts.PassphraseFile; got != "/dumptype/pass" {
+		t.Fatalf("planDecode must delegate to the same precedence: got %q", got)
+	}
+	if got := r.planDecode("other-dle", "none", "gpg", "").decryptOpts; got != d.DecryptOpts {
+		t.Fatalf("planDecode fallback must be the config-wide opts, got: %+v", got)
 	}
 }
 
@@ -83,6 +105,23 @@ func TestFriendlyDLEErrRewritesSlug(t *testing.T) {
 	}
 }
 
+// TestFriendlyDLEErrPreservesChain: the rewrite is message-only — the wrapped
+// error chain survives for errors.Is/As, the classification contract the
+// package doc declares.
+func TestFriendlyDLEErrPreservesChain(t *testing.T) {
+	d := testDeps(&fakeStore{}, nil)
+	d.DisplayDLE = func(string) string { return "app01:/data" }
+	r := New(d)
+	sentinel := errors.New("boom")
+	err := r.friendlyDLEErr("app01-data", fmt.Errorf("plan %q: %w", "app01-data", sentinel))
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("friendlyDLEErr must preserve the wrapped chain, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), `"app01:/data"`) || strings.Contains(err.Error(), `"app01-data"`) {
+		t.Fatalf("message should be rewritten to the display form: %v", err)
+	}
+}
+
 func extractStep(run, dle string, level int, members ...string) recovery.ExtractStep {
 	return recovery.ExtractStep{
 		Step:    recovery.Step{RunID: run, DLE: dle, Level: level, Archiver: "gnutar", Compress: "none"},
@@ -91,7 +130,7 @@ func extractStep(run, dle string, level int, members ...string) recovery.Extract
 }
 
 // TestExtractSelectionSkipsEmptyStep: an archive in the selection that holds none
-// of the chosen files (only directory entries, countFiles == 0) contributes
+// of the chosen files (only directory entries, archiver.CountFiles == 0) contributes
 // nothing and is skipped silently — its stream is never opened — while the
 // archive that does hold files is extracted and counted.
 func TestExtractSelectionSkipsEmptyStep(t *testing.T) {

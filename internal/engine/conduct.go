@@ -97,19 +97,17 @@ func (e *Engine) landingSeams(medium string, spec archiveio.RunSpec, now time.Ti
 		}
 		return []archiveio.PartAllocator{wt.alloc}, wt.session, wm, nil
 	}
-	partSize, err := e.dep.PartSizeFor(medium)
+	partSize, exp, err := e.writePrelude(medium, now, lf)
 	if err != nil {
 		_ = wm.Close()
 		return nil, nil, nil, err
 	}
-	exp := e.acct.ExpectedVolumeFor(medium, now)
-	announceExpectation(medium, exp, lf)
 	lazyAllocs := wm.LazyDriveAllocators(def.IsAppendable(), exp.Label, partSize, now, librarian.Logf(lf))
 	allocs := make([]archiveio.PartAllocator, len(lazyAllocs))
 	for i, a := range lazyAllocs {
 		allocs[i] = a
 	}
-	return allocs, e.fs.OpenRun(e.cat, wm, spec.ID), wm, nil
+	return allocs, e.fs.OpenRun(e.cat, wm), wm, nil
 }
 
 // landingFor resolves the medium a DLE lands on: its dumptype's `landing` override, else the run's
@@ -137,25 +135,22 @@ func (e *Engine) landingForDLEName(slug string) string {
 // newConductor wires a per-run conductor.Conductor to the engine's dumper, plan
 // lane, landing volume, and write/flush machinery. Plan binds to the scheduler's
 // method (not the engine's own planWith) so the run lane reads its plan from the
-// scheduler. The engine's Backup/PlannedRunID methods build one of these per run
+// scheduler. The engine's Run/PlannedRunID methods build one of these per run
 // and delegate to it (see internal/conductor).
 func (e *Engine) newConductor() *conductor.Conductor {
 	return conductor.New(conductor.Deps{
-		Cat:               e.cat,
-		Dmp:               e.dmp,
-		Plan:              e.sched.Plan,
-		OpenWriter:        e.openWriter,
-		OpenReader:        e.openReader,
-		CheckCompress:     e.tc.checkCompress,
-		ProbeReachable:    e.tc.probeReachable,
-		PreflightDumptype: e.tc.preflightDumptype,
-		Flush:             e.Flush,
-		HoldingMedia:      e.cfg.HoldingMedia(),
-		Workers:           e.cfg.Workers(),
-		NewFileSink:       func() progress.Sink { return progress.NewFileSink(e.cfg.WorkdirPath(), time.Now) },
-		Landing:           e.dep.LandingName(),
-		LandingFor:        func(it planner.Item) string { return e.landingFor(it.DLE) },
-		RunSink:           e.runSink,
-		EstimateSink:      e.estimateSink,
+		Cat:          e.cat,
+		Dmp:          e.dmp,
+		Plan:         e.sched.Plan,
+		OpenWriter:   e.openWriter,
+		OpenReader:   e.openReader,
+		Preflight:    e.preflightDeps(),
+		Flush:        e.Flush,
+		HoldingMedia: e.cfg.HoldingMedia(),
+		Workers:      e.cfg.Workers(),
+		NewFileSink:  func() progress.Sink { return progress.NewFileSink(e.cfg.WorkdirPath(), time.Now) },
+		LandingFor:   func(it planner.Item) string { return e.landingFor(it.DLE) },
+		RunSink:      e.runSink,
+		EstimateSink: e.estimateSink,
 	})
 }

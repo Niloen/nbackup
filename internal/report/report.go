@@ -20,6 +20,7 @@ type Command string
 
 const (
 	CommandDump   Command = "dump"
+	CommandCopy   Command = "copy"
 	CommandSync   Command = "sync"
 	CommandPrune  Command = "prune"
 	CommandVerify Command = "verify"

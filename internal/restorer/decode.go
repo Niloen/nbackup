@@ -66,21 +66,17 @@ func (d *decoder) restoreArchive(rc io.ReadCloser, plan decodePlan, archiverType
 	if err != nil {
 		return err
 	}
-	encF, err := crypt.Filter(plan.encrypt, plan.decryptOpts)
-	if err != nil {
-		return err
-	}
-	compF, err := compress.Filter(plan.compress, plan.compressOpts)
+	decrypt, decompress, err := buildDecode(plan.compress, plan.compressOpts, plan.encrypt, plan.decryptOpts)
 	if err != nil {
 		return err
 	}
 
 	// Place each decode step; the sink chain is decrypt → decompress → tar.
 	fused, filters := xfer.SplitTransforms(
-		xfer.Transform{Cmd: encF.Reverse, Fused: plan.decryptInSink},
-		xfer.Transform{Cmd: compF.Reverse, Fused: plan.remote},
+		xfer.Transform{Cmd: decrypt, Fused: plan.decryptInSink},
+		xfer.Transform{Cmd: decompress, Fused: plan.remote},
 	)
-	sink := xfer.NewProgramChain(dst.exec).Add(fused...).Add(arch.RestoreStage(dst.dir, members))
+	sink := xfer.NewProgramSink(dst.exec).Add(fused...).Add(arch.RestoreStage(dst.dir, members))
 
 	_, err = xfer.Transfer(context.Background(), xfer.Reader(rc), filters, sink)
 	return err
@@ -111,7 +107,7 @@ func (r *Restorer) VerifyChecksum(rc io.ReadCloser, sha string) (bool, error) {
 // check. It returns the listed members and the raw, role-tagged transfer error
 // for the caller to classify and hint.
 func (r *Restorer) ListMembers(rc io.ReadCloser, compressScheme, encrypt string, opts crypt.Options, arch archiver.Archiver) ([]string, error) {
-	decrypt, decompress, err := r.decodeFilters(compressScheme, encrypt, opts)
+	decrypt, decompress, err := buildDecode(compressScheme, r.deps.CompressOpts, encrypt, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -122,20 +118,16 @@ func (r *Restorer) ListMembers(rc io.ReadCloser, compressScheme, encrypt string,
 	return ls.members, terr
 }
 
-// decodeFilters returns the decrypt and decompress commands that reverse an
-// archive's recorded transforms. The decrypt key reference (opts) is resolved
-// per-DLE by the caller so a per-dumptype passphrase_file is honored, falling
-// back to the config-wide default. A none scheme yields an empty Cmd, which a
-// transfer skips.
-func (r *Restorer) decodeFilters(compressScheme, encrypt string, opts crypt.Options) (decrypt, decompress programs.Cmd, err error) {
-	cf, err := compress.Filter(compressScheme, r.deps.CompressOpts)
+// buildDecode returns the decrypt and decompress commands that reverse an
+// archive's recorded transforms. The decrypt key reference is resolved per-DLE
+// by the caller (decryptOptsFor — the one precedence rule). A none scheme
+// yields an empty Cmd, which a transfer skips.
+func buildDecode(compressScheme string, copts compress.Options, encrypt string, dopts crypt.Options) (decrypt, decompress programs.Cmd, err error) {
+	ef, err := crypt.Filter(encrypt, dopts)
 	if err != nil {
 		return programs.Cmd{}, programs.Cmd{}, err
 	}
-	if opts == (crypt.Options{}) {
-		opts = r.deps.DecryptOpts
-	}
-	ef, err := crypt.Filter(encrypt, opts)
+	cf, err := compress.Filter(compressScheme, copts)
 	if err != nil {
 		return programs.Cmd{}, programs.Cmd{}, err
 	}

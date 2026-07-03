@@ -69,8 +69,10 @@ func parseMtxDriveLine(line string) (int, mtxDrive, bool) {
 	e := mtxDrive{full: true, srcSlot: -1, barcode: parseMtxBarcode(rest)}
 	// "Full (Storage Element <S> Loaded):VolumeTag = …"
 	if j := strings.Index(rest, "Storage Element "); j >= 0 {
-		if n, err := strconv.Atoi(strings.Fields(rest[j+len("Storage Element "):])[0]); err == nil {
-			e.srcSlot = n
+		if f := strings.Fields(rest[j+len("Storage Element "):]); len(f) > 0 {
+			if n, err := strconv.Atoi(f[0]); err == nil {
+				e.srcSlot = n
+			}
 		}
 	}
 	return d, e, true

@@ -69,8 +69,8 @@ func (localExec) TempFile(pattern string) (string, error) {
 func (localExec) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
 
 // RunPipe chains the stages with in-process os/exec pipes: each stage's stdout feeds the
-// next stage's stdin, optionally tapped for a byte counter. The identity case (one stage
-// with nil program is not expressible here; zero stages returns stdin unchanged).
+// next stage's stdin, optionally tapped for a byte counter. Zero stages is the identity:
+// it returns stdin unchanged.
 func (localExec) RunPipe(ctx context.Context, stdin io.Reader, progs ...Cmd) (io.ReadCloser, func() error, error) {
 	if len(progs) == 0 {
 		return io.NopCloser(stdin), func() error { return nil }, nil

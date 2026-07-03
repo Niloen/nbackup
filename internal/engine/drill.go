@@ -17,6 +17,7 @@ import (
 	"github.com/Niloen/nbackup/internal/depot"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/librarian"
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/restorer"
@@ -147,7 +148,7 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 		medium = d.dep.LandingName()
 	}
 	if _, ok := d.cfg.Media[medium]; !ok {
-		return nil, fmt.Errorf("unknown drill medium %q", medium)
+		return nil, fmt.Errorf("unknown drill medium %q %s", medium, mediaNamesHint(d.cfg))
 	}
 
 	dles := d.dles.names()
@@ -161,7 +162,7 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 		AsOf: opts.AsOf, Window: opts.Window, Medium: medium, Tier: opts.Tier,
 		Apply: opts.Apply, Unattended: opts.Unattended, Ledger: ledger,
 	}
-	rep.NeverDrilled, rep.Overdue = coverage(dles, ledger, opts.Window, opts.Now)
+	rep.NeverDrilled, rep.Overdue = ledger.Coverage(dles, opts.Window, opts.Now)
 
 	// Price the egress of reading the selected chains off the drill medium — the
 	// honest cost of an offsite drill (an encrypted+compressed archive is all-or-
@@ -218,14 +219,10 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 		}
 	}
 
-	if opts.Worm {
-		rep.Worm = d.wormProbe(medium, true, opts.Now)
-	} else {
-		rep.Worm = d.wormProbe(medium, false, opts.Now)
-	}
+	rep.Worm = d.wormProbe(medium, opts.Worm, opts.Now)
 	rep.Posture = d.posture(rep.Worm, rep.Failures)
 	// Recompute coverage against the freshly updated ledger.
-	rep.NeverDrilled, rep.Overdue = coverage(dles, ledger, opts.Window, opts.Now)
+	rep.NeverDrilled, rep.Overdue = ledger.Coverage(dles, opts.Window, opts.Now)
 	return rep, nil
 }
 
@@ -443,16 +440,24 @@ func stockPipeline(encrypt, compress, passphraseFile string) (string, error) {
 // unattendedReachable reports whether a target's source copy can be read without a
 // human loading a tape. Address-identified media (disk/cloud) and robotic libraries
 // (which auto-mount) are always reachable; a single-drive station is reachable only
-// when every needed volume is already the one loaded in its drive.
+// when every needed volume is already the one loaded in its drive. A medium that
+// fails to open or inventory is NOT treated as reachable: OpenAdmin succeeds for
+// address-identified media too, so an error here is a real problem (e.g. a
+// write-held medium) and rides into the skip reason.
 func (d *driller) unattendedReachable(medium string, steps []recovery.Step) (bool, string) {
 	am, _, err := d.dep.OpenAdmin(medium)
 	if err != nil {
-		return true, "" // address-identified: nothing to mount
+		return false, fmt.Sprintf("cannot open medium %q: %v", medium, err)
 	}
 	defer am.Close()
+	// The changer capability — not a View error — decides "nothing to mount": an
+	// address-identified volume (disk/cloud) has no changer, so nothing needs a human.
+	if _, isChanger := am.Volume().(media.Changer); !isChanger {
+		return true, ""
+	}
 	view, err := am.View()
 	if err != nil {
-		return true, "" // address-identified: nothing to mount
+		return false, fmt.Sprintf("cannot inventory medium %q: %v", medium, err)
 	}
 	if !view.Manual {
 		return true, "" // a robot loads the right run itself
@@ -463,10 +468,18 @@ func (d *driller) unattendedReachable(medium string, steps []recovery.Step) (boo
 	}
 	for _, v := range d.chainLabels(steps, medium) {
 		if v != loaded {
-			return false, fmt.Sprintf("needs tape %q in the %q drive (a human-only swap); loaded: %s", v, medium, reelOrEmpty(loaded))
+			return false, fmt.Sprintf("needs volume %q in the %q drive (a human-only swap); loaded: %s", v, medium, volumeOrEmpty(loaded))
 		}
 	}
 	return true, ""
+}
+
+// volumeOrEmpty renders a volume label for a message, or "(empty)" for none.
+func volumeOrEmpty(label string) string {
+	if label == "" {
+		return "(empty)"
+	}
+	return fmt.Sprintf("%q", label)
 }
 
 // chainLabels is the distinct set of volume labels a chain's copies occupy on the
@@ -521,11 +534,4 @@ func failureToken(r DrillResult) string {
 		return ""
 	}
 	return r.Class.String()
-}
-
-// coverage reports the configured DLEs that have never been drilled and how many are
-// not covered within the window. It delegates to drill.Coverage — the pure
-// computation lives in the leaf with the ledger, so `nb report` reuses it too.
-func coverage(dles []string, ledger *drill.Ledger, window time.Duration, now time.Time) (never []string, overdue int) {
-	return ledger.Coverage(dles, window, now)
 }

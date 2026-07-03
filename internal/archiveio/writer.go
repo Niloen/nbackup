@@ -47,11 +47,11 @@ type PartAllocator interface {
 	// rolling onto a fresh volume first if the loaded one is full. A max < 0 means
 	// unbounded — write the whole remaining stream as a single part. It errors when a
 	// roll is needed but no further writable volume is available.
-	NextPart() (vol media.Volume, max int64, volume string, epoch int, err error)
+	NextPart() (vol media.Volume, max int64, label string, epoch int, err error)
 	// PlaceFile returns the volume to write a small whole file (an archive's member
 	// index or its commit footer) of the given payload size to, rolling first if it will
 	// not fit the loaded volume.
-	PlaceFile(size int64) (vol media.Volume, volume string, epoch int, err error)
+	PlaceFile(size int64) (vol media.Volume, label string, epoch int, err error)
 	// Bounded reports whether this allocator ever caps a part's size — by a configured
 	// part_size or by a finite volume's remaining capacity (the dual of NextPart's "max < 0
 	// means unbounded"). When true an archive may land as several parts (cloud splitting
@@ -206,7 +206,7 @@ func (a *ArchiveWriter) SetCloser(fn func() error) { a.onClose = fn }
 // PartAllocator.NextPart alloc may cross to the orchestrator; the AppendFile header and the payload
 // writes stay on this goroutine.
 func (a *ArchiveWriter) NextPart(ctx context.Context) (io.WriteCloser, int64, error) {
-	vol, max, volName, epoch, err := a.w.alloc.NextPart()
+	vol, max, label, epoch, err := a.w.alloc.NextPart()
 	if err != nil {
 		return nil, 0, err
 	}
@@ -217,17 +217,17 @@ func (a *ArchiveWriter) NextPart(ctx context.Context) (io.WriteCloser, int64, er
 	if err != nil {
 		return nil, 0, err
 	}
-	return &archivePartWriter{a: a, fw: fw, dst: a.w.lim.Writer(fw), volName: volName, epoch: epoch}, max, nil
+	return &archivePartWriter{a: a, fw: fw, dst: a.w.lim.Writer(fw), label: label, epoch: epoch}, max, nil
 }
 
 // archivePartWriter meters the bytes (sha + size, on the caller's goroutine) then writes them
 // through — rate-limited — to the volume. Close records the part's position.
 type archivePartWriter struct {
-	a       *ArchiveWriter
-	fw      media.FileWriter
-	dst     io.Writer
-	volName string
-	epoch   int
+	a     *ArchiveWriter
+	fw    media.FileWriter
+	dst   io.Writer
+	label string
+	epoch int
 }
 
 func (p *archivePartWriter) Write(b []byte) (int, error) {
@@ -246,7 +246,7 @@ func (p *archivePartWriter) Close() error {
 	if err := p.fw.Close(); err != nil {
 		return err
 	}
-	p.a.parts = append(p.a.parts, record.FilePos{Label: p.volName, Epoch: p.epoch, Pos: p.fw.Pos()})
+	p.a.parts = append(p.a.parts, record.FilePos{Label: p.label, Epoch: p.epoch, Pos: p.fw.Pos()})
 	return nil
 }
 
@@ -283,7 +283,7 @@ func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.SourceStats) error {
 		}
 		arch.CreatedAt = a.w.now() // the archive's landing time (per-archive)
 	}
-	pos, err := a.w.Commit(ctx, arch, a.parts)
+	pos, err := a.w.finalize(ctx, arch, a.parts)
 	if err != nil {
 		return err
 	}
@@ -306,14 +306,14 @@ func (a *ArchiveWriter) Close() error {
 	return nil
 }
 
-// Commit durably finalizes an archive (all fields final): it writes the member index (the
+// finalize durably finalizes an archive (all fields final): it writes the member index (the
 // gzip'd Members) then the commit footer (the metadata without members) — the footer last,
 // so a crash before it leaves orphan parts a scan ignores. It returns the archive's on-medium
 // position (parts/footer/index) for the caller to record. The Writer keeps no run state — the
 // footer makes the archive durable and the caller records it from the returned position — so
 // concurrent Commits on an unbounded medium need no coordination here. Call it once the caller has
 // merged the producer's stats (FileCount/Uncompressed/Members) into the archive.
-func (w *Writer) Commit(ctx context.Context, arch record.Archive, parts []record.FilePos) (record.ArchivePos, error) {
+func (w *Writer) finalize(ctx context.Context, arch record.Archive, parts []record.FilePos) (record.ArchivePos, error) {
 	var index record.FilePos
 	if len(arch.Members) > 0 {
 		var buf bytes.Buffer
@@ -350,7 +350,7 @@ func (w *Writer) Commit(ctx context.Context, arch record.Archive, parts []record
 // archive, returning where it landed. The header identifies the archive it belongs to so a
 // scan can correlate it with the archive's parts (which may be on other volumes).
 func (w *Writer) writeRecord(ctx context.Context, kind string, a record.Archive, payload []byte) (record.FilePos, error) {
-	vol, volName, epoch, err := w.alloc.PlaceFile(int64(len(payload)))
+	vol, label, epoch, err := w.alloc.PlaceFile(int64(len(payload)))
 	if err != nil {
 		return record.FilePos{}, fmt.Errorf("place %s record: %w", kind, err)
 	}
@@ -366,7 +366,7 @@ func (w *Writer) writeRecord(ctx context.Context, kind string, a record.Archive,
 	if werr != nil {
 		return record.FilePos{}, werr
 	}
-	return record.FilePos{Label: volName, Epoch: epoch, Pos: fw.Pos()}, nil
+	return record.FilePos{Label: label, Epoch: epoch, Pos: fw.Pos()}, nil
 }
 
 // archiveHeader builds the base record.Header an archive's parts share (NextPart clones
@@ -389,6 +389,3 @@ func (w *Writer) archiveHeader(a record.Archive) record.Header {
 		CreatedAt: w.createdAt,
 	}
 }
-
-// RunID returns the id of the run being authored.
-func (w *Writer) RunID() string { return w.runID }

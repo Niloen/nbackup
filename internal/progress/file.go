@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/Niloen/nbackup/internal/fsx"
 )
 
 // flushInterval bounds how often byte-count updates rewrite the status file;
@@ -47,17 +49,7 @@ func writeStatus(path string, s Snapshot) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(path, data, 0o644)
-}
-
-// writeFileAtomic writes data to a sibling temp file and renames it over path,
-// so a concurrent reader never observes a half-written file.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return fsx.WriteFileAtomic(path, data, 0o644)
 }
 
 // Load reads the run-status file from a catalog workdir. It returns

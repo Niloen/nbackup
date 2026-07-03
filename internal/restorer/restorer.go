@@ -195,7 +195,7 @@ func (r *Restorer) extractChain(runID string, req Request, rollbackOnFail bool, 
 		if oerr != nil {
 			return stepErr(step, DecryptHint(step.Encrypt, oerr))
 		}
-		plan := r.planDecode(step.Compress, step.Encrypt, ec, req.Host)
+		plan := r.planDecode(step.DLE, step.Compress, step.Encrypt, req.Host)
 		if xerr := r.dec.restoreArchive(rc, plan, step.Archiver, d, nil); xerr != nil {
 			return stepErr(step, DecryptHint(step.Encrypt, xerr))
 		}
@@ -256,22 +256,15 @@ func clearDirContents(dir string) error {
 	return nil
 }
 
-// decodePlan resolves the decode placement (policy): decrypt runs on the target
+// planDecode resolves the decode placement (policy): decrypt runs on the target
 // (the sink) only when the key is client-held and reached over `--to`; otherwise
-// on the local server, with the server's default decrypt opts.
-func (r *Restorer) planDecode(compressScheme, encrypt string, ec config.EncryptConfig, targetHost string) decodePlan {
-	opts := r.deps.DecryptOpts
-	// A per-dumptype encrypt block overrides the config-wide decrypt key
-	// reference, mirroring the dump side — otherwise a passphrase_file declared
-	// under a dumptype is dropped on read-back and a server-side restore cannot
-	// decrypt it.
-	if ec.PassphraseFile != "" || ec.Program != "" {
-		opts = crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile, Nice: r.deps.DecryptOpts.Nice}
-	}
+// on the local server. The decrypt key reference is decryptOptsFor's one rule.
+func (r *Restorer) planDecode(dleName, compressScheme, encrypt, targetHost string) decodePlan {
+	ec, _ := r.deps.EncryptionFor(dleName)
 	inSink := ec.At == "client" && targetHost != ""
 	return decodePlan{
 		compress: compressScheme, compressOpts: r.deps.CompressOpts,
-		encrypt: encrypt, decryptOpts: opts, decryptInSink: inSink,
+		encrypt: encrypt, decryptOpts: r.decryptOptsFor(dleName), decryptInSink: inSink,
 		remote: targetHost != "",
 	}
 }
@@ -326,26 +319,35 @@ func clientSideKeyRestore(ec config.EncryptConfig, dleName string) (hardErr erro
 	return nil, true
 }
 
-// friendlyDLEErr rewrites a chain error so the DLE reads as host:path — the form
-// the user passed and the surrounding output uses — rather than the internal
-// catalog slug the planning layer embeds. A DLE with no display mapping is left
-// unchanged.
+// friendlyDLEErr rewrites a chain error's message so the DLE reads as host:path
+// — the form the user passed and the surrounding output uses — rather than the
+// internal catalog slug the planning layer embeds, preserving the wrapped chain
+// (the package contract: errors.Is/As survive). A DLE with no display mapping
+// is left unchanged.
 func (r *Restorer) friendlyDLEErr(dleName string, err error) error {
 	disp := r.deps.DisplayDLE(dleName)
 	if disp == dleName || err == nil {
 		return err
 	}
-	return errors.New(strings.ReplaceAll(err.Error(), `"`+dleName+`"`, `"`+disp+`"`))
+	return &filteredErr{msg: strings.ReplaceAll(err.Error(), `"`+dleName+`"`, `"`+disp+`"`), cause: err}
 }
 
-// DecryptOptsFor resolves the decrypt key reference for a DLE's archives: the
-// per-dumptype encrypt block's passphrase_file/program when that DLE's dumptype
-// sets one, else the config-wide default. It mirrors the dump side — without it
-// a passphrase_file declared under a dumptype is silently dropped on read-back,
-// so recover / verify --deep / drill cannot decrypt a config the README
-// documents. A DLE no longer in the config falls back to the config-wide block.
+// DecryptOptsFor resolves the decrypt key reference for a DLE's archives — the
+// exported face of decryptOptsFor for the engine's verify/drill paths.
 func (r *Restorer) DecryptOptsFor(dleName string) crypt.Options {
-	if ec, ok := r.deps.EncryptionFor(dleName); ok {
+	return r.decryptOptsFor(dleName)
+}
+
+// decryptOptsFor is the one place the decrypt key reference for a DLE's
+// archives is decided: a DLE whose encrypt config sets a passphrase_file or
+// program uses it (mirroring the dump side — without this a passphrase_file
+// declared under a dumptype is silently dropped on read-back, so recover /
+// verify --deep / drill cannot decrypt a config the README documents);
+// otherwise — including a DLE no longer in the config — the config-wide
+// default applies. Every decode path (planDecode, DecryptOptsFor) delegates
+// here so the precedence cannot drift.
+func (r *Restorer) decryptOptsFor(dleName string) crypt.Options {
+	if ec, ok := r.deps.EncryptionFor(dleName); ok && (ec.PassphraseFile != "" || ec.Program != "") {
 		return crypt.Options{Program: ec.Program, PassphraseFile: ec.PassphraseFile, Nice: r.deps.DecryptOpts.Nice}
 	}
 	return r.deps.DecryptOpts

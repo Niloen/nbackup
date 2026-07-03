@@ -2,7 +2,6 @@ package media
 
 import (
 	"sort"
-	"strconv"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/record"
@@ -130,35 +129,13 @@ func (p sizeProfile) Reclaim(archives []record.Archive, keep Retention, now time
 // --- volume-based profile (libraries of removable volumes, e.g. tape) —
 // capacity known, reclamation deferred ---
 
-// NewVolumeProfile builds a removable-volume profile from "volume_size" (each
-// cartridge's capacity) and the cartridge count, reading the same keys the changer
-// does so the two never disagree: a file-backed library counts "slots", and a real
-// drive ("device") has an unbounded pool — the operator can load any number of
-// cartridges by hand, so only the per-run reel ceiling (VolumeSize) is finite.
-func NewVolumeProfile(opts Options) (Profile, error) {
-	volumeSize, _ := parseBytes(opts.Get("volume_size"))
-	return volumeProfile{volumes: volumeCount(opts), volumeSize: volumeSize}, nil
-}
-
-// volumeCount reads the retainable cartridge count from the same option key the
-// changer keys on, so the planner's pool capacity can never disagree with the medium
-// it lands on: a file-backed library counts "slots", and a real drive ("device") has
-// an unbounded pool (0). This mirrors the tape factory's key choice by convention.
-func volumeCount(opts Options) int64 {
-	if opts.Get("device") != "" {
-		return 0 // real drive: pool unbounded, only the reel is finite
-	}
-	return countOpt(opts.Get("slots"))
-}
-
-// countOpt parses a volume count, defaulting to 1 (a medium always has at least
-// its one loaded volume), matching the changer's own atoiOpt(..., 1) default.
-func countOpt(s string) int64 {
-	if s == "" {
-		return 1
-	}
-	n, _ := strconv.ParseInt(s, 10, 64)
-	return n
+// NewVolumeProfile builds a removable-volume profile: volumes retainable
+// cartridges (0 = an unbounded pool, e.g. a hand-loaded drive whose shelf is
+// unknowable), each of volumeSize bytes (the per-run reel ceiling). How those two
+// numbers fall out of a medium's config is the medium's business — the tape
+// package derives them from its own option keys when it registers.
+func NewVolumeProfile(volumes, volumeSize int64) Profile {
+	return volumeProfile{volumes: volumes, volumeSize: volumeSize}
 }
 
 type volumeProfile struct {

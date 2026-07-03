@@ -40,6 +40,8 @@ const driveBindFile = ".drives"
 // still effects the chosen cartridge — simulating a hand-loaded drive without
 // hardware.
 type dirLoader struct {
+	// ctx in a struct is accepted debt, forced by media.Volume's ctx-less read path
+	// (revisit if Volume ever grows a ctx).
 	ctx      context.Context
 	bucket   *blob.Bucket
 	capacity int64
@@ -180,6 +182,8 @@ func (l *dirLoader) loaded(drive int) (device, string, int, bool) {
 // run past it fails mid-stream with media.ErrVolumeFull (end-of-tape), as a real
 // drive signals EOT.
 type dirDevice struct {
+	// ctx in a struct is accepted debt, forced by media.Volume's ctx-less read path
+	// (revisit if Volume ever grows a ctx).
 	ctx        context.Context
 	bucket     *blob.Bucket
 	prefix     string // "slot-NN/": the cartridge's key prefix
@@ -190,11 +194,11 @@ type dirDevice struct {
 	hasForeign bool  // prefix holds non-NBackup keys (foreign media); see foreign()
 }
 
-// foreign reports whether the bay prefix holds keys that are not NBackup's
+// foreign reports whether the cartridge prefix holds keys that are not NBackup's
 // own NNNNNN-numbered files — non-NBackup data the overwrite guard must refuse,
-// distinct from a genuinely empty (blank) bay. The label protocol consults it so
-// foreign content in an emulated bay is detected just as a foreign file-0 label
-// is on a real tape, rather than being mistaken for blank.
+// distinct from a genuinely empty (blank) cartridge. The label protocol consults it
+// so foreign content in an emulated cartridge is detected just as a foreign file-0
+// label is on a real tape, rather than being mistaken for blank.
 func (d *dirDevice) foreign() bool { return d.hasForeign }
 
 func openDir(ctx context.Context, b *blob.Bucket, prefix string, capacity int64) (*dirDevice, error) {
@@ -216,9 +220,9 @@ func openDir(ctx context.Context, b *blob.Bucket, prefix string, capacity int64)
 		}
 		n, err := strconv.Atoi(strings.TrimPrefix(obj.Key, prefix))
 		if err != nil {
-			// A key that is not one of our NNNNNN-numbered files: this bay holds
-			// non-NBackup data. Flag it foreign so the label guard refuses to overwrite
-			// it, rather than counting only our files and mistaking the bay for blank.
+			// A key that is not one of our NNNNNN-numbered files: this cartridge holds
+			// non-NBackup data. Flag it foreign so the label guard refuses to overwrite it,
+			// rather than counting only our files and mistaking the cartridge for blank.
 			d.hasForeign = true
 			continue
 		}
@@ -338,7 +342,7 @@ func (d *dirDevice) readFile(pos int) (io.ReadCloser, error) {
 // reset deletes every file so the next write starts at file 0 — the emulator's
 // equivalent of overwriting a tape from BOT. It removes foreign (non-numbered)
 // keys too: relabeling overwrites the whole volume, so a forced relabel of a
-// foreign bay leaves a clean tape rather than co-mingling our label with the
+// foreign cartridge leaves a clean tape rather than co-mingling our label with the
 // stranger's files.
 func (d *dirDevice) reset() error {
 	d.mu.Lock()

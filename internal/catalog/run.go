@@ -19,11 +19,11 @@ type Run struct {
 }
 
 // Date is the run date (YYYY-MM-DD) encoded in the run id.
-func (s *Run) Date() string { return record.RunDate(s.ID) }
+func (r *Run) Date() string { return record.RunDate(r.ID) }
 
 // Archive returns the run's archive for a DLE at a level, if recorded.
-func (s *Run) Archive(dle string, level int) (record.Archive, bool) {
-	for _, a := range s.Archives {
+func (r *Run) Archive(dle string, level int) (record.Archive, bool) {
+	for _, a := range r.Archives {
 		if a.DLE == dle && a.Level == level {
 			return a, true
 		}
@@ -32,9 +32,9 @@ func (s *Run) Archive(dle string, level int) (record.Archive, bool) {
 }
 
 // TotalBytes sums the compressed sizes of the run's archives.
-func (s *Run) TotalBytes() int64 {
+func (r *Run) TotalBytes() int64 {
 	var n int64
-	for _, a := range s.Archives {
+	for _, a := range r.Archives {
 		n += a.Compressed
 	}
 	return n
@@ -42,8 +42,8 @@ func (s *Run) TotalBytes() int64 {
 
 // Partial reports whether any of the run's archives is a PARTIAL dump (omitted
 // unreadable source files) — the run committed, but not everything it aimed at.
-func (s *Run) Partial() bool {
-	for _, a := range s.Archives {
+func (r *Run) Partial() bool {
+	for _, a := range r.Archives {
 		if a.Partial() {
 			return true
 		}
@@ -53,9 +53,9 @@ func (s *Run) Partial() bool {
 
 // LastArchiveAt is when the run's most recently committed archive landed — the run's "last
 // activity", for display. Zero when the run has no archives.
-func (s *Run) LastArchiveAt() time.Time {
+func (r *Run) LastArchiveAt() time.Time {
 	var last time.Time
-	for _, a := range s.Archives {
+	for _, a := range r.Archives {
 		if a.CreatedAt.After(last) {
 			last = a.CreatedAt
 		}
@@ -66,29 +66,29 @@ func (s *Run) LastArchiveAt() time.Time {
 // addArchive merges a into the run's content, replacing any prior archive of the same
 // (DLE, level). The content is the union of every archive the run produces, independent of
 // which medium currently holds each copy.
-func (s *Run) addArchive(a record.Archive) {
-	for i := range s.Archives {
-		if s.Archives[i].DLE == a.DLE && s.Archives[i].Level == a.Level {
-			s.Archives[i] = a
+func (r *Run) addArchive(a record.Archive) {
+	for i := range r.Archives {
+		if r.Archives[i].DLE == a.DLE && r.Archives[i].Level == a.Level {
+			r.Archives[i] = a
 			return
 		}
 	}
-	s.Archives = append(s.Archives, a)
+	r.Archives = append(r.Archives, a)
 }
 
 // dropArchive removes a DLE's archive, the inverse of addArchive. Used when the last copy of
 // that DLE's image has been reclaimed, so the run's content no longer advertises an image no
 // medium holds. Reports whether an archive was removed.
-func (s *Run) dropArchive(dle string) bool {
-	kept := s.Archives[:0:0]
+func (r *Run) dropArchive(dle string) bool {
+	kept := r.Archives[:0:0]
 	removed := false
-	for _, a := range s.Archives {
+	for _, a := range r.Archives {
 		if a.DLE == dle {
 			removed = true
 			continue
 		}
 		kept = append(kept, a)
 	}
-	s.Archives = kept
+	r.Archives = kept
 	return removed
 }

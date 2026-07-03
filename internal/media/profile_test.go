@@ -42,30 +42,22 @@ func TestSizeProfileReclaimsPerArchive(t *testing.T) {
 	}
 }
 
-// TestVolumeProfileShapeAware: the volume profile reads the same keys the tape
-// changer does, so the planner's capacity never disagrees with the medium. A
-// file-backed library counts "slots" (robotic or manual); a real drive ("device")
-// has an unbounded pool but a finite reel; and an unsized reel is unbounded. The
-// count defaults to one, matching the changer.
-func TestVolumeProfileShapeAware(t *testing.T) {
+// TestVolumeProfile: the pool is volumes * volume size; zero volumes means an
+// unbounded pool (a hand-loaded drive) with the reel still the per-run ceiling;
+// an unsized reel is unbounded.
+func TestVolumeProfile(t *testing.T) {
 	cases := []struct {
-		name      string
-		opts      Options
-		wantTotal int64 // retainable pool (TotalBytes)
-		wantReel  int64 // per-run reel ceiling (VolumeSize)
+		name                string
+		volumes, volumeSize int64
+		wantTotal, wantReel int64
 	}{
-		{"library counts bays", Options{"dir": "/x", "slots": "3", "volume_size": "100"}, 300, 100},
-		{"manual station counts reels", Options{"dir": "/x", "manual": "true", "slots": "4", "volume_size": "100"}, 400, 100},
-		{"bare drive: unbounded pool, finite reel", Options{"device": "/dev/nst0", "volume_size": "100"}, 0, 100},
-		{"count defaults to one", Options{"dir": "/x", "volume_size": "100"}, 100, 100},
-		{"unsized reel is unbounded", Options{"dir": "/x", "slots": "3"}, 0, 0},
+		{"library multiplies out", 3, 100, 300, 100},
+		{"unbounded pool, finite reel", 0, 100, 0, 100},
+		{"unsized reel is unbounded", 3, 0, 0, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p, err := NewVolumeProfile(tc.opts)
-			if err != nil {
-				t.Fatal(err)
-			}
+			p := NewVolumeProfile(tc.volumes, tc.volumeSize)
 			if got := p.TotalBytes(); got != tc.wantTotal {
 				t.Errorf("TotalBytes = %d, want %d", got, tc.wantTotal)
 			}

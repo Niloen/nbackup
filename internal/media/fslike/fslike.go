@@ -48,10 +48,6 @@ type Store interface {
 	// must not commit (a cloud upload is abandoned; a local partial is left for the caller to discard),
 	// so an aborted append never leaves a committed payload.
 	Writer(ctx context.Context, key string) (io.WriteCloser, error)
-	// WriteAll writes b to key (the header sidecar).
-	WriteAll(ctx context.Context, key string, b []byte) error
-	// ReadAll reads the whole file at key (the header sidecar).
-	ReadAll(key string) ([]byte, error)
 	// Open opens the file at key for streaming; the caller closes it.
 	Open(key string) (io.ReadCloser, error)
 	// List returns every stored file, for the catalog-rebuild scan.
@@ -61,6 +57,31 @@ type Store interface {
 	// Remove deletes a single file by key (one archive's payload or sidecar). A
 	// missing key is not an error (idempotent reclamation).
 	Remove(key string) error
+}
+
+// writeAll writes b as the whole file at key (a header sidecar) through the
+// Store's streaming Writer.
+func writeAll(ctx context.Context, s Store, key string, b []byte) error {
+	w, err := s.Writer(ctx, key)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(b); err != nil {
+		w.Close() //nolint:errcheck — the write error is the one to report
+		return err
+	}
+	return w.Close()
+}
+
+// readAll reads the whole file at key (a header sidecar) through the Store's
+// streaming Open.
+func readAll(s Store, key string) ([]byte, error) {
+	r, err := s.Open(key)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(r)
 }
 
 // entry pairs a file's header sidecar and payload keys with its run. incomplete
@@ -233,7 +254,7 @@ func (f *fileWriter) Close() error {
 		f.v.drop(f.pos)
 		return cerr
 	}
-	if err := f.v.store.WriteAll(f.ctx, f.hdrKey, f.hdr); err != nil {
+	if err := writeAll(f.ctx, f.v.store, f.hdrKey, f.hdr); err != nil {
 		f.v.drop(f.pos)
 		return err
 	}
@@ -383,7 +404,7 @@ func (v *Volume) scan() error {
 }
 
 func (v *Volume) readHeader(key string) (record.Header, error) {
-	data, err := v.store.ReadAll(key)
+	data, err := readAll(v.store, key)
 	if err != nil {
 		return record.Header{}, fmt.Errorf("read header %s: %w", key, err)
 	}

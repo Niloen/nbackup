@@ -7,10 +7,15 @@ package accounting
 //     cannot reclaim (MediumProtectedOverCapacity / PoolRoom), or a projected total
 //     after a pending write (ProjectedOverCapacity);
 //   - 0 capacity always means unbounded, never "full".
+//
+// The two "protected bytes" figures are deliberately different quantities:
+// MediumProtectedOverCapacity is the residual left after a capacity-fitting prune
+// (current total minus what Reclaim would free — which may leave unprotected bytes
+// a prune had no need to delete), while PoolRoom counts only the floor-pinned bytes
+// themselves (the hard minimum no prune can ever go below).
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/retention"
@@ -86,8 +91,8 @@ func (a *Accountant) MediumProtectionIsAgeBound(name string, now time.Time) bool
 	archives := a.d.Cat.ArchivesOn(name)
 	floor := retention.Compute(archives, a.d.Cfg.MinAgeFor(def), now)
 	for _, ar := range archives {
-		reason, ok := floor.ReasonArchive(ar.Run, ar.DLE)
-		if ok && !strings.Contains(reason, "minimum age") {
+		kind, ok := floor.KindArchive(ar.Run, ar.DLE)
+		if ok && kind != retention.KindAge {
 			return false // a recovery-chain pin that shortening minimum_age can't release
 		}
 	}

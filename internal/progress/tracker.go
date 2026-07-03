@@ -22,7 +22,8 @@ type Sink func(s Snapshot, force bool)
 
 // Tracker maintains the single live Snapshot of a run and pushes it to a sink as
 // workers report progress. Its methods are safe for concurrent use by parallel
-// workers.
+// workers. A nil *Tracker is a no-op sink: every reporting method returns early,
+// so a caller that may run without progress tracking needs no guard.
 type Tracker struct {
 	now  func() time.Time
 	sink Sink
@@ -42,13 +43,12 @@ func NewTracker(runID string, phase Phase, workers int, plan []Plan, now func() 
 	}
 	start := now()
 	dles := make([]DLE, len(plan))
-	idx := make(map[string]int, len(plan))
 	for i, p := range plan {
 		dles[i] = DLE{Name: p.Name, Level: p.Level, State: StatePending, EstBytes: p.EstBytes}
-		idx[p.Name] = i
 	}
 	byName(dles)
-	for i, d := range dles { // reindex after sort
+	idx := make(map[string]int, len(dles))
+	for i, d := range dles {
 		idx[d.Name] = i
 	}
 	t := &Tracker{
@@ -70,6 +70,9 @@ func NewTracker(runID string, phase Phase, workers int, plan []Plan, now func() 
 
 // StartDLE marks a DLE as actively dumping.
 func (t *Tracker) StartDLE(name string) {
+	if t == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if d := t.dle(name); d != nil {
@@ -82,6 +85,9 @@ func (t *Tracker) StartDLE(name string) {
 // AddBytes records cumulative progress for a DLE: uncompressed bytes archived and
 // compressed bytes written so far. Throttle-eligible (force=false).
 func (t *Tracker) AddBytes(name string, uncompressed, compressed int64) {
+	if t == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if d := t.dle(name); d != nil {
@@ -94,6 +100,9 @@ func (t *Tracker) AddBytes(name string, uncompressed, compressed int64) {
 // AddDrainBytes records cumulative compressed bytes copied to the landing for a DLE the
 // drainer is flushing off a holding disk. Throttle-eligible (force=false), mirroring AddBytes.
 func (t *Tracker) AddDrainBytes(name string, copied int64) {
+	if t == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if d := t.dle(name); d != nil {
@@ -104,6 +113,9 @@ func (t *Tracker) AddDrainBytes(name string, copied int64) {
 
 // FinishDLE marks a DLE done (or failed when err != nil) with its final tallies.
 func (t *Tracker) FinishDLE(name string, fileCount int, uncompressed, compressed int64, err error) {
+	if t == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if d := t.dle(name); d != nil {
@@ -132,6 +144,9 @@ func (t *Tracker) FinishDLE(name string, fileCount int, uncompressed, compressed
 // CancelDLE marks a DLE interrupted in flight by a canceled run — distinct from a failure,
 // so status shows it as canceled rather than a scary error. A no-op for an unknown DLE.
 func (t *Tracker) CancelDLE(name string) {
+	if t == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if d := t.dle(name); d != nil {
@@ -147,6 +162,9 @@ func (t *Tracker) CancelDLE(name string) {
 // DLE staging to holding (and not yet on the volume) instead of mistaking its in-flight dump for a
 // direct write to the landing. A no-op for an unknown DLE.
 func (t *Tracker) MarkToHolding(name string) {
+	if t == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if d := t.dle(name); d != nil {
@@ -160,6 +178,9 @@ func (t *Tracker) MarkToHolding(name string) {
 // another's drain from a direct dump: until the drainer reaches it, only this mark tells the two
 // apart (without it, a queued holding DLE renders as "direct"). A no-op for an unknown DLE.
 func (t *Tracker) StageHolding(name, holding string) {
+	if t == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if d := t.dle(name); d != nil {
@@ -173,7 +194,7 @@ func (t *Tracker) StageHolding(name, holding string) {
 // is what surfaces the multi-drive spread in `nb status`: each DLE shows the volume its data reached. A
 // no-op for an unknown DLE or an empty volume id (an address-identified landing carries no label).
 func (t *Tracker) LandVolume(name, volume string) {
-	if volume == "" {
+	if t == nil || volume == "" {
 		return
 	}
 	t.mu.Lock()
@@ -188,6 +209,9 @@ func (t *Tracker) LandVolume(name, volume string) {
 // (the second phase after its dump committed). Recording the disk lets a multi-disk run show where
 // each DLE buffered. A no-op for an unknown DLE.
 func (t *Tracker) StartFlush(name, holding string) {
+	if t == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if d := t.dle(name); d != nil {
@@ -204,6 +228,9 @@ func (t *Tracker) StartFlush(name, holding string) {
 // FinishFlush marks a DLE done once it has landed and been reclaimed from the holding disk.
 // A no-op for an unknown DLE.
 func (t *Tracker) FinishFlush(name string) {
+	if t == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if d := t.dle(name); d != nil {
@@ -233,6 +260,9 @@ func (t *Tracker) markDumpEndIfDone() {
 
 // SetPhase advances the run's overall phase; terminal phases stamp EndedAt.
 func (t *Tracker) SetPhase(p Phase) {
+	if t == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.snap.Phase = p
@@ -242,8 +272,11 @@ func (t *Tracker) SetPhase(p Phase) {
 	t.flush(true)
 }
 
-// Snapshot returns a copy of the current state.
+// Snapshot returns a copy of the current state (the zero Snapshot on a nil Tracker).
 func (t *Tracker) Snapshot() Snapshot {
+	if t == nil {
+		return Snapshot{}
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.copy()

@@ -5,7 +5,6 @@ package recovery
 
 import (
 	"fmt"
-	"sort"
 
 	"github.com/Niloen/nbackup/internal/record"
 )
@@ -49,7 +48,7 @@ func Chain(archives []record.Archive, dleName, targetRunID string) ([]Step, erro
 	}
 
 	// The DLE's archives in run order (one per run — a run dumps each DLE once).
-	ds := archivesOf(archives, dleName)
+	ds := record.ArchivesOf(archives, dleName)
 
 	// The tip is the most recent dump of the DLE at or before the target.
 	cur := -1
@@ -107,16 +106,4 @@ func baseIndex(ds []record.Archive, curIdx int, dleName string) (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("broken incremental chain for DLE %q: run %s (level %d) has no level-%d base at or before it", dleName, a.Run, a.Level, a.Level-1)
-}
-
-// archivesOf returns the archives of dle, in run order (by run id).
-func archivesOf(archives []record.Archive, dleName string) []record.Archive {
-	var out []record.Archive
-	for _, a := range archives {
-		if a.DLE == dleName {
-			out = append(out, a)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return record.RunIDLess(out[i].Run, out[j].Run) })
-	return out
 }

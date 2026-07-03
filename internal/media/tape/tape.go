@@ -33,7 +33,7 @@ func init() {
 		// A library of removable reels: capacity is known (volumes * volume_size) but
 		// reclamation is deferred to label rotation, so no concurrent-write capability —
 		// a serial, whole-volume medium.
-		Profile: media.NewVolumeProfile,
+		Profile: newVolumeProfile,
 		Params:  []string{"dir", "device", "changer", "slots", "drives", "manual", "volume_size", "part_size", "block_size"},
 	})
 }
@@ -101,6 +101,9 @@ func newTapeVolume(opts media.Options) (media.Volume, error) {
 				return nil, fmt.Errorf("`%s` applies only to an emulated library (dir:); a real drive (device:) is a single hand-loaded drive", k)
 			}
 		}
+		if opts.Get("volume_size") != "" {
+			return nil, fmt.Errorf("`volume_size` does not apply to a real drive (device:): the drive reports EOT only by hitting it, so capacity is unknowable; bound parts with `part_size`")
+		}
 		block, err := blockOpt(opts.Get("block_size"))
 		if err != nil {
 			return nil, err
@@ -109,10 +112,32 @@ func newTapeVolume(opts media.Options) (media.Volume, error) {
 		if err != nil {
 			return nil, err
 		}
-		return newTapeChanger(&realDriveLoader{dev: dev}, capacity)
+		return newTapeChanger(&realDriveLoader{dev: dev}, 0)
 	default:
 		return nil, fmt.Errorf("tape medium requires 'dir' (emulated library: a directory or bucket URL) or 'device' (real drive)")
 	}
+}
+
+// newVolumeProfile builds the tape pool's capacity profile from the same option
+// keys the changer factory reads, so the planner's pool capacity can never
+// disagree with the medium it lands on: a file-backed library counts "slots"
+// (defaulting to 1, matching atoiOpt — a medium always has at least its one
+// loaded volume), and a real drive ("device") has an unbounded pool (0) — the
+// operator can load any number of cartridges by hand, so only the per-run reel
+// ceiling (volume_size) is finite.
+func newVolumeProfile(opts media.Options) (media.Profile, error) {
+	var volumeSize int64
+	if s := opts.Get("volume_size"); s != "" {
+		volumeSize, _ = sizeutil.ParseBytes(s)
+	}
+	var volumes int64 = 1
+	switch {
+	case opts.Get("device") != "":
+		volumes = 0 // real drive: pool unbounded, only the reel is finite
+	case opts.Get("slots") != "":
+		volumes, _ = strconv.ParseInt(opts.Get("slots"), 10, 64)
+	}
+	return media.NewVolumeProfile(volumes, volumeSize), nil
 }
 
 // atoiOpt parses an integer option, returning def when the value is empty.
@@ -161,6 +186,11 @@ type device interface {
 	// bytesUsed reports the bytes written on the mounted volume, or 0 when the
 	// device cannot see its own fill (a real drive only learns it by hitting EOT).
 	bytesUsed() int64
+	// foreign reports whether the device can see, without reading file 0, that the
+	// mounted volume holds non-NBackup data (a file-backed cartridge with stray,
+	// unnumbered keys). A real tape always reports false — its foreignness is
+	// detected by decoding the file-0 label instead.
+	foreign() bool
 }
 
 // tape is the per-cartridge I/O core: it frames files and the label over one mounted
@@ -187,7 +217,7 @@ type deviceWriter interface {
 }
 
 // AppendFile frames an inline header block ahead of the payload (a tape cannot carry a sidecar) and
-// appends it as the next file on the mounted bay. The device hands back a writer that holds the drive
+// appends it as the next file on the mounted cartridge. The device hands back a writer that holds the drive
 // serially; the consumer writes the payload, and Close commits it (filemark) — or, if ctx was
 // canceled, aborts (the append-only partial tail is left for the rebuild scan to ignore).
 func (t *tape) AppendFile(ctx context.Context, h record.Header) (media.FileWriter, error) {
@@ -229,7 +259,7 @@ func (t *tapeWriter) Close() error {
 	return nil
 }
 
-// ReadFile fast-forwards to a file number on the mounted bay and decodes its
+// ReadFile fast-forwards to a file number on the mounted cartridge and decodes its
 // leading header; the returned stream is positioned at the payload.
 func (t *tape) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
 	dev, err := t.requireDev()
@@ -248,7 +278,7 @@ func (t *tape) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
 	return h, rc, nil
 }
 
-// Files scans the whole mounted bay reading each header. This is the catalog-
+// Files scans the whole mounted cartridge reading each header. This is the catalog-
 // rebuild path for one tape (a full pass); normal reads seek by file number from
 // the catalog and never call this.
 func (t *tape) Files() ([]record.FileInfo, error) {
@@ -283,7 +313,7 @@ func (t *tape) RemoveFile(int) error {
 	return fmt.Errorf("tape: %w", media.ErrNoFileRemoval)
 }
 
-// ReadLabel reads the mounted bay's file-0 label record. A blank tape (no files)
+// ReadLabel reads the mounted cartridge's file-0 label record. A blank tape (no files)
 // reports ok=false; a non-empty tape whose file 0 is not our label is foreign.
 func (t *tape) ReadLabel() (record.Label, bool, error) {
 	dev, err := t.requireDev()
@@ -293,7 +323,7 @@ func (t *tape) ReadLabel() (record.Label, bool, error) {
 	return readLabel(dev)
 }
 
-// WriteLabel resets the mounted bay and writes lbl as file 0, destroying any
+// WriteLabel resets the mounted cartridge and writes lbl as file 0, destroying any
 // prior contents. The caller is responsible for deciding this is allowed.
 func (t *tape) WriteLabel(lbl record.Label) error {
 	dev, err := t.requireDev()
@@ -349,7 +379,7 @@ func (d *tapeDrive) Loaded() (media.VolumeStatus, bool) {
 	if d.dev == nil {
 		return media.VolumeStatus{}, false
 	}
-	st := deviceStatus("", d.dev, d.capacity)
+	st := deviceStatus(d.dev, d.capacity)
 	st.Barcode = d.barcode
 	return st, true
 }
@@ -438,20 +468,17 @@ func (r *realDriveLoader) loaded(drive int) (device, string, int, bool) {
 }
 
 // deviceStatus inventories one mounted device: its label, fill, and file count.
-func deviceStatus(id string, dev device, capacity int64) media.VolumeStatus {
+func deviceStatus(dev device, capacity int64) media.VolumeStatus {
 	n, _ := dev.count()
-	st := media.VolumeStatus{ID: id, Capacity: capacity, Files: n, Blank: n == 0, Used: dev.bytesUsed()}
+	st := media.VolumeStatus{Capacity: capacity, Files: n, Blank: n == 0, Used: dev.bytesUsed()}
 	lbl, ok, err := readLabel(dev)
 	switch {
 	case ok:
 		st.Label, st.Pool = lbl.Name, lbl.Pool
-	case err == media.ErrForeignVolume:
-		// Foreign data: not blank and not writable until a forced relabel.
-		st.Foreign, st.Blank = true, false
 	case err != nil:
-		// A corrupt or truncated header (e.g. "unexpected EOF") is neither a blank
-		// tape nor safely writable — surface it as foreign so inventory and the
-		// overwrite guard treat it consistently (a forced relabel reclaims it).
+		// Foreign label or unreadable header (e.g. a truncated file 0) — either way
+		// not blank and not writable until a forced relabel, so inventory and the
+		// overwrite guard treat both consistently.
 		st.Foreign, st.Blank = true, false
 	}
 	return st
@@ -460,10 +487,10 @@ func deviceStatus(id string, dev device, capacity int64) media.VolumeStatus {
 // readLabel decodes a mounted device's file-0 label. ok=false on a blank tape;
 // ErrForeignVolume when file 0 is present but is not one of ours.
 func readLabel(dev device) (record.Label, bool, error) {
-	// A file-backed bay that holds non-NBackup files is foreign, not blank — its own
-	// files are unnumbered so they would not be counted below, and the overwrite
-	// guard must refuse it rather than treat the bay as writable.
-	if f, ok := dev.(interface{ foreign() bool }); ok && f.foreign() {
+	// A file-backed cartridge that holds non-NBackup files is foreign, not blank — its
+	// own files are unnumbered so they would not be counted below, and the overwrite
+	// guard must refuse it rather than treat the cartridge as writable.
+	if dev.foreign() {
 		return record.Label{}, false, media.ErrForeignVolume
 	}
 	n, err := dev.count()

@@ -9,8 +9,8 @@ import (
 )
 
 // fakeMtxRunner scripts a changer's responses without any mtx binary. responder is
-// consulted for every subcommand (indexed by call order) so a test can, e.g., return
-// one `status` before a load and a different one after (the barcode re-read).
+// consulted for every subcommand (indexed by call order) so a test can vary the
+// response as the sequence progresses.
 type fakeMtxRunner struct {
 	calls     [][]string
 	responder func(nCall int, args []string) (string, error)
@@ -31,7 +31,7 @@ func newFakeLoader(t *testing.T, f *fakeMtxRunner) *mtxLoader {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &mtxLoader{control: "/dev/sg0", nodes: []string{"/dev/nst0"}, devs: []*mtDevice{dev}, runner: f}
+	return &mtxLoader{nodes: []string{"/dev/nst0"}, devs: []*mtDevice{dev}, runner: f}
 }
 
 // callNames returns the subcommand verb of each recorded call (args[0]).
@@ -53,21 +53,13 @@ Data Transfer Element 0:Empty
 `
 
 // TestMtxLoadIntoEmptyDrive: loading slot 1 into an empty drive issues `load 1 0`
-// (no prior unload), then re-reads status to report the freshly loaded barcode.
+// (no prior unload) and reports the barcode the pre-load inventory read in slot 1 —
+// no second status round-trip.
 func TestMtxLoadIntoEmptyDrive(t *testing.T) {
-	loadedStatus := `  Storage Changer /dev/sg0:1 Drives, 3 Slots ( 0 Import/Export )
-Data Transfer Element 0:Full (Storage Element 1 Loaded):VolumeTag = E01001L8
-      Storage Element 1:Empty
-      Storage Element 2:Full :VolumeTag=E01002L8
-      Storage Element 3:Empty
-`
 	f := &fakeMtxRunner{responder: func(n int, args []string) (string, error) {
 		switch args[0] {
 		case "status":
-			if n == 0 {
-				return statusEmptyDrive, nil // pre-load: drive empty
-			}
-			return loadedStatus, nil // post-load barcode re-read
+			return statusEmptyDrive, nil // pre-load: drive empty
 		case "load":
 			return "", nil
 		}
@@ -83,11 +75,11 @@ Data Transfer Element 0:Full (Storage Element 1 Loaded):VolumeTag = E01001L8
 		t.Fatal("load should return the drive's persistent device handle")
 	}
 	if bc != "E01001L8" {
-		t.Fatalf("barcode = %q, want E01001L8 (re-read after load)", bc)
+		t.Fatalf("barcode = %q, want E01001L8 (from the pre-load slot inventory)", bc)
 	}
-	// Sequence: status (probe), load 1 0, status (barcode re-read). No unload.
-	if got := callNames(f); strings.Join(got, ",") != "status,load,status" {
-		t.Fatalf("call sequence = %v, want status,load,status", got)
+	// Sequence: status (probe), load 1 0. No unload, no barcode re-read.
+	if got := callNames(f); strings.Join(got, ",") != "status,load" {
+		t.Fatalf("call sequence = %v, want status,load", got)
 	}
 	if lc := f.calls[1]; lc[1] != "1" || lc[2] != "0" {
 		t.Fatalf("load args = %v, want [load 1 0]", lc)
@@ -130,17 +122,10 @@ Data Transfer Element 0:Full (Storage Element 2 Loaded):VolumeTag = E01002L8
       Storage Element 1:Full :VolumeTag=E01001L8
       Storage Element 2:Empty
 `
-	afterLoad := `  Storage Changer /dev/sg0:1 Drives, 3 Slots ( 0 Import/Export )
-Data Transfer Element 0:Full (Storage Element 1 Loaded):VolumeTag = E01001L8
-      Storage Element 2:Full :VolumeTag=E01002L8
-`
 	f := &fakeMtxRunner{responder: func(n int, args []string) (string, error) {
 		switch args[0] {
 		case "status":
-			if n == 0 {
-				return occupied, nil
-			}
-			return afterLoad, nil
+			return occupied, nil
 		case "unload", "load":
 			return "", nil
 		}
@@ -155,9 +140,9 @@ Data Transfer Element 0:Full (Storage Element 1 Loaded):VolumeTag = E01001L8
 	if bc != "E01001L8" {
 		t.Fatalf("barcode = %q, want E01001L8", bc)
 	}
-	// status (probe, drive holds slot 2), unload 2 0 (evict to home), load 1 0, status.
-	if got := callNames(f); strings.Join(got, ",") != "status,unload,load,status" {
-		t.Fatalf("call sequence = %v, want status,unload,load,status", got)
+	// status (probe, drive holds slot 2), unload 2 0 (evict to home), load 1 0.
+	if got := callNames(f); strings.Join(got, ",") != "status,unload,load" {
+		t.Fatalf("call sequence = %v, want status,unload,load", got)
 	}
 	if uc := f.calls[1]; uc[0] != "unload" || uc[1] != "2" || uc[2] != "0" {
 		t.Fatalf("unload args = %v, want [unload 2 0] (evict to home slot 2)", uc)

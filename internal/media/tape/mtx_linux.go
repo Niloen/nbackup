@@ -21,10 +21,9 @@ import (
 // The librarian schedules drive 0 today, but the loader models every configured drive
 // so multi-drive scheduling is a librarian change, not a backend one.
 type mtxLoader struct {
-	control string      // the changer control device (sg node) passed to `mtx -f`
-	nodes   []string    // drive device nodes (/dev/nstN); index = drive number
-	devs    []*mtDevice // persistent byte handle per drive (the cartridge swaps under it)
-	runner  mtxRunner   // runs mtx subcommands (execMtxRunner in production; a fake in tests)
+	nodes  []string    // drive device nodes (/dev/nstN); index = drive number
+	devs   []*mtDevice // persistent byte handle per drive (the cartridge swaps under it)
+	runner mtxRunner   // runs mtx subcommands (execMtxRunner in production; a fake in tests)
 }
 
 // mtxRunner runs one mtx(1) subcommand against a changer and returns its combined
@@ -64,19 +63,14 @@ func openMtxLoader(control string, nodes []string, block int) (loader, error) {
 		}
 		devs[i] = d
 	}
-	return &mtxLoader{control: control, nodes: nodes, devs: devs, runner: execMtxRunner{control: control}}, nil
+	return &mtxLoader{nodes: nodes, devs: devs, runner: execMtxRunner{control: control}}, nil
 }
 
 func (m *mtxLoader) driveCount() int { return len(m.nodes) }
 func (m *mtxLoader) manual() bool    { return false }
 
-// mtx runs one mtx subcommand against the control device.
-func (m *mtxLoader) mtx(args ...string) (string, error) {
-	return m.runner.run(args...)
-}
-
 func (m *mtxLoader) status() (mtxStatus, error) {
-	out, err := m.mtx("status")
+	out, err := m.runner.run("status")
 	if err != nil {
 		return mtxStatus{}, err
 	}
@@ -123,12 +117,17 @@ func (m *mtxLoader) load(slot, drive int) (device, string, error) {
 			return nil, "", err
 		}
 	}
-	if _, err := m.mtx("load", strconv.Itoa(slot), strconv.Itoa(drive)); err != nil {
+	if _, err := m.runner.run("load", strconv.Itoa(slot), strconv.Itoa(drive)); err != nil {
 		return nil, "", err
 	}
+	// The loaded cartridge's barcode is the one the scanner read in its home slot —
+	// already in the pre-load inventory, no second `mtx status` round-trip needed.
 	bc := ""
-	if st2, err := m.status(); err == nil {
-		bc = st2.drives[drive].barcode
+	for _, s := range st.slots {
+		if s.Slot == slot {
+			bc = s.Barcode
+			break
+		}
 	}
 	return m.devs[drive], bc, nil
 }
@@ -157,7 +156,7 @@ func (m *mtxLoader) unloadTo(slot, drive int) error {
 		}
 		slot = s
 	}
-	_, err := m.mtx("unload", strconv.Itoa(slot), strconv.Itoa(drive))
+	_, err := m.runner.run("unload", strconv.Itoa(slot), strconv.Itoa(drive))
 	return err
 }
 

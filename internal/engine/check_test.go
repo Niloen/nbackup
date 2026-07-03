@@ -69,7 +69,7 @@ func TestCheckOfflineProbesLocalSkipsRemote(t *testing.T) {
 	if !ok || local.Remote {
 		t.Fatal("localhost should be present and local")
 	}
-	if !anyMsg(local.Lines, "GNU tar present") || !anyMsg(local.Lines, "readable") {
+	if !anyMsg(local.Lines, "archiver ready") || !anyMsg(local.Lines, "readable") {
 		t.Fatalf("localhost should be probed via the Local executor: %+v", local.Lines)
 	}
 	app, ok := hostLines(rep, "app01")

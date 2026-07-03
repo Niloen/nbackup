@@ -127,9 +127,6 @@ func (s Snapshot) TotalEst() int64 { return sum(s.DLEs, func(d DLE) int64 { retu
 // TotalDone sums uncompressed bytes archived so far.
 func (s Snapshot) TotalDone() int64 { return sum(s.DLEs, func(d DLE) int64 { return d.DoneBytes }) }
 
-// TotalOut sums compressed bytes produced so far.
-func (s Snapshot) TotalOut() int64 { return sum(s.DLEs, func(d DLE) int64 { return d.OutBytes }) }
-
 // TotalToDrain sums the compressed size every drained DLE must copy to the landing.
 func (s Snapshot) TotalToDrain() int64 {
 	return sum(s.DLEs, func(d DLE) int64 {
@@ -186,7 +183,7 @@ func (s Snapshot) Canceled() int {
 	return n
 }
 
-// Elapsed is the wall time from start to the reference instant (UpdatedAt for a
+// Elapsed is the wall time from start to the reference instant (EndedAt for a
 // finished run, otherwise now).
 func (s Snapshot) Elapsed(now time.Time) time.Duration {
 	end := now

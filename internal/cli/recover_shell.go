@@ -240,7 +240,7 @@ func (sh *recoverShell) setTime(args []string) {
 		fmt.Println("usage: settime YYYY-MM-DD HH[:MM[:SS]]")
 		return
 	}
-	when, err := validateAsOfTime(strings.Join(args, " "))
+	when, err := recovery.ValidateAsOf(strings.Join(args, " "))
 	if err != nil {
 		fmt.Printf("bad time: %v\n", err)
 		return

@@ -16,28 +16,9 @@
 // consecutive incrementals overlapping for redundancy.
 //
 // The one balancing lever is promotion: pulling a future full forward onto today
-// to level the daily full load across the cycle, so a pile-up of deadlines on one
-// day is spread over the lighter runs before it. It works from a deadline calendar
-// (each not-yet-due DLE sits on the day its full is due) and repeatedly relieves
-// the heaviest future day by pulling one of its fulls onto today, as long as (a)
-// today is lighter than that peak, (b) the move does not overshoot the day it
-// relieves — today's resulting load may not exceed that day's load *after the moved
-// full leaves it* — which is why a DLE that dominates its own deadline day is never
-// promoted: relocating it would make today the new, equally heavy peak, so it waits
-// for its own deadline rather than being re-fulled early to chase an average (and a
-// tiny DLE merely sharing that deadline can no longer inflate the peak enough to
-// unlock the move) — and (c) it fits the per-run room left before pruning would
-// evict a protected run.
-//
-// Promotion is also *paced*: a cluster of N fulls sharing a deadline D days out is
-// not destaggered all at once but one per run, and only once the runway can no
-// longer hold the cluster on distinct days (days-left < cluster-size). Until then
-// it waits — re-fulling a freshly-fulled DLE six days before its deadline only
-// wastes freshness when a later, closer run could place it instead. The result is
-// quiet runs early in a cluster's life and a tidy one-full-per-day spread over the
-// last few days before the deadline. With no free capacity, promotion does nothing;
-// with capacity to spare, it spends it to keep backups fresh and balanced — which
-// is exactly what budgeting that capacity is for.
+// to level the daily full load across the cycle, paced so a deadline cluster is
+// destaggered one full per run and never past the per-run room. The guards and
+// the pacing are documented on promote.
 //
 // Whether the cycle fits the medium *at all* is a separate, structural check:
 // over a cycle every DLE is fulled once, and (with minimum_age >= cycle) those
@@ -202,6 +183,22 @@ func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, fo
 	return plan
 }
 
+// SittingLevel returns the incremental level a DLE currently sits at: its last
+// dumped level, floored at 1 (right after a full the next incremental is L1) and
+// clamped to MaxLevel. This is the one rule for "what level would this DLE dump
+// next, absent a bump" — the scheduler estimates at this level so its sizes match
+// the level chooseIncrLevel holds or climbs from.
+func SittingLevel(st *catalog.DLEState) int {
+	lvl := st.LastLevel()
+	if lvl < 1 {
+		lvl = 1
+	}
+	if lvl > MaxLevel {
+		lvl = MaxLevel
+	}
+	return lvl
+}
+
 // chooseIncrLevel decides the incremental level for a DLE that is not getting a
 // full, returning the level, its estimated size, and a human reason.
 //
@@ -293,7 +290,7 @@ func runBytes(cands []*cand) int64 {
 // Three guards keep it from chasing an average. First, a runway gate paces the
 // destagger: a peak day is relieved only once its deadline is too close to spread
 // its cluster over distinct days (days-left < cluster-size); a peak with slack is
-// set aside for a later, closer run. Because each promotion shrinks the cluster,
+// set aside for a later, closer run — promoting sooner would only waste freshness. Because each promotion shrinks the cluster,
 // the gate flips off as soon as the cluster shrinks to the days remaining, so a
 // cluster is relieved at most one full per run — quiet early, one-per-day near the
 // deadline. Second, each move must not overshoot the day it relieves — today's
@@ -346,19 +343,10 @@ func promote(cands []*cand, cycle int, room int64) {
 		if peakOff == 0 || todayLoad >= peakLoad {
 			return
 		}
-		// Don't rush: a cluster of N fulls sharing a deadline D days out can be
-		// spread one per day across its runway (today plus D future runs = D+1
-		// runs). While the runway still holds the whole cluster on distinct days
-		// (D >= N), pulling one forward now only wastes freshness — a later run,
-		// closer to the deadline, can place it instead. So relieve a peak only once
-		// its runway can no longer absorb the wait: days-left < cluster-size. Defer
-		// otherwise and look for a tighter peak. Because each promotion removes one
-		// DLE from the cluster, the condition flips off as soon as the cluster
-		// shrinks to the days remaining — so this relieves at most one per run,
-		// pacing the destagger across the cycle instead of cramming it onto today.
-		// An overloaded cluster (more DLEs than days) still cliffs down to one-per-
-		// day, but no sooner than its short runway forces.
-		if peakOff >= len(byOffset[peakOff]) {
+		// The runway gate (the first guard): while the days left can still hold the
+		// cluster on distinct days, defer to a later, closer run.
+		daysLeft, cluster := peakOff, byOffset[peakOff]
+		if daysLeft >= len(cluster) {
 			delete(load, peakOff)
 			delete(byOffset, peakOff)
 			continue
@@ -367,13 +355,11 @@ func promote(cands []*cand, cycle int, room int64) {
 		// the peak strictly drops) and fits the per-run room.
 		var pick *cand
 		var pickIdx int
-		for i, c := range byOffset[peakOff] {
-			// The move must not overshoot the day it relieves: today's resulting load
-			// may not exceed the peak day's load *after this full leaves it*. Comparing
-			// against the day's remaining load (peakLoad-c.estFull), not its total, is
-			// what keeps a DLE that dominates its own deadline day from being relocated
-			// for a near-zero gain just because a tiny co-deadline DLE inflated the peak
-			// above it — the case that otherwise re-fulls a big DLE almost every run.
+		for i, c := range cluster {
+			// No overshoot (the second guard). Comparing against the day's load *after
+			// this full leaves it* (peakLoad-c.estFull), not its total, is what keeps a
+			// DLE that dominates its own deadline day from being relocated just because
+			// a tiny co-deadline DLE inflated the peak above it.
 			if todayLoad+c.estFull > peakLoad-c.estFull {
 				continue
 			}
@@ -395,6 +381,6 @@ func promote(cands []*cand, cycle int, room int64) {
 		todayLoad += pick.estFull
 		total += pick.estFull - pick.estIncr
 		load[peakOff] -= pick.estFull
-		byOffset[peakOff] = append(byOffset[peakOff][:pickIdx], byOffset[peakOff][pickIdx+1:]...)
+		byOffset[peakOff] = append(cluster[:pickIdx], cluster[pickIdx+1:]...)
 	}
 }

@@ -192,6 +192,11 @@ func (m *mtDevice) count() (int, error) {
 // without hitting EOT, so capacity tracking falls back to the reactive ErrVolumeFull.
 func (m *mtDevice) bytesUsed() int64 { return 0 }
 
+// foreign is always false for a real tape: the drive cannot see what a cartridge
+// holds without reading it, so foreignness is detected by decoding the file-0
+// label (readLabel) instead.
+func (m *mtDevice) foreign() bool { return false }
+
 // reset rewinds and arms the next append to write at BOT. The label write that
 // follows overwrites file 0, which on tape truncates everything beyond it — the
 // physical basis of (re)labeling.

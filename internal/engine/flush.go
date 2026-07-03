@@ -4,6 +4,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/conductor"
 	"github.com/Niloen/nbackup/internal/config"
@@ -59,7 +60,7 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 			if err != nil {
 				return err
 			}
-			return e.fs.ReclaimStaged(e.cat, holding, vol, runID, dle, pos)
+			return archivefs.ReclaimStaged(e.cat, holding, vol, runID, dle, pos)
 		},
 		OpenLanding: func(landing string, spec archiveio.RunSpec) (*archiveio.Writer, error) {
 			lh, ok := landers[landing]

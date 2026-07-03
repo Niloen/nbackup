@@ -23,6 +23,7 @@ package archiver
 
 import (
 	"io"
+	"strings"
 
 	"github.com/Niloen/nbackup/internal/programs"
 )
@@ -48,6 +49,20 @@ type BackupResult struct {
 	// A partial archive is still a valid, restorable stream of what was readable; the caller
 	// warns and exits non-zero so the gap is loud, rather than discarding a usable backup.
 	Unreadable []string
+}
+
+// CountFiles counts the file members in a list, excluding directories — the
+// member convention (BackupResult.Members, List) marks a directory with a
+// trailing slash. So one nested file counts as 1, not "2 entries" once its
+// parent directory is included.
+func CountFiles(members []string) int {
+	n := 0
+	for _, m := range members {
+		if !strings.HasSuffix(m, "/") {
+			n++
+		}
+	}
+	return n
 }
 
 // BackupSource is the producing side of one archive as a pipeline source: the program

@@ -32,20 +32,21 @@ type Medium interface {
 // serves the volume reads on a single-volume medium (a holding disk) — a landing's
 // volume is never read back through OpenArchive/Reclaim.
 type Session struct {
-	fs    *FS
-	w     WriteMap
-	m     Medium
-	runID string // the run tag every archive carries (for the catalog + member index)
+	fs *FS
+	w  WriteMap
+	m  Medium
 }
 
 var _ WriteStore = (*Session)(nil)
 
-// OpenRun starts a write session for run runID on the opened medium m, recording into w.
-// It builds no writer — a writer is bound with archiveio.NewWriter(alloc, session, …),
-// where alloc is the opened medium's part allocator (the engine does so for a dump/copy;
-// the spool routes both seams onto its orchestrator and builds its own).
-func (c *FS) OpenRun(w WriteMap, m Medium, runID string) *Session {
-	return &Session{fs: c, w: w, m: m, runID: runID}
+// OpenRun starts a write session on the opened medium m, recording into w. The run
+// identity rides on each archive's own tag (a session may even carry archives from
+// several source runs — a cross-run sync), so the session holds none. It builds no
+// writer — a writer is bound with archiveio.NewWriter(alloc, session, …), where alloc
+// is the opened medium's part allocator (the engine does so for a dump/copy; the
+// spool routes both seams onto its orchestrator and builds its own).
+func (fs *FS) OpenRun(w WriteMap, m Medium) *Session {
+	return &Session{fs: fs, w: w, m: m}
 }
 
 // Record commits one finished archive's placement onto this session's medium: it caches the member
@@ -68,20 +69,23 @@ func (s *Session) Record(r archiveio.CommitResult) error {
 // staged archive to the landing.
 func (s *Session) OpenArchive(arch record.Archive, pos record.ArchivePos) (io.ReadCloser, error) {
 	open := func(p record.FilePos) (record.Header, io.ReadCloser, error) { return s.m.Volume().ReadFile(p.Pos) }
-	return archiveio.NewReader(open, nil).Open(record.Ref{Run: s.runID, DLE: arch.DLE, Level: arch.Level}, pos.Parts)
+	// Key on the archive's own run, not the session's, matching Record: a session carrying
+	// archives from several source runs (a cross-run sync) reads each under the right run.
+	return archiveio.NewReader(open, nil).Open(record.Ref{Run: arch.Run, DLE: arch.DLE, Level: arch.Level}, pos.Parts)
 }
 
-// Reclaim drops a staged archive once it has landed on the landing; see FS.ReclaimStaged.
+// Reclaim drops a staged archive once it has landed on the landing; see ReclaimStaged.
 func (s *Session) Reclaim(arch record.Archive, pos record.ArchivePos) error {
-	return s.fs.ReclaimStaged(s.w, s.m.Name(), s.m.Volume(), s.runID, arch.DLE, pos)
+	return ReclaimStaged(s.w, s.m.Name(), s.m.Volume(), arch.Run, arch.DLE, pos)
 }
 
 // ReclaimStaged drops a staged archive from a holding medium once it has landed: it removes the
 // archive's files from vol (the commit footer first, so an interrupted reclaim un-commits before
 // dropping parts) then drops its placement from the catalog via w. The live drain reaches it
 // through Session.Reclaim; the crash-recovery flush (conductor.Flush) calls it directly — the
-// footer-first invariant lives only here.
-func (c *FS) ReclaimStaged(w WriteMap, medium string, vol media.Volume, runID, dle string, pos record.ArchivePos) error {
+// footer-first invariant lives only here. A package function: it touches only its arguments,
+// never the fs.
+func ReclaimStaged(w WriteMap, medium string, vol media.Volume, runID, dle string, pos record.ArchivePos) error {
 	for _, p := range archivePosFiles(pos) {
 		if err := vol.RemoveFile(p); err != nil {
 			return err

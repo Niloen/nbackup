@@ -40,7 +40,7 @@ type ArchivePos struct {
 // catalog, not here, so the metadata stays portable across volumes). A "run" is just the
 // shared Run tag a run's archives carry — there is no run record on the medium.
 type Archive struct {
-	Run          string    `json:"run"`                  // the run (run) this dump belongs to, e.g. "run-2026-06-21.001"
+	Run          string    `json:"run"`                  // the run this dump belongs to, e.g. "run-2026-06-21.031500"
 	DLE          string    `json:"dle"`                  // DLE name, e.g. "app01-home"
 	Host         string    `json:"host"`                 // source host
 	Path         string    `json:"path"`                 // source path

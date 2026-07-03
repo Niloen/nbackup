@@ -35,8 +35,9 @@ const wormProbeRun = "drill-worm-probe"
 // delete proves it is not (the probe is recreated next run). Immutability is
 // configured operator-side (S3 Object Lock, LTO WORM); NBackup only detects it, never
 // sets it. Append-only media (tape) are immutable by construction and are reported
-// without writing a probe. The active probe is skipped in --dry-run.
-func (d *driller) wormProbe(medium string, apply bool, now time.Time) WormResult {
+// without writing a probe. probe selects the active delete attempt; when false
+// (--dry-run, or --worm off) the result is detect-only.
+func (d *driller) wormProbe(medium string, probe bool, now time.Time) WormResult {
 	res := WormResult{Medium: medium}
 	am, _, err := d.dep.OpenAdmin(medium)
 	if err != nil {
@@ -53,7 +54,7 @@ func (d *driller) wormProbe(medium string, apply bool, now time.Time) WormResult
 		return res
 	}
 	vol := am.Volume()
-	if !apply {
+	if !probe {
 		res.Detail = "not probed (dry-run / --worm off); pass --worm (without --dry-run) to test immutability"
 		return res
 	}
@@ -288,11 +289,4 @@ func (d *driller) postureCapacity() (string, PostureStatus, string) {
 		return "capacity OK", PostureWarn, fmt.Sprintf("over capacity (%.0f%% used); run `nb prune`", pct)
 	}
 	return "capacity OK", PostureOK, fmt.Sprintf("%.0f%% used", pct)
-}
-
-func reelOrEmpty(label string) string {
-	if label == "" {
-		return "(empty)"
-	}
-	return fmt.Sprintf("%q", label)
 }

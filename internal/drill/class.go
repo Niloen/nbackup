@@ -6,11 +6,13 @@
 // stock-tools one-liner — and records the outcome in an inspectable ledger. It is
 // NBackup's contribution of the "0 errors" digit of the 3-2-1-1-0 rule.
 //
-// This package holds the *pure* parts: the failure taxonomy and drill tiers
-// (class.go), the recoverability ledger and its file persistence (ledger.go), and
-// the risk-biased target selection (select.go). The engine performs the actual I/O
-// (verify, restore, the WORM probe) and consumes these types; this package never
-// imports the engine, so it stays a leaf the way retention/restore are.
+// This package holds the drill's model: the failure taxonomy and drill tiers
+// (class.go), the recoverability ledger (ledger.go), and the risk-biased target
+// selection (select.go). It is pure except for the ledger's own file persistence
+// — deliberately kept beside its type (the "state lives in files" stance) rather
+// than pushed to the engine. The engine performs the actual drill I/O (verify,
+// restore, the WORM probe) and consumes these types; this package never imports
+// the engine, so it stays a leaf the way retention/recovery are.
 package drill
 
 import "fmt"

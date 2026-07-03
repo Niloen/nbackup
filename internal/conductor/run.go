@@ -9,10 +9,12 @@ import (
 	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/logf"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/scheduler"
 	"github.com/Niloen/nbackup/internal/spool"
 )
 
@@ -43,17 +45,18 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 	date := localDay(now, time.Local)
 	now = now.UTC()
 	// Guard the restore-order invariant: restore replays a DLE's writers in date order,
-	// but the archiver's incremental snapshots advance in dump (wall-clock) order. A
+	// but the archiver's incremental state advances in dump (wall-clock) order. A
 	// run dated earlier than a run already sealed would splice an out-of-order
-	// archive into the chain whose snapshot has already moved past it — silently
-	// dropping files at restore. Reject it (a same-day rerun, equal date, is fine and
-	// mints a later time suffix). Backdating before today is already caught at the CLI.
+	// archive into the chain whose incremental state has already moved past it —
+	// silently dropping files at restore. Reject it (a same-day rerun, equal date, is fine
+	// and mints a later time suffix). Backdating before today is already caught at the CLI.
 	if latest, ok := c.latestRunDate(); ok && record.DateString(date) < latest {
-		return nil, fmt.Errorf("cannot dump for %s: run(s) dated %s already exist; an earlier-dated run would corrupt the incremental restore order (snapshots have advanced past it) — dump on or after %s", record.DateString(date), latest, latest)
+		return nil, fmt.Errorf("cannot dump for %s: run(s) dated %s already exist; an earlier-dated run would corrupt the incremental restore order (incremental state has advanced past it) — dump on or after %s", record.DateString(date), latest, latest)
 	}
 	// Drain any leftover archives a previous holding-disk run crashed before flushing, so the
 	// holding disk is clean before this run stages onto it (amflush-on-next-dump). A no-op
-	// without a holding disk or when nothing is staged.
+	// without a holding disk or when nothing is staged. Deliberately time.Now, not `now`:
+	// a --date backdate stamps this run, not the leftover flush of a previous one.
 	if n, err := c.d.Flush(time.Now().UTC(), logf); err != nil {
 		return nil, fmt.Errorf("flush leftover holding-disk archives before dumping: %w", err)
 	} else if n > 0 {
@@ -75,24 +78,16 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 		logf.Log("WARNING: %s", w)
 	}
 
-	// Pre-flight before creating a run: the compressor binary and every archiver.
+	// Pre-flight before creating a run: every source host, the compressor binary, and
+	// every archiver — the strict mode of the same check `nb plan` previews with.
 	// Resolving every archiver here also populates the archiver cache, so the parallel
 	// workers below only read it (no concurrent writes).
-	if err := c.d.CheckCompress(); err != nil {
-		return nil, err
+	dles := make([]config.DLE, len(plan.Items))
+	for i, item := range plan.Items {
+		dles[i] = item.DLE
 	}
-	checkedEnc := map[string]bool{}
-	checkedHost := map[string]bool{}
-	for _, item := range plan.Items {
-		if !checkedHost[item.DLE.Host] {
-			if err := c.d.ProbeReachable(item.DLE.Host); err != nil {
-				return nil, err
-			}
-			checkedHost[item.DLE.Host] = true
-		}
-		if err := c.d.PreflightDumptype(item.DLE.DumpTypeName(), item.DLE.Host, true, checkedEnc); err != nil {
-			return nil, err
-		}
+	if _, err := scheduler.Preflight(c.d.Preflight, dles, true); err != nil {
+		return nil, err
 	}
 
 	runID := c.mintRunID(now, time.Local)

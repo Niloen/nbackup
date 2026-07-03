@@ -20,7 +20,7 @@ func (a *app) dispatchNotify(cfg *config.Config, rec report.Run) {
 	if len(cfg.Notify.Backends) == 0 {
 		return
 	}
-	notify.DispatchRun(context.Background(), cfg.Notify, a.notifyIdentity(), rec, notifyWarn)
+	notify.DispatchRun(context.Background(), cfg.Notify, hostname(), rec, notifyWarn)
 }
 
 // dispatchDigest sends an `nb report --notify` digest through the config's
@@ -37,12 +37,7 @@ func (a *app) dispatchDigest(cfg *config.Config, runs []report.Run) {
 	if host := hostname(); host != "" {
 		subject += " on " + host
 	}
-	notify.DispatchDigest(context.Background(), cfg.Notify, a.notifyIdentity(), subject, body.String(), notifyWarn)
-}
-
-// notifyIdentity is the host/config context stamped onto every notification subject.
-func (a *app) notifyIdentity() notify.Event {
-	return notify.Event{Host: hostname(), Config: a.cfgPath}
+	notify.DispatchDigest(context.Background(), cfg.Notify, subject, body.String(), notifyWarn)
 }
 
 // notifyWarn logs a non-fatal notification problem to stderr.

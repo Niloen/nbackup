@@ -1,7 +1,6 @@
 package accounting
 
 import (
-	"fmt"
 	"sort"
 
 	"github.com/Niloen/nbackup/internal/catalog"
@@ -17,8 +16,9 @@ type MediumInfo struct {
 	Runs     int
 	Used     int64
 	Capacity int64  // 0 = unbounded
-	Volume   string // label name; "" for address-identified media (disk, s3)
+	Volume   string // label name when the pool holds exactly one volume; "" otherwise (address-identified media, or several volumes — see Volumes)
 	Epoch    int
+	Volumes  int // labeled volumes in the pool; 0 for address-identified media (disk, s3)
 }
 
 // MediumAppendable reports whether a medium packs many runs per volume (the
@@ -64,16 +64,13 @@ func (a *Accountant) Medium(name string) (MediumInfo, bool) {
 	}
 	// Summarize the medium's labeled volumes from the catalog (no medium type
 	// special-casing): address-identified media (disk, s3) carry no label so the
-	// pool is empty and Volume stays ""; a single labeled volume shows its name and
-	// epoch; a pool of several (a tape library/station) shows the count, with the
-	// per-volume detail in `nb medium <name>`.
-	switch pool := a.volumesInPool(name); len(pool) {
-	case 0:
-		// nothing labeled (address-identified, or a still-blank changer)
-	case 1:
+	// pool is empty and Volumes stays 0; a single labeled volume also carries its
+	// name and epoch; a pool of several (a tape library/station) reports only the
+	// count, with the per-volume detail in `nb medium <name>`.
+	pool := a.volumesInPool(name)
+	info.Volumes = len(pool)
+	if len(pool) == 1 {
 		info.Volume, info.Epoch = pool[0].Label.Name, pool[0].Label.Epoch
-	default:
-		info.Volume = fmt.Sprintf("%d volume(s)", len(pool))
 	}
 	return info, true
 }

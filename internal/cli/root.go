@@ -139,7 +139,7 @@ func newVersionCmd() *cobra.Command {
 		Short: "Print the nb version",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(cmd.OutOrStdout(), "nb version %s\n", Version)
+			fmt.Printf("nb version %s\n", Version)
 			return nil
 		},
 	}
@@ -195,21 +195,26 @@ func Execute() error {
 	return err
 }
 
-// load reads full configuration (for commands that may write), applying the
-// global --config and --catalog flags.
-func (a *app) load() (*config.Config, error) {
+// loadForWrite reads full configuration for commands whose runs may write media
+// (dump/copy/sync/…) and their previews: the config file must exist and parse, and
+// --catalog is refused when the config defines media (see loadConfig). It applies
+// the global --config and --catalog flags.
+func (a *app) loadForWrite() (*config.Config, error) {
 	return loadConfig(a.cfgPath, a.catalog)
 }
 
-// loadRO reads configuration for read-only commands.
-func (a *app) loadRO() (*config.Config, error) {
-	return loadConfigRO(a.cfgPath, a.catalog)
+// loadOrDefaultCatalog reads configuration for read-only browsing commands
+// (run/dle/medium/report/…): when no config file exists it synthesizes a default
+// local catalog so a bare `nb run` can still browse.
+func (a *app) loadOrDefaultCatalog() (*config.Config, error) {
+	return loadConfigOrDefaultCatalog(a.cfgPath, a.catalog)
 }
 
-// loadRORequire reads configuration for read-only assertion commands (verify),
-// erroring when no config file exists instead of synthesizing a default catalog.
-func (a *app) loadRORequire() (*config.Config, error) {
-	return loadConfigRORequire(a.cfgPath, a.catalog)
+// loadRequired reads configuration for read-only assertion commands (verify,
+// status), erroring when no config file exists instead of synthesizing a default
+// catalog — a monitor must see a failure, not a green answer about nothing.
+func (a *app) loadRequired() (*config.Config, error) {
+	return loadConfigRequired(a.cfgPath, a.catalog)
 }
 
 // lockedEngine takes the per-config exclusive lock, then builds the engine —
@@ -222,7 +227,7 @@ func (a *app) lockedEngine(cfg *config.Config) (*engine.Engine, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	eng, err := newEngine(cfg)
+	eng, err := engine.New(cfg)
 	if err != nil {
 		lk.Release()
 		return nil, nil, err
@@ -239,7 +244,7 @@ func (a *app) engineFor(cfg *config.Config, mutating bool) (eng *engine.Engine, 
 	if mutating {
 		return a.lockedEngine(cfg)
 	}
-	eng, err = newEngine(cfg)
+	eng, err = engine.New(cfg)
 	if err != nil {
 		return nil, nil, err
 	}

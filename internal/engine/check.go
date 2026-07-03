@@ -231,10 +231,12 @@ func (c *checker) checkHost(rep *CheckReport, host string, connect bool) HostChe
 		if err == nil {
 			err = arch.Check()
 		}
+		// The checker is archiver-neutral: the archiver's own Check error names the
+		// missing tool (e.g. GNU tar), so the generic line just says "archiver".
 		if err != nil {
-			rep.add(&hc.Lines, false, false, fmt.Sprintf("GNU tar (dumptype %q): %v", dt, err))
+			rep.add(&hc.Lines, false, false, fmt.Sprintf("archiver (dumptype %q): %v", dt, err))
 		} else {
-			rep.add(&hc.Lines, true, false, fmt.Sprintf("GNU tar present (dumptype %q)", dt))
+			rep.add(&hc.Lines, true, false, fmt.Sprintf("archiver ready (dumptype %q)", dt))
 		}
 		c.checkClientTools(rep, &hc, ex, dt)
 	}

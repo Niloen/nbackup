@@ -91,8 +91,20 @@ func (s sshExec) Rename(oldpath, newpath string) error {
 	return s.Command("mv", "-f", "--", oldpath, newpath).Run()
 }
 
+// TempFile creates the scratch file with mktemp under the remote $TMPDIR,
+// honoring the pattern the way os.CreateTemp does — the last "*" (or, absent
+// one, the end of the pattern) becomes the random part — so remote temp files
+// are as identifiable as local ones.
 func (s sshExec) TempFile(pattern string) (string, error) {
-	out, err := s.Command("mktemp").Output()
+	args := []string{"mktemp"}
+	if pattern != "" {
+		template := pattern + "XXXXXX"
+		if i := strings.LastIndex(pattern, "*"); i >= 0 {
+			template = pattern[:i] + "XXXXXX" + pattern[i+1:]
+		}
+		args = append(args, "-t", template)
+	}
+	out, err := s.Command(args[0], args[1:]...).Output()
 	if err != nil {
 		return "", err
 	}

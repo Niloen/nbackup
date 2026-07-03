@@ -79,7 +79,7 @@ func TestDispatchRunRoutingAndBuild(t *testing.T) {
 	cfg := config.NotifyConfig{Backends: map[string]config.NotifyBackend{
 		"a": {Type: "fake"}, "b": {Type: "fake"},
 	}}
-	DispatchRun(context.Background(), cfg, Event{Host: "box"}, failRun(), failWarn(t))
+	DispatchRun(context.Background(), cfg, "box", failRun(), failWarn(t))
 	if len(got) != 2 {
 		t.Fatalf("failure with no routing reached %d backends, want 2 (all)", len(got))
 	}
@@ -99,7 +99,7 @@ func TestDispatchBackendErrorIsWarnedNotFatal(t *testing.T) {
 	}})
 	cfg := config.NotifyConfig{Backends: map[string]config.NotifyBackend{"x": {Type: "fake-err"}}}
 	var warnings int
-	DispatchRun(context.Background(), cfg, Event{}, failRun(), func(string, ...any) { warnings++ })
+	DispatchRun(context.Background(), cfg, "", failRun(), func(string, ...any) { warnings++ })
 	if len(got) != 1 {
 		t.Errorf("backend should still be attempted, got %d sends", len(got))
 	}

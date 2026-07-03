@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
@@ -223,7 +222,7 @@ func TestPostureCapacityOver(t *testing.T) {
 	// Record an archive well past capacity (no bucket is opened — this is catalog-only).
 	at := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	arch := record.Archive{Run: record.IDFromTime(at), DLE: "d", Level: 0, Compressed: 5000, CreatedAt: at}
-	pos := catalog.ArchivePos{DLE: "d", Level: 0, Parts: []catalog.FilePos{{Label: "cloud", Pos: 1}}, Commit: catalog.FilePos{Label: "cloud", Pos: 2}}
+	pos := record.ArchivePos{DLE: "d", Level: 0, Parts: []record.FilePos{{Label: "cloud", Pos: 1}}, Commit: record.FilePos{Label: "cloud", Pos: 2}}
 	if err := eng.cat.AddArchive(arch, "cloud", pos); err != nil {
 		t.Fatal(err)
 	}

@@ -72,7 +72,7 @@ func OrderForOnePass(items []ReadItem) []ReadItem {
 // Refs with no available copy are not read; they are returned as missing for the caller to
 // handle (a broken chain, a position-missing verdict). An opener that cannot be acquired
 // (medium not in this config) is the error.
-func (c *FS) ReadArchives(refs []record.Ref, medium string, fn func(ref record.Ref, open func() (io.ReadCloser, error)) error) (missing []record.Ref, err error) {
+func (fs *FS) ReadArchives(refs []record.Ref, medium string, fn func(ref record.Ref, open func() (io.ReadCloser, error)) error) (missing []record.Ref, err error) {
 	type loc struct {
 		medium string
 		parts  []record.FilePos
@@ -80,7 +80,7 @@ func (c *FS) ReadArchives(refs []record.Ref, medium string, fn func(ref record.R
 	locs := map[record.Ref]loc{}
 	items := make([]ReadItem, 0, len(refs))
 	for _, ref := range refs {
-		m, parts, ok := c.locate(ref, medium)
+		m, parts, ok := fs.locate(ref, medium)
 		if !ok {
 			missing = append(missing, ref)
 			continue
@@ -98,7 +98,7 @@ func (c *FS) ReadArchives(refs []record.Ref, medium string, fn func(ref record.R
 		if r, ok := readers[m]; ok {
 			return r, nil
 		}
-		r, e := c.readerFor(m)
+		r, e := fs.readerFor(m)
 		if e != nil {
 			return nil, e
 		}
@@ -121,7 +121,7 @@ func (c *FS) ReadArchives(refs []record.Ref, medium string, fn func(ref record.R
 			// The located copy would not open (the eager first-part prime failed —
 			// wrong volume, or a file gone behind its catalog entry): fail over
 			// through every eligible copy, as a single-archive Open would.
-			return c.openRaw(ref, medium)
+			return fs.Open(ref, medium)
 		}
 		if e := fn(ref, open); e != nil {
 			return missing, e
@@ -133,8 +133,8 @@ func (c *FS) ReadArchives(refs []record.Ref, medium string, fn func(ref record.R
 // locate resolves a ref to the copy that holds it: a set medium pins to that copy; "" takes
 // the first placement in read-preference order (the engine's own copy first) that has the
 // archive's parts.
-func (c *FS) locate(ref record.Ref, medium string) (string, []record.FilePos, bool) {
-	for _, p := range c.cat.PlacementsFor(ref.Run) {
+func (fs *FS) locate(ref record.Ref, medium string) (string, []record.FilePos, bool) {
+	for _, p := range fs.cat.PlacementsFor(ref.Run) {
 		if medium != "" && p.Medium != medium {
 			continue
 		}

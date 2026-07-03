@@ -92,16 +92,13 @@ func Select(dles []string, archives []record.Archive, asOf string, ledger *Ledge
 }
 
 // newestRunForDLE returns the id of the newest run at or before asOf that holds an
-// archive for the DLE, or "" if none.
+// archive for the DLE, or "" if none. It defers to recovery.AsOf over the DLE's own
+// archives, so a drill's as-of point (date, or date+time) resolves identically to a
+// restore's.
 func newestRunForDLE(archives []record.Archive, dle, asOf string) string {
-	id := ""
-	for _, a := range archives {
-		if a.DLE != dle || record.RunDate(a.Run) > asOf {
-			continue // wrong DLE, or strictly after the point-in-time
-		}
-		if id == "" || record.RunIDLess(id, a.Run) {
-			id = a.Run
-		}
+	id, err := recovery.AsOf(record.ArchivesOf(archives, dle), asOf)
+	if err != nil {
+		return "" // no recovery point at or before asOf (or an unparsable as-of)
 	}
 	return id
 }

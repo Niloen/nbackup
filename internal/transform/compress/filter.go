@@ -12,11 +12,10 @@ package compress
 import (
 	"fmt"
 	"os/exec"
-	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/Niloen/nbackup/internal/programs"
+	"github.com/Niloen/nbackup/internal/transform"
 )
 
 // Options tune a scheme invocation.
@@ -27,24 +26,22 @@ type Options struct {
 	Nice    int    // run the child under `nice -n Nice` for CPU politeness; 0 = no nice
 }
 
-// Spec describes a scheme: its archive file extension and how to build the child
+var registry = transform.NewRegistry[Options]("compression", func(o Options) int { return o.Nice })
+
+// exts maps a scheme to its archive file extension ("" for none).
+var exts = map[string]string{}
+
+// register adds a scheme: its archive file extension and how to build the child
 // argv. A nil argv builder means "no external process" (the none scheme).
-type Spec struct {
-	Name           string
-	Ext            string // archive extension, e.g. "zst", "gz"; "" for none
-	compressArgv   func(o Options) []string
-	decompressArgv func(o Options) []string
+func register(name, ext string, compressArgv, decompressArgv func(Options) []string) {
+	registry.Register(transform.Scheme[Options]{Name: name, Forward: compressArgv, Reverse: decompressArgv})
+	exts[name] = ext
 }
 
-var registry = map[string]Spec{}
-
-func register(s Spec) { registry[s.Name] = s }
-
 func init() {
-	register(Spec{
-		Name: "zstd", Ext: "zst",
-		compressArgv: func(o Options) []string {
-			argv := []string{prog(o, "zstd")}
+	register("zstd", "zst",
+		func(o Options) []string {
+			argv := []string{transform.Prog(o.Program, "zstd")}
 			if o.Level > 0 {
 				argv = append(argv, "-"+strconv.Itoa(o.Level))
 			}
@@ -53,56 +50,39 @@ func init() {
 			}
 			return append(argv, "-c")
 		},
-		decompressArgv: func(o Options) []string { return []string{prog(o, "zstd"), "-d", "-c"} },
-	})
-	register(Spec{
-		Name: "gzip", Ext: "gz",
-		compressArgv: func(o Options) []string {
-			argv := []string{prog(o, "gzip")}
+		func(o Options) []string { return []string{transform.Prog(o.Program, "zstd"), "-d", "-c"} },
+	)
+	register("gzip", "gz",
+		func(o Options) []string {
+			argv := []string{transform.Prog(o.Program, "gzip")}
 			if o.Level > 0 {
 				argv = append(argv, "-"+strconv.Itoa(o.Level))
 			}
 			return append(argv, "-c")
 		},
-		decompressArgv: func(o Options) []string { return []string{prog(o, "gzip"), "-d", "-c"} },
-	})
-	register(Spec{Name: "none", Ext: ""}) // identity: no child process
-}
-
-func prog(o Options, def string) string {
-	if o.Program != "" {
-		return o.Program
-	}
-	return def
-}
-
-func spec(scheme string) (Spec, error) {
-	s, ok := registry[scheme]
-	if !ok {
-		return Spec{}, fmt.Errorf("unknown compression scheme %q (known: %s)", scheme, strings.Join(sortedNames(registry), ", "))
-	}
-	return s, nil
+		func(o Options) []string { return []string{transform.Prog(o.Program, "gzip"), "-d", "-c"} },
+	)
+	register("none", "", nil, nil) // identity: no child process
 }
 
 // Ext returns the archive file extension for a scheme ("" for none).
 func Ext(scheme string) (string, error) {
-	s, err := spec(scheme)
-	if err != nil {
+	if _, err := registry.Lookup(scheme); err != nil {
 		return "", err
 	}
-	return s.Ext, nil
+	return exts[scheme], nil
 }
 
 // Check verifies the scheme is known and its binary is available on PATH.
 func Check(scheme string, o Options) error {
-	s, err := spec(scheme)
+	s, err := registry.Lookup(scheme)
 	if err != nil {
 		return err
 	}
-	if s.compressArgv == nil {
+	if s.Forward == nil {
 		return nil // none: nothing to run
 	}
-	bin := s.compressArgv(o)[0]
+	bin := s.Forward(o)[0]
 	if _, err := exec.LookPath(bin); err != nil {
 		return fmt.Errorf("scheme %q needs %q on PATH: %w", scheme, bin, err)
 	}
@@ -113,49 +93,18 @@ func Check(scheme string, o Options) error {
 // (none) scheme, which contributes no stage. It lets the unified pipeline run compression
 // through any executor (local or a remote client).
 func CompressCmd(scheme string, o Options) (cmd programs.Cmd, ok bool, err error) {
-	return stageCmd(scheme, func(s Spec) func(Options) []string { return s.compressArgv }, o)
+	return registry.ForwardCmd(scheme, o)
 }
 
 // DecompressCmd returns the decompressor as a pipeline stage (the read-side peer of
 // CompressCmd), or ok=false for none.
 func DecompressCmd(scheme string, o Options) (cmd programs.Cmd, ok bool, err error) {
-	return stageCmd(scheme, func(s Spec) func(Options) []string { return s.decompressArgv }, o)
+	return registry.ReverseCmd(scheme, o)
 }
 
 // Filter returns the scheme as a reversible programs.Filter — Forward compresses, Reverse
 // decompresses — for the transform layer to place and chain. The none scheme yields a
 // Filter with empty cmds (skipped by the pipeline). It errors only for an unknown scheme.
 func Filter(scheme string, o Options) (programs.Filter, error) {
-	fwd, _, err := CompressCmd(scheme, o)
-	if err != nil {
-		return programs.Filter{}, err
-	}
-	rev, _, err := DecompressCmd(scheme, o)
-	if err != nil {
-		return programs.Filter{}, err
-	}
-	return programs.Filter{Name: scheme, Forward: fwd, Reverse: rev}, nil
-}
-
-func stageCmd(scheme string, pick func(Spec) func(Options) []string, o Options) (programs.Cmd, bool, error) {
-	s, err := spec(scheme)
-	if err != nil {
-		return programs.Cmd{}, false, err
-	}
-	build := pick(s)
-	if build == nil {
-		return programs.Cmd{}, false, nil
-	}
-	argv := build(o)
-	return programs.Cmd{Name: argv[0], Args: argv[1:], Nice: o.Nice}, true, nil
-}
-
-// sortedNames returns a registry map's keys sorted, for stable "known: …" errors.
-func sortedNames[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+	return registry.Filter(scheme, o)
 }

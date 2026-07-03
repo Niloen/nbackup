@@ -26,32 +26,28 @@ type VolumeExpectation struct {
 
 // ExpectedVolume reports the tape the next run on the landing medium will write to,
 // or ok=false for address-identified media (disk, s3) that carry no label and so
-// have no tape to expect.
+// have no tape to expect. It is the landing shortcut over ExpectedVolumeFor.
 func (a *Accountant) ExpectedVolume(now time.Time) (VolumeExpectation, bool) {
 	if !a.d.LandingLabeled() {
 		return VolumeExpectation{}, false
 	}
-	exp := a.ExpectedVolumeFor(a.d.Landing, now)
-	// The reel's capacity and current fill bound this run physically: an appendable
-	// run extends the latest reel (room = size - used), a fresh or recycled reel
-	// offers a whole reel (used stays 0).
-	exp.VolumeBytes = a.d.LandingProfile.VolumeSize()
-	if exp.Appendable && !exp.FreshVolume {
-		for _, s := range a.d.Cat.RunsOnLabel(exp.Label) {
-			exp.UsedBytes += s.TotalBytes()
-		}
-	}
-	return exp, true
+	return a.ExpectedVolumeFor(a.d.Landing, now), true
 }
 
 // ExpectedVolumeFor computes the expected volume for a labeled medium from the
 // catalog's volume registry ordered oldest-written-first. A
 // non-appendable run reuses the oldest volume whose every run is unprotected (the
 // retention safety floor: past minimum age, with a newer recovery path); an
-// appendable run extends the most recently written volume in the pool.
+// appendable run extends the most recently written volume in the pool. The reel's
+// capacity and current fill (VolumeBytes/UsedBytes) bound the run physically: an
+// appendable run extends the latest reel (room = size - used), a fresh or recycled
+// reel offers a whole reel (used stays 0).
 func (a *Accountant) ExpectedVolumeFor(medium string, now time.Time) VolumeExpectation {
 	def := a.d.Cfg.Media[medium]
 	exp := VolumeExpectation{Medium: medium, Appendable: def.IsAppendable()}
+	if prof, err := a.ProfileFor(medium); err == nil {
+		exp.VolumeBytes = prof.VolumeSize()
+	}
 
 	// volumesInPool returns the same pool sorted by name; this expectation wants
 	// oldest-written-first, so copy and re-sort rather than duplicate the compress.
@@ -61,6 +57,9 @@ func (a *Accountant) ExpectedVolumeFor(medium string, now time.Time) VolumeExpec
 	if exp.Appendable {
 		if n := len(pool); n > 0 {
 			exp.Label, exp.WrittenAt = pool[n-1].Label.Name, pool[n-1].Label.WrittenAt
+			for _, s := range a.d.Cat.RunsOnLabel(exp.Label) {
+				exp.UsedBytes += s.TotalBytes()
+			}
 		} else {
 			exp.FreshVolume = true
 		}

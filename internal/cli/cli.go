@@ -6,8 +6,10 @@ package cli
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/config"
@@ -95,11 +97,11 @@ func loadConfig(cfgPath, catalogOverride string) (*config.Config, error) {
 	return cfg, nil
 }
 
-// loadConfigRO loads configuration for read-only commands. With --catalog it uses
+// loadConfigOrDefaultCatalog loads configuration for read-only commands. With --catalog it uses
 // that directory directly (ignoring any config file). Otherwise it reads the config
 // if present (surfacing parse/validation errors) or synthesizes a default
 // catalog when no config file exists.
-func loadConfigRO(cfgPath, catalogOverride string) (*config.Config, error) {
+func loadConfigOrDefaultCatalog(cfgPath, catalogOverride string) (*config.Config, error) {
 	if catalogOverride != "" {
 		cfg := &config.Config{}
 		applyCatalog(cfg, catalogOverride)
@@ -125,12 +127,12 @@ func loadConfigRO(cfgPath, catalogOverride string) (*config.Config, error) {
 	return cfg, nil
 }
 
-// loadConfigRORequire is loadConfigRO for read-only *assertion* commands (verify,
+// loadConfigRequired is loadConfigOrDefaultCatalog for read-only *assertion* commands (verify,
 // status): it never synthesizes a default catalog when no config file exists. A
 // monitor that scrapes the exit code must see a clear failure rather than a green
 // "0 run(s) verified" in a directory that simply has no config. A --catalog override still
 // lets it inspect an existing catalog directly.
-func loadConfigRORequire(cfgPath, catalogOverride string) (*config.Config, error) {
+func loadConfigRequired(cfgPath, catalogOverride string) (*config.Config, error) {
 	if catalogOverride != "" {
 		cfg := &config.Config{}
 		applyCatalog(cfg, catalogOverride)
@@ -171,8 +173,19 @@ func setLocalLanding(cfg *config.Config, name, path string) {
 	cfg.Workdir = path
 }
 
-func newEngine(cfg *config.Config) (*engine.Engine, error) {
-	return engine.New(cfg)
+// newTab returns a tabwriter with the package's uniform table geometry (two-space
+// minimal cells, space-padded), so every `nb` listing aligns the same way.
+func newTab(w io.Writer) *tabwriter.Writer {
+	return tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+}
+
+// noConfigHint renders the empty-listing message for a read-only command that fell
+// back to the synthesized default catalog because no backup config was found —
+// distinguishing "configured but nothing dumped yet" from "no config at all", so a
+// newcomer isn't left with the false impression that an unconfigured listing
+// succeeded meaningfully. `what` is the command's own empty-listing phrase.
+func noConfigHint(what string) string {
+	return what + " (no backup config found — copy nbackup.example.yaml to nbackup.yaml and edit it, or pass -c <config>)"
 }
 
 // logfStdout writes progress lines to stdout.
@@ -274,16 +287,14 @@ func suggestReel(r librarian.SwapRequest) string {
 }
 
 // reelDesc renders a reel/drive status for the operator prompt, reusing the
-// inventory label/status classifier so the two never diverge.
+// inventory label classifier so the two never diverge. It uses the pure
+// classifier only: the catalog-derived refinements (reclaimable orphans,
+// appendability) are inventory concerns that don't belong in a swap prompt.
 func reelDesc(b media.VolumeStatus, medium string) string {
 	if b.ID == "" && b.Label == "" {
 		return "(empty)"
 	}
-	// reelDesc only surfaces the "full" case (decided before appendability matters),
-	// so the appendable flag is immaterial here; pass the common default. It has no
-	// catalog here, so pass hasRuns=true to keep the reclaimable-orphan branch (a
-	// catalog-derived inventory concern) out of the swap prompt.
-	label, status := volumeLabelStatus(b, medium, true, true)
+	label, status := classifyVolume(b, medium)
 	if status == "full" {
 		return fmt.Sprintf("%s (full)", label)
 	}

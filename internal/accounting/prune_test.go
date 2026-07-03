@@ -96,7 +96,7 @@ func TestSweepOrphansMinimumAgeAndWORM(t *testing.T) {
 func TestArchivePositionsCommitFirst(t *testing.T) {
 	ps := []catalog.Placement{{
 		Medium: "disk",
-		Archives: []catalog.ArchivePos{{
+		Archives: []record.ArchivePos{{
 			DLE:    "app",
 			Level:  0,
 			Parts:  []record.FilePos{{Pos: 0}, {Pos: 1}},

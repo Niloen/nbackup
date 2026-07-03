@@ -142,7 +142,7 @@ func TestFiltersFaultRole(t *testing.T) {
 		t.Skip("gzip unavailable")
 	}
 	f := NewFilters(programs.Cmd{Name: "gzip", Args: []string{"-dc"}})
-	_, err := Transfer(context.Background(), reader([]byte("not gzip data")), f, Drain())
+	_, err := Transfer(context.Background(), reader([]byte("not gzip data")), f, Writer(io.Discard))
 	var te *Error
 	if !errors.As(err, &te) || te.Role != RoleFilters {
 		t.Fatalf("want Filters-role error, got %v", err)
@@ -152,7 +152,7 @@ func TestFiltersFaultRole(t *testing.T) {
 // TestProgramSink: a program sink (cat) consumes the stream as stdin.
 func TestProgramSink(t *testing.T) {
 	data := []byte("hello program sink")
-	sink := NewProgramChain(programs.Local()).Add(programs.Cmd{Name: "cat"})
+	sink := NewProgramSink(programs.Local()).Add(programs.Cmd{Name: "cat"})
 	if _, err := Transfer(context.Background(), reader(data), NewFilters(), sink); err != nil {
 		t.Fatalf("program sink Transfer: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestFilterOpenFailure(t *testing.T) {
 	src := &faultSource{data: []byte("payload")}
 	filters := NewFilters(programs.Cmd{Name: "nbackup-no-such-filter-xyzzy"})
 
-	_, err := Transfer(context.Background(), src, filters, Drain())
+	_, err := Transfer(context.Background(), src, filters, Writer(io.Discard))
 
 	var te *Error
 	if !errors.As(err, &te) || te.Role != RoleFilters {

@@ -21,21 +21,17 @@ import (
 // never reaches into the engine directly. It is exported so the engine can wire one;
 // the Scheduler embeds it directly.
 type Deps struct {
-	DLEs              func() []config.DLE
-	History           func() *catalog.History
-	ForcedFulls       func() map[string]bool
-	Workers           func() int
-	ArchiverFor       func(dtName, host string) (archiver.Archiver, error)
-	ExcludeFor        func(dtName string) []string
-	CycleDays         func() int
-	BumpPercent       func() float64
-	Capacity          func() int64
-	CapacityRoom      func(now time.Time) int64
-	CompressCheck     func() error
-	PreflightDumptype func(dt, host string, checkArchiver bool, checked map[string]bool) error
-	RemoteHost        func(host string) (config.SSHConfig, bool)
-	StatSource        func(path string) error
-	ProbeReachable    func(host string) error
+	DLEs          func() []config.DLE
+	History       func() *catalog.History
+	ForcedFulls   func() map[string]bool
+	Workers       func() int
+	ArchiverFor   func(dtName, host string) (archiver.Archiver, error)
+	ExcludeFor    func(dtName string) []string
+	CycleDays     func() int
+	BumpPercent   func() float64
+	Capacity      func() int64
+	CapacityRoom  func(now time.Time) int64
+	PreflightDeps // the dump pre-flight closures, shared with the conductor's strict pre-flight
 }
 
 // Scheduler drives the planner: it estimates DLE sizes, builds and forecasts plans,

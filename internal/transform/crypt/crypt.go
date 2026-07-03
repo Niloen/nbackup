@@ -17,10 +17,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"sort"
 	"strings"
 
 	"github.com/Niloen/nbackup/internal/programs"
+	"github.com/Niloen/nbackup/internal/transform"
 )
 
 // Options tune a scheme invocation. They carry a key *reference* (a gpg recipient
@@ -33,24 +33,17 @@ type Options struct {
 	Nice           int    // run the child under `nice -n Nice` for CPU politeness; 0 = no nice
 }
 
-// Spec describes a scheme: how to build the child argv for encrypting and
-// decrypting. A nil argv builder means "no external process" (the none scheme).
-type Spec struct {
-	Name         string
-	encryptArgv  func(o Options) []string
-	decryptArgv  func(o Options) []string
-	needsKeyHint string // non-empty for schemes that require a key reference (used by Check)
-}
+var registry = transform.NewRegistry[Options]("encryption", func(o Options) int { return o.Nice })
 
-var registry = map[string]Spec{}
-
-func register(s Spec) { registry[s.Name] = s }
+// keyHints holds, per scheme that requires a key reference, the hint Check
+// reports when none is configured.
+var keyHints = map[string]string{}
 
 func init() {
-	register(Spec{
+	registry.Register(transform.Scheme[Options]{
 		Name: "gpg",
-		encryptArgv: func(o Options) []string {
-			argv := []string{prog(o, "gpg"), "--batch", "--yes", "--no-tty", "--compress-algo", "none"}
+		Forward: func(o Options) []string {
+			argv := []string{transform.Prog(o.Program, "gpg"), "--batch", "--yes", "--no-tty", "--compress-algo", "none"}
 			if o.Recipient != "" { // public-key (asymmetric)
 				argv = append(argv, "-e", "-r", o.Recipient)
 			} else { // symmetric, passphrase from a file
@@ -58,8 +51,8 @@ func init() {
 			}
 			return append(argv, "--output", "-")
 		},
-		decryptArgv: func(o Options) []string {
-			argv := []string{prog(o, "gpg"), "--batch", "--yes", "--no-tty"}
+		Reverse: func(o Options) []string {
+			argv := []string{transform.Prog(o.Program, "gpg"), "--batch", "--yes", "--no-tty"}
 			if o.PassphraseFile != "" { // symmetric: supply the passphrase non-interactively
 				argv = append(argv, "--pinentry-mode", "loopback", "--passphrase-file", o.PassphraseFile)
 			}
@@ -67,42 +60,34 @@ func init() {
 			// from the ciphertext and finds the matching secret key in the keyring.
 			return append(argv, "-d")
 		},
-		needsKeyHint: "gpg needs a `recipient` (public-key) or a `passphrase_file` (symmetric)",
 	})
-	register(Spec{Name: "none"}) // identity: no child process
+	keyHints["gpg"] = "gpg needs a `recipient` (public-key) or a `passphrase_file` (symmetric)"
+	registry.Register(transform.Scheme[Options]{Name: "none"}) // identity: no child process
 }
 
-func prog(o Options, def string) string {
-	if o.Program != "" {
-		return o.Program
-	}
-	return def
-}
-
-func spec(scheme string) (Spec, error) {
+// norm maps an unset scheme to "none": an unset Encryption field means the
+// archive is plaintext.
+func norm(scheme string) string {
 	if scheme == "" {
-		scheme = "none" // an unset Encryption field means the archive is plaintext
+		return "none"
 	}
-	s, ok := registry[scheme]
-	if !ok {
-		return Spec{}, fmt.Errorf("unknown encryption scheme %q (known: %s)", scheme, strings.Join(sortedNames(registry), ", "))
-	}
-	return s, nil
+	return scheme
 }
 
 // Check verifies the scheme is known, its binary is available on PATH, and any
 // required key reference is present. It does not test that a key actually
 // decrypts — only that the run is configured well enough to start.
 func Check(scheme string, o Options) error {
-	s, err := spec(scheme)
+	scheme = norm(scheme)
+	s, err := registry.Lookup(scheme)
 	if err != nil {
 		return err
 	}
-	if s.encryptArgv == nil {
+	if s.Forward == nil {
 		return nil // none: nothing to run
 	}
-	if s.needsKeyHint != "" && o.Recipient == "" && o.PassphraseFile == "" {
-		return fmt.Errorf("encryption scheme %q: %s", scheme, s.needsKeyHint)
+	if hint := keyHints[scheme]; hint != "" && o.Recipient == "" && o.PassphraseFile == "" {
+		return fmt.Errorf("encryption scheme %q: %s", scheme, hint)
 	}
 	// recipient (public-key) and passphrase_file (symmetric) are mutually exclusive:
 	// at encrypt time recipient silently wins, so accepting both would give asymmetric
@@ -122,7 +107,7 @@ func Check(scheme string, o Options) error {
 		}
 		f.Close()
 	}
-	bin := s.encryptArgv(o)[0]
+	bin := s.Forward(o)[0]
 	if _, err := exec.LookPath(bin); err != nil {
 		return fmt.Errorf("encryption scheme %q needs %q on PATH: %w", scheme, bin, err)
 	}
@@ -158,49 +143,18 @@ func lastGPGLine(out []byte) string {
 // (none) scheme. It lets the unified pipeline run encryption through any executor — on
 // the client when the key lives there, so plaintext never leaves it.
 func EncryptCmd(scheme string, o Options) (cmd programs.Cmd, ok bool, err error) {
-	return stageCmd(scheme, func(s Spec) func(Options) []string { return s.encryptArgv }, o)
+	return registry.ForwardCmd(norm(scheme), o)
 }
 
 // DecryptCmd returns the decryptor as a pipeline stage (the read-side peer of
 // EncryptCmd), or ok=false for none. This is the only stage that needs the key.
 func DecryptCmd(scheme string, o Options) (cmd programs.Cmd, ok bool, err error) {
-	return stageCmd(scheme, func(s Spec) func(Options) []string { return s.decryptArgv }, o)
+	return registry.ReverseCmd(norm(scheme), o)
 }
 
 // Filter returns the scheme as a reversible programs.Filter — Forward encrypts, Reverse
 // decrypts — for the transform layer to place and chain. The none scheme yields a Filter
 // with empty cmds (skipped by the pipeline). It errors only for an unknown scheme.
 func Filter(scheme string, o Options) (programs.Filter, error) {
-	fwd, _, err := EncryptCmd(scheme, o)
-	if err != nil {
-		return programs.Filter{}, err
-	}
-	rev, _, err := DecryptCmd(scheme, o)
-	if err != nil {
-		return programs.Filter{}, err
-	}
-	return programs.Filter{Name: scheme, Forward: fwd, Reverse: rev}, nil
-}
-
-func stageCmd(scheme string, pick func(Spec) func(Options) []string, o Options) (programs.Cmd, bool, error) {
-	s, err := spec(scheme)
-	if err != nil {
-		return programs.Cmd{}, false, err
-	}
-	build := pick(s)
-	if build == nil {
-		return programs.Cmd{}, false, nil
-	}
-	argv := build(o)
-	return programs.Cmd{Name: argv[0], Args: argv[1:], Nice: o.Nice}, true, nil
-}
-
-// sortedNames returns a registry map's keys sorted, for stable "known: …" errors.
-func sortedNames[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+	return registry.Filter(norm(scheme), o)
 }

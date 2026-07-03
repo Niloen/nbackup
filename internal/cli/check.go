@@ -28,7 +28,7 @@ func newCheckCmd(a *app) *cobra.Command {
 			// check validates a real config and reaches its hosts; without a config
 			// file there is nothing to check, so require one (like plan/dump) rather
 			// than synthesizing a default landing and reporting it "ready".
-			cfg, err := a.load()
+			cfg, err := a.loadForWrite()
 			if err != nil {
 				return err
 			}

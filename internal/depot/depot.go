@@ -82,10 +82,6 @@ func (d *Depot) Profile() media.Profile { return d.profile }
 // MinAge is the landing medium's retention floor.
 func (d *Depot) MinAge() time.Duration { return d.minAge }
 
-// LandingVolume returns the landing volume handle if a command has already opened it
-// (Landing), or nil — for callers that pass the handle along without forcing an open.
-func (d *Depot) LandingVolume() media.Volume { return d.vol }
-
 // OpenForRead opens a medium for reading archive data — the only mint of the read
 // face. Refused while a run window write-owns the medium; the fs's copy selection
 // treats that like any unavailable copy and fails over. Read opens are not tracked
@@ -168,7 +164,16 @@ func (m *writeMedium) Close() error {
 var ErrUnknownMedium = errors.New("unknown medium")
 
 // Landing opens the depot's own (landing) volume on first use and bootstraps the
-// catalog against it, memoizing the handle. Opening is deferred to here — never done
+// catalog against it, memoizing the handle.
+//
+// Landing (with MediumVolume, which wraps it) is the deliberate claim-EXEMPT path:
+// the typed faces (OpenForRead/OpenForWrite/OpenAdmin) are the claim-checked access
+// rule, while this bare handle serves the bootstrap and maintenance flows — rebuild,
+// the ledger, `nb check`, the holding-disk flush — that run single-owner with no run
+// window open, so there is no concurrent writer for a claim to guard against. New
+// access paths should open a face, not this.
+//
+// Opening is deferred to here — never done
 // at construction — so a catalog-only command (report, run, dle, status) never
 // touches the medium: no bucket LIST for a cloud landing, no physical mount for a
 // tape. The commands that genuinely need the medium (dump, restore, verify, prune,
@@ -216,6 +221,12 @@ func (d *Depot) Landing() (media.Volume, error) {
 // rebuilt against it; any other medium is opened as a fresh handle. This is the
 // single place that distinguishes "my medium" from the rest, so the rest of the
 // engine never compares medium names itself.
+//
+// Like Landing, MediumVolume is the deliberate claim-EXEMPT scan/bootstrap path: it
+// skips the writeHeld check the typed faces enforce, because its callers (rebuild,
+// ledger, check, flush) run single-owner outside a run window. The faces are the
+// access rule; this is the documented exemption — do not add callers that could
+// coexist with an open window.
 func (d *Depot) MediumVolume(name string) (vol media.Volume, def config.Media, own bool, err error) {
 	if name == d.landingName {
 		v, err := d.Landing()
@@ -256,7 +267,7 @@ func (d *Depot) Limiter(medium string) *ratelimit.Limiter { return d.limiters[me
 func (d *Depot) PartSizeFor(medium string) (int64, error) {
 	md, ok := d.cfg.Media[medium]
 	if !ok {
-		return 0, fmt.Errorf("unknown medium %q", medium)
+		return 0, fmt.Errorf("%w %q", ErrUnknownMedium, medium)
 	}
 	policy := media.PartSizeFor(md.Type)
 	s := md.Params["part_size"]

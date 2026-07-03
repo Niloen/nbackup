@@ -806,7 +806,11 @@ func TestTapeLabelVerify(t *testing.T) {
 	// Out-of-band relabel of the loaded tape (same name, bumped epoch) makes the
 	// catalog stale for it; a dump must refuse until `nb rebuild`. (Loading
 	// a genuinely different tape from the pool is not an error under a changer.)
-	lv := eng.dep.LandingVolume().(media.Labeled)
+	vol, err := eng.dep.Landing()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lv := vol.(media.Labeled)
 	if err := lv.WriteLabel(record.Label{Name: "lto-0001", Pool: "lto", Epoch: 2}); err != nil {
 		t.Fatal(err)
 	}
@@ -880,7 +884,11 @@ func TestRelabelRefusesForeignPool(t *testing.T) {
 	if err := eng.LabelVolume("lto", "lto-0001", false, false, time.Now().UTC(), nil); err != nil {
 		t.Fatalf("initial label: %v", err)
 	}
-	lv := eng.dep.LandingVolume().(media.Labeled)
+	vol, err := eng.dep.Landing()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lv := vol.(media.Labeled)
 	if err := lv.WriteLabel(record.Label{Name: "FOREIGN-01", Pool: "otherpool", Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
@@ -2097,7 +2105,7 @@ func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, byte
 	at, _ := record.ParseDateField(date)
 	id := record.IDFromTime(at)
 	arch := record.Archive{Run: id, DLE: dle, Level: 0, Compressed: bytes, CreatedAt: at}
-	pos := catalog.ArchivePos{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: volume, Epoch: 1, Pos: 1}}, Commit: catalog.FilePos{Label: volume, Epoch: 1, Pos: 2}}
+	pos := record.ArchivePos{DLE: dle, Level: 0, Parts: []record.FilePos{{Label: volume, Epoch: 1, Pos: 1}}, Commit: record.FilePos{Label: volume, Epoch: 1, Pos: 2}}
 	if err := eng.cat.AddArchive(arch, "lto", pos); err != nil {
 		t.Fatal(err)
 	}
@@ -2110,7 +2118,7 @@ func recordFullOnOtherMedium(t *testing.T, eng *Engine, date, dle, medium string
 	at, _ := record.ParseDateField(date)
 	id := record.IDFromTime(at)
 	arch := record.Archive{Run: id, DLE: dle, Level: 0, CreatedAt: at}
-	pos := catalog.ArchivePos{DLE: dle, Level: 0, Parts: []catalog.FilePos{{Label: medium, Pos: 1}}, Commit: catalog.FilePos{Label: medium, Pos: 2}}
+	pos := record.ArchivePos{DLE: dle, Level: 0, Parts: []record.FilePos{{Label: medium, Pos: 1}}, Commit: record.FilePos{Label: medium, Pos: 2}}
 	if err := eng.cat.AddArchive(arch, medium, pos); err != nil {
 		t.Fatal(err)
 	}

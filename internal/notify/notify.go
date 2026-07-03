@@ -28,15 +28,10 @@ import (
 // endpoint can never wedge a cron run waiting to report.
 const dispatchTimeout = 30 * time.Second
 
-// Event is what a backend renders and delivers: the run plus the host/config
-// identity that frames it, with a pre-rendered subject and body so every backend
-// sends the same message (and the body matches `nb report`'s rendering).
+// Event is what a backend delivers: a pre-rendered subject and body, so every
+// backend sends the same message (and a run's body matches `nb report`'s
+// rendering). Rendering happens once, in the dispatch layer — backends only carry.
 type Event struct {
-	Outcome report.Outcome
-	Command report.Command
-	Host    string
-	Config  string
-	Run     report.Run
 	Subject string
 	Body    string
 }
@@ -68,21 +63,20 @@ func init() {
 }
 
 // DispatchRun delivers a finished run to the backends routed for its command and
-// outcome (see routeFor). It builds the Event once and is best-effort per backend.
-func DispatchRun(ctx context.Context, cfg config.NotifyConfig, id Event, rec report.Run, warn Warnf) {
+// outcome (see routeFor). host frames the subject ("… on <host>"; "" omits it).
+// It builds the Event once and is best-effort per backend.
+func DispatchRun(ctx context.Context, cfg config.NotifyConfig, host string, rec report.Run, warn Warnf) {
 	names := routeFor(cfg, rec.Command, rec.Outcome)
 	if len(names) == 0 {
 		return
 	}
-	deliver(ctx, cfg, names, buildEvent(id, rec), warn)
+	deliver(ctx, cfg, names, buildEvent(host, rec), warn)
 }
 
 // DispatchDigest delivers an `nb report --notify` digest to the configured `digest`
 // backends. body is the already-rendered digest text.
-func DispatchDigest(ctx context.Context, cfg config.NotifyConfig, id Event, subject, body string, warn Warnf) {
-	ev := id
-	ev.Subject, ev.Body = subject, body
-	deliver(ctx, cfg, cfg.Digest, ev, warn)
+func DispatchDigest(ctx context.Context, cfg config.NotifyConfig, subject, body string, warn Warnf) {
+	deliver(ctx, cfg, cfg.Digest, Event{Subject: subject, Body: body}, warn)
 }
 
 // routeFor resolves which backends fire for a command's outcome.
@@ -143,22 +137,17 @@ func deliver(ctx context.Context, cfg config.NotifyConfig, names []string, ev Ev
 
 // buildEvent renders the subject and body for a run, reusing report.RenderRun so the
 // notification body matches what `nb report` shows.
-func buildEvent(id Event, rec report.Run) Event {
-	ev := id
-	ev.Outcome, ev.Command, ev.Run = rec.Outcome, rec.Command, rec
+func buildEvent(host string, rec report.Run) Event {
 	state := "OK"
 	if rec.Failed() {
 		state = "FAILED"
 	}
-	host := id.Host
 	if host != "" {
 		host = " on " + host
 	}
-	ev.Subject = "nbackup " + string(rec.Command) + " " + state + host
 	var sb strings.Builder
 	report.RenderRun(&sb, rec)
-	ev.Body = sb.String()
-	return ev
+	return Event{Subject: "nbackup " + string(rec.Command) + " " + state + host, Body: sb.String()}
 }
 
 func backendNames(cfg config.NotifyConfig) []string {

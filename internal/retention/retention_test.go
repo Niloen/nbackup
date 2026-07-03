@@ -165,3 +165,56 @@ func TestFloor_MinAgeSubDay(t *testing.T) {
 		t.Errorf("incremental committed 30m ago must be kept within the 1h minimum_age")
 	}
 }
+
+// Precedence and classification key on the typed Kind, never the rendered text:
+// a floor whose reason strings are deliberately reworded still ranks
+// age > last-full > chain (Reason) and still classifies each pin by its Kind
+// (KindArchive), so rewording a user-facing message can never silently change
+// either. Constructed directly so the texts share no wording with Compute's.
+func TestFloor_KindDrivesRankAndClassification(t *testing.T) {
+	f := Floor{reasons: map[archiveRef]pin{
+		{"run-1", "a"}: {KindAge, "reworded age text"},
+		{"run-1", "b"}: {KindLastFull, "reworded last-full text"},
+		{"run-1", "c"}: {KindChain, "reworded chain text"},
+	}}
+	if reason, ok := f.Reason("run-1"); !ok || reason != "reworded age text" {
+		t.Errorf("Reason = %q, %v; want the KindAge pin to outrank the others", reason, ok)
+	}
+	delete(f.reasons, archiveRef{"run-1", "a"})
+	if reason, ok := f.Reason("run-1"); !ok || reason != "reworded last-full text" {
+		t.Errorf("Reason = %q, %v; want the KindLastFull pin to outrank KindChain", reason, ok)
+	}
+	delete(f.reasons, archiveRef{"run-1", "b"})
+	if reason, ok := f.Reason("run-1"); !ok || reason != "reworded chain text" {
+		t.Errorf("Reason = %q, %v; want the KindChain pin", reason, ok)
+	}
+	if kind, ok := f.KindArchive("run-1", "c"); !ok || kind != KindChain {
+		t.Errorf("KindArchive = %v, %v; want KindChain regardless of the text", kind, ok)
+	}
+	if _, ok := f.KindArchive("run-1", "a"); ok {
+		t.Errorf("KindArchive must report ok=false for an unpinned archive")
+	}
+}
+
+// Compute stamps the Kind the callers classify on: an age pin is KindAge (the one
+// MediumProtectionIsAgeBound treats as releasable by shortening minimum_age),
+// a last-full pin is KindLastFull, a chain pin is KindChain.
+func TestFloor_ComputeStampsKinds(t *testing.T) {
+	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	runs := cat(
+		mkRun("run-2026-01-01.001", "2026-01-01", arch("app", 0)),
+		mkRun("run-2026-01-02.001", "2026-01-02", arch("app", 1)),
+		mkRunAt("run-2026-02-28.001", "2026-02-28", now.Add(-time.Hour), arch("db", 1)),
+	)
+	got := Compute(runs, 24*time.Hour, now)
+
+	if kind, ok := got.KindArchive("run-2026-02-28.001", "db"); !ok || kind != KindAge {
+		t.Errorf("young archive: kind = %v, %v; want KindAge", kind, ok)
+	}
+	if kind, ok := got.KindArchive("run-2026-01-01.001", "app"); !ok || kind != KindLastFull {
+		t.Errorf("last full: kind = %v, %v; want KindLastFull", kind, ok)
+	}
+	if kind, ok := got.KindArchive("run-2026-01-02.001", "app"); !ok || kind != KindChain {
+		t.Errorf("chain incremental: kind = %v, %v; want KindChain", kind, ok)
+	}
+}

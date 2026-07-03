@@ -17,6 +17,7 @@ import (
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/ratelimit"
+	"github.com/Niloen/nbackup/internal/scheduler"
 )
 
 // PreparedWriter is the folded view of a medium opened for writing: the run store the
@@ -70,18 +71,15 @@ type Deps struct {
 	// catalog; the closure reads the View's copy (sound because a session never reads
 	// its own writes). Which media it may mount is the media layer's business: a mount
 	// onto a window-written medium is refused and the read fails over to another copy.
-	OpenReader        func(view *catalog.View) archivefs.ReadStore
-	CheckCompress     func() error
-	ProbeReachable    func(host string) error
-	PreflightDumptype func(dt, host string, checkArchiver bool, checked map[string]bool) error
-	Flush             func(now time.Time, lf logf.Logf) (int, error)
-	HoldingMedia      []string
-	Workers           int
-	NewFileSink       func() progress.Sink
-	Landing           string
-	LandingFor        func(item planner.Item) string // the medium an item's DLE lands on (dumptype override, else Landing)
-	RunSink           progress.Sink
-	EstimateSink      progress.Sink
+	OpenReader   func(view *catalog.View) archivefs.ReadStore
+	Preflight    scheduler.PreflightDeps // the shared dump pre-flight closures (run strict here)
+	Flush        func(now time.Time, lf logf.Logf) (int, error)
+	HoldingMedia []string
+	Workers      int
+	NewFileSink  func() progress.Sink
+	LandingFor   func(item planner.Item) string // the medium an item's DLE lands on (dumptype override, else the default landing)
+	RunSink      progress.Sink
+	EstimateSink progress.Sink
 }
 
 // Conductor executes one plan into one sealed run. It is per-run (it carries the

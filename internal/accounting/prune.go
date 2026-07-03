@@ -33,15 +33,15 @@ func (a *Accountant) Prune(mediumName string, now time.Time, apply bool, out log
 
 	// Reclamation is per archive (run+DLE): a medium's Reclaim walks the oldest
 	// non-protected archives, so an old run can lose one DLE's image while keeping
-	// another the chain still needs.
-	type archiveRef struct{ run, dle string }
-	reclaim := map[archiveRef]media.Reclamation{}
+	// another the chain still needs. The map is keyed by record.Ref with Level left
+	// zero on both sides — (run,DLE) already names an archive uniquely.
+	reclaim := map[record.Ref]media.Reclamation{}
 	for _, r := range profile.Reclaim(archives, floor, now) {
-		reclaim[archiveRef{r.RunID, r.DLE}] = r
+		reclaim[record.Ref{Run: r.RunID, DLE: r.DLE}] = r
 	}
 
 	for _, ar := range archives {
-		if _, ok := reclaim[archiveRef{ar.Run, ar.DLE}]; ok {
+		if _, ok := reclaim[record.Ref{Run: ar.Run, DLE: ar.DLE}]; ok {
 			continue // reported below
 		}
 		if reason, ok := floor.ReasonArchive(ar.Run, ar.DLE); ok {
@@ -59,7 +59,7 @@ func (a *Accountant) Prune(mediumName string, now time.Time, apply bool, out log
 		}
 	}
 	for _, ar := range archives {
-		r, ok := reclaim[archiveRef{ar.Run, ar.DLE}]
+		r, ok := reclaim[record.Ref{Run: ar.Run, DLE: ar.DLE}]
 		if !ok {
 			continue
 		}

@@ -1,11 +1,13 @@
 package catalog
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 
+	"github.com/Niloen/nbackup/internal/fsx"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
@@ -34,22 +36,11 @@ func (m *MemberIndex) Store(run, dle string, level int, members []string) error 
 	if err := os.MkdirAll(m.dir, 0o755); err != nil {
 		return err
 	}
-	p := m.path(run, dle, level)
-	tmp := p + ".tmp"
-	f, err := os.Create(tmp)
-	if err != nil {
+	var buf bytes.Buffer
+	if err := record.EncodeIndex(&buf, members); err != nil {
 		return err
 	}
-	if err := record.EncodeIndex(f, members); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, p)
+	return fsx.WriteFileAtomic(m.path(run, dle, level), buf.Bytes(), 0o644)
 }
 
 // Load reads an archive's cached member list, reporting whether it was present.

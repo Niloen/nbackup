@@ -114,14 +114,8 @@ func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force boo
 	if from == "" {
 		from = c.landing
 	}
-	if from == target {
-		return nil, fmt.Errorf("sync source and target are the same medium %q", target)
-	}
-	if !c.knownMedium(from) {
-		return nil, fmt.Errorf("unknown source medium %q %s", from, c.mediaHint())
-	}
-	if !c.knownMedium(target) {
-		return nil, fmt.Errorf("unknown medium %q %s", target, c.mediaHint())
+	if err := c.validatePair(from, target); err != nil {
+		return nil, err
 	}
 
 	report := &SyncReport{From: from, To: target}
@@ -130,10 +124,8 @@ func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force boo
 		if err != nil {
 			return nil, err
 		}
-		want := missing
-		if force {
-			want = held // a forced sync re-copies the source copy's whole content
-		}
+		// A forced sync re-copies the source copy's whole content.
+		want := wantArchives(held, missing, force)
 		if len(want) == 0 {
 			continue // idempotent: the target holds everything the source copy does
 		}
@@ -145,7 +137,7 @@ func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force boo
 	}
 	// Capacity projection (sampled before any copy, so it reads the same for dry-run
 	// and apply): current target usage plus the backlog about to land.
-	if prof, perr := c.profileFor(target); perr == nil {
+	if prof, perr := c.acct.ProfileFor(target); perr == nil {
 		report.TargetCapacity = prof.TotalBytes()
 	}
 	report.ProjectedBytes = c.cat.MediumBytes(target) + report.Bytes()

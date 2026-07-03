@@ -4,11 +4,12 @@
 // never touch the media.
 //
 // Its model separates what a run *is* from where its copies *are*: an Entry pairs
-// one medium-independent run (its content, from the seal record) with the set of
-// Placements that hold a copy — each a volume plus the file position of every
-// archive on it. The media remain the source of truth (every file self-describing,
-// every run sealed, every labeled volume identified), so the whole cache rebuilds
-// by scanning: seals -> runs, labels -> the volume registry.
+// one medium-independent run (its content, grouped from the archives' commit footers)
+// with the set of Placements that hold a copy — each a volume plus the file position
+// of every archive on it. The media remain the source of truth (every file
+// self-describing, every archive marked complete by its commit footer, every labeled
+// volume identified), so the whole cache rebuilds by scanning: commit footers ->
+// runs, labels -> the volume registry.
 //
 // The package has two faces. This file is the store: an in-memory index of Entries
 // and VolumeRecords with queries, insert/update/delete, and JSON persistence — the
@@ -32,6 +33,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/Niloen/nbackup/internal/fsx"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
@@ -58,7 +60,7 @@ type Catalog struct {
 	volumes map[string]*VolumeRecord // by volume label name
 	dles    map[string]*DLEMeta      // per-DLE operator/planner metadata, by slug
 	loaded  bool
-	win     *Window // the open run window, if any — mutations journal instead of persisting
+	win     *Window // the open run window, if any — guards one-window-at-a-time; mutators persist per op as always
 }
 
 type cacheFile struct {
@@ -103,7 +105,7 @@ func Open(workdir string) (*Catalog, error) {
 //
 // Every catalog mutation is single-threaded (a run routes all placement writes through one
 // goroutine), so no locking is needed.
-func (c *Catalog) AddArchive(arch record.Archive, medium string, pos ArchivePos) error {
+func (c *Catalog) AddArchive(arch record.Archive, medium string, pos record.ArchivePos) error {
 	c.addArchive(arch, medium, pos)
 	c.sortEntries()
 	return c.persist()
@@ -114,7 +116,7 @@ func (c *Catalog) AddArchive(arch record.Archive, medium string, pos ArchivePos)
 // placement position, but neither sorts nor persists — for a bulk caller (a rebuild scan)
 // that persists once at the end. The catalog cache holds no member lists (they live in the
 // member-index cache + the on-medium index), so members are cleared here.
-func (c *Catalog) addArchive(arch record.Archive, medium string, pos ArchivePos) {
+func (c *Catalog) addArchive(arch record.Archive, medium string, pos record.ArchivePos) {
 	e := c.entryByID(arch.Run)
 	if e == nil {
 		e = &Entry{Run: &Run{ID: arch.Run}}
@@ -128,18 +130,18 @@ func (c *Catalog) addArchive(arch record.Archive, medium string, pos ArchivePos)
 
 // addPlacementPos records archive position pos on the entry's copy on medium, creating the
 // placement if absent and replacing any prior position of the same (DLE, level).
-func (e *Entry) addPlacementPos(medium string, pos ArchivePos) {
+func (e *Entry) addPlacementPos(medium string, pos record.ArchivePos) {
 	for i := range e.Placements {
 		if e.Placements[i].Medium == medium {
 			e.Placements[i].Archives = mergeArchivePos(e.Placements[i].Archives, pos)
 			return
 		}
 	}
-	e.Placements = append(e.Placements, Placement{Medium: medium, Archives: []ArchivePos{pos}})
+	e.Placements = append(e.Placements, Placement{Medium: medium, Archives: []record.ArchivePos{pos}})
 }
 
 // mergeArchivePos returns list with pos added, replacing any entry of the same (DLE, level).
-func mergeArchivePos(list []ArchivePos, pos ArchivePos) []ArchivePos {
+func mergeArchivePos(list []record.ArchivePos, pos record.ArchivePos) []record.ArchivePos {
 	for i := range list {
 		if list[i].DLE == pos.DLE && list[i].Level == pos.Level {
 			list[i] = pos
@@ -171,7 +173,7 @@ func (c *Catalog) RemovePlacement(runID, medium string) (gone bool, err error) {
 }
 
 // RemoveArchive drops one archive (a DLE's image) from the copy of a run on one
-// medium — the per-archive peer of RemovePlacement. It removes that DLE's ArchivePos
+// medium — the per-archive peer of RemovePlacement. It removes that DLE's record.ArchivePos
 // from the medium's placement; when the placement keeps no archives the whole
 // placement goes (placementGone), and when that was the run's last copy the entry
 // goes too (entryGone) — the run no longer exists anywhere. When no remaining
@@ -198,22 +200,15 @@ func (c *Catalog) RemoveArchive(runID, medium, dle string) (placementGone, entry
 		break
 	}
 	kept := e.Placements[:0:0]
-	dleStillHeld := false
 	for _, p := range e.Placements {
 		if len(p.Archives) > 0 {
 			kept = append(kept, p)
 		} else {
 			placementGone = true
 		}
-		for _, a := range p.Archives {
-			if a.DLE == dle {
-				dleStillHeld = true
-				break
-			}
-		}
 	}
 	e.Placements = kept
-	if !dleStillHeld {
+	if !e.anyPlacementHolds(dle) {
 		e.Run.dropArchive(dle)
 	}
 	if len(e.Placements) == 0 {
@@ -304,7 +299,7 @@ func (c *Catalog) snapshotPlacements() map[string][]Placement {
 	for _, e := range c.entries {
 		ps := make([]Placement, len(e.Placements))
 		for i, p := range e.Placements {
-			archives := make([]ArchivePos, len(p.Archives))
+			archives := make([]record.ArchivePos, len(p.Archives))
 			for j, a := range p.Archives {
 				a.Parts = append([]record.FilePos(nil), a.Parts...)
 				archives[j] = a
@@ -393,16 +388,8 @@ func (c *Catalog) RunIDsOnLabel(label string) []string {
 // here even while its run's other archives (or its own copies elsewhere) remain.
 func (c *Catalog) MediumBytes(medium string) int64 {
 	var total int64
-	for _, e := range c.entries {
-		p, ok := e.placementOn(medium)
-		if !ok {
-			continue
-		}
-		for _, a := range e.Run.Archives {
-			if p.Holds(a.DLE, a.Level) {
-				total += a.Compressed
-			}
-		}
+	for _, a := range c.ArchivesOn(medium) {
+		total += a.Compressed
 	}
 	return total
 }
@@ -457,9 +444,5 @@ func (c *Catalog) persist() error {
 		return err
 	}
 	data = append(data, '\n')
-	tmp := filepath.Join(c.workdir, CacheFile+".tmp")
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(c.workdir, CacheFile))
+	return fsx.WriteFileAtomic(filepath.Join(c.workdir, CacheFile), data, 0o644)
 }

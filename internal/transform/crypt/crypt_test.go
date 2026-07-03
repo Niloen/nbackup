@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Niloen/nbackup/internal/programs"
+	"github.com/Niloen/nbackup/internal/transform"
 )
 
 // runFilter runs one filter command over src through the live programs path — the same
@@ -42,10 +43,10 @@ func runFilter(t *testing.T, cmd programs.Cmd, src []byte) []byte {
 // env has no gpg). It stands in for a stream cipher: reversible, and its output
 // differs from its input.
 func init() {
-	register(Spec{
-		Name:        "gztest",
-		encryptArgv: func(o Options) []string { return []string{"gzip", "-c"} },
-		decryptArgv: func(o Options) []string { return []string{"gzip", "-dc"} },
+	registry.Register(transform.Scheme[Options]{
+		Name:    "gztest",
+		Forward: func(o Options) []string { return []string{"gzip", "-c"} },
+		Reverse: func(o Options) []string { return []string{"gzip", "-dc"} },
 	})
 }
 

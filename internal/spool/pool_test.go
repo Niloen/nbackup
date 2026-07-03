@@ -12,15 +12,15 @@ import (
 // plain byte gate.
 func TestPoolBlocksUntilReleased(t *testing.T) {
 	p := NewPool([]Disk{{Capacity: 100}})
-	if idx, direct, err := p.Acquire(10); err != nil || direct || idx != 0 {
-		t.Fatalf("acquire under capacity = (%d,%v,%v); want (0,false,nil)", idx, direct, err)
+	if d, direct, err := p.Acquire(10); err != nil || direct || d != &p.disks[0] {
+		t.Fatalf("acquire under capacity = (%p,%v,%v); want (disk 0,false,nil)", d, direct, err)
 	}
 	p.disks[0].used = 130 // force over capacity
 
-	acquired := make(chan int, 1)
+	acquired := make(chan *Disk, 1)
 	go func() {
-		i, _, _ := p.Acquire(10) // must block: the only disk is full
-		acquired <- i
+		d, _, _ := p.Acquire(10) // must block: the only disk is full
+		acquired <- d
 	}()
 	select {
 	case <-acquired:
@@ -28,11 +28,11 @@ func TestPoolBlocksUntilReleased(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	p.Release(0, 130) // used drops to 0: the waiter proceeds
+	p.Release(&p.disks[0], 130) // used drops to 0: the waiter proceeds
 	select {
-	case i := <-acquired:
-		if i != 0 {
-			t.Fatalf("woke onto disk %d, want 0", i)
+	case d := <-acquired:
+		if d != &p.disks[0] {
+			t.Fatalf("woke onto disk %p, want disk 0", d)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("release must wake the blocked acquire")
@@ -44,14 +44,14 @@ func TestPoolBlocksUntilReleased(t *testing.T) {
 // disks, the acquire spills to the disk with a free slot instead of blocking.
 func TestPoolWritersCapGatesStaging(t *testing.T) {
 	p := NewPool([]Disk{{Capacity: 100, Writers: 1}})
-	if idx, direct, err := p.Acquire(10); err != nil || direct || idx != 0 {
-		t.Fatalf("first acquire = (%d,%v,%v); want (0,false,nil)", idx, direct, err)
+	if d, direct, err := p.Acquire(10); err != nil || direct || d != &p.disks[0] {
+		t.Fatalf("first acquire = (%p,%v,%v); want (disk 0,false,nil)", d, direct, err)
 	}
 
-	acquired := make(chan int, 1)
+	acquired := make(chan *Disk, 1)
 	go func() {
-		i, _, _ := p.Acquire(10) // must block: the only disk is at its writer cap
-		acquired <- i
+		d, _, _ := p.Acquire(10) // must block: the only disk is at its writer cap
+		acquired <- d
 	}()
 	select {
 	case <-acquired:
@@ -59,11 +59,11 @@ func TestPoolWritersCapGatesStaging(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	p.ReleaseWriter(0) // the first write closed: the waiter proceeds
+	p.ReleaseWriter(&p.disks[0]) // the first write closed: the waiter proceeds
 	select {
-	case i := <-acquired:
-		if i != 0 {
-			t.Fatalf("woke onto disk %d, want 0", i)
+	case d := <-acquired:
+		if d != &p.disks[0] {
+			t.Fatalf("woke onto disk %p, want disk 0", d)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("ReleaseWriter must wake the blocked acquire")
@@ -74,7 +74,7 @@ func TestPoolWritersCapGatesStaging(t *testing.T) {
 	first, _, _ := p2.Acquire(10)
 	second, direct, err := p2.Acquire(10)
 	if err != nil || direct || second == first {
-		t.Fatalf("second acquire = (%d,%v,%v); want the other disk than %d", second, direct, err, first)
+		t.Fatalf("second acquire = (%p,%v,%v); want the other disk than %p", second, direct, err, first)
 	}
 }
 
@@ -114,12 +114,12 @@ func TestPoolAbortWakesBlocked(t *testing.T) {
 // next acquire still blocks until the drain releases them.
 func TestPoolChargeBackpressuresOnDrainBacklog(t *testing.T) {
 	p := NewPool([]Disk{{Capacity: 100}})
-	idx, direct, err := p.Acquire(80) // reserves 80 of 100 for the in-flight write
-	if err != nil || direct || idx != 0 {
-		t.Fatalf("acquire = (%d,%v,%v); want (0,false,nil)", idx, direct, err)
+	d, direct, err := p.Acquire(80) // reserves 80 of 100 for the in-flight write
+	if err != nil || direct || d != &p.disks[0] {
+		t.Fatalf("acquire = (%p,%v,%v); want (disk 0,false,nil)", d, direct, err)
 	}
-	p.Charge(0, 80)  // the archive committed: 80 landed bytes now occupy the disk (used = 160)
-	p.Release(0, 80) // the producer frees its in-flight estimate on Close (used = 80, still the backlog)
+	p.Charge(d, 80)  // the archive committed: 80 landed bytes now occupy the disk (used = 160)
+	p.Release(d, 80) // the producer frees its in-flight estimate on Close (used = 80, still the backlog)
 
 	acquired := make(chan struct{}, 1)
 	go func() {
@@ -132,7 +132,7 @@ func TestPoolChargeBackpressuresOnDrainBacklog(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	p.Release(0, 80) // the drain copied the archive off and freed its landed bytes
+	p.Release(d, 80) // the drain copied the archive off and freed its landed bytes
 	select {
 	case <-acquired:
 	case <-time.After(time.Second):
@@ -143,15 +143,15 @@ func TestPoolChargeBackpressuresOnDrainBacklog(t *testing.T) {
 // Allocation is round-robin across the disks, so successive dumps spread across spindles.
 func TestPoolRoundRobin(t *testing.T) {
 	p := NewPool([]Disk{{Capacity: 1000}, {Capacity: 1000}, {Capacity: 1000}})
-	var got []int
+	var got []*Disk
 	for i := 0; i < 6; i++ {
-		idx, direct, err := p.Acquire(10)
+		d, direct, err := p.Acquire(10)
 		if err != nil || direct {
-			t.Fatalf("acquire %d = (%d,%v,%v)", i, idx, direct, err)
+			t.Fatalf("acquire %d = (%p,%v,%v)", i, d, direct, err)
 		}
-		got = append(got, idx)
+		got = append(got, d)
 	}
-	want := []int{0, 1, 2, 0, 1, 2}
+	want := []*Disk{&p.disks[0], &p.disks[1], &p.disks[2], &p.disks[0], &p.disks[1], &p.disks[2]}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("round-robin order = %v, want %v", got, want)
@@ -164,12 +164,12 @@ func TestPoolSkipsFull(t *testing.T) {
 	p := NewPool([]Disk{{Capacity: 100}, {Capacity: 100}})
 	p.disks[0].used = 100 // disk 0 full
 	for i := 0; i < 3; i++ {
-		idx, direct, err := p.Acquire(10)
+		d, direct, err := p.Acquire(10)
 		if err != nil || direct {
-			t.Fatalf("acquire %d = (%d,%v,%v)", i, idx, direct, err)
+			t.Fatalf("acquire %d = (%p,%v,%v)", i, d, direct, err)
 		}
-		if idx != 1 {
-			t.Errorf("acquire %d landed on disk %d, want 1 (0 is full)", i, idx)
+		if d != &p.disks[1] {
+			t.Errorf("acquire %d landed on disk %p, want disk 1 (0 is full)", i, d)
 		}
 	}
 }

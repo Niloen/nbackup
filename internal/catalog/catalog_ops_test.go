@@ -25,12 +25,12 @@ func TestOpenCorruptCache(t *testing.T) {
 	}
 }
 
-func archivePos(dle string, level, partPos, commitPos int) ArchivePos {
-	return ArchivePos{
+func archivePos(dle string, level, partPos, commitPos int) record.ArchivePos {
+	return record.ArchivePos{
 		DLE:    dle,
 		Level:  level,
-		Parts:  []FilePos{{Pos: partPos}},
-		Commit: FilePos{Pos: commitPos},
+		Parts:  []record.FilePos{{Pos: partPos}},
+		Commit: record.FilePos{Pos: commitPos},
 	}
 }
 
@@ -146,7 +146,7 @@ func TestQueryProjections(t *testing.T) {
 	}
 	run := "run-2026-06-20.001"
 	arch := record.Archive{Run: run, DLE: "h-data", Level: 0, Compressed: 100}
-	pos := ArchivePos{DLE: "h-data", Level: 0, Parts: []FilePos{{Label: "vol-a", Pos: 0}}, Commit: FilePos{Label: "vol-a", Pos: 1}}
+	pos := record.ArchivePos{DLE: "h-data", Level: 0, Parts: []record.FilePos{{Label: "vol-a", Pos: 0}}, Commit: record.FilePos{Label: "vol-a", Pos: 1}}
 	if err := cat.AddArchive(arch, "tape", pos); err != nil {
 		t.Fatal(err)
 	}

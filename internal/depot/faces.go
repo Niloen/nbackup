@@ -44,7 +44,7 @@ type WriteMedium interface {
 // introspection reporting reads (posture, ledger, drill) need. It cannot author a run
 // and cannot read archive data.
 type AdminMedium interface {
-	Label(name string, relabel, force bool, minAge time.Duration, now time.Time, logf librarian.Logf) error
+	Label(name string, relabel, force bool, now time.Time, logf librarian.Logf) error
 	Load(target string, byLabel bool, logf librarian.Logf) error
 	View() (librarian.View, error)
 	Labeled() bool

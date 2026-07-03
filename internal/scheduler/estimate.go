@@ -50,7 +50,7 @@ func (s *Scheduler) estimates(dles []config.DLE, sink progress.Sink) map[string]
 			if tr != nil {
 				tr.StartDLE(d.ID()) // progress display keys by host:path, matching the dump phase
 			}
-			results[i] = s.estimateDLE(d, d.Name(), st)
+			results[i] = s.estimateDLE(d, st)
 			if tr != nil {
 				tr.FinishDLE(d.ID(), 0, results[i].Full, 0, nil)
 			}
@@ -84,14 +84,15 @@ func (s *Scheduler) warmCaches(dles []config.DLE) []*catalog.DLEState {
 	return states
 }
 
-func (s *Scheduler) estimateDLE(d config.DLE, name string, st *catalog.DLEState) planner.Estimate {
+func (s *Scheduler) estimateDLE(d config.DLE, st *catalog.DLEState) planner.Estimate {
+	name := d.Name() // the internal slug, the archiver's incremental-state key
 	arch, err := s.d.ArchiverFor(d.DumpTypeName(), d.Host)
 	if err != nil || arch.Check() != nil {
-		return planner.Estimate{} // no estimator available (e.g. tar missing)
+		return planner.Estimate{} // no estimator available (e.g. the archiver's tool missing)
 	}
 	excl := s.d.ExcludeFor(d.DumpTypeName())
 	full, ferr := arch.Estimate(archiver.BackupRequest{DLE: name, SourcePath: d.Path, Level: 0, BaseLevel: -1, Exclude: excl})
-	// A non-nil error with a non-zero floor means tar walked a partially-readable
+	// A non-nil error with a non-zero floor means the archiver walked a partially-readable
 	// source (an unreadable member): the size is a floor, not exact. A zero floor is
 	// a total failure (e.g. a missing path) that ValidatePlan already reports, so we
 	// don't double-warn for it here.
@@ -100,17 +101,11 @@ func (s *Scheduler) estimateDLE(d config.DLE, name string, st *catalog.DLEState)
 		return planner.Estimate{Full: full, Incomplete: incomplete} // never fulled: only a full is possible
 	}
 
-	// The DLE sits at level L — 1 right after a full, otherwise its last level. We
-	// estimate that level and the next so the planner can judge whether climbing to
-	// L+1 saves enough to be worth it (see planner.chooseIncrLevel). L+1 is only
-	// estimable once an L dump exists to base it on; until then IncrNext stays 0.
-	lvl := st.LastLevel()
-	if lvl < 1 {
-		lvl = 1
-	}
-	if lvl > planner.MaxLevel {
-		lvl = planner.MaxLevel
-	}
+	// The DLE sits at level L (planner.SittingLevel). We estimate that level and
+	// the next so the planner can judge whether climbing to L+1 saves enough to be
+	// worth it (see planner.chooseIncrLevel). L+1 is only estimable once an L dump
+	// exists to base it on; until then IncrNext stays 0.
+	lvl := planner.SittingLevel(st)
 	est := planner.Estimate{Full: full, Incomplete: incomplete}
 	if arch.HasBase(name, lvl-1) {
 		est.Incr, _ = arch.Estimate(archiver.BackupRequest{

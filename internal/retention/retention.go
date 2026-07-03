@@ -17,7 +17,6 @@ package retention
 import (
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/record"
@@ -30,18 +29,39 @@ import (
 // run, so an old run may keep one DLE's archive while another DLE's is reclaimed.
 type archiveRef struct{ run, dle string }
 
+// Kind classifies why the floor pins an archive — the typed identity of a pin,
+// stable across any rewording of the rendered reason text. Precedence and any
+// caller classification (e.g. "is this pin age-bound?") key on the Kind, never on
+// the text. Declaration order is strength order: lower = stronger.
+type Kind int
+
+const (
+	// KindAge — the archive is still within the medium's minimum_age.
+	KindAge Kind = iota
+	// KindLastFull — the archive is a DLE's last full, its last recovery path.
+	KindLastFull
+	// KindChain — the archive is in a DLE's pinned recovery chain.
+	KindChain
+)
+
+// pin is one floor entry: the typed kind plus the rendered reason text.
+type pin struct {
+	kind Kind
+	text string
+}
+
 // Floor is the retention floor computed for one medium's runs: the archives
 // reclamation must never delete, each with the reason it is pinned. Build it once
-// with Compute, then query it — per archive (KeepsArchive, ReasonArchive), per run
-// (Keeps, Reason — "is any archive of the run pinned"), or by "is any of these
-// runs pinned" (First). The zero Floor keeps nothing.
+// with Compute, then query it — per archive (KeepsArchive, ReasonArchive,
+// KindArchive), per run (Keeps, Reason — "is any archive of the run pinned"), or
+// by "is any of these runs pinned" (First). The zero Floor keeps nothing.
 //
 // The floor is per-archive because reclamation on address-identified media (disk,
 // cloud) is per-archive; the run-level queries report a run as kept when any of
 // its archives is pinned, which is what the whole-volume reclaimers (tape relabel,
 // ExpectedTape) and the cost forecast still reason in.
 type Floor struct {
-	reasons map[archiveRef]string // (run,DLE) -> reason; absent ⇒ reclaimable
+	reasons map[archiveRef]pin // (run,DLE) -> pin; absent ⇒ reclaimable
 }
 
 // Compute applies a medium's retention rules to its runs and returns the floor —
@@ -51,7 +71,7 @@ type Floor struct {
 //  2. Last recovery path: the last full of each DLE is kept, so at least one
 //     recovery path for it never ages out.
 //  3. Recovery chain: an incremental restore replays its full PLUS every later
-//     incremental up to the target (see restore.Chain), so a kept run pins the
+//     incremental up to the target (see recovery.Chain), so a kept run pins the
 //     whole chain its restore needs. Each DLE's latest run pins the live chain
 //     after the last full (the tip and every point in between); each young run
 //     pins the older base its restore depends on. So reclamation can never orphan
@@ -63,10 +83,10 @@ type Floor struct {
 // Note: once verification status is tracked, the successor requirement should
 // tighten from "a newer full exists" to "a newer verified full exists".
 func Compute(archives []record.Archive, minAge time.Duration, now time.Time) Floor {
-	reasons := map[archiveRef]string{}
-	pin := func(run, dle, reason string) {
+	reasons := map[archiveRef]pin{}
+	keep := func(run, dle string, kind Kind, reason string) {
 		if _, ok := reasons[archiveRef{run, dle}]; !ok {
-			reasons[archiveRef{run, dle}] = reason
+			reasons[archiveRef{run, dle}] = pin{kind, reason}
 		}
 	}
 	youngArchive := func(a record.Archive) bool {
@@ -88,7 +108,7 @@ func Compute(archives []record.Archive, minAge time.Duration, now time.Time) Flo
 	// 1) Age floor: pin each archive still within the minimum age (per archive).
 	for _, a := range archives {
 		if youngArchive(a) {
-			pin(a.Run, a.DLE, fmt.Sprintf("within minimum age (%s)", sizeutil.FormatDuration(minAge)))
+			keep(a.Run, a.DLE, KindAge, fmt.Sprintf("within minimum age (%s)", sizeutil.FormatDuration(minAge)))
 		}
 	}
 	// 2) Last-recovery floor (kept distinct so an archive that is a DLE's last full
@@ -98,12 +118,12 @@ func Compute(archives []record.Archive, minAge time.Duration, now time.Time) Flo
 			// The reason omits the DLE: callers render it in the line's path
 			// column (as host:path), so repeating the internal slug here is
 			// redundant and inconsistent.
-			pin(a.Run, a.DLE, "last recovery path")
+			keep(a.Run, a.DLE, KindLastFull, "last recovery path")
 		}
 	}
 	// 3) Recovery-chain floor.
 	for _, dle := range dleNames(archives) {
-		ds := archivesOf(archives, dle) // the dle's archives in run order, one per run
+		ds := record.ArchivesOf(archives, dle) // the dle's archives in run order, one per run
 		anchors := map[int]bool{}
 		if n := len(ds); n > 0 {
 			anchors[n-1] = true // the latest run: keeps the live chain (and its full)
@@ -124,7 +144,7 @@ func Compute(archives []record.Archive, minAge time.Duration, now time.Time) Flo
 				continue // no full at or before the anchor (cannot happen for a real chain)
 			}
 			for j := full; j <= ai; j++ {
-				pin(ds[j].Run, dle, "in this DLE's recovery chain")
+				keep(ds[j].Run, dle, KindChain, "in this DLE's recovery chain")
 			}
 		}
 	}
@@ -145,19 +165,6 @@ func dleNames(archives []record.Archive) []string {
 	return out
 }
 
-// archivesOf returns the archives of dle, in run order (by run). A run dumps each DLE once,
-// so there is one archive per run.
-func archivesOf(archives []record.Archive, dle string) []record.Archive {
-	var out []record.Archive
-	for _, a := range archives {
-		if a.DLE == dle {
-			out = append(out, a)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return record.RunIDLess(out[i].Run, out[j].Run) })
-	return out
-}
-
 // KeepsArchive reports whether the floor pins one archive (run+DLE), so per-archive
 // reclamation must not delete it. It is the predicate a medium's Reclaim consults.
 func (f Floor) KeepsArchive(run, dle string) bool {
@@ -167,8 +174,15 @@ func (f Floor) KeepsArchive(run, dle string) bool {
 
 // ReasonArchive returns why the floor pins one archive, and whether it pins it.
 func (f Floor) ReasonArchive(run, dle string) (reason string, ok bool) {
-	r, ok := f.reasons[archiveRef{run, dle}]
-	return r, ok
+	p, ok := f.reasons[archiveRef{run, dle}]
+	return p.text, ok
+}
+
+// KindArchive returns the typed kind of the pin on one archive, and whether the
+// floor pins it — the classification callers branch on (never the reason text).
+func (f Floor) KindArchive(run, dle string) (Kind, bool) {
+	p, ok := f.reasons[archiveRef{run, dle}]
+	return p.kind, ok
 }
 
 // Keeps reports whether the floor pins any archive of run id — the run-level view
@@ -186,30 +200,19 @@ func (f Floor) Keeps(id string) bool {
 // (the precedence Compute applies per archive, projected to the run). Ties within a
 // rank break by DLE for a stable message.
 func (f Floor) Reason(id string) (reason string, ok bool) {
-	bestRank, bestDLE := 0, ""
-	for ref, r := range f.reasons {
+	var bestKind Kind
+	bestDLE := ""
+	for ref, p := range f.reasons {
 		if ref.run != id {
 			continue
 		}
-		rk := reasonRank(r)
-		if !ok || rk < bestRank || (rk == bestRank && ref.dle < bestDLE) {
-			bestRank, bestDLE, reason, ok = rk, ref.dle, r, true
+		// Kind is the strength order (lower = stronger), so the run-level Reason
+		// reports the same precedence Compute uses per archive.
+		if !ok || p.kind < bestKind || (p.kind == bestKind && ref.dle < bestDLE) {
+			bestKind, bestDLE, reason, ok = p.kind, ref.dle, p.text, true
 		}
 	}
 	return reason, ok
-}
-
-// reasonRank orders the floor's reason kinds by strength (lower = stronger), so the
-// run-level Reason reports the same precedence Compute uses per archive.
-func reasonRank(reason string) int {
-	switch {
-	case strings.HasPrefix(reason, "within minimum age"):
-		return 0
-	case strings.HasPrefix(reason, "last recovery path"):
-		return 1
-	default: // recovery chain
-		return 2
-	}
 }
 
 // First returns the first of the given run ids that the floor pins, with the reason — the

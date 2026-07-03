@@ -46,17 +46,7 @@ func (s *hashSink) Commit(_ context.Context, _ SourceStats) error {
 	return nil
 }
 
-// Drain is a sink that discards the stream (the recoverability proof's "did it decode").
-func Drain() Sink { return drainSink{} }
-
-type drainSink struct{}
-
-func (drainSink) NextPart(_ context.Context) (io.WriteCloser, int64, error) {
-	return nopWriteCloser{io.Discard}, -1, nil
-}
-func (drainSink) Commit(_ context.Context, _ SourceStats) error { return nil }
-
-// Writer is a sink that copies the stream to w (a temp file, stdout).
+// Writer is a sink that copies the stream to w (a temp file, stdout, io.Discard).
 func Writer(w io.Writer) Sink { return writerSink{w: w} }
 
 type writerSink struct{ w io.Writer }

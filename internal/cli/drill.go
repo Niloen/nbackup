@@ -3,11 +3,9 @@ package cli
 import (
 	"fmt"
 	"os"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/sys/unix"
 
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
@@ -72,30 +70,29 @@ func newDrillCmd(a *app) *cobra.Command {
 		Example: "  nb drill\n  nb drill --dry-run\n  nb drill --from offsite --tier structural\n  nb dump && nb sync && nb drill --unattended",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := a.load()
+			cfg, err := a.loadForWrite()
 			if err != nil {
 				return err
 			}
 
-			// Resolve options: CLI flags override the config `drill:` block.
-			if window == "" {
-				window = cfg.Drill.Window
-			}
+			// Resolve options: a CLI flag the user set overrides the config `drill:`
+			// block (uniformly via Flags().Changed, so an explicit empty/zero flag
+			// still wins). The config side owns its own parsing/defaults.
 			win := cfg.DrillWindow()
-			if window != "" {
-				if d, perr := sizeutil.ParseDuration(window); perr == nil {
-					win = d
-				} else {
+			if cmd.Flags().Changed("window") {
+				d, perr := sizeutil.ParseDuration(window)
+				if perr != nil {
 					return fmt.Errorf("--window: %w", perr)
 				}
+				win = d
 			}
 			if !cmd.Flags().Changed("sample") {
 				sample = cfg.DrillSample()
 			}
-			if from == "" {
+			if !cmd.Flags().Changed("from") {
 				from = cfg.Drill.From
 			}
-			if tier == "" {
+			if !cmd.Flags().Changed("tier") {
 				tier = cfg.DrillTierName()
 			}
 			t, err := drill.ParseTier(tier)
@@ -198,7 +195,7 @@ func printDrillReport(r *engine.DrillReport) {
 			verb = "Drilled"
 		}
 		fmt.Printf("%s %d DLE(s) (window %s, sample of the riskiest):\n", verb, len(r.Targets), sizeutil.FormatDuration(r.Window))
-		tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		tw := newTab(os.Stdout)
 		if r.Apply {
 			fmt.Fprintln(tw, "  DLE\tAS-OF\tRUN\tEGRESS\tRESULT")
 			for _, t := range r.Targets {
@@ -242,7 +239,7 @@ func printDrillReport(r *engine.DrillReport) {
 
 	// WORM + 3-2-1-1-0 posture audit.
 	fmt.Println("Recoverability posture (3-2-1-1-0)")
-	ptw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	ptw := newTab(os.Stdout)
 	for _, c := range r.Posture.Checks {
 		fmt.Fprintf(ptw, "  [%s]\t%s\t%s\n", c.Status, c.Name, c.Detail)
 	}
@@ -258,32 +255,4 @@ func unattendedTag(unattended bool) string {
 		return ", unattended"
 	}
 	return ""
-}
-
-// stdinIsTerminal reports whether stdin is an interactive terminal (vs a pipe/cron),
-// so an unspecified `nb drill` defaults to unattended in a non-interactive context and a
-// manual tape station only prompts when someone can answer. It uses a real TTY ioctl, not
-// an os.ModeCharDevice test: /dev/null (a common cron stdin) is itself a character device,
-// so the looser test wrongly reported `nb dump </dev/null` as interactive — printing a swap
-// prompt into the log and then erroring, instead of the clean unattended path.
-// A var (not a plain func) so tests can script the interactive-vs-cron decision
-// the prompt paths (confirmRead, the swap operator) gate on.
-var stdinIsTerminal = func() bool {
-	return isTerminal(os.Stdin.Fd())
-}
-
-// isTerminal reports whether fd refers to a real terminal, via the get-termios ioctl
-// that underlies isatty(3) (TCGETS on Linux, TIOCGETA on darwin/BSD — see tty_*.go).
-// Unlike an os.ModeCharDevice test it returns false for /dev/null and other character
-// devices — only a tty answers it.
-func isTerminal(fd uintptr) bool {
-	_, err := unix.IoctlGetTermios(int(fd), ioctlGetTermios)
-	return err == nil
-}
-
-// stderrIsTerminal reports whether stderr is an interactive terminal, so live
-// in-place progress is only painted when someone is watching (not into a pipe,
-// file, or cron log). Same real-TTY check as stdinIsTerminal (not os.ModeCharDevice).
-func stderrIsTerminal() bool {
-	return isTerminal(os.Stderr.Fd())
 }

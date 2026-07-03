@@ -556,3 +556,37 @@ func writeFileT(v media.Volume, h record.Header, write func(io.Writer) error) (i
 	}
 	return fw.Pos(), nil
 }
+
+// TestVolumeProfileShapeAware: the tape profile factory reads the same option keys
+// the changer factory does, so the planner's capacity never disagrees with the
+// medium. A file-backed library counts "slots" (robotic or manual); a real drive
+// ("device") has an unbounded pool but a finite reel; and an unsized reel is
+// unbounded. The count defaults to one, matching the changer.
+func TestVolumeProfileShapeAware(t *testing.T) {
+	cases := []struct {
+		name      string
+		opts      media.Options
+		wantTotal int64 // retainable pool (TotalBytes)
+		wantReel  int64 // per-run reel ceiling (VolumeSize)
+	}{
+		{"library counts cartridges", media.Options{"dir": "/x", "slots": "3", "volume_size": "100"}, 300, 100},
+		{"manual station counts reels", media.Options{"dir": "/x", "manual": "true", "slots": "4", "volume_size": "100"}, 400, 100},
+		{"bare drive: unbounded pool, finite reel", media.Options{"device": "/dev/nst0", "volume_size": "100"}, 0, 100},
+		{"count defaults to one", media.Options{"dir": "/x", "volume_size": "100"}, 100, 100},
+		{"unsized reel is unbounded", media.Options{"dir": "/x", "slots": "3"}, 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := newVolumeProfile(tc.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := p.TotalBytes(); got != tc.wantTotal {
+				t.Errorf("TotalBytes = %d, want %d", got, tc.wantTotal)
+			}
+			if got := p.VolumeSize(); got != tc.wantReel {
+				t.Errorf("VolumeSize = %d, want %d", got, tc.wantReel)
+			}
+		})
+	}
+}

@@ -14,7 +14,7 @@ The recovery chain (everything that reads backups back) is split awkwardly:
 - **Drill has a private restore path.** `engine/restore.go` claims `extractInto` is
   "the engine's one extraction path", but `engine/drill.go` (`drillChain`)
   hand-composes its own transfer (`decodeFilters` + `SplitTransforms` +
-  `NewProgramChain` + `RestoreStage` + `Transfer`). So a green chain drill proves a
+  `NewProgramSink` + `RestoreStage` + `Transfer`). So a green chain drill proves a
   *copy* of the restore path works — not that `nb recover --all` works.
 - **Two read-driving idioms.** File-level recover and drill verify use
   `clerk.ReadArchives` (ordered one-pass, mount reuse); the whole-DLE chain restore

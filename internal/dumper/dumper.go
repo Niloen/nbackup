@@ -1,5 +1,5 @@
 // Package dumper is the producing half of a dump: it spins up workers that archive each planned
-// DLE — running the tar source and the encode pipeline (compress/encrypt, placed client- or
+// DLE — running the archiver's stage source and the encode pipeline (compress/encrypt, placed client- or
 // server-side) — and transfers the bytes into a Store the consumer hands out. It owns parallelism
 // and the per-item dump; it never touches the catalog or decides where an archive is stored. The
 // consumer (the drain over holding disks, or the landing itself) is an archive store: NewArchive
@@ -47,7 +47,7 @@ func New(cfg Config) *Dumper {
 	return &Dumper{archiverFor: cfg.ArchiverFor, exclude: cfg.Exclude, placement: cfg.Placement, threads: cfg.Threads}
 }
 
-// dumpGate bounds how many DLEs run the heavy transfer (the tar source + encode pipeline) at once.
+// dumpGate bounds how many DLEs run the heavy transfer (the archiver source + encode pipeline) at once.
 // A DLE acquires its target (the store's NewArchive — a holding-disk run or the backing permit)
 // before entering the gate, so a DLE parked waiting on a full holding disk or a busy landing holds
 // no run, and `workers` counts dumps actually running rather than waiters. acquire blocks for a

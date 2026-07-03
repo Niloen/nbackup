@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/Niloen/nbackup/internal/fsx"
 )
 
 // LedgerFile is the recoverability ledger stored in the catalog workdir. It is the
@@ -70,11 +72,7 @@ func (l *Ledger) Save(workdir string) error {
 		return err
 	}
 	data = append(data, '\n')
-	tmp := filepath.Join(workdir, LedgerFile+".tmp")
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(workdir, LedgerFile))
+	return fsx.WriteFileAtomic(filepath.Join(workdir, LedgerFile), data, 0o644)
 }
 
 // Update records (or replaces) a DLE's latest drill outcome.

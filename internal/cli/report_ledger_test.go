@@ -68,7 +68,7 @@ func TestRenderDrillLedgerAllHealthy(t *testing.T) {
 }
 
 // TestReportCommand exercises the full `nb report` wiring through cobra, including
-// loadRO via --catalog and reading the seeded run history.
+// loadOrDefaultCatalog via --catalog and reading the seeded run history.
 func TestReportCommand(t *testing.T) {
 	dir := t.TempDir()
 	for _, r := range []report.Run{

@@ -9,7 +9,7 @@ import (
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/record"
-	"github.com/Niloen/nbackup/internal/xfer"
+	"github.com/Niloen/nbackup/internal/spool"
 )
 
 // flush.go is the amflush analogue: it drains a crashed run's leftover holding-disk archives to
@@ -106,14 +106,12 @@ func Flush(d FlushDeps) (flushed int, err error) {
 					if err != nil {
 						return flushed, err
 					}
-					rc, err := d.Open(s.ID, ap.DLE, ap.Level, holding)
-					if err != nil {
-						return flushed, fmt.Errorf("flush %s %s: read holding disk: %w", s.ID, dleID, err)
-					}
-					// NewCopy records the landing placement on its Commit; xfer.Reader closes rc.
-					cw := landingWriter.NewCopy(arch)
-					if _, err := xfer.Transfer(context.Background(), xfer.Reader(rc), xfer.NewFilters(), cw); err != nil {
-						return flushed, fmt.Errorf("flush %s %s to %q: %w", s.ID, dleID, landing, err)
+					// CopyStaged (shared with the live drain) opens the staged payload and streams it
+					// into the copy writer, whose Commit records the landing placement.
+					label := fmt.Sprintf("flush %s %s", s.ID, dleID)
+					open := func() (io.ReadCloser, error) { return d.Open(s.ID, ap.DLE, ap.Level, holding) }
+					if err := spool.CopyStaged(context.Background(), label, open, landingWriter.NewCopy(arch), landing); err != nil {
+						return flushed, err
 					}
 				}
 				if err := d.Reclaim(holding, s.ID, ap.DLE, ap); err != nil {

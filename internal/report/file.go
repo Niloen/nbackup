@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/Niloen/nbackup/internal/fsx"
 )
 
 // LogFile is the append-only run history in the catalog workdir: one compact JSON
@@ -69,17 +71,7 @@ func writeSummary(path string, r Run) error {
 		return err
 	}
 	data = append(data, '\n')
-	return writeFileAtomic(path, data, 0o644)
-}
-
-// writeFileAtomic writes data to a sibling temp file and renames it over path,
-// so a concurrent reader never observes a half-written file.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return fsx.WriteFileAtomic(path, data, 0o644)
 }
 
 // Load reads the run history, oldest-first. A torn trailing line (a reader racing
@@ -140,8 +132,14 @@ func Last(dir string, n int) ([]Run, error) {
 
 // compactIfLarge rewrites the log to its last maxLogLines records when it has grown
 // past the cap, atomically (temp + rename) so a reader always sees a complete file.
-// It re-reads via Load so a torn trailing line is dropped in the same pass.
+// A cheap line count decides first — Append calls this on every run, and the common
+// case (an under-cap log) must not pay a full JSON parse. Only an over-cap log is
+// re-read via Load, so a torn trailing line is dropped in the same pass.
 func compactIfLarge(path string) error {
+	over, err := overLineCap(path)
+	if err != nil || !over {
+		return err
+	}
 	dir := filepath.Dir(path)
 	runs, err := Load(dir)
 	if err != nil || len(runs) <= maxLogLines {
@@ -157,5 +155,30 @@ func compactIfLarge(path string) error {
 		buf.Write(line)
 		buf.WriteByte('\n')
 	}
-	return writeFileAtomic(path, buf.Bytes(), 0o644)
+	return fsx.WriteFileAtomic(path, buf.Bytes(), 0o644)
+}
+
+// overLineCap reports whether the log file holds more than maxLogLines non-blank
+// lines, by scanning raw lines without parsing any JSON. A missing file is not over.
+func overLineCap(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	var n int
+	for sc.Scan() {
+		if len(bytes.TrimSpace(sc.Bytes())) == 0 {
+			continue
+		}
+		if n++; n > maxLogLines {
+			return true, nil
+		}
+	}
+	return false, sc.Err()
 }
