@@ -130,7 +130,7 @@ func (v *memVolume) RemoveFile(pos int) error {
 // memStore is an in-memory archivefs.WriteStore plus PartAllocator (a landing's seams or a holding
 // disk's full store), backed by one memVolume. Its control calls (NextPart/PlaceFile/Record) are the ones the spool
 // routes onto the orchestrator; each optionally faults and each runs a concurrency probe so a test
-// can assert they never overlap. OpenArchive/Reclaim are the drain's read-back and drop, also
+// can assert they never overlap. OpenArchiveAt/ReclaimAt are the drain's read-back and drop, also
 // faultable.
 type memStore struct {
 	name string
@@ -191,16 +191,16 @@ func (s *memStore) Record(r archiveio.CommitResult) error {
 	return nil
 }
 
-func (s *memStore) OpenArchive(arch record.Archive, pos record.ArchivePos) (io.ReadCloser, error) {
+func (s *memStore) OpenArchiveAt(runID string, pos record.ArchivePos) (io.ReadCloser, error) {
 	if s.openErr != nil {
 		return nil, s.openErr
 	}
-	exp := record.Ref{Run: arch.Run, DLE: arch.DLE, Level: arch.Level}
+	exp := record.Ref{Run: runID, DLE: pos.DLE, Level: pos.Level}
 	open := func(p record.FilePos) (record.Header, io.ReadCloser, error) { return s.vol.ReadFile(p.Pos) }
 	return archiveio.NewReader(open, nil).Open(exp, pos.Parts)
 }
 
-func (s *memStore) Reclaim(record.Archive, record.ArchivePos) error {
+func (s *memStore) ReclaimAt(string, record.ArchivePos) error {
 	if s.reclaimErr != nil {
 		return s.reclaimErr
 	}
@@ -244,7 +244,7 @@ func stageOne(t *testing.T, sp *Spool, body []byte) error {
 	return sp.Drain()
 }
 
-// TestDrainReadBackFaultAborts faults the holding-disk read-back (OpenArchive) mid-drain: the copy
+// TestDrainReadBackFaultAborts faults the holding-disk read-back (OpenArchiveAt) mid-drain: the copy
 // to the landing can't even start, so the drain must abort the run and Drain must surface it.
 func TestDrainReadBackFaultAborts(t *testing.T) {
 	boom := errors.New("read holding boom")

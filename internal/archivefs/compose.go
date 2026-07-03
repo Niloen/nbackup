@@ -10,7 +10,7 @@ import (
 
 // compose.go is the fs's write side: a Session over a run on one medium. The Session is that
 // medium's WriteStore — the fs write face: a Recorder (Record writes the placement to the
-// catalog) plus OpenArchive/Reclaim, the drain's read-back and reclaim of a staged archive. It
+// catalog) plus OpenArchiveAt/ReclaimAt, the drain's read-back and reclaim of a staged archive. It
 // holds no allocator: part placement is the device side's business (the opened WriteMedium's
 // librarian Allocator), which a writer is bound to separately — archiveio.NewWriter(alloc,
 // session, …). The engine builds one for the serial CopyRun/Flush paths, the spool builds its
@@ -30,7 +30,7 @@ type Medium interface {
 // Session is one run's write handle on its medium and is its WriteStore. w is the
 // catalog's write face the session records into; m identifies the opened medium and
 // serves the volume reads on a single-volume medium (a holding disk) — a landing's
-// volume is never read back through OpenArchive/Reclaim.
+// volume is never read back through OpenArchiveAt/ReclaimAt.
 type Session struct {
 	fs *FS
 	w  WriteMap
@@ -64,34 +64,35 @@ func (s *Session) Record(r archiveio.CommitResult) error {
 	return s.w.AddArchive(arch, s.m.Name(), r.Pos)
 }
 
-// OpenArchive reads a committed archive's payload back by concatenating its parts straight off the
-// session's volume (whose index the producer keeps current) — the drain's read seam, for copying a
-// staged archive to the landing.
-func (s *Session) OpenArchive(arch record.Archive, pos record.ArchivePos) (io.ReadCloser, error) {
+// OpenArchiveAt reads a staged archive's payload back by concatenating the parts at pos straight off
+// the session's volume (whose index the producer keeps current) — the drain's read seam, for copying
+// a staged archive to the landing. It is positional: pos carries the part locations and the archive's
+// DLE/Level, so only runID (the enclosing context ArchivePos omits) is passed, matching Record's
+// per-archive keying so a session carrying archives from several source runs (a cross-run sync) reads
+// each under the right run.
+func (s *Session) OpenArchiveAt(runID string, pos record.ArchivePos) (io.ReadCloser, error) {
 	open := func(p record.FilePos) (record.Header, io.ReadCloser, error) { return s.m.Volume().ReadFile(p.Pos) }
-	// Key on the archive's own run, not the session's, matching Record: a session carrying
-	// archives from several source runs (a cross-run sync) reads each under the right run.
-	return archiveio.NewReader(open, nil).Open(record.Ref{Run: arch.Run, DLE: arch.DLE, Level: arch.Level}, pos.Parts)
+	return archiveio.NewReader(open, nil).Open(record.Ref{Run: runID, DLE: pos.DLE, Level: pos.Level}, pos.Parts)
 }
 
-// Reclaim drops a staged archive once it has landed on the landing; see ReclaimStaged.
-func (s *Session) Reclaim(arch record.Archive, pos record.ArchivePos) error {
-	return ReclaimStaged(s.w, s.m.Name(), s.m.Volume(), arch.Run, arch.DLE, pos)
+// ReclaimAt drops a staged archive once it has landed on the landing; see ReclaimStaged.
+func (s *Session) ReclaimAt(runID string, pos record.ArchivePos) error {
+	return ReclaimStaged(s.w, s.m.Name(), s.m.Volume(), runID, pos)
 }
 
 // ReclaimStaged drops a staged archive from a holding medium once it has landed: it removes the
 // archive's files from vol (the commit footer first, so an interrupted reclaim un-commits before
 // dropping parts) then drops its placement from the catalog via w. The live drain reaches it
-// through Session.Reclaim; the crash-recovery flush (conductor.Flush) calls it directly — the
-// footer-first invariant lives only here. A package function: it touches only its arguments,
-// never the fs.
-func ReclaimStaged(w WriteMap, medium string, vol media.Volume, runID, dle string, pos record.ArchivePos) error {
+// through Session.ReclaimAt; the crash-recovery flush (conductor.Flush) calls it directly — the
+// footer-first invariant lives only here. Positional like the read-back: pos carries the archive's
+// DLE, so only runID is passed. A package function: it touches only its arguments, never the fs.
+func ReclaimStaged(w WriteMap, medium string, vol media.Volume, runID string, pos record.ArchivePos) error {
 	for _, p := range archivePosFiles(pos) {
 		if err := vol.RemoveFile(p); err != nil {
 			return err
 		}
 	}
-	_, _, err := w.RemoveArchive(runID, medium, dle)
+	_, _, err := w.RemoveArchive(runID, medium, pos.DLE)
 	return err
 }
 

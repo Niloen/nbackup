@@ -49,7 +49,7 @@ type recordReq struct {
 }
 type reclaimReq struct {
 	store archivefs.WriteStore
-	arch  record.Archive
+	runID string
 	pos   record.ArchivePos
 	reply chan error
 }
@@ -80,7 +80,7 @@ func (o *orchestrator) loop() {
 		case r := <-o.record:
 			r.reply <- r.rec.Record(r.res)
 		case r := <-o.reclaim:
-			r.reply <- r.store.Reclaim(r.arch, r.pos)
+			r.reply <- r.store.ReclaimAt(r.runID, r.pos)
 		case <-o.stop:
 			return
 		}
@@ -91,9 +91,9 @@ func (o *orchestrator) shutdown() { close(o.stop) }
 
 // reclaimOn drops a staged archive from store on the orchestrator (Reclaim's catalog RemoveArchive is
 // single-owner, like Record).
-func (o *orchestrator) reclaimOn(store archivefs.WriteStore, arch record.Archive, pos record.ArchivePos) error {
+func (o *orchestrator) reclaimOn(store archivefs.WriteStore, runID string, pos record.ArchivePos) error {
 	reply := make(chan error, 1)
-	o.reclaim <- reclaimReq{store: store, arch: arch, pos: pos, reply: reply}
+	o.reclaim <- reclaimReq{store: store, runID: runID, pos: pos, reply: reply}
 	return <-reply
 }
 

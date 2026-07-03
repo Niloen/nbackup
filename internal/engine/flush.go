@@ -55,12 +55,12 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 		Members: func(runID, dle string, level int) ([]string, error) {
 			return e.fs.Members(record.Ref{Run: runID, DLE: dle, Level: level})
 		},
-		Reclaim: func(holding, runID, dle string, pos record.ArchivePos) error {
+		Reclaim: func(holding, runID string, pos record.ArchivePos) error {
 			vol, err := holdVol(holding)
 			if err != nil {
 				return err
 			}
-			return archivefs.ReclaimStaged(e.cat, holding, vol, runID, dle, pos)
+			return archivefs.ReclaimStaged(e.cat, holding, vol, runID, pos)
 		},
 		OpenLanding: func(landing string, spec archiveio.RunSpec) (*archiveio.Writer, error) {
 			lh, ok := landers[landing]

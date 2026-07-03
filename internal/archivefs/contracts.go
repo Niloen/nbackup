@@ -41,15 +41,20 @@ type ReadStore interface {
 
 // WriteStore is the write face of the archive fs — one run's medium end, the mirror of
 // ReadStore: it receives each committed archive (archiveio.Recorder — the block-layer
-// writer's commit seam), and it can read a committed archive's payload back (OpenArchive)
-// and drop it (Reclaim). A landing is only ever recorded to; a holding disk uses the full
+// writer's commit seam), and it can read a staged archive's payload back (OpenArchiveAt)
+// and drop it (ReclaimAt). A landing is only ever recorded to; a holding disk uses the full
 // surface, since the drain reads its staged archives back and reclaims them. It is not a
 // writer factory: archive writers are made by archiveio.NewWriter over a PartAllocator +
 // this Recorder, never by the store. The Session implements it.
+//
+// The read-back and reclaim are positional, not logical: the caller already holds the
+// archive's positions (its ArchivePos, straight off the writer's CommitResult), so there is
+// no catalog resolution or copy-selection like ReadStore.Open — only the run id is needed
+// as enclosing context, since ArchivePos is scoped to a (run, medium) and carries no run.
 type WriteStore interface {
 	archiveio.Recorder
-	OpenArchive(arch record.Archive, pos record.ArchivePos) (io.ReadCloser, error)
-	Reclaim(arch record.Archive, pos record.ArchivePos) error
+	OpenArchiveAt(runID string, pos record.ArchivePos) (io.ReadCloser, error)
+	ReclaimAt(runID string, pos record.ArchivePos) error
 }
 
 // Ingest is the producer's source of ArchiveWriters: NewArchive reserves a per-archive

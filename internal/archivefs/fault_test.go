@@ -155,7 +155,7 @@ func (v *memVol) RemoveFile(pos int) error {
 }
 
 // memWriteStore is a minimal allocator+recorder over a memVol so a real archiveio.Writer can author an
-// archive onto it (for the OpenArchive/Reclaim read-back tests).
+// archive onto it (for the OpenArchiveAt/ReclaimAt read-back tests).
 type memWriteStore struct{ vol *memVol }
 
 func (s *memWriteStore) NextPart() (media.Volume, int64, string, int, error) {
@@ -209,7 +209,7 @@ func TestSessionRecord(t *testing.T) {
 }
 
 // TestSessionOpenArchive authors a real archive onto the session's volume and reads it back through
-// OpenArchive (the drain's read seam), asserting the bytes round-trip.
+// OpenArchiveAt (the drain's read seam), asserting the bytes round-trip.
 func TestSessionOpenArchive(t *testing.T) {
 	vol := newMemVol()
 	body := []byte("staged archive payload")
@@ -218,9 +218,9 @@ func TestSessionOpenArchive(t *testing.T) {
 	m := &fakeMap{}
 	c := New(m, &fakeDeps{}, catalog.OpenMemberIndex(t.TempDir()))
 	sess := c.OpenRun(m, fakeMedium{name: "hd0", vol: vol})
-	rc, err := sess.OpenArchive(arch, pos)
+	rc, err := sess.OpenArchiveAt(arch.Run, pos)
 	if err != nil {
-		t.Fatalf("OpenArchive: %v", err)
+		t.Fatalf("OpenArchiveAt: %v", err)
 	}
 	got, _ := io.ReadAll(rc)
 	rc.Close()
@@ -241,8 +241,8 @@ func TestReclaimStagedFooterFirst(t *testing.T) {
 	m := &fakeMap{}
 	c := New(m, &fakeDeps{}, catalog.OpenMemberIndex(t.TempDir()))
 	sess := c.OpenRun(m, fakeMedium{name: "hd0", vol: vol})
-	if err := sess.Reclaim(arch, pos); err != nil {
-		t.Fatalf("Reclaim: %v", err)
+	if err := sess.ReclaimAt(arch.Run, pos); err != nil {
+		t.Fatalf("ReclaimAt: %v", err)
 	}
 	if len(vol.removed) == 0 || vol.removed[0] != pos.Commit.Pos {
 		t.Fatalf("removed order = %v; the commit footer (pos %d) must be removed first", vol.removed, pos.Commit.Pos)
@@ -267,8 +267,8 @@ func TestReclaimStagedFileFaultKeepsCatalog(t *testing.T) {
 	m := &fakeMap{}
 	c := New(m, &fakeDeps{}, catalog.OpenMemberIndex(t.TempDir()))
 	sess := c.OpenRun(m, fakeMedium{name: "hd0", vol: vol})
-	if err := sess.Reclaim(arch, pos); err == nil {
-		t.Fatal("Reclaim must surface the file-removal fault")
+	if err := sess.ReclaimAt(arch.Run, pos); err == nil {
+		t.Fatal("ReclaimAt must surface the file-removal fault")
 	}
 	if len(m.removed) != 0 {
 		t.Fatalf("catalog RemoveArchive ran despite a file-removal fault: %+v", m.removed)

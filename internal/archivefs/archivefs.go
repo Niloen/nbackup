@@ -11,7 +11,7 @@
 //   - WriteStore (implemented by Session): one run's write handle on its medium. A writer
 //     is bound to it with archiveio.NewWriter (by the engine for a copy/flush, by the
 //     spool for a concurrent dump) and, on Commit, reports the placement via the
-//     Session's Record; OpenArchive/Reclaim read a staged archive back and drop it.
+//     Session's Record; OpenArchiveAt/ReclaimAt read a staged archive back and drop it.
 //     There is no seal: a run is its committed archives.
 //   - Ingest (implemented by the spool): the producer's writer factory.
 //

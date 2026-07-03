@@ -33,7 +33,7 @@ type FlushDeps struct {
 	Holdings    []string
 	Open        func(runID, dle string, level int, medium string) (io.ReadCloser, error)
 	Members     func(runID, dle string, level int) ([]string, error)
-	Reclaim     func(holding, runID, dle string, pos record.ArchivePos) error
+	Reclaim     func(holding, runID string, pos record.ArchivePos) error
 	OpenLanding func(landing string, spec archiveio.RunSpec) (*archiveio.Writer, error)
 	DisplayDLE  func(dle string) string
 	Logf        func(format string, args ...any)
@@ -114,7 +114,7 @@ func Flush(d FlushDeps) (flushed int, err error) {
 						return flushed, err
 					}
 				}
-				if err := d.Reclaim(holding, s.ID, ap.DLE, ap); err != nil {
+				if err := d.Reclaim(holding, s.ID, ap); err != nil {
 					return flushed, fmt.Errorf("flush %s %s: reclaim holding disk: %w", s.ID, dleID, err)
 				}
 				flushed++
