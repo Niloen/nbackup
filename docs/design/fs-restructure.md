@@ -1,14 +1,12 @@
-# FS restructure — packages, layers, and names
+# FS structure — packages, layers, and names
+
+Status: implemented.
 
 NBackup's storage stack deliberately mirrors a filesystem: media are opened like
 devices, archives are mapped onto volume files like blocks, and operations read
-and write archives by logical name like files. The structure was sound; the
-naming and package boundaries had drifted — fs contracts stranded in the block
-layer, the device-open layer split between `librarian` (interfaces) and a
-private `engine` struct (the depot), and interface names (`Store`,
-`WriteStore`, `Deps`, `Medium`) that didn't say which layer or scope they
-belonged to. This doc records the corrected structure and names; it is the map
-the restructure was executed against.
+and write archives by logical name like files. This doc records the layers and
+the naming discipline — which names encode a *layer*, which encode a *side* — and
+the asymmetries that are design rather than drift.
 
 ## The layer × scope matrix
 
@@ -25,7 +23,7 @@ Top is closest to the user; bytes flow down on write, up on read. Each cell:
 | **librarian** *(volume manager / autoloader)* | `MountForRead` / `ReadFileAt` on **Librarian** (methods, no named object) | `Allocator` (one drive) — implements `PartAllocator` | `Label` / `Load` / `Advance`; `Operator` (the human) |
 | **media** *(devices, /dev)* | `Volume.ReadFile` | `Volume` write path | `Labeled`, `Changer.Load/Unload`, `Drive` |
 | **catalog** *(inode + volume table — sidecar, not on the byte path)* | `View` (window snapshot) | `Window` (the run's write claim) | rebuild / scan |
-| **record** *(on-medium format)* | shared vocabulary both directions: `Ref`, `Header`, `FilePos`, `Archive`, `Label` | | |
+| **record / archiveio** *(on-medium format + value objects)* | shared vocabulary both directions: `record.Header`/`Archive`/`Label`; `archiveio.Ref`, `FilePos`, `ArchivePos` | | |
 
 ## The naming grid
 
@@ -63,10 +61,9 @@ media.Volume ── the device ──────────────── 
 ## The down-seams, unit-aligned
 
 The block layer's seams are named by **what crosses them**, not by the
-implementer's scope (the old `VolumeSink`/`WriteStore` named the librarian's
-volumes and the run — but the Writer thinks in parts and archives; and no bytes
-ever flow through them, so "Sink" was wrong twice — `Sink` is reserved for true
-byte sinks, `xfer.Sink`):
+implementer's scope: the Writer thinks in parts and archives, not the librarian's
+volumes or the run. No bytes flow through these seams, so `Sink` is reserved for
+true byte sinks (`xfer.Sink`).
 
 | exchanged unit | read | write | implemented by |
 |---|---|---|---|
@@ -74,23 +71,17 @@ byte sinks, `xfer.Sink`):
 | archive commit | — *(reads don't mutate the catalog)* | `Recorder` — `Record(CommitResult)` | `archivefs.Session` (→ `WriteMap`) |
 | bound end | `Reader(open, lim)` | `Writer(alloc, rec, spec, lim, now)` | — |
 
-`PartOpener` is deliberately not `PartSource`: a Source implies a stream, but
-the opener is *addressed* (open the part at this position) while the allocator
-is *allocating* (where does the next part go). The asymmetric verbs encode that
+`PartOpener` is deliberately not `PartSource`: a Source implies a stream, but the
+opener is *addressed* (open the part at this position) while the allocator is
+*allocating* (where does the next part go). The asymmetric verbs encode that
 reads are random-access and writes are append-ordered.
 
-### Amendment to concurrent-writes.md
-
-The Writer used to be built over one glued interface (`WriteStore` =
-volume alloc + `Record`), with the clerk `Session` proxying the alloc calls to
-the librarian. That glue had no honest name because it joined two seams with
-different owners: allocation belongs to the device side (librarian/depot),
-recording to the fs side (catalog). `NewWriter` now takes the two seams
-separately — `PartAllocator` from the opened `WriteMedium`, `Recorder` from the
-fs `Session` — and the Session's forwarding boilerplate is gone. The invariant
-that mattered is untouched: on the concurrent path the spool still routes
-*both* seams through its single orchestrator goroutine, which remains the sole
-owner of rolls and catalog writes.
+A `Writer` binds its two seams separately — a `PartAllocator` (volume alloc/roll,
+from the opened `WriteMedium`) and a `Recorder` (commit, from the fs `Session`) —
+rather than one glued handle. The seams have different owners: allocation belongs
+to the device side (librarian/depot), recording to the fs side (catalog). On the
+concurrent path the spool routes *both* through its single orchestrator
+goroutine, which remains the sole owner of rolls and catalog writes.
 
 ## Asymmetries that are design, not drift
 
@@ -109,45 +100,25 @@ owner of rolls and catalog writes.
    would seal partial archives on error paths). Reading's whole protocol is
    Close, so there is deliberately no `ArchiveReader`.
 5. **The librarian has no named read object.** Drive positioning state lives
-   inside `Librarian`; the depot face (`ReadMedium`) is the object callers
-   hold. `Allocator` exists on the write side only because multi-drive
-   parallelism needs one bound object per drive.
-6. **`Session` wears two hats by design.** The same object is held from above
-   as `archivefs.WriteStore` (the open write handle: record, read back,
-   reclaim) and called from below as `archiveio.Recorder` (the commit
-   crossing). It is the point where the layers meet; the interface name at a
-   call site says which hat is in play.
+   inside `Librarian`; the depot face (`ReadMedium`) is the object callers hold.
+   `Allocator` exists on the write side only because multi-drive parallelism
+   needs one bound object per drive.
+6. **`Session` wears two hats by design.** The same object is held from above as
+   `archivefs.WriteStore` (the open write handle: record, read back, reclaim) and
+   called from below as `archiveio.Recorder` (the commit crossing). It is the
+   point where the layers meet; the interface name at a call site says which hat
+   is in play.
 
-## What moved (and what deliberately didn't)
+## Where the value objects live
 
-- `engine.depot` (private struct) → **`internal/depot`** package; the three
-  faces moved from `librarian/faces.go` to the package that mints them. The
-  write-claims table, lazy landing open + catalog bootstrap, limiters, and
-  part-size policy all live there.
-- `clerk` → **`archivefs`**; `Clerk` → `FS`. The fs contracts moved home from
-  `archiveio`: `ReadStore`, `Store` → `WriteStore`, `Ingest`,
-  `ErrMissingCopy`. `Deps` → `Depot` (the fs's slice of the depot).
-  `archivefs.Medium` (Name+Volume) was kept as the Session's consumer-side
-  slice of the opened `depot.WriteMedium` rather than dissolved — holding the
-  full face would force every fs test fake to implement the whole write face
-  (PrepareWrite, allocators, …) for the two methods a Session actually uses.
-- `archiveio.Ref` → **`record.Ref`**: it is precisely the identity stamped in
-  every part header, and `record` already owns the run-id vocabulary, so both
-  the block layer (header assert) and the fs (the "filename") share it from
-  below. *(Reversed 2026-07-03: `Ref` is never serialized — `Header` carries
-  the fields flat — so it moved back to `archiveio` alongside `FilePos` and a
-  position-only `ArchivePos`; `record` keeps only on-medium records, and the
-  catalog persists its own `PlacedArchive` shape.)*
-- `archiveio`: `Author` → `Writer` (the dual of `Reader`; "Author" was a name
-  dodge around `ArchiveWriter`, resolved by scope instead: unqualified
-  `Writer`/`Reader` are the run/medium ends, `ArchiveWriter` is one archive's
-  handle). `Reader` is constructor-bound to its `PartOpener` + limiter
-  (mirroring `NewWriter`); `VerifyParts` → `Verify`. `VolumeSink` →
-  `PartAllocator`; `PlaceRecord` → `PlaceFile`; `WriteStore` dissolved into
-  `PartAllocator` + `Recorder`.
-- `librarian.WriteSink` → `librarian.Allocator`;
-  `WriteMedium.WriteSink`/`LazyDriveSinks` → `Allocator`/`LazyDriveAllocators`.
-- **Not moved**: `media`, `catalog`, `spool`, `xfer`, the operations — already
-  on the right layer. `librarian` keeps its name and mechanism; only the faces
-  left. The catalog-window semantics (write claims at open, faces as method
-  sets) are untouched: this was a re-homing, not a redesign.
+`Ref` (an archive's logical identity — the fs "filename", asserted against part
+headers on read), `FilePos`, and a position-only `ArchivePos` live in
+**`archiveio`**: `Ref` is never serialized (`record.Header` carries the fields
+flat), so it belongs with the block layer that asserts it and the fs that
+resolves it, not with `record`. `record` keeps only on-medium records
+(`Header`/`Archive`/`Label`); the **catalog** persists its own `PlacedArchive`
+shape. The depot owns the write-claims table, lazy landing open + catalog
+bootstrap, limiters, and part-size policy. `librarian` keeps its name and
+mechanism; only the typed faces were homed at the depot that mints them — a
+re-homing, not a redesign, so the catalog-window semantics (write claims at open,
+faces as method sets) are untouched.

@@ -319,7 +319,7 @@ fails — never overfilling a disk or dropping data. A DLE estimated too big for
 **size-routed** straight to the landing (the orchestrator dumps it via the drainer), so an
 oversized DLE never monopolizes the buffer. The load-bearing concurrency decision: **the
 orchestrator is the sole catalog writer.** The drainer does only catalog-free byte I/O; the
-landing Writer's control calls (`NextPart`/`PlaceRecord`, where a volume roll touches the
+landing Writer's control calls (`NextPart`/`PlaceFile`, where a volume roll touches the
 catalog and drives the librarian) **funnel back to the orchestrator through routed
 `PartAllocator`/`Recorder` seams**, so all catalog writes — holding placements, landing placements, volume labels —
 stay on one goroutine. Since the dumpers only queue (never touch the catalog), the catalog needs
@@ -770,15 +770,10 @@ decisions carry it:
 
 ## Conventions for working here
 
-- **Commits:** only when the user explicitly says so. **Never push** (no
-  credentials). End commit messages with the `Co-Authored-By` trailer.
-- **Amanda-faithful:** research upstream behavior before inventing; prefer
-  orchestrating external tools as processes. See memory `nbackup-amanda-faithful`.
-- **Greenfield, pre-release:** no back-compat shims, no migrations; don't add
-  concepts or layers speculatively. See memory `nbackup-greenfield`.
-- **Verify** every change: `gofmt -l`, `go vet ./...`, `go test -race ./...`.
-- **Test environment:** `zstd` is **not** installed — tests use scheme `none`;
-  `tar`, `gzip`, `nice` are present. Tests that need GNU tar `t.Skip` when absent.
+The working rules (commit discipline, Amanda-faithfulness, the verify commands, and
+the test environment's missing `zstd`) live in [CLAUDE.md](CLAUDE.md); they are not
+repeated here. The one convention that is architectural rather than procedural:
+
 - **CLI:** flags may appear before or after positionals (`parseArgs`). The convention is
   **inspect with a noun** (`nb run`, `nb dle`, `nb medium`), **act with a flat verb**
   (`nb dump`, `nb check`, `nb verify`, `nb drill`, `nb prune`, `nb rebuild`, …) — so every
@@ -792,19 +787,13 @@ decisions carry it:
 
 ## Deferred / known next steps
 
-- **Remote sources over SSH** — the dump path is implemented (see
-  [docs/design/remote-sources.md](docs/design/remote-sources.md)); a remote DLE dumps
-  over SSH with no NBackup software on the client. A source host is remote **by default**
-  (local means exactly `localhost`); a top-level `ssh:` block sets global SSH defaults a
-  per-host `hosts:` entry overrides. **`nb check`** verifies the server and every host
-  (connecting to remote clients by default, `--offline` to skip), every probe running
-  through the host's executor so local and remote checks share one code path. Whole-DLE
-  restore is opt-in onto a client (`nb recover --all --to host:path`), and for an
-  `encrypt.at: client` DLE the decode runs on the client (the key never leaves it); a
-  server-side restore of a client-only symmetric key fails fast. The remaining follow-on
+- **Remote sources over SSH** — the dump path is implemented; a remote DLE dumps over
+  SSH with no NBackup software on the client, `nb check` verifies every host through its
+  executor, and whole-DLE restore is opt-in onto a client (`nb recover --all --to
+  host:path`, decode running client-side for a client-held key). The remaining follow-on
   is the drill recoverability tiers and file-level recover on the client. SSH paths are
-  untested in CI (no sshd; the client-side encrypt+decode round-trip is covered locally
-  with real gpg/gzip/tar).
+  untested in CI (no sshd); see [docs/design/remote-sources.md](docs/design/remote-sources.md)
+  for the transport, the client-vs-server encryption point, and the trust postures.
 - Real `mtDevice` hardware validation — also the only spanning path not exercised
   (real-drive spanning is proactive-via-`part_size` and structurally complete but
   untested; the `dir:` emulator spans and is tested).
