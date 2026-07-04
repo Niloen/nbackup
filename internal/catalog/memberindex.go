@@ -44,7 +44,11 @@ func (m *MemberIndex) Store(run, dle string, level int, idx record.Index) error 
 	return fsx.WriteFileAtomic(m.path(run, dle, level), buf.Bytes(), 0o644)
 }
 
-// Load reads an archive's cached index, reporting whether it was present.
+// Load reads an archive's cached index, reporting whether it was present. A cache
+// file that does not decode — a pre-shapes cache entry (the old bare-array format), or
+// a torn write — is a MISS, not an error: this is only a cache, the durable copy is
+// the archive's on-medium index, and an old workdir must degrade (unbrowsable) rather
+// than fail the operations that touch it.
 func (m *MemberIndex) Load(run, dle string, level int) (record.Index, bool, error) {
 	f, err := os.Open(m.path(run, dle, level))
 	if err != nil {
@@ -56,7 +60,7 @@ func (m *MemberIndex) Load(run, dle string, level int) (record.Index, bool, erro
 	defer f.Close()
 	idx, err := record.DecodeIndex(f)
 	if err != nil {
-		return record.Index{}, false, err
+		return record.Index{}, false, nil
 	}
 	return idx, true, nil
 }

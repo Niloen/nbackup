@@ -393,6 +393,14 @@ func (v *verifier) structuralCheck(id string, a record.Archive, open func() (io.
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
+	// No loadable index for an archive that has members: a pre-shapes archive whose
+	// on-medium index is the old format (undecodable by design — greenfield, no
+	// migration). The clean decode + `tar -t` above already proved the stream
+	// restorable, so degrade to that proof rather than inventing a member-count
+	// mismatch — a healthy old archive must never be reported as corrupt.
+	if len(recorded) == 0 {
+		return drill.ClassNone, ""
+	}
 	if diff := membersDiff(recorded, members); diff != "" {
 		return drill.ClassIntegrity, diff
 	}
