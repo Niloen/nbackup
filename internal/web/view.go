@@ -103,3 +103,39 @@ type copyRow struct {
 	Medium string
 	Labels string
 }
+
+// dleRow is one line of the DLEs list — the DLE-major catalog rollup (catalog.DLESummary
+// flattened for the template, with Media pre-joined).
+type dleRow struct {
+	Slug      string
+	Display   string
+	Runs      int
+	LastLevel int
+	LastFull  string
+	Bytes     int64
+	Media     string
+}
+
+// dleDetail backs the single-DLE page: the rollup plus this DLE's per-run history.
+type dleDetail struct {
+	NotFound bool
+	Slug     string
+	Display  string
+	Runs     int
+	Bytes    int64
+	Media    string
+	History  []dleArchiveRow
+}
+
+// dleArchiveRow is one run's archive for a DLE — a row of the DLE history, linking
+// back to the run it belongs to.
+type dleArchiveRow struct {
+	RunID   string
+	Date    string
+	Level   int
+	Bytes   int64
+	At      time.Time
+	Files   int
+	Partial bool
+	Copies  string
+}

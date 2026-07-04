@@ -31,6 +31,7 @@ type Source interface {
 	Placements(runID string) []catalog.Placement
 	Media() []engine.MediumInfo
 	DisplayDLE(slug string) string
+	DLESummaries() []catalog.DLESummary
 }
 
 // Server renders the status pages from a Source plus the catalog workdir, where the
@@ -53,6 +54,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", s.handleHome)     // exact "/"; unknown paths 404 in the handler
 	mux.HandleFunc("/runs", s.handleRuns) // exact
 	mux.HandleFunc("/runs/", s.handleRun) // subtree: /runs/<id>
+	mux.HandleFunc("/dles", s.handleDLEs) // exact
+	mux.HandleFunc("/dles/", s.handleDLE) // subtree: /dles/<slug>
 	mux.HandleFunc("/media", s.handleMedia)
 	mux.HandleFunc("/report", s.handleReport)
 	mux.HandleFunc("/status", s.handleStatus)
@@ -166,6 +169,89 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		Archives: run.Archives,
 		Copies:   copies,
 	}})
+}
+
+// handleDLEs renders the DLE-major catalog view: one row per backup source, each
+// linking to its own history so an operator can drill into a single DLE.
+func (s *Server) handleDLEs(w http.ResponseWriter, r *http.Request) {
+	sums := s.src.DLESummaries()
+	rows := make([]dleRow, 0, len(sums))
+	for _, d := range sums {
+		rows = append(rows, dleRow{
+			Slug: d.DLE, Display: d.Display, Runs: d.Runs, LastLevel: d.LastLevel,
+			LastFull: d.LastFull, Bytes: d.Bytes, Media: strings.Join(d.Media, ", "),
+		})
+	}
+	s.render(w, "dles", page{Title: "DLEs", Active: "dles", Data: rows})
+}
+
+// handleDLE renders one DLE's history — its archive in every run that dumped it,
+// newest first, each linking back to the run. The slug is the internal DLE id (as
+// listed on /dles); an unknown slug renders a not-found page rather than 404 so the
+// nav stays intact.
+func (s *Server) handleDLE(w http.ResponseWriter, r *http.Request) {
+	slug := strings.TrimPrefix(r.URL.Path, "/dles/")
+	if slug == "" {
+		http.Redirect(w, r, "/dles", http.StatusSeeOther)
+		return
+	}
+	var sum *catalog.DLESummary
+	for _, d := range s.src.DLESummaries() {
+		if d.DLE == slug {
+			d := d
+			sum = &d
+			break
+		}
+	}
+	if sum == nil {
+		s.render(w, "dle", page{Title: slug, Active: "dles", Data: dleDetail{NotFound: true, Slug: slug}})
+		return
+	}
+	s.render(w, "dle", page{Title: sum.Display, Active: "dles", Data: dleDetail{
+		Slug:    sum.DLE,
+		Display: sum.Display,
+		Runs:    sum.Runs,
+		Bytes:   sum.Bytes,
+		Media:   strings.Join(sum.Media, ", "),
+		History: s.dleHistory(slug),
+	}})
+}
+
+// dleHistory gathers a DLE's archive from every run that holds one, newest run first —
+// the DLE-major slice of the same archives the run pages present run-major. Each row
+// names the media that actually hold that archive (archive-granular, matching a
+// per-archive prune), so a copy that has been reclaimed off one medium shows honestly.
+func (s *Server) dleHistory(slug string) []dleArchiveRow {
+	var rows []dleArchiveRow
+	for _, run := range s.src.Runs() {
+		for _, a := range run.Archives {
+			if a.DLE != slug {
+				continue
+			}
+			var media []string
+			for _, p := range s.src.Placements(run.ID) {
+				if p.Holds(a.DLE, a.Level) {
+					if labels := p.Labels(); len(labels) > 0 {
+						media = append(media, p.Medium+":"+strings.Join(labels, "+"))
+					} else {
+						media = append(media, p.Medium)
+					}
+				}
+			}
+			rows = append(rows, dleArchiveRow{
+				RunID:   run.ID,
+				Date:    run.Date(),
+				Level:   a.Level,
+				Bytes:   a.Compressed,
+				At:      a.CreatedAt,
+				Files:   a.FileCount,
+				Partial: a.Partial(),
+				Copies:  strings.Join(media, ", "),
+			})
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].RunID > rows[j].RunID })
+	return rows
 }
 
 func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {

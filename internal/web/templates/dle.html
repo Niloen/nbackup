@@ -1,0 +1,35 @@
+{{define "content"}}
+{{with .Data}}
+{{if .NotFound}}
+<h1>DLE not found</h1>
+<div class="panel"><div class="empty">No DLE <code>{{.Slug}}</code> in the catalog. <a href="/dles">All DLEs →</a></div></div>
+{{else}}
+<h1>{{.Display}}</h1>
+<div class="cards">
+  <div class="card"><div class="k">Runs</div><div class="v">{{.Runs}}</div></div>
+  <div class="card"><div class="k">Total</div><div class="v">{{bytes .Bytes}}</div></div>
+  <div class="card"><div class="k">Media</div><div class="v" style="font-size:1rem">{{if .Media}}{{.Media}}{{else}}—{{end}}</div></div>
+</div>
+
+<h2>History</h2>
+<div class="panel scroll">
+{{if .History}}
+<table>
+  <tr><th>Run</th><th>Date</th><th>Level</th><th class="num">Files</th><th class="num">Size</th><th>Committed</th><th>Copies</th></tr>
+  {{range .History}}
+  <tr>
+    <td><a href="/runs/{{.RunID}}">{{.RunID}}</a></td>
+    <td>{{.Date}}</td>
+    <td><span class="pill dim">{{level .Level}}</span>{{if .Partial}} <span class="warn">partial</span>{{end}}</td>
+    <td class="num">{{.Files}}</td>
+    <td class="num">{{bytes .Bytes}}</td>
+    <td>{{stampsec .At}}</td>
+    <td class="muted">{{.Copies}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<div class="empty">No archives recorded for this DLE.</div>{{end}}
+</div>
+{{end}}
+{{end}}
+{{end}}

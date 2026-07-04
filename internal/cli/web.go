@@ -97,3 +97,5 @@ func (e engineSource) ReadRun(id string) (*catalog.Run, error) { return e.Catalo
 func (e engineSource) Placements(runID string) []catalog.Placement {
 	return e.Catalog().Placements(runID)
 }
+
+func (e engineSource) DLESummaries() []catalog.DLESummary { return e.Catalog().DLESummaries() }

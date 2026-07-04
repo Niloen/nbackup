@@ -15,7 +15,7 @@ import (
 )
 
 // fakeSource is a canned read-only Source for exercising the handlers without an
-// engine. That it need implement only these five methods is the read-only guarantee
+// engine. That it need implement only these read methods is the read-only guarantee
 // made concrete: there is no write verb to stub.
 type fakeSource struct {
 	runs  []*catalog.Run
@@ -40,6 +40,34 @@ func (f fakeSource) Placements(runID string) []catalog.Placement {
 func (f fakeSource) Media() []engine.MediumInfo { return f.media }
 
 func (f fakeSource) DisplayDLE(slug string) string { return slug }
+
+// DLESummaries aggregates the fake's runs per DLE, mirroring catalog.DLESummaries
+// closely enough to render the DLE pages (every archive here is on "disk").
+func (f fakeSource) DLESummaries() []catalog.DLESummary {
+	byDLE := map[string]*catalog.DLESummary{}
+	var order []string
+	for _, r := range f.runs {
+		for _, a := range r.Archives {
+			s := byDLE[a.DLE]
+			if s == nil {
+				s = &catalog.DLESummary{DLE: a.DLE, Display: a.DLEID(), Media: []string{"disk"}}
+				byDLE[a.DLE] = s
+				order = append(order, a.DLE)
+			}
+			s.Runs++
+			s.Bytes += a.Compressed
+			s.LastLevel = a.Level
+			if a.Level == 0 {
+				s.LastFull = r.Date()
+			}
+		}
+	}
+	out := make([]catalog.DLESummary, 0, len(order))
+	for _, slug := range order {
+		out = append(out, *byDLE[slug])
+	}
+	return out
+}
 
 func sampleSource() fakeSource {
 	return fakeSource{
@@ -69,6 +97,8 @@ func TestPagesRenderPopulated(t *testing.T) {
 		{"/runs", "run-2026-07-03.120000"},                // run id links in the list
 		{"/runs/run-2026-07-03.120000", "localhost:/src"}, // archive DLE identity
 		{"/runs/run-2026-07-03.120000", "gzip"},           // per-archive compression scheme
+		{"/dles", "localhost:/src"},                       // DLE identity links in the list
+		{"/dles/local", "run-2026-07-03.120000"},          // the DLE's per-run history links back to the run
 		{"/media", "disk"},                                // medium name
 	}
 	for _, c := range cases {
@@ -85,6 +115,17 @@ func TestPagesRenderPopulated(t *testing.T) {
 func TestUnknownRunIsFriendly(t *testing.T) {
 	h := NewServer(sampleSource(), t.TempDir()).Handler()
 	code, body := get(t, h, "/runs/run-does-not-exist")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d, want 200 (a rendered not-found page, not a raw error)", code)
+	}
+	if !strings.Contains(body, "not found") {
+		t.Errorf("expected a not-found message, got:\n%s", body)
+	}
+}
+
+func TestUnknownDLEIsFriendly(t *testing.T) {
+	h := NewServer(sampleSource(), t.TempDir()).Handler()
+	code, body := get(t, h, "/dles/does-not-exist")
 	if code != http.StatusOK {
 		t.Fatalf("code=%d, want 200 (a rendered not-found page, not a raw error)", code)
 	}
@@ -117,7 +158,7 @@ func TestUnknownPath404(t *testing.T) {
 
 func TestEmptyCatalog(t *testing.T) {
 	h := NewServer(fakeSource{}, t.TempDir()).Handler()
-	for _, p := range []string{"/", "/runs", "/media", "/report", "/status"} {
+	for _, p := range []string{"/", "/runs", "/dles", "/media", "/report", "/status"} {
 		if code, _ := get(t, h, p); code != http.StatusOK {
 			t.Errorf("%s: code=%d, want 200 on an empty catalog", p, code)
 		}

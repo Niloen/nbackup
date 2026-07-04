@@ -34,6 +34,13 @@ func drillRunRecord(dr *engine.DrillReport, priorOK map[string]bool) report.Run 
 			WasOK:   seen && was,
 			Drilled: t.Class != drill.ClassSkipped,
 		})
+		// "Bytes moved" for a drill is the egress it actually read off the medium —
+		// the drilled chain payload of each target it exercised (a skipped target read
+		// nothing). This is what the report/webui history shows, so a drill row reads
+		// its true size instead of 0 B.
+		if t.Class != drill.ClassSkipped {
+			rec.BytesMoved += t.Bytes
+		}
 	}
 	return rec
 }

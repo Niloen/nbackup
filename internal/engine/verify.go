@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/Niloen/nbackup/internal/archiveio"
@@ -265,12 +267,18 @@ func (v *verifier) verifyCopy(s *catalog.Run, p catalog.Placement, opts VerifyOp
 	return copyOK, false
 }
 
-// verifyArchive runs the requested checks against one archive, opening its stream via open
-// (each check reads it afresh).
+// verifyArchive runs the requested checks against one archive, opening its stream via open.
+// A checksum-only or structural-only check reads once. A deep verify (both) also reads
+// once: the structural decode drains the whole raw payload, so hashing it inline through a
+// tee yields the checksum for free — no second pass off the medium, halving the egress a
+// deep offsite drill would otherwise pay.
 func (v *verifier) verifyArchive(a record.Archive, ref archiveio.Ref, medium string, opts VerifyOptions, open func() (io.ReadCloser, error), logf Logf) ArchiveVerdict {
 	id := ref.Run
 	vd := ArchiveVerdict{Run: id, DLE: a.DLE, Level: a.Level, Medium: medium, OK: true}
 
+	if opts.Checks.has(CheckChecksum) && opts.Checks.has(CheckStructural) {
+		return v.verifyDeep(a, ref, medium, open, logf)
+	}
 	if opts.Checks.has(CheckChecksum) {
 		rc, serr := open()
 		if serr != nil {
@@ -299,6 +307,50 @@ func (v *verifier) verifyArchive(a record.Archive, ref archiveio.Ref, medium str
 	}
 	return vd
 }
+
+// verifyDeep runs the checksum + structural checks in a single read. It opens the raw
+// stream once and tees it into a hash while the structural decode consumes it; because
+// the decode drains the whole payload (a filter reads to EOF; `tar -t` reads the
+// record-aligned tar in full), the tee sees every stored byte, so the accumulated hash is
+// the payload's true checksum. Structural runs first: a decode/list fault (a broken key or
+// scheme, a not-a-tar) is reported as the structural failure it is; only once the stream
+// decoded cleanly is the hash compared, catching a corruption that still parsed as an
+// integrity fault.
+func (v *verifier) verifyDeep(a record.Archive, ref archiveio.Ref, medium string, open func() (io.ReadCloser, error), logf Logf) ArchiveVerdict {
+	id := ref.Run
+	vd := ArchiveVerdict{Run: id, DLE: a.DLE, Level: a.Level, Medium: medium, OK: true}
+
+	rc, serr := open()
+	if serr != nil {
+		logf.Log("%s [%s]: %s L%d ERROR %v", id, medium, a.DLEID(), a.Level, serr)
+		vd.OK, vd.Class, vd.Detail = false, drill.ClassPipeline, serr.Error()
+		return vd
+	}
+	h := sha256.New()
+	tee := &teeReadCloser{r: io.TeeReader(rc, h), c: rc}
+	if cls, detail := v.structuralCheck(id, a, func() (io.ReadCloser, error) { return tee, nil }); cls != drill.ClassNone {
+		logf.Log("%s [%s]: %s L%d STRUCTURAL %s: %s", id, medium, a.DLEID(), a.Level, cls, detail)
+		vd.OK, vd.Class, vd.Detail = false, cls, detail
+		return vd
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != a.SHA256 {
+		logf.Log("%s [%s]: %s L%d CHECKSUM MISMATCH", id, medium, a.DLEID(), a.Level)
+		vd.OK, vd.Class, vd.Detail = false, drill.ClassIntegrity, "checksum mismatch vs commit footer"
+		return vd
+	}
+	return vd
+}
+
+// teeReadCloser adapts an io.Reader (a tee) plus the underlying closer into an
+// io.ReadCloser, so the decode pipeline reads bytes that also flow into the deep-verify
+// hash while Close still releases the real stream.
+type teeReadCloser struct {
+	r io.Reader
+	c io.Closer
+}
+
+func (t *teeReadCloser) Read(p []byte) (int, error) { return t.r.Read(p) }
+func (t *teeReadCloser) Close() error               { return t.c.Close() }
 
 // structuralCheck streams the archive through the real read pipeline and lists its
 // members (`tar -t`), asserting the pipeline completes cleanly and the members match

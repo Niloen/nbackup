@@ -10,6 +10,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
+	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/report"
 )
 
@@ -165,4 +166,21 @@ func captureStdout(t *testing.T, f func()) string {
 	w.Close()
 	os.Stdout = orig
 	return <-done
+}
+
+// TestDrillRunRecordBytesMoved verifies a drill's run record carries the egress it
+// actually read (the drilled targets' bytes, skips excluded) — the value the
+// report/webui history shows, so a drill row is not a misleading 0 B.
+func TestDrillRunRecordBytesMoved(t *testing.T) {
+	dr := &engine.DrillReport{
+		Targets: []engine.DrillResult{
+			{DLE: "a", Class: drill.ClassNone, Bytes: 3_000_000},
+			{DLE: "b", Class: drill.ClassSkipped, Bytes: 9_000_000}, // skipped: read nothing
+			{DLE: "c", Class: drill.ClassIntegrity, Bytes: 1_000_000},
+		},
+	}
+	rec := drillRunRecord(dr, nil)
+	if rec.BytesMoved != 4_000_000 {
+		t.Fatalf("BytesMoved = %d, want 4000000 (drilled a+c, not skipped b)", rec.BytesMoved)
+	}
 }

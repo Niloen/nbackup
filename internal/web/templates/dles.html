@@ -1,0 +1,20 @@
+{{define "content"}}
+<h1>DLEs</h1>
+<div class="panel scroll">
+{{if .Data}}
+<table>
+  <tr><th>DLE</th><th class="num">Runs</th><th>Last</th><th>Last full</th><th class="num">Size</th><th>Media</th></tr>
+  {{range .Data}}
+  <tr>
+    <td><a href="/dles/{{.Slug}}">{{.Display}}</a></td>
+    <td class="num">{{.Runs}}</td>
+    <td><span class="pill dim">{{level .LastLevel}}</span></td>
+    <td>{{if .LastFull}}{{.LastFull}}{{else}}<span class="warn">never</span>{{end}}</td>
+    <td class="num">{{bytes .Bytes}}</td>
+    <td class="muted">{{.Media}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<div class="empty">No DLEs in catalog.</div>{{end}}
+</div>
+{{end}}
