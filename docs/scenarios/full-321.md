@@ -130,8 +130,10 @@ probe as Object Lock. See [Media types](../features/media).
 ## Commands
 
 ```bash
-# Hands-off cron line: dump, push both tiers, prove a restore, then mail the digest.
-nb dump && nb sync && nb drill --unattended; nb report --notify
+# Hands-off cron line: dump, push both tiers, trim to budget, prove a restore, mail the digest.
+# `nb prune` (no medium) trims each medium to its own budget after the copies land;
+# tape recycles by relabel, so a fleet-wide prune only reclaims disk/cloud.
+nb dump && nb sync && nb prune && nb drill --unattended; nb report --notify
 
 # Routine offsite check — the no-write structural tier limits egress.
 nb drill --from offsite --tier structural

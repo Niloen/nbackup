@@ -147,13 +147,16 @@ Once you add an offsite medium and a `notify:` block, a complete unattended
 nightly looks like this:
 
 ```sh
-nb dump && nb sync && nb drill --unattended; nb report --notify
+nb dump && nb sync && nb prune && nb drill --unattended; nb report --notify
 ```
 
-`nb dump` lands the backup, `nb sync` mirrors it offsite, `nb drill` proves a
-sample restores, and `nb report --notify` emails the result. Every mutating
-command exits non-zero on failure and can alert you — see
-[Monitoring & reporting](features/monitoring).
+`nb dump` lands the backup, `nb sync` mirrors it offsite, `nb prune` trims each
+medium back to its cycle/capacity limits, `nb drill` proves a sample restores, and
+`nb report --notify` emails the result. `nb prune` with no medium named prunes
+every configured medium against its own retention (tape recycles by relabel, so it
+is left untouched); it runs **after** `nb sync` so a run is replicated offsite
+before disk can reclaim it. Every mutating command exits non-zero on failure and
+can alert you — see [Monitoring & reporting](features/monitoring).
 
 ## Global flags
 

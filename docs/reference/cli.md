@@ -52,7 +52,7 @@ equivalent.
 | `nb sync` | Mirror one medium's runs onto another (disk → tape/s3) |
 | `nb label` | Label a volume (required for tape before its first dump) |
 | `nb load` | Load a slot into a medium's drive (by slot number or `--label`) |
-| `nb prune <medium>` | Delete a medium's runs past its cycle/capacity limits |
+| `nb prune [medium]` | Delete runs past each medium's cycle/capacity limits (all media if none named) |
 | `nb reset <dle>` | Schedule a DLE for a full on its next run (fresh chain) |
 | `nb rebuild` | Rebuild the local run-index cache from media |
 
@@ -174,7 +174,7 @@ The source defaults to the landing medium; `--from` overrides it. See
 
 | Command | Key flags | Purpose |
 |---|---|---|
-| `nb prune <medium>` | `-n, --dry-run` | Delete the named medium's runs past its cycle/capacity limits; `-n` previews. |
+| `nb prune [medium]` | `-n, --dry-run` | Delete runs past the cycle/capacity limits — one named medium, or every medium if none named; `-n` previews. |
 | `nb label` | `--relabel` | Label a volume (required for tape before its first dump); `--relabel` recycles an aged-out tape. |
 | `nb load` | — | Load a slot into a medium's drive (by slot number, or `--label`). |
 | `nb reset <dle>` | — | Schedule a DLE for a full on its next run (fresh chain). |
@@ -184,6 +184,7 @@ The source defaults to the landing medium; `--from` overrides it. See
 ```bash
 nb prune disk -n
 nb prune disk
+nb prune                     # prune every configured medium (hands-off cron form)
 nb label lto lto-0001
 nb label --relabel lto lto-0042
 nb load lto 2
@@ -191,8 +192,10 @@ nb reset app01:/home
 nb rebuild
 ```
 
-The medium is named explicitly because retention is per-medium. See
-[Pruning](../features/pruning) and [Media](../features/media).
+Retention is per-medium: name a medium to prune just it, or name none to prune
+every configured medium in turn (tape recycles by relabel, so a fleet-wide prune
+only reclaims disk/cloud). See [Pruning](../features/pruning) and
+[Media](../features/media).
 
 ## Reporting
 

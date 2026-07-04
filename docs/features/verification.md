@@ -69,10 +69,10 @@ nb drill --from cloud --tier structural   # routine offsite check (no-write)
 nb drill --tier stock                     # restore via the documented gpg/zstd/tar one-liner
 ```
 
-The hands-off nightly form drills after the dump and sync, then reports:
+The hands-off nightly form drills after the dump, sync, and prune, then reports:
 
 ```bash
-nb dump && nb sync && nb drill --unattended; nb report --notify
+nb dump && nb sync && nb prune && nb drill --unattended; nb report --notify
 ```
 
 ### Selection is risk-first

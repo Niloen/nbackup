@@ -92,8 +92,10 @@ nb dump                          # land a run on disk
 nb sync --to offsite --dry-run   # preview: which runs disk has that S3 doesn't
 nb sync --to offsite             # copy the backlog to S3, oldest first
 
-# Hands-off cron line: dump, push offsite, prove a restore, then mail the digest.
-nb dump && nb sync && nb drill --unattended; nb report --notify
+# Hands-off cron line: dump, push offsite, trim to budget, prove a restore, mail the digest.
+# `nb prune` (no medium) trims disk to its capacity; it runs after `nb sync` so
+# every run reaches S3 before disk can reclaim it.
+nb dump && nb sync && nb prune && nb drill --unattended; nb report --notify
 ```
 
 A routine offsite drill should limit egress — drill the *structural* tier (decrypt

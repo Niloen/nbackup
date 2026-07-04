@@ -135,11 +135,16 @@ func TestSmokeMediumUnknown(t *testing.T) {
 	}
 }
 
-func TestSmokePruneNoMedium(t *testing.T) {
+func TestSmokePruneAllMedia(t *testing.T) {
 	cfg := writeSmokeConfig(t)
-	_, err := runCmd(t, "-c", cfg, "prune")
-	if err == nil || !strings.Contains(err.Error(), "exactly one medium") {
-		t.Fatalf("prune (no arg): got %v, want a require-one-medium error", err)
+	// No medium named: prune fans out over every configured medium (disk + vtape),
+	// each a no-op on an empty store. It must succeed, not demand a medium name.
+	out, err := runCmd(t, "-c", cfg, "prune", "--dry-run")
+	if err != nil {
+		t.Fatalf("prune (no arg): %v", err)
+	}
+	if !strings.Contains(out, "disk:") || !strings.Contains(out, "vtape:") {
+		t.Errorf("no-arg prune should report every medium, got:\n%s", out)
 	}
 }
 

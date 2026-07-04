@@ -19,11 +19,21 @@ Per-medium retention with a safety floor that never deletes the last recovery pa
 
 ## Pruning is per-medium
 
-`nb prune <medium>` deletes by default; pass `--dry-run` (`-n`) to preview.
-**Retention is per-medium**, so the medium is named explicitly (`nb prune disk`,
-`nb prune offsite`): each store is pruned against its **own** archives, capacity,
-and `minimum_age`. A copy on another medium never makes an archive prunable —
-double storage exists for redundancy, so each copy is retained on its own terms.
+`nb prune [medium]` deletes by default; pass `--dry-run` (`-n`) to preview.
+**Retention is per-medium**: name a medium to prune just it (`nb prune disk`,
+`nb prune offsite`), or name none to prune **every** configured medium in turn —
+the hands-off form for cron, mirroring `nb sync` running every rule. Either way each
+store is pruned against its **own** archives, capacity, and `minimum_age`. A copy on
+another medium never makes an archive prunable — double storage exists for
+redundancy, so each copy is retained on its own terms. Tape recycles whole volumes
+by relabel rather than per run, so a fleet-wide `nb prune` only reclaims disk/cloud
+and leaves tape untouched.
+
+In the nightly chain, put `nb prune` **after** `nb sync` (`nb dump && nb sync &&
+nb prune && …`): a capacity-bound landing must not reclaim a run before it has been
+replicated. `minimum_age` (one cycle by default) already keeps a fresh run safe for
+the common case, but ordering is the guard when replication is more than a cycle
+behind.
 
 The unit pruning reasons about is the **archive** (one DLE's image within a run),
 not the whole run. So an old run can shed one DLE's image while keeping a

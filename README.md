@@ -181,7 +181,7 @@ details one item when given an id (`nb run run-2026-06-21.020000`, `nb medium lt
 | `nb sync`            | Mirror one medium's runs onto another (disk → tape/s3)  |
 | `nb label`           | Label a volume (required for tape before its first dump) |
 | `nb load`            | Load a bay/reel into a medium's drive (by id or `--label`) |
-| `nb prune <medium>`  | Delete a medium's runs past its cycle/capacity limits  |
+| `nb prune [medium]`   | Delete runs past each medium's cycle/capacity limits (all media if none named)  |
 | `nb reset <dle>`     | Schedule a DLE for a full on its next run (fresh chain)  |
 | `nb flush`           | Drain a holding disk's un-flushed archives to the landing |
 | `nb rebuild`         | Rebuild the local run-index cache from media            |
@@ -483,7 +483,7 @@ only ever a stderr warning: it never fails or blocks the backup. So a complete
 hands-off cron line is:
 
 ```sh
-nb dump && nb sync && nb drill --unattended; nb report --notify
+nb dump && nb sync && nb prune && nb drill --unattended; nb report --notify
 ```
 
 ### Recover (restore a whole DLE, or pick files)
@@ -561,7 +561,7 @@ nb drill                       # drill the riskiest sample on the landing copy
 nb drill --dry-run             # preview: what would be drilled + a posture audit
 nb drill --from cloud --tier structural   # routine offsite check
 nb drill --tier stock          # restore via the documented gpg/zstd/tar one-liner
-nb dump && nb sync && nb drill --unattended; nb report --notify   # hands-off cron line
+nb dump && nb sync && nb prune && nb drill --unattended; nb report --notify   # hands-off cron line
 ```
 
 A drill **selects** risk-first: it rotates DLEs so each is drilled within a window,
@@ -594,11 +594,14 @@ operator-side on the storage; least privilege keeps NBackup unable to turn it of
 
 ### Pruning (cycle safety)
 
-`nb prune <medium>` deletes by default; pass `--dry-run` (`-n`) to preview.
-**Retention is per-medium**, so the medium is named explicitly (`nb prune disk`,
-`nb prune offsite`): each store is pruned against its own archives, capacity, and
-`minimum_age` — a copy on another medium never makes an archive prunable, because
-double storage exists for redundancy. The unit pruning reasons about is the
+`nb prune [medium]` deletes by default; pass `--dry-run` (`-n`) to preview.
+**Retention is per-medium**: name a medium to prune just it (`nb prune disk`,
+`nb prune offsite`), or name none to prune **every** configured medium in turn
+— the hands-off form for cron, mirroring `nb sync` running every rule. Either way
+each store is pruned against its own archives, capacity, and `minimum_age` — a copy
+on another medium never makes an archive prunable, because double storage exists for
+redundancy, and tape recycles by relabel rather than per-run so a fleet-wide prune
+only reclaims disk/cloud. The unit pruning reasons about is the
 **archive** (one DLE's image within a run), not the whole run, so an old run can
 shed one DLE's image while keeping a run-mate the chain still needs. Pruning has
 two layers:

@@ -171,11 +171,14 @@ notification failure (unreachable mail server, missing secret, hung endpoint) is
 ## A hands-off cron line
 
 ```sh
-nb dump && nb sync && nb drill --unattended; nb report --notify
+nb dump && nb sync && nb prune && nb drill --unattended; nb report --notify
 ```
 
-This dumps, replicates offsite, rehearses a recovery, and mails the nightly
-digest — every step recording its run summary and alerting on failure.
+This dumps, replicates offsite, trims each medium to its cycle/capacity budget,
+rehearses a recovery, and mails the nightly digest — every step recording its run
+summary and alerting on failure. `nb prune` with no medium named prunes every
+configured medium against its own retention, and runs after `nb sync` so nothing
+is reclaimed before it is replicated.
 
 ---
 
