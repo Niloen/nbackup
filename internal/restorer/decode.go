@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
@@ -45,6 +46,10 @@ type decodePlan struct {
 	decryptOpts   crypt.Options
 	decryptInSink bool
 	remote        bool
+	// atomSizes set = the archive is atomic: the raw stream is these per-atom
+	// encrypted sizes back to back, and decode runs one decrypt child per atom
+	// (see atomic.go). nil = a single-stream decode, exactly as before shapes.
+	atomSizes []int64
 }
 
 // restoreArchive streams an archive (from a ReadStore) through the
@@ -57,30 +62,60 @@ type decodePlan struct {
 // (a Sink fault is a tar/composition fault, a Filters fault is a decode fault —
 // what the drill's failure taxonomy classifies on).
 func (d *decoder) restoreArchive(rc io.ReadCloser, plan decodePlan, archiverType string, dst dest, members []string) error {
+	if plan.atomSizes != nil && plan.decryptInSink {
+		rc.Close()
+		return fmt.Errorf("an atomic archive decrypts per atom on the server; client-held keys are not supported on this path — restore without --to (or use the documented stock file-loop on the client)")
+	}
 	if err := dst.exec.MkdirAll(dst.dir); err != nil {
 		// The destination could not even be created (e.g. an unreachable `--to`
 		// client): nothing was written, so mark it so the caller does not warn
 		// about a "partial" restore that never started.
+		rc.Close()
 		return errors.Join(errDestSetup, err)
 	}
 	arch, err := d.deps.ArchiverFor(archiverType, dst.host)
 	if err != nil {
+		rc.Close()
 		return err
 	}
+	src, filters, err := decodeSource(rc, plan)
+	if err != nil {
+		rc.Close()
+		return err
+	}
+	sink := xfer.NewProgramSink(dst.exec).Add(filters.fused...).Add(arch.RestoreStage(dst.dir, members))
+	_, err = xfer.Transfer(context.Background(), src, filters.local, sink)
+	return err
+}
+
+// decodedFilters is a decode pipeline's placed remainder: the local filter chain and
+// the stages fused into the sink (a remote target's decompress).
+type decodedFilters struct {
+	local xfer.Filters
+	fused []programs.Cmd
+}
+
+// decodeSource turns an archive's raw stream into the transfer source plus the placed
+// decode stages, per the plan's shape — the ONE place the stream/atomic split lives:
+//
+//   - single stream (nil atomSizes): the source is the raw bytes; decrypt and
+//     decompress place as local filters or fuse into the sink per the plan.
+//   - atomic: the source is the per-atom decrypt loop's plaintext (decrypt is
+//     consumed here, server-side by construction); only decompress remains to place.
+func decodeSource(rc io.ReadCloser, plan decodePlan) (xfer.Source, decodedFilters, error) {
 	decrypt, decompress, err := buildDecode(plan.compress, plan.compressOpts, plan.encrypt, plan.decryptOpts)
 	if err != nil {
-		return err
+		return nil, decodedFilters{}, err
 	}
-
-	// Place each decode step; the sink chain is decrypt → decompress → tar.
-	fused, filters := xfer.SplitTransforms(
+	if plan.atomSizes != nil {
+		fused, local := xfer.SplitTransforms(xfer.Transform{Cmd: decompress, Fused: plan.remote})
+		return xfer.Reader(atomicPlaintext(rc, plan.atomSizes, decrypt)), decodedFilters{local: local, fused: fused}, nil
+	}
+	fused, local := xfer.SplitTransforms(
 		xfer.Transform{Cmd: decrypt, Fused: plan.decryptInSink},
 		xfer.Transform{Cmd: decompress, Fused: plan.remote},
 	)
-	sink := xfer.NewProgramSink(dst.exec).Add(fused...).Add(arch.RestoreStage(dst.dir, members))
-
-	_, err = xfer.Transfer(context.Background(), xfer.Reader(rc), filters, sink)
-	return err
+	return xfer.Reader(rc), decodedFilters{local: local, fused: fused}, nil
 }
 
 // VerifyChecksum hashes an archive's raw stream (a ReadStore endpoint) and
@@ -104,18 +139,29 @@ func (r *Restorer) VerifyChecksum(rc io.ReadCloser, sha string) (bool, error) {
 }
 
 // ListMembers decodes an archive's stream (a ReadStore endpoint, server-side
-// filters) and lists its members (`tar -t`) — the verify path's structural
-// check. It returns the listed members and the raw, role-tagged transfer error
-// for the caller to classify and hint.
-func (r *Restorer) ListMembers(rc io.ReadCloser, compressScheme, encrypt string, opts crypt.Options, arch archiver.Archiver) ([]record.Member, error) {
-	decrypt, decompress, err := buildDecode(compressScheme, r.deps.CompressOpts, encrypt, opts)
+// filters) per its recorded shape and lists its members (`tar -t`) — the verify
+// path's structural check. It resolves the shape's decode itself (an atomic
+// archive runs the per-atom decrypt loop), so the caller passes the archive's
+// record and never picks a variant. It returns the listed members and the raw,
+// role-tagged transfer error for the caller to classify and hint.
+func (r *Restorer) ListMembers(rc io.ReadCloser, a record.Archive, opts crypt.Options, arch archiver.Archiver) ([]record.Member, error) {
+	plan := decodePlan{compress: a.Compress, compressOpts: r.deps.CompressOpts, encrypt: a.Encrypt, decryptOpts: opts}
+	if a.Shape == record.ShapeAtomic {
+		sizes, _, err := r.atomSizes(archiveio.Ref{Run: a.Run, DLE: a.DLE, Level: a.Level})
+		if err != nil {
+			rc.Close()
+			return nil, err
+		}
+		plan.atomSizes = sizes
+	}
+	// A local list runs every transform server-side (nothing fuses with a far tar).
+	src, filters, err := decodeSource(rc, plan)
 	if err != nil {
+		rc.Close()
 		return nil, err
 	}
-	// A local list runs both transforms server-side (nothing fuses with a far tar).
-	_, filters := xfer.SplitTransforms(xfer.Transform{Cmd: decrypt}, xfer.Transform{Cmd: decompress})
 	ls := &listSink{arch: arch}
-	_, terr := xfer.Transfer(context.Background(), xfer.Reader(rc), filters, ls)
+	_, terr := xfer.Transfer(context.Background(), src, filters.local, ls)
 	return ls.members, terr
 }
 

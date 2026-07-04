@@ -377,20 +377,10 @@ func (d *driller) frameSample(t drill.Target, medium string, rot int, logf Logf)
 	if err != nil {
 		return drill.ClassNone, ""
 	}
-	ref := archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}
-	var res restorer.FrameSampleResult
-	unit := "frame"
-	switch {
-	case a.Shape == record.ShapeAtomic:
-		// The KEY-PROVING sample: decrypt-and-list one atom — structural proof at one
-		// atom's egress, and the proof the key still opens this archive.
-		unit = "atom"
-		res, err = d.rst.SampleAtom(ref, medium, a.Compress, a.Encrypt, d.rst.DecryptOptsFor(a.DLE), arch, rot)
-	case a.Encrypt == "" || a.Encrypt == "none":
-		res, err = d.rst.SampleFrame(ref, medium, a.Compress, arch, rot)
-	default:
-		return drill.ClassNone, "" // an encrypted stream-shape archive has no cheap structural sample
-	}
+	// The restorer resolves the shape itself: framed → decode one frame group;
+	// atomic → decrypt-and-list one atom (the KEY-PROVING check); encrypted
+	// stream shape → nothing cheap to sample (Ran=false).
+	res, err := d.rst.Sample(medium, a, d.rst.DecryptOptsFor(a.DLE), arch, rot)
 	if err != nil {
 		return classifyReadErr(err), restorer.DecryptHint(a.Encrypt, err).Error()
 	}
@@ -399,13 +389,13 @@ func (d *driller) frameSample(t drill.Target, medium string, rot int, logf Logf)
 	}
 	if !res.OK {
 		return drill.ClassIntegrity, fmt.Sprintf("%s %s L%d %s %d structural sample: %s",
-			ref.Run, ref.DLE, ref.Level, unit, res.Frame, res.Detail)
+			step.RunID, step.DLE, step.Level, res.Unit, res.Frame, res.Detail)
 	}
 	fetched := "the stream tail"
 	if res.Bytes >= 0 {
 		fetched = sizeutil.FormatBytes(res.Bytes)
 	}
-	logf.Log("drill %s: %s %d structural sample OK (%s fetched)", d.dles.display(t.DLE), unit, res.Frame, fetched)
+	logf.Log("drill %s: %s %d structural sample OK (%s fetched)", d.dles.display(t.DLE), res.Unit, res.Frame, fetched)
 	return drill.ClassNone, ""
 }
 

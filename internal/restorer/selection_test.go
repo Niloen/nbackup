@@ -70,10 +70,18 @@ func TestDecryptOptsForPrecedence(t *testing.T) {
 		t.Fatalf("a DLE not in config should fall back to the config-wide opts, got: %+v", got)
 	}
 	// planDecode routes through the same rule — the plan's decrypt opts match.
-	if got := r.planDecode("db01-pg", "none", "gpg", "").decryptOpts.PassphraseFile; got != "/dumptype/pass" {
+	plan, err := r.planDecode(recovery.Step{DLE: "db01-pg", Compress: "none", Encrypt: "gpg"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plan.decryptOpts.PassphraseFile; got != "/dumptype/pass" {
 		t.Fatalf("planDecode must delegate to the same precedence: got %q", got)
 	}
-	if got := r.planDecode("other-dle", "none", "gpg", "").decryptOpts; got != d.DecryptOpts {
+	plan, err = r.planDecode(recovery.Step{DLE: "other-dle", Compress: "none", Encrypt: "gpg"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plan.decryptOpts; got != d.DecryptOpts {
 		t.Fatalf("planDecode fallback must be the config-wide opts, got: %+v", got)
 	}
 }

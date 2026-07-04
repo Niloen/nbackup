@@ -12,6 +12,7 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/transform/compress"
+	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
@@ -132,25 +133,77 @@ func planGroups(frames []record.Frame, extents []rawExtent) []rangeGroup {
 	return out
 }
 
-// extractRanged attempts the ranged extraction of one step's selection. handled is
-// false — with no error — when an ingredient is missing and the caller should fall
-// back to the whole-stream path; once the first range is open (the capability probe),
-// a failure is a real extraction error.
-func (r *Restorer) extractRanged(st recovery.ExtractStep, d dest, log Logf) (handled bool, err error) {
+// selectionPlan is a ranged selection's shape-resolved ingredients: the restart table
+// (the index's frame table; the atoms' cumulative sizes; nil entries impossible), an
+// optional per-group stream decoration (the atomic per-atom decrypt loop), and the
+// decompress child. One resolver, so the ranged path itself never branches on shape.
+type selectionPlan struct {
+	table      []record.Frame
+	decode     func(rangeGroup, io.ReadCloser) io.ReadCloser // nil = the fetched range is already the decode input
+	decompress programs.Cmd
+}
+
+// planSelection resolves a step's selectionPlan per its recorded shape, or ok=false
+// when an ingredient is missing — the fallback cue (the whole-stream path then reports
+// any real fault precisely).
+func (r *Restorer) planSelection(st recovery.ExtractStep, idx record.Index) (selectionPlan, bool) {
+	ref := archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level}
+	if st.Shape == record.ShapeAtomic {
+		encSizes, rawSizes, err := r.atomSizes(ref)
+		if err != nil {
+			return selectionPlan{}, false
+		}
+		table := atomTable(encSizes, rawSizes)
+		if table == nil {
+			return selectionPlan{}, false // RawSize never recorded: whole stream
+		}
+		decrypt, decompress, err := buildDecode(st.Compress, r.deps.CompressOpts, st.Encrypt, r.decryptOptsFor(st.DLE))
+		if err != nil {
+			return selectionPlan{}, false
+		}
+		return selectionPlan{
+			table: table,
+			decode: func(g rangeGroup, rc io.ReadCloser) io.ReadCloser {
+				return atomicPlaintext(rc, groupAtomSizes(table, encSizes, g), decrypt)
+			},
+			decompress: decompress,
+		}, true
+	}
 	identity := (st.Compress == "" || st.Compress == "none") && (st.Encrypt == "" || st.Encrypt == "none")
+	if len(idx.Frames) == 0 && !identity {
+		return selectionPlan{}, false // no restart points and a real transform: whole stream only
+	}
+	var decompress programs.Cmd
+	if !identity {
+		cf, err := compress.Filter(st.Compress, r.deps.CompressOpts)
+		if err != nil {
+			return selectionPlan{}, false
+		}
+		decompress = cf.Reverse
+	}
+	return selectionPlan{table: idx.Frames, decompress: decompress}, true
+}
+
+// extractSelected attempts the ranged extraction of one step's selection, per the
+// archive's shape: selected members → raw extents → covering frames (or atoms) →
+// coalesced ranged fetches → decode → tar. handled is false — with no error — when an
+// ingredient is missing and the caller should fall back to the whole-stream path; once
+// the first range is open (the capability probe), a failure is a real extraction error.
+func (r *Restorer) extractSelected(st recovery.ExtractStep, d dest, log Logf) (handled bool, err error) {
 	ref := archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level}
 	idx, ierr := r.deps.Store.Index(ref)
 	if ierr != nil || len(idx.Members) == 0 {
 		return false, nil
 	}
-	if len(idx.Frames) == 0 && !identity {
-		return false, nil // no restart points and a real transform: whole stream only
-	}
 	extents, ok := planExtents(idx.Members, st.Members)
 	if !ok {
 		return false, nil
 	}
-	groups := planGroups(idx.Frames, extents)
+	plan, ok := r.planSelection(st, idx)
+	if !ok {
+		return false, nil
+	}
+	groups := planGroups(plan.table, extents)
 	if len(groups) == 0 {
 		return false, nil
 	}
@@ -161,18 +214,8 @@ func (r *Restorer) extractRanged(st recovery.ExtractStep, d dest, log Logf) (han
 		return false, nil
 	}
 
-	var decompress programs.Cmd
-	if !identity {
-		cf, err := compress.Filter(st.Compress, r.deps.CompressOpts)
-		if err != nil {
-			first.Close()
-			return true, err
-		}
-		decompress = cf.Reverse
-	}
-
 	pr, pw := io.Pipe()
-	go r.emitGroups(ref, groups, first, decompress, pw)
+	go r.emitGroups(ref, groups, first, plan, pw)
 
 	arch, err := r.deps.ArchiverFor(st.Archiver, d.host)
 	if err != nil {
@@ -190,7 +233,7 @@ func (r *Restorer) extractRanged(st recovery.ExtractStep, d dest, log Logf) (han
 // the pipeline has one, discards up to each extent, emits the extent, and drains the
 // group's tail so the decode child exits cleanly at its input's end. A trailing 1 KiB
 // of NULs is tar's end-of-archive marker (PoC-proven clean exit).
-func (r *Restorer) emitGroups(ref archiveio.Ref, groups []rangeGroup, first io.ReadCloser, decompress programs.Cmd, pw *io.PipeWriter) {
+func (r *Restorer) emitGroups(ref archiveio.Ref, groups []rangeGroup, first io.ReadCloser, plan selectionPlan, pw *io.PipeWriter) {
 	for i, g := range groups {
 		rc := first
 		if i > 0 {
@@ -201,12 +244,16 @@ func (r *Restorer) emitGroups(ref archiveio.Ref, groups []rangeGroup, first io.R
 				return
 			}
 		}
-		if err := emitGroup(g, rc, decompress, pw); err != nil {
-			rc.Close()
+		stream := rc
+		if plan.decode != nil {
+			stream = plan.decode(g, rc)
+		}
+		if err := emitGroup(g, stream, plan.decompress, pw); err != nil {
+			stream.Close()
 			pw.CloseWithError(fmt.Errorf("ranged read of %s %s L%d: %w", ref.Run, ref.DLE, ref.Level, err))
 			return
 		}
-		rc.Close()
+		stream.Close()
 	}
 	// tar's end-of-archive: two 512-byte zero blocks (1 KiB) after the last member.
 	if _, err := pw.Write(make([]byte, 1024)); err != nil {
@@ -216,39 +263,73 @@ func (r *Restorer) emitGroups(ref archiveio.Ref, groups []rangeGroup, first io.R
 	pw.Close()
 }
 
-// FrameSampleResult is one structural frame sample's outcome (see SampleFrame).
+// FrameSampleResult is one structural sample's outcome (see Sample).
 type FrameSampleResult struct {
 	Ran    bool   // false: an ingredient was missing (no frames/offsets/ranged copy) — not a verdict
 	OK     bool   // the listed members+offsets matched the index slice
 	Detail string // the first mismatch, when !OK
-	Frame  int    // the sampled frame's index
+	Unit   string // what was sampled: "frame" (framed shape) or "atom" (atomic — the key-proving check)
+	Frame  int    // the sampled frame's/atom's index
 	Bytes  int64  // encoded bytes fetched (the sample's egress); -1 = a to-the-end fetch of unknown size
 }
 
-// SampleFrame structurally proves ONE frame group of an archive at bounded egress —
-// the drill sample tier's framed sibling of the per-part seal check: it ranged-fetches
-// the frames covering the members that start inside frame (rot % frames), decodes them
-// through the real pipeline (a fresh child, exactly as a ranged restore would), lists
-// the result with the archiver (`tar -tR` from the first indexed header), and compares
-// the listed names AND offsets (relative to the span's start) against the index slice.
-// rot rotates the sampled frame across drills, like the checksum sample's part
+// Sample structurally proves ONE restart unit of an archive at bounded egress — the
+// drill sample tier's structural half, resolved per the recorded shape so the caller
+// never picks a variant:
+//
+//   - framed: fetch the frames covering the members starting inside frame
+//     (rot % frames), decode with a fresh child, `tar -tR`, and compare names AND
+//     offsets (relative to the span's start) against the index slice.
+//   - atomic: the same over ONE atom (the seals' cumulative sizes are the table) with
+//     the per-atom decrypt in front — the KEY-PROVING check: it proves the key still
+//     opens this archive, at one atom's egress.
+//   - an encrypted stream-shape archive has no cheap structural sample: Ran=false.
+//
+// rot rotates the sampled unit across drills, like the checksum sample's part
 // rotation. Ingredient gaps report Ran=false; a decode/list fault is the error; a
 // clean decode whose members differ is Ran && !OK — the caller's integrity verdict.
-func (r *Restorer) SampleFrame(ref archiveio.Ref, medium, compressScheme string, arch archiver.Archiver, rot int) (FrameSampleResult, error) {
-	res := FrameSampleResult{}
+func (r *Restorer) Sample(medium string, a record.Archive, opts crypt.Options, arch archiver.Archiver, rot int) (FrameSampleResult, error) {
+	res := FrameSampleResult{Unit: "frame"}
+	ref := archiveio.Ref{Run: a.Run, DLE: a.DLE, Level: a.Level}
 	idx, err := r.deps.Store.Index(ref)
-	if err != nil || len(idx.Frames) == 0 || len(idx.Members) == 0 {
+	if err != nil || len(idx.Members) == 0 {
+		return res, nil
+	}
+	table := idx.Frames
+	var decode func(rangeGroup, io.ReadCloser) io.ReadCloser
+	switch {
+	case a.Shape == record.ShapeAtomic:
+		res.Unit = "atom"
+		encSizes, rawSizes, aerr := r.atomSizes(ref)
+		if aerr != nil {
+			return res, nil // seal-less copy: nothing to cut against
+		}
+		if table = atomTable(encSizes, rawSizes); table == nil {
+			return res, nil
+		}
+		decrypt, _, derr := buildDecode(a.Compress, r.deps.CompressOpts, a.Encrypt, opts)
+		if derr != nil {
+			return res, derr
+		}
+		decode = func(g rangeGroup, rc io.ReadCloser) io.ReadCloser {
+			return atomicPlaintext(rc, groupAtomSizes(table, encSizes, g), decrypt)
+		}
+	case a.Encrypt != "" && a.Encrypt != "none":
+		return res, nil // encrypted stream shape: whole-archive checks only
+	case len(table) == 0:
 		return res, nil
 	}
 	var decompress programs.Cmd
-	if compressScheme != "" && compressScheme != "none" {
-		cf, ferr := compress.Filter(compressScheme, r.deps.CompressOpts)
+	if a.Compress != "" && a.Compress != "none" {
+		cf, ferr := compress.Filter(a.Compress, r.deps.CompressOpts)
 		if ferr != nil {
 			return res, ferr
 		}
 		decompress = cf.Reverse
 	}
-	return r.sampleTable(ref, medium, idx.Frames, idx.Members, arch, rot, nil, decompress)
+	out, err := r.sampleTable(ref, medium, table, idx.Members, arch, rot, decode, decompress)
+	out.Unit = res.Unit
+	return out, err
 }
 
 // sampleTable is the shared sampling core behind SampleFrame (framed: table = the

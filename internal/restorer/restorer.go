@@ -196,17 +196,10 @@ func (r *Restorer) extractChain(runID string, req Request, rollbackOnFail bool, 
 		if oerr != nil {
 			return stepErr(step, DecryptHint(step.Encrypt, oerr))
 		}
-		plan := r.planDecode(step.DLE, step.Compress, step.Encrypt, req.Host)
-		if step.Shape == record.ShapeAtomic {
-			sizes, _, aerr := r.atomSizes(ref)
-			if aerr != nil {
-				rc.Close()
-				return stepErr(step, aerr)
-			}
-			if xerr := r.dec.restoreAtomic(rc, plan, step.Archiver, d, nil, sizes); xerr != nil {
-				return stepErr(step, DecryptHint(step.Encrypt, xerr))
-			}
-			return nil
+		plan, perr := r.planDecode(step, req.Host)
+		if perr != nil {
+			rc.Close()
+			return stepErr(step, perr)
 		}
 		if xerr := r.dec.restoreArchive(rc, plan, step.Archiver, d, nil); xerr != nil {
 			return stepErr(step, DecryptHint(step.Encrypt, xerr))
@@ -271,14 +264,24 @@ func clearDirContents(dir string) error {
 // planDecode resolves the decode placement (policy): decrypt runs on the target
 // (the sink) only when the key is client-held and reached over `--to`; otherwise
 // on the local server. The decrypt key reference is decryptOptsFor's one rule.
-func (r *Restorer) planDecode(dleName, compressScheme, encrypt, targetHost string) decodePlan {
-	ec, _ := r.deps.EncryptionFor(dleName)
+func (r *Restorer) planDecode(step recovery.Step, targetHost string) (decodePlan, error) {
+	ec, _ := r.deps.EncryptionFor(step.DLE)
 	inSink := ec.At == "client" && targetHost != ""
-	return decodePlan{
-		compress: compressScheme, compressOpts: r.deps.CompressOpts,
-		encrypt: encrypt, decryptOpts: r.decryptOptsFor(dleName), decryptInSink: inSink,
+	plan := decodePlan{
+		compress: step.Compress, compressOpts: r.deps.CompressOpts,
+		encrypt: step.Encrypt, decryptOpts: r.decryptOptsFor(step.DLE), decryptInSink: inSink,
 		remote: targetHost != "",
 	}
+	// An atomic archive's decode cuts the stream at its seals' sizes and decrypts per
+	// atom — resolved HERE, once, so no caller ever fetches sizes or picks a variant.
+	if step.Shape == record.ShapeAtomic {
+		sizes, _, err := r.atomSizes(archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level})
+		if err != nil {
+			return decodePlan{}, err
+		}
+		plan.atomSizes = sizes
+	}
+	return plan, nil
 }
 
 // ensureServerCanDecode fails fast when a restore would have the server decrypt

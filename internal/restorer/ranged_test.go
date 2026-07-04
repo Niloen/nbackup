@@ -13,6 +13,7 @@ import (
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
+	"github.com/Niloen/nbackup/internal/transform/crypt"
 )
 
 // tarEntry is one ordered member of a built test archive.
@@ -224,9 +225,10 @@ func TestSampleFrame(t *testing.T) {
 	store, step, members, _ := framedFixture(t, dle)
 	deps := testDeps(store, nil)
 	r := New(deps)
+	arch2 := record.Archive{Run: step.RunID, DLE: dle, Level: 0, Compress: "gzip"}
 	aref := ref(step.RunID, dle, 0)
 
-	res, err := r.SampleFrame(aref, "", "gzip", arch, 0)
+	res, err := r.Sample("", arch2, crypt.Options{}, arch, 0)
 	if err != nil {
 		t.Fatalf("SampleFrame: %v", err)
 	}
@@ -244,7 +246,7 @@ func TestSampleFrame(t *testing.T) {
 	store.members[aref] = bad
 	caught := false
 	for rot := 0; rot < len(store.frames[aref]); rot++ {
-		res, err = r.SampleFrame(aref, "", "gzip", arch, rot)
+		res, err = r.Sample("", arch2, crypt.Options{}, arch, rot)
 		if err != nil {
 			t.Fatalf("SampleFrame rot=%d: %v", rot, err)
 		}
@@ -259,7 +261,7 @@ func TestSampleFrame(t *testing.T) {
 
 	// No ranged copy: an ingredient gap, not a verdict.
 	store.ranged = false
-	res, err = r.SampleFrame(aref, "", "gzip", arch, 0)
+	res, err = r.Sample("", arch2, crypt.Options{}, arch, 0)
 	if err != nil || res.Ran {
 		t.Fatalf("rangeless copy should skip (ran=%v err=%v)", res.Ran, err)
 	}
