@@ -17,9 +17,21 @@ import (
 // or the on-medium index on a miss), so a fully-cached browse touches no media
 // until extract.
 func (r *Restorer) OpenRecover(dle, asOf string) (*recovery.Tree, error) {
-	return recovery.BuildTree(r.deps.Archives(), dle, asOf, func(runID string, level int) ([]record.Member, error) {
+	return recovery.BuildTree(r.deps.Archives(), dle, asOf, r.membersFor(dle))
+}
+
+// OpenRecoverRun is OpenRecover pinned to an exact run — the mount's per-run
+// snapshot view; see recovery.BuildTreeForRun.
+func (r *Restorer) OpenRecoverRun(dle, runID string) (*recovery.Tree, error) {
+	return recovery.BuildTreeForRun(r.deps.Archives(), dle, runID, r.membersFor(dle))
+}
+
+// membersFor is the lazy member-list loader BuildTree wants: cache first, the
+// on-medium index on a miss (see archivefs.ReadStore.Members).
+func (r *Restorer) membersFor(dle string) func(runID string, level int) ([]record.Member, error) {
+	return func(runID string, level int) ([]record.Member, error) {
 		return r.deps.Store.Members(archiveio.Ref{Run: runID, DLE: dle, Level: level})
-	})
+	}
 }
 
 // ExtractSelection extracts a selected set of files, grouped by their source

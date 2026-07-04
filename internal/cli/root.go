@@ -101,6 +101,7 @@ func NewRootCmd() *cobra.Command {
 		newReportCmd(a),
 		newWebCmd(a),
 		newRecoverCmd(a),
+		newMountCmd(a),
 		newCopyCmd(a),
 		newSyncCmd(a),
 		newLabelCmd(a),

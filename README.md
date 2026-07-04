@@ -179,6 +179,7 @@ details one item when given an id (`nb run run-2026-06-21.020000`, `nb medium lt
 | `nb verify`          | Verify run integrity: checksums, or `--deep` structure  |
 | `nb drill`           | Rehearse recovery: prove backups are restorable          |
 | `nb recover`         | Recover as of a date: browse + pick files, or `--all` for a whole DLE |
+| `nb mount <dir>`     | FUSE-mount the backups read-only: one directory per run, each a snapshot |
 | `nb copy`            | Copy one run between media (`--from`/`--to`, e.g. disk → tape) |
 | `nb sync`            | Mirror one medium's runs onto another (disk → tape/s3)  |
 | `nb label`           | Label a volume (required for tape before its first dump) |

@@ -597,6 +597,12 @@ func (e *Engine) OpenRecover(dle, asOf string) (*recovery.Tree, error) {
 	return e.rst.OpenRecover(dle, asOf)
 }
 
+// OpenRecoverRun builds a browsable filesystem of a DLE as of an exact run — the
+// mount's per-run snapshot view; see restorer.
+func (e *Engine) OpenRecoverRun(dle, runID string) (*recovery.Tree, error) {
+	return e.rst.OpenRecoverRun(dle, runID)
+}
+
 // ExtractSelection extracts a selected set of files into destDir; see restorer.
 func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, logf Logf) (int, int, error) {
 	return e.rst.ExtractSelection(steps, destDir, logf)

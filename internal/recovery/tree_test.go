@@ -112,6 +112,39 @@ func TestBuildTreeAsOfEarlierDate(t *testing.T) {
 	}
 }
 
+func TestBuildTreeForRunPinsExactRun(t *testing.T) {
+	tree, err := BuildTreeForRun(scenario(), "app", "run-2026-06-21.001", membersOf(scenario(), "app"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tree.TargetRun != "run-2026-06-21.001" {
+		t.Fatalf("target = %s", tree.TargetRun)
+	}
+	if _, ok := tree.Lookup("etc/new.conf"); ok {
+		t.Fatal("etc/new.conf should not exist as of run 1")
+	}
+	hosts, ok := tree.Lookup("etc/hosts")
+	if !ok || hosts.src.RunID != "run-2026-06-21.001" {
+		t.Fatalf("etc/hosts should be from the full, got %+v", hosts.src)
+	}
+}
+
+func TestBuildTreeForRunTipAtOrBefore(t *testing.T) {
+	// A second DLE dumped only in run 1: pinning to run 2 still resolves it,
+	// via its most recent dump at or before the target run.
+	archives := append(scenario(), record.Archive{
+		Run: "run-2026-06-21.001", DLE: "web", Level: 0, Archiver: "gnutar", Compress: "none",
+		Members: mems("./", "./index.html"),
+	})
+	tree, err := BuildTreeForRun(archives, "web", "run-2026-06-22.001", membersOf(archives, "web"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := tree.Lookup("index.html"); !ok {
+		t.Fatal("index.html missing from web's snapshot as of run 2")
+	}
+}
+
 func TestBuildTreeNoFull(t *testing.T) {
 	if _, err := BuildTree(scenario(), "other", "2026-06-22", membersOf(scenario(), "other")); err == nil {
 		t.Fatal("expected error for a DLE with no backup")

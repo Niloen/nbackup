@@ -94,6 +94,17 @@ func BuildTree(archives []record.Archive, dle, asOf string, members func(runID s
 	if err != nil {
 		return nil, err
 	}
+	return buildTree(archives, dle, target, asOf, members)
+}
+
+// BuildTreeForRun is BuildTree pinned to an exact target run instead of an as-of
+// date: the chain's tip is the DLE's most recent dump at or before that run, so a
+// run that did not dump the DLE still resolves to its state as of that run.
+func BuildTreeForRun(archives []record.Archive, dle, runID string, members func(runID string, level int) ([]record.Member, error)) (*Tree, error) {
+	return buildTree(archives, dle, runID, record.RunDate(runID), members)
+}
+
+func buildTree(archives []record.Archive, dle, target, asOf string, members func(runID string, level int) ([]record.Member, error)) (*Tree, error) {
 	steps, err := Chain(archives, dle, target)
 	if err != nil {
 		return nil, err

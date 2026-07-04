@@ -48,6 +48,7 @@ equivalent.
 | `nb verify` | Verify run integrity: checksums, or `--deep` structure |
 | `nb drill` | Rehearse recovery: prove backups are restorable |
 | `nb recover` | Recover as of a date: browse + pick files, or `--all` for a whole DLE |
+| `nb mount <dir>` | FUSE-mount the backups read-only: one directory per run, each a snapshot |
 | `nb copy` | Copy one run between media (`--from`/`--to`, e.g. disk → tape) |
 | `nb sync` | Mirror one medium's runs onto another (disk → tape/s3) |
 | `nb label` | Label a volume (required for tape before its first dump) |
@@ -151,6 +152,28 @@ nb recover --dle app01:/home --date 2026-06-20 \
 ```
 
 See [Recovery](../features/recovery).
+
+## Mounting
+
+`nb mount <dir>` serves the backups as a read-only FUSE filesystem: the top
+level lists runs, and inside each run is every DLE's snapshot as of that run —
+the same view `nb recover` browses for a date, pinned to a run. Browsing reads
+only the member indexes; a file's content is recovered from the archives on its
+first open and cached for the mount's lifetime, so an unopened file lists with
+size 0 until read (`cat`/`cp` see the full content). Like file-level recovery
+the view is a union: a file deleted before the run may still appear. Unmount
+with Ctrl-C or `fusermount -u <dir>`.
+
+| Flag | Purpose |
+|---|---|
+| `--cache-dir <dir>` | Keep the recovered-file cache here (default: a temp dir, removed on unmount). |
+
+```bash
+nb mount /mnt/backups
+ls /mnt/backups
+cat '/mnt/backups/<run>/<dle>/etc/hosts'
+fusermount -u /mnt/backups
+```
 
 ## Replicating
 
