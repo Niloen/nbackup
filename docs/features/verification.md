@@ -93,6 +93,7 @@ Each target is exercised at a tier, from cheapest to most thorough:
 
 | Tier         | What it does                                                        |
 |--------------|--------------------------------------------------------------------|
+| `sample`     | re-hash ONE part per archive against its per-part seal — bounded egress on a cloud copy; successive drills rotate through the parts, so coverage accumulates |
 | `checksum`   | re-hash the payload against the recorded checksum                  |
 | `structural` | stream through decrypt → decompress → `tar -t` (list, no write)    |
 | `chain`      | a real restore of the full + incrementals to scratch              |

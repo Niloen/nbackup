@@ -272,7 +272,7 @@ func (c *Config) validateSync() error {
 
 // validDrillTiers is the accepted set for the drill tier token (kept here so config
 // validation needs no dependency on package drill, which depends on no config).
-var validDrillTiers = map[string]bool{"": true, "checksum": true, "structural": true, "chain": true, "stock": true}
+var validDrillTiers = map[string]bool{"": true, "sample": true, "checksum": true, "structural": true, "chain": true, "stock": true}
 
 // validateDrill checks the optional `drill:` block.
 func (c *Config) validateDrill() error {
@@ -286,7 +286,7 @@ func (c *Config) validateDrill() error {
 		return fmt.Errorf("drill: sample must not be negative")
 	}
 	if !validDrillTiers[d.Tier] {
-		return fmt.Errorf("drill: unknown tier %q (known: checksum, structural, chain, stock)", d.Tier)
+		return fmt.Errorf("drill: unknown tier %q (known: sample, checksum, structural, chain, stock)", d.Tier)
 	}
 	if d.From != "" && len(c.Media) > 0 {
 		if _, ok := c.Media[d.From]; !ok {

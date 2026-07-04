@@ -167,25 +167,45 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 
 	// Price the egress of reading the selected chains off the drill medium — the
 	// honest cost of an offsite drill (an encrypted+compressed archive is all-or-
-	// nothing, so a structural/chain drill spends the full bytes).
+	// nothing, so a structural/chain drill spends the full bytes; the sample tier
+	// reads one sealed part per archive, so it is priced on those parts alone).
 	if cm := d.acct.CostModelFor(medium); cm.Priced() {
-		var refs []archiveio.Ref
-		for _, t := range targets {
-			for _, s := range t.Steps {
-				refs = append(refs, archiveio.Ref{Run: s.RunID, DLE: s.DLE, Level: s.Level})
-			}
-		}
-		est := d.acct.EstimateRead(refs, medium)
 		rep.Priced = true
-		rep.Provider = est.Provider
-		rep.ForecastCost = est.Cost
+		rep.Provider = cm.Provider
+		if opts.Tier == drill.TierSample {
+			var bytes, gets int64
+			for _, t := range targets {
+				rec, _ := ledger.Get(t.DLE)
+				if choices, ok := d.samplePlan(t.Steps, medium, rec.Drills); ok {
+					for _, c := range choices {
+						bytes += c.size
+						gets++
+					}
+				} else { // sealless copy: sampling falls back to the full checksum read
+					bytes += d.chainBytes(t.Steps)
+					gets += int64(len(t.Steps))
+				}
+			}
+			rep.ForecastCost = cm.ReadCost(bytes, gets)
+		} else {
+			var refs []archiveio.Ref
+			for _, t := range targets {
+				for _, s := range t.Steps {
+					refs = append(refs, archiveio.Ref{Run: s.RunID, DLE: s.DLE, Level: s.Level})
+				}
+			}
+			est := d.acct.EstimateRead(refs, medium)
+			rep.Provider = est.Provider
+			rep.ForecastCost = est.Cost
+		}
 	}
 
 	if !opts.Apply {
 		// Dry-run: show what would run and its forecast cost; touch no media, write
 		// no ledger. The WORM probe is detect-only here (no probe object written).
 		for _, t := range targets {
-			b := d.chainBytes(t.Steps)
+			rec, _ := ledger.Get(t.DLE)
+			b := d.targetBytes(t, medium, opts.Tier, rec.Drills)
 			rep.Targets = append(rep.Targets, DrillResult{
 				DLE: t.DLE, DLEDisplay: d.dles.display(t.DLE), RunID: t.RunID, AsOf: t.AsOf, Medium: medium, Tier: opts.Tier, Bytes: b,
 			})
@@ -197,7 +217,8 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 	}
 
 	for _, t := range targets {
-		res := d.drillTarget(t, medium, opts, logf)
+		prev, _ := ledger.Get(t.DLE)
+		res := d.drillTarget(t, medium, prev.Drills, opts, logf)
 		rep.Targets = append(rep.Targets, res)
 		rep.ForecastBytes += res.Bytes
 		switch {
@@ -213,6 +234,7 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 				DLE: t.DLE, LastDrill: opts.Now, Tier: opts.Tier.String(), Medium: medium,
 				AsOf: t.AsOf, RunID: t.RunID, OK: res.OK,
 				Class: failureToken(res), Detail: res.Detail,
+				Drills: prev.Drills + 1, // advances the sample tier's part rotation
 			})
 			if err := ledger.Save(d.cfg.WorkdirPath()); err != nil {
 				return rep, fmt.Errorf("save drill ledger: %w", err)
@@ -229,9 +251,9 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 
 // drillTarget exercises one target at the requested tier and classifies the outcome.
 // In unattended mode it first skips any target whose source copy a human would have
-// to load.
-func (d *driller) drillTarget(t drill.Target, medium string, opts DrillOptions, logf Logf) DrillResult {
-	res := DrillResult{DLE: t.DLE, DLEDisplay: d.dles.display(t.DLE), RunID: t.RunID, AsOf: t.AsOf, Medium: medium, Tier: opts.Tier, Bytes: d.chainBytes(t.Steps)}
+// to load. drills is the DLE's ledger drill count — the sample tier's part rotation.
+func (d *driller) drillTarget(t drill.Target, medium string, drills int, opts DrillOptions, logf Logf) DrillResult {
+	res := DrillResult{DLE: t.DLE, DLEDisplay: d.dles.display(t.DLE), RunID: t.RunID, AsOf: t.AsOf, Medium: medium, Tier: opts.Tier, Bytes: d.targetBytes(t, medium, opts.Tier, drills)}
 	if opts.Unattended {
 		if ok, reason := d.unattendedReachable(medium, t.Steps); !ok {
 			res.Class, res.Detail = drill.ClassSkipped, reason
@@ -243,6 +265,8 @@ func (d *driller) drillTarget(t drill.Target, medium string, opts DrillOptions, 
 	var cls drill.Class
 	var detail string
 	switch opts.Tier {
+	case drill.TierSample:
+		cls, detail = d.drillSample(t, medium, drills, logf)
 	case drill.TierChecksum:
 		cls, detail = d.drillVerify(t, medium, CheckChecksum)
 	case drill.TierStructural:
@@ -304,6 +328,87 @@ func (d *driller) drillVerify(t drill.Target, medium string, checks VerifyChecks
 		return drill.ClassMissing, fmt.Sprintf("no copy on medium %q", medium)
 	}
 	return drill.ClassNone, ""
+}
+
+// drillSample verifies ONE part of each chain archive on the medium against its
+// recorded per-part seal — the bounded-egress tier: a part's worth of bytes per
+// archive off the medium instead of the whole chain. rot (the DLE's ledger drill
+// count) picks the part, so successive drills rotate through an archive's parts and
+// checksum coverage accumulates across runs. A copy that records no seals falls back
+// to the full checksum read for the whole target, so the tier never silently proves
+// less than it claims.
+func (d *driller) drillSample(t drill.Target, medium string, rot int, logf Logf) (drill.Class, string) {
+	choices, ok := d.samplePlan(t.Steps, medium, rot)
+	if !ok {
+		logf.Log("drill %s: copy on %q records no part seals — sampling falls back to a full checksum read", d.dles.display(t.DLE), medium)
+		return d.drillVerify(t, medium, CheckChecksum)
+	}
+	for _, c := range choices {
+		ok, err := d.fs.VerifyPart(c.ref, medium, c.idx)
+		if err != nil {
+			return classifyOpenErr(err), err.Error()
+		}
+		if !ok {
+			return drill.ClassIntegrity, fmt.Sprintf("%s %s L%d part %d of %d: checksum mismatch vs its recorded seal",
+				c.ref.Run, c.ref.DLE, c.ref.Level, c.idx+1, c.parts)
+		}
+	}
+	return drill.ClassNone, ""
+}
+
+// sampleChoice is one archive's sampled part: which of its parts, and the egress
+// (the seal's size) reading it costs.
+type sampleChoice struct {
+	ref   archiveio.Ref
+	idx   int
+	parts int
+	size  int64
+}
+
+// samplePlan picks the part each chain archive's sample would read on the medium
+// (rot % parts) and its egress. ok=false when any archive's copy there records no
+// aligned seals or is absent — the caller falls back to the full checksum tier,
+// which locates and reports the precise fault.
+func (d *driller) samplePlan(steps []recovery.Step, medium string, rot int) ([]sampleChoice, bool) {
+	choices := make([]sampleChoice, 0, len(steps))
+	for _, step := range steps {
+		found := false
+		for _, p := range placementsOnMedium(d.placementsFor(step.RunID), medium) {
+			pa, ok := p.Placed(step.DLE, step.Level)
+			if !ok || len(pa.Seals) == 0 || len(pa.Seals) != len(pa.Parts) {
+				continue
+			}
+			idx := rot % len(pa.Parts)
+			choices = append(choices, sampleChoice{
+				ref:   archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level},
+				idx:   idx,
+				parts: len(pa.Parts),
+				size:  pa.Seals[idx].Size,
+			})
+			found = true
+			break
+		}
+		if !found {
+			return nil, false
+		}
+	}
+	return choices, true
+}
+
+// targetBytes is the egress a drill of the target reads off the medium at the tier:
+// the sampled parts' sizes for the sample tier (falling back to the full chain when
+// sampling would), the whole chain's stored bytes otherwise.
+func (d *driller) targetBytes(t drill.Target, medium string, tier drill.Tier, rot int) int64 {
+	if tier == drill.TierSample {
+		if choices, ok := d.samplePlan(t.Steps, medium, rot); ok {
+			var n int64
+			for _, c := range choices {
+				n += c.size
+			}
+			return n
+		}
+	}
+	return d.chainBytes(t.Steps)
 }
 
 // drillChain performs a real point-in-time chain restore of the DLE into a scratch

@@ -1,6 +1,9 @@
 package catalog
 
-import "github.com/Niloen/nbackup/internal/archiveio"
+import (
+	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/record"
+)
 
 // Entry is the catalog's per-run record: one logical run plus every place a
 // copy of it lives.
@@ -37,6 +40,7 @@ type PlacedArchive struct {
 	DLE    string              `json:"dle"`
 	Level  int                 `json:"level"`
 	Parts  []archiveio.FilePos `json:"parts"`
+	Seals  []record.PartSeal   `json:"seals,omitempty"` // per-part seals, index-aligned with Parts (from this placement's commit footer); empty when the footer predates seals or a scan found only some parts
 	Commit archiveio.FilePos   `json:"commit"`          // the commit footer's location (the archive's marker)
 	Index  archiveio.FilePos   `json:"index,omitempty"` // the member index's location (zero = no members)
 }
@@ -55,6 +59,18 @@ func (p Placement) Parts(dle string, level int) ([]archiveio.FilePos, bool) {
 		}
 	}
 	return nil, false
+}
+
+// Placed returns the full placed-archive record of (dle, level) on this copy — parts,
+// seals, commit, index — for callers that need more than the part positions (a sampling
+// check reads the per-part seals).
+func (p Placement) Placed(dle string, level int) (PlacedArchive, bool) {
+	for _, a := range p.Archives {
+		if a.DLE == dle && a.Level == level {
+			return a, true
+		}
+	}
+	return PlacedArchive{}, false
 }
 
 // Holds reports whether this copy records the archive at all. A copy is

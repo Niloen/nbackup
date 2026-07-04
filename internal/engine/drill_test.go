@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archivefs"
+	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/librarian"
@@ -149,7 +150,7 @@ func TestVerifyStructuralPipelineFault(t *testing.T) {
 // TestDrillTiersPass runs each drill tier against a healthy chain and asserts it
 // passes, writes a ledger, and (dry-run) writes nothing.
 func TestDrillTiersPass(t *testing.T) {
-	for _, tier := range []drill.Tier{drill.TierChecksum, drill.TierStructural, drill.TierChain, drill.TierStock} {
+	for _, tier := range []drill.Tier{drill.TierSample, drill.TierChecksum, drill.TierStructural, drill.TierChain, drill.TierStock} {
 		t.Run(tier.String(), func(t *testing.T) {
 			f := newDrillFixture(t, "none")
 			eng := f.eng
@@ -478,5 +479,110 @@ func TestClassifyRestoreErr(t *testing.T) {
 		if got := classifyRestoreErr(tc.err); got != tc.want {
 			t.Errorf("%s: classified %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestDrillSampleTier exercises the sample tier end-to-end on a multi-part cloud copy:
+// the offsite medium splits the synced full into parts (part_size), a sample drill
+// reads ONE part per chain archive (bounded egress — fewer bytes than the chain), and
+// the ledger's drill counter rotates the sampled part so a corruption in part 1 is
+// missed by the first drill (which reads part 0) and caught by the second.
+func TestDrillSampleTier(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "big.txt"), strings.Repeat("0123456789abcdef", 10240)) // ~160 KiB → 3 parts at 64KiB
+	diskDir, offsiteDir := t.TempDir(), t.TempDir()
+
+	cfg := &config.Config{
+		Landing: "disk",
+		Media: map[string]config.Media{
+			"disk":    {Type: "disk", Params: map[string]string{"path": diskDir}},
+			"offsite": {Type: "cloud", Params: map[string]string{"url": "file://" + offsiteDir, "part_size": "64KiB"}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skip("GNU tar not available")
+	}
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("full dump: %v", err)
+	}
+	write(t, filepath.Join(src, "b.txt"), "incremental content")
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("incremental dump: %v", err)
+	}
+	if _, err := eng.SyncTo("", "offsite", SyncSelection{}, true, false, nil); err != nil {
+		t.Fatalf("sync offsite: %v", err)
+	}
+	dle := config.DLE{Host: "localhost", Path: src}.Name()
+
+	// The synced full must have split into sealed parts for the sample to mean anything.
+	var full catalog.PlacedArchive
+	for _, p := range eng.cat.Placements("run-2026-06-21.000000") {
+		if p.Medium == "offsite" {
+			full, _ = p.Placed(dle, 0)
+		}
+	}
+	if len(full.Parts) < 3 || len(full.Seals) != len(full.Parts) {
+		t.Fatalf("offsite full: %d parts, %d seals — want >=3 sealed parts", len(full.Parts), len(full.Seals))
+	}
+	var chainTotal, fullTotal int64
+	for _, s := range full.Seals {
+		fullTotal += s.Size
+	}
+	run, err := eng.cat.ReadRun("run-2026-06-21.000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range run.Archives {
+		chainTotal += a.Compressed
+	}
+
+	opts := DrillOptions{Tier: drill.TierSample, Medium: "offsite", Sample: 1, Window: 24 * time.Hour, Apply: true,
+		Now: time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)}
+
+	// Corrupt part 1 of the offsite full. Drill #1 samples part 0 (rotation counter 0)
+	// and passes; drill #2 rotates to part 1 and catches the corruption.
+	partFiles, _ := filepath.Glob(filepath.Join(offsiteDir, "runs", "run-2026-06-21.000000", "*.p001"))
+	if len(partFiles) != 1 {
+		t.Fatalf("want exactly one .p001 part object, got %v", partFiles)
+	}
+	corrupt(t, partFiles[0])
+
+	rep, err := eng.Drill(opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Failures != 0 {
+		t.Fatalf("drill #1 (part 0) failures = %d (%+v), want pass", rep.Failures, rep.Targets)
+	}
+	if b := rep.Targets[0].Bytes; b <= 0 || b >= chainTotal {
+		t.Fatalf("sample drill bytes = %d, want > 0 and < the chain's %d (bounded egress)", b, chainTotal)
+	}
+	led, _ := drill.Load(eng.cfg.WorkdirPath())
+	if rec, _ := led.Get(dle); rec.Drills != 1 {
+		t.Fatalf("ledger Drills = %d after one drill, want 1", rec.Drills)
+	}
+
+	opts.Now = opts.Now.Add(48 * time.Hour) // past the window, so the DLE is due again
+	rep, err = eng.Drill(opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Failures != 1 || rep.Targets[0].Class != drill.ClassIntegrity {
+		t.Fatalf("drill #2 (part 1, corrupted) = %+v (failures %d), want an integrity fault", rep.Targets, rep.Failures)
+	}
+	if !strings.Contains(rep.Targets[0].Detail, "part 2 of") {
+		t.Fatalf("failure detail %q does not name the sampled part", rep.Targets[0].Detail)
+	}
+	led, _ = drill.Load(eng.cfg.WorkdirPath())
+	if rec, _ := led.Get(dle); rec.Drills != 2 || rec.OK {
+		t.Fatalf("ledger after failing drill = %+v, want Drills=2 OK=false", rec)
 	}
 }

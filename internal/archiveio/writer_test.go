@@ -379,3 +379,89 @@ func TestCommitRecordsUnreadable(t *testing.T) {
 		t.Fatalf("copied archive Unreadable = %d, want 2", got)
 	}
 }
+
+// TestPartSealsRecorded: each part of a split archive carries its own seal (size +
+// SHA256), durable in the commit footer, and VerifyPart checks exactly one part —
+// catching a corrupt part at that index while the others still pass. A copy re-splits
+// to its own layout and re-seals (fresh seals, preserved whole-archive checksum).
+func TestPartSealsRecorded(t *testing.T) {
+	v := newMemVolume("only", 0)
+	sink := &memSink{vols: []*memVolume{v}, partCap: 10 * 1024}
+	spec := RunSpec{ID: "run-x", CreatedAt: time.Unix(0, 0).UTC()}
+	w := NewWriter(sink, sink, spec, nil, nil)
+	body := []byte(strings.Repeat("y", 35*1024)) // 35 KiB / 10 KiB → 4 parts
+	arch, apos := writeOneArchive(t, w, sink, "dle1", body)
+
+	if len(arch.PartSeals) != arch.Parts || arch.Parts < 3 {
+		t.Fatalf("PartSeals = %d for %d parts, want aligned and split", len(arch.PartSeals), arch.Parts)
+	}
+	var total int64
+	for i, s := range arch.PartSeals {
+		if s.Size != int64(len(v.data[apos.Parts[i].Pos])) {
+			t.Fatalf("seal %d Size = %d, want the part's stored size %d", i, s.Size, len(v.data[apos.Parts[i].Pos]))
+		}
+		total += s.Size
+	}
+	if total != arch.Compressed {
+		t.Fatalf("seal sizes sum to %d, want Compressed %d", total, arch.Compressed)
+	}
+
+	// The footer on the medium carries the seals — a rebuild restores them from there.
+	_, rc, err := v.ReadFile(apos.Commit.Pos)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := io.ReadAll(rc)
+	rc.Close()
+	footer, err := record.ParseCommit(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(footer.PartSeals) != arch.Parts {
+		t.Fatalf("footer PartSeals = %d, want %d (seals must be durable on the medium)", len(footer.PartSeals), arch.Parts)
+	}
+
+	// VerifyPart passes per part; corrupting ONE part fails that index only.
+	ref := Ref{Run: spec.ID, DLE: "dle1", Level: 0}
+	r := NewReader(openerOver(v), nil)
+	for i, s := range arch.PartSeals {
+		if ok, err := r.VerifyPart(ref, apos.Parts, i, s); err != nil || !ok {
+			t.Fatalf("VerifyPart(%d) ok=%v err=%v, want pass", i, ok, err)
+		}
+	}
+	v.data[apos.Parts[1].Pos][0] ^= 0xff // bit-rot in part 1
+	if ok, _ := r.VerifyPart(ref, apos.Parts, 1, arch.PartSeals[1]); ok {
+		t.Fatal("VerifyPart(1) passed on a corrupted part")
+	}
+	if ok, err := r.VerifyPart(ref, apos.Parts, 0, arch.PartSeals[0]); err != nil || !ok {
+		t.Fatalf("VerifyPart(0) ok=%v err=%v, want pass (only part 1 is corrupt)", ok, err)
+	}
+	v.data[apos.Parts[1].Pos][0] ^= 0xff // restore for the copy below
+
+	// A copy re-splits to its own layout and re-seals; the whole-archive checksum survives.
+	v2 := newMemVolume("v2", 0)
+	sink2 := &memSink{vols: []*memVolume{v2}, partCap: 20 * 1024} // coarser split: fewer parts
+	w2 := NewWriter(sink2, sink2, spec, nil, nil)
+	cw := w2.NewCopy(arch)
+	if err := driveArchive(cw, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := cw.Commit(context.Background(), xfer.SourceStats{}); err != nil {
+		t.Fatal(err)
+	}
+	carch := sink2.last.Archive
+	if carch.SHA256 != arch.SHA256 {
+		t.Fatal("copy changed the whole-archive checksum")
+	}
+	if carch.Parts >= arch.Parts || len(carch.PartSeals) != carch.Parts {
+		t.Fatalf("copy Parts=%d seals=%d, want a fresh, aligned seal set for the coarser layout (source had %d)",
+			carch.Parts, len(carch.PartSeals), arch.Parts)
+	}
+	cref := Ref{Run: spec.ID, DLE: "dle1", Level: 0}
+	r2 := NewReader(openerOver(v2), nil)
+	for i, s := range carch.PartSeals {
+		if ok, err := r2.VerifyPart(cref, sink2.last.Pos.Parts, i, s); err != nil || !ok {
+			t.Fatalf("copy VerifyPart(%d) ok=%v err=%v", i, ok, err)
+		}
+	}
+}

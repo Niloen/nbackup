@@ -518,3 +518,64 @@ func TestSetVolumeBarcode(t *testing.T) {
 		t.Fatalf("T-B after recycle = %+v, want barcode SIM0001 epoch 2", v)
 	}
 }
+
+// TestRebuildRestoresPartSeals: the per-part seals ride in the commit footer, so a
+// rebuild restores them onto the placement (index-aligned with the part positions) and
+// strips them from the run's medium-independent content. A scan that found only some
+// parts drops the seals rather than mis-aligning them.
+func TestRebuildRestoresPartSeals(t *testing.T) {
+	dir := t.TempDir()
+	vol := newVolume(t, dir)
+
+	seals := []record.PartSeal{{Size: 4, SHA256: "aa"}, {Size: 3, SHA256: "bb"}}
+	arch := record.Archive{Run: "run-2026-06-20.001", DLE: "h-data", Level: 0, Compressed: 7, Parts: 2, PartSeals: seals}
+	for part := 0; part < 2; part++ {
+		h := record.Header{Run: arch.Run, Kind: record.KindArchive, DLE: arch.DLE, Level: 0, Part: part}
+		if _, err := writeFileT(vol, h, func(w io.Writer) error { _, e := w.Write([]byte("data")); return e }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	putCommit(t, vol, arch.Run, arch)
+	// A second archive whose footer claims 2 sealed parts but with only part 0 on the
+	// medium: alignment is broken, so its seals must be dropped.
+	partial := record.Archive{Run: arch.Run, DLE: "h-partial", Level: 0, Parts: 2, PartSeals: seals}
+	if _, err := writeFileT(vol, record.Header{Run: arch.Run, Kind: record.KindArchive, DLE: "h-partial", Level: 0, Part: 0},
+		func(w io.Writer) error { _, e := w.Write([]byte("data")); return e }); err != nil {
+		t.Fatal(err)
+	}
+	putCommit(t, vol, arch.Run, partial)
+
+	cat, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.Rebuild(map[string]media.Volume{"disk": vol}); err != nil {
+		t.Fatal(err)
+	}
+	var pa PlacedArchive
+	var ok bool
+	for _, p := range cat.Placements(arch.Run) {
+		if pa, ok = p.Placed("h-data", 0); ok {
+			break
+		}
+	}
+	if !ok {
+		t.Fatal("rebuilt catalog lost the placement")
+	}
+	if len(pa.Seals) != 2 || pa.Seals[1] != seals[1] {
+		t.Fatalf("rebuilt Seals = %+v, want the footer's %+v", pa.Seals, seals)
+	}
+	// The run's medium-independent content carries no seals (they are placement facts).
+	s, err := cat.ReadRun(arch.Run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := s.Archive("h-data", 0); len(a.PartSeals) != 0 {
+		t.Fatalf("run content carries %d seals, want 0 (stripped onto the placement)", len(a.PartSeals))
+	}
+	for _, p := range cat.Placements(arch.Run) {
+		if ppa, ok := p.Placed("h-partial", 0); ok && len(ppa.Seals) != 0 {
+			t.Fatalf("partial scan kept %d seals over %d found part(s) — misaligned", len(ppa.Seals), len(ppa.Parts))
+		}
+	}
+}

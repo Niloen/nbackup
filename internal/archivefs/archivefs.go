@@ -151,6 +151,32 @@ func (fs *FS) OpenArchive(ref archiveio.Ref, medium string) (io.ReadCloser, erro
 	return out, nil
 }
 
+// VerifyPart re-hashes one part of an archive's copy on a medium against the seal the
+// placement recorded — the bounded-egress integrity primitive: a sampling drill reads a
+// single part off the medium instead of the archive. It is medium-pinned by nature (a
+// seal describes one placement's layout, so there is no copy fail-over), and it errors
+// when the placement records no seals — the caller falls back to a whole-archive check.
+func (fs *FS) VerifyPart(ref archiveio.Ref, medium string, idx int) (bool, error) {
+	for _, p := range onMedium(fs.cat.PlacementsFor(ref.Run), medium) {
+		pa, ok := p.Placed(ref.DLE, ref.Level)
+		if !ok {
+			continue
+		}
+		if len(pa.Seals) != len(pa.Parts) || len(pa.Seals) == 0 {
+			return false, fmt.Errorf("archive %s %s L%d on %q records no part seals", ref.Run, ref.DLE, ref.Level, medium)
+		}
+		if idx < 0 || idx >= len(pa.Parts) {
+			return false, fmt.Errorf("archive %s %s L%d on %q has no part %d (%d part(s))", ref.Run, ref.DLE, ref.Level, medium, idx, len(pa.Parts))
+		}
+		r, err := fs.readerFor(medium)
+		if err != nil {
+			return false, err
+		}
+		return r.VerifyPart(ref, pa.Parts, idx, pa.Seals[idx])
+	}
+	return false, fs.missingCopyErr(ref, medium)
+}
+
 // readerFor returns the medium's bound block-layer read end: an archiveio.Reader over a
 // mounting opener for the medium's volumes, paced by its shared bandwidth cap. Callers that
 // drive a read loop themselves (OpenArchives) thread one Reader across all of a copy's

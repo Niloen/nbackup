@@ -1,6 +1,8 @@
 package archiveio
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 
@@ -51,6 +53,28 @@ func (r *Reader) Open(ref Ref, parts []FilePos) (io.ReadCloser, error) {
 		return nil, err
 	}
 	return raw, nil
+}
+
+// VerifyPart re-hashes ONE part's stored payload against its recorded seal — the
+// bounded-egress integrity check: a sampling drill reads a single part off the medium
+// instead of the whole archive. The part's header is asserted like any read; a size or
+// checksum mismatch is a false verdict, not an error.
+func (r *Reader) VerifyPart(ref Ref, parts []FilePos, idx int, seal record.PartSeal) (bool, error) {
+	if idx < 0 || idx >= len(parts) {
+		return false, fmt.Errorf("archive %s %s L%d has no part %d (%d part(s) recorded)", ref.Run, ref.DLE, ref.Level, idx, len(parts))
+	}
+	pr := &partsReader{parts: parts, want: ref, open: r.openLimited}
+	rc, err := pr.openIdx(idx)
+	if err != nil {
+		return false, err
+	}
+	defer rc.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, rc)
+	if err != nil {
+		return false, err
+	}
+	return n == seal.Size && hex.EncodeToString(h.Sum(nil)) == seal.SHA256, nil
 }
 
 // Verify asserts each part's header against ref, then re-hashes the concatenated raw

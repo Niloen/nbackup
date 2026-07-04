@@ -124,9 +124,19 @@ func (c *Catalog) addArchive(arch record.Archive, medium string, pos archiveio.A
 		c.entries = append(c.entries, e)
 	}
 	arch.Members = nil
+	// The per-part seals describe this placement's layout, so they land on the placed
+	// record (index-aligned with the part positions) and are stripped from the run's
+	// medium-independent content — the same split as the positions themselves. A scan
+	// that found only some parts (a tape absent) breaks the index alignment, so seals
+	// attach only when every part position is present.
+	seals := arch.PartSeals
+	if len(seals) != len(pos.Parts) {
+		seals = nil
+	}
+	arch.PartSeals = nil
 	e.Run.addArchive(arch)
 	// The archive's key comes from the archive record itself — pos is pure position.
-	e.addPlaced(medium, PlacedArchive{DLE: arch.DLE, Level: arch.Level, Parts: pos.Parts, Commit: pos.Commit, Index: pos.Index})
+	e.addPlaced(medium, PlacedArchive{DLE: arch.DLE, Level: arch.Level, Parts: pos.Parts, Seals: seals, Commit: pos.Commit, Index: pos.Index})
 	c.loaded = true
 }
 

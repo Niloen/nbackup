@@ -176,7 +176,10 @@ type ArchiveWriter struct {
 	expectSHA string // a copy's known digest to verify against ("" for a fresh dump)
 	h         hash.Hash
 	n         int64
+	ph        hash.Hash // the in-flight part's own hash (reset per part); with pn it seals each part
+	pn        int64     // the in-flight part's landed bytes
 	parts     []FilePos
+	seals     []record.PartSeal // one seal per committed part, index-aligned with parts
 	part      int
 	tap       func(int64)   // optional progress tap (MeterArchive); fired on the writing goroutine
 	committed *CommitResult // the assembled result, stashed by Commit (nil until then); read via Committed
@@ -217,6 +220,7 @@ func (a *ArchiveWriter) NextPart(ctx context.Context) (io.WriteCloser, int64, er
 	if err != nil {
 		return nil, 0, err
 	}
+	a.ph, a.pn = sha256.New(), 0 // each part carries its own seal beside the whole-archive hash
 	return &archivePartWriter{a: a, fw: fw, dst: a.w.lim.Writer(fw), label: label, epoch: epoch}, max, nil
 }
 
@@ -234,7 +238,9 @@ func (p *archivePartWriter) Write(b []byte) (int, error) {
 	n, err := p.dst.Write(b)
 	if n > 0 {
 		p.a.h.Write(b[:n])
+		p.a.ph.Write(b[:n])
 		p.a.n += int64(n)
+		p.a.pn += int64(n)
 		if p.a.tap != nil {
 			p.a.tap(p.a.n)
 		}
@@ -247,6 +253,7 @@ func (p *archivePartWriter) Close() error {
 		return err
 	}
 	p.a.parts = append(p.a.parts, FilePos{Label: p.label, Epoch: p.epoch, Pos: p.fw.Pos()})
+	p.a.seals = append(p.a.seals, record.PartSeal{Size: p.a.pn, SHA256: hex.EncodeToString(p.a.ph.Sum(nil))})
 	return nil
 }
 
@@ -263,6 +270,9 @@ func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.SourceStats) error {
 	arch := a.meta
 	arch.Compressed = a.n
 	arch.Parts = len(a.parts)
+	// The seals describe THIS placement's part layout — like Parts, set for a copy too
+	// (overwriting the source's: a copy re-splits to its own medium and re-seals).
+	arch.PartSeals = append([]record.PartSeal(nil), a.seals...)
 	if a.expectSHA != "" {
 		if got := hex.EncodeToString(a.h.Sum(nil)); got != a.expectSHA {
 			return fmt.Errorf("copy of %s L%d checksum mismatch (source corrupt?)", arch.DLE, arch.Level)

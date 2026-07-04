@@ -32,6 +32,7 @@ type Record struct {
 	OK        bool      `json:"ok"`               // passed
 	Class     string    `json:"class,omitempty"`  // failure class token when !OK
 	Detail    string    `json:"detail,omitempty"` // human-readable reason when !OK
+	Drills    int       `json:"drills,omitempty"` // applied drills that have exercised this DLE — the sample tier's rotation counter (drill N samples part N mod parts)
 }
 
 // Ledger maps DLE name -> its last drill Record. It is loaded from and saved to the

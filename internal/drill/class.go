@@ -122,9 +122,16 @@ func (c Class) Remedy() string {
 type Tier int
 
 const (
+	// TierSample re-hashes ONE part of each chain archive against its recorded
+	// per-part seal — integrity at bounded egress: a part's worth of bytes per
+	// archive instead of the whole payload, whatever the archive's size. Successive
+	// drills rotate which part (the ledger's drill counter), so full checksum
+	// coverage accumulates across runs instead of being paid every run. A copy that
+	// records no per-part seals falls back to the full checksum read.
+	TierSample Tier = iota
 	// TierChecksum re-hashes the stored payload against the seal — integrity only,
-	// keyless, no decode. The cheapest check (today's `nb verify`).
-	TierChecksum Tier = iota
+	// keyless, no decode. The cheapest full-read check (today's `nb verify`).
+	TierChecksum
 	// TierStructural streams the archive through the real read pipeline
 	// (decrypt → decompress → `tar -t`) and asserts the members match the seal —
 	// proving the bytes are a *valid restorable stream* and exercising the key and
@@ -142,6 +149,8 @@ const (
 // String returns the tier's config/CLI token.
 func (t Tier) String() string {
 	switch t {
+	case TierSample:
+		return "sample"
 	case TierChecksum:
 		return "checksum"
 	case TierStructural:
@@ -161,6 +170,8 @@ func ParseTier(s string) (Tier, error) {
 	switch s {
 	case "", "structural":
 		return TierStructural, nil
+	case "sample":
+		return TierSample, nil
 	case "checksum":
 		return TierChecksum, nil
 	case "chain":
@@ -168,6 +179,6 @@ func ParseTier(s string) (Tier, error) {
 	case "stock":
 		return TierStock, nil
 	default:
-		return 0, fmt.Errorf("unknown drill tier %q (known: checksum, structural, chain, stock)", s)
+		return 0, fmt.Errorf("unknown drill tier %q (known: sample, checksum, structural, chain, stock)", s)
 	}
 }
