@@ -183,33 +183,62 @@ func assemble(medium string, acc *scanMaps) []runPlacement {
 	return out
 }
 
-// OrphanFiles scans one volume and returns the files that belong to no committed archive:
-// parts and member indexes a crashed run left behind without ever writing their commit
-// footer (and any file whose footer is present but unreadable, since its archive then never
-// assembles). These are invisible to retention — assemble discards them, so the catalog never
-// records them — yet they still consume the medium.
+// OrphanFiles returns the files on a volume that belong to no committed archive: parts and
+// member indexes a crashed run left behind without ever writing their commit footer (and any
+// file whose footer is present but unreadable, since its archive then never assembles). These
+// are invisible to retention — assemble discards them, so the catalog never records them —
+// yet they still consume the medium.
 //
-// Detection reads the volume's OWN commit footers (the on-medium ground truth), never the
-// catalog cache: orphans are the readable files (vol.Files()) minus the positions of the
-// archives a fresh scan assembles. This is the safety-critical property — a stale or empty
-// cache can never make a committed archive look orphaned, because the same footer that proves
-// an archive is good is what marks its files referenced here. Volume labels are never orphans.
-// On any scan error nothing is returned, so a caller deletes nothing on a partial read.
+// It reads only the SURPRISES. known is the set of positions the caller (the prune sweep,
+// from the catalog's own placements) already accounts for on this medium; those files are
+// skipped without a read, and only the leftover positions are opened and classified. On a
+// cloud store that is the difference between a couple of list calls and a network round trip
+// per object, so a healthy bucket is diffed almost for free. When known is empty (a lost or
+// empty cache) nothing is excluded and this degrades to a full medium scan.
+//
+// Detection stays MEDIUM-TRUTH for every candidate: a surprise is reported as an orphan only
+// after this reads the medium's own commit footers among the surprises and finds none
+// referencing it. So a committed-but-uncatalogued archive (the stale-cache danger) still
+// shows its footer here and is kept — excluding the known set only ever narrows what is read
+// and deleted, never the reverse, so it can never make a committed archive look orphaned.
+// Volume labels are never orphans. On any read error nothing is returned, so a caller deletes
+// nothing on a partial read.
+//
+// A fully-committed but superseded copy (a rare forced-re-copy leftover, all parts + footer
+// present at other positions) assembles from its own footer among the surprises and is thus
+// kept rather than swept; those are prevented proactively by ReclaimCopy, so this is a benign
+// capacity edge, not the crash-leftover case this targets.
 //
 // It sees only files committed at the medium layer; a torn append (a payload whose header
 // sidecar never landed) is not surfaced here — that fragment is enumerated separately via
 // media.IncompleteEnumerator.
-func OrphanFiles(vol media.Volume) ([]record.FileInfo, error) {
-	files, err := vol.Files()
+func OrphanFiles(vol media.Volume, known map[int]bool) ([]record.FileInfo, error) {
+	files, err := surpriseFiles(vol, known)
 	if err != nil {
 		return nil, err
 	}
-	idx, err := scanMedium("", vol)
-	if err != nil {
-		return nil, err
+	// Assemble any committed archives hiding among the surprises (a stale cache the known
+	// set did not cover), so their files are recognized as referenced and never swept. On a
+	// healthy store the surprise set holds no commit footers, so this reads nothing more.
+	acc := newScanMaps()
+	for _, f := range files {
+		loc := archiveio.FilePos{Pos: f.Pos} // address-identified medium: no label/epoch
+		switch f.Header.Kind {
+		case record.KindArchive:
+			acc.parts[partKey{run: f.Header.Run, dle: f.Header.DLE, level: f.Header.Level, part: f.Header.Part}] = loc
+		case record.KindCommit:
+			a, cerr := readCommit(vol, f.Pos)
+			if cerr != nil {
+				continue // unreadable footer: its archive reads as uncommitted (a real orphan)
+			}
+			acc.commits[archiveKey{run: f.Header.Run, dle: f.Header.DLE, level: f.Header.Level}] =
+				scannedCommit{arch: a, loc: loc}
+		case record.KindIndex:
+			acc.indexes[archiveKey{run: f.Header.Run, dle: f.Header.DLE, level: f.Header.Level}] = loc
+		}
 	}
 	referenced := map[int]bool{}
-	for _, sp := range idx.placements {
+	for _, sp := range assemble("", acc) {
 		for _, ap := range sp.p.Archives {
 			for _, pt := range ap.Parts {
 				referenced[pt.Pos] = true
@@ -228,6 +257,27 @@ func OrphanFiles(vol media.Volume) ([]record.FileInfo, error) {
 		orphans = append(orphans, f)
 	}
 	return orphans, nil
+}
+
+// surpriseFiles lists a volume's files while skipping the known positions. A per-file medium
+// (fslike: disk, cloud) enumerates only the unknown files' headers via KnownExcluder — the
+// whole point, so a large store is not re-read object by object. Any other medium (tape never
+// reaches the orphan sweep) falls back to a full Files() pass filtered by known.
+func surpriseFiles(vol media.Volume, known map[int]bool) ([]record.FileInfo, error) {
+	if ex, ok := vol.(media.KnownExcluder); ok {
+		return ex.FilesExcept(known)
+	}
+	files, err := vol.Files()
+	if err != nil {
+		return nil, err
+	}
+	out := files[:0]
+	for _, f := range files {
+		if !known[f.Pos] {
+			out = append(out, f)
+		}
+	}
+	return out, nil
 }
 
 // ScanRuns reads a volume's committed runs without touching the cache — used to check a

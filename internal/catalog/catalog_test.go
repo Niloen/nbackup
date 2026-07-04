@@ -103,7 +103,7 @@ func TestOrphanFiles(t *testing.T) {
 		record.Archive{DLE: "h-data", Level: 0, Compressed: 100}))
 	putPart(t, vol, "run-2026-06-22.001", record.Archive{DLE: "h-data", Level: 1})
 
-	orphans, err := OrphanFiles(vol)
+	orphans, err := OrphanFiles(vol, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

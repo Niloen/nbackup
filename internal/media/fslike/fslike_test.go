@@ -19,6 +19,7 @@ type memStore struct {
 	mu      sync.Mutex
 	files   map[string][]byte
 	onWrite func(key string)
+	onOpen  func(key string) // invoked from Open/ReadAll — records which objects are fetched
 }
 
 func newMemStore() *memStore { return &memStore{files: map[string][]byte{}} }
@@ -47,6 +48,9 @@ func (w *memWriter) Close() error {
 }
 
 func (s *memStore) ReadAll(key string) ([]byte, error) {
+	if s.onOpen != nil {
+		s.onOpen(key)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.files[key]
@@ -217,5 +221,44 @@ func TestPayloadExtEncryption(t *testing.T) {
 				t.Errorf("payloadExt = %q, want %q", got, c.wantExt)
 			}
 		})
+	}
+}
+
+// TestFilesExceptSkipsKnown pins the orphan-sweep optimization: FilesExcept returns only
+// the files whose position is absent from known, and — the point on a cloud store — never
+// reads a known file's header. It is what lets the prune sweep diff a large bucket against
+// the catalog and open only the "surprises" instead of one GET per object.
+func TestFilesExceptSkipsKnown(t *testing.T) {
+	st := newMemStore()
+	v, err := Open(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	posA := appendArchive(t, v, "run-a", "app", "AAA")
+	posB := appendArchive(t, v, "run-b", "app", "BBB")
+	posC := appendArchive(t, v, "run-c", "app", "CCC")
+
+	// Reopen so the index is rebuilt from the store listing alone (no headers read yet),
+	// mirroring a fresh prune process, and record every object fetched from here on.
+	v2, err := Open(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var opened []string
+	st.onOpen = func(key string) { opened = append(opened, key) }
+
+	// A and C are "known" (the catalog already accounts for them); only B is a surprise.
+	files, err := v2.FilesExcept(map[int]bool{posA: true, posC: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Pos != posB {
+		t.Fatalf("FilesExcept returned %+v, want just the surprise at pos %d", files, posB)
+	}
+	// No header of a known file may have been read — that is the whole cost saving.
+	for _, key := range opened {
+		if strings.HasPrefix(key, "run-a/") || strings.HasPrefix(key, "run-c/") {
+			t.Fatalf("FilesExcept read a known file's object %q; it must skip known positions", key)
+		}
 	}
 }

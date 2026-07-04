@@ -204,7 +204,7 @@ func TestUnreadableFooterIsOrphan(t *testing.T) {
 
 	// OrphanFiles sees both the part and the unparseable commit file as orphans
 	// (neither is referenced by an assembled archive).
-	orphans, err := OrphanFiles(newVolume(t, dir))
+	orphans, err := OrphanFiles(newVolume(t, dir), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
 )
@@ -47,8 +48,16 @@ func TestSweepOrphansMinimumAgeAndWORM(t *testing.T) {
 			Run: "run-2026-06-30.001", Kind: record.KindArchive, DLE: "app", CreatedAt: createdAt,
 		}}}
 	}
+	cat, err := catalog.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	acct := func(v media.Volume) *Accountant {
 		return New(Deps{
+			// An empty catalog: knownPositions finds nothing to exclude, so the sweep
+			// scans the whole fake volume (every fixed file is a "surprise"), exercising
+			// the orphan classifier exactly as before the catalog-diff optimization.
+			Cat:        cat,
 			OpenVolume: func(string) (media.Volume, error) { return v, nil },
 			DisplayDLE: func(s string) string { return s },
 		})

@@ -285,10 +285,21 @@ func (v *Volume) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
 	return h, r, nil
 }
 
-func (v *Volume) Files() ([]record.FileInfo, error) {
+func (v *Volume) Files() ([]record.FileInfo, error) { return v.FilesExcept(nil) }
+
+// FilesExcept is Files() restricted to positions the caller does not already know: it
+// reads (and returns) the header only for entries whose position is absent from known.
+// The orphan sweep passes the catalog's placement positions as known, so on a healthy
+// store it opens almost nothing — every object read on a cloud medium is a round trip.
+// known may be nil (a read from a nil map is false), in which case this is exactly
+// Files(). Skipped positions are simply omitted from the result.
+func (v *Volume) FilesExcept(known map[int]bool) ([]record.FileInfo, error) {
 	v.mu.Lock()
 	entries := make(map[int]entry, len(v.idx))
 	for pos, e := range v.idx {
+		if known[pos] {
+			continue // the caller already accounts for this file; don't read its header
+		}
 		entries[pos] = e
 	}
 	v.mu.Unlock()

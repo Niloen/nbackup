@@ -111,12 +111,21 @@ func (a *Accountant) Prune(mediumName string, now time.Time, apply bool, out log
 //     than failing the run.
 //
 // Tape is excluded by the caller (ConcurrentWrite gate): it reclaims orphans at relabel.
+//
+// Detection reads the medium, but only the SURPRISES: the catalog's own placements name
+// every position it already accounts for on this medium (knownPositions, no I/O), and
+// OrphanFiles reads headers/footers only for the positions the catalog does not already
+// hold. On a healthy store the surprise set is empty, so the sweep is nearly free even on
+// a large cloud bucket — instead of a network round trip per object. Excluding the known
+// set only ever narrows what is read/deleted, never the reverse, so the medium-truth
+// safety property is intact: a surprise is deleted only after its own (absent) commit
+// footer is confirmed, and an empty catalog degrades to a full medium scan.
 func (a *Accountant) sweepOrphans(mediumName string, minAge time.Duration, now time.Time, apply bool, out logf.Logf) (swept int, err error) {
 	vol, err := a.d.OpenVolume(mediumName)
 	if err != nil {
 		return 0, err
 	}
-	orphans, err := catalog.OrphanFiles(vol)
+	orphans, err := catalog.OrphanFiles(vol, a.knownPositions(mediumName))
 	if err != nil {
 		return 0, err
 	}
@@ -164,6 +173,34 @@ func (a *Accountant) sweepOrphans(mediumName string, minAge time.Duration, now t
 		remove(pos, "torn file, interrupted append")
 	}
 	return swept, nil
+}
+
+// knownPositions returns every file position the catalog already accounts for on a
+// medium — each placed archive's parts, its commit footer, and its member index. It is
+// what the orphan sweep excludes from its medium read: only positions NOT in this set
+// (the "surprises") are worth opening, so a healthy store is diffed for free rather than
+// re-read object by object. It reads only the in-memory catalog, no medium I/O. An empty
+// result (a lost or empty cache) simply means nothing is excluded, so OrphanFiles falls
+// back to a full medium-truth scan — the safe degradation.
+func (a *Accountant) knownPositions(medium string) map[int]bool {
+	known := map[int]bool{}
+	for _, run := range a.d.Cat.RunsOn(medium) {
+		for _, p := range a.d.Cat.Placements(run.ID) {
+			if p.Medium != medium {
+				continue
+			}
+			for _, ar := range p.Archives {
+				for _, pt := range ar.Parts {
+					known[pt.Pos] = true
+				}
+				known[ar.Commit.Pos] = true
+				if ar.Index != (archiveio.FilePos{}) {
+					known[ar.Index.Pos] = true
+				}
+			}
+		}
+	}
+	return known
 }
 
 // ReclaimCopy deletes an existing copy of a run on a removable (fslike: disk

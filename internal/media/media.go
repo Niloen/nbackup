@@ -256,6 +256,18 @@ type IncompleteEnumerator interface {
 	IncompleteFiles() ([]int, error)
 }
 
+// KnownExcluder is implemented by per-file media (fslike: disk, cloud) that can list
+// their committed files while skipping positions the caller already accounts for — the
+// header of a skipped file is never read. Orphan detection uses it to diff the medium
+// against the catalog and read only the "surprises" (positions the catalog does not
+// already hold), instead of reading every file's header — one network round trip each on
+// a cloud store. It is a cheap variant of Files(): the position index is built at Open
+// from the store listing alone, so excluding the known set costs no extra I/O. Whole-
+// volume media (tape) do not implement it; the catalog scan falls back to Files().
+type KnownExcluder interface {
+	FilesExcept(known map[int]bool) ([]record.FileInfo, error)
+}
+
 // WalkReadable visits every readable cartridge reachable from vol in turn, calling fn
 // for each one loaded in a drive. It is the medium-shape primitive the catalog rebuild
 // scan needs, kept here next to the shape interfaces it asserts on (Changer) so the
