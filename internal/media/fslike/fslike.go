@@ -59,6 +59,14 @@ type Store interface {
 	Remove(key string) error
 }
 
+// RangeStore is the optional Store capability behind media.RangeOpener: open a byte
+// sub-range [off, off+length) of the file at key (length < 0 = to the end). Both
+// fslike backings implement it — a disk file seeks, a cloud object issues a ranged
+// GET — so every fslike medium supports ranged payload reads.
+type RangeStore interface {
+	OpenRange(key string, off, length int64) (io.ReadCloser, error)
+}
+
 // writeAll writes b as the whole file at key (a header sidecar) through the
 // Store's streaming Writer.
 func writeAll(ctx context.Context, s Store, key string, b []byte) error {
@@ -165,7 +173,16 @@ func payloadExt(h record.Header) string {
 	if h.Encrypt != "" && h.Encrypt != "none" {
 		ext += "." + h.Encrypt
 	}
-	// A split archive's payload is one slice of a multi-part whole, not a standalone
+	// The part-index suffix position IS the shape (docs/design/archive-shapes.md):
+	//
+	// An ATOM is a complete valid file of its type (one whole gpg message), so its
+	// part index goes BEFORE the extensions — …-L0.p000.tar.zst.gpg — keeping the
+	// name honest (tools recognize it, the file-loop stock recovery works per file)
+	// and making the shape operator-visible at a bare bucket listing.
+	if h.Shape == record.ShapeAtomic {
+		return fmt.Sprintf(".p%03d", h.Part) + ext
+	}
+	// A split archive's payload is one SLICE of a multi-part whole, not a standalone
 	// file: append a .pNNN part-index suffix AFTER the .tar/.gz/.gpg extension so the
 	// name no longer claims to be a directly-openable artifact (a stock `tar` on a lone
 	// part fails fast instead of yielding garbage) and the siblings group and order by
@@ -279,6 +296,35 @@ func (v *Volume) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
 		return record.Header{}, nil, err
 	}
 	r, err := v.store.Open(e.payload)
+	if err != nil {
+		return record.Header{}, nil, err
+	}
+	return h, r, nil
+}
+
+// ReadFileRange implements media.RangeOpener: the header still comes whole from the
+// sidecar (asserting identity costs nothing here), only the payload is opened ranged
+// through the Store's RangeStore capability. A payload here is pure archive bytes (the
+// header lives in the sidecar, not inline), so offset 0 is the payload's first byte.
+func (v *Volume) ReadFileRange(pos int, off, length int64) (record.Header, io.ReadCloser, error) {
+	rs, ok := v.store.(RangeStore)
+	if !ok {
+		return record.Header{}, nil, media.ErrRangeUnsupported
+	}
+	v.mu.Lock()
+	e, exists := v.idx[pos]
+	v.mu.Unlock()
+	if !exists {
+		return record.Header{}, nil, fmt.Errorf("no file at position %d", pos)
+	}
+	if e.incomplete {
+		return record.Header{}, nil, fmt.Errorf("file at position %d is incomplete (interrupted append)", pos)
+	}
+	h, err := v.readHeader(e.hdr)
+	if err != nil {
+		return record.Header{}, nil, err
+	}
+	r, err := rs.OpenRange(e.payload, off, length)
 	if err != nil {
 		return record.Header{}, nil, err
 	}

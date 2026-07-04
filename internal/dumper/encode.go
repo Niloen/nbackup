@@ -15,6 +15,7 @@ import (
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/sizeutil"
+	"github.com/Niloen/nbackup/internal/transform"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
@@ -47,6 +48,7 @@ type EncodePlacement struct {
 	EncryptScheme  string
 	EncryptOpts    crypt.Options
 	EncryptClient  bool
+	AtomSize       int64 // resolved atom size (dumptype part_size, else global, else default); consulted only when the shape resolves atomic
 }
 
 // dumpItem archives a single DLE into the store: it acquires an ingestion Sink, transfers the
@@ -184,6 +186,37 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 	}, nil
 }
 
+// resolveShape folds the pipeline's declared capabilities into the archive's on-medium
+// shape — the design's one decision point (docs/design/archive-shapes.md); nothing else
+// branches on schemes. FRAMED-INVISIBLE requires every stage Concat=Full AND
+// server-placed (a client-fused stage cannot be respawned per frame by the server).
+// A pipeline with a PerFrame stage (gpg) will become FRAMED-ATOMIC in phase 3; until
+// that shape exists it stays a plain stream.
+func resolveShape(pl EncodePlacement) (string, error) {
+	if pl.CompressClient || pl.EncryptClient {
+		return record.ShapeStream, nil
+	}
+	cc, err := compress.Concat(pl.CompressScheme)
+	if err != nil {
+		return "", err
+	}
+	ec, err := crypt.Concat(pl.EncryptScheme)
+	if err != nil {
+		return "", err
+	}
+	if cc == transform.ConcatFull && ec == transform.ConcatFull {
+		return record.ShapeFramed, nil
+	}
+	if cc >= transform.ConcatPerFrame && ec >= transform.ConcatPerFrame {
+		return record.ShapeAtomic, nil
+	}
+	return record.ShapeStream, nil
+}
+
+// ShapeFor exposes the shape resolution to the engine (dump-time ceiling checks name
+// dumptype × landing pairs the dumper cannot see).
+func ShapeFor(pl EncodePlacement) (string, error) { return resolveShape(pl) }
+
 // dumpArchive composes the encode transfer for one archive — the archiver's stage source (on its
 // host) → the encode filters placed per the dumptype (client-side fused into the source,
 // server-side as local Filters) → an ingestion xfer.Sink the store hands out, which the transfer
@@ -201,6 +234,10 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 		return record.Archive{}, nil, err
 	}
 
+	shape, err := resolveShape(pl)
+	if err != nil {
+		return record.Archive{}, nil, err
+	}
 	bs, err := spec.Archiver.BackupSource(spec.Request)
 	if err != nil {
 		return record.Archive{}, nil, err
@@ -212,8 +249,19 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 		Archiver: spec.Archiver.Name(),
 		Compress: pl.CompressScheme,
 		Encrypt:  pl.EncryptScheme,
+		Shape:    shape,
 		Level:    spec.Request.Level,
 		BaseRun:  spec.BaseRun,
+	}
+	if shape == record.ShapeAtomic {
+		aspec.AtomSize = pl.AtomSize
+		// Dump-time half of the atom validation ladder: refuse hard when this
+		// dumptype's atoms can never land on its routed medium.
+		if d.atomCeiling != nil {
+			if err := d.atomCeiling(spec.DumpType, pl.AtomSize); err != nil {
+				return record.Archive{}, nil, err
+			}
+		}
 	}
 
 	var unc, comp atomic.Int64
@@ -247,6 +295,16 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 		unreadable = res.Unreadable
 		return xfer.SourceStats{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members, Unreadable: res.Unreadable}, nil
 	}).OnCleanup(bs.Cleanup)
+	// A framed archive absorbs the encode filters into the source, which respawns them
+	// every frame_size of raw input (the decode-restart mechanism) and reports the frame
+	// table through the producer stats; the transfer then runs with an empty filter
+	// zone. An all-none pipeline has no filters to respawn — ChunkSource returns src
+	// unchanged and no frames are recorded (raw and encoded offsets coincide).
+	var source xfer.Source = src
+	if shape == record.ShapeFramed {
+		source = xfer.ChunkSource(src, filters, d.frameSize)
+		filters = xfer.NewFilters()
+	}
 
 	// Create the ingestion Sink before entering the gate, so the wait for the target (a full holding
 	// disk, or the backing permit) holds no transfer run — only the heavy work below is gated. The
@@ -271,8 +329,15 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 	defer release()
 	// Transfer drives the whole ingestion: it streams the encoded archive into the sink and, on a
 	// clean transfer, has the sink seal it (footer + placement) against the producer's totals,
-	// returning those totals.
-	if _, terr := xfer.Transfer(ctx, src, filters, sink); terr != nil {
+	// returning those totals. An atomic archive runs the atom drive instead: the source packs
+	// compressed frames into sealed bundles (one gpg child per atom) and each atom lands as
+	// exactly one part.
+	if shape == record.ShapeAtomic {
+		asrc := xfer.AtomicSource(src, xfer.NewFilters().Add(compF.Forward), d.frameSize, encF.Forward, pl.AtomSize)
+		if _, terr := xfer.TransferAtoms(ctx, asrc, sink); terr != nil {
+			return record.Archive{}, nil, terr
+		}
+	} else if _, terr := xfer.Transfer(ctx, source, filters, sink); terr != nil {
 		return record.Archive{}, nil, terr
 	}
 	// The archive is durably committed to the store; only now promote the archiver's new

@@ -107,6 +107,7 @@ func (t *toolchain) encodePlacement(dumpType string) dumper.EncodePlacement {
 		EncryptScheme:  encScheme,
 		EncryptOpts:    encOpts,
 		EncryptClient:  t.cfg.EncryptionFor(dumpType).At == "client",
+		AtomSize:       t.cfg.AtomSizeBytes(dumpType),
 	}
 }
 

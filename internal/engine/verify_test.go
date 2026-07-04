@@ -1,13 +1,18 @@
 package engine
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // twoDLEFixture dumps two DLEs into one run on disk and mirrors the run onto an
@@ -237,4 +242,110 @@ func TestVerifyDeepStructuralZeroChangeIncremental(t *testing.T) {
 	if rep.Failures != 0 {
 		t.Fatalf("deep verify failures = %d, want 0 (zero-change incremental must not false-fail): %+v", rep.Failures, rep.Runs)
 	}
+}
+
+// TestMembersDiffOffsets pins the offset-aware structural comparison: identical lists
+// match; a member whose stream offset moved is a difference even when every name
+// survives; and an unreported offset (-1) on either side skips the offset check rather
+// than failing an archiver that cannot report offsets.
+func TestMembersDiffOffsets(t *testing.T) {
+	recorded := []record.Member{{Path: "./a", Off: 0}, {Path: "./b", Off: 1024}}
+	if d := membersDiff(recorded, []record.Member{{Path: "./b", Off: 1024}, {Path: "./a", Off: 0}}); d != "" {
+		t.Fatalf("equal sets must match regardless of order, got %q", d)
+	}
+	moved := []record.Member{{Path: "./a", Off: 0}, {Path: "./b", Off: 2048}}
+	if d := membersDiff(recorded, moved); d == "" {
+		t.Fatal("a member that moved in the stream must be reported")
+	}
+	unreported := []record.Member{{Path: "./a", Off: -1}, {Path: "./b", Off: -1}}
+	if d := membersDiff(recorded, unreported); d != "" {
+		t.Fatalf("unreported offsets must not fail the name-set match, got %q", d)
+	}
+	if d := membersDiff(recorded, []record.Member{{Path: "./a", Off: 0}, {Path: "./c", Off: 1024}}); d == "" {
+		t.Fatal("a renamed member must be reported")
+	}
+}
+
+// TestOldFormatIndexDegradesGracefully pins the pre-shapes compatibility contract:
+// an archive whose per-archive index is the OLD format (a bare gzip JSON array of
+// member paths) must never fail or be misreported. There is deliberately no migration
+// (greenfield); the contract is graceful degradation — the archive stays restorable
+// and deep-verifiable (the clean decode is the structural proof), browse is simply
+// empty, and nothing errors out over an existing catalog/workdir.
+func TestOldFormatIndexDegradesGracefully(t *testing.T) {
+	src := t.TempDir()
+	diskDir := t.TempDir()
+	write(t, filepath.Join(src, "keep.txt"), "v1")
+
+	cfg := &config.Config{
+		Landing:  "disk",
+		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": diskDir}}},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skip("GNU tar not available")
+	}
+	day1 := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	if _, err := eng.Run(context.Background(), day1, nil); err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+
+	// Rewrite the on-medium index in the OLD format and poison the cache with it too.
+	oldIndex := func() []byte {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		if err := json.NewEncoder(gz).Encode([]string{"./", "./keep.txt"}); err != nil {
+			t.Fatal(err)
+		}
+		gz.Close()
+		return buf.Bytes()
+	}()
+	onMedium, _ := filepath.Glob(filepath.Join(diskDir, "runs", "*", "*-index.json.gz"))
+	if len(onMedium) != 1 {
+		t.Fatalf("want one on-medium index, got %v", onMedium)
+	}
+	if err := os.Chmod(onMedium[0], 0o644); err != nil { // committed payloads are 0444
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(onMedium[0], oldIndex, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cached, _ := filepath.Glob(filepath.Join(cfg.Workdir, "member-index", "*.idx.gz"))
+	for _, c := range cached {
+		if err := os.WriteFile(c, oldIndex, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Deep verify passes: the decode+list is the structural proof; the unreadable old
+	// index must not surface as an error, and never as a false integrity verdict.
+	rep, err := eng.Verify(nil, VerifyOptions{Checks: CheckChecksum | CheckStructural}, logfDiscard)
+	if err != nil || rep.Failures != 0 {
+		t.Fatalf("deep verify over an old-format index: failures=%d err=%v report=%+v", rep.Failures, err, rep.Runs)
+	}
+
+	// Browse degrades to an empty tree — no error, nothing selectable.
+	name := config.DLE{Host: "localhost", Path: src}.Name()
+	tree, err := eng.OpenRecover(name, "2026-06-21")
+	if err != nil {
+		t.Fatalf("OpenRecover must not error over an old-format index: %v", err)
+	}
+	if _, ok := tree.Lookup("keep.txt"); ok {
+		t.Fatal("old-format members are not migrated; the browse tree should be empty")
+	}
+
+	// The whole-DLE restore never needed the index: still fully functional.
+	runID := eng.cat.Runs()[0].ID
+	dest := filepath.Join(t.TempDir(), "out")
+	if err := eng.Restore(runID, name, dest, false, logfDiscard); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	assertContent(t, filepath.Join(dest, "keep.txt"), "v1")
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/programs"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 
 	_ "github.com/Niloen/nbackup/internal/archiver/gnutar"
@@ -134,11 +135,15 @@ func TestListMembersRealTar(t *testing.T) {
 	arch := gnutarOrSkip(t)
 	raw := buildTar(t, map[string]string{"etc/hosts": "127.0.0.1 localhost\n", "var/log/app.log": "boot\n"})
 	r := New(testDeps(&fakeStore{}, nil))
-	members, err := r.ListMembers(io.NopCloser(bytes.NewReader(raw)), "none", "none", crypt.Options{}, arch)
+	members, err := r.ListMembers(io.NopCloser(bytes.NewReader(raw)), record.Archive{Compress: "none", Encrypt: "none"}, crypt.Options{}, arch)
 	if err != nil {
 		t.Fatalf("ListMembers over a valid tar: %v", err)
 	}
-	joined := strings.Join(members, "\n")
+	var paths []string
+	for _, m := range members {
+		paths = append(paths, m.Path)
+	}
+	joined := strings.Join(paths, "\n")
 	if !strings.Contains(joined, "etc/hosts") || !strings.Contains(joined, "var/log/app.log") {
 		t.Fatalf("members = %v, want both tar entries", members)
 	}
@@ -153,7 +158,7 @@ func TestListMembersTruncatedStream(t *testing.T) {
 	raw := buildTar(t, map[string]string{"big/file": strings.Repeat("payload-block-", 4096)})
 	truncated := raw[:len(raw)/3] // cut mid-archive: header promises bytes that never arrive
 	r := New(testDeps(&fakeStore{}, nil))
-	_, err := r.ListMembers(io.NopCloser(bytes.NewReader(truncated)), "none", "none", crypt.Options{}, arch)
+	_, err := r.ListMembers(io.NopCloser(bytes.NewReader(truncated)), record.Archive{Compress: "none", Encrypt: "none"}, crypt.Options{}, arch)
 	if err == nil {
 		t.Fatal("listing a truncated tar must error, not read as a clean short archive")
 	}

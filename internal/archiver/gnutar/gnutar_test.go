@@ -1,6 +1,7 @@
 package gnutar
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/programs"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // newArchiver opens a gnutar archiver whose incremental state lives under stateRoot (the
@@ -273,13 +275,19 @@ func TestList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	got := map[string]bool{}
+	got := map[string]int64{}
 	for _, mem := range members {
-		got[mem] = true
+		got[mem.Path] = mem.Off
 	}
 	for _, want := range []string{"./a.txt", "./sub/", "./sub/c.txt"} {
-		if !got[want] {
+		off, ok := got[want]
+		if !ok {
 			t.Errorf("List missing member %q; got %v", want, members)
+			continue
+		}
+		// tar -tR reports each member's header block; offsets are byte-exact ×512.
+		if off < 0 || off%512 != 0 {
+			t.Errorf("List member %q offset = %d; want a non-negative multiple of 512", want, off)
 		}
 	}
 }
@@ -355,7 +363,7 @@ func TestPromoteSnapshotRenameFailure(t *testing.T) {
 
 // backup runs the archiver's backup pipeline source to outFile, the way the writer does
 // (run the tar stage, drain its stdout, finish), exercising the new BackupSource API.
-func backup(t *testing.T, m archiver.Archiver, req archiver.BackupRequest, outFile string) {
+func backup(t *testing.T, m archiver.Archiver, req archiver.BackupRequest, outFile string) *archiver.BackupResult {
 	t.Helper()
 	f, err := os.Create(outFile)
 	if err != nil {
@@ -377,7 +385,8 @@ func backup(t *testing.T, m archiver.Archiver, req archiver.BackupRequest, outFi
 	if err := wait(); err != nil {
 		t.Fatalf("backup L%d: %v", req.Level, err)
 	}
-	if _, err := bs.Finish(); err != nil {
+	res, err := bs.Finish()
+	if err != nil {
 		t.Fatalf("finish L%d: %v", req.Level, err)
 	}
 	// A real dump promotes the new snapshot into the library only once the archive is
@@ -390,6 +399,7 @@ func backup(t *testing.T, m archiver.Archiver, req archiver.BackupRequest, outFi
 	if bs.Cleanup != nil {
 		bs.Cleanup()
 	}
+	return res
 }
 
 func restore(t *testing.T, m archiver.Archiver, inFile, dest string) {
@@ -469,5 +479,115 @@ func TestClassifyTarStderr(t *testing.T) {
 		"Total bytes written: 512\n")
 	if fatal != nil || len(unreadable) != 0 {
 		t.Errorf("clean/warning run: unreadable=%v fatal=%v, want none", unreadable, fatal)
+	}
+}
+
+// TestMemberOffsets pins the --block-number member index: create mode records each
+// member's byte offset in the raw stream byte-exactly — the tar header at Off carries
+// the member's own name — for a full AND a listed-incremental archive (whose dumpdir
+// payloads for directories sit between members), and list mode (`tar -tR`) reports the
+// same offsets create mode recorded.
+func TestMemberOffsets(t *testing.T) {
+	src := t.TempDir()
+	out := t.TempDir()
+	m := newArchiver(t, t.TempDir())
+	write(t, filepath.Join(src, "a.txt"), strings.Repeat("alpha\n", 300)) // >1 block, so offsets diverge from index order
+	write(t, filepath.Join(src, "sub", "c.txt"), "gamma")
+
+	l0 := filepath.Join(out, "l0.tar")
+	res0 := backup(t, m, archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 0, BaseLevel: -1}, l0)
+	assertOffsets(t, l0, res0.Members)
+
+	time.Sleep(1100 * time.Millisecond) // 1s mtime granularity
+	write(t, filepath.Join(src, "d.txt"), "delta")
+	l1 := filepath.Join(out, "l1.tar")
+	res1 := backup(t, m, archiver.BackupRequest{DLE: "app", SourcePath: src, Level: 1, BaseLevel: 0}, l1)
+	assertOffsets(t, l1, res1.Members)
+
+	// List mode must agree with the create-time index, offsets included.
+	f, err := os.Open(l1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	listed, err := m.List(f)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := map[string]int64{}
+	for _, mem := range res1.Members {
+		want[mem.Path] = mem.Off
+	}
+	if len(listed) != len(res1.Members) {
+		t.Fatalf("List = %d member(s), create-time index recorded %d", len(listed), len(res1.Members))
+	}
+	for _, mem := range listed {
+		off, ok := want[mem.Path]
+		if !ok {
+			t.Errorf("List reports %q, absent from the create-time index", mem.Path)
+			continue
+		}
+		if mem.Off != off {
+			t.Errorf("member %q: List offset %d, create-time index recorded %d", mem.Path, mem.Off, off)
+		}
+	}
+}
+
+// assertOffsets checks every member's recorded offset against the archive bytes: the
+// 512-byte tar header at Off must name the member itself (the name field is the header's
+// first 100 bytes, NUL-terminated) — the byte-exact proof that Off = block × 512.
+func assertOffsets(t *testing.T, tarFile string, members []record.Member) {
+	t.Helper()
+	data, err := os.ReadFile(tarFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(members) == 0 {
+		t.Fatal("backup recorded no members")
+	}
+	for _, mem := range members {
+		if mem.Off < 0 || mem.Off+512 > int64(len(data)) {
+			t.Fatalf("member %q offset %d out of range (archive %d bytes)", mem.Path, mem.Off, len(data))
+		}
+		header := data[mem.Off : mem.Off+512]
+		name := string(bytes.TrimRight(header[:100], "\x00"))
+		if name != mem.Path {
+			t.Errorf("member %q: header at offset %d names %q", mem.Path, mem.Off, name)
+		}
+	}
+}
+
+// TestScanMemberOffsets pins the block-line parser on its edge cases: the ×512
+// conversion, the dropped "./" root and "** Block of NULs **"/"** End of File **"
+// markers, and a line without the block prefix degrading to offset -1 (kept, so odd
+// tar output never loses a member).
+func TestScanMemberOffsets(t *testing.T) {
+	in := strings.Join([]string{
+		"block 0: ./",
+		"block 1: ./a.txt",
+		"block 5: ./sub/",
+		"block 6: ./sub/c.txt",
+		"unprefixed.txt",
+		"block 9: ** Block of NULs **",
+		"block 10: ** End of File **",
+		"",
+	}, "\n")
+	got, err := scanMemberOffsets(strings.NewReader(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []record.Member{
+		{Path: "./a.txt", Off: 512},
+		{Path: "./sub/", Off: 5 * 512},
+		{Path: "./sub/c.txt", Off: 6 * 512},
+		{Path: "unprefixed.txt", Off: -1},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("scanMemberOffsets = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("member %d = %+v, want %+v", i, got[i], want[i])
+		}
 	}
 }

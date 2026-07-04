@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/Niloen/nbackup/internal/programs"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // isBrokenPipe reports whether err is a SIGPIPE/EPIPE — the symptom a producer shows
@@ -47,8 +48,9 @@ func isBrokenPipe(err error) bool {
 type SourceStats struct {
 	Uncompressed int64
 	FileCount    int
-	Members      []string
-	Unreadable   []string // source paths the producer could not read (a partial dump); empty = complete
+	Members      []record.Member
+	Frames       []record.Frame // a framed source's decode-restart table (ChunkSource); nil = plain stream
+	Unreadable   []string       // source paths the producer could not read (a partial dump); empty = complete
 }
 
 // Role identifies which zone of a transfer faulted, so a caller can classify the failure.

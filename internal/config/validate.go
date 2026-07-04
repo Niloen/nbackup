@@ -49,6 +49,36 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("cycle must be positive (e.g. 7d); got %q", c.Cycle)
 		}
 	}
+	if c.FrameSize != "" {
+		n, err := sizeutil.ParseBytes(c.FrameSize)
+		if err != nil {
+			return fmt.Errorf("frame_size: %w", err)
+		}
+		if n <= 0 {
+			return fmt.Errorf("frame_size must be positive (e.g. 256MiB); got %q", c.FrameSize)
+		}
+	}
+	if c.PartSize != "" {
+		n, err := sizeutil.ParseBytes(c.PartSize)
+		if err != nil {
+			return fmt.Errorf("part_size: %w", err)
+		}
+		if n <= 0 {
+			return fmt.Errorf("part_size must be positive (e.g. 10GiB); got %q", c.PartSize)
+		}
+	}
+	for name, dt := range c.DumpTypes {
+		if dt.PartSize == "" {
+			continue
+		}
+		n, err := sizeutil.ParseBytes(dt.PartSize)
+		if err != nil {
+			return fmt.Errorf("dumptype %q part_size: %w", name, err)
+		}
+		if n <= 0 {
+			return fmt.Errorf("dumptype %q part_size must be positive (e.g. 2GiB); got %q", name, dt.PartSize)
+		}
+	}
 	for name, m := range c.Media {
 		if _, err := m.CapacityBytes(); err != nil {
 			return fmt.Errorf("media %s: capacity: %w", name, err)

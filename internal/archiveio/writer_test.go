@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
@@ -178,7 +180,7 @@ func writeOneArchive(t *testing.T, w *Writer, sink *memSink, dle string, body []
 	if err := driveArchive(aw, body); err != nil {
 		t.Fatalf("driveArchive: %v", err)
 	}
-	if err := aw.Commit(context.Background(), xfer.SourceStats{FileCount: 1, Uncompressed: int64(len(body)), Members: []string{dle}}); err != nil {
+	if err := aw.Commit(context.Background(), xfer.SourceStats{FileCount: 1, Uncompressed: int64(len(body)), Members: []record.Member{{Path: dle, Off: 0}}}); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	return sink.last.Archive, sink.last.Pos
@@ -250,7 +252,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	}
 
 	// Read the archive back by concatenating its parts; it must equal the input.
-	r := NewReader(openerOver(v1, v2, v3), nil)
+	r := NewReader(openerOver(v1, v2, v3), nil, nil)
 	rc, err := r.Open(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, parts, nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -285,7 +287,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	if arch.Parts < 5 {
 		t.Fatalf("Parts = %d, want >= 5", arch.Parts)
 	}
-	r := NewReader(openerOver(v), nil)
+	r := NewReader(openerOver(v), nil, nil)
 	rc, err := r.Open(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, apos.Parts, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -333,7 +335,7 @@ func TestCommitRecordsUnreadable(t *testing.T) {
 	stats := xfer.SourceStats{
 		FileCount:    2,
 		Uncompressed: int64(len(body)),
-		Members:      []string{"readable.txt"},
+		Members:      []record.Member{{Path: "readable.txt", Off: 0}},
 		Unreadable:   []string{"/p/locked-a", "/p/locked-b"},
 	}
 	if err := aw.Commit(context.Background(), stats); err != nil {
@@ -424,7 +426,7 @@ func TestPartSealsRecorded(t *testing.T) {
 
 	// VerifyPart passes per part; corrupting ONE part fails that index only.
 	ref := Ref{Run: spec.ID, DLE: "dle1", Level: 0}
-	r := NewReader(openerOver(v), nil)
+	r := NewReader(openerOver(v), nil, nil)
 	for i, s := range arch.PartSeals {
 		if ok, err := r.VerifyPart(ref, apos.Parts, i, s); err != nil || !ok {
 			t.Fatalf("VerifyPart(%d) ok=%v err=%v, want pass", i, ok, err)
@@ -459,7 +461,7 @@ func TestPartSealsRecorded(t *testing.T) {
 			carch.Parts, len(carch.PartSeals), arch.Parts)
 	}
 	cref := Ref{Run: spec.ID, DLE: "dle1", Level: 0}
-	r2 := NewReader(openerOver(v2), nil)
+	r2 := NewReader(openerOver(v2), nil, nil)
 	for i, s := range carch.PartSeals {
 		if ok, err := r2.VerifyPart(cref, sink2.last.Pos.Parts, i, s); err != nil || !ok {
 			t.Fatalf("copy VerifyPart(%d) ok=%v err=%v", i, ok, err)
@@ -479,7 +481,7 @@ func TestOpenSealedCatchesCorruptPart(t *testing.T) {
 	body := []byte(strings.Repeat("s", 20*1024)) // 3 parts
 	arch, apos := writeOneArchive(t, w, sink, "dle1", body)
 	ref := Ref{Run: spec.ID, DLE: "dle1", Level: 0}
-	r := NewReader(openerOver(v), nil)
+	r := NewReader(openerOver(v), nil, nil)
 
 	// Flip one byte in the middle part — the silent kind of damage tar cannot see.
 	v.data[apos.Parts[1].Pos][100] ^= 0x01
@@ -517,4 +519,68 @@ func TestOpenSealedCatchesCorruptPart(t *testing.T) {
 		t.Fatalf("misaligned seals must disarm the check, got %v", err)
 	}
 	rc.Close()
+}
+
+// TestAtomicRollByBound drives the atomic write path onto finite volumes: each atom is
+// placed WHOLE against its bound, so the writer rolls to the next volume proactively
+// when the loaded one's remaining capacity is under it (no split buffer, no
+// ErrVolumeFull backstop), and each part IS one atom — here the seal is `cat`, so the
+// concatenated parts must equal the raw input and the seals' RawSize its chunking.
+func TestAtomicRollByBound(t *testing.T) {
+	if _, err := exec.LookPath("cat"); err != nil {
+		t.Skip("cat not available")
+	}
+	capacity := int64(256 * 1024)
+	v1, v2, v3 := newMemVolume("v1", capacity), newMemVolume("v2", capacity), newMemVolume("v3", capacity)
+	sink := &memSink{vols: []*memVolume{v1, v2, v3}}
+	w := NewWriter(sink, sink, RunSpec{ID: "run-2026-06-21.001", CreatedAt: time.Unix(0, 0).UTC()}, nil, nil)
+
+	body := make([]byte, 200*1024)
+	x := uint32(7)
+	for i := range body {
+		x = x*1664525 + 1013904223
+		body[i] = byte(x >> 24)
+	}
+	const frameSize, atomSize = 16 * 1024, 64 * 1024
+	aw := w.NewArchive(ArchiveSpec{DLE: "d", Host: "h", Path: "/p", Archiver: "m", Compress: "none", Encrypt: "seal", Shape: record.ShapeAtomic, AtomSize: atomSize})
+	src := xfer.AtomicSource(xfer.Reader(io.NopCloser(bytes.NewReader(body))), xfer.NewFilters(), frameSize, programs.Cmd{Name: "cat"}, atomSize)
+	if _, err := xfer.TransferAtoms(context.Background(), src, aw); err != nil {
+		t.Fatalf("TransferAtoms: %v", err)
+	}
+	res, ok := aw.Committed()
+	if !ok {
+		t.Fatal("archive did not commit")
+	}
+	arch := res.Archive
+	if arch.Parts != 5 { // the bundle cuts BEFORE a frame that might not fit (worst-case margin), so 3×16 KiB frames per atom: 48+48+48+48+8 KiB
+		t.Fatalf("Parts = %d, want 5 atoms", arch.Parts)
+	}
+	vols := map[string]bool{}
+	for _, p := range res.Pos.Parts {
+		vols[p.Label] = true
+	}
+	if len(vols) < 2 {
+		t.Fatalf("atoms all landed on one %d-byte volume; the writer should roll by bound", capacity)
+	}
+	var back bytes.Buffer
+	var rawSum int64
+	for i, p := range res.Pos.Parts {
+		if arch.PartSeals[i].RawSize <= 0 {
+			t.Fatalf("seal %d missing RawSize: %+v", i, arch.PartSeals[i])
+		}
+		rawSum += arch.PartSeals[i].RawSize
+		byName := map[string]*memVolume{"v1": v1, "v2": v2, "v3": v3}
+		_, rc, err := byName[p.Label].ReadFile(p.Pos)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(&back, rc)
+		rc.Close()
+	}
+	if rawSum != int64(len(body)) {
+		t.Fatalf("RawSize sum = %d, want %d", rawSum, len(body))
+	}
+	if !bytes.Equal(back.Bytes(), body) {
+		t.Fatal("concatenated atoms differ from the input (seal = cat, so they must match)")
+	}
 }

@@ -6,31 +6,40 @@ import (
 	"io"
 )
 
-// index.go is the per-archive member index: the list of paths an archive holds, stored as
-// its own file (KindIndex) beside the archive's parts and read only for browse. It is kept
-// out of the commit footer so a scan/rebuild reads only small footers; the member list — the
-// large part of an archive's metadata — is paid for only when someone browses.
+// index.go is the per-archive index: the members an archive holds plus, for a framed
+// archive, its frame table — stored as one file (KindIndex) beside the archive's parts
+// and read only for browse and ranged reads. It is kept out of the commit footer so a
+// scan/rebuild reads only small footers; the member list — the large part of an
+// archive's metadata — is paid for only when someone browses.
 
-// EncodeIndex writes an archive's member list as a gzip'd JSON array.
-func EncodeIndex(w io.Writer, members []string) error {
+// Index is the per-archive index document: the member list and, for a framed archive,
+// the decode-restart table. Absent frames mean a plain stream — exactly today's read
+// path; the table is an optimization for ranged reads, never decode-critical.
+type Index struct {
+	Members []Member `json:"members"`
+	Frames  []Frame  `json:"frames,omitempty"`
+}
+
+// EncodeIndex writes an archive's index as a gzip'd JSON document.
+func EncodeIndex(w io.Writer, idx Index) error {
 	gz := gzip.NewWriter(w)
-	if err := json.NewEncoder(gz).Encode(members); err != nil {
+	if err := json.NewEncoder(gz).Encode(idx); err != nil {
 		gz.Close()
 		return err
 	}
 	return gz.Close()
 }
 
-// DecodeIndex reads a member list written by EncodeIndex.
-func DecodeIndex(r io.Reader) ([]string, error) {
+// DecodeIndex reads an index written by EncodeIndex.
+func DecodeIndex(r io.Reader) (Index, error) {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
-		return nil, err
+		return Index{}, err
 	}
 	defer gz.Close()
-	var members []string
-	if err := json.NewDecoder(gz).Decode(&members); err != nil {
-		return nil, err
+	var doc Index
+	if err := json.NewDecoder(gz).Decode(&doc); err != nil {
+		return Index{}, err
 	}
-	return members, nil
+	return doc, nil
 }

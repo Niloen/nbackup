@@ -10,8 +10,8 @@ import (
 // rewrites etc/hosts and adds etc/new.conf.
 // membersOf is a test member loader: it returns each archive's inline Members from the
 // scenario runs, standing in for the engine's lazy clerk-backed loader.
-func membersOf(archives []record.Archive, dle string) func(string, int) ([]string, error) {
-	return func(runID string, level int) ([]string, error) {
+func membersOf(archives []record.Archive, dle string) func(string, int) ([]record.Member, error) {
+	return func(runID string, level int) ([]record.Member, error) {
 		for i := range archives {
 			if archives[i].Run == runID && archives[i].DLE == dle && archives[i].Level == level {
 				return archives[i].Members, nil
@@ -24,14 +24,24 @@ func membersOf(archives []record.Archive, dle string) func(string, int) ([]strin
 func scenario() []record.Archive {
 	return []record.Archive{{
 		Run: "run-2026-06-21.001", DLE: "app", Level: 0, Archiver: "gnutar", Compress: "none",
-		Members: []string{
+		Members: mems(
 			"./", "./etc/", "./etc/hosts", "./etc/passwd",
 			"./var/", "./var/log/", "./var/log/a.log",
-		},
+		),
 	}, {
 		Run: "run-2026-06-22.001", DLE: "app", Level: 1, Archiver: "gnutar", Compress: "none",
-		Members: []string{"./", "./etc/", "./etc/hosts", "./etc/new.conf"},
+		Members: mems("./", "./etc/", "./etc/hosts", "./etc/new.conf"),
 	}}
+}
+
+// mems builds a member list from paths, with synthetic stream offsets (one 512-byte
+// header apart) — the offsets are irrelevant to tree building, which keys on paths.
+func mems(paths ...string) []record.Member {
+	out := make([]record.Member, len(paths))
+	for i, p := range paths {
+		out[i] = record.Member{Path: p, Off: int64(i) * 512}
+	}
+	return out
 }
 
 func TestAsOf(t *testing.T) {

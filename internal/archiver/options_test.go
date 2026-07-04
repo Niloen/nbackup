@@ -3,6 +3,8 @@ package archiver
 import (
 	"strings"
 	"testing"
+
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // TestOptionsBool: unset yields the default; the accepted spellings parse; a
@@ -27,7 +29,8 @@ func TestOptionsBool(t *testing.T) {
 // TestCountFiles: directories (trailing slash, the member convention) are
 // excluded, so one nested file counts as 1.
 func TestCountFiles(t *testing.T) {
-	if n := CountFiles([]string{"./etc/", "./etc/hosts", "./var/"}); n != 1 {
+	members := []record.Member{{Path: "./etc/", Off: 0}, {Path: "./etc/hosts", Off: 512}, {Path: "./var/", Off: 1536}}
+	if n := CountFiles(members); n != 1 {
 		t.Fatalf("CountFiles = %d, want 1", n)
 	}
 }

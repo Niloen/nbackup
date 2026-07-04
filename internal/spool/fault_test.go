@@ -196,7 +196,7 @@ func (s *memStore) OpenArchiveAt(ref archiveio.Ref, pos archiveio.ArchivePos) (i
 		return nil, s.openErr
 	}
 	open := func(p archiveio.FilePos) (record.Header, io.ReadCloser, error) { return s.vol.ReadFile(p.Pos) }
-	return archiveio.NewReader(open, nil).Open(ref, pos.Parts, nil)
+	return archiveio.NewReader(open, nil, nil).Open(ref, pos.Parts, nil)
 }
 
 func (s *memStore) ReclaimAt(archiveio.Ref, archiveio.ArchivePos) error {

@@ -89,7 +89,7 @@ func (t *Tree) HasIncrementals() bool { return t.chainLen > 1 }
 // the member lists of the restore chain in run order, so each path resolves to the
 // most recent archive that holds it. The member lists are loaded via members (the
 // catalog cache holds the run index, not the member lists — those are loaded lazily).
-func BuildTree(archives []record.Archive, dle, asOf string, members func(runID string, level int) ([]string, error)) (*Tree, error) {
+func BuildTree(archives []record.Archive, dle, asOf string, members func(runID string, level int) ([]record.Member, error)) (*Tree, error) {
 	target, err := AsOf(archives, asOf)
 	if err != nil {
 		return nil, err
@@ -111,7 +111,7 @@ func BuildTree(archives []record.Archive, dle, asOf string, members func(runID s
 			return nil, err
 		}
 		for _, m := range ms {
-			t.insert(m, &Source{Step: st, Member: m})
+			t.insert(m.Path, &Source{Step: st, Member: m.Path})
 		}
 	}
 	return t, nil

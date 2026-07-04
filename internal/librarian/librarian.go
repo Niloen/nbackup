@@ -235,6 +235,27 @@ func (l *Librarian) ReadFileAt(volume string, epoch, pos int) (record.Header, io
 	return l.driveVol().ReadFile(pos) // MountForRead set l.drive to whichever drive holds it
 }
 
+// ReadFileRangeAt is ReadFileAt for a byte sub-range of the payload (length < 0 = to
+// the end). It surfaces media.ErrRangeUnsupported when the mounted volume cannot open
+// ranges (tape) — the caller's cue to fall back to the whole stream; the capability is
+// the volume's, discovered by assertion, never by medium name.
+func (l *Librarian) ReadFileRangeAt(volume string, epoch, pos int, off, length int64) (record.Header, io.ReadCloser, error) {
+	if err := l.MountForRead(volume, epoch); err != nil {
+		return record.Header{}, nil, err
+	}
+	vol := l.driveVol()
+	if dd, ok := vol.(directDrive); ok {
+		// The direct-volume adapter embeds the Volume as an interface, which would
+		// hide the concrete volume's optional capabilities from assertion — unwrap it.
+		vol = dd.Volume
+	}
+	ro, ok := vol.(media.RangeOpener)
+	if !ok {
+		return record.Header{}, nil, media.ErrRangeUnsupported
+	}
+	return ro.ReadFileRange(pos, off, length)
+}
+
 // eachLoadableSlot is the changer's occupied-slot scan, shared by every path that must
 // discover what the library holds by loading cartridges (the changer reports only
 // barcodes; a label is truly read only once its cartridge is in a drive): the advance

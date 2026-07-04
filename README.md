@@ -116,8 +116,10 @@ exactly as `nb recover` does — and `nb drill --tier stock` rehearses that
 bare-tools path for you and prints the commands. (Encrypted archives carry a
 `.gpg` suffix on the payload — `…-L0.tar.zst.gpg` — and just add a `gpg -d` at the
 front of the pipe for a public-key dump, or `gpg --passphrase-file <file> -d` for a
-symmetric one; spanned tape parts are listed by
-`nb run <id>`.) The full by-hand procedure is in
+symmetric one. A multi-part encrypted archive is stored as **atoms** — each part one
+complete gpg message, `.pNNN` before the extension — restored by a file loop:
+`for p in …-L0.p*.tar.zst.gpg; do gpg -d "$p"; done | zstd -dc | tar -x`. Spanned
+tape parts are listed by `nb run <id>`.) The full by-hand procedure is in
 [docs/restore-by-hand.md](docs/restore-by-hand.md).
 
 ### Encryption

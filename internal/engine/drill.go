@@ -353,6 +353,49 @@ func (d *driller) drillSample(t drill.Target, medium string, rot int, logf Logf)
 				c.ref.Run, c.ref.DLE, c.ref.Level, c.idx+1, c.parts)
 		}
 	}
+	return d.frameSample(t, medium, rot, logf)
+}
+
+// frameSample adds the sample tier's STRUCTURAL half on a framed archive: decode one
+// frame group of the chain's tip through the real pipeline and compare the listed
+// members+offsets against the index slice — the seal check above proves the stored
+// bytes, this proves they still decode to the recorded structure, still at bounded
+// egress (rot rotates the frame across drills like the seal check's part). An archive
+// without the ingredients (no frame table, no offsets, no range-capable copy) skips
+// silently: the seal sample already ran, and this half only exists where framing does.
+func (d *driller) frameSample(t drill.Target, medium string, rot int, logf Logf) (drill.Class, string) {
+	step := t.Steps[len(t.Steps)-1] // the tip: the archive a restore would read last
+	s, err := d.cat.ReadRun(step.RunID)
+	if err != nil {
+		return drill.ClassNone, ""
+	}
+	a, ok := s.Archive(step.DLE, step.Level)
+	if !ok {
+		return drill.ClassNone, ""
+	}
+	arch, err := d.tc.restoreArchiver(a.Archiver, "")
+	if err != nil {
+		return drill.ClassNone, ""
+	}
+	// The restorer resolves the shape itself: framed → decode one frame group;
+	// atomic → decrypt-and-list one atom (the KEY-PROVING check); encrypted
+	// stream shape → nothing cheap to sample (Ran=false).
+	res, err := d.rst.Sample(medium, a, d.rst.DecryptOptsFor(a.DLE), arch, rot)
+	if err != nil {
+		return classifyReadErr(err), restorer.DecryptHint(a.Encrypt, err).Error()
+	}
+	if !res.Ran {
+		return drill.ClassNone, ""
+	}
+	if !res.OK {
+		return drill.ClassIntegrity, fmt.Sprintf("%s %s L%d %s %d structural sample: %s",
+			step.RunID, step.DLE, step.Level, res.Unit, res.Frame, res.Detail)
+	}
+	fetched := "the stream tail"
+	if res.Bytes >= 0 {
+		fetched = sizeutil.FormatBytes(res.Bytes)
+	}
+	logf.Log("drill %s: %s %d structural sample OK (%s fetched)", d.dles.display(t.DLE), res.Unit, res.Frame, fetched)
 	return drill.ClassNone, ""
 }
 
@@ -469,7 +512,81 @@ func (d *driller) drillStock(t drill.Target, medium string, logf Logf) (drill.Cl
 	return drill.ClassNone, ""
 }
 
+// stockExtractAtomic validates the atomic shape's documented one-liner — a FILE LOOP,
+// since each atom is one complete encrypted message and gpg refuses concatenated
+// input: the atoms are fetched to files (NBackup only moves bytes; on a bare bucket
+// they already ARE these files) and the stock recipe is
+// `for p in atoms/*; do gpg -d "$p"; done | zstd -d | tar x`.
+func (d *driller) stockExtractAtomic(step recovery.Step, dest, medium string, logf Logf) (drill.Class, string) {
+	ref := archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}
+	seals, err := d.fs.AtomSeals(ref)
+	if err != nil || len(seals) == 0 {
+		return drill.ClassPipeline, "atomic archive records no per-part seals on any copy — its atoms cannot be cut; run `nb rebuild`"
+	}
+	dir, err := os.MkdirTemp("", "nbackup-drill-atoms-*")
+	if err != nil {
+		return drill.ClassPipeline, err.Error()
+	}
+	defer os.RemoveAll(dir)
+	src, err := d.fs.OpenArchive(ref, medium)
+	if err != nil {
+		return classifyOpenErr(err), err.Error()
+	}
+	for i, s := range seals {
+		f, err := os.Create(fmt.Sprintf("%s/atom-%03d.bin", dir, i))
+		if err != nil {
+			src.Close()
+			return drill.ClassPipeline, err.Error()
+		}
+		_, cerr := io.CopyN(f, src, s.Size)
+		f.Close()
+		if cerr != nil {
+			src.Close()
+			return classifyOpenErr(cerr), cerr.Error()
+		}
+	}
+	src.Close()
+
+	script, err := stockAtomPipeline(step.Encrypt, step.Compress, d.rst.DecryptOptsFor(step.DLE).PassphraseFile)
+	if err != nil {
+		return drill.ClassPipeline, err.Error()
+	}
+	// `sh -c <script> sh <dest> <atomdir>` makes $1 == dest and $2 == the atoms inside.
+	cmd := exec.Command("/bin/sh", "-c", script, "sh", dest, dir)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	logf.Log("stock-restoring %s %s L%d via documented atom loop: %s", step.RunID, step.DLE, step.Level, script)
+	if err := cmd.Run(); err != nil {
+		return drill.ClassPipeline, fmt.Sprintf("stock atom loop failed: %v\n%s", err, strings.TrimSpace(stderr.String()))
+	}
+	return drill.ClassNone, ""
+}
+
+// stockAtomPipeline builds the atomic shape's documented restore loop: decrypt each
+// atom file in order, concatenate the plaintexts (whole compressed frames — one valid
+// stream), decompress, untar into "$1". The atoms are the files under "$2".
+func stockAtomPipeline(encrypt, compress, passphraseFile string) (string, error) {
+	tail, err := stockPipeline("none", compress, "")
+	if err != nil {
+		return "", err
+	}
+	var gpg string
+	switch encrypt {
+	case "gpg":
+		gpg = "gpg -d --batch --yes --no-tty"
+		if passphraseFile != "" {
+			gpg = "gpg --passphrase-file " + shSingleQuote(passphraseFile) + " -d --batch --yes --no-tty"
+		}
+	default:
+		return "", fmt.Errorf("stock drill: no documented atom-loop recipe for encryption scheme %q", encrypt)
+	}
+	return `for p in "$2"/atom-*; do ` + gpg + ` "$p"; done | ` + tail, nil
+}
+
 func (d *driller) stockExtractStep(step recovery.Step, dest, medium string, logf Logf) (drill.Class, string) {
+	if step.Shape == record.ShapeAtomic {
+		return d.stockExtractAtomic(step, dest, medium, logf)
+	}
 	// Fetch the raw (still-encrypted/compressed) payload to a temp file as a transfer whose
 	// sink is just the file — NBackup is used only to move bytes off the medium (unavoidable
 	// for tape/cloud); the decode is done entirely by the documented stock tools below.

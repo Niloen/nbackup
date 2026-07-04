@@ -32,6 +32,11 @@ type Config struct {
 	Exclude     func(dumpType string) []string
 	Placement   func(dumpType string) EncodePlacement
 	Threads     int
+	FrameSize   int64 // framed shape's decode-restart interval (config frame_size)
+	// AtomCeiling validates an atomic dumptype's atom size against its routed
+	// landing's part ceiling — the dump-time hard error of the validation ladder
+	// (the engine supplies it; the dumper knows shapes, not media). nil = no check.
+	AtomCeiling func(dumpType string, atomSize int64) error
 }
 
 // Dumper archives planned items into an archivefs.Ingest. Build it with New and drive it with Run.
@@ -40,11 +45,13 @@ type Dumper struct {
 	exclude     func(dumpType string) []string
 	placement   func(dumpType string) EncodePlacement
 	threads     int
+	frameSize   int64
+	atomCeiling func(dumpType string, atomSize int64) error
 }
 
 // New builds a Dumper from cfg.
 func New(cfg Config) *Dumper {
-	return &Dumper{archiverFor: cfg.ArchiverFor, exclude: cfg.Exclude, placement: cfg.Placement, threads: cfg.Threads}
+	return &Dumper{archiverFor: cfg.ArchiverFor, exclude: cfg.Exclude, placement: cfg.Placement, threads: cfg.Threads, frameSize: cfg.FrameSize, atomCeiling: cfg.AtomCeiling}
 }
 
 // dumpGate bounds how many DLEs run the heavy transfer (the archiver source + encode pipeline) at once.

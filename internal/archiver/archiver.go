@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/Niloen/nbackup/internal/programs"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // BackupRequest describes one archive to produce. The Archiver resolves any
@@ -41,9 +42,9 @@ type BackupRequest struct {
 
 // BackupResult reports what was produced.
 type BackupResult struct {
-	Uncompressed int64    // raw stream size
-	FileCount    int      // number of file members
-	Members      []string // member paths
+	Uncompressed int64           // raw stream size
+	FileCount    int             // number of file members
+	Members      []record.Member // members in stream order, each with its byte offset in the raw stream (Off -1 when the archiver cannot report offsets)
 	// Unreadable lists source paths the archiver could not read (e.g. a permission-denied
 	// file): the archive committed without them — a *partial* dump. Empty means complete.
 	// A partial archive is still a valid, restorable stream of what was readable; the caller
@@ -55,10 +56,10 @@ type BackupResult struct {
 // member convention (BackupResult.Members, List) marks a directory with a
 // trailing slash. So one nested file counts as 1, not "2 entries" once its
 // parent directory is included.
-func CountFiles(members []string) int {
+func CountFiles(members []record.Member) int {
 	n := 0
 	for _, m := range members {
-		if !strings.HasSuffix(m, "/") {
+		if !strings.HasSuffix(m.Path, "/") {
 			n++
 		}
 	}
@@ -120,10 +121,10 @@ type Archiver interface {
 	// recovery). It is the engine's one extraction primitive — the caller composes it
 	// into a programs pipeline and runs it; the archiver never streams bytes itself.
 	RestoreStage(destDir string, members []string) programs.Cmd
-	// List reads a raw archive stream and returns its member paths without
+	// List reads a raw archive stream and returns its members without
 	// extracting anything (`tar -t`). It writes nothing; it proves the
 	// stream is a valid, listable archive end-to-end and yields the members to
-	// compare against the seal. The returned paths use the same convention as
-	// BackupResult.Members.
-	List(in io.Reader) ([]string, error)
+	// compare against the seal. The returned members use the same convention
+	// (and offset semantics) as BackupResult.Members.
+	List(in io.Reader) ([]record.Member, error)
 }

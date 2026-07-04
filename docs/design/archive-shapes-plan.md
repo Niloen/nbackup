@@ -27,24 +27,24 @@ Goal: the member index carries each member's byte offset in the raw archive
 stream. Standalone value: structural verify compares offsets as well as names.
 Everything later (selective restore, mount) builds on this.
 
-- [ ] `archiver/gnutar`: add `--block-number` to the backup index invocation
+- [x] `archiver/gnutar`: add `--block-number` to the backup index invocation
       (`createArgs`) and to `List` (`tar -tR`). Parse `block N: path` lines
       (new sibling of `scanMembers`; drop the `** Block of NULs **` trailer in
       list mode). `RawOff = N × 512` — the ×512 stays inside gnutar.
-- [ ] Widen `Members []string` → `[]record.Member{Path string; Off int64}`
+- [x] Widen `Members []string` → `[]record.Member{Path string; Off int64}`
       (Off −1 when unreported). Ripple is mechanical: `archiver.BackupResult`,
       `xfer.SourceStats`, `record.Archive`, `CountFiles`, recovery tree
       loaders, `RestoreStage` replay (paths only at point of use). Document on
       the type: **the list is in stream order; member i's extent is
       `[Off_i, Off_{i+1})`** — this invariant becomes load-bearing.
-- [ ] Index encoding (`record/index.go`): gzip JSON array of strings → gzip
+- [x] Index encoding (`record/index.go`): gzip JSON array of strings → gzip
       JSON document `{"members":[{"p":…,"o":…},…]}` with room for a `frames`
       key (phase 2). Update golden/format tests. Footer stays untouched
       (Members remain omitempty/stripped).
-- [ ] Structural verify (`engine/verify.go` membersDiff + drill structural
+- [x] Structural verify (`engine/verify.go` membersDiff + drill structural
       tier): compare `{Path, Off}` pairs against the seal — a stronger check,
       free.
-- [ ] Zero-change incrementals record no index — unchanged; keep it that way.
+- [x] Zero-change incrementals record no index — unchanged; keep it that way.
 
 Acceptance: existing suites green; new tests for offset parsing (create and
 list mode, incl. a listed-incremental archive — dumpdir payloads sit between
@@ -59,33 +59,33 @@ restore fetches only covering frames; drill gains structural frame sampling.
 On-medium bytes stay byte-identical to today for every existing reader and the
 stock one-liner.
 
-- [ ] `transform.Scheme` gains `Concat` enum (`Full | PerFrame | None`),
+- [x] `transform.Scheme` gains `Concat` enum (`Full | PerFrame | None`),
       declared at each `register()`: zstd/gzip/none = Full, gpg = PerFrame.
-- [ ] `resolveShape()` in `dumper/encode.go` beside transform placement:
+- [x] `resolveShape()` in `dumper/encode.go` beside transform placement:
       STREAM vs FRAMED-INVISIBLE only (ATOMIC is phase 3 — resolver returns
       STREAM for PerFrame pipelines until then). Conditions per the design:
       all stages Full AND server-placed. Stamp `shape` into
       ArchiveSpec → `record.Header`/footer.
-- [ ] `xfer.ChunkSource(inner Source, filters Filters, frameSize)`: Source
+- [x] `xfer.ChunkSource(inner Source, filters Filters, frameSize)`: Source
       decorator absorbing the encode filters; one `RunPipe` per chunk (child
       respawn = the restart mechanism); counts raw/encoded offsets; merges
       `Frames []Frame` into `SourceStats` at finish. Wrap stage errors so the
       failing program is still named (encode faults now surface as RoleSource).
       `frame_size` advanced knob, default 256 MiB.
-- [ ] Records: footer `shape`; index document gains
+- [x] Records: footer `shape`; index document gains
       `"frames": [[rawOff, encOff],…]` (absent = stream-as-today).
-- [ ] `archiveio.Reader.OpenRange(ref, parts, off, n)`: encoded-offset →
+- [x] `archiveio.Reader.OpenRange(ref, parts, off, n)`: encoded-offset →
       (part, offset) via cumulative part sizes — **per-part sizes already
       exist in `PlacedArchive.Seals`**. Below it, an optional ranged
       part-open capability on the medium: `fslike` implements (cloud
       `blob.NewRangeReader`, disk seek); tape doesn't and streams.
-- [ ] Restorer: range planner in `ExtractSelection` — selected members → raw
+- [x] Restorer: range planner in `ExtractSelection` — selected members → raw
       extents → covering frames → coalesced encoded ranges → OpenRange + one
       decode child per range → discard to member offset → tar. Feed exactly
       the wanted extent + 1 KiB NUL end-of-archive marker for clean tar exit
       (PoC-proven). Fall back to today's whole-stream path when any ingredient
       is missing (no table, no offsets, no ranged medium).
-- [ ] Drill: structural frame sample — ranged-fetch one frame group, decode
+- [x] Drill: structural frame sample — ranged-fetch one frame group, decode
       through the real pipeline, `tar -t` from the first indexed header in it,
       compare names+offsets against the index slice; ledger-rotated like the
       checksum sample.
@@ -106,39 +106,39 @@ committed archive). Road-test: real `nb recover --path` of one file from a
 Goal: FrameSafe pipelines produce sealed atoms — part == complete gpg message
 — with honest filenames, atom-carrying copies, and the sizing knobs.
 
-- [ ] Resolver: all stages ≥ PerFrame (≥1 not Full) → ATOMIC. Atom size =
+- [x] Resolver: all stages ≥ PerFrame (≥1 not Full) → ATOMIC. Atom size =
       dumptype `part_size`, else global `part_size` (new top-level knob,
       default 10 GiB). Atoms cut in the **compressed domain**: inner Full
       stages frame at `frame_size`; whole inner frames pack up to the atom
       bound, then the PerFrame stage seals each bundle.
-- [ ] `xfer` framed drive mode: for atomic archives Transfer cuts parts at
+- [x] `xfer` framed drive mode: for atomic archives Transfer cuts parts at
       frame boundaries, not at the sink's cap (per-frame readers from the
       framed source; one part per atom). The only real Transfer surgery —
       highest testing bar in the plan.
-- [ ] `archiveio.Writer` atom placement: place each atom as a whole unit
+- [x] `archiveio.Writer` atom placement: place each atom as a whole unit
       (PlaceFile-style verb with archive part headers); tape rolls proactively
       when `remaining < atom bound` (no split buffer). `record.PartSeal` gains
       `RawSize` — cumulative raw sizes are the atomic shape's frame table (no
       separate index table).
-- [ ] Naming (`fslike`): atoms put `.pNNN` BEFORE the extensions
+- [x] Naming (`fslike`): atoms put `.pNNN` BEFORE the extensions
       (`…-L0.p000.tar.zst.gpg` — a valid file); slices keep `.pNNN` after
       (today's "not a real file" marker). Keyed off the recorded shape.
-- [ ] Copies: `NewCopy` atom mode — parts carried 1:1, never re-split; footer
+- [x] Copies: `NewCopy` atom mode — parts carried 1:1, never re-split; footer
       shape selects the mode. Holding disk stages atomic archives as atoms
       (final shape), since the drain is key-free.
-- [ ] Knobs + validation ladder: dumptype `part_size` (atom size; inert-knob
+- [x] Knobs + validation ladder: dumptype `part_size` (atom size; inert-knob
       warning when the dumptype has no PerFrame stage); media `part_size`
       keeps today's slice meaning; atom sizes validate against media
       *ceilings* (`PartSizePolicy.Max`) — config-time warning naming
       dumptype × medium pairs, dump-time hard error when routed there,
       sync-time per-archive refusal with remedy. `nb repack` is named in docs
       as deliberately not built.
-- [ ] Read side: `restorer.planDecode` per footer shape — per-atom decode loop
+- [x] Read side: `restorer.planDecode` per footer shape — per-atom decode loop
       (one Reverse child per atom) vs single child. Selective restore on
       atomic = open the covering parts (no OpenRange needed). Stock drill tier
       learns the file-loop recipe for atomic archives; README/verification.md
       stock-recovery sections updated with both recipes.
-- [ ] Drill: key-proving sample — decrypt-and-list ONE atom (structural proof
+- [x] Drill: key-proving sample — decrypt-and-list ONE atom (structural proof
       at one atom's egress), the encrypted sibling of the checksum sample.
 
 Acceptance: atomic e2e with gpg where available, `none`-as-PerFrame test

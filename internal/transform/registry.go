@@ -13,11 +13,33 @@ import (
 	"github.com/Niloen/nbackup/internal/programs"
 )
 
+// Concat declares how independently encoded segments (frames) of one scheme compose
+// on read — the per-scheme capability the archive-shape resolver folds (see
+// docs/design/archive-shapes.md). It is declared at register() and never negotiated;
+// nothing anywhere branches on scheme names, only on this. The order is meaningful
+// (None < PerFrame < Full), so "at least per-frame decodable" reads as >= ConcatPerFrame.
+type Concat int
+
+const (
+	// ConcatNone: whole-stream only — concatenated encodings are not decodable at all.
+	// The zero value, so an undeclared scheme is conservatively unframeable.
+	ConcatNone Concat = iota
+	// ConcatPerFrame: each frame decodes with ONE Reverse invocation per frame (gpg —
+	// every real encryption CLI: GnuPG >= 2.2.8 deliberately rejects concatenated
+	// messages, see docs/design/ranged-reads.md).
+	ConcatPerFrame
+	// ConcatFull: concatenated frames decode as ONE stream with a single stock Reverse
+	// invocation (gzip, zstd, the identity none scheme).
+	ConcatFull
+)
+
 // Scheme is one registered transform scheme: a name plus the argv builders for
 // its forward and reverse child commands. A nil builder means "no external
 // process" — the identity (none) scheme, which contributes no pipeline stage.
+// Concat declares the scheme's frame-composition capability.
 type Scheme[O any] struct {
 	Name    string
+	Concat  Concat
 	Forward func(O) []string
 	Reverse func(O) []string
 }
@@ -39,6 +61,15 @@ func NewRegistry[O any](kind string, nice func(O) int) *Registry[O] {
 
 // Register adds a scheme under its name.
 func (r *Registry[O]) Register(s Scheme[O]) { r.schemes[s.Name] = s }
+
+// Concat returns a scheme's declared frame-composition capability.
+func (r *Registry[O]) Concat(scheme string) (Concat, error) {
+	s, err := r.Lookup(scheme)
+	if err != nil {
+		return ConcatNone, err
+	}
+	return s.Concat, nil
+}
 
 // Lookup resolves a scheme by name, or fails with the known names.
 func (r *Registry[O]) Lookup(scheme string) (Scheme[O], error) {

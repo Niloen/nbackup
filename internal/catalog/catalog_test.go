@@ -50,7 +50,7 @@ func putCommit(t *testing.T, v media.Volume, runID string, a record.Archive) {
 	t.Helper()
 	if len(a.Members) > 0 {
 		if _, err := writeFileT(v, record.Header{Run: runID, Kind: record.KindIndex, DLE: a.DLE, Level: a.Level}, func(w io.Writer) error {
-			return record.EncodeIndex(w, a.Members)
+			return record.EncodeIndex(w, record.Index{Members: a.Members, Frames: a.Frames})
 		}); err != nil {
 			t.Fatal(err)
 		}

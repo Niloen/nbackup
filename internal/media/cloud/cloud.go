@@ -113,6 +113,13 @@ func (s blobStore) Open(key string) (io.ReadCloser, error) {
 	return s.bucket.NewReader(s.ctx, key, nil)
 }
 
+// OpenRange implements fslike.RangeStore as an object store's ranged GET — the whole
+// point of the framed shape on cloud: selective restore pays for the covering frames'
+// bytes, not the object's.
+func (s blobStore) OpenRange(key string, off, length int64) (io.ReadCloser, error) {
+	return s.bucket.NewRangeReader(s.ctx, key, off, length, nil)
+}
+
 func (s blobStore) RemoveTree(run string) error {
 	prefix := path.Join(runsPrefix, run) + "/"
 	iter := s.bucket.List(&blob.ListOptions{Prefix: prefix})
