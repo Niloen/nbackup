@@ -34,6 +34,12 @@ Because a run can have several copies, `nb verify` audits **every** copy and tel
 you that an intact copy still exists when one is damaged — a damaged offsite reel
 does not condemn the run if disk still holds a good copy.
 
+Integrity is also enforced on **every read, not just on demand**: each part is
+re-hashed against its recorded seal as it streams, so a restore of a damaged copy
+fails loudly — naming the corrupt part and pointing at the intact copies — instead
+of silently writing a bit-flipped file (tar's own checksums cover only headers, so
+data corruption would otherwise pass through unnoticed).
+
 ### `--deep` — prove it is a restorable stream
 
 A checksum proves the bytes are unchanged; it does not prove they are *readable*.

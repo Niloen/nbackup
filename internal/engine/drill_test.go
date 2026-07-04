@@ -12,10 +12,12 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archivefs"
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/librarian"
+	"github.com/Niloen/nbackup/internal/restorer"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
 
@@ -206,20 +208,22 @@ func TestDrillMissingCopy(t *testing.T) {
 	}
 }
 
-// TestDrillBrokenChain classifies a chain whose incremental no longer untars as a
-// chain-composition fault.
-func TestDrillBrokenChain(t *testing.T) {
+// TestDrillCorruptIncremental: a garbled incremental fails the chain-tier drill and is
+// classified as INTEGRITY — the stream's inline seal check catches the damaged copy
+// before (or while) tar chokes on it, so the verdict names the root cause rather than
+// the composition symptom. (Before per-part seals this surfaced as a chain fault via
+// tar's exit; ClassChain now marks genuine composition faults with intact bytes, and
+// its mapping stays covered by TestClassifyRestoreErr.)
+func TestDrillCorruptIncremental(t *testing.T) {
 	f := newDrillFixture(t, "none")
 	eng := f.eng
-	// Garble the incremental payload on disk: the bytes are not a tar stream, so the
-	// chain restore (full then incremental) fails composing — a chain fault.
 	corrupt(t, payloadFile(t, f.diskDir, "run-2026-06-22.000000", 1))
 	rep, err := eng.Drill(DrillOptions{Tier: drill.TierChain, Medium: "disk", Sample: 1, Apply: true, Now: time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Failures != 1 || rep.Targets[0].Class != drill.ClassChain {
-		t.Fatalf("broken-chain drill = %+v (failures %d)", rep.Targets, rep.Failures)
+	if rep.Failures != 1 || rep.Targets[0].Class != drill.ClassIntegrity {
+		t.Fatalf("corrupt-incremental drill = %+v (failures %d), want integrity", rep.Targets, rep.Failures)
 	}
 }
 
@@ -584,5 +588,44 @@ func TestDrillSampleTier(t *testing.T) {
 	led, _ = drill.Load(eng.cfg.WorkdirPath())
 	if rec, _ := led.Get(dle); rec.Drills != 2 || rec.OK {
 		t.Fatalf("ledger after failing drill = %+v, want Drills=2 OK=false", rec)
+	}
+}
+
+// TestRestoreCatchesSilentCorruption is the inline-seal payoff: a single flipped byte
+// INSIDE a file's data region is invisible to tar (its checksum covers only headers),
+// so before per-part seals a restore would complete and silently write a corrupt file.
+// Now the stream's seal check fails the restore loudly, classified as integrity.
+func TestRestoreCatchesSilentCorruption(t *testing.T) {
+	f := newDrillFixture(t, "none")
+	eng := f.eng
+
+	// Flip one byte inside "full content" — a.txt's data region in the tar stream.
+	payload := payloadFile(t, f.diskDir, "run-2026-06-21.000000", 0)
+	data, err := os.ReadFile(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := strings.Index(string(data), "full content")
+	if off < 0 {
+		t.Fatal("file body not found in the uncompressed payload")
+	}
+	data[off] ^= 0x01
+	if err := os.Chmod(payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(payload, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	rerr := eng.rst.Extract(restorer.Request{DLE: f.dle, RunID: "run-2026-06-22.000000", Dest: dest, Medium: "disk"}, nil)
+	if rerr == nil {
+		t.Fatal("restore of a silently-corrupted archive succeeded — corrupt bytes were written")
+	}
+	if !errors.Is(rerr, archiveio.ErrSealMismatch) {
+		t.Fatalf("restore err = %v, want ErrSealMismatch", rerr)
+	}
+	if got := classifyRestoreErr(rerr); got != drill.ClassIntegrity {
+		t.Fatalf("classified %s, want integrity (a damaged copy, not a chain fault)", got)
 	}
 }

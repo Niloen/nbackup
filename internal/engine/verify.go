@@ -289,7 +289,8 @@ func (v *verifier) verifyArchive(a record.Archive, ref archiveio.Ref, medium str
 		good, err := v.rst.VerifyChecksum(rc, a.SHA256)
 		if err != nil {
 			logf.Log("%s [%s]: %s L%d ERROR %v", id, medium, a.DLEID(), a.Level, err)
-			vd.OK, vd.Class, vd.Detail = false, drill.ClassPipeline, err.Error()
+			// An inline seal mismatch on the stream is corruption, not a read fault.
+			vd.OK, vd.Class, vd.Detail = false, classifyReadErr(err), err.Error()
 			return vd
 		}
 		if !good {
@@ -373,7 +374,7 @@ func (v *verifier) structuralCheck(id string, a record.Archive, open func() (io.
 	// hint keeps a lost-key failure from being mislabeled as corruption.
 	members, terr := v.rst.ListMembers(rc, a.Compress, a.Encrypt, v.decryptOpts(a.DLE), arch)
 	if terr != nil {
-		return drill.ClassPipeline, restorer.DecryptHint(a.Encrypt, terr).Error()
+		return classifyReadErr(terr), restorer.DecryptHint(a.Encrypt, terr).Error()
 	}
 	// A zero-change incremental records no member index by design (it writes just the
 	// payload and commit; recover reads the base full's index for it — see README). Its
@@ -395,6 +396,17 @@ func (v *verifier) structuralCheck(id string, a record.Archive, open func() (io.
 		return drill.ClassIntegrity, diff
 	}
 	return drill.ClassNone, ""
+}
+
+// classifyReadErr maps a failed read-side operation to its drill class: an inline part-seal
+// mismatch (archiveio.ErrSealMismatch, caught on the stream itself) is corruption —
+// ClassIntegrity — while any other fault (media read, decode child, not-a-tar) stays the
+// pipeline class. errors.Is sees through the xfer role wrapping.
+func classifyReadErr(err error) drill.Class {
+	if errors.Is(err, archiveio.ErrSealMismatch) {
+		return drill.ClassIntegrity
+	}
+	return drill.ClassPipeline
 }
 
 // membersDiff compares the seal's member list to a freshly listed one as sorted

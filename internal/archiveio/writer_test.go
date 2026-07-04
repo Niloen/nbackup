@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -250,7 +251,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 
 	// Read the archive back by concatenating its parts; it must equal the input.
 	r := NewReader(openerOver(v1, v2, v3), nil)
-	rc, err := r.Open(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, parts)
+	rc, err := r.Open(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, parts, nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -285,7 +286,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 		t.Fatalf("Parts = %d, want >= 5", arch.Parts)
 	}
 	r := NewReader(openerOver(v), nil)
-	rc, err := r.Open(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, apos.Parts)
+	rc, err := r.Open(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, apos.Parts, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,4 +465,56 @@ func TestPartSealsRecorded(t *testing.T) {
 			t.Fatalf("copy VerifyPart(%d) ok=%v err=%v", i, ok, err)
 		}
 	}
+}
+
+// TestOpenSealedCatchesCorruptPart: Open armed with seals fails the stream at the
+// damaged part with ErrSealMismatch (naming the part), instead of delivering corrupt
+// bytes to the consumer; unsealed Open (nil) still reads straight through — the
+// pre-seal behavior for sealless archives.
+func TestOpenSealedCatchesCorruptPart(t *testing.T) {
+	v := newMemVolume("only", 0)
+	sink := &memSink{vols: []*memVolume{v}, partCap: 8 * 1024}
+	spec := RunSpec{ID: "run-x", CreatedAt: time.Unix(0, 0).UTC()}
+	w := NewWriter(sink, sink, spec, nil, nil)
+	body := []byte(strings.Repeat("s", 20*1024)) // 3 parts
+	arch, apos := writeOneArchive(t, w, sink, "dle1", body)
+	ref := Ref{Run: spec.ID, DLE: "dle1", Level: 0}
+	r := NewReader(openerOver(v), nil)
+
+	// Flip one byte in the middle part — the silent kind of damage tar cannot see.
+	v.data[apos.Parts[1].Pos][100] ^= 0x01
+
+	rc, err := r.Open(ref, apos.Parts, arch.PartSeals)
+	if err != nil {
+		t.Fatalf("Open (prime) should succeed — the fault is mid-stream: %v", err)
+	}
+	_, err = io.ReadAll(rc)
+	rc.Close()
+	if !errors.Is(err, ErrSealMismatch) {
+		t.Fatalf("sealed read err = %v, want ErrSealMismatch", err)
+	}
+	if !strings.Contains(err.Error(), "part 2 of 3") {
+		t.Fatalf("seal error %q does not name the part", err)
+	}
+
+	// Unsealed (nil) reads through unchecked, as before seals existed.
+	rc, err = r.Open(ref, apos.Parts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil || len(got) != len(body) {
+		t.Fatalf("unsealed read n=%d err=%v, want the full (corrupt) payload", len(got), err)
+	}
+
+	// Misaligned seals are dropped, not misapplied: a short seal list reads unchecked.
+	rc, err = r.Open(ref, apos.Parts, arch.PartSeals[:1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = io.ReadAll(rc); err != nil {
+		t.Fatalf("misaligned seals must disarm the check, got %v", err)
+	}
+	rc.Close()
 }

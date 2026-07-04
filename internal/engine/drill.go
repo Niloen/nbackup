@@ -439,6 +439,11 @@ func classifyRestoreErr(err error) drill.Class {
 	if errors.Is(err, archivefs.ErrMissingCopy) || errors.Is(err, librarian.ErrVolumeUnavailable) {
 		return drill.ClassMissing
 	}
+	if errors.Is(err, archiveio.ErrSealMismatch) {
+		// The stream's inline seal check caught corruption before (or while) the
+		// consumer choked on it — the root cause is a damaged copy, not composition.
+		return drill.ClassIntegrity
+	}
 	var xe *xfer.Error
 	if errors.As(err, &xe) && (xe.Role == xfer.RoleSink || xe.Role == xfer.RoleCommit) {
 		return drill.ClassChain
@@ -630,6 +635,9 @@ func (d *driller) chainBytes(steps []recovery.Step) int64 {
 func classifyOpenErr(err error) drill.Class {
 	if errors.Is(err, archivefs.ErrMissingCopy) || errors.Is(err, librarian.ErrVolumeUnavailable) {
 		return drill.ClassMissing
+	}
+	if errors.Is(err, archiveio.ErrSealMismatch) {
+		return drill.ClassIntegrity
 	}
 	return drill.ClassPipeline
 }

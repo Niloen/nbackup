@@ -224,8 +224,8 @@ func (fs *FS) openRef(ref archiveio.Ref, medium string, readerFor func(string) (
 	}
 	var lastErr error
 	for _, p := range placements {
-		parts, ok := p.Parts(ref.DLE, ref.Level)
-		if !ok {
+		pa, ok := p.Placed(ref.DLE, ref.Level)
+		if !ok || len(pa.Parts) == 0 {
 			continue
 		}
 		r, err := readerFor(p.Medium)
@@ -235,7 +235,9 @@ func (fs *FS) openRef(ref archiveio.Ref, medium string, readerFor func(string) (
 			lastErr = err
 			continue
 		}
-		rc, err := r.Open(ref, parts)
+		// The placement's per-part seals arm inline integrity on the stream (Open drops
+		// them if misaligned), so no read path can silently deliver corrupt bytes.
+		rc, err := r.Open(ref, pa.Parts, pa.Seals)
 		if err != nil {
 			lastErr = err
 			continue

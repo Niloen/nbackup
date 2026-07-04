@@ -62,7 +62,7 @@ func TestAssertPartWrongVolume(t *testing.T) {
 	// Wrap so we can observe the reader is closed on the rejection path.
 	so.resp[0].rc = closeSpy{ReadCloser: so.resp[0].rc, closed: &closed}
 
-	_, err := NewReader(so.open, nil).Open(want, []FilePos{{Pos: 0}})
+	_, err := NewReader(so.open, nil).Open(want, []FilePos{{Pos: 0}}, nil)
 	if err == nil {
 		t.Fatal("want a wrong-volume rejection at prime, got nil")
 	}
@@ -92,7 +92,7 @@ func TestAssertPartWrongKind(t *testing.T) {
 	}{
 		{h: record.Header{Kind: record.KindCommit, Run: want.Run, DLE: want.DLE, Level: want.Level}, rc: io.NopCloser(strings.NewReader(""))},
 	}}
-	_, err := NewReader(so.open, nil).Open(want, []FilePos{{Pos: 0}})
+	_, err := NewReader(so.open, nil).Open(want, []FilePos{{Pos: 0}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "not an archive") {
 		t.Fatalf("want a not-an-archive rejection, got: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestReadMidStreamOpenFailure(t *testing.T) {
 		{h: archiveHeaderFor(want, 0), rc: io.NopCloser(strings.NewReader("part0"))},
 		{err: mountErr}, // second part won't open
 	}}
-	rc, err := NewReader(so.open, nil).Open(want, []FilePos{{Pos: 0}, {Pos: 1}})
+	rc, err := NewReader(so.open, nil).Open(want, []FilePos{{Pos: 0}, {Pos: 1}}, nil)
 	if err != nil {
 		t.Fatalf("prime (part 0) should succeed: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestReadWrongPartIndex(t *testing.T) {
 		{h: archiveHeaderFor(want, 0), rc: io.NopCloser(strings.NewReader("part0"))},
 		{h: archiveHeaderFor(want, 7), rc: io.NopCloser(strings.NewReader("part1"))}, // wrong index (want 1)
 	}}
-	rc, err := NewReader(so.open, nil).Open(want, []FilePos{{Pos: 0}, {Pos: 1}})
+	rc, err := NewReader(so.open, nil).Open(want, []FilePos{{Pos: 0}, {Pos: 1}}, nil)
 	if err != nil {
 		t.Fatalf("prime should succeed: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestReadPartCloseErrorPropagates(t *testing.T) {
 	}{
 		{h: archiveHeaderFor(want, 0), rc: errCloser{Reader: strings.NewReader("payload"), closeErr: closeErr}},
 	}}
-	rc, err := NewReader(so.open, nil).Open(want, []FilePos{{Pos: 0}})
+	rc, err := NewReader(so.open, nil).Open(want, []FilePos{{Pos: 0}}, nil)
 	if err != nil {
 		t.Fatalf("prime should succeed: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestReadPartCloseErrorPropagates(t *testing.T) {
 // TestOpenNoParts rejects an archive record that lists no parts (a corrupt
 // catalog entry) rather than returning an empty, silently-valid stream.
 func TestOpenNoParts(t *testing.T) {
-	_, err := NewReader(nil, nil).Open(Ref{Run: "r", DLE: "d", Level: 0}, nil)
+	_, err := NewReader(nil, nil).Open(Ref{Run: "r", DLE: "d", Level: 0}, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "no parts") {
 		t.Fatalf("want a no-parts error, got: %v", err)
 	}
