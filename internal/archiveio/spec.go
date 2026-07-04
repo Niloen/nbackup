@@ -19,6 +19,7 @@ type ArchiveSpec struct {
 	Archiver string
 	Compress string
 	Encrypt  string
+	Shape    string // stream shape (record.ShapeStream/ShapeFramed), resolved by the dumper from the pipeline's declared capabilities
 	Level    int
 	BaseRun  string
 }

@@ -62,6 +62,15 @@ type Mounter interface {
 	ReadFileAt(volume string, epoch, pos int) (record.Header, io.ReadCloser, error)
 }
 
+// RangeMounter is the Mounter's optional ranged capability: read a byte sub-range of a
+// part's payload (length < 0 = to the end). The fs discovers it by type assertion —
+// the depot's read face implements it for every medium; whether a given VOLUME can
+// actually open ranges is answered below (media.ErrRangeUnsupported), so capability
+// remains the medium's own declaration, never a name check here.
+type RangeMounter interface {
+	ReadFileRangeAt(volume string, epoch, pos int, off, length int64) (record.Header, io.ReadCloser, error)
+}
+
 // Depot is the fs's slice of the depot — the rest of what the data path needs beside the
 // map: a medium's read-mount and its bandwidth cap. (The transforms, the tar endpoints, and
 // the archiver/executor resolution all moved up to the operations.) The engine implements
@@ -90,28 +99,35 @@ func New(cat ReadMap, deps Depot, mindex *catalog.MemberIndex) *FS {
 	return &FS{deps: deps, cat: cat, mindex: mindex}
 }
 
-// Members returns an archive's member list, lazily: from the member-index cache, else by
-// reading the on-medium index (via a copy's recorded index position) and re-caching it. A nil
-// list is a valid "no members" answer (an archive with no files records no index).
+// Members returns an archive's member list (see Index; the members are its large half).
 func (fs *FS) Members(ref archiveio.Ref) ([]record.Member, error) {
-	if members, ok, err := fs.mindex.Load(ref.Run, ref.DLE, ref.Level); err != nil {
-		return nil, err
+	idx, err := fs.Index(ref)
+	return idx.Members, err
+}
+
+// Index returns an archive's per-archive index (members + any frame table), lazily: from
+// the index cache, else by reading the on-medium index (via a copy's recorded index
+// position) and re-caching it. A zero Index is a valid "no index" answer (an archive
+// with no files records none).
+func (fs *FS) Index(ref archiveio.Ref) (record.Index, error) {
+	if idx, ok, err := fs.mindex.Load(ref.Run, ref.DLE, ref.Level); err != nil {
+		return record.Index{}, err
 	} else if ok {
-		return members, nil
+		return idx, nil
 	}
 	for _, p := range fs.cat.PlacementsFor(ref.Run) {
 		pos, ok := indexPosOf(p, ref.DLE, ref.Level)
 		if !ok {
 			continue
 		}
-		members, err := fs.readIndex(p.Medium, pos)
+		idx, err := fs.readIndex(p.Medium, pos)
 		if err != nil {
 			continue // try another copy
 		}
-		_ = fs.mindex.Store(ref.Run, ref.DLE, ref.Level, members)
-		return members, nil
+		_ = fs.mindex.Store(ref.Run, ref.DLE, ref.Level, idx)
+		return idx, nil
 	}
-	return nil, nil
+	return record.Index{}, nil
 }
 
 // indexPosOf finds an archive's recorded member-index position on a placement (the zero
@@ -149,6 +165,45 @@ func (fs *FS) OpenArchive(ref archiveio.Ref, medium string) (io.ReadCloser, erro
 		return nil, fs.missingCopyErr(ref, medium)
 	}
 	return out, nil
+}
+
+// OpenRange opens a byte sub-range [off, off+length) of an archive's encoded payload
+// (length < 0 = to the end), with the same copy selection as OpenArchive: medium ""
+// tries every copy in read-preference order, a set medium reads only that copy. A copy
+// qualifies only when its placement records aligned per-part seals (the cumulative part
+// sizes locate the range) and its medium's volume can open ranges — otherwise the next
+// copy is tried, and when none qualifies the last cause (e.g. media.ErrRangeUnsupported)
+// surfaces so the caller falls back to the whole-stream read.
+func (fs *FS) OpenRange(ref archiveio.Ref, medium string, off, length int64) (io.ReadCloser, error) {
+	placements := fs.cat.PlacementsFor(ref.Run)
+	if medium != "" {
+		placements = onMedium(placements, medium)
+	}
+	if len(placements) == 0 {
+		return nil, fs.missingCopyErr(ref, medium)
+	}
+	var lastErr error
+	for _, p := range placements {
+		pa, ok := p.Placed(ref.DLE, ref.Level)
+		if !ok || len(pa.Parts) == 0 {
+			continue
+		}
+		r, err := fs.readerFor(p.Medium)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		rc, err := r.OpenRange(ref, pa.Parts, pa.Seals, off, length)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return rc, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("%w of %s %s L%d in the catalog", ErrMissingCopy, ref.Run, ref.DLE, ref.Level)
+	}
+	return nil, lastErr
 }
 
 // VerifyPart re-hashes one part of an archive's copy on a medium against the seal the
@@ -189,20 +244,26 @@ func (fs *FS) readerFor(medium string) (*archiveio.Reader, error) {
 	open := func(p archiveio.FilePos) (record.Header, io.ReadCloser, error) {
 		return mounter.ReadFileAt(p.Label, p.Epoch, p.Pos)
 	}
-	return archiveio.NewReader(open, fs.deps.Limiter(medium)), nil
+	var openRange archiveio.RangedPartOpener
+	if rm, ok := mounter.(RangeMounter); ok {
+		openRange = func(p archiveio.FilePos, off, length int64) (record.Header, io.ReadCloser, error) {
+			return rm.ReadFileRangeAt(p.Label, p.Epoch, p.Pos, off, length)
+		}
+	}
+	return archiveio.NewReader(open, openRange, fs.deps.Limiter(medium)), nil
 }
 
 // readIndex reads an archive's member index off a medium — the lazy fallback when the
 // server-side member cache misses (a rebuilt run not yet browsed). It mounts the volume the
 // index lives on and decodes it.
-func (fs *FS) readIndex(medium string, pos archiveio.FilePos) ([]record.Member, error) {
+func (fs *FS) readIndex(medium string, pos archiveio.FilePos) (record.Index, error) {
 	mounter, err := fs.deps.MounterFor(medium)
 	if err != nil {
-		return nil, err
+		return record.Index{}, err
 	}
 	_, rc, err := mounter.ReadFileAt(pos.Label, pos.Epoch, pos.Pos)
 	if err != nil {
-		return nil, err
+		return record.Index{}, err
 	}
 	defer rc.Close()
 	return record.DecodeIndex(rc)

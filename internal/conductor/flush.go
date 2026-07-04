@@ -34,9 +34,10 @@ type FlushDeps struct {
 	LandingFor func(dle string) string
 	Holdings   []string
 	Open       func(holding string, ref archiveio.Ref, pos archiveio.ArchivePos) (io.ReadCloser, error)
-	// Members returns an archive's member list, given where its index sits on the holding —
-	// the host serves it from its member cache when it can, else reads the index there.
-	Members     func(holding string, ref archiveio.Ref, index archiveio.FilePos) ([]record.Member, error)
+	// Index returns an archive's per-archive index (members + frame table), given where it
+	// sits on the holding — the host serves it from its index cache when it can, else reads
+	// the index there.
+	Index       func(holding string, ref archiveio.Ref, index archiveio.FilePos) (record.Index, error)
 	Reclaim     func(holding string, ref archiveio.Ref, pos archiveio.ArchivePos) error
 	OpenLanding func(landing string, spec archiveio.RunSpec) (*archiveio.Writer, error)
 	DisplayDLE  func(dle string) string
@@ -110,7 +111,8 @@ func Flush(d FlushDeps) (flushed int, err error) {
 					// Best-effort like the live drain's member cache: a copy without its member
 					// list is still restorable, just not browsable, so an unreadable index does
 					// not fail the flush.
-					arch.Members, _ = d.Members(holding, ref, ap.Index)
+					idx, _ := d.Index(holding, ref, ap.Index)
+					arch.Members, arch.Frames = idx.Members, idx.Frames
 					landingWriter, err := writerFor(landing)
 					if err != nil {
 						return flushed, err

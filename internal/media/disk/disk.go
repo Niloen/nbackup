@@ -72,6 +72,32 @@ func (s fsStore) Writer(_ context.Context, key string) (io.WriteCloser, error) {
 
 func (s fsStore) Open(key string) (io.ReadCloser, error) { return os.Open(s.full(key)) }
 
+// OpenRange implements fslike.RangeStore: seek to off and bound the stream to length
+// (< 0 = to the end) — a disk file's native ranged read.
+func (s fsStore) OpenRange(key string, off, length int64) (io.ReadCloser, error) {
+	f, err := os.Open(s.full(key))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := f.Seek(off, io.SeekStart); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if length < 0 {
+		return f, nil
+	}
+	return &boundedFile{r: io.LimitReader(f, length), f: f}, nil
+}
+
+// boundedFile pairs a length-limited view with the file's own Close.
+type boundedFile struct {
+	r io.Reader
+	f *os.File
+}
+
+func (b *boundedFile) Read(p []byte) (int, error) { return b.r.Read(p) }
+func (b *boundedFile) Close() error               { return b.f.Close() }
+
 func (s fsStore) RemoveTree(run string) error { return os.RemoveAll(filepath.Join(s.root, run)) }
 
 func (s fsStore) Remove(key string) error {

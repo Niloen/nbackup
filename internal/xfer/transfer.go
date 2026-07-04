@@ -49,7 +49,8 @@ type SourceStats struct {
 	Uncompressed int64
 	FileCount    int
 	Members      []record.Member
-	Unreadable   []string // source paths the producer could not read (a partial dump); empty = complete
+	Frames       []record.Frame // a framed source's decode-restart table (ChunkSource); nil = plain stream
+	Unreadable   []string       // source paths the producer could not read (a partial dump); empty = complete
 }
 
 // Role identifies which zone of a transfer faulted, so a caller can classify the failure.

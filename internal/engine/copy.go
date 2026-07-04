@@ -304,7 +304,8 @@ func (c *copier) jobsForRun(runID string, archives []record.Archive) []copyJob {
 	jobs := make([]copyJob, 0, len(archives))
 	for _, a := range archives {
 		ref := archiveio.Ref{Run: runID, DLE: a.DLE, Level: a.Level}
-		a.Members, _ = c.fs.Members(ref)
+		idx, _ := c.fs.Index(ref)
+		a.Members, a.Frames = idx.Members, idx.Frames
 		jobs = append(jobs, copyJob{ref: ref, meta: a, est: a.Compressed})
 	}
 	return jobs

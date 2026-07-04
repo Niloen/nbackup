@@ -136,6 +136,7 @@ func (w *Writer) NewArchive(spec ArchiveSpec) *ArchiveWriter {
 		Archiver: spec.Archiver,
 		Compress: spec.Compress,
 		Encrypt:  spec.Encrypt,
+		Shape:    spec.Shape,
 		Level:    spec.Level,
 		BaseRun:  spec.BaseRun,
 	}
@@ -284,12 +285,15 @@ func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.SourceStats) error {
 		arch.Unreadable = len(p.Unreadable) // a PARTIAL dump's omitted-file count, durable in the footer so a rebuild preserves it
 		arch.Uncompressed = p.Uncompressed
 		arch.Members = p.Members
+		arch.Frames = p.Frames
 		if p.FileCount == 0 {
 			// A zero-change incremental still carries tar's directory census (e.g.
 			// "./docs/") as members, but nothing actually changed. Per the documented
 			// artifact shape it records no member index — recover reads the base full's
-			// index for it — so drop the census members here and write payload+commit only.
+			// index for it — so drop the census members (and the frame table riding the
+			// same index) here and write payload+commit only.
 			arch.Members = nil
+			arch.Frames = nil
 		}
 		arch.CreatedAt = a.w.now() // the archive's landing time (per-archive)
 	}
@@ -327,7 +331,7 @@ func (w *Writer) finalize(ctx context.Context, arch record.Archive, parts []File
 	var index FilePos
 	if len(arch.Members) > 0 {
 		var buf bytes.Buffer
-		if err := record.EncodeIndex(&buf, arch.Members); err != nil {
+		if err := record.EncodeIndex(&buf, record.Index{Members: arch.Members, Frames: arch.Frames}); err != nil {
 			return ArchivePos{}, err
 		}
 		pos, err := w.writeRecord(ctx, record.KindIndex, arch, buf.Bytes())
@@ -336,9 +340,11 @@ func (w *Writer) finalize(ctx context.Context, arch record.Archive, parts []File
 		}
 		index = pos
 	}
-	// The footer omits the member list (it rides in the index); marshal a memberless copy.
+	// The footer omits the member list and frame table (they ride in the index);
+	// marshal a copy without them.
 	footer := arch
 	footer.Members = nil
+	footer.Frames = nil
 	data, err := record.MarshalCommit(footer)
 	if err != nil {
 		return ArchivePos{}, err
@@ -391,6 +397,7 @@ func (w *Writer) archiveHeader(a record.Archive) record.Header {
 		Archiver:  a.Archiver,
 		Compress:  a.Compress,
 		Encrypt:   a.Encrypt,
+		Shape:     a.Shape,
 		Level:     a.Level,
 		BaseRun:   a.BaseRun,
 		Split:     w.alloc.Bounded(),

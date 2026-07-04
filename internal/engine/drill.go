@@ -353,6 +353,47 @@ func (d *driller) drillSample(t drill.Target, medium string, rot int, logf Logf)
 				c.ref.Run, c.ref.DLE, c.ref.Level, c.idx+1, c.parts)
 		}
 	}
+	return d.frameSample(t, medium, rot, logf)
+}
+
+// frameSample adds the sample tier's STRUCTURAL half on a framed archive: decode one
+// frame group of the chain's tip through the real pipeline and compare the listed
+// members+offsets against the index slice — the seal check above proves the stored
+// bytes, this proves they still decode to the recorded structure, still at bounded
+// egress (rot rotates the frame across drills like the seal check's part). An archive
+// without the ingredients (no frame table, no offsets, no range-capable copy) skips
+// silently: the seal sample already ran, and this half only exists where framing does.
+func (d *driller) frameSample(t drill.Target, medium string, rot int, logf Logf) (drill.Class, string) {
+	step := t.Steps[len(t.Steps)-1] // the tip: the archive a restore would read last
+	s, err := d.cat.ReadRun(step.RunID)
+	if err != nil {
+		return drill.ClassNone, ""
+	}
+	a, ok := s.Archive(step.DLE, step.Level)
+	if !ok || (a.Encrypt != "" && a.Encrypt != "none") {
+		return drill.ClassNone, ""
+	}
+	arch, err := d.tc.restoreArchiver(a.Archiver, "")
+	if err != nil {
+		return drill.ClassNone, ""
+	}
+	ref := archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level}
+	res, err := d.rst.SampleFrame(ref, medium, a.Compress, arch, rot)
+	if err != nil {
+		return classifyReadErr(err), err.Error()
+	}
+	if !res.Ran {
+		return drill.ClassNone, ""
+	}
+	if !res.OK {
+		return drill.ClassIntegrity, fmt.Sprintf("%s %s L%d frame %d structural sample: %s",
+			ref.Run, ref.DLE, ref.Level, res.Frame, res.Detail)
+	}
+	fetched := "the stream tail"
+	if res.Bytes >= 0 {
+		fetched = sizeutil.FormatBytes(res.Bytes)
+	}
+	logf.Log("drill %s: frame %d structural sample OK (%s fetched)", d.dles.display(t.DLE), res.Frame, fetched)
 	return drill.ClassNone, ""
 }
 

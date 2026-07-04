@@ -42,6 +42,9 @@ var keyHints = map[string]string{}
 func init() {
 	registry.Register(transform.Scheme[Options]{
 		Name: "gpg",
+		// PerFrame, not Full: GnuPG >= 2.2.8 deliberately refuses concatenated messages
+		// (an anti-splicing measure), so each frame needs its own decrypt invocation.
+		Concat: transform.ConcatPerFrame,
 		Forward: func(o Options) []string {
 			argv := []string{transform.Prog(o.Program, "gpg"), "--batch", "--yes", "--no-tty", "--compress-algo", "none"}
 			if o.Recipient != "" { // public-key (asymmetric)
@@ -62,7 +65,13 @@ func init() {
 		},
 	})
 	keyHints["gpg"] = "gpg needs a `recipient` (public-key) or a `passphrase_file` (symmetric)"
-	registry.Register(transform.Scheme[Options]{Name: "none"}) // identity: no child process
+	registry.Register(transform.Scheme[Options]{Name: "none", Concat: transform.ConcatFull}) // identity: no child process; concatenation is trivially one stream
+}
+
+// Concat returns the scheme's declared frame-composition capability (an unset
+// scheme is the plaintext none).
+func Concat(scheme string) (transform.Concat, error) {
+	return registry.Concat(norm(scheme))
 }
 
 // norm maps an unset scheme to "none": an unset Encryption field means the

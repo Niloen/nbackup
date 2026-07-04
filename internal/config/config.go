@@ -49,6 +49,14 @@ type Config struct {
 	// so it is not an archiver option.
 	StateDir string `yaml:"state_dir,omitempty"`
 
+	// FrameSize is the raw-stream interval at which a framed archive's encode pipeline
+	// restarts — a decode-restart point every this-many bytes of tar stream, recorded in
+	// the archive's frame table (see docs/design/archive-shapes.md). It is an advanced
+	// internal knob: frames never exist as files (deliberately outside the "part"
+	// vocabulary); the default (DefaultFrameSize) is right for almost everyone, and
+	// smaller frames only trade a sliver of compression ratio for finer ranged reads.
+	FrameSize string `yaml:"frame_size,omitempty"`
+
 	// Compress configures the external compressor archives are piped through. It is the
 	// config-wide default; a dumptype may replace it wholesale with its own `compress`
 	// block (see DumpType.Compress), exactly as encryption overrides.
@@ -376,6 +384,25 @@ func (c *Config) Workers() int {
 
 // DefaultCycle is the dump cycle assumed when `cycle` is unset.
 const DefaultCycle = 7 * 24 * time.Hour
+
+// DefaultFrameSize is the framed shape's default decode-restart interval (raw bytes).
+// 256 MiB keeps the ratio cost negligible (+0.03% measured at far smaller frames) while
+// a single-file ranged restore fetches at most a frame's worth of extra bytes.
+const DefaultFrameSize = 256 << 20
+
+// FrameSizeBytes returns the framed shape's decode-restart interval (default
+// DefaultFrameSize). Validate already parsed and rejected a bad or non-positive
+// frame_size, so the parse here cannot fail.
+func (c *Config) FrameSizeBytes() int64 {
+	if c.FrameSize == "" {
+		return DefaultFrameSize
+	}
+	n, _ := sizeutil.ParseBytes(c.FrameSize)
+	if n > 0 {
+		return n
+	}
+	return DefaultFrameSize
+}
 
 // CycleDuration returns the dump cycle as a duration (default DefaultCycle).
 // Validate already parsed any non-empty Cycle and rejected a non-positive one,

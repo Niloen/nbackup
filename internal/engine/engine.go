@@ -194,6 +194,7 @@ func build(cfg *config.Config) (*Engine, error) {
 		Exclude:     func(dt string) []string { return e.cfg.ResolveDumpType(dt).Exclude },
 		Placement:   e.tc.encodePlacement,
 		Threads:     e.tc.fopts.Threads,
+		FrameSize:   e.cfg.FrameSizeBytes(),
 	})
 	e.ver = e.newVerifier()
 	e.acct = e.newLedger()

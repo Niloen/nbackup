@@ -59,33 +59,33 @@ restore fetches only covering frames; drill gains structural frame sampling.
 On-medium bytes stay byte-identical to today for every existing reader and the
 stock one-liner.
 
-- [ ] `transform.Scheme` gains `Concat` enum (`Full | PerFrame | None`),
+- [x] `transform.Scheme` gains `Concat` enum (`Full | PerFrame | None`),
       declared at each `register()`: zstd/gzip/none = Full, gpg = PerFrame.
-- [ ] `resolveShape()` in `dumper/encode.go` beside transform placement:
+- [x] `resolveShape()` in `dumper/encode.go` beside transform placement:
       STREAM vs FRAMED-INVISIBLE only (ATOMIC is phase 3 — resolver returns
       STREAM for PerFrame pipelines until then). Conditions per the design:
       all stages Full AND server-placed. Stamp `shape` into
       ArchiveSpec → `record.Header`/footer.
-- [ ] `xfer.ChunkSource(inner Source, filters Filters, frameSize)`: Source
+- [x] `xfer.ChunkSource(inner Source, filters Filters, frameSize)`: Source
       decorator absorbing the encode filters; one `RunPipe` per chunk (child
       respawn = the restart mechanism); counts raw/encoded offsets; merges
       `Frames []Frame` into `SourceStats` at finish. Wrap stage errors so the
       failing program is still named (encode faults now surface as RoleSource).
       `frame_size` advanced knob, default 256 MiB.
-- [ ] Records: footer `shape`; index document gains
+- [x] Records: footer `shape`; index document gains
       `"frames": [[rawOff, encOff],…]` (absent = stream-as-today).
-- [ ] `archiveio.Reader.OpenRange(ref, parts, off, n)`: encoded-offset →
+- [x] `archiveio.Reader.OpenRange(ref, parts, off, n)`: encoded-offset →
       (part, offset) via cumulative part sizes — **per-part sizes already
       exist in `PlacedArchive.Seals`**. Below it, an optional ranged
       part-open capability on the medium: `fslike` implements (cloud
       `blob.NewRangeReader`, disk seek); tape doesn't and streams.
-- [ ] Restorer: range planner in `ExtractSelection` — selected members → raw
+- [x] Restorer: range planner in `ExtractSelection` — selected members → raw
       extents → covering frames → coalesced encoded ranges → OpenRange + one
       decode child per range → discard to member offset → tar. Feed exactly
       the wanted extent + 1 KiB NUL end-of-archive marker for clean tar exit
       (PoC-proven). Fall back to today's whole-stream path when any ingredient
       is missing (no table, no offsets, no ranged medium).
-- [ ] Drill: structural frame sample — ranged-fetch one frame group, decode
+- [x] Drill: structural frame sample — ranged-fetch one frame group, decode
       through the real pipeline, `tar -t` from the first indexed header in it,
       compare names+offsets against the index slice; ledger-rotated like the
       checksum sample.

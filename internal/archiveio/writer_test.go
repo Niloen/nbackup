@@ -250,7 +250,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	}
 
 	// Read the archive back by concatenating its parts; it must equal the input.
-	r := NewReader(openerOver(v1, v2, v3), nil)
+	r := NewReader(openerOver(v1, v2, v3), nil, nil)
 	rc, err := r.Open(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, parts, nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -285,7 +285,7 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	if arch.Parts < 5 {
 		t.Fatalf("Parts = %d, want >= 5", arch.Parts)
 	}
-	r := NewReader(openerOver(v), nil)
+	r := NewReader(openerOver(v), nil, nil)
 	rc, err := r.Open(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, apos.Parts, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -424,7 +424,7 @@ func TestPartSealsRecorded(t *testing.T) {
 
 	// VerifyPart passes per part; corrupting ONE part fails that index only.
 	ref := Ref{Run: spec.ID, DLE: "dle1", Level: 0}
-	r := NewReader(openerOver(v), nil)
+	r := NewReader(openerOver(v), nil, nil)
 	for i, s := range arch.PartSeals {
 		if ok, err := r.VerifyPart(ref, apos.Parts, i, s); err != nil || !ok {
 			t.Fatalf("VerifyPart(%d) ok=%v err=%v, want pass", i, ok, err)
@@ -459,7 +459,7 @@ func TestPartSealsRecorded(t *testing.T) {
 			carch.Parts, len(carch.PartSeals), arch.Parts)
 	}
 	cref := Ref{Run: spec.ID, DLE: "dle1", Level: 0}
-	r2 := NewReader(openerOver(v2), nil)
+	r2 := NewReader(openerOver(v2), nil, nil)
 	for i, s := range carch.PartSeals {
 		if ok, err := r2.VerifyPart(cref, sink2.last.Pos.Parts, i, s); err != nil || !ok {
 			t.Fatalf("copy VerifyPart(%d) ok=%v err=%v", i, ok, err)
@@ -479,7 +479,7 @@ func TestOpenSealedCatchesCorruptPart(t *testing.T) {
 	body := []byte(strings.Repeat("s", 20*1024)) // 3 parts
 	arch, apos := writeOneArchive(t, w, sink, "dle1", body)
 	ref := Ref{Run: spec.ID, DLE: "dle1", Level: 0}
-	r := NewReader(openerOver(v), nil)
+	r := NewReader(openerOver(v), nil, nil)
 
 	// Flip one byte in the middle part — the silent kind of damage tar cannot see.
 	v.data[apos.Parts[1].Pos][100] ^= 0x01

@@ -14,6 +14,7 @@ import (
 	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
@@ -23,9 +24,12 @@ import (
 // fakeStore is an in-memory archivefs.ReadStore: the restorer runs over it with
 // no media, catalog, or clerk — the point of the ReadStore seam.
 type fakeStore struct {
-	payloads map[archiveio.Ref][]byte
-	members  map[archiveio.Ref][]record.Member
-	opened   []archiveio.Ref // refs actually opened, in order
+	payloads    map[archiveio.Ref][]byte
+	members     map[archiveio.Ref][]record.Member
+	frames      map[archiveio.Ref][]record.Frame
+	ranged      bool            // the fake medium supports ranged opens
+	rangedBytes int64           // total bytes served through OpenRange (the egress a test asserts)
+	opened      []archiveio.Ref // refs actually opened, in order
 }
 
 func (f *fakeStore) OpenArchive(ref archiveio.Ref, medium string) (io.ReadCloser, error) {
@@ -56,6 +60,27 @@ func (f *fakeStore) OpenArchives(refs []archiveio.Ref, medium string, fn func(re
 }
 
 func (f *fakeStore) Members(ref archiveio.Ref) ([]record.Member, error) { return f.members[ref], nil }
+
+// Index serves the fake's members (with any frames a test injected); OpenRange counts
+// the ranged bytes actually fetched, so a test can assert selective restore's egress.
+func (f *fakeStore) Index(ref archiveio.Ref) (record.Index, error) {
+	return record.Index{Members: f.members[ref], Frames: f.frames[ref]}, nil
+}
+
+func (f *fakeStore) OpenRange(ref archiveio.Ref, medium string, off, length int64) (io.ReadCloser, error) {
+	if !f.ranged {
+		return nil, media.ErrRangeUnsupported
+	}
+	b, ok := f.payloads[ref]
+	if !ok {
+		return nil, fmt.Errorf("%w of %s %s L%d", archivefs.ErrMissingCopy, ref.Run, ref.DLE, ref.Level)
+	}
+	if length < 0 || off+length > int64(len(b)) {
+		length = int64(len(b)) - off
+	}
+	f.rangedBytes += length
+	return io.NopCloser(bytes.NewReader(b[off : off+length])), nil
+}
 
 // fakeArchiver implements only the read side (RestoreStage); the restorer never
 // touches the produce side.

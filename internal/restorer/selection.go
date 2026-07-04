@@ -67,6 +67,16 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 		}
 		archives++
 		log.Log("extracting %d file(s) from %s %s L%d", countFilePaths(st.Members), st.RunID, r.deps.DisplayDLE(st.DLE), st.Level)
+		// Ranged path first: a framed (or identity-pipeline) archive on a range-capable
+		// copy reads only the covering frames of the selected members. Any missing
+		// ingredient falls through to the whole-stream path — the unchanged code below.
+		if handled, rerr := r.extractRanged(st, d, log); handled {
+			if rerr != nil {
+				return rerr
+			}
+			files += countFilePaths(st.Members)
+			return nil
+		}
 		rc, serr := open()
 		if serr != nil {
 			return serr

@@ -60,23 +60,23 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 			}
 			return h.session.OpenArchiveAt(ref, pos)
 		},
-		Members: func(name string, ref archiveio.Ref, index archiveio.FilePos) ([]record.Member, error) {
-			// The member cache (or another copy) first; else read the index positionally off
+		Index: func(name string, ref archiveio.Ref, index archiveio.FilePos) (record.Index, error) {
+			// The index cache (or another copy) first; else read the index positionally off
 			// the holding's own volume — its read face is refused while the session's write
 			// claim holds it, exactly as during the live drain.
-			if members, err := e.fs.Members(ref); err != nil || members != nil {
-				return members, err
+			if idx, err := e.fs.Index(ref); err != nil || idx.Members != nil {
+				return idx, err
 			}
 			if index == (archiveio.FilePos{}) {
-				return nil, nil
+				return record.Index{}, nil
 			}
 			h, err := holding(name)
 			if err != nil {
-				return nil, err
+				return record.Index{}, err
 			}
 			_, rc, err := h.wm.Volume().ReadFile(index.Pos)
 			if err != nil {
-				return nil, err
+				return record.Index{}, err
 			}
 			defer rc.Close()
 			return record.DecodeIndex(rc)

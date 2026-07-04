@@ -31,8 +31,48 @@ type Archive struct {
 	Parts        int        `json:"parts,omitempty"`      // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
 	BaseRun      string     `json:"base_run,omitempty"`   // for level>=1, the run whose state this builds on (a full omits it)
 	CreatedAt    time.Time  `json:"created_at"`           // when this archive committed (landed) — per-archive, the basis for retention age and the "last archive added" display
+	Shape        string     `json:"shape,omitempty"`      // stream shape (ShapeStream/ShapeFramed): how the encoded payload is laid out. Kept in the footer — a reader decodes without config — and archive-invariant across copies (the encoded bytes are carried verbatim).
 	Members      []Member   `json:"members,omitempty"`    // members archived, in stream order (see Member); the raw path token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
+	Frames       []Frame    `json:"frames,omitempty"`     // a framed archive's decode-restart table, in stream order (see Frame). Like Members it rides the per-archive index, never the footer; unlike part seals it is archive-invariant (encoded-stream domain), so copies carry it unchanged.
 	PartSeals    []PartSeal `json:"part_seals,omitempty"` // per-part seals, index-aligned with the parts (Header.Part order). Like Parts, a fact about THIS placement's layout (a copy re-splits and re-seals its own parts): the catalog moves them onto the placement's record and strips them from the run's medium-independent content.
+}
+
+// Archive stream shapes (Archive.Shape, Header.Shape). The shape is recorded, never
+// re-derived, so a reader needs no config to decode; absence ("" — ShapeStream) means
+// exactly today's behavior and selects the unchanged streaming read path.
+const (
+	// ShapeStream is the default: one opaque encoded stream; parts are slices of it.
+	// It is the empty string so every pre-shape record is a stream by construction.
+	ShapeStream = ""
+	// ShapeFramed is FRAMED-INVISIBLE: the encoder restarted every frame_size of raw
+	// input, so the stream carries invisible decode-restart points — byte-identical
+	// to a stream for every whole-stream reader and the stock one-liner — and the
+	// per-archive index records the frame table enabling ranged reads.
+	ShapeFramed = "framed"
+)
+
+// Frame is one decode-restart boundary of a framed archive: the raw-stream offset and
+// the encoded-stream offset at which a fresh decode may start. Frames are recorded in
+// stream order starting at {0, 0}; frame i spans [Raw_i, Raw_{i+1}) raw and
+// [Enc_i, Enc_{i+1}) encoded (the last frame runs to the stream's end) — like a member
+// list, the order is load-bearing. The JSON form is a compact two-element array
+// [raw, enc], so an index document reads as {"frames":[[0,0],[268435456,80530636],…]}.
+type Frame struct {
+	Raw int64
+	Enc int64
+}
+
+// MarshalJSON encodes the frame as its documented [raw, enc] pair.
+func (f Frame) MarshalJSON() ([]byte, error) { return json.Marshal([2]int64{f.Raw, f.Enc}) }
+
+// UnmarshalJSON decodes the [raw, enc] pair form.
+func (f *Frame) UnmarshalJSON(b []byte) error {
+	var a [2]int64
+	if err := json.Unmarshal(b, &a); err != nil {
+		return err
+	}
+	f.Raw, f.Enc = a[0], a[1]
+	return nil
 }
 
 // Member is one archive member: its path (slash-separated, directories with a trailing

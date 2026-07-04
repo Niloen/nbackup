@@ -32,6 +32,7 @@ type Config struct {
 	Exclude     func(dumpType string) []string
 	Placement   func(dumpType string) EncodePlacement
 	Threads     int
+	FrameSize   int64 // framed shape's decode-restart interval (config frame_size)
 }
 
 // Dumper archives planned items into an archivefs.Ingest. Build it with New and drive it with Run.
@@ -40,11 +41,12 @@ type Dumper struct {
 	exclude     func(dumpType string) []string
 	placement   func(dumpType string) EncodePlacement
 	threads     int
+	frameSize   int64
 }
 
 // New builds a Dumper from cfg.
 func New(cfg Config) *Dumper {
-	return &Dumper{archiverFor: cfg.ArchiverFor, exclude: cfg.Exclude, placement: cfg.Placement, threads: cfg.Threads}
+	return &Dumper{archiverFor: cfg.ArchiverFor, exclude: cfg.Exclude, placement: cfg.Placement, threads: cfg.Threads, frameSize: cfg.FrameSize}
 }
 
 // dumpGate bounds how many DLEs run the heavy transfer (the archiver source + encode pipeline) at once.

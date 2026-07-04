@@ -8,6 +8,7 @@ import (
 	"hash"
 	"io"
 
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/ratelimit"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/xfer"
@@ -28,6 +29,12 @@ var ErrSealMismatch = errors.New("part checksum mismatch vs its recorded seal")
 // PartAllocator, allocates instead: reads are random-access, writes append-ordered).
 type PartOpener func(p FilePos) (record.Header, io.ReadCloser, error)
 
+// RangedPartOpener is PartOpener for a byte sub-range of one part's payload
+// (length < 0 = to the part's end) — the optional device capability behind ranged
+// archive reads. nil when the medium cannot open ranges (tape); implementations
+// surface media.ErrRangeUnsupported the same way, so callers fall back uniformly.
+type RangedPartOpener func(p FilePos, off, length int64) (record.Header, io.ReadCloser, error)
+
 // Reader is one medium's read end — the mirror of Writer (one run's write end). It is
 // bound to the medium at construction: open is the device seam each part is opened
 // through, lim (nil = uncapped) paces the bytes read back, shared by every stream this
@@ -37,13 +44,15 @@ type PartOpener func(p FilePos) (record.Header, io.ReadCloser, error)
 // compose them as host-placed program stages over Open's raw stream, so decrypt runs
 // where the key lives and decompress on the target.
 type Reader struct {
-	open PartOpener
-	lim  *ratelimit.Limiter
+	open      PartOpener
+	openRange RangedPartOpener // nil = the medium cannot open payload sub-ranges
+	lim       *ratelimit.Limiter
 }
 
-// NewReader binds a Reader to a medium's part opener and its bandwidth cap.
-func NewReader(open PartOpener, lim *ratelimit.Limiter) *Reader {
-	return &Reader{open: open, lim: lim}
+// NewReader binds a Reader to a medium's part opener, its optional ranged opener
+// (nil when the medium cannot open payload sub-ranges), and its bandwidth cap.
+func NewReader(open PartOpener, openRange RangedPartOpener, lim *ratelimit.Limiter) *Reader {
+	return &Reader{open: open, openRange: openRange, lim: lim}
 }
 
 // Open returns an archive's payload as the ordered concatenation of its part files —
@@ -71,6 +80,147 @@ func (r *Reader) Open(ref Ref, parts []FilePos, seals []record.PartSeal) (io.Rea
 		return nil, err
 	}
 	return raw, nil
+}
+
+// OpenRange returns a byte sub-range [off, off+length) of an archive's encoded payload
+// (length < 0 = to the end) — the ranged-read primitive behind selective restore and
+// frame sampling. The encoded offset is mapped to (part, in-part offset) through the
+// cumulative part sizes the placement's seals record, so it requires seals aligned 1:1
+// with the parts, plus a medium with the ranged part-open capability (else
+// media.ErrRangeUnsupported surfaces from the opener and the caller falls back to
+// Open). Each touched part's header is asserted as it is reached; the bytes stream
+// UNSEALED — a sub-range cannot be checked against a whole-part seal — which is
+// acceptable because ranged reads feed decode pipelines that fail loudly on damage,
+// and integrity proper stays the drill/verify machinery's job.
+func (r *Reader) OpenRange(ref Ref, parts []FilePos, seals []record.PartSeal, off, length int64) (io.ReadCloser, error) {
+	if r.openRange == nil {
+		return nil, media.ErrRangeUnsupported
+	}
+	if len(parts) == 0 || len(seals) != len(parts) {
+		return nil, fmt.Errorf("archive %s %s L%d records no per-part seals; ranged reads need the parts' sizes", ref.Run, ref.DLE, ref.Level)
+	}
+	var total int64
+	for _, s := range seals {
+		total += s.Size
+	}
+	if off < 0 || off > total {
+		return nil, fmt.Errorf("range offset %d outside archive payload (%d bytes)", off, total)
+	}
+	if length < 0 || off+length > total {
+		length = total - off
+	}
+	var segs []rangeSegment
+	start := int64(0)
+	for i, s := range seals {
+		end := start + s.Size
+		if end > off && start < off+length && s.Size > 0 {
+			segOff := max(off-start, 0)
+			segEnd := min(off+length-start, s.Size)
+			segs = append(segs, rangeSegment{idx: i, off: segOff, length: segEnd - segOff})
+		}
+		start = end
+	}
+	rr := &rangedPartsReader{parts: parts, want: ref, segs: segs, open: r.openRangeLimited}
+	// Prime the first segment eagerly (as Open does for part 0): a capability or
+	// mount fault must surface HERE, where the caller can still fail over to another
+	// copy or fall back to the whole stream — not mid-read inside a decode pipeline.
+	if err := rr.prime(); err != nil {
+		return nil, err
+	}
+	return rr, nil
+}
+
+// openRangeLimited opens one part sub-range through the bound ranged opener and paces
+// its stream to the medium's cap.
+func (r *Reader) openRangeLimited(p FilePos, off, length int64) (record.Header, io.ReadCloser, error) {
+	h, rc, err := r.openRange(p, off, length)
+	if err != nil {
+		return h, rc, err
+	}
+	return h, r.lim.ReadCloser(rc), nil
+}
+
+// rangeSegment is one part's slice of a ranged read: which part, and the byte window
+// within its payload.
+type rangeSegment struct {
+	idx         int
+	off, length int64
+}
+
+// rangedPartsReader concatenates the range's per-part segments, opening each lazily and
+// asserting its header before bytes flow — the ranged sibling of partsReader.
+type rangedPartsReader struct {
+	parts []FilePos
+	want  Ref
+	segs  []rangeSegment
+	open  RangedPartOpener
+	pos   int
+	cur   io.ReadCloser
+}
+
+// openSeg opens segment i and asserts its part's header before bytes flow.
+func (rr *rangedPartsReader) openSeg(i int) (io.ReadCloser, error) {
+	seg := rr.segs[i]
+	h, rc, err := rr.open(rr.parts[seg.idx], seg.off, seg.length)
+	if err != nil {
+		return nil, err
+	}
+	if err := assertPart(h, rr.want, seg.idx); err != nil {
+		rc.Close()
+		return nil, err
+	}
+	return rc, nil
+}
+
+// prime opens the first segment so an open-time fault surfaces at OpenRange itself.
+func (rr *rangedPartsReader) prime() error {
+	if len(rr.segs) == 0 {
+		return nil
+	}
+	rc, err := rr.openSeg(0)
+	if err != nil {
+		return err
+	}
+	rr.cur = rc
+	return nil
+}
+
+func (rr *rangedPartsReader) Read(p []byte) (int, error) {
+	for {
+		if rr.cur == nil {
+			if rr.pos >= len(rr.segs) {
+				return 0, io.EOF
+			}
+			rc, err := rr.openSeg(rr.pos)
+			if err != nil {
+				return 0, err
+			}
+			rr.cur = rc
+		}
+		n, err := rr.cur.Read(p)
+		if err == io.EOF {
+			closeErr := rr.cur.Close()
+			rr.cur = nil
+			rr.pos++
+			if n > 0 {
+				return n, nil
+			}
+			if closeErr != nil {
+				return 0, closeErr
+			}
+			continue
+		}
+		return n, err
+	}
+}
+
+func (rr *rangedPartsReader) Close() error {
+	if rr.cur != nil {
+		err := rr.cur.Close()
+		rr.cur = nil
+		return err
+	}
+	return nil
 }
 
 // VerifyPart re-hashes ONE part's stored payload against its recorded seal — the

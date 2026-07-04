@@ -203,7 +203,7 @@ func TestSessionRecord(t *testing.T) {
 		t.Fatalf("AddArchive not called as expected: %+v", m.added)
 	}
 	got, ok, err := mindex.Load("run-2026-07-02.001", "h:/p", 0)
-	if err != nil || !ok || !reflect.DeepEqual(got, arch.Members) {
+	if err != nil || !ok || !reflect.DeepEqual(got.Members, arch.Members) {
 		t.Fatalf("member index not cached: got=%v ok=%v err=%v", got, ok, err)
 	}
 }
@@ -413,7 +413,7 @@ func TestMembersOnMediumFallback(t *testing.T) {
 	ref := archiveio.Ref{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0}
 	members := []record.Member{{Path: "dir/", Off: 0}, {Path: "dir/file", Off: 512}}
 	var idxBuf bytes.Buffer
-	if err := record.EncodeIndex(&idxBuf, members); err != nil {
+	if err := record.EncodeIndex(&idxBuf, record.Index{Members: members}); err != nil {
 		t.Fatalf("encode index: %v", err)
 	}
 	deps := &fakeDeps{mounters: map[string]*memMounter{
@@ -432,7 +432,7 @@ func TestMembersOnMediumFallback(t *testing.T) {
 		t.Fatalf("Members fallback = %v, err = %v; want the decoded on-medium index", got, err)
 	}
 	// It re-caches: the index cache now has it.
-	if cached, ok, _ := mindex.Load(ref.Run, ref.DLE, 0); !ok || !reflect.DeepEqual(cached, members) {
+	if cached, ok, _ := mindex.Load(ref.Run, ref.DLE, 0); !ok || !reflect.DeepEqual(cached.Members, members) {
 		t.Fatalf("Members did not re-cache the on-medium index: %v ok=%v", cached, ok)
 	}
 }

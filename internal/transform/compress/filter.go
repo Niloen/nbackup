@@ -31,15 +31,19 @@ var registry = transform.NewRegistry[Options]("compression", func(o Options) int
 // exts maps a scheme to its archive file extension ("" for none).
 var exts = map[string]string{}
 
-// register adds a scheme: its archive file extension and how to build the child
-// argv. A nil argv builder means "no external process" (the none scheme).
-func register(name, ext string, compressArgv, decompressArgv func(Options) []string) {
-	registry.Register(transform.Scheme[Options]{Name: name, Forward: compressArgv, Reverse: decompressArgv})
+// register adds a scheme: its archive file extension, its frame-composition
+// capability, and how to build the child argv. A nil argv builder means "no external
+// process" (the none scheme).
+func register(name, ext string, concat transform.Concat, compressArgv, decompressArgv func(Options) []string) {
+	registry.Register(transform.Scheme[Options]{Name: name, Concat: concat, Forward: compressArgv, Reverse: decompressArgv})
 	exts[name] = ext
 }
 
 func init() {
-	register("zstd", "zst",
+	// zstd and gzip are ConcatFull: their formats define concatenated members as ONE
+	// stream, and the stock tool decodes it in a single invocation (gzip PoC-verified
+	// byte-exact; re-check zstd multistream on a machine WITH zstd before relying on it).
+	register("zstd", "zst", transform.ConcatFull,
 		func(o Options) []string {
 			argv := []string{transform.Prog(o.Program, "zstd")}
 			if o.Level > 0 {
@@ -52,7 +56,7 @@ func init() {
 		},
 		func(o Options) []string { return []string{transform.Prog(o.Program, "zstd"), "-d", "-c"} },
 	)
-	register("gzip", "gz",
+	register("gzip", "gz", transform.ConcatFull,
 		func(o Options) []string {
 			argv := []string{transform.Prog(o.Program, "gzip")}
 			if o.Level > 0 {
@@ -62,7 +66,7 @@ func init() {
 		},
 		func(o Options) []string { return []string{transform.Prog(o.Program, "gzip"), "-d", "-c"} },
 	)
-	register("none", "", nil, nil) // identity: no child process
+	register("none", "", transform.ConcatFull, nil, nil) // identity: no child process; concatenation is trivially one stream
 }
 
 // Ext returns the archive file extension for a scheme ("" for none).
@@ -107,4 +111,9 @@ func DecompressCmd(scheme string, o Options) (cmd programs.Cmd, ok bool, err err
 // Filter with empty cmds (skipped by the pipeline). It errors only for an unknown scheme.
 func Filter(scheme string, o Options) (programs.Filter, error) {
 	return registry.Filter(scheme, o)
+}
+
+// Concat returns the scheme's declared frame-composition capability.
+func Concat(scheme string) (transform.Concat, error) {
+	return registry.Concat(scheme)
 }
