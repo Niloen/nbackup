@@ -173,7 +173,16 @@ func payloadExt(h record.Header) string {
 	if h.Encrypt != "" && h.Encrypt != "none" {
 		ext += "." + h.Encrypt
 	}
-	// A split archive's payload is one slice of a multi-part whole, not a standalone
+	// The part-index suffix position IS the shape (docs/design/archive-shapes.md):
+	//
+	// An ATOM is a complete valid file of its type (one whole gpg message), so its
+	// part index goes BEFORE the extensions — …-L0.p000.tar.zst.gpg — keeping the
+	// name honest (tools recognize it, the file-loop stock recovery works per file)
+	// and making the shape operator-visible at a bare bucket listing.
+	if h.Shape == record.ShapeAtomic {
+		return fmt.Sprintf(".p%03d", h.Part) + ext
+	}
+	// A split archive's payload is one SLICE of a multi-part whole, not a standalone
 	// file: append a .pNNN part-index suffix AFTER the .tar/.gz/.gpg extension so the
 	// name no longer claims to be a directly-openable artifact (a stock `tar` on a lone
 	// part fails fast instead of yielding garbage) and the siblings group and order by

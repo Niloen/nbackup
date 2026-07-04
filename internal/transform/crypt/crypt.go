@@ -68,6 +68,12 @@ func init() {
 	registry.Register(transform.Scheme[Options]{Name: "none", Concat: transform.ConcatFull}) // identity: no child process; concatenation is trivially one stream
 }
 
+// RegisterScheme adds a scheme to the encryption registry. The production schemes are
+// registered by this package's init; the export exists for TESTS to install a
+// stand-in PerFrame scheme (e.g. gzip posing as a sealer) so the atomic write/read
+// paths run end-to-end in environments without gpg.
+func RegisterScheme(s transform.Scheme[Options]) { registry.Register(s) }
+
 // Concat returns the scheme's declared frame-composition capability (an unset
 // scheme is the plaintext none).
 func Concat(scheme string) (transform.Concat, error) {

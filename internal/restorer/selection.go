@@ -68,9 +68,16 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 		archives++
 		log.Log("extracting %d file(s) from %s %s L%d", countFilePaths(st.Members), st.RunID, r.deps.DisplayDLE(st.DLE), st.Level)
 		// Ranged path first: a framed (or identity-pipeline) archive on a range-capable
-		// copy reads only the covering frames of the selected members. Any missing
-		// ingredient falls through to the whole-stream path — the unchanged code below.
-		if handled, rerr := r.extractRanged(st, d, log); handled {
+		// copy reads only the covering frames of the selected members; an atomic one
+		// fetches only the covering atoms. Any missing ingredient falls through to the
+		// whole-stream path below.
+		handled, rerr := false, error(nil)
+		if st.Shape == record.ShapeAtomic {
+			handled, rerr = r.extractAtomic(st, d, log)
+		} else {
+			handled, rerr = r.extractRanged(st, d, log)
+		}
+		if handled {
 			if rerr != nil {
 				return rerr
 			}
@@ -82,7 +89,18 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 			return serr
 		}
 		plan := r.planDecode(st.DLE, st.Compress, st.Encrypt, "")
-		if err := DecryptHint(st.Encrypt, r.dec.restoreArchive(rc, plan, st.Archiver, d, st.Members)); err != nil {
+		var xerr error
+		if st.Shape == record.ShapeAtomic {
+			sizes, _, aerr := r.atomSizes(archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level})
+			if aerr != nil {
+				rc.Close()
+				return aerr
+			}
+			xerr = r.dec.restoreAtomic(rc, plan, st.Archiver, d, st.Members, sizes)
+		} else {
+			xerr = r.dec.restoreArchive(rc, plan, st.Archiver, d, st.Members)
+		}
+		if err := DecryptHint(st.Encrypt, xerr); err != nil {
 			return err
 		}
 		files += countFilePaths(st.Members)

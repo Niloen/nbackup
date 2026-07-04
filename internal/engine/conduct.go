@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"sort"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
+	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
 // openWriter folds the engine's fs/librarian write machinery into the medium-
@@ -118,6 +120,24 @@ func (e *Engine) landingFor(d config.DLE) string {
 		return name
 	}
 	return e.dep.LandingName()
+}
+
+// atomCeilingErr is the dump-time half of the atom validation ladder: a hard error
+// when an atomic dumptype's atoms exceed its routed landing's part ceiling — a sealed
+// atom can never be re-cut to fit, so the dump must refuse rather than write archives
+// no copy could carry there. The check-time sibling (checkAtomShapes) warns about
+// every dumptype × medium pair; this fires only for the pair actually routed.
+func (e *Engine) atomCeilingErr(dumpType string, atomSize int64) error {
+	landing := e.cfg.ResolveDumpType(dumpType).Landing
+	if landing == "" {
+		landing = e.cfg.Landing
+	}
+	ceiling := media.PartSizeFor(e.cfg.Media[landing].Type).Max
+	if ceiling > 0 && atomSize > ceiling {
+		return fmt.Errorf("dumptype %q: its %s atoms (part_size) exceed landing %q's %s part ceiling and a sealed atom cannot be re-cut — lower the dumptype's part_size or route it to a medium with a higher ceiling",
+			dumpType, sizeutil.FormatBytes(atomSize), landing, sizeutil.FormatBytes(ceiling))
+	}
+	return nil
 }
 
 // landingForDLEName resolves the landing of a DLE named by its catalog slug (DLE.Name()) — what a

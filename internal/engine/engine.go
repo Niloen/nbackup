@@ -195,6 +195,7 @@ func build(cfg *config.Config) (*Engine, error) {
 		Placement:   e.tc.encodePlacement,
 		Threads:     e.tc.fopts.Threads,
 		FrameSize:   e.cfg.FrameSizeBytes(),
+		AtomCeiling: e.atomCeilingErr,
 	})
 	e.ver = e.newVerifier()
 	e.acct = e.newLedger()

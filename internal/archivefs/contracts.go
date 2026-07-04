@@ -47,6 +47,11 @@ type ReadStore interface {
 	// media.ErrRangeUnsupported) surfaces so the caller falls back to OpenArchive —
 	// a ranged read is always an optimization, never the only road to the bytes.
 	OpenRange(ref archiveio.Ref, medium string, off, length int64) (io.ReadCloser, error)
+	// AtomSeals returns an atomic archive's per-part seals from any copy carrying an
+	// aligned set — for atoms they are archive-invariant (every copy holds the same
+	// sealed messages), and their sizes cut the stream into atoms on read while the
+	// cumulative RawSize is the member→atom map. nil when no copy records them.
+	AtomSeals(ref archiveio.Ref) ([]record.PartSeal, error)
 }
 
 // WriteStore is the write face of the archive fs — one run's medium end, the mirror of

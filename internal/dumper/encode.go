@@ -48,6 +48,7 @@ type EncodePlacement struct {
 	EncryptScheme  string
 	EncryptOpts    crypt.Options
 	EncryptClient  bool
+	AtomSize       int64 // resolved atom size (dumptype part_size, else global, else default); consulted only when the shape resolves atomic
 }
 
 // dumpItem archives a single DLE into the store: it acquires an ingestion Sink, transfers the
@@ -206,8 +207,15 @@ func resolveShape(pl EncodePlacement) (string, error) {
 	if cc == transform.ConcatFull && ec == transform.ConcatFull {
 		return record.ShapeFramed, nil
 	}
+	if cc >= transform.ConcatPerFrame && ec >= transform.ConcatPerFrame {
+		return record.ShapeAtomic, nil
+	}
 	return record.ShapeStream, nil
 }
+
+// ShapeFor exposes the shape resolution to the engine (dump-time ceiling checks name
+// dumptype × landing pairs the dumper cannot see).
+func ShapeFor(pl EncodePlacement) (string, error) { return resolveShape(pl) }
 
 // dumpArchive composes the encode transfer for one archive — the archiver's stage source (on its
 // host) → the encode filters placed per the dumptype (client-side fused into the source,
@@ -244,6 +252,16 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 		Shape:    shape,
 		Level:    spec.Request.Level,
 		BaseRun:  spec.BaseRun,
+	}
+	if shape == record.ShapeAtomic {
+		aspec.AtomSize = pl.AtomSize
+		// Dump-time half of the atom validation ladder: refuse hard when this
+		// dumptype's atoms can never land on its routed medium.
+		if d.atomCeiling != nil {
+			if err := d.atomCeiling(spec.DumpType, pl.AtomSize); err != nil {
+				return record.Archive{}, nil, err
+			}
+		}
 	}
 
 	var unc, comp atomic.Int64
@@ -311,8 +329,15 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 	defer release()
 	// Transfer drives the whole ingestion: it streams the encoded archive into the sink and, on a
 	// clean transfer, has the sink seal it (footer + placement) against the producer's totals,
-	// returning those totals.
-	if _, terr := xfer.Transfer(ctx, source, filters, sink); terr != nil {
+	// returning those totals. An atomic archive runs the atom drive instead: the source packs
+	// compressed frames into sealed bundles (one gpg child per atom) and each atom lands as
+	// exactly one part.
+	if shape == record.ShapeAtomic {
+		asrc := xfer.AtomicSource(src, xfer.NewFilters().Add(compF.Forward), d.frameSize, encF.Forward, pl.AtomSize)
+		if _, terr := xfer.TransferAtoms(ctx, asrc, sink); terr != nil {
+			return record.Archive{}, nil, terr
+		}
+	} else if _, terr := xfer.Transfer(ctx, source, filters, sink); terr != nil {
 		return record.Archive{}, nil, terr
 	}
 	// The archive is durably committed to the store; only now promote the archiver's new

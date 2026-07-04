@@ -49,6 +49,14 @@ const (
 	// to a stream for every whole-stream reader and the stock one-liner — and the
 	// per-archive index records the frame table enabling ranged reads.
 	ShapeFramed = "framed"
+	// ShapeAtomic is FRAMED-ATOMIC: a FrameSafe pipeline (a PerFrame stage — gpg —
+	// over Full inner stages) whose parts are indivisible sealed atoms, each ONE
+	// complete encrypted message on every medium. Copies carry atoms 1:1 and never
+	// re-split (re-cutting needs the key); reads decrypt per atom; the stock recovery
+	// is a file loop (`for p in …; do gpg -d "$p"; done | zstd -d | tar x`). There is
+	// no separate frame table: the per-part seals' cumulative RawSize IS the
+	// member→atom map.
+	ShapeAtomic = "atomic"
 )
 
 // Frame is one decode-restart boundary of a framed archive: the raw-stream offset and
@@ -94,6 +102,12 @@ type Member struct {
 type PartSeal struct {
 	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
+	// RawSize is the raw (tar-stream) bytes this part covers — set only for an atomic
+	// archive, where each part is a sealed atom: the cumulative raw sizes are the
+	// shape's frame table (member offset → covering atom), so no separate index table
+	// exists. Unlike Size/SHA256 (per-placement facts), it is archive-invariant —
+	// atoms are carried 1:1 by every copy.
+	RawSize int64 `json:"raw_size,omitempty"`
 }
 
 // Partial reports whether the archive omitted source files it could not read (a PARTIAL

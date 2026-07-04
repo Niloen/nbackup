@@ -70,6 +70,24 @@ gpg --batch --pinentry-mode loopback --passphrase-file /etc/nbackup/secret -d \
 A public-key dump restores on any host with the private key in its keyring; a
 symmetric (`passphrase_file`) dump needs the same passphrase supplied to gpg.
 
+### Encrypted, multi-part (atoms)
+
+An encrypted archive larger than its `part_size` lands as **atoms**: each part is
+one complete gpg message, named with the part index BEFORE the extensions
+(`…-L0.p000.tar.zst.gpg` — a valid `.gpg` file, unlike a slice's
+`….tar.zst.gpg.p000`). gpg deliberately refuses concatenated messages, so the
+recipe is a file loop — decrypt each atom, concatenate the plaintexts (whole
+compressed frames: one valid stream), then decompress and untar once:
+
+```bash
+for p in 00*-app01-home-L0.p*.tar.zst.gpg; do gpg -d "$p"; done | zstd -dc | tar -xf -
+```
+
+The loop needs no index — the boundaries are the file boundaries, and `ls | sort`
+already yields part order. Re-cutting an atom needs the key, so copies carry atoms
+unchanged to every medium; an `nb repack` (decrypt → re-encrypt at a new atom size)
+is deliberately not built — retention ages old atom sizes out on its own.
+
 ## From tape
 
 Tape frames each payload with a fixed 32 KB inline header — skip it first. On an

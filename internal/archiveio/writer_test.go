@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
@@ -517,4 +519,68 @@ func TestOpenSealedCatchesCorruptPart(t *testing.T) {
 		t.Fatalf("misaligned seals must disarm the check, got %v", err)
 	}
 	rc.Close()
+}
+
+// TestAtomicRollByBound drives the atomic write path onto finite volumes: each atom is
+// placed WHOLE against its bound, so the writer rolls to the next volume proactively
+// when the loaded one's remaining capacity is under it (no split buffer, no
+// ErrVolumeFull backstop), and each part IS one atom — here the seal is `cat`, so the
+// concatenated parts must equal the raw input and the seals' RawSize its chunking.
+func TestAtomicRollByBound(t *testing.T) {
+	if _, err := exec.LookPath("cat"); err != nil {
+		t.Skip("cat not available")
+	}
+	capacity := int64(256 * 1024)
+	v1, v2, v3 := newMemVolume("v1", capacity), newMemVolume("v2", capacity), newMemVolume("v3", capacity)
+	sink := &memSink{vols: []*memVolume{v1, v2, v3}}
+	w := NewWriter(sink, sink, RunSpec{ID: "run-2026-06-21.001", CreatedAt: time.Unix(0, 0).UTC()}, nil, nil)
+
+	body := make([]byte, 200*1024)
+	x := uint32(7)
+	for i := range body {
+		x = x*1664525 + 1013904223
+		body[i] = byte(x >> 24)
+	}
+	const frameSize, atomSize = 16 * 1024, 64 * 1024
+	aw := w.NewArchive(ArchiveSpec{DLE: "d", Host: "h", Path: "/p", Archiver: "m", Compress: "none", Encrypt: "seal", Shape: record.ShapeAtomic, AtomSize: atomSize})
+	src := xfer.AtomicSource(xfer.Reader(io.NopCloser(bytes.NewReader(body))), xfer.NewFilters(), frameSize, programs.Cmd{Name: "cat"}, atomSize)
+	if _, err := xfer.TransferAtoms(context.Background(), src, aw); err != nil {
+		t.Fatalf("TransferAtoms: %v", err)
+	}
+	res, ok := aw.Committed()
+	if !ok {
+		t.Fatal("archive did not commit")
+	}
+	arch := res.Archive
+	if arch.Parts != 5 { // the bundle cuts BEFORE a frame that might not fit (worst-case margin), so 3×16 KiB frames per atom: 48+48+48+48+8 KiB
+		t.Fatalf("Parts = %d, want 5 atoms", arch.Parts)
+	}
+	vols := map[string]bool{}
+	for _, p := range res.Pos.Parts {
+		vols[p.Label] = true
+	}
+	if len(vols) < 2 {
+		t.Fatalf("atoms all landed on one %d-byte volume; the writer should roll by bound", capacity)
+	}
+	var back bytes.Buffer
+	var rawSum int64
+	for i, p := range res.Pos.Parts {
+		if arch.PartSeals[i].RawSize <= 0 {
+			t.Fatalf("seal %d missing RawSize: %+v", i, arch.PartSeals[i])
+		}
+		rawSum += arch.PartSeals[i].RawSize
+		byName := map[string]*memVolume{"v1": v1, "v2": v2, "v3": v3}
+		_, rc, err := byName[p.Label].ReadFile(p.Pos)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(&back, rc)
+		rc.Close()
+	}
+	if rawSum != int64(len(body)) {
+		t.Fatalf("RawSize sum = %d, want %d", rawSum, len(body))
+	}
+	if !bytes.Equal(back.Bytes(), body) {
+		t.Fatal("concatenated atoms differ from the input (seal = cat, so they must match)")
+	}
 }

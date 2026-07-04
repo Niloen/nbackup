@@ -228,11 +228,12 @@ func (m Media) MinAge() (time.Duration, error) {
 // split. Excludes live here, not on the archiver: skipping `*.log` is
 // a content decision about the source, not a property of how tar runs.
 type DumpType struct {
-	Archiver string          `yaml:"archiver"`           // named archiver definition ("" = DefaultArchiver)
-	Exclude  []string        `yaml:"exclude,omitempty"`  // patterns to skip (passed to the archiver per dump)
-	Encrypt  *EncryptConfig  `yaml:"encrypt,omitempty"`  // nil = inherit the config-wide default; set = replace it wholesale (no field merge)
-	Compress *CompressConfig `yaml:"compress,omitempty"` // nil = inherit the config-wide default; set = replace it wholesale (no field merge) — the peer of Encrypt
-	Landing  string          `yaml:"landing,omitempty"`  // medium this dumptype's DLEs land on; "" = the config-wide `landing`. Routes different sources to different media (cheap cloud vs fast disk vs tape) within one run.
+	Archiver string          `yaml:"archiver"`            // named archiver definition ("" = DefaultArchiver)
+	Exclude  []string        `yaml:"exclude,omitempty"`   // patterns to skip (passed to the archiver per dump)
+	Encrypt  *EncryptConfig  `yaml:"encrypt,omitempty"`   // nil = inherit the config-wide default; set = replace it wholesale (no field merge)
+	Compress *CompressConfig `yaml:"compress,omitempty"`  // nil = inherit the config-wide default; set = replace it wholesale (no field merge) — the peer of Encrypt
+	Landing  string          `yaml:"landing,omitempty"`   // medium this dumptype's DLEs land on; "" = the config-wide `landing`. Routes different sources to different media (cheap cloud vs fast disk vs tape) within one run.
+	PartSize string          `yaml:"part_size,omitempty"` // ATOM size for this dumptype's encrypted (atomic-shape) archives, overriding the top-level part_size (Amanda precedent: tape_splitsize was a dumptype option). Inert — warned about at check — on a dumptype with no per-frame (encryption) stage.
 }
 
 // Archiver is a named dump-program definition: a

@@ -140,7 +140,14 @@ func (w *Writer) NewArchive(spec ArchiveSpec) *ArchiveWriter {
 		Level:    spec.Level,
 		BaseRun:  spec.BaseRun,
 	}
-	return &ArchiveWriter{w: w, base: w.archiveHeader(meta), meta: meta, h: sha256.New()}
+	aw := &ArchiveWriter{w: w, base: w.archiveHeader(meta), meta: meta, h: sha256.New()}
+	if spec.Shape == record.ShapeAtomic {
+		// Each atom is placed whole against this bound: the bundle packs compressed
+		// frames up to AtomSize, and the seal (gpg) adds a small envelope on top —
+		// a proportional margin plus a floor covers it with room to spare.
+		aw.atomBound = spec.AtomSize + spec.AtomSize/32 + 64<<10
+	}
+	return aw
 }
 
 // NewCopy begins re-authoring an already-committed archive onto the run — the same path as
@@ -153,7 +160,16 @@ func (w *Writer) NewCopy(arch record.Archive) *ArchiveWriter {
 	// arch keeps its own run — a copy preserves the source archive's identity, so one writer can
 	// re-author archives from several source runs (a cross-run sync) and file each under its own run.
 	// For a per-run copy the writer's run is that same id, so this is unchanged there.
-	return &ArchiveWriter{w: w, base: w.archiveHeader(arch), meta: arch, expectSHA: arch.SHA256, h: sha256.New()}
+	aw := &ArchiveWriter{w: w, base: w.archiveHeader(arch), meta: arch, expectSHA: arch.SHA256, h: sha256.New()}
+	if arch.Shape == record.ShapeAtomic && len(arch.PartSeals) == arch.Parts && arch.Parts > 0 {
+		// An atomic copy carries the atoms 1:1, never re-splitting (re-cutting needs
+		// the key): the source's per-part seals drive the cut — each part's cap is
+		// exactly its atom's size, so the plain Transfer loop reproduces the source's
+		// parts bit-for-bit. The caller loads the seals from any placement (they are
+		// archive-invariant for atoms).
+		aw.copySeals = arch.PartSeals
+	}
+	return aw
 }
 
 // MeterArchive attaches a progress tap to aw — the running count of landed bytes, reported after
@@ -181,6 +197,8 @@ type ArchiveWriter struct {
 	pn        int64     // the in-flight part's landed bytes
 	parts     []FilePos
 	seals     []record.PartSeal // one seal per committed part, index-aligned with parts
+	atomBound int64             // atomic fresh dump: each part is one atom placed whole against this bound (0 = not atomic)
+	copySeals []record.PartSeal // atomic copy: the source's seals — each drives its part's exact cut and carries RawSize
 	part      int
 	tap       func(int64)   // optional progress tap (MeterArchive); fired on the writing goroutine
 	committed *CommitResult // the assembled result, stashed by Commit (nil until then); read via Committed
@@ -210,7 +228,7 @@ func (a *ArchiveWriter) SetCloser(fn func() error) { a.onClose = fn }
 // PartAllocator.NextPart alloc may cross to the orchestrator; the AppendFile header and the payload
 // writes stay on this goroutine.
 func (a *ArchiveWriter) NextPart(ctx context.Context) (io.WriteCloser, int64, error) {
-	vol, max, label, epoch, err := a.w.alloc.NextPart()
+	vol, max, label, epoch, err := a.nextSlot()
 	if err != nil {
 		return nil, 0, err
 	}
@@ -223,6 +241,28 @@ func (a *ArchiveWriter) NextPart(ctx context.Context) (io.WriteCloser, int64, er
 	}
 	a.ph, a.pn = sha256.New(), 0 // each part carries its own seal beside the whole-archive hash
 	return &archivePartWriter{a: a, fw: fw, dst: a.w.lim.Writer(fw), label: label, epoch: epoch}, max, nil
+}
+
+// nextSlot allocates the next part's volume and cap per the archive's shape. A slice
+// (stream/framed) takes the medium's cut: NextPart's remaining-capacity/part_size cap.
+// An atom is placed WHOLE: PlaceFile with its known bound rolls a finite volume
+// proactively (remaining < bound → roll first, no split buffer), and the cap is the
+// atom's own — a fresh dump's atoms end at the source's seal boundary (uncapped here;
+// TransferAtoms drives one part per atom), a copy's at exactly the source part's size.
+func (a *ArchiveWriter) nextSlot() (vol media.Volume, max int64, label string, epoch int, err error) {
+	switch {
+	case a.copySeals != nil: // atomic copy: cut exactly at the source's atom sizes
+		if a.part >= len(a.copySeals) {
+			return nil, 0, "", 0, fmt.Errorf("atomic copy of %s L%d: stream longer than its %d recorded atom(s) (source corrupt?)", a.meta.DLE, a.meta.Level, len(a.copySeals))
+		}
+		size := a.copySeals[a.part].Size
+		vol, label, epoch, err = a.w.alloc.PlaceFile(size)
+		return vol, size, label, epoch, err
+	case a.atomBound > 0: // atomic fresh dump: whole-atom placement against the bound
+		vol, label, epoch, err = a.w.alloc.PlaceFile(a.atomBound)
+		return vol, -1, label, epoch, err
+	}
+	return a.w.alloc.NextPart()
 }
 
 // archivePartWriter meters the bytes (sha + size, on the caller's goroutine) then writes them
@@ -296,6 +336,26 @@ func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.SourceStats) error {
 			arch.Frames = nil
 		}
 		arch.CreatedAt = a.w.now() // the archive's landing time (per-archive)
+	}
+	switch {
+	case arch.Shape == record.ShapeAtomic && a.copySeals != nil && len(a.copySeals) == len(arch.PartSeals):
+		// A copy's atoms are the source's bit-for-bit, so the archive-invariant half
+		// of each seal — the raw span the atom covers — carries over unchanged.
+		for i := range arch.PartSeals {
+			arch.PartSeals[i].RawSize = a.copySeals[i].RawSize
+		}
+	case arch.Shape == record.ShapeAtomic && len(p.Frames) == len(arch.PartSeals):
+		// A fresh dump's atom boundaries arrived as producer Frames (per-atom start
+		// offsets); folded into per-part RawSize they ARE the atomic shape's frame
+		// table (member offset → covering atom), so no table rides the index.
+		for i := range arch.PartSeals {
+			end := p.Uncompressed
+			if i+1 < len(p.Frames) {
+				end = p.Frames[i+1].Raw
+			}
+			arch.PartSeals[i].RawSize = end - p.Frames[i].Raw
+		}
+		arch.Frames = nil
 	}
 	pos, err := a.w.finalize(ctx, arch, a.parts)
 	if err != nil {
@@ -389,18 +449,21 @@ func (w *Writer) writeRecord(ctx context.Context, kind string, a record.Archive,
 // write), stamped so a multi-part payload's parts are named and read as slices, not standalone files.
 func (w *Writer) archiveHeader(a record.Archive) record.Header {
 	return record.Header{
-		Run:       a.Run,
-		Kind:      record.KindArchive,
-		DLE:       a.DLE,
-		Host:      a.Host,
-		Path:      a.Path,
-		Archiver:  a.Archiver,
-		Compress:  a.Compress,
-		Encrypt:   a.Encrypt,
-		Shape:     a.Shape,
-		Level:     a.Level,
-		BaseRun:   a.BaseRun,
-		Split:     w.alloc.Bounded(),
+		Run:      a.Run,
+		Kind:     record.KindArchive,
+		DLE:      a.DLE,
+		Host:     a.Host,
+		Path:     a.Path,
+		Archiver: a.Archiver,
+		Compress: a.Compress,
+		Encrypt:  a.Encrypt,
+		Shape:    a.Shape,
+		Level:    a.Level,
+		BaseRun:  a.BaseRun,
+		// An atom is a whole valid file, never a slice of one — Split (the "not a
+		// standalone artifact" marker driving the .pNNN-after-extension name) is a
+		// slice concept; atoms carry their part index BEFORE the extension instead.
+		Split:     w.alloc.Bounded() && a.Shape != record.ShapeAtomic,
 		CreatedAt: w.createdAt,
 	}
 }

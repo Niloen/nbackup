@@ -27,6 +27,7 @@ type fakeStore struct {
 	payloads    map[archiveio.Ref][]byte
 	members     map[archiveio.Ref][]record.Member
 	frames      map[archiveio.Ref][]record.Frame
+	atomSeals   map[archiveio.Ref][]record.PartSeal
 	ranged      bool            // the fake medium supports ranged opens
 	rangedBytes int64           // total bytes served through OpenRange (the egress a test asserts)
 	opened      []archiveio.Ref // refs actually opened, in order
@@ -80,6 +81,10 @@ func (f *fakeStore) OpenRange(ref archiveio.Ref, medium string, off, length int6
 	}
 	f.rangedBytes += length
 	return io.NopCloser(bytes.NewReader(b[off : off+length])), nil
+}
+
+func (f *fakeStore) AtomSeals(ref archiveio.Ref) ([]record.PartSeal, error) {
+	return f.atomSeals[ref], nil
 }
 
 // fakeArchiver implements only the read side (RestoreStage); the restorer never

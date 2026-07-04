@@ -371,8 +371,24 @@ func (v *verifier) structuralCheck(id string, a record.Archive, open func() (io.
 	// The fs reads the parts → decodes (server-side Filters) → lists members (`tar -t`).
 	// Any fault — a media read, a decode child, or a not-a-tar List — is a Pipeline failure; a
 	// clean stream whose members differ from the seal is an Integrity failure. The decrypt
-	// hint keeps a lost-key failure from being mislabeled as corruption.
-	members, terr := v.rst.ListMembers(rc, a.Compress, a.Encrypt, v.decryptOpts(a.DLE), arch)
+	// hint keeps a lost-key failure from being mislabeled as corruption. An atomic archive
+	// decodes per atom (the seals' sizes cut the stream; one decrypt child per atom).
+	var members []record.Member
+	var terr error
+	if a.Shape == record.ShapeAtomic {
+		seals, serr := v.store.AtomSeals(archiveio.Ref{Run: id, DLE: a.DLE, Level: a.Level})
+		if serr != nil || len(seals) == 0 {
+			rc.Close()
+			return drill.ClassPipeline, "atomic archive records no per-part seals on any copy — its atoms cannot be cut for decode; run `nb rebuild`"
+		}
+		sizes := make([]int64, len(seals))
+		for i, s := range seals {
+			sizes[i] = s.Size
+		}
+		members, terr = v.rst.ListMembersAtomic(rc, a.Compress, a.Encrypt, v.decryptOpts(a.DLE), arch, sizes)
+	} else {
+		members, terr = v.rst.ListMembers(rc, a.Compress, a.Encrypt, v.decryptOpts(a.DLE), arch)
+	}
 	if terr != nil {
 		return classifyReadErr(terr), restorer.DecryptHint(a.Encrypt, terr).Error()
 	}

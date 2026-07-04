@@ -197,6 +197,17 @@ func (r *Restorer) extractChain(runID string, req Request, rollbackOnFail bool, 
 			return stepErr(step, DecryptHint(step.Encrypt, oerr))
 		}
 		plan := r.planDecode(step.DLE, step.Compress, step.Encrypt, req.Host)
+		if step.Shape == record.ShapeAtomic {
+			sizes, _, aerr := r.atomSizes(ref)
+			if aerr != nil {
+				rc.Close()
+				return stepErr(step, aerr)
+			}
+			if xerr := r.dec.restoreAtomic(rc, plan, step.Archiver, d, nil, sizes); xerr != nil {
+				return stepErr(step, DecryptHint(step.Encrypt, xerr))
+			}
+			return nil
+		}
 		if xerr := r.dec.restoreArchive(rc, plan, step.Archiver, d, nil); xerr != nil {
 			return stepErr(step, DecryptHint(step.Encrypt, xerr))
 		}

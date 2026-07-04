@@ -240,7 +240,25 @@ func (r *Restorer) SampleFrame(ref archiveio.Ref, medium, compressScheme string,
 	if err != nil || len(idx.Frames) == 0 || len(idx.Members) == 0 {
 		return res, nil
 	}
-	frames, members := idx.Frames, idx.Members
+	var decompress programs.Cmd
+	if compressScheme != "" && compressScheme != "none" {
+		cf, ferr := compress.Filter(compressScheme, r.deps.CompressOpts)
+		if ferr != nil {
+			return res, ferr
+		}
+		decompress = cf.Reverse
+	}
+	return r.sampleTable(ref, medium, idx.Frames, idx.Members, arch, rot, nil, decompress)
+}
+
+// sampleTable is the shared sampling core behind SampleFrame (framed: table = the
+// index's frame table, no extra decode) and SampleAtom (atomic: table = the seals'
+// cumulative sizes, decode = the per-atom decrypt loop): pick a rotated,
+// egress-budgeted table entry holding member headers, fetch the covering encoded
+// range, decode it, list it with the archiver, and compare names+offsets against the
+// index slice.
+func (r *Restorer) sampleTable(ref archiveio.Ref, medium string, frames []record.Frame, members []record.Member, arch archiver.Archiver, rot int, decode func(rangeGroup, io.ReadCloser) io.ReadCloser, decompress programs.Cmd) (FrameSampleResult, error) {
+	res := FrameSampleResult{}
 	// Pick the rotated frame; scan forward (wrapping) past frames that hold no member
 	// header (a large file's middle) or whose span would blow the tier's bounded-egress
 	// promise: a frame's span runs from its first member header to its LAST member's
@@ -293,23 +311,18 @@ func (r *Restorer) SampleFrame(ref archiveio.Ref, medium, compressScheme string,
 	if err != nil {
 		return res, nil // no ranged copy on this medium — an ingredient gap, not a fault
 	}
-	var decompress programs.Cmd
-	if compressScheme != "" && compressScheme != "none" {
-		cf, ferr := compress.Filter(compressScheme, r.deps.CompressOpts)
-		if ferr != nil {
-			rc.Close()
-			return res, ferr
-		}
-		decompress = cf.Reverse
+	stream := rc
+	if decode != nil {
+		stream = decode(groups[0], rc)
 	}
 	pr, pw := io.Pipe()
 	go func() {
-		if err := emitGroup(groups[0], rc, decompress, pw); err != nil {
-			rc.Close()
+		if err := emitGroup(groups[0], stream, decompress, pw); err != nil {
+			stream.Close()
 			pw.CloseWithError(err)
 			return
 		}
-		rc.Close()
+		stream.Close()
 		if _, err := pw.Write(make([]byte, 1024)); err != nil {
 			pw.CloseWithError(err)
 			return

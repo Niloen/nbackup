@@ -10,8 +10,11 @@ import (
 
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/depot"
+	"github.com/Niloen/nbackup/internal/dumper"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/programs"
+	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 )
@@ -80,8 +83,50 @@ func (rep *CheckReport) add(lines *[]CheckLine, ok, warn bool, msg string) {
 	}
 }
 
+// checkAtomShapes is the config-time rung of the atom validation ladder: for each
+// dumptype it resolves the archive shape from the declared capabilities and warns —
+// never fails — about (a) an inert dumptype part_size (the atom knob does nothing
+// without a per-frame stage) and (b) dumptype × medium pairs whose atoms exceed the
+// medium's part ceiling and so can never land or sync there. Warnings, because adding
+// a low-ceiling medium must not brick the config; the routed pair hardens to a
+// dump-time error (atomCeilingErr) and sync refuses per archive.
+func (c *checker) checkAtomShapes(rep *CheckReport) {
+	dtNames := make([]string, 0, len(c.cfg.DumpTypes))
+	for n := range c.cfg.DumpTypes {
+		dtNames = append(dtNames, n)
+	}
+	sort.Strings(dtNames)
+	for _, name := range dtNames {
+		dt := c.cfg.DumpTypes[name]
+		shape, err := dumper.ShapeFor(c.tc.encodePlacement(name))
+		if err != nil {
+			continue // an unknown scheme fails elsewhere (checkMedia/compression checks)
+		}
+		if shape != record.ShapeAtomic {
+			if dt.PartSize != "" {
+				rep.add(&rep.Server, true, true, fmt.Sprintf("dumptype %q sets part_size but has no per-frame (encryption) stage — the atom-size knob is inert there", name))
+			}
+			continue
+		}
+		atomSize := c.cfg.AtomSizeBytes(name)
+		mNames := make([]string, 0, len(c.cfg.Media))
+		for m := range c.cfg.Media {
+			mNames = append(mNames, m)
+		}
+		sort.Strings(mNames)
+		for _, m := range mNames {
+			ceiling := media.PartSizeFor(c.cfg.Media[m].Type).Max
+			if ceiling > 0 && atomSize > ceiling {
+				rep.add(&rep.Server, true, true, fmt.Sprintf("dumptype %q atoms (%s part_size) exceed medium %q's %s part ceiling — its archives can never land or sync there (a sealed atom cannot be re-cut)",
+					name, sizeutil.FormatBytes(atomSize), m, sizeutil.FormatBytes(ceiling)))
+			}
+		}
+	}
+}
+
 func (c *checker) checkServer(rep *CheckReport) {
 	c.checkMedia(rep)
+	c.checkAtomShapes(rep)
 
 	wd := c.cfg.WorkdirPath()
 	if err := writableDir(wd); err != nil {

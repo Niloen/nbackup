@@ -49,6 +49,16 @@ type Config struct {
 	// so it is not an archiver option.
 	StateDir string `yaml:"state_dir,omitempty"`
 
+	// PartSize is the config-wide default ATOM size for encrypted (atomic-shape)
+	// archives: each part of such an archive is one complete encrypted message of at
+	// most this many compressed bytes, cut at dump time and carried unchanged by every
+	// copy ("an atomic archive brings its own part size; a sliced archive takes the
+	// medium's" — a medium's part_size keeps its slice meaning and is never consulted
+	// for atoms). A dumptype may override it (DumpType.PartSize) — the selective-
+	// restore tuning lever: smaller atoms, finer encrypted restore granularity and
+	// cheaper key-proving drills, more objects. Default DefaultAtomSize.
+	PartSize string `yaml:"part_size,omitempty"`
+
 	// FrameSize is the raw-stream interval at which a framed archive's encode pipeline
 	// restarts — a decode-restart point every this-many bytes of tar stream, recorded in
 	// the archive's frame table (see docs/design/archive-shapes.md). It is an advanced
@@ -384,6 +394,29 @@ func (c *Config) Workers() int {
 
 // DefaultCycle is the dump cycle assumed when `cycle` is unset.
 const DefaultCycle = 7 * 24 * time.Hour
+
+// DefaultAtomSize is the atomic shape's default atom size (compressed bytes per sealed
+// part). 10 GiB matches the cloud media's default slice part_size, so an encrypted
+// archive lands as about as many objects as an unencrypted one does today.
+const DefaultAtomSize = 10 << 30
+
+// AtomSizeBytes resolves the atom size for one dumptype: its own part_size, else the
+// top-level part_size, else DefaultAtomSize. Consulted only for atomic-shape pipelines
+// ("an atomic archive brings its own part size"); Validate already parsed and rejected
+// bad values, so the parses here cannot fail.
+func (c *Config) AtomSizeBytes(dumptype string) int64 {
+	if dt, ok := c.DumpTypes[dumptype]; ok && dt.PartSize != "" {
+		if n, _ := sizeutil.ParseBytes(dt.PartSize); n > 0 {
+			return n
+		}
+	}
+	if c.PartSize != "" {
+		if n, _ := sizeutil.ParseBytes(c.PartSize); n > 0 {
+			return n
+		}
+	}
+	return DefaultAtomSize
+}
 
 // DefaultFrameSize is the framed shape's default decode-restart interval (raw bytes).
 // 256 MiB keeps the ratio cost negligible (+0.03% measured at far smaller frames) while

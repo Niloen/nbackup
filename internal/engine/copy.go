@@ -16,6 +16,7 @@ import (
 	"github.com/Niloen/nbackup/internal/depot"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/spool"
 	"github.com/Niloen/nbackup/internal/xfer"
 )
@@ -306,9 +307,26 @@ func (c *copier) jobsForRun(runID string, archives []record.Archive) []copyJob {
 		ref := archiveio.Ref{Run: runID, DLE: a.DLE, Level: a.Level}
 		idx, _ := c.fs.Index(ref)
 		a.Members, a.Frames = idx.Members, idx.Frames
+		if a.Shape == record.ShapeAtomic {
+			// An atomic copy needs the source's per-part seals: they drive the 1:1
+			// atom cut and carry the RawSize map. Seals are archive-invariant for
+			// atoms, so any placement with an aligned set serves.
+			a.PartSeals = atomSeals(c.cat.Placements(runID), a.DLE, a.Level, a.Parts)
+		}
 		jobs = append(jobs, copyJob{ref: ref, meta: a, est: a.Compressed})
 	}
 	return jobs
+}
+
+// atomSeals returns an archive's per-part seals from the first placement carrying an
+// aligned set, or nil (the copy then refuses rather than re-splitting an atom).
+func atomSeals(placements []catalog.Placement, dle string, level, parts int) []record.PartSeal {
+	for _, p := range placements {
+		if pa, ok := p.Placed(dle, level); ok && len(pa.Seals) == parts && parts > 0 {
+			return pa.Seals
+		}
+	}
+	return nil
 }
 
 // transfer re-authors each job onto the target through the spool's Ingest, up to `workers` at once —
@@ -369,6 +387,22 @@ func (c *copier) transfer(ctx context.Context, jobs []copyJob, fromMedia, target
 // a drive, preserves the source's identity/checksum/members, and records the new placement on Commit).
 // Transfer drives and closes the writer, so the drive is released whether or not the copy commits.
 func (c *copier) transferOne(ctx context.Context, job copyJob, fromMedia, targetMedia string, ingest archivefs.Ingest, ro archivefs.ReadStore) error {
+	// Sync-time half of the atom validation ladder: a sealed atom cannot be re-cut
+	// without the key, so an archive whose atoms cannot be carried whole is refused
+	// per-archive (everything that fits is still carried by its own job).
+	if job.meta.Shape == record.ShapeAtomic {
+		if len(job.meta.PartSeals) != job.meta.Parts || job.meta.Parts == 0 {
+			return fmt.Errorf("copy %s L%d: atomic archive records no aligned per-part seals on any copy, so its atoms cannot be carried 1:1 — run `nb rebuild`, or re-dump", job.ref.DLE, job.ref.Level)
+		}
+		if ceiling := media.PartSizeFor(c.cfg.Media[targetMedia].Type).Max; ceiling > 0 {
+			for i, s := range job.meta.PartSeals {
+				if s.Size > ceiling {
+					return fmt.Errorf("copy %s L%d to %q refused: atom %d is %s, over the medium's %s part ceiling, and a sealed atom cannot shrink without the key — lower the dumptype's part_size for future dumps (retention ages this archive out) or target a medium with a higher ceiling",
+						job.ref.DLE, job.ref.Level, targetMedia, i, sizeutil.FormatBytes(s.Size), sizeutil.FormatBytes(ceiling))
+				}
+			}
+		}
+	}
 	rc, err := ro.OpenArchive(job.ref, fromMedia)
 	if err != nil {
 		return fmt.Errorf("copy %s L%d from %q: %w", job.ref.DLE, job.ref.Level, fromMedia, err)

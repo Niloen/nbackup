@@ -206,6 +206,18 @@ func (fs *FS) OpenRange(ref archiveio.Ref, medium string, off, length int64) (io
 	return nil, lastErr
 }
 
+// AtomSeals returns an atomic archive's per-part seals from the first placement
+// carrying an aligned set (archive-invariant for atoms: every copy holds the same
+// sealed messages), or nil when none records them.
+func (fs *FS) AtomSeals(ref archiveio.Ref) ([]record.PartSeal, error) {
+	for _, p := range fs.cat.PlacementsFor(ref.Run) {
+		if pa, ok := p.Placed(ref.DLE, ref.Level); ok && len(pa.Seals) == len(pa.Parts) && len(pa.Seals) > 0 {
+			return pa.Seals, nil
+		}
+	}
+	return nil, nil
+}
+
 // VerifyPart re-hashes one part of an archive's copy on a medium against the seal the
 // placement recorded — the bounded-egress integrity primitive: a sampling drill reads a
 // single part off the medium instead of the archive. It is medium-pinned by nature (a

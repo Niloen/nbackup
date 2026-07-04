@@ -106,39 +106,39 @@ committed archive). Road-test: real `nb recover --path` of one file from a
 Goal: FrameSafe pipelines produce sealed atoms — part == complete gpg message
 — with honest filenames, atom-carrying copies, and the sizing knobs.
 
-- [ ] Resolver: all stages ≥ PerFrame (≥1 not Full) → ATOMIC. Atom size =
+- [x] Resolver: all stages ≥ PerFrame (≥1 not Full) → ATOMIC. Atom size =
       dumptype `part_size`, else global `part_size` (new top-level knob,
       default 10 GiB). Atoms cut in the **compressed domain**: inner Full
       stages frame at `frame_size`; whole inner frames pack up to the atom
       bound, then the PerFrame stage seals each bundle.
-- [ ] `xfer` framed drive mode: for atomic archives Transfer cuts parts at
+- [x] `xfer` framed drive mode: for atomic archives Transfer cuts parts at
       frame boundaries, not at the sink's cap (per-frame readers from the
       framed source; one part per atom). The only real Transfer surgery —
       highest testing bar in the plan.
-- [ ] `archiveio.Writer` atom placement: place each atom as a whole unit
+- [x] `archiveio.Writer` atom placement: place each atom as a whole unit
       (PlaceFile-style verb with archive part headers); tape rolls proactively
       when `remaining < atom bound` (no split buffer). `record.PartSeal` gains
       `RawSize` — cumulative raw sizes are the atomic shape's frame table (no
       separate index table).
-- [ ] Naming (`fslike`): atoms put `.pNNN` BEFORE the extensions
+- [x] Naming (`fslike`): atoms put `.pNNN` BEFORE the extensions
       (`…-L0.p000.tar.zst.gpg` — a valid file); slices keep `.pNNN` after
       (today's "not a real file" marker). Keyed off the recorded shape.
-- [ ] Copies: `NewCopy` atom mode — parts carried 1:1, never re-split; footer
+- [x] Copies: `NewCopy` atom mode — parts carried 1:1, never re-split; footer
       shape selects the mode. Holding disk stages atomic archives as atoms
       (final shape), since the drain is key-free.
-- [ ] Knobs + validation ladder: dumptype `part_size` (atom size; inert-knob
+- [x] Knobs + validation ladder: dumptype `part_size` (atom size; inert-knob
       warning when the dumptype has no PerFrame stage); media `part_size`
       keeps today's slice meaning; atom sizes validate against media
       *ceilings* (`PartSizePolicy.Max`) — config-time warning naming
       dumptype × medium pairs, dump-time hard error when routed there,
       sync-time per-archive refusal with remedy. `nb repack` is named in docs
       as deliberately not built.
-- [ ] Read side: `restorer.planDecode` per footer shape — per-atom decode loop
+- [x] Read side: `restorer.planDecode` per footer shape — per-atom decode loop
       (one Reverse child per atom) vs single child. Selective restore on
       atomic = open the covering parts (no OpenRange needed). Stock drill tier
       learns the file-loop recipe for atomic archives; README/verification.md
       stock-recovery sections updated with both recipes.
-- [ ] Drill: key-proving sample — decrypt-and-list ONE atom (structural proof
+- [x] Drill: key-proving sample — decrypt-and-list ONE atom (structural proof
       at one atom's egress), the encrypted sibling of the checksum sample.
 
 Acceptance: atomic e2e with gpg where available, `none`-as-PerFrame test
