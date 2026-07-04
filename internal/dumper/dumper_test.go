@@ -45,6 +45,7 @@ func (f *fakeArchiver) Estimate(archiver.BackupRequest) (int64, error) { return 
 func (f *fakeArchiver) HasBase(string, int) bool                       { return f.hasBase }
 func (f *fakeArchiver) RestoreStage(string, []string) programs.Cmd     { return programs.Cmd{} }
 func (f *fakeArchiver) List(io.Reader) ([]record.Member, error)        { return nil, nil }
+func (f *fakeArchiver) SpliceTrailer() []byte                          { return nil }
 
 func (f *fakeArchiver) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource, error) {
 	if f.backupErr != nil {

@@ -207,6 +207,17 @@ func (r *Restorer) extractSelected(st recovery.ExtractStep, d dest, log Logf) (h
 	if len(groups) == 0 {
 		return false, nil
 	}
+	// The archiver must DECLARE its streams spliceable (member extents are
+	// independently restorable and this trailer terminates an assembled stream) —
+	// reporting offsets alone is not that promise; without it, whole-stream only.
+	arch, err := r.deps.ArchiverFor(st.Archiver, d.host)
+	if err != nil {
+		return true, err
+	}
+	trailer := arch.SpliceTrailer()
+	if trailer == nil {
+		return false, nil
+	}
 	// Capability probe: open the first group's range now. Any failure here — no seals,
 	// a range-incapable medium, no copy — is the fallback cue, before any byte moved.
 	first, perr := r.deps.Store.OpenRange(ref, "", groups[0].encOff, groups[0].encLen)
@@ -215,14 +226,8 @@ func (r *Restorer) extractSelected(st recovery.ExtractStep, d dest, log Logf) (h
 	}
 
 	pr, pw := io.Pipe()
-	go r.emitGroups(ref, groups, first, plan, pw)
+	go r.emitGroups(ref, groups, first, plan, trailer, pw)
 
-	arch, err := r.deps.ArchiverFor(st.Archiver, d.host)
-	if err != nil {
-		first.Close()
-		pr.Close()
-		return true, err
-	}
 	sink := xfer.NewProgramSink(d.exec).Add(arch.RestoreStage(d.dir, st.Members))
 	_, terr := xfer.Transfer(context.Background(), xfer.Reader(pr), xfer.NewFilters(), sink)
 	return true, terr
@@ -233,7 +238,7 @@ func (r *Restorer) extractSelected(st recovery.ExtractStep, d dest, log Logf) (h
 // the pipeline has one, discards up to each extent, emits the extent, and drains the
 // group's tail so the decode child exits cleanly at its input's end. A trailing 1 KiB
 // of NULs is tar's end-of-archive marker (PoC-proven clean exit).
-func (r *Restorer) emitGroups(ref archiveio.Ref, groups []rangeGroup, first io.ReadCloser, plan selectionPlan, pw *io.PipeWriter) {
+func (r *Restorer) emitGroups(ref archiveio.Ref, groups []rangeGroup, first io.ReadCloser, plan selectionPlan, trailer []byte, pw *io.PipeWriter) {
 	for i, g := range groups {
 		rc := first
 		if i > 0 {
@@ -255,8 +260,8 @@ func (r *Restorer) emitGroups(ref archiveio.Ref, groups []rangeGroup, first io.R
 		}
 		stream.Close()
 	}
-	// tar's end-of-archive: two 512-byte zero blocks (1 KiB) after the last member.
-	if _, err := pw.Write(make([]byte, 1024)); err != nil {
+	// The archiver's splice trailer terminates the assembled stream cleanly.
+	if _, err := pw.Write(trailer); err != nil {
 		pw.CloseWithError(err)
 		return
 	}
@@ -387,6 +392,10 @@ func (r *Restorer) sampleTable(ref archiveio.Ref, medium string, frames []record
 	if len(groups) != 1 {
 		return res, nil
 	}
+	trailer := arch.SpliceTrailer()
+	if trailer == nil {
+		return res, nil // the archiver's streams do not splice: nothing to sample
+	}
 	res.Bytes = groups[0].encLen
 	rc, err := r.deps.Store.OpenRange(ref, medium, groups[0].encOff, groups[0].encLen)
 	if err != nil {
@@ -404,7 +413,7 @@ func (r *Restorer) sampleTable(ref archiveio.Ref, medium string, frames []record
 			return
 		}
 		stream.Close()
-		if _, err := pw.Write(make([]byte, 1024)); err != nil {
+		if _, err := pw.Write(trailer); err != nil {
 			pw.CloseWithError(err)
 			return
 		}

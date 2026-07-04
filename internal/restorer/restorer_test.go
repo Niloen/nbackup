@@ -95,6 +95,9 @@ func (fakeArchiver) RestoreStage(destDir string, members []string) programs.Cmd 
 	return programs.Cmd{Name: "sh", Args: []string{"-c", "cat >/dev/null"}}
 }
 
+// The fake consumes anything, so it may honestly declare its streams spliceable.
+func (fakeArchiver) SpliceTrailer() []byte { return []byte{} }
+
 func testDeps(store *fakeStore, archives []record.Archive) Deps {
 	return Deps{
 		Store:    store,

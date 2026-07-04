@@ -127,4 +127,17 @@ type Archiver interface {
 	// compare against the seal. The returned members use the same convention
 	// (and offset semantics) as BackupResult.Members.
 	List(in io.Reader) ([]record.Member, error)
+	// SpliceTrailer declares whether this archiver's streams can be SPLICED — a
+	// synthetic stream assembled from whole member extents (each [Off_i, Off_{i+1}),
+	// in stream order) that RestoreStage and List will consume correctly — and, when
+	// they can, returns the bytes that cleanly terminate such a stream (GNU tar: the
+	// two 512-byte zero blocks of its end-of-archive marker). This is a stronger
+	// promise than reporting member offsets: it requires every member's extent to be
+	// self-contained and independently restorable, with no cross-member state and no
+	// out-of-band directory (a zip-style central directory, a solid-compressed
+	// format's shared dictionary would both report offsets yet NOT be spliceable).
+	// nil = no such promise; ranged selective restore and the structural samples
+	// then fall back to the whole-stream decode, which is always correct. The read
+	// side's capability peer of the transforms' Concat and the media's RangeOpener.
+	SpliceTrailer() []byte
 }

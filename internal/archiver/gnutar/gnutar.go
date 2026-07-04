@@ -244,6 +244,12 @@ func (g *gnutar) RestoreStage(destDir string, members []string) programs.Cmd {
 	return programs.Cmd{Name: g.bin, Args: args, OKExit: []int{1}}
 }
 
+// SpliceTrailer: tar streams splice — every member leads with a self-describing
+// 512-byte header and carries no cross-member state, so a concatenation of whole
+// member extents is itself a readable tar stream; the trailer is tar's end-of-archive
+// marker, two 512-byte zero blocks. The one place tar's splice/EOF shape is known.
+func (g *gnutar) SpliceTrailer() []byte { return make([]byte, 1024) }
+
 // createArgs builds the shared tar create-mode argument list. fileTarget is "-" for a
 // streamed backup or "/dev/null" for an estimate; indexPath, when set, adds the verbose
 // member index (backup only).

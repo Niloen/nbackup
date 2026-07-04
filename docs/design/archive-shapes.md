@@ -28,6 +28,13 @@ archiver           BackupResult.Members []Member{Path, Off}; Off = -1 when the
                    archiver cannot report member offsets (gnutar can: tar -R,
                    Off = block × 512, byte-exact — PoC-verified). Offsets gate
                    only member-SELECTIVE restore, never the shape.
+                   SpliceTrailer() []byte: declares the STRONGER promise selective
+                   restore actually rides on — member extents are self-contained
+                   and a stream assembled from them, terminated by these bytes
+                   (tar: two 512-byte zero blocks), restores/lists correctly. An
+                   offset-reporting but non-spliceable format (zip-style central
+                   directory, solid compression) returns nil and reads whole
+                   streams only.
 
 media (exists)     PartSizePolicy{Default, Max} + Bounded() — placement
                    geometry and hard ceilings only. Media never influence shape.

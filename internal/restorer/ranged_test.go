@@ -266,3 +266,45 @@ func TestSampleFrame(t *testing.T) {
 		t.Fatalf("rangeless copy should skip (ran=%v err=%v)", res.Ran, err)
 	}
 }
+
+// noSplice wraps a real archiver but withdraws the splice declaration — modeling an
+// offset-reporting yet non-spliceable format (a zip-style central directory, a solid
+// compressor). Offsets alone must never admit a stream into the spliced paths.
+type noSplice struct{ archiver.Archiver }
+
+func (noSplice) SpliceTrailer() []byte { return nil }
+
+// TestNoSpliceDeclarationFallsBack pins the capability gate: with every OTHER ranged
+// ingredient present (offsets, frames, a range-capable copy), an archiver that does
+// not declare splicing gets the whole-stream path — selection still restores
+// correctly, zero ranged bytes are fetched, and the structural sample reports Ran=false.
+func TestNoSpliceDeclarationFallsBack(t *testing.T) {
+	arch := noSplice{gnutarOrSkip(t)}
+	dle := "app01-data"
+	store, step, _, _ := framedFixture(t, dle)
+	step.Members = []string{"tail.txt"}
+
+	deps := testDeps(store, nil)
+	deps.ArchiverFor = func(typeName, host string) (archiver.Archiver, error) { return arch, nil }
+	r := New(deps)
+	dest := filepath.Join(t.TempDir(), "out")
+	if _, _, err := r.ExtractSelection([]recovery.ExtractStep{step}, dest, nil); err != nil {
+		t.Fatalf("ExtractSelection (no-splice fallback): %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "tail.txt"))
+	if err != nil || string(got) != "the needle\n" {
+		t.Fatalf("restored tail.txt = %q, %v", got, err)
+	}
+	if store.rangedBytes != 0 {
+		t.Fatalf("a non-spliceable archiver must not be fed ranged reads; fetched %d bytes", store.rangedBytes)
+	}
+	if len(store.opened) != 1 {
+		t.Fatalf("fallback should open the whole stream once, opened %v", store.opened)
+	}
+
+	a := record.Archive{Run: step.RunID, DLE: dle, Level: 0, Compress: "gzip"}
+	res, err := r.Sample("", a, crypt.Options{}, arch, 0)
+	if err != nil || res.Ran {
+		t.Fatalf("the structural sample must skip a non-spliceable archiver (ran=%v err=%v)", res.Ran, err)
+	}
+}
