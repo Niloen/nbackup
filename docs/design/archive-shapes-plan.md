@@ -27,24 +27,24 @@ Goal: the member index carries each member's byte offset in the raw archive
 stream. Standalone value: structural verify compares offsets as well as names.
 Everything later (selective restore, mount) builds on this.
 
-- [ ] `archiver/gnutar`: add `--block-number` to the backup index invocation
+- [x] `archiver/gnutar`: add `--block-number` to the backup index invocation
       (`createArgs`) and to `List` (`tar -tR`). Parse `block N: path` lines
       (new sibling of `scanMembers`; drop the `** Block of NULs **` trailer in
       list mode). `RawOff = N × 512` — the ×512 stays inside gnutar.
-- [ ] Widen `Members []string` → `[]record.Member{Path string; Off int64}`
+- [x] Widen `Members []string` → `[]record.Member{Path string; Off int64}`
       (Off −1 when unreported). Ripple is mechanical: `archiver.BackupResult`,
       `xfer.SourceStats`, `record.Archive`, `CountFiles`, recovery tree
       loaders, `RestoreStage` replay (paths only at point of use). Document on
       the type: **the list is in stream order; member i's extent is
       `[Off_i, Off_{i+1})`** — this invariant becomes load-bearing.
-- [ ] Index encoding (`record/index.go`): gzip JSON array of strings → gzip
+- [x] Index encoding (`record/index.go`): gzip JSON array of strings → gzip
       JSON document `{"members":[{"p":…,"o":…},…]}` with room for a `frames`
       key (phase 2). Update golden/format tests. Footer stays untouched
       (Members remain omitempty/stripped).
-- [ ] Structural verify (`engine/verify.go` membersDiff + drill structural
+- [x] Structural verify (`engine/verify.go` membersDiff + drill structural
       tier): compare `{Path, Off}` pairs against the seal — a stronger check,
       free.
-- [ ] Zero-change incrementals record no index — unchanged; keep it that way.
+- [x] Zero-change incrementals record no index — unchanged; keep it that way.
 
 Acceptance: existing suites green; new tests for offset parsing (create and
 list mode, incl. a listed-incremental archive — dumpdir payloads sit between

@@ -8,6 +8,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // twoDLEFixture dumps two DLEs into one run on disk and mirrors the run onto an
@@ -236,5 +237,27 @@ func TestVerifyDeepStructuralZeroChangeIncremental(t *testing.T) {
 	}
 	if rep.Failures != 0 {
 		t.Fatalf("deep verify failures = %d, want 0 (zero-change incremental must not false-fail): %+v", rep.Failures, rep.Runs)
+	}
+}
+
+// TestMembersDiffOffsets pins the offset-aware structural comparison: identical lists
+// match; a member whose stream offset moved is a difference even when every name
+// survives; and an unreported offset (-1) on either side skips the offset check rather
+// than failing an archiver that cannot report offsets.
+func TestMembersDiffOffsets(t *testing.T) {
+	recorded := []record.Member{{Path: "./a", Off: 0}, {Path: "./b", Off: 1024}}
+	if d := membersDiff(recorded, []record.Member{{Path: "./b", Off: 1024}, {Path: "./a", Off: 0}}); d != "" {
+		t.Fatalf("equal sets must match regardless of order, got %q", d)
+	}
+	moved := []record.Member{{Path: "./a", Off: 0}, {Path: "./b", Off: 2048}}
+	if d := membersDiff(recorded, moved); d == "" {
+		t.Fatal("a member that moved in the stream must be reported")
+	}
+	unreported := []record.Member{{Path: "./a", Off: -1}, {Path: "./b", Off: -1}}
+	if d := membersDiff(recorded, unreported); d != "" {
+		t.Fatalf("unreported offsets must not fail the name-set match, got %q", d)
+	}
+	if d := membersDiff(recorded, []record.Member{{Path: "./a", Off: 0}, {Path: "./c", Off: 1024}}); d == "" {
+		t.Fatal("a renamed member must be reported")
 	}
 }

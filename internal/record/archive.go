@@ -31,8 +31,20 @@ type Archive struct {
 	Parts        int        `json:"parts,omitempty"`      // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
 	BaseRun      string     `json:"base_run,omitempty"`   // for level>=1, the run whose state this builds on (a full omits it)
 	CreatedAt    time.Time  `json:"created_at"`           // when this archive committed (landed) — per-archive, the basis for retention age and the "last archive added" display
-	Members      []string   `json:"members,omitempty"`    // member paths archived: slash-separated, directories with a trailing slash (the archiver-neutral convention recovery browses); the raw token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
+	Members      []Member   `json:"members,omitempty"`    // members archived, in stream order (see Member); the raw path token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
 	PartSeals    []PartSeal `json:"part_seals,omitempty"` // per-part seals, index-aligned with the parts (Header.Part order). Like Parts, a fact about THIS placement's layout (a copy re-splits and re-seals its own parts): the catalog moves them onto the placement's record and strips them from the run's medium-independent content.
+}
+
+// Member is one archive member: its path (slash-separated, directories with a trailing
+// slash — the archiver-neutral convention) and its byte offset in the raw archive stream
+// (-1 when the producing archiver cannot report offsets). A member list is in stream
+// order, and member i's extent is [Off_i, Off_{i+1}) — offset-consumers (selective
+// restore's range planning, offset-aware structural verify) rely on that invariant, so
+// never reorder a recorded list. The JSON keys are terse (p/o) because member lists are
+// the bulk of an archive's metadata.
+type Member struct {
+	Path string `json:"p"`
+	Off  int64  `json:"o"`
 }
 
 // PartSeal is the seal of one part file as it lies on a placement: its size and the

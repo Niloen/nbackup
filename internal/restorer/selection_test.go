@@ -19,9 +19,9 @@ import (
 // where each path resolves to the archive that last held it — no media touched.
 func TestOpenRecoverBuildsTree(t *testing.T) {
 	dle := "app01-data"
-	store := &fakeStore{members: map[archiveio.Ref][]string{
-		ref("run-2026-06-01.001", dle, 0): {"./etc/", "./etc/hosts"},
-		ref("run-2026-06-02.001", dle, 1): {"./var/", "./var/log"},
+	store := &fakeStore{members: map[archiveio.Ref][]record.Member{
+		ref("run-2026-06-01.001", dle, 0): {{Path: "./etc/", Off: 0}, {Path: "./etc/hosts", Off: 512}},
+		ref("run-2026-06-02.001", dle, 1): {{Path: "./var/", Off: 0}, {Path: "./var/log", Off: 512}},
 	}}
 	r := New(testDeps(store, chainArchives(dle)))
 	tree, err := r.OpenRecover(dle, "2026-06-02")

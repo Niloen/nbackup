@@ -32,7 +32,7 @@ func (m *MemberIndex) path(run, dle string, level int) string {
 }
 
 // Store writes an archive's member list to the cache (atomic temp+rename).
-func (m *MemberIndex) Store(run, dle string, level int, members []string) error {
+func (m *MemberIndex) Store(run, dle string, level int, members []record.Member) error {
 	if err := os.MkdirAll(m.dir, 0o755); err != nil {
 		return err
 	}
@@ -44,7 +44,7 @@ func (m *MemberIndex) Store(run, dle string, level int, members []string) error 
 }
 
 // Load reads an archive's cached member list, reporting whether it was present.
-func (m *MemberIndex) Load(run, dle string, level int) ([]string, bool, error) {
+func (m *MemberIndex) Load(run, dle string, level int) ([]record.Member, bool, error) {
 	f, err := os.Open(m.path(run, dle, level))
 	if err != nil {
 		if os.IsNotExist(err) {

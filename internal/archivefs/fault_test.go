@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
-	"strings"
+	"reflect"
 	"testing"
 	"time"
 
@@ -194,7 +194,7 @@ func TestSessionRecord(t *testing.T) {
 	c := New(m, &fakeDeps{}, mindex)
 	sess := c.OpenRun(m, fakeMedium{name: "disk"})
 
-	arch := record.Archive{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0, Members: []string{"a", "b"}}
+	arch := record.Archive{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0, Members: []record.Member{{Path: "a", Off: 0}, {Path: "b", Off: 512}}}
 	pos := archiveio.ArchivePos{}
 	if err := sess.Record(archiveio.CommitResult{Archive: arch, Pos: pos}); err != nil {
 		t.Fatalf("Record: %v", err)
@@ -203,7 +203,7 @@ func TestSessionRecord(t *testing.T) {
 		t.Fatalf("AddArchive not called as expected: %+v", m.added)
 	}
 	got, ok, err := mindex.Load("run-2026-07-02.001", "h:/p", 0)
-	if err != nil || !ok || strings.Join(got, ",") != "a,b" {
+	if err != nil || !ok || !reflect.DeepEqual(got, arch.Members) {
 		t.Fatalf("member index not cached: got=%v ok=%v err=%v", got, ok, err)
 	}
 }
@@ -411,7 +411,7 @@ func TestOpenArchivesOrdersReadsAndReportsMissing(t *testing.T) {
 // re-caches it so a second call hits the cache.
 func TestMembersOnMediumFallback(t *testing.T) {
 	ref := archiveio.Ref{Run: "run-2026-07-02.001", DLE: "h:/p", Level: 0}
-	members := []string{"dir/", "dir/file"}
+	members := []record.Member{{Path: "dir/", Off: 0}, {Path: "dir/file", Off: 512}}
 	var idxBuf bytes.Buffer
 	if err := record.EncodeIndex(&idxBuf, members); err != nil {
 		t.Fatalf("encode index: %v", err)
@@ -428,11 +428,11 @@ func TestMembersOnMediumFallback(t *testing.T) {
 	c := New(m, deps, mindex)
 
 	got, err := c.Members(ref)
-	if err != nil || strings.Join(got, ",") != "dir/,dir/file" {
+	if err != nil || !reflect.DeepEqual(got, members) {
 		t.Fatalf("Members fallback = %v, err = %v; want the decoded on-medium index", got, err)
 	}
 	// It re-caches: the index cache now has it.
-	if cached, ok, _ := mindex.Load(ref.Run, ref.DLE, 0); !ok || strings.Join(cached, ",") != "dir/,dir/file" {
+	if cached, ok, _ := mindex.Load(ref.Run, ref.DLE, 0); !ok || !reflect.DeepEqual(cached, members) {
 		t.Fatalf("Members did not re-cache the on-medium index: %v ok=%v", cached, ok)
 	}
 }

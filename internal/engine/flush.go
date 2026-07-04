@@ -60,7 +60,7 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 			}
 			return h.session.OpenArchiveAt(ref, pos)
 		},
-		Members: func(name string, ref archiveio.Ref, index archiveio.FilePos) ([]string, error) {
+		Members: func(name string, ref archiveio.Ref, index archiveio.FilePos) ([]record.Member, error) {
 			// The member cache (or another copy) first; else read the index positionally off
 			// the holding's own volume — its read face is refused while the session's write
 			// claim holds it, exactly as during the live drain.

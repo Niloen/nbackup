@@ -178,7 +178,7 @@ func writeOneArchive(t *testing.T, w *Writer, sink *memSink, dle string, body []
 	if err := driveArchive(aw, body); err != nil {
 		t.Fatalf("driveArchive: %v", err)
 	}
-	if err := aw.Commit(context.Background(), xfer.SourceStats{FileCount: 1, Uncompressed: int64(len(body)), Members: []string{dle}}); err != nil {
+	if err := aw.Commit(context.Background(), xfer.SourceStats{FileCount: 1, Uncompressed: int64(len(body)), Members: []record.Member{{Path: dle, Off: 0}}}); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	return sink.last.Archive, sink.last.Pos
@@ -333,7 +333,7 @@ func TestCommitRecordsUnreadable(t *testing.T) {
 	stats := xfer.SourceStats{
 		FileCount:    2,
 		Uncompressed: int64(len(body)),
-		Members:      []string{"readable.txt"},
+		Members:      []record.Member{{Path: "readable.txt", Off: 0}},
 		Unreadable:   []string{"/p/locked-a", "/p/locked-b"},
 	}
 	if err := aw.Commit(context.Background(), stats); err != nil {

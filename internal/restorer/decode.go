@@ -9,6 +9,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/programs"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
 	"github.com/Niloen/nbackup/internal/xfer"
@@ -106,7 +107,7 @@ func (r *Restorer) VerifyChecksum(rc io.ReadCloser, sha string) (bool, error) {
 // filters) and lists its members (`tar -t`) — the verify path's structural
 // check. It returns the listed members and the raw, role-tagged transfer error
 // for the caller to classify and hint.
-func (r *Restorer) ListMembers(rc io.ReadCloser, compressScheme, encrypt string, opts crypt.Options, arch archiver.Archiver) ([]string, error) {
+func (r *Restorer) ListMembers(rc io.ReadCloser, compressScheme, encrypt string, opts crypt.Options, arch archiver.Archiver) ([]record.Member, error) {
 	decrypt, decompress, err := buildDecode(compressScheme, r.deps.CompressOpts, encrypt, opts)
 	if err != nil {
 		return nil, err
@@ -140,7 +141,7 @@ func buildDecode(compressScheme string, copts compress.Options, encrypt string, 
 // comparison.
 type listSink struct {
 	arch    archiver.Archiver
-	members []string
+	members []record.Member
 	done    chan error
 }
 

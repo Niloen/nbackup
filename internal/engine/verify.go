@@ -410,19 +410,32 @@ func classifyReadErr(err error) drill.Class {
 }
 
 // membersDiff compares the seal's member list to a freshly listed one as sorted
-// sets, returning "" when they match or a short human description of the first
-// difference otherwise.
-func membersDiff(want, got []string) string {
-	wc := append([]string(nil), want...)
-	gc := append([]string(nil), got...)
-	sort.Strings(wc)
-	sort.Strings(gc)
+// sets — paths AND stream offsets — returning "" when they match or a short human
+// description of the first difference otherwise. Offsets are compared only when both
+// sides report one (>= 0): an archiver that cannot report offsets still gets the
+// name-set check.
+func membersDiff(want, got []record.Member) string {
+	wc := append([]record.Member(nil), want...)
+	gc := append([]record.Member(nil), got...)
+	byPathOff := func(ms []record.Member) func(i, j int) bool {
+		return func(i, j int) bool {
+			if ms[i].Path != ms[j].Path {
+				return ms[i].Path < ms[j].Path
+			}
+			return ms[i].Off < ms[j].Off
+		}
+	}
+	sort.Slice(wc, byPathOff(wc))
+	sort.Slice(gc, byPathOff(gc))
 	if len(wc) != len(gc) {
 		return fmt.Sprintf("member count differs from the recorded index: recorded %d, archive lists %d", len(wc), len(gc))
 	}
 	for i := range wc {
-		if wc[i] != gc[i] {
-			return fmt.Sprintf("members differ from the recorded index (e.g. recorded %q vs archive %q)", wc[i], gc[i])
+		if wc[i].Path != gc[i].Path {
+			return fmt.Sprintf("members differ from the recorded index (e.g. recorded %q vs archive %q)", wc[i].Path, gc[i].Path)
+		}
+		if wc[i].Off >= 0 && gc[i].Off >= 0 && wc[i].Off != gc[i].Off {
+			return fmt.Sprintf("member %q moved in the stream: recorded offset %d, archive lists %d", wc[i].Path, wc[i].Off, gc[i].Off)
 		}
 	}
 	return ""

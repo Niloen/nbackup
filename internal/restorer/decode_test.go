@@ -138,7 +138,11 @@ func TestListMembersRealTar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListMembers over a valid tar: %v", err)
 	}
-	joined := strings.Join(members, "\n")
+	var paths []string
+	for _, m := range members {
+		paths = append(paths, m.Path)
+	}
+	joined := strings.Join(paths, "\n")
 	if !strings.Contains(joined, "etc/hosts") || !strings.Contains(joined, "var/log/app.log") {
 		t.Fatalf("members = %v, want both tar entries", members)
 	}

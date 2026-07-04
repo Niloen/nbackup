@@ -3,11 +3,12 @@ package restorer
 import (
 	"errors"
 	"fmt"
-	"github.com/Niloen/nbackup/internal/archiveio"
 	"io"
+	"strings"
 
 	"github.com/Niloen/nbackup/internal/archivefs"
-	"github.com/Niloen/nbackup/internal/archiver"
+	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
 )
 
@@ -16,7 +17,7 @@ import (
 // or the on-medium index on a miss), so a fully-cached browse touches no media
 // until extract.
 func (r *Restorer) OpenRecover(dle, asOf string) (*recovery.Tree, error) {
-	return recovery.BuildTree(r.deps.Archives(), dle, asOf, func(runID string, level int) ([]string, error) {
+	return recovery.BuildTree(r.deps.Archives(), dle, asOf, func(runID string, level int) ([]record.Member, error) {
 		return r.deps.Store.Members(archiveio.Ref{Run: runID, DLE: dle, Level: level})
 	})
 }
@@ -61,11 +62,11 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 		st := stepByRef[ref]
 		// An archive in the chain that holds none of the selected files contributes
 		// nothing — skip it silently rather than logging a noisy "extracting 0 file(s)".
-		if archiver.CountFiles(st.Members) == 0 {
+		if countFilePaths(st.Members) == 0 {
 			return nil
 		}
 		archives++
-		log.Log("extracting %d file(s) from %s %s L%d", archiver.CountFiles(st.Members), st.RunID, r.deps.DisplayDLE(st.DLE), st.Level)
+		log.Log("extracting %d file(s) from %s %s L%d", countFilePaths(st.Members), st.RunID, r.deps.DisplayDLE(st.DLE), st.Level)
 		rc, serr := open()
 		if serr != nil {
 			return serr
@@ -74,7 +75,7 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 		if err := DecryptHint(st.Encrypt, r.dec.restoreArchive(rc, plan, st.Archiver, d, st.Members)); err != nil {
 			return err
 		}
-		files += archiver.CountFiles(st.Members)
+		files += countFilePaths(st.Members)
 		return nil
 	})
 	if err != nil {
@@ -84,4 +85,17 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 		return files, archives, fmt.Errorf("recover: %w — one or more selected archives have no available copy", archivefs.ErrMissingCopy)
 	}
 	return files, archives, nil
+}
+
+// countFilePaths counts the file entries in a raw member-path list (an ExtractStep's
+// selection), excluding directories per the trailing-slash convention — the path-only
+// twin of archiver.CountFiles.
+func countFilePaths(paths []string) int {
+	n := 0
+	for _, p := range paths {
+		if !strings.HasSuffix(p, "/") {
+			n++
+		}
+	}
+	return n
 }

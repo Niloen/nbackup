@@ -17,7 +17,7 @@ func TestCommitRoundTrip(t *testing.T) {
 		Compressed: 1024, Uncompressed: 2048, FileCount: 7, SHA256: "deadbeef",
 		Parts: 2, BaseRun: "run-2026-06-20.020000",
 		CreatedAt: time.Date(2026, 6, 21, 14, 30, 0, 0, time.UTC),
-		Members:   []string{"./", "./etc/hosts"},
+		Members:   []Member{{Path: "./", Off: 0}, {Path: "./etc/hosts", Off: 512}},
 	}
 	data, err := MarshalCommit(a)
 	if err != nil {

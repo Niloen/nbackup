@@ -26,6 +26,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/programs"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 func init() {
@@ -190,15 +191,17 @@ func (g *gnutar) Estimate(r archiver.BackupRequest) (int64, error) {
 	return total, nil
 }
 
-// List reads a raw tar stream from in and returns its member paths (`tar -t`), without
-// extracting. It is the structural half of a deep verify: the pipeline completing cleanly
-// proves the stream is a valid, listable archive, and the returned members compare
-// directly against the seal. Exit-1 ("some files changed") is a warning, not a failure.
-func (g *gnutar) List(in io.Reader) ([]string, error) {
+// List reads a raw tar stream from in and returns its members with their stream offsets
+// (`tar -tR`), without extracting. It is the structural half of a deep verify: the
+// pipeline completing cleanly proves the stream is a valid, listable archive, and the
+// returned members compare directly against the seal — offsets included, so a member
+// that moved in the stream is caught even when every name survives. Exit-1 ("some files
+// changed") is a warning, not a failure.
+func (g *gnutar) List(in io.Reader) ([]record.Member, error) {
 	if err := g.Check(); err != nil {
 		return nil, err
 	}
-	cmd := g.ex.Command(g.bin, "--list", "--file=-")
+	cmd := g.ex.Command(g.bin, "--list", "--block-number", "--file=-")
 	cmd.Stdin = in
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -209,7 +212,7 @@ func (g *gnutar) List(in io.Reader) ([]string, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", g.bin, err)
 	}
-	members, scanErr := scanMembers(stdout)
+	members, scanErr := scanMemberOffsets(stdout)
 	waitErr := cmd.Wait()
 	if scanErr != nil {
 		return nil, scanErr
@@ -262,18 +265,18 @@ func (g *gnutar) createArgs(r archiver.BackupRequest, fileTarget, snapshot, inde
 		args = append(args, "--exclude="+p)
 	}
 	if indexPath != "" {
-		args = append(args, "--verbose", "--index-file="+indexPath)
+		args = append(args, "--verbose", "--block-number", "--index-file="+indexPath)
 	}
 	return append(args, ".")
 }
 
 // readIndex reads the member index tar wrote to path on the executor's host.
-func (g *gnutar) readIndex(path string) ([]string, error) {
+func (g *gnutar) readIndex(path string) ([]record.Member, error) {
 	data, err := g.ex.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return scanMembers(bytes.NewReader(data))
+	return scanMemberOffsets(bytes.NewReader(data))
 }
 
 // isWarning reports whether a tar exit was a non-fatal warning (exit code 1: "some files
@@ -346,17 +349,35 @@ func containsAny(s string, subs []string) bool {
 	return false
 }
 
-// scanMembers reads a newline-separated member listing (a tar --index-file, or `tar -t`
-// output) and returns the member tokens, dropping blanks and the bare "./" root entry.
-func scanMembers(r io.Reader) ([]string, error) {
-	var members []string
+// scanMemberOffsets reads a --block-number member listing (a create-mode --index-file,
+// or `tar -tR` output) and returns the members with their raw-stream byte offsets. tar
+// prefixes each member with the 512-byte archive block its header starts at ("block N:
+// path"); the ×512 conversion happens here — nothing outside gnutar knows tar's block
+// size. Blanks, the bare "./" root entry, and list mode's "** Block of NULs **" /
+// "** End of File **" end-of-archive markers are dropped. A line without the block
+// prefix is kept with offset -1 rather than dropped, so unexpected tar output degrades
+// to "offset unreported", never to a missing member.
+func scanMemberOffsets(r io.Reader) ([]record.Member, error) {
+	var members []record.Member
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
-		if line != "" && line != "./" {
-			members = append(members, line)
+		if line == "" {
+			continue
 		}
+		m := record.Member{Path: line, Off: -1}
+		if rest, ok := strings.CutPrefix(line, "block "); ok {
+			if num, path, found := strings.Cut(rest, ": "); found {
+				if n, err := strconv.ParseInt(num, 10, 64); err == nil {
+					m = record.Member{Path: path, Off: n * 512}
+				}
+			}
+		}
+		if m.Path == "./" || strings.HasPrefix(m.Path, "** ") {
+			continue
+		}
+		members = append(members, m)
 	}
 	return members, sc.Err()
 }

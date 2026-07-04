@@ -36,7 +36,7 @@ type FlushDeps struct {
 	Open       func(holding string, ref archiveio.Ref, pos archiveio.ArchivePos) (io.ReadCloser, error)
 	// Members returns an archive's member list, given where its index sits on the holding —
 	// the host serves it from its member cache when it can, else reads the index there.
-	Members     func(holding string, ref archiveio.Ref, index archiveio.FilePos) ([]string, error)
+	Members     func(holding string, ref archiveio.Ref, index archiveio.FilePos) ([]record.Member, error)
 	Reclaim     func(holding string, ref archiveio.Ref, pos archiveio.ArchivePos) error
 	OpenLanding func(landing string, spec archiveio.RunSpec) (*archiveio.Writer, error)
 	DisplayDLE  func(dle string) string

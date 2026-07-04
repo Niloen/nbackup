@@ -24,7 +24,7 @@ import (
 // no media, catalog, or clerk — the point of the ReadStore seam.
 type fakeStore struct {
 	payloads map[archiveio.Ref][]byte
-	members  map[archiveio.Ref][]string
+	members  map[archiveio.Ref][]record.Member
 	opened   []archiveio.Ref // refs actually opened, in order
 }
 
@@ -55,7 +55,7 @@ func (f *fakeStore) OpenArchives(refs []archiveio.Ref, medium string, fn func(re
 	return missing, nil
 }
 
-func (f *fakeStore) Members(ref archiveio.Ref) ([]string, error) { return f.members[ref], nil }
+func (f *fakeStore) Members(ref archiveio.Ref) ([]record.Member, error) { return f.members[ref], nil }
 
 // fakeArchiver implements only the read side (RestoreStage); the restorer never
 // touches the produce side.

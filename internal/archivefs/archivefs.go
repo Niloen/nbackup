@@ -93,7 +93,7 @@ func New(cat ReadMap, deps Depot, mindex *catalog.MemberIndex) *FS {
 // Members returns an archive's member list, lazily: from the member-index cache, else by
 // reading the on-medium index (via a copy's recorded index position) and re-caching it. A nil
 // list is a valid "no members" answer (an archive with no files records no index).
-func (fs *FS) Members(ref archiveio.Ref) ([]string, error) {
+func (fs *FS) Members(ref archiveio.Ref) ([]record.Member, error) {
 	if members, ok, err := fs.mindex.Load(ref.Run, ref.DLE, ref.Level); err != nil {
 		return nil, err
 	} else if ok {
@@ -195,7 +195,7 @@ func (fs *FS) readerFor(medium string) (*archiveio.Reader, error) {
 // readIndex reads an archive's member index off a medium — the lazy fallback when the
 // server-side member cache misses (a rebuilt run not yet browsed). It mounts the volume the
 // index lives on and decodes it.
-func (fs *FS) readIndex(medium string, pos archiveio.FilePos) ([]string, error) {
+func (fs *FS) readIndex(medium string, pos archiveio.FilePos) ([]record.Member, error) {
 	mounter, err := fs.deps.MounterFor(medium)
 	if err != nil {
 		return nil, err

@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/Niloen/nbackup/internal/programs"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // isBrokenPipe reports whether err is a SIGPIPE/EPIPE — the symptom a producer shows
@@ -47,7 +48,7 @@ func isBrokenPipe(err error) bool {
 type SourceStats struct {
 	Uncompressed int64
 	FileCount    int
-	Members      []string
+	Members      []record.Member
 	Unreadable   []string // source paths the producer could not read (a partial dump); empty = complete
 }
 

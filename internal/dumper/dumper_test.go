@@ -44,7 +44,7 @@ func (f *fakeArchiver) Check() error                                   { return 
 func (f *fakeArchiver) Estimate(archiver.BackupRequest) (int64, error) { return 0, nil }
 func (f *fakeArchiver) HasBase(string, int) bool                       { return f.hasBase }
 func (f *fakeArchiver) RestoreStage(string, []string) programs.Cmd     { return programs.Cmd{} }
-func (f *fakeArchiver) List(io.Reader) ([]string, error)               { return nil, nil }
+func (f *fakeArchiver) List(io.Reader) ([]record.Member, error)        { return nil, nil }
 
 func (f *fakeArchiver) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource, error) {
 	if f.backupErr != nil {
@@ -54,7 +54,7 @@ func (f *fakeArchiver) BackupSource(r archiver.BackupRequest) (*archiver.BackupS
 		if f.finishErr != nil {
 			return nil, f.finishErr
 		}
-		return &archiver.BackupResult{Uncompressed: 0, FileCount: 3, Members: []string{"a", "b", "c"}, Unreadable: f.unreadable}, nil
+		return &archiver.BackupResult{Uncompressed: 0, FileCount: 3, Members: []record.Member{{Path: "a", Off: 0}, {Path: "b", Off: 512}, {Path: "c", Off: 1024}}, Unreadable: f.unreadable}, nil
 	}
 	promote := func() error {
 		if f.promoteErr != nil {

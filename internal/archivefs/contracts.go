@@ -37,7 +37,7 @@ type ReadStore interface {
 	// more than once. Refs with no available copy are skipped and returned as missing.
 	OpenArchives(refs []archiveio.Ref, medium string, fn func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error) (missing []archiveio.Ref, err error)
 	// Members returns an archive's member list (cache, else the on-medium index).
-	Members(ref archiveio.Ref) ([]string, error)
+	Members(ref archiveio.Ref) ([]record.Member, error)
 }
 
 // WriteStore is the write face of the archive fs — one run's medium end, the mirror of
