@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -34,6 +35,13 @@ func Load(path string) (*Config, error) {
 	}
 	if err := c.Validate(); err != nil {
 		return nil, err
+	}
+	// Anchor the local/server-side default paths (workdir, state_dir, secrets_dir) to
+	// where this config file lives, not wherever nb's cwd happens to be when it runs
+	// (see resolveLocal) — an absolute path here still wins if the config itself sits
+	// under a relative/symlinked location by the time nb reads it back.
+	if abs, aerr := filepath.Abs(path); aerr == nil {
+		c.configDir = filepath.Dir(abs)
 	}
 	return &c, nil
 }

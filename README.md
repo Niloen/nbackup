@@ -697,7 +697,8 @@ runs offsite and `nb prune` independently trims disk back to its budget.
 
 ## Configuration
 
-See [`nbackup.example.yaml`](nbackup.example.yaml). Minimal example:
+See [`nbackup.example.yaml`](nbackup.example.yaml). Minimal example (repoint `path:`
+at a directory you own before running — `/var/lib/nbackup/catalog` needs root):
 
 ```yaml
 cycle: 7d                            # target & hard-max time between fulls per DLE
@@ -888,7 +889,10 @@ slots (storage elements that hold cartridges). It comes in shapes that differ in
 
 When a backup or restore needs a different tape, a robot loads it; a manual or
 real drive **prompts you to load it and waits** (an unattended run errors instead
-of hanging). Either way you label a blank tape (`nb label`), inventory a medium
+of hanging). The prompt only appears on a real terminal — stdin is checked, not
+just piped/redirected, so a swap can't be scripted by piping an answer in; a
+cron/pipe invocation always takes the unattended, error-instead-of-hang path.
+Either way you label a blank tape (`nb label`), inventory a medium
 with `nb medium <name>` (its drives and slots), and load a tape with `nb load`.
 Each slot reports a physical **barcode** (read without loading); the on-tape
 **label** is read after a load. Tapes carry that self-describing label, which

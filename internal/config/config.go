@@ -6,6 +6,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -141,6 +142,14 @@ type Config struct {
 	Hosts map[string]HostConfig `yaml:"hosts,omitempty"`
 
 	Sources Sources `yaml:"sources"`
+
+	// configDir is the absolute directory of the config file Load read this Config
+	// from — never a YAML field. It anchors the local/server-side default paths
+	// (workdir, state_dir, secrets_dir) so they resolve the same way regardless of
+	// nb's process cwd (see resolveLocal); a Config built directly (e.g. by tests or
+	// `nb init`'s preview) leaves it empty, and those paths then pass through
+	// unresolved exactly as before.
+	configDir string
 }
 
 // HostConfig overrides per-host settings for one source host. The two kinds are kept
@@ -521,6 +530,20 @@ func (c *Config) MinAgeFor(m Media) time.Duration {
 	return c.CycleDuration()
 }
 
+// resolveLocal anchors a relative local/server-side path (workdir, state_dir,
+// secrets_dir) to the config file's own directory rather than nb's process cwd, so
+// a cron job invoked from a different directory (or with no explicit `cd` at all)
+// still finds the same catalog/state/credentials nb created on a prior run. An
+// absolute path, an empty path, and a Config not obtained via Load (configDir
+// unset — direct construction in tests, or `nb init`'s preview) all pass through
+// unchanged, preserving the historical cwd-relative behavior for those cases.
+func (c *Config) resolveLocal(p string) string {
+	if p == "" || filepath.IsAbs(p) || c.configDir == "" {
+		return p
+	}
+	return filepath.Join(c.configDir, p)
+}
+
 // DefaultWorkdir is where the catalog cache lives when `workdir` is unset. It is
 // deliberately independent of any storage medium: the catalog is a cache over the
 // whole pool, not a thing owned by one medium.
@@ -528,12 +551,13 @@ const DefaultWorkdir = "nbackup-catalog"
 
 // WorkdirPath returns the catalog's own operational-state directory (the run
 // cache), independent of any storage medium. It defaults to DefaultWorkdir when
-// `workdir` is unset.
+// `workdir` is unset; a relative path resolves against the config file's directory
+// (see resolveLocal) — the catalog is always server-side, never a per-host path.
 func (c *Config) WorkdirPath() string {
 	if c.Workdir != "" {
-		return c.Workdir
+		return c.resolveLocal(c.Workdir)
 	}
-	return DefaultWorkdir
+	return c.resolveLocal(DefaultWorkdir)
 }
 
 // DefaultStateDir is the host's incremental-state library root when neither a per-host
@@ -541,13 +565,15 @@ func (c *Config) WorkdirPath() string {
 // dedicated location *beside* the catalog workdir, not beneath it: the workdir is a
 // disposable cache (rebuildable from the media) while the state library is the one piece
 // of precious, non-rebuildable state, so nesting it under the wipe-and-rebuild workdir
-// would invite its loss. It is relative, so it resolves under the server's cwd for a
-// local host and under the backup user's home on a client.
+// would invite its loss. It is relative: for a local host it resolves against the config
+// file's directory (see resolveLocal), and for a remote host — which has no config file —
+// against the backup user's home there, exactly as before.
 const DefaultStateDir = "nbackup-state"
 
 // StatePath returns the fleet-wide default incremental-state root, defaulting to
 // DefaultStateDir when `state_dir` is unset. It is the host-level fallback used by
-// StateDirFor when a host sets no override.
+// StateDirFor when a host sets no override; StateDirFor is the one that knows whether
+// the host is local (and so applies resolveLocal) — this raw accessor does not.
 func (c *Config) StatePath() string {
 	if c.StateDir != "" {
 		return c.StateDir
@@ -558,8 +584,9 @@ func (c *Config) StatePath() string {
 // DefaultSecretsDir is the pool-side credential root when `secrets_dir` is unset. Like
 // DefaultStateDir it is a dedicated location BESIDE the catalog workdir, not beneath it: a
 // login token (the gdrive OAuth token) is precious, non-rebuildable state, so nesting it
-// under the wipe-and-rebuild workdir would invite its loss. Relative, so it resolves under
-// the server's cwd — the same base the workdir defaults to.
+// under the wipe-and-rebuild workdir would invite its loss. It is pool-side (never a
+// per-host path), so a relative path resolves against the config file's directory like
+// the workdir (see resolveLocal).
 const DefaultSecretsDir = "nbackup-secrets"
 
 // SecretsPath returns the pool-side credential root, defaulting to DefaultSecretsDir when
@@ -567,21 +594,29 @@ const DefaultSecretsDir = "nbackup-secrets"
 // its credential back from it (see the gdrive medium).
 func (c *Config) SecretsPath() string {
 	if c.SecretsDir != "" {
-		return c.SecretsDir
+		return c.resolveLocal(c.SecretsDir)
 	}
-	return DefaultSecretsDir
+	return c.resolveLocal(DefaultSecretsDir)
 }
 
 // StateDirFor returns the incremental-state root for a host: the host's own
 // `hosts.<host>.state_dir` when set, else the fleet-wide StatePath. The path is a
-// location on the host where the archiver runs (the server for a local host, the client
-// for a remote one); a relative default resolves there, so the server's path never leaks
-// onto a client.
+// location on the host where the archiver runs — the server for a local host, the client
+// for a remote one — so only a local host's relative default anchors to the config
+// file's directory (resolveLocal); a remote host has no config file to anchor to, so its
+// relative default is left exactly as it resolves on the client (its own cwd/home).
 func (c *Config) StateDirFor(host string) string {
+	_, remote := c.RemoteHost(host)
 	if h, ok := c.Hosts[host]; ok && h.StateDir != "" {
-		return h.StateDir
+		if remote {
+			return h.StateDir
+		}
+		return c.resolveLocal(h.StateDir)
 	}
-	return c.StatePath()
+	if remote {
+		return c.StatePath()
+	}
+	return c.resolveLocal(c.StatePath())
 }
 
 // ArchiverOverrides returns the per-host property overrides for an archiver type on a

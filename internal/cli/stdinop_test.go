@@ -75,8 +75,8 @@ func TestStdinOperatorAbortNoDefault(t *testing.T) {
 			t.Fatalf("empty line with no default should abort, got %q ok=%v", id, ok)
 		}
 	})
-	if !strings.Contains(out, "empty line aborts") {
-		t.Errorf("prompt should say an empty line aborts, got:\n%s", out)
+	if !strings.Contains(out, "Enter aborts") {
+		t.Errorf("prompt should say Enter aborts, got:\n%s", out)
 	}
 }
 

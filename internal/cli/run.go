@@ -47,7 +47,7 @@ func runRunList(a *app) error {
 		if len(cfg.Sources) == 0 {
 			fmt.Println(noConfigHint("no runs in catalog", a.catalog))
 		} else {
-			fmt.Println("no runs in catalog")
+			fmt.Println("no runs in catalog (if runs exist on media but not here, run `nb rebuild`)")
 		}
 		return nil
 	}

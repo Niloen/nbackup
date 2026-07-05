@@ -72,6 +72,9 @@ func newRecoverCmd(a *app) *cobra.Command {
 			if ra.list || len(ra.paths) > 0 {
 				return runRecoverBatch(eng, ra, a.logf())
 			}
+			if ra.dest != "" {
+				return fmt.Errorf("--dest requires --all or --path (the interactive shell has its own 'extract <dest>' command)")
+			}
 			return runRecoverShell(eng, ra.dle, ra.date, ra.time, ra.dest)
 		},
 	}

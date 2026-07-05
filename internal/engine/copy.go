@@ -131,6 +131,12 @@ func (c *copier) planCopy(runID, fromMedia, targetMedia string, force bool) (Cop
 	if err != nil {
 		return CopyPlan{}, nil, err
 	}
+	if len(held) == 0 {
+		// The source holds none of the run's archives — surface that now, before the
+		// already-on-target check below, which only looks at the target and would
+		// otherwise misreport a valid-but-wrong --from as a harmless no-op.
+		return CopyPlan{}, nil, fmt.Errorf("run %s has no copy on source medium %q", runID, fromMedia)
+	}
 	want := wantArchives(held, missing, force)
 	plan := CopyPlan{RunID: runID, From: fromMedia, To: targetMedia, Archives: len(want), Bytes: archivesBytes(want)}
 	if !force && len(missing) == 0 {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/programs"
@@ -46,17 +47,25 @@ func sealSizes(seals []record.PartSeal) []int64 {
 // Closing the returned reader closes rc.
 func atomicPlaintext(rc io.ReadCloser, sizes []int64, decrypt programs.Cmd) io.ReadCloser {
 	pr, pw := io.Pipe()
+	cp := &closerPair{Reader: pr, a: pr, b: rc}
 	go func() {
 		br := bufio.NewReader(rc)
 		for i, size := range sizes {
 			if err := decodeAtom(io.LimitReader(br, size), decrypt, pw); err != nil {
-				pw.CloseWithError(fmt.Errorf("decrypt atom %d of %d: %w", i+1, len(sizes), err))
+				werr := fmt.Errorf("decrypt atom %d of %d: %w", i+1, len(sizes), err)
+				// Recorded on cp (not just the pipe) because a downstream stage fed this
+				// pipe's error (e.g. gzip choking on the truncated plaintext) also exits
+				// non-zero, and Go's os/exec discards the stdin-copy error whenever the
+				// child process itself reports a failure — so the specific decrypt cause
+				// would otherwise never reach the caller, only gzip's generic exit status.
+				cp.setErr(werr)
+				pw.CloseWithError(werr)
 				return
 			}
 		}
 		pw.Close()
 	}()
-	return &closerPair{Reader: pr, a: pr, b: rc}
+	return cp
 }
 
 // decodeAtom runs one atom through its decrypt child (or straight through for a
@@ -78,16 +87,32 @@ func decodeAtom(atom io.Reader, decrypt programs.Cmd, w io.Writer) error {
 	return cerr
 }
 
-// closerPair is a reader whose Close closes both halves of a composed stream.
+// closerPair is a reader whose Close closes both halves of a composed stream and,
+// if the producer recorded a decode fault via setErr, surfaces that over either
+// half's own (usually nil) Close error — see atomicPlaintext.
 type closerPair struct {
 	io.Reader
 	a, b io.Closer
+
+	mu  sync.Mutex
+	err error
+}
+
+func (c *closerPair) setErr(err error) {
+	c.mu.Lock()
+	c.err = err
+	c.mu.Unlock()
 }
 
 func (c *closerPair) Close() error {
 	err := c.a.Close()
 	if berr := c.b.Close(); err == nil {
 		err = berr
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err != nil {
+		return c.err
 	}
 	return err
 }

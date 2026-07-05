@@ -238,12 +238,14 @@ func (stdinOperator) Swap(r librarian.SwapRequest) (string, bool) {
 	def := suggestReel(r)
 	prompt := "load which reel? (id or label"
 	if def != "" {
-		// With a default, a bare Enter takes it; aborting needs EOF (Ctrl-D). Without
-		// one, an empty line aborts. Describe whichever applies — never both, since
-		// "Enter = X" and "empty line aborts" contradict each other.
+		// With a default, a bare Enter takes it; aborting needs EOF (Ctrl-D).
 		prompt += fmt.Sprintf("; Enter = %s; Ctrl-D aborts", def)
 	} else {
-		prompt += "; empty line aborts"
+		// No safe default (e.g. every remaining reel needs an explicit recycle
+		// decision) — say plainly that Enter itself aborts here, rather than
+		// "empty line aborts", which reads as a no-op to someone who has been
+		// accepting defaults with Enter through earlier prompts in the same run.
+		prompt += "; Enter aborts (no safe default — recycling a reel needs an explicit choice)"
 	}
 	fmt.Print(prompt + "): ")
 
