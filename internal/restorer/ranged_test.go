@@ -105,7 +105,7 @@ func TestExtractSelectionRangedEgress(t *testing.T) {
 	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) { return arch, nil }
 	r := New(deps)
 	dest := filepath.Join(t.TempDir(), "out")
-	files, archives, err := r.ExtractSelection([]recovery.ExtractStep{step}, dest, nil)
+	files, archives, err := r.ExtractSelection([]recovery.ExtractStep{step}, dest, nil, nil)
 	if err != nil {
 		t.Fatalf("ExtractSelection (ranged): %v", err)
 	}
@@ -136,7 +136,7 @@ func TestExtractSelectionRangedMidMember(t *testing.T) {
 	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) { return arch, nil }
 	r := New(deps)
 	dest := filepath.Join(t.TempDir(), "out")
-	if _, _, err := r.ExtractSelection([]recovery.ExtractStep{step}, dest, nil); err != nil {
+	if _, _, err := r.ExtractSelection([]recovery.ExtractStep{step}, dest, nil, nil); err != nil {
 		t.Fatalf("ExtractSelection: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(dest, "etc-hosts"))
@@ -158,7 +158,7 @@ func TestExtractSelectionRangedFallback(t *testing.T) {
 	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) { return arch, nil }
 	r := New(deps)
 	dest := filepath.Join(t.TempDir(), "out")
-	if _, _, err := r.ExtractSelection([]recovery.ExtractStep{step}, dest, nil); err != nil {
+	if _, _, err := r.ExtractSelection([]recovery.ExtractStep{step}, dest, nil, nil); err != nil {
 		t.Fatalf("ExtractSelection (fallback): %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(dest, "tail.txt"))
@@ -289,7 +289,7 @@ func TestNoSpliceDeclarationFallsBack(t *testing.T) {
 	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) { return arch, nil }
 	r := New(deps)
 	dest := filepath.Join(t.TempDir(), "out")
-	if _, _, err := r.ExtractSelection([]recovery.ExtractStep{step}, dest, nil); err != nil {
+	if _, _, err := r.ExtractSelection([]recovery.ExtractStep{step}, dest, nil, nil); err != nil {
 		t.Fatalf("ExtractSelection (no-splice fallback): %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(dest, "tail.txt"))

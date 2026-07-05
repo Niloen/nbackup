@@ -155,7 +155,7 @@ func TestAtomicEndToEnd(t *testing.T) {
 		t.Fatalf("Collect: %v", err)
 	}
 	selDest := t.TempDir()
-	if _, _, err := eng.ExtractSelection(steps, selDest, logfDiscard); err != nil {
+	if _, _, err := eng.ExtractSelection(steps, selDest, logfDiscard, nil); err != nil {
 		t.Fatalf("ExtractSelection: %v", err)
 	}
 	assertContent(t, filepath.Join(selDest, "etc", "hosts"), "127.0.0.1 localhost\n")

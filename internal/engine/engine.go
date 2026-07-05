@@ -622,9 +622,10 @@ func (e *Engine) OpenRecoverRun(dle, runID string) (*recovery.Tree, error) {
 	return e.rst.OpenRecoverRun(dle, runID)
 }
 
-// ExtractSelection extracts a selected set of files into destDir; see restorer.
-func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, logf Logf) (int, int, error) {
-	return e.rst.ExtractSelection(steps, destDir, logf)
+// ExtractSelection extracts a selected set of files into destDir, reporting media
+// reads to prog for a live progress view (nil disables it); see restorer.
+func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, logf Logf, prog restorer.ReadProgress) (int, int, error) {
+	return e.rst.ExtractSelection(steps, destDir, logf, prog)
 }
 
 // DLENames returns the distinct DLE names recorded across all catalog runs,

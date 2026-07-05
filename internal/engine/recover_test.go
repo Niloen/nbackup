@@ -65,7 +65,7 @@ func TestRecoverSelectedFiles(t *testing.T) {
 		t.Fatalf("Collect: %v", err)
 	}
 	dest := t.TempDir()
-	if _, _, err := eng.ExtractSelection(steps, dest, logfDiscard); err != nil {
+	if _, _, err := eng.ExtractSelection(steps, dest, logfDiscard, nil); err != nil {
 		t.Fatalf("ExtractSelection: %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "etc", "hosts"), "hosts-v2")
@@ -89,7 +89,7 @@ func TestRecoverSelectedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest1 := t.TempDir()
-	if _, _, err := eng.ExtractSelection(steps1, dest1, logfDiscard); err != nil {
+	if _, _, err := eng.ExtractSelection(steps1, dest1, logfDiscard, nil); err != nil {
 		t.Fatalf("ExtractSelection day1: %v", err)
 	}
 	assertContent(t, filepath.Join(dest1, "etc", "hosts"), "hosts-v1")
@@ -137,7 +137,7 @@ func TestRecoverWholeDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := t.TempDir()
-	if _, _, err := eng.ExtractSelection(steps, dest, logfDiscard); err != nil {
+	if _, _, err := eng.ExtractSelection(steps, dest, logfDiscard, nil); err != nil {
 		t.Fatal(err)
 	}
 	assertContent(t, filepath.Join(dest, "etc", "hosts"), "h2")  // from incremental

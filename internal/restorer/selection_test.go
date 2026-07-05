@@ -155,7 +155,7 @@ func TestExtractSelectionSkipsEmptyStep(t *testing.T) {
 		extractStep("run-2026-06-01.001", dle, 0, "./etc/"),            // dirs only → 0 files
 		extractStep("run-2026-06-02.001", dle, 1, "./var/", "./var/x"), // 1 real file
 	}
-	n, _, err := r.ExtractSelection(steps, filepath.Join(t.TempDir(), "out"), nil)
+	n, _, err := r.ExtractSelection(steps, filepath.Join(t.TempDir(), "out"), nil, nil)
 	if err != nil {
 		t.Fatalf("ExtractSelection: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestExtractSelectionMissingCopy(t *testing.T) {
 	store := &fakeStore{payloads: map[archiveio.Ref][]byte{}} // no copies
 	r := New(testDeps(store, chainArchives(dle)))
 	steps := []recovery.ExtractStep{extractStep("run-2026-06-02.001", dle, 1, "./var/x")}
-	_, _, err := r.ExtractSelection(steps, filepath.Join(t.TempDir(), "out"), nil)
+	_, _, err := r.ExtractSelection(steps, filepath.Join(t.TempDir(), "out"), nil, nil)
 	if !errors.Is(err, archivefs.ErrMissingCopy) {
 		t.Fatalf("want ErrMissingCopy for a selection with no available copy, got: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestExtractSelectionClientKeyGate(t *testing.T) {
 	}
 	r := New(d)
 	steps := []recovery.ExtractStep{extractStep("run-2026-06-02.001", dle, 1, "./var/x")}
-	_, _, err := r.ExtractSelection(steps, filepath.Join(t.TempDir(), "out"), nil)
+	_, _, err := r.ExtractSelection(steps, filepath.Join(t.TempDir(), "out"), nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "passphrase never leaves the client") {
 		t.Fatalf("want a client-key infeasibility error, got: %v", err)
 	}

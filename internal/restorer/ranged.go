@@ -249,7 +249,7 @@ func groupsEgress(groups []rangeGroup, encodedSize int64) int64 {
 // the first range is open (the capability probe), a failure is a real extraction error.
 // egress is the encoded bytes the ranged read pulled (for the caller's read log), valid
 // only when handled and err is nil.
-func (r *Restorer) extractSelected(st recovery.ExtractStep, d dest) (handled bool, egress int64, err error) {
+func (r *Restorer) extractSelected(st recovery.ExtractStep, d dest, prog ReadProgress, label string) (handled bool, egress int64, err error) {
 	groups, plan, _, ok := r.rangedGroups(st)
 	if !ok {
 		return false, 0, nil
@@ -272,12 +272,14 @@ func (r *Restorer) extractSelected(st recovery.ExtractStep, d dest) (handled boo
 		return false, 0, nil
 	}
 
+	egress = groupsEgress(groups, r.encodedSize(ref))
+	prog.Reading("RANGED", label, egress)
 	pr, pw := io.Pipe()
-	go r.emitGroups(ref, groups, first, plan, trailer, pw)
+	go r.emitGroups(ref, groups, first, plan, trailer, pw, prog)
 
 	sink := xfer.NewProgramSink(d.exec).Add(arch.RestoreStage(d.dir, st.Members))
 	_, terr := xfer.Transfer(context.Background(), xfer.Reader(pr), xfer.NewFilters(), sink)
-	return true, groupsEgress(groups, r.encodedSize(ref)), terr
+	return true, egress, terr
 }
 
 // ArchiveRead is how one archive of a file selection will be read: the encoded bytes
@@ -367,7 +369,7 @@ func (r *Restorer) encodedSize(ref archiveio.Ref) int64 {
 // the pipeline has one, discards up to each extent, emits the extent, and drains the
 // group's tail so the decode child exits cleanly at its input's end. A trailing 1 KiB
 // of NULs is tar's end-of-archive marker (PoC-proven clean exit).
-func (r *Restorer) emitGroups(ref archiveio.Ref, groups []rangeGroup, first io.ReadCloser, plan selectionPlan, trailer []byte, pw *io.PipeWriter) {
+func (r *Restorer) emitGroups(ref archiveio.Ref, groups []rangeGroup, first io.ReadCloser, plan selectionPlan, trailer []byte, pw *io.PipeWriter, prog ReadProgress) {
 	for i, g := range groups {
 		rc := first
 		if i > 0 {
@@ -378,6 +380,7 @@ func (r *Restorer) emitGroups(ref archiveio.Ref, groups []rangeGroup, first io.R
 				return
 			}
 		}
+		rc = &countReadCloser{ReadCloser: rc, prog: prog} // count the encoded bytes pulled off the medium
 		stream := rc
 		if plan.decode != nil {
 			stream = plan.decode(g, rc)

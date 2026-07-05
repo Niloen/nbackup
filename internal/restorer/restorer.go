@@ -38,6 +38,45 @@ import (
 // Logf is the shared optional progress logger.
 type Logf = logf.Logf
 
+// ReadProgress observes an extraction's media reads so a caller can paint a live
+// progress bar as bytes are pulled — the byte-level twin of the per-archive Logf
+// lines. Reading announces the archive now being read — its kind ("RANGED" or
+// "WHOLE", matching the plan's READ column), its label (the plan's ARCHIVE column),
+// and the encoded bytes it is expected to pull; Pulled reports each further chunk off
+// the medium; Finished ends
+// the current archive's read (so a live view clears its transient line). All calls
+// run on the extraction goroutine; a nil ReadProgress is replaced by a no-op, so the
+// restorer calls it unconditionally.
+type ReadProgress interface {
+	Reading(kind, label string, expect int64)
+	Pulled(delta int64)
+	Finished()
+}
+
+// noProgress is the no-op ReadProgress used when a caller passes none (piped output,
+// or stderr is not a terminal), so the extraction path never nil-checks.
+type noProgress struct{}
+
+func (noProgress) Reading(string, string, int64) {}
+func (noProgress) Pulled(int64)                  {}
+func (noProgress) Finished()                     {}
+
+// countReadCloser reports each read's byte count to a ReadProgress as bytes are pulled
+// off a medium — wrapped around the raw (pre-decode) archive streams so the tally is
+// the encoded egress a read spends, matching the plan's estimate and the read log.
+type countReadCloser struct {
+	io.ReadCloser
+	prog ReadProgress
+}
+
+func (c *countReadCloser) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	if n > 0 {
+		c.prog.Pulled(int64(n))
+	}
+	return n, err
+}
+
 // Deps is what the restorer needs from the orchestrator: the archive fs's read
 // face, the catalog's archive metadata (for chain/as-of planning), and the
 // engine's resolution — hosts, archivers, per-DLE encryption posture. Funcs, not

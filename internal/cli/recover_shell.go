@@ -9,6 +9,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/recovery"
+	"golang.org/x/term"
 )
 
 // recoverShell is the interactive recovery session: the terminal I/O (prompt,
@@ -22,6 +23,9 @@ type recoverShell struct {
 	dest  string
 	noted bool // whether the file-level deletion note has been shown this session
 	tty   bool // stdin is a real terminal, so prompting for missing input is safe
+
+	term *term.Terminal // line editor (history/editing/completion); nil when stdin is piped
+	fd   int            // stdin fd, toggled to raw mode around each edited read
 }
 
 // runRecoverShell drives the interactive recovery prompt. It reuses the shared
@@ -32,6 +36,7 @@ func runRecoverShell(eng *engine.Engine, dleName, dateStr, timeStr, dest string)
 		return err
 	}
 	sh := &recoverShell{eng: eng, date: asOf, dest: dest, tty: stdinIsTerminal()}
+	sh.setupLineEditor()
 	if dleName != "" {
 		if slug, ok := eng.ResolveDLE(dleName); ok {
 			sh.dle = slug
@@ -45,10 +50,9 @@ func runRecoverShell(eng *engine.Engine, dleName, dateStr, timeStr, dest string)
 	fmt.Println("nb recover — type 'help' for commands, 'quit' to exit.")
 	sh.banner()
 	for {
-		if sh.tty { // suppress the prompt when stdin is piped (avoids interleaved echo)
-			fmt.Print(sh.prompt())
-		}
-		line, rerr := stdinReader.ReadString('\n')
+		// readLine draws the prompt itself on a terminal (with line editing); a piped
+		// session gets no prompt here and is echoed below so a transcript reads cleanly.
+		line, rerr := sh.readLine(sh.prompt())
 		line = strings.TrimSpace(line)
 		if line == "" {
 			if rerr != nil {
@@ -63,7 +67,7 @@ func runRecoverShell(eng *engine.Engine, dleName, dateStr, timeStr, dest string)
 			// scripted session reads top-to-bottom.
 			fmt.Printf("%s%s\n", sh.prompt(), line)
 		}
-		fields := strings.Fields(line)
+		fields := scanArgs(line)
 		if sh.dispatch(fields[0], fields[1:]) {
 			return nil
 		}
@@ -394,7 +398,7 @@ func (sh *recoverShell) extract(args []string) {
 		return
 	}
 	sh.noteDeletionOnce()
-	n, archives, err := sh.eng.ExtractSelection(steps, sh.dest, logfStdout)
+	n, archives, err := sh.eng.ExtractSelection(steps, sh.dest, logfStdout, newExtractProgress(est.Bytes))
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
 		return
@@ -420,6 +424,9 @@ func recoverHelp() {
   extract [dir]        recover the selection into the destination
   help                 this help
   quit                 leave
+
+Tab completes commands, paths, and disks; ↑/↓ recall history. Quote a name with a
+space: add "My Photo.jpg" (or add My\ Photo.jpg).
 `)
 }
 

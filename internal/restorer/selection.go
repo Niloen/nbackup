@@ -53,7 +53,10 @@ func (r *Restorer) membersFor(dle string) func(runID string, level int) ([]recor
 // recovered and, second, from how many distinct archives — the archive count reflects
 // only the archives actually read (a chain step holding none of the selection is
 // skipped, so it is not counted), matching the "extracting …" lines it logs.
-func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string, log Logf) (int, int, error) {
+func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string, log Logf, prog ReadProgress) (int, int, error) {
+	if prog == nil {
+		prog = noProgress{}
+	}
 	for _, st := range steps {
 		if ec, ok := r.deps.EncryptionFor(st.DLE); ok {
 			if hardErr, _ := clientSideKeyRestore(ec, st.DLE); hardErr != nil {
@@ -89,12 +92,14 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 		}
 		archives++
 		nfiles := countFilePaths(st.Members)
-		log.Log("extracting %d file(s) from %s %s L%d", nfiles, st.RunID, r.deps.DisplayDLE(st.DLE), st.Level)
+		label := fmt.Sprintf("%s %s L%d", st.RunID, r.deps.DisplayDLE(st.DLE), st.Level)
+		log.Log("extracting %d file(s) from %s", nfiles, label)
 		whole := r.encodedSize(archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level})
 		// Ranged path first: on a range-capable copy only the covering frames (or
 		// atoms) of the selected members are read. Any missing ingredient falls
 		// through to the whole-stream path below.
-		if handled, egress, rerr := r.extractSelected(st, d); handled {
+		if handled, egress, rerr := r.extractSelected(st, d, prog, label); handled {
+			prog.Finished()
 			if rerr != nil {
 				return rerr
 			}
@@ -107,14 +112,19 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 		if serr != nil {
 			return serr
 		}
+		prog.Reading("WHOLE", label, whole)
+		rc = &countReadCloser{ReadCloser: rc, prog: prog}
 		plan, perr := r.planDecode(st.Step, "")
 		if perr != nil {
 			rc.Close()
+			prog.Finished()
 			return perr
 		}
 		if err := DecryptHint(st.Encrypt, r.dec.restoreArchive(rc, plan, st.Archiver, st.DLE, d, st.Members)); err != nil {
+			prog.Finished()
 			return err
 		}
+		prog.Finished()
 		files += countFilePaths(st.Members)
 		return nil
 	})
