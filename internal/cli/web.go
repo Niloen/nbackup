@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -30,13 +31,21 @@ is safe to run alongside a backup.
 It binds to 0.0.0.0:8080 by default, reachable from your LAN. There is no
 authentication or TLS, so expose it only on a trusted network — or bind it to
 127.0.0.1 and front it with a reverse proxy or a VPN (e.g. Tailscale) for
-remote access.`
+remote access.
+
+--reload is a development convenience: the server watches its own executable and
+re-execs itself when the binary is replaced on disk, so you can iterate by just
+copying a fresh 'nb' over the old one (use an atomic replace — 'install nb DEST'
+or 'cp nb DEST.new && mv DEST.new DEST' — not an in-place 'cp', which the kernel
+refuses with "text file busy" while the binary runs). Off by default; leave it
+off in production.`
 
 // newWebCmd implements `nb web`: a read-only status HTTP server. It builds a plain
 // (unlocked) engine like the other browsing commands and serves the catalog,
 // run-history, and live-progress data as HTML — never a write path.
 func newWebCmd(a *app) *cobra.Command {
 	addr := ":8080"
+	reload := false
 	cmd := &cobra.Command{
 		Use:     "web",
 		Short:   "Serve a read-only status website",
@@ -53,17 +62,23 @@ func newWebCmd(a *app) *cobra.Command {
 				return err
 			}
 			srv := web.NewServer(src, cfg.WorkdirPath())
-			return serveWeb(cmd.Context(), addr, srv.Handler())
+			return serveWeb(cmd.Context(), addr, srv.Handler(), reload)
 		},
 	}
 	cmd.Flags().StringVar(&addr, "addr", addr, "address to listen on (host:port)")
+	cmd.Flags().BoolVar(&reload, "reload", reload, "dev: re-exec when the nb binary is replaced on disk")
 	return cmd
 }
 
 // serveWeb runs the HTTP server until the command's context is canceled (Ctrl-C),
 // then shuts it down gracefully. Binding is done up front so a port-in-use error is
 // reported immediately rather than swallowed by ListenAndServe's goroutine.
-func serveWeb(ctx context.Context, addr string, h http.Handler) error {
+//
+// With reload set, it also watches its own executable and, when the binary is
+// replaced on disk, shuts down and re-execs itself so the running server picks up
+// the new build (see watchExecutable / reexec). This is a dev convenience, off by
+// default.
+func serveWeb(ctx context.Context, addr string, h http.Handler, reload bool) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
@@ -74,17 +89,71 @@ func serveWeb(ctx context.Context, addr string, h http.Handler) error {
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ln) }()
 
+	var reloadCh <-chan struct{} // nil unless --reload: a nil channel blocks forever in the select
+	if reload {
+		reloadCh = watchExecutable(ctx)
+	}
+
 	select {
 	case <-ctx.Done():
-		shutCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		return srv.Shutdown(shutCtx)
+		return srv.Shutdown(shutdownContext())
+	case <-reloadCh:
+		_ = srv.Shutdown(shutdownContext()) // release the listener before the new image rebinds
+		return reexec()
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return err
 	}
+}
+
+func shutdownContext() context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	_ = cancel // the process exits (Shutdown returns, then re-exec/return); leak is bounded to that instant
+	return ctx
+}
+
+// watchExecutable polls this process's own binary once a second and closes the
+// returned channel the first time its on-disk identity changes. It uses the same
+// stat-stamp trick as the catalog watcher, so an atomic replace (rename over the
+// path) is seen as a new (mod,size); an in-place write would be too, but the kernel
+// forbids that on a running binary. A zero stamp (a transient stat error) is
+// ignored so a torn read never triggers a spurious reload.
+func watchExecutable(ctx context.Context) <-chan struct{} {
+	ch := make(chan struct{})
+	exe, err := os.Executable()
+	if err != nil {
+		return ch // can't resolve our own path: never fires, behaves like reload off
+	}
+	start := statFile(exe)
+	go func() {
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if s := statFile(exe); s != start && s != (catalogStamp{}) {
+					close(ch)
+					return
+				}
+			}
+		}
+	}()
+	return ch
+}
+
+// reexec replaces the current process image with a fresh exec of the (now updated)
+// binary, preserving argv and environment. On success it does not return.
+func reexec() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "nb web: binary changed, reloading %s\n", exe)
+	return syscall.Exec(exe, os.Args, os.Environ())
 }
 
 // engineSource adapts the engine to web.Source: it promotes the engine's own
@@ -116,7 +185,12 @@ type catalogStamp struct {
 }
 
 func statCatalog(workdir string) catalogStamp {
-	fi, err := os.Stat(filepath.Join(workdir, catalog.CacheFile))
+	return statFile(filepath.Join(workdir, catalog.CacheFile))
+}
+
+// statFile stamps a file's on-disk identity (zero when it can't be stat'd).
+func statFile(path string) catalogStamp {
+	fi, err := os.Stat(path)
 	if err != nil {
 		return catalogStamp{}
 	}
