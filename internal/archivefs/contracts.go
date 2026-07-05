@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
@@ -41,12 +42,13 @@ type ReadStore interface {
 	// Index returns an archive's whole per-archive index — the members plus, for a
 	// framed archive, its frame table (cache, else the on-medium index).
 	Index(ref archiveio.Ref) (record.Index, error)
-	// OpenRange opens a byte sub-range of an archive's encoded payload (length < 0 =
-	// to the end), copy-selected like OpenArchive. It needs a copy with aligned
-	// per-part seals on a range-capable medium; when none qualifies the cause (e.g.
-	// media.ErrRangeUnsupported) surfaces so the caller falls back to OpenArchive —
-	// a ranged read is always an optimization, never the only road to the bytes.
-	OpenRange(ref archiveio.Ref, medium string, off, length int64) (io.ReadCloser, error)
+	// OpenRange opens the rng slice of an archive's encoded payload, copy-selected
+	// like OpenArchive (OpenArchive is exactly this at media.Range{}). A genuine
+	// sub-range needs a copy with aligned per-part seals on a range-capable medium;
+	// when none qualifies the cause (e.g. media.ErrRangeUnsupported) surfaces so the
+	// caller falls back to OpenArchive — a ranged read is always an optimization,
+	// never the only road to the bytes.
+	OpenRange(ref archiveio.Ref, medium string, rng media.Range) (io.ReadCloser, error)
 	// AtomSeals returns an atomic archive's per-part seals from any copy carrying an
 	// aligned set — for atoms they are archive-invariant (every copy holds the same
 	// sealed messages), and their sizes cut the stream into atoms on read while the

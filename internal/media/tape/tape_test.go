@@ -65,7 +65,7 @@ func TestTapeSequential(t *testing.T) {
 	}
 
 	// Fast-forward read.
-	h, rc, err := v.ReadFile(p0)
+	h, rc, err := v.ReadFile(p0, media.Range{})
 	if err != nil {
 		t.Fatal(err)
 	}

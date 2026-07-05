@@ -63,10 +63,17 @@ func (w *memFileWriter) Close() error {
 	return nil
 }
 
-func (v *memVolume) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
+func (v *memVolume) ReadFile(pos int, rng media.Range) (record.Header, io.ReadCloser, error) {
 	d, ok := v.data[pos]
 	if !ok {
 		return record.Header{}, nil, fmt.Errorf("no file at %d", pos)
+	}
+	if !rng.IsWhole() {
+		b, err := rng.Bound(int64(len(d)))
+		if err != nil {
+			return record.Header{}, nil, err
+		}
+		d = d[b.Off : b.Off+b.Len]
 	}
 	return v.hdrs[pos], io.NopCloser(bytes.NewReader(d)), nil
 }
@@ -164,13 +171,23 @@ func openerOver(vols ...*memVolume) PartOpener {
 	for _, v := range vols {
 		byName[v.name] = v
 	}
-	return func(p FilePos) (record.Header, io.ReadCloser, error) {
+	return func(p FilePos, rng media.Range) (record.Header, io.ReadCloser, error) {
 		v, ok := byName[p.Label]
 		if !ok {
 			return record.Header{}, nil, fmt.Errorf("no volume %q", p.Label)
 		}
-		return v.ReadFile(p.Pos)
+		return v.ReadFile(p.Pos, rng)
 	}
+}
+
+// zipParts pairs positions with their seals — what the catalog's PlacedArchive.IOParts
+// does for real placements.
+func zipParts(pos []FilePos, seals []record.PartSeal) []Part {
+	parts := BareParts(pos)
+	for i := range parts {
+		parts[i].Seal = seals[i]
+	}
+	return parts
 }
 
 func writeOneArchive(t *testing.T, w *Writer, sink *memSink, dle string, body []byte) (record.Archive, ArchivePos) {
@@ -252,8 +269,8 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	}
 
 	// Read the archive back by concatenating its parts; it must equal the input.
-	r := NewReader(openerOver(v1, v2, v3), nil, nil)
-	rc, err := r.Open(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, parts, nil)
+	r := NewReader(openerOver(v1, v2, v3), nil)
+	rc, err := r.Open(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, BareParts(parts), media.Range{})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -267,7 +284,7 @@ func TestSpanAcrossVolumes(t *testing.T) {
 	}
 
 	// VerifyParts must confirm the recorded checksum over the concatenation.
-	ok, err := r.Verify(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, parts, arch.SHA256)
+	ok, err := r.Verify(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, BareParts(parts), arch.SHA256)
 	if err != nil || !ok {
 		t.Fatalf("Verify ok=%v err=%v", ok, err)
 	}
@@ -287,8 +304,8 @@ func TestPartSizeSplitsWithinVolume(t *testing.T) {
 	if arch.Parts < 5 {
 		t.Fatalf("Parts = %d, want >= 5", arch.Parts)
 	}
-	r := NewReader(openerOver(v), nil, nil)
-	rc, err := r.Open(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, apos.Parts, nil)
+	r := NewReader(openerOver(v), nil)
+	rc, err := r.Open(Ref{Run: spec.ID, DLE: "dle1", Level: 0}, BareParts(apos.Parts), media.Range{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +367,7 @@ func TestCommitRecordsUnreadable(t *testing.T) {
 	}
 
 	// The commit footer on the medium itself must carry the count (rebuild reads it there).
-	_, rc, err := v.ReadFile(sink.last.Pos.Commit.Pos)
+	_, rc, err := v.ReadFile(sink.last.Pos.Commit.Pos, media.Range{})
 	if err != nil {
 		t.Fatalf("read commit footer: %v", err)
 	}
@@ -410,7 +427,7 @@ func TestPartSealsRecorded(t *testing.T) {
 	}
 
 	// The footer on the medium carries the seals — a rebuild restores them from there.
-	_, rc, err := v.ReadFile(apos.Commit.Pos)
+	_, rc, err := v.ReadFile(apos.Commit.Pos, media.Range{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,17 +443,18 @@ func TestPartSealsRecorded(t *testing.T) {
 
 	// VerifyPart passes per part; corrupting ONE part fails that index only.
 	ref := Ref{Run: spec.ID, DLE: "dle1", Level: 0}
-	r := NewReader(openerOver(v), nil, nil)
-	for i, s := range arch.PartSeals {
-		if ok, err := r.VerifyPart(ref, apos.Parts, i, s); err != nil || !ok {
+	r := NewReader(openerOver(v), nil)
+	sealed := zipParts(apos.Parts, arch.PartSeals)
+	for i := range arch.PartSeals {
+		if ok, err := r.VerifyPart(ref, sealed, i); err != nil || !ok {
 			t.Fatalf("VerifyPart(%d) ok=%v err=%v, want pass", i, ok, err)
 		}
 	}
 	v.data[apos.Parts[1].Pos][0] ^= 0xff // bit-rot in part 1
-	if ok, _ := r.VerifyPart(ref, apos.Parts, 1, arch.PartSeals[1]); ok {
+	if ok, _ := r.VerifyPart(ref, sealed, 1); ok {
 		t.Fatal("VerifyPart(1) passed on a corrupted part")
 	}
-	if ok, err := r.VerifyPart(ref, apos.Parts, 0, arch.PartSeals[0]); err != nil || !ok {
+	if ok, err := r.VerifyPart(ref, sealed, 0); err != nil || !ok {
 		t.Fatalf("VerifyPart(0) ok=%v err=%v, want pass (only part 1 is corrupt)", ok, err)
 	}
 	v.data[apos.Parts[1].Pos][0] ^= 0xff // restore for the copy below
@@ -461,9 +479,10 @@ func TestPartSealsRecorded(t *testing.T) {
 			carch.Parts, len(carch.PartSeals), arch.Parts)
 	}
 	cref := Ref{Run: spec.ID, DLE: "dle1", Level: 0}
-	r2 := NewReader(openerOver(v2), nil, nil)
-	for i, s := range carch.PartSeals {
-		if ok, err := r2.VerifyPart(cref, sink2.last.Pos.Parts, i, s); err != nil || !ok {
+	r2 := NewReader(openerOver(v2), nil)
+	csealed := zipParts(sink2.last.Pos.Parts, carch.PartSeals)
+	for i := range carch.PartSeals {
+		if ok, err := r2.VerifyPart(cref, csealed, i); err != nil || !ok {
 			t.Fatalf("copy VerifyPart(%d) ok=%v err=%v", i, ok, err)
 		}
 	}
@@ -481,12 +500,12 @@ func TestOpenSealedCatchesCorruptPart(t *testing.T) {
 	body := []byte(strings.Repeat("s", 20*1024)) // 3 parts
 	arch, apos := writeOneArchive(t, w, sink, "dle1", body)
 	ref := Ref{Run: spec.ID, DLE: "dle1", Level: 0}
-	r := NewReader(openerOver(v), nil, nil)
+	r := NewReader(openerOver(v), nil)
 
 	// Flip one byte in the middle part — the silent kind of damage tar cannot see.
 	v.data[apos.Parts[1].Pos][100] ^= 0x01
 
-	rc, err := r.Open(ref, apos.Parts, arch.PartSeals)
+	rc, err := r.Open(ref, zipParts(apos.Parts, arch.PartSeals), media.Range{})
 	if err != nil {
 		t.Fatalf("Open (prime) should succeed — the fault is mid-stream: %v", err)
 	}
@@ -499,8 +518,8 @@ func TestOpenSealedCatchesCorruptPart(t *testing.T) {
 		t.Fatalf("seal error %q does not name the part", err)
 	}
 
-	// Unsealed (nil) reads through unchecked, as before seals existed.
-	rc, err = r.Open(ref, apos.Parts, nil)
+	// Unsealed parts read through unchecked, as before seals existed.
+	rc, err = r.Open(ref, BareParts(apos.Parts), media.Range{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,13 +529,18 @@ func TestOpenSealedCatchesCorruptPart(t *testing.T) {
 		t.Fatalf("unsealed read n=%d err=%v, want the full (corrupt) payload", len(got), err)
 	}
 
-	// Misaligned seals are dropped, not misapplied: a short seal list reads unchecked.
-	rc, err = r.Open(ref, apos.Parts, arch.PartSeals[:1])
+	// A partially sealed parts list checks only what it covers: with only part 0
+	// sealed (parts 1-2 unsealed), the corrupt part 1 streams through unchecked.
+	// Misapplying a seal to the wrong part is unrepresentable — each Part carries
+	// its own.
+	partial := BareParts(apos.Parts)
+	partial[0].Seal = arch.PartSeals[0]
+	rc, err = r.Open(ref, partial, media.Range{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = io.ReadAll(rc); err != nil {
-		t.Fatalf("misaligned seals must disarm the check, got %v", err)
+		t.Fatalf("unsealed parts must read unchecked, got %v", err)
 	}
 	rc.Close()
 }
@@ -570,7 +594,7 @@ func TestAtomicRollByBound(t *testing.T) {
 		}
 		rawSum += arch.PartSeals[i].RawSize
 		byName := map[string]*memVolume{"v1": v1, "v2": v2, "v3": v3}
-		_, rc, err := byName[p.Label].ReadFile(p.Pos)
+		_, rc, err := byName[p.Label].ReadFile(p.Pos, media.Range{})
 		if err != nil {
 			t.Fatal(err)
 		}

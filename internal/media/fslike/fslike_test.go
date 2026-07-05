@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
@@ -60,10 +61,17 @@ func (s *memStore) ReadAll(key string) ([]byte, error) {
 	return append([]byte(nil), b...), nil
 }
 
-func (s *memStore) Open(key string) (io.ReadCloser, error) {
+func (s *memStore) Open(key string, rng media.Range) (io.ReadCloser, error) {
 	b, err := s.ReadAll(key)
 	if err != nil {
 		return nil, err
+	}
+	if !rng.IsWhole() {
+		bounded, err := rng.Bound(int64(len(b)))
+		if err != nil {
+			return nil, err
+		}
+		b = b[bounded.Off : bounded.Off+bounded.Len]
 	}
 	return io.NopCloser(bytes.NewReader(b)), nil
 }
@@ -151,7 +159,7 @@ func TestReclaimSparesInFlightAppend(t *testing.T) {
 	posB := <-done
 
 	// The in-flight payload must have survived the concurrent reclaim.
-	_, rc, err := v.ReadFile(posB)
+	_, rc, err := v.ReadFile(posB, media.Range{})
 	if err != nil {
 		t.Fatalf("in-flight payload destroyed by concurrent reclaim: %v", err)
 	}

@@ -98,10 +98,10 @@ func groupAtomSizes(atoms []record.Frame, encSizes []int64, g rangeGroup) []int6
 	var out []int64
 	var covered int64
 	for i, a := range atoms {
-		if a.Enc < g.encOff {
+		if a.Enc < g.enc.Off {
 			continue
 		}
-		if g.encLen >= 0 && covered >= g.encLen {
+		if g.enc.Len > 0 && covered >= g.enc.Len {
 			break
 		}
 		out = append(out, encSizes[i])

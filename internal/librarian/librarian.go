@@ -225,35 +225,17 @@ func (l *Librarian) Labeled() bool { _, ok := l.vol.(media.Labeled); return ok }
 // medium immutable?), so callers state their intent and the equivalence lives here only.
 func (l *Librarian) AppendOnly() bool { return l.Labeled() }
 
-// ReadFileAt mounts the volume holding a part (verifying its identity) and reads
-// the file at the given position. It keeps the mount-then-read sequence behind the
-// librarian seam so callers never hold the media.Volume to seek it directly.
-func (l *Librarian) ReadFileAt(volume string, epoch, pos int) (record.Header, io.ReadCloser, error) {
+// ReadFileAt mounts the volume holding a part (verifying its identity) and reads the
+// rng slice of the file at the given position (media.Range{} = the whole file; a
+// volume that cannot serve a genuine sub-range — tape — answers
+// media.ErrRangeUnsupported, the caller's cue to fall back to the whole stream). It
+// keeps the mount-then-read sequence behind the librarian seam so callers never hold
+// the media.Volume to seek it directly.
+func (l *Librarian) ReadFileAt(volume string, epoch, pos int, rng media.Range) (record.Header, io.ReadCloser, error) {
 	if err := l.MountForRead(volume, epoch); err != nil {
 		return record.Header{}, nil, err
 	}
-	return l.driveVol().ReadFile(pos) // MountForRead set l.drive to whichever drive holds it
-}
-
-// ReadFileRangeAt is ReadFileAt for a byte sub-range of the payload (length < 0 = to
-// the end). It surfaces media.ErrRangeUnsupported when the mounted volume cannot open
-// ranges (tape) — the caller's cue to fall back to the whole stream; the capability is
-// the volume's, discovered by assertion, never by medium name.
-func (l *Librarian) ReadFileRangeAt(volume string, epoch, pos int, off, length int64) (record.Header, io.ReadCloser, error) {
-	if err := l.MountForRead(volume, epoch); err != nil {
-		return record.Header{}, nil, err
-	}
-	vol := l.driveVol()
-	if dd, ok := vol.(directDrive); ok {
-		// The direct-volume adapter embeds the Volume as an interface, which would
-		// hide the concrete volume's optional capabilities from assertion — unwrap it.
-		vol = dd.Volume
-	}
-	ro, ok := vol.(media.RangeOpener)
-	if !ok {
-		return record.Header{}, nil, media.ErrRangeUnsupported
-	}
-	return ro.ReadFileRange(pos, off, length)
+	return l.driveVol().ReadFile(pos, rng) // MountForRead set l.drive to whichever drive holds it
 }
 
 // eachLoadableSlot is the changer's occupied-slot scan, shared by every path that must

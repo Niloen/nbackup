@@ -49,7 +49,7 @@ func TestVolumeRoundTrip(t *testing.T) {
 
 	pos := appendArchive(t, v, "run-2026-06-22.001", "h-data", 0, "hello world")
 
-	h, rc, err := v.ReadFile(pos)
+	h, rc, err := v.ReadFile(pos, media.Range{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestVolumeRoundTrip(t *testing.T) {
 
 	// Reopen (rescan from disk) must reconstruct the index and read back.
 	v2 := openVol(t, dir)
-	_, rc2, err := v2.ReadFile(pos)
+	_, rc2, err := v2.ReadFile(pos, media.Range{})
 	if err != nil {
 		t.Fatalf("read after reopen: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestRemoveFileRaceWithAppend(t *testing.T) {
 		go func() { defer wg.Done(); posB = appendArchive(t, v, run, "b", 0, "b-payload") }()
 		wg.Wait()
 
-		_, rc, err := v.ReadFile(posB)
+		_, rc, err := v.ReadFile(posB, media.Range{})
 		if err != nil {
 			t.Fatalf("iter %d: concurrently-appended file vanished: %v", i, err)
 		}

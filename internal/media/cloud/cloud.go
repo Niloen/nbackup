@@ -109,15 +109,18 @@ func (s blobStore) Writer(ctx context.Context, key string) (io.WriteCloser, erro
 	return s.bucket.NewWriter(ctx, key, nil)
 }
 
-func (s blobStore) Open(key string) (io.ReadCloser, error) {
-	return s.bucket.NewReader(s.ctx, key, nil)
-}
-
-// OpenRange implements fslike.RangeStore as an object store's ranged GET — the whole
-// point of the framed shape on cloud: selective restore pays for the covering frames'
-// bytes, not the object's.
-func (s blobStore) OpenRange(key string, off, length int64) (io.ReadCloser, error) {
-	return s.bucket.NewRangeReader(s.ctx, key, off, length, nil)
+// Open opens the rng slice of the object at key. A sub-range is the object store's
+// ranged GET — the whole point of the framed shape on cloud: selective restore pays
+// for the covering frames' bytes, not the object's.
+func (s blobStore) Open(key string, rng media.Range) (io.ReadCloser, error) {
+	if rng.IsWhole() {
+		return s.bucket.NewReader(s.ctx, key, nil)
+	}
+	length := rng.Len
+	if length <= 0 {
+		length = -1 // gocloud's "to the end"
+	}
+	return s.bucket.NewRangeReader(s.ctx, key, rng.Off, length, nil)
 }
 
 func (s blobStore) RemoveTree(run string) error {

@@ -162,7 +162,7 @@ func (w *flushFW) Close() error {
 	w.pos = pos
 	return nil
 }
-func (v *memFlushVol) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
+func (v *memFlushVol) ReadFile(pos int, _ media.Range) (record.Header, io.ReadCloser, error) {
 	return v.hdrs[pos], io.NopCloser(bytes.NewReader(v.data[pos])), nil
 }
 func (v *memFlushVol) Files() ([]record.FileInfo, error) { return nil, nil }

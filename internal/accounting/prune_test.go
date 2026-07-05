@@ -25,7 +25,7 @@ type fakeVol struct {
 func (f *fakeVol) AppendFile(context.Context, record.Header) (media.FileWriter, error) {
 	return nil, errors.New("not implemented")
 }
-func (f *fakeVol) ReadFile(int) (record.Header, io.ReadCloser, error) {
+func (f *fakeVol) ReadFile(int, media.Range) (record.Header, io.ReadCloser, error) {
 	return record.Header{}, nil, errors.New("not implemented")
 }
 func (f *fakeVol) Files() ([]record.FileInfo, error) { return f.files, nil }

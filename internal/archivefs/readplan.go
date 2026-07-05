@@ -4,6 +4,7 @@ import (
 	"io"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/media"
 )
 
 // ReadItem is one archive in a multi-archive read selection: its logical identity plus the
@@ -105,7 +106,7 @@ func (fs *FS) OpenArchives(refs []archiveio.Ref, medium string, fn func(ref arch
 
 	for _, it := range OrderForOnePass(items) {
 		ref := it.Ref
-		open := func() (io.ReadCloser, error) { return fs.openRef(ref, medium, readerFor) }
+		open := func() (io.ReadCloser, error) { return fs.openRef(ref, medium, media.Range{}, readerFor) }
 		if e := fn(ref, open); e != nil {
 			return missing, e
 		}

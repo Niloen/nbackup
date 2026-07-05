@@ -68,7 +68,7 @@ func (f *fakeStore) Index(ref archiveio.Ref) (record.Index, error) {
 	return record.Index{Members: f.members[ref], Frames: f.frames[ref]}, nil
 }
 
-func (f *fakeStore) OpenRange(ref archiveio.Ref, medium string, off, length int64) (io.ReadCloser, error) {
+func (f *fakeStore) OpenRange(ref archiveio.Ref, medium string, rng media.Range) (io.ReadCloser, error) {
 	if !f.ranged {
 		return nil, media.ErrRangeUnsupported
 	}
@@ -76,11 +76,12 @@ func (f *fakeStore) OpenRange(ref archiveio.Ref, medium string, off, length int6
 	if !ok {
 		return nil, fmt.Errorf("%w of %s %s L%d", archivefs.ErrMissingCopy, ref.Run, ref.DLE, ref.Level)
 	}
-	if length < 0 || off+length > int64(len(b)) {
-		length = int64(len(b)) - off
+	bounded, err := rng.Bound(int64(len(b)))
+	if err != nil {
+		return nil, err
 	}
-	f.rangedBytes += length
-	return io.NopCloser(bytes.NewReader(b[off : off+length])), nil
+	f.rangedBytes += bounded.Len
+	return io.NopCloser(bytes.NewReader(b[bounded.Off : bounded.Off+bounded.Len])), nil
 }
 
 func (f *fakeStore) AtomSeals(ref archiveio.Ref) ([]record.PartSeal, error) {

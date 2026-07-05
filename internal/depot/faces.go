@@ -21,7 +21,7 @@ import (
 // opening is refused while a run window write-owns the medium, which is how a window
 // reader fails over past a medium being written instead of mounting it mid-write.
 type ReadMedium interface {
-	ReadFileAt(volume string, epoch, pos int) (record.Header, io.ReadCloser, error)
+	ReadFileAt(volume string, epoch, pos int, rng media.Range) (record.Header, io.ReadCloser, error)
 	MountForRead(volume string, epoch int) error
 	io.Closer
 }

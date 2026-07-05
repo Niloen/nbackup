@@ -138,6 +138,6 @@ type Archiver interface {
 	// format's shared dictionary would both report offsets yet NOT be spliceable).
 	// nil = no such promise; ranged selective restore and the structural samples
 	// then fall back to the whole-stream decode, which is always correct. The read
-	// side's capability peer of the transforms' Concat and the media's RangeOpener.
+	// side's capability peer of the transforms' Concat and the media's ranged reads.
 	SpliceTrailer() []byte
 }

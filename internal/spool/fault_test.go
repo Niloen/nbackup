@@ -107,7 +107,7 @@ func (w *memFileWriter) Close() error {
 	return nil
 }
 
-func (v *memVolume) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
+func (v *memVolume) ReadFile(pos int, _ media.Range) (record.Header, io.ReadCloser, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	d, ok := v.data[pos]
@@ -195,8 +195,10 @@ func (s *memStore) OpenArchiveAt(ref archiveio.Ref, pos archiveio.ArchivePos) (i
 	if s.openErr != nil {
 		return nil, s.openErr
 	}
-	open := func(p archiveio.FilePos) (record.Header, io.ReadCloser, error) { return s.vol.ReadFile(p.Pos) }
-	return archiveio.NewReader(open, nil, nil).Open(ref, pos.Parts, nil)
+	open := func(p archiveio.FilePos, rng media.Range) (record.Header, io.ReadCloser, error) {
+		return s.vol.ReadFile(p.Pos, rng)
+	}
+	return archiveio.NewReader(open, nil).Open(ref, archiveio.BareParts(pos.Parts), media.Range{})
 }
 
 func (s *memStore) ReclaimAt(archiveio.Ref, archiveio.ArchivePos) error {

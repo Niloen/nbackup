@@ -157,20 +157,13 @@ type VolumeStatus struct {
 	Files    int
 }
 
-// ErrRangeUnsupported reports that a volume cannot open a byte sub-range of a file's
-// payload (tape streams; ranged reads are an fslike capability). Callers test it with
+// ErrRangeUnsupported reports that a volume cannot serve a genuine sub-range of a
+// file's payload (tape streams; ranged reads are an fslike capability — a cloud
+// object's ranged GET, a disk seek). A whole-file read (Range.IsWhole) works on every
+// medium, so this only ever answers a sub-range request. Callers test it with
 // errors.Is and fall back to the whole-stream read — a ranged read is always an
 // optimization, never the only road to the bytes.
 var ErrRangeUnsupported = fmt.Errorf("ranged payload reads unsupported on this medium")
-
-// RangeOpener is the optional Volume capability of opening a byte sub-range
-// [off, off+length) of one file's payload — what turns a cloud object's ranged GET (or
-// a disk seek) into selective restore's bounded egress. length < 0 means "to the
-// payload's end". Implemented by the fslike media (disk, cloud); tape streams and does
-// not. Callers discover it by type assertion, never by medium name.
-type RangeOpener interface {
-	ReadFileRange(pos int, off, length int64) (record.Header, io.ReadCloser, error)
-}
 
 // Options carries medium-specific configuration to a factory as generic
 // key/value parameters (e.g. "path" for disk, "bucket" for s3).
@@ -231,9 +224,13 @@ type Volume interface {
 	// scan ignores). The Volume owns concurrency and position assignment (disk allows concurrent
 	// appends; tape serializes).
 	AppendFile(ctx context.Context, h record.Header) (FileWriter, error)
-	// ReadFile positions to pos and returns its header and a payload stream the
-	// caller must close.
-	ReadFile(pos int) (record.Header, io.ReadCloser, error)
+	// ReadFile positions to pos and returns its header and a payload stream — the
+	// rng slice of it — the caller must close. The header always comes whole (identity
+	// is asserted on every read); rng addresses only the payload's bytes, and Range{}
+	// (the zero value) is the classic whole-file read every medium serves. A medium
+	// that cannot serve a genuine sub-range (tape streams) returns
+	// ErrRangeUnsupported for one — the caller's cue to fall back to Range{}.
+	ReadFile(pos int, rng Range) (record.Header, io.ReadCloser, error)
 	// Files returns every file's position and header in order — the volume's
 	// self-index, used to rebuild the catalog. May be O(volume) (a full scan).
 	//

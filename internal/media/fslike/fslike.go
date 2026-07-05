@@ -48,8 +48,11 @@ type Store interface {
 	// must not commit (a cloud upload is abandoned; a local partial is left for the caller to discard),
 	// so an aborted append never leaves a committed payload.
 	Writer(ctx context.Context, key string) (io.WriteCloser, error)
-	// Open opens the file at key for streaming; the caller closes it.
-	Open(key string) (io.ReadCloser, error)
+	// Open opens the rng slice of the file at key for streaming (Range{} = the whole
+	// file); the caller closes it. Both fslike backings serve genuine sub-ranges — a
+	// disk file seeks, a cloud object issues a ranged GET — which is what makes every
+	// fslike medium range-capable.
+	Open(key string, rng media.Range) (io.ReadCloser, error)
 	// List returns every stored file, for the catalog-rebuild scan.
 	List() ([]Object, error)
 	// RemoveTree deletes every file belonging to run.
@@ -57,14 +60,6 @@ type Store interface {
 	// Remove deletes a single file by key (one archive's payload or sidecar). A
 	// missing key is not an error (idempotent reclamation).
 	Remove(key string) error
-}
-
-// RangeStore is the optional Store capability behind media.RangeOpener: open a byte
-// sub-range [off, off+length) of the file at key (length < 0 = to the end). Both
-// fslike backings implement it — a disk file seeks, a cloud object issues a ranged
-// GET — so every fslike medium supports ranged payload reads.
-type RangeStore interface {
-	OpenRange(key string, off, length int64) (io.ReadCloser, error)
 }
 
 // writeAll writes b as the whole file at key (a header sidecar) through the
@@ -84,7 +79,7 @@ func writeAll(ctx context.Context, s Store, key string, b []byte) error {
 // readAll reads the whole file at key (a header sidecar) through the Store's
 // streaming Open.
 func readAll(s Store, key string) ([]byte, error) {
-	r, err := s.Open(key)
+	r, err := s.Open(key, media.Range{})
 	if err != nil {
 		return nil, err
 	}
@@ -281,7 +276,11 @@ func (f *fileWriter) Close() error {
 	return nil
 }
 
-func (v *Volume) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
+// ReadFile opens the rng slice of the file at pos. The header always comes whole from
+// the sidecar (asserting identity costs nothing here); only the payload is opened
+// ranged through the Store. A payload here is pure archive bytes (the header lives in
+// the sidecar, not inline), so offset 0 is the payload's first byte.
+func (v *Volume) ReadFile(pos int, rng media.Range) (record.Header, io.ReadCloser, error) {
 	v.mu.Lock()
 	e, ok := v.idx[pos]
 	v.mu.Unlock()
@@ -295,36 +294,7 @@ func (v *Volume) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
 	if err != nil {
 		return record.Header{}, nil, err
 	}
-	r, err := v.store.Open(e.payload)
-	if err != nil {
-		return record.Header{}, nil, err
-	}
-	return h, r, nil
-}
-
-// ReadFileRange implements media.RangeOpener: the header still comes whole from the
-// sidecar (asserting identity costs nothing here), only the payload is opened ranged
-// through the Store's RangeStore capability. A payload here is pure archive bytes (the
-// header lives in the sidecar, not inline), so offset 0 is the payload's first byte.
-func (v *Volume) ReadFileRange(pos int, off, length int64) (record.Header, io.ReadCloser, error) {
-	rs, ok := v.store.(RangeStore)
-	if !ok {
-		return record.Header{}, nil, media.ErrRangeUnsupported
-	}
-	v.mu.Lock()
-	e, exists := v.idx[pos]
-	v.mu.Unlock()
-	if !exists {
-		return record.Header{}, nil, fmt.Errorf("no file at position %d", pos)
-	}
-	if e.incomplete {
-		return record.Header{}, nil, fmt.Errorf("file at position %d is incomplete (interrupted append)", pos)
-	}
-	h, err := v.readHeader(e.hdr)
-	if err != nil {
-		return record.Header{}, nil, err
-	}
-	r, err := rs.OpenRange(e.payload, off, length)
+	r, err := v.store.Open(e.payload, rng)
 	if err != nil {
 		return record.Header{}, nil, err
 	}
