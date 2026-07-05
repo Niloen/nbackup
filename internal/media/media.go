@@ -461,11 +461,21 @@ func ValidateParams(typ string, params map[string]string) error {
 	sort.Strings(unknown)
 	allowed := append([]string(nil), s.Params...)
 	sort.Strings(allowed)
+	hint := ""
+	for _, k := range unknown {
+		// auto_label is a config-wide key (Config.AutoLabel), not a per-medium one — the
+		// natural place to guess it lives is here, so say so explicitly rather than just
+		// omitting it from "accepted options" and leaving the reader to wonder.
+		if k == "auto_label" {
+			hint = " (auto_label is a top-level config key, not a medium option — set it at the config root)"
+			break
+		}
+	}
 	// capacity/minimum_age are common struct fields on every medium (not inline
 	// params), so name them too — a typo'd `capacity` otherwise sees a list that
 	// omits the very key it meant.
-	return fmt.Errorf("unknown %s option(s) %s; accepted options: %s (plus the common medium fields capacity, minimum_age)",
-		typ, strings.Join(unknown, ", "), strings.Join(allowed, ", "))
+	return fmt.Errorf("unknown %s option(s) %s; accepted options: %s (plus the common medium fields capacity, minimum_age)%s",
+		typ, strings.Join(unknown, ", "), strings.Join(allowed, ", "), hint)
 }
 
 // KnownVolumeType reports whether a medium type is registered — a config-validity

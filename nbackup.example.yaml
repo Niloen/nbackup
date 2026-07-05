@@ -8,8 +8,12 @@
 #
 # The paths below use a production-style /var/lib/nbackup/... layout, which needs root.
 # To run as an ordinary user, repoint every storage path you keep — the media
-# `path`/`dir` of each medium, plus `workdir` and `state_dir` — at a writable directory
-# you own (e.g. ~/nbackup) before `nb check`, or the run dead-ends on a permission error.
+# `path`/`dir` of each medium — at a writable directory you own (e.g. ~/nbackup) before
+# `nb check`, or the run dead-ends on a permission error. `workdir` and `state_dir`
+# (both commented out below, near the bottom of this file) default to ./nbackup-catalog
+# and ./nbackup-state relative to wherever you run `nb` from; uncomment and repoint them
+# too if you want them somewhere deliberate (e.g. alongside the paths above) rather than
+# wherever cron happens to `cd` from.
 
 # The dump cycle: the target — and hard maximum — time between fulls for every
 # DLE (default 7d). It is the main scheduling knob. Each run fulls the DLEs due

@@ -293,7 +293,14 @@ func (v *Volume) ReadFile(pos int, rng media.Range) (record.Header, io.ReadClose
 		return record.Header{}, nil, fmt.Errorf("no file at position %d", pos)
 	}
 	if e.incomplete {
-		return record.Header{}, nil, fmt.Errorf("file at position %d is incomplete (interrupted append)", pos)
+		switch {
+		case e.payload == "" && e.hdr != "":
+			return record.Header{}, nil, fmt.Errorf("file at position %d is missing its payload (deleted, or never landed)", pos)
+		case e.hdr == "" && e.payload != "":
+			return record.Header{}, nil, fmt.Errorf("file at position %d is incomplete (interrupted append: payload with no header sidecar)", pos)
+		default:
+			return record.Header{}, nil, fmt.Errorf("file at position %d is missing (no payload or header)", pos)
+		}
 	}
 	h, err := v.readHeader(e.hdr)
 	if err != nil {

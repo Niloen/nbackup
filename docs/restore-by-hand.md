@@ -43,45 +43,43 @@ dle=app01-home
 runs=$(ls -d runs/run-* | sed -E 's#(/run-[0-9-]+)$#\1.1#' \
           | sort -t. -k1,1 -k2,2n | sed -E 's#\.1$##')
 # keep only the runs from this DLE's most recent full onward:
-full=$(for d in $runs; do ls "$d"/0*-"$dle"-L0.tar* 2>/dev/null; done | tail -1)
+full=$(for d in $runs; do ls "$d"/0*-"$dle"-L0*.tar* 2>/dev/null; done | tail -1)
 chain=$(printf '%s\n' "$runs" | sed -n "\#^$(dirname "$full")\$#,\$p")
 for lvl in $(seq 0 9); do
-  a=$(for d in $chain; do ls "$d"/0*-"$dle"-L"$lvl".tar* 2>/dev/null; done | tail -1)
+  a=$(for d in $chain; do ls "$d"/0*-"$dle"-L"$lvl"*.tar* 2>/dev/null; done | tail -1)
   [ -n "$a" ] && zstd -dc "$a" | tar --extract --listed-incremental=/dev/null
 done
 ```
 
+(The `L<n>*.tar*` glob — a wildcard before `.tar`, not just after — matches both a
+plain `…-L0.tar.zst` and an encrypted `…-L0.p000.tar.zst.gpg`. An encrypted level
+still needs the atom loop below in place of the bare `zstd -dc "$a"` line.)
+
 ## Encrypted archives
 
-An encrypted archive's payload carries a `.gpg` suffix on top of the `.tar.<ext>`
-name (`…-L0.tar.zst.gpg`), signalling that it is ciphertext; reverse it the same
-way, decrypting first:
+An encrypted archive is **always** stored as one or more **atoms**, even when it
+is a single, unsplit archive: gpg refuses to decrypt concatenated messages, so no
+encrypted payload can be the plain `…-L0.tar.<ext>` a full's name otherwise is.
+Every part — one in the common case — carries a `.pNNN` part-index suffix BEFORE
+the extensions (`…-L0.p000.tar.zst.gpg` — a valid `.gpg` file, unlike a slice's
+`….tar.zst.gpg.p000`), signalling that it is ciphertext. The recipe is always the
+same file loop — decrypt each atom, concatenate the plaintexts (whole compressed
+frames: one valid stream), then decompress and untar once — whether there is one
+atom or many:
 
 ```bash
 # public-key (the private key is in the operator's keyring):
-gpg -d < 000000-app01-home-L0.tar.zst.gpg | zstd -dc | tar -xf -
+for p in 00*-app01-home-L0.p*.tar.zst.gpg; do gpg -d "$p"; done | zstd -dc | tar -xf -
 
 # symmetric (passphrase_file) — supply the passphrase non-interactively, or a bare
 # `gpg -d` blocks on a pinentry prompt:
-gpg --batch --pinentry-mode loopback --passphrase-file /etc/nbackup/secret -d \
-    < 000000-app01-home-L0.tar.zst.gpg | zstd -dc | tar -xf -
+for p in 00*-app01-home-L0.p*.tar.zst.gpg; do
+    gpg --batch --pinentry-mode loopback --passphrase-file /etc/nbackup/secret -d "$p"
+done | zstd -dc | tar -xf -
 ```
 
 A public-key dump restores on any host with the private key in its keyring; a
 symmetric (`passphrase_file`) dump needs the same passphrase supplied to gpg.
-
-### Encrypted, multi-part (atoms)
-
-An encrypted archive larger than its `part_size` lands as **atoms**: each part is
-one complete gpg message, named with the part index BEFORE the extensions
-(`…-L0.p000.tar.zst.gpg` — a valid `.gpg` file, unlike a slice's
-`….tar.zst.gpg.p000`). gpg deliberately refuses concatenated messages, so the
-recipe is a file loop — decrypt each atom, concatenate the plaintexts (whole
-compressed frames: one valid stream), then decompress and untar once:
-
-```bash
-for p in 00*-app01-home-L0.p*.tar.zst.gpg; do gpg -d "$p"; done | zstd -dc | tar -xf -
-```
 
 The loop needs no index — the boundaries are the file boundaries, and `ls | sort`
 already yields part order. Re-cutting an atom needs the key, so copies carry atoms

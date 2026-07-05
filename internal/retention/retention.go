@@ -122,6 +122,17 @@ func Compute(archives []record.Archive, minAge time.Duration, now time.Time) Flo
 		}
 	}
 	// 3) Recovery-chain floor.
+	//
+	// Note: a newer full landing does NOT retroactively free an older, still-young
+	// incremental's own base. Each young run is anchored to ITS full (walking back
+	// from ai, not from the DLE's latest run), because that incremental was taken
+	// against that base and restoring it as-of its own date still replays that exact
+	// chain — a later full is a separate, independent recovery path, not a substitute
+	// for the one the young run already committed to. So a full landing exactly on
+	// the prune reference date does not "supersede away" an old-but-still-young
+	// sibling chain; it only stops protecting archives once every young run anchored
+	// to it has itself aged out of minimum_age. This is intentional over-retention
+	// (recoverability first), not an off-by-one on the reference date.
 	for _, dle := range dleNames(archives) {
 		ds := record.ArchivesOf(archives, dle) // the dle's archives in run order, one per run
 		anchors := map[int]bool{}

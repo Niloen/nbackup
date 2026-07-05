@@ -107,7 +107,10 @@ func RenderRun(w io.Writer, r Run) {
 func RenderDump(w io.Writer, r Run) {
 	fmt.Fprintf(w, "DUMP REPORT  %s", r.RunID)
 	if !r.StartedAt.IsZero() {
-		fmt.Fprintf(w, "  (run %s)", sizeutil.FormatStamp(r.StartedAt.Local()))
+		// StartedAt is the command's real wall-clock execution time, which can differ
+		// from the run's logical date (nb run/nb medium) under a --date override —
+		// label it explicitly so the two are never mistaken for each other.
+		fmt.Fprintf(w, "  (executed %s)", sizeutil.FormatStamp(r.StartedAt.Local()))
 	}
 	fmt.Fprintln(w)
 	if r.Failed() {

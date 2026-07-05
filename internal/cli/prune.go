@@ -40,7 +40,7 @@ func newPruneCmd(a *app) *cobra.Command {
 				}
 				media = []string{args[0]}
 			} else {
-				media = mediaNames(cfg)
+				media = landingFirst(cfg, mediaNames(cfg))
 				if len(media) == 0 {
 					return fmt.Errorf("no media configured to prune")
 				}
@@ -192,6 +192,25 @@ func mediaNames(cfg *config.Config) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// landingFirst reorders an alphabetical medium list so the landing medium — the
+// operationally primary one — is reported first in a fleet-wide `nb prune`, with
+// the rest staying alphabetical (config declaration order isn't preserved through
+// YAML-to-map decoding, so this is the closest stable, meaningful ordering).
+func landingFirst(cfg *config.Config, names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if n == cfg.Landing {
+			out = append(out, n)
+		}
+	}
+	for _, n := range names {
+		if n != cfg.Landing {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // printNothingToReclaim explains a zero-reclaim prune. Tape reclaims whole volumes

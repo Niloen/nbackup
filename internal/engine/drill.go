@@ -560,7 +560,11 @@ func (d *driller) stockExtractAtomic(step recovery.Step, dest, medium string, lo
 	cmd := exec.Command("/bin/sh", "-c", script, "sh", dest, dir)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
-	logf.Log("stock-restoring %s %s L%d via documented atom loop: %s", step.RunID, step.DLE, step.Level, script)
+	// The script's "$2"/atom-* glob matches this drill's own staged copies (named
+	// atom-NNN.bin above), not the real run directory's `…-L<n>.p*.tar.<ext>[.gpg]`
+	// filenames — say so, so a reader copying this line against a real run dir
+	// isn't left with a silent no-match (see docs/restore-by-hand.md for that glob).
+	logf.Log("stock-restoring %s %s L%d via the documented atom-loop shape (against this drill's staged copies, not the real run-dir filenames): %s", step.RunID, step.DLE, step.Level, script)
 	if err := cmd.Run(); err != nil {
 		return drill.ClassPipeline, fmt.Sprintf("stock atom loop failed: %v\n%s", err, strings.TrimSpace(stderr.String()))
 	}

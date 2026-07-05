@@ -113,11 +113,13 @@ tar -xf  000000-app01-home-L0.tar                   # scheme: none
 
 Restoring a full + its incrementals replays one archive per level in order,
 exactly as `nb recover` does — and `nb drill --tier stock` rehearses that
-bare-tools path for you and prints the commands. (Encrypted archives carry a
-`.gpg` suffix on the payload — `…-L0.tar.zst.gpg` — and just add a `gpg -d` at the
-front of the pipe for a public-key dump, or `gpg --passphrase-file <file> -d` for a
-symmetric one. A multi-part encrypted archive is stored as **atoms** — each part one
-complete gpg message, `.pNNN` before the extension — restored by a file loop:
+bare-tools path for you and prints the commands. (An encrypted archive is
+**always** stored as one or more **atoms** — each part one complete gpg
+message, `.pNNN` before the extension, even when there is only one part
+(`…-L0.p000.tar.zst.gpg`) — because gpg refuses concatenated messages, so no
+encrypted payload can be the plain, directly-openable `…-L0.tar.zst` a full's
+name otherwise is. Restore with a file loop, adding a `gpg -d` for a
+public-key dump or `gpg --passphrase-file <file> -d` for a symmetric one:
 `for p in …-L0.p*.tar.zst.gpg; do gpg -d "$p"; done | zstd -dc | tar -x`. Spanned
 tape parts are listed by `nb run <id>`.) The full by-hand procedure is in
 [docs/restore-by-hand.md](docs/restore-by-hand.md).
@@ -190,6 +192,8 @@ details one item when given an id (`nb run run-2026-06-21.020000`, `nb medium lt
 | `nb flush`           | Drain a holding disk's un-flushed archives to the landing |
 | `nb rebuild`         | Rebuild the local run-index cache from media            |
 | `nb web`             | Serve a read-only status website (overview, runs, media, history) |
+| `nb version`         | Print the build version                                  |
+| `nb completion <shell>` | Generate shell completion (bash/zsh/fish/powershell)   |
 
 Run `nb help <command>` (or `nb <command> --help`) for per-command usage and
 examples, and `nb completion <shell>` to generate shell completion.

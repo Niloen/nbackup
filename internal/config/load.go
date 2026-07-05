@@ -67,5 +67,12 @@ func cleanYAMLError(err error) string {
 			break
 		}
 	}
+	// A raw go-yaml syntax error (bad indentation, an unclosed quote, a stray tab) has
+	// no "unknown key" of ours to rewrite, and reads noticeably rawer than the
+	// strict-field errors above. It still carries go-yaml's own line number, so point
+	// the reader at it rather than leaving a bare parser message.
+	if strings.HasPrefix(s, "yaml:") && !strings.Contains(s, "unknown key") {
+		s += "\n(a YAML syntax problem, not a config field — check indentation, tabs, and quoting on or just before that line)"
+	}
 	return s
 }

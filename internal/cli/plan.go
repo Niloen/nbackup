@@ -15,6 +15,14 @@ import (
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
+// maxForecastDays bounds `nb plan --days`: the per-day forecast cost (Simulate's
+// bounded history scans, and ForecastCost's per-day scan of the accumulating
+// working set of archives) grows with both the window and the medium's archive/DLE
+// count, so an unbounded --days can turn a routine capacity preview into a command
+// that runs for minutes with no output. 1000 days (~2.7 years) comfortably covers
+// any realistic capacity-planning horizon while keeping the worst case fast.
+const maxForecastDays = 1000
+
 // newPlanCmd implements `nb plan`: show what the next run would do, or — with
 // --days — an extended forecast of running daily for that many days.
 func newPlanCmd(a *app) *cobra.Command {
@@ -29,6 +37,9 @@ func newPlanCmd(a *app) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if days < 1 {
 				return fmt.Errorf("--days must be at least 1")
+			}
+			if days > maxForecastDays {
+				return fmt.Errorf("--days %d exceeds the %d-day forecast ceiling (the simulation cost grows with the window and the media/DLE count; a shorter window is representative enough for capacity planning)", days, maxForecastDays)
 			}
 			cfg, err := a.loadForWrite()
 			if err != nil {
