@@ -63,6 +63,7 @@ type Run struct {
 	Failures       int    `json:"failures,omitempty"`        // verify/drill failure count
 
 	// Drill-only coverage + per-DLE health, so a digest can flag trends.
+	Tier         string        `json:"tier,omitempty"` // drill: the tier exercised (what the drill tested)
 	DrillHealth  []DrillHealth `json:"drill_health,omitempty"`
 	Skipped      int           `json:"skipped,omitempty"`       // drill: unattended skips
 	Overdue      int           `json:"overdue,omitempty"`       // drill: DLEs not covered within the window
@@ -106,6 +107,7 @@ type DrillHealth struct {
 	Class   string `json:"class,omitempty"` // drill.Class token when !OK
 	WasOK   bool   `json:"was_ok"`          // the prior ledger record passed
 	Drilled bool   `json:"drilled"`         // actually exercised this run (vs skipped)
+	Bytes   int64  `json:"bytes,omitempty"` // egress this DLE's drill read off the medium
 }
 
 // Degrading reports a DLE that was passing and is now failing — the trend a digest

@@ -16,9 +16,11 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/report"
+	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
 // Source is the read-only slice of the engine the webui renders. Listing only read
@@ -32,6 +34,8 @@ type Source interface {
 	Media() []engine.MediumInfo
 	DisplayDLE(slug string) string
 	DLESummaries() []catalog.DLESummary
+	DLENames() []string         // configured DLE slugs, for drill coverage (never-drilled)
+	DrillWindow() time.Duration // the configured drill coverage window
 }
 
 // Server renders the status pages from a Source plus the catalog workdir, where the
@@ -57,6 +61,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dles", s.handleDLEs) // exact
 	mux.HandleFunc("/dles/", s.handleDLE) // subtree: /dles/<slug>
 	mux.HandleFunc("/media", s.handleMedia)
+	mux.HandleFunc("/drills", s.handleDrills)
 	mux.HandleFunc("/report", s.handleReport)
 	mux.HandleFunc("/status", s.handleStatus)
 	return mux
@@ -256,6 +261,104 @@ func (s *Server) dleHistory(slug string) []dleArchiveRow {
 
 func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "media", page{Title: "Media", Active: "media", Data: s.src.Media()})
+}
+
+// handleDrills renders the recovery-drill picture: the coverage rollup and per-DLE
+// ledger (what each DLE's last drill tested, against which copy, how much it read,
+// and whether it passed — the browser view of `nb report`'s drill-coverage section)
+// plus the recent drill runs from the history, each with its per-DLE outcomes. The
+// ledger is read from its workdir file per request, like the run history, so the
+// page is always current.
+func (s *Server) handleDrills(w http.ResponseWriter, r *http.Request) {
+	now := s.now()
+	window := s.src.DrillWindow()
+	data := drillsData{Window: sizeutil.FormatDuration(window)}
+
+	ledger, err := drill.Load(s.workdir)
+	if err != nil {
+		ledger = &drill.Ledger{} // unreadable ledger renders as never-drilled, not a 500
+	}
+	never, overdue := ledger.Coverage(s.src.DLENames(), window, now)
+	data.Overdue = overdue
+	for _, slug := range never {
+		data.Never = append(data.Never, s.src.DisplayDLE(slug))
+	}
+	sort.Strings(data.Never)
+
+	for _, rec := range ledger.Sorted() {
+		row := drillLedgerRow{
+			DLE:    s.src.DisplayDLE(rec.DLE),
+			Tier:   rec.Tier,
+			What:   tierWhat(rec.Tier),
+			Medium: rec.Medium,
+			AsOf:   rec.AsOf,
+			RunID:  rec.RunID,
+			At:     rec.LastDrill,
+			Age:    sizeutil.FormatDaysHours(now.Sub(rec.LastDrill)),
+			Bytes:  rec.Bytes,
+			Drills: rec.Drills,
+		}
+		switch {
+		case !rec.OK:
+			row.Status, row.Failing = "failing", true
+			row.Class, row.Detail = rec.Class, rec.Detail
+			row.Remedy = drill.ParseClass(rec.Class).Remedy()
+			data.Failing++
+		case now.Sub(rec.LastDrill) >= window:
+			row.Status, row.Stale = "stale", true
+			data.Stale++
+		default:
+			row.Status = "ok"
+			data.Passing++
+		}
+		data.Ledger = append(data.Ledger, row)
+	}
+
+	// Recent drill runs, newest first, each with its per-DLE outcomes.
+	for _, run := range s.history(0) {
+		if run.Command != report.CommandDrill || len(data.Runs) == maxDrillRuns {
+			continue
+		}
+		dr := drillRunRow{
+			EndedAt: run.EndedAt, Failed: run.Failed(), Error: run.Error,
+			Tier: run.Tier, What: tierWhat(run.Tier), Bytes: run.BytesMoved,
+			Failures: run.Failures, Skipped: run.Skipped, Overdue: run.Overdue,
+		}
+		for _, h := range run.DrillHealth {
+			if h.Drilled {
+				dr.Drilled++
+			}
+			dr.Targets = append(dr.Targets, drillTargetRow{
+				DLE: s.src.DisplayDLE(h.DLE), OK: h.OK, Drilled: h.Drilled,
+				Class: h.Class, Degrading: h.Degrading(), Bytes: h.Bytes,
+			})
+		}
+		data.Runs = append(data.Runs, dr)
+	}
+
+	s.render(w, "drills", page{Title: "Drills", Active: "drills", Data: data})
+}
+
+// maxDrillRuns caps the recent-drills section; the full history is on /report.
+const maxDrillRuns = 10
+
+// tierWhat is the one-line "what this tier tested" gloss shown beside the tier
+// token, mirroring the ladder documented on `nb drill --help`.
+func tierWhat(tier string) string {
+	switch tier {
+	case "sample":
+		return "re-hashed one sealed part per archive"
+	case "checksum":
+		return "re-hashed stored bytes against the seal"
+	case "structural":
+		return "decrypted, decompressed, and listed the tar stream"
+	case "chain":
+		return "point-in-time chain restore to scratch"
+	case "stock":
+		return "restored via the stock gpg/zstd/tar one-liner"
+	default:
+		return ""
+	}
 }
 
 func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {

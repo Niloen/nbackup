@@ -7,11 +7,14 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/web"
 )
@@ -45,11 +48,11 @@ func newWebCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eng, err := engine.New(cfg)
+			src, err := newEngineSource(cfg)
 			if err != nil {
 				return err
 			}
-			srv := web.NewServer(engineSource{eng}, cfg.WorkdirPath())
+			srv := web.NewServer(src, cfg.WorkdirPath())
 			return serveWeb(cmd.Context(), addr, srv.Handler())
 		},
 	}
@@ -88,14 +91,79 @@ func serveWeb(ctx context.Context, addr string, h http.Handler) error {
 // read-only Media/DisplayDLE and forwards the catalog's run/placement reads. This
 // adapter is the single, compile-checked list of everything the webui can touch —
 // if a page needs a new datum, it surfaces here rather than as an ad-hoc call.
-type engineSource struct{ *engine.Engine }
+//
+// The engine loads the catalog cache once at construction, but `nb web` is a
+// long-running reader beside cron-driven writers (dump/sync/prune run in their own
+// processes and rewrite catalog.json). So the source stats the cache file per read
+// and rebuilds the engine when it has changed — the browser then always sees the
+// current catalog, like the run history and live progress, which are re-read from
+// their workdir files per request already. Rebuilding is cheap: engine construction
+// is pure wiring plus that one JSON read (the landing volume opens lazily, and no
+// web page touches it).
+type engineSource struct {
+	cfg *config.Config
 
-func (e engineSource) Runs() []*catalog.Run { return e.Catalog().Runs() }
-
-func (e engineSource) ReadRun(id string) (*catalog.Run, error) { return e.Catalog().ReadRun(id) }
-
-func (e engineSource) Placements(runID string) []catalog.Placement {
-	return e.Catalog().Placements(runID)
+	mu    sync.Mutex
+	eng   *engine.Engine
+	stamp catalogStamp // identity of catalog.json when eng was built
 }
 
-func (e engineSource) DLESummaries() []catalog.DLESummary { return e.Catalog().DLESummaries() }
+// catalogStamp identifies a catalog cache file's on-disk version (zero when the
+// file is absent — the empty-catalog case).
+type catalogStamp struct {
+	mod  time.Time
+	size int64
+}
+
+func statCatalog(workdir string) catalogStamp {
+	fi, err := os.Stat(filepath.Join(workdir, catalog.CacheFile))
+	if err != nil {
+		return catalogStamp{}
+	}
+	return catalogStamp{mod: fi.ModTime(), size: fi.Size()}
+}
+
+// newEngineSource builds the source with its first engine, so `nb web` still fails
+// loudly at startup on a broken config or catalog.
+func newEngineSource(cfg *config.Config) (*engineSource, error) {
+	stamp := statCatalog(cfg.WorkdirPath())
+	eng, err := engine.New(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &engineSource{cfg: cfg, eng: eng, stamp: stamp}, nil
+}
+
+// engine returns the current engine, rebuilding it first when catalog.json has
+// changed on disk since the last build. A rebuild failure (e.g. a torn read racing
+// a writer's rename) keeps serving the previous engine; the next request retries.
+func (e *engineSource) engine() *engine.Engine {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if stamp := statCatalog(e.cfg.WorkdirPath()); stamp != e.stamp {
+		if eng, err := engine.New(e.cfg); err == nil {
+			e.eng, e.stamp = eng, stamp
+		}
+	}
+	return e.eng
+}
+
+func (e *engineSource) Runs() []*catalog.Run { return e.engine().Catalog().Runs() }
+
+func (e *engineSource) ReadRun(id string) (*catalog.Run, error) {
+	return e.engine().Catalog().ReadRun(id)
+}
+
+func (e *engineSource) Placements(runID string) []catalog.Placement {
+	return e.engine().Catalog().Placements(runID)
+}
+
+func (e *engineSource) DLESummaries() []catalog.DLESummary { return e.engine().DLESummaries() }
+
+func (e *engineSource) Media() []engine.MediumInfo { return e.engine().Media() }
+
+func (e *engineSource) DisplayDLE(slug string) string { return e.engine().DisplayDLE(slug) }
+
+func (e *engineSource) DLENames() []string { return e.engine().DLENames() }
+
+func (e *engineSource) DrillWindow() time.Duration { return e.cfg.DrillWindow() }

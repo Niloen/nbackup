@@ -127,6 +127,62 @@ type dleDetail struct {
 	History  []dleArchiveRow
 }
 
+// drillsData backs the drills page: the coverage rollup, the per-DLE ledger, and
+// the recent drill runs.
+type drillsData struct {
+	Window                  string   // formatted coverage window (e.g. "30d")
+	Passing, Stale, Failing int      // ledger records by current health
+	Never                   []string // configured DLEs never drilled (display names)
+	Overdue                 int      // DLEs not covered within the window
+	Ledger                  []drillLedgerRow
+	Runs                    []drillRunRow
+}
+
+// drillLedgerRow is one DLE's last drill outcome — a row of the recoverability
+// ledger, classified against the current time (failing / stale / ok).
+type drillLedgerRow struct {
+	DLE            string
+	Status         string // "ok" | "stale" | "failing" — also the pill class
+	Failing, Stale bool
+	Tier           string
+	What           string // one-line gloss of what the tier tested
+	Medium         string
+	AsOf           string
+	RunID          string // target run the drill restored to (links to /runs/<id>)
+	At             time.Time
+	Age            string // formatted now-LastDrill (e.g. "3d 4h")
+	Bytes          int64  // egress the drill read off the medium
+	Drills         int    // total applied drills of this DLE
+	Class, Detail  string // failure class + reason when failing
+	Remedy         string // operator guidance for the failure class
+}
+
+// drillRunRow is one drill invocation from the run history, with its per-DLE
+// outcomes.
+type drillRunRow struct {
+	EndedAt  time.Time
+	Failed   bool
+	Error    string
+	Tier     string
+	What     string // one-line gloss of what the tier tested
+	Bytes    int64  // total egress the drill read
+	Drilled  int    // targets actually exercised
+	Failures int
+	Skipped  int
+	Overdue  int
+	Targets  []drillTargetRow
+}
+
+// drillTargetRow is one DLE's outcome within a drill run.
+type drillTargetRow struct {
+	DLE       string
+	OK        bool
+	Drilled   bool // false = skipped (needed an operator)
+	Class     string
+	Degrading bool // passed before, failing now
+	Bytes     int64
+}
+
 // dleArchiveRow is one run's archive for a DLE — a row of the DLE history, linking
 // back to the run it belongs to.
 type dleArchiveRow struct {

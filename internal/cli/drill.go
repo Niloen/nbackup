@@ -20,6 +20,7 @@ import (
 func drillRunRecord(dr *engine.DrillReport, priorOK map[string]bool) report.Run {
 	rec := report.Run{
 		Command:      report.CommandDrill,
+		Tier:         dr.Tier.String(),
 		Failures:     dr.Failures,
 		Skipped:      dr.Skipped,
 		Overdue:      dr.Overdue,
@@ -27,20 +28,23 @@ func drillRunRecord(dr *engine.DrillReport, priorOK map[string]bool) report.Run 
 	}
 	for _, t := range dr.Targets {
 		was, seen := priorOK[t.DLE]
-		rec.DrillHealth = append(rec.DrillHealth, report.DrillHealth{
+		drilled := t.Class != drill.ClassSkipped
+		h := report.DrillHealth{
 			DLE:     t.DLE,
 			OK:      t.OK,
 			Class:   t.Class.String(),
 			WasOK:   seen && was,
-			Drilled: t.Class != drill.ClassSkipped,
-		})
+			Drilled: drilled,
+		}
+		if drilled {
+			h.Bytes = t.Bytes
+		}
+		rec.DrillHealth = append(rec.DrillHealth, h)
 		// "Bytes moved" for a drill is the egress it actually read off the medium —
 		// the drilled chain payload of each target it exercised (a skipped target read
 		// nothing). This is what the report/webui history shows, so a drill row reads
 		// its true size instead of 0 B.
-		if t.Class != drill.ClassSkipped {
-			rec.BytesMoved += t.Bytes
-		}
+		rec.BytesMoved += h.Bytes
 	}
 	return rec
 }

@@ -234,6 +234,7 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 				DLE: t.DLE, LastDrill: opts.Now, Tier: opts.Tier.String(), Medium: medium,
 				AsOf: t.AsOf, RunID: t.RunID, OK: res.OK,
 				Class: failureToken(res), Detail: res.Detail,
+				Bytes:  res.Bytes,
 				Drills: prev.Drills + 1, // advances the sample tier's part rotation
 			})
 			if err := ledger.Save(d.cfg.WorkdirPath()); err != nil {

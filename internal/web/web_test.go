@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/report"
 )
 
 // fakeSource is a canned read-only Source for exercising the handlers without an
@@ -40,6 +42,24 @@ func (f fakeSource) Placements(runID string) []catalog.Placement {
 func (f fakeSource) Media() []engine.MediumInfo { return f.media }
 
 func (f fakeSource) DisplayDLE(slug string) string { return slug }
+
+// DLENames returns the DLEs seen in the fake's runs — the "configured" set for
+// drill coverage.
+func (f fakeSource) DLENames() []string {
+	var names []string
+	seen := map[string]bool{}
+	for _, r := range f.runs {
+		for _, a := range r.Archives {
+			if !seen[a.DLE] {
+				seen[a.DLE] = true
+				names = append(names, a.DLE)
+			}
+		}
+	}
+	return names
+}
+
+func (f fakeSource) DrillWindow() time.Duration { return 30 * 24 * time.Hour }
 
 // DLESummaries aggregates the fake's runs per DLE, mirroring catalog.DLESummaries
 // closely enough to render the DLE pages (every archive here is on "disk").
@@ -149,6 +169,48 @@ func TestFinishedRunHasNoInProgressBanner(t *testing.T) {
 	}
 }
 
+func TestDrillsPageRendersLedgerAndHistory(t *testing.T) {
+	dir := t.TempDir()
+	// One passing and one failing ledger record, plus an unknown-to-the-ledger DLE
+	// ("local" from sampleSource) that must show as never drilled.
+	ledger := &drill.Ledger{}
+	ledger.Update(drill.Record{
+		DLE: "svc-a", LastDrill: time.Now().Add(-2 * 24 * time.Hour), Tier: "structural",
+		Medium: "disk", AsOf: "2026-07-03", RunID: "run-2026-07-03.120000", OK: true,
+		Bytes: 123_000, Drills: 3,
+	})
+	ledger.Update(drill.Record{
+		DLE: "svc-b", LastDrill: time.Now().Add(-24 * time.Hour), Tier: "chain",
+		Medium: "offsite", AsOf: "2026-07-03", RunID: "run-2026-07-03.120000", OK: false,
+		Class: "pipeline", Detail: "gpg: decryption failed",
+	})
+	if err := ledger.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := report.Append(dir, report.Run{
+		Command: report.CommandDrill, EndedAt: time.Now(), Outcome: report.OutcomeSuccess,
+		Tier: "structural", BytesMoved: 123_000,
+		DrillHealth: []report.DrillHealth{{DLE: "svc-a", OK: true, Drilled: true, Bytes: 123_000}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := get(t, NewServer(sampleSource(), dir).Handler(), "/drills")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d", code)
+	}
+	for _, want := range []string{
+		"svc-a", "structural", "123.00 kB", // passing ledger row: tier + egress
+		"svc-b", "pipeline", "gpg: decryption failed", // failing row: class + detail
+		"Never drilled", "local", // coverage: the configured DLE with no record
+		"1 DLE(s) drilled", // the recent drill run from the history
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/drills missing %q", want)
+		}
+	}
+}
+
 func TestUnknownPath404(t *testing.T) {
 	h := NewServer(sampleSource(), t.TempDir()).Handler()
 	if code, _ := get(t, h, "/nope"); code != http.StatusNotFound {
@@ -158,7 +220,7 @@ func TestUnknownPath404(t *testing.T) {
 
 func TestEmptyCatalog(t *testing.T) {
 	h := NewServer(fakeSource{}, t.TempDir()).Handler()
-	for _, p := range []string{"/", "/runs", "/dles", "/media", "/report", "/status"} {
+	for _, p := range []string{"/", "/runs", "/dles", "/media", "/drills", "/report", "/status"} {
 		if code, _ := get(t, h, p); code != http.StatusOK {
 			t.Errorf("%s: code=%d, want 200 on an empty catalog", p, code)
 		}

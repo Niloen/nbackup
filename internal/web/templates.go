@@ -49,7 +49,7 @@ var funcs = template.FuncMap{
 var pages = parsePages()
 
 func parsePages() map[string]*template.Template {
-	names := []string{"home", "runs", "run", "dles", "dle", "media", "report", "status"}
+	names := []string{"home", "runs", "run", "dles", "dle", "media", "drills", "report", "status"}
 	m := make(map[string]*template.Template, len(names))
 	for _, n := range names {
 		m[n] = template.Must(template.New("base.html").Funcs(funcs).

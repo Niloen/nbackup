@@ -32,6 +32,7 @@ type Record struct {
 	OK        bool      `json:"ok"`               // passed
 	Class     string    `json:"class,omitempty"`  // failure class token when !OK
 	Detail    string    `json:"detail,omitempty"` // human-readable reason when !OK
+	Bytes     int64     `json:"bytes,omitempty"`  // egress the drill read off the medium
 	Drills    int       `json:"drills,omitempty"` // applied drills that have exercised this DLE — the sample tier's rotation counter (drill N samples part N mod parts)
 }
 
