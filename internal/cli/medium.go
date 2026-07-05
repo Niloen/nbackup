@@ -161,14 +161,32 @@ func printInventory(eng *engine.Engine, name string) {
 	appendable := eng.MediumAppendable(name)
 
 	dw := newTab(os.Stdout)
-	fmt.Fprintln(dw, "\n\tDRIVE\tBARCODE\tLABEL\tSTATUS\tON VOLUME\tFILES")
+	// Show the device node per drive so the drive-index↔node mapping is inspectable:
+	// on a robotic library the `device:` list must name the nodes in the library's
+	// drive order, and this is where an operator verifies it. Omitted for a file-backed
+	// library (no OS node).
+	hasNode := false
 	for _, d := range view.Drives {
+		if d.Node != "" {
+			hasNode = true
+		}
+	}
+	if hasNode {
+		fmt.Fprintln(dw, "\n\tDRIVE\tNODE\tBARCODE\tLABEL\tSTATUS\tON VOLUME\tFILES")
+	} else {
+		fmt.Fprintln(dw, "\n\tDRIVE\tBARCODE\tLABEL\tSTATUS\tON VOLUME\tFILES")
+	}
+	for _, d := range view.Drives {
+		node := ""
+		if hasNode {
+			node = "\t" + barcodeOr(d.Node)
+		}
 		if !d.Loaded {
-			fmt.Fprintf(dw, "\t%d\t(empty)\t-\t-\t-\t-\n", d.Drive)
+			fmt.Fprintf(dw, "\t%d%s\t(empty)\t-\t-\t-\t-\n", d.Drive, node)
 			continue
 		}
 		label, status := volumeLabelStatus(d.Volume, name, appendable, volumeHasRuns(eng, d.Volume.Label))
-		fmt.Fprintf(dw, "\t%d\t%s\t%s\t%s\t%s\t%d\n", d.Drive, barcodeOr(d.Volume.Barcode), label, status,
+		fmt.Fprintf(dw, "\t%d%s\t%s\t%s\t%s\t%s\t%d\n", d.Drive, node, barcodeOr(d.Volume.Barcode), label, status,
 			sizeutil.FormatBytes(d.Volume.Used), d.Volume.Files)
 	}
 	dw.Flush()

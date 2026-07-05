@@ -87,8 +87,9 @@ func openDirLoader(loc string, capacity int64, nSlots, nDrives int, manual bool)
 	return l, nil
 }
 
-func (l *dirLoader) driveCount() int { return l.nDrives }
-func (l *dirLoader) manual() bool    { return l.isManual }
+func (l *dirLoader) driveCount() int      { return l.nDrives }
+func (l *dirLoader) manual() bool         { return l.isManual }
+func (l *dirLoader) driveNode(int) string { return "" } // file-backed: no OS device node
 
 // loadedIn reports the drive currently holding slot s, or -1. Caller holds l.mu.
 func (l *dirLoader) loadedIn(s int) int {

@@ -18,8 +18,11 @@ import (
 // shape: inventory comes from `mtx status` (barcodes read without loading), and a load
 // is `mtx load <slot> <drive>`.
 //
-// The librarian schedules drive 0 today, but the loader models every configured drive
-// so multi-drive scheduling is a librarian change, not a backend one.
+// The loader models every configured drive, and the librarian schedules across all of
+// them — a parallel run drives several data-transfer elements at once. `nodes[i]` is
+// drive i in the changer's own drive order (the target of `mtx load <slot> i`); it is
+// not the numeric /dev/nstN order, so the config must list the nodes in that order (the
+// mtDevice backend fails fast, not hangs, when a loaded drive reads empty).
 type mtxLoader struct {
 	nodes  []string    // drive device nodes (/dev/nstN); index = drive number
 	devs   []*mtDevice // persistent byte handle per drive (the cartridge swaps under it)
@@ -68,6 +71,12 @@ func openMtxLoader(control string, nodes []string, block int) (loader, error) {
 
 func (m *mtxLoader) driveCount() int { return len(m.nodes) }
 func (m *mtxLoader) manual() bool    { return false }
+func (m *mtxLoader) driveNode(i int) string {
+	if i >= 0 && i < len(m.nodes) {
+		return m.nodes[i]
+	}
+	return ""
+}
 
 func (m *mtxLoader) status() (mtxStatus, error) {
 	out, err := m.runner.run("status")

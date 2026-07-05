@@ -136,6 +136,7 @@ type SlotStatus struct {
 // loaded (by barcode and home slot), and the loaded volume's physical fill.
 type DriveStatus struct {
 	Drive    int          // data-transfer-element address (0-based)
+	Node     string       // the drive's device node (e.g. /dev/nst0); "" for a file-backed library
 	Loaded   bool         // a cartridge is in the drive
 	FromSlot int          // the slot it came from, for Unload; -1 when unknown
 	Volume   VolumeStatus // the loaded cartridge's barcode/label/fill (zero when empty)

@@ -143,11 +143,13 @@ See [Media](../features/media) and [Cost](../features/cost).
 ### type: tape
 
 A tape medium is a **changer**: drives (data-transfer elements) fed from slots
-(storage elements that hold cartridges). An emulated library uses `dir:` with
-`slots:` (and optionally `drives:`); a hand-changed single drive uses `dir:` +
-`manual: true` (an emulated sim) or `device:` (a real no-rewind `st` drive).
-`dir:` is a local directory or a bucket URL (`s3://`, `gs://`, `azblob://`), so
-the same virtual library can live in an object store.
+(storage elements that hold cartridges). It comes in three shapes: an emulated
+library (`dir:` with `slots:`, and optionally `drives:`); a **real SCSI library**
+(`changer:` the robot's sg control node + `device:` the drive nodes, driven via
+`mtx(1)`); or a single drive — hand-loaded emulated (`dir:` + `manual: true`) or a
+real no-rewind `st` drive (`device:`). `dir:` is a local directory or a bucket URL
+(`s3://`, `gs://`, `azblob://`), so the same virtual library can live in an object
+store.
 
 ```yaml
 media:
@@ -161,9 +163,19 @@ media:
     drives: 1                     # data-transfer drives a robot loads slots into
     volume_size: 6TB              # per-cartridge capacity; a write past it hits EOT
     # part_size: 6TB              # use instead of volume_size on a real drive
-    # block_size: 64k             # (device: only) tape record size; default 64k, 32k–256k
+    # block_size: 64k             # (device:/changer: only) tape record size; default 64k, 32k–256k
     minimum_age: 180d
     appendable: true              # pack many runs per tape; false = one run per tape
+  robot:                          # a REAL SCSI library driven via mtx(1)
+    type: tape
+    changer: /dev/sg0             # the library's robot control (sg) node
+    device: /dev/nst0,/dev/nst1   # the drive nodes IN THE LIBRARY'S DRIVE ORDER
+                                  #   (entry i = drive i; NOT the numeric nstN order —
+                                  #   a library's drive 0 can be /dev/nst7). `nb medium`
+                                  #   prints each drive's node so you can confirm it.
+                                  #   `slots`/`drives`/`manual`/`volume_size` do not apply.
+    part_size: 6TB                # bound parts (a drive can't see its own fill)
+    minimum_age: 180d
   desk-drive:
     type: tape
     dir: /var/lib/nbackup/station

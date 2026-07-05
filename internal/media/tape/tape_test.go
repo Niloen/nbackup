@@ -461,7 +461,8 @@ func (f *fakeLoader) slots() ([]media.SlotStatus, error) { return f.slotList, ni
 func (f *fakeLoader) load(slot, drive int) (device, string, error) {
 	return f.loadFn(slot, drive)
 }
-func (f *fakeLoader) unload(int) error { return nil }
+func (f *fakeLoader) unload(int) error     { return nil }
+func (f *fakeLoader) driveNode(int) string { return "" }
 func (f *fakeLoader) loaded(int) (device, string, int, bool) {
 	return nil, "", -1, false
 }

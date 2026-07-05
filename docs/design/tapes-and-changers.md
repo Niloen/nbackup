@@ -1,12 +1,27 @@
 # Design note: tapes and changers (what real hardware needs)
 
 Status: implemented — the single-drive `device:` path, the slots/drives/`Manual`
-changer remodel, and the real `mtx`/`chg-robot` loader all shipped and are validated
-against a SCSI media-changer emulator (`mtx -f /dev/sg0`, a 4-drive / 43-slot LTO-8
-library with `/dev/nst0…3`). Multi-drive scheduling (the librarian assigning a drive
-per worker) and real-hardware validation on a physical drive are the remaining work.
-The current shape lives in ARCHITECTURE.md, "Tape = a changer"; this note keeps the
-*why* — what real tape taught us and how the model maps onto Amanda's.
+changer remodel, the real `mtx`/`chg-robot` loader, and multi-drive scheduling (the
+librarian assigning a drive per worker) all shipped and are validated against a SCSI
+media-changer emulator: a 4-drive / 43-slot LTO-8 library (`mtx -f /dev/sg0`,
+`/dev/nst0…3`) and a 4-drive STK T10000B library (`mtx -f /dev/sg2`) where a parallel
+run was observed driving all four drives at once. Real-hardware validation on a
+physical drive is the remaining work. The current shape lives in ARCHITECTURE.md,
+"Tape = a changer"; this note keeps the *why* — what real tape taught us and how the
+model maps onto Amanda's.
+
+### Drive order is load-bearing (finding 6)
+
+`device:` lists the drive nodes in the changer's DRIVE order: entry *i* is the drive
+the loader targets with `mtx load <slot> i`. This order is **not** the numeric
+`/dev/nstN` order — a library's drive 0 is whatever data-transfer element the robot
+calls 0, which on a real STK L80 was `/dev/nst7`. List the nodes in the wrong order and
+`mtx load` puts the cartridge in one physical drive while the backend opens another. The
+backend guards this: it opens each drive `O_NONBLOCK` and checks the st(4) `DR_OPEN`
+status bit, so a drive the changer reports loaded but that reads empty fails fast with a
+message that names the likely ordering mismatch — rather than the original bug, an
+`open()` of an empty drive that blocks forever and cannot be reaped by `SIGTERM`.
+`nb medium <name>` prints each drive's node so the mapping is inspectable.
 
 ## Part 1 — What real tape requires (learned from a broken first cut)
 

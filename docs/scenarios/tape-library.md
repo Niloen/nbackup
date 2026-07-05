@@ -106,6 +106,49 @@ nb prune lto                 # reclaim — whole volumes only, by label rotation
 Restore loads whichever tape holds the copy it needs. A **spanned** archive reassembles
 by loading its tapes in order.
 
+## Real hardware: a SCSI changer
+
+The config above uses a **virtual** library (`dir:`) so it runs with no hardware. A
+real robotic library is the same medium with two fields swapped in: `changer:` (the
+library's SCSI control node) and `device:` (its tape drive nodes), driven via
+`mtx(1)`. Everything else — labeling, spanning, recycle, restore — is identical.
+
+```yaml
+media:
+  lto:
+    type: tape
+    changer: /dev/sg0              # the robot's control (sg) node — mtx talks to this
+    device: /dev/nst0,/dev/nst1    # the drive nodes, IN THE LIBRARY'S DRIVE ORDER
+    part_size: 6TB                 # bound parts; a real drive can't see its own fill
+    minimum_age: 180d
+    appendable: true
+landing: lto
+```
+
+`slots:`/`drives:`/`volume_size:` do not apply here — the library reports its own
+slots, drives, and barcodes (`nb medium lto` shows them). `mtx` must be on `PATH`.
+
+**Drive order is load-bearing.** `device:` lists the drive nodes in the changer's
+own **drive order**: the first node is drive 0 (the robot's first data-transfer
+element), the second is drive 1, and so on. This is **not** the numeric `/dev/nstN`
+order — a library's drive 0 is often `/dev/nst7`. Get it wrong and a load puts the
+tape in one drive while NBackup reads another; it fails fast with *"no tape loaded …
+check `device:` order"* rather than hanging, but it won't run. To find the order,
+load a slot into drive 0 and see which node comes online:
+
+```bash
+mtx -f /dev/sg0 load 1 0
+for d in /dev/nst*; do mt -f $d status 2>/dev/null | grep -q ONLINE && echo "drive 0 = $d"; done
+mtx -f /dev/sg0 unload 1 0
+# repeat for `load 1 1`, `load 1 2`, … to map every drive, then list them in that order.
+nb medium lto     # confirms: each drive row shows its NODE
+```
+
+**Multiple drives run in parallel.** List two or more nodes and NBackup schedules
+`parallelism.workers` dumps across the drives at once — each worker gets its own
+drive and its own tape. (To instead feed a *single* slow drive at full speed, put a
+[holding disk](tape-holding-disk) in front of it.)
+
 ## Single-drive variants
 
 A single drive you change by hand — a file-backed manual drive (`manual: true`) or a real

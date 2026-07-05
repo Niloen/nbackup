@@ -135,31 +135,86 @@ func mtIoctlOp(fd uintptr, op int16, count int32) error {
 
 // mtFileno returns the current file (record-group) number via MTIOCGET.
 func mtFileno(fd uintptr) (int, error) {
-	var g mtGet
-	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, fd, mtIOCGET, uintptr(unsafe.Pointer(&g))); errno != 0 {
-		return 0, errno
+	g, err := mtGetStatus(fd)
+	if err != nil {
+		return 0, err
 	}
 	return int(g.fileno), nil
 }
+
+// mtGetStatus reads the drive's MTIOCGET status (position + generic-status bits).
+func mtGetStatus(fd uintptr) (mtGet, error) {
+	var g mtGet
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, fd, mtIOCGET, uintptr(unsafe.Pointer(&g))); errno != 0 {
+		return mtGet{}, errno
+	}
+	return g, nil
+}
+
+// gmtDROpen is the st(4) generic-status "no cartridge in the drive" bit (GMT_DR_OPEN
+// in <linux/mtio.h>): set when the drive is empty (door open). It is the definitive,
+// immediately-readable signal that no tape is loaded.
+const gmtDROpen = 0x00040000
 
 // openDev opens the no-rewind device and puts it in variable-block mode. A write
 // path opens read-write; a read path opens read-only (so a write-protected tape is
 // still readable) and tolerates a rejected MTSETBLK, since reading a variable-block
 // record only needs a large-enough buffer regardless of the device's set size.
+//
+// The open is O_NONBLOCK so it returns even when the drive holds no cartridge: a plain
+// open of an empty drive blocks until a tape is loaded, and if a changer put the
+// cartridge in a DIFFERENT physical drive than this node — the `device:` list order not
+// matching the library's drive index — that wait never ends and not even SIGTERM reaps
+// it. With O_NONBLOCK we can check for media (requireMedia) and fail fast with a clear
+// message, then clear the flag so the subsequent data I/O blocks normally.
 func (m *mtDevice) openDev(write bool) (*os.File, error) {
 	flag := os.O_RDONLY
 	if write {
 		flag = os.O_RDWR
 	}
-	f, err := os.OpenFile(m.dev, flag, 0)
+	f, err := os.OpenFile(m.dev, flag|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
+	}
+	if err := m.requireMedia(f.Fd()); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := clearNonblock(f.Fd()); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("clear non-blocking mode on %s: %w", m.dev, err)
 	}
 	if err := mtIoctlOp(f.Fd(), mtSETBLK, 0); err != nil && write {
 		f.Close()
 		return nil, fmt.Errorf("set variable block mode on %s: %w", m.dev, err)
 	}
 	return f, nil
+}
+
+// requireMedia fails fast when the drive holds no cartridge, so a later blocking read
+// never waits forever on an empty drive. It keys on the DR_OPEN status bit; the most
+// common cause on a robotic library is a `device:` ordering mismatch, so the error
+// names it. When the status ioctl is unreadable it returns nil rather than block the
+// operation on the probe — the real I/O will then surface any error.
+func (m *mtDevice) requireMedia(fd uintptr) error {
+	g, err := mtGetStatus(fd)
+	if err != nil {
+		return nil
+	}
+	if g.gstat&gmtDROpen != 0 {
+		return fmt.Errorf("%s: no tape loaded. If a changer feeds this drive, check that `device:` lists the drive nodes in the library's drive order (drive 0 first): a mismatch loads a cartridge into a different drive than the one read here", m.dev)
+	}
+	return nil
+}
+
+// clearNonblock removes O_NONBLOCK from an open fd (see openDev) so data I/O blocks.
+func clearNonblock(fd uintptr) error {
+	flags, err := unix.FcntlInt(fd, unix.F_GETFL, 0)
+	if err != nil {
+		return err
+	}
+	_, err = unix.FcntlInt(fd, unix.F_SETFL, flags&^unix.O_NONBLOCK)
+	return err
 }
 
 // count returns the number of files on the mounted tape: space to end of recorded

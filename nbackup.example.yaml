@@ -46,6 +46,15 @@ media:
     #                             #   into the drive; barcodes come from the library scanner.
     #                             #   `slots`/`drives`/`manual`/`volume_size` do not apply; bound
     #                             #   parts with `part_size` (a drive can't see its own fill).
+    #  ORDER MATTERS: the nodes must be listed in the library's DRIVE order — the first
+    #  is drive 0 (the changer's first data-transfer element), the second drive 1, and so
+    #  on. This is NOT the numeric /dev/nstN order: a library's drive 0 can be /dev/nst7.
+    #  Get it wrong and a load puts the tape in one drive while NBackup reads another —
+    #  it now fails fast ("no tape loaded … check device: order") rather than hanging, but
+    #  it still won't run. To find the order: load a slot into drive 0 and see which node
+    #  lights up, e.g.  `mtx -f /dev/sg0 load 1 0 && for d in /dev/nst*; do mt -f $d status
+    #  2>/dev/null | grep -q ONLINE && echo "drive 0 = $d"; done; mtx -f /dev/sg0 unload 1 0`
+    #  Then `nb medium <name>` prints each drive's node so you can confirm the mapping.
     # device: /dev/nst0           # OR (no `changer:`) a real single drive a human hand-loads —
     #                             #   `slots`/`drives`/`manual` do not apply; set `part_size`.
     # block_size: 64k             # (device:/changer: only) tape record size; writes are chunked

@@ -326,4 +326,12 @@ func TestMtxDriveCountManual(t *testing.T) {
 	if ld.manual() {
 		t.Fatal("an mtx robot is not manual")
 	}
+	// driveNode exposes each drive's device node (for the `nb medium` mapping) and
+	// returns "" out of range rather than panicking.
+	if got := ld.driveNode(0); got != "/dev/nst0" {
+		t.Fatalf("driveNode(0) = %q, want /dev/nst0", got)
+	}
+	if got := ld.driveNode(1); got != "" {
+		t.Fatalf("driveNode(1) out of range = %q, want \"\"", got)
+	}
 }

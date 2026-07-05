@@ -127,14 +127,22 @@ A tape medium is a **changer**: a set of **drives** (data-transfer elements) fed
 from a set of **slots** (storage elements that hold cartridges). It comes in
 shapes that differ in **who loads the tape**:
 
-- A **changer with a robot** — `dir:` (a virtual library in a local directory or,
-  via a bucket URL like `s3://…`, an object store), `slots: N` cartridges,
-  `drives: K` (default 1), a finite `volume_size` per cartridge. A command loads
-  a slot into a drive; the robot does it unattended.
+- A **changer with a robot** — either a **virtual library** (`dir:` in a local
+  directory or, via a bucket URL like `s3://…`, an object store) with `slots: N`
+  cartridges and a finite `volume_size`, or a **real SCSI library** (`changer:`
+  the robot's control node + `device:` the drive nodes) driven via `mtx(1)`. Either
+  way `drives: K` (default 1) run in parallel and a command loads a slot into a
+  drive; the robot does it unattended.
 - A **single drive loaded by hand** — either an emulated sim (`manual: true`, a
   drive a human loads), or a real drive (`device:`, a one-drive changer with
   `block_size:` for the tape record size). It shows only the cartridge currently
   loaded.
+
+For a real SCSI library, `changer:` is the control (sg) node and `device:` lists
+the drive nodes **in the library's drive order** — entry *i* is drive *i*, which is
+not the numeric `/dev/nstN` order (a library's drive 0 can be `/dev/nst7`). `nb
+medium <name>` prints each drive's node so you can confirm the mapping; see
+[Robotic tape library](../scenarios/tape-library#real-hardware-a-scsi-changer).
 
 When a backup or restore needs a different tape, a robot loads it; a `manual:
 true` changer or a real `device:` drive **prompts you to load it and waits**. An

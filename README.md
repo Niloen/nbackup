@@ -829,9 +829,12 @@ The `tape` medium is a **changer**: drives (data-transfer elements) fed from
 slots (storage elements that hold cartridges). It comes in shapes that differ in
 *who loads the tape*:
 
-- A **changer with a robot** (`dir:` file-backed) has `slots: N` cartridges and
-  `drives: K` (default 1), each cartridge a finite `volume_size` tape, and a
-  command loads a slot into a drive unattended.
+- A **changer with a robot** — a `dir:` file-backed virtual library (`slots: N`
+  cartridges, `drives: K`, a finite `volume_size` each), or a **real SCSI library**
+  (`changer:` control node + `device:` drive nodes in drive order, via `mtx(1)`) —
+  loads a slot into a drive unattended, `drives: K` in parallel. (See the
+  [robotic tape library](docs/scenarios/tape-library.md) guide for the hardware setup
+  and the drive-order rule.)
 - A **single drive you load by hand** — a file-backed sim (`manual: true`), or a
   real drive (`device:`, with `block_size:` for the tape record size) — shows only
   the cartridge currently in the drive; the sim also lists the other cartridges in

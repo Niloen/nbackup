@@ -112,7 +112,7 @@ func newTapeVolume(opts media.Options) (media.Volume, error) {
 		if err != nil {
 			return nil, err
 		}
-		return newTapeChanger(&realDriveLoader{dev: dev}, 0)
+		return newTapeChanger(&realDriveLoader{dev: dev, node: opts.Get("device")}, 0)
 	default:
 		return nil, fmt.Errorf("tape medium requires 'dir' (emulated library: a directory or bucket URL) or 'device' (real drive)")
 	}
@@ -366,6 +366,9 @@ type loader interface {
 	unload(drive int) error
 	// loaded reports drive's current binding (device, barcode, home slot), if any.
 	loaded(drive int) (dev device, barcode string, fromSlot int, ok bool)
+	// driveNode is the OS device node backing drive i (e.g. /dev/nst0), for display so
+	// the drive-index↔node mapping is inspectable; "" for a file-backed library.
+	driveNode(i int) string
 }
 
 // tapeDrive is one data-transfer element: the per-cartridge I/O core (tape) over the
@@ -420,7 +423,7 @@ func (c *tapeChanger) Drives() ([]media.DriveStatus, error) {
 	out := make([]media.DriveStatus, len(c.drives))
 	for i, d := range c.drives {
 		st, ok := d.Loaded()
-		out[i] = media.DriveStatus{Drive: i, Loaded: ok, FromSlot: d.fromSlot, Volume: st}
+		out[i] = media.DriveStatus{Drive: i, Node: c.ld.driveNode(i), Loaded: ok, FromSlot: d.fromSlot, Volume: st}
 	}
 	return out, nil
 }
@@ -455,11 +458,20 @@ func (c *tapeChanger) Unload(drive int) error {
 // realDriveLoader is a single real drive a human loads: one fixed device, no
 // addressable slots, and a Load that refuses (media.ErrManualLoad) because only a
 // human moves the reel. The librarian prompts the operator and re-reads the drive.
-type realDriveLoader struct{ dev device }
+type realDriveLoader struct {
+	dev  device
+	node string // the drive's device node, for display (e.g. /dev/nst0)
+}
 
 func (r *realDriveLoader) driveCount() int                    { return 1 }
 func (r *realDriveLoader) manual() bool                       { return true }
 func (r *realDriveLoader) slots() ([]media.SlotStatus, error) { return nil, nil }
+func (r *realDriveLoader) driveNode(i int) string {
+	if i == 0 {
+		return r.node
+	}
+	return ""
+}
 func (r *realDriveLoader) load(slot, drive int) (device, string, error) {
 	return nil, "", media.ErrManualLoad
 }
