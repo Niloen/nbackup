@@ -91,13 +91,10 @@ account and point %s at its key — no login needed`, clientEnv, credsEnv)
 	if err != nil {
 		return fmt.Errorf("read OAuth client %q: %w", clientPath, err)
 	}
-	conf, err := google.ConfigFromJSON(cb, drive.DriveFileScope)
+	conf, err := clientConfig(cb, drive.DriveFileScope)
 	if err != nil {
 		return fmt.Errorf("parse OAuth client %q (expected a client-secret JSON downloaded from the Cloud Console): %w", clientPath, err)
 	}
-	// ConfigFromJSON populates only the auth/token URLs from the client JSON, not the
-	// device endpoint — supply it so the device flow can run.
-	conf.Endpoint.DeviceAuthURL = google.Endpoint.DeviceAuthURL
 
 	tok, err := authorize(ctx, conf, out)
 	if err != nil {
@@ -132,6 +129,57 @@ account and point %s at its key — no login needed`, clientEnv, credsEnv)
 		fmt.Fprintf(out, "Set %s=%s (in your shell / cron env) so the medium finds it, then run `nb check`.\n", credsEnv, outPath)
 	}
 	return nil
+}
+
+// clientConfig parses an OAuth client-secret JSON (an "installed" or "web" wrapper) into an
+// oauth2.Config. It stands in for google.ConfigFromJSON, which rejects any client that omits
+// redirect_uris — but a modern Console download for a "Desktop app" or "TVs and Limited Input
+// devices" client carries no redirect_uris at all, and neither flow here needs the file's URI
+// anyway (the device flow uses none; the loopback flow mints its own). Missing auth/token URLs
+// fall back to Google's well-known endpoints, and the base carries the device endpoint the
+// device flow needs.
+func clientConfig(jsonKey []byte, scope ...string) (*oauth2.Config, error) {
+	type cred struct {
+		ClientID     string   `json:"client_id"`
+		ClientSecret string   `json:"client_secret"`
+		RedirectURIs []string `json:"redirect_uris"`
+		AuthURI      string   `json:"auth_uri"`
+		TokenURI     string   `json:"token_uri"`
+	}
+	var j struct {
+		Web       *cred `json:"web"`
+		Installed *cred `json:"installed"`
+	}
+	if err := json.Unmarshal(jsonKey, &j); err != nil {
+		return nil, err
+	}
+	c := j.Installed
+	if c == nil {
+		c = j.Web
+	}
+	if c == nil {
+		return nil, errors.New(`no "installed" or "web" client found in the JSON`)
+	}
+	if c.ClientID == "" {
+		return nil, errors.New("client JSON has no client_id")
+	}
+	endpoint := google.Endpoint // carries Google's DeviceAuthURL for the device flow
+	if c.AuthURI != "" {
+		endpoint.AuthURL = c.AuthURI
+	}
+	if c.TokenURI != "" {
+		endpoint.TokenURL = c.TokenURI
+	}
+	conf := &oauth2.Config{
+		ClientID:     c.ClientID,
+		ClientSecret: c.ClientSecret,
+		Scopes:       scope,
+		Endpoint:     endpoint,
+	}
+	if len(c.RedirectURIs) > 0 {
+		conf.RedirectURL = c.RedirectURIs[0]
+	}
+	return conf, nil
 }
 
 // authorize runs the OAuth consent, preferring the device flow (no browser or open port on
