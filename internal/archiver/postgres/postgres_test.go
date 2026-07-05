@@ -50,6 +50,7 @@ func fakePsql(t *testing.T, dir string, summarizeWAL string) {
   *pg_database_size*) echo 12345 ;;
   *pg_database*) echo "5|testdb" ;;
   *pg_class*) echo "r|1234|2234|3234|public|users|90112" ;;
+  *rolreplication*) echo t ;;
   *summarize_wal*) echo %s ;;
   *"SELECT 1"*) echo 1 ;;
   *) echo "unexpected psql args: $*" >&2; exit 2 ;;
@@ -206,6 +207,18 @@ func TestCheckSource(t *testing.T) {
 	fakePsql(t, bin, "on")
 	if err := p.CheckSource("testdb"); err != nil {
 		t.Fatal(err)
+	}
+
+	// A role that connects fine but lacks REPLICATION must fail check, not sail
+	// through to a dump-time "permission denied to start WAL sender".
+	fakeTool(t, bin, "psql", `case "$*" in
+  *rolreplication*) echo f ;;
+  *summarize_wal*) echo on ;;
+  *"SELECT 1"*) echo 1 ;;
+  *) echo "unexpected psql args: $*" >&2; exit 2 ;;
+esac`)
+	if err := p.CheckSource("testdb"); err == nil || !strings.Contains(err.Error(), "REPLICATION") {
+		t.Fatalf("want REPLICATION failure, got %v", err)
 	}
 }
 
@@ -695,5 +708,68 @@ func TestLiveIncrementalCycle(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(out2)); got != "2000" {
 		t.Fatalf("restored row count = %s, want 2000", got)
+	}
+}
+
+// TestInterpretDumpError checks that the archiver rewrites pg_basebackup's raw,
+// shell-wrapped failures into the action that fixes them and drops the generic
+// "bash: exit status N" noise (see InterpretDumpError).
+func TestInterpretDumpError(t *testing.T) {
+	p := open(t, t.TempDir(), t.TempDir())
+	req := archiver.BackupRequest{Level: 1}
+	const dle = "app01:app_prod"
+
+	cases := []struct {
+		name     string
+		req      archiver.BackupRequest
+		in       string
+		wantHas  []string // substrings the rewritten message must contain
+		wantGone []string // substrings it must not contain
+	}{
+		{
+			name:     "summarize_wal off",
+			req:      req,
+			in:       "source: bash: exit status 1\npg_basebackup: error: could not initiate base backup: ERROR:  incremental backups cannot be taken unless WAL summarization is enabled",
+			wantHas:  []string{"summarize_wal = on", "pg_reload_conf", "pg_basebackup: error"},
+			wantGone: []string{"bash: exit status"},
+		},
+		{
+			name:     "WAL summaries gap",
+			req:      req,
+			in:       "source: bash: exit status 1\npg_basebackup: error: could not initiate base backup: ERROR:  WAL summaries are required on timeline 1 from 0/1D to 0/5F, but the summaries for that timeline and LSN range are incomplete\nDETAIL:  The first unsummarized LSN in this range is 0/23.",
+			wantHas:  []string{"nb reset " + dle, "pg_basebackup: error", "DETAIL:"},
+			wantGone: []string{"bash: exit status"},
+		},
+		{
+			name:     "unrelated failure keeps pg words, drops shell noise",
+			req:      req,
+			in:       "source: bash: exit status 1\npg_basebackup: error: connection to server failed: FATAL:  the database system is starting up",
+			wantHas:  []string{"pg_basebackup: error", "starting up"},
+			wantGone: []string{"bash: exit status"},
+		},
+		{
+			name:    "level 0 (full) with no pg lines is untouched",
+			req:     archiver.BackupRequest{Level: 0},
+			in:      "some non-postgres write error",
+			wantHas: []string{"some non-postgres write error"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := p.InterpretDumpError(tc.req, dle, fmt.Errorf("%s", tc.in)).Error()
+			for _, s := range tc.wantHas {
+				if !strings.Contains(got, s) {
+					t.Errorf("message missing %q\ngot: %s", s, got)
+				}
+			}
+			for _, s := range tc.wantGone {
+				if strings.Contains(got, s) {
+					t.Errorf("message should have dropped %q\ngot: %s", s, got)
+				}
+			}
+		})
+	}
+	if p.InterpretDumpError(req, dle, nil) != nil {
+		t.Error("nil error should stay nil")
 	}
 }

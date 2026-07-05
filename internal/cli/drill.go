@@ -182,7 +182,7 @@ func newDrillCmd(a *app) *cobra.Command {
 	cmd.Flags().BoolVar(&unattended, "unattended", false, "cron mode: never prompt; skip targets needing a tape swap")
 	cmd.Flags().BoolVar(&worm, "worm", false, "probe the medium for WORM/immutability (skipped in --dry-run)")
 	cmd.Flags().StringVar(&asOf, "as-of", "", "drill a point-in-time YYYY-MM-DD (default today)")
-	cmd.Flags().StringVar(&window, "window", "", "each DLE should be drilled within this window (e.g. 30d)")
+	cmd.Flags().StringVar(&window, "window", "", "each DLE should be drilled within this window (e.g. 30d); pass 0 to drill now regardless of when each was last drilled")
 	cmd.Flags().IntVar(&sample, "sample", 1, "max DLEs to drill this run")
 	cmd.Flags().StringVar(&from, "from", "", "source medium to drill (default: the landing medium)")
 	cmd.Flags().StringVar(&tier, "tier", "", "drill depth (default structural); see Tiers above for each level")
@@ -200,7 +200,8 @@ func printDrillReport(r *engine.DrillReport) {
 		mode, r.AsOf, r.Medium, r.Tier, unattendedTag(r.Unattended))
 
 	if len(r.Targets) == 0 {
-		fmt.Printf("No DLEs due to drill (every DLE drilled within %s).\n\n", sizeutil.FormatDuration(r.Window))
+		fmt.Printf("No DLEs due to drill (every DLE drilled within %s).\n", sizeutil.FormatDuration(r.Window))
+		fmt.Printf("To drill now regardless of coverage, pass --window 0 (with --tier/--sample to pick depth and count).\n\n")
 	} else {
 		verb := "Would drill"
 		if r.Apply {

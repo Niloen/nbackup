@@ -112,6 +112,50 @@ func (p *postgres) Check() error {
 	return nil
 }
 
+// InterpretDumpError rewrites a failed dump's raw error into the action that fixes it.
+// pg_basebackup fails an incremental in two operator-recoverable ways that its own
+// message states but does not prescribe a remedy for, and the stage error leads with a
+// generic "bash: exit status 1" that buries the database's words. This surfaces the
+// PostgreSQL diagnosis and names the fix: turning summarize_wal back on (currently off),
+// or `nb reset` for a fresh full (the WAL summaries no longer reach back to the base,
+// which happens when summarization was disabled for any window since the last full — an
+// incremental from that base is impossible until a new full re-anchors the chain).
+func (p *postgres) InterpretDumpError(req archiver.BackupRequest, dleDisplay string, err error) error {
+	if err == nil {
+		return err
+	}
+	msg := err.Error()
+	if req.Level > 0 {
+		switch {
+		case strings.Contains(msg, "unless WAL summarization is enabled"):
+			return fmt.Errorf("this incremental needs WAL summarization, which is off on the server — turn it on with two separate statements:\n  ALTER SYSTEM SET summarize_wal = on;\n  SELECT pg_reload_conf();\n%s", extractPGError(msg))
+		case strings.Contains(msg, "WAL summaries are required") && strings.Contains(msg, "incomplete"):
+			return fmt.Errorf("this incremental cannot be built — PostgreSQL no longer has the WAL summaries reaching back to the last full (summarize_wal was disabled for some window since it). Force a fresh full on the next run:\n  nb reset %s\n%s", dleDisplay, extractPGError(msg))
+		}
+	}
+	// No specific remedy, but still strip the shell-wrapper noise when pg_basebackup
+	// left a real diagnosis, so the message reads as the database's own words.
+	if pg := extractPGError(msg); pg != "" && pg != msg {
+		return errors.New(pg)
+	}
+	return err
+}
+
+// extractPGError pulls the PostgreSQL/pg_basebackup diagnostic lines out of a noisy
+// multi-line stage error (which leads with a generic "bash: exit status N" from the shell
+// that ran the dump script), or "" when there are none to lift out.
+func extractPGError(msg string) string {
+	var keep []string
+	for _, line := range strings.Split(msg, "\n") {
+		l := strings.TrimSpace(line)
+		if strings.HasPrefix(l, "pg_basebackup:") || strings.Contains(l, "ERROR:") ||
+			strings.HasPrefix(l, "DETAIL:") || strings.HasPrefix(l, "HINT:") {
+			keep = append(keep, l)
+		}
+	}
+	return strings.Join(keep, "\n")
+}
+
 // pgMajor parses the major version from a `--version` line
 // ("pg_basebackup (PostgreSQL) 17.2"), or 0 when unrecognized.
 func pgMajor(version string) int {
@@ -129,19 +173,32 @@ func pgMajor(version string) int {
 
 // CheckSource proves the whole client-side auth chain by actually connecting
 // (`SELECT 1`) as the executor's identity — peer auth, ~/.pgpass, or
-// ~/.pg_service.conf, whichever the client is configured with — and then
-// verifies WAL summarization is on, without which the server cannot take the
-// incremental (level ≥ 1) dumps this archiver schedules.
+// ~/.pg_service.conf, whichever the client is configured with — then verifies
+// the connecting role may actually take a base backup (pg_basebackup starts a
+// WAL sender, which needs the REPLICATION attribute or superuser — a plain
+// LOGIN role connects fine but fails the dump), and finally that WAL
+// summarization is on, without which the server cannot take the incremental
+// (level ≥ 1) dumps this archiver schedules. All three are proven live so
+// `nb check` fails now rather than the nightly dump failing later.
 func (p *postgres) CheckSource(source string) error {
 	if _, err := p.psql(source, "SELECT 1"); err != nil {
 		return fmt.Errorf("cannot connect: %w\n(check the server is reachable; auth is the client's own libpq config — peer auth as this identity, ~/.pgpass, or ~/.pg_service.conf; grant a role once with: CREATE ROLE <user> LOGIN REPLICATION)", err)
+	}
+	// pg_basebackup starts a WAL sender, so the role must have REPLICATION (or be
+	// superuser); pg_roles is world-readable and exposes both for current_user.
+	canReplicate, err := p.psql(source, "SELECT rolsuper OR rolreplication FROM pg_roles WHERE rolname = current_user")
+	if err != nil {
+		return fmt.Errorf("cannot read the connecting role's attributes: %w", err)
+	}
+	if canReplicate != "t" {
+		return fmt.Errorf("the connecting role lacks REPLICATION — pg_basebackup cannot start a WAL sender, so the dump would fail: grant it with `ALTER ROLE <user> REPLICATION` (or connect as a superuser)")
 	}
 	on, err := p.psql(source, "SHOW summarize_wal")
 	if err != nil {
 		return fmt.Errorf("cannot read summarize_wal: %w (PostgreSQL 17+ is required for incremental base backups)", err)
 	}
 	if on != "on" {
-		return fmt.Errorf("summarize_wal is off — incremental backups need it: ALTER SYSTEM SET summarize_wal = on; SELECT pg_reload_conf();")
+		return fmt.Errorf("summarize_wal is off — incremental backups need it. Turn it on with two separate statements:\n  ALTER SYSTEM SET summarize_wal = on;\n  SELECT pg_reload_conf();")
 	}
 	return nil
 }

@@ -165,8 +165,8 @@ func runDumpDryRun(eng *engine.Engine, date, now time.Time, validationWarnings [
 		fmt.Println()
 	}
 
-	estTotal := fprintPlanItems(os.Stdout, plan)
-	fmt.Printf("\nThis run (estimated): ~%s\n", sizeutil.FormatBytes(estTotal))
+	estTotal, unknownEst := fprintPlanItems(os.Stdout, plan)
+	fmt.Printf("\nThis run (estimated): %s\n", runEstimateLine(estTotal, unknownEst))
 	fmt.Printf("Would commit %s. Run without --dry-run to execute.\n", eng.PlannedRunID(now))
 	return nil
 }

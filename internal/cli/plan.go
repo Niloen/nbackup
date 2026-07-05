@@ -80,12 +80,12 @@ func newPlanCmd(a *app) *cobra.Command {
 				fmt.Println()
 			}
 
-			estTotal := fprintPlanItems(os.Stdout, plan)
+			estTotal, unknownEst := fprintPlanItems(os.Stdout, plan)
 
 			current := eng.StoredBytes()
 			capacity := eng.Capacity()
 			fmt.Printf("\nCatalog currently stored: %s\n", sizeutil.FormatBytes(current))
-			fmt.Printf("This run (estimated): ~%s\n", sizeutil.FormatBytes(estTotal))
+			fmt.Printf("This run (estimated): %s\n", runEstimateLine(estTotal, unknownEst))
 			if capacity > 0 {
 				over, pct := eng.CapacityStatus(current)
 				fmt.Printf("Capacity: %s (%.1f%% used)\n", sizeutil.FormatBytes(capacity), pct)
@@ -121,25 +121,44 @@ func newPlanCmd(a *app) *cobra.Command {
 // fprintPlanItems writes a plan's per-DLE level/size/reason table to w and returns
 // the total estimated bytes. Shared by `nb plan` and the `nb dump --dry-run`
 // preview so a single run renders identically in both.
-func fprintPlanItems(w io.Writer, plan *planner.Plan) int64 {
+func fprintPlanItems(w io.Writer, plan *planner.Plan) (estTotal int64, unknown int) {
 	tw := newTab(w)
 	fmt.Fprintln(tw, "DLE\tLEVEL\tEST. SIZE\tFULL SIZE\tREASON")
-	var estTotal int64
 	for _, item := range plan.Items {
 		levelStr := fmt.Sprintf("L%d (full)", item.Level)
 		// For an incremental, show the full-dump size alongside the chosen size so a
 		// small incremental does not hide a large full waiting at the cycle deadline.
 		// For a full the two are identical, so leave the column blank to avoid noise.
 		fullStr := "-"
+		estStr := "~" + sizeutil.FormatBytes(item.EstBytes)
 		if item.Level >= 1 {
 			levelStr = fmt.Sprintf("L%d (incr)", item.Level)
 			fullStr = "~" + sizeutil.FormatBytes(item.FullBytes)
+			// Some archivers (postgres) cannot cheaply size an incremental and report 0 —
+			// "no estimate", not "nothing to store". Render that honestly as "unknown"
+			// rather than "~0 B", which would read as an empty run and mislead a capacity
+			// or cost decision (the FULL SIZE column is the number to plan against).
+			if item.EstBytes == 0 {
+				estStr = "unknown"
+				unknown++
+			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t~%s\t%s\t%s\n", item.DLE.ID(), levelStr, sizeutil.FormatBytes(item.EstBytes), fullStr, item.Reason)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", item.DLE.ID(), levelStr, estStr, fullStr, item.Reason)
 		estTotal += item.EstBytes
 	}
 	tw.Flush()
-	return estTotal
+	return estTotal, unknown
+}
+
+// runEstimateLine renders the "This run (estimated)" summary, noting when some
+// incrementals had no size estimate so the shown total reads as the floor it is
+// rather than the whole run.
+func runEstimateLine(estTotal int64, unknown int) string {
+	s := "~" + sizeutil.FormatBytes(estTotal)
+	if unknown > 0 {
+		s += fmt.Sprintf(" + %d incremental(s) with no size estimate", unknown)
+	}
+	return s
 }
 
 // runPlanForecast renders an extended plan: one row per simulated daily run,

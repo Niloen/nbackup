@@ -274,3 +274,14 @@ type Version struct {
 	R     io.Reader
 	Delta bool
 }
+
+// DumpErrorInterpreter is an optional Archiver capability: when a dump stage fails, the
+// dumper offers the archiver a chance to translate its tool's raw error into a more
+// actionable one — a database that alone knows what "WAL summaries are incomplete" means
+// can rewrite it into the `nb reset` that fixes it, and strip the generic shell-wrapper
+// noise ("bash: exit status 1") so the user sees the tool's own words. It only clarifies;
+// it never suppresses the failure. Returning err unchanged (or not implementing this) keeps
+// the raw message. dleDisplay is the DLE's host:path identity (what `nb plan`/`nb reset` show).
+type DumpErrorInterpreter interface {
+	InterpretDumpError(req BackupRequest, dleDisplay string, err error) error
+}

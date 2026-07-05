@@ -97,7 +97,12 @@ func (d *Dumper) dumpItem(ctx context.Context, fs archivefs.Ingest, item planner
 	committed, unreadable, err = d.dumpArchive(ctx, fs, item.EstBytes, spec, gate, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
 	if err != nil {
 		// A genuinely fatal archiver error (write failure, OOM) — not a mere unreadable file,
-		// which now commits a partial archive below. Surface it plainly.
+		// which now commits a partial archive below. Give the archiver a chance to translate
+		// its tool's raw error into the action that fixes it (postgres: a WAL-summary gap →
+		// `nb reset`), then surface it plainly.
+		if interp, ok := spec.Archiver.(archiver.DumpErrorInterpreter); ok {
+			err = interp.InterpretDumpError(spec.Request, item.DLE.ID(), err)
+		}
 		return fmt.Errorf("archive %s: %w", item.DLE.ID(), err)
 	}
 
