@@ -125,9 +125,10 @@ These are excellent tools, and for some workloads the right ones. They slice
 data into content-addressed chunks and deduplicate across every backup and
 (often) every machine, so **they win decisively on storage efficiency**: backing
 up fifty similar servers, or keeping ninety daily snapshots of slowly-changing
-data, they may store a small fraction of what NBackup would. They also fetch
-only the blocks a single-file restore needs, where NBackup must read an archive
-stream from the start.
+data, they may store a small fraction of what NBackup would. (Single-file
+restores are cheap in both: they fetch only the blocks a file needs, and
+NBackup records decode-restart points so a selective restore reads only the
+bytes it needs — see [efficient partial reads](features/recovery).)
 
 What you trade for that efficiency is exactly what NBackup refuses to trade:
 
