@@ -22,6 +22,8 @@ to yours and adapt.
 | [Robotic tape library](tape-library) | A changer with drives fed from slots and automatic label rotation. |
 | [Remote hosts over SSH](remote-hosts) | Back up several remote machines with no agent installed. |
 | [Full 3-2-1-1-0 deployment](full-321) | Disk + offsite + immutability + drills + alerting, end to end. |
+| [Backing up to Google Drive](gdrive) | A personal Drive over OAuth, or a Workspace Shared Drive with a service account. |
+| [Running in Docker](docker) | Run `nb` from the container image with config and catalog mounted; scheduling stays host cron. |
 
 Each scenario links to the [Features](../features) pages for the mechanics behind
 it. If you're new, start with [Single machine](single-machine).

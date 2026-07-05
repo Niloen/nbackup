@@ -150,7 +150,7 @@ time.
 $ nb recover --dle localhost:app_prod --date 2026-07-01 --inventory
   table.app_prod.public.orders   1.8 GB  (14 file(s))
   table.app_prod.public.users    312 MB  (6 file(s))
-2 units · run run-20260701.020000
+2 units · run run-2026-07-01.020000
 ```
 
 Pointing `--path` (or the shell's `add`) at a unit name exports the table as

@@ -157,13 +157,20 @@ OAuth scope).
 
 ### Two ways to authenticate
 
-Credentials come from `GOOGLE_APPLICATION_CREDENTIALS` — **never the config file** —
-and the file is one of two kinds, auto-detected:
+Credentials **never** live in the config file. They are one of two kinds,
+auto-detected from the credential file's own `type` field:
 
 | Credential | Best for | Setup |
 |---|---|---|
 | **Service-account key** | Unattended, **Workspace + a Shared Drive** | Share a Shared Drive with the service account; point `GOOGLE_APPLICATION_CREDENTIALS` at its JSON key. No login step. |
-| **OAuth user token** | A **personal `@gmail`** Drive (or a Workspace user's own Drive) | Run `nb login gdrive` once (below); it writes the token file. |
+| **OAuth user token** | A **personal `@gmail`** Drive (or a Workspace user's own Drive) | Run `nb login gdrive` once (below); it writes the token to a default path the medium reads automatically — no env var to set. |
+
+The two paths differ in *where the credential lives*. A **service-account key** is
+pointed to by `GOOGLE_APPLICATION_CREDENTIALS`. An **OAuth token** written by `nb
+login` defaults to a fixed path under the secrets dir (`gdrive.json` beside the
+catalog), which the medium reads back with no environment variable. Setting
+`GOOGLE_APPLICATION_CREDENTIALS` always wins, so it doubles as the override if you
+ever want the token at a custom path.
 
 A bare service account has **no usable My-Drive storage quota**, so on a personal
 account (which has no Shared Drives) the OAuth token is the only workable path; on
@@ -173,16 +180,21 @@ mechanism matrix is in [Backing up to Google Drive](../scenarios/gdrive).
 ### `nb login` for the OAuth path
 
 `nb login gdrive` runs a **headless** consent flow — no browser is launched and no
-callback port is bound, so it works over SSH on a server. It prints a URL you open
-on any device and reads back the authorization code you paste. It needs a
-**Desktop-app OAuth client** you create once in the Google Cloud Console (NBackup
-ships none, so there is no shared app or quota):
+callback port is bound, so it works over SSH on a server. It prints a URL and a
+short code you enter on any device. This is the RFC 8628 device flow, so it needs a
+**"TVs and Limited Input devices" OAuth client** you create once in the Google Cloud
+Console (NBackup ships none, so there is no shared app or quota). A **Desktop-app**
+client also works, but has no device flow, so `nb login` falls back to opening a
+browser and binding a local port on the machine you run it on — fine locally, not on
+a headless server:
 
 ```bash
-export GOOGLE_APPLICATION_CREDENTIALS=~/.config/nbackup/gdrive-token.json
 nb login gdrive --client ~/Downloads/client_secret.json
-# open the printed URL, authorize, paste the code back
+# open the printed URL, enter the code, authorize
 ```
+
+`nb login` writes the token to its default path (`gdrive.json` under the secrets
+dir) where the medium reads it automatically; `--out` overrides the location.
 
 Because the scope is `drive.file` (non-sensitive), you can publish your consent
 screen to **Production** without Google's verification review, so the token does

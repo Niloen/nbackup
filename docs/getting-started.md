@@ -65,6 +65,13 @@ make build          # builds ./bin/nb
 go install ./cmd/nb
 ```
 
+**Upgrading and uninstalling** — upgrades are an in-place binary replacement: bump
+the package (`apt install ./niloen-backup_<newer>.deb` / `dnf upgrade`) or drop the
+newer `nb` on your `PATH`. To remove, `sudo apt remove niloen-backup` (or `dnf
+remove niloen-backup`) for a package install, or just delete the `nb` binary for a
+tarball/`go install` one. Your config, catalog, and state directories are yours and
+are left untouched either way.
+
 ## The command shape
 
 NBackup has one convention you'll lean on constantly:
@@ -115,6 +122,11 @@ sources:
   default:
     localhost: [/home, /etc]         # localhost = backed up locally
 ```
+
+{: .note }
+> Reading all of `/etc` (and most of `/home`) needs **root** — run `nb dump` as
+> root (or via cron's root crontab). Without it, unreadable files are omitted and
+> the run commits a **PARTIAL** archive with a warning rather than failing.
 
 The four building blocks — **media**, **archivers**, **dumptypes**, **sources** —
 are explained in the [Configuration reference](reference/configuration) and the

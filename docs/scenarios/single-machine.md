@@ -69,7 +69,9 @@ dumptypes:
     exclude: ["*.log", "*.tmp"]
 
 # The disklist: grouped by dumptype, then host, then paths. Everything is
-# localhost, so it all runs locally.
+# localhost, so it all runs locally. Reading all of /etc and /var/log needs root,
+# so run `nb dump` as root — otherwise unreadable files are omitted and the run
+# commits a PARTIAL archive with a warning.
 sources:
   default:
     localhost: [/home, /etc]

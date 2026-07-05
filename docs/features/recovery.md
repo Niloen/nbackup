@@ -44,6 +44,20 @@ Omit `--dle` to restore **every** DLE, each into its own subdirectory of `--dest
 nb recover --date 2026-06-21 --all --dest /tmp/out
 ```
 
+### Restore onto a remote client
+
+`--all` can restore straight onto a **remote client** instead of a local `--dest`,
+with `--to host:path` (the host must be one of the config's `hosts:`):
+
+```bash
+nb recover --dle app01:/home --date 2026-06-21 --all --to app01:/restore
+```
+
+tar runs on the client, so the bytes land there directly; for a client DLE encrypted
+with `encrypt.at: client`, decryption also happens on the client and the key never
+leaves it. `--to` and `--dest` are mutually exclusive — `--to` carries its own
+destination path.
+
 ## File-level recovery (browse + pick)
 
 Without `--all`, recover browses a DLE's filesystem and pulls back individual
@@ -81,6 +95,13 @@ recovered 12 file(s) from 2 archive(s) into /tmp/out
 
 Paths are relative to the DLE's backed-up root. Selecting a directory pulls its
 **whole subtree** (each file from the archive that last changed it).
+
+On a real terminal the shell is a full line editor: **command history**, cursor and
+word editing, and **tab-completion** of both command words and paths (a path with a
+space completes as one argument). During an `extract`, a **live progress bar** tracks
+the bytes pulled off the medium — so a large ranged read shows movement rather than a
+silent pause — and clears itself when the extraction finishes. On a pipe it falls
+back to plain reads with a clean, non-interactive transcript.
 
 {: .note }
 Selected-file recovery **never deletes** — you get exactly what you ask for, and

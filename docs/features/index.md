@@ -25,6 +25,7 @@ why it works the way it does, and how to configure and use it.
 | [Holding disk](holding-disk) | A fast scratch buffer that feeds a slow tape or cloud at disk speed. |
 | [Remote sources over SSH](remote-sources) | Back up remote hosts with no NBackup software on the client. |
 | [Monitoring & reporting](monitoring) | `nb status`, `nb report`, and pluggable failure alerting. |
+| [Status website](web) | `nb web` — a read-only, mobile-friendly dashboard (overview, runs, media history, drills) that takes no lock. |
 
 New here? Read [Concepts](../concepts) first for the vocabulary, then come back.
 Looking for a complete worked setup? See [Scenarios](../scenarios).

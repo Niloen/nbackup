@@ -25,7 +25,7 @@ immutable daily artifacts, and cycle-based safety — modernized: object storage
 is a peer of tape, and the whole system is one static Go binary driven by cron,
 with no daemons and no database (the catalog is a cache one media scan
 rebuilds). This is a first version — see [PRD.md](PRD.md) for the product
-vision, and the [docs site](docs/index.md) for the full manual (concepts,
+vision, and the [docs site](https://backup.niloen.com) for the full manual (concepts,
 features, scenarios, reference). (The rest of this page assumes the Amanda
 lineage above and calls it out again only where a specific mechanism is worth
 tracing back.)
@@ -220,7 +220,9 @@ There is no authentication or TLS, so expose it only on a trusted network — or
 bind it to `127.0.0.1` and front it with a reverse proxy or a VPN (e.g.
 Tailscale) for remote access. The deb/rpm packages ship an optional
 `nb-web.service`; enable it with `systemctl enable --now nb-web` to keep the
-dashboard always-on (backups themselves stay on cron).
+dashboard always-on (backups themselves stay on cron). It also has a `/drills`
+coverage page and a per-medium usage-history chart, and `--reload` for copy-deploy
+iteration — see [Status website](docs/features/web.md) for the full page tour.
 
 ## Quick start
 
@@ -861,7 +863,8 @@ them all to the landing.
 
 ## Status & limitations (first version)
 
-Implemented: disk, tape, and cloud (S3/GCS/Azure) Volumes, **copying runs between
+Implemented: disk, tape, cloud (S3/GCS/Azure), and **Google Drive** (`gdrive`,
+personal over OAuth or a Workspace Shared Drive) Volumes, **copying runs between
 media** (`nb copy`, e.g. disk → tape or disk → cloud) with the copy **recorded as a
 second placement** so a restore reads from any available copy (and `nb verify` audits
 *every* copy, reporting that an intact copy remains when one is damaged), balanced
@@ -946,9 +949,37 @@ environment (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_*`). An object st
 is **address-identified** like disk: no labels, no swap prompts, nothing to
 inventory — it just lands and reclaims runs within its `capacity`. Each archive is
 stored as a clean `.tar.<scheme>` object (a plain GET restores it with stock tools)
-plus a small header sidecar, so a run streams disk↔cloud unchanged. (Google Drive
-and other file-API stores are out of scope — `gocloud.dev/blob` is an object-store
-abstraction.)
+plus a small header sidecar, so a run streams disk↔cloud unchanged. (This `cloud`
+type is an **object-store** abstraction — `gocloud.dev/blob` — so it does not cover
+Google Drive, which is a file API, not an object store; Drive has its own `gdrive`
+medium type, below.)
+
+### Google Drive
+
+Land runs in a Google Drive folder with `type: gdrive` — a personal Google One
+Drive over an OAuth token, or a Workspace **Shared Drive** with a service account.
+Like disk and cloud it is **address-identified** and its on-Drive layout is disk's
+verbatim, so a run streams disk↔cloud↔gdrive unchanged and a plain download restores
+with stock tools.
+
+```yaml
+media:
+  gdrive:
+    type: gdrive
+    folder: 0A--FOLDER-OR-SHARED-DRIVE-ID   # from the folder's URL
+    capacity: 2TB
+landing: gdrive
+```
+
+Credentials are **never in the config**, and the mode is auto-detected: a
+**service-account** key (pointed at by `GOOGLE_APPLICATION_CREDENTIALS`, needs a
+Workspace Shared Drive — a bare service account has no usable My-Drive quota) runs
+fully unattended, while a **personal** Drive uses an **OAuth authorized-user token**
+minted once by `nb login gdrive` (a headless, device-code consent flow — no browser
+or open port — so it works over SSH). `nb login` writes the token to a default path
+under the secrets dir that the medium then reads automatically, with no env var to
+set. NBackup only ever touches files it created (the `drive.file` scope). See
+[Media](docs/features/media.md) and [Backing up to Google Drive](docs/scenarios/gdrive.md).
 
 `appendable: true` (default) packs many runs per tape; `appendable: false` uses
 one run per tape. Restore loads (robot) or prompts for (manual) whichever tape

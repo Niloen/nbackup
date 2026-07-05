@@ -52,10 +52,16 @@ equivalent.
 | `nb copy` | Copy one run between media (`--from`/`--to`, e.g. disk → tape) |
 | `nb sync` | Mirror one medium's runs onto another (disk → tape/s3) |
 | `nb label` | Label a volume (required for tape before its first dump) |
-| `nb load` | Load a slot into a medium's drive (by slot number or `--label`) |
+| `nb load` | Load a volume into a medium's drive (by bay/reel id, or `--label`) |
 | `nb prune [medium]` | Delete runs past each medium's cycle/capacity limits (all media if none named) |
+| `nb flush` | Drain a holding disk's staged archives to the landing |
 | `nb reset <dle>` | Schedule a DLE for a full on its next run (fresh chain) |
 | `nb rebuild` | Rebuild the local run-index cache from media |
+| `nb init` | Write a starting `nbackup.yaml` (interactive, or via flags) |
+| `nb login` | Authenticate a medium needing an interactive credential bootstrap (Google Drive OAuth) |
+| `nb web` | Serve a read-only status website |
+| `nb version` | Print the `nb` version |
+| `nb completion` | Generate a shell completion script |
 
 ## Global flags
 
@@ -73,7 +79,7 @@ before or after the subcommand and its arguments.
 | Command | Key flags | Purpose |
 |---|---|---|
 | `nb check` | `--offline` | Verify config and reach every source host before a run; warns when `workdir`/`state_dir` resolve to a *relative* path (the cron re-full footgun). `--offline` skips the host probes. |
-| `nb plan` | `--days N` | Preview today's plan; `--days N` forecasts the next N daily runs and the `$/month` cost curve. |
+| `nb plan` | `--days N`, `--date <day>` | Preview today's plan; `--days N` forecasts the next N daily runs and the `$/month` cost curve, `--date` plans a specific day. |
 | `nb dump` | `--dry-run`, `--date <day>` | Run the backup; `--dry-run` plans without writing, `--date` plans/runs for a specific day. |
 
 ```bash
@@ -112,7 +118,7 @@ See [Monitoring](../features/monitoring).
 | Command | Key flags | Purpose |
 |---|---|---|
 | `nb verify` | `--all`, `--deep` | Re-hash archive checksums; `--all` every run, `--deep` adds a structural decrypt → decompress → `tar -t` check. |
-| `nb drill` | `--dry-run`, `--from <medium>`, `--tier <tier>`, `--as-of <date>`, `--unattended` | Rehearse recovery by restoring a risk-biased sample to scratch. |
+| `nb drill` | `--dry-run`, `--from <medium>`, `--tier <tier>`, `--sample N`, `--window <dur>`, `--as-of <date>`, `--worm`, `--unattended` | Rehearse recovery by restoring a risk-biased sample to scratch. `--sample N` sets how many DLEs to drill (default 1), `--window` the coverage window each DLE should fall within, `--worm` probes the medium for WORM/immutability. |
 
 ```bash
 nb verify --all
@@ -124,8 +130,9 @@ nb drill --tier stock
 nb drill --unattended
 ```
 
-Tiers run weakest to strongest: `checksum`, `structural`, `chain`, `stock`. See
-[Verification](../features/verification).
+Tiers run cheapest to strongest: `sample` (re-hash one part per archive against
+its per-part seal — bounded egress, the offsite-friendly default), `checksum`,
+`structural`, `chain`, `stock`. See [Verification](../features/verification).
 
 ## Recovering
 
@@ -135,13 +142,17 @@ Tiers run weakest to strongest: `checksum`, `structural`, `chain`, `stock`. See
 | Flag | Purpose |
 |---|---|
 | `--dle <host:path>` | The DLE to recover (omit with `--all` to recover every DLE). |
-| `--date <day>` | Recover as of this date. |
+| `--date <day>` | Recover as of this date (`YYYY-MM-DD`, default today; resolves to the most recent run on or before it). |
+| `--time <ts>` | As-of point-in-time `YYYY-MM-DD HH[:MM[:SS]]` (UTC) — reaches an earlier same-day run. Mutually exclusive with `--date`. |
 | `--all` | Whole-DLE restore (replays full + later incrementals, deletion-faithful). |
 | `--dest <dir>` | Destination directory (must be empty unless `--force`). |
-| `--force` | Restore into a populated `--dest`, replacing its contents. |
-| `--path <p>` | Restrict to a path; repeatable for several. |
+| `--force` | With `--all`, restore into a populated `--dest`, pruning its contents to match. |
+| `--path <p>` | Restrict to a path, or name an inventory unit to export (e.g. `public.users` → `<unit>.sql`); repeatable. |
 | `--list` | List matching paths instead of extracting. |
-| `--to host:path` | Restore onto a remote client. |
+| `--inventory` | Print the DLE's content inventory as of the date (the units the archiver reported, e.g. postgres tables) and exit. |
+| `--from <medium>` | With `--all`, read from this medium's copy specifically (e.g. the offsite tape) instead of auto-selecting. |
+| `--to host:path` | With `--all`, restore onto a remote client (`host` must be in `hosts:`). |
+| `--yes` | Skip the egress-cost confirmation when reading from a cloud/cold medium. |
 
 ```bash
 nb recover                                                    # interactive shell
@@ -179,8 +190,8 @@ fusermount -u /mnt/backups
 
 | Command | Key flags | Purpose |
 |---|---|---|
-| `nb copy` | `--from <medium>`, `--to <medium>` | Copy one run between media (e.g. disk → tape). |
-| `nb sync` | `--to <medium>`, `--from <medium>`, `--last N`, `--dry-run` | Mirror one medium's runs onto another, oldest-first; no `--to` runs every config `sync:` rule. |
+| `nb copy` | `--from <medium>`, `--to <medium>`, `--dry-run`, `--force` | Copy one run between media (e.g. disk → tape); `--force` re-copies a run already on the target. |
+| `nb sync` | `--to <medium>`, `--from <medium>`, `--last N`, `--since <day>`, `--dry-run`, `--force` | Mirror one medium's runs onto another, oldest-first; no `--to` runs every config `sync:` rule. `--since` bounds by date (intersects `--last`); `--force` re-copies runs already on the target. |
 
 ```bash
 nb sync --to lto --dry-run
@@ -197,9 +208,9 @@ The source defaults to the landing medium; `--from` overrides it. See
 
 | Command | Key flags | Purpose |
 |---|---|---|
-| `nb prune [medium]` | `-n, --dry-run` | Delete runs past the cycle/capacity limits — one named medium, or every medium if none named; `-n` previews. |
+| `nb prune [medium]` | `-n, --dry-run`, `--date <day>` | Delete runs past the cycle/capacity limits — one named medium, or every medium if none named; `-n` previews, `--date` sets the reference "now". |
 | `nb label` | `--relabel` | Label a volume (required for tape before its first dump); `--relabel` recycles an aged-out tape. |
-| `nb load` | — | Load a slot into a medium's drive (by slot number, or `--label`). |
+| `nb load` | `--label` | Load a volume into a medium's drive — by bay/reel id, or `--label` to match a volume label. |
 | `nb reset <dle>` | — | Schedule a DLE for a full on its next run (fresh chain). |
 | `nb rebuild` | — | Rebuild the local run-index cache from media. |
 | `nb flush` | — | Drain a holding disk's staged archives to the landing. |
@@ -210,7 +221,8 @@ nb prune disk
 nb prune                     # prune every configured medium (hands-off cron form)
 nb label lto lto-0001
 nb label --relabel lto lto-0042
-nb load lto 2
+nb load lto bay-03
+nb load --label lto DAILY-01
 nb reset app01:/home
 nb rebuild
 ```
@@ -219,6 +231,36 @@ Retention is per-medium: name a medium to prune just it, or name none to prune
 every configured medium in turn (tape recycles by relabel, so a fleet-wide prune
 only reclaims disk/cloud). See [Pruning](../features/pruning) and
 [Media](../features/media).
+
+## Logging in a medium
+
+Most media need no login: disk and tape have no credentials, and a cloud bucket
+or a **service-account** Google Drive authenticate straight from the ambient
+environment (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, …). `nb login <medium>`
+exists for the one case that needs a one-time interactive consent — a **personal
+Google Drive**, whose OAuth grant mints a reusable token.
+
+| Command | Key flags | Purpose |
+|---|---|---|
+| `nb login <medium>` | `--client <json>`, `--out <path>` | Run a medium's credential bootstrap. Flags after the medium name are that type's own; see `nb login <medium> -h`. |
+
+The gdrive flow adapts to the OAuth client you registered in the Google Cloud
+Console (NBackup ships none — you bring your own, so no shared app or quota sits
+between you and Google): a **"TVs and Limited Input devices"** client uses a
+headless device code (prints a short code + URL, no browser or open port), while
+a **"Desktop app"** client opens a browser on this machine and captures the
+redirect itself. Pass the client-secret JSON with `--client` (or set
+`GOOGLE_OAUTH_CLIENT`). The minted token is written to a default per-medium path
+under the [`secrets_dir`](configuration#secrets_dir) (`<secrets_dir>/gdrive.json`)
+that the medium then reads automatically — no environment variable to set.
+Override the path with `--out`.
+
+```bash
+nb login gdrive
+nb login gdrive --client ~/client_secret.json
+```
+
+See [Backing up to Google Drive](../scenarios/gdrive).
 
 ## Reporting
 

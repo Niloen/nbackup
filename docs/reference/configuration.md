@@ -77,7 +77,7 @@ medium type is a registry registration — no config struct changes.
 
 | Key | Applies to | Meaning |
 |---|---|---|
-| `type` | all | `disk`, `tape`, or `cloud`. |
+| `type` | all | `disk`, `tape`, `cloud`, or `gdrive`. |
 | `capacity` | disk, cloud | Space NBackup may use here; `nb prune` reclaims oldest to fit. |
 | `minimum_age` | all | Retention floor before a run may be retired. Defaults to **one cycle**. |
 | `throughput` | all | Bandwidth cap, e.g. `50MB/s` (bytes/sec, `/s` optional; default uncapped). Symmetric on reads; concurrent workers share it. |
@@ -156,13 +156,19 @@ media:
     # throughput: 20MB/s
 ```
 
-**Credentials are never in the config.** They come from
-`GOOGLE_APPLICATION_CREDENTIALS`, auto-detected as either a **service-account key**
-(unattended; a Workspace **Shared Drive**) or an **OAuth authorized-user token**
-minted by `nb login gdrive` (a personal Google Drive). The scope is `drive.file`,
-so NBackup sees only files it created. A bare service account has no usable
-My-Drive quota, so personal accounts must use the OAuth path. An optional `cost:`
-block overrides the storage rate (Drive bills no egress/GET).
+**Credentials are never in the config.** There are two paths, auto-detected:
+
+- **Service account** (unattended; a Workspace **Shared Drive**): set
+  `GOOGLE_APPLICATION_CREDENTIALS` to the key file. When set it always wins.
+- **OAuth authorized-user token** (a personal Google Drive): run
+  `nb login gdrive` once, which writes a reusable token to a default path under
+  the [`secrets_dir`](#secrets_dir) (`<secrets_dir>/gdrive.json`) that the medium
+  reads back automatically — no environment variable to set.
+
+A bare service account has no usable My-Drive quota, so personal accounts must
+use the OAuth path. The scope is `drive.file`, so NBackup sees only files it
+created. An optional `cost:` block overrides the storage rate (Drive bills no
+egress/GET).
 
 See [Backing up to Google Drive](../scenarios/gdrive), [Media](../features/media),
 and `nb login`.
@@ -220,10 +226,27 @@ instead of `volume_size`, since end-of-tape is only hit, not read. `auto_label`
 
 ## landing
 
-Which medium new runs are created on.
+Which medium new runs are created on. A plain name is one landing; a **list**
+fans each archive out to every entry, **primary first** — the first medium is
+"the landing" that accounting, read preference, and `nb sync`'s default source
+treat as authoritative, and the rest are additional copies written in the same
+run.
 
 ```yaml
-landing: fast-disk
+landing: fast-disk           # single landing
+# landing: [fast-disk, s3]   # OR fan out: primary first, the rest are copies
+```
+
+A `dumptype` may set its own `landing` (a name or a list) to route that
+dumptype's DLEs to different media within one run — cheap cloud for bulk data,
+fast disk or tape for the rest. A dumptype's `landing` overrides this top-level
+one for its DLEs; unset, they use the config-wide `landing`.
+
+```yaml
+dumptypes:
+  archive-only:
+    archiver: default
+    landing: [s3, gdrive]    # this dumptype's DLEs land on s3 (primary) + gdrive
 ```
 
 ## workdir
@@ -255,6 +278,47 @@ silently re-full. `nb check` **warns when either resolves to a relative path**,
 for exactly this reason. A per-host override lives under `hosts:` (below). The
 engine namespaces each archiver under a private subtree by type
 (`<state_dir>/gnutar`).
+
+{: #secrets_dir }
+## secrets_dir
+
+The pool-side root for credentials a medium's `nb login` mints — today the
+Google Drive OAuth token (`<secrets_dir>/gdrive.json`). Like `state_dir` it is a
+dedicated location **beside** the workdir, never beneath it: the workdir is a
+disposable rebuild-from-media cache, while a login token is precious,
+non-rebuildable state (only a fresh consent brings it back). Defaults to
+`nbackup-secrets` relative to the config file's directory.
+
+```yaml
+secrets_dir: /var/lib/nbackup/secrets
+```
+
+## part_size
+
+The config-wide default **atom size** for encrypted archives: each part of such
+an archive is one complete encrypted message of at most this many compressed
+bytes, cut at dump time and carried unchanged by every copy (default 10 GiB). A
+`dumptype` may override it (`dumptypes.<name>.part_size`) — the selective-restore
+tuning lever: smaller atoms give finer encrypted-restore granularity and cheaper
+key-proving drills, at the cost of more objects. It is inert (and warned about at
+`nb check`) on a dumptype with no encryption stage.
+
+```yaml
+part_size: 10GiB
+```
+
+## frame_size
+
+An advanced internal knob: the raw-stream interval at which a framed archive's
+encode pipeline restarts, giving a decode-restart point every this-many bytes for
+ranged reads (default 256 MiB). Frames never exist as files — they are outside the
+"part" vocabulary — and the default is right for almost everyone; smaller frames
+only trade a sliver of compression ratio for finer ranged reads. See
+[Recovery](../features/recovery).
+
+```yaml
+frame_size: 256MiB
+```
 
 ## auto_label
 
@@ -511,9 +575,13 @@ notify:
       type: sendmail           # hand off to the local MTA
       from: nbackup@example.com
       to: [ops@example.com]
+      # sendmail_path: /usr/sbin/sendmail   # local sendmail binary (this is the default)
     slack:
       type: webhook            # generic JSON POST (Slack/Discord/PagerDuty)
       url_env: SLACK_WEBHOOK_URL
+      # template: text         # payload field the message goes in (default "text")
+      # headers:               # optional extra HTTP headers
+      #   Authorization: Bearer ...
 ```
 
 Any command alerts on failure; a successful `nb dump` notifies by default. See
@@ -529,7 +597,7 @@ drill:
   window: 30d         # every DLE should be drilled at least this often
   sample: 1           # DLEs drilled per run (risk-biased rotation)
   from: cloud         # which copy to drill (default: the landing medium)
-  tier: structural    # checksum | structural | chain | stock
+  tier: structural    # sample | checksum | structural | chain | stock
   worm: true          # probe the medium for WORM/immutability
   unattended: false   # cron mode: never prompt; skip targets needing a tape swap
 ```

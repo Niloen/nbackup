@@ -29,20 +29,28 @@ Run run-2026-06-21.020000  [running]
   workers:  2 configured, 2 active
   dles:     1 done, 2 active, 1 pending
 
-DLE            LEVEL  STATE    PROGRESS           DONE       EST        WRITTEN
-app01:/etc     L1     done     [##########] 100%  120.00 kB  ~118.0 kB  41.00 kB
-app01:/home    L0     dumping  [####......]  42%  8.40 GB    ~20.0 GB   3.10 GB
-db01:/pg       L0     dumping  [##........]  18%  3.60 GB    ~20.0 GB   1.40 GB
-app01:/var     L1     pending  -                  0 B        ~2.0 GB    0 B
+DLE            LEVEL  STATE    DUMP               FLUSH   EST        DUMPED     LANDED
+app01:/etc     L1     done     [##########] 100%  direct  120.00 kB  120.00 kB  41.00 kB
+app01:/home    L0     dumping  [####......]  42%   -       20.00 GB   8.40 GB    2.90 GB
+db01:/pg       L0     dumping  [##........]  18%   -       20.00 GB   3.60 GB    1.20 GB
+app01:/var     L1     pending  -                  -       80.00 kB   0 B        0 B
 
-Total:    12.12 GB of ~62.12 GB  (20%)
-Rate:     48.10 MB/s
+Dump:     12.12 GB of ~62.12 GB  (20%)   48.10 MB/s
+Volume:   4.11 GB written
 ETA:      17m18s
 ```
 
-Each DLE's percentage is **uncompressed bytes against the planner estimate**. The
-run streams source → compressor → volume in one pass, so there is a single
-`dumping` state per DLE — no separate dumper/taper queues.
+The **DUMP** bar meters each DLE's source→volume progress — **uncompressed bytes
+against the planner estimate** — with `EST` the estimate, `DUMPED` the uncompressed
+source read so far, and `LANDED` what has landed authoritatively. The run streams
+source → compressor → volume in one pass, so there is a single `dumping` state per
+DLE — no separate dumper/taper queues — and **FLUSH** reads `direct` for that
+one-pass path. With a [holding disk](holding-disk) FLUSH becomes a second bar
+metering the drain from the holding disk to the landing, and the bottom gains a
+`Flush:` line for the aggregate backlog. A run landing on a **removable medium**
+(tape) adds a **VOLUME** column naming the volume(s) — the tape label(s) — each
+DLE's data reached; a disk or cloud landing is its own sole volume, so the column
+is dropped.
 
 A run opens in an `estimating` phase while it sizes every DLE (a pass that can
 take a while on a large source), so `nb status` shows the dump is underway rather
