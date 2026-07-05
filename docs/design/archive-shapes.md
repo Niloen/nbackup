@@ -1,10 +1,12 @@
 # Archive shapes — capability-driven framing for ranged reads and encrypted atoms
 
-Status: designed, not implemented. Generalizes and supersedes the encryption
-section of [ranged-reads.md](ranged-reads.md); the frame/ConcatSafe machinery
-designed there is the FRAMED-INVISIBLE shape here. Prerequisite work already on
-main: per-part seals, the drill `sample` tier, and inline seal verification on
-every read.
+Status: **implemented and shipped** — all three shapes (STREAM / FRAMED-INVISIBLE
+/ FRAMED-ATOMIC), the `resolveShape` resolver, ChunkSource/AtomicSource write
+paths, ranged selective restore, and the shape-aware drill sample tier are on
+main. This doc is kept as the design rationale. Generalizes and supersedes the
+encryption section of [ranged-reads.md](ranged-reads.md); the frame/ConcatSafe
+machinery designed there is the FRAMED-INVISIBLE shape here. Prerequisite work:
+per-part seals, the drill `sample` tier, and inline seal verification on every read.
 
 The goal: cheap partial reads (selective restore, drill sampling) should fall
 out of what each component *is* — the archiver, the compressor, the encryption

@@ -124,9 +124,40 @@ stream is **tar → compress → encrypt → land**; on read it reverses **decry
 decompress**. Encryption is always the **outermost** transform, which is exactly
 why verifying and replicating stay keyless — the seal covers the ciphertext.
 
-This is also why an encrypted archive is all-or-nothing to read: you decrypt the
-whole stream to reach any member. Restoring by hand just adds `gpg -d` at the
-front of the stock pipe — see [Restore by hand](../restore-by-hand).
+Restoring by hand just adds `gpg -d` at the front of the stock pipe — see
+[Restore by hand](../restore-by-hand).
+
+## Encrypted archives are stored as atoms
+
+An encrypted archive can't be re-decrypted from a concatenation of gpg messages
+(GnuPG rejects that by design), so it can't carry the invisible decode-restart
+points an unencrypted archive uses for ranged reads. Instead each part is written as
+one complete, sealed gpg message — an **atom** — a self-contained
+`…-L0.pNNN.tar.zst.gpg` file. That keeps encrypted archives from being all-or-nothing
+after all: a selective `nb recover` decrypts **only the atoms covering the members you
+ask for**, and a recovery drill proves the key by decrypting a **single atom** rather
+than the whole payload. Copies carry atoms 1:1 (re-cutting one would need the key), so
+`nb sync` stays keyless. A whole-DLE restore still reads every atom, as it must.
+
+Atom size is the tuning lever, set with `part_size` on the dumptype (or globally):
+
+```yaml
+part_size: 10GiB              # global default atom size (matches the cloud slice size)
+dumptypes:
+  finance:
+    archiver: default
+    part_size: 2GiB           # smaller atoms → finer selective restore, cheaper drills
+    encrypt:
+      scheme: gpg
+      recipient: finance-key@example.com
+```
+
+Smaller atoms give finer selective-restore granularity and cheaper key-proving drills,
+at the cost of more objects on the medium. A sealed atom can't shrink without the key,
+so it can't land on a medium whose per-part **ceiling** is below it — flagged at
+`nb plan` time and refused per-archive by `nb sync`, never a silent failure. See
+[Recovery → Efficient partial reads](recovery#efficient-partial-reads-archive-shapes)
+for the whole shape model and how unencrypted archives get ranged reads instead.
 
 ## Related and future work
 

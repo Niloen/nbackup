@@ -1,10 +1,11 @@
 # Ranged reads — frame-tabled archives for selective restore and cheap drills
 
-Status: designed and PoC-validated with stock tools, not implemented.
-Superseded in part: [archive-shapes.md](archive-shapes.md) generalizes this
-design into a capability-driven shape model (and replaces the encryption
-section here with the FRAMED-ATOMIC shape); the frame mechanics, PoC results,
-and rejected roads below remain the reference.
+Status: **implemented and shipped** (as the FRAMED-INVISIBLE shape) — this doc is
+the PoC-validated design rationale and remains the reference for the frame
+mechanics, PoC results, and rejected roads. Superseded in part:
+[archive-shapes.md](archive-shapes.md) generalizes this design into a
+capability-driven shape model (and replaces the encryption section here with the
+FRAMED-ATOMIC shape).
 
 Reading anything from a large archive today costs the whole archive: a
 single-file `nb recover` streams every byte through decode and lets tar pick

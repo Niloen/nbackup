@@ -541,6 +541,18 @@ asked for. One fidelity note: GNU tar records deletions in its snapshot, not the
 member index, so a file deleted at a later incremental still shows in the browse
 view; recover the *whole* DLE with `--all` when you need deletion-accurate state.
 
+### Efficient partial reads
+
+Recovering one file from a large archive doesn't cost the whole archive. NBackup
+records **decode-restart points** at write time, so a single-file `nb recover` — or a
+recovery drill — fetches only the bytes it needs (a validated single-file extract cost
+**0.3%** of the archive), which is real money saved on egress-billed cloud stores. This
+falls out of the archive's *shape* without changing what it looks like to a whole-stream
+reader or the stock one-liner: unencrypted archives get ranged reads; encrypted ones are
+stored as independently-decryptable **atoms** you fetch selectively. See
+[Recovery → Efficient partial reads](docs/features/recovery.md) for how shapes work and
+the encryption/part-size trade-offs.
+
 ### Verifying and recovery drills
 
 Two layers prove your backups are good, weakest to strongest:
@@ -570,8 +582,10 @@ nb dump && nb sync && nb prune && nb drill --unattended; nb report --notify   # 
 A drill **selects** risk-first: it rotates DLEs so each is drilled within a window,
 prioritizes the longest incremental chains and the oldest fulls still relied upon,
 and drills a **point-in-time** (`--as-of`), not just the latest run. Each target is
-exercised at a **tier** — `checksum`, `structural`, a real `chain` restore, or
-`stock` (the documented one-liner) — and the outcome is appended to an inspectable
+exercised at a **tier** — `sample` (re-hash one part per archive against its seal,
+bounded egress; successive drills rotate through the parts), `checksum`, `structural`,
+a real `chain` restore, or `stock` (the documented one-liner) — and the outcome is
+appended to an inspectable
 **ledger** (`drill-ledger.json`) in the workdir: per DLE its last drill, tier,
 source medium, and pass/fail. A failure is **classified** — integrity (corruption),
 pipeline (key/scheme), chain (incremental composition), or missing-copy — because
@@ -589,11 +603,12 @@ one fixed probe object on the `--from` medium and checks that deleting it is *re
 (S3 Object Lock, LTO WORM). NBackup only **detects** immutability — you configure it
 operator-side on the storage; least privilege keeps NBackup unable to turn it off.
 
-> Honest limits: an encrypted+compressed archive is all-or-nothing to read (you must
-> decrypt+decompress the whole stream to reach late members), so a drill costs the
-> full bytes — make routine **offsite** drills the no-write `structural` tier and
-> watch the forecast egress the dry-run prints. Drills restore only to scratch and
-> never touch real data or the tar snapshot library.
+> Honest limits: a full `chain` restore reads every member, so it costs the full
+> bytes whatever the shape — make routine **offsite** drills the cheap `sample` tier
+> (one part per archive) or the no-write `structural` tier, and watch the forecast
+> egress the dry-run prints. Selective (single-file) recovery is where the ranged
+> reads above pay off; a whole-DLE restore inherently reads it all. Drills restore
+> only to scratch and never touch real data or the tar snapshot library.
 
 ### Pruning (cycle safety)
 

@@ -89,6 +89,58 @@ deletions in its snapshot, not the member index, so a file deleted at a later
 incremental still shows in the browse view. Recover the **whole DLE** with
 `--all` when you need deletion-accurate state.
 
+## Efficient partial reads (archive shapes)
+
+Pulling one file out of a large archive normally costs the *whole* archive:
+decompression is stateful, so reaching a late member means streaming every byte
+before it through the decoder — real egress on a cloud store. NBackup records
+enough metadata at write time (**decode-restart points**) that a selective recover
+fetches **only the bytes it needs**, without changing what the archive looks like to
+a whole-stream reader or to the [stock-tools one-liner](../restore-by-hand).
+
+Which optimization applies falls out of the pipeline — the archive's **shape**,
+stamped in its commit footer so a reader decodes it with no config:
+
+| Pipeline | Shape | Selective read | Whole restore |
+|----------|-------|----------------|---------------|
+| Server-side compress, no encryption (`zstd`/`gzip`/`none`) | **framed** | ranged GET of the covering frames — a validated single-file extract cost 0.3% of the archive | reads it all |
+| Encrypted (`gpg`) | **atomic** | fetch only the atoms (sealed `.pNNN` gpg messages) covering the members | reads it all |
+| Client-placed transform, or a non-restartable scheme | **stream** | whole archive, as before | reads it all |
+
+A **framed** archive is byte-for-byte identical to a plain stream — the compressor
+just restarts every `frame_size` of input, an invisible restart point — so `nb copy`,
+`nb verify`, and the stock one-liner are all unchanged; the frame table rides in the
+per-archive index. An **atomic** archive stores each part as one complete gpg message
+(a concatenation of gpg messages can't be re-decrypted as one stream, so encryption
+can't be frame-invisible), and selective restore decrypts only the covering atoms.
+
+{: .note }
+Tape streams whole regardless — it has no egress meter, and a within-file skip buys
+little — so ranged reads pay off on **cloud** (and, less, local disk). A **whole-DLE**
+restore reads every member whatever the shape; the win is in single-file recovery.
+
+### Tuning encrypted-restore granularity
+
+For an encrypted (atomic) dumptype, `part_size` sets the **atom size** — the unit a
+selective restore and a key-proving drill fetch:
+
+```yaml
+part_size: 10GiB              # global default atom size (matches the cloud slice size)
+dumptypes:
+  vm-images:
+    encrypt: { scheme: gpg, recipient: backups@example.com }
+    part_size: 2GiB           # smaller atoms → finer restore, cheaper drills, more objects
+```
+
+Smaller atoms mean finer selective-restore granularity and a cheaper key-proving drill
+sample, at the cost of more objects on the medium. Because a sealed atom can't shrink
+without the key, it also can't land on a medium whose per-part **ceiling** is below it —
+flagged at `nb plan` time and refused per-archive by `nb sync`, never a silent failure.
+Unencrypted framed archives carry no atom size; they are re-sliced freely and take each
+medium's own `part_size`. `frame_size` (default 256 MiB) is the framed shape's
+restart interval — an advanced knob that is right for almost everyone as-is. The full
+design is in [docs/design/archive-shapes.md](https://github.com/Niloen/nbackup/blob/main/docs/design/archive-shapes.md).
+
 ## Egress on a cloud restore
 
 Pulling from a cloud store costs egress. `nb recover` estimates the **egress $**

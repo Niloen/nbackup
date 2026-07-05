@@ -157,12 +157,15 @@ immutable by construction and reported without a probe.
 ## Honest limits
 
 {: .note }
-An encrypted + compressed archive is all-or-nothing to read — you must decrypt and
-decompress the whole stream to reach its late members — so a `chain` drill spends the
-**full bytes**. Make routine **offsite** drills the no-write `structural` tier and
-watch the forecast egress the dry-run prints (see [Cost forecasting](cost)). Drills
-restore only to scratch and **never** touch real data or the incremental snapshot
-library.
+A `chain` drill restores a whole DLE, so it reads every member and spends the **full
+bytes** whatever the archive's shape. For routine **offsite** drills use the cheap
+`sample` tier (one part per archive, rotating through the parts over successive drills)
+or the no-write `structural` tier, and watch the forecast egress the dry-run prints
+(see [Cost forecasting](cost)). Ranged reads cut the cost of *selective* (single-file)
+recovery, not of a whole-DLE restore — see
+[Recovery → Efficient partial reads](recovery#efficient-partial-reads-archive-shapes).
+Drills restore only to scratch and **never** touch real data or the incremental
+snapshot library.
 
 ## See also
 
