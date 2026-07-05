@@ -47,8 +47,11 @@ archives:
 
 nfpms:
   - id: packages
-    package_name: nbackup
-    vendor: NBackup
+    # Not "nbackup": Debian's firebird3.0-utils already ships /usr/bin/nbackup
+    # and nbackup(1), so that name is taken in the distro namespace. The binary
+    # stays `nb` (no file collision — we ship nb + nb*.1 only).
+    package_name: niloen-backup
+    vendor: Niloen AB
     homepage: https://github.com/Niloen/nbackup
     maintainer: Marcus Nilsson <marcus.nilsson@niloen.com>
     description: |-
