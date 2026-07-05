@@ -1,0 +1,68 @@
+{{define "content"}}
+{{$d := .Data}}
+{{if $d.NotFound}}
+<h1>{{$d.Name}}</h1>
+<div class="panel"><div class="empty">No medium named <code>{{$d.Name}}</code> is configured. See <a href="/media">all media</a>.</div></div>
+{{else}}
+<h1>{{$d.Name}} <span class="pill dim">{{$d.Type}}</span></h1>
+
+<div class="cards">
+  <div class="card"><div class="k">Used</div>
+    <div class="v {{if $d.Over}}bad{{end}}">{{bytes $d.Used}}</div>
+    {{if $d.Capacity}}<div class="muted" style="font-size:.82rem">{{pct $d.UtilPct}} of {{bytes $d.Capacity}}{{if $d.Over}} · over capacity{{end}}</div>{{end}}
+  </div>
+  <div class="card"><div class="k">Capacity</div>
+    <div class="v">{{if $d.Capacity}}{{bytes $d.Capacity}}{{else}}<span class="muted">∞</span>{{end}}</div>
+    {{if $d.Free}}<div class="muted" style="font-size:.82rem">{{bytes $d.Free}} free</div>{{end}}
+  </div>
+  <div class="card"><div class="k">Runs</div><div class="v">{{$d.Runs}}</div>
+    <div class="muted" style="font-size:.82rem">{{$d.Archives}} archive(s)</div></div>
+  <div class="card"><div class="k">Growth</div>
+    <div class="v">{{if $d.PerDay}}{{bytes $d.PerDay}}<span class="muted" style="font-size:.9rem">/day</span>{{else}}<span class="muted">—</span>{{end}}</div>
+    {{if not $d.ProjFull.IsZero}}<div class="muted" style="font-size:.82rem">full ~{{$d.ProjFull.Format "2006-01-02"}}</div>{{end}}
+  </div>
+</div>
+
+{{if $d.Capacity}}
+<div class="bar" style="margin-top:.9rem"><span style="width:{{pct $d.UtilPct}};{{if $d.Over}}background:var(--bad){{end}}"></span></div>
+{{end}}
+
+<h2>Used capacity over time</h2>
+<div class="panel">
+{{if $d.Chart}}
+{{$d.Chart}}
+<div class="muted" style="margin-top:.5rem;font-size:.82rem">{{$d.Samples}} recorded samples, {{stamp $d.HistFirst}} → {{stamp $d.HistLast}} · captures reclamation, not just growth</div>
+{{else}}
+<div class="empty">Not enough recorded history yet — the usage curve is drawn from samples taken after each dump/prune, so it appears once a medium has changed at least twice.</div>
+{{end}}
+</div>
+
+<h2>Composition</h2>
+<div class="panel">
+  <div class="bar"><span style="width:{{pct $d.FullPct}};background:var(--accent)"></span></div>
+  <div class="muted" style="margin-top:.5rem;font-size:.85rem">
+    <span style="color:var(--accent)">■</span> full {{bytes $d.FullBytes}} · incremental {{bytes $d.IncrBytes}}
+  </div>
+  {{if $d.Volume}}<div class="muted" style="margin-top:.4rem;font-size:.85rem">volume: {{$d.Volume}}</div>{{end}}
+  {{if not $d.First.IsZero}}<div class="muted" style="margin-top:.4rem;font-size:.85rem">retained data spans {{stamp $d.First}} → {{stamp $d.Last}}</div>{{end}}
+</div>
+
+<h2>Per-run usage</h2>
+<div class="panel scroll">
+{{if $d.Points}}
+<table>
+  <tr><th>Run</th><th>Committed</th><th class="num">Added</th><th class="num">Used</th>{{if $d.Capacity}}<th class="num">% full</th>{{end}}</tr>
+  {{range $d.Points}}
+  <tr>
+    <td><a href="/runs/{{.Run}}">{{.Run}}</a></td>
+    <td class="muted">{{stamp .At}}</td>
+    <td class="num">{{bytes .Added}}</td>
+    <td class="num">{{bytes .Used}}</td>
+    {{if $d.Capacity}}<td class="num">{{pct .Pct}}</td>{{end}}
+  </tr>
+  {{end}}
+</table>
+{{else}}<div class="empty">No runs on this medium yet.</div>{{end}}
+</div>
+{{end}}
+{{end}}

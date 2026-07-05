@@ -18,12 +18,16 @@
 // placements back through the store's write path and never touches its fields.
 //
 // Almost everything the catalog holds is derivable from the media; the cache is a
-// performance copy, not a system of record. The one exception is per-DLE operator intent
-// (DLEMeta — today just the `nb reset` force-full directive): it cannot be scanned back, so
-// it lives in the cache file beside the entries and is preserved across a Rebuild. An
-// archiver's incremental state (gnutar's .snar library) is non-derivable too, but it is
-// precious and belongs to the archiver, not here (see package archiver); the force-full
-// directive, by contrast, is small and short-lived — a run consumes it.
+// performance copy, not a system of record. Two deliberate exceptions live beside it.
+// Per-DLE operator intent (DLEMeta — today just the `nb reset` force-full directive)
+// cannot be scanned back, so it lives in the cache file beside the entries and is
+// preserved across a Rebuild. And the usage ledger (usage.go, its own append-only file)
+// records each medium's stored bytes over time: a prune's or relabel's *decline* leaves
+// no trace on the volume, so it must be recorded when it happens, never derived — the
+// bookkeeping half of the package's charter, Amanda's curinfo keeping history in the
+// catalog layer. An archiver's incremental state (gnutar's .snar library) is
+// non-derivable too, but it is precious and belongs to the archiver, not here (see
+// package archiver).
 package catalog
 
 import (
@@ -32,6 +36,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/fsx"
@@ -62,6 +67,10 @@ type Catalog struct {
 	dles    map[string]*DLEMeta      // per-DLE operator/planner metadata, by slug
 	loaded  bool
 	win     *Window // the open run window, if any — guards one-window-at-a-time; mutators persist per op as always
+
+	now       func() time.Time // injectable clock for the usage ledger's sample stamps; Open sets time.Now
+	usage     []UsageSample    // the usage ledger (usage.go), loaded at Open, appended by persist
+	usageLast map[string]int64 // each medium's last recorded stored-bytes, the persist-time diff base
 }
 
 type cacheFile struct {
@@ -73,7 +82,8 @@ type cacheFile struct {
 // Open loads the catalog cache from the workdir. If the cache file is absent, the
 // catalog is empty and not yet loaded (EnsureFresh will populate it).
 func Open(workdir string) (*Catalog, error) {
-	c := &Catalog{workdir: workdir, volumes: map[string]*VolumeRecord{}, dles: map[string]*DLEMeta{}}
+	c := &Catalog{workdir: workdir, volumes: map[string]*VolumeRecord{}, dles: map[string]*DLEMeta{}, now: time.Now}
+	c.loadUsage()
 	data, err := os.ReadFile(filepath.Join(workdir, CacheFile))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -457,5 +467,13 @@ func (c *Catalog) persist() error {
 		return err
 	}
 	data = append(data, '\n')
-	return fsx.WriteFileAtomic(filepath.Join(c.workdir, CacheFile), data, 0o644)
+	if err := fsx.WriteFileAtomic(filepath.Join(c.workdir, CacheFile), data, 0o644); err != nil {
+		return err
+	}
+	// The cache is durable; record what changed in the usage ledger (usage.go).
+	// persist is the one choke point every mutation flows through, so recording here
+	// covers every byte-changing path by construction; recordUsage itself is
+	// best-effort and diffs to a no-op for non-byte mutations.
+	c.recordUsage()
+	return nil
 }

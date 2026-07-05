@@ -225,12 +225,30 @@ func (e *Engine) MediumAppendable(name string) bool { return e.acct.MediumAppend
 // internal/cli — are unaffected.
 type MediumInfo = accounting.MediumInfo
 
+// MediumStats is a medium's usage picture — composition, the catalog's recorded
+// used-over-time ledger, and growth statistics (`nb medium <name>`, the webui medium
+// page); MediumInfo's richer sibling. Aliased like MediumInfo so callers name the
+// engine type.
+type MediumStats = accounting.MediumStats
+
+// UsagePoint is one run's step of a medium's retained-bytes composition (see
+// MediumStats.ByRun).
+type UsagePoint = accounting.UsagePoint
+
+// UsageStats summarizes a medium's recorded usage curve (see MediumStats.Growth).
+type UsageStats = accounting.UsageStats
+
 // Media returns a summary of every configured medium, sorted by name.
 func (e *Engine) Media() []MediumInfo { return e.acct.Media() }
 
 // Medium returns the summary for one configured medium; ok is false if the name
 // is unknown.
 func (e *Engine) Medium(name string) (MediumInfo, bool) { return e.acct.Medium(name) }
+
+// MediumStats returns a medium's usage history and derived statistics (used-capacity
+// over time, full/incremental split, growth projection); ok is false for an unknown
+// medium.
+func (e *Engine) MediumStats(name string) (MediumStats, bool) { return e.acct.MediumStats(name) }
 
 // DLESummaries returns the per-DLE catalog rollup behind `nb dle` — a thin facade
 // over catalog.DLESummaries, which owns the computation.

@@ -128,6 +128,9 @@ func mediumDetail(eng *engine.Engine, name string) error {
 	fmt.Printf("  volume:  %s\n", volumeStr(m))
 	fmt.Printf("  used:    %s / %s%s\n", sizeutil.FormatBytes(m.Used), capacityStr(m.Capacity), overMarker(m.Used, m.Capacity))
 	fmt.Printf("  retention: minimum_age %s\n", sizeutil.FormatDuration(eng.MediumMinAge(name)))
+	if st, ok := eng.MediumStats(name); ok {
+		printMediumStats(st)
+	}
 	printInventory(eng, name)
 	fmt.Println()
 	runs := eng.Catalog().RunsOn(name)
@@ -146,6 +149,32 @@ func mediumDetail(eng *engine.Engine, name string) error {
 	}
 	tw.Flush()
 	return nil
+}
+
+// printMediumStats prints a medium's usage statistics beneath its `nb medium <name>`
+// header: the full/incremental split of the currently-retained archives, then — from
+// the catalog's recorded usage ledger, which captures prune/relabel declines the
+// retained picture cannot — the recorded span and an average-growth projection of
+// when a bounded medium fills. The full used-over-time curve behind the growth figure
+// is on the webui medium page.
+func printMediumStats(st engine.MediumStats) {
+	if st.Archives == 0 {
+		return
+	}
+	fmt.Printf("  archives: %d  (full %s / incr %s)\n", st.Archives,
+		sizeutil.FormatBytes(st.FullBytes), sizeutil.FormatBytes(st.IncrBytes))
+	g := st.Growth
+	if g.Samples >= 2 && g.Last.After(g.First) {
+		fmt.Printf("  history: %d samples, %s → %s\n", g.Samples,
+			sizeutil.FormatStamp(g.First), sizeutil.FormatStamp(g.Last))
+	}
+	if g.PerDay > 0 {
+		line := fmt.Sprintf("  growth:  ~%s/day", sizeutil.FormatBytes(g.PerDay))
+		if !g.ProjFull.IsZero() {
+			line += fmt.Sprintf("  (reaches capacity ~%s)", g.ProjFull.Format("2006-01-02"))
+		}
+		fmt.Println(line)
+	}
 }
 
 // printInventory shows a tape medium's physical inventory beneath its `nb medium`

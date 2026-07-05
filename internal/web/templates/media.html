@@ -6,7 +6,7 @@
   <tr><th>Medium</th><th>Type</th><th class="num">Runs</th><th class="num">Used</th><th class="num">Capacity</th><th class="num">Volumes</th><th>Volume</th></tr>
   {{range .Data}}
   <tr>
-    <td>{{.Name}}</td>
+    <td><a href="/media/{{.Name}}">{{.Name}}</a></td>
     <td class="muted">{{.Type}}</td>
     <td class="num">{{.Runs}}</td>
     <td class="num">{{bytes .Used}}</td>

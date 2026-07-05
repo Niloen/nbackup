@@ -162,6 +162,10 @@ func (e *engineSource) DLESummaries() []catalog.DLESummary { return e.engine().D
 
 func (e *engineSource) Media() []engine.MediumInfo { return e.engine().Media() }
 
+func (e *engineSource) MediumStats(name string) (engine.MediumStats, bool) {
+	return e.engine().MediumStats(name)
+}
+
 func (e *engineSource) DisplayDLE(slug string) string { return e.engine().DisplayDLE(slug) }
 
 func (e *engineSource) DLENames() []string { return e.engine().DLENames() }

@@ -2,6 +2,7 @@ package accounting
 
 import (
 	"sort"
+	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/media"
@@ -73,6 +74,137 @@ func (a *Accountant) Medium(name string) (MediumInfo, bool) {
 		info.Volume, info.Epoch = pool[0].Label.Name, pool[0].Label.Epoch
 	}
 	return info, true
+}
+
+// UsagePoint is one step in a medium's used-capacity-over-time series: the running
+// total of stored bytes on the medium after a run landed its archives there. The
+// series is derived from the archives currently on the medium (each carries its
+// Compressed size and CreatedAt commit time), oldest run first — the same
+// derive-from-the-cache stance run History takes, so there is no separately-persisted
+// per-medium fill log to drift out of sync. Because a reclaimed archive has left the
+// catalog, the curve tracks the growth of what is *currently retained* rather than a
+// live fill gauge: a prune shows up as the absence of old points, never as a drop.
+type UsagePoint struct {
+	Run   string    // the run whose archives put these bytes on the medium
+	At    time.Time // when the run's last archive still on this medium committed
+	Added int64     // bytes this run added to the medium (its archives still retained here)
+	Used  int64     // cumulative stored bytes on the medium after this run
+}
+
+// MediumStats is a medium's usage picture: the current composition derived from the
+// catalog (full/incremental byte split, the span the retained archives cover, the
+// per-run cumulative breakdown) plus the catalog's recorded usage ledger — the true
+// used-over-time curve, which also shows the prune/relabel declines the retained
+// picture cannot — and the growth statistics Summarize reads off it. It embeds the
+// same MediumInfo `nb medium` lists and is a pure read like Medium(), so `nb web`
+// serves it lock-free.
+type MediumStats struct {
+	MediumInfo
+	Archives  int          // archives currently on the medium
+	FullBytes int64        // stored bytes from full (level-0) archives
+	IncrBytes int64        // stored bytes from incremental (level>=1) archives
+	First     time.Time    // earliest archive commit on the medium (zero if none)
+	Last      time.Time    // latest archive commit on the medium (zero if none)
+	ByRun     []UsagePoint // the cumulative retained-bytes series per run, oldest first
+
+	Usage  []catalog.UsageSample // the recorded used-over-time curve (the catalog's ledger)
+	Growth UsageStats            // growth/projection statistics over Usage
+}
+
+// MediumStats returns a medium's usage picture; ok is false if the name is unknown.
+// The per-run series groups the medium's archives by run (one point per run that put
+// bytes here), so it mirrors what `nb run`/`nb medium` count as a run's size on the
+// medium; the Usage curve comes verbatim from the catalog's ledger.
+func (a *Accountant) MediumStats(name string) (MediumStats, bool) {
+	info, ok := a.Medium(name)
+	if !ok {
+		return MediumStats{}, false
+	}
+	st := MediumStats{MediumInfo: info}
+
+	// Sum each run's bytes on the medium and track that run's latest commit — the
+	// archive-granular ArchivesOn already excludes copies pruned off this medium.
+	type agg struct {
+		at    time.Time
+		bytes int64
+	}
+	byRun := map[string]*agg{}
+	order := make([]string, 0)
+	for _, ar := range a.d.Cat.ArchivesOn(name) {
+		st.Archives++
+		if ar.Level == 0 {
+			st.FullBytes += ar.Compressed
+		} else {
+			st.IncrBytes += ar.Compressed
+		}
+		g := byRun[ar.Run]
+		if g == nil {
+			g = &agg{}
+			byRun[ar.Run] = g
+			order = append(order, ar.Run)
+		}
+		g.bytes += ar.Compressed
+		if ar.CreatedAt.After(g.at) {
+			g.at = ar.CreatedAt
+		}
+	}
+	// Run ids are datestamps, so plain-text order is chronological order.
+	sort.Strings(order)
+	var cum int64
+	for _, id := range order {
+		g := byRun[id]
+		cum += g.bytes
+		st.ByRun = append(st.ByRun, UsagePoint{Run: id, At: g.at, Added: g.bytes, Used: cum})
+	}
+	if n := len(st.ByRun); n > 0 {
+		st.First, st.Last = st.ByRun[0].At, st.ByRun[n-1].At
+	}
+	st.Usage = a.d.Cat.MediumUsage(name)
+	st.Growth = Summarize(st.Usage, info.Capacity)
+	return st, true
+}
+
+// UsageStats summarizes a medium's recorded usage curve: how long it has been
+// recorded, its average growth over that span, and — for a bounded medium still
+// filling — a naive linear projection of when it reaches capacity. A glanceable hint
+// (the dollar/byte forecasts in cost.go stay the planner's real machinery), computed
+// from the ledger so it reflects prunes, not just currently-retained bytes.
+type UsageStats struct {
+	Samples  int
+	First    time.Time // first / last recorded sample
+	Last     time.Time
+	PerDay   int64     // average growth over [First,Last], bytes/day; 0 when under a day or shrinking
+	ProjFull time.Time // projected capacity-reached date; zero when unbounded, at/over capacity, or not growing
+}
+
+// Summarize computes the growth statistics for a medium's usage curve against its
+// current capacity (capacity is config knowledge, so the caller passes it fresh
+// rather than reading it out of old samples). Fewer than two samples, a sub-day
+// span, or a net decline all yield no rate — the projection must never mislead.
+func Summarize(series []catalog.UsageSample, capacity int64) UsageStats {
+	st := UsageStats{Samples: len(series)}
+	if len(series) == 0 {
+		return st
+	}
+	first, last := series[0], series[len(series)-1]
+	st.First, st.Last = first.At, last.At
+	if len(series) < 2 {
+		return st
+	}
+	days := last.At.Sub(first.At).Hours() / 24
+	if days < 1 {
+		return st // too short a baseline to read a daily rate from
+	}
+	grew := last.Used - first.Used
+	if grew <= 0 {
+		return st // flat or shrinking: no meaningful fill projection
+	}
+	st.PerDay = int64(float64(grew) / days)
+	if st.PerDay > 0 && capacity > 0 && last.Used < capacity {
+		daysToFull := float64(capacity-last.Used) / float64(st.PerDay)
+		st.ProjFull = last.At.Add(time.Duration(daysToFull * float64(24*time.Hour)))
+	}
+	return st
 }
 
 // volumesInPool returns the labeled volumes the catalog tracks for a medium

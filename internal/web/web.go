@@ -32,6 +32,7 @@ type Source interface {
 	ReadRun(id string) (*catalog.Run, error)
 	Placements(runID string) []catalog.Placement
 	Media() []engine.MediumInfo
+	MediumStats(name string) (engine.MediumStats, bool) // one medium's usage history + statistics
 	DisplayDLE(slug string) string
 	DLESummaries() []catalog.DLESummary
 	DLENames() []string         // configured DLE slugs, for drill coverage (never-drilled)
@@ -55,12 +56,13 @@ func NewServer(src Source, workdir string) *Server {
 // Handler returns the router for the status site. Every route is read-only.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handleHome)     // exact "/"; unknown paths 404 in the handler
-	mux.HandleFunc("/runs", s.handleRuns) // exact
-	mux.HandleFunc("/runs/", s.handleRun) // subtree: /runs/<id>
-	mux.HandleFunc("/dles", s.handleDLEs) // exact
-	mux.HandleFunc("/dles/", s.handleDLE) // subtree: /dles/<slug>
-	mux.HandleFunc("/media", s.handleMedia)
+	mux.HandleFunc("/", s.handleHome)         // exact "/"; unknown paths 404 in the handler
+	mux.HandleFunc("/runs", s.handleRuns)     // exact
+	mux.HandleFunc("/runs/", s.handleRun)     // subtree: /runs/<id>
+	mux.HandleFunc("/dles", s.handleDLEs)     // exact
+	mux.HandleFunc("/dles/", s.handleDLE)     // subtree: /dles/<slug>
+	mux.HandleFunc("/media", s.handleMedia)   // exact
+	mux.HandleFunc("/media/", s.handleMedium) // subtree: /media/<name>
 	mux.HandleFunc("/drills", s.handleDrills)
 	mux.HandleFunc("/report", s.handleReport)
 	mux.HandleFunc("/status", s.handleStatus)
@@ -261,6 +263,24 @@ func (s *Server) dleHistory(slug string) []dleArchiveRow {
 
 func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "media", page{Title: "Media", Active: "media", Data: s.src.Media()})
+}
+
+// handleMedium renders one medium's detail page: its capacity utilization, the
+// full/incremental split, a growth projection, and the used-capacity-over-time chart —
+// the browser view of `nb medium <name>`. An unknown name renders a not-found page
+// (nav intact) rather than a 404, matching the run/DLE detail pages.
+func (s *Server) handleMedium(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/media/")
+	if name == "" {
+		http.Redirect(w, r, "/media", http.StatusSeeOther)
+		return
+	}
+	st, ok := s.src.MediumStats(name)
+	if !ok {
+		s.render(w, "medium", page{Title: name, Active: "media", Data: mediumData{NotFound: true, Name: name}})
+		return
+	}
+	s.render(w, "medium", page{Title: name, Active: "media", Data: newMediumData(st)})
 }
 
 // handleDrills renders the recovery-drill picture: the coverage rollup and per-DLE
