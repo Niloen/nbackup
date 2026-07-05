@@ -2,7 +2,7 @@
 title: Monitoring & reporting
 layout: default
 parent: Features
-nav_order: 11
+nav_order: 12
 description: "Watch a live run with nb status, review history with nb report, and push failures to a human with pluggable alerts."
 ---
 

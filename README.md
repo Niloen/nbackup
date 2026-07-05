@@ -1,7 +1,8 @@
 # Niloen Backup (NBackup) — backups you can read, restore, and prove
 
-NBackup backs up Unix machines to **local disk, cloud object stores (S3, GCS,
-Azure Blob), Google Drive, and tape**, treating them as equal targets and making
+NBackup backs up Unix machines — filesystem trees and **live PostgreSQL
+clusters** — to **local disk, cloud object stores (S3, GCS, Azure Blob), Google
+Drive, and tape**, treating them as equal targets and making
 the common modern shape — land fast on disk, then replicate offsite — a first-class
 operation. It is built on three promises:
 
@@ -773,8 +774,11 @@ sources:
   a registry registration — no config struct changes.
 - **Archivers** are named definitions of the dump program plus its content-
   independent options — the tar binary, `one-file-system`. Most setups need just one;
-  an undeclared name is a bare type, so `archiver: gnutar` needs no block. (The
-  incremental-state root is a host property — `state_dir` — not an archiver option.)
+  an undeclared name is a bare type, so `archiver: gnutar` needs no block. Three
+  types ship: `gnutar` (default), `postgres` (live clusters, PG17+ incremental
+  base backups), and `pipe` (your own backup/restore commands) — see
+  [Archivers](docs/features/archivers.md). (The incremental-state root is a host
+  property — `state_dir` — not an archiver option.)
 - **Dumptypes** name an archiver and carry per-DLE policy — what to skip (`exclude`)
   and encryption. Excludes live here, not on the archiver, because skipping logs is a
   decision about the data, not how tar runs. Compression is config-wide.
@@ -844,6 +848,9 @@ them all to the landing.
 - The configured **compressor** on `PATH`: `zstd` (default) or `gzip`; `none`
   needs nothing. NBackup checks it before running. Optional `nice` is used for
   CPU politeness when configured.
+- For `postgres` DLEs only: the **PostgreSQL 17+ client tools**
+  (`pg_basebackup`, `pg_combinebackup`) on the host that dumps — set the
+  archiver's `bin_dir` if they are off `PATH`. `nb check` verifies them.
 
 ## Status & limitations (first version)
 
@@ -855,8 +862,10 @@ second placement** so a restore reads from any available copy (and `nb verify` a
 commit-footed archives with **time-suffixed** same-day runs, **deletion-aware** incremental
 restore, checksum verification, point-in-time restore, per-medium capacity reporting,
 cycle-safe pruning, **unattended reporting and alerting** (`nb report`, pluggable
-email/webhook notifications), and **remote sources over SSH** (any non-`localhost`
-DLE host runs stock tar on the client — no NBackup software or open port there).
+email/webhook notifications), **remote sources over SSH** (any non-`localhost`
+DLE host runs stock tar on the client — no NBackup software or open port there),
+and **live PostgreSQL backups** (PG17+ native incremental base backups, with a
+table inventory and per-table SQL export at recover time).
 
 ### Tape
 
@@ -977,6 +986,42 @@ comes from the operator's ssh agent/config (`identity_file` is a path). Listing 
 host under `hosts:` is **only** to override the `ssh:` defaults — it is *not* what
 makes a host remote; any non-`localhost` source is remote by default. `nb check`
 reaches every source host so you can confirm connectivity before a run.
+
+### PostgreSQL databases
+
+The `postgres` archiver backs up a **live PostgreSQL 17+ cluster** with the
+server's native incremental base backups: level 0 is a streamed
+`pg_basebackup`, level N sends only the blocks changed since the previous
+level, and a whole-DLE restore merges the chain with `pg_combinebackup` — the
+database's own tools do the work, NBackup contributes the scheduling, media,
+verification, and drills around them.
+
+```yaml
+archivers:
+  pg:
+    type: postgres
+    bin_dir: /usr/lib/postgresql/17/bin  # if the v17 tools are off PATH
+dumptypes:
+  db: { archiver: pg }
+sources:
+  db:
+    localhost: [app_prod]   # the "path" is a libpq connection reference:
+                            # a dbname, "service=prod", or a conninfo string
+```
+
+The DLE's source string is anything `psql -d` accepts, and authentication is
+the client's own libpq configuration (peer auth, `~/.pgpass`,
+`~/.pg_service.conf`) — no database credentials in NBackup's config. A base
+backup images the **whole cluster** (the dbname only names the connection), so
+configure one DLE per cluster; `nb check` proves the tools, the connection, and
+the server's `summarize_wal = on` prerequisite before a run.
+
+Backups know their contents: `nb recover --inventory` lists the cluster's
+tables with sizes as of any date, and pointing `--path` (or the shell's `add`)
+at a table name exports it as **ready-to-import `pg_dump` SQL** via a scratch
+restore — no live server is ever touched. See
+[Archivers](docs/features/archivers.md) for the full story, including the
+`pipe` archiver for sources NBackup has no native support for.
 
 ## Architecture
 

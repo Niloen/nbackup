@@ -2,7 +2,7 @@
 title: Storage media
 layout: default
 parent: Features
-nav_order: 3
+nav_order: 4
 description: "Disk, tape, and cloud object stores — three medium types behind one self-describing artifact, plus capacity and bandwidth controls."
 ---
 

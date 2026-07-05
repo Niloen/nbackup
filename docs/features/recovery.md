@@ -2,7 +2,7 @@
 title: Recovery
 layout: default
 parent: Features
-nav_order: 7
+nav_order: 8
 description: "Recover backups as they stood on a date — a whole DLE, or browse and pick individual files. No index server needed."
 ---
 

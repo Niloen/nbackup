@@ -2,7 +2,7 @@
 title: Replication & tiered storage
 layout: default
 parent: Features
-nav_order: 4
+nav_order: 5
 description: "Land fast on disk, replicate offsite. nb copy moves one run between media; nb sync mirrors a whole medium."
 ---
 

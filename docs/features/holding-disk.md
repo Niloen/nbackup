@@ -2,7 +2,7 @@
 title: Holding disk
 layout: default
 parent: Features
-nav_order: 9
+nav_order: 10
 description: "A fast scratch disk that absorbs parallel dumps and feeds one slow tape drive (or a bandwidth-capped cloud) at disk speed."
 ---
 

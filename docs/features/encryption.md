@@ -2,7 +2,7 @@
 title: Encryption
 layout: default
 parent: Features
-nav_order: 5
+nav_order: 6
 description: "Source-tied gpg encryption that keeps copies interchangeable: encrypted once, verified and replicated offsite without the key."
 ---
 

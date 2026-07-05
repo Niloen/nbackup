@@ -2,7 +2,7 @@
 title: Verification & drills
 layout: default
 parent: Features
-nav_order: 6
+nav_order: 7
 description: "nb verify checks integrity; nb drill actually restores a risk-biased sample to prove recoverability — the 0 of 3-2-1-1-0."
 ---
 

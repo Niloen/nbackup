@@ -3,7 +3,7 @@ title: Features
 layout: default
 nav_order: 5
 has_children: true
-description: "Each major NBackup capability — planning, media, replication, encryption, drills, recovery, pruning, holding disk, remote sources, and monitoring."
+description: "Each major NBackup capability — planning, archivers (tar, PostgreSQL, pipe), media, replication, encryption, drills, recovery, pruning, holding disk, remote sources, and monitoring."
 ---
 
 # Features
@@ -15,6 +15,7 @@ why it works the way it does, and how to configure and use it.
 |---|---|
 | [Planning & scheduling](planning) | Multilevel levels, the bump rule, automatic promotion, the two capacity limits, forecasting. |
 | [Cost forecasting](cost) | `$/month` storage and egress estimates for cloud media — fully offline. |
+| [Archivers](archivers) | What produces the dump stream — GNU tar (default), live PostgreSQL clusters (17+ incremental base backups), and bring-your-own-command pipes. |
 | [Storage media](media) | Disk, tape (libraries & single drives), and cloud object stores. |
 | [Replication & tiered storage](replication) | `nb copy` and `nb sync` — land fast, replicate offsite. |
 | [Encryption](encryption) | Source-tied `gpg` encryption that keeps copies interchangeable. |

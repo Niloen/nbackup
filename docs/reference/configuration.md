@@ -269,9 +269,11 @@ auto_label: false
 ## archivers
 
 A map of named archiver definitions: a registered archiver `type` plus its
-content-independent options (how tar runs, regardless of what you point it at).
-An undeclared name is a bare type with defaults, so `archiver: gnutar` works
-with no block here. Most setups need just one.
+content-independent options (how the tool runs, regardless of what you point it
+at). An undeclared name is a bare type with defaults, so `archiver: gnutar`
+works with no block here. Most setups need just one. Three types are built in —
+`gnutar` (the default), `postgres`, and `pipe`; see
+[Archivers](../features/archivers) for what each does and when to use it.
 
 ```yaml
 archivers:
@@ -280,10 +282,31 @@ archivers:
     one-file-system: "true"
     sparse: "true"
     # tar_path: gtar     # GNU tar binary (use "gtar" on macOS/BSD)
+
+  # Live PostgreSQL 17+ clusters via native incremental base backups. The DLE
+  # source string is a libpq connection reference ("app_prod", "service=prod",
+  # "host=/run/postgresql dbname=app"); credentials are libpq's own config
+  # (peer auth, ~/.pgpass, ~/.pg_service.conf) — never this file. One DLE per
+  # cluster. Requires `summarize_wal = on` (`nb check` prints the line).
+  pg:
+    type: postgres
+    # mode: incr                           # the default (and only) mode
+    # bin_dir: /usr/lib/postgresql/17/bin  # if the v17 tools are off PATH
+
+  # Bring-your-own command: {source}/{dest} substitute the DLE source string
+  # and restore destination. Full-only; the stock recovery recipe is your own
+  # restore_command.
+  sqlite:
+    type: pipe
+    backup_command: "sqlite3 {source} '.backup /dev/stdout'"
+    restore_command: "sqlite3 {dest}"
+    # estimate_command: "stat -c%s {source}"  # optional: prints a byte count
 ```
 
 Incremental state is **not** an archiver option — its location is the host-level
-`state_dir`. The archiver owns only its format knobs like `tar_path`.
+`state_dir` (gnutar's `.snar` snapshots and postgres's backup manifests both
+live there). The archiver owns only its format knobs like `tar_path`; a
+per-host value goes in `hosts.<h>.archivers.<type>` (below).
 
 ## dumptypes
 
@@ -378,10 +401,20 @@ sources:
     localhost: [/home, /etc]
   no-logs:
     localhost: [/srv/www, /opt/app]
+  db:
+    localhost: [app_prod]     # a postgres dumptype's "path" is a libpq
+                              # connection reference, not a filesystem path
 ```
 
-NBackup backs up filesystem trees; for a live database, snapshot or dump it to a
-file first.
+The "path" is a **source string the dumptype's archiver interprets**: a
+filesystem path for `gnutar`, a libpq connection reference for `postgres`
+(`app_prod`, `service=legacy`, `"host=10.0.0.12 dbname=app"`), an opaque token
+your own commands consume for `pipe`. It is also the DLE's identity — changing
+the string mints a new DLE (fresh level-0; the old history stays recoverable
+under the old ID until retention retires it), so prefer a stable form such as a
+`service=` name whose details live in `~/.pg_service.conf`. For any other live
+database, snapshot or dump it to a file first (or wrap the dump in a `pipe`
+archiver).
 
 ## sync
 

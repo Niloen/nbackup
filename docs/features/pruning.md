@@ -2,7 +2,7 @@
 title: Pruning & retention
 layout: default
 parent: Features
-nav_order: 8
+nav_order: 9
 description: "Per-medium retention with a safety floor that never deletes the last recovery path, then capacity reclamation to fit."
 ---
 

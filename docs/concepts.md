@@ -124,11 +124,13 @@ since a tape has no sidecars.
 
 ### Recovery never requires NBackup
 
-Archives are produced by **GNU tar** in listed-incremental format, piped through
-an external compressor (`zstd` by default; `gzip` or `none` also built in) and,
-optionally, an external **encryptor** (`gpg`). NBackup orchestrates these as child
-processes rather than reimplementing them — so the tools that wrote an archive are
-the tools that read it. A full restores with one pipe:
+Archives are produced by a pluggable **archiver** — by default **GNU tar** in
+listed-incremental format; a live PostgreSQL cluster or your own command works
+too (see [Archivers](features/archivers)) — piped through an external
+compressor (`zstd` by default; `gzip` or `none` also built in) and, optionally,
+an external **encryptor** (`gpg`). NBackup orchestrates these as child
+processes rather than reimplementing them — so the tools that wrote an archive
+are the tools that read it. A full restores with one pipe:
 
 ```bash
 zstd -dc 000000-app01-home-L0.tar.zst | tar -xf -
