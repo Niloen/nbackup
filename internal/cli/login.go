@@ -21,8 +21,8 @@ func newLoginCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "login <medium> [options]",
 		Short:   "Authenticate a medium that needs an interactive credential bootstrap (e.g. Google Drive OAuth)",
-		Long:    "Run a medium's one-time credential bootstrap. Most media need no login — disk and tape have no credentials, and a cloud bucket or a service-account Google Drive authenticate from the ambient environment. It exists for a personal Google Drive, whose OAuth consent must be granted once to mint a reusable token.\n\nAny options AFTER the medium name are specific to that medium's type (the neutral `nb login` command names none of them); see `nb login <medium> -h`. Headless-safe: no browser is opened and no callback port is bound.",
-		Example: "  nb login gdrive\n  nb login gdrive --client ~/client_secret.json --out ~/.config/nbackup/gdrive-token.json",
+		Long:    "Run a medium's one-time credential bootstrap. Most media need no login — disk and tape have no credentials, and a cloud bucket or a service-account Google Drive authenticate from the ambient environment. It exists for a personal Google Drive, whose OAuth consent must be granted once to mint a reusable token. The token is written to a default per-medium path the medium then reads automatically — no environment variable to set.\n\nAny options AFTER the medium name are specific to that medium's type (the neutral `nb login` command names none of them); see `nb login <medium> -h`. The gdrive flow adapts to your OAuth client: a \"TVs and Limited Input devices\" client uses a headless device code (no browser or open port here); a \"Desktop app\" client opens a browser on this machine and captures the redirect itself.",
+		Example: "  nb login gdrive\n  nb login gdrive --client ~/client_secret.json",
 		Args:    cobra.MinimumNArgs(1),
 		// Stop flag parsing at the first positional (the medium name), so a type's own
 		// options (gdrive's --client/--out) pass through as args for its login hook to
@@ -51,7 +51,7 @@ func newLoginCmd(a *app) *cobra.Command {
 				opts = media.Options{}
 			}
 			// Everything after the medium name belongs to the type's login hook.
-			return loginFn(cmd.Context(), opts, args[1:], cmd.InOrStdin(), cmd.OutOrStdout())
+			return loginFn(cmd.Context(), opts, cfg.SecretsPath(), args[1:], cmd.InOrStdin(), cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().SetInterspersed(false)

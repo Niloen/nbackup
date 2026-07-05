@@ -28,8 +28,8 @@ func (listFailVolume) Files() ([]record.FileInfo, error) {
 func init() {
 	media.Register(media.Spec{
 		Type: "listfail",
-		New: func(opts media.Options) (media.Volume, error) {
-			v, err := media.OpenVolume("disk", opts)
+		New: func(opts media.Options, _ string) (media.Volume, error) {
+			v, err := media.OpenVolume("disk", opts, "")
 			if err != nil {
 				return nil, err
 			}

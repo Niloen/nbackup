@@ -44,13 +44,13 @@ func init() {
 	}
 	s.Cost = newCost
 	s.Login = login
-	s.New = func(opts media.Options) (media.Volume, error) {
+	s.New = func(opts media.Options, secretsDir string) (media.Volume, error) {
 		folder := opts.Get("folder")
 		if folder == "" {
 			return nil, fmt.Errorf("gdrive medium requires a folder (a Drive folder ID or Shared-Drive ID to store backups under)")
 		}
 		ctx := context.Background()
-		svc, err := openService(ctx)
+		svc, err := openService(ctx, secretsDir)
 		if err != nil {
 			return nil, err
 		}

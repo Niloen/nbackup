@@ -254,11 +254,12 @@ func writeInitConfig(out string, ans initAnswers) error {
 	}
 
 	cfg := &config.Config{
-		Cycle:    ans.Cycle,
-		Landing:  kind,
-		Media:    map[string]config.Media{kind: medium},
-		Workdir:  filepath.Join(absDir, config.DefaultWorkdir),
-		StateDir: filepath.Join(absDir, config.DefaultStateDir),
+		Cycle:      ans.Cycle,
+		Landing:    kind,
+		Media:      map[string]config.Media{kind: medium},
+		Workdir:    filepath.Join(absDir, config.DefaultWorkdir),
+		StateDir:   filepath.Join(absDir, config.DefaultStateDir),
+		SecretsDir: filepath.Join(absDir, config.DefaultSecretsDir),
 	}
 	scheme, note := probeCompressor()
 	cfg.Compress.Scheme = scheme

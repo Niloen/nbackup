@@ -26,7 +26,7 @@ func loadSlot(t *testing.T, v media.Volume, s int) {
 
 func openTape(t *testing.T, dir string) media.Volume {
 	t.Helper()
-	v, err := media.OpenVolume("tape", media.Options{"dir": dir})
+	v, err := media.OpenVolume("tape", media.Options{"dir": dir}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestTapeFull(t *testing.T) {
 	// Each file carries a 32 KiB header block; size the tape to hold a label and
 	// one small archive, so a second archive's header overflows it.
 	capacity := int64(3 * record.HeaderBlock)
-	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "volume_size": fmt.Sprintf("%d", capacity)})
+	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "volume_size": fmt.Sprintf("%d", capacity)}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestTapeFull(t *testing.T) {
 // across reopen, and a loaded slot reports empty in the inventory.
 func TestTapeLibrary(t *testing.T) {
 	dir := t.TempDir()
-	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "slots": "3"})
+	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "slots": "3"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestTapeLibrary(t *testing.T) {
 	}
 
 	// Reopen: the drive binding persists (slot 2 / VOL-B), and loading slot 1 yields VOL-A.
-	v2, err := media.OpenVolume("tape", media.Options{"dir": dir, "slots": "3"})
+	v2, err := media.OpenVolume("tape", media.Options{"dir": dir, "slots": "3"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestTapeLibrary(t *testing.T) {
 // the librarian runs the operator-prompt path.
 func TestManualChanger(t *testing.T) {
 	dir := t.TempDir()
-	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "manual": "true", "slots": "3"})
+	v, err := media.OpenVolume("tape", media.Options{"dir": dir, "manual": "true", "slots": "3"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ func TestManualChanger(t *testing.T) {
 	}
 
 	// Reopen: the loaded cartridge persists.
-	v2, err := media.OpenVolume("tape", media.Options{"dir": dir, "manual": "true", "slots": "3"})
+	v2, err := media.OpenVolume("tape", media.Options{"dir": dir, "manual": "true", "slots": "3"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +366,7 @@ func TestTapeTornTailSkipped(t *testing.T) {
 // verifies the full lifecycle including persistence across reopen.
 func TestTapeBucketURL(t *testing.T) {
 	// mem://: label a slot and read it back through the changer facets.
-	v, err := media.OpenVolume("tape", media.Options{"dir": "mem://", "slots": "2"})
+	v, err := media.OpenVolume("tape", media.Options{"dir": "mem://", "slots": "2"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestTapeBucketURL(t *testing.T) {
 
 	// file:// URL: same driver family, but durable — the load and the data survive reopen.
 	url := "file://" + t.TempDir() + "?metadata=skip"
-	v, err = media.OpenVolume("tape", media.Options{"dir": url, "slots": "2"})
+	v, err = media.OpenVolume("tape", media.Options{"dir": url, "slots": "2"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +393,7 @@ func TestTapeBucketURL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	v2, err := media.OpenVolume("tape", media.Options{"dir": url, "slots": "2"})
+	v2, err := media.OpenVolume("tape", media.Options{"dir": url, "slots": "2"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

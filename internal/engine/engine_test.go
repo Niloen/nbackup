@@ -2747,7 +2747,7 @@ func TestPruneSweepsCrashOrphans(t *testing.T) {
 
 	// (a) a footer-less archive part: committed at the file layer (payload + .hdr) but no
 	// commit footer, so no archive references it.
-	vol, err := media.OpenVolume("disk", media.Options{"path": catalogDir})
+	vol, err := media.OpenVolume("disk", media.Options{"path": catalogDir}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

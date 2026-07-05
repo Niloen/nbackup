@@ -46,8 +46,11 @@ A bare service account cannot store data in "My Drive" (Google gives it 0 GB), s
 - **Workspace** → create a **Shared Drive**, add a service account to it, and use
   the **service-account** path.
 
-Either way, credentials come from `GOOGLE_APPLICATION_CREDENTIALS` and **never**
-the config file, so the config is safe to commit.
+Credentials **never** live in the config file, so the config is safe to commit. For
+a personal Drive, `nb login` writes the token to a default location the medium reads
+automatically — no environment variable to set. For a service account, point
+`GOOGLE_APPLICATION_CREDENTIALS` at the key (it also overrides the token location if
+you ever want a custom path).
 
 ## Config
 
@@ -75,20 +78,25 @@ quota, no verification burden), so you create your own **once**:
 2. Configure the **OAuth consent screen** (User type: *External*). Because
    `drive.file` is non-sensitive, you can **Publish** it to *Production* with no
    verification review — this stops the refresh token from expiring after 7 days.
-3. Create an **OAuth client ID** of type **Desktop app** and **download** its
-   `client_secret.json`.
+3. Create an **OAuth client ID** of type **TVs and Limited Input devices** and
+   **download** its `client_secret.json`. (This client type gives you the
+   headless *device flow* below — the best fit for a backup server. A **Desktop
+   app** client also works; `nb login` detects it and falls back to a browser
+   sign-in on the local machine instead.)
 4. Bootstrap the token — headless, so it works over SSH on a server:
 
    ```bash
-   export GOOGLE_APPLICATION_CREDENTIALS=~/.config/nbackup/gdrive-token.json
    nb login gdrive --client ~/Downloads/client_secret.json
    ```
 
-   `nb login` prints a URL. Open it on **any** device, sign in, and grant access.
-   Your browser then tries to open a `http://localhost/?code=…` page that **won't
-   load** — that's expected; copy the `code` value from its address bar (or paste
-   the whole URL) back into the terminal. NBackup writes the token to
-   `$GOOGLE_APPLICATION_CREDENTIALS`.
+   `nb login` prints a short **code** and a URL. Open the URL on **any** device,
+   sign in, enter the code, and grant access — `nb login` waits, then writes the
+   token to its default path (under `nbackup-secrets/`, beside the catalog), where
+   the medium reads it automatically. Nothing else to wire up.
+
+   *(With a Desktop-app client instead, `nb login` opens your browser and captures
+   the redirect itself — no code to copy, no failed-to-load localhost page — but it
+   needs a browser and a free port on the machine you run it on.)*
 
 5. `nb check` then confirms the medium opens; `nb dump` lands the first run.
 

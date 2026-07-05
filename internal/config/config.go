@@ -49,6 +49,13 @@ type Config struct {
 	// so it is not an archiver option.
 	StateDir string `yaml:"state_dir,omitempty"`
 
+	// SecretsDir is the pool-side root for credentials a medium's `nb login` mints (the
+	// gdrive OAuth token). Like StateDir it is a dedicated location BESIDE the workdir, not
+	// beneath it: the workdir is a disposable cache that rebuild wipes, whereas a login
+	// token is precious, non-rebuildable state — only a fresh consent brings it back — so
+	// nesting it under the workdir would invite its loss. Defaults to DefaultSecretsDir.
+	SecretsDir string `yaml:"secrets_dir,omitempty"`
+
 	// PartSize is the config-wide default ATOM size for encrypted (atomic-shape)
 	// archives: each part of such an archive is one complete encrypted message of at
 	// most this many compressed bytes, cut at dump time and carried unchanged by every
@@ -521,6 +528,23 @@ func (c *Config) StatePath() string {
 		return c.StateDir
 	}
 	return DefaultStateDir
+}
+
+// DefaultSecretsDir is the pool-side credential root when `secrets_dir` is unset. Like
+// DefaultStateDir it is a dedicated location BESIDE the catalog workdir, not beneath it: a
+// login token (the gdrive OAuth token) is precious, non-rebuildable state, so nesting it
+// under the wipe-and-rebuild workdir would invite its loss. Relative, so it resolves under
+// the server's cwd — the same base the workdir defaults to.
+const DefaultSecretsDir = "nbackup-secrets"
+
+// SecretsPath returns the pool-side credential root, defaulting to DefaultSecretsDir when
+// `secrets_dir` is unset. A medium's login bootstrap writes under it and the medium reads
+// its credential back from it (see the gdrive medium).
+func (c *Config) SecretsPath() string {
+	if c.SecretsDir != "" {
+		return c.SecretsDir
+	}
+	return DefaultSecretsDir
 }
 
 // StateDirFor returns the incremental-state root for a host: the host's own

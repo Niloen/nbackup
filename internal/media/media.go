@@ -354,8 +354,12 @@ func WalkReadable(vol Volume, fn func(Volume) error) error {
 	return nil
 }
 
-// VolumeFactory constructs a Volume from options.
-type VolumeFactory func(Options) (Volume, error)
+// VolumeFactory constructs a Volume from its options and the pool-side secrets root — the
+// resolved config.SecretsPath() a medium that mints login credentials writes to and reads
+// back (gdrive's OAuth token). It mirrors how an archiver's factory receives its stateRoot:
+// a host/config path the medium needs but does not resolve itself; media with no login
+// credential (disk, cloud, tape) ignore it.
+type VolumeFactory func(opts Options, secretsDir string) (Volume, error)
 
 // Spec is everything the media layer knows about one medium type, declared in a single
 // registration. Bundling the facts — the Volume constructor, the capacity Profile and
@@ -401,11 +405,13 @@ type Spec struct {
 }
 
 // LoginFunc runs a medium type's `nb login` bootstrap. opts carries the medium's
-// configured params; args are the CLI tokens after the medium name, which the type
-// parses itself (its own flags — e.g. gdrive's --client/--out — so the neutral `nb login`
-// command never names a type's options). in/out are the command's stdin/stdout for the
-// headless prompt-and-paste exchange.
-type LoginFunc func(ctx context.Context, opts Options, args []string, in io.Reader, out io.Writer) error
+// configured params; secretsDir is the resolved pool-side credential root
+// (config.SecretsPath()) the bootstrap writes its token under — the same root the medium
+// reads it back from; args are the CLI tokens after the medium name, which the type parses
+// itself (its own flags — e.g. gdrive's --client/--out — so the neutral `nb login` command
+// never names a type's options). in/out are the command's stdin/stdout for the interactive
+// exchange.
+type LoginFunc func(ctx context.Context, opts Options, secretsDir string, args []string, in io.Reader, out io.Writer) error
 
 // LoginFor returns a medium type's registered Login bootstrap, or ok=false when the
 // type authenticates from ambient credentials with no interactive step.
@@ -428,13 +434,15 @@ func Register(s Spec) { specs[s.Type] = s }
 // medium returns false.
 func ConcurrentWrite(typ string) bool { return specs[typ].ConcurrentWrite }
 
-// OpenVolume constructs the Volume registered for the given medium type.
-func OpenVolume(typ string, opts Options) (Volume, error) {
+// OpenVolume constructs the Volume registered for the given medium type. secretsDir is the
+// resolved pool-side credential root (config.SecretsPath()), passed through to the factory
+// for a medium that authenticates from a login credential (gdrive); others ignore it.
+func OpenVolume(typ string, opts Options, secretsDir string) (Volume, error) {
 	s, ok := specs[typ]
 	if !ok || s.New == nil {
 		return nil, fmt.Errorf("unknown medium type %q (known: %v)", typ, VolumeTypes())
 	}
-	return s.New(opts)
+	return s.New(opts, secretsDir)
 }
 
 // ValidateParams checks a medium's inline params against the keys its type accepts,

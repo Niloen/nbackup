@@ -20,7 +20,7 @@ import (
 func newTapeLib(t *testing.T, slots int, autoLabel bool) (*Librarian, *catalog.Catalog, media.Changer) {
 	t.Helper()
 	v, err := media.OpenVolume("tape", media.Options{
-		"dir": t.TempDir(), "slots": strconv.Itoa(slots), "volume_size": "1048576"})
+		"dir": t.TempDir(), "slots": strconv.Itoa(slots), "volume_size": "1048576"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

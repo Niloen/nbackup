@@ -254,6 +254,14 @@ landing: fast-disk
 # state_dir: /var/lib/nbackup/state
 # A per-host override (e.g. for a remote client's own path) lives under hosts:.
 
+# Where a medium's `nb login` keeps the credential it mints (the Google Drive OAuth
+# token). Like state_dir it is precious, non-rebuildable state, so it too sits BESIDE
+# the workdir, not beneath it. Defaults to ./nbackup-secrets (relative to the working
+# directory — set an ABSOLUTE path for cron). Only media that log in use it; a
+# service-account gdrive or a cloud bucket reads GOOGLE_APPLICATION_CREDENTIALS /
+# the SDK environment instead, and that env var still overrides this location.
+# secrets_dir: /var/lib/nbackup/secrets
+
 # Let a dump auto-label a *blank* tape instead of requiring `nb label` first.
 # Off by default: explicit labeling is what makes the overwrite guard meaningful.
 # It never overwrites foreign or non-blank media. A ROBOTIC library labels a blank

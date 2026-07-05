@@ -48,7 +48,7 @@ func init() {
 		MaxNote: "an object store caps a single object's multipart upload at 10000 parts (~48.8 GiB at the 5 MiB buffer); use a smaller part_size so each part-object stays well under it",
 	}
 	s.Cost = newCost
-	s.New = func(opts media.Options) (media.Volume, error) {
+	s.New = func(opts media.Options, _ string) (media.Volume, error) {
 		url := opts.Get("url")
 		if url == "" {
 			return nil, fmt.Errorf("cloud medium requires a url (e.g. s3://bucket?region=…, gs://bucket, azblob://container)")

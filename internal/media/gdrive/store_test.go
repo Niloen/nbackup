@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -233,7 +234,7 @@ func TestAbortedWriteLeavesNoObject(t *testing.T) {
 // TestFactoryRequiresFolder confirms the factory rejects a missing folder before it ever
 // reaches for credentials (so the check is testable without a real Drive).
 func TestFactoryRequiresFolder(t *testing.T) {
-	if _, err := media.OpenVolume("gdrive", media.Options{}); err == nil {
+	if _, err := media.OpenVolume("gdrive", media.Options{}, ""); err == nil {
 		t.Fatal("expected gdrive to require a folder")
 	}
 }
@@ -272,16 +273,11 @@ func TestPrefixReroots(t *testing.T) {
 	}
 }
 
-func TestExtractCode(t *testing.T) {
-	cases := map[string]string{
-		"4/0AbCdEf": "4/0AbCdEf",
-		"http://localhost/?code=4/0AbCdEf&scope=drive": "4/0AbCdEf",
-		"http://localhost/?scope=drive&code=xyz":       "xyz",
-	}
-	for in, want := range cases {
-		if got := extractCode(in); got != want {
-			t.Errorf("extractCode(%q) = %q, want %q", in, got, want)
-		}
+// TestTokenPath pins the default credential file within the pool-side secrets root the
+// medium is handed (config.SecretsPath()): one token per deployment, under that root.
+func TestTokenPath(t *testing.T) {
+	if got, want := tokenPath("nbackup-secrets"), filepath.Join("nbackup-secrets", "gdrive.json"); got != want {
+		t.Errorf("tokenPath = %q, want %q", got, want)
 	}
 }
 

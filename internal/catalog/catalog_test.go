@@ -15,7 +15,7 @@ import (
 
 func newVolume(t *testing.T, path string) media.Volume {
 	t.Helper()
-	v, err := media.OpenVolume("disk", media.Options{"path": path})
+	v, err := media.OpenVolume("disk", media.Options{"path": path}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +359,7 @@ func writePart(t *testing.T, v media.Volume, runID, dle string, level, part int)
 func TestRebuildReassemblesSpannedRun(t *testing.T) {
 	dir := t.TempDir()
 	open := func() media.Volume {
-		v, err := media.OpenVolume("tape", media.Options{"dir": dir, "slots": "2", "volume_size": "1048576"})
+		v, err := media.OpenVolume("tape", media.Options{"dir": dir, "slots": "2", "volume_size": "1048576"}, "")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -184,7 +184,7 @@ var ErrUnknownMedium = errors.New("unknown medium")
 // within the same process does not re-probe an unreachable store.
 func (d *Depot) Landing() (media.Volume, error) {
 	d.volOnce.Do(func() {
-		vol, err := media.OpenVolume(d.landingDef.Type, media.Options(d.landingDef.Params))
+		vol, err := media.OpenVolume(d.landingDef.Type, media.Options(d.landingDef.Params), d.cfg.SecretsPath())
 		if err != nil {
 			// Opening a cloud volume lists the bucket, so this is where absent SDK
 			// credentials or an unreachable store first surface. Name the medium and
@@ -239,7 +239,7 @@ func (d *Depot) MediumVolume(name string) (vol media.Volume, def config.Media, o
 	if !ok {
 		return nil, config.Media{}, false, fmt.Errorf("%w %q", ErrUnknownMedium, name)
 	}
-	v, err := media.OpenVolume(md.Type, media.Options(md.Params))
+	v, err := media.OpenVolume(md.Type, media.Options(md.Params), d.cfg.SecretsPath())
 	return v, md, false, err
 }
 

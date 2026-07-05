@@ -15,7 +15,7 @@ import (
 
 func openVol(t *testing.T, path string) media.Volume {
 	t.Helper()
-	v, err := media.OpenVolume("disk", media.Options{"path": path})
+	v, err := media.OpenVolume("disk", media.Options{"path": path}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +25,7 @@ func openVol(t *testing.T, path string) media.Volume {
 // TestRejectsPartSize confirms disk refuses part_size: it is unbounded, so it never
 // splits an archive, and silently ignoring the knob would mislead.
 func TestRejectsPartSize(t *testing.T) {
-	_, err := media.OpenVolume("disk", media.Options{"path": t.TempDir(), "part_size": "1MB"})
+	_, err := media.OpenVolume("disk", media.Options{"path": t.TempDir(), "part_size": "1MB"}, "")
 	if err == nil {
 		t.Fatal("expected disk to reject part_size")
 	}

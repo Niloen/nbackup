@@ -20,7 +20,7 @@ import (
 // the full Volume contract is exercised offline with no cross-test state.
 func openVol(t *testing.T) media.Volume {
 	t.Helper()
-	v, err := media.OpenVolume("cloud", media.Options{"url": "mem://"})
+	v, err := media.OpenVolume("cloud", media.Options{"url": "mem://"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func openVol(t *testing.T) media.Volume {
 // TestRequiresURL: the factory rejects a missing url rather than opening a
 // useless volume.
 func TestRequiresURL(t *testing.T) {
-	if _, err := media.OpenVolume("cloud", media.Options{}); err == nil {
+	if _, err := media.OpenVolume("cloud", media.Options{}, ""); err == nil {
 		t.Fatal("expected cloud to require a url")
 	}
 }
@@ -40,7 +40,7 @@ func TestRequiresURL(t *testing.T) {
 // drives the split; the factory just opens the bucket). The default/bound live in the
 // part-size policy and are exercised at the engine level.
 func TestAcceptsPartSize(t *testing.T) {
-	if _, err := media.OpenVolume("cloud", media.Options{"url": "mem://", "part_size": "1MB"}); err != nil {
+	if _, err := media.OpenVolume("cloud", media.Options{"url": "mem://", "part_size": "1MB"}, ""); err != nil {
 		t.Fatalf("cloud should accept part_size: %v", err)
 	}
 }
@@ -146,13 +146,13 @@ func TestCleanPayloadObject(t *testing.T) {
 // because it must persist across two opens (each mem:// open is independent).
 func TestReopenRescans(t *testing.T) {
 	url := "file://" + t.TempDir()
-	v, err := media.OpenVolume("cloud", media.Options{"url": url, "prefix": "reopen-test/"})
+	v, err := media.OpenVolume("cloud", media.Options{"url": url, "prefix": "reopen-test/"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	pos := appendArchive(t, v, "run-a", "h-data", 0, "payload")
 
-	v2, err := media.OpenVolume("cloud", media.Options{"url": url, "prefix": "reopen-test/"})
+	v2, err := media.OpenVolume("cloud", media.Options{"url": url, "prefix": "reopen-test/"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,7 +22,7 @@ func init() {
 	s := fslike.Spec()
 	s.Type = "disk"
 	s.Params = []string{"path", "part_size"}
-	s.New = func(opts media.Options) (media.Volume, error) {
+	s.New = func(opts media.Options, _ string) (media.Volume, error) {
 		path := opts.Get("path")
 		if path == "" {
 			return nil, fmt.Errorf("disk medium requires a path")

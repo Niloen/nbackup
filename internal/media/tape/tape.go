@@ -42,7 +42,7 @@ func init() {
 // `dir` (a directory path or bucket URL), or a real drive at `device`. Either way the result is a tapeChanger, which
 // is both a media.Changer (the librarian's logistics) and a media.Volume (the active
 // drive's cartridge, so the medium handle is a Volume above the librarian).
-func newTapeVolume(opts media.Options) (media.Volume, error) {
+func newTapeVolume(opts media.Options, _ string) (media.Volume, error) {
 	// volume_size caps each emulated cartridge so it fills like a real reel; a real
 	// drive reports EOT only by hitting it, so capacity there stays 0 (use part_size).
 	var capacity int64
