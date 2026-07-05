@@ -9,11 +9,6 @@ import (
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
-// materialEgressUSD is the threshold above which a cloud read's egress estimate is
-// worth confirming. Below it the charge is noise (a few cents); above it the user
-// sees the number and, interactively, confirms before paying it.
-const materialEgressUSD = 1.00
-
 // formatUSD renders a dollar amount with a leading $: extra precision for sub-cent
 // sums (a small footprint's monthly cost) so they don't collapse to "$0.00".
 func formatUSD(usd float64) string {
@@ -74,13 +69,15 @@ func plural(n int, noun string) string {
 }
 
 // confirmRead surfaces the egress cost of reading bytes off a cloud medium and, when
-// material and interactive, asks the operator to confirm before pulling them. It
+// interactive, asks the operator to confirm before pulling them. Any priced read gets
+// the prompt regardless of the dollar amount: a cheap ranged read can still pull a
+// large frame (slow), so the operator confirms the pull, not just the charge. It
 // returns false only on an explicit decline at an interactive prompt: a
 // non-interactive run (cron) prints the estimate and proceeds, never blocking — the
 // estimate is informational, exactly as planning never blocks. yes skips the prompt.
 func confirmRead(est engine.ReadEstimate, yes bool) bool {
-	if !est.Priced || est.Bytes == 0 || est.Cost < materialEgressUSD {
-		return true // a local medium, nothing to read, or an immaterial charge
+	if !est.Priced || est.Bytes == 0 {
+		return true // a local medium or nothing to read
 	}
 	scope := ""
 	if est.Ranged {

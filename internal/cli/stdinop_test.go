@@ -139,11 +139,15 @@ func TestSuggestReel(t *testing.T) {
 	}
 }
 
-// confirmRead: below the material threshold, unpriced, or zero bytes always
-// proceeds without a prompt; a material charge with --yes or a non-terminal stdin
-// proceeds; and at an interactive prompt the typed answer decides.
+// confirmRead: an unpriced (local) medium or a zero-byte read always proceeds without
+// a prompt; any priced non-zero read prompts when interactive regardless of the dollar
+// amount (a cheap ranged read can still pull a large frame); --yes or a non-terminal
+// stdin proceeds; and at an interactive prompt the typed answer decides.
 func TestConfirmRead(t *testing.T) {
 	material := engine.ReadEstimate{Priced: true, Bytes: 1 << 30, Cost: 5, Medium: "s3", Provider: "aws-s3"}
+	// A priced read whose charge is a fraction of a cent: below any old dollar gate,
+	// yet it must still prompt — the operator is confirming the pull, not the charge.
+	cheap := engine.ReadEstimate{Priced: true, Bytes: 1 << 10, Cost: 0.001, Medium: "s3", Provider: "aws-s3"}
 
 	orig := stdinIsTerminal
 	t.Cleanup(func() { stdinIsTerminal = orig })
@@ -156,9 +160,6 @@ func TestConfirmRead(t *testing.T) {
 		if !confirmRead(engine.ReadEstimate{Priced: true, Bytes: 0, Cost: 5}, false) {
 			t.Error("zero-byte read must proceed")
 		}
-		if !confirmRead(engine.ReadEstimate{Priced: true, Bytes: 1 << 10, Cost: 0.001}, false) {
-			t.Error("immaterial charge must proceed")
-		}
 		if !confirmRead(material, false) {
 			t.Error("a non-interactive run must proceed (print-and-go, never block)")
 		}
@@ -169,6 +170,13 @@ func TestConfirmRead(t *testing.T) {
 	captureStdout(t, func() {
 		if !confirmRead(material, true) {
 			t.Error("--yes must skip the prompt and proceed")
+		}
+	})
+	// A cheap priced read still reaches the prompt: declining aborts it.
+	withStdin(t, "n\n")
+	captureStdout(t, func() {
+		if confirmRead(cheap, false) {
+			t.Error("a cheap priced read must still prompt; declining must abort")
 		}
 	})
 	for _, tc := range []struct {
