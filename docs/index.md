@@ -113,5 +113,8 @@ for the full vocabulary and [Artifacts you can read](concepts#artifacts-you-can-
 
 ---
 
-NBackup is free software under the **GNU General Public License v3.0**.
-Copyright © 2026 Niloen AB.
+NBackup is free software under the **GNU General Public License v3.0**,
+developed and maintained by [Niloen AB](https://niloen.com), a software
+development consultancy. Copyright © 2026 Niloen AB. Bug reports and questions
+are welcome on [GitHub issues](https://github.com/Niloen/nbackup/issues);
+commercial support is available on request.

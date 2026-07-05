@@ -29,6 +29,9 @@ aux_links_new_tab: true
 back_to_top: true
 back_to_top_text: "Back to top"
 last_edit_timestamp: false
+footer_content: >-
+  Niloen Backup is developed by <a href="https://niloen.com">Niloen AB</a>.
+  Free software under <a href="https://github.com/Niloen/nbackup/blob/main/LICENSE">GPLv3</a>.
 
 # Internal design notes live under docs/design/ and are intentionally kept out of
 # the published navigation (they remain readable as raw files in the repo).

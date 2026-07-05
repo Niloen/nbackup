@@ -1045,6 +1045,13 @@ make test     # go test ./...
 make vet      # go vet ./...
 ```
 
+## Support
+
+Bug reports and questions are welcome on
+[GitHub issues](https://github.com/Niloen/nbackup/issues). NBackup is developed
+and maintained by **[Niloen AB](https://niloen.com)**, a software development
+consultancy; commercial support is available on request.
+
 ## License
 
 Copyright © 2026 Niloen AB.
