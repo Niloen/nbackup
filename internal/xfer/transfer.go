@@ -23,7 +23,7 @@ func isBrokenPipe(err error) bool {
 	if errors.Is(err, syscall.EPIPE) {
 		return true
 	}
-	return strings.Contains(err.Error(), "broken pipe") // covers "signal: broken pipe"
+	return strings.Contains(strings.ToLower(err.Error()), "broken pipe") // covers "signal: broken pipe"
 }
 
 // A Transfer moves one byte stream from a Source, through a local Filters chain, to a

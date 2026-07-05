@@ -1,7 +1,10 @@
 # CI: the same three checks CLAUDE.md requires for every change.
-# The suite is written to pass without zstd (tests use scheme `none`); nothing
-# beyond GNU tar + gzip (already on the runner) is installed, matching the
-# documented test environment.
+# The core suite is written to pass without zstd (tests use scheme `none`), so
+# that part needs nothing beyond GNU tar + gzip. The e2e suite additionally
+# exercises real backends where installed — PostgreSQL 17 (postgres archiver),
+# zstd (compression), and passwordless SSH-to-localhost (client-side transform
+# placement) — each self-skips via a live probe if its backend is missing, so
+# installing them here is what turns those tests from skipped to running.
 name: CI
 
 on:
@@ -21,6 +24,31 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Install PostgreSQL 17
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-17
+
+      - name: Install zstd + gpg
+        run: sudo apt-get install -y zstd gnupg
+
+      - name: Set up passwordless SSH to localhost
+        run: |
+          sudo apt-get install -y openssh-server
+          sudo service ssh start
+          mkdir -p ~/.ssh
+          ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+          cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+          ssh-keyscan -H localhost 127.0.0.1 >> ~/.ssh/known_hosts
+          ssh -o BatchMode=yes localhost true
 
       - name: gofmt
         run: |
