@@ -124,7 +124,7 @@ stamped in its commit footer so a reader decodes it with no config:
 
 | Pipeline | Shape | Selective read | Whole restore |
 |----------|-------|----------------|---------------|
-| Server-side compress, no encryption (`zstd`/`gzip`/`none`) | **framed** | ranged GET of the covering frames — a validated single-file extract cost 0.3% of the archive | reads it all |
+| Server-side compress, no encryption (`zstd`/`gzip`/`none`) | **framed** | ranged GET of the covering frames — in one measurement a small-file extract touched 0.3% of the archive | reads it all |
 | Encrypted (`gpg`) | **atomic** | fetch only the atoms (sealed `.pNNN` gpg messages) covering the members | reads it all |
 | Client-placed transform, or a non-restartable scheme | **stream** | whole archive, as before | reads it all |
 

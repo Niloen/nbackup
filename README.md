@@ -557,8 +557,8 @@ view; recover the *whole* DLE with `--all` when you need deletion-accurate state
 
 Recovering one file from a large archive doesn't cost the whole archive. NBackup
 records **decode-restart points** at write time, so a single-file `nb recover` — or a
-recovery drill — fetches only the bytes it needs (a validated single-file extract cost
-**0.3%** of the archive), which is real money saved on egress-billed cloud stores. This
+recovery drill — fetches only the bytes it needs (in one measurement, extracting a small
+file touched **0.3%** of the archive), which is real money saved on egress-billed cloud stores. This
 falls out of the archive's *shape* without changing what it looks like to a whole-stream
 reader or the stock one-liner: unencrypted archives get ranged reads; encrypted ones are
 stored as independently-decryptable **atoms** you fetch selectively. See
