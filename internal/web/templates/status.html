@@ -35,7 +35,7 @@
     {{if .Drains}}
     {{/* FLUSH bar: holding disk -> landing, metered against the staged (compressed) size. */}}
     <div class="bar" style="margin-top:.5rem"><span style="width:{{pct .DrainPct}}"></span></div>
-    <div class="dle-meta">flush · {{pct .DrainPct}} · {{bytes .DrainBytes}} of {{bytes .OutBytes}} to landing{{if .Holding}} · from {{.Holding}}{{end}}</div>
+    <div class="dle-meta">flush · {{pct .DrainPct}} · {{bytes .DrainBytes}} of {{bytes .DrainTotal}} to landing{{if .Holding}} · from {{.Holding}}{{end}}</div>
     {{else if .ToHolding}}
     <div class="dle-meta">staging to holding disk…</div>
     {{end}}

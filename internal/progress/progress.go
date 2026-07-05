@@ -91,6 +91,11 @@ func (d DLE) lanes() int64 {
 // per landing on its route.
 func (d DLE) toDrain() int64 { return d.OutBytes * d.lanes() }
 
+// DrainTotal is the compressed total the DLE's drain must copy across its whole route —
+// its staged size, once per landing — so callers displaying DrainBytes alongside a total
+// (e.g. "X of Y") use this instead of OutBytes, which is only one landing's share.
+func (d DLE) DrainTotal() int64 { return d.toDrain() }
+
 // DrainPct is a holding-disk DLE's drain completion: bytes copied off the holding disk
 // against the total its route needs — staged size × landings — so 100% means every
 // landing holds the archive. 0 when nothing is staged.
