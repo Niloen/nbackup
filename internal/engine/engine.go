@@ -32,6 +32,7 @@ import (
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/ratelimit"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/restorer"
 	"github.com/Niloen/nbackup/internal/scheduler"
@@ -39,6 +40,7 @@ import (
 	// Register the bundled media and archiver implementations.
 	_ "github.com/Niloen/nbackup/internal/archiver/gnutar"
 	_ "github.com/Niloen/nbackup/internal/archiver/pipe"
+	_ "github.com/Niloen/nbackup/internal/archiver/postgres"
 	_ "github.com/Niloen/nbackup/internal/media/cloud"
 	_ "github.com/Niloen/nbackup/internal/media/disk"
 	_ "github.com/Niloen/nbackup/internal/media/gdrive"
@@ -623,10 +625,16 @@ func (e *Engine) OpenRecoverRun(dle, runID string) (*recovery.Tree, error) {
 	return e.rst.OpenRecoverRun(dle, runID)
 }
 
-// ExtractSelection extracts a selected set of files into destDir, reporting media
-// reads to prog for a live progress view (nil disables it); see restorer.
-func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, logf Logf, prog restorer.ReadProgress) (int, int, error) {
-	return e.rst.ExtractSelection(steps, destDir, logf, prog)
+// ExtractSelection extracts a selected set of files (plus any delta-tipped
+// assemblies) into destDir, reporting media reads to prog for a live progress
+// view (nil disables it); see restorer.
+func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, asms []recovery.Assembly, destDir string, logf Logf, prog restorer.ReadProgress) (int, int, error) {
+	return e.rst.ExtractSelection(steps, asms, destDir, logf, prog)
+}
+
+// Inventory returns a DLE's content inventory (units) as of a date; see restorer.
+func (e *Engine) Inventory(dle, asOf string) ([]record.Unit, string, error) {
+	return e.rst.Inventory(dle, asOf)
 }
 
 // DLENames returns the distinct DLE names recorded across all catalog runs,

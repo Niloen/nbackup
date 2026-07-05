@@ -270,6 +270,16 @@ func (g *gnutar) RestoreStage(destDir string, members []string) programs.Cmd {
 	return programs.Cmd{Name: g.bin, Args: args, OKExit: []int{1}}
 }
 
+// RestoreIsCombine: no — a chain restore is tar's own additive listed-incremental
+// replay, each level applied directly into the destination.
+func (g *gnutar) RestoreIsCombine() bool { return false }
+
+func (g *gnutar) CombineStage(string, []string) programs.Cmd { return programs.Cmd{} }
+
+// Assembler: nil — tar incrementals store whole files, so the newest version of a
+// path IS the file (the browse tree's default).
+func (g *gnutar) Assembler() archiver.Assembler { return nil }
+
 // SpliceTrailer: tar streams splice — every member leads with a self-describing
 // 512-byte header and carries no cross-member state, so a concatenation of whole
 // member extents is itself a readable tar stream; the trailer is tar's end-of-archive

@@ -327,6 +327,7 @@ func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.SourceStats) error {
 		arch.Uncompressed = p.Uncompressed
 		arch.Members = p.Members
 		arch.Frames = p.Frames
+		arch.Units = p.Units
 		if p.FileCount == 0 {
 			// A zero-change incremental still carries tar's directory census (e.g.
 			// "./docs/") as members, but nothing actually changed. Per the documented
@@ -335,6 +336,7 @@ func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.SourceStats) error {
 			// same index) here and write payload+commit only.
 			arch.Members = nil
 			arch.Frames = nil
+			arch.Units = nil
 		}
 		arch.CreatedAt = a.w.now() // the archive's landing time (per-archive)
 	}
@@ -390,9 +392,9 @@ func (a *ArchiveWriter) Close() error {
 // merged the producer's stats (FileCount/Uncompressed/Members) into the archive.
 func (w *Writer) finalize(ctx context.Context, arch record.Archive, parts []FilePos) (ArchivePos, error) {
 	var index FilePos
-	if len(arch.Members) > 0 {
+	if len(arch.Members) > 0 || len(arch.Units) > 0 {
 		var buf bytes.Buffer
-		if err := record.EncodeIndex(&buf, record.Index{Members: arch.Members, Frames: arch.Frames}); err != nil {
+		if err := record.EncodeIndex(&buf, record.Index{Members: arch.Members, Frames: arch.Frames, Units: arch.Units}); err != nil {
 			return ArchivePos{}, err
 		}
 		pos, err := w.writeRecord(ctx, record.KindIndex, arch, buf.Bytes())
@@ -406,6 +408,7 @@ func (w *Writer) finalize(ctx context.Context, arch record.Archive, parts []File
 	footer := arch
 	footer.Members = nil
 	footer.Frames = nil
+	footer.Units = nil
 	data, err := record.MarshalCommit(footer)
 	if err != nil {
 		return ArchivePos{}, err

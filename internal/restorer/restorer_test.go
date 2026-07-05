@@ -103,6 +103,13 @@ func (fakeArchiver) SpliceTrailer() []byte { return []byte{} }
 func (fakeArchiver) DestIsDir() bool { return true }
 func (fakeArchiver) CanList() bool   { return true }
 
+// Additive replay, no browse-time assembly — the defaults (the embedded
+// interface is nil, so the promoted methods would panic when the restorer
+// probes these capabilities).
+func (fakeArchiver) RestoreIsCombine() bool                     { return false }
+func (fakeArchiver) CombineStage(string, []string) programs.Cmd { return programs.Cmd{} }
+func (fakeArchiver) Assembler() archiver.Assembler              { return nil }
+
 func testDeps(store *fakeStore, archives []record.Archive) Deps {
 	return Deps{
 		Store:    store,

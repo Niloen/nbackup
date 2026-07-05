@@ -7,7 +7,7 @@ import (
 
 func newTestSession(t *testing.T) *Session {
 	t.Helper()
-	tree, err := BuildTree(scenario(), "app", "2026-06-22", membersOf(scenario(), "app"))
+	tree, err := BuildTree(scenario(), "app", "2026-06-22", membersOf(scenario(), "app"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

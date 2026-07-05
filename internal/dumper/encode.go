@@ -294,7 +294,7 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 			return xfer.SourceStats{}, nil
 		}
 		unreadable = res.Unreadable
-		stats := xfer.SourceStats{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members, Unreadable: res.Unreadable}
+		stats := xfer.SourceStats{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members, Units: res.Units, Unreadable: res.Unreadable}
 		if stats.Uncompressed == 0 {
 			// An archiver with no totals side channel (pipe's opaque producer) reports 0;
 			// the stage tap already metered the raw stream, so record that instead of a

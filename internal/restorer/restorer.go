@@ -15,14 +15,17 @@
 package restorer
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"github.com/Niloen/nbackup/internal/archiveio"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Niloen/nbackup/internal/archiveio"
 
 	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiver"
@@ -205,6 +208,14 @@ func (r *Restorer) extractChain(runID string, req Request, log Logf) error {
 	if err != nil {
 		return err
 	}
+	// A combine-shaped chain (postgres) gathers every level into staging under
+	// the destination and merges once at the end; an additive chain (gnutar,
+	// pipe) extracts each level straight into the destination. Resolved for the
+	// host the extraction lands on — the combine tool runs there.
+	combiner, err := r.combineFor(steps, req.Host)
+	if err != nil {
+		return err
+	}
 	rollbackOnFail := false
 	if dirDest && req.Host == "" && !req.Force {
 		if err := errNonEmptyDest(req.Dest); err != nil {
@@ -239,9 +250,27 @@ func (r *Restorer) extractChain(runID string, req Request, log Logf) error {
 	}
 
 	d := dest{exec: r.deps.Exec(req.Host), host: req.Host, dir: req.Dest}
+	// Combine staging lives INSIDE the destination — same filesystem (the
+	// combine's copy_file_range can reflink) and covered by the same guard and
+	// rollback as the destination itself.
+	var staging []string
+	if combiner != nil {
+		for _, step := range steps {
+			staging = append(staging, path.Join(req.Dest, ".nb-combine", fmt.Sprintf("L%d", step.Level)))
+		}
+	}
 	_, err = r.deps.Store.OpenArchives(refs, req.Medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
 		step := stepByRef[ref]
-		log.Log("extracting %s %s L%d -> %s", step.RunID, r.deps.DisplayDLE(step.DLE), step.Level, req.Dest)
+		stepDest := d
+		if combiner != nil {
+			for i, s := range steps {
+				if s == step {
+					stepDest.dir = staging[i]
+					break
+				}
+			}
+		}
+		log.Log("extracting %s %s L%d -> %s", step.RunID, r.deps.DisplayDLE(step.DLE), step.Level, stepDest.dir)
 		rc, oerr := open()
 		if oerr != nil {
 			return stepErr(step, DecryptHint(step.Encrypt, oerr))
@@ -251,11 +280,15 @@ func (r *Restorer) extractChain(runID string, req Request, log Logf) error {
 			rc.Close()
 			return stepErr(step, perr)
 		}
-		if xerr := r.dec.restoreArchive(rc, plan, step.Archiver, step.DLE, d, nil); xerr != nil {
+		if xerr := r.dec.restoreArchive(rc, plan, step.Archiver, step.DLE, stepDest, nil); xerr != nil {
 			return stepErr(step, DecryptHint(step.Encrypt, xerr))
 		}
 		return nil
 	})
+	if err == nil && combiner != nil {
+		log.Log("combining %d level(s) -> %s", len(staging), req.Dest)
+		err = runStage(d.exec, combiner.CombineStage(req.Dest, staging))
+	}
 	if err == nil {
 		return nil
 	}
@@ -432,6 +465,39 @@ func (r *Restorer) destIsDir(steps []recovery.Step) (bool, error) {
 		return false, err
 	}
 	return arch.DestIsDir(), nil
+}
+
+// combineFor resolves the chain's archiver FOR THE DESTINATION HOST when the
+// restore is combine-shaped (RestoreIsCombine — postgres's pg_combinebackup
+// merge), or nil for the default additive replay. The host matters: the
+// combine stage runs where the data lands.
+func (r *Restorer) combineFor(steps []recovery.Step, host string) (archiver.Archiver, error) {
+	if len(steps) == 0 {
+		return nil, nil
+	}
+	arch, err := r.deps.ArchiverFor(steps[0].Archiver, steps[0].DLE, host)
+	if err != nil {
+		return nil, err
+	}
+	if !arch.RestoreIsCombine() {
+		return nil, nil
+	}
+	return arch, nil
+}
+
+// runStage runs one program stage on an executor to completion, surfacing its
+// failure — how the combine finalize executes.
+func runStage(ex programs.Executor, stage programs.Cmd) error {
+	out, wait, err := ex.RunPipe(context.Background(), nil, stage)
+	if err != nil {
+		return err
+	}
+	_, cerr := io.Copy(io.Discard, out)
+	out.Close()
+	if werr := wait(); werr != nil {
+		return werr
+	}
+	return cerr
 }
 
 // errNonEmptyDest refuses a whole-DLE restore into a destination that already

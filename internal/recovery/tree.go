@@ -18,6 +18,20 @@
 // at a later incremental still appears in the browse view; a whole-DLE chain
 // restore (engine.Restore) applies deletions, but selected-file recovery extracts
 // each chosen file from the archive that last held it and does not delete.
+//
+// One archiver capability refines the tree beyond that union (see
+// archiver.Assembler):
+//   - An archiver with an ASSEMBLER stores some chain members as per-file deltas
+//     (postgres: INCREMENTAL.<name> block maps). The tree then keys nodes on the
+//     LOGICAL path (delta and whole versions of one file are one node), keeps the
+//     node's chain versions for the read side to assemble, and takes the newest
+//     chain level as the census — such archivers enumerate every live file per
+//     level, so deletions fall out and the union caveat does not apply.
+//
+// The archiver's named-content view (tables, databases) is deliberately NOT part
+// of this tree: it is the archive's Unit inventory (record.Unit), rendered by
+// `recover --inventory` and the shell's `inventory` verb. The tree stays stream
+// truth; the inventory is content truth.
 package recovery
 
 import (
@@ -25,6 +39,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
@@ -35,6 +50,15 @@ type Source struct {
 	Member string // the producing archiver's verbatim member token, replayed to it on extract (e.g. "./etc/hosts")
 }
 
+// Version is one chain level's stored form of a node, oldest→newest: where the
+// bytes live and whether they are a delta the archiver's Assembler must apply
+// over the earlier versions (a node whose newest version is a delta cannot be
+// extracted alone).
+type Version struct {
+	Src   *Source
+	Delta bool
+}
+
 // Node is a file or directory in the reconstructed virtual filesystem. A node has
 // a Source when an archive in the chain holds it as a member; purely structural
 // parent directories (implied by a deeper member) have none.
@@ -43,6 +67,7 @@ type Node struct {
 	path     string // clean path from the DLE root, e.g. "etc/hosts"
 	dir      bool
 	src      *Source
+	versions []Version // the chain versions behind this node (newest last); a whole version resets the list
 	children map[string]*Node
 }
 
@@ -54,6 +79,16 @@ func (n *Node) Path() string { return n.path }
 
 // IsDir reports whether the node is a directory.
 func (n *Node) IsDir() bool { return n.dir }
+
+// NeedsAssembly reports whether the node's newest chain version is a delta —
+// reading it requires assembling the versions, not extracting one member.
+func (n *Node) NeedsAssembly() bool {
+	return len(n.versions) > 0 && n.versions[len(n.versions)-1].Delta
+}
+
+// Versions returns the node's chain versions, oldest first. For a plain
+// (non-assembler) tree this is just the newest member.
+func (n *Node) Versions() []Version { return n.versions }
 
 // Children returns the node's entries sorted directories-first, then by name.
 func (n *Node) Children() []*Node {
@@ -85,26 +120,31 @@ type Tree struct {
 // note on it.
 func (t *Tree) HasIncrementals() bool { return t.chainLen > 1 }
 
+// AssemblerFor resolves the browse-time chain assembler for an archiver type —
+// nil for archivers whose newest member version IS the file (the default). The
+// restorer supplies it from its archiver resolution; tests pass nil.
+type AssemblerFor func(archiverType string) archiver.Assembler
+
 // BuildTree reconstructs the filesystem of dle as of asOf (YYYY-MM-DD) by merging
 // the member lists of the restore chain in run order, so each path resolves to the
 // most recent archive that holds it. The member lists are loaded via members (the
 // catalog cache holds the run index, not the member lists — those are loaded lazily).
-func BuildTree(archives []record.Archive, dle, asOf string, members func(runID string, level int) ([]record.Member, error)) (*Tree, error) {
+func BuildTree(archives []record.Archive, dle, asOf string, members func(runID string, level int) ([]record.Member, error), assemblerFor AssemblerFor) (*Tree, error) {
 	target, err := AsOf(archives, asOf)
 	if err != nil {
 		return nil, err
 	}
-	return buildTree(archives, dle, target, asOf, members)
+	return buildTree(archives, dle, target, asOf, members, assemblerFor)
 }
 
 // BuildTreeForRun is BuildTree pinned to an exact target run instead of an as-of
 // date: the chain's tip is the DLE's most recent dump at or before that run, so a
 // run that did not dump the DLE still resolves to its state as of that run.
-func BuildTreeForRun(archives []record.Archive, dle, runID string, members func(runID string, level int) ([]record.Member, error)) (*Tree, error) {
-	return buildTree(archives, dle, runID, record.RunDate(runID), members)
+func BuildTreeForRun(archives []record.Archive, dle, runID string, members func(runID string, level int) ([]record.Member, error), assemblerFor AssemblerFor) (*Tree, error) {
+	return buildTree(archives, dle, runID, record.RunDate(runID), members, assemblerFor)
 }
 
-func buildTree(archives []record.Archive, dle, target, asOf string, members func(runID string, level int) ([]record.Member, error)) (*Tree, error) {
+func buildTree(archives []record.Archive, dle, target, asOf string, members func(runID string, level int) ([]record.Member, error), assemblerFor AssemblerFor) (*Tree, error) {
 	steps, err := Chain(archives, dle, target)
 	if err != nil {
 		return nil, err
@@ -116,22 +156,48 @@ func buildTree(archives []record.Archive, dle, target, asOf string, members func
 		chainLen:  len(steps),
 		root:      &Node{dir: true, children: map[string]*Node{}},
 	}
-	for _, st := range steps {
+	// One chain is one DLE's, so every step records the same archiver type;
+	// the first step answers for all (as the restorer's destIsDir does).
+	var asm archiver.Assembler
+	if assemblerFor != nil && len(steps) > 0 {
+		asm = assemblerFor(steps[0].Archiver)
+	}
+	// With an assembler, the newest chain level's member list is the census:
+	// such archivers enumerate every live file per level (whole or delta), so
+	// a path absent from the newest level was deleted — prune it, where the
+	// default tree keeps the union.
+	var newest map[string]bool
+	for si, st := range steps {
 		ms, err := members(st.RunID, st.Level)
 		if err != nil {
 			return nil, err
 		}
-		for _, m := range ms {
-			t.insert(m.Path, &Source{Step: st, Member: m.Path})
+		if asm != nil && si == len(steps)-1 {
+			newest = make(map[string]bool, len(ms))
 		}
+		for _, m := range ms {
+			logical, delta := m.Path, false
+			if asm != nil {
+				logical, delta = asm.Logical(m.Path)
+			}
+			t.insert(logical, &Source{Step: st, Member: m.Path}, delta)
+			if newest != nil {
+				p, _ := cleanMember(logical)
+				newest[p] = true
+			}
+		}
+	}
+	if newest != nil {
+		prune(t.root, newest)
 	}
 	return t, nil
 }
 
-// insert adds a tar member to the tree, creating parent directories as needed.
-// A later call (a more recent archive) overwrites the leaf's Source, so the tree
-// reflects most-recent-wins.
-func (t *Tree) insert(member string, src *Source) {
+// insert adds a member to the tree at its (logical) path, creating parent
+// directories as needed. A later call (a more recent archive) overwrites the
+// leaf's Source, so the tree reflects most-recent-wins; the version list keeps
+// the older forms a delta needs — a whole version resets it, a delta appends.
+func (t *Tree) insert(member string, src *Source, delta bool) {
 	path, isDir := cleanMember(member)
 	if path == "" {
 		return // the archive root ("./")
@@ -153,8 +219,26 @@ func (t *Tree) insert(member string, src *Source) {
 		if i == len(parts)-1 {
 			child.dir = isDir
 			child.src = src
+			if delta {
+				child.versions = append(child.versions, Version{Src: src, Delta: true})
+			} else {
+				child.versions = []Version{{Src: src}}
+			}
 		}
 		n = child
+	}
+}
+
+// prune drops every node absent from the newest chain level's census: a file
+// (or explicitly-recorded directory) not in the set is deleted content, and a
+// structural directory emptied by the pruning goes with it. Parents implied by
+// surviving children always stay.
+func prune(n *Node, newest map[string]bool) {
+	for name, c := range n.children {
+		prune(c, newest)
+		if len(c.children) == 0 && !newest[c.path] {
+			delete(n.children, name)
+		}
 	}
 }
 
@@ -191,30 +275,43 @@ type ExtractStep struct {
 	Members []string // raw tar member names
 }
 
+// Assembly is one selected file whose newest chain version is a delta: no
+// single archive holds its content, so the restorer fetches every version
+// (oldest→newest) and runs the archiver's Assembler — landing the result at
+// the logical Path.
+type Assembly struct {
+	Path     string // clean tree path the assembled file lands at
+	Versions []Version
+}
+
 // Collect resolves a set of selected paths (files or directories) into the
-// per-archive extractions that reproduce them as of the target date. Selecting a
-// directory takes every descendant; each path also pulls its ancestor directory
-// members so directory metadata is restored. The steps and their members are
-// returned in a deterministic order.
-func (t *Tree) Collect(paths []string) ([]ExtractStep, error) {
+// per-archive extractions — plus the ASSEMBLIES for files whose newest version
+// is a delta — that reproduce them as of the target date. Selecting a directory
+// takes every descendant; an alias symlink resolves to its target; each path
+// also pulls its ancestor directory members so directory metadata is restored.
+// Steps, their members, and assemblies come back in a deterministic order.
+func (t *Tree) Collect(paths []string) ([]ExtractStep, []Assembly, error) {
 	chosen := map[string]*Source{}
+	toAssemble := map[string]*Node{}
 	for _, p := range paths {
 		n, ok := t.Lookup(p)
 		if !ok {
-			return nil, fmt.Errorf("not found: %s", p)
+			return nil, nil, fmt.Errorf("not found: %s", p)
 		}
-		gather(n, chosen)
+		t.gather(n, chosen, toAssemble)
 	}
 	// Pull ancestor directory members so parent-dir ownership/permissions land.
-	for cp := range chosen {
-		for _, anc := range ancestors(cp) {
-			if n, ok := t.Lookup(anc); ok && n.src != nil {
-				chosen[anc] = n.src
+	for _, m := range []map[string]bool{keysOf(chosen), keysOf(toAssemble)} {
+		for cp := range m {
+			for _, anc := range ancestors(cp) {
+				if n, ok := t.Lookup(anc); ok && n.src != nil && !n.NeedsAssembly() {
+					chosen[anc] = n.src
+				}
 			}
 		}
 	}
-	if len(chosen) == 0 {
-		return nil, fmt.Errorf("nothing to extract")
+	if len(chosen) == 0 && len(toAssemble) == 0 {
+		return nil, nil, fmt.Errorf("nothing to extract")
 	}
 
 	type key struct {
@@ -245,17 +342,43 @@ func (t *Tree) Collect(paths []string) ([]ExtractStep, error) {
 	for _, k := range order {
 		out = append(out, *steps[k])
 	}
-	return out, nil
+	var asms []Assembly
+	for _, p := range sortedNodeKeys(toAssemble) {
+		asms = append(asms, Assembly{Path: p, Versions: toAssemble[p].versions})
+	}
+	return out, asms, nil
 }
 
-// gather walks a node's subtree, recording every node that has a Source.
-func gather(n *Node, into map[string]*Source) {
+// gather walks a node's subtree, recording every node that has a Source —
+// splitting off the delta-tipped ones (they need assembly, not extraction).
+func (t *Tree) gather(n *Node, into map[string]*Source, toAssemble map[string]*Node) {
 	if n.src != nil {
-		into[n.path] = n.src
+		if n.NeedsAssembly() {
+			toAssemble[n.path] = n
+		} else {
+			into[n.path] = n.src
+		}
 	}
 	for _, c := range n.children {
-		gather(c, into)
+		t.gather(c, into, toAssemble)
 	}
+}
+
+func keysOf[V any](m map[string]V) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for k := range m {
+		out[k] = true
+	}
+	return out
+}
+
+func sortedNodeKeys(m map[string]*Node) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ancestors returns the clean paths of a path's parent directories, nearest last.

@@ -66,8 +66,8 @@ func newMountCmd(a *app) *cobra.Command {
 			}, mount.Backend{
 				Runs: eng.Catalog().Runs,
 				Tree: eng.OpenRecoverRun,
-				Extract: func(steps []recovery.ExtractStep, destDir string) error {
-					_, _, err := eng.ExtractSelection(steps, destDir, logf, nil)
+				Extract: func(steps []recovery.ExtractStep, asms []recovery.Assembly, destDir string) error {
+					_, _, err := eng.ExtractSelection(steps, asms, destDir, logf, nil)
 					return err
 				},
 			})

@@ -42,9 +42,9 @@ func backend() Backend {
 	return Backend{
 		Runs: func() []*catalog.Run { return runs },
 		Tree: func(dle, runID string) (*recovery.Tree, error) {
-			return recovery.BuildTreeForRun(archives, dle, runID, membersOf(dle))
+			return recovery.BuildTreeForRun(archives, dle, runID, membersOf(dle), nil)
 		},
-		Extract: func(steps []recovery.ExtractStep, destDir string) error {
+		Extract: func(steps []recovery.ExtractStep, _ []recovery.Assembly, destDir string) error {
 			for _, st := range steps {
 				for _, m := range st.Members {
 					p := strings.Trim(strings.TrimPrefix(m, "./"), "/")

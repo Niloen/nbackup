@@ -11,6 +11,7 @@ import (
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
+	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
 // newRecoverCmd implements `nb recover`: browse a DLE's files as of a date and
@@ -53,6 +54,12 @@ func newRecoverCmd(a *app) *cobra.Command {
 			}
 			defer unlock()
 			attachOperator(eng)
+			if ra.inventory {
+				if ra.all || ra.list || len(ra.paths) > 0 {
+					return fmt.Errorf("--inventory is its own mode and cannot be combined with --all/--list/--path")
+				}
+				return runRecoverInventory(eng, ra)
+			}
 			if ra.all {
 				if ra.list || len(ra.paths) > 0 {
 					return fmt.Errorf("--all restores the whole DLE and cannot be combined with --path/--list")
@@ -71,6 +78,7 @@ func newRecoverCmd(a *app) *cobra.Command {
 	cmd.Flags().StringArrayVar(&ra.paths, "path", nil, "file/dir to recover (repeatable); non-interactive")
 	cmd.Flags().StringVar(&ra.dest, "dest", "", "destination directory for recovered files")
 	cmd.Flags().BoolVar(&ra.list, "list", false, "print a listing of --path (or the root) and exit")
+	cmd.Flags().BoolVar(&ra.inventory, "inventory", false, "print the DLE's content inventory as of the date — the named units the archiver reported at dump time (postgres: tables with sizes) — and exit")
 	cmd.Flags().BoolVar(&ra.all, "all", false, "restore the whole DLE (deletion-accurate) as of the date into --dest")
 	cmd.Flags().BoolVar(&ra.force, "force", false, "with --all, restore into a non-empty --dest (its contents are pruned to match the backup)")
 	cmd.Flags().BoolVar(&ra.yes, "yes", false, "skip the egress-cost confirmation when reading from a cloud/cold medium")
@@ -82,10 +90,60 @@ func newRecoverCmd(a *app) *cobra.Command {
 // recoverArgs carries `nb recover`'s flag set, bound once in newRecoverCmd and
 // passed whole to the mode handlers instead of a positional parade of ten params.
 type recoverArgs struct {
-	dle, date, time       string // selection: which DLE, as of when
-	dest, to, from        string // where to restore, and from which medium's copy
-	paths                 []string
-	list, all, force, yes bool
+	dle, date, time                  string // selection: which DLE, as of when
+	dest, to, from                   string // where to restore, and from which medium's copy
+	paths                            []string
+	list, inventory, all, force, yes bool
+}
+
+// runRecoverInventory prints a DLE's content inventory as of the date: the
+// named units the archiver reported at dump time, sized — the "what tables are
+// in this backup" report. The vocabulary in the unit paths is the archiver's
+// own ("tables/…" for postgres); this mode only renders it.
+func runRecoverInventory(eng *engine.Engine, ra recoverArgs) error {
+	if ra.dle == "" {
+		return fmt.Errorf("--inventory needs --dle (it is one backup's content report); known: %s", strings.Join(eng.DLEDisplay(), ", "))
+	}
+	slug, ok := eng.ResolveDLE(ra.dle)
+	if !ok {
+		return fmt.Errorf("unknown DLE %q; known: %s", ra.dle, strings.Join(eng.DLEDisplay(), ", "))
+	}
+	asOf, err := recoverAsOf(ra.date, ra.time)
+	if err != nil {
+		return err
+	}
+	units, run, err := eng.Inventory(slug, asOf)
+	if err != nil {
+		return err
+	}
+	if len(units) == 0 {
+		fmt.Printf("no inventory recorded for %s as of %s (run %s) — its archiver reports none\n", eng.DisplayDLE(slug), asOf, run)
+		return nil
+	}
+	printUnits(units)
+	fmt.Printf("%d units · run %s\n", len(units), run)
+	return nil
+}
+
+// printUnits renders a unit list as aligned rows: path, size, file count.
+func printUnits(units []record.Unit) {
+	width := 0
+	for _, u := range units {
+		if len(u.Path) > width {
+			width = len(u.Path)
+		}
+	}
+	for _, u := range units {
+		size := "-"
+		if u.Size > 0 {
+			size = sizeutil.FormatBytes(u.Size)
+		}
+		files := ""
+		if n := len(u.Members); n > 0 {
+			files = fmt.Sprintf("  (%d file(s))", n)
+		}
+		fmt.Printf("  %-*s  %10s%s\n", width, u.Path, size, files)
+	}
 }
 
 // runRecoverRestore performs a whole-DLE, deletion-accurate restore as of a date —
@@ -220,7 +278,7 @@ func runRecoverBatch(eng *engine.Engine, ra recoverArgs, logf engine.Logf) error
 	if ra.dest == "" {
 		return fmt.Errorf("--dest is required to recover files")
 	}
-	steps, err := tree.Collect(ra.paths)
+	steps, asms, err := tree.Collect(ra.paths)
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "not found: ") {
 			return fmt.Errorf("%w%s", err, pathRootHint(strings.TrimPrefix(err.Error(), "not found: ")))
@@ -235,7 +293,7 @@ func runRecoverBatch(eng *engine.Engine, ra recoverArgs, logf engine.Logf) error
 	if tree.HasIncrementals() {
 		fmt.Println(fileLevelDeletionNote)
 	}
-	n, archives, err := eng.ExtractSelection(steps, ra.dest, logf, newExtractProgress(est.Bytes))
+	n, archives, err := eng.ExtractSelection(steps, asms, ra.dest, logf, newExtractProgress(est.Bytes))
 	if err != nil {
 		return err
 	}

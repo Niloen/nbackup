@@ -60,12 +60,12 @@ func TestRecoverSelectedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenRecover: %v", err)
 	}
-	steps, err := tree.Collect([]string{"/etc/hosts", "/etc/passwd", "/etc/new.conf"})
+	steps, _, err := tree.Collect([]string{"/etc/hosts", "/etc/passwd", "/etc/new.conf"})
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
 	dest := t.TempDir()
-	if _, _, err := eng.ExtractSelection(steps, dest, logfDiscard, nil); err != nil {
+	if _, _, err := eng.ExtractSelection(steps, nil, dest, logfDiscard, nil); err != nil {
 		t.Fatalf("ExtractSelection: %v", err)
 	}
 	assertContent(t, filepath.Join(dest, "etc", "hosts"), "hosts-v2")
@@ -84,12 +84,12 @@ func TestRecoverSelectedFiles(t *testing.T) {
 	if _, ok := tree1.Lookup("etc/new.conf"); ok {
 		t.Error("new.conf should not exist as of day 1")
 	}
-	steps1, err := tree1.Collect([]string{"/etc/hosts"})
+	steps1, _, err := tree1.Collect([]string{"/etc/hosts"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	dest1 := t.TempDir()
-	if _, _, err := eng.ExtractSelection(steps1, dest1, logfDiscard, nil); err != nil {
+	if _, _, err := eng.ExtractSelection(steps1, nil, dest1, logfDiscard, nil); err != nil {
 		t.Fatalf("ExtractSelection day1: %v", err)
 	}
 	assertContent(t, filepath.Join(dest1, "etc", "hosts"), "hosts-v1")
@@ -132,12 +132,12 @@ func TestRecoverWholeDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	steps, err := tree.Collect([]string{"/etc"})
+	steps, _, err := tree.Collect([]string{"/etc"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	dest := t.TempDir()
-	if _, _, err := eng.ExtractSelection(steps, dest, logfDiscard, nil); err != nil {
+	if _, _, err := eng.ExtractSelection(steps, nil, dest, logfDiscard, nil); err != nil {
 		t.Fatal(err)
 	}
 	assertContent(t, filepath.Join(dest, "etc", "hosts"), "h2")  // from incremental

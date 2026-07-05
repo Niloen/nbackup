@@ -51,6 +51,11 @@ type BackupResult struct {
 	Uncompressed int64           // raw stream size
 	FileCount    int             // number of file members
 	Members      []record.Member // members in stream order, each with its byte offset in the raw stream (Off -1 when the archiver cannot report offsets)
+	// Units is the archive's content inventory in this archiver's own vocabulary
+	// (postgres: tables with sizes; see record.Unit), sorted by Path. Nil when the
+	// archiver reports none (gnutar, pipe) — inventory is a declared extra, like
+	// member offsets.
+	Units []record.Unit
 	// Unreadable lists source paths the archiver could not read (e.g. a permission-denied
 	// file): the archive committed without them — a *partial* dump. Empty means complete.
 	// A partial archive is still a valid, restorable stream of what was readable; the caller
@@ -178,4 +183,55 @@ type Archiver interface {
 	// then fall back to the whole-stream decode, which is always correct. The read
 	// side's capability peer of the transforms' Concat and the media's ranged reads.
 	SpliceTrailer() []byte
+	// RestoreIsCombine declares that a whole-DLE chain restore is a GATHER-THEN-COMBINE:
+	// each level's RestoreStage extracts into its own staging directory (inside the
+	// destination, so one filesystem) and CombineStage then merges the staged levels into
+	// the destination in one step (postgres: pg_combinebackup — an N-input merge, so the
+	// levels must exist on disk simultaneously). false = the default additive replay: each
+	// level's RestoreStage applies directly into the destination in level order (gnutar's
+	// listed-incremental overlay, pipe's consumer). A capability with a graceful default,
+	// like SpliceTrailer.
+	RestoreIsCombine() bool
+	// CombineStage returns the program stage that merges the staged level directories
+	// (in chain order, base first) into dest — the finalize step of a combine-shaped
+	// restore. It runs on the destination's executor after every level has been staged,
+	// and owns removing the staging (which lives under dest). Only called when
+	// RestoreIsCombine; a zero Cmd otherwise.
+	CombineStage(dest string, stagingDirs []string) programs.Cmd
+	// Assembler declares how one logical file's chain versions merge when the browse
+	// tree (recover's selection, `nb mount`) reads a file from an incremental chain
+	// WITHOUT running the full restore. nil = the default: the newest version of a path
+	// is the file (gnutar overlays whole files; pipe has no members). An archiver whose
+	// incrementals store per-file DELTAS (postgres: INCREMENTAL.<name> block maps)
+	// returns one, so a chain browse assembles correct content instead of showing a
+	// stale full beside an unreadable delta.
+	Assembler() Assembler
+}
+
+// Assembler merges one logical file's chain versions for browse-time reads — the
+// member-level analog of the chain restore, used where running the archiver's real
+// combine (pg_combinebackup) is impossible because only one file is wanted. An archiver
+// returning an Assembler also promises the ASSEMBLER CENSUS: the newest chain level's
+// member list enumerates every live file (postgres incrementals carry every file as a
+// whole copy or a delta stub), so the browse tree takes the newest level as
+// authoritative for existence and deletions fall out — where the default census is the
+// most-recent-wins union of all levels.
+type Assembler interface {
+	// Logical maps a stream member path to its logical tree identity and whether the
+	// member is a delta needing assembly: postgres "base/16384/INCREMENTAL.2619" →
+	// ("base/16384/2619", true); anything stored whole maps to itself with false.
+	Logical(path string) (logical string, delta bool)
+	// Assemble merges one logical file's chain versions (oldest→newest, one per chain
+	// level that holds the member) into the file's content. Each version carries the
+	// delta flag Logical reported for its member — the tree knows which stored form it
+	// read, so Assemble never guesses from content: a whole version replaces the
+	// accumulated result outright, a delta is applied over it.
+	Assemble(versions []Version) (io.ReadCloser, error)
+}
+
+// Version is one chain level's stored form of a logical file, as handed to
+// Assemble: the member's bytes and whether they are a delta (per Logical).
+type Version struct {
+	R     io.Reader
+	Delta bool
 }

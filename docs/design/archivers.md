@@ -1,7 +1,9 @@
 # Archivers beyond tar — the plugin roadmap and the neutrality it demands
 
 Status: phase 1 implemented (neutrality moves + the `pipe` archiver);
-database archivers designed, not built.
+phase 2 implemented (the `postgres` archiver, `mode: incr` — see "The
+postgres archiver as built", which records where the build deviated from
+the original sketch below and why).
 
 GNU tar is today the only `Archiver`. This doc records which archivers are
 worth adding, what the generic layers must stop assuming so a non-tar archiver
@@ -114,8 +116,9 @@ escape hatches (`Off = -1`, nothing structurally requires slashes).
 
 `nb mount` and the recovery browse tree stay tree-capability consumers:
 present for tar/basebackup, absent (or one opaque file) for logical DB dumps.
-Do not contort them; decide their capability gate when a DB archiver actually
-needs it, not before.
+The capability gate this paragraph deferred is now decided — see neutrality
+moves 7–8 under "The postgres archiver as built": the assembler makes
+incremental chains browse correctly, and the unit inventory makes them legible.
 
 ## Database incrementals — the transaction log, and it is Amanda-faithful
 
@@ -218,6 +221,103 @@ one-liner must not depend on an NBackup-resolved env var. `nb check` proves
 auth by actually connecting (`SELECT 1`) as the configured identity. The pipe
 archiver stays out of all of this: its commands are user-authored.
 
+## The postgres archiver as built (phase 2, `mode: incr`)
+
+The build deviated from the sketch above in three deliberate ways, each a
+user decision recorded here so the sketch's `mode: wal` plan is read as
+history, not intent.
+
+### PG17 incremental base backups, not the WAL spool
+
+`mode: incr` shipped first: level 0 = `pg_basebackup --format=tar -D -`
+(streamed to stdout), level N = the same with `--incremental=<manifest>`,
+restore = `pg_combinebackup`. The `ampgsql`-faithful `mode: wal` remains a
+possible later mode, but it was passed over because its incremental state is
+an external, payload-sized WAL spool that `archive_command` must feed
+continuously — machinery outside the dump window. The PG17 model's state is
+just the **backup manifest**: a small file teed out of the dump's own tar
+stream in flight (`backup_manifest` rides inside it) and promoted
+`.new`-then-rename exactly like a `.snar`. Nothing is staged on backup; the
+manifests are the only files the archiver keeps on the host. `nb check`
+verifies connectivity (`SELECT 1`) and `summarize_wal = on` (printing the
+`ALTER SYSTEM` line), instead of an `archive_command` recipe.
+
+One format fact the integration test pinned down (cross-validating against
+`pg_combinebackup` byte-for-byte): an `INCREMENTAL.<name>` file pads its
+header (magic, block count, truncation length, block-number array) with
+zeros to the next BLCKSZ boundary before the block data — but only when it
+carries blocks; a zero-block stub is the bare 12-byte header.
+
+### Connection details and credentials: libpq's own config, not ours
+
+The `hosts:` connection-override model and credential rungs 2–3 sketched
+above were **not built**. The DLE source string is a libpq connection
+reference (`app_prod`, `service=legacy`, `host=/run/postgresql
+dbname=app`), and authentication is entirely the client's own libpq
+configuration: peer auth as the executor identity, `~/.pgpass`,
+`~/.pg_service.conf`. That is the ssh-agent/gpg-keyring doctrine applied to
+the database — libpq already is the credential resolver, so NBackup adds
+none. The archiver's options are just `mode` and `bin_dir`; there is no
+`password_env`, no `Cmd.Env`, and locality lives in the client's service
+file rather than a `hosts:` block. `nb check` proves the whole chain by
+connecting as the configured identity.
+
+### Two more neutrality moves (7 and 8)
+
+The combine-shaped restore and the delta-shaped members forced two further
+declared capabilities, both following the SpliceTrailer pattern (declared by
+the archiver, graceful generic default):
+
+7. **Gather-then-combine restore** (`RestoreIsCombine` + `CombineStage`).
+   A postgres chain cannot be replayed additively: `pg_combinebackup` is an
+   N-input merge needing every level on disk simultaneously. The restorer
+   stages each level's `RestoreStage` into `dest/.nb-combine/L<n>` — inside
+   the destination, so one filesystem (the combine's `--copy-file-range`
+   can reflink) and covered by the existing empty-dest guard and rollback —
+   then runs `CombineStage` once. Default (gnutar, pipe): the additive
+   replay, unchanged.
+8. **Archiver-owned member assembly** (`Assembler`: `Logical` + `Assemble`),
+   plus the **unit inventory** (`record.Unit`). The browse tree
+   (`recovery.Tree`, and with it `nb recover`'s selection and `nb mount`)
+   was a most-recent-wins union — wrong for a chain whose newest version of
+   a changed relation file is an `INCREMENTAL.<name>` block delta (a mounted
+   chain would show a stale full beside a garbage delta). With an assembler
+   the tree keys nodes on the LOGICAL path (`Logical` folds the delta name),
+   keeps each node's chain versions, takes the newest level as the census
+   (such archivers enumerate every live file per level, so deletions fall
+   out — the union caveat does not apply), and browse-time reads fetch each
+   version and run `Assemble` (~100 lines of block splicing, cross-validated
+   byte-for-byte against `pg_combinebackup`). Whole-DLE restore still runs
+   `pg_combinebackup` itself — the database's own tool stays authoritative;
+   the assembler is the mount/browse/selection read path.
+
+   The *legibility* half went through a deliberate revision. The first build
+   recorded a per-member alias path and grafted `tables/…` symlinks into the
+   tree/mount — rejected after review: a downloaded heap file is an
+   attractive nuisance (raw 8k pages, no catalogs, no rows — a dead end at
+   the worst moment), and file→thing is the wrong cardinality anyway (one
+   thing spans many files; one file can serve many things; a thing needn't
+   be file-shaped at all — a logical dump's TOC entry, a pipe stream).
+   Replaced by the archive-level **unit inventory**: `record.Unit{Path,
+   Size, Members}` in the per-archive index — Path a stable name-based
+   identity in the archiver's vocabulary ("tables/postgres/public.users"),
+   Size the unit's TOTAL size as of the dump (postgres: `pg_table_size`,
+   never delta-bytes extent math), Members the raw members in that archive
+   carrying it (heap + forks + segments + TOAST + toast index), normalized
+   to logical browse paths when served. Rendered by `nb recover
+   --inventory` (a sibling MODE of `--list`/`--all`, chain-tip units) and
+   the shell's `inventory` verb; the shell's `add` falls back to unit
+   matching (exact, then unique substring) so `add public.users` selects
+   the table's files — assembly included. The CLI grows no per-archiver
+   nouns: the vocabulary lives in the recorded unit paths. The mount stays
+   a faithful physical view. This resolves the "mount/browse stay
+   tree-capability consumers" question above: the capability gate is the
+   assembler + the inventory, and incremental chains browse correctly.
+
+Semantics note, documented loudly: `pg_basebackup` is **cluster**-level.
+The source's database only names the connection — configure one DLE per
+cluster. (Per-database logical backup is the future `mode: dump`.)
+
 ## The pipe archiver (phase 1)
 
 ```yaml
@@ -245,12 +345,14 @@ archivers:
 
 ## Phasing
 
-1. **Phase 1 (this change):** the five neutrality moves + the `pipe`
-   archiver. Each capability was added because pipe forced it, none
-   speculatively.
-2. **Phase 2:** postgres (`mode: wal` first), the `hosts:` connection
-   overrides, the credentials ladder, per-DLE `CheckSource` connectivity
-   probes.
-3. **Phase 3:** mysql (`mode: dump`, then `mariabackup`), zfs send/recv.
-4. **Not planned:** dump(8); a "service" config concept; mount/browse for
-   non-tree archivers.
+1. **Phase 1 (done):** the five neutrality moves + the `pipe` archiver.
+   Each capability was added because pipe forced it, none speculatively.
+2. **Phase 2 (done):** postgres — built as `mode: incr` with libpq
+   client-side credentials, per-DLE `CheckSource` connectivity probes, and
+   neutrality moves 7–8 (see "The postgres archiver as built"); the
+   `hosts:` connection overrides and the env-var credential rung were
+   dropped, `mode: wal` deferred.
+3. **Phase 3:** mysql (`mode: dump`, then `mariabackup`), zfs send/recv;
+   postgres `mode: dump` (logical, members = pg_restore TOC entries) and/or
+   `mode: wal` if wanted.
+4. **Not planned:** dump(8); a "service" config concept.
