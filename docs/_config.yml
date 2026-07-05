@@ -5,10 +5,12 @@ description: >-
   and restore with stock tools.
 remote_theme: just-the-docs/just-the-docs
 
-# When published as a GitHub project page at https://<owner>.github.io/nbackup/,
-# set url/baseurl to match. For a user/org page or custom domain, blank them out.
-url: https://niloen.github.io
-baseurl: /nbackup
+# Served at the custom domain (Pages custom domain + backup.niloen.com CNAME),
+# so the site lives at the root: url is the domain and baseurl stays blank.
+# (As a plain project page it would be url: https://niloen.github.io with
+# baseurl: /nbackup.)
+url: https://backup.niloen.com
+baseurl: ""
 
 # Just-the-Docs options
 color_scheme: dark
