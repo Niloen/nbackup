@@ -106,6 +106,7 @@ func NewRootCmd() *cobra.Command {
 		newSyncCmd(a),
 		newLabelCmd(a),
 		newLoadCmd(a),
+		newLoginCmd(a),
 		newPruneCmd(a),
 		newFlushCmd(a),
 		newResetCmd(a),

@@ -36,10 +36,11 @@ media:
 landing: disk
 ```
 
-There are three types — **disk**, **tape**, and **cloud** — but they all produce
-the same self-describing artifact: an archive restores with stock tools whether
-it landed on a filesystem, a tape, or an object store. Adding a new medium type
-is a code-level registration; it needs no change to the config structure.
+There are four types — **disk**, **tape**, **cloud**, and **gdrive** (Google
+Drive) — but they all produce the same self-describing artifact: an archive
+restores with stock tools whether it landed on a filesystem, a tape, an object
+store, or a Drive folder. Adding a new medium type is a code-level registration;
+it needs no change to the config structure.
 
 Any medium can also be a **replication target**: dump to one, then mirror sealed
 runs onto another with [Replication](replication). Capacity and retention are set
@@ -112,8 +113,67 @@ SDK's standard environment:
 - GCS: `GOOGLE_APPLICATION_CREDENTIALS`
 - Azure: the `AZURE_*` variables
 
-File-API stores like Google Drive are out of scope — this is an object-store
-abstraction, not a generic filesystem driver.
+This `cloud` type is an **object-store** abstraction (S3/GCS/Azure). Google
+Drive is a file API, not an object store, so it is its own medium type —
+**gdrive**, below.
+
+## Google Drive
+
+```yaml
+media:
+  gdrive:
+    type: gdrive
+    folder: 0A--REPLACE-WITH-FOLDER-OR-SHARED-DRIVE-ID   # where backups are stored
+    # prefix: nbackup/   # optional: a subfolder path under `folder`
+    capacity: 2TB
+```
+
+A **gdrive** medium stores runs in a Google Drive folder. Like disk and cloud it
+is **address-identified** (no labels, no swap prompts, nothing to inventory), and
+its on-Drive layout is **disk's, verbatim** — `runs/<run>/` folders holding clean
+payload files plus `.hdr` sidecars — so a run streams disk↔cloud↔gdrive unchanged
+and a plain download yields a stock-tool-restorable archive. A large archive is
+split into `≤ part_size` ordered part-files (default 10 GiB) for resumability.
+Selective restore uses Drive's ranged download, so it pays for the covering
+frames' bytes, not the whole archive.
+
+`folder` is a Drive **folder ID** (the last path segment of the folder's URL) or a
+**Shared Drive ID**. NBackup only ever touches files it created (the `drive.file`
+OAuth scope).
+
+### Two ways to authenticate
+
+Credentials come from `GOOGLE_APPLICATION_CREDENTIALS` — **never the config file** —
+and the file is one of two kinds, auto-detected:
+
+| Credential | Best for | Setup |
+|---|---|---|
+| **Service-account key** | Unattended, **Workspace + a Shared Drive** | Share a Shared Drive with the service account; point `GOOGLE_APPLICATION_CREDENTIALS` at its JSON key. No login step. |
+| **OAuth user token** | A **personal `@gmail`** Drive (or a Workspace user's own Drive) | Run `nb login gdrive` once (below); it writes the token file. |
+
+A bare service account has **no usable My-Drive storage quota**, so on a personal
+account (which has no Shared Drives) the OAuth token is the only workable path; on
+Workspace, a Shared Drive is the clean unattended choice. The full account-type ×
+mechanism matrix is in [Backing up to Google Drive](../scenarios/gdrive).
+
+### `nb login` for the OAuth path
+
+`nb login gdrive` runs a **headless** consent flow — no browser is launched and no
+callback port is bound, so it works over SSH on a server. It prints a URL you open
+on any device and reads back the authorization code you paste. It needs a
+**Desktop-app OAuth client** you create once in the Google Cloud Console (NBackup
+ships none, so there is no shared app or quota):
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS=~/.config/nbackup/gdrive-token.json
+nb login gdrive --client ~/Downloads/client_secret.json
+# open the printed URL, authorize, paste the code back
+```
+
+Because the scope is `drive.file` (non-sensitive), you can publish your consent
+screen to **Production** without Google's verification review, so the token does
+not expire. See [Backing up to Google Drive](../scenarios/gdrive) for the
+step-by-step console walkthrough.
 
 ## Tape
 

@@ -140,6 +140,33 @@ from its URL scheme (`s3://` = AWS, `gs://` = GCS, `azblob://` = Azure):
 
 See [Media](../features/media) and [Cost](../features/cost).
 
+### type: gdrive
+
+A Google Drive folder (a file API, not an object store, so it is its own type).
+Address-identified like disk/cloud; the on-Drive layout is disk's verbatim. A
+large archive splits into `≤ part_size` part-files (default 10 GiB).
+
+```yaml
+media:
+  gdrive:
+    type: gdrive
+    folder: 0A--FOLDER-OR-SHARED-DRIVE-ID   # from the folder's URL
+    # prefix: nbackup/       # optional: a subfolder path under `folder`
+    capacity: 2TB
+    # throughput: 20MB/s
+```
+
+**Credentials are never in the config.** They come from
+`GOOGLE_APPLICATION_CREDENTIALS`, auto-detected as either a **service-account key**
+(unattended; a Workspace **Shared Drive**) or an **OAuth authorized-user token**
+minted by `nb login gdrive` (a personal Google Drive). The scope is `drive.file`,
+so NBackup sees only files it created. A bare service account has no usable
+My-Drive quota, so personal accounts must use the OAuth path. An optional `cost:`
+block overrides the storage rate (Drive bills no egress/GET).
+
+See [Backing up to Google Drive](../scenarios/gdrive), [Media](../features/media),
+and `nb login`.
+
 ### type: tape
 
 A tape medium is a **changer**: drives (data-transfer elements) fed from slots

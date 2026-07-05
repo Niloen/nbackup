@@ -389,6 +389,29 @@ type Spec struct {
 	// the capability a holding disk requires (disk, cloud). The false default is a
 	// serial, whole-volume medium (tape) that shares one rolling volume.
 	ConcurrentWrite bool
+
+	// Login, if non-nil, is the medium type's interactive credential bootstrap, run by
+	// `nb login <medium>`. It is headless-friendly (prints instructions and reads a
+	// pasted code from in — no browser assumption) and writes whatever credential
+	// artifact the type authenticates from. Nil (the default) means the type needs no
+	// bootstrap: it reads ambient credentials directly (disk/tape have none; cloud/gdrive
+	// with a service account authenticate straight from the environment). The capability
+	// stays medium-neutral — any remote medium may register one.
+	Login LoginFunc
+}
+
+// LoginFunc runs a medium type's `nb login` bootstrap. opts carries the medium's
+// configured params; args are the CLI tokens after the medium name, which the type
+// parses itself (its own flags — e.g. gdrive's --client/--out — so the neutral `nb login`
+// command never names a type's options). in/out are the command's stdin/stdout for the
+// headless prompt-and-paste exchange.
+type LoginFunc func(ctx context.Context, opts Options, args []string, in io.Reader, out io.Writer) error
+
+// LoginFor returns a medium type's registered Login bootstrap, or ok=false when the
+// type authenticates from ambient credentials with no interactive step.
+func LoginFor(typ string) (LoginFunc, bool) {
+	f := specs[typ].Login
+	return f, f != nil
 }
 
 // specs is the single medium registry: one Spec per type, populated by Register from each

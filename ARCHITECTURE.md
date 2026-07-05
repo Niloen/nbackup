@@ -62,8 +62,8 @@ registry registration, not a conditional in the core.
 | `media` | `Volume` + `Labeled` + `Drive`/`Changer` (slots + drives, `Load`/`Unload`/`Manual`) + `Profile` + registry; reads/writes `record` artifacts | Device API |
 | `librarian` | operates a medium's `Changer` + label protocol (make-writable, advance, load-for-read, label, load); prompts an operator when the changer is `Manual`; its drive-bound `Allocator` implements `archiveio.PartAllocator` (part sizing + the volume roll) | changer / amtape |
 | `depot` | where media are opened — open(2) + the mount table: resolves a configured medium to a typed face (`ReadMedium`/`WriteMedium`/`AdminMedium`, the access rule as a method set), owns the run window's exclusive write claims, the lazily opened landing volume + one-time catalog bootstrap, and the per-medium write knobs (part size, bandwidth cap) | — |
-| `media/disk`, `media/tape`, `media/cloud` | Volume impls (disk sidecar headers; tape library; object store via gocloud.dev/blob) | vfs / tape / s3 devices |
-| `media/fslike` | the run layout shared by the address-identified media — clean payloads + `.hdr` sidecars over a small `Store` seam (disk = a directory, cloud = a bucket), so disk↔cloud copies are byte-identical | — |
+| `media/disk`, `media/tape`, `media/cloud`, `media/gdrive` | Volume impls (disk sidecar headers; tape library; object store via gocloud.dev/blob; Google Drive via google.golang.org/api/drive/v3) | vfs / tape / s3 devices |
+| `media/fslike` | the run layout shared by the address-identified media — clean payloads + `.hdr` sidecars over a small `Store` seam (disk = a directory, cloud = a bucket, gdrive = a Drive folder tree), so disk↔cloud↔gdrive copies are byte-identical | — |
 | `archiver` + `archiver/gnutar`, `archiver/pipe` | `Archiver` interface + registry + named definitions; owns its incremental-state library; GNU tar impl + the command archiver (operator-supplied producer/consumer commands, full-only, opaque stream) — the archiver roadmap and capability model are in docs/design/archivers.md | Application API / amgtar, amraw |
 | `transform/compress` | external compressor child processes (zstd/gzip/none) + registry; `Filter(scheme)` returns the forward/reverse `programs.Cmd` | compress |
 | `transform/crypt` | external encryptor child processes (gpg/none) + registry; `Filter(scheme)` returns the forward/reverse `programs.Cmd` | amcrypt/amgpgcrypt |
@@ -415,7 +415,31 @@ last, a failed upload aborted (not committed), so an interrupted write leaves a
 sidecar-less orphan that scan/rebuild ignores. Credentials come from each SDK's ambient
 environment, never the config.
 
-It does, however, **split a large archive into `≤ part_size` part-objects** (default
+**Google Drive = an `fslike.Store` over the Drive API (`media/gdrive`).** Drive is *not* an
+object store and has *no* `gocloud.dev/blob` driver, so it cannot fold into `type: cloud`; it
+is its own `type: gdrive` over `google.golang.org/api/drive/v3`. But it is the *same shape* as
+disk and cloud — address-identified (a folder+path names a file), no `Labeled`/`Drive`/`Changer`,
+the `media/fslike` run layout verbatim — so it is a third `fslike.Store` beside the disk directory
+and the cloud bucket, and disk↔cloud↔gdrive copies stay byte-identical. What is Drive-specific
+lives behind a narrow `driveAPI` seam (an in-memory fake replaces it in tests, since there is no
+`mem://` for Drive): opaque **file-id** addressing (Drive has no paths and permits same-named
+siblings, so the store maps its `runs/<run>/<file>` keys to ids and caches them, serializing folder
+creation through one mutex so concurrent dumpers never mint a duplicate run folder), a streaming
+upload over an `io.Pipe`, and **ranged reads via the HTTP `Range` header** (so selective restore
+pays for the covering frames, like the cloud object's ranged GET). It splits large archives into
+`≤ part_size` part-files like cloud (default 10 GiB; Drive has no S3 part-count ceiling, so the cap
+is only for resumability) and stays fully concurrent. Two **auth** modes, auto-detected from the
+one ambient credential file (`GOOGLE_APPLICATION_CREDENTIALS`, never the config):
+`google.CredentialsFromJSON` parses *both* a **service-account key** (unattended; a Workspace
+**Shared Drive** — a bare service account has 0 GB usable My-Drive quota) and an **OAuth
+authorized-user token** (a personal Google Drive), the latter minted by the headless `nb login
+<medium>` flow (no browser, no callback port — print the URL, paste the code back). The scope is
+**`drive.file`** (non-sensitive: only app-created files, dodging Google's restricted-scope audit and
+letting an operator publish their own consent screen to Production so the token doesn't expire).
+`nb login` is a medium-neutral capability (`media.Spec.Login`), the source-side peer of `nb label`:
+only a type that needs a bootstrap registers one.
+
+The cloud medium does, however, **split a large archive into `≤ part_size` part-objects** (default
 10 GB), so an 84 GB archive becomes several objects rather than one — keeping each
 object's S3 multipart upload well under the 10000-part ceiling (~48.8 GB at the default
 5 MiB buffer; the buffer is unchanged, so process memory stays flat regardless of

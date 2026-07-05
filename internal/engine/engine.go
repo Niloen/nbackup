@@ -41,6 +41,7 @@ import (
 	_ "github.com/Niloen/nbackup/internal/archiver/pipe"
 	_ "github.com/Niloen/nbackup/internal/media/cloud"
 	_ "github.com/Niloen/nbackup/internal/media/disk"
+	_ "github.com/Niloen/nbackup/internal/media/gdrive"
 	_ "github.com/Niloen/nbackup/internal/media/tape"
 )
 

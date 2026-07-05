@@ -1,8 +1,8 @@
 # Niloen Backup (NBackup) — backups you can read, restore, and prove
 
 NBackup backs up Unix machines to **local disk, cloud object stores (S3, GCS,
-Azure Blob), and tape**, treating all three as equal targets and making the
-common modern shape — land fast on disk, then replicate offsite — a first-class
+Azure Blob), Google Drive, and tape**, treating them as equal targets and making
+the common modern shape — land fast on disk, then replicate offsite — a first-class
 operation. It is built on three promises:
 
 - **Backups you can read.** Each daily **run** is one immutable set of ordinary
@@ -184,6 +184,7 @@ details one item when given an id (`nb run run-2026-06-21.020000`, `nb medium lt
 | `nb sync`            | Mirror one medium's runs onto another (disk → tape/s3)  |
 | `nb label`           | Label a volume (required for tape before its first dump) |
 | `nb load`            | Load a bay/reel into a medium's drive (by id or `--label`) |
+| `nb login <medium>`  | Bootstrap a medium's credentials (e.g. Google Drive OAuth) |
 | `nb prune [medium]`   | Delete runs past each medium's cycle/capacity limits (all media if none named)  |
 | `nb reset <dle>`     | Schedule a DLE for a full on its next run (fresh chain)  |
 | `nb flush`           | Drain a holding disk's un-flushed archives to the landing |
