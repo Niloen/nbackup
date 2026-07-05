@@ -5,6 +5,8 @@ import (
 	"path"
 	"sort"
 	"strings"
+
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // Session is the navigable, selectable state of an interactive recovery browse over
@@ -106,4 +108,23 @@ func (s *Session) Selection() []string {
 // extraction steps, plus the assemblies for delta-tipped files (see Collect).
 func (s *Session) CollectSelection() ([]ExtractStep, []Assembly, error) {
 	return s.tree.Collect(s.Selection())
+}
+
+// MatchUnits resolves a user-pointed name against an inventory's unit
+// identities: an exact match wins alone; otherwise every unit whose identity
+// contains the argument (so "public.users" reaches
+// "table.postgres.public.users"). The caller decides what multiple matches
+// mean — candidates listed as help in a shell, a deterministic error in a
+// script.
+func MatchUnits(units []record.Unit, arg string) []record.Unit {
+	var matches []record.Unit
+	for _, u := range units {
+		if u.Path == arg {
+			return []record.Unit{u}
+		}
+		if strings.Contains(u.Path, arg) {
+			matches = append(matches, u)
+		}
+	}
+	return matches
 }

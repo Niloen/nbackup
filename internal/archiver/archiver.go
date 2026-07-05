@@ -206,6 +206,34 @@ type Archiver interface {
 	// returns one, so a chain browse assembles correct content instead of showing a
 	// stale full beside an unreadable delta.
 	Assembler() Assembler
+	// Exporter declares that this archiver can MATERIALIZE named units (the
+	// inventory's record.Unit identities) into their directly-useful form —
+	// postgres: boot a throwaway cluster on the restored tree and pg_dump the
+	// table to SQL. nil = no export capability; pointing `--path`/`add` at a
+	// unit then errors, and only file selection is available. The read-side
+	// answer to "what does a user DO with a table in a backup": point at a
+	// file, get a file; point at a thing, get the thing in its useful form.
+	Exporter() Exporter
+}
+
+// Exporter materializes units from a restored whole-DLE tree — the generic
+// layer restores the chain into a scratch directory (the same gather-then-
+// combine restore `--all` runs) and then runs Stage there; the archiver owns
+// everything inside it. nb's contract stays non-destructive: the output is a
+// file the operator imports themselves; no export path ever touches a live
+// service.
+type Exporter interface {
+	// Ext is the filename extension an exported unit lands with (postgres:
+	// ".sql"); a unit exports as exactly "<Unit.Path><Ext>" under the
+	// destination, so a selection listing can say verbatim what will appear.
+	Ext() string
+	// Stage returns the program stage that materializes the named units (unit
+	// identities, resolved by the caller against the archive's inventory) from
+	// the restored tree at dataDir into destDir. It runs on the host that holds
+	// dataDir, owns any service it starts there (and must tear it down on every
+	// path), and must not touch anything outside dataDir, destDir, and scratch
+	// of its own making.
+	Stage(dataDir, destDir string, units []string) programs.Cmd
 }
 
 // Assembler merges one logical file's chain versions for browse-time reads — the

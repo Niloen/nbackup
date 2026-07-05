@@ -134,14 +134,17 @@ func TestPostgresArchiverEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("--inventory: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "tables/postgres/public.users") || !strings.Contains(out, "units · run") {
+	if !strings.Contains(out, "table.postgres.public.users") || !strings.Contains(out, "units · run") {
 		t.Fatalf("inventory lacks the users table:\n%s", out)
 	}
 
-	// The interactive shell: inventory-driven selection. `add public.users`
-	// matches the unit by suffix and selects its files — the delta-tipped heap
-	// file rides the assembler, and postgresql.conf in the same extraction
-	// keeps the ancestor-dir step non-empty (the --no-recursion regression).
+	// The interactive shell: point at a file, get the file; point at a thing,
+	// get the thing in its useful form. `add public.users` (unit suffix match)
+	// marks the UNIT; extract restores the DLE to scratch, boots a throwaway
+	// postmaster, and pg_dumps the table — landing table.postgres.public.users.sql
+	// beside the plainly-extracted postgresql.conf. `add base/5` keeps a real
+	// file selection in the same pass (chain assembly + the --no-recursion
+	// regression both still exercised).
 	selDest := filepath.Join(base, "sel")
 	script := strings.Join([]string{
 		"inventory users",
@@ -161,24 +164,39 @@ func TestPostgresArchiverEndToEnd(t *testing.T) {
 	if !strings.Contains(out, "named units — 'inventory' lists them") {
 		t.Fatalf("shell lacks the inventory hint:\n%s", out)
 	}
-	if !strings.Contains(out, "matched unit tables/postgres/public.users") {
-		t.Fatalf("unit add did not match:\n%s", out)
+	if !strings.Contains(out, "added unit table.postgres.public.users (extracts as table.postgres.public.users.sql)") {
+		t.Fatalf("unit add did not mark the unit:\n%s", out)
 	}
 	if _, err := os.Stat(filepath.Join(selDest, "postgresql.conf")); err != nil {
 		t.Fatalf("postgresql.conf not recovered: %v", err)
 	}
-	var relFile string
-	_ = filepath.WalkDir(filepath.Join(selDest, "base"), func(p string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && relFile == "" {
-			relFile = p
-		}
-		return nil
-	})
-	if relFile == "" {
-		t.Fatalf("no relation file recovered under %s/base", selDest)
+	sqlFile := filepath.Join(selDest, "table.postgres.public.users.sql")
+	if fi, err := os.Stat(sqlFile); err != nil || fi.Size() == 0 {
+		t.Fatalf("exported SQL missing/empty: %v\n%s", err, out)
 	}
-	if fi, _ := os.Stat(relFile); fi.Size() == 0 || fi.Size()%8192 != 0 {
-		t.Fatalf("assembled relation file has a non-block size %d", fi.Size())
+	// The proof of usefulness: the export loads into a FRESH database and
+	// yields every row — the artifact the panicking operator actually needs.
+	psql("CREATE DATABASE verifydb")
+	if out, err := exec.Command(filepath.Join(bin, "psql"), "-X", "-w", "-v", "ON_ERROR_STOP=1",
+		"-d", strings.Replace(conninfo, "dbname=postgres", "dbname=verifydb", 1), "-f", sqlFile).CombinedOutput(); err != nil {
+		t.Fatalf("loading export: %v\n%s", err, out)
+	}
+	rows, err := exec.Command(filepath.Join(bin, "psql"), "-X", "-Atw",
+		"-d", strings.Replace(conninfo, "dbname=postgres", "dbname=verifydb", 1), "-c", "SELECT count(*) FROM users").Output()
+	if err != nil || strings.TrimSpace(string(rows)) != "2000" {
+		t.Fatalf("exported table rows = %q, %v (want 2000)", rows, err)
+	}
+
+	// Batch mode: the SAME pointing rule — --path with a unit name exports.
+	exDest := filepath.Join(base, "export2")
+	if out, err = runCmd(t, "-c", cfgPath, "recover", "--dle", dleID, "--path", "public.users", "--dest", exDest, "--yes"); err != nil {
+		t.Fatalf("batch unit export: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "matched unit table.postgres.public.users") || !strings.Contains(out, "wrote ") {
+		t.Fatalf("batch export output:\n%s", out)
+	}
+	if fi, err := os.Stat(filepath.Join(exDest, "table.postgres.public.users.sql")); err != nil || fi.Size() == 0 {
+		t.Fatalf("batch export missing: %v", err)
 	}
 
 	// Whole-DLE restore: gather-then-combine into --dest, then the restored

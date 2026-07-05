@@ -54,6 +54,7 @@ func (f *fakeArchiver) StockExtract() string                           { return 
 func (f *fakeArchiver) RestoreIsCombine() bool                         { return false }
 func (f *fakeArchiver) CombineStage(string, []string) programs.Cmd     { return programs.Cmd{} }
 func (f *fakeArchiver) Assembler() archiver.Assembler                  { return nil }
+func (f *fakeArchiver) Exporter() archiver.Exporter                    { return nil }
 
 func (f *fakeArchiver) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource, error) {
 	if f.backupErr != nil {

@@ -168,3 +168,23 @@ func TestCollectDirectoryWithAssemblies(t *testing.T) {
 		t.Fatal("whole new file missing from steps")
 	}
 }
+
+func TestMatchUnits(t *testing.T) {
+	units := []record.Unit{
+		{Path: "table.postgres.public.users"},
+		{Path: "table.postgres.public.users_archive"},
+		{Path: "table.postgres.audit.log"},
+	}
+	if m := MatchUnits(units, "table.postgres.public.users"); len(m) != 1 || m[0].Path != "table.postgres.public.users" {
+		t.Fatalf("exact match = %v (an exact hit must win alone, even with substring siblings)", m)
+	}
+	if m := MatchUnits(units, "audit.log"); len(m) != 1 {
+		t.Fatalf("suffix match = %v", m)
+	}
+	if m := MatchUnits(units, "users"); len(m) != 2 {
+		t.Fatalf("ambiguous match = %v (want both candidates)", m)
+	}
+	if m := MatchUnits(units, "nope"); len(m) != 0 {
+		t.Fatalf("miss = %v", m)
+	}
+}

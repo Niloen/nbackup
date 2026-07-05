@@ -280,6 +280,9 @@ func (g *gnutar) CombineStage(string, []string) programs.Cmd { return programs.C
 // path IS the file (the browse tree's default).
 func (g *gnutar) Assembler() archiver.Assembler { return nil }
 
+// Exporter: nil — tar members ARE their useful form; select them with --path.
+func (g *gnutar) Exporter() archiver.Exporter { return nil }
+
 // SpliceTrailer: tar streams splice — every member leads with a self-describing
 // 512-byte header and carries no cross-member state, so a concatenation of whole
 // member extents is itself a readable tar stream; the trailer is tar's end-of-archive

@@ -735,8 +735,11 @@ archivers:
   # and auth is the client's own libpq config (peer auth, ~/.pgpass,
   # ~/.pg_service.conf) — no credentials in this file. One DLE per cluster (a
   # base backup images the whole cluster); requires `summarize_wal = on`
-  # (`nb check` prints the line). Backups browse by table: `nb mount` and
-  # `nb recover` show tables/<db>/<schema>.<table>/ beside the data dir.
+  # (`nb check` prints the line). Backups report their tables: `nb recover
+  # --inventory` lists them with sizes, and pointing --path (or the shell's
+  # `add`) at a table name exports it as ready-to-import pg_dump SQL — nb
+  # restores the cluster to scratch, dumps the table, and hands you the
+  # file; loading it into your database stays your own, explicit act.
   # pg:
   #   type: postgres
   #   bin_dir: /usr/lib/postgresql/17/bin  # if the v17 tools are off PATH

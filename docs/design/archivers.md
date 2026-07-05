@@ -300,7 +300,7 @@ the archiver, graceful generic default):
    be file-shaped at all — a logical dump's TOC entry, a pipe stream).
    Replaced by the archive-level **unit inventory**: `record.Unit{Path,
    Size, Members}` in the per-archive index — Path a stable name-based
-   identity in the archiver's vocabulary ("tables/postgres/public.users"),
+   identity in the archiver's vocabulary ("table.postgres.public.users" — flat kind-first dotted names, not paths),
    Size the unit's TOTAL size as of the dump (postgres: `pg_table_size`,
    never delta-bytes extent math), Members the raw members in that archive
    carrying it (heap + forks + segments + TOAST + toast index), normalized
@@ -313,6 +313,26 @@ the archiver, graceful generic default):
    a faithful physical view. This resolves the "mount/browse stay
    tree-capability consumers" question above: the capability gate is the
    assembler + the inventory, and incremental chains browse correctly.
+
+9. **Unit export** (`Exporter`: `Ext` + `Stage`). The answer to "what does a
+   user DO with a table in a backup": pointing `--path`/`add` at a unit name
+   materializes the unit in its directly-useful form instead of handing over
+   physical files. One pointing rule everywhere — an exact tree path is that
+   file; anything else resolves against unit identities (exact, then unique
+   substring), unambiguous because the archiver names both namespaces and
+   keeps them disjoint. Unit identities are flat kind-first dotted names
+   ("table.<db>.<schema>.<table>") and export as exactly `<identity><ext>`,
+   so the selection says verbatim what will land. For postgres the exporter
+   restores the DLE to scratch (the honest physical-backup cost, priced and
+   confirmed like `--all`), boots a THROWAWAY postmaster with every
+   prod-reaching knob overridden (sockets only, no archive_command, no
+   preload libraries, no absolute pid/log paths), `pg_dump -t`'s each unit,
+   and tears everything down — the output is stock pg_dump SQL the operator
+   imports themselves. Non-destructive by construction: no export path
+   touches a live service, and pg_dump's CREATE TABLE errors loudly if the
+   table already exists. A future logical mode exports without any scratch
+   boot — same flag, same UX, cheaper cost note — which is the sign the
+   capability sits at the right seam.
 
 Semantics note, documented loudly: `pg_basebackup` is **cluster**-level.
 The source's database only names the connection — configure one DLE per

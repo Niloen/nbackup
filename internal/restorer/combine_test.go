@@ -11,6 +11,7 @@ import (
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/programs"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
 )
 
@@ -195,4 +196,76 @@ func translate(payload string) string {
 		return "incr"
 	}
 	return payload
+}
+
+// exportingArchiver: combine-shaped with an exporter whose stage proves the
+// ordering contract — it reads a marker CombineStage left in the restored
+// tree, so an export that ran before (or without) the scratch restore fails.
+type exportingArchiver struct{ combineArchiver }
+
+func (exportingArchiver) Exporter() archiver.Exporter { return fakeExporter{} }
+
+type fakeExporter struct{}
+
+func (fakeExporter) Ext() string { return ".sql" }
+
+func (fakeExporter) Stage(dataDir, destDir string, units []string) programs.Cmd {
+	var sh []string
+	for _, u := range units {
+		sh = append(sh, fmt.Sprintf("printf 'exported %%s from %%s' %s \"$(cat %s/combined.txt)\" > %s",
+			u, dataDir, filepath.Join(destDir, u+".sql")))
+	}
+	return programs.Cmd{Name: "sh", Args: []string{"-c", strings.Join(sh, " && ")}}
+}
+
+// TestExportUnits drives the whole export orchestration over fakes: inventory
+// resolution (unique-substring pointing), the scratch whole-DLE restore, the
+// exporter stage on the restored tree, and the written-file contract
+// (<identity><ext> under dest).
+func TestExportUnits(t *testing.T) {
+	dle := "db01"
+	tip := ref("run-2026-06-02.001", dle, 1)
+	store := &fakeStore{
+		payloads: map[archiveio.Ref][]byte{
+			ref("run-2026-06-01.001", dle, 0): []byte("full"),
+			tip:                               []byte("incr"),
+		},
+		units: map[archiveio.Ref][]record.Unit{
+			tip: {{Path: "table.postgres.public.users", Size: 42}},
+		},
+	}
+	deps := testDeps(store, chainArchives(dle))
+	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) {
+		return exportingArchiver{}, nil
+	}
+	r := New(deps)
+	dest := filepath.Join(t.TempDir(), "out")
+	written, err := r.ExportUnits(dle, "2026-06-02", []string{"public.users"}, dest, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(written) != 1 || written[0] != filepath.Join(dest, "table.postgres.public.users.sql") {
+		t.Fatalf("written = %v", written)
+	}
+	got, err := os.ReadFile(written[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The exporter saw the combined scratch tree (its stage read the combine marker).
+	if !strings.HasPrefix(string(got), "exported table.postgres.public.users from ") ||
+		!strings.Contains(string(got), ".nb-combine/L0") {
+		t.Fatalf("export content = %q", got)
+	}
+
+	// Pointing failures are deterministic errors.
+	if _, err := r.ExportUnits(dle, "2026-06-02", []string{"nope"}, dest, nil); err == nil || !strings.Contains(err.Error(), "no unit matches") {
+		t.Fatalf("miss = %v", err)
+	}
+	// No exporter → a clear capability error.
+	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) {
+		return combineArchiver{}, nil
+	}
+	if _, err := New(deps).ExportUnits(dle, "2026-06-02", []string{"public.users"}, dest, nil); err == nil || !strings.Contains(err.Error(), "no export capability") {
+		t.Fatalf("capability error = %v", err)
+	}
 }

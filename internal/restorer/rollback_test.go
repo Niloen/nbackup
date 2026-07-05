@@ -34,6 +34,7 @@ func (scriptArchiver) DestIsDir() bool { return true }
 func (scriptArchiver) RestoreIsCombine() bool                     { return false }
 func (scriptArchiver) CombineStage(string, []string) programs.Cmd { return programs.Cmd{} }
 func (scriptArchiver) Assembler() archiver.Assembler              { return nil }
+func (scriptArchiver) Exporter() archiver.Exporter                { return nil }
 
 // scriptDeps returns Deps whose ArchiverFor hands out the given per-archive
 // RestoreStages in order (one per archive extracted).

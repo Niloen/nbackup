@@ -9,7 +9,8 @@ import (
 )
 
 // This file builds the archive's content inventory (record.Unit): one unit per
-// table, "tables/<db>/<schema>.<table>", captured at dump time — the mapping
+// table, "table.<db>.<schema>.<table>" (kind-first dotted name; matviews mint
+// "matview.…"), captured at dump time — the mapping
 // (relfilenode → name) is cluster state that dies with the cluster, so it can
 // never be recomputed later. Unit.Size is pg_table_size (heap + toast + fsm +
 // vm, as of the dump — NOT this archive's delta bytes), and Unit.Members
@@ -45,9 +46,12 @@ func (p *postgres) unitsFor(source string, members []record.Member) []record.Uni
 		if !ok {
 			continue
 		}
-		// One row per table/matview: its filenode, its TOAST relation's and TOAST
-		// index's filenodes (0/empty when none), name, and total size.
-		rels, err := p.psql(conn, `SELECT c.relfilenode, coalesce(tc.relfilenode, 0), coalesce(tic.relfilenode, 0), n.nspname, c.relname, pg_table_size(c.oid)
+		if !safeIdent(db) {
+			continue // the identity must split unambiguously; exotic names are skipped (best-effort)
+		}
+		// One row per table/matview: its kind, filenode, its TOAST relation's and
+		// TOAST index's filenodes (0/empty when none), name, and total size.
+		rels, err := p.psql(conn, `SELECT c.relkind, c.relfilenode, coalesce(tc.relfilenode, 0), coalesce(tic.relfilenode, 0), n.nspname, c.relname, pg_table_size(c.oid)
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_class tc ON tc.oid = c.reltoastrelid
@@ -58,17 +62,21 @@ WHERE c.relkind IN ('r','m') AND c.relfilenode <> 0`)
 			continue
 		}
 		for _, rel := range strings.Split(rels, "\n") {
-			parts := strings.SplitN(rel, "|", 6)
-			if len(parts) != 6 || strings.ContainsAny(parts[3]+parts[4], "/") {
+			parts := strings.SplitN(rel, "|", 7)
+			if len(parts) != 7 || !safeIdent(parts[4]) || !safeIdent(parts[5]) {
 				continue
 			}
-			size, _ := strconv.ParseInt(parts[5], 10, 64)
+			kind := "table"
+			if parts[0] == "m" {
+				kind = "matview"
+			}
+			size, _ := strconv.ParseInt(parts[6], 10, 64)
 			t := &table{unit: record.Unit{
-				Path: "tables/" + db + "/" + parts[3] + "." + parts[4],
+				Path: kind + "." + db + "." + parts[4] + "." + parts[5],
 				Size: size,
 			}}
 			tables = append(tables, t)
-			for _, filenode := range parts[:3] {
+			for _, filenode := range parts[1:4] {
 				if filenode != "" && filenode != "0" {
 					byFile["base/"+oid+"/"+filenode] = t
 				}
@@ -97,6 +105,25 @@ WHERE c.relkind IN ('r','m') AND c.relfilenode <> 0`)
 	}
 	sort.Slice(units, func(i, j int) bool { return units[i].Path < units[j].Path })
 	return units
+}
+
+// safeIdent gates which names may enter a unit identity: the dotted form
+// "kind.db.schema.rel" must split unambiguously, and the identity becomes an
+// export filename verbatim — so components carrying dots, slashes, spaces, or
+// quoting are skipped (best-effort inventory; quoted exotic identifiers are
+// vanishingly rare in practice).
+func safeIdent(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '$', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // connTo composes a connection reference to another database of the same

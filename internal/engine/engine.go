@@ -637,6 +637,13 @@ func (e *Engine) Inventory(dle, asOf string) ([]record.Unit, string, error) {
 	return e.rst.Inventory(dle, asOf)
 }
 
+// ExportUnits materializes named inventory units of a DLE as of a date into
+// destDir (a whole-DLE scratch restore, then the archiver's exporter); see
+// restorer.
+func (e *Engine) ExportUnits(dle, asOf string, names []string, destDir string, logf Logf) ([]string, error) {
+	return e.rst.ExportUnits(dle, asOf, names, destDir, logf)
+}
+
 // DLENames returns the distinct DLE names recorded across all catalog runs,
 // sorted — the DLEs a recovery session can choose from; see dleDirectory.
 func (e *Engine) DLENames() []string { return e.dles.names() }

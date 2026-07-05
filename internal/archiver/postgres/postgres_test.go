@@ -49,7 +49,7 @@ func fakePsql(t *testing.T, dir string, summarizeWAL string) {
 	fakeTool(t, dir, "psql", fmt.Sprintf(`case "$*" in
   *pg_database_size*) echo 12345 ;;
   *pg_database*) echo "5|testdb" ;;
-  *pg_class*) echo "1234|2234|3234|public|users|90112" ;;
+  *pg_class*) echo "r|1234|2234|3234|public|users|90112" ;;
   *summarize_wal*) echo %s ;;
   *"SELECT 1"*) echo 1 ;;
   *) echo "unexpected psql args: $*" >&2; exit 2 ;;
@@ -140,7 +140,7 @@ func TestBackupStreamAndState(t *testing.T) {
 		t.Fatalf("units = %+v", res.Units)
 	}
 	u := res.Units[0]
-	if u.Path != "tables/testdb/public.users" || u.Size != 90112 {
+	if u.Path != "table.testdb.public.users" || u.Size != 90112 {
 		t.Fatalf("unit = %+v", u)
 	}
 	wantMembers := map[string]bool{"base/5/1234": true, "base/5/1234_fsm": true, "base/5/2234": true, "base/5/3234": true}
@@ -557,7 +557,7 @@ func TestLiveIncrementalCycle(t *testing.T) {
 	}
 	var users record.Unit
 	for _, u := range fullRes.Units {
-		if u.Path == "tables/postgres/public.users" {
+		if u.Path == "table.postgres.public.users" {
 			users = u
 		}
 	}

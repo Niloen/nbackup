@@ -155,17 +155,22 @@ type Member struct {
 }
 
 // Unit is one named thing an archive contains, in the producing archiver's own
-// vocabulary ("tables/postgres/public.users") — an archive-level CONTENT fact,
+// vocabulary ("table.postgres.public.users") — an archive-level CONTENT fact,
 // distinct from the stream-layout facts (Members, Frames) it rides beside in
-// the per-archive index. Units power `nb recover --inventory` and the shell's
-// unit-aware selection; they are advisory metadata outside every structural
-// comparison (verify's List cannot reproduce them from the stream).
+// the per-archive index. Units power `nb recover --inventory`, unit-pointing
+// selection (`--path`/`add` fall back to unit names), and unit export; they
+// are advisory metadata outside every structural comparison (verify's List
+// cannot reproduce them from the stream).
 type Unit struct {
-	// Path is the unit's stable, hierarchical identity, unique within the
-	// archive and built from NAMES (never oids/relfilenodes — those are
-	// cluster-lifetime accidents), so inventories diff across runs and
-	// `--export` arguments resolve against it. The vocabulary is the
-	// archiver's; the generic layers render, sort, and match it — never parse.
+	// Path is the unit's stable FLAT identity — a kind-first dotted name
+	// ("table.<db>.<schema>.<table>"), not a filesystem path — unique within
+	// the archive, DISJOINT from the archive's member namespace (the archiver
+	// names both, so a pointed-at name is never ambiguous), and built from
+	// NAMES (never oids/relfilenodes — those are cluster-lifetime accidents),
+	// so inventories diff across runs. An exported unit lands as exactly this
+	// identity plus the exporter's extension ("table.postgres.public.users.sql").
+	// The vocabulary is the archiver's; the generic layers render, sort, and
+	// match it — never parse.
 	Path string `json:"path"`
 	// Size is the unit's TOTAL size as of this dump, in archiver-defined terms
 	// (postgres: pg_table_size — heap+toast+fsm+vm); 0 = unreported. It

@@ -27,7 +27,10 @@ func newRecoverCmd(a *app) *cobra.Command {
 			"  • interactive (no flags): a shell to browse and pick files — setdate, setdisk," +
 			" disks, cd, ls, add, delete, list, extract.\n" +
 			"  • file-level (--path / --list): recover the named files/dirs in one shot, or just" +
-			" print a listing. Selected-file recovery never deletes.\n" +
+			" print a listing. Selected-file recovery never deletes. A --path that names an" +
+			" INVENTORY UNIT (see --inventory; e.g. public.users) exports the unit in its useful" +
+			" form instead — a table becomes <unit>.sql, produced by restoring the DLE to scratch" +
+			" and dumping with the database's own tools; importing the SQL stays your act.\n" +
 			"  • whole-DLE (--all): rebuild an entire DLE (or every DLE) as of the date into --dest," +
 			" replaying the full plus later incrementals so deletions are applied. This prunes the" +
 			" destination to match the backup, so --dest must be empty unless --force.\n\n" +
@@ -75,7 +78,7 @@ func newRecoverCmd(a *app) *cobra.Command {
 	cmd.Flags().StringVar(&ra.dle, "dle", "", "DLE to recover from (with --all, omit to restore every DLE)")
 	cmd.Flags().StringVar(&ra.date, "date", "", "as-of date YYYY-MM-DD (default today); resolves to the most recent run on or before that day")
 	cmd.Flags().StringVar(&ra.time, "time", "", "as-of point-in-time 'YYYY-MM-DD HH[:MM[:SS]]' (UTC); resolves to the most recent run committed in or before that period — reaches an earlier same-day run. Mutually exclusive with --date")
-	cmd.Flags().StringArrayVar(&ra.paths, "path", nil, "file/dir to recover (repeatable); non-interactive")
+	cmd.Flags().StringArrayVar(&ra.paths, "path", nil, "file/dir to recover, or an inventory unit name to export (repeatable); a file lands as the file, a unit (e.g. public.users) as its useful form — a table exports as <unit>.sql via a scratch restore; non-interactive")
 	cmd.Flags().StringVar(&ra.dest, "dest", "", "destination directory for recovered files")
 	cmd.Flags().BoolVar(&ra.list, "list", false, "print a listing of --path (or the root) and exit")
 	cmd.Flags().BoolVar(&ra.inventory, "inventory", false, "print the DLE's content inventory as of the date — the named units the archiver reported at dump time (postgres: tables with sizes) — and exit")
@@ -278,26 +281,76 @@ func runRecoverBatch(eng *engine.Engine, ra recoverArgs, logf engine.Logf) error
 	if ra.dest == "" {
 		return fmt.Errorf("--dest is required to recover files")
 	}
-	steps, asms, err := tree.Collect(ra.paths)
-	if err != nil {
-		if strings.HasPrefix(err.Error(), "not found: ") {
-			return fmt.Errorf("%w%s", err, pathRootHint(strings.TrimPrefix(err.Error(), "not found: ")))
+	// One pointing rule: an exact tree path is that FILE; anything else resolves
+	// against the inventory's unit names — pointing at a thing yields the thing
+	// in its useful form (a table exports as SQL). Precedence is deterministic,
+	// and unit names are disjoint from member paths by the archiver's contract.
+	var filePaths, unitNames []string
+	var units []record.Unit
+	for _, p := range ra.paths {
+		if _, ok := tree.Lookup(p); ok {
+			filePaths = append(filePaths, p)
+			continue
 		}
-		return err
+		if units == nil {
+			units, _, _ = eng.Inventory(slug, asOf)
+		}
+		matches := recovery.MatchUnits(units, p)
+		switch len(matches) {
+		case 0:
+			return fmt.Errorf("not found: %s%s (neither a backed-up path nor an inventory unit — see --list and --inventory)", p, pathRootHint(p))
+		case 1:
+			fmt.Printf("matched unit %s — will export as %s.sql\n", matches[0].Path, matches[0].Path)
+			unitNames = append(unitNames, matches[0].Path)
+		default:
+			var cands []string
+			for _, m := range matches {
+				cands = append(cands, m.Path)
+			}
+			return fmt.Errorf("%q matches %d units — use a fuller name: %s", p, len(matches), strings.Join(cands, ", "))
+		}
 	}
-	rows, est := eng.SelectionPlan(steps)
-	printReadPlan(rows)
-	if !confirmRead(est, ra.yes) {
-		return nil
+
+	recovered, exported := 0, 0
+	if len(filePaths) > 0 {
+		steps, asms, err := tree.Collect(filePaths)
+		if err != nil {
+			return err
+		}
+		rows, est := eng.SelectionPlan(steps)
+		printReadPlan(rows)
+		if !confirmRead(est, ra.yes) {
+			return nil
+		}
+		if tree.HasIncrementals() {
+			fmt.Println(fileLevelDeletionNote)
+		}
+		n, archives, err := eng.ExtractSelection(steps, asms, ra.dest, logf, newExtractProgress(est.Bytes))
+		if err != nil {
+			return err
+		}
+		recovered = n
+		fmt.Printf("recovered %d file(s) from %d archive(s) into %s\n", n, archives, ra.dest)
 	}
-	if tree.HasIncrementals() {
-		fmt.Println(fileLevelDeletionNote)
+	if len(unitNames) > 0 {
+		// The honest cost of exporting from a physical backup is a whole-DLE
+		// scratch restore — the same read --all would take, priced and confirmed
+		// the same way.
+		if !confirmRead(eng.RestoreCost([]string{slug}, asOf), ra.yes) {
+			return nil
+		}
+		written, err := eng.ExportUnits(slug, asOf, unitNames, ra.dest, logf)
+		if err != nil {
+			return err
+		}
+		exported = len(written)
+		for _, w := range written {
+			fmt.Printf("wrote %s\n", w)
+		}
 	}
-	n, archives, err := eng.ExtractSelection(steps, asms, ra.dest, logf, newExtractProgress(est.Bytes))
-	if err != nil {
-		return err
+	if recovered == 0 && exported == 0 {
+		return fmt.Errorf("nothing selected")
 	}
-	fmt.Printf("recovered %d file(s) from %d archive(s) into %s\n", n, archives, ra.dest)
 	return nil
 }
 

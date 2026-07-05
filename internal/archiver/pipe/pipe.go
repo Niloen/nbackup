@@ -153,6 +153,9 @@ func (p *pipe) CombineStage(string, []string) programs.Cmd { return programs.Cmd
 // Assembler: nil — no members, nothing to assemble.
 func (p *pipe) Assembler() archiver.Assembler { return nil }
 
+// Exporter: nil — the stream's useful form is whatever the consumer command makes.
+func (p *pipe) Exporter() archiver.Exporter { return nil }
+
 // substitute replaces a {placeholder} with its value single-quoted for `sh -c`,
 // so a source/dest containing spaces or metacharacters rides as one word and is
 // never re-interpreted by the shell.

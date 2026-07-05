@@ -5,6 +5,7 @@ package cli
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Niloen/nbackup/internal/engine"
@@ -30,6 +31,11 @@ type recoverShell struct {
 
 	units    []record.Unit // the browsed backup's content inventory (chain tip's units); nil = none reported
 	unitsRun string        // the run whose archive reported the units
+
+	// selUnits is the UNIT half of the selection: things (a table) marked for
+	// materialized export, kept beside the session's file selection — extract
+	// recovers files as files and exports units in their useful form.
+	selUnits map[string]record.Unit
 }
 
 // runRecoverShell drives the interactive recovery prompt. It reuses the shared
@@ -150,6 +156,7 @@ func (sh *recoverShell) dispatch(cmd string, args []string) (quit bool) {
 		sh.listSelected()
 	case "clear":
 		sh.sess.Clear()
+		sh.selUnits = map[string]record.Unit{}
 		fmt.Println("selection cleared")
 	case "dest", "setdest", "lcd":
 		if len(args) == 1 {
@@ -191,6 +198,7 @@ func (sh *recoverShell) reload() error {
 // failure) just leaves the inventory empty, and the shell says so when asked.
 func (sh *recoverShell) loadUnits() {
 	sh.units, sh.unitsRun = nil, ""
+	sh.selUnits = map[string]record.Unit{}
 	if units, run, err := sh.eng.Inventory(sh.dle, sh.date); err == nil {
 		sh.units, sh.unitsRun = units, run
 	}
@@ -400,16 +408,7 @@ func (sh *recoverShell) addUnit(arg string) bool {
 	if len(sh.units) == 0 {
 		return false
 	}
-	var matches []record.Unit
-	for _, u := range sh.units {
-		if u.Path == arg {
-			matches = []record.Unit{u}
-			break
-		}
-		if strings.Contains(u.Path, arg) {
-			matches = append(matches, u)
-		}
-	}
+	matches := recovery.MatchUnits(sh.units, arg)
 	switch {
 	case len(matches) == 0:
 		return false
@@ -421,15 +420,8 @@ func (sh *recoverShell) addUnit(arg string) bool {
 		return true
 	}
 	u := matches[0]
-	if len(u.Members) == 0 {
-		fmt.Printf("unit %s reports no files to select\n", u.Path)
-		return true
-	}
-	added, notFound := sh.sess.Add(u.Members)
-	fmt.Printf("matched unit %s — added %d file(s)\n", u.Path, len(added))
-	for _, p := range notFound {
-		fmt.Printf("  (unit file not in the browse tree: /%s)\n", p)
-	}
+	sh.selUnits[u.Path] = u
+	fmt.Printf("added unit %s (extracts as %s.sql)\n", u.Path, u.Path)
 	return true
 }
 
@@ -440,6 +432,13 @@ func (sh *recoverShell) del(args []string) {
 	removed := sh.sess.Remove(args)
 	for _, p := range removed {
 		fmt.Printf("removed /%s\n", p)
+	}
+	for _, arg := range args {
+		if m := recovery.MatchUnits(unitList(sh.selUnits), arg); len(m) == 1 {
+			delete(sh.selUnits, m[0].Path)
+			fmt.Printf("removed unit %s\n", m[0].Path)
+			removed = append(removed, m[0].Path)
+		}
 	}
 	// Give feedback on a no-op delete rather than staying silent, so a mistyped or
 	// already-unselected path is obviously a no-op, not a success.
@@ -454,13 +453,26 @@ func (sh *recoverShell) listSelected() {
 		return
 	}
 	sel := sh.sess.Selection()
-	if len(sel) == 0 {
+	if len(sel) == 0 && len(sh.selUnits) == 0 {
 		fmt.Println("(no files selected)")
 		return
 	}
 	for _, p := range sel {
 		fmt.Printf("  /%s\n", p)
 	}
+	for _, u := range unitList(sh.selUnits) {
+		fmt.Printf("  unit %s → %s.sql\n", u.Path, u.Path)
+	}
+}
+
+// unitList returns a unit selection sorted by identity.
+func unitList(m map[string]record.Unit) []record.Unit {
+	out := make([]record.Unit, 0, len(m))
+	for _, u := range m {
+		out = append(out, u)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
 }
 
 func (sh *recoverShell) extract(args []string) {
@@ -468,8 +480,8 @@ func (sh *recoverShell) extract(args []string) {
 		fmt.Println("set a disk first (setdisk <dle>)")
 		return
 	}
-	if len(sh.sess.Selection()) == 0 {
-		fmt.Println("nothing selected (use 'add <path>')")
+	if len(sh.sess.Selection()) == 0 && len(sh.selUnits) == 0 {
+		fmt.Println("nothing selected (use 'add <path|unit>')")
 		return
 	}
 	if len(args) == 1 {
@@ -490,23 +502,44 @@ func (sh *recoverShell) extract(args []string) {
 		fmt.Println("no destination; aborted")
 		return
 	}
-	steps, asms, err := sh.sess.CollectSelection()
-	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		return
+	if len(sh.sess.Selection()) > 0 {
+		steps, asms, err := sh.sess.CollectSelection()
+		if err != nil {
+			fmt.Printf("error: %v\n", err)
+			return
+		}
+		rows, est := sh.eng.SelectionPlan(steps)
+		printReadPlan(rows)
+		if !confirmRead(est, false) {
+			return
+		}
+		sh.noteDeletionOnce()
+		n, archives, err := sh.eng.ExtractSelection(steps, asms, sh.dest, logfStdout, newExtractProgress(est.Bytes))
+		if err != nil {
+			fmt.Printf("error: %v\n", err)
+			return
+		}
+		fmt.Printf("recovered %d file(s) from %d archive(s) into %s\n", n, archives, sh.dest)
 	}
-	rows, est := sh.eng.SelectionPlan(steps)
-	printReadPlan(rows)
-	if !confirmRead(est, false) {
-		return
+	if len(sh.selUnits) > 0 {
+		// Exporting from a physical backup restores the whole DLE to scratch —
+		// the same read --all would take, priced and confirmed the same way.
+		names := make([]string, 0, len(sh.selUnits))
+		for _, u := range unitList(sh.selUnits) {
+			names = append(names, u.Path)
+		}
+		if !confirmRead(sh.eng.RestoreCost([]string{sh.dle}, sh.date), false) {
+			return
+		}
+		written, err := sh.eng.ExportUnits(sh.dle, sh.date, names, sh.dest, logfStdout)
+		if err != nil {
+			fmt.Printf("error: %v\n", err)
+			return
+		}
+		for _, w := range written {
+			fmt.Printf("wrote %s\n", w)
+		}
 	}
-	sh.noteDeletionOnce()
-	n, archives, err := sh.eng.ExtractSelection(steps, asms, sh.dest, logfStdout, newExtractProgress(est.Bytes))
-	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		return
-	}
-	fmt.Printf("recovered %d file(s) from %d archive(s) into %s\n", n, archives, sh.dest)
 }
 
 func recoverHelp() {
@@ -522,7 +555,8 @@ func recoverHelp() {
   cd [path]            change directory (.. and absolute /paths work)
   pwd                  print the current directory
   add <path|unit>...   mark files/dirs for recovery; a unit name (from
-                       'inventory', suffixes work) selects the unit's files
+                       'inventory', suffixes work) marks the unit itself —
+                       extract materializes it (a table becomes <unit>.sql)
   delete <path>...     unmark (alias: rm)
   list                 show the current selection
   clear                clear the selection

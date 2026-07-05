@@ -27,6 +27,7 @@ type fakeStore struct {
 	payloads    map[archiveio.Ref][]byte
 	members     map[archiveio.Ref][]record.Member
 	frames      map[archiveio.Ref][]record.Frame
+	units       map[archiveio.Ref][]record.Unit
 	atomSeals   map[archiveio.Ref][]record.PartSeal
 	ranged      bool            // the fake medium supports ranged opens
 	rangedBytes int64           // total bytes served through OpenRange (the egress a test asserts)
@@ -65,7 +66,7 @@ func (f *fakeStore) Members(ref archiveio.Ref) ([]record.Member, error) { return
 // Index serves the fake's members (with any frames a test injected); OpenRange counts
 // the ranged bytes actually fetched, so a test can assert selective restore's egress.
 func (f *fakeStore) Index(ref archiveio.Ref) (record.Index, error) {
-	return record.Index{Members: f.members[ref], Frames: f.frames[ref]}, nil
+	return record.Index{Members: f.members[ref], Frames: f.frames[ref], Units: f.units[ref]}, nil
 }
 
 func (f *fakeStore) OpenRange(ref archiveio.Ref, medium string, rng media.Range) (io.ReadCloser, error) {
@@ -109,6 +110,7 @@ func (fakeArchiver) CanList() bool   { return true }
 func (fakeArchiver) RestoreIsCombine() bool                     { return false }
 func (fakeArchiver) CombineStage(string, []string) programs.Cmd { return programs.Cmd{} }
 func (fakeArchiver) Assembler() archiver.Assembler              { return nil }
+func (fakeArchiver) Exporter() archiver.Exporter                { return nil }
 
 func testDeps(store *fakeStore, archives []record.Archive) Deps {
 	return Deps{
