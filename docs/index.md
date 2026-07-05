@@ -109,6 +109,7 @@ for the full vocabulary and [Artifacts you can read](concepts#artifacts-you-can-
 | Copy a working setup for your situation | [Scenarios](scenarios) |
 | Look up a command or config key | [Reference](reference) |
 | Come from Amanda | [Migrating from Amanda](migrating-from-amanda) |
+| Compare it to restic/Borg, Bacula, pgBackRest… | [NBackup vs the alternatives](compared) |
 
 ---
 
