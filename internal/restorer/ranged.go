@@ -187,45 +187,89 @@ func (r *Restorer) planSelection(st recovery.ExtractStep, idx record.Index) (sel
 	return selectionPlan{table: table, decompress: decompress}, true
 }
 
+// rangedGroups resolves a step's selection to its coalesced ranged-fetch groups
+// (selected members → raw extents → covering frames or atoms) without moving any of the
+// medium's payload — the plan the extractor executes and the cost estimate prices, so a
+// forecast matches the read it forecasts. ok is false at exactly extractSelected's
+// paper-only fallback gates: no member index, an unlisted or offset-less member, a shape
+// whose restart table is absent under a real transform, or an archiver whose streams do
+// not splice. The one gate that moves a byte — the live OpenRange capability probe —
+// stays in extractSelected.
+func (r *Restorer) rangedGroups(st recovery.ExtractStep) ([]rangeGroup, selectionPlan, bool) {
+	ref := archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level}
+	idx, ierr := r.deps.Store.Index(ref)
+	if ierr != nil || len(idx.Members) == 0 {
+		return nil, selectionPlan{}, false
+	}
+	extents, ok := planExtents(idx.Members, st.Members)
+	if !ok {
+		return nil, selectionPlan{}, false
+	}
+	plan, ok := r.planSelection(st, idx)
+	if !ok {
+		return nil, selectionPlan{}, false
+	}
+	groups := planGroups(plan.table, extents)
+	if len(groups) == 0 {
+		return nil, selectionPlan{}, false
+	}
+	// The archiver must DECLARE its streams spliceable (member extents are
+	// independently restorable and a trailer terminates an assembled stream) — reporting
+	// offsets alone is not that promise. Splicing is a format property, so it resolves
+	// server-side ("") for both the estimate and the extract.
+	arch, err := r.deps.ArchiverFor(st.Archiver, st.DLE, "")
+	if err != nil || arch.SpliceTrailer() == nil {
+		return nil, selectionPlan{}, false
+	}
+	return groups, plan, true
+}
+
+// groupsEgress totals the encoded bytes the ranged fetch groups pull off the medium:
+// each bounded group its enc.Len, each open-ended group (running to the stream's tail)
+// the bytes from its start to encodedSize. It is the egress a ranged selection spends —
+// what the estimate quotes and the extract log reports. encodedSize <= a group's start
+// (an unknown archive size) leaves that group's tail uncounted rather than guessing.
+func groupsEgress(groups []rangeGroup, encodedSize int64) int64 {
+	var n int64
+	for _, g := range groups {
+		switch {
+		case g.enc.Len > 0:
+			n += g.enc.Len
+		case encodedSize > g.enc.Off:
+			n += encodedSize - g.enc.Off
+		}
+	}
+	return n
+}
+
 // extractSelected attempts the ranged extraction of one step's selection, per the
 // archive's shape: selected members → raw extents → covering frames (or atoms) →
 // coalesced ranged fetches → decode → tar. handled is false — with no error — when an
 // ingredient is missing and the caller should fall back to the whole-stream path; once
 // the first range is open (the capability probe), a failure is a real extraction error.
-func (r *Restorer) extractSelected(st recovery.ExtractStep, d dest, log Logf) (handled bool, err error) {
+// egress is the encoded bytes the ranged read pulled (for the caller's read log), valid
+// only when handled and err is nil.
+func (r *Restorer) extractSelected(st recovery.ExtractStep, d dest) (handled bool, egress int64, err error) {
+	groups, plan, ok := r.rangedGroups(st)
+	if !ok {
+		return false, 0, nil
+	}
 	ref := archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level}
-	idx, ierr := r.deps.Store.Index(ref)
-	if ierr != nil || len(idx.Members) == 0 {
-		return false, nil
-	}
-	extents, ok := planExtents(idx.Members, st.Members)
-	if !ok {
-		return false, nil
-	}
-	plan, ok := r.planSelection(st, idx)
-	if !ok {
-		return false, nil
-	}
-	groups := planGroups(plan.table, extents)
-	if len(groups) == 0 {
-		return false, nil
-	}
-	// The archiver must DECLARE its streams spliceable (member extents are
-	// independently restorable and this trailer terminates an assembled stream) —
-	// reporting offsets alone is not that promise; without it, whole-stream only.
+	// The archiver reverses on the destination host; its splice trailer (a format
+	// property, so identical to rangedGroups' server-side resolve) terminates the stream.
 	arch, err := r.deps.ArchiverFor(st.Archiver, st.DLE, d.host)
 	if err != nil {
-		return true, err
+		return true, 0, err
 	}
 	trailer := arch.SpliceTrailer()
 	if trailer == nil {
-		return false, nil
+		return false, 0, nil
 	}
 	// Capability probe: open the first group's range now. Any failure here — no seals,
 	// a range-incapable medium, no copy — is the fallback cue, before any byte moved.
 	first, perr := r.deps.Store.OpenRange(ref, "", groups[0].enc)
 	if perr != nil {
-		return false, nil
+		return false, 0, nil
 	}
 
 	pr, pw := io.Pipe()
@@ -233,7 +277,81 @@ func (r *Restorer) extractSelected(st recovery.ExtractStep, d dest, log Logf) (h
 
 	sink := xfer.NewProgramSink(d.exec).Add(arch.RestoreStage(d.dir, st.Members))
 	_, terr := xfer.Transfer(context.Background(), xfer.Reader(pr), xfer.NewFilters(), sink)
-	return true, terr
+	return true, groupsEgress(groups, r.encodedSize(ref)), terr
+}
+
+// ArchiveRead is how one archive of a file selection will be read: the encoded bytes
+// pulled off the medium and in how many fetches, and whether that is a ranged read (only
+// the selected members' covering frames) or the whole archive. It lets a cost estimate
+// price the real egress instead of the whole payload.
+type ArchiveRead struct {
+	Ref    archiveio.Ref
+	Bytes  int64
+	Parts  int64
+	Ranged bool
+}
+
+// SelectionReads plans, without moving payload, how each step's selection will be read —
+// the ranged-aware core of the recovery cost estimate. It plans through rangedGroups
+// (extractSelected's own paper-only gates), so the forecast matches the extract: a
+// rangeable archive reports only its covering-frame egress, everything else the whole
+// compressed archive. It assumes the extract's live capability probe succeeds — true
+// whenever a framed/atomic archive's placement carries the per-part seals written
+// alongside its frames, i.e. the normal case; a placement missing them would read whole
+// and the estimate would under-quote. Steps holding no files (directory-only) read
+// nothing and are omitted, matching ExtractSelection.
+func (r *Restorer) SelectionReads(steps []recovery.ExtractStep) []ArchiveRead {
+	sizes := r.encodedSizes()
+	out := make([]ArchiveRead, 0, len(steps))
+	for _, st := range steps {
+		if countFilePaths(st.Members) == 0 {
+			continue
+		}
+		ref := archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level}
+		size := sizes[ref]
+		rd := ArchiveRead{Ref: ref, Bytes: size.bytes, Parts: size.parts}
+		if groups, _, ok := r.rangedGroups(st); ok {
+			rd.Bytes = groupsEgress(groups, size.bytes)
+			rd.Parts = int64(len(groups))
+			rd.Ranged = true
+		}
+		out = append(out, rd)
+	}
+	return out
+}
+
+// archiveSize is an archive's whole-read cost: its on-medium compressed size and the
+// number of part-fetches reading it takes.
+type archiveSize struct {
+	bytes int64
+	parts int64
+}
+
+// encodedSizes indexes the catalog's archive metadata by ref for the whole-archive
+// figures a read estimate and read log need (an open-ended group's tail, the fallback
+// size). Built once per estimate; a lone lookup uses encodedSize.
+func (r *Restorer) encodedSizes() map[archiveio.Ref]archiveSize {
+	m := map[archiveio.Ref]archiveSize{}
+	for _, a := range r.deps.Archives() {
+		parts := int64(1)
+		if a.Parts > 1 {
+			parts = int64(a.Parts)
+		}
+		m[archiveio.Ref{Run: a.Run, DLE: a.DLE, Level: a.Level}] = archiveSize{bytes: a.Compressed, parts: parts}
+	}
+	return m
+}
+
+// encodedSize is one archive's on-medium compressed size from the catalog metadata, or 0
+// when the ref is unknown — it bounds an open-ended ranged fetch and names the
+// whole-archive size in the read log.
+func (r *Restorer) encodedSize(ref archiveio.Ref) int64 {
+	for _, a := range r.deps.Archives() {
+		if a.Run == ref.Run && a.DLE == ref.DLE && a.Level == ref.Level {
+			return a.Compressed
+		}
+	}
+	return 0
 }
 
 // emitGroups streams the planned groups into pw: per group it fetches the encoded

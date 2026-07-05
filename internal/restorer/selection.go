@@ -10,7 +10,17 @@ import (
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
+	"github.com/Niloen/nbackup/internal/sizeutil"
 )
+
+// readSize renders a read/egress figure for the recovery log, degrading to a neutral
+// phrase when the size is unknown (no catalog metadata) rather than printing "0 B".
+func readSize(n int64) string {
+	if n <= 0 {
+		return "unknown-size"
+	}
+	return sizeutil.FormatBytes(n)
+}
 
 // OpenRecover builds a browsable filesystem of a DLE as of a date (YYYY-MM-DD) —
 // the recover entry point. Member lists are loaded lazily via the store (cache,
@@ -78,17 +88,21 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 			return nil
 		}
 		archives++
-		log.Log("extracting %d file(s) from %s %s L%d", countFilePaths(st.Members), st.RunID, r.deps.DisplayDLE(st.DLE), st.Level)
+		nfiles := countFilePaths(st.Members)
+		log.Log("extracting %d file(s) from %s %s L%d", nfiles, st.RunID, r.deps.DisplayDLE(st.DLE), st.Level)
+		whole := r.encodedSize(archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level})
 		// Ranged path first: on a range-capable copy only the covering frames (or
 		// atoms) of the selected members are read. Any missing ingredient falls
 		// through to the whole-stream path below.
-		if handled, rerr := r.extractSelected(st, d, log); handled {
+		if handled, egress, rerr := r.extractSelected(st, d); handled {
 			if rerr != nil {
 				return rerr
 			}
-			files += countFilePaths(st.Members)
+			log.Log("  ranged read: fetched %s of the %s archive (only the selected file(s))", readSize(egress), readSize(whole))
+			files += nfiles
 			return nil
 		}
+		log.Log("  reading the whole %s archive (its bytes can't be fetched in ranges)", readSize(whole))
 		rc, serr := open()
 		if serr != nil {
 			return serr

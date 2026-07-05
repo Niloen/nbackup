@@ -104,6 +104,46 @@ type ReadEstimate struct {
 	Bytes    int64   // compressed payload read off the medium
 	Parts    int64   // number of files/parts fetched (request count)
 	Cost     float64 // egress + request cost
+	Ranged   bool    // every archive in the estimate is read in ranges (only the selected members), not whole
+}
+
+// ReadItem is one archive's pre-computed contribution to a read estimate: the encoded
+// bytes that will be pulled off the medium and in how many fetches. A ranged read makes
+// Bytes a fraction of the whole archive; the read layer computes it (only it knows the
+// frame plan), accounting only prices it.
+type ReadItem struct {
+	Ref    archiveio.Ref
+	Bytes  int64
+	Parts  int64
+	Ranged bool
+}
+
+// PriceRead prices a set of pre-computed per-archive reads on the medium each is read
+// from (the copy a restore prefers, landing first) — the ranged-aware sibling of
+// EstimateRead, which prices whole archives straight from the catalog. Bytes already
+// reflect any ranged read, so this only resolves the medium and applies its rate table.
+// Ranged is set when every priced archive is read in ranges, so the caller can say so.
+func (a *Accountant) PriceRead(items []ReadItem) ReadEstimate {
+	est := ReadEstimate{Ranged: len(items) > 0}
+	for _, it := range items {
+		medium, _, ok := a.locateArchive(it.Ref, "")
+		if !ok {
+			continue
+		}
+		if est.Medium == "" {
+			est.Medium = medium
+		}
+		est.Bytes += it.Bytes
+		est.Parts += it.Parts
+		if !it.Ranged {
+			est.Ranged = false
+		}
+	}
+	c := a.CostModelFor(est.Medium)
+	est.Provider = c.Provider
+	est.Priced = c.Priced()
+	est.Cost = c.ReadCost(est.Bytes, est.Parts)
+	return est
 }
 
 // RestoreCost prices a whole-DLE restore (or every DLE) as of a date — the egress of
@@ -123,16 +163,6 @@ func (a *Accountant) RestoreCost(dles []string, asOf string) ReadEstimate {
 		for _, s := range steps {
 			refs = append(refs, archiveio.Ref{Run: s.RunID, DLE: s.DLE, Level: s.Level})
 		}
-	}
-	return a.EstimateRead(refs, "")
-}
-
-// SelectionCost prices a file-level recovery: the egress of the archives its selected
-// members are extracted from.
-func (a *Accountant) SelectionCost(steps []recovery.ExtractStep) ReadEstimate {
-	refs := make([]archiveio.Ref, 0, len(steps))
-	for _, st := range steps {
-		refs = append(refs, archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level})
 	}
 	return a.EstimateRead(refs, "")
 }

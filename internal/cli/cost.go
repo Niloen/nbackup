@@ -35,8 +35,12 @@ func confirmRead(est engine.ReadEstimate, yes bool) bool {
 	if !est.Priced || est.Bytes == 0 || est.Cost < materialEgressUSD {
 		return true // a local medium, nothing to read, or an immaterial charge
 	}
-	fmt.Printf("\nThis reads %s off %q (%s): estimated egress %s.\n",
-		sizeutil.FormatBytes(est.Bytes), est.Medium, est.Provider, formatUSD(est.Cost))
+	scope := ""
+	if est.Ranged {
+		scope = " (a ranged read of only the selected file(s), not the whole archive)"
+	}
+	fmt.Printf("\nThis reads %s off %q (%s): estimated egress %s%s.\n",
+		sizeutil.FormatBytes(est.Bytes), est.Medium, est.Provider, formatUSD(est.Cost), scope)
 	if yes || !stdinIsTerminal() {
 		return true
 	}

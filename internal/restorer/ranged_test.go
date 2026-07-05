@@ -309,3 +309,56 @@ func TestNoSpliceDeclarationFallsBack(t *testing.T) {
 		t.Fatalf("the structural sample must skip a non-spliceable archiver (ran=%v err=%v)", res.Ran, err)
 	}
 }
+
+// TestSelectionReadsRangedEstimate: the recovery cost estimate forecasts a framed
+// single-file selection as its covering-frame egress — a small fraction of the whole
+// archive, marked ranged — and touches no payload doing it (so the confirmation prompt
+// no longer quotes the whole archive for a one-file recover).
+func TestSelectionReadsRangedEstimate(t *testing.T) {
+	dle := "app01-data"
+	store, step, _, encTotal := framedFixture(t, dle)
+	step.Members = []string{"tail.txt"}
+
+	r := New(testDeps(store, []record.Archive{
+		{Run: step.RunID, DLE: dle, Level: 0, Compress: "gzip", Compressed: int64(encTotal), Parts: 1},
+	}))
+
+	reads := r.SelectionReads([]recovery.ExtractStep{step})
+	if len(reads) != 1 {
+		t.Fatalf("got %d reads, want 1", len(reads))
+	}
+	rd := reads[0]
+	if !rd.Ranged {
+		t.Fatalf("a framed selection should estimate a ranged read: %+v", rd)
+	}
+	if rd.Bytes <= 0 || rd.Bytes > int64(encTotal)/4 {
+		t.Fatalf("ranged estimate = %d of %d encoded bytes; want a small fraction", rd.Bytes, encTotal)
+	}
+	if store.rangedBytes != 0 || len(store.opened) != 0 {
+		t.Fatalf("the estimate must not read payload (ranged=%d opened=%v)", store.rangedBytes, store.opened)
+	}
+}
+
+// TestSelectionReadsWholeFallback: when an ingredient is missing (here a non-spliceable
+// archiver), the estimate reports the whole archive — not ranged — so the forecast still
+// matches the whole-stream read the extract will fall back to.
+func TestSelectionReadsWholeFallback(t *testing.T) {
+	arch := noSplice{gnutarOrSkip(t)}
+	dle := "app01-data"
+	store, step, _, encTotal := framedFixture(t, dle)
+	step.Members = []string{"tail.txt"}
+
+	deps := testDeps(store, []record.Archive{
+		{Run: step.RunID, DLE: dle, Level: 0, Compress: "gzip", Compressed: int64(encTotal), Parts: 1},
+	})
+	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) { return arch, nil }
+	r := New(deps)
+
+	reads := r.SelectionReads([]recovery.ExtractStep{step})
+	if len(reads) != 1 || reads[0].Ranged {
+		t.Fatalf("a non-spliceable archive must estimate a whole read, got %+v", reads)
+	}
+	if reads[0].Bytes != int64(encTotal) {
+		t.Fatalf("whole estimate = %d, want the full %d encoded bytes", reads[0].Bytes, encTotal)
+	}
+}

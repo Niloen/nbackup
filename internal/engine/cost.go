@@ -38,7 +38,15 @@ func (e *Engine) RestoreCost(dles []string, asOf string) ReadEstimate {
 	return e.acct.RestoreCost(dles, asOf)
 }
 
-// SelectionCost prices a file-level recovery; see accounting.
+// SelectionCost prices a file-level recovery. The restorer plans how each archive will
+// actually be read — a framed/atomic archive fetches only its selected members' covering
+// frames, everything else the whole payload — and the accountant prices that real egress,
+// so the confirmation matches what the extract pulls (not the whole archive by default).
 func (e *Engine) SelectionCost(steps []recovery.ExtractStep) ReadEstimate {
-	return e.acct.SelectionCost(steps)
+	reads := e.rst.SelectionReads(steps)
+	items := make([]accounting.ReadItem, 0, len(reads))
+	for _, rd := range reads {
+		items = append(items, accounting.ReadItem{Ref: rd.Ref, Bytes: rd.Bytes, Parts: rd.Parts, Ranged: rd.Ranged})
+	}
+	return e.acct.PriceRead(items)
 }
