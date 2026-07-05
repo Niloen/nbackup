@@ -342,6 +342,23 @@ archivers:
   #   #                                        # planning (without it the size is
   #   #                                        # unknown and plans show 0)
   #   # extension: .sqlite                     # payload filename extension (default .raw)
+  # The POSTGRES archiver — REQUIRES PostgreSQL 17+ (server AND client tools):
+  # native incremental base backups. Level 0 = pg_basebackup, level N = the block
+  # deltas since the previous dump; restore merges the chain with
+  # pg_combinebackup. The DLE source string is a libpq connection reference
+  # ("app_prod", "service=prod", "host=/run/postgresql dbname=app") and auth is
+  # the client's own libpq config (peer auth, ~/.pgpass, ~/.pg_service.conf) — no
+  # credentials in this file. One DLE per CLUSTER (a base backup images the whole
+  # cluster); requires `summarize_wal = on` (`nb check` verifies the tools and the
+  # server, printing the ALTER SYSTEM line). Backups report their tables:
+  # `nb recover --inventory` lists them with sizes, and pointing --path (or the
+  # shell's `add`) at a table name exports it as ready-to-import pg_dump SQL.
+  # On PostgreSQL 16 and older, use the pipe archiver with pg_dump instead
+  # (full backups only) — see the recipe in the configuration reference:
+  # docs/reference/configuration.md, "PostgreSQL 16 and older".
+  # pg:
+  #   type: postgres
+  #   # bin_dir: /usr/lib/postgresql/17/bin  # if the v17 tools are off PATH
 
 # Named dumptypes (Amanda's "dumptype"): an archiver reference plus per-DLE policy —
 # what to skip (exclude) and encryption. Excludes live here, not on the archiver:

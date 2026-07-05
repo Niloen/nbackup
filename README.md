@@ -741,6 +741,8 @@ archivers:
   # `add`) at a table name exports it as ready-to-import pg_dump SQL — nb
   # restores the cluster to scratch, dumps the table, and hands you the
   # file; loading it into your database stays your own, explicit act.
+  # (PostgreSQL 16 and older: use the pipe archiver with pg_dump instead —
+  # full backups only; see the recipe in docs/reference/configuration.md.)
   # pg:
   #   type: postgres
   #   bin_dir: /usr/lib/postgresql/17/bin  # if the v17 tools are off PATH

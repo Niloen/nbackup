@@ -308,6 +308,51 @@ Incremental state is **not** an archiver option — its location is the host-lev
 live there). The archiver owns only its format knobs like `tar_path`; a
 per-host value goes in `hosts.<h>.archivers.<type>` (below).
 
+### PostgreSQL 16 and older
+
+Many production clusters run 13–16, where the `postgres` archiver cannot work
+(the server has no incremental base backups). The honest fallback is the
+`pipe` archiver around `pg_dump` — **full backups only**, but with all of
+NBackup's scheduling, retention, cycle safety, copies/sync, checksum
+verification, and drills applied to those fulls:
+
+```yaml
+archivers:
+  pgdump:
+    type: pipe
+    backup_command: "pg_dump --format=custom {source}"
+    # pg_restore turns the stream back into ready-to-import SQL under the
+    # restore destination ({dest} must be an existing directory; a drill's
+    # scratch directory is). Importing it stays your own, explicit act:
+    #   psql -d <db> -f restored.sql
+    restore_command: "pg_restore --file={dest}/restored.sql"
+    extension: .dump
+    # estimate_command: "psql -Atc 'select pg_database_size(current_database())' {source}"
+
+dumptypes:
+  databases:
+    archiver: pgdump
+    compress:
+      scheme: none      # pg_dump's custom format is already compressed
+
+sources:
+  databases:
+    db01: [app_prod]    # per-DATABASE (pg_dump), unlike the cluster-level postgres type
+```
+
+What you lose against the `postgres` type: **no incrementals** (the pipe
+archiver keeps no incremental state, so it never reports a base and the
+planner schedules a full every run — levels never rise above 0), **no
+per-file browse** or `nb mount`, and **no table inventory/export** (the
+stream is opaque; structural verify degrades to a clean decode). For a
+whole-cluster dump swap in `pg_dumpall` and drop the per-database source
+strings.
+
+After upgrading the cluster to 17+, point the dumptype's `archiver` at a
+`postgres` definition: the next run starts a fresh chain with a full (and the
+DLE shape changes from one-per-database to one-per-cluster). The old pipe
+fulls remain restorable as recorded, with `pg_restore` alone.
+
 ## dumptypes
 
 A map of named dumptypes: an archiver reference plus per-DLE policy — what to

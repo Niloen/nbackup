@@ -154,7 +154,9 @@ daemons on every client, and a SQL catalog that is precious state to operate
 and back up. NBackup is **one binary, no daemons, no database** — the catalog
 is a disposable cache, clients need only `sshd` and `tar` — while keeping the
 parts that made that generation trustworthy: balanced fulls, cycle safety,
-real tape support, and a nightly report in your inbox.
+real tape support, and a nightly report in your inbox. Coming from Amanda?
+[Migrating from Amanda](migrating-from-amanda) maps the vocabulary
+(disklist, dumptype, tapecycle, the `am*` commands) onto NBackup.
 
 ### vs. filesystem snapshots and `rsync`-style mirrors
 
