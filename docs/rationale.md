@@ -115,7 +115,9 @@ NBackup deliberately does **not** do these things:
 ## How NBackup compares
 
 An honest map of the field — including where the other tool is the better
-choice.
+choice. This is the short form; the full tool-by-tool comparison (including
+pgBackRest/barman and a summary table) is
+[NBackup vs the alternatives](compared).
 
 ### vs. chunk-store tools (restic, Borg, Kopia)
 
