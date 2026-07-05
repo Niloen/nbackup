@@ -179,7 +179,7 @@ func payloadExt(h record.Header) string {
 	// part index goes BEFORE the extensions — …-L0.p000.tar.zst.gpg — keeping the
 	// name honest (tools recognize it, the file-loop stock recovery works per file)
 	// and making the shape operator-visible at a bare bucket listing.
-	if h.Shape == record.ShapeAtomic {
+	if h.Shape.StandaloneParts() {
 		return fmt.Sprintf(".p%03d", h.Part) + ext
 	}
 	// A split archive's payload is one SLICE of a multi-part whole, not a standalone

@@ -113,7 +113,7 @@ func Flush(d FlushDeps) (flushed int, err error) {
 					// not fail the flush.
 					idx, _ := d.Index(holding, ref, ap.Index)
 					arch.Members, arch.Frames = idx.Members, idx.Frames
-					if arch.Shape == record.ShapeAtomic {
+					if !arch.Shape.Resplittable() {
 						// The holding stages atoms in final shape; its placement's seals
 						// drive the landing copy's 1:1 atom carriage.
 						arch.PartSeals = ap.Seals

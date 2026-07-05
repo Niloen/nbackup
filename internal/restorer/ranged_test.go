@@ -85,7 +85,7 @@ func framedFixture(t *testing.T, dle string) (*fakeStore, recovery.ExtractStep, 
 		ranged:   true,
 	}
 	step := recovery.ExtractStep{
-		Step: recovery.Step{RunID: r.Run, DLE: dle, Level: 0, Archiver: "gnutar", Compress: "gzip"},
+		Step: recovery.Step{RunID: r.Run, DLE: dle, Level: 0, Archiver: "gnutar", Compress: "gzip", Shape: record.ShapeFramed},
 	}
 	return store, step, members, len(enc)
 }
@@ -225,7 +225,7 @@ func TestSampleFrame(t *testing.T) {
 	store, step, members, _ := framedFixture(t, dle)
 	deps := testDeps(store, nil)
 	r := New(deps)
-	arch2 := record.Archive{Run: step.RunID, DLE: dle, Level: 0, Compress: "gzip"}
+	arch2 := record.Archive{Run: step.RunID, DLE: dle, Level: 0, Compress: "gzip", Shape: record.ShapeFramed}
 	aref := ref(step.RunID, dle, 0)
 
 	res, err := r.Sample("", arch2, crypt.Options{}, arch, 0)

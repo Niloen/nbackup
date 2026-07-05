@@ -31,24 +31,30 @@ type Archive struct {
 	Parts        int        `json:"parts,omitempty"`      // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
 	BaseRun      string     `json:"base_run,omitempty"`   // for level>=1, the run whose state this builds on (a full omits it)
 	CreatedAt    time.Time  `json:"created_at"`           // when this archive committed (landed) — per-archive, the basis for retention age and the "last archive added" display
-	Shape        string     `json:"shape,omitempty"`      // stream shape (ShapeStream/ShapeFramed): how the encoded payload is laid out. Kept in the footer — a reader decodes without config — and archive-invariant across copies (the encoded bytes are carried verbatim).
+	Shape        Shape      `json:"shape,omitempty"`      // stream shape (see Shape): how the encoded payload is laid out. Kept in the footer — a reader decodes without config — and archive-invariant across copies (the encoded bytes are carried verbatim).
 	Members      []Member   `json:"members,omitempty"`    // members archived, in stream order (see Member); the raw path token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
 	Frames       []Frame    `json:"frames,omitempty"`     // a framed archive's decode-restart table, in stream order (see Frame). Like Members it rides the per-archive index, never the footer; unlike part seals it is archive-invariant (encoded-stream domain), so copies carry it unchanged.
 	PartSeals    []PartSeal `json:"part_seals,omitempty"` // per-part seals, index-aligned with the parts (Header.Part order). Like Parts, a fact about THIS placement's layout (a copy re-splits and re-seals its own parts): the catalog moves them onto the placement's record and strips them from the run's medium-independent content.
 }
 
-// Archive stream shapes (Archive.Shape, Header.Shape). The shape is recorded, never
-// re-derived, so a reader needs no config to decode; absence ("" — ShapeStream) means
-// exactly today's behavior and selects the unchanged streaming read path.
+// Shape is an archive's stream shape (Archive.Shape, Header.Shape): how the encoded
+// payload is laid out. The shape is recorded, never re-derived, so a reader needs no
+// config to decode; the zero value (ShapeStream) means exactly the pre-shape behavior
+// and selects the unchanged streaming read path. What a shape implies for copying,
+// naming, and ranged decoding is read through its properties (Resplittable,
+// StandaloneParts, RestartTable), so shape-dependent code states the fact it relies
+// on rather than naming a shape.
+type Shape string
+
 const (
 	// ShapeStream is the default: one opaque encoded stream; parts are slices of it.
 	// It is the empty string so every pre-shape record is a stream by construction.
-	ShapeStream = ""
+	ShapeStream Shape = ""
 	// ShapeFramed is FRAMED-INVISIBLE: the encoder restarted every frame_size of raw
 	// input, so the stream carries invisible decode-restart points — byte-identical
 	// to a stream for every whole-stream reader and the stock one-liner — and the
 	// per-archive index records the frame table enabling ranged reads.
-	ShapeFramed = "framed"
+	ShapeFramed Shape = "framed"
 	// ShapeAtomic is FRAMED-ATOMIC: a FrameSafe pipeline (a PerFrame stage — gpg —
 	// over Full inner stages) whose parts are indivisible sealed atoms, each ONE
 	// complete encrypted message on every medium. Copies carry atoms 1:1 and never
@@ -56,8 +62,59 @@ const (
 	// is a file loop (`for p in …; do gpg -d "$p"; done | zstd -d | tar x`). There is
 	// no separate frame table: the per-part seals' cumulative RawSize IS the
 	// member→atom map.
-	ShapeAtomic = "atomic"
+	ShapeAtomic Shape = "atomic"
 )
+
+// Resplittable reports whether a copy may re-cut the archive's payload into its own
+// part layout. Stream and framed parts are slices of one opaque encoded stream, so a
+// copy re-splits them to fit its medium's volumes and re-seals its own parts. Atomic
+// parts are sealed messages — re-cutting one needs the key — so a copy must carry the
+// atoms 1:1, seal for seal, and refuses when it cannot (a target part ceiling below
+// an atom's size, or no aligned seals to cut by).
+func (s Shape) Resplittable() bool { return s != ShapeAtomic }
+
+// StandaloneParts reports whether each part file is a complete valid file of its type
+// (an atom: one whole gpg message) rather than a slice of a multi-part whole. It
+// drives the part's on-medium name (the .pNNN index goes before the extensions, so
+// tools recognize the file) and the stock recovery style (a per-file loop instead of
+// concatenate-then-decode).
+func (s Shape) StandaloneParts() bool { return s == ShapeAtomic }
+
+// RestartTable returns the shape's decode-restart table — where a fresh decode may
+// start, the basis of ranged reads — or nil when the shape has none (a plain stream)
+// or the ingredient it needs was never recorded:
+//
+//   - framed: the per-archive index's frame table, recorded at encode time.
+//   - atomic: the per-part seals' cumulative (RawSize, Size) sums — each atom is a
+//     restart point, so the seals ARE the table and no separate one rides the index.
+//
+// Callers treat nil uniformly as "whole-stream reads only".
+func (s Shape) RestartTable(frames []Frame, seals []PartSeal) []Frame {
+	switch s {
+	case ShapeFramed:
+		if len(frames) == 0 {
+			return nil
+		}
+		return frames
+	case ShapeAtomic:
+		if len(seals) == 0 {
+			return nil
+		}
+		table := make([]Frame, len(seals))
+		var raw, enc int64
+		for i, seal := range seals {
+			if seal.RawSize <= 0 {
+				return nil // RawSize never recorded: no member→atom map
+			}
+			table[i] = Frame{Raw: raw, Enc: enc}
+			raw += seal.RawSize
+			enc += seal.Size
+		}
+		return table
+	default:
+		return nil
+	}
+}
 
 // Frame is one decode-restart boundary of a framed archive: the raw-stream offset and
 // the encoded-stream offset at which a fresh decode may start. Frames are recorded in

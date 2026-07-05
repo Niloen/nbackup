@@ -585,7 +585,9 @@ func stockAtomPipeline(encrypt, compress, passphraseFile string) (string, error)
 }
 
 func (d *driller) stockExtractStep(step recovery.Step, dest, medium string, logf Logf) (drill.Class, string) {
-	if step.Shape == record.ShapeAtomic {
+	if step.Shape.StandaloneParts() {
+		// Each part is a complete file of its type, so the stock recovery is the
+		// documented per-file loop over the fetched atoms, not concatenate-then-decode.
 		return d.stockExtractAtomic(step, dest, medium, logf)
 	}
 	// Fetch the raw (still-encrypted/compressed) payload to a temp file as a transfer whose

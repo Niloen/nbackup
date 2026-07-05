@@ -15,10 +15,10 @@ type Step struct {
 	RunID    string
 	DLE      string
 	Level    int
-	Archiver string // archiver type that produced the archive
-	Compress string // compression scheme to reverse before extracting
-	Encrypt  string // encryption scheme to reverse before decompressing ("" = plaintext)
-	Shape    string // recorded stream shape (record.ShapeStream/Framed/Atomic) — selects the decode mode (one child vs per-atom loop)
+	Archiver string       // archiver type that produced the archive
+	Compress string       // compression scheme to reverse before extracting
+	Encrypt  string       // encryption scheme to reverse before decompressing ("" = plaintext)
+	Shape    record.Shape // recorded stream shape — selects the decode mode (one child vs per-atom loop)
 }
 
 // Chain returns the archives needed to restore a DLE as of the target run, in

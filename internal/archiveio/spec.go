@@ -19,8 +19,8 @@ type ArchiveSpec struct {
 	Archiver string
 	Compress string
 	Encrypt  string
-	Shape    string // stream shape (record.ShapeStream/ShapeFramed/ShapeAtomic), resolved by the dumper from the pipeline's declared capabilities
-	AtomSize int64  // the atomic shape's atom bound (compressed bytes per sealed part); 0 for other shapes
+	Shape    record.Shape // stream shape, resolved by the dumper from the pipeline's declared capabilities
+	AtomSize int64        // the atomic shape's atom bound (compressed bytes per sealed part); 0 for other shapes
 	Level    int
 	BaseRun  string
 }

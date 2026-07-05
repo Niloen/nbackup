@@ -275,7 +275,7 @@ func (r *Restorer) planDecode(step recovery.Step, targetHost string) (decodePlan
 	// An atomic archive's decode cuts the stream at its seals' sizes and decrypts per
 	// atom — resolved HERE, once, so no caller ever fetches sizes or picks a variant.
 	if step.Shape == record.ShapeAtomic {
-		sizes, _, err := r.atomSizes(archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level})
+		sizes, err := r.atomSizes(archiveio.Ref{Run: step.RunID, DLE: step.DLE, Level: step.Level})
 		if err != nil {
 			return decodePlan{}, err
 		}

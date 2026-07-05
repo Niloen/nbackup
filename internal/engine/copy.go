@@ -307,10 +307,10 @@ func (c *copier) jobsForRun(runID string, archives []record.Archive) []copyJob {
 		ref := archiveio.Ref{Run: runID, DLE: a.DLE, Level: a.Level}
 		idx, _ := c.fs.Index(ref)
 		a.Members, a.Frames = idx.Members, idx.Frames
-		if a.Shape == record.ShapeAtomic {
-			// An atomic copy needs the source's per-part seals: they drive the 1:1
-			// atom cut and carry the RawSize map. Seals are archive-invariant for
-			// atoms, so any placement with an aligned set serves.
+		if !a.Shape.Resplittable() {
+			// A non-resplittable copy needs the source's per-part seals: they drive
+			// the 1:1 atom cut and carry the RawSize map. Seals are archive-invariant
+			// for atoms, so any placement with an aligned set serves.
 			a.PartSeals = atomSeals(c.cat.Placements(runID), a.DLE, a.Level, a.Parts)
 		}
 		jobs = append(jobs, copyJob{ref: ref, meta: a, est: a.Compressed})
@@ -390,7 +390,7 @@ func (c *copier) transferOne(ctx context.Context, job copyJob, fromMedia, target
 	// Sync-time half of the atom validation ladder: a sealed atom cannot be re-cut
 	// without the key, so an archive whose atoms cannot be carried whole is refused
 	// per-archive (everything that fits is still carried by its own job).
-	if job.meta.Shape == record.ShapeAtomic {
+	if !job.meta.Shape.Resplittable() {
 		if len(job.meta.PartSeals) != job.meta.Parts || job.meta.Parts == 0 {
 			return fmt.Errorf("copy %s L%d: atomic archive records no aligned per-part seals on any copy, so its atoms cannot be carried 1:1 — run `nb rebuild`, or re-dump", job.ref.DLE, job.ref.Level)
 		}

@@ -149,18 +149,19 @@ type selectionPlan struct {
 func (r *Restorer) planSelection(st recovery.ExtractStep, idx record.Index) (selectionPlan, bool) {
 	ref := archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level}
 	if st.Shape == record.ShapeAtomic {
-		encSizes, rawSizes, err := r.atomSizes(ref)
+		seals, err := r.deps.Store.AtomSeals(ref)
 		if err != nil {
 			return selectionPlan{}, false
 		}
-		table := atomTable(encSizes, rawSizes)
+		table := st.Shape.RestartTable(nil, seals)
 		if table == nil {
-			return selectionPlan{}, false // RawSize never recorded: whole stream
+			return selectionPlan{}, false // no seals, or RawSize never recorded: whole stream
 		}
 		decrypt, decompress, err := buildDecode(st.Compress, r.deps.CompressOpts, st.Encrypt, r.decryptOptsFor(st.DLE))
 		if err != nil {
 			return selectionPlan{}, false
 		}
+		encSizes := sealSizes(seals)
 		return selectionPlan{
 			table: table,
 			decode: func(g rangeGroup, rc io.ReadCloser) io.ReadCloser {
@@ -170,7 +171,8 @@ func (r *Restorer) planSelection(st recovery.ExtractStep, idx record.Index) (sel
 		}, true
 	}
 	identity := (st.Compress == "" || st.Compress == "none") && (st.Encrypt == "" || st.Encrypt == "none")
-	if len(idx.Frames) == 0 && !identity {
+	table := st.Shape.RestartTable(idx.Frames, nil)
+	if table == nil && !identity {
 		return selectionPlan{}, false // no restart points and a real transform: whole stream only
 	}
 	var decompress programs.Cmd
@@ -181,7 +183,7 @@ func (r *Restorer) planSelection(st recovery.ExtractStep, idx record.Index) (sel
 		}
 		decompress = cf.Reverse
 	}
-	return selectionPlan{table: idx.Frames, decompress: decompress}, true
+	return selectionPlan{table: table, decompress: decompress}, true
 }
 
 // extractSelected attempts the ranged extraction of one step's selection, per the
@@ -300,29 +302,32 @@ func (r *Restorer) Sample(medium string, a record.Archive, opts crypt.Options, a
 	if err != nil || len(idx.Members) == 0 {
 		return res, nil
 	}
-	table := idx.Frames
+	var table []record.Frame
 	var decode func(rangeGroup, io.ReadCloser) io.ReadCloser
 	switch {
 	case a.Shape == record.ShapeAtomic:
 		res.Unit = "atom"
-		encSizes, rawSizes, aerr := r.atomSizes(ref)
+		seals, aerr := r.deps.Store.AtomSeals(ref)
 		if aerr != nil {
 			return res, nil // seal-less copy: nothing to cut against
 		}
-		if table = atomTable(encSizes, rawSizes); table == nil {
+		if table = a.Shape.RestartTable(nil, seals); table == nil {
 			return res, nil
 		}
 		decrypt, _, derr := buildDecode(a.Compress, r.deps.CompressOpts, a.Encrypt, opts)
 		if derr != nil {
 			return res, derr
 		}
+		encSizes := sealSizes(seals)
 		decode = func(g rangeGroup, rc io.ReadCloser) io.ReadCloser {
 			return atomicPlaintext(rc, groupAtomSizes(table, encSizes, g), decrypt)
 		}
 	case a.Encrypt != "" && a.Encrypt != "none":
 		return res, nil // encrypted stream shape: whole-archive checks only
-	case len(table) == 0:
-		return res, nil
+	default:
+		if table = a.Shape.RestartTable(idx.Frames, nil); table == nil {
+			return res, nil
+		}
 	}
 	var decompress programs.Cmd
 	if a.Compress != "" && a.Compress != "none" {
