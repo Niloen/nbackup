@@ -51,13 +51,20 @@ func (p *postgres) unitsFor(source string, members []record.Member) []record.Uni
 		}
 		// One row per table/matview: its kind, filenode, its TOAST relation's and
 		// TOAST index's filenodes (0/empty when none), name, and total size.
+		// System schemas (pg_catalog, information_schema, pg_toast, per-session
+		// pg_temp) are the cluster's own machinery, not the user's data — a dump of
+		// a small database otherwise buries three real tables under ~160 catalog
+		// relations. They ride inside the base backup regardless; the inventory is
+		// the human-facing "what's in here", so it lists only user relations.
 		rels, err := p.psql(conn, `SELECT c.relkind, c.relfilenode, coalesce(tc.relfilenode, 0), coalesce(tic.relfilenode, 0), n.nspname, c.relname, pg_table_size(c.oid)
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_class tc ON tc.oid = c.reltoastrelid
 LEFT JOIN pg_index ti ON ti.indrelid = tc.oid
 LEFT JOIN pg_class tic ON tic.oid = ti.indexrelid
-WHERE c.relkind IN ('r','m') AND c.relfilenode <> 0`)
+WHERE c.relkind IN ('r','m') AND c.relfilenode <> 0
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'`)
 		if err != nil {
 			continue
 		}

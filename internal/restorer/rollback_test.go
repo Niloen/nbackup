@@ -28,7 +28,8 @@ func (s scriptArchiver) RestoreStage(dest string, members []string) programs.Cmd
 }
 
 // Tree-style, so the rollback tests exercise the guard/rollback paths.
-func (scriptArchiver) DestIsDir() bool { return true }
+func (scriptArchiver) DestIsDir() bool    { return true }
+func (scriptArchiver) SourceIsPath() bool { return true }
 
 // The defaults (the embedded interface is nil; see fakeArchiver).
 func (scriptArchiver) RestoreIsCombine() bool                     { return false }

@@ -29,7 +29,7 @@ func TestExportStageScript(t *testing.T) {
 	if exp == nil || exp.Ext() != ".sql" {
 		t.Fatalf("exporter = %v", exp)
 	}
-	cmd := exp.Stage("/scratch/data", "/out", []string{"table.postgres.public.users", "table.postgres.public.orders"})
+	cmd := exp.Stage("/scratch/data", "/out", "host=db user=bakop dbname=app", []string{"table.postgres.public.users", "table.postgres.public.orders"})
 	script := strings.Join(cmd.Args, " ")
 	for _, want := range []string{
 		"chmod 0700 '/scratch/data'",
@@ -38,19 +38,46 @@ func TestExportStageScript(t *testing.T) {
 		"archive_mode=off",
 		"logging_collector=off",
 		"external_pid_file=''",
+		`hba_file='$d/pg_hba.conf'`,      // prod's auth can't gate the disposable boot
+		`printf 'local all all trust\n'`, // the trust hba the boot points at
 		"trap cleanup EXIT",
 		"'/opt/pg/bin/pg_ctl' -D '/scratch/data' -w -l",
-		`'/opt/pg/bin/pg_dump' -h "$d" -p 5433 -d 'postgres' -t 'public.users' -f '/out/table.postgres.public.users.sql'`,
+		// pg_dump connects AS the DLE's configured role, not the restoring OS user.
+		`'/opt/pg/bin/pg_dump' -h "$d" -p 5433 -U 'bakop' -d 'postgres' -t 'public.users' -f '/out/table.postgres.public.users.sql'`,
 		`-t 'public.orders' -f '/out/table.postgres.public.orders.sql'`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("export script lacks %q:\n%s", want, script)
 		}
 	}
+	// A source with no user= (bare dbname) leaves pg_dump's default — no -U.
+	noUser := strings.Join(exp.Stage("/scratch/data", "/out", "app_prod", []string{"table.postgres.public.users"}).Args, " ")
+	if strings.Contains(noUser, "-U ") {
+		t.Fatalf("bare-dbname source should not force a -U:\n%s", noUser)
+	}
 	// A malformed identity must fail the stage, not dump the wrong thing.
-	bad := exp.Stage("/scratch/data", "/out", []string{"nonsense"})
+	bad := exp.Stage("/scratch/data", "/out", "", []string{"nonsense"})
 	if !strings.Contains(strings.Join(bad.Args, " "), "exit 2") {
 		t.Fatal("malformed unit must produce a failing stage")
+	}
+}
+
+// TestConnUser pins the role pg_dump connects as: the conninfo `user=` keyword
+// or a URI's userinfo, and empty when the source names no user.
+func TestConnUser(t *testing.T) {
+	cases := map[string]string{
+		"host=/tmp/pgrt port=55432 user=postgres dbname=app_prod": "postgres",
+		"user=bakop":                         "bakop",
+		"app_prod":                           "",
+		"service=legacy":                     "",
+		"postgresql://alice@db.internal/app": "alice",
+		"postgres://bob:secret@db/app":       "bob",
+		"postgresql://db.internal/app":       "",
+	}
+	for source, want := range cases {
+		if got := connUser(source); got != want {
+			t.Errorf("connUser(%q) = %q, want %q", source, got, want)
+		}
 	}
 }
 

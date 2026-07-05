@@ -126,6 +126,11 @@ func (p *pipe) RestoreStage(dest string, _ []string) programs.Cmd {
 // so the generic layer must not create, guard, or clear anything there.
 func (p *pipe) DestIsDir() bool { return false }
 
+// SourceIsPath: no — the DLE's source is an opaque token the user's backup_command
+// interprets ({source}), not necessarily a filesystem path; the generic layer must
+// not stat it.
+func (p *pipe) SourceIsPath() bool { return false }
+
 func (p *pipe) Ext() string { return p.ext }
 
 // CanList: an opaque stream has no enumerable members; structural verify degrades

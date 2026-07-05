@@ -28,6 +28,7 @@ package postgres
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -77,8 +78,17 @@ func (p *postgres) bin(tool string) string {
 // returns its unaligned, tuples-only output. -w fails rather than prompts: an
 // unauthenticated identity must surface as an error, never a hang.
 func (p *postgres) psql(source, sql string) (string, error) {
-	out, err := p.ex.Command(p.bin("psql"), "-X", "-Atw", "-d", source, "-c", sql).Output()
+	cmd := p.ex.Command(p.bin("psql"), "-X", "-Atw", "-d", source, "-c", sql)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
+		// psql's own message ("connection refused", "role … does not exist",
+		// "password authentication failed") is the real diagnosis; a bare
+		// "exit status 2" from the exec error hides it. Surface it verbatim.
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", errors.New(msg)
+		}
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
@@ -124,7 +134,7 @@ func pgMajor(version string) int {
 // incremental (level ≥ 1) dumps this archiver schedules.
 func (p *postgres) CheckSource(source string) error {
 	if _, err := p.psql(source, "SELECT 1"); err != nil {
-		return fmt.Errorf("cannot connect: %w (auth is the client's libpq configuration — peer auth as this identity, ~/.pgpass, or ~/.pg_service.conf; grant once with: CREATE ROLE <user> LOGIN REPLICATION)", err)
+		return fmt.Errorf("cannot connect: %w\n(check the server is reachable; auth is the client's own libpq config — peer auth as this identity, ~/.pgpass, or ~/.pg_service.conf; grant a role once with: CREATE ROLE <user> LOGIN REPLICATION)", err)
 	}
 	on, err := p.psql(source, "SHOW summarize_wal")
 	if err != nil {
@@ -187,9 +197,13 @@ func (p *postgres) BackupSource(r archiver.BackupRequest) (*archiver.BackupSourc
 		`trap 'rm -rf "$d"' EXIT`,
 		`mkfifo "$d/m" "$d/i"`,
 		// Neither tar exits before its FIFO hits EOF (no --occurrence), so tee
-		// never takes a SIGPIPE from a reader that stopped early.
-		fmt.Sprintf(`tar -xOf "$d/m" backup_manifest > %s & p1=$!`, shQuote(work)),
-		fmt.Sprintf(`tar --list --block-number -f "$d/i" > %s & p2=$!`, shQuote(indexPath)),
+		// never takes a SIGPIPE from a reader that stopped early. Their stderr is
+		// silenced: when pg_basebackup fails it feeds tee nothing, and two tars each
+		// crying "This does not look like a tar archive" would bury the ONE message
+		// that matters (pg_basebackup's) — which pipefail preserves as the stage's
+		// exit and Finish surfaces from this stage's stderr.
+		fmt.Sprintf(`tar -xOf "$d/m" backup_manifest > %s 2>/dev/null & p1=$!`, shQuote(work)),
+		fmt.Sprintf(`tar --list --block-number -f "$d/i" > %s 2>/dev/null & p2=$!`, shQuote(indexPath)),
 		fmt.Sprintf(`%s | tee "$d/m" "$d/i"`, basebackup),
 		`wait $p1 $p2`,
 	}, "\n")
@@ -240,6 +254,11 @@ func (p *postgres) Ext() string { return ".tar" }
 // DestIsDir: a restore lands a data directory the generic layer owns the
 // lifecycle of (created empty, rolled back on a failed chain).
 func (p *postgres) DestIsDir() bool { return true }
+
+// SourceIsPath: no — the DLE's source is a libpq connection reference, not a
+// filesystem path; a preview must not stat it (readiness is CheckSource's live
+// connect, proven by `nb check`).
+func (p *postgres) SourceIsPath() bool { return false }
 
 // CanList: `tar -t` enumerates the cluster files.
 func (p *postgres) CanList() bool { return true }

@@ -147,6 +147,15 @@ type Archiver interface {
 	// alone interprets it (pipe hands it to the consumer command verbatim), so the
 	// generic layer must neither create nor guard nor clear anything there.
 	DestIsDir() bool
+	// SourceIsPath declares that the DLE's source string is a local filesystem path
+	// this archiver reads directly (gnutar: a directory tree) — so a preview may stat
+	// it to warn about a missing/unreadable source before the run. false = the source
+	// is an opaque reference the archiver alone interprets (postgres: a libpq
+	// connection string; pipe: a token for the user's command), which the generic
+	// layer must NOT stat — doing so mis-warns "source path is missing" for a perfectly
+	// valid conninfo. Readiness of a non-path source is the archiver's own live probe
+	// (postgres CheckSource connects), surfaced by `nb check`, not a filesystem stat.
+	SourceIsPath() bool
 	// Ext is the filename extension for this archiver's raw stream (gnutar: ".tar"),
 	// recorded per-archive so a payload's on-medium name says what stock tool reads
 	// it — the naming peer of the recorded compress/encrypt schemes.
@@ -229,11 +238,13 @@ type Exporter interface {
 	Ext() string
 	// Stage returns the program stage that materializes the named units (unit
 	// identities, resolved by the caller against the archive's inventory) from
-	// the restored tree at dataDir into destDir. It runs on the host that holds
-	// dataDir, owns any service it starts there (and must tear it down on every
-	// path), and must not touch anything outside dataDir, destDir, and scratch
-	// of its own making.
-	Stage(dataDir, destDir string, units []string) programs.Cmd
+	// the restored tree at dataDir into destDir. source is the DLE's own source
+	// string (postgres: the libpq connection reference — the exporter reads the
+	// role to connect AS from it; the throwaway cluster's roles are prod's, not
+	// the restoring OS user's). It runs on the host that holds dataDir, owns any
+	// service it starts there (and must tear it down on every path), and must not
+	// touch anything outside dataDir, destDir, and scratch of its own making.
+	Stage(dataDir, destDir, source string, units []string) programs.Cmd
 }
 
 // Assembler merges one logical file's chain versions for browse-time reads — the

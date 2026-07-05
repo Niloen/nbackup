@@ -144,6 +144,20 @@ func (t *toolchain) openArchiver(key, typeName string, options map[string]string
 	return d, nil
 }
 
+// sourceIsPath reports whether a dumptype's archiver reads the DLE source as a
+// local filesystem path (gnutar) rather than an opaque reference (postgres conninfo,
+// pipe token). The plan preview uses it to decide whether stat'ing the source is
+// meaningful. A resolution failure defaults to true — the same source-is-a-path
+// assumption the preview held before archivers existed — and surfaces through the
+// dumptype pre-flight that runs first anyway.
+func (t *toolchain) sourceIsPath(dtName, host string) bool {
+	arch, err := t.archiverFor(dtName, host)
+	if err != nil {
+		return true
+	}
+	return arch.SourceIsPath()
+}
+
 // preflightDumptype validates one dumptype's pipeline tools before a dump: it resolves
 // the archiver for (dumptype, host) — and runs its readiness Check when checkArchiver is
 // set (the real dump does; plan validation only resolves) — and validates the dumptype's

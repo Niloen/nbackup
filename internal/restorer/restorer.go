@@ -98,10 +98,15 @@ type Deps struct {
 	// when the DLE is no longer in the config (an old run's DLE may be removed).
 	EncryptionFor func(dleName string) (config.EncryptConfig, bool)
 	// KnownHosts are the names a `--to` restore may target (hosts: + source hosts).
-	KnownHosts   func() []string
-	DisplayDLE   func(slug string) string // host:path identity for logging
-	CompressOpts compress.Options         // decompress invocation options
-	DecryptOpts  crypt.Options            // config-wide default decrypt key reference
+	KnownHosts func() []string
+	DisplayDLE func(slug string) string // host:path identity for logging
+	// SourceOf returns a DLE slug's raw source string (gnutar: a path; postgres:
+	// the libpq connection reference) — what the archiver interpreted at dump
+	// time. "" when the DLE is no longer configured. Unit export forwards it so an
+	// archiver's exporter can honor the source's own connection identity.
+	SourceOf     func(slug string) string
+	CompressOpts compress.Options // decompress invocation options
+	DecryptOpts  crypt.Options    // config-wide default decrypt key reference
 }
 
 // Restorer executes recovery plans. It is deliberately a concrete struct: the

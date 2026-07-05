@@ -101,8 +101,9 @@ func (fakeArchiver) RestoreStage(destDir string, members []string) programs.Cmd 
 func (fakeArchiver) SpliceTrailer() []byte { return []byte{} }
 
 // A tree-style fake: the tests exercise the directory guard/rollback paths.
-func (fakeArchiver) DestIsDir() bool { return true }
-func (fakeArchiver) CanList() bool   { return true }
+func (fakeArchiver) DestIsDir() bool    { return true }
+func (fakeArchiver) SourceIsPath() bool { return true }
+func (fakeArchiver) CanList() bool      { return true }
 
 // Additive replay, no browse-time assembly — the defaults (the embedded
 // interface is nil, so the promoted methods would panic when the restorer

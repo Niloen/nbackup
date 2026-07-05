@@ -190,6 +190,7 @@ func build(cfg *config.Config) (*Engine, error) {
 		EncryptionFor: e.dleEncryption,
 		KnownHosts:    e.knownHosts,
 		DisplayDLE:    e.DisplayDLE,
+		SourceOf:      e.dles.source,
 		CompressOpts:  e.tc.fopts,
 		DecryptOpts:   e.tc.dcopts,
 	})

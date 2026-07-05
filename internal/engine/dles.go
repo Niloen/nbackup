@@ -57,6 +57,20 @@ func (d *dleDirectory) displayMap() map[string]string {
 	return m
 }
 
+// source maps an internal DLE slug to its raw source string (a path, or a libpq
+// connection reference) as this configuration defines it. "" when the slug is
+// not a configured DLE (an old run's DLE may be gone); the catalog records the
+// source too, but only a configured DLE's source is authoritative for a live
+// action like unit export, which needs the connection identity the config holds.
+func (d *dleDirectory) source(slug string) string {
+	for _, dle := range d.cfg.DLEs() {
+		if dle.Name() == slug {
+			return dle.Path
+		}
+	}
+	return ""
+}
+
 // display maps an internal DLE slug to its host:path identity for messages,
 // falling back to the slug when host/path are unknown.
 func (d *dleDirectory) display(slug string) string {

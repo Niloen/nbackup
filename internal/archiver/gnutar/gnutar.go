@@ -104,6 +104,10 @@ func (g *gnutar) Ext() string { return ".tar" }
 // replay deletes), and may clear it to roll back a failed chain.
 func (g *gnutar) DestIsDir() bool { return true }
 
+// SourceIsPath: the DLE's source is a filesystem tree tar reads directly, so a
+// preview may stat it to warn about a missing/unreadable source.
+func (g *gnutar) SourceIsPath() bool { return true }
+
 // CanList: `tar -t` enumerates members.
 func (g *gnutar) CanList() bool { return true }
 

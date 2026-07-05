@@ -34,6 +34,7 @@ func (e *Engine) preflightDeps() scheduler.PreflightDeps {
 		PreflightDumptype: e.tc.preflightDumptype,
 		RemoteHost:        e.cfg.RemoteHost,
 		StatSource:        func(p string) error { _, err := os.Stat(p); return err },
+		SourceIsPath:      e.tc.sourceIsPath,
 		ProbeReachable:    e.tc.probeReachable,
 	}
 }

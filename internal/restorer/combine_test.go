@@ -209,14 +209,18 @@ type fakeExporter struct{}
 
 func (fakeExporter) Ext() string { return ".sql" }
 
-func (fakeExporter) Stage(dataDir, destDir string, units []string) programs.Cmd {
+func (fakeExporter) Stage(dataDir, destDir, source string, units []string) programs.Cmd {
 	var sh []string
 	for _, u := range units {
-		sh = append(sh, fmt.Sprintf("printf 'exported %%s from %%s' %s \"$(cat %s/combined.txt)\" > %s",
-			u, dataDir, filepath.Join(destDir, u+".sql")))
+		sh = append(sh, fmt.Sprintf("printf 'exported %%s as %%s from %%s' %s %s \"$(cat %s/combined.txt)\" > %s",
+			u, shSingleQuote(source), dataDir, filepath.Join(destDir, u+".sql")))
 	}
 	return programs.Cmd{Name: "sh", Args: []string{"-c", strings.Join(sh, " && ")}}
 }
+
+// shSingleQuote wraps s so a source string with spaces (a conninfo) rides as one
+// printf argument in the fake stage.
+func shSingleQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // TestExportUnits drives the whole export orchestration over fakes: inventory
 // resolution (unique-substring pointing), the scratch whole-DLE restore, the
@@ -238,6 +242,7 @@ func TestExportUnits(t *testing.T) {
 	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) {
 		return exportingArchiver{}, nil
 	}
+	deps.SourceOf = func(slug string) string { return "host=db.internal user=bakop dbname=app" }
 	r := New(deps)
 	dest := filepath.Join(t.TempDir(), "out")
 	written, err := r.ExportUnits(dle, "2026-06-02", []string{"public.users"}, dest, nil)
@@ -251,8 +256,9 @@ func TestExportUnits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The exporter saw the combined scratch tree (its stage read the combine marker).
-	if !strings.HasPrefix(string(got), "exported table.postgres.public.users from ") ||
+	// The exporter saw the combined scratch tree (its stage read the combine marker)
+	// and was handed the DLE's own source string (its connection identity).
+	if !strings.HasPrefix(string(got), "exported table.postgres.public.users as host=db.internal user=bakop dbname=app from ") ||
 		!strings.Contains(string(got), ".nb-combine/L0") {
 		t.Fatalf("export content = %q", got)
 	}

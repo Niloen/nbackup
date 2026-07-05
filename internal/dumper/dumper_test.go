@@ -48,6 +48,7 @@ func (f *fakeArchiver) List(io.Reader) ([]record.Member, error)        { return 
 func (f *fakeArchiver) SpliceTrailer() []byte                          { return nil }
 func (f *fakeArchiver) CheckSource(string) error                       { return nil }
 func (f *fakeArchiver) DestIsDir() bool                                { return true }
+func (f *fakeArchiver) SourceIsPath() bool                             { return true }
 func (f *fakeArchiver) Ext() string                                    { return ".tar" }
 func (f *fakeArchiver) CanList() bool                                  { return true }
 func (f *fakeArchiver) StockExtract() string                           { return "cat > /dev/null" }

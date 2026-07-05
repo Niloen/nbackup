@@ -84,7 +84,11 @@ func (r *Restorer) ExportUnits(dle, asOf string, names []string, destDir string,
 		unitNames[i] = u.Path
 	}
 	log.Log("materializing %s", strings.Join(unitNames, ", "))
-	if err := runStage(r.deps.Exec(""), exp.Stage(dataDir, destDir, unitNames)); err != nil {
+	source := ""
+	if r.deps.SourceOf != nil {
+		source = r.deps.SourceOf(dle)
+	}
+	if err := runStage(r.deps.Exec(""), exp.Stage(dataDir, destDir, source, unitNames)); err != nil {
 		return nil, fmt.Errorf("export: %w", err)
 	}
 	written := make([]string, len(unitNames))

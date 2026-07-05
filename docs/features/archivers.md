@@ -77,7 +77,11 @@ written on the database host but a small manifest per level:
   all apply as usual).
 - **Level N** is `pg_basebackup --incremental` against the manifest the
   previous level left behind — changed relation files are stored as block
-  deltas, so a busy cluster's daily incremental is small.
+  deltas, so a busy cluster's daily incremental is small. By default a DLE
+  *sits* at level 1 (each incremental re-captures everything changed since the
+  full, so any one restores as L0 + a single L1), and the
+  [planner](planning) deepens the level only when a climb saves enough — so a
+  chain is usually just two levels.
 - The manifest rides *inside* the dump's own tar stream and is teed out in
   flight, then promoted atomically on commit — the same discipline as gnutar's
   `.snar` library, stored under the same `state_dir`.

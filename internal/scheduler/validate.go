@@ -15,7 +15,12 @@ type PreflightDeps struct {
 	PreflightDumptype func(dt, host string, checkArchiver bool, checked map[string]bool) error
 	RemoteHost        func(host string) (config.SSHConfig, bool)
 	StatSource        func(path string) error
-	ProbeReachable    func(host string) error
+	// SourceIsPath reports whether a dumptype's archiver treats the DLE source as a
+	// local filesystem path (so the preview may stat it). false for a non-path source
+	// (postgres conninfo, pipe token) — the preview then skips the stat rather than
+	// mis-warning "source path is missing" for a valid connection reference.
+	SourceIsPath   func(dt, host string) bool
+	ProbeReachable func(host string) error
 }
 
 // Preflight checks each DLE the way a run resolves it: the compression scheme,
@@ -60,8 +65,13 @@ func Preflight(d PreflightDeps, dles []config.DLE, strict bool) (warnings []stri
 		// client warns here rather than silently estimating ~0 B — the misleading
 		// "healthy" plan `nb check` would otherwise be the only thing to catch.
 		if _, remote := d.RemoteHost(dle.Host); !remote {
-			if err := d.StatSource(dle.Path); err != nil {
-				warnings = append(warnings, fmt.Sprintf("DLE %s: source path %s is missing or unreadable (%v) — the real run will fail unless it becomes available", dle.ID(), dle.Path, err))
+			// Only stat a source the archiver reads as a filesystem path; a postgres
+			// conninfo or pipe token is not a path, and its readiness is proven live by
+			// `nb check` (a connect), not a stat that would falsely warn "missing".
+			if d.SourceIsPath == nil || d.SourceIsPath(dle.DumpTypeName(), dle.Host) {
+				if err := d.StatSource(dle.Path); err != nil {
+					warnings = append(warnings, fmt.Sprintf("DLE %s: source path %s is missing or unreadable (%v) — the real run will fail unless it becomes available", dle.ID(), dle.Path, err))
+				}
 			}
 		} else if !probed[dle.Host] {
 			probed[dle.Host] = true
