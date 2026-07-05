@@ -55,6 +55,27 @@ or intact repository, first-class tape alongside disk and cloud, and automated
 recovery drills that *prove* the backups restore. Choose NBackup when being
 certain you can restore in ten years matters more than squeezing bytes today.
 
+## Install
+
+Prebuilt binaries, `niloen-backup` `.deb`/`.rpm` packages (with man pages and
+shell completions), and a container image are published per release:
+
+- **[GitHub Releases](https://github.com/Niloen/nbackup/releases)** — tarballs
+  for Linux/macOS (amd64/arm64) plus the `deb`/`rpm` packages
+- **`ghcr.io/niloen/nbackup`** — Docker image (GNU tar, zstd, gnupg included);
+  entrypoint is `nb`, scheduling stays your host's cron
+- `nb init` writes a starting config interactively (see Quick start)
+
+Or build from source:
+
+```bash
+make build          # builds ./bin/nb
+# or
+go install ./cmd/nb
+```
+
+Either way you get a single `nb` binary.
+
 ## Artifacts you can read
 
 A **volume** is an ordered sequence of self-describing files, each carrying an
@@ -144,26 +165,9 @@ without the key. Checksum integrity (`nb verify`) and copy/sync also stay keyles
 only extraction — and the deeper `nb verify --deep`, which decrypts to list the
 stream — needs the key.
 
-## Install
+## The commands
 
-Prebuilt binaries, `.deb`/`.rpm` packages (with man pages and shell completions),
-and a container image are published per release:
-
-- **[GitHub Releases](https://github.com/Niloen/nbackup/releases)** — tarballs
-  for Linux/macOS (amd64/arm64) plus `deb`/`rpm` packages
-- **`ghcr.io/niloen/nbackup`** — Docker image (GNU tar, zstd, gnupg included);
-  entrypoint is `nb`, scheduling stays your host's cron
-- `nb init` writes a starting config interactively (see Quick start)
-
-Or build from source:
-
-```bash
-make build          # builds ./bin/nb
-# or
-go install ./cmd/nb
-```
-
-Either way you get a single `nb` binary. The convention: you **inspect** with a noun
+The `nb` convention: you **inspect** with a noun
 (`nb run`, `nb dle`, `nb medium`) and **act** with a flat verb (`nb dump`,
 `nb recover`, `nb prune`, …). Each inspection noun lists with no argument and
 details one item when given an id (`nb run run-2026-06-21.020000`, `nb medium lto`).

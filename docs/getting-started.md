@@ -18,13 +18,13 @@ Install NBackup, write a minimal config, and run your first backup.
 
 ## Requirements
 
-- **Go 1.25+** to build.
 - **GNU tar** at runtime (`tar` on Linux, `gtar` on macOS/BSD; set a `tar_path`
   option on the archiver to override). NBackup checks the binary is GNU tar
   before running.
 - The configured **compressor** on `PATH`: `zstd` (default) or `gzip`; `none`
   needs nothing. NBackup checks it before running. Optional `nice` is used for
   CPU politeness when configured.
+- **Go 1.25+** only if you build from source.
 
 {: .note }
 > If `zstd` is not installed, set `compress.scheme` to `gzip` or `none` — the
@@ -32,13 +32,38 @@ Install NBackup, write a minimal config, and run your first backup.
 
 ## Install
 
+Every path below ends with the same single `nb` binary.
+
+**Packages (Debian/Ubuntu, RHEL/Fedora)** — the `niloen-backup` deb/rpm from
+[GitHub Releases](https://github.com/Niloen/nbackup/releases) installs `nb`
+with man pages and shell completions, and declares its dependencies
+(GNU tar; `zstd` and `gnupg` recommended):
+
 ```bash
+# Debian/Ubuntu — pick the .deb for your architecture from the latest release
+sudo apt install ./niloen-backup_<version>_amd64.deb
+
+# RHEL/Fedora
+sudo dnf install ./niloen-backup-<version>.x86_64.rpm
+```
+
+**Prebuilt binary (Linux/macOS, amd64/arm64)** — a tarball per platform on the
+same [Releases](https://github.com/Niloen/nbackup/releases) page; unpack and
+put `nb` on your `PATH` (man pages and completions ride along in the tarball).
+
+**Container** — `ghcr.io/niloen/nbackup` ships `nb` with GNU tar, zstd, and
+gnupg included; the entrypoint is `nb`, and scheduling stays your host's cron.
+Mount your config and the catalog/media directories into the container so runs
+and state land on the host.
+
+**From source:**
+
+```bash
+git clone https://github.com/Niloen/nbackup && cd nbackup
 make build          # builds ./bin/nb
 # or
 go install ./cmd/nb
 ```
-
-This produces a single `nb` binary.
 
 ## The command shape
 
