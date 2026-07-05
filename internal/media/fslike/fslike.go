@@ -152,14 +152,19 @@ func payloadExt(h record.Header) string {
 	case record.KindIndex:
 		return ".json.gz"
 	}
-	var ext string
+	// The base extension is the archiver's own (recorded per-archive, like the
+	// schemes) — ".tar" for gnutar, ".raw" or the operator's for pipe. An archive
+	// written before the field existed records ""; every archiver then was gnutar.
+	ext := h.Ext
+	if ext == "" {
+		ext = ".tar"
+	}
 	switch h.Compress {
 	case "gzip":
-		ext = ".tar.gz"
+		ext += ".gz"
 	case "none", "":
-		ext = ".tar"
 	default: // zstd and any future compressor named after its extension
-		ext = ".tar." + compressExt(h.Compress)
+		ext += "." + compressExt(h.Compress)
 	}
 	// An encrypted payload is ciphertext, not a readable tar/gz: append the scheme
 	// (gpg) so the name says "decrypt first" and a stock `tar`/`gzip` is not reached

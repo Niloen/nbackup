@@ -331,7 +331,7 @@ func TestDrillPostureAudit(t *testing.T) {
 // stages, and the unknown-scheme errors for both transforms.
 func TestStockPipeline(t *testing.T) {
 	// Plaintext, uncompressed: just the tar extract stage.
-	got, err := stockPipeline("none", "none", "")
+	got, err := stockPipeline("none", "none", "", `tar --extract --listed-incremental=/dev/null --numeric-owner -C "$1" -f -`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +340,7 @@ func TestStockPipeline(t *testing.T) {
 	}
 
 	// gpg (with a passphrase file) then gzip then tar.
-	got, err = stockPipeline("gpg", "gzip", "/keys/pass")
+	got, err = stockPipeline("gpg", "gzip", "/keys/pass", `tar --extract --listed-incremental=/dev/null --numeric-owner -C "$1" -f -`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestStockPipeline(t *testing.T) {
 	}
 
 	// gpg without a passphrase file (public-key dump) and a zstd stage.
-	got, err = stockPipeline("gpg", "zstd", "")
+	got, err = stockPipeline("gpg", "zstd", "", `tar --extract --listed-incremental=/dev/null --numeric-owner -C "$1" -f -`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,10 +364,10 @@ func TestStockPipeline(t *testing.T) {
 	}
 
 	// Unknown schemes are hard errors on both axes.
-	if _, err := stockPipeline("rot13", "none", ""); err == nil {
+	if _, err := stockPipeline("rot13", "none", "", `tar --extract --listed-incremental=/dev/null --numeric-owner -C "$1" -f -`); err == nil {
 		t.Error("an unknown encryption scheme should error")
 	}
-	if _, err := stockPipeline("none", "lzma", ""); err == nil {
+	if _, err := stockPipeline("none", "lzma", "", `tar --extract --listed-incremental=/dev/null --numeric-owner -C "$1" -f -`); err == nil {
 		t.Error("an unknown compression scheme should error")
 	}
 }

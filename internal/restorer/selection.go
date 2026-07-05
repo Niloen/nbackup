@@ -98,7 +98,7 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, destDir string
 			rc.Close()
 			return perr
 		}
-		if err := DecryptHint(st.Encrypt, r.dec.restoreArchive(rc, plan, st.Archiver, d, st.Members)); err != nil {
+		if err := DecryptHint(st.Encrypt, r.dec.restoreArchive(rc, plan, st.Archiver, st.DLE, d, st.Members)); err != nil {
 			return err
 		}
 		files += countFilePaths(st.Members)

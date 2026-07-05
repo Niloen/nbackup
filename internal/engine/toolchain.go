@@ -169,12 +169,31 @@ func (t *toolchain) preflightDumptype(dt, host string, checkArchiver bool, check
 	return nil
 }
 
-// restoreArchiver resolves and caches an archiver by its type name for reading, built
-// with the executor for the DLE's host: a remote DLE extracts on the client (tar runs
-// there, the destination path is on the client — restore/recover land back where the
-// data came from), a local/unlisted host extracts server-side exactly as before. The
-// archive records its producing archiver's type; restore reverses it.
-func (t *toolchain) restoreArchiver(typeName, host string) (archiver.Archiver, error) {
+// restoreArchiver resolves and caches an archiver for reading, built with the
+// executor for host: a remote DLE extracts on the client (tar runs there, the
+// destination path is on the client — restore/recover land back where the data
+// came from), a local/unlisted host ("") extracts server-side.
+//
+// The archive records its producing archiver's TYPE — how to reverse the stream —
+// but a type's options live in a config definition (a pipe definition's
+// restore_command is essential to extraction, where gnutar's flags are not). The
+// DLE's dumptype is the config's mapping to that definition, so when the DLE is
+// still configured and its dumptype still resolves to this type, restore runs
+// with the definition's current options (the same config-is-source-of-truth rule
+// decryptOptsFor applies to keys). A DLE no longer in the config — or remapped to
+// another archiver type since the dump — falls back to the bare type with default
+// options; an archiver whose options are load-bearing then errors, naming the
+// missing option.
+func (t *toolchain) restoreArchiver(typeName, dleName, host string) (archiver.Archiver, error) {
+	for _, d := range t.cfg.DLEs() {
+		if d.Name() != dleName {
+			continue
+		}
+		if t.cfg.ResolveArchiver(t.cfg.ResolveDumpType(d.DumpTypeName()).Archiver).Type == typeName {
+			return t.archiverFor(d.DumpTypeName(), host)
+		}
+		break
+	}
 	return t.openArchiver("@"+typeName+"\x00"+host, typeName, nil, host)
 }
 

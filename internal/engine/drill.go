@@ -374,7 +374,7 @@ func (d *driller) frameSample(t drill.Target, medium string, rot int, logf Logf)
 	if !ok {
 		return drill.ClassNone, ""
 	}
-	arch, err := d.tc.restoreArchiver(a.Archiver, "")
+	arch, err := d.tc.restoreArchiver(a.Archiver, a.DLE, "")
 	if err != nil {
 		return drill.ClassNone, ""
 	}
@@ -548,7 +548,11 @@ func (d *driller) stockExtractAtomic(step recovery.Step, dest, medium string, lo
 	}
 	src.Close()
 
-	script, err := stockAtomPipeline(step.Encrypt, step.Compress, d.rst.DecryptOptsFor(step.DLE).PassphraseFile)
+	tail, err := d.stockTail(step)
+	if err != nil {
+		return drill.ClassPipeline, err.Error()
+	}
+	script, err := stockAtomPipeline(step.Encrypt, step.Compress, d.rst.DecryptOptsFor(step.DLE).PassphraseFile, tail)
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
@@ -565,9 +569,10 @@ func (d *driller) stockExtractAtomic(step recovery.Step, dest, medium string, lo
 
 // stockAtomPipeline builds the atomic shape's documented restore loop: decrypt each
 // atom file in order, concatenate the plaintexts (whole compressed frames — one valid
-// stream), decompress, untar into "$1". The atoms are the files under "$2".
-func stockAtomPipeline(encrypt, compress, passphraseFile string) (string, error) {
-	tail, err := stockPipeline("none", compress, "")
+// stream), decompress, extract into "$1" via the archiver's stock tail. The atoms are
+// the files under "$2".
+func stockAtomPipeline(encrypt, compress, passphraseFile, extract string) (string, error) {
+	tail, err := stockPipeline("none", compress, "", extract)
 	if err != nil {
 		return "", err
 	}
@@ -609,7 +614,11 @@ func (d *driller) stockExtractStep(step recovery.Step, dest, medium string, logf
 		return classifyOpenErr(terr), terr.Error()
 	}
 
-	script, err := stockPipeline(step.Encrypt, step.Compress, d.rst.DecryptOptsFor(step.DLE).PassphraseFile)
+	tail, err := d.stockTail(step)
+	if err != nil {
+		return drill.ClassPipeline, err.Error()
+	}
+	script, err := stockPipeline(step.Encrypt, step.Compress, d.rst.DecryptOptsFor(step.DLE).PassphraseFile, tail)
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}
@@ -636,11 +645,27 @@ func shSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// stockTail resolves the archiver's stock extraction fragment for a step — the
+// per-format tail of the documented one-liner (gnutar's `tar --extract … -C "$1"`,
+// pipe's consumer command). An archiver declaring none fails the stock tier with
+// that fact, rather than the tier silently exercising the wrong command.
+func (d *driller) stockTail(step recovery.Step) (string, error) {
+	arch, err := d.tc.restoreArchiver(step.Archiver, step.DLE, "")
+	if err != nil {
+		return "", err
+	}
+	tail := arch.StockExtract()
+	if tail == "" {
+		return "", fmt.Errorf("stock drill: archiver %q documents no stock extraction command", step.Archiver)
+	}
+	return tail, nil
+}
+
 // stockPipeline builds the documented restore one-liner for an archive's
-// (encrypt, compress): decrypt (gpg) then decompress (zstd/gzip) then untar with
-// listed-incremental, reading stdin and extracting into "$1". It is deliberately the
-// README's stock command, not NBackup's own filter/crypt/method code.
-func stockPipeline(encrypt, compress, passphraseFile string) (string, error) {
+// (encrypt, compress): decrypt (gpg) then decompress (zstd/gzip) then the
+// archiver's stock extraction tail, reading stdin and extracting into "$1". It is
+// deliberately the README's stock command, not NBackup's own filter/crypt/method code.
+func stockPipeline(encrypt, compress, passphraseFile, extract string) (string, error) {
 	var stages []string
 	switch encrypt {
 	case "", "none":
@@ -664,7 +689,7 @@ func stockPipeline(encrypt, compress, passphraseFile string) (string, error) {
 	default:
 		return "", fmt.Errorf("stock drill: unknown compression scheme %q", compress)
 	}
-	stages = append(stages, `tar --extract --listed-incremental=/dev/null --numeric-owner -C "$1" -f -`)
+	stages = append(stages, extract)
 	return strings.Join(stages, " | "), nil
 }
 

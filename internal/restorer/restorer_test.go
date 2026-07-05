@@ -99,12 +99,16 @@ func (fakeArchiver) RestoreStage(destDir string, members []string) programs.Cmd 
 // The fake consumes anything, so it may honestly declare its streams spliceable.
 func (fakeArchiver) SpliceTrailer() []byte { return []byte{} }
 
+// A tree-style fake: the tests exercise the directory guard/rollback paths.
+func (fakeArchiver) DestIsDir() bool { return true }
+func (fakeArchiver) CanList() bool   { return true }
+
 func testDeps(store *fakeStore, archives []record.Archive) Deps {
 	return Deps{
 		Store:    store,
 		Archives: func() []record.Archive { return archives },
 		Exec:     func(host string) programs.Executor { return programs.Local() },
-		ArchiverFor: func(typeName, host string) (archiver.Archiver, error) {
+		ArchiverFor: func(typeName, dle, host string) (archiver.Archiver, error) {
 			return fakeArchiver{}, nil
 		},
 		EncryptionFor: func(dle string) (config.EncryptConfig, bool) { return config.EncryptConfig{}, false },

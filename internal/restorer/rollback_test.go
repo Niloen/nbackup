@@ -27,12 +27,22 @@ func (s scriptArchiver) RestoreStage(dest string, members []string) programs.Cmd
 	return s.stage(dest, members)
 }
 
+// Tree-style, so the rollback tests exercise the guard/rollback paths.
+func (scriptArchiver) DestIsDir() bool { return true }
+
 // scriptDeps returns Deps whose ArchiverFor hands out the given per-archive
 // RestoreStages in order (one per archive extracted).
 func scriptDeps(store *fakeStore, archives []record.Archive, stages ...func(dest string, members []string) programs.Cmd) Deps {
 	d := testDeps(store, archives)
 	i := 0
-	d.ArchiverFor = func(typeName, host string) (archiver.Archiver, error) {
+	probed := false
+	d.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) {
+		// The chain's first resolution is the destination-capability probe
+		// (destIsDir), before any extraction; it must not consume a scripted stage.
+		if !probed {
+			probed = true
+			return scriptArchiver{stage: drainStage}, nil
+		}
 		st := stages[i]
 		i++
 		return scriptArchiver{stage: st}, nil

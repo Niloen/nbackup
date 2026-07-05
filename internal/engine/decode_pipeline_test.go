@@ -49,7 +49,7 @@ func TestClientSidePipelineRoundTrip(t *testing.T) {
 	}
 
 	// Produce: tar | gzip | gpg -c  (the fully client-side dump pipeline).
-	bs, err := m.BackupSource(archiver.BackupRequest{DLE: "app-data", SourcePath: src, Level: 0, BaseLevel: -1})
+	bs, err := m.BackupSource(archiver.BackupRequest{DLE: "app-data", Source: src, Level: 0, BaseLevel: -1})
 	if err != nil {
 		t.Fatal(err)
 	}

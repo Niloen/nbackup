@@ -135,6 +135,15 @@ func runRecoverRestore(eng *engine.Engine, ra recoverArgs, logf engine.Logf) err
 	if !confirmRead(eng.RestoreCost(dles, asOf), ra.yes) {
 		return nil
 	}
+	// Restoring every DLE lays each under dest/<dle>. dest itself is ours to
+	// create: a tree archiver's extraction would anyway (MkdirAll), but an
+	// opaque-destination archiver (pipe) writes dest/<dle> as a single path and
+	// must find its parent in place.
+	if !specified && toHost == "" {
+		if err := os.MkdirAll(dest, 0o755); err != nil {
+			return err
+		}
+	}
 	for _, name := range dles {
 		base := dest
 		if toHost != "" {

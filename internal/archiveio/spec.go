@@ -17,6 +17,7 @@ type ArchiveSpec struct {
 	Host     string
 	Path     string
 	Archiver string
+	Ext      string // the archiver's raw-stream filename extension (".tar"), the naming peer of Compress/Encrypt
 	Compress string
 	Encrypt  string
 	Shape    record.Shape // stream shape, resolved by the dumper from the pipeline's declared capabilities

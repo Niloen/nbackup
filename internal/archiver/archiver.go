@@ -2,7 +2,9 @@
 // produces a raw backup stream and consumes one for restore — it is the
 // bidirectional handler for one archive format, knowing nothing about
 // compression, checksums, where bytes are
-// stored, or configuration. It operates on a source path and is configured with
+// stored, or configuration. It operates on an opaque source string it alone
+// interprets (a directory for tar, a command argument for pipe, a database name
+// for a future db archiver) and is configured with
 // generic options (supplied by a named archiver definition). It also owns its own
 // incremental state — the non-derivable, per-DLE/per-level base data an incremental
 // builds on (GNU tar's listed-incremental snapshots, a dump database, ...) — keyed
@@ -33,11 +35,15 @@ import (
 // incremental state it needs from DLE + BaseLevel itself; the request carries
 // identity and levels, never file paths.
 type BackupRequest struct {
-	DLE        string   // DLE name; the key under which the Archiver stores incremental state
-	SourcePath string   // directory to archive
-	Level      int      // 0 = full, >=1 = incremental
-	BaseLevel  int      // level whose state this incremental builds on; <0 for a full
-	Exclude    []string // patterns to skip (content-dependent, so per-request, not Archiver config)
+	DLE string // DLE name; the key under which the Archiver stores incremental state
+	// Source names what to archive, in this archiver's own vocabulary: a directory
+	// for a tree archiver (gnutar), the producer command's argument for pipe, a
+	// database name or a dataset for a future db/zfs archiver. Opaque to the generic
+	// layers — only the archiver interprets it (CheckSource is its readiness probe).
+	Source    string
+	Level     int      // 0 = full, >=1 = incremental
+	BaseLevel int      // level whose state this incremental builds on; <0 for a full
+	Exclude   []string // patterns to skip (content-dependent, so per-request, not Archiver config)
 }
 
 // BackupResult reports what was produced.
@@ -95,6 +101,12 @@ type Archiver interface {
 	Name() string
 	// Check verifies the archiver's prerequisites (e.g. the tar binary).
 	Check() error
+	// CheckSource verifies one DLE's source is ready to back up, in this archiver's
+	// own vocabulary — gnutar probes the directory's readability (`test -r`), a db
+	// archiver would probe connectivity, pipe has nothing to probe (the producer
+	// command owns its source). It is `nb check`'s per-DLE probe, replacing the
+	// generic "is the path readable" that assumed every source is a filesystem path.
+	CheckSource(source string) error
 	// Estimate returns the uncompressed bytes the request would archive.
 	Estimate(r BackupRequest) (int64, error)
 	// BackupSource returns the producing pipeline source for one archive (see
@@ -113,20 +125,46 @@ type Archiver interface {
 	// forces a full rather than silently producing a full-sized incremental.
 	HasBase(dle string, level int) bool
 	// RestoreStage returns the extractor as a program stage (extract from stdin into
-	// destDir), so a decode→extract pipeline can run entirely on the host where the
+	// dest), so a decode→extract pipeline can run entirely on the host where the
 	// bytes should land — letting a client-held key decrypt on the client and a
-	// server-held key ship only compressed plaintext to a remote target. With no members
+	// server-held key ship only compressed plaintext to a remote target. dest is the
+	// restore destination in this archiver's vocabulary (see DestIsDir). With no members
 	// it restores the whole archive applying incremental deletions (a chain restore);
 	// with members it extracts only those named entries and does not delete (selected-file
 	// recovery). It is the engine's one extraction primitive — the caller composes it
 	// into a programs pipeline and runs it; the archiver never streams bytes itself.
-	RestoreStage(destDir string, members []string) programs.Cmd
+	RestoreStage(dest string, members []string) programs.Cmd
+	// DestIsDir declares the restore destination a directory tree the GENERIC layer
+	// owns the lifecycle of: it creates it, refuses a non-empty one for a whole-DLE
+	// restore (the archiver's chain replay applies deletions, so restoring over an
+	// existing tree would prune unrelated files), and rolls a failed chain back by
+	// clearing it. false = the destination is opaque — the archiver's restore stage
+	// alone interprets it (pipe hands it to the consumer command verbatim), so the
+	// generic layer must neither create nor guard nor clear anything there.
+	DestIsDir() bool
+	// Ext is the filename extension for this archiver's raw stream (gnutar: ".tar"),
+	// recorded per-archive so a payload's on-medium name says what stock tool reads
+	// it — the naming peer of the recorded compress/encrypt schemes.
+	Ext() string
+	// CanList declares whether List is available. An archiver whose stream has no
+	// enumerable members (pipe: an opaque byte stream) reports false; structural
+	// verify then degrades to proving the decode pipeline drains cleanly — the same
+	// class of fallback ranged reads take for unreported offsets.
+	CanList() bool
 	// List reads a raw archive stream and returns its members without
 	// extracting anything (`tar -t`). It writes nothing; it proves the
 	// stream is a valid, listable archive end-to-end and yields the members to
 	// compare against the seal. The returned members use the same convention
-	// (and offset semantics) as BackupResult.Members.
+	// (and offset semantics) as BackupResult.Members. Only called when CanList.
 	List(in io.Reader) ([]record.Member, error)
+	// StockExtract is the documented no-NBackup extraction fragment for this
+	// archiver's raw stream: an `sh` pipeline tail that reads the stream on stdin
+	// and restores it into "$1" (gnutar: `tar --extract … -C "$1" -f -`; pipe: the
+	// configured consumer command). The drill's stock tier composes it after the
+	// stock decrypt/decompress stages — proving recovery needs no NBackup — so it
+	// must use only the operator's own tools. "" = no stock recipe; the stock tier
+	// then fails with that fact rather than silently exercising the wrong command.
+	StockExtract() string
 	// SpliceTrailer declares whether this archiver's streams can be SPLICED — a
 	// synthetic stream assembled from whole member extents (each [Off_i, Off_{i+1}),
 	// in stream order) that RestoreStage and List will consume correctly — and, when

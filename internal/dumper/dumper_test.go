@@ -46,6 +46,11 @@ func (f *fakeArchiver) HasBase(string, int) bool                       { return 
 func (f *fakeArchiver) RestoreStage(string, []string) programs.Cmd     { return programs.Cmd{} }
 func (f *fakeArchiver) List(io.Reader) ([]record.Member, error)        { return nil, nil }
 func (f *fakeArchiver) SpliceTrailer() []byte                          { return nil }
+func (f *fakeArchiver) CheckSource(string) error                       { return nil }
+func (f *fakeArchiver) DestIsDir() bool                                { return true }
+func (f *fakeArchiver) Ext() string                                    { return ".tar" }
+func (f *fakeArchiver) CanList() bool                                  { return true }
+func (f *fakeArchiver) StockExtract() string                           { return "cat > /dev/null" }
 
 func (f *fakeArchiver) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource, error) {
 	if f.backupErr != nil {

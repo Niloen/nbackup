@@ -87,6 +87,32 @@ func (g *gnutar) Check() error {
 	return g.checkErr
 }
 
+// CheckSource probes the DLE's source directory for readability on the executor's
+// host — the tree-archiver meaning of "source ready".
+func (g *gnutar) CheckSource(source string) error {
+	if err := g.ex.Command("test", "-r", source).Run(); err != nil {
+		return fmt.Errorf("not readable")
+	}
+	return nil
+}
+
+// Ext: the raw stream is a tar archive.
+func (g *gnutar) Ext() string { return ".tar" }
+
+// DestIsDir: extraction lands in a directory tree the generic layer owns — it may
+// create it, must refuse a non-empty one for a chain restore (listed-incremental
+// replay deletes), and may clear it to roll back a failed chain.
+func (g *gnutar) DestIsDir() bool { return true }
+
+// CanList: `tar -t` enumerates members.
+func (g *gnutar) CanList() bool { return true }
+
+// StockExtract is the README's stock extraction tail: whole-archive
+// listed-incremental extraction into "$1", exactly what RestoreStage runs.
+func (g *gnutar) StockExtract() string {
+	return `tar --extract --listed-incremental=/dev/null --numeric-owner -C "$1" -f -`
+}
+
 var totalsRE = regexp.MustCompile(`Total bytes written: (\d+)`)
 
 // parseTotals extracts tar's `--totals` byte count from its stderr, or 0 if absent.
@@ -257,7 +283,7 @@ func (g *gnutar) createArgs(r archiver.BackupRequest, fileTarget, snapshot, inde
 	args := []string{
 		g.bin,
 		"--create", "--file=" + fileTarget,
-		"--directory=" + r.SourcePath,
+		"--directory=" + r.Source,
 		"--listed-incremental=" + snapshot,
 		"--totals",
 	}

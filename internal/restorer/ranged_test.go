@@ -102,7 +102,7 @@ func TestExtractSelectionRangedEgress(t *testing.T) {
 	step.Members = []string{"tail.txt"}
 
 	deps := testDeps(store, nil)
-	deps.ArchiverFor = func(typeName, host string) (archiver.Archiver, error) { return arch, nil }
+	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) { return arch, nil }
 	r := New(deps)
 	dest := filepath.Join(t.TempDir(), "out")
 	files, archives, err := r.ExtractSelection([]recovery.ExtractStep{step}, dest, nil)
@@ -133,7 +133,7 @@ func TestExtractSelectionRangedMidMember(t *testing.T) {
 	step.Members = []string{"etc-hosts"}
 
 	deps := testDeps(store, nil)
-	deps.ArchiverFor = func(typeName, host string) (archiver.Archiver, error) { return arch, nil }
+	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) { return arch, nil }
 	r := New(deps)
 	dest := filepath.Join(t.TempDir(), "out")
 	if _, _, err := r.ExtractSelection([]recovery.ExtractStep{step}, dest, nil); err != nil {
@@ -155,7 +155,7 @@ func TestExtractSelectionRangedFallback(t *testing.T) {
 	step.Members = []string{"tail.txt"}
 
 	deps := testDeps(store, nil)
-	deps.ArchiverFor = func(typeName, host string) (archiver.Archiver, error) { return arch, nil }
+	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) { return arch, nil }
 	r := New(deps)
 	dest := filepath.Join(t.TempDir(), "out")
 	if _, _, err := r.ExtractSelection([]recovery.ExtractStep{step}, dest, nil); err != nil {
@@ -286,7 +286,7 @@ func TestNoSpliceDeclarationFallsBack(t *testing.T) {
 	step.Members = []string{"tail.txt"}
 
 	deps := testDeps(store, nil)
-	deps.ArchiverFor = func(typeName, host string) (archiver.Archiver, error) { return arch, nil }
+	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) { return arch, nil }
 	r := New(deps)
 	dest := filepath.Join(t.TempDir(), "out")
 	if _, _, err := r.ExtractSelection([]recovery.ExtractStep{step}, dest, nil); err != nil {

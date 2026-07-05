@@ -312,6 +312,24 @@ archivers:
     # tar_path: gtar     # GNU tar binary (use "gtar" on macOS/BSD)
     # (Incremental state is NOT an archiver option — its location is the host-level
     #  `state_dir:` above; the archiver only owns its format knobs like tar_path.)
+  # The PIPE archiver: your own producer/consumer commands around NBackup's
+  # compression, encryption, placement, catalog, verify, and drills — for anything
+  # that dumps itself to stdout and restores from stdin (sqlite `.backup`, an LVM
+  # snapshot, an application export). Full-only (it keeps no incremental state, so
+  # every run is a full) and the stream is opaque: no per-file browse/recover, no
+  # `nb mount`; verify proves the checksum and a clean decode. {source} is the
+  # DLE's source string from `sources:`; {dest} is the restore destination exactly
+  # as given to `nb recover --dest` (a drill passes a scratch directory). Both are
+  # substituted shell-quoted and the commands run via `sh -c` — on the DLE's own
+  # host, so a remote source's producer runs on that client like tar does.
+  # sqlite:
+  #   type: pipe
+  #   backup_command: "sqlite3 {source} '.backup /dev/stdout'"
+  #   restore_command: "sqlite3 {dest}"       # consumes the stream on stdin
+  #   # estimate_command: "stat -c%s {source}" # optional: prints a byte count for
+  #   #                                        # planning (without it the size is
+  #   #                                        # unknown and plans show 0)
+  #   # extension: .sqlite                     # payload filename extension (default .raw)
 
 # Named dumptypes (Amanda's "dumptype"): an archiver reference plus per-DLE policy —
 # what to skip (exclude) and encryption. Excludes live here, not on the archiver:

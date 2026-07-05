@@ -162,11 +162,11 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 		return BackupSpec{}, err
 	}
 	req := archiver.BackupRequest{
-		DLE:        item.Name,
-		SourcePath: item.DLE.Path,
-		Level:      item.Level,
-		BaseLevel:  -1,
-		Exclude:    d.exclude(item.DLE.DumpTypeName()),
+		DLE:       item.Name,
+		Source:    item.DLE.Path,
+		Level:     item.Level,
+		BaseLevel: -1,
+		Exclude:   d.exclude(item.DLE.DumpTypeName()),
 	}
 	if item.Level >= 1 {
 		req.BaseLevel = item.BaseLevel
@@ -245,8 +245,9 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 	aspec := archiveio.ArchiveSpec{
 		DLE:      spec.Request.DLE,
 		Host:     spec.Host,
-		Path:     spec.Request.SourcePath,
+		Path:     spec.Request.Source,
 		Archiver: spec.Archiver.Name(),
+		Ext:      spec.Archiver.Ext(),
 		Compress: pl.CompressScheme,
 		Encrypt:  pl.EncryptScheme,
 		Shape:    shape,
@@ -293,7 +294,15 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 			return xfer.SourceStats{}, nil
 		}
 		unreadable = res.Unreadable
-		return xfer.SourceStats{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members, Unreadable: res.Unreadable}, nil
+		stats := xfer.SourceStats{Uncompressed: res.Uncompressed, FileCount: res.FileCount, Members: res.Members, Unreadable: res.Unreadable}
+		if stats.Uncompressed == 0 {
+			// An archiver with no totals side channel (pipe's opaque producer) reports 0;
+			// the stage tap already metered the raw stream, so record that instead of a
+			// zero that would read as an empty archive. Best-effort: the tap is honored
+			// only for a locally-run stage, so a client-fused dump may still record 0.
+			stats.Uncompressed = unc.Load()
+		}
+		return stats, nil
 	}).OnCleanup(bs.Cleanup)
 	// A framed archive absorbs the encode filters into the source, which respawns them
 	// every frame_size of raw input (the decode-restart mechanism) and reports the frame

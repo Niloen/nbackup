@@ -57,6 +57,7 @@ type Header struct {
 	Host      string    `json:"host,omitempty"`
 	Path      string    `json:"path,omitempty"`
 	Archiver  string    `json:"archiver,omitempty"`
+	Ext       string    `json:"ext,omitempty"` // the archiver's raw-stream filename extension (gnutar: ".tar") — drives the payload's on-medium name, so it says what stock tool reads the decoded stream. "" on pre-Ext archives; the media default it to ".tar" (the only archiver that existed then).
 	Compress  string    `json:"compress,omitempty"`
 	Encrypt   string    `json:"encrypt,omitempty"` // encryption scheme name (gpg|none); reversed on restore. "none" = plaintext (the peer of Compress, which is likewise always concrete). The key is never recorded — gpg resolves it from the ciphertext + keyring.
 	Level     int       `json:"level"`             // always emitted, 0 included — the README promises the header carries the level, and a level-0 full must say so explicitly

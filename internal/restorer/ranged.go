@@ -213,7 +213,7 @@ func (r *Restorer) extractSelected(st recovery.ExtractStep, d dest, log Logf) (h
 	// The archiver must DECLARE its streams spliceable (member extents are
 	// independently restorable and this trailer terminates an assembled stream) —
 	// reporting offsets alone is not that promise; without it, whole-stream only.
-	arch, err := r.deps.ArchiverFor(st.Archiver, d.host)
+	arch, err := r.deps.ArchiverFor(st.Archiver, st.DLE, d.host)
 	if err != nil {
 		return true, err
 	}

@@ -46,9 +46,12 @@ type Deps struct {
 	Store    archivefs.ReadStore     // raw archive bytes + member lists
 	Archives func() []record.Archive // catalog archive metadata, run-ordered
 	Exec     func(host string) programs.Executor
-	// ArchiverFor resolves the archiver that reverses a recorded type, built for
-	// the host tar runs on ("" = server-side).
-	ArchiverFor func(typeName, host string) (archiver.Archiver, error)
+	// ArchiverFor resolves the archiver that reverses a recorded type for one
+	// DLE's archives, built for the host extraction runs on ("" = server-side).
+	// The DLE rides along so the resolver can recover the archiver definition's
+	// options from the DLE's dumptype (a pipe definition's restore_command is
+	// load-bearing; the recorded type alone cannot name it).
+	ArchiverFor func(typeName, dle, host string) (archiver.Archiver, error)
 	// EncryptionFor resolves a DLE's configured encryption posture; ok is false
 	// when the DLE is no longer in the config (an old run's DLE may be removed).
 	EncryptionFor func(dleName string) (config.EncryptConfig, bool)
@@ -118,18 +121,7 @@ func (r *Restorer) Extract(req Request, log Logf) error {
 			return err
 		}
 	}
-	// When the guard ensured an empty local dest, a failed chain leaves only files
-	// this restore wrote — so it can be rolled back to leave no half-restored tree.
-	// With --force the dest held the operator's own content, so never auto-delete
-	// it; a remote dest is never rolled back.
-	rollbackOnFail := false
-	if req.Host == "" && !req.Force {
-		if err := errNonEmptyDest(req.Dest); err != nil {
-			return err
-		}
-		rollbackOnFail = true
-	}
-	return r.extractChain(runID, req, rollbackOnFail, log)
+	return r.extractChain(runID, req, log)
 }
 
 // checkKnownHost validates a `--to` target up front: every non-localhost name
@@ -157,10 +149,29 @@ func (r *Restorer) checkKnownHost(host string) error {
 // other restore decrypts server-side, which must be feasible (else fail fast);
 // when decrypt is on the client there is nothing the server needs the key for,
 // so the feasibility gate is skipped.
-func (r *Restorer) extractChain(runID string, req Request, rollbackOnFail bool, log Logf) error {
+func (r *Restorer) extractChain(runID string, req Request, log Logf) error {
 	steps, err := recovery.Chain(r.deps.Archives(), req.DLE, runID)
 	if err != nil {
 		return r.friendlyDLEErr(req.DLE, err)
+	}
+	// The destination's lifecycle is the archiver's call (DestIsDir): a tree
+	// archiver's chain replay prunes the destination to match the backup, so a
+	// non-empty local dest is refused unless forced — and, once guarded empty, a
+	// failed chain leaves only files this restore wrote, so it can be rolled back
+	// to leave no half-restored tree. An opaque destination (pipe) is solely the
+	// restore command's to interpret: no guard, no rollback, never auto-deleted.
+	// With --force the dest held the operator's own content, so never auto-delete
+	// it; a remote dest is never rolled back.
+	dirDest, err := r.destIsDir(steps)
+	if err != nil {
+		return err
+	}
+	rollbackOnFail := false
+	if dirDest && req.Host == "" && !req.Force {
+		if err := errNonEmptyDest(req.Dest); err != nil {
+			return err
+		}
+		rollbackOnFail = true
 	}
 	ec, _ := r.deps.EncryptionFor(req.DLE)
 	decryptOnClient := req.Host != "" && ec.At == "client" && ec.SchemeName() != "none"
@@ -201,7 +212,7 @@ func (r *Restorer) extractChain(runID string, req Request, rollbackOnFail bool, 
 			rc.Close()
 			return stepErr(step, perr)
 		}
-		if xerr := r.dec.restoreArchive(rc, plan, step.Archiver, d, nil); xerr != nil {
+		if xerr := r.dec.restoreArchive(rc, plan, step.Archiver, step.DLE, d, nil); xerr != nil {
 			return stepErr(step, DecryptHint(step.Encrypt, xerr))
 		}
 		return nil
@@ -368,10 +379,27 @@ func (r *Restorer) decryptOptsFor(dleName string) crypt.Options {
 	return r.deps.DecryptOpts
 }
 
+// destIsDir resolves whether the chain's archiver treats the restore destination
+// as a directory tree the generic layer owns (guard + rollback; see
+// archiver.Archiver.DestIsDir). A chain is one DLE's, so every step records the
+// same archiver type; the first step answers for all. Resolved server-side ("") —
+// the capability is a format property, not a host one.
+func (r *Restorer) destIsDir(steps []recovery.Step) (bool, error) {
+	if len(steps) == 0 {
+		return false, nil
+	}
+	arch, err := r.deps.ArchiverFor(steps[0].Archiver, steps[0].DLE, "")
+	if err != nil {
+		return false, err
+	}
+	return arch.DestIsDir(), nil
+}
+
 // errNonEmptyDest refuses a whole-DLE restore into a destination that already
-// holds files. Listed-incremental extraction prunes the destination to match the
-// backup (that is how deletions are applied), so restoring over an existing tree
-// would delete unrelated files in it. A missing or empty directory is fine.
+// holds files. A tree archiver's incremental extraction prunes the destination to
+// match the backup (that is how deletions are applied), so restoring over an
+// existing tree would delete unrelated files in it. A missing or empty directory
+// is fine.
 func errNonEmptyDest(destDir string) error {
 	entries, err := os.ReadDir(destDir)
 	if err != nil {
@@ -381,7 +409,7 @@ func errNonEmptyDest(destDir string) error {
 		return err
 	}
 	if len(entries) > 0 {
-		return fmt.Errorf("destination %s is not empty: a whole-DLE restore prunes it to match the backup (GNU tar incremental extraction deletes files not in the archive), which would remove unrelated files — restore into a new/empty directory, or pass --force to restore into this one anyway", destDir)
+		return fmt.Errorf("destination %s is not empty: a whole-DLE restore prunes it to match the backup (the archiver's incremental extraction deletes files not in the archive), which would remove unrelated files — restore into a new/empty directory, or pass --force to restore into this one anyway", destDir)
 	}
 	return nil
 }

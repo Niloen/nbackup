@@ -91,7 +91,7 @@ func (s *Scheduler) estimateDLE(d config.DLE, st *catalog.DLEState) planner.Esti
 		return planner.Estimate{} // no estimator available (e.g. the archiver's tool missing)
 	}
 	excl := s.d.ExcludeFor(d.DumpTypeName())
-	full, ferr := arch.Estimate(archiver.BackupRequest{DLE: name, SourcePath: d.Path, Level: 0, BaseLevel: -1, Exclude: excl})
+	full, ferr := arch.Estimate(archiver.BackupRequest{DLE: name, Source: d.Path, Level: 0, BaseLevel: -1, Exclude: excl})
 	// A non-nil error with a non-zero floor means the archiver walked a partially-readable
 	// source (an unreadable member): the size is a floor, not exact. A zero floor is
 	// a total failure (e.g. a missing path) that ValidatePlan already reports, so we
@@ -109,12 +109,12 @@ func (s *Scheduler) estimateDLE(d config.DLE, st *catalog.DLEState) planner.Esti
 	est := planner.Estimate{Full: full, Incomplete: incomplete}
 	if arch.HasBase(name, lvl-1) {
 		est.Incr, _ = arch.Estimate(archiver.BackupRequest{
-			DLE: name, SourcePath: d.Path, Level: lvl, BaseLevel: lvl - 1, Exclude: excl,
+			DLE: name, Source: d.Path, Level: lvl, BaseLevel: lvl - 1, Exclude: excl,
 		})
 	}
 	if lvl < planner.MaxLevel && arch.HasBase(name, lvl) {
 		est.IncrNext, _ = arch.Estimate(archiver.BackupRequest{
-			DLE: name, SourcePath: d.Path, Level: lvl + 1, BaseLevel: lvl, Exclude: excl,
+			DLE: name, Source: d.Path, Level: lvl + 1, BaseLevel: lvl, Exclude: excl,
 		})
 	}
 	return est

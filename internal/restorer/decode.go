@@ -61,22 +61,26 @@ type decodePlan struct {
 // keeping decompress in the filters keeps the role-tagged error contract sharp
 // (a Sink fault is a tar/composition fault, a Filters fault is a decode fault —
 // what the drill's failure taxonomy classifies on).
-func (d *decoder) restoreArchive(rc io.ReadCloser, plan decodePlan, archiverType string, dst dest, members []string) error {
+func (d *decoder) restoreArchive(rc io.ReadCloser, plan decodePlan, archiverType, dle string, dst dest, members []string) error {
 	if plan.atomSizes != nil && plan.decryptInSink {
 		rc.Close()
 		return fmt.Errorf("an atomic archive decrypts per atom on the server; client-held keys are not supported on this path — restore without --to (or use the documented stock file-loop on the client)")
 	}
-	if err := dst.exec.MkdirAll(dst.dir); err != nil {
-		// The destination could not even be created (e.g. an unreachable `--to`
-		// client): nothing was written, so mark it so the caller does not warn
-		// about a "partial" restore that never started.
-		rc.Close()
-		return errors.Join(errDestSetup, err)
-	}
-	arch, err := d.deps.ArchiverFor(archiverType, dst.host)
+	arch, err := d.deps.ArchiverFor(archiverType, dle, dst.host)
 	if err != nil {
 		rc.Close()
 		return err
+	}
+	// Only a directory destination is the generic layer's to create; an opaque one
+	// (pipe) belongs to the archiver's restore command alone.
+	if arch.DestIsDir() {
+		if err := dst.exec.MkdirAll(dst.dir); err != nil {
+			// The destination could not even be created (e.g. an unreachable `--to`
+			// client): nothing was written, so mark it so the caller does not warn
+			// about a "partial" restore that never started.
+			rc.Close()
+			return errors.Join(errDestSetup, err)
+		}
 	}
 	src, filters, err := decodeSource(rc, plan)
 	if err != nil {
@@ -144,6 +148,11 @@ func (r *Restorer) VerifyChecksum(rc io.ReadCloser, sha string) (bool, error) {
 // archive runs the per-atom decrypt loop), so the caller passes the archive's
 // record and never picks a variant. It returns the listed members and the raw,
 // role-tagged transfer error for the caller to classify and hint.
+//
+// An archiver that cannot list (pipe's opaque stream) still gets the decode
+// proof: the same pipeline drains to discard, so a broken key, scheme, or
+// truncated stream surfaces exactly as for a listable archive — only the member
+// comparison is off the table (nil members, which the caller must not diff).
 func (r *Restorer) ListMembers(rc io.ReadCloser, a record.Archive, opts crypt.Options, arch archiver.Archiver) ([]record.Member, error) {
 	plan := decodePlan{compress: a.Compress, compressOpts: r.deps.CompressOpts, encrypt: a.Encrypt, decryptOpts: opts}
 	if a.Shape == record.ShapeAtomic {
@@ -160,9 +169,18 @@ func (r *Restorer) ListMembers(rc io.ReadCloser, a record.Archive, opts crypt.Op
 		rc.Close()
 		return nil, err
 	}
+	if !arch.CanList() {
+		_, terr := xfer.Transfer(context.Background(), src, filters.local, xfer.Writer(io.Discard))
+		return nil, terr
+	}
 	ls := &listSink{arch: arch}
-	_, terr := xfer.Transfer(context.Background(), src, filters.local, ls)
-	return ls.members, terr
+	if _, terr := xfer.Transfer(context.Background(), src, filters.local, ls); terr != nil {
+		// A faulted transfer may not have run Commit, so nothing synchronized with
+		// the list goroutine — its members must not be read (and are meaningless
+		// for a stream that did not decode cleanly anyway).
+		return nil, terr
+	}
+	return ls.members, nil
 }
 
 // buildDecode returns the decrypt and decompress commands that reverse an

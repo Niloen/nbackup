@@ -20,6 +20,7 @@ type Archive struct {
 	Host         string     `json:"host"`                 // source host
 	Path         string     `json:"path"`                 // source path
 	Archiver     string     `json:"archiver"`             // archiver type that produced it
+	Ext          string     `json:"ext,omitempty"`        // the archiver's raw-stream filename extension (gnutar: ".tar"); archive-invariant like Shape, so copies carry it. "" on pre-Ext archives (the media default it to ".tar")
 	Compress     string     `json:"compress"`             // compression scheme (zstd|gzip|none); reversed on restore
 	Encrypt      string     `json:"encrypt"`              // encryption scheme (gpg|none); reversed on restore. "none" = plaintext — always concrete, the peer of Compress, so the two transforms describe their off-state identically. The key is never stored — restore resolves it from the operator's keyring.
 	Level        int        `json:"level"`                // 0 = full, >=1 = incremental

@@ -286,11 +286,19 @@ func (c *checker) checkHost(rep *CheckReport, host string, connect bool) HostChe
 		c.checkClientTools(rep, &hc, ex, dt)
 	}
 
+	// The source probe is the archiver's (CheckSource): "ready" means readable
+	// directory for a tree archiver, nothing at all for pipe (its producer command
+	// owns the source), connectivity for a future db archiver. An archiver that
+	// failed to open was already reported above — don't pile a second line on.
 	for _, d := range dles {
-		if err := ex.Command("test", "-r", d.Path).Run(); err != nil {
-			rep.add(&hc.Lines, false, false, fmt.Sprintf("source %s not readable", d.Path))
+		arch, err := c.tc.archiverFor(d.DumpTypeName(), host)
+		if err != nil {
+			continue
+		}
+		if err := arch.CheckSource(d.Path); err != nil {
+			rep.add(&hc.Lines, false, false, fmt.Sprintf("source %s: %v", d.Path, err))
 		} else {
-			rep.add(&hc.Lines, true, false, fmt.Sprintf("source %s readable", d.Path))
+			rep.add(&hc.Lines, true, false, fmt.Sprintf("source %s ready", d.Path))
 		}
 	}
 
