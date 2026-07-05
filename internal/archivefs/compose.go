@@ -55,11 +55,11 @@ func (fs *FS) OpenRun(w WriteMap, m Medium) *Session {
 // (inline for a serial run, on the orchestrator when the spool has routed it).
 func (s *Session) Record(r archiveio.CommitResult) error {
 	arch := r.Archive
-	if len(arch.Members) > 0 || len(arch.Frames) > 0 {
+	if len(arch.Members) > 0 || len(arch.Frames) > 0 || len(arch.Units) > 0 {
 		// Key the member index on the archive's own run, not the session's, so a session that carries
 		// archives from several source runs (a cross-run sync through one spool) files each under the
 		// right run. For a dump or a per-run copy the two are identical, so this changes nothing there.
-		_ = s.fs.mindex.Store(arch.Run, arch.DLE, arch.Level, record.Index{Members: arch.Members, Frames: arch.Frames})
+		_ = s.fs.mindex.Store(arch.Run, arch.DLE, arch.Level, record.Index{Members: arch.Members, Frames: arch.Frames, Units: arch.Units})
 	}
 	return s.w.AddArchive(arch, s.m.Name(), r.Pos)
 }

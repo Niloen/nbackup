@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
 	"golang.org/x/term"
 )
@@ -26,6 +27,9 @@ type recoverShell struct {
 
 	term *term.Terminal // line editor (history/editing/completion); nil when stdin is piped
 	fd   int            // stdin fd, toggled to raw mode around each edited read
+
+	units    []record.Unit // the browsed backup's content inventory (chain tip's units); nil = none reported
+	unitsRun string        // the run whose archive reported the units
 }
 
 // runRecoverShell drives the interactive recovery prompt. It reuses the shared
@@ -91,6 +95,9 @@ func (sh *recoverShell) prompt() string {
 func (sh *recoverShell) banner() {
 	if sh.sess != nil {
 		fmt.Printf("disk %q as of %s (resolved to %s)\n", sh.eng.DisplayDLE(sh.dle), sh.date, sh.sess.Tree().TargetRun)
+		if len(sh.units) > 0 {
+			fmt.Printf("this backup reports %d named units — 'inventory' lists them\n", len(sh.units))
+		}
 		sh.noteDeletionOnce()
 		return
 	}
@@ -127,6 +134,8 @@ func (sh *recoverShell) dispatch(cmd string, args []string) (quit bool) {
 		sh.setDisk(args)
 	case "disks", "disklist", "lsdisk":
 		sh.listDisks()
+	case "inventory", "inv":
+		sh.inventory(args)
 	case "ls", "dir":
 		sh.ls(args)
 	case "cd":
@@ -173,7 +182,18 @@ func (sh *recoverShell) reload() error {
 		return err
 	}
 	sh.sess = recovery.NewSession(tree)
+	sh.loadUnits()
 	return nil
+}
+
+// loadUnits refreshes the browsed backup's content inventory alongside the
+// tree — best-effort: a backup whose archiver reports none (or an index read
+// failure) just leaves the inventory empty, and the shell says so when asked.
+func (sh *recoverShell) loadUnits() {
+	sh.units, sh.unitsRun = nil, ""
+	if units, run, err := sh.eng.Inventory(sh.dle, sh.date); err == nil {
+		sh.units, sh.unitsRun = units, run
+	}
 }
 
 // rebrowse re-opens the current disk as of a candidate date, committing it as the
@@ -187,6 +207,7 @@ func (sh *recoverShell) rebrowse(date string) error {
 	}
 	sh.date = date
 	sh.sess = recovery.NewSession(tree)
+	sh.loadUnits()
 	return nil
 }
 
@@ -312,13 +333,50 @@ func (sh *recoverShell) cd(args []string) {
 	}
 }
 
+// inventory prints the browsed backup's content inventory — the named units
+// its archiver reported at dump time (postgres: tables with sizes). With a
+// filter argument, matching units are expanded to show the browse paths of the
+// files carrying them (what `add <unit>` would select).
+func (sh *recoverShell) inventory(args []string) {
+	if sh.sess == nil {
+		fmt.Println("set a disk first (setdisk <dle>)")
+		return
+	}
+	if len(sh.units) == 0 {
+		fmt.Println("no inventory recorded for this backup — its archiver reports none")
+		return
+	}
+	filter := strings.ToLower(strings.Join(args, " "))
+	shown := 0
+	for _, u := range sh.units {
+		if filter != "" && !strings.Contains(strings.ToLower(u.Path), filter) {
+			continue
+		}
+		shown++
+		if filter == "" {
+			printUnits([]record.Unit{u})
+			continue
+		}
+		printUnits([]record.Unit{u})
+		for _, m := range u.Members {
+			fmt.Printf("      /%s\n", m)
+		}
+	}
+	switch {
+	case shown == 0:
+		fmt.Printf("no unit matches %q (%d units total)\n", strings.Join(args, " "), len(sh.units))
+	case filter == "":
+		fmt.Printf("%d units · run %s\n", shown, sh.unitsRun)
+	}
+}
+
 func (sh *recoverShell) add(args []string) {
 	if sh.sess == nil {
 		fmt.Println("set a disk first (setdisk <dle>)")
 		return
 	}
 	if len(args) == 0 {
-		fmt.Println("usage: add <path>...")
+		fmt.Println("usage: add <path|unit>...")
 		return
 	}
 	added, notFound := sh.sess.Add(args)
@@ -326,8 +384,53 @@ func (sh *recoverShell) add(args []string) {
 		fmt.Printf("added /%s\n", p)
 	}
 	for _, p := range notFound {
+		if sh.addUnit(p) {
+			continue
+		}
 		fmt.Printf("not found: /%s\n", p)
 	}
+}
+
+// addUnit resolves an argument that matched no tree path against the
+// inventory's unit paths — exact first, then unique suffix/substring (an
+// interactive shell should accept `add public.users`) — and selects the
+// matched unit's files. An ambiguous name lists the candidates: that is help,
+// not failure. Reports whether the argument was handled.
+func (sh *recoverShell) addUnit(arg string) bool {
+	if len(sh.units) == 0 {
+		return false
+	}
+	var matches []record.Unit
+	for _, u := range sh.units {
+		if u.Path == arg {
+			matches = []record.Unit{u}
+			break
+		}
+		if strings.Contains(u.Path, arg) {
+			matches = append(matches, u)
+		}
+	}
+	switch {
+	case len(matches) == 0:
+		return false
+	case len(matches) > 1:
+		fmt.Printf("%q matches %d units — pick one:\n", arg, len(matches))
+		for _, u := range matches {
+			fmt.Printf("  %s\n", u.Path)
+		}
+		return true
+	}
+	u := matches[0]
+	if len(u.Members) == 0 {
+		fmt.Printf("unit %s reports no files to select\n", u.Path)
+		return true
+	}
+	added, notFound := sh.sess.Add(u.Members)
+	fmt.Printf("matched unit %s — added %d file(s)\n", u.Path, len(added))
+	for _, p := range notFound {
+		fmt.Printf("  (unit file not in the browse tree: /%s)\n", p)
+	}
+	return true
 }
 
 func (sh *recoverShell) del(args []string) {
@@ -413,10 +516,13 @@ func recoverHelp() {
   setdate <date>       set the as-of date (YYYY-MM-DD), then rebrowse
   settime <date time>  set the as-of point-in-time (YYYY-MM-DD HH[:MM[:SS]], UTC),
                        reaching an earlier same-day run, then rebrowse
+  inventory [filter]   list the backup's named units (tables, …) with sizes;
+                       a filter expands matches to the files carrying them
   ls [path]            list a directory
   cd [path]            change directory (.. and absolute /paths work)
   pwd                  print the current directory
-  add <path>...        mark files/dirs for recovery
+  add <path|unit>...   mark files/dirs for recovery; a unit name (from
+                       'inventory', suffixes work) selects the unit's files
   delete <path>...     unmark (alias: rm)
   list                 show the current selection
   clear                clear the selection

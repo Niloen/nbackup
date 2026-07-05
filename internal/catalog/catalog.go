@@ -134,6 +134,7 @@ func (c *Catalog) addArchive(arch record.Archive, medium string, pos archiveio.A
 		c.entries = append(c.entries, e)
 	}
 	arch.Members = nil
+	arch.Units = nil
 	arch.Frames = nil
 	// The per-part seals describe this placement's layout, so they land on the placed
 	// record (index-aligned with the part positions) and are stripped from the run's

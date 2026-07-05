@@ -12,12 +12,15 @@ import (
 // scan/rebuild reads only small footers; the member list — the large part of an
 // archive's metadata — is paid for only when someone browses.
 
-// Index is the per-archive index document: the member list and, for a framed archive,
-// the decode-restart table. Absent frames mean a plain stream — exactly today's read
-// path; the table is an optimization for ranged reads, never decode-critical.
+// Index is the per-archive index document: the member list, for a framed archive
+// the decode-restart table, and the archiver's content inventory (see Unit). Absent
+// frames mean a plain stream — exactly today's read path; the table is an
+// optimization for ranged reads, never decode-critical. Absent units mean the
+// archiver reports no inventory (gnutar, pipe) — `--inventory` then says so.
 type Index struct {
 	Members []Member `json:"members"`
 	Frames  []Frame  `json:"frames,omitempty"`
+	Units   []Unit   `json:"units,omitempty"`
 }
 
 // EncodeIndex writes an archive's index as a gzip'd JSON document.

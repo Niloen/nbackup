@@ -51,6 +51,11 @@ type BackupResult struct {
 	Uncompressed int64           // raw stream size
 	FileCount    int             // number of file members
 	Members      []record.Member // members in stream order, each with its byte offset in the raw stream (Off -1 when the archiver cannot report offsets)
+	// Units is the archive's content inventory in this archiver's own vocabulary
+	// (postgres: tables with sizes; see record.Unit), sorted by Path. Nil when the
+	// archiver reports none (gnutar, pipe) — inventory is a declared extra, like
+	// member offsets.
+	Units []record.Unit
 	// Unreadable lists source paths the archiver could not read (e.g. a permission-denied
 	// file): the archive committed without them — a *partial* dump. Empty means complete.
 	// A partial archive is still a valid, restorable stream of what was readable; the caller

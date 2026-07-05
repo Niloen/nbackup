@@ -50,6 +50,7 @@ type SourceStats struct {
 	FileCount    int
 	Members      []record.Member
 	Frames       []record.Frame // a framed source's decode-restart table (ChunkSource); nil = plain stream
+	Units        []record.Unit  // the producer's content inventory (see record.Unit); nil = none reported
 	Unreadable   []string       // source paths the producer could not read (a partial dump); empty = complete
 }
 

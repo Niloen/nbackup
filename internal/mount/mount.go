@@ -267,17 +267,12 @@ func listChildren(n *recovery.Node) fs.DirStream {
 	return fs.NewListDirStream(out)
 }
 
-// nodeMode maps a tree node to its FUSE type: directory, alias symlink
-// (recovery grafts table-name aliases as symlinks to physical paths), or file.
+// nodeMode maps a tree node to its FUSE type.
 func nodeMode(n *recovery.Node) uint32 {
-	switch {
-	case n.IsDir():
+	if n.IsDir() {
 		return fuse.S_IFDIR
-	case n.IsSymlink():
-		return fuse.S_IFLNK
-	default:
-		return fuse.S_IFREG
 	}
+	return fuse.S_IFREG
 }
 
 // lookupChild resolves one name under a tree directory into an inode — the
@@ -304,17 +299,7 @@ var (
 	_ = (fs.NodeLookuper)((*treeEntry)(nil))
 	_ = (fs.NodeGetattrer)((*treeEntry)(nil))
 	_ = (fs.NodeOpener)((*treeEntry)(nil))
-	_ = (fs.NodeReadlinker)((*treeEntry)(nil))
 )
-
-// Readlink resolves an alias symlink to its relative target ("tables/…" →
-// "../../../base/…"); the kernel then follows it to the physical entry.
-func (e *treeEntry) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
-	if !e.node.IsSymlink() {
-		return nil, syscall.EINVAL
-	}
-	return []byte(e.node.LinkTarget()), 0
-}
 
 // fillAttr stamps the entry's attributes; a file already recovered into the
 // cache reports its real size, an unopened one reports 0 (content is only
@@ -322,11 +307,6 @@ func (e *treeEntry) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 // clamped by the 0).
 func (e *treeEntry) fillAttr(a *fuse.Attr) {
 	stamp(a, e.node.IsDir(), runMtime(e.d.runID))
-	if e.node.IsSymlink() {
-		a.Mode = fuse.S_IFLNK | 0o777
-		a.Size = uint64(len(e.node.LinkTarget()))
-		return
-	}
 	if e.node.IsDir() {
 		return
 	}

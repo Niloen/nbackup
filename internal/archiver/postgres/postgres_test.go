@@ -14,6 +14,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/programs"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // open builds a postgres archiver whose PostgreSQL tools live in binDir (the
@@ -48,7 +49,7 @@ func fakePsql(t *testing.T, dir string, summarizeWAL string) {
 	fakeTool(t, dir, "psql", fmt.Sprintf(`case "$*" in
   *pg_database_size*) echo 12345 ;;
   *pg_database*) echo "5|testdb" ;;
-  *pg_class*) echo "1234|public|users" ;;
+  *pg_class*) echo "1234|2234|3234|public|users|90112" ;;
   *summarize_wal*) echo %s ;;
   *"SELECT 1"*) echo 1 ;;
   *) echo "unexpected psql args: $*" >&2; exit 2 ;;
@@ -65,6 +66,8 @@ func clusterTar(t *testing.T) (tarPath, manifest string) {
 	for p, content := range map[string]string{
 		"base/5/1234":       strings.Repeat("x", 16),
 		"base/5/1234_fsm":   "fsm",
+		"base/5/2234":       "toast heap",
+		"base/5/3234":       "toast index",
 		"base/5/9999":       "unmapped relation",
 		"postgresql.conf":   "port=5432\n",
 		"backup_manifest":   manifest,
@@ -90,8 +93,8 @@ func clusterTar(t *testing.T) (tarPath, manifest string) {
 // the stage, drain the stream, Finish, Promote — against a fake pg_basebackup
 // that emits a fixture tar, and checks: the stream is byte-identical to the
 // tool's output, the manifest was teed out in flight and promotes into the
-// library, the member index carries offsets, and the relation file got its
-// table alias.
+// library, the member index carries offsets, and the inventory maps the
+// table with its size, forks, toast, and toast index.
 func TestBackupStreamAndState(t *testing.T) {
 	bin := t.TempDir()
 	tarPath, manifest := clusterTar(t)
@@ -126,31 +129,28 @@ func TestBackupStreamAndState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	byPath := map[string]struct {
-		off   int64
-		alias string
-	}{}
+	byPath := map[string]int64{}
 	for _, m := range res.Members {
-		byPath[m.Path] = struct {
-			off   int64
-			alias string
-		}{m.Off, m.Alias}
+		byPath[m.Path] = m.Off
 	}
-	rel, ok := byPath["base/5/1234"]
-	if !ok || rel.off < 0 {
+	if off, ok := byPath["base/5/1234"]; !ok || off < 0 {
 		t.Fatalf("member base/5/1234 missing or offsetless: %+v", byPath)
 	}
-	if rel.alias != "tables/testdb/public.users/data" {
-		t.Fatalf("alias = %q", rel.alias)
+	if len(res.Units) != 1 {
+		t.Fatalf("units = %+v", res.Units)
 	}
-	if a := byPath["base/5/1234_fsm"].alias; a != "tables/testdb/public.users/fsm" {
-		t.Fatalf("fsm alias = %q", a)
+	u := res.Units[0]
+	if u.Path != "tables/testdb/public.users" || u.Size != 90112 {
+		t.Fatalf("unit = %+v", u)
 	}
-	if a := byPath["base/5/9999"].alias; a != "" {
-		t.Fatalf("unmapped relation should have no alias, got %q", a)
+	wantMembers := map[string]bool{"base/5/1234": true, "base/5/1234_fsm": true, "base/5/2234": true, "base/5/3234": true}
+	if len(u.Members) != len(wantMembers) {
+		t.Fatalf("unit members = %v", u.Members)
 	}
-	if a := byPath["postgresql.conf"].alias; a != "" {
-		t.Fatalf("non-relation file should have no alias, got %q", a)
+	for _, m := range u.Members {
+		if !wantMembers[m] {
+			t.Fatalf("unexpected unit member %q (unmapped/non-relation files must stay out)", m)
+		}
 	}
 
 	// The dump's manifest landed as the work file and only Promote commits it.
@@ -394,25 +394,21 @@ func TestAssemble(t *testing.T) {
 	}
 }
 
-func TestRelationFileNaming(t *testing.T) {
-	alias := map[string]string{"base/5/1234": "tables/testdb/public.users"}
+func TestRelationKey(t *testing.T) {
+	// Every stored form of one relation's files keys back to the same owner.
 	for in, want := range map[string]string{
-		"base/5/1234":                 "tables/testdb/public.users/data",
-		"base/5/1234.1":               "tables/testdb/public.users/data.1",
-		"base/5/1234_fsm":             "tables/testdb/public.users/fsm",
-		"base/5/1234_vm":              "tables/testdb/public.users/vm",
-		"base/5/1234_fsm.2":           "tables/testdb/public.users/fsm.2",
-		"base/5/INCREMENTAL.1234":     "tables/testdb/public.users/data",
-		"base/5/INCREMENTAL.1234_fsm": "tables/testdb/public.users/fsm",
+		"base/5/1234":                 "base/5/1234",
+		"base/5/1234.1":               "base/5/1234",
+		"base/5/1234_fsm":             "base/5/1234",
+		"base/5/1234_vm":              "base/5/1234",
+		"base/5/1234_fsm.2":           "base/5/1234",
+		"base/5/INCREMENTAL.1234":     "base/5/1234",
+		"base/5/INCREMENTAL.1234_fsm": "base/5/1234",
+		"base/5/1234_other":           "base/5/1234_other", // unknown fork suffix stays distinct
+		"postgresql.conf":             "postgresql.conf",
 	} {
-		table, fork, ok := relationFile(in, alias)
-		if !ok || table+"/"+fork != want {
-			t.Errorf("relationFile(%q) = %q/%q (%v), want %q", in, table, fork, ok, want)
-		}
-	}
-	for _, in := range []string{"base/5/9999", "postgresql.conf", "global/1234", "base/5/1234_other"} {
-		if _, _, ok := relationFile(in, alias); ok {
-			t.Errorf("relationFile(%q) should not match", in)
+		if got := relationKey(in); got != want {
+			t.Errorf("relationKey(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -526,7 +522,7 @@ func TestLiveIncrementalCycle(t *testing.T) {
 	psql("CREATE TABLE users (id int, name text)")
 	psql("INSERT INTO users SELECT g, 'u' || g FROM generate_series(1, 1000) g")
 
-	dump := func(level, baseLevel int) ([]byte, []struct{ path, alias string }) {
+	dump := func(level, baseLevel int) ([]byte, *archiver.BackupResult) {
 		t.Helper()
 		bs, err := p.BackupSource(archiver.BackupRequest{DLE: "db01", Source: conninfo, Level: level, BaseLevel: baseLevel})
 		if err != nil {
@@ -552,33 +548,40 @@ func TestLiveIncrementalCycle(t *testing.T) {
 		if err := bs.Promote(); err != nil {
 			t.Fatal(err)
 		}
-		var members []struct{ path, alias string }
-		for _, m := range res.Members {
-			members = append(members, struct{ path, alias string }{m.Path, m.Alias})
-		}
-		return stream, members
+		return stream, res
 	}
 
-	full, fullMembers := dump(0, -1)
+	full, fullRes := dump(0, -1)
 	if !p.HasBase("db01", 0) {
 		t.Fatal("no base after promoted full")
 	}
-	var usersAlias string
-	for _, m := range fullMembers {
-		if strings.HasSuffix(m.alias, "/public.users/data") {
-			usersAlias = m.alias
+	var users record.Unit
+	for _, u := range fullRes.Units {
+		if u.Path == "tables/postgres/public.users" {
+			users = u
 		}
 	}
-	if usersAlias != "tables/postgres/public.users/data" {
-		t.Fatalf("users table alias = %q", usersAlias)
+	if users.Path == "" || users.Size == 0 || len(users.Members) == 0 {
+		t.Fatalf("users table unit missing/empty: %+v (all: %d units)", users, len(fullRes.Units))
+	}
+	// The unit's TOAST relation rides along (name text is toastable).
+	toast := 0
+	for _, m := range users.Members {
+		if !strings.HasPrefix(m, "base/") {
+			t.Fatalf("unit member %q outside base/", m)
+		}
+		toast++
+	}
+	if toast < 2 {
+		t.Fatalf("users unit should span heap+toast files, got %v", users.Members)
 	}
 
 	psql("INSERT INTO users SELECT g, 'v' || g FROM generate_series(1001, 2000) g")
 	psql("CHECKPOINT")
-	incr, incrMembers := dump(1, 0)
+	incr, incrRes := dump(1, 0)
 	hasDelta := false
-	for _, m := range incrMembers {
-		if strings.Contains(m.path, "INCREMENTAL.") {
+	for _, m := range incrRes.Members {
+		if strings.Contains(m.Path, "INCREMENTAL.") {
 			hasDelta = true
 		}
 	}

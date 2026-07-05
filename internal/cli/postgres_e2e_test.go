@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
@@ -128,26 +129,47 @@ func TestPostgresArchiverEndToEnd(t *testing.T) {
 		t.Fatalf("verify --deep: %v\n%s", err, out)
 	}
 
-	// Selected-file recovery THROUGH THE TABLE ALIAS: the tree grafts
-	// tables/postgres/public.users/data as a symlink to the relation file,
-	// whose newest chain version is a block delta — so this exercises the
-	// assembler end to end (fetch both versions, merge, land at the physical
-	// path). postgresql.conf rides along deliberately: it puts a real file in
-	// the same extract step as the pulled ancestor dirs (base/, base/5/), so
-	// the step is not skipped as dir-only — the regression for tar's
-	// recursive-match quirk (redundant child dir args need --no-recursion).
+	// The inventory: the tables the archiver reported at dump time, sized.
+	out, err = runCmd(t, "-c", cfgPath, "recover", "--dle", dleID, "--inventory")
+	if err != nil {
+		t.Fatalf("--inventory: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "tables/postgres/public.users") || !strings.Contains(out, "units · run") {
+		t.Fatalf("inventory lacks the users table:\n%s", out)
+	}
+
+	// The interactive shell: inventory-driven selection. `add public.users`
+	// matches the unit by suffix and selects its files — the delta-tipped heap
+	// file rides the assembler, and postgresql.conf in the same extraction
+	// keeps the ancestor-dir step non-empty (the --no-recursion regression).
 	selDest := filepath.Join(base, "sel")
-	if out, err = runCmd(t, "-c", cfgPath, "recover", "--dle", dleID,
-		"--path", "tables/postgres/public.users/data", "--path", "postgresql.conf",
-		"--dest", selDest, "--yes"); err != nil {
-		t.Fatalf("alias selection recover: %v\n%s", err, out)
+	script := strings.Join([]string{
+		"inventory users",
+		"add public.users",
+		"add postgresql.conf",
+		"dest " + selDest,
+		"extract",
+		"quit",
+	}, "\n") + "\n"
+	oldIn := stdinReader
+	stdinReader = bufio.NewReader(strings.NewReader(script))
+	out, err = runCmd(t, "-c", cfgPath, "recover", "--dle", dleID)
+	stdinReader = oldIn
+	if err != nil {
+		t.Fatalf("shell session: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "named units — 'inventory' lists them") {
+		t.Fatalf("shell lacks the inventory hint:\n%s", out)
+	}
+	if !strings.Contains(out, "matched unit tables/postgres/public.users") {
+		t.Fatalf("unit add did not match:\n%s", out)
 	}
 	if _, err := os.Stat(filepath.Join(selDest, "postgresql.conf")); err != nil {
 		t.Fatalf("postgresql.conf not recovered: %v", err)
 	}
 	var relFile string
 	_ = filepath.WalkDir(filepath.Join(selDest, "base"), func(p string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() {
+		if err == nil && !d.IsDir() && relFile == "" {
 			relFile = p
 		}
 		return nil

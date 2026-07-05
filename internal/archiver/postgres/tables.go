@@ -1,34 +1,41 @@
 package postgres
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-// This file captures the table-name aliases at dump time: one catalog pass
-// maps each relation file in the stream ("base/<dboid>/<relfilenode>[_fork]
-// [.seg]") to a human-meaningful browse path ("tables/<db>/<schema>.<table>/
-// data"), recorded as Member.Alias. The browse tree grafts aliases as
-// symlinks, so a mounted backup answers "what tables are in here" by name.
-// The mapping is queried per database because pg_class is database-local —
-// N+1 psql calls against the cluster being dumped, so the names are exactly
-// as of the backup.
+// This file builds the archive's content inventory (record.Unit): one unit per
+// table, "tables/<db>/<schema>.<table>", captured at dump time — the mapping
+// (relfilenode → name) is cluster state that dies with the cluster, so it can
+// never be recomputed later. Unit.Size is pg_table_size (heap + toast + fsm +
+// vm, as of the dump — NOT this archive's delta bytes), and Unit.Members
+// cross-references the raw members in this archive that carry the table's
+// bytes: heap segments and forks, plus the TOAST relation and its index, so an
+// expert's salvage selection is complete. pg_class is database-local, so the
+// inventory costs one catalog query per connectable database, against the
+// cluster being dumped.
 //
-// Annotation is best-effort: a database that cannot be reached (datallowconn
-// on a db the backup role cannot enter, an exotic conninfo form) just
-// contributes no aliases — the physical paths stay authoritative, browse is
-// merely less friendly there.
+// The inventory is best-effort: a database the backup role cannot enter, or an
+// exotic conninfo form, just contributes no units — the archive itself is
+// unaffected, `--inventory` merely knows less.
 
-// annotateTables fills Member.Alias for the relation files of every
-// connectable database in the cluster.
-func (p *postgres) annotateTables(source string, members []record.Member) {
+// unitsFor builds the inventory for one dump from the cluster's catalogs and
+// the archive's member list. Returns nil when nothing could be mapped.
+func (p *postgres) unitsFor(source string, members []record.Member) []record.Unit {
 	out, err := p.psql(source, "SELECT oid, datname FROM pg_database WHERE datallowconn")
 	if err != nil {
-		return
+		return nil
 	}
-	alias := map[string]string{} // "base/<dboid>/<relfilenode>" -> "tables/<db>/<schema>.<table>"
+	type table struct {
+		unit  record.Unit
+		order int // first member's stream position, for deterministic-but-informative Members order
+	}
+	byFile := map[string]*table{} // "base/<dboid>/<relfilenode>" -> its table (heap, toast, and toast-index files all map here)
+	var tables []*table
 	for _, line := range strings.Split(out, "\n") {
 		oid, db, ok := strings.Cut(line, "|")
 		if !ok || strings.Contains(db, "/") {
@@ -38,32 +45,64 @@ func (p *postgres) annotateTables(source string, members []record.Member) {
 		if !ok {
 			continue
 		}
-		rels, err := p.psql(conn, "SELECT c.relfilenode, n.nspname, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','m') AND c.relfilenode <> 0")
+		// One row per table/matview: its filenode, its TOAST relation's and TOAST
+		// index's filenodes (0/empty when none), name, and total size.
+		rels, err := p.psql(conn, `SELECT c.relfilenode, coalesce(tc.relfilenode, 0), coalesce(tic.relfilenode, 0), n.nspname, c.relname, pg_table_size(c.oid)
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_class tc ON tc.oid = c.reltoastrelid
+LEFT JOIN pg_index ti ON ti.indrelid = tc.oid
+LEFT JOIN pg_class tic ON tic.oid = ti.indexrelid
+WHERE c.relkind IN ('r','m') AND c.relfilenode <> 0`)
 		if err != nil {
 			continue
 		}
 		for _, rel := range strings.Split(rels, "\n") {
-			parts := strings.SplitN(rel, "|", 3)
-			if len(parts) != 3 || strings.ContainsAny(parts[1]+parts[2], "/") {
+			parts := strings.SplitN(rel, "|", 6)
+			if len(parts) != 6 || strings.ContainsAny(parts[3]+parts[4], "/") {
 				continue
 			}
-			alias["base/"+oid+"/"+parts[0]] = "tables/" + db + "/" + parts[1] + "." + parts[2]
+			size, _ := strconv.ParseInt(parts[5], 10, 64)
+			t := &table{unit: record.Unit{
+				Path: "tables/" + db + "/" + parts[3] + "." + parts[4],
+				Size: size,
+			}}
+			tables = append(tables, t)
+			for _, filenode := range parts[:3] {
+				if filenode != "" && filenode != "0" {
+					byFile["base/"+oid+"/"+filenode] = t
+				}
+			}
 		}
 	}
-	if len(alias) == 0 {
-		return
+	if len(byFile) == 0 {
+		return nil
 	}
 	for i, m := range members {
-		if table, fork, ok := relationFile(m.Path, alias); ok {
-			members[i].Alias = table + "/" + fork
+		t, ok := byFile[relationKey(m.Path)]
+		if !ok {
+			continue
 		}
+		if len(t.unit.Members) == 0 {
+			t.order = i
+		}
+		t.unit.Members = append(t.unit.Members, m.Path)
 	}
+	units := make([]record.Unit, 0, len(tables))
+	for _, t := range tables {
+		if len(t.unit.Members) == 0 {
+			continue // a mapped table with no file in this archive (shouldn't occur: every dump enumerates all files)
+		}
+		units = append(units, t.unit)
+	}
+	sort.Slice(units, func(i, j int) bool { return units[i].Path < units[j].Path })
+	return units
 }
 
 // connTo composes a connection reference to another database of the same
 // cluster: a bare database name is swapped outright, a conninfo string gets a
 // trailing dbname override (libpq: later keys win). A URL-form source is not
-// composable — skip it (best-effort annotation).
+// composable — skip it (best-effort inventory).
 func connTo(source, db string) (string, bool) {
 	if strings.Contains(source, "://") {
 		return "", false
@@ -74,38 +113,28 @@ func connTo(source, db string) (string, bool) {
 	return db, true
 }
 
-// relationFile matches a stream member path against the relation-file naming
-// ("base/<dboid>/<relfilenode>[_<fork>][.<segment>]", with a possible
-// INCREMENTAL. delta marker) and returns the table's alias prefix plus the
-// fork file name inside the table's directory: the main fork is "data"
-// ("data.1", … for 1GB segments), the others keep their PostgreSQL fork names
-// (fsm, vm, init).
-func relationFile(memberPath string, alias map[string]string) (table, fork string, ok bool) {
-	name, isDelta := assembler{}.Logical(memberPath)
-	_ = isDelta // a delta aliases the same logical file
+// relationKey reduces a stream member path to its owning relation's map key:
+// "base/<dboid>/<relfilenode>" — stripping the INCREMENTAL delta marker, a
+// fork suffix (_fsm/_vm/_init), and a 1GB-segment suffix (.<n>). A path that
+// is not relation-file-shaped returns itself (and simply won't be in the map).
+func relationKey(memberPath string) string {
+	name, _ := assembler{}.Logical(memberPath)
 	dir, file := splitLast(name)
-	base := file
-	seg := ""
-	if i := strings.LastIndexByte(base, '.'); i >= 0 {
-		if _, err := strconv.Atoi(base[i+1:]); err == nil {
-			base, seg = base[:i], base[i+1:]
+	if i := strings.LastIndexByte(file, '.'); i >= 0 {
+		if _, err := strconv.Atoi(file[i+1:]); err == nil {
+			file = file[:i]
 		}
 	}
-	forkName := "data"
-	if i := strings.LastIndexByte(base, '_'); i >= 0 {
-		switch base[i+1:] {
+	if i := strings.LastIndexByte(file, '_'); i >= 0 {
+		switch file[i+1:] {
 		case "fsm", "vm", "init":
-			base, forkName = base[:i], base[i+1:]
+			file = file[:i]
 		}
 	}
-	table, ok = alias[dir+"/"+base]
-	if !ok {
-		return "", "", false
+	if dir == "" {
+		return file
 	}
-	if seg != "" {
-		forkName += "." + seg
-	}
-	return table, forkName, true
+	return dir + "/" + file
 }
 
 // splitLast splits a slash path into (dir, last) without the trailing slash.

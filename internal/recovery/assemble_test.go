@@ -30,14 +30,13 @@ func (fakeAssembler) Assemble([]archiver.Version) (io.ReadCloser, error) {
 // incremental re-enumerates every live file (the assembler census contract):
 // 2619 changed (a delta), 3000 unchanged (a zero-block delta stub), config
 // copied whole; 4000 was DELETED (absent), and 5000 is new (stored whole).
-// 2619 carries a table alias on the newest version.
 func pgScenario() []record.Archive {
 	return []record.Archive{{
 		Run: "run-2026-06-21.001", DLE: "db", Level: 0, Archiver: "postgres", Compress: "none",
 		Members: []record.Member{
 			{Path: "base/", Off: 0},
 			{Path: "base/5/", Off: 512},
-			{Path: "base/5/2619", Off: 1024, Alias: "tables/app/public.users/data"},
+			{Path: "base/5/2619", Off: 1024},
 			{Path: "base/5/3000", Off: 2048},
 			{Path: "base/5/4000", Off: 3072},
 			{Path: "postgresql.conf", Off: 4096},
@@ -47,7 +46,7 @@ func pgScenario() []record.Archive {
 		Members: []record.Member{
 			{Path: "base/", Off: 0},
 			{Path: "base/5/", Off: 512},
-			{Path: "base/5/INCREMENTAL.2619", Off: 1024, Alias: "tables/app/public.users/data"},
+			{Path: "base/5/INCREMENTAL.2619", Off: 1024},
 			{Path: "base/5/INCREMENTAL.3000", Off: 2048},
 			{Path: "base/5/5000", Off: 3072},
 			{Path: "postgresql.conf", Off: 4096},
@@ -114,45 +113,12 @@ func TestAssemblerCensus(t *testing.T) {
 	}
 }
 
-// TestAliasGraft: the alias appears as a symlink to the physical path, with a
-// relative link target, and never shadows real content.
-func TestAliasGraft(t *testing.T) {
-	tree := pgTree(t)
-	n, ok := tree.Lookup("tables/app/public.users/data")
-	if !ok {
-		t.Fatal("alias path missing")
-	}
-	if !n.IsSymlink() || n.IsDir() {
-		t.Fatalf("alias node: symlink=%v dir=%v", n.IsSymlink(), n.IsDir())
-	}
-	if got := n.LinkTarget(); got != "../../../base/5/2619" {
-		t.Fatalf("link target = %q", got)
-	}
-	if d, ok := tree.Lookup("tables/app"); !ok || !d.IsDir() {
-		t.Fatal("alias parent dirs missing")
-	}
-}
-
-func TestAliasNeverShadows(t *testing.T) {
-	archives := pgScenario()
-	// A hostile alias colliding with a real physical path must be skipped.
-	archives[1].Members[3].Alias = "postgresql.conf"
-	tree, err := BuildTreeForRun(archives, "db", "run-2026-06-22.001", membersOf(archives, "db"), assemblerFor)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n, ok := tree.Lookup("postgresql.conf")
-	if !ok || n.IsSymlink() {
-		t.Fatal("alias must not shadow a physical path")
-	}
-}
-
-// TestCollectAssemblies: selecting a delta-tipped file (via its alias symlink,
-// even) yields an Assembly with the chain versions in order, not a plain step;
-// whole files still collect as steps.
+// TestCollectAssemblies: selecting a delta-tipped file yields an Assembly with
+// the chain versions in order, not a plain step; whole files still collect as
+// steps.
 func TestCollectAssemblies(t *testing.T) {
 	tree := pgTree(t)
-	steps, asms, err := tree.Collect([]string{"tables/app/public.users/data", "postgresql.conf"})
+	steps, asms, err := tree.Collect([]string{"base/5/2619", "postgresql.conf"})
 	if err != nil {
 		t.Fatal(err)
 	}

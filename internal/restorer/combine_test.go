@@ -130,7 +130,7 @@ func TestAssembledSelection(t *testing.T) {
 		},
 	}}
 	out := filepath.Join(t.TempDir(), "sel")
-	files, archives, err := r.ExtractSelection(nil, asm, out, nil)
+	files, archives, err := r.ExtractSelection(nil, asm, out, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

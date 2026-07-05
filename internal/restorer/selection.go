@@ -48,6 +48,45 @@ func (r *Restorer) membersFor(dle string) func(runID string, level int) ([]recor
 	}
 }
 
+// Inventory returns a DLE's content inventory as of a date: the units of the
+// NEWEST chain archive that reports any (each dump's inventory is a complete
+// statement about content, so the tip speaks for the chain — the same instinct
+// as the assembler census), plus the run that reported it. Nil units = the
+// archiver records no inventory (gnutar, pipe) — the caller says so rather
+// than showing an empty table.
+//
+// The RECORDED unit members are raw archive tokens (an incremental's delta
+// files, "base/5/INCREMENTAL.2619"); the SERVED inventory normalizes them to
+// their logical browse paths via the archiver's Assembler, so what the user
+// sees is selectable in the browse tree as-is (`add`, `--path`).
+func (r *Restorer) Inventory(dle, asOf string) ([]record.Unit, string, error) {
+	target, err := recovery.AsOf(r.deps.Archives(), asOf)
+	if err != nil {
+		return nil, "", err
+	}
+	steps, err := recovery.Chain(r.deps.Archives(), dle, target)
+	if err != nil {
+		return nil, "", r.friendlyDLEErr(dle, err)
+	}
+	for i := len(steps) - 1; i >= 0; i-- {
+		idx, err := r.deps.Store.Index(archiveio.Ref{Run: steps[i].RunID, DLE: dle, Level: steps[i].Level})
+		if err != nil {
+			return nil, "", err
+		}
+		if len(idx.Units) > 0 {
+			if asm := r.assemblerFor(dle)(steps[i].Archiver); asm != nil {
+				for u := range idx.Units {
+					for m, member := range idx.Units[u].Members {
+						idx.Units[u].Members[m], _ = asm.Logical(member)
+					}
+				}
+			}
+			return idx.Units, steps[i].RunID, nil
+		}
+	}
+	return nil, target, nil
+}
+
 // assemblerFor resolves the browse-time chain assembler for a recorded archiver
 // type, through the DLE's config as every read-side resolution does. An
 // unresolvable archiver yields nil — the tree then keeps its default

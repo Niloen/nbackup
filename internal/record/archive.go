@@ -35,6 +35,7 @@ type Archive struct {
 	Shape        Shape      `json:"shape,omitempty"`      // stream shape (see Shape): how the encoded payload is laid out. Kept in the footer — a reader decodes without config — and archive-invariant across copies (the encoded bytes are carried verbatim).
 	Members      []Member   `json:"members,omitempty"`    // members archived, in stream order (see Member); the raw path token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
 	Frames       []Frame    `json:"frames,omitempty"`     // a framed archive's decode-restart table, in stream order (see Frame). Like Members it rides the per-archive index, never the footer; unlike part seals it is archive-invariant (encoded-stream domain), so copies carry it unchanged.
+	Units        []Unit     `json:"units,omitempty"`      // the archive's content inventory in the archiver's vocabulary (see Unit), sorted by Path. Rides the per-archive index like Members, never the footer; archive-invariant, so copies carry it unchanged.
 	PartSeals    []PartSeal `json:"part_seals,omitempty"` // per-part seals, index-aligned with the parts (Header.Part order). Like Parts, a fact about THIS placement's layout (a copy re-splits and re-seals its own parts): the catalog moves them onto the placement's record and strips them from the run's medium-independent content.
 }
 
@@ -151,13 +152,30 @@ func (f *Frame) UnmarshalJSON(b []byte) error {
 type Member struct {
 	Path string `json:"p"`
 	Off  int64  `json:"o"`
-	// Alias is an optional alternate, human-meaningful browse path for this member
-	// (postgres: "tables/app_prod/public.users/data" for the relation file
-	// "base/16384/2619"). The browse tree grafts it as a symlink to Path, so a
-	// database backup reads as tables without the physical layout leaking into the
-	// generic layers. Path stays the member's one canonical identity — every
-	// structural comparison (seals, verify's List) keys on Path/Off and ignores Alias.
-	Alias string `json:"a,omitempty"`
+}
+
+// Unit is one named thing an archive contains, in the producing archiver's own
+// vocabulary ("tables/postgres/public.users") — an archive-level CONTENT fact,
+// distinct from the stream-layout facts (Members, Frames) it rides beside in
+// the per-archive index. Units power `nb recover --inventory` and the shell's
+// unit-aware selection; they are advisory metadata outside every structural
+// comparison (verify's List cannot reproduce them from the stream).
+type Unit struct {
+	// Path is the unit's stable, hierarchical identity, unique within the
+	// archive and built from NAMES (never oids/relfilenodes — those are
+	// cluster-lifetime accidents), so inventories diff across runs and
+	// `--export` arguments resolve against it. The vocabulary is the
+	// archiver's; the generic layers render, sort, and match it — never parse.
+	Path string `json:"path"`
+	// Size is the unit's TOTAL size as of this dump, in archiver-defined terms
+	// (postgres: pg_table_size — heap+toast+fsm+vm); 0 = unreported. It
+	// describes the thing, not its bytes in this archive — an incremental's
+	// delta members are small while the table stays its full size.
+	Size int64 `json:"size,omitempty"`
+	// Members names the raw members in THIS archive carrying the unit's bytes
+	// (an incremental lists its delta files) — the cross-reference an expert
+	// pulls with `--path`. Empty when the unit is not file-shaped.
+	Members []string `json:"members,omitempty"`
 }
 
 // PartSeal is the seal of one part file as it lies on a placement: its size and the

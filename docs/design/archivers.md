@@ -118,7 +118,7 @@ escape hatches (`Off = -1`, nothing structurally requires slashes).
 present for tar/basebackup, absent (or one opaque file) for logical DB dumps.
 The capability gate this paragraph deferred is now decided — see neutrality
 moves 7–8 under "The postgres archiver as built": the assembler makes
-incremental chains browse correctly, and member aliases make them legible.
+incremental chains browse correctly, and the unit inventory makes them legible.
 
 ## Database incrementals — the transaction log, and it is Amanda-faithful
 
@@ -277,25 +277,42 @@ the archiver, graceful generic default):
    then runs `CombineStage` once. Default (gnutar, pipe): the additive
    replay, unchanged.
 8. **Archiver-owned member assembly** (`Assembler`: `Logical` + `Assemble`),
-   plus **alias grafting** (`record.Member.Alias`). The browse tree
+   plus the **unit inventory** (`record.Unit`). The browse tree
    (`recovery.Tree`, and with it `nb recover`'s selection and `nb mount`)
    was a most-recent-wins union — wrong for a chain whose newest version of
-   a changed relation file is an `INCREMENTAL.<name>` block delta. With an
-   assembler the tree keys nodes on the LOGICAL path (`Logical` folds the
-   delta name), keeps each node's chain versions, takes the newest level as
-   the census (such archivers enumerate every live file per level, so
-   deletions fall out — the union caveat does not apply), and browse-time
-   reads fetch each version and run `Assemble` (~100 lines of block
-   splicing, cross-validated byte-for-byte against `pg_combinebackup`).
-   Whole-DLE restore still runs `pg_combinebackup` itself — the database's
-   own tool stays authoritative; the assembler is the mount/browse/selection
-   read path. Aliases make the result legible: at dump time one catalog
-   pass per database maps relation files to `tables/<db>/<schema>.<table>/
-   {data,fsm,vm,…}`, recorded per member and grafted into the tree as
-   symlinks to the physical paths — no postgres code in the mount, nothing
-   for archivers that record no alias. This resolves the "mount/browse stay
+   a changed relation file is an `INCREMENTAL.<name>` block delta (a mounted
+   chain would show a stale full beside a garbage delta). With an assembler
+   the tree keys nodes on the LOGICAL path (`Logical` folds the delta name),
+   keeps each node's chain versions, takes the newest level as the census
+   (such archivers enumerate every live file per level, so deletions fall
+   out — the union caveat does not apply), and browse-time reads fetch each
+   version and run `Assemble` (~100 lines of block splicing, cross-validated
+   byte-for-byte against `pg_combinebackup`). Whole-DLE restore still runs
+   `pg_combinebackup` itself — the database's own tool stays authoritative;
+   the assembler is the mount/browse/selection read path.
+
+   The *legibility* half went through a deliberate revision. The first build
+   recorded a per-member alias path and grafted `tables/…` symlinks into the
+   tree/mount — rejected after review: a downloaded heap file is an
+   attractive nuisance (raw 8k pages, no catalogs, no rows — a dead end at
+   the worst moment), and file→thing is the wrong cardinality anyway (one
+   thing spans many files; one file can serve many things; a thing needn't
+   be file-shaped at all — a logical dump's TOC entry, a pipe stream).
+   Replaced by the archive-level **unit inventory**: `record.Unit{Path,
+   Size, Members}` in the per-archive index — Path a stable name-based
+   identity in the archiver's vocabulary ("tables/postgres/public.users"),
+   Size the unit's TOTAL size as of the dump (postgres: `pg_table_size`,
+   never delta-bytes extent math), Members the raw members in that archive
+   carrying it (heap + forks + segments + TOAST + toast index), normalized
+   to logical browse paths when served. Rendered by `nb recover
+   --inventory` (a sibling MODE of `--list`/`--all`, chain-tip units) and
+   the shell's `inventory` verb; the shell's `add` falls back to unit
+   matching (exact, then unique substring) so `add public.users` selects
+   the table's files — assembly included. The CLI grows no per-archiver
+   nouns: the vocabulary lives in the recorded unit paths. The mount stays
+   a faithful physical view. This resolves the "mount/browse stay
    tree-capability consumers" question above: the capability gate is the
-   assembler + aliases, and incremental chains mount correctly.
+   assembler + the inventory, and incremental chains browse correctly.
 
 Semantics note, documented loudly: `pg_basebackup` is **cluster**-level.
 The source's database only names the connection — configure one DLE per

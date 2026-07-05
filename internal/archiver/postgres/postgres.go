@@ -20,8 +20,9 @@
 // is stored as an `INCREMENTAL.<name>` block delta, so a whole-DLE restore
 // gathers every level into staging and merges once with `pg_combinebackup`
 // (RestoreIsCombine/CombineStage), and browse-time reads assemble a single
-// file's chain versions in-process (assemble.go). Table-name aliases for
-// relation files are captured at dump time (tables.go).
+// file's chain versions in-process (assemble.go). The archive's content
+// inventory — tables with sizes, for `recover --inventory` — is captured at
+// dump time (tables.go).
 package postgres
 
 import (
@@ -207,12 +208,12 @@ func (p *postgres) BackupSource(r archiver.BackupRequest) (*archiver.BackupSourc
 		if err != nil {
 			return nil, err
 		}
-		p.annotateTables(r.Source, members)
 		return &archiver.BackupResult{
 			// The raw stream size is metered by the caller off the stage's own
 			// output (pg_basebackup has no totals side channel).
 			FileCount: archiver.CountFiles(members),
 			Members:   members,
+			Units:     p.unitsFor(r.Source, members),
 		}, nil
 	}
 	promote := func() error { return p.promoteManifest(r.DLE, r.Level) }
