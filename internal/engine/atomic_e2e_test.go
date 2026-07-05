@@ -150,12 +150,12 @@ func TestAtomicEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenRecover: %v", err)
 	}
-	steps, err := tree.Collect([]string{"/etc/hosts"})
+	steps, _, err := tree.Collect([]string{"/etc/hosts"})
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
 	selDest := t.TempDir()
-	if _, _, err := eng.ExtractSelection(steps, selDest, logfDiscard, nil); err != nil {
+	if _, _, err := eng.ExtractSelection(steps, nil, selDest, logfDiscard, nil); err != nil {
 		t.Fatalf("ExtractSelection: %v", err)
 	}
 	assertContent(t, filepath.Join(selDest, "etc", "hosts"), "127.0.0.1 localhost\n")

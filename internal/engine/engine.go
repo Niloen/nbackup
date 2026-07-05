@@ -39,6 +39,7 @@ import (
 	// Register the bundled media and archiver implementations.
 	_ "github.com/Niloen/nbackup/internal/archiver/gnutar"
 	_ "github.com/Niloen/nbackup/internal/archiver/pipe"
+	_ "github.com/Niloen/nbackup/internal/archiver/postgres"
 	_ "github.com/Niloen/nbackup/internal/media/cloud"
 	_ "github.com/Niloen/nbackup/internal/media/disk"
 	_ "github.com/Niloen/nbackup/internal/media/gdrive"
@@ -623,10 +624,11 @@ func (e *Engine) OpenRecoverRun(dle, runID string) (*recovery.Tree, error) {
 	return e.rst.OpenRecoverRun(dle, runID)
 }
 
-// ExtractSelection extracts a selected set of files into destDir, reporting media
-// reads to prog for a live progress view (nil disables it); see restorer.
-func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, destDir string, logf Logf, prog restorer.ReadProgress) (int, int, error) {
-	return e.rst.ExtractSelection(steps, destDir, logf, prog)
+// ExtractSelection extracts a selected set of files (plus any delta-tipped
+// assemblies) into destDir, reporting media reads to prog for a live progress
+// view (nil disables it); see restorer.
+func (e *Engine) ExtractSelection(steps []recovery.ExtractStep, asms []recovery.Assembly, destDir string, logf Logf, prog restorer.ReadProgress) (int, int, error) {
+	return e.rst.ExtractSelection(steps, asms, destDir, logf, prog)
 }
 
 // DLENames returns the distinct DLE names recorded across all catalog runs,

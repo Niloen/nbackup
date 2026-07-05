@@ -728,6 +728,18 @@ archivers:
     type: gnutar
     one-file-system: "true"
     # tar_path: gtar     # GNU tar binary (use "gtar" on macOS/BSD)
+  # PostgreSQL 17+ native incremental base backups: level 0 = pg_basebackup,
+  # level N = the block deltas since the previous dump; restore merges the
+  # chain with pg_combinebackup. The DLE source string is a libpq connection
+  # reference ("app_prod", "service=prod", "host=/run/postgresql dbname=app")
+  # and auth is the client's own libpq config (peer auth, ~/.pgpass,
+  # ~/.pg_service.conf) — no credentials in this file. One DLE per cluster (a
+  # base backup images the whole cluster); requires `summarize_wal = on`
+  # (`nb check` prints the line). Backups browse by table: `nb mount` and
+  # `nb recover` show tables/<db>/<schema>.<table>/ beside the data dir.
+  # pg:
+  #   type: postgres
+  #   bin_dir: /usr/lib/postgresql/17/bin  # if the v17 tools are off PATH
 
 # Named dumptypes: an archiver reference + per-DLE policy —
 # what to skip (exclude) and encryption. Excludes are a content decision, so they

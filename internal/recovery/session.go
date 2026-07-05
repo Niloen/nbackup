@@ -103,7 +103,7 @@ func (s *Session) Selection() []string {
 }
 
 // CollectSelection turns the current selection into the fewest per-archive
-// extraction steps.
-func (s *Session) CollectSelection() ([]ExtractStep, error) {
+// extraction steps, plus the assemblies for delta-tipped files (see Collect).
+func (s *Session) CollectSelection() ([]ExtractStep, []Assembly, error) {
 	return s.tree.Collect(s.Selection())
 }

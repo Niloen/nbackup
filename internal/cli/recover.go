@@ -220,7 +220,7 @@ func runRecoverBatch(eng *engine.Engine, ra recoverArgs, logf engine.Logf) error
 	if ra.dest == "" {
 		return fmt.Errorf("--dest is required to recover files")
 	}
-	steps, err := tree.Collect(ra.paths)
+	steps, asms, err := tree.Collect(ra.paths)
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "not found: ") {
 			return fmt.Errorf("%w%s", err, pathRootHint(strings.TrimPrefix(err.Error(), "not found: ")))
@@ -235,7 +235,7 @@ func runRecoverBatch(eng *engine.Engine, ra recoverArgs, logf engine.Logf) error
 	if tree.HasIncrementals() {
 		fmt.Println(fileLevelDeletionNote)
 	}
-	n, archives, err := eng.ExtractSelection(steps, ra.dest, logf, newExtractProgress(est.Bytes))
+	n, archives, err := eng.ExtractSelection(steps, asms, ra.dest, logf, newExtractProgress(est.Bytes))
 	if err != nil {
 		return err
 	}

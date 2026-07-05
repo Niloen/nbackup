@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
+
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
@@ -25,6 +27,8 @@ func backend() Backend {
 		{Run: "run-2026-06-22.001", DLE: "app", Level: 1, Archiver: "gnutar", Compress: "none",
 			Members: mems("./", "./etc/", "./etc/hosts", "./etc/new.conf")},
 	}
+	// web's index carries a browse alias — grafted as a symlink in the tree.
+	archives[1].Members[1].Alias = "pages/home.html"
 	runs := []*catalog.Run{
 		{ID: "run-2026-06-21.001", Archives: archives[:2]},
 		{ID: "run-2026-06-22.001", Archives: archives[2:]},
@@ -42,9 +46,9 @@ func backend() Backend {
 	return Backend{
 		Runs: func() []*catalog.Run { return runs },
 		Tree: func(dle, runID string) (*recovery.Tree, error) {
-			return recovery.BuildTreeForRun(archives, dle, runID, membersOf(dle))
+			return recovery.BuildTreeForRun(archives, dle, runID, membersOf(dle), nil)
 		},
-		Extract: func(steps []recovery.ExtractStep, destDir string) error {
+		Extract: func(steps []recovery.ExtractStep, _ []recovery.Assembly, destDir string) error {
 			for _, st := range steps {
 				for _, m := range st.Members {
 					p := strings.Trim(strings.TrimPrefix(m, "./"), "/")
@@ -165,11 +169,61 @@ func TestServe(t *testing.T) {
 		t.Fatalf("web index = %q, want %q", got, want)
 	}
 
+	// The alias appears as a real symlink and reads THROUGH it resolve to the
+	// physical file's content.
+	link := filepath.Join(run2, "web", "pages", "home.html")
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("alias lstat = %v, %v; want symlink", fi, err)
+	}
+	if target, err := os.Readlink(link); err != nil || target != "../index.html" {
+		t.Fatalf("alias readlink = %q, %v", target, err)
+	}
+	got, err = os.ReadFile(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "content of index.html@run-2026-06-21.001"; string(got) != want {
+		t.Fatalf("alias read = %q, want %q", got, want)
+	}
+
 	// Read-only: writes are refused.
 	if err := os.WriteFile(hosts, []byte("nope"), 0o644); err == nil {
 		t.Fatal("write should be refused")
 	}
 	if _, err := os.Stat(filepath.Join(run2, "app", "nope")); err == nil {
 		t.Fatal("missing path should ENOENT")
+	}
+}
+
+// TestNodeModeSymlink: an alias graft renders as a FUSE symlink; files and
+// dirs keep their modes. (The full FUSE walk is TestServe, gated on /dev/fuse.)
+func TestNodeModeSymlink(t *testing.T) {
+	archives := []record.Archive{{
+		Run: "run-2026-06-21.001", DLE: "db", Level: 0, Archiver: "postgres", Compress: "none",
+		Members: []record.Member{
+			{Path: "base/", Off: 0},
+			{Path: "base/5/", Off: 512},
+			{Path: "base/5/2619", Off: 1024, Alias: "tables/app/public.users/data"},
+		},
+	}}
+	members := func(runID string, level int) ([]record.Member, error) { return archives[0].Members, nil }
+	tree, err := recovery.BuildTreeForRun(archives, "db", "run-2026-06-21.001", members, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, ok := tree.Lookup("tables/app/public.users/data")
+	if !ok {
+		t.Fatal("alias missing")
+	}
+	if nodeMode(link) != fuse.S_IFLNK {
+		t.Fatalf("alias mode = %#o, want S_IFLNK", nodeMode(link))
+	}
+	file, _ := tree.Lookup("base/5/2619")
+	dir, _ := tree.Lookup("base/5")
+	if nodeMode(file) != fuse.S_IFREG || nodeMode(dir) != fuse.S_IFDIR {
+		t.Fatal("file/dir modes changed")
+	}
+	if got := link.LinkTarget(); got != "../../../base/5/2619" {
+		t.Fatalf("link target = %q", got)
 	}
 }

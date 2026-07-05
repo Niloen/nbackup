@@ -18,6 +18,18 @@
 // at a later incremental still appears in the browse view; a whole-DLE chain
 // restore (engine.Restore) applies deletions, but selected-file recovery extracts
 // each chosen file from the archive that last held it and does not delete.
+//
+// Two archiver capabilities refine the tree beyond that union (see
+// archiver.Assembler and record.Member.Alias):
+//   - An archiver with an ASSEMBLER stores some chain members as per-file deltas
+//     (postgres: INCREMENTAL.<name> block maps). The tree then keys nodes on the
+//     LOGICAL path (delta and whole versions of one file are one node), keeps the
+//     node's chain versions for the read side to assemble, and takes the newest
+//     chain level as the census — such archivers enumerate every live file per
+//     level, so deletions fall out and the union caveat does not apply.
+//   - A member carrying an ALIAS (an alternate human-meaningful path, e.g.
+//     "tables/app/public.users/data") is grafted into the tree a second time as a
+//     symlink to its physical path, so a database backup browses by table name.
 package recovery
 
 import (
@@ -25,6 +37,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
@@ -35,14 +48,27 @@ type Source struct {
 	Member string // the producing archiver's verbatim member token, replayed to it on extract (e.g. "./etc/hosts")
 }
 
+// Version is one chain level's stored form of a node, oldest→newest: where the
+// bytes live and whether they are a delta the archiver's Assembler must apply
+// over the earlier versions (a node whose newest version is a delta cannot be
+// extracted alone).
+type Version struct {
+	Src   *Source
+	Delta bool
+}
+
 // Node is a file or directory in the reconstructed virtual filesystem. A node has
 // a Source when an archive in the chain holds it as a member; purely structural
-// parent directories (implied by a deeper member) have none.
+// parent directories (implied by a deeper member) have none. A node with a link
+// is an alias symlink pointing at another node's path.
 type Node struct {
 	name     string
 	path     string // clean path from the DLE root, e.g. "etc/hosts"
 	dir      bool
 	src      *Source
+	versions []Version // the chain versions behind this node (newest last); a whole version resets the list
+	alias    string    // the newest version's recorded alias path, if any
+	link     string    // symlink nodes only: the target's clean tree path
 	children map[string]*Node
 }
 
@@ -54,6 +80,26 @@ func (n *Node) Path() string { return n.path }
 
 // IsDir reports whether the node is a directory.
 func (n *Node) IsDir() bool { return n.dir }
+
+// IsSymlink reports whether the node is an alias symlink.
+func (n *Node) IsSymlink() bool { return n.link != "" }
+
+// LinkTarget returns an alias symlink's target as a path RELATIVE to the
+// node's directory (the form a filesystem symlink wants), e.g. the alias
+// "tables/app/public.users/data" → "../../../base/5/1234".
+func (n *Node) LinkTarget() string {
+	return relPath(parentDir(n.path), n.link)
+}
+
+// NeedsAssembly reports whether the node's newest chain version is a delta —
+// reading it requires assembling the versions, not extracting one member.
+func (n *Node) NeedsAssembly() bool {
+	return len(n.versions) > 0 && n.versions[len(n.versions)-1].Delta
+}
+
+// Versions returns the node's chain versions, oldest first. For a plain
+// (non-assembler) tree this is just the newest member.
+func (n *Node) Versions() []Version { return n.versions }
 
 // Children returns the node's entries sorted directories-first, then by name.
 func (n *Node) Children() []*Node {
@@ -85,26 +131,31 @@ type Tree struct {
 // note on it.
 func (t *Tree) HasIncrementals() bool { return t.chainLen > 1 }
 
+// AssemblerFor resolves the browse-time chain assembler for an archiver type —
+// nil for archivers whose newest member version IS the file (the default). The
+// restorer supplies it from its archiver resolution; tests pass nil.
+type AssemblerFor func(archiverType string) archiver.Assembler
+
 // BuildTree reconstructs the filesystem of dle as of asOf (YYYY-MM-DD) by merging
 // the member lists of the restore chain in run order, so each path resolves to the
 // most recent archive that holds it. The member lists are loaded via members (the
 // catalog cache holds the run index, not the member lists — those are loaded lazily).
-func BuildTree(archives []record.Archive, dle, asOf string, members func(runID string, level int) ([]record.Member, error)) (*Tree, error) {
+func BuildTree(archives []record.Archive, dle, asOf string, members func(runID string, level int) ([]record.Member, error), assemblerFor AssemblerFor) (*Tree, error) {
 	target, err := AsOf(archives, asOf)
 	if err != nil {
 		return nil, err
 	}
-	return buildTree(archives, dle, target, asOf, members)
+	return buildTree(archives, dle, target, asOf, members, assemblerFor)
 }
 
 // BuildTreeForRun is BuildTree pinned to an exact target run instead of an as-of
 // date: the chain's tip is the DLE's most recent dump at or before that run, so a
 // run that did not dump the DLE still resolves to its state as of that run.
-func BuildTreeForRun(archives []record.Archive, dle, runID string, members func(runID string, level int) ([]record.Member, error)) (*Tree, error) {
-	return buildTree(archives, dle, runID, record.RunDate(runID), members)
+func BuildTreeForRun(archives []record.Archive, dle, runID string, members func(runID string, level int) ([]record.Member, error), assemblerFor AssemblerFor) (*Tree, error) {
+	return buildTree(archives, dle, runID, record.RunDate(runID), members, assemblerFor)
 }
 
-func buildTree(archives []record.Archive, dle, target, asOf string, members func(runID string, level int) ([]record.Member, error)) (*Tree, error) {
+func buildTree(archives []record.Archive, dle, target, asOf string, members func(runID string, level int) ([]record.Member, error), assemblerFor AssemblerFor) (*Tree, error) {
 	steps, err := Chain(archives, dle, target)
 	if err != nil {
 		return nil, err
@@ -116,22 +167,49 @@ func buildTree(archives []record.Archive, dle, target, asOf string, members func
 		chainLen:  len(steps),
 		root:      &Node{dir: true, children: map[string]*Node{}},
 	}
-	for _, st := range steps {
+	// One chain is one DLE's, so every step records the same archiver type;
+	// the first step answers for all (as the restorer's destIsDir does).
+	var asm archiver.Assembler
+	if assemblerFor != nil && len(steps) > 0 {
+		asm = assemblerFor(steps[0].Archiver)
+	}
+	// With an assembler, the newest chain level's member list is the census:
+	// such archivers enumerate every live file per level (whole or delta), so
+	// a path absent from the newest level was deleted — prune it, where the
+	// default tree keeps the union.
+	var newest map[string]bool
+	for si, st := range steps {
 		ms, err := members(st.RunID, st.Level)
 		if err != nil {
 			return nil, err
 		}
+		if asm != nil && si == len(steps)-1 {
+			newest = make(map[string]bool, len(ms))
+		}
 		for _, m := range ms {
-			t.insert(m.Path, &Source{Step: st, Member: m.Path})
+			logical, delta := m.Path, false
+			if asm != nil {
+				logical, delta = asm.Logical(m.Path)
+			}
+			t.insert(logical, &Source{Step: st, Member: m.Path}, delta, m.Alias)
+			if newest != nil {
+				p, _ := cleanMember(logical)
+				newest[p] = true
+			}
 		}
 	}
+	if newest != nil {
+		prune(t.root, newest)
+	}
+	t.graftAliases()
 	return t, nil
 }
 
-// insert adds a tar member to the tree, creating parent directories as needed.
-// A later call (a more recent archive) overwrites the leaf's Source, so the tree
-// reflects most-recent-wins.
-func (t *Tree) insert(member string, src *Source) {
+// insert adds a member to the tree at its (logical) path, creating parent
+// directories as needed. A later call (a more recent archive) overwrites the
+// leaf's Source, so the tree reflects most-recent-wins; the version list keeps
+// the older forms a delta needs — a whole version resets it, a delta appends.
+func (t *Tree) insert(member string, src *Source, delta bool, alias string) {
 	path, isDir := cleanMember(member)
 	if path == "" {
 		return // the archive root ("./")
@@ -153,9 +231,119 @@ func (t *Tree) insert(member string, src *Source) {
 		if i == len(parts)-1 {
 			child.dir = isDir
 			child.src = src
+			if delta {
+				child.versions = append(child.versions, Version{Src: src, Delta: true})
+			} else {
+				child.versions = []Version{{Src: src}}
+			}
+			if alias != "" {
+				child.alias = alias
+			}
 		}
 		n = child
 	}
+}
+
+// prune drops every node absent from the newest chain level's census: a file
+// (or explicitly-recorded directory) not in the set is deleted content, and a
+// structural directory emptied by the pruning goes with it. Parents implied by
+// surviving children always stay.
+func prune(n *Node, newest map[string]bool) {
+	for name, c := range n.children {
+		prune(c, newest)
+		if len(c.children) == 0 && !newest[c.path] {
+			delete(n.children, name)
+		}
+	}
+}
+
+// graftAliases inserts a symlink node at every aliased member's alias path,
+// pointing at the member's physical path — how "tables/app/public.users/data"
+// appears beside the cluster tree. An alias never shadows real content: a
+// collision with an existing physical path skips the graft.
+func (t *Tree) graftAliases() {
+	type graft struct{ alias, target string }
+	var grafts []graft
+	var walk func(n *Node)
+	walk = func(n *Node) {
+		if n.alias != "" {
+			grafts = append(grafts, graft{alias: n.alias, target: n.path})
+		}
+		for _, c := range n.children {
+			walk(c)
+		}
+	}
+	walk(t.root)
+	// Deterministic graft order, so a (pathological) duplicate alias resolves
+	// the same way every build.
+	sort.Slice(grafts, func(i, j int) bool { return grafts[i].alias < grafts[j].alias })
+	for _, g := range grafts {
+		t.graftLink(g.alias, g.target)
+	}
+}
+
+// graftLink creates the symlink node at path (with structural parents),
+// refusing to overwrite or tunnel through any existing non-directory node.
+func (t *Tree) graftLink(path, target string) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		return
+	}
+	n := t.root
+	cur := ""
+	for _, p := range parts[:len(parts)-1] {
+		if cur == "" {
+			cur = p
+		} else {
+			cur += "/" + p
+		}
+		child, ok := n.children[p]
+		if !ok {
+			child = &Node{name: p, path: cur, dir: true, children: map[string]*Node{}}
+			n.children[p] = child
+		}
+		if !child.dir {
+			return // a real file sits where the alias tree would go
+		}
+		n = child
+	}
+	leaf := parts[len(parts)-1]
+	if _, exists := n.children[leaf]; exists {
+		return // never shadow real content (or an earlier alias)
+	}
+	full := leaf
+	if cur != "" {
+		full = cur + "/" + leaf
+	}
+	n.children[leaf] = &Node{name: leaf, path: full, link: target, children: map[string]*Node{}}
+}
+
+// parentDir returns the clean parent of a clean path ("" for a root entry).
+func parentDir(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[:i]
+	}
+	return ""
+}
+
+// relPath computes the relative path from one clean tree directory to a clean
+// tree path — the symlink form of an alias target.
+func relPath(fromDir, to string) string {
+	var from []string
+	if fromDir != "" {
+		from = strings.Split(fromDir, "/")
+	}
+	target := strings.Split(to, "/")
+	common := 0
+	for common < len(from) && common < len(target) && from[common] == target[common] {
+		common++
+	}
+	out := make([]string, 0, len(from)-common+len(target)-common)
+	for range from[common:] {
+		out = append(out, "..")
+	}
+	out = append(out, target[common:]...)
+	return strings.Join(out, "/")
 }
 
 // cleanMember normalizes an archive member ("./etc/hosts", "./etc/") into a clean
@@ -191,30 +379,43 @@ type ExtractStep struct {
 	Members []string // raw tar member names
 }
 
+// Assembly is one selected file whose newest chain version is a delta: no
+// single archive holds its content, so the restorer fetches every version
+// (oldest→newest) and runs the archiver's Assembler — landing the result at
+// the logical Path.
+type Assembly struct {
+	Path     string // clean tree path the assembled file lands at
+	Versions []Version
+}
+
 // Collect resolves a set of selected paths (files or directories) into the
-// per-archive extractions that reproduce them as of the target date. Selecting a
-// directory takes every descendant; each path also pulls its ancestor directory
-// members so directory metadata is restored. The steps and their members are
-// returned in a deterministic order.
-func (t *Tree) Collect(paths []string) ([]ExtractStep, error) {
+// per-archive extractions — plus the ASSEMBLIES for files whose newest version
+// is a delta — that reproduce them as of the target date. Selecting a directory
+// takes every descendant; an alias symlink resolves to its target; each path
+// also pulls its ancestor directory members so directory metadata is restored.
+// Steps, their members, and assemblies come back in a deterministic order.
+func (t *Tree) Collect(paths []string) ([]ExtractStep, []Assembly, error) {
 	chosen := map[string]*Source{}
+	toAssemble := map[string]*Node{}
 	for _, p := range paths {
 		n, ok := t.Lookup(p)
 		if !ok {
-			return nil, fmt.Errorf("not found: %s", p)
+			return nil, nil, fmt.Errorf("not found: %s", p)
 		}
-		gather(n, chosen)
+		t.gather(n, chosen, toAssemble)
 	}
 	// Pull ancestor directory members so parent-dir ownership/permissions land.
-	for cp := range chosen {
-		for _, anc := range ancestors(cp) {
-			if n, ok := t.Lookup(anc); ok && n.src != nil {
-				chosen[anc] = n.src
+	for _, m := range []map[string]bool{keysOf(chosen), keysOf(toAssemble)} {
+		for cp := range m {
+			for _, anc := range ancestors(cp) {
+				if n, ok := t.Lookup(anc); ok && n.src != nil && !n.NeedsAssembly() {
+					chosen[anc] = n.src
+				}
 			}
 		}
 	}
-	if len(chosen) == 0 {
-		return nil, fmt.Errorf("nothing to extract")
+	if len(chosen) == 0 && len(toAssemble) == 0 {
+		return nil, nil, fmt.Errorf("nothing to extract")
 	}
 
 	type key struct {
@@ -245,17 +446,50 @@ func (t *Tree) Collect(paths []string) ([]ExtractStep, error) {
 	for _, k := range order {
 		out = append(out, *steps[k])
 	}
-	return out, nil
+	var asms []Assembly
+	for _, p := range sortedNodeKeys(toAssemble) {
+		asms = append(asms, Assembly{Path: p, Versions: toAssemble[p].versions})
+	}
+	return out, asms, nil
 }
 
-// gather walks a node's subtree, recording every node that has a Source.
-func gather(n *Node, into map[string]*Source) {
+// gather walks a node's subtree, recording every node that has a Source —
+// splitting off the delta-tipped ones (they need assembly, not extraction) —
+// and following an alias symlink to its target.
+func (t *Tree) gather(n *Node, into map[string]*Source, toAssemble map[string]*Node) {
+	if n.link != "" {
+		if target, ok := t.Lookup(n.link); ok {
+			t.gather(target, into, toAssemble)
+		}
+		return
+	}
 	if n.src != nil {
-		into[n.path] = n.src
+		if n.NeedsAssembly() {
+			toAssemble[n.path] = n
+		} else {
+			into[n.path] = n.src
+		}
 	}
 	for _, c := range n.children {
-		gather(c, into)
+		t.gather(c, into, toAssemble)
 	}
+}
+
+func keysOf[V any](m map[string]V) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for k := range m {
+		out[k] = true
+	}
+	return out
+}
+
+func sortedNodeKeys(m map[string]*Node) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ancestors returns the clean paths of a path's parent directories, nearest last.

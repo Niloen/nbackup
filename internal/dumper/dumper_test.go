@@ -51,6 +51,9 @@ func (f *fakeArchiver) DestIsDir() bool                                { return 
 func (f *fakeArchiver) Ext() string                                    { return ".tar" }
 func (f *fakeArchiver) CanList() bool                                  { return true }
 func (f *fakeArchiver) StockExtract() string                           { return "cat > /dev/null" }
+func (f *fakeArchiver) RestoreIsCombine() bool                         { return false }
+func (f *fakeArchiver) CombineStage(string, []string) programs.Cmd     { return programs.Cmd{} }
+func (f *fakeArchiver) Assembler() archiver.Assembler                  { return nil }
 
 func (f *fakeArchiver) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource, error) {
 	if f.backupErr != nil {

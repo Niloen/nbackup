@@ -151,6 +151,13 @@ func (f *Frame) UnmarshalJSON(b []byte) error {
 type Member struct {
 	Path string `json:"p"`
 	Off  int64  `json:"o"`
+	// Alias is an optional alternate, human-meaningful browse path for this member
+	// (postgres: "tables/app_prod/public.users/data" for the relation file
+	// "base/16384/2619"). The browse tree grafts it as a symlink to Path, so a
+	// database backup reads as tables without the physical layout leaking into the
+	// generic layers. Path stays the member's one canonical identity — every
+	// structural comparison (seals, verify's List) keys on Path/Off and ignores Alias.
+	Alias string `json:"a,omitempty"`
 }
 
 // PartSeal is the seal of one part file as it lies on a placement: its size and the

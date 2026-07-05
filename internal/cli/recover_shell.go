@@ -387,7 +387,7 @@ func (sh *recoverShell) extract(args []string) {
 		fmt.Println("no destination; aborted")
 		return
 	}
-	steps, err := sh.sess.CollectSelection()
+	steps, asms, err := sh.sess.CollectSelection()
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
 		return
@@ -398,7 +398,7 @@ func (sh *recoverShell) extract(args []string) {
 		return
 	}
 	sh.noteDeletionOnce()
-	n, archives, err := sh.eng.ExtractSelection(steps, sh.dest, logfStdout, newExtractProgress(est.Bytes))
+	n, archives, err := sh.eng.ExtractSelection(steps, asms, sh.dest, logfStdout, newExtractProgress(est.Bytes))
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
 		return

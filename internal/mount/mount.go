@@ -36,11 +36,12 @@ import (
 
 // Backend is what the mount needs from the engine, as plain funcs so the
 // filesystem is testable without one: the catalog's runs, a run-pinned browse
-// tree per DLE, and selected-file extraction into a directory.
+// tree per DLE, and selected-file extraction (plus delta-tipped assemblies)
+// into a directory.
 type Backend struct {
 	Runs    func() []*catalog.Run
 	Tree    func(dle, runID string) (*recovery.Tree, error)
-	Extract func(steps []recovery.ExtractStep, destDir string) error
+	Extract func(steps []recovery.ExtractStep, asms []recovery.Assembly, destDir string) error
 }
 
 // Options configures a mount. The caller owns CacheDir's lifecycle — the mount
@@ -261,13 +262,22 @@ func listChildren(n *recovery.Node) fs.DirStream {
 	cs := n.Children()
 	out := make([]fuse.DirEntry, 0, len(cs))
 	for _, c := range cs {
-		mode := uint32(fuse.S_IFREG)
-		if c.IsDir() {
-			mode = fuse.S_IFDIR
-		}
-		out = append(out, fuse.DirEntry{Mode: mode, Name: c.Name()})
+		out = append(out, fuse.DirEntry{Mode: nodeMode(c), Name: c.Name()})
 	}
 	return fs.NewListDirStream(out)
+}
+
+// nodeMode maps a tree node to its FUSE type: directory, alias symlink
+// (recovery grafts table-name aliases as symlinks to physical paths), or file.
+func nodeMode(n *recovery.Node) uint32 {
+	switch {
+	case n.IsDir():
+		return fuse.S_IFDIR
+	case n.IsSymlink():
+		return fuse.S_IFLNK
+	default:
+		return fuse.S_IFREG
+	}
 }
 
 // lookupChild resolves one name under a tree directory into an inode — the
@@ -278,12 +288,8 @@ func lookupChild(ctx context.Context, parent *fs.Inode, d *dleNode, dirPath, nam
 		return nil, errno
 	}
 	child := &treeEntry{d: d, node: c}
-	mode := uint32(fuse.S_IFREG)
-	if c.IsDir() {
-		mode = fuse.S_IFDIR
-	}
 	child.fillAttr(&out.Attr)
-	return parent.NewInode(ctx, child, fs.StableAttr{Mode: mode}), 0
+	return parent.NewInode(ctx, child, fs.StableAttr{Mode: nodeMode(c)}), 0
 }
 
 // treeEntry is a file or directory inside a DLE's snapshot.
@@ -298,7 +304,17 @@ var (
 	_ = (fs.NodeLookuper)((*treeEntry)(nil))
 	_ = (fs.NodeGetattrer)((*treeEntry)(nil))
 	_ = (fs.NodeOpener)((*treeEntry)(nil))
+	_ = (fs.NodeReadlinker)((*treeEntry)(nil))
 )
+
+// Readlink resolves an alias symlink to its relative target ("tables/…" →
+// "../../../base/…"); the kernel then follows it to the physical entry.
+func (e *treeEntry) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
+	if !e.node.IsSymlink() {
+		return nil, syscall.EINVAL
+	}
+	return []byte(e.node.LinkTarget()), 0
+}
 
 // fillAttr stamps the entry's attributes; a file already recovered into the
 // cache reports its real size, an unopened one reports 0 (content is only
@@ -306,6 +322,11 @@ var (
 // clamped by the 0).
 func (e *treeEntry) fillAttr(a *fuse.Attr) {
 	stamp(a, e.node.IsDir(), runMtime(e.d.runID))
+	if e.node.IsSymlink() {
+		a.Mode = fuse.S_IFLNK | 0o777
+		a.Size = uint64(len(e.node.LinkTarget()))
+		return
+	}
 	if e.node.IsDir() {
 		return
 	}
@@ -381,11 +402,11 @@ func (d *dleNode) ensure(n *recovery.Node) (string, error) {
 	if errno != 0 {
 		return "", d.err
 	}
-	steps, err := tree.Collect([]string{n.Path()})
+	steps, asms, err := tree.Collect([]string{n.Path()})
 	if err != nil {
 		return "", err
 	}
-	if err := d.m.b.Extract(steps, d.cacheDirFor()); err != nil {
+	if err := d.m.b.Extract(steps, asms, d.cacheDirFor()); err != nil {
 		return "", err
 	}
 	fi, err := os.Lstat(p)
