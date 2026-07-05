@@ -195,8 +195,8 @@ func (m Media) CapacityBytes() (int64, error) {
 // ThroughputBytes returns this medium's bandwidth cap in bytes per second, or 0
 // if unset (uncapped). It caps both directions — a dump/sync to the medium and a
 // restore/un-vault/drill from it — so the office uplink survives a business-hours
-// backup. Concurrent workers to one medium share the single budget,
-// since a run writes a single landing medium.
+// backup. Concurrent workers to one medium share the single budget; a run writing
+// several landings gives each its own medium's budget.
 func (m Media) ThroughputBytes() (int64, error) {
 	if m.Throughput == "" {
 		return 0, nil
@@ -232,7 +232,7 @@ type DumpType struct {
 	Exclude  []string        `yaml:"exclude,omitempty"`   // patterns to skip (passed to the archiver per dump)
 	Encrypt  *EncryptConfig  `yaml:"encrypt,omitempty"`   // nil = inherit the config-wide default; set = replace it wholesale (no field merge)
 	Compress *CompressConfig `yaml:"compress,omitempty"`  // nil = inherit the config-wide default; set = replace it wholesale (no field merge) — the peer of Encrypt
-	Landing  string          `yaml:"landing,omitempty"`   // medium this dumptype's DLEs land on; "" = the config-wide `landing`. Routes different sources to different media (cheap cloud vs fast disk vs tape) within one run.
+	Landing  MediumList      `yaml:"landing,omitempty"`   // medium (or list, primary first) this dumptype's DLEs land on; empty = the config-wide `landing`. Routes different sources to different media (cheap cloud vs fast disk vs tape) within one run; a list fans each archive out to every entry.
 	PartSize string          `yaml:"part_size,omitempty"` // ATOM size for this dumptype's encrypted (atomic-shape) archives, overriding the top-level part_size (Amanda precedent: tape_splitsize was a dumptype option). Inert — warned about at check — on a dumptype with no per-frame (encryption) stage.
 }
 

@@ -46,7 +46,7 @@ func init() {
 // from the open-failure branch.
 func TestRunFailsWhenLandingCannotBeIndexed(t *testing.T) {
 	cfg := &config.Config{
-		Landing:  "listfail",
+		Landing:  config.MediumList{"listfail"},
 		Media:    map[string]config.Media{"listfail": {Type: "listfail", Params: map[string]string{"path": t.TempDir()}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
 		Workdir:  t.TempDir(),
@@ -101,7 +101,7 @@ func (c *capturingLogf) joined() string {
 // medium named and the SDK-credential hint, not a bare provider error.
 func TestRunFailsWhenCloudLandingUnreachable(t *testing.T) {
 	cfg := &config.Config{
-		Landing: "cloud",
+		Landing: config.MediumList{"cloud"},
 		Media: map[string]config.Media{
 			// A bogus URL scheme: gocloud registers no driver for it, so opening the
 			// bucket (which landing() does on first use) fails deterministically with
@@ -144,7 +144,7 @@ func TestRunFailsWhenDiskLandingUnwritable(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": blocker}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
 		Workdir:  t.TempDir(),
@@ -177,7 +177,7 @@ func TestRebuildSkipsUnopenableMedium(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "rebuild me")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			// A second medium that fails to open (bogus cloud URL). It is not the

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archivefs"
@@ -94,10 +95,11 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 	spec := archiveio.RunSpec{ID: runID, CreatedAt: now}
 
 	// The producers dump every DLE; the drain consumes them — buffering each onto a holding disk
-	// (one or more media marked `holding: true`) and copying it to its landing, or, when no disk fits
-	// or none is configured, writing it straight to its landing. Holding disks let the producers run
-	// flat out while a landing's drive drains at its own pace. A run may write several landings at once
-	// (per-dumptype routing): the spool opens a backing per distinct landing — see runOrchestrated.
+	// (one or more media marked `holding: true`) and copying it to every landing on its route, or,
+	// when no disk fits or none is configured, writing it straight to its landing(s). Holding disks
+	// let the producers run flat out while a landing's drive drains at its own pace. A run may write
+	// several landings at once (per-dumptype routing, or a fan-out route like `landing: [s3, gdrive]`):
+	// the spool opens a backing per distinct landing — see runOrchestrated.
 	holdingNames := c.d.HoldingMedia
 
 	// No global worker clamp: per-backing Writers in the spool serialize a serial landing (a single drive
@@ -135,9 +137,31 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 // spool wiring — holding disks, per-landing backings, the drain lifecycle — is withSpool, shared with
 // copy/sync so that machinery lives in one place.
 func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, workers int, spec archiveio.RunSpec, holdingNames []string, tr *progress.Tracker, now time.Time, lf logf.Logf) (*catalog.Run, error) {
-	landings := distinctLandings(plan.Items, c.d.LandingFor)
-	err := c.withSpool(ctx, landings, holdingNames, spec, workers, tr, now, lf, func(sp *spool.Spool, _ archivefs.ReadStore) error {
-		route := func(it planner.Item) archivefs.Ingest { return sp.Ingest(c.d.LandingFor(it)) }
+	landings := distinctLandings(plan.Items, c.d.LandingsFor)
+	if len(landings) > 1 {
+		lf.Log("run writes landings: %s", strings.Join(landings, ", "))
+	}
+	// Any-lane-suffices holds at window-open too: a landing that fails to OPEN (medium
+	// down before the run starts) is skipped with a warning, exactly like one that
+	// fails mid-run — fatal only if some item's whole route failed to open, because
+	// that item could land nowhere.
+	fatalOpen := func(failed map[string]error) error {
+		for _, it := range plan.Items {
+			route := c.d.LandingsFor(it)
+			alive := 0
+			for _, l := range route {
+				if _, down := failed[l]; !down {
+					alive++
+				}
+			}
+			if alive == 0 {
+				return fmt.Errorf("dump %s: no landing on its route could open: %w", it.DLE.ID(), failed[route[0]])
+			}
+		}
+		return nil
+	}
+	err := c.withSpool(ctx, landings, holdingNames, spec, workers, tr, now, lf, fatalOpen, func(sp *spool.Spool, _ archivefs.ReadStore) error {
+		route := func(it planner.Item) archivefs.Ingest { return sp.Ingest(c.d.LandingsFor(it)...) }
 		return c.d.Dmp.Run(ctx, plan.Items, workers, route, tr, lf) // a dump keeps no media: it only writes, and reads no medium
 	})
 	if err != nil {
@@ -179,7 +203,11 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 // (Deps.OpenReader; sound because a session never reads its own writes). The window closes
 // unconditionally when withSpool returns — every archive recorded before then is already
 // persisted (the archive is the commit unit).
-func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []string, spec archiveio.RunSpec, workers int, tr *progress.Tracker, now time.Time, lf logf.Logf, run func(sp *spool.Spool, ro archivefs.ReadStore) error) (err error) {
+// fatalOpen, when non-nil, lets a run tolerate landings that fail to OPEN: each failure is
+// warned and its backing skipped (the spool treats the name as tripped from the start), and
+// fatalOpen judges the collected failures — returning an error when some producer's whole
+// route is down. nil means any open failure is fatal (copy/sync, whose one target is the job).
+func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []string, spec archiveio.RunSpec, workers int, tr *progress.Tracker, now time.Time, lf logf.Logf, fatalOpen func(failed map[string]error) error, run func(sp *spool.Spool, ro archivefs.ReadStore) error) (err error) {
 	// The window opens here — before the spool (and its orchestrator and drains) exists,
 	// while this goroutine is the only one touching the catalog.
 	view, win, err := c.d.Cat.OpenWindow()
@@ -219,15 +247,27 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 
 	// One backing per landing; landingWriters decides how many writes to it may run at once.
 	backings := make([]spool.Backing, 0, len(landings))
+	openFailed := map[string]error{}
 	for _, name := range landings {
 		pw, err := c.d.OpenWriter(name, spec, now, lf)
 		if err != nil {
-			setPhase(progress.PhaseFailed)
-			return fmt.Errorf("open landing %q: %w", name, err)
+			if fatalOpen == nil {
+				setPhase(progress.PhaseFailed)
+				return fmt.Errorf("open landing %q: %w", name, err)
+			}
+			openFailed[name] = err
+			lf.Log("WARNING landing %q failed to open and is skipped for this run: %v — repair: nb sync --to %s", name, err, name)
+			continue
 		}
 		defer releaseWriter(pw)
 		writers := landingWriters(pw, workers)
 		backings = append(backings, spool.Backing{Name: name, Allocs: pw.Allocs, Rec: pw.Store, Writers: writers, Lim: pw.Lim})
+	}
+	if len(openFailed) > 0 {
+		if err := fatalOpen(openFailed); err != nil {
+			setPhase(progress.PhaseFailed)
+			return err
+		}
 	}
 
 	sp := spool.New(ctx, spool.Config{
@@ -249,7 +289,15 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 	}
 
 	setPhase(progress.PhaseSealing)
-	if err := firstErr(runErr, sp.Drain()); err != nil {
+	drainErr := sp.Drain()
+	// A tripped landing is a warning, not a failure: every archive still landed
+	// somewhere (a route with NO survivor aborts instead), and the catalog's
+	// placements record exactly what is missing — so the repair is one `nb sync`,
+	// named here loud enough to act on.
+	for _, w := range sp.Warnings() {
+		lf.Log("WARNING %s", w)
+	}
+	if err := firstErr(runErr, drainErr); err != nil {
 		setPhase(progress.PhaseFailed)
 		return err
 	}
@@ -268,7 +316,7 @@ func (c *Conductor) CopyRun(ctx context.Context, target, source string, spec arc
 	if source == target {
 		return fmt.Errorf("medium %q cannot be both read and written in one run", target)
 	}
-	return c.withSpool(ctx, []string{target}, nil, spec, workers, nil, now, lf, run)
+	return c.withSpool(ctx, []string{target}, nil, spec, workers, nil, now, lf, nil, run)
 }
 
 // landingWriters is how many writes to one landing may run at once — the medium's `writers`
@@ -296,15 +344,17 @@ func landingWriters(pw PreparedWriter, workers int) int {
 }
 
 // distinctLandings returns the distinct landing media the plan's items route to, in first-seen order
-// (so the open order is stable). An empty plan yields none — an empty run opens no landing writer.
-func distinctLandings(items []planner.Item, landingFor func(planner.Item) string) []string {
+// (so the open order is stable) — the union across every item's route, since a fan-out item writes
+// several. An empty plan yields none — an empty run opens no landing writer.
+func distinctLandings(items []planner.Item, landingsFor func(planner.Item) []string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, it := range items {
-		l := landingFor(it)
-		if !seen[l] {
-			seen[l] = true
-			out = append(out, l)
+		for _, l := range landingsFor(it) {
+			if !seen[l] {
+				seen[l] = true
+				out = append(out, l)
+			}
 		}
 	}
 	return out

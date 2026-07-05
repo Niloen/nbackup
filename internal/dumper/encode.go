@@ -325,7 +325,7 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 	// Progress is layered on here, by the one caller that wants it: wrap the sink to tap the running
 	// compressed count for live `nb status` (symmetric with stageCmd.Tap's uncompressed side). The store
 	// stays observability-free.
-	sink = archiveio.MeterArchive(sink, func(n int64) { comp.Store(n); report() })
+	sink.Meter(func(n int64) { comp.Store(n); report() })
 	// Release the sink's resources (for a direct landing write, its backing permit; for a holding
 	// write, its disk reservation) on every exit path — success, a faulted transfer, or a promote
 	// failure. The resource is held from NewArchive, so without this a failed dump would leak it;

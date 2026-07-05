@@ -51,9 +51,9 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 		}
 	}()
 	return conductor.Flush(conductor.FlushDeps{
-		Cat:        e.cat,
-		LandingFor: e.landingForDLEName,
-		Holdings:   e.cfg.HoldingMedia(),
+		Cat:         e.cat,
+		LandingsFor: e.landingsForDLEName,
+		Holdings:    e.cfg.HoldingMedia(),
 		Open: func(name string, ref archiveio.Ref, pos archiveio.ArchivePos) (io.ReadCloser, error) {
 			h, err := holding(name)
 			if err != nil {

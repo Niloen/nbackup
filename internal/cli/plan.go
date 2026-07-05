@@ -72,7 +72,7 @@ func newPlanCmd(a *app) *cobra.Command {
 
 			plan := eng.PlanWithProgress(date, estimateProgress(a.quiet))
 			fmt.Printf("Plan for run %s  (cycle %dd, landing %q)\n\n",
-				record.DateString(date), plan.Interval, eng.Landing())
+				record.DateString(date), plan.Interval, strings.Join(eng.Landings(), ", "))
 			for _, w := range plan.Warnings {
 				fmt.Printf("WARNING: %s\n", w)
 			}
@@ -148,7 +148,7 @@ func fprintPlanItems(w io.Writer, plan *planner.Plan) int64 {
 func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 	plans := eng.Simulate(start, days)
 	fmt.Printf("Forecast: %d daily runs from %s  (cycle %dd, landing %q)\n\n",
-		days, record.DateString(start), plans[0].Interval, eng.Landing())
+		days, record.DateString(start), plans[0].Interval, strings.Join(eng.Landings(), ", "))
 
 	// Structural warnings (e.g. a recovery set that won't fit capacity) are
 	// constant across the window; surface each one once, above the schedule.

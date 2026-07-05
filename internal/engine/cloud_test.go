@@ -25,7 +25,7 @@ func TestCloudLandingRoundTrip(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "land me in the cloud")
 
 	cfg := &config.Config{
-		Landing: "cloud",
+		Landing: config.MediumList{"cloud"},
 		Media: map[string]config.Media{
 			"cloud": {Type: "cloud", Params: map[string]string{"url": "file://" + t.TempDir()}},
 		},
@@ -71,7 +71,7 @@ func TestCloudPartSizeSplitsAndRestores(t *testing.T) {
 	write(t, filepath.Join(src, "big.txt"), body)
 
 	cfg := &config.Config{
-		Landing: "cloud",
+		Landing: config.MediumList{"cloud"},
 		Media: map[string]config.Media{
 			// part_size 64 KiB (the 2-header minimum) forces an intra-volume split.
 			"cloud": {Type: "cloud", Params: map[string]string{"url": "file://" + t.TempDir(), "part_size": "65536"}},
@@ -122,7 +122,7 @@ func TestCloudPartSizeStaysConcurrent(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Landing: "cloud",
+		Landing: config.MediumList{"cloud"},
 		Media: map[string]config.Media{
 			"cloud": {Type: "cloud", Params: map[string]string{"url": "file://" + t.TempDir(), "part_size": "65536"}},
 		},
@@ -183,7 +183,7 @@ func TestCloudPartSizeStaysConcurrent(t *testing.T) {
 func TestCloudPartSizeDefaultAndBound(t *testing.T) {
 	base := func(p map[string]string) *config.Config {
 		return &config.Config{
-			Landing:  "cloud",
+			Landing:  config.MediumList{"cloud"},
 			Media:    map[string]config.Media{"cloud": {Type: "cloud", Params: p}},
 			Workdir:  t.TempDir(),
 			StateDir: t.TempDir(),
@@ -219,7 +219,7 @@ func TestCloudPartSizeDefaultAndBound(t *testing.T) {
 func TestPartSizeForBounds(t *testing.T) {
 	base := func(p map[string]string) *config.Config {
 		return &config.Config{
-			Landing:  "cloud",
+			Landing:  config.MediumList{"cloud"},
 			Media:    map[string]config.Media{"cloud": {Type: "cloud", Params: p}},
 			Workdir:  t.TempDir(),
 			StateDir: t.TempDir(),
@@ -264,7 +264,7 @@ func TestSyncDiskToCloud(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "offsite me")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk":  {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"cloud": {Type: "cloud", Params: map[string]string{"url": "file://" + t.TempDir()}},

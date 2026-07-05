@@ -32,7 +32,7 @@ func TestRunRestoreEndToEnd(t *testing.T) {
 	write(t, filepath.Join(src, "gone.txt"), "temp")
 
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -89,7 +89,7 @@ func TestRunCanceledMarksStatusCanceled(t *testing.T) {
 	write(t, filepath.Join(src, "keep.txt"), "v1")
 
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -142,7 +142,7 @@ func TestRepeatedLevelRestore(t *testing.T) {
 	write(t, filepath.Join(src, "gone.txt"), "temp")
 
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -215,7 +215,7 @@ func TestResetForcesFullNextRun(t *testing.T) {
 	write(t, filepath.Join(src, "keep.txt"), "v1")
 
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -291,7 +291,7 @@ func TestValidatePlan(t *testing.T) {
 
 	base := func() *config.Config {
 		c := &config.Config{
-			Landing:  "disk",
+			Landing:  config.MediumList{"disk"},
 			Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 			Sources:  []config.DLE{{Host: "localhost", Path: src}},
 			Workdir:  t.TempDir(),
@@ -345,7 +345,7 @@ func TestValidatePlan(t *testing.T) {
 func TestParallelWorkers(t *testing.T) {
 	catalogDir := t.TempDir()
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
 		Workdir:  t.TempDir(),
 		StateDir: t.TempDir(),
@@ -393,7 +393,7 @@ func TestParallelWorkers(t *testing.T) {
 // the cross-drive read that follows (a tape may be left in a drive other than 0).
 func TestMultiDriveTapeConcurrentWrite(t *testing.T) {
 	cfg := &config.Config{
-		Landing:   "lib",
+		Landing:   config.MediumList{"lib"},
 		AutoLabel: true, // the robot labels each fresh tape it rolls onto
 		Cycle:     "1d", // every run a fresh full, so each DLE carries its own payload
 		Media: map[string]config.Media{
@@ -462,7 +462,7 @@ func TestMultiDriveTapeConcurrentWrite(t *testing.T) {
 // each source's size (the parallel estimate produces the same result as serial).
 func TestPlanWithProgress(t *testing.T) {
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 		Workdir:  t.TempDir(),
 		StateDir: t.TempDir(),
@@ -531,7 +531,7 @@ func TestPlanWithProgress(t *testing.T) {
 func TestRunStatusSpansEstimatePhase(t *testing.T) {
 	workdir := t.TempDir()
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 		Workdir:  workdir,
 		StateDir: t.TempDir(),
@@ -604,7 +604,7 @@ func TestThroughputCapThrottlesDump(t *testing.T) {
 	run := func(throughput string) (time.Duration, int64) {
 		t.Helper()
 		cfg := &config.Config{
-			Landing: "disk",
+			Landing: config.MediumList{"disk"},
 			Media: map[string]config.Media{
 				"disk": {Type: "disk", Throughput: throughput, Params: map[string]string{"path": t.TempDir()}},
 			},
@@ -657,7 +657,7 @@ func TestThroughputCapThrottlesRestore(t *testing.T) {
 	mk := func(throughput string) *Engine {
 		t.Helper()
 		cfg := &config.Config{
-			Landing: "disk",
+			Landing: config.MediumList{"disk"},
 			Media: map[string]config.Media{
 				"disk": {Type: "disk", Throughput: throughput, Params: map[string]string{"path": diskDir}},
 			},
@@ -709,7 +709,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "copy me to tape")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": diskDir}},
 			"tape": {Type: "tape", Params: map[string]string{"dir": tapeDir}},
@@ -743,7 +743,7 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 	// Restore from the tape alone: a fresh engine landed on the tape rebuilds its
 	// catalog from the volume, then restores.
 	tcfg := &config.Config{
-		Landing:  "tape",
+		Landing:  config.MediumList{"tape"},
 		Media:    map[string]config.Media{"tape": {Type: "tape", Params: map[string]string{"dir": tapeDir}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -774,7 +774,7 @@ func TestTapeLabelVerify(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "data")
 
 	cfg := &config.Config{
-		Landing:  "lto",
+		Landing:  config.MediumList{"lto"},
 		Media:    map[string]config.Media{"lto": {Type: "tape", Params: map[string]string{"dir": tapeDir}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -827,7 +827,7 @@ func TestTapeLabelVerify(t *testing.T) {
 // is dropped on read-back and recover/verify --deep/drill cannot decrypt.
 func TestDecryptOptsForPerDumptype(t *testing.T) {
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 		Workdir:  t.TempDir(),
 		StateDir: t.TempDir(),
@@ -868,7 +868,7 @@ func TestDecryptOptsForPerDumptype(t *testing.T) {
 func TestRelabelRefusesForeignPool(t *testing.T) {
 	tapeDir := t.TempDir()
 	cfg := &config.Config{
-		Landing:  "lto",
+		Landing:  config.MediumList{"lto"},
 		Media:    map[string]config.Media{"lto": {Type: "tape", Params: map[string]string{"dir": tapeDir}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
 		Workdir:  t.TempDir(),
@@ -920,7 +920,7 @@ func TestCopyRecordsPlacementAndFailover(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "two homes")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
@@ -980,7 +980,7 @@ func TestRunWritesStatus(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "status me")
 
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  workdir,
@@ -1058,7 +1058,7 @@ func TestHoldingDiskBuffersTape(t *testing.T) {
 	scratchDir := t.TempDir()
 
 	cfg := &config.Config{
-		Landing: "lto",
+		Landing: config.MediumList{"lto"},
 		Media: map[string]config.Media{
 			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "4"}},
 			"scratch": {Type: "disk", Holding: true, Capacity: "500MB", Params: map[string]string{"path": scratchDir}},
@@ -1132,7 +1132,7 @@ func TestHoldingDiskParallelDrains(t *testing.T) {
 	scratchDir := t.TempDir()
 
 	cfg := &config.Config{
-		Landing: "vault",
+		Landing: config.MediumList{"vault"},
 		Media: map[string]config.Media{
 			"vault":   {Type: "disk", Writers: 3, Params: map[string]string{"path": t.TempDir()}},
 			"scratch": {Type: "disk", Holding: true, Capacity: "500MB", Params: map[string]string{"path": scratchDir}},
@@ -1206,7 +1206,7 @@ func TestHoldingDisksSpread(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Landing: "lto",
+		Landing: config.MediumList{"lto"},
 		Media: map[string]config.Media{
 			"lto": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "4"}},
 			"s1":  {Type: "disk", Holding: true, Capacity: "500MB", Params: map[string]string{"path": t.TempDir()}},
@@ -1275,7 +1275,7 @@ func TestHoldingDisksFlush(t *testing.T) {
 	// stranded on each — the state a crashed multi-disk holding run leaves behind.
 	stage := func(disk, path string, src config.DLE, date time.Time) *catalog.Run {
 		cfg := &config.Config{
-			Landing:  disk,
+			Landing:  config.MediumList{disk},
 			Media:    map[string]config.Media{disk: {Type: "disk", Params: map[string]string{"path": path}}},
 			Sources:  []config.DLE{src},
 			Workdir:  workdir,
@@ -1301,7 +1301,7 @@ func TestHoldingDisksFlush(t *testing.T) {
 	// Now treat both scratch disks as holding disks for a tape landing (same workdir, so the catalog
 	// still holds both scratch placements) and flush.
 	flushCfg := &config.Config{
-		Landing: "lto",
+		Landing: config.MediumList{"lto"},
 		Media: map[string]config.Media{
 			"lto": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "2"}},
 			"s1":  {Type: "disk", Holding: true, Params: map[string]string{"path": d1}},
@@ -1368,7 +1368,7 @@ func TestHoldingDiskDrainSpansVolumes(t *testing.T) {
 	scratchDir := t.TempDir()
 
 	cfg := &config.Config{
-		Landing:   "lto",
+		Landing:   config.MediumList{"lto"},
 		AutoLabel: true,
 		Media: map[string]config.Media{
 			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "12", "volume_size": "163840"}},
@@ -1443,7 +1443,7 @@ func TestHoldingDiskRoutesOversizedDirect(t *testing.T) {
 	scratchDir := t.TempDir()
 
 	cfg := &config.Config{
-		Landing:   "lto",
+		Landing:   config.MediumList{"lto"},
 		AutoLabel: true,
 		Media: map[string]config.Media{
 			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "4"}},
@@ -1512,7 +1512,7 @@ func TestHoldingDiskAllDirect(t *testing.T) {
 	write(t, filepath.Join(srcB, "b.txt"), "bravo payload")
 
 	cfg := &config.Config{
-		Landing:   "lto",
+		Landing:   config.MediumList{"lto"},
 		AutoLabel: true,
 		Media: map[string]config.Media{
 			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "4"}},
@@ -1554,7 +1554,7 @@ func TestHoldingDiskAllDirect(t *testing.T) {
 // property (media.ConcurrentWrite), not a hardcoded type list in config.
 func TestHoldingDiskRejectsTape(t *testing.T) {
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk":  {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"vault": {Type: "tape", Holding: true, Params: map[string]string{"dir": t.TempDir()}},
@@ -1585,7 +1585,7 @@ func TestHoldingDiskFlush(t *testing.T) {
 	// Stage: dump onto the scratch disk as a landing (leaves a catalogued run on scratch —
 	// the state a holding-disk run leaves behind when it crashes before flushing).
 	stageCfg := &config.Config{
-		Landing:  "scratch",
+		Landing:  config.MediumList{"scratch"},
 		Media:    map[string]config.Media{"scratch": {Type: "disk", Params: map[string]string{"path": scratchDir}}},
 		Sources:  sources,
 		Workdir:  workdir,
@@ -1607,7 +1607,7 @@ func TestHoldingDiskFlush(t *testing.T) {
 	// Now treat that scratch disk as a holding disk for a tape landing (same workdir, so the
 	// catalog still holds the scratch placement) and flush.
 	flushCfg := &config.Config{
-		Landing: "lto",
+		Landing: config.MediumList{"lto"},
 		Media: map[string]config.Media{
 			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "2"}},
 			"scratch": {Type: "disk", Holding: true, Params: map[string]string{"path": scratchDir}},
@@ -1656,7 +1656,7 @@ func TestHoldingDiskLandingDownFails(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "needs a home")
 
 	cfg := &config.Config{
-		Landing: "lto",
+		Landing: config.MediumList{"lto"},
 		Media: map[string]config.Media{
 			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "1"}},
 			"scratch": {Type: "disk", Holding: true, Params: map[string]string{"path": t.TempDir()}},
@@ -1692,7 +1692,7 @@ func TestDumpContinuesPastFailedDLE(t *testing.T) {
 	bad := filepath.Join(t.TempDir(), "does-not-exist") // never created -> tar fails at dump time
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 		},
@@ -1734,7 +1734,7 @@ func TestTapeLibraryRestore(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "v1")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"lib":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "2"}},
@@ -1810,7 +1810,7 @@ func TestTapeAppendableFalse(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "data")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"lib":  {Type: "tape", Appendable: boolp(false), Params: map[string]string{"dir": t.TempDir(), "slots": "2"}},
@@ -1891,7 +1891,7 @@ func TestManualStationWriteSwap(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "manual write")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"lto":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "manual": "true", "slots": "1"}},
@@ -1943,7 +1943,7 @@ func TestManualStationReadSwap(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "v1")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"lto":  {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "manual": "true", "slots": "2"}},
@@ -2030,7 +2030,7 @@ func TestManualStationReadSwap(t *testing.T) {
 // mounting a bay id, which a single-drive station has none of.
 func TestManualStationLandingLabel(t *testing.T) {
 	cfg := &config.Config{
-		Landing: "vtape",
+		Landing: config.MediumList{"vtape"},
 		Media: map[string]config.Media{
 			"vtape": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "manual": "true", "slots": "3"}},
 		},
@@ -2063,7 +2063,7 @@ func TestManualStationLandingLabel(t *testing.T) {
 func tapeEngine(t *testing.T, appendable bool, minAge string) *Engine {
 	t.Helper()
 	cfg := &config.Config{
-		Landing: "lto",
+		Landing: config.MediumList{"lto"},
 		Media: map[string]config.Media{
 			"lto": {
 				Type:       "tape",
@@ -2217,7 +2217,7 @@ func TestExpectedTapeAppendsToLatest(t *testing.T) {
 func TestExpectedTapeReportsReelFill(t *testing.T) {
 	appendable := true
 	cfg := &config.Config{
-		Landing: "lto",
+		Landing: config.MediumList{"lto"},
 		Media: map[string]config.Media{
 			"lto": {
 				Type:       "tape",
@@ -2254,7 +2254,7 @@ func TestExpectedTapeReportsReelFill(t *testing.T) {
 // label, so there is no tape to expect.
 func TestExpectedTapeDiskHasNone(t *testing.T) {
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 		Workdir:  t.TempDir(),
 		StateDir: t.TempDir(),
@@ -2296,7 +2296,7 @@ func TestTapeRecyclesOldestOnWrite(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "v1")
 
 	cfg := &config.Config{
-		Landing:   "lib",
+		Landing:   config.MediumList{"lib"},
 		AutoLabel: true,
 		Cycle:     "1d", // full every run, so each run supersedes the prior — no live chain pins the old tape
 		Media: map[string]config.Media{
@@ -2391,7 +2391,7 @@ func TestTapeRecycleRefusedWhenAllKept(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "v1")
 
 	cfg := &config.Config{
-		Landing:   "lib",
+		Landing:   config.MediumList{"lib"},
 		AutoLabel: true,
 		Cycle:     "30d", // incrementals between fulls — the first full stays a recovery base
 		Media: map[string]config.Media{
@@ -2439,7 +2439,7 @@ func TestDumpSpanRecyclesReusableTape(t *testing.T) {
 	src := t.TempDir()
 
 	cfg := &config.Config{
-		Landing:   "lib",
+		Landing:   config.MediumList{"lib"},
 		AutoLabel: true,
 		Cycle:     "1d", // full every run, so older fulls clear the Floor
 		Media: map[string]config.Media{
@@ -2523,7 +2523,7 @@ func TestDumpSpansArchiveAcrossTapes(t *testing.T) {
 	write(t, filepath.Join(src, "big.txt"), body)
 
 	cfg := &config.Config{
-		Landing:   "lib",
+		Landing:   config.MediumList{"lib"},
 		AutoLabel: true,
 		Media: map[string]config.Media{
 			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "6", "volume_size": "163840"}},
@@ -2592,7 +2592,7 @@ func TestCopySpansArchiveAcrossTapes(t *testing.T) {
 	write(t, filepath.Join(src, "big.txt"), body)
 
 	cfg := &config.Config{
-		Landing:   "disk",
+		Landing:   config.MediumList{"disk"},
 		AutoLabel: true,
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
@@ -2655,7 +2655,7 @@ func TestPartSizeSplitsWithinTape(t *testing.T) {
 	write(t, filepath.Join(src, "big.txt"), body)
 
 	cfg := &config.Config{
-		Landing:   "lib",
+		Landing:   config.MediumList{"lib"},
 		AutoLabel: true,
 		Media: map[string]config.Media{
 			// One roomy 4 MiB bay, but part_size caps each part at 64 KiB.
@@ -2717,7 +2717,7 @@ func pruneSweepEngine(t *testing.T) (*Engine, *catalog.Run, string, string) {
 	write(t, filepath.Join(src, "keep.txt"), "v1")
 
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),

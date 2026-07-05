@@ -20,7 +20,7 @@ func cloudCostEngine(t *testing.T, runDate time.Time, costCfg *config.CostConfig
 	write(t, filepath.Join(src, "f.txt"), "price me")
 
 	cfg := &config.Config{
-		Landing: "cloud",
+		Landing: config.MediumList{"cloud"},
 		Media: map[string]config.Media{
 			"cloud": {Type: "cloud", Cost: costCfg, Params: map[string]string{"url": "file://" + t.TempDir()}},
 		},
@@ -70,7 +70,7 @@ func TestCostSummaryDiskUnpriced(t *testing.T) {
 	src := t.TempDir()
 	write(t, filepath.Join(src, "f.txt"), "local")
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -158,7 +158,7 @@ func TestForecastCostReclaims(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), strings.Repeat("forecast-reclaim-", 512)) // a non-trivial full
 
 	cfg := &config.Config{
-		Landing: "cloud",
+		Landing: config.MediumList{"cloud"},
 		Media: map[string]config.Media{
 			// A tiny capacity forces the forecast over budget, and a short floor lets
 			// superseded fulls be reclaimed rather than pinned.

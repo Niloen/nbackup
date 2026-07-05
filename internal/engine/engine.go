@@ -441,9 +441,19 @@ func (e *Engine) placementsFor(runID string) []catalog.Placement {
 // StoredBytes is the bytes currently stored on the engine's own medium.
 func (e *Engine) StoredBytes() int64 { return e.acct.StoredBytes() }
 
-// Landing is the resolved name of the medium new dumps land on. Unlike the raw
-// config field it is never empty — it reflects the sole-medium fallback New applied.
+// Landing is the resolved name of the PRIMARY medium new dumps land on — the
+// accounted one. Unlike the raw config field it is never empty — it reflects the
+// sole-medium fallback New applied.
 func (e *Engine) Landing() string { return e.dep.LandingName() }
+
+// Landings is the resolved landing route new dumps write, primary first: one name
+// for the classic run, several when `landing:` lists a fan-out.
+func (e *Engine) Landings() []string {
+	if names, err := e.cfg.LandingNames(); err == nil && len(names) > 0 {
+		return names
+	}
+	return []string{e.dep.LandingName()}
+}
 
 // VolumeExpectation describes the volume the next run on a labeled medium will
 // write to; see accounting (which owns the arithmetic).

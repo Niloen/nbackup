@@ -33,8 +33,10 @@ type Config struct {
 	// Default DefaultBumpPercent. See package planner.
 	BumpPct float64 `yaml:"bump_percent,omitempty"`
 
-	// Landing names the media definition where runs are created.
-	Landing string `yaml:"landing,omitempty"`
+	// Landing names the media definition(s) where runs are created: a single name, or
+	// a list to write every archive to several media (the first entry is the primary —
+	// see MediumList).
+	Landing MediumList `yaml:"landing,omitempty"`
 
 	// Workdir holds the catalog's local cache, independent of any storage medium.
 	// Defaults to DefaultWorkdir. (An archiver's incremental state lives under the host's
@@ -275,56 +277,79 @@ func (c *Config) DrillTierName() string {
 // DLEs returns the configured backup sources.
 func (c *Config) DLEs() []DLE { return c.Sources }
 
-// landingDefined reports an error if a non-empty `landing` names a medium that is
+// landingDefined reports an error if any `landing` entry names a medium that is
 // not defined. This holds even when the media map is empty: a config that sets
 // `landing:` but omits its `media:` block is a misconfig, not a cue to silently
 // synthesize a default medium (which would discard the requested landing and write
-// to ./nbackup-catalog). An empty landing is not an error here — LandingName resolves
-// it via the sole-medium fallback. Shared by Validate and LandingName so the rule
-// lives once.
+// to ./nbackup-catalog). An empty landing is not an error here — LandingNames resolves
+// it via the sole-medium fallback. (Validate runs the fuller validateLandingList,
+// which repeats this check with holding/duplicate rules; this one guards the
+// runtime resolve of a config that skipped Validate.)
 func (c *Config) landingDefined() error {
-	if c.Landing != "" {
-		if _, ok := c.Media[c.Landing]; !ok {
-			return fmt.Errorf("landing %q is not a defined medium", c.Landing)
+	for _, name := range c.Landing {
+		if _, ok := c.Media[name]; !ok {
+			return fmt.Errorf("landing %q is not a defined medium", name)
 		}
 	}
 	return nil
 }
 
-// LandingName resolves the name of the medium used for landing: the configured
-// `landing`, or the sole medium when exactly one is defined.
-func (c *Config) LandingName() (string, error) {
-	if c.Landing != "" {
+// LandingNames resolves the landing route: the configured `landing` list, or the
+// sole medium when none is set and exactly one is defined. The first name is the
+// primary (see MediumList).
+func (c *Config) LandingNames() ([]string, error) {
+	if len(c.Landing) > 0 {
 		if err := c.landingDefined(); err != nil {
-			return "", err
+			return nil, err
 		}
 		return c.Landing, nil
 	}
 	if len(c.Media) == 1 {
 		for name := range c.Media {
-			return name, nil
+			return []string{name}, nil
 		}
 	}
-	return "", fmt.Errorf("no landing medium selected (set `landing:` to a media name)")
+	return nil, fmt.Errorf("no landing medium selected (set `landing:` to a media name, or a list of them)")
 }
 
-// LandingFor resolves the medium a DLE's archives land on: its dumptype's `landing`
-// override when set, else the config-wide LandingName. A dumptype override routes
+// LandingName resolves the primary landing medium — the single "the landing" every
+// per-medium consumer (accounting, read preference, sync's default source) uses.
+func (c *Config) LandingName() (string, error) {
+	names, err := c.LandingNames()
+	if err != nil {
+		return "", err
+	}
+	return names[0], nil
+}
+
+// LandingsFor resolves the media a DLE's archives land on: its dumptype's `landing`
+// override when set, else the config-wide LandingNames. A dumptype override routes
 // different sources to different media (e.g. bulk media to cheap cloud, databases to
-// fast disk) within one run. The override is validated against `media` at load
+// fast disk) within one run; a multi-name route writes the archive to every listed
+// medium. The override is validated against `media` at load
 // (validateDumpTypeLandings), so a run-time resolve trusts it.
-func (c *Config) LandingFor(d DLE) (string, error) {
-	if l := c.ResolveDumpType(d.DumpTypeName()).Landing; l != "" {
+func (c *Config) LandingsFor(d DLE) ([]string, error) {
+	if l := c.ResolveDumpType(d.DumpTypeName()).Landing; len(l) > 0 {
 		return l, nil
 	}
-	return c.LandingName()
+	return c.LandingNames()
+}
+
+// LandingFor resolves a DLE's primary landing — LandingsFor's first entry, for
+// consumers that need the one accounted medium.
+func (c *Config) LandingFor(d DLE) (string, error) {
+	names, err := c.LandingsFor(d)
+	if err != nil {
+		return "", err
+	}
+	return names[0], nil
 }
 
 // HoldingMedia returns the names of every medium marked `holding: true`, sorted — the fast
-// scratch buffers dumps flow through on the way to the landing. Empty when no medium is a holding
-// disk (the normal direct-to-landing run). Dumpers spread their writes across these; the drain
-// copies them all to the one landing. The order is deterministic so a run's disk allocation and
-// Flush's drain order are reproducible.
+// scratch buffers dumps flow through on the way to the landing(s). Empty when no medium is a
+// holding disk (the normal direct-to-landing run). Dumpers spread their writes across these; the
+// drains copy each staged archive to every landing on its route. The order is deterministic so a
+// run's disk allocation and Flush's drain order are reproducible.
 func (c *Config) HoldingMedia() []string {
 	var names []string
 	for name, m := range c.Media {

@@ -44,6 +44,11 @@ Here four workers dump in parallel onto the `scratch` disk while a drain copies 
 completed archive onto `lto` — one at a time, because a single tape drive takes one
 archive at a time.
 
+With a **multi-landing route** (`landing: [s3, gdrive]`, see
+[Storage media](media)) each staged archive is drained **once per landing, in
+parallel**, and its disk space is freed only after every landing has its copy —
+the holding disk is what lets a slow secondary upload never gate the dump itself.
+
 How many archives a medium accepts at once is its `writers` cap — one lever per medium,
 counted the same for every write path: a dumper's direct dump, a drain from the holding
 disk, and staging onto a holding disk. Unset, a medium takes its natural width — a serial

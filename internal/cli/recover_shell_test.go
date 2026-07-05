@@ -23,7 +23,7 @@ func newShellFixture(t *testing.T) (eng *engine.Engine, dle string, runID string
 		t.Fatal(err)
 	}
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 		},

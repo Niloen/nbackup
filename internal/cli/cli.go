@@ -90,7 +90,7 @@ func loadConfig(cfgPath, catalogOverride string) (*config.Config, error) {
 	// backup into the catalog dir instead of the configured landing — a data-misroute
 	// with no warning. Refuse it: --catalog is an inspection flag, and `workdir:` is how
 	// you move the cache.
-	if catalogOverride != "" && (len(cfg.Media) > 0 || cfg.Landing != "") {
+	if catalogOverride != "" && (len(cfg.Media) > 0 || len(cfg.Landing) > 0) {
 		return nil, fmt.Errorf("--catalog cannot be combined with a config that defines media (it would redirect writes to %q instead of the configured landing) — drop --catalog, or set `workdir:` in the config to move the catalog cache", catalogOverride)
 	}
 	applyCatalog(cfg, catalogOverride)
@@ -160,7 +160,7 @@ func applyCatalog(cfg *config.Config, catalogOverride string) {
 		setLocalLanding(cfg, "cli", catalogOverride)
 		return
 	}
-	if len(cfg.Media) == 0 && cfg.Landing == "" {
+	if len(cfg.Media) == 0 && len(cfg.Landing) == 0 {
 		setLocalLanding(cfg, "default", DefaultCatalog)
 	}
 }
@@ -169,7 +169,7 @@ func setLocalLanding(cfg *config.Config, name, path string) {
 	cfg.Media = map[string]config.Media{
 		name: {Type: "disk", Params: map[string]string{"path": path}},
 	}
-	cfg.Landing = name
+	cfg.Landing = config.MediumList{name}
 	cfg.Workdir = path
 }
 

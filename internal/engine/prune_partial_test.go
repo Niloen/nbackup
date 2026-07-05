@@ -34,7 +34,7 @@ func TestPartialPruneKeepsCatalogArchiveGranular(t *testing.T) {
 	workdir, stateDir := t.TempDir(), t.TempDir()
 	cfgFor := func(diskCapacity string) *config.Config {
 		cfg := &config.Config{
-			Landing: "disk",
+			Landing: config.MediumList{"disk"},
 			Cycle:   "1d",
 			Media: map[string]config.Media{
 				"disk":    {Type: "disk", Capacity: diskCapacity, Params: map[string]string{"path": diskPath}},

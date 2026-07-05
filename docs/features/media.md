@@ -46,6 +46,20 @@ Any medium can also be a **replication target**: dump to one, then mirror sealed
 runs onto another with [Replication](replication). Capacity and retention are set
 per medium, not globally.
 
+`landing:` also accepts a **list** — `landing: [offsite, gdrive]` — and then every
+archive is written to *all* of the listed media in one run, from local data (never
+by downloading one cloud to feed another). The **first entry is the primary**: the
+medium capacity planning, cost forecasts, and reads prefer; the others read as
+offsite copies. A failed landing doesn't fail the run
+as long as each archive still lands somewhere — the failed medium is skipped for
+the rest of the run with a loud warning, and `nb sync --to <medium>` copies the
+missing archives afterwards. (One boundary: the *primary* hosts the catalog
+bootstrap, so a primary that is unreachable before the run starts still fails it;
+a primary failing mid-run trips like any other landing.) A dumptype's `landing:` override takes the same
+list form. With a [holding disk](holding-disk) each archive is staged once and
+drained to every landing in parallel; without one the dump stream is written to
+all landings at once, so the dump runs at the slowest medium's pace.
+
 ## Disk
 
 ```yaml

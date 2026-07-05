@@ -20,7 +20,7 @@ func (c *Conductor) progressTracker(runID string, workers int, items []planner.I
 		sink = progress.MultiSink(fileSink, c.d.RunSink)
 		runLogf = nil
 	}
-	return progress.NewTracker(runID, progress.PhaseRunning, workers, planProgress(items), time.Now, sink), runLogf
+	return progress.NewTracker(runID, progress.PhaseRunning, workers, c.planProgress(items), time.Now, sink), runLogf
 }
 
 // keepEstimating adapts the estimate phase's status-file sink so the file stays
@@ -39,11 +39,12 @@ func keepEstimating(file progress.Sink) progress.Sink {
 }
 
 // planProgress projects planner items onto the progress package's seed type,
-// keeping progress unaware of the planner.
-func planProgress(items []planner.Item) []progress.Plan {
+// keeping progress unaware of the planner. The landing route rides along so the
+// tracker can meter a fan-out's drains per landing.
+func (c *Conductor) planProgress(items []planner.Item) []progress.Plan {
 	out := make([]progress.Plan, len(items))
 	for i, it := range items {
-		out[i] = progress.Plan{Name: it.DLE.ID(), Level: it.Level, EstBytes: it.EstBytes}
+		out[i] = progress.Plan{Name: it.DLE.ID(), Level: it.Level, EstBytes: it.EstBytes, Landings: c.d.LandingsFor(it)}
 	}
 	return out
 }

@@ -89,7 +89,7 @@ func TestInitWritesLoadableConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generated config does not load: %v", err)
 	}
-	if cfg.Landing != "disk" || cfg.Media["disk"].Params["path"] != "/backups/runs" || cfg.Media["disk"].Capacity != "500GB" {
+	if cfg.Landing.Primary() != "disk" || cfg.Media["disk"].Params["path"] != "/backups/runs" || cfg.Media["disk"].Capacity != "500GB" {
 		t.Errorf("landing medium wrong: %+v", cfg.Media)
 	}
 	if cfg.Cycle != "14d" {

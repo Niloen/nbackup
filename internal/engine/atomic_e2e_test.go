@@ -63,7 +63,7 @@ func TestAtomicEndToEnd(t *testing.T) {
 	write(t, filepath.Join(src, "tail.txt"), "the needle\n")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk":   {Type: "disk", Params: map[string]string{"path": diskDir}},
 			"second": {Type: "disk", Params: map[string]string{"path": secondDir}},
@@ -194,7 +194,7 @@ func TestAtomicEndToEnd(t *testing.T) {
 // re-cut to fit.
 func TestAtomCeilingLadder(t *testing.T) {
 	cfg := &config.Config{
-		Landing: "offsite",
+		Landing: config.MediumList{"offsite"},
 		Media: map[string]config.Media{
 			"offsite": {Type: "cloud", Params: map[string]string{"url": "file://" + t.TempDir()}},
 		},

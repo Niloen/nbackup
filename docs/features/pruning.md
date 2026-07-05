@@ -25,7 +25,8 @@ Per-medium retention with a safety floor that never deletes the last recovery pa
 the hands-off form for cron, mirroring `nb sync` running every rule. Either way each
 store is pruned against its **own** archives, capacity, and `minimum_age`. A copy on
 another medium never makes an archive prunable — double storage exists for
-redundancy, so each copy is retained on its own terms. Tape recycles whole volumes
+redundancy, so each copy is retained on its own terms (a fan-out route's secondary
+landings are pruned like any offsite copy, each against its own capacity). Tape recycles whole volumes
 by relabel rather than per run, so a fleet-wide `nb prune` only reclaims disk/cloud
 and leaves tape untouched.
 

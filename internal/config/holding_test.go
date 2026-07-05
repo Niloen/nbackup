@@ -99,7 +99,7 @@ sources:
   default:
     localhost: [/home]
 `)
-	if err == nil || !strings.Contains(err.Error(), "both the landing and a holding disk") {
+	if err == nil || !strings.Contains(err.Error(), "holding medium, not a landing") {
 		t.Fatalf("want landing-conflict error, got %v", err)
 	}
 }

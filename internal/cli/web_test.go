@@ -16,7 +16,7 @@ import (
 func TestWebSourceSeesCatalogWrittenAfterStartup(t *testing.T) {
 	src := t.TempDir()
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 		},

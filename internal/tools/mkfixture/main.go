@@ -85,7 +85,7 @@ func makeDiskFixture() error {
 	writeFile(src, "data/sub/nested.txt", "hi")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media:   map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": mediumDir}}},
 		Sources: []config.DLE{{Host: "localhost", Path: "data"}},
 		Workdir: work,
@@ -151,7 +151,7 @@ func makeTapeFixture() error {
 	writeFile(src, "data/sub/nested.txt", "hi")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": diskDir}},
 			"tape": {Type: "tape", Params: map[string]string{"dir": tapeDir}},

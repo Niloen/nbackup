@@ -18,7 +18,7 @@ func asOfFixture(t *testing.T) (*Engine, string) {
 	write(t, filepath.Join(src, "f.txt"), "as of me")
 
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),

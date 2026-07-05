@@ -68,6 +68,24 @@ landing: gdrive
 `folder` is a Drive **folder ID** — the last segment of the folder's URL
 (`https://drive.google.com/drive/folders/`**`0A…`**) — or a **Shared Drive ID**.
 
+To run Drive as a **second landing beside S3** — every new run on both, with no
+S3 egress — list both media as the landing route (primary first) and let a small
+holding disk decouple the dump from the two uploads:
+
+```yaml
+media:
+  s3:      { type: cloud, url: s3://company-backups?region=eu-north-1, capacity: 50TB }
+  gdrive:  { type: gdrive, folder: 0A--YOUR-FOLDER-ID, capacity: 2TB }
+  scratch: { type: disk, path: /var/spool/nbackup, capacity: 100GB, holding: true }
+landing: [s3, gdrive]
+```
+
+Each archive stages once on `scratch`, drains to S3 and Drive in parallel, and is
+reclaimed after both copies commit. If Drive is down mid-run the run still
+succeeds (S3 has everything) and warns; `nb sync --to gdrive` fills the gap. Use
+`nb sync` (not the route) to seed Drive with runs that predate it — that backfill
+is the only path that reads S3 back.
+
 ## Path A — personal Google Drive (OAuth token)
 
 OAuth needs a registered client. NBackup ships none (no shared app, no shared

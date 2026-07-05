@@ -7,6 +7,7 @@ import (
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/xfer"
 )
 
 // contracts.go is the archive fs's two faces and its writer intake — the interfaces the
@@ -74,15 +75,33 @@ type WriteStore interface {
 	ReclaimAt(ref archiveio.Ref, pos archiveio.ArchivePos) error
 }
 
-// Ingest is the producer's source of ArchiveWriters: NewArchive reserves a per-archive
-// writer, blocking for back-pressure and returning the run's error if it has failed. est is the size
+// ArchiveSink is one archive's write handle — the full surface a producer drives:
+// the transfer pumps it as an xfer.Sink (NextPart/Commit), and the producer meters
+// its landed bytes, reads the committed result, and Closes it on every exit path.
+// The bare archiveio.ArchiveWriter implements it for a single medium; the tee
+// implements it over several, fanning one stream to all of them — the producer
+// cannot tell the difference, which is the point.
+type ArchiveSink interface {
+	xfer.Sink
+	io.Closer
+	// Committed returns the archive's assembled result and true once Commit has
+	// succeeded (a multi-medium sink reports its primary copy's result).
+	Committed() (archiveio.CommitResult, bool)
+	// Meter attaches a progress tap: the running count of landed bytes, reported
+	// after each write on the writing goroutine. A multi-medium sink counts the
+	// stream once, at the fan-in.
+	Meter(tap func(landed int64))
+}
+
+// Ingest is the producer's source of ArchiveSinks: NewArchive reserves a per-archive
+// sink, blocking for back-pressure and returning the run's error if it has failed. est is the size
 // estimate — the spool (the only implementer) uses it to pick a medium. It is deliberately not a
-// WriteStore: it manufactures writers (over whatever allocator and recorder it chooses), it is not
-// itself written to. The dumper points at one and drives the writers it hands back.
+// WriteStore: it manufactures sinks (over whatever allocator and recorder it chooses), it is not
+// itself written to. The dumper points at one and drives the sinks it hands back.
 type Ingest interface {
-	NewArchive(spec archiveio.ArchiveSpec, est int64) (*archiveio.ArchiveWriter, error)
-	// NewCopy reserves a per-archive writer that re-authors an already-sealed archive (a copy or
+	NewArchive(spec archiveio.ArchiveSpec, est int64) (ArchiveSink, error)
+	// NewCopy reserves a per-archive sink that re-authors an already-sealed archive (a copy or
 	// sync), preserving its identity, checksum, and members rather than producing a fresh one. Like
-	// NewArchive it blocks for back-pressure and leases a drive; only the writer it builds differs.
-	NewCopy(arch record.Archive, est int64) (*archiveio.ArchiveWriter, error)
+	// NewArchive it blocks for back-pressure and leases a drive; only the sink it builds differs.
+	NewCopy(arch record.Archive, est int64) (ArchiveSink, error)
 }

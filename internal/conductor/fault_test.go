@@ -193,9 +193,9 @@ func TestFlushDoubleCrashReclaimsOnly(t *testing.T) {
 	opened := false
 	reclaimed := 0
 	flushed, err := Flush(FlushDeps{
-		Cat:        c,
-		LandingFor: func(string) string { return "landing" },
-		Holdings:   []string{"hd0"},
+		Cat:         c,
+		LandingsFor: func(string) []string { return []string{"landing"} },
+		Holdings:    []string{"hd0"},
 		Open: func(string, archiveio.Ref, archiveio.ArchivePos) (io.ReadCloser, error) {
 			opened = true
 			return nil, errors.New("Open must not be called on the reclaim-only path")
@@ -229,9 +229,9 @@ func TestFlushCopiesAndReclaims(t *testing.T) {
 
 	reclaimed := 0
 	flushed, err := Flush(FlushDeps{
-		Cat:        c,
-		LandingFor: func(string) string { return "landing" },
-		Holdings:   []string{"hd0"},
+		Cat:         c,
+		LandingsFor: func(string) []string { return []string{"landing"} },
+		Holdings:    []string{"hd0"},
 		Open: func(string, archiveio.Ref, archiveio.ArchivePos) (io.ReadCloser, error) {
 			return io.NopCloser(bytes.NewReader(body)), nil
 		},
@@ -256,5 +256,115 @@ func TestFlushNoHolding(t *testing.T) {
 	n, err := Flush(FlushDeps{Cat: newCatalog(t)})
 	if err != nil || n != 0 {
 		t.Fatalf("Flush with no holding = (%d,%v); want (0,nil)", n, err)
+	}
+}
+
+// TestFlushFanoutCopiesEachMissing: a staged archive routed to TWO landings, neither
+// served yet — flush copies it to both, then reclaims the staged copy once.
+func TestFlushFanoutCopiesEachMissing(t *testing.T) {
+	c := newCatalog(t)
+	id := "run-2026-07-05.020000"
+	body := []byte("fan me out on recovery")
+	addArchive(t, c, id, "hd0", "h:/p", 0, record.Archive{SHA256: shaOf(body), Compress: "none", Uncompressed: int64(len(body))})
+
+	reclaimed, copied := 0, map[string]int{}
+	flushed, err := Flush(FlushDeps{
+		Cat:         c,
+		LandingsFor: func(string) []string { return []string{"a", "b"} },
+		Holdings:    []string{"hd0"},
+		Open: func(string, archiveio.Ref, archiveio.ArchivePos) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(body)), nil
+		},
+		Index:   func(string, archiveio.Ref, archiveio.FilePos) (record.Index, error) { return record.Index{}, nil },
+		Reclaim: func(string, archiveio.Ref, archiveio.ArchivePos) error { reclaimed++; return nil },
+		OpenLanding: func(landing string, spec archiveio.RunSpec) (*archiveio.Writer, error) {
+			copied[landing]++
+			ms := &memFlushStore{vol: newFlushVol()}
+			return archiveio.NewWriter(ms, ms, spec, nil, nil), nil
+		},
+		DisplayDLE: func(dle string) string { return dle },
+	})
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if copied["a"] != 1 || copied["b"] != 1 {
+		t.Fatalf("landing writers opened %v; want one per landing", copied)
+	}
+	if flushed != 1 || reclaimed != 1 {
+		t.Fatalf("flushed=%d reclaimed=%d; want the archive counted once and reclaimed once", flushed, reclaimed)
+	}
+}
+
+// TestFlushFanoutSkipsServedLanding: a crash mid-fan-out left the archive on landing
+// "a" but not "b" — flush copies only to b (re-copying a would double-write it), then
+// reclaims.
+func TestFlushFanoutSkipsServedLanding(t *testing.T) {
+	c := newCatalog(t)
+	id := "run-2026-07-05.020000"
+	body := []byte("half served")
+	addArchive(t, c, id, "hd0", "h:/p", 0, record.Archive{SHA256: shaOf(body), Compress: "none", Uncompressed: int64(len(body))})
+	addArchive(t, c, id, "a", "h:/p", 0, record.Archive{SHA256: shaOf(body), Compress: "none", Uncompressed: int64(len(body))})
+
+	reclaimed, copied := 0, map[string]int{}
+	flushed, err := Flush(FlushDeps{
+		Cat:         c,
+		LandingsFor: func(string) []string { return []string{"a", "b"} },
+		Holdings:    []string{"hd0"},
+		Open: func(string, archiveio.Ref, archiveio.ArchivePos) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(body)), nil
+		},
+		Index:   func(string, archiveio.Ref, archiveio.FilePos) (record.Index, error) { return record.Index{}, nil },
+		Reclaim: func(string, archiveio.Ref, archiveio.ArchivePos) error { reclaimed++; return nil },
+		OpenLanding: func(landing string, spec archiveio.RunSpec) (*archiveio.Writer, error) {
+			copied[landing]++
+			ms := &memFlushStore{vol: newFlushVol()}
+			return archiveio.NewWriter(ms, ms, spec, nil, nil), nil
+		},
+		DisplayDLE: func(dle string) string { return dle },
+	})
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if copied["a"] != 0 || copied["b"] != 1 {
+		t.Fatalf("landing writers opened %v; want only the missing landing b", copied)
+	}
+	if flushed != 1 || reclaimed != 1 {
+		t.Fatalf("flushed=%d reclaimed=%d; want 1/1", flushed, reclaimed)
+	}
+}
+
+// TestFlushFanoutSecondCopyFailureKeepsStaged: the copy to the second landing fails —
+// flush must return the error WITHOUT reclaiming, so the staged copy survives for the
+// next flush; the first landing's committed placement stands.
+func TestFlushFanoutSecondCopyFailureKeepsStaged(t *testing.T) {
+	c := newCatalog(t)
+	id := "run-2026-07-05.020000"
+	body := []byte("second copy dies")
+	addArchive(t, c, id, "hd0", "h:/p", 0, record.Archive{SHA256: shaOf(body), Compress: "none", Uncompressed: int64(len(body))})
+
+	reclaimed := 0
+	_, err := Flush(FlushDeps{
+		Cat:         c,
+		LandingsFor: func(string) []string { return []string{"a", "b"} },
+		Holdings:    []string{"hd0"},
+		Open: func(string, archiveio.Ref, archiveio.ArchivePos) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(body)), nil
+		},
+		Index:   func(string, archiveio.Ref, archiveio.FilePos) (record.Index, error) { return record.Index{}, nil },
+		Reclaim: func(string, archiveio.Ref, archiveio.ArchivePos) error { reclaimed++; return nil },
+		OpenLanding: func(landing string, spec archiveio.RunSpec) (*archiveio.Writer, error) {
+			if landing == "b" {
+				return nil, errors.New("landing b unreachable")
+			}
+			ms := &memFlushStore{vol: newFlushVol()}
+			return archiveio.NewWriter(ms, ms, spec, nil, nil), nil
+		},
+		DisplayDLE: func(dle string) string { return dle },
+	})
+	if err == nil || !strings.Contains(err.Error(), "landing \"b\"") {
+		t.Fatalf("Flush = %v; want the landing-b failure surfaced", err)
+	}
+	if reclaimed != 0 {
+		t.Fatalf("reclaimed %d times; a partial fan-out flush must keep the staged copy", reclaimed)
 	}
 }

@@ -21,13 +21,13 @@ func TestPerDumptypeLandingRoutes(t *testing.T) {
 	write(t, filepath.Join(srcBulk, "bulk.txt"), "lands on bulk")
 
 	cfg := &config.Config{
-		Landing: "main",
+		Landing: config.MediumList{"main"},
 		Media: map[string]config.Media{
 			"main": {Type: "cloud", Params: map[string]string{"url": "file://" + t.TempDir()}},
 			"bulk": {Type: "cloud", Params: map[string]string{"url": "file://" + t.TempDir()}},
 		},
 		DumpTypes: map[string]config.DumpType{
-			"bulky": {Landing: "bulk"},
+			"bulky": {Landing: config.MediumList{"bulk"}},
 		},
 		Sources: []config.DLE{
 			{Host: "localhost", Path: srcMain},                    // default dumptype -> main
@@ -102,7 +102,7 @@ func TestFlushRoutesPerDumptypeLanding(t *testing.T) {
 	// disk regardless of its eventual landing, so the crash leaves both on scratch. `bulky` carries no
 	// landing here (it resolves to the scratch landing).
 	stageCfg := &config.Config{
-		Landing:   "scratch",
+		Landing:   config.MediumList{"scratch"},
 		Media:     map[string]config.Media{"scratch": {Type: "disk", Params: map[string]string{"path": scratchDir}}},
 		DumpTypes: map[string]config.DumpType{"bulky": {}},
 		Sources:   sources,
@@ -124,13 +124,13 @@ func TestFlushRoutesPerDumptypeLanding(t *testing.T) {
 
 	// Flush: scratch is now a holding disk; `bulky` routes to the `bulk` landing, the default to `main`.
 	flushCfg := &config.Config{
-		Landing: "main",
+		Landing: config.MediumList{"main"},
 		Media: map[string]config.Media{
 			"main":    {Type: "cloud", Params: map[string]string{"url": "file://" + t.TempDir()}},
 			"bulk":    {Type: "cloud", Params: map[string]string{"url": "file://" + t.TempDir()}},
 			"scratch": {Type: "disk", Holding: true, Params: map[string]string{"path": scratchDir}},
 		},
-		DumpTypes: map[string]config.DumpType{"bulky": {Landing: "bulk"}},
+		DumpTypes: map[string]config.DumpType{"bulky": {Landing: config.MediumList{"bulk"}}},
 		Sources:   sources,
 		Workdir:   workdir,
 		StateDir:  stateDir,
@@ -175,12 +175,12 @@ func TestFlushRoutesPerDumptypeLanding(t *testing.T) {
 // TestPerDumptypeLandingValidation rejects a dumptype whose `landing` names an undefined medium.
 func TestPerDumptypeLandingValidation(t *testing.T) {
 	cfg := &config.Config{
-		Landing: "main",
+		Landing: config.MediumList{"main"},
 		Media: map[string]config.Media{
 			"main": {Type: "cloud", Params: map[string]string{"url": "file://" + t.TempDir()}},
 		},
 		DumpTypes: map[string]config.DumpType{
-			"bulky": {Landing: "nope"},
+			"bulky": {Landing: config.MediumList{"nope"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
 		Workdir:  t.TempDir(),

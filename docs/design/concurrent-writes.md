@@ -32,8 +32,17 @@ Concurrency is nothing but *where those two seams point*:
   a volume roll and a catalog record hop to it while bulk bytes stay on the worker
   (dumps).
 
-`archivefs.Ingest` (`NewArchive → *ArchiveWriter`) is the dumper's *source* of writers
-for a landing — it hands out writers, it is not written to. Only the spool implements it.
+`archivefs.Ingest` (`NewArchive → ArchiveSink`) is the dumper's *source* of write
+handles for a landing route — it hands out sinks, it is not written to. Only the spool
+implements it. `ArchiveSink` is the five-method surface a producer drives (the
+`xfer.Sink` pair plus Close/Committed/Meter): a single-landing route gets the bare
+`*archiveio.ArchiveWriter`; a fan-out route (`landing: [s3, gdrive]`) gets an
+`archiveio.Tee` fanning one stream into a writer per lane, all cutting parts at the SAME
+boundaries (the minimum cap), so every copy carries identical per-part seals and no
+re-parting or per-lane goroutine exists. On the staged path the fan-out is N parallel
+drains per archive instead, with the holding copy reclaimed by the last one; failure is
+any-lane-suffices (a failed landing trips for the rest of the run, warned with the
+`nb sync` repair; only a route with no survivor aborts).
 
 ## The orchestrator
 

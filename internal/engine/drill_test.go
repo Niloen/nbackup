@@ -38,7 +38,7 @@ func newDrillFixture(t *testing.T, scheme string) *drillFixture {
 	diskDir, offsiteDir := t.TempDir(), t.TempDir()
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk":    {Type: "disk", Params: map[string]string{"path": diskDir}},
 			"offsite": {Type: "disk", Params: map[string]string{"path": offsiteDir}},
@@ -256,7 +256,7 @@ func TestDrillUnattendedSkipsSwap(t *testing.T) {
 	write(t, filepath.Join(src, "a.txt"), "tape me")
 
 	cfg := &config.Config{
-		Landing:   "disk",
+		Landing:   config.MediumList{"disk"},
 		AutoLabel: true,
 		Media: map[string]config.Media{
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
@@ -497,7 +497,7 @@ func TestDrillSampleTier(t *testing.T) {
 	diskDir, offsiteDir := t.TempDir(), t.TempDir()
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk":    {Type: "disk", Params: map[string]string{"path": diskDir}},
 			"offsite": {Type: "cloud", Params: map[string]string{"url": "file://" + offsiteDir, "part_size": "64KiB"}},

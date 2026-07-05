@@ -50,7 +50,7 @@ func TestFormatSurvivesRestore(t *testing.T) {
 			untarGz(t, filepath.Join(dir, "volume.tar.gz"), volDir)
 
 			cfg := &config.Config{
-				Landing:  man.Landing,
+				Landing:  config.MediumList{man.Landing},
 				Media:    map[string]config.Media{man.Landing: {Type: man.MediumType, Params: map[string]string{man.ParamKey: volDir}}},
 				Sources:  []config.DLE{{Host: "localhost", Path: "data"}}, // unused by restore; satisfies a non-empty config
 				Workdir:  t.TempDir(),

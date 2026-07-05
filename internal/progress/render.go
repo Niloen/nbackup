@@ -68,13 +68,27 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 		fmt.Fprintf(w, "   %s/s", sizeutil.FormatBytes(int64(rate)))
 	}
 	fmt.Fprintln(w)
-	if toDrain := s.TotalToDrain(); toDrain > 0 {
+	// One aggregate Flush line for the classic single-landing run; a fan-out (a route
+	// with several landings) itemizes per landing instead — each with its own backlog
+	// and rate, so a slow secondary is visible at a glance.
+	if drains := s.LandingDrains(); len(drains) == 1 {
 		fmt.Fprintf(w, "Flush:    %s of %s  (%.0f%%)",
-			sizeutil.FormatBytes(s.TotalDrained()), sizeutil.FormatBytes(toDrain), s.DrainPct())
+			sizeutil.FormatBytes(s.TotalDrained()), sizeutil.FormatBytes(s.TotalToDrain()), s.DrainPct())
 		if rate := s.DrainRate(now); rate > 0 {
 			fmt.Fprintf(w, "   %s/s", sizeutil.FormatBytes(int64(rate)))
 		}
 		fmt.Fprintln(w)
+	} else if len(drains) > 1 {
+		label := "Flush:"
+		for _, ld := range drains {
+			fmt.Fprintf(w, "%-9s %-8s  %s of %s  (%.0f%%)",
+				label, ld.Landing, sizeutil.FormatBytes(ld.Done), sizeutil.FormatBytes(ld.Total), pct(ld.Done, ld.Total))
+			if rate := s.LandingDrainRate(ld.Done, now); rate > 0 {
+				fmt.Fprintf(w, "   %s/s", sizeutil.FormatBytes(int64(rate)))
+			}
+			fmt.Fprintln(w)
+			label = ""
+		}
 	}
 	fmt.Fprintf(w, "Volume:   %s written\n", sizeutil.FormatBytes(s.TotalOnVolume()))
 	if eta, ok := s.ETA(now); ok {

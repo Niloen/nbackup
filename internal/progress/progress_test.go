@@ -259,7 +259,7 @@ func TestDrainProgressAndRates(t *testing.T) {
 	dumpEnd := c.now()
 	tr.StartFlush("alpha", "scratch")
 	c.advance(8 * time.Second)
-	tr.AddDrainBytes("alpha", 400) // 400 of 800 copied in 8s -> 50 B/s drain
+	tr.AddDrainBytes("alpha", "landing", 400) // 400 of 800 copied in 8s -> 50 B/s drain
 
 	snap := tr.Snapshot()
 	now := c.now()
@@ -392,5 +392,52 @@ func TestAtomicWriteNoTemp(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, StatusFileName+".tmp")); !os.IsNotExist(err) {
 		t.Fatalf("temp file left behind (stat err = %v)", err)
+	}
+}
+
+// TestFanoutDrainProgress: a two-landing route doubles the DLE's to-drain total, its
+// bar reaches 100% only when both landings hold the archive, OnVolume counts only the
+// primary's share (no double-counting), and the footer itemizes each landing with its
+// own rate.
+func TestFanoutDrainProgress(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("run", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000, Landings: []string{"s3", "gdrive"}}}, c.now, nil)
+
+	tr.StartDLE("alpha")
+	c.advance(10 * time.Second)
+	tr.FinishDLE("alpha", 1, 1000, 800, nil)
+	tr.StartFlush("alpha", "scratch")
+	c.advance(8 * time.Second)
+	tr.AddDrainBytes("alpha", "s3", 800)     // primary done
+	tr.AddDrainBytes("alpha", "gdrive", 400) // secondary halfway
+
+	snap := tr.Snapshot()
+	a := snap.DLEs[0]
+	if got := a.DrainPct(); got != 75 { // 1200 of 1600
+		t.Fatalf("drain pct = %.0f, want 75", got)
+	}
+	if got := a.OnVolume(); got != 800 {
+		t.Fatalf("on-volume = %d, want the primary's 800, not the fan-out sum", got)
+	}
+	drains := snap.LandingDrains()
+	if len(drains) != 2 || drains[0].Landing != "s3" || drains[1].Landing != "gdrive" {
+		t.Fatalf("LandingDrains = %+v; want s3 then gdrive", drains)
+	}
+	if drains[0].Done != 800 || drains[0].Total != 800 || drains[1].Done != 400 || drains[1].Total != 800 {
+		t.Fatalf("LandingDrains = %+v; want s3 800/800, gdrive 400/800", drains)
+	}
+
+	var sb strings.Builder
+	Render(&sb, snap, c.now())
+	out := sb.String()
+	for _, want := range []string{"s3", "gdrive", "Flush:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q in:\n%s", want, out)
+		}
+	}
+
+	tr.FinishFlush("alpha")
+	if got := tr.Snapshot().DLEs[0].DrainBytes; got != 1600 {
+		t.Fatalf("FinishFlush should settle to staged x landings = 1600, got %d", got)
 	}
 }

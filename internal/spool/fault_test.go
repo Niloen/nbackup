@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
@@ -140,6 +141,7 @@ type memStore struct {
 	recordErr   error
 	openErr     error
 	reclaimErr  error
+	partCap     int64 // per-part byte cap NextPart hands out; 0 = unbounded (-1)
 
 	mu        sync.Mutex
 	records   []archiveio.CommitResult
@@ -170,7 +172,11 @@ func (s *memStore) NextPart() (media.Volume, int64, string, int, error) {
 	if s.nextPartErr != nil {
 		return nil, 0, "", 0, s.nextPartErr
 	}
-	return s.vol, -1, s.name, 1, nil
+	cap := s.partCap
+	if cap == 0 {
+		cap = -1
+	}
+	return s.vol, cap, s.name, 1, nil
 }
 
 func (s *memStore) PlaceFile(int64) (media.Volume, string, int, error) {
@@ -220,7 +226,7 @@ func (s *memStore) recordCount() int {
 // transferArchive drives one archive's payload through sink exactly as the dumper's transfer does
 // (a raw byte source, no filters), so the spool's real writer path runs — meter, part, footer,
 // routed Record — and Close fires the spool's per-write release hook.
-func transferArchive(sink *archiveio.ArchiveWriter, body []byte) error {
+func transferArchive(sink archivefs.ArchiveSink, body []byte) error {
 	_, err := xfer.Transfer(context.Background(), xfer.Reader(io.NopCloser(bytes.NewReader(body))), xfer.NewFilters(), sink)
 	cerr := sink.Close()
 	if err != nil {

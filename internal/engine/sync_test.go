@@ -22,7 +22,7 @@ func TestSyncMirrorsLandingToTarget(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "sync me")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
@@ -100,7 +100,7 @@ func TestSyncSelectionLast(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "x")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
@@ -144,7 +144,7 @@ func TestSyncSelectionSince(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "x")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
@@ -189,7 +189,7 @@ func TestSyncOverCapacityStillCopies(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), strings.Repeat("payload-", 4096)) // ~32 KiB, well past a 10-byte cap
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			// A cloud target with a 10-byte capacity: any real run overshoots it.
@@ -235,7 +235,7 @@ func TestSyncFromNonLanding(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), "tiered")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
@@ -297,7 +297,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 	src := t.TempDir()
 
 	cfg := &config.Config{
-		Landing:   "disk",
+		Landing:   config.MediumList{"disk"},
 		AutoLabel: true, // let the changer label each fresh tape it rolls onto
 		// A one-day cycle makes every run a fresh full, so each run carries its own
 		// payload independently. (With incrementals the three same-second writes race
@@ -397,7 +397,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 // copy/sync go through the spool (drive per concurrent copy), not the old single-drive writer.
 func TestMultiDriveCopyToTape(t *testing.T) {
 	cfg := &config.Config{
-		Landing:   "disk",
+		Landing:   config.MediumList{"disk"},
 		AutoLabel: true,
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
@@ -479,7 +479,7 @@ func TestMultiDriveCopyToTape(t *testing.T) {
 func TestMultiDriveSyncCrossRun(t *testing.T) {
 	src := t.TempDir()
 	cfg := &config.Config{
-		Landing:   "disk",
+		Landing:   config.MediumList{"disk"},
 		AutoLabel: true,
 		Cycle:     "1d", // each run a fresh full, so each slot carries its own payload independently
 		Media: map[string]config.Media{
@@ -576,7 +576,7 @@ func TestRelabelRefusesProtectedSpanTape(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), strings.Repeat("x", 600*1024))
 
 	cfg := &config.Config{
-		Landing:   "disk",
+		Landing:   config.MediumList{"disk"},
 		AutoLabel: true,
 		Cycle:     "1d",
 		Media: map[string]config.Media{
@@ -663,7 +663,7 @@ func TestSyncRunOutOfTapes(t *testing.T) {
 	write(t, filepath.Join(src, "f.txt"), strings.Repeat("z", 200*1024)) // ~200 KiB
 
 	cfg := &config.Config{
-		Landing:   "disk",
+		Landing:   config.MediumList{"disk"},
 		AutoLabel: true,
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
@@ -707,7 +707,7 @@ func TestSyncRunOutOfTapes(t *testing.T) {
 // TestSyncTargetIsLanding rejects syncing a medium to itself.
 func TestSyncTargetIsLanding(t *testing.T) {
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
 		Workdir:  t.TempDir(),
@@ -733,7 +733,7 @@ func TestSyncResumesPartialTargetCopy(t *testing.T) {
 	write(t, filepath.Join(srcB, "b.txt"), "bravo")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
@@ -847,7 +847,7 @@ func TestSyncStopsAfterFirstSinkError(t *testing.T) {
 	targetPath := t.TempDir()
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"archive": {Type: "disk", Params: map[string]string{"path": targetPath}},
@@ -908,7 +908,7 @@ func TestSyncTapeMidRunFailureResumes(t *testing.T) {
 	tapeDir := t.TempDir()
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		// One-day cycle: every run is a full, so the second run's payload sizes are
 		// deterministic (no incremental change-detection races).
 		Cycle: "1d",

@@ -37,7 +37,7 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
-	if err := c.landingDefined(); err != nil {
+	if err := c.validateLandingList("", c.Landing); err != nil {
 		return err
 	}
 	if c.Cycle != "" {
@@ -122,22 +122,37 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// validateDumpTypeLandings rejects a dumptype whose `landing` override names a medium
+// validateDumpTypeLandings rejects a dumptype whose `landing` override lists a medium
 // that is not defined — the per-dumptype peer of landingDefined, so a routing typo is
 // caught at load rather than mid-run. A holding medium is not a valid landing (it is a
-// write-path buffer, not an authoritative destination).
+// write-path buffer, not an authoritative destination), and a route must not repeat a
+// medium (a duplicate would double-write the same archive to one store).
 func (c *Config) validateDumpTypeLandings() error {
 	for name, dt := range c.DumpTypes {
-		if dt.Landing == "" {
-			continue
+		if err := c.validateLandingList(fmt.Sprintf("dumptype %q: ", name), dt.Landing); err != nil {
+			return err
 		}
-		m, ok := c.Media[dt.Landing]
+	}
+	return nil
+}
+
+// validateLandingList checks one landing route (the config-wide list or a dumptype
+// override): every entry defined, no entry a holding medium, no duplicates. context
+// prefixes each error with where the route came from.
+func (c *Config) validateLandingList(context string, l MediumList) error {
+	seen := make(map[string]bool, len(l))
+	for _, entry := range l {
+		m, ok := c.Media[entry]
 		if !ok {
-			return fmt.Errorf("dumptype %q: landing %q is not a defined medium", name, dt.Landing)
+			return fmt.Errorf("%slanding %q is not a defined medium", context, entry)
 		}
 		if m.Holding {
-			return fmt.Errorf("dumptype %q: landing %q is a holding medium, not a landing", name, dt.Landing)
+			return fmt.Errorf("%slanding %q is a holding medium, not a landing", context, entry)
 		}
+		if seen[entry] {
+			return fmt.Errorf("%slanding lists medium %q twice", context, entry)
+		}
+		seen[entry] = true
 	}
 	return nil
 }
@@ -288,7 +303,7 @@ func (c *Config) validateSync() error {
 		}
 		from := r.From
 		if from == "" {
-			from = c.Landing
+			from = c.Landing.Primary()
 		}
 		if from == r.To {
 			return fmt.Errorf("sync rule %d: source and target are the same medium %q", n, r.To)

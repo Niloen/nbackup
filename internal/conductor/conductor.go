@@ -77,7 +77,7 @@ type Deps struct {
 	HoldingMedia []string
 	Workers      int
 	NewFileSink  func() progress.Sink
-	LandingFor   func(item planner.Item) string // the medium an item's DLE lands on (dumptype override, else the default landing)
+	LandingsFor  func(item planner.Item) []string // the media an item's DLE lands on, primary first (dumptype override, else the default landing route)
 	RunSink      progress.Sink
 	EstimateSink progress.Sink
 }

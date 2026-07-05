@@ -182,7 +182,7 @@ func newFakeIngest() *fakeIngest {
 	return &fakeIngest{author: a, store: st}
 }
 
-func (f *fakeIngest) NewArchive(spec archiveio.ArchiveSpec, est int64) (*archiveio.ArchiveWriter, error) {
+func (f *fakeIngest) NewArchive(spec archiveio.ArchiveSpec, est int64) (archivefs.ArchiveSink, error) {
 	if f.park != nil {
 		if f.parked != nil {
 			f.parked <- spec.DLE
@@ -195,7 +195,7 @@ func (f *fakeIngest) NewArchive(spec archiveio.ArchiveSpec, est int64) (*archive
 	return f.author.NewArchive(spec), nil
 }
 
-func (f *fakeIngest) NewCopy(record.Archive, int64) (*archiveio.ArchiveWriter, error) {
+func (f *fakeIngest) NewCopy(record.Archive, int64) (archivefs.ArchiveSink, error) {
 	return nil, fmt.Errorf("NewCopy not used")
 }
 

@@ -201,12 +201,12 @@ func mediaNames(cfg *config.Config) []string {
 func landingFirst(cfg *config.Config, names []string) []string {
 	out := make([]string, 0, len(names))
 	for _, n := range names {
-		if n == cfg.Landing {
+		if n == cfg.Landing.Primary() {
 			out = append(out, n)
 		}
 	}
 	for _, n := range names {
-		if n != cfg.Landing {
+		if n != cfg.Landing.Primary() {
 			out = append(out, n)
 		}
 	}

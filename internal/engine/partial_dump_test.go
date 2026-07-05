@@ -30,7 +30,7 @@ func TestPartialDumpKeepsRunAndMarksArchive(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),

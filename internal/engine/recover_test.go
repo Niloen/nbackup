@@ -22,7 +22,7 @@ func TestRecoverSelectedFiles(t *testing.T) {
 	write(t, filepath.Join(src, "var", "log", "a.log"), "log-v1")
 
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -104,7 +104,7 @@ func TestRecoverWholeDirectory(t *testing.T) {
 	write(t, filepath.Join(src, "etc", "passwd"), "p1")
 
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": catalogDir}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),

@@ -85,8 +85,11 @@ three medium types:
   file-backed library, a robot, or a single drive you change by hand. Tapes carry
   a **label** NBackup verifies before every write.
 
-The **landing** medium (config key `landing:`) is where new runs are created. Any
-medium can also be a replication target. See [Storage media](features/media).
+The **landing** medium (config key `landing:`) is where new runs are created. It
+may also be a **list** (`landing: [s3, gdrive]`): every archive is then written to
+all of the listed media from local data, with the first entry as the **primary** —
+the medium capacity planning and reads prefer. Any medium can also be a
+replication target. See [Storage media](features/media).
 
 ## Artifacts you can read
 

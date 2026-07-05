@@ -173,13 +173,19 @@ func (w *Writer) NewCopy(arch record.Archive) *ArchiveWriter {
 	return aw
 }
 
-// MeterArchive attaches a progress tap to aw — the running count of landed bytes, reported after
-// each write on the writing goroutine — and returns aw for chaining. A nil tap is a no-op. The count
+// MeterArchive attaches a progress tap to aw and returns it for chaining — the
+// free-function form of Meter, for call sites that hold the concrete writer.
+func MeterArchive(aw *ArchiveWriter, tap func(landed int64)) *ArchiveWriter {
+	aw.Meter(tap)
+	return aw
+}
+
+// Meter attaches a progress tap to the writer — the running count of landed bytes, reported after
+// each write on the writing goroutine. A nil tap is a no-op. The count
 // is the same one the writer already meters for the archive's size, so this only exposes it; the
 // writer, session, spool, and fs stay otherwise observability-free.
-func MeterArchive(aw *ArchiveWriter, tap func(landed int64)) *ArchiveWriter {
-	aw.tap = tap
-	return aw
+func (a *ArchiveWriter) Meter(tap func(landed int64)) {
+	a.tap = tap
 }
 
 // ArchiveWriter is one archive's part-by-part write SDK (see NewArchive / NewCopy). A transfer drives

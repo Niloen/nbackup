@@ -346,12 +346,36 @@ the sole catalog writer across every landing, no per-lane goroutine, no map look
 (each request carries its `*lane`). Drain copies to independent landings run in parallel (a copy
 goroutine per dispatch, bounded by each lane's `Writers`); the global worker clamp is gone — a serial
 tape's single permit parks its producers (off the dumper's gate, holding no worker) while cloud-bound
-producers run. Crash-recovery `nb flush` re-resolves each staged archive's landing from config
-(`landingForDLEName`) so a multi-landing crash drains each DLE back to its own medium. *Deferred*: a
+producers run. Crash-recovery `nb flush` re-resolves each staged archive's landing route from config
+(`landingsForDLEName`) so a multi-landing crash drains each DLE back to its own media. *Deferred*: a
 manual tape swap mid-roll still freezes the orchestrator (hence all landings) because the librarian
 fuses the operator prompt with the catalog reconcile in one critical section; the non-blocking fix
 (invert `archiveio.PartAllocator`→`UseVolume` so the orchestrator drives a parkable roll, with a
 spool-side operator goroutine serializing prompts) is planned but not built.
+
+**A DLE may fan out to several landings — `landing: [s3, gdrive]` (`config.MediumList`,
+`spool.drainTo`, `archiveio.Tee`).** The landing route (config-wide and per-dumptype) is a
+**list of media, primary first**; every archive on the route is written to all of them **from
+local data** — Amanda 3.4's multi-storage model, and the answer to "add a second cloud without
+paying the first cloud's egress" (`nb sync` from S3 re-downloads what was local moments
+earlier; sync remains the backfill tool for *history*). The **primary** (first entry) stays
+"the landing" for every single-medium consumer — accounting/capacity/cost, read preference,
+posture, drill, sync's default `--from`, prune classification — so fan-out touches only
+routing, drain, and flush. Two write paths: **staged** (a holding disk absorbs the dump once,
+then one drain per landing copies it out in parallel; the staged copy is reclaimed by the LAST
+drain, so it outlives the fan-out until every landing is served — `spool.drainSet`), and
+**direct** (`archiveio.Tee` fans the stream into a bare `ArchiveWriter` per lane, all cutting
+parts at the SAME boundaries — the minimum cap — so no re-parting and identical per-part seals
+across copies, which is precisely `OpenRange`'s aligned-seals condition; drives lease in
+sorted-name order so overlapping routes cannot deadlock). The `Ingest` seam returns the
+**`archivefs.ArchiveSink`** interface (the five methods a producer drives) so the bare writer
+and the tee are interchangeable. **Failure is any-lane-suffices**: a failed landing is
+*tripped* for the rest of the run (no per-archive retries against a down medium), the run
+continues and succeeds with a loud warning naming the repair (`nb sync --to <landing>` — the
+per-medium placements already record exactly what is missing, so nothing new is persisted);
+only an archive whose ENTIRE route is dead aborts the run (staged copy kept for `nb flush`).
+Flush generalizes the same way: copy to each landing still missing the archive, reclaim after
+the whole route is served.
 
 **One mutating `nb` per config at a time** (`internal/lock`). Rather than make the
 catalog concurrently writable, we serialize the whole mutating run: every command that

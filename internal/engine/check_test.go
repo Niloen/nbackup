@@ -12,7 +12,7 @@ import (
 func newCheckEngine(t *testing.T, sources []config.DLE) *Engine {
 	t.Helper()
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 		Sources:  sources,
 		Workdir:  t.TempDir(),
@@ -113,7 +113,7 @@ func TestCheckWarnsOnRelativePaths(t *testing.T) {
 	defer os.Chdir(cwd)
 
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": filepath.Join(tmp, "m")}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: tmp}},
 		Workdir:  "rel-catalog",
@@ -147,7 +147,7 @@ func TestCheckWarnsOnRelativePaths(t *testing.T) {
 // executable file not found in $PATH").
 func TestCheckMissingCompressorIsOneLineWithRemedy(t *testing.T) {
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
 		Workdir:  t.TempDir(),

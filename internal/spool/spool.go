@@ -10,13 +10,17 @@
 //     onto one goroutine (the sole catalog writer), with no bulk bytes flowing through it — a
 //     slow drive can't block it.
 //
-// Routing is the caller's: the dumper resolves each DLE's landing and asks the spool for that
-// landing's Ingest. The spool decides per archive whether to stage it on a holding disk (then
-// drain it to the landing later) or, when no disk fits or none is configured, write it straight
-// to the landing. A lane's writers cap serializes a serial medium (a tape writes one archive at
+// Routing is the caller's: the dumper resolves each DLE's landing route (one medium, or several
+// for a fan-out, primary first) and asks the spool for that route's Ingest. The spool decides per
+// archive whether to stage it on a holding disk (then drain it to each landing later, reclaiming
+// only after the whole route is served) or, when no disk fits or none is configured, write it
+// straight to the landing(s) — one bare writer, or an archiveio.Tee cutting lockstep parts across
+// the route. A lane's writers cap serializes a serial medium (a tape writes one archive at
 // a time); a concurrent medium (cloud/disk) runs several writers at once. Holding back-pressure
-// is the Pool's. A landing failure aborts the run so producers stop and the run fails — never
-// dropping data — and a rerun fills in.
+// is the Pool's. Failure is any-lane-suffices: a failed landing is tripped for the rest of the
+// run (a Warning names the `nb sync` repair) and the run continues on the survivors; only an
+// archive whose every landing failed aborts the run so producers stop — never dropping data —
+// and a rerun (or flush) fills in.
 //
 // The crash-recovery counterpart (draining what a crashed run left staged) is conductor.Flush.
 package spool
@@ -25,8 +29,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archivefs"
@@ -83,6 +89,12 @@ type lane struct {
 	rec     archiveio.Recorder
 	lim     *ratelimit.Limiter
 	permits chan int
+	// tripped marks the lane dead for the rest of the run after a write to it failed —
+	// no further archive retries a down medium. Set once (by Spool.trip, which also
+	// records the run warning); read before routing an archive's copies. As long as a
+	// route keeps one live lane the run continues and `nb sync` repairs the gap; only
+	// an archive whose every lane is dead aborts the run (it would land nowhere).
+	tripped atomic.Bool
 }
 
 // newLane wires one Backing into its runtime lane, filling permits with one allocator index per
@@ -125,7 +137,16 @@ type Spool struct {
 
 	mu       sync.Mutex
 	abortErr error
-	closed   chan struct{} // closed by Drain; stops the cancel watcher
+	trips    map[string]*laneTrip // per-lane failure records, keyed by lane name (see trip)
+	closed   chan struct{}        // closed by Drain; stops the cancel watcher
+}
+
+// laneTrip is one tripped lane's failure record: the error that killed it and how
+// many archives are missing there (failed or skipped after the trip) — the raw
+// material for the run's warning + `nb sync` repair hint.
+type laneTrip struct {
+	err     error
+	missing int
 }
 
 // New builds a Spool from cfg and starts its orchestrator — the single goroutine every write's control
@@ -149,6 +170,7 @@ func New(ctx context.Context, cfg Config) *Spool {
 		tr:     cfg.Tracker,
 		logf:   cfg.Logf,
 		ctx:    ctx,
+		trips:  make(map[string]*laneTrip),
 		closed: make(chan struct{}),
 	}
 	if sp.logf == nil {
@@ -169,30 +191,39 @@ func New(ctx context.Context, cfg Config) *Spool {
 	return sp
 }
 
-// Ingest returns the writer source for the named landing, which must be one of Config.Backings — an
-// unknown name is a caller bug (the handle panics on first use). The dumper resolves each DLE's
-// landing to one of these and pulls writers from it; the spool never picks a landing itself.
-func (sp *Spool) Ingest(name string) archivefs.Ingest {
-	return laneHandle{sp: sp, l: sp.lanes[name]}
+// Ingest returns the writer source for the named landing(s). The dumper resolves each DLE's
+// landing route (primary first) to these and pulls writers from the handle; the spool never picks
+// a landing itself. A multi-name route writes every archive to all of them. A name with no lane is
+// skipped — a landing that failed to open at window-start, already warned by the conductor and
+// treated exactly like a tripped lane (a route whose EVERY name is laneless aborts at NewArchive,
+// since the archive could land nowhere).
+func (sp *Spool) Ingest(names ...string) archivefs.Ingest {
+	ls := make([]*lane, 0, len(names))
+	for _, name := range names {
+		if l, ok := sp.lanes[name]; ok {
+			ls = append(ls, l)
+		}
+	}
+	return laneHandle{sp: sp, ls: ls}
 }
 
-// laneHandle is a producer's view of one landing — an Ingest bound to a lane, so NewArchive routes
-// there without the spool re-deciding the landing.
+// laneHandle is a producer's view of one landing route — an Ingest bound to its lanes (primary
+// first), so NewArchive routes there without the spool re-deciding the landing.
 type laneHandle struct {
 	sp *Spool
-	l  *lane
+	ls []*lane
 }
 
 var _ archivefs.Ingest = laneHandle{}
 
-func (h laneHandle) NewArchive(spec archiveio.ArchiveSpec, est int64) (*archiveio.ArchiveWriter, error) {
-	return h.sp.ingest(h.l, spec.Host+":"+spec.Path, est, func(a *archiveio.Writer) *archiveio.ArchiveWriter {
+func (h laneHandle) NewArchive(spec archiveio.ArchiveSpec, est int64) (archivefs.ArchiveSink, error) {
+	return h.sp.ingest(h.ls, spec.Host+":"+spec.Path, est, func(a *archiveio.Writer) *archiveio.ArchiveWriter {
 		return a.NewArchive(spec)
 	})
 }
 
-func (h laneHandle) NewCopy(arch record.Archive, est int64) (*archiveio.ArchiveWriter, error) {
-	return h.sp.ingest(h.l, arch.Host+":"+arch.Path, est, func(a *archiveio.Writer) *archiveio.ArchiveWriter {
+func (h laneHandle) NewCopy(arch record.Archive, est int64) (archivefs.ArchiveSink, error) {
+	return h.sp.ingest(h.ls, arch.Host+":"+arch.Path, est, func(a *archiveio.Writer) *archiveio.ArchiveWriter {
 		return a.NewCopy(arch)
 	})
 }
@@ -219,24 +250,96 @@ func landingVolume(pos archiveio.ArchivePos) string {
 	return strings.Join(labels, ",")
 }
 
-// ingest reserves ingestion for one archive bound for lane l, identified by dleID and estimated at
-// est bytes, and returns the archiveio writer to transfer it into — built by build over the leased
-// store's Author (NewArchive for a dump, NewCopy for a copy/sync; only the writer differs). It blocks
-// for back-pressure: a holding write waits while every fitting disk is over capacity; a direct write (no
-// disk fits, or none configured) waits for a free drive on l. The writer's control calls route onto the
-// orchestrator, and its Close hook releases whatever the write leased. It returns the run's error if the
-// spool has aborted.
-func (sp *Spool) ingest(l *lane, dleID string, est int64, build func(*archiveio.Writer) *archiveio.ArchiveWriter) (*archiveio.ArchiveWriter, error) {
+// ingest reserves ingestion for one archive bound for the lanes ls (primary first), identified by
+// dleID and estimated at est bytes, and returns the archive sink to transfer it into — built by
+// build over the leased store's Author (NewArchive for a dump, NewCopy for a copy/sync; only the
+// writer differs). It blocks for back-pressure: a holding write waits while every fitting disk is
+// over capacity; a direct write (no disk fits, or none configured) waits for a free drive on each
+// lane. The writer's control calls route onto the orchestrator, and its Close hook releases
+// whatever the write leased. It returns the run's error if the spool has aborted.
+func (sp *Spool) ingest(ls []*lane, dleID string, est int64, build func(*archiveio.Writer) *archiveio.ArchiveWriter) (archivefs.ArchiveSink, error) {
 	if err := sp.Aborted(); err != nil {
 		return nil, err
 	}
+	// A tripped lane is dead for the run: drop it from the route up front (counted
+	// missing, `nb sync` repairs). An archive whose whole route is dead can land
+	// nowhere — abort, exactly as a landing failure always has.
+	live := make([]*lane, 0, len(ls))
+	for _, tl := range ls {
+		if tl.tripped.Load() {
+			sp.noteMissing(tl)
+			continue
+		}
+		live = append(live, tl)
+	}
+	if len(live) == 0 {
+		err := fmt.Errorf("dump %s: every landing on its route failed", dleID)
+		sp.setAbort(err)
+		return nil, err
+	}
+	ls = live
 	disk, direct, err := sp.pool.Acquire(est)
 	if err != nil {
 		return nil, err
 	}
 	if direct {
-		// No holding disk fits: write straight to the landing, leasing one of l's drives for the write.
-		drive := l.lease()
+		return sp.ingestDirect(ls, build), nil
+	}
+	// Stage onto holding disk disk; drains copy it to every landing on the route later.
+	sp.tr.MarkToHolding(dleID)
+	aw := build(sp.writerOver(disk.Alloc, disk.Storage, disk.Lim))
+	aw.SetCloser(func() error {
+		// On commit the archive occupies the disk until its drains copy it off: charge the landed
+		// bytes (so a later Acquire back-pressures on the drain backlog) and launch one drain per
+		// live landing — tripped lanes are skipped (counted missing, `nb sync` repairs). A
+		// faulted transfer never committed, so there is nothing to drain — just free the estimate.
+		if res, ok := aw.Committed(); ok {
+			sp.pool.Charge(disk, res.Archive.Compressed)
+			sp.tr.StageHolding(res.Archive.Host+":"+res.Archive.Path, disk.Name)
+			live := make([]*lane, 0, len(ls))
+			for _, tl := range ls {
+				if tl.tripped.Load() {
+					sp.noteMissing(tl)
+					continue
+				}
+				live = append(live, tl)
+			}
+			if len(live) == 0 {
+				// Landed nowhere: every landing on the route is dead. The staged copy is
+				// kept (no reclaim) so the next run's flush completes it; the run fails.
+				sp.setAbort(fmt.Errorf("dump %s L%d: every landing on its route failed; staged copy kept on %q for `nb flush`", dleID, res.Archive.Level, disk.Name))
+			} else {
+				set := &drainSet{remaining: int32(len(live))}
+				sp.drains.Add(len(live))
+				for _, tl := range live {
+					go sp.drainTo(disk, res, tl, set)
+				}
+			}
+		}
+		sp.pool.Release(disk, est)
+		sp.pool.ReleaseWriter(disk)
+		return nil
+	})
+	return aw, nil
+}
+
+// ingestDirect is ingest's no-holding path: the archive streams straight to its
+// landing(s). One lane gets today's bare writer; a multi-landing route gets a Tee
+// fanning the stream to a writer per lane, all cutting parts in lockstep (see
+// archiveio.Tee). Drives are leased in sorted lane-name order — a global order, so
+// two producers with overlapping routes can never deadlock on each other's permits —
+// while the writers keep route order (primary first). A mid-stream lane failure
+// drops that lane from the fan and trips it; the spool learns via the Tee's onDrop.
+func (sp *Spool) ingestDirect(ls []*lane, build func(*archiveio.Writer) *archiveio.ArchiveWriter) archivefs.ArchiveSink {
+	byName := append([]*lane(nil), ls...)
+	sort.Slice(byName, func(i, j int) bool { return byName[i].name < byName[j].name })
+	drives := make(map[*lane]int, len(ls))
+	for _, l := range byName {
+		drives[l] = l.lease()
+	}
+	writers := make([]*archiveio.ArchiveWriter, len(ls))
+	for i, l := range ls {
+		l, drive := l, drives[l]
 		aw := build(sp.writerOver(l.allocs[drive], l.rec, l.lim))
 		aw.SetCloser(func() error {
 			// Surface the landing volume(s) this drive wrote to, so `nb status` shows the
@@ -247,39 +350,48 @@ func (sp *Spool) ingest(l *lane, dleID string, est int64, build func(*archiveio.
 			l.release(drive)
 			return nil
 		})
-		return aw, nil
+		writers[i] = aw
 	}
-	// Stage onto holding disk disk; a drain copies it to l later.
-	sp.tr.MarkToHolding(dleID)
-	aw := build(sp.writerOver(disk.Alloc, disk.Storage, disk.Lim))
-	aw.SetCloser(func() error {
-		// On commit the archive occupies the disk until its drain copies it off: charge the landed
-		// bytes (so a later Acquire back-pressures on the drain backlog) and launch the drain to l. A
-		// faulted transfer never committed, so there is nothing to drain — just free the estimate.
-		if res, ok := aw.Committed(); ok {
-			sp.pool.Charge(disk, res.Archive.Compressed)
-			sp.tr.StageHolding(res.Archive.Host+":"+res.Archive.Path, disk.Name)
-			sp.drains.Add(1)
-			go sp.drain(disk, res, l)
-		}
-		sp.pool.Release(disk, est)
-		sp.pool.ReleaseWriter(disk)
-		return nil
-	})
-	return aw, nil
+	if len(writers) == 1 {
+		return writers[0]
+	}
+	return archiveio.NewTee(writers, func(i int, err error) { sp.trip(ls[i], err) })
 }
 
-// drain copies one staged archive from holding disk disk to lane l, then reclaims the holding copy.
-// It runs on its own goroutine, holding one of l's writers for the copy so it serializes with direct
-// writes and other drains to l. A failure aborts the run.
-func (sp *Spool) drain(disk *Disk, hres archiveio.CommitResult, l *lane) {
+// drainSet coordinates one staged archive's fan-out: remaining counts the drains still
+// running, landed the ones that committed. The LAST drain to finish settles the
+// archive — reclaiming the staged copy if any landing has it (a tripped lane is a
+// warning, sync repairs), or aborting the run if none does (the copy stays for flush).
+type drainSet struct {
+	remaining int32
+	landed    int32
+}
+
+// drainTo copies one staged archive from holding disk disk to lane l — one of the
+// archive's route's drains, holding one of l's writers for the copy so it serializes
+// with direct writes and other drains to l. A failure trips the lane (the run
+// continues on the survivors); the last drain of the set reclaims or aborts.
+func (sp *Spool) drainTo(disk *Disk, hres archiveio.CommitResult, l *lane, set *drainSet) {
 	defer sp.drains.Done()
 	dleID := hres.Archive.Host + ":" + hres.Archive.Path
 	sp.tr.StartFlush(dleID, disk.Name)
 	drive := l.lease()
-	defer l.release(drive)
-	if err := sp.copyOne(disk, hres, l, drive, dleID); err != nil {
-		sp.setAbort(err)
+	err := sp.copyOne(disk, hres, l, drive, dleID)
+	l.release(drive)
+	if err != nil {
+		sp.trip(l, err)
+	} else {
+		atomic.AddInt32(&set.landed, 1)
+	}
+	if atomic.AddInt32(&set.remaining, -1) != 0 {
+		return
+	}
+	if atomic.LoadInt32(&set.landed) == 0 {
+		sp.setAbort(fmt.Errorf("every landing on %s L%d's route failed (last: %w); staged copy kept on %q for `nb flush`", dleID, hres.Archive.Level, err, disk.Name))
+		return
+	}
+	if rerr := sp.reclaimStaged(disk, hres, dleID); rerr != nil {
+		sp.setAbort(rerr)
 	}
 }
 
@@ -301,12 +413,12 @@ func CopyStaged(ctx context.Context, label string, open func() (io.ReadCloser, e
 
 // copyOne reads a staged archive off holding disk disk (on this goroutine) and streams it to l's
 // leased drive through a fresh copy writer — its volume rolls and its placement Record route onto the
-// orchestrator, while the bytes flow here. The copy's Commit records the landing placement; then the
-// holding copy is reclaimed on the orchestrator (files + placement, the catalog write) and its disk
-// bytes freed.
+// orchestrator, while the bytes flow here. The copy's Commit records the landing placement.
+// Reclaiming the staged copy is the drain set's job, once every landing on the route has its copy
+// (reclaimStaged).
 func (sp *Spool) copyOne(disk *Disk, hres archiveio.CommitResult, l *lane, drive int, dleID string) error {
 	cw := sp.writerOver(l.allocs[drive], l.rec, l.lim).NewCopy(hres.Archive)
-	archiveio.MeterArchive(cw, func(copied int64) { sp.tr.AddDrainBytes(dleID, copied) })
+	archiveio.MeterArchive(cw, func(copied int64) { sp.tr.AddDrainBytes(dleID, l.name, copied) })
 	label := fmt.Sprintf("flush %s L%d", dleID, hres.Archive.Level)
 	open := func() (io.ReadCloser, error) { return disk.Storage.OpenArchiveAt(hres.Ref(), hres.Pos) }
 	if err := CopyStaged(sp.ctx, label, open, cw, l.name); err != nil {
@@ -315,12 +427,20 @@ func (sp *Spool) copyOne(disk *Disk, hres archiveio.CommitResult, l *lane, drive
 	if res, ok := cw.Committed(); ok {
 		sp.tr.LandVolume(dleID, landingVolume(res.Pos)) // the landing tape the drain reached
 	}
+	sp.logf("flushed %s L%d to %q", dleID, hres.Archive.Level, l.name)
+	return nil
+}
+
+// reclaimStaged drops one staged archive's holding copy — files + placement, the catalog write, on
+// the orchestrator — and frees its disk bytes. Run by the archive's LAST drain, so the staged copy
+// outlives the fan-out until every landing on the route has been served (committed, or tripped with
+// at least one survivor).
+func (sp *Spool) reclaimStaged(disk *Disk, hres archiveio.CommitResult, dleID string) error {
 	if err := sp.orch.reclaimOn(disk.Storage, hres.Ref(), hres.Pos); err != nil {
 		return fmt.Errorf("flush %s: reclaim holding disk: %w", dleID, err)
 	}
 	sp.pool.Release(disk, hres.Archive.Compressed)
 	sp.tr.FinishFlush(dleID)
-	sp.logf("flushed %s L%d to %q", dleID, hres.Archive.Level, l.name)
 	return nil
 }
 
@@ -352,4 +472,51 @@ func (sp *Spool) setAbort(err error) {
 	if sp.pool != nil {
 		sp.pool.Abort(err) // wake producers blocked on holding back-pressure
 	}
+}
+
+// trip marks lane l dead for the rest of the run, recording the first error that
+// killed it and counting the archive that failed as missing there. Idempotent per
+// lane; loud once, so a down medium doesn't spam a line per archive.
+func (sp *Spool) trip(l *lane, err error) {
+	l.tripped.Store(true)
+	sp.mu.Lock()
+	t, seen := sp.trips[l.name]
+	if !seen {
+		t = &laneTrip{err: err}
+		sp.trips[l.name] = t
+	}
+	t.missing++
+	sp.mu.Unlock()
+	if !seen {
+		sp.logf("WARNING landing %q failed and is skipped for the rest of the run: %v", l.name, err)
+	}
+}
+
+// noteMissing counts an archive skipped on an already-tripped lane.
+func (sp *Spool) noteMissing(l *lane) {
+	sp.mu.Lock()
+	if t, ok := sp.trips[l.name]; ok {
+		t.missing++
+	}
+	sp.mu.Unlock()
+}
+
+// Warnings reports the run's tripped landings — one line each, with the failure and
+// the repair (`nb sync` computes exactly the missing backlog from the catalog's
+// placements, so nothing here needs persisting). Empty for a healthy run. Sorted for
+// stable output.
+func (sp *Spool) Warnings() []string {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	names := make([]string, 0, len(sp.trips))
+	for name := range sp.trips {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]string, len(names))
+	for i, name := range names {
+		t := sp.trips[name]
+		out[i] = fmt.Sprintf("landing %q failed (%v); %d archive(s) missing there — repair: nb sync --to %s", name, t.err, t.missing, name)
+	}
+	return out
 }

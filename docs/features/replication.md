@@ -28,6 +28,13 @@ offsite copy. NBackup has two commands for moving runs between media:
 - `nb sync` is the **batch** form of `nb copy`: it copies every run the target
   medium is missing.
 
+When the second copy should exist from day one, prefer a **multi-landing route**
+over syncing: `landing: [s3, gdrive]` writes every new archive to both media from
+local data, so nothing is downloaded from one cloud to feed the other (see
+[Storage media](media)). `nb sync` then remains the tool for **history** — seeding
+a newly added medium with the runs that predate it — and for repairing the gap a
+failed landing left behind (`nb sync --to gdrive`).
+
 `nb sync` works **oldest first**, so an interrupted sync makes contiguous,
 replayable progress and a full always lands before its incrementals.
 

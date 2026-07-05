@@ -112,44 +112,52 @@ func (e *Engine) landingSeams(medium string, spec archiveio.RunSpec, now time.Ti
 	return allocs, e.fs.OpenRun(e.cat, wm), wm, nil
 }
 
-// landingFor resolves the medium a DLE lands on: its dumptype's `landing` override, else the run's
-// default landing (e.mediumName). The override is validated against `media` at config load, so a
-// resolve error or empty result falls back to the default.
-func (e *Engine) landingFor(d config.DLE) string {
-	if name, err := e.cfg.LandingFor(d); err == nil && name != "" {
-		return name
+// landingsFor resolves the media a DLE lands on, primary first: its dumptype's `landing` override,
+// else the run's default landing route. The route is validated against `media` at config load, so a
+// resolve error or empty result falls back to the default landing.
+func (e *Engine) landingsFor(d config.DLE) []string {
+	if names, err := e.cfg.LandingsFor(d); err == nil && len(names) > 0 {
+		return names
 	}
-	return e.dep.LandingName()
+	return []string{e.dep.LandingName()}
+}
+
+// landingFor is a DLE's primary landing — the accounted medium — for the single-landing consumers.
+func (e *Engine) landingFor(d config.DLE) string {
+	return e.landingsFor(d)[0]
 }
 
 // atomCeilingErr is the dump-time half of the atom validation ladder: a hard error
-// when an atomic dumptype's atoms exceed its routed landing's part ceiling — a sealed
+// when an atomic dumptype's atoms exceed ANY routed landing's part ceiling — a sealed
 // atom can never be re-cut to fit, so the dump must refuse rather than write archives
-// no copy could carry there. The check-time sibling (checkAtomShapes) warns about
-// every dumptype × medium pair; this fires only for the pair actually routed.
+// no copy could carry there (a fan-out writes every landing on the route, so each
+// must carry the atom). The check-time sibling (checkAtomShapes) warns about
+// every dumptype × medium pair; this fires only for the pairs actually routed.
 func (e *Engine) atomCeilingErr(dumpType string, atomSize int64) error {
-	landing := e.cfg.ResolveDumpType(dumpType).Landing
-	if landing == "" {
-		landing = e.cfg.Landing
+	landings := e.cfg.ResolveDumpType(dumpType).Landing
+	if len(landings) == 0 {
+		landings = e.cfg.Landing
 	}
-	ceiling := media.PartSizeFor(e.cfg.Media[landing].Type).Max
-	if ceiling > 0 && atomSize > ceiling {
-		return fmt.Errorf("dumptype %q: its %s atoms (part_size) exceed landing %q's %s part ceiling and a sealed atom cannot be re-cut — lower the dumptype's part_size or route it to a medium with a higher ceiling",
-			dumpType, sizeutil.FormatBytes(atomSize), landing, sizeutil.FormatBytes(ceiling))
+	for _, landing := range landings {
+		ceiling := media.PartSizeFor(e.cfg.Media[landing].Type).Max
+		if ceiling > 0 && atomSize > ceiling {
+			return fmt.Errorf("dumptype %q: its %s atoms (part_size) exceed landing %q's %s part ceiling and a sealed atom cannot be re-cut — lower the dumptype's part_size or route it to a medium with a higher ceiling",
+				dumpType, sizeutil.FormatBytes(atomSize), landing, sizeutil.FormatBytes(ceiling))
+		}
 	}
 	return nil
 }
 
-// landingForDLEName resolves the landing of a DLE named by its catalog slug (DLE.Name()) — what a
-// staged archive's placement carries — for the crash-recovery flush. A DLE no longer in config (the
-// config changed since the crash) drains to the default landing.
-func (e *Engine) landingForDLEName(slug string) string {
+// landingsForDLEName resolves the landing route of a DLE named by its catalog slug (DLE.Name()) —
+// what a staged archive's placement carries — for the crash-recovery flush. A DLE no longer in
+// config (the config changed since the crash) drains to the default primary landing.
+func (e *Engine) landingsForDLEName(slug string) []string {
 	for _, d := range e.cfg.DLEs() {
 		if d.Name() == slug {
-			return e.landingFor(d)
+			return e.landingsFor(d)
 		}
 	}
-	return e.dep.LandingName()
+	return []string{e.dep.LandingName()}
 }
 
 // newConductor wires a per-run conductor.Conductor to the engine's dumper, plan
@@ -169,7 +177,7 @@ func (e *Engine) newConductor() *conductor.Conductor {
 		HoldingMedia: e.cfg.HoldingMedia(),
 		Workers:      e.cfg.Workers(),
 		NewFileSink:  func() progress.Sink { return progress.NewFileSink(e.cfg.WorkdirPath(), time.Now) },
-		LandingFor:   func(it planner.Item) string { return e.landingFor(it.DLE) },
+		LandingsFor:  func(it planner.Item) []string { return e.landingsFor(it.DLE) },
 		RunSink:      e.runSink,
 		EstimateSink: e.estimateSink,
 	})

@@ -43,7 +43,7 @@ func init() {
 // ENFORCED — the probe object persists as the proof.
 func TestWormProbeEnforcedRefusedDelete(t *testing.T) {
 	cfg := &config.Config{
-		Landing:  "wormlock",
+		Landing:  config.MediumList{"wormlock"},
 		Media:    map[string]config.Media{"wormlock": {Type: "wormlock", Params: map[string]string{"path": t.TempDir()}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
 		Workdir:  t.TempDir(),
@@ -71,7 +71,7 @@ func TestWormProbeEnforcedRefusedDelete(t *testing.T) {
 // medium is immutable by construction and reported enforced without writing a probe.
 func TestWormProbeAppendOnlyMedium(t *testing.T) {
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk":  {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"vault": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "2"}},
@@ -100,7 +100,7 @@ func TestWormProbeAppendOnlyMedium(t *testing.T) {
 func postureEngine(t *testing.T) *Engine {
 	t.Helper()
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
 		Workdir:  t.TempDir(),
@@ -145,7 +145,7 @@ func TestPostureSingleCopyWarns(t *testing.T) {
 	src := t.TempDir()
 	write(t, filepath.Join(src, "f.txt"), "one copy")
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -179,7 +179,7 @@ func TestPostureSingleCopyWarns(t *testing.T) {
 // check warns (the lost-key mode checksum verification cannot see).
 func TestPostureKeyConfiguredNotReady(t *testing.T) {
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
 		Workdir:  t.TempDir(),
@@ -205,7 +205,7 @@ func TestPostureKeyConfiguredNotReady(t *testing.T) {
 // whose stored bytes exceed its capacity warns to run `nb prune`.
 func TestPostureCapacityOver(t *testing.T) {
 	cfg := &config.Config{
-		Landing:  "cloud",
+		Landing:  config.MediumList{"cloud"},
 		Media:    map[string]config.Media{"cloud": {Type: "cloud", Capacity: "1000", Params: map[string]string{"url": "mem://"}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: t.TempDir()}},
 		Workdir:  t.TempDir(),

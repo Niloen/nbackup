@@ -19,7 +19,7 @@ func copyFixture(t *testing.T) (*Engine, string, string) {
 	write(t, filepath.Join(src, "f.txt"), "copy me")
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
 			"archive": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},

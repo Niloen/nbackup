@@ -1,6 +1,7 @@
 package progress
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -12,6 +13,7 @@ type Plan struct {
 	Name     string
 	Level    int
 	EstBytes int64
+	Landings []string // the DLE's landing route, primary first; empty = a single unnamed landing
 }
 
 // Sink receives a snapshot whenever the run state changes. force is true for
@@ -44,7 +46,7 @@ func NewTracker(runID string, phase Phase, workers int, plan []Plan, now func() 
 	start := now()
 	dles := make([]DLE, len(plan))
 	for i, p := range plan {
-		dles[i] = DLE{Name: p.Name, Level: p.Level, State: StatePending, EstBytes: p.EstBytes}
+		dles[i] = DLE{Name: p.Name, Level: p.Level, State: StatePending, EstBytes: p.EstBytes, Landings: p.Landings}
 	}
 	byName(dles)
 	idx := make(map[string]int, len(dles))
@@ -97,16 +99,25 @@ func (t *Tracker) AddBytes(name string, uncompressed, compressed int64) {
 	t.flush(false)
 }
 
-// AddDrainBytes records cumulative compressed bytes copied to the landing for a DLE the
-// drainer is flushing off a holding disk. Throttle-eligible (force=false), mirroring AddBytes.
-func (t *Tracker) AddDrainBytes(name string, copied int64) {
+// AddDrainBytes records cumulative compressed bytes copied to one landing for a DLE the
+// drainer is flushing off a holding disk — per landing, so a fan-out's copies meter
+// independently; DrainBytes stays their sum. Throttle-eligible (force=false), mirroring AddBytes.
+func (t *Tracker) AddDrainBytes(name, landing string, copied int64) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if d := t.dle(name); d != nil {
-		d.DrainBytes = copied
+		if d.Drained == nil {
+			d.Drained = map[string]int64{}
+		}
+		d.Drained[landing] = copied
+		var total int64
+		for _, n := range d.Drained {
+			total += n
+		}
+		d.DrainBytes = total
 	}
 	t.flush(false)
 }
@@ -190,9 +201,11 @@ func (t *Tracker) StageHolding(name, holding string) {
 }
 
 // LandVolume records which landing volume(s) a DLE's archive committed to — the volume's label (or
-// several, comma-joined, when the archive spanned volumes or, on a multi-drive library, drives). This
-// is what surfaces the multi-drive spread in `nb status`: each DLE shows the volume its data reached. A
-// no-op for an unknown DLE or an empty volume id (an address-identified landing carries no label).
+// several, comma-joined, when the archive spanned volumes, drives, or landings). This
+// is what surfaces the multi-drive spread in `nb status`: each DLE shows the volume its data reached.
+// Reports merge: a fan-out lands on several media, each reporting its own label(s), and all distinct
+// labels are kept. A no-op for an unknown DLE or an empty volume id (an address-identified landing
+// carries no label).
 func (t *Tracker) LandVolume(name, volume string) {
 	if t == nil || volume == "" {
 		return
@@ -200,9 +213,28 @@ func (t *Tracker) LandVolume(name, volume string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if d := t.dle(name); d != nil {
-		d.Volume = volume
+		d.Volume = mergeLabels(d.Volume, volume)
 	}
 	t.flush(true)
+}
+
+// mergeLabels folds a comma-joined label report into an existing one, keeping every
+// distinct label once, in first-reported order.
+func mergeLabels(have, add string) string {
+	if have == "" {
+		return add
+	}
+	seen := map[string]bool{}
+	for _, l := range strings.Split(have, ",") {
+		seen[l] = true
+	}
+	for _, l := range strings.Split(add, ",") {
+		if !seen[l] {
+			have += "," + l
+			seen[l] = true
+		}
+	}
+	return have
 }
 
 // StartFlush marks a DLE as draining from the holding disk it landed on (holding) to the landing
@@ -237,7 +269,13 @@ func (t *Tracker) FinishFlush(name string) {
 		d.State = StateDone
 		d.EndedAt = t.now()
 		if d.OutBytes > 0 {
-			d.DrainBytes = d.OutBytes // settle the drain bar to 100%
+			d.DrainBytes = d.toDrain() // settle the drain bar to 100%
+			for _, l := range d.Landings {
+				if d.Drained == nil {
+					d.Drained = map[string]int64{}
+				}
+				d.Drained[l] = d.OutBytes
+			}
 		}
 	}
 	t.flush(true)
@@ -299,9 +337,19 @@ func (t *Tracker) flush(force bool) {
 	}
 }
 
-// copy deep-copies the snapshot so callers and sinks never share the live slice.
+// copy deep-copies the snapshot so callers and sinks never share the live slice
+// (or a DLE's live per-landing drain map).
 func (t *Tracker) copy() Snapshot {
 	s := t.snap
 	s.DLEs = append([]DLE(nil), t.snap.DLEs...)
+	for i, d := range s.DLEs {
+		if d.Drained != nil {
+			m := make(map[string]int64, len(d.Drained))
+			for k, v := range d.Drained {
+				m[k] = v
+			}
+			s.DLEs[i].Drained = m
+		}
+	}
 	return s
 }

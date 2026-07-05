@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
@@ -22,18 +23,19 @@ import (
 // closures only.
 
 // FlushDeps is what Flush needs from the host: the catalog it reads staged placements from, the
-// holding medium names, and the host-bound seams — resolving a staged archive's landing (its
-// dumptype's `landing`, so a crashed multi-landing run drains each DLE back to its own medium),
-// reading a staged archive's payload (Open) and member list (Members), reclaiming a staged archive
+// holding medium names, and the host-bound seams — resolving a staged archive's landing route (its
+// dumptype's `landing`, so a crashed multi-landing run drains each DLE back to its own media,
+// primary first; re-derived from CURRENT config, never persisted), reading a staged archive's
+// payload (Open) and member list (Members), reclaiming a staged archive
 // (Reclaim), opening a landing writer for a (landing, run), and the DLE display id — plus an
 // optional log. The engine binds Open/Reclaim to a write session on each holding disk (the same
 // handle the live drain uses), so they are positional like the session's own read-back: the
 // catalog's staged placement supplies ref, pos, and the index position.
 type FlushDeps struct {
-	Cat        *catalog.Catalog
-	LandingFor func(dle string) string
-	Holdings   []string
-	Open       func(holding string, ref archiveio.Ref, pos archiveio.ArchivePos) (io.ReadCloser, error)
+	Cat         *catalog.Catalog
+	LandingsFor func(dle string) []string
+	Holdings    []string
+	Open        func(holding string, ref archiveio.Ref, pos archiveio.ArchivePos) (io.ReadCloser, error)
 	// Index returns an archive's per-archive index (members + frame table), given where it
 	// sits on the holding — the host serves it from its index cache when it can, else reads
 	// the index there.
@@ -100,10 +102,15 @@ func Flush(d FlushDeps) (flushed int, err error) {
 			for _, ap := range hp.Archives {
 				ref := archiveio.Ref{Run: s.ID, DLE: ap.DLE, Level: ap.Level}
 				dleID := d.DisplayDLE(ap.DLE)
-				landing := d.LandingFor(ap.DLE)
-				// A crash between recording the landing placement and reclaiming the holding one
-				// leaves an archive on both; in that case just reclaim, don't re-copy.
-				if !archiveOnLanding(d.Cat, landing, s.ID, ap.DLE, ap.Level) {
+				landings := d.LandingsFor(ap.DLE)
+				for _, landing := range landings {
+					// A crash between recording a landing placement and reclaiming the holding one
+					// leaves an archive on both; a crash mid-fan-out leaves some landings served and
+					// some not. Copy only to the landings still missing the archive — then reclaim
+					// once, below, after the whole route is served.
+					if archiveOnLanding(d.Cat, landing, s.ID, ap.DLE, ap.Level) {
+						continue
+					}
 					arch, err := catalogArchive(d.Cat, s.ID, ap.DLE, ap.Level)
 					if err != nil {
 						return flushed, fmt.Errorf("flush %s %s: %w", s.ID, dleID, err)
@@ -130,11 +137,13 @@ func Flush(d FlushDeps) (flushed int, err error) {
 						return flushed, err
 					}
 				}
+				// Every landing on the route holds the archive now (an error above returned
+				// early, keeping it staged), so the staged copy can go.
 				if err := d.Reclaim(holding, ref, ap.Pos()); err != nil {
 					return flushed, fmt.Errorf("flush %s %s: reclaim holding disk: %w", s.ID, dleID, err)
 				}
 				flushed++
-				logf("flushed %s %s to %q", s.ID, dleID, landing)
+				logf("flushed %s %s to %q", s.ID, dleID, strings.Join(landings, ", "))
 			}
 		}
 	}

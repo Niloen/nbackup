@@ -35,7 +35,7 @@ func newTwoDLEFixture(t *testing.T) *twoDLEFixture {
 	diskDir, offsiteDir := t.TempDir(), t.TempDir()
 
 	cfg := &config.Config{
-		Landing: "disk",
+		Landing: config.MediumList{"disk"},
 		Media: map[string]config.Media{
 			"disk":    {Type: "disk", Params: map[string]string{"path": diskDir}},
 			"offsite": {Type: "disk", Params: map[string]string{"path": offsiteDir}},
@@ -201,7 +201,7 @@ func TestVerifyDeepStructuralZeroChangeIncremental(t *testing.T) {
 	write(t, filepath.Join(src, "a.txt"), "full content")
 	diskDir := t.TempDir()
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": diskDir}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -278,7 +278,7 @@ func TestOldFormatIndexDegradesGracefully(t *testing.T) {
 	write(t, filepath.Join(src, "keep.txt"), "v1")
 
 	cfg := &config.Config{
-		Landing:  "disk",
+		Landing:  config.MediumList{"disk"},
 		Media:    map[string]config.Media{"disk": {Type: "disk", Params: map[string]string{"path": diskDir}}},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
