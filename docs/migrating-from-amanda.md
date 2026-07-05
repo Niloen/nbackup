@@ -35,6 +35,7 @@ changed and what isn't there.
 | `amlabel` | `nb label` | Same contract: a tape must be labeled before its first write, and the label is verified before every write so a foreign reel is never clobbered. `nb label --relabel` is the manual early-recycle. |
 | `amtape` | `nb medium` / `nb load` | `nb medium <name>` inventories a changer (drives + slots + barcodes); `nb load` loads a bay by id or `--label`. |
 | `amcheckdump` / `amverify` | `nb verify` | Checksum verification, plus `--deep` for a structural decode. `nb drill` goes further than Amanda ever did — see below. |
+| `amreindex` | `nb rebuild` | Same idea, wider reach: `amreindex` regenerates browse indexes from the volumes a run or a dump at a time; one `nb rebuild` scan reconstructs the whole catalog — indexes, dump history, and placements. |
 | taper | the **drainer** and the **landing** | There is no taper process. Runs are written to the `landing:` medium; with a holding disk, one drainer copies finished archives to it. The planner is medium-neutral — it never knows tape from S3. |
 | `amanda.conf` + `disklist` | one `nbackup.yaml` | Everything — media, dumptypes, sources, sync rules, notification — in a single file. Unknown keys are rejected, so typos fail loudly. See the [Configuration reference](reference/configuration). |
 | `bumppercent` / `bumpdays` | `bump_percent` + the bump rule | Same intent, one knob (default 5%). A DLE sits at level 1 and climbs only after holding its level a couple of runs *and* when climbing saves ≥ `bump_percent` of the full — so chains stay short. See [Planning](features/planning). |
@@ -98,9 +99,14 @@ The operational properties you trusted Amanda for are the point of NBackup:
 - **One static binary + cron.** No `amandad`, no `xinetd`, no server/client
   package split. Clients need only `sshd` and `tar`; scheduling is your
   crontab: `nb dump && nb sync && nb prune && nb drill --unattended; nb report --notify`.
-- **The catalog is a cache, not a database.** Amanda's `curinfo`/`tapelist`
-  state is precious; NBackup's catalog is disposable — the media are the source
-  of truth and one scan rebuilds it (`nb rebuild`). See
+- **The catalog rebuilds itself.** Both systems keep the media self-describing
+  — Amanda's labeled tapes and dump headers mean `amrestore` restores with the
+  catalog gone, and NBackup inherits exactly that design. The difference is the
+  road back: Amanda regenerates browse indexes from the tapes with
+  `amreindex` (a run or a dump at a time), but `curinfo` (planning history)
+  and `tapelist` (overwrite safety) have no rebuild — lose them and you
+  reconstruct by hand. NBackup's one `nb rebuild` scan reconstructs the whole
+  catalog: dump history, placements, and browse indexes together. See
   [Concepts](concepts#the-catalog-is-a-cache).
 
 ## What's not there
