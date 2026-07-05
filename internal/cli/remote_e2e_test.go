@@ -108,8 +108,18 @@ func TestRemoteTransformPlacementEndToEnd(t *testing.T) {
 			}
 
 			dest := filepath.Join(base, "restored-"+at)
-			if out, err := runCmd(t, "-c", cfgPath, "recover", "--all",
-				"--dle", "127.0.0.1:"+filepath.Join(base, "data"), "--dest", dest); err != nil {
+			// A client-placed symmetric passphrase never leaves the client, so a
+			// server-side restore can't decrypt it — recovery must run on the client
+			// (`--to host:path`), where the key lives. Server-placed encryption
+			// decrypts locally, so a plain `--dest` restore suffices.
+			recoverArgs := []string{"-c", cfgPath, "recover", "--all",
+				"--dle", "127.0.0.1:" + filepath.Join(base, "data")}
+			if at == "client" {
+				recoverArgs = append(recoverArgs, "--to", "127.0.0.1:"+dest)
+			} else {
+				recoverArgs = append(recoverArgs, "--dest", dest)
+			}
+			if out, err := runCmd(t, recoverArgs...); err != nil {
 				t.Fatalf("recover: %v\n%s", err, out)
 			}
 			got, err := os.ReadFile(filepath.Join(dest, "file.txt"))
