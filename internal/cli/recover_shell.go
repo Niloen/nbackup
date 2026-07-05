@@ -388,7 +388,9 @@ func (sh *recoverShell) extract(args []string) {
 		fmt.Printf("error: %v\n", err)
 		return
 	}
-	if !confirmRead(sh.eng.SelectionCost(steps), false) {
+	rows, est := sh.eng.SelectionPlan(steps)
+	printReadPlan(rows)
+	if !confirmRead(est, false) {
 		return
 	}
 	sh.noteDeletionOnce()

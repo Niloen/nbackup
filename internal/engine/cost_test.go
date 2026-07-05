@@ -118,8 +118,9 @@ func TestCostOverride(t *testing.T) {
 	}
 }
 
-// TestSelectionCostEgress exercises SelectionCost: a file-level recovery is priced as
-// the egress of the archives its selected members are extracted from.
+// TestSelectionCostEgress exercises SelectionPlan: a file-level recovery is priced as
+// the egress of the archives its selected members are extracted from, and its per-archive
+// plan row carries the same read for the EXPLAIN display.
 func TestSelectionCostEgress(t *testing.T) {
 	runDate := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	eng, dle := cloudCostEngine(t, runDate, nil)
@@ -130,7 +131,7 @@ func TestSelectionCostEgress(t *testing.T) {
 		{Step: recovery.Step{RunID: run.ID, DLE: dle, Level: a.Level}, Members: []string{"f.txt"}},
 	}
 
-	est := eng.SelectionCost(steps)
+	rows, est := eng.SelectionPlan(steps)
 	if !est.Priced {
 		t.Fatalf("a cloud selection recovery should be priced: %+v", est)
 	}
@@ -139,6 +140,12 @@ func TestSelectionCostEgress(t *testing.T) {
 	}
 	if est.Cost <= 0 {
 		t.Errorf("a cloud selection recovery should cost egress: %v", est.Cost)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want one plan row for one archive, got %d", len(rows))
+	}
+	if r := rows[0]; r.Files != 1 || r.Read <= 0 || !r.Priced || r.Whole <= 0 {
+		t.Errorf("plan row should describe the read: %+v", r)
 	}
 }
 

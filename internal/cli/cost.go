@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/Niloen/nbackup/internal/engine"
@@ -24,6 +25,52 @@ func formatUSD(usd float64) string {
 	default:
 		return fmt.Sprintf("$%.2f", usd)
 	}
+}
+
+// printReadPlan renders a selective recovery's extraction plan — one line per archive, the
+// EXPLAIN of the read the extract is about to run — before the confirmation prompt, so it
+// shows regardless of whether the egress clears the confirm threshold (a ranged read is
+// cheap in dollars but can still pull a large frame, hence slow: the plan makes that
+// visible). Each row: the read strategy and fetch count, the encoded bytes pulled versus
+// the whole-archive size, the copy and its egress price, and — on a whole read — why
+// ranging was not possible.
+func printReadPlan(rows []engine.ReadPlanRow) {
+	if len(rows) == 0 {
+		return
+	}
+	files := 0
+	for _, r := range rows {
+		files += r.Files
+	}
+	fmt.Printf("\nextraction plan — %s from %s:\n", plural(files, "file"), plural(len(rows), "archive"))
+	tw := newTab(os.Stdout)
+	fmt.Fprintln(tw, "  READ\tFETCHES\tPULLS\tEGRESS\tMEDIUM\tARCHIVE\tWHY")
+	for _, r := range rows {
+		read, fetches := "RANGED", fmt.Sprintf("%d", r.Fetches)
+		if !r.Ranged {
+			read, fetches = "WHOLE", "—"
+		}
+		pulls := sizeutil.FormatBytes(r.Read)
+		if r.Ranged {
+			pulls += " / " + sizeutil.FormatBytes(r.Whole)
+		}
+		egress := "local"
+		if r.Priced {
+			egress = "~" + formatUSD(r.Cost)
+		}
+		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			read, fetches, pulls, egress, orDash(r.Medium),
+			fmt.Sprintf("%s %s L%d", r.Ref.Run, r.DLE, r.Ref.Level), orDash(r.Reason))
+	}
+	tw.Flush()
+}
+
+// plural renders "1 file" / "3 files" — a count with its noun, pluralized by a trailing s.
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("1 %s", noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // confirmRead surfaces the egress cost of reading bytes off a cloud medium and, when

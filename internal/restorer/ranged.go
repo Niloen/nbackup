@@ -195,23 +195,23 @@ func (r *Restorer) planSelection(st recovery.ExtractStep, idx record.Index) (sel
 // whose restart table is absent under a real transform, or an archiver whose streams do
 // not splice. The one gate that moves a byte — the live OpenRange capability probe —
 // stays in extractSelected.
-func (r *Restorer) rangedGroups(st recovery.ExtractStep) ([]rangeGroup, selectionPlan, bool) {
+func (r *Restorer) rangedGroups(st recovery.ExtractStep) ([]rangeGroup, selectionPlan, string, bool) {
 	ref := archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level}
 	idx, ierr := r.deps.Store.Index(ref)
 	if ierr != nil || len(idx.Members) == 0 {
-		return nil, selectionPlan{}, false
+		return nil, selectionPlan{}, "no member index (pre-shapes archive)", false
 	}
 	extents, ok := planExtents(idx.Members, st.Members)
 	if !ok {
-		return nil, selectionPlan{}, false
+		return nil, selectionPlan{}, "a selected member has no recorded stream offset", false
 	}
 	plan, ok := r.planSelection(st, idx)
 	if !ok {
-		return nil, selectionPlan{}, false
+		return nil, selectionPlan{}, "not seekable — no restart table for this shape", false
 	}
 	groups := planGroups(plan.table, extents)
 	if len(groups) == 0 {
-		return nil, selectionPlan{}, false
+		return nil, selectionPlan{}, "no fetch groups planned", false
 	}
 	// The archiver must DECLARE its streams spliceable (member extents are
 	// independently restorable and a trailer terminates an assembled stream) — reporting
@@ -219,9 +219,9 @@ func (r *Restorer) rangedGroups(st recovery.ExtractStep) ([]rangeGroup, selectio
 	// server-side ("") for both the estimate and the extract.
 	arch, err := r.deps.ArchiverFor(st.Archiver, st.DLE, "")
 	if err != nil || arch.SpliceTrailer() == nil {
-		return nil, selectionPlan{}, false
+		return nil, selectionPlan{}, "archiver cannot splice member ranges", false
 	}
-	return groups, plan, true
+	return groups, plan, "", true
 }
 
 // groupsEgress totals the encoded bytes the ranged fetch groups pull off the medium:
@@ -250,7 +250,7 @@ func groupsEgress(groups []rangeGroup, encodedSize int64) int64 {
 // egress is the encoded bytes the ranged read pulled (for the caller's read log), valid
 // only when handled and err is nil.
 func (r *Restorer) extractSelected(st recovery.ExtractStep, d dest) (handled bool, egress int64, err error) {
-	groups, plan, ok := r.rangedGroups(st)
+	groups, plan, _, ok := r.rangedGroups(st)
 	if !ok {
 		return false, 0, nil
 	}
@@ -281,14 +281,19 @@ func (r *Restorer) extractSelected(st recovery.ExtractStep, d dest) (handled boo
 }
 
 // ArchiveRead is how one archive of a file selection will be read: the encoded bytes
-// pulled off the medium and in how many fetches, and whether that is a ranged read (only
-// the selected members' covering frames) or the whole archive. It lets a cost estimate
-// price the real egress instead of the whole payload.
+// pulled off the medium and in how many fetches, whether that is a ranged read (only the
+// selected members' covering frames) or the whole archive, and — for the extraction plan
+// — the whole-archive size it is a fraction of, the file count, and (on a whole read) the
+// reason ranging was not possible. It lets a cost estimate price the real egress instead
+// of the whole payload, and an EXPLAIN-style plan show the read strategy per archive.
 type ArchiveRead struct {
 	Ref    archiveio.Ref
-	Bytes  int64
-	Parts  int64
+	Bytes  int64 // encoded bytes pulled off the medium (a ranged read's covering frames, else the whole archive)
+	Parts  int64 // fetches: ranged groups, else the whole archive's part count
 	Ranged bool
+	Whole  int64  // the whole archive's on-medium size (what Bytes is a fraction of on a ranged read)
+	Files  int    // selected file entries in this archive
+	Reason string // on a whole read, why ranging was not possible (empty on a ranged read)
 }
 
 // SelectionReads plans, without moving payload, how each step's selection will be read —
@@ -304,16 +309,19 @@ func (r *Restorer) SelectionReads(steps []recovery.ExtractStep) []ArchiveRead {
 	sizes := r.encodedSizes()
 	out := make([]ArchiveRead, 0, len(steps))
 	for _, st := range steps {
-		if countFilePaths(st.Members) == 0 {
+		files := countFilePaths(st.Members)
+		if files == 0 {
 			continue
 		}
 		ref := archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level}
 		size := sizes[ref]
-		rd := ArchiveRead{Ref: ref, Bytes: size.bytes, Parts: size.parts}
-		if groups, _, ok := r.rangedGroups(st); ok {
+		rd := ArchiveRead{Ref: ref, Bytes: size.bytes, Parts: size.parts, Whole: size.bytes, Files: files}
+		if groups, _, reason, ok := r.rangedGroups(st); ok {
 			rd.Bytes = groupsEgress(groups, size.bytes)
 			rd.Parts = int64(len(groups))
 			rd.Ranged = true
+		} else {
+			rd.Reason = reason
 		}
 		out = append(out, rd)
 	}

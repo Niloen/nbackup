@@ -227,7 +227,9 @@ func runRecoverBatch(eng *engine.Engine, ra recoverArgs, logf engine.Logf) error
 		}
 		return err
 	}
-	if !confirmRead(eng.SelectionCost(steps), ra.yes) {
+	rows, est := eng.SelectionPlan(steps)
+	printReadPlan(rows)
+	if !confirmRead(est, ra.yes) {
 		return nil
 	}
 	if tree.HasIncrementals() {

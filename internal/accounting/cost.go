@@ -146,6 +146,29 @@ func (a *Accountant) PriceRead(items []ReadItem) ReadEstimate {
 	return est
 }
 
+// ReadRow is one archive's resolved read pricing: the medium a restore would read it from
+// and that medium's cost picture for the pre-computed bytes/fetches. It backs the
+// per-archive extraction plan, where each row names its own copy (archives of one
+// selection can land on different media, so a single aggregate medium would misattribute).
+type ReadRow struct {
+	Medium   string
+	Provider string
+	Priced   bool
+	Cost     float64
+}
+
+// PriceReadRow prices one pre-computed read on the copy a restore would read it from —
+// the per-archive sibling of PriceRead's aggregate, for the extraction plan. An
+// unlocatable ref (no placement) yields a zero, unpriced row.
+func (a *Accountant) PriceReadRow(it ReadItem) ReadRow {
+	medium, _, ok := a.locateArchive(it.Ref, "")
+	if !ok {
+		return ReadRow{}
+	}
+	c := a.CostModelFor(medium)
+	return ReadRow{Medium: medium, Provider: c.Provider, Priced: c.Priced(), Cost: c.ReadCost(it.Bytes, it.Parts)}
+}
+
 // RestoreCost prices a whole-DLE restore (or every DLE) as of a date — the egress of
 // the chains the restore would replay, read off the copy a restore would pick (the
 // landing medium first). DLEs with no backup as of the date contribute nothing.
