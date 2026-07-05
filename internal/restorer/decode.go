@@ -147,7 +147,7 @@ func (r *Restorer) VerifyChecksum(rc io.ReadCloser, sha string) (bool, error) {
 func (r *Restorer) ListMembers(rc io.ReadCloser, a record.Archive, opts crypt.Options, arch archiver.Archiver) ([]record.Member, error) {
 	plan := decodePlan{compress: a.Compress, compressOpts: r.deps.CompressOpts, encrypt: a.Encrypt, decryptOpts: opts}
 	if a.Shape == record.ShapeAtomic {
-		sizes, _, err := r.atomSizes(archiveio.Ref{Run: a.Run, DLE: a.DLE, Level: a.Level})
+		sizes, err := r.atomSizes(archiveio.Ref{Run: a.Run, DLE: a.DLE, Level: a.Level})
 		if err != nil {
 			rc.Close()
 			return nil, err

@@ -9,6 +9,7 @@ import (
 	"github.com/Niloen/nbackup/internal/conductor"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/depot"
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
@@ -74,7 +75,7 @@ func (e *Engine) Flush(now time.Time, logf Logf) (int, error) {
 			if err != nil {
 				return record.Index{}, err
 			}
-			_, rc, err := h.wm.Volume().ReadFile(index.Pos)
+			_, rc, err := h.wm.Volume().ReadFile(index.Pos, media.Range{})
 			if err != nil {
 				return record.Index{}, err
 			}

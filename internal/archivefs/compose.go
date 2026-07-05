@@ -71,10 +71,12 @@ func (s *Session) Record(r archiveio.CommitResult) error {
 // per-archive keying so a session carrying archives from several source runs (a cross-run sync) reads
 // each under the right run.
 func (s *Session) OpenArchiveAt(ref archiveio.Ref, pos archiveio.ArchivePos) (io.ReadCloser, error) {
-	open := func(p archiveio.FilePos) (record.Header, io.ReadCloser, error) { return s.m.Volume().ReadFile(p.Pos) }
+	open := func(p archiveio.FilePos, rng media.Range) (record.Header, io.ReadCloser, error) {
+		return s.m.Volume().ReadFile(p.Pos, rng)
+	}
 	// Positional read-back reads unsealed (pos carries no seals); the drain's NewCopy
 	// verifies the whole-archive checksum at commit, which covers this path.
-	return archiveio.NewReader(open, nil, nil).Open(ref, pos.Parts, nil)
+	return archiveio.NewReader(open, nil).Open(ref, archiveio.BareParts(pos.Parts), media.Range{})
 }
 
 // ReclaimAt deletes one archive's copy on the session's medium: it removes the archive's

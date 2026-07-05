@@ -260,8 +260,12 @@ func (t *tapeWriter) Close() error {
 }
 
 // ReadFile fast-forwards to a file number on the mounted cartridge and decodes its
-// leading header; the returned stream is positioned at the payload.
-func (t *tape) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
+// leading header; the returned stream is positioned at the payload. Tape streams, so
+// only the whole payload can be served — a sub-range request is refused up front.
+func (t *tape) ReadFile(pos int, rng media.Range) (record.Header, io.ReadCloser, error) {
+	if !rng.IsWhole() {
+		return record.Header{}, nil, media.ErrRangeUnsupported
+	}
 	dev, err := t.requireDev()
 	if err != nil {
 		return record.Header{}, nil, err
@@ -292,7 +296,7 @@ func (t *tape) Files() ([]record.FileInfo, error) {
 	}
 	out := make([]record.FileInfo, 0, n)
 	for pos := 0; pos < n; pos++ {
-		h, rc, err := t.ReadFile(pos)
+		h, rc, err := t.ReadFile(pos, media.Range{})
 		if err != nil {
 			// A record whose header will not decode is a partial tail left by an
 			// interrupted append (writes are serialized, so a partial is always last):

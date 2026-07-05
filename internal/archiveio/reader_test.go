@@ -1,11 +1,14 @@
 package archiveio
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"strings"
 	"testing"
 
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
@@ -30,7 +33,7 @@ type scriptOpener struct {
 	calls int
 }
 
-func (s *scriptOpener) open(FilePos) (record.Header, io.ReadCloser, error) {
+func (s *scriptOpener) open(_ FilePos, _ media.Range) (record.Header, io.ReadCloser, error) {
 	i := s.calls
 	s.calls++
 	if i >= len(s.resp) {
@@ -62,7 +65,7 @@ func TestAssertPartWrongVolume(t *testing.T) {
 	// Wrap so we can observe the reader is closed on the rejection path.
 	so.resp[0].rc = closeSpy{ReadCloser: so.resp[0].rc, closed: &closed}
 
-	_, err := NewReader(so.open, nil, nil).Open(want, []FilePos{{Pos: 0}}, nil)
+	_, err := NewReader(so.open, nil).Open(want, BareParts([]FilePos{{Pos: 0}}), media.Range{})
 	if err == nil {
 		t.Fatal("want a wrong-volume rejection at prime, got nil")
 	}
@@ -92,7 +95,7 @@ func TestAssertPartWrongKind(t *testing.T) {
 	}{
 		{h: record.Header{Kind: record.KindCommit, Run: want.Run, DLE: want.DLE, Level: want.Level}, rc: io.NopCloser(strings.NewReader(""))},
 	}}
-	_, err := NewReader(so.open, nil, nil).Open(want, []FilePos{{Pos: 0}}, nil)
+	_, err := NewReader(so.open, nil).Open(want, BareParts([]FilePos{{Pos: 0}}), media.Range{})
 	if err == nil || !strings.Contains(err.Error(), "not an archive") {
 		t.Fatalf("want a not-an-archive rejection, got: %v", err)
 	}
@@ -112,7 +115,7 @@ func TestReadMidStreamOpenFailure(t *testing.T) {
 		{h: archiveHeaderFor(want, 0), rc: io.NopCloser(strings.NewReader("part0"))},
 		{err: mountErr}, // second part won't open
 	}}
-	rc, err := NewReader(so.open, nil, nil).Open(want, []FilePos{{Pos: 0}, {Pos: 1}}, nil)
+	rc, err := NewReader(so.open, nil).Open(want, BareParts([]FilePos{{Pos: 0}, {Pos: 1}}), media.Range{})
 	if err != nil {
 		t.Fatalf("prime (part 0) should succeed: %v", err)
 	}
@@ -136,7 +139,7 @@ func TestReadWrongPartIndex(t *testing.T) {
 		{h: archiveHeaderFor(want, 0), rc: io.NopCloser(strings.NewReader("part0"))},
 		{h: archiveHeaderFor(want, 7), rc: io.NopCloser(strings.NewReader("part1"))}, // wrong index (want 1)
 	}}
-	rc, err := NewReader(so.open, nil, nil).Open(want, []FilePos{{Pos: 0}, {Pos: 1}}, nil)
+	rc, err := NewReader(so.open, nil).Open(want, BareParts([]FilePos{{Pos: 0}, {Pos: 1}}), media.Range{})
 	if err != nil {
 		t.Fatalf("prime should succeed: %v", err)
 	}
@@ -160,7 +163,7 @@ func TestReadPartCloseErrorPropagates(t *testing.T) {
 	}{
 		{h: archiveHeaderFor(want, 0), rc: errCloser{Reader: strings.NewReader("payload"), closeErr: closeErr}},
 	}}
-	rc, err := NewReader(so.open, nil, nil).Open(want, []FilePos{{Pos: 0}}, nil)
+	rc, err := NewReader(so.open, nil).Open(want, BareParts([]FilePos{{Pos: 0}}), media.Range{})
 	if err != nil {
 		t.Fatalf("prime should succeed: %v", err)
 	}
@@ -174,7 +177,7 @@ func TestReadPartCloseErrorPropagates(t *testing.T) {
 // TestOpenNoParts rejects an archive record that lists no parts (a corrupt
 // catalog entry) rather than returning an empty, silently-valid stream.
 func TestOpenNoParts(t *testing.T) {
-	_, err := NewReader(nil, nil, nil).Open(Ref{Run: "r", DLE: "d", Level: 0}, nil, nil)
+	_, err := NewReader(nil, nil).Open(Ref{Run: "r", DLE: "d", Level: 0}, nil, media.Range{})
 	if err == nil || !strings.Contains(err.Error(), "no parts") {
 		t.Fatalf("want a no-parts error, got: %v", err)
 	}
@@ -191,11 +194,88 @@ func TestVerifyPartsWrongVolume(t *testing.T) {
 	}{
 		{h: record.Header{Kind: record.KindArchive, Run: "other", DLE: "d", Level: 0}, rc: io.NopCloser(strings.NewReader("x"))},
 	}}
-	ok, err := NewReader(so.open, nil, nil).Verify(want, []FilePos{{Pos: 0}}, "deadbeef")
+	ok, err := NewReader(so.open, nil).Verify(want, BareParts([]FilePos{{Pos: 0}}), "deadbeef")
 	if ok {
 		t.Fatal("VerifyParts must not report ok for a wrong-volume mount")
 	}
 	if err == nil || !strings.Contains(err.Error(), "wrong volume or stale catalog") {
 		t.Fatalf("want the assertion fault surfaced as an error, got: %v", err)
 	}
+}
+
+// TestOpenRangeAcrossParts pins the sub-range → (part, in-part slice) mapping of the
+// unified Open: ranges crossing part boundaries read exactly their bytes; a ranged
+// segment that covers a WHOLE part keeps that part's seal check armed (a partial
+// slice reads unchecked — it cannot be checked against a whole-part seal); and a
+// sub-range over sealless parts refuses, since only the seals know the part sizes.
+func TestOpenRangeAcrossParts(t *testing.T) {
+	want := Ref{Run: "run-r", DLE: "d", Level: 0}
+	v := newMemVolume("v", 0)
+	bodies := [][]byte{
+		[]byte("aaaaaaaaaa"), // part 0: bytes [0,10)
+		[]byte("bbbbbbbbbb"), // part 1: bytes [10,20)
+		[]byte("cccc"),       // part 2: bytes [20,24)
+	}
+	var parts []Part
+	var whole []byte
+	for i, body := range bodies {
+		v.hdrs[i] = archiveHeaderFor(want, i)
+		v.data[i] = append([]byte(nil), body...)
+		sum := sha256.Sum256(body)
+		parts = append(parts, Part{
+			Pos:  FilePos{Label: "v", Pos: i},
+			Seal: record.PartSeal{Size: int64(len(body)), SHA256: hex.EncodeToString(sum[:])},
+		})
+		whole = append(whole, body...)
+	}
+	r := NewReader(openerOver(v), nil)
+
+	for _, tc := range []struct {
+		name string
+		rng  media.Range
+		want string
+	}{
+		{"crosses part 0 into 1", media.Range{Off: 5, Len: 10}, string(whole[5:15])},
+		{"exactly one whole part", media.Range{Off: 10, Len: 10}, string(whole[10:20])},
+		{"open-ended tail", media.Range{Off: 21}, string(whole[21:])},
+		{"spans all three parts", media.Range{Off: 8, Len: 14}, string(whole[8:22])},
+	} {
+		rc, err := r.Open(want, parts, tc.rng)
+		if err != nil {
+			t.Fatalf("%s: Open: %v", tc.name, err)
+		}
+		got, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil || string(got) != tc.want {
+			t.Fatalf("%s: read %q (err=%v), want %q", tc.name, got, err, tc.want)
+		}
+	}
+
+	// A sub-range over sealless parts refuses: without seals the part sizes are
+	// unknown, so the range cannot locate itself.
+	if _, err := r.Open(want, Unsealed(parts), media.Range{Off: 1, Len: 2}); err == nil || !strings.Contains(err.Error(), "seals") {
+		t.Fatalf("sealless sub-range should refuse, got: %v", err)
+	}
+
+	// Corrupt part 1: a ranged read whose segment covers that whole part still
+	// catches it (the seal check armed on the whole-part segment)...
+	v.data[1][0] ^= 0x01
+	rc, err := r.Open(want, parts, media.Range{Off: 10, Len: 10})
+	if err != nil {
+		t.Fatalf("Open (prime) should succeed — the fault is on the stream: %v", err)
+	}
+	_, err = io.ReadAll(rc)
+	rc.Close()
+	if !errors.Is(err, ErrSealMismatch) {
+		t.Fatalf("whole-part ranged read of a corrupt part: err = %v, want ErrSealMismatch", err)
+	}
+	// ...while a partial slice of the same part reads unchecked, as documented.
+	rc, err = r.Open(want, parts, media.Range{Off: 12, Len: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(rc); err != nil {
+		t.Fatalf("a partial segment must read unchecked, got: %v", err)
+	}
+	rc.Close()
 }

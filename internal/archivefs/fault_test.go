@@ -65,7 +65,7 @@ type memFile struct {
 	data []byte
 }
 
-func (m *memMounter) ReadFileAt(_ string, _, pos int) (record.Header, io.ReadCloser, error) {
+func (m *memMounter) ReadFileAt(_ string, _, pos int, _ media.Range) (record.Header, io.ReadCloser, error) {
 	if m.err != nil {
 		return record.Header{}, nil, m.err
 	}
@@ -136,7 +136,7 @@ func (w *memFW) Close() error {
 	return nil
 }
 
-func (v *memVol) ReadFile(pos int) (record.Header, io.ReadCloser, error) {
+func (v *memVol) ReadFile(pos int, _ media.Range) (record.Header, io.ReadCloser, error) {
 	d, ok := v.data[pos]
 	if !ok {
 		return record.Header{}, nil, errors.New("no file")

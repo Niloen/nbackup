@@ -161,7 +161,7 @@ func (w *Writer) NewCopy(arch record.Archive) *ArchiveWriter {
 	// re-author archives from several source runs (a cross-run sync) and file each under its own run.
 	// For a per-run copy the writer's run is that same id, so this is unchanged there.
 	aw := &ArchiveWriter{w: w, base: w.archiveHeader(arch), meta: arch, expectSHA: arch.SHA256, h: sha256.New()}
-	if arch.Shape == record.ShapeAtomic && len(arch.PartSeals) == arch.Parts && arch.Parts > 0 {
+	if !arch.Shape.Resplittable() && len(arch.PartSeals) == arch.Parts && arch.Parts > 0 {
 		// An atomic copy carries the atoms 1:1, never re-splitting (re-cutting needs
 		// the key): the source's per-part seals drive the cut — each part's cap is
 		// exactly its atom's size, so the plain Transfer loop reproduces the source's
@@ -460,10 +460,11 @@ func (w *Writer) archiveHeader(a record.Archive) record.Header {
 		Shape:    a.Shape,
 		Level:    a.Level,
 		BaseRun:  a.BaseRun,
-		// An atom is a whole valid file, never a slice of one — Split (the "not a
-		// standalone artifact" marker driving the .pNNN-after-extension name) is a
-		// slice concept; atoms carry their part index BEFORE the extension instead.
-		Split:     w.alloc.Bounded() && a.Shape != record.ShapeAtomic,
+		// Split (the "not a standalone artifact" marker driving the
+		// .pNNN-after-extension name) is a slice concept, so only a resplittable
+		// payload carries it; a standalone part (an atom — a whole valid file,
+		// never a slice) puts its part index BEFORE the extension instead.
+		Split:     w.alloc.Bounded() && a.Shape.Resplittable(),
 		CreatedAt: w.createdAt,
 	}
 }

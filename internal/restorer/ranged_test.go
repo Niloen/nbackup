@@ -11,6 +11,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
@@ -85,7 +86,7 @@ func framedFixture(t *testing.T, dle string) (*fakeStore, recovery.ExtractStep, 
 		ranged:   true,
 	}
 	step := recovery.ExtractStep{
-		Step: recovery.Step{RunID: r.Run, DLE: dle, Level: 0, Archiver: "gnutar", Compress: "gzip"},
+		Step: recovery.Step{RunID: r.Run, DLE: dle, Level: 0, Archiver: "gnutar", Compress: "gzip", Shape: record.ShapeFramed},
 	}
 	return store, step, members, len(enc)
 }
@@ -177,12 +178,12 @@ func TestPlanExtentsAndGroups(t *testing.T) {
 	}
 	// Adjacent selections coalesce.
 	ext, ok := planExtents(members, []string{"a", "b"})
-	if !ok || len(ext) != 1 || ext[0] != (rawExtent{start: 0, end: 4096}) {
+	if !ok || len(ext) != 1 || ext[0] != (media.Range{Off: 0, Len: 4096}) {
 		t.Fatalf("adjacent extents should coalesce: %+v ok=%v", ext, ok)
 	}
 	// The last member's extent runs to the stream's end.
 	ext, ok = planExtents(members, []string{"d"})
-	if !ok || len(ext) != 1 || ext[0] != (rawExtent{start: 9216, end: -1}) {
+	if !ok || len(ext) != 1 || ext[0] != (media.Range{Off: 9216}) {
 		t.Fatalf("tail extent: %+v ok=%v", ext, ok)
 	}
 	// A missing member or an offset-less index refuses (fallback).
@@ -195,23 +196,23 @@ func TestPlanExtentsAndGroups(t *testing.T) {
 
 	frames := []record.Frame{{Raw: 0, Enc: 0}, {Raw: 4096, Enc: 1000}, {Raw: 8192, Enc: 2000}}
 	// One extent inside frame 0: fetch exactly frame 0's encoded range.
-	g := planGroups(frames, []rawExtent{{start: 512, end: 1024}})
-	if len(g) != 1 || g[0].encOff != 0 || g[0].encLen != 1000 || g[0].rawStart != 0 {
+	g := planGroups(frames, []media.Range{{Off: 512, Len: 512}})
+	if len(g) != 1 || g[0].enc.Off != 0 || g[0].enc.Len != 1000 || g[0].rawStart != 0 {
 		t.Fatalf("frame-0 group: %+v", g)
 	}
 	// Two extents in the same frame window merge into one fetch.
-	g = planGroups(frames, []rawExtent{{start: 512, end: 1024}, {start: 2048, end: 3072}})
+	g = planGroups(frames, []media.Range{{Off: 512, Len: 512}, {Off: 2048, Len: 1024}})
 	if len(g) != 1 || len(g[0].extents) != 2 {
 		t.Fatalf("same-window extents should merge: %+v", g)
 	}
 	// A tail extent fetches to the stream's end.
-	g = planGroups(frames, []rawExtent{{start: 9000, end: -1}})
-	if len(g) != 1 || g[0].encOff != 2000 || g[0].encLen != -1 || g[0].rawStart != 8192 {
+	g = planGroups(frames, []media.Range{{Off: 9000}})
+	if len(g) != 1 || g[0].enc.Off != 2000 || g[0].enc.Len != 0 || g[0].rawStart != 8192 {
 		t.Fatalf("tail group: %+v", g)
 	}
 	// The identity pipeline (no frames) maps extents 1:1.
-	g = planGroups(nil, []rawExtent{{start: 512, end: 1024}})
-	if len(g) != 1 || g[0].encOff != 512 || g[0].encLen != 512 || g[0].rawStart != 512 {
+	g = planGroups(nil, []media.Range{{Off: 512, Len: 512}})
+	if len(g) != 1 || g[0].enc.Off != 512 || g[0].enc.Len != 512 || g[0].rawStart != 512 {
 		t.Fatalf("identity group: %+v", g)
 	}
 }
@@ -225,7 +226,7 @@ func TestSampleFrame(t *testing.T) {
 	store, step, members, _ := framedFixture(t, dle)
 	deps := testDeps(store, nil)
 	r := New(deps)
-	arch2 := record.Archive{Run: step.RunID, DLE: dle, Level: 0, Compress: "gzip"}
+	arch2 := record.Archive{Run: step.RunID, DLE: dle, Level: 0, Compress: "gzip", Shape: record.ShapeFramed}
 	aref := ref(step.RunID, dle, 0)
 
 	res, err := r.Sample("", arch2, crypt.Options{}, arch, 0)

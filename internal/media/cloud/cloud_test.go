@@ -75,7 +75,7 @@ func TestVolumeRoundTrip(t *testing.T) {
 
 	pos := appendArchive(t, v, "run-2026-06-22.001", "h-data", 0, "hello world")
 
-	h, rc, err := v.ReadFile(pos)
+	h, rc, err := v.ReadFile(pos, media.Range{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestReopenRescans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, rc, err := v2.ReadFile(pos)
+	_, rc, err := v2.ReadFile(pos, media.Range{})
 	if err != nil {
 		t.Fatalf("read after reopen: %v", err)
 	}

@@ -18,21 +18,26 @@ import (
 // atom boundaries come from the per-part seals: their sizes cut the raw stream, their
 // cumulative RawSize is the member→atom map selective restore plans over.
 
-// atomSizes returns an atomic archive's per-atom (encrypted, raw) sizes from its
-// seals, or an error naming the remedy when no copy records them.
-func (r *Restorer) atomSizes(ref archiveio.Ref) (enc, raw []int64, err error) {
+// atomSizes returns an atomic archive's per-atom encrypted sizes from its seals — the
+// decode loop's cut list — or an error naming the remedy when no copy records them.
+func (r *Restorer) atomSizes(ref archiveio.Ref) ([]int64, error) {
 	seals, err := r.deps.Store.AtomSeals(ref)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if len(seals) == 0 {
-		return nil, nil, fmt.Errorf("atomic archive %s %s L%d records no per-part seals on any copy — its atoms cannot be cut for decode; run `nb rebuild`", ref.Run, ref.DLE, ref.Level)
+		return nil, fmt.Errorf("atomic archive %s %s L%d records no per-part seals on any copy — its atoms cannot be cut for decode; run `nb rebuild`", ref.Run, ref.DLE, ref.Level)
 	}
-	for _, s := range seals {
-		enc = append(enc, s.Size)
-		raw = append(raw, s.RawSize)
+	return sealSizes(seals), nil
+}
+
+// sealSizes lists the seals' part sizes — an atomic archive's atom cut list.
+func sealSizes(seals []record.PartSeal) []int64 {
+	sizes := make([]int64, len(seals))
+	for i, s := range seals {
+		sizes[i] = s.Size
 	}
-	return enc, raw, nil
+	return sizes
 }
 
 // atomicPlaintext returns the decrypted — still compressed — stream of an atomic
@@ -87,32 +92,16 @@ func (c *closerPair) Close() error {
 	return err
 }
 
-// atomTable folds the seals' cumulative (raw, encrypted) sizes into a frame table —
-// entry i is atom i's start offsets — or nil when RawSize was never recorded.
-func atomTable(encSizes, rawSizes []int64) []record.Frame {
-	table := make([]record.Frame, len(encSizes))
-	var raw, enc int64
-	for i := range encSizes {
-		if rawSizes[i] <= 0 {
-			return nil
-		}
-		table[i] = record.Frame{Raw: raw, Enc: enc}
-		raw += rawSizes[i]
-		enc += encSizes[i]
-	}
-	return table
-}
-
 // groupAtomSizes lists the encrypted sizes of the atoms a group's encoded range
 // covers, in order — the cut list for its per-atom decrypt loop.
 func groupAtomSizes(atoms []record.Frame, encSizes []int64, g rangeGroup) []int64 {
 	var out []int64
 	var covered int64
 	for i, a := range atoms {
-		if a.Enc < g.encOff {
+		if a.Enc < g.enc.Off {
 			continue
 		}
-		if g.encLen >= 0 && covered >= g.encLen {
+		if g.enc.Len > 0 && covered >= g.enc.Len {
 			break
 		}
 		out = append(out, encSizes[i])

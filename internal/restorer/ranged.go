@@ -8,6 +8,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
@@ -26,51 +27,55 @@ import (
 // offsets, no frame table (unless the pipeline is the identity), no range-capable
 // copy — falls back to the whole-stream path, which is the unchanged existing code.
 
-// rawExtent is one selected member's byte range in the raw archive stream; end < 0
-// means "to the stream's end" (the last member's extent).
-type rawExtent struct {
-	start, end int64
-}
+// A raw extent (one selected member's byte range in the raw archive stream) and an
+// encoded fetch are both media.Range values — the read ladder's one range vocabulary;
+// an open end (the last member's extent, a fetch running to the stream's tail) is the
+// range's own Len <= 0 form.
 
-// rangeGroup is one coalesced fetch: an encoded range to read off the medium (encLen
-// < 0 = to the end), the raw offset its decoded output begins at, and the extents to
-// emit from within it, ascending.
+// rangeGroup is one coalesced fetch: the encoded range to read off the medium, the raw
+// offset its decoded output begins at, and the raw extents to emit from within it,
+// ascending.
 type rangeGroup struct {
-	encOff, encLen int64
-	rawStart       int64
-	extents        []rawExtent
+	enc      media.Range
+	rawStart int64
+	extents  []media.Range
 }
 
 // planExtents resolves the selected member paths to their raw extents via the index's
 // stream-ordered member list, coalescing adjacent extents. ok is false when any
 // selected member is absent from the index or lacks an offset — the fallback cue.
-func planExtents(members []record.Member, selected []string) ([]rawExtent, bool) {
+func planExtents(members []record.Member, selected []string) ([]media.Range, bool) {
 	pos := make(map[string]int, len(members))
 	for i, m := range members {
 		pos[m.Path] = i
 	}
-	extents := make([]rawExtent, 0, len(selected))
+	extents := make([]media.Range, 0, len(selected))
 	for _, path := range selected {
 		i, found := pos[path]
 		if !found || members[i].Off < 0 {
 			return nil, false
 		}
-		end := int64(-1)
+		e := media.Range{Off: members[i].Off} // open-ended: the last member runs to the stream's end
 		if i+1 < len(members) {
 			if members[i+1].Off < 0 {
 				return nil, false
 			}
-			end = members[i+1].Off
+			e.Len = members[i+1].Off - e.Off
 		}
-		extents = append(extents, rawExtent{start: members[i].Off, end: end})
+		extents = append(extents, e)
 	}
-	sort.Slice(extents, func(i, j int) bool { return extents[i].start < extents[j].start })
+	sort.Slice(extents, func(i, j int) bool { return extents[i].Off < extents[j].Off })
 	// Coalesce adjacent/overlapping extents (consecutive members selected together).
 	out := extents[:0]
 	for _, e := range extents {
-		if n := len(out); n > 0 && (out[n-1].end < 0 || out[n-1].end >= e.start) {
-			if out[n-1].end >= 0 && (e.end < 0 || e.end > out[n-1].end) {
-				out[n-1].end = e.end
+		if n := len(out); n > 0 && (out[n-1].End() < 0 || out[n-1].End() >= e.Off) {
+			prev := &out[n-1]
+			if prev.End() >= 0 {
+				if e.End() < 0 {
+					prev.Len = 0 // runs to the stream's end
+				} else if e.End() > prev.End() {
+					prev.Len = e.End() - prev.Off
+				}
 			}
 			continue
 		}
@@ -83,15 +88,11 @@ func planExtents(members []record.Member, selected []string) ([]rawExtent, bool)
 // each extent is widened to its covering frames; frames == nil is the identity
 // pipeline (no transform children), where encoded and raw offsets coincide and each
 // extent maps 1:1. Overlapping/adjacent frame windows merge into one fetch.
-func planGroups(frames []record.Frame, extents []rawExtent) []rangeGroup {
+func planGroups(frames []record.Frame, extents []media.Range) []rangeGroup {
 	if frames == nil {
 		out := make([]rangeGroup, 0, len(extents))
 		for _, e := range extents {
-			length := int64(-1)
-			if e.end >= 0 {
-				length = e.end - e.start
-			}
-			out = append(out, rangeGroup{encOff: e.start, encLen: length, rawStart: e.start, extents: []rawExtent{e}})
+			out = append(out, rangeGroup{enc: e, rawStart: e.Off, extents: []media.Range{e}})
 		}
 		return out
 	}
@@ -99,36 +100,36 @@ func planGroups(frames []record.Frame, extents []rawExtent) []rangeGroup {
 	for _, e := range extents {
 		// f: the last frame starting at or before the extent; g: the first frame at or
 		// past its end (len(frames) = the stream's end when the extent runs into the tail).
-		f := sort.Search(len(frames), func(i int) bool { return frames[i].Raw > e.start }) - 1
+		f := sort.Search(len(frames), func(i int) bool { return frames[i].Raw > e.Off }) - 1
 		if f < 0 {
 			f = 0 // frame 0 is {0,0}; a start before it cannot happen, but stay in range
 		}
 		g := len(frames)
-		if e.end >= 0 {
-			g = sort.Search(len(frames), func(i int) bool { return frames[i].Raw >= e.end })
+		if e.End() >= 0 {
+			g = sort.Search(len(frames), func(i int) bool { return frames[i].Raw >= e.End() })
 		}
 		encEnd := int64(-1)
 		if g < len(frames) {
 			encEnd = frames[g].Enc
 		}
-		if n := len(out); n > 0 && (out[n-1].encLen < 0 || out[n-1].encOff+out[n-1].encLen >= frames[f].Enc) {
+		if n := len(out); n > 0 && (out[n-1].enc.End() < 0 || out[n-1].enc.End() >= frames[f].Enc) {
 			// Overlaps/adjoins the previous group's frame window: merge the fetches.
 			prev := &out[n-1]
-			if prev.encLen >= 0 {
+			if prev.enc.End() >= 0 {
 				if encEnd < 0 {
-					prev.encLen = -1
-				} else if encEnd > prev.encOff+prev.encLen {
-					prev.encLen = encEnd - prev.encOff
+					prev.enc.Len = 0 // runs to the stream's end
+				} else if encEnd > prev.enc.End() {
+					prev.enc.Len = encEnd - prev.enc.Off
 				}
 			}
 			prev.extents = append(prev.extents, e)
 			continue
 		}
-		length := int64(-1)
+		enc := media.Range{Off: frames[f].Enc} // open-ended when the span runs to the tail
 		if encEnd >= 0 {
-			length = encEnd - frames[f].Enc
+			enc.Len = encEnd - enc.Off
 		}
-		out = append(out, rangeGroup{encOff: frames[f].Enc, encLen: length, rawStart: frames[f].Raw, extents: []rawExtent{e}})
+		out = append(out, rangeGroup{enc: enc, rawStart: frames[f].Raw, extents: []media.Range{e}})
 	}
 	return out
 }
@@ -149,18 +150,19 @@ type selectionPlan struct {
 func (r *Restorer) planSelection(st recovery.ExtractStep, idx record.Index) (selectionPlan, bool) {
 	ref := archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level}
 	if st.Shape == record.ShapeAtomic {
-		encSizes, rawSizes, err := r.atomSizes(ref)
+		seals, err := r.deps.Store.AtomSeals(ref)
 		if err != nil {
 			return selectionPlan{}, false
 		}
-		table := atomTable(encSizes, rawSizes)
+		table := st.Shape.RestartTable(nil, seals)
 		if table == nil {
-			return selectionPlan{}, false // RawSize never recorded: whole stream
+			return selectionPlan{}, false // no seals, or RawSize never recorded: whole stream
 		}
 		decrypt, decompress, err := buildDecode(st.Compress, r.deps.CompressOpts, st.Encrypt, r.decryptOptsFor(st.DLE))
 		if err != nil {
 			return selectionPlan{}, false
 		}
+		encSizes := sealSizes(seals)
 		return selectionPlan{
 			table: table,
 			decode: func(g rangeGroup, rc io.ReadCloser) io.ReadCloser {
@@ -170,7 +172,8 @@ func (r *Restorer) planSelection(st recovery.ExtractStep, idx record.Index) (sel
 		}, true
 	}
 	identity := (st.Compress == "" || st.Compress == "none") && (st.Encrypt == "" || st.Encrypt == "none")
-	if len(idx.Frames) == 0 && !identity {
+	table := st.Shape.RestartTable(idx.Frames, nil)
+	if table == nil && !identity {
 		return selectionPlan{}, false // no restart points and a real transform: whole stream only
 	}
 	var decompress programs.Cmd
@@ -181,7 +184,7 @@ func (r *Restorer) planSelection(st recovery.ExtractStep, idx record.Index) (sel
 		}
 		decompress = cf.Reverse
 	}
-	return selectionPlan{table: idx.Frames, decompress: decompress}, true
+	return selectionPlan{table: table, decompress: decompress}, true
 }
 
 // extractSelected attempts the ranged extraction of one step's selection, per the
@@ -220,7 +223,7 @@ func (r *Restorer) extractSelected(st recovery.ExtractStep, d dest, log Logf) (h
 	}
 	// Capability probe: open the first group's range now. Any failure here — no seals,
 	// a range-incapable medium, no copy — is the fallback cue, before any byte moved.
-	first, perr := r.deps.Store.OpenRange(ref, "", groups[0].encOff, groups[0].encLen)
+	first, perr := r.deps.Store.OpenRange(ref, "", groups[0].enc)
 	if perr != nil {
 		return false, nil
 	}
@@ -243,7 +246,7 @@ func (r *Restorer) emitGroups(ref archiveio.Ref, groups []rangeGroup, first io.R
 		rc := first
 		if i > 0 {
 			var err error
-			rc, err = r.deps.Store.OpenRange(ref, "", g.encOff, g.encLen)
+			rc, err = r.deps.Store.OpenRange(ref, "", g.enc)
 			if err != nil {
 				pw.CloseWithError(err)
 				return
@@ -300,29 +303,32 @@ func (r *Restorer) Sample(medium string, a record.Archive, opts crypt.Options, a
 	if err != nil || len(idx.Members) == 0 {
 		return res, nil
 	}
-	table := idx.Frames
+	var table []record.Frame
 	var decode func(rangeGroup, io.ReadCloser) io.ReadCloser
 	switch {
 	case a.Shape == record.ShapeAtomic:
 		res.Unit = "atom"
-		encSizes, rawSizes, aerr := r.atomSizes(ref)
+		seals, aerr := r.deps.Store.AtomSeals(ref)
 		if aerr != nil {
 			return res, nil // seal-less copy: nothing to cut against
 		}
-		if table = atomTable(encSizes, rawSizes); table == nil {
+		if table = a.Shape.RestartTable(nil, seals); table == nil {
 			return res, nil
 		}
 		decrypt, _, derr := buildDecode(a.Compress, r.deps.CompressOpts, a.Encrypt, opts)
 		if derr != nil {
 			return res, derr
 		}
+		encSizes := sealSizes(seals)
 		decode = func(g rangeGroup, rc io.ReadCloser) io.ReadCloser {
 			return atomicPlaintext(rc, groupAtomSizes(table, encSizes, g), decrypt)
 		}
 	case a.Encrypt != "" && a.Encrypt != "none":
 		return res, nil // encrypted stream shape: whole-archive checks only
-	case len(table) == 0:
-		return res, nil
+	default:
+		if table = a.Shape.RestartTable(idx.Frames, nil); table == nil {
+			return res, nil
+		}
 	}
 	var decompress programs.Cmd
 	if a.Compress != "" && a.Compress != "none" {
@@ -388,7 +394,11 @@ func (r *Restorer) sampleTable(ref archiveio.Ref, medium string, frames []record
 	}
 	res.Frame = choice
 	sel := membersInFrame(members, frames, choice)
-	groups := planGroups(frames, []rawExtent{{start: spanStart, end: spanEnd}})
+	span := media.Range{Off: spanStart} // open-ended when the span runs to the stream's end
+	if spanEnd >= 0 {
+		span.Len = spanEnd - spanStart
+	}
+	groups := planGroups(frames, []media.Range{span})
 	if len(groups) != 1 {
 		return res, nil
 	}
@@ -396,8 +406,11 @@ func (r *Restorer) sampleTable(ref archiveio.Ref, medium string, frames []record
 	if trailer == nil {
 		return res, nil // the archiver's streams do not splice: nothing to sample
 	}
-	res.Bytes = groups[0].encLen
-	rc, err := r.deps.Store.OpenRange(ref, medium, groups[0].encOff, groups[0].encLen)
+	res.Bytes = groups[0].enc.Len
+	if res.Bytes <= 0 {
+		res.Bytes = -1 // a to-the-end fetch of unknown size
+	}
+	rc, err := r.deps.Store.OpenRange(ref, medium, groups[0].enc)
 	if err != nil {
 		return res, nil // no ranged copy on this medium — an ingredient gap, not a fault
 	}
@@ -492,23 +505,23 @@ func emitGroup(g rangeGroup, rc io.ReadCloser, decompress programs.Cmd, pw io.Wr
 	}
 	pos := g.rawStart
 	for _, e := range g.extents {
-		if skip := e.start - pos; skip > 0 {
+		if skip := e.Off - pos; skip > 0 {
 			if _, err := io.CopyN(io.Discard, raw, skip); err != nil {
 				return err
 			}
 		}
-		pos = e.start
-		if e.end < 0 {
+		pos = e.Off
+		if e.End() < 0 {
 			n, err := io.Copy(pw, raw)
 			pos += n
 			if err != nil {
 				return err
 			}
 		} else {
-			if _, err := io.CopyN(pw, raw, e.end-e.start); err != nil {
+			if _, err := io.CopyN(pw, raw, e.Len); err != nil {
 				return err
 			}
-			pos = e.end
+			pos = e.End()
 		}
 	}
 	// Drain the group's tail so a decode child sees its output fully consumed.

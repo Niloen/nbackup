@@ -51,6 +51,21 @@ func (a PlacedArchive) Pos() archiveio.ArchivePos {
 	return archiveio.ArchivePos{Parts: a.Parts, Commit: a.Commit, Index: a.Index}
 }
 
+// IOParts returns the archive's parts as the block layer's read vocabulary: each
+// part's position zipped with its seal. When the recorded seals do not align 1:1 with
+// the parts (a sealless footer, a scan that saw only some parts) the parts come back
+// unsealed — misalignment is unrepresentable in []archiveio.Part, so the pairing rule
+// lives here, at the persisted record's edge, once.
+func (a PlacedArchive) IOParts() []archiveio.Part {
+	parts := archiveio.BareParts(a.Parts)
+	if len(a.Seals) == len(a.Parts) {
+		for i := range parts {
+			parts[i].Seal = a.Seals[i]
+		}
+	}
+	return parts
+}
+
 // Parts returns the ordered part locations of an archive on this placement.
 func (p Placement) Parts(dle string, level int) ([]archiveio.FilePos, bool) {
 	for _, a := range p.Archives {

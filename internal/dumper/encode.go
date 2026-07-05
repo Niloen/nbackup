@@ -190,9 +190,9 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 // shape — the design's one decision point (docs/design/archive-shapes.md); nothing else
 // branches on schemes. FRAMED-INVISIBLE requires every stage Concat=Full AND
 // server-placed (a client-fused stage cannot be respawned per frame by the server).
-// A pipeline with a PerFrame stage (gpg) will become FRAMED-ATOMIC in phase 3; until
-// that shape exists it stays a plain stream.
-func resolveShape(pl EncodePlacement) (string, error) {
+// A pipeline with a PerFrame stage (gpg) over frame-safe inner stages is
+// FRAMED-ATOMIC: its parts land as sealed atoms.
+func resolveShape(pl EncodePlacement) (record.Shape, error) {
 	if pl.CompressClient || pl.EncryptClient {
 		return record.ShapeStream, nil
 	}
@@ -215,7 +215,7 @@ func resolveShape(pl EncodePlacement) (string, error) {
 
 // ShapeFor exposes the shape resolution to the engine (dump-time ceiling checks name
 // dumptype × landing pairs the dumper cannot see).
-func ShapeFor(pl EncodePlacement) (string, error) { return resolveShape(pl) }
+func ShapeFor(pl EncodePlacement) (record.Shape, error) { return resolveShape(pl) }
 
 // dumpArchive composes the encode transfer for one archive — the archiver's stage source (on its
 // host) → the encode filters placed per the dumptype (client-side fused into the source,

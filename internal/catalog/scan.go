@@ -402,7 +402,7 @@ func scanVolume(vol media.Volume) (scanResult, error) {
 
 // readCommit reads and parses an archive's commit footer payload from the volume.
 func readCommit(vol media.Volume, pos int) (*record.Archive, error) {
-	_, rc, err := vol.ReadFile(pos)
+	_, rc, err := vol.ReadFile(pos, media.Range{})
 	if err != nil {
 		return nil, err
 	}

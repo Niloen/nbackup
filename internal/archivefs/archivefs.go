@@ -29,6 +29,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/ratelimit"
 	"github.com/Niloen/nbackup/internal/record"
 )
@@ -55,20 +56,14 @@ type WriteMap interface {
 	RemoveArchive(runID, medium, dle string) (placementGone, entryGone bool, err error)
 }
 
-// Mounter is the fs's data-path slice of an opened read medium: mount the volume a part
-// names and read it. The depot's ReadMedium satisfies it; the fs depends on the role, not
-// the depot package, so a window's snapshot reader (or a test fake) plugs in the same way.
+// Mounter is the fs's data-path slice of an opened read medium: mount the volume a
+// part names and read the rng slice of it (media.Range{} = the whole file; whether a
+// VOLUME can serve a genuine sub-range is the medium's own answer —
+// media.ErrRangeUnsupported — never a name or type check here). The depot's ReadMedium
+// satisfies it; the fs depends on the role, not the depot package, so a window's
+// snapshot reader (or a test fake) plugs in the same way.
 type Mounter interface {
-	ReadFileAt(volume string, epoch, pos int) (record.Header, io.ReadCloser, error)
-}
-
-// RangeMounter is the Mounter's optional ranged capability: read a byte sub-range of a
-// part's payload (length < 0 = to the end). The fs discovers it by type assertion —
-// the depot's read face implements it for every medium; whether a given VOLUME can
-// actually open ranges is answered below (media.ErrRangeUnsupported), so capability
-// remains the medium's own declaration, never a name check here.
-type RangeMounter interface {
-	ReadFileRangeAt(volume string, epoch, pos int, off, length int64) (record.Header, io.ReadCloser, error)
+	ReadFileAt(volume string, epoch, pos int, rng media.Range) (record.Header, io.ReadCloser, error)
 }
 
 // Depot is the fs's slice of the depot — the rest of what the data path needs beside the
@@ -167,43 +162,15 @@ func (fs *FS) OpenArchive(ref archiveio.Ref, medium string) (io.ReadCloser, erro
 	return out, nil
 }
 
-// OpenRange opens a byte sub-range [off, off+length) of an archive's encoded payload
-// (length < 0 = to the end), with the same copy selection as OpenArchive: medium ""
-// tries every copy in read-preference order, a set medium reads only that copy. A copy
-// qualifies only when its placement records aligned per-part seals (the cumulative part
-// sizes locate the range) and its medium's volume can open ranges — otherwise the next
-// copy is tried, and when none qualifies the last cause (e.g. media.ErrRangeUnsupported)
-// surfaces so the caller falls back to the whole-stream read.
-func (fs *FS) OpenRange(ref archiveio.Ref, medium string, off, length int64) (io.ReadCloser, error) {
-	placements := fs.cat.PlacementsFor(ref.Run)
-	if medium != "" {
-		placements = onMedium(placements, medium)
-	}
-	if len(placements) == 0 {
-		return nil, fs.missingCopyErr(ref, medium)
-	}
-	var lastErr error
-	for _, p := range placements {
-		pa, ok := p.Placed(ref.DLE, ref.Level)
-		if !ok || len(pa.Parts) == 0 {
-			continue
-		}
-		r, err := fs.readerFor(p.Medium)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		rc, err := r.OpenRange(ref, pa.Parts, pa.Seals, off, length)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		return rc, nil
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("%w of %s %s L%d in the catalog", ErrMissingCopy, ref.Run, ref.DLE, ref.Level)
-	}
-	return nil, lastErr
+// OpenRange opens the rng slice of an archive's encoded payload, with exactly
+// OpenArchive's copy selection and fail-over (they share openRef; this is the
+// sub-range spelling of the same open). A copy qualifies only when its placement
+// records aligned per-part seals (the cumulative part sizes locate the range) and its
+// medium's volume can open ranges — otherwise the next copy is tried, and when none
+// qualifies the last cause (e.g. media.ErrRangeUnsupported) surfaces so the caller
+// falls back to the whole-stream read.
+func (fs *FS) OpenRange(ref archiveio.Ref, medium string, rng media.Range) (io.ReadCloser, error) {
+	return fs.openRef(ref, medium, rng, fs.readerFor)
 }
 
 // AtomSeals returns an atomic archive's per-part seals from the first placement
@@ -239,7 +206,7 @@ func (fs *FS) VerifyPart(ref archiveio.Ref, medium string, idx int) (bool, error
 		if err != nil {
 			return false, err
 		}
-		return r.VerifyPart(ref, pa.Parts, idx, pa.Seals[idx])
+		return r.VerifyPart(ref, pa.IOParts(), idx)
 	}
 	return false, fs.missingCopyErr(ref, medium)
 }
@@ -253,16 +220,10 @@ func (fs *FS) readerFor(medium string) (*archiveio.Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	open := func(p archiveio.FilePos) (record.Header, io.ReadCloser, error) {
-		return mounter.ReadFileAt(p.Label, p.Epoch, p.Pos)
+	open := func(p archiveio.FilePos, rng media.Range) (record.Header, io.ReadCloser, error) {
+		return mounter.ReadFileAt(p.Label, p.Epoch, p.Pos, rng)
 	}
-	var openRange archiveio.RangedPartOpener
-	if rm, ok := mounter.(RangeMounter); ok {
-		openRange = func(p archiveio.FilePos, off, length int64) (record.Header, io.ReadCloser, error) {
-			return rm.ReadFileRangeAt(p.Label, p.Epoch, p.Pos, off, length)
-		}
-	}
-	return archiveio.NewReader(open, openRange, fs.deps.Limiter(medium)), nil
+	return archiveio.NewReader(open, fs.deps.Limiter(medium)), nil
 }
 
 // readIndex reads an archive's member index off a medium — the lazy fallback when the
@@ -273,7 +234,7 @@ func (fs *FS) readIndex(medium string, pos archiveio.FilePos) (record.Index, err
 	if err != nil {
 		return record.Index{}, err
 	}
-	_, rc, err := mounter.ReadFileAt(pos.Label, pos.Epoch, pos.Pos)
+	_, rc, err := mounter.ReadFileAt(pos.Label, pos.Epoch, pos.Pos, media.Range{})
 	if err != nil {
 		return record.Index{}, err
 	}
@@ -281,13 +242,15 @@ func (fs *FS) readIndex(medium string, pos archiveio.FilePos) (record.Index, err
 	return record.DecodeIndex(rc)
 }
 
-// openRef opens ref by copy selection + fail-over: it resolves the placements holding ref's run
-// (all copies in read-preference order, or only those on medium when set), then tries each that
-// carries the archive — obtaining that copy's medium Reader through readerFor — until one opens,
-// so a read fails over to another copy. readerFor is threaded in rather than fixed to fs.readerFor
+// openRef opens the rng slice of ref by copy selection + fail-over: it resolves the placements
+// holding ref's run (all copies in read-preference order, or only those on medium when set), then
+// tries each that carries the archive — obtaining that copy's medium Reader through readerFor —
+// until one opens, so a read fails over to another copy. A copy that cannot serve the request (a
+// sub-range on a sealless placement or a range-incapable medium) fails over the same way, and the
+// last cause surfaces when none can. readerFor is threaded in rather than fixed to fs.readerFor
 // so a batch (OpenArchives) can hand its pooled, mount-reusing factory while a bare open passes a
 // fresh one. It is the sole home of copy selection and the missing-copy errors (ErrMissingCopy).
-func (fs *FS) openRef(ref archiveio.Ref, medium string, readerFor func(string) (*archiveio.Reader, error)) (io.ReadCloser, error) {
+func (fs *FS) openRef(ref archiveio.Ref, medium string, rng media.Range, readerFor func(string) (*archiveio.Reader, error)) (io.ReadCloser, error) {
 	placements := fs.cat.PlacementsFor(ref.Run)
 	if medium != "" {
 		placements = onMedium(placements, medium)
@@ -308,9 +271,10 @@ func (fs *FS) openRef(ref archiveio.Ref, medium string, readerFor func(string) (
 			lastErr = err
 			continue
 		}
-		// The placement's per-part seals arm inline integrity on the stream (Open drops
-		// them if misaligned), so no read path can silently deliver corrupt bytes.
-		rc, err := r.Open(ref, pa.Parts, pa.Seals)
+		// The placement's parts carry their seals (IOParts pairs them; a misaligned
+		// set reads unsealed), arming inline integrity on whole-part segments, so no
+		// read path can silently deliver corrupt bytes.
+		rc, err := r.Open(ref, pa.IOParts(), rng)
 		if err != nil {
 			lastErr = err
 			continue

@@ -70,23 +70,23 @@ func (s fsStore) Writer(_ context.Context, key string) (io.WriteCloser, error) {
 	return os.OpenFile(full, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o444)
 }
 
-func (s fsStore) Open(key string) (io.ReadCloser, error) { return os.Open(s.full(key)) }
-
-// OpenRange implements fslike.RangeStore: seek to off and bound the stream to length
-// (< 0 = to the end) — a disk file's native ranged read.
-func (s fsStore) OpenRange(key string, off, length int64) (io.ReadCloser, error) {
+// Open opens the rng slice of the file at key — a disk file's native ranged read:
+// seek to the offset, bound the stream to the length (a whole read does neither).
+func (s fsStore) Open(key string, rng media.Range) (io.ReadCloser, error) {
 	f, err := os.Open(s.full(key))
 	if err != nil {
 		return nil, err
 	}
-	if _, err := f.Seek(off, io.SeekStart); err != nil {
-		f.Close()
-		return nil, err
+	if rng.Off > 0 {
+		if _, err := f.Seek(rng.Off, io.SeekStart); err != nil {
+			f.Close()
+			return nil, err
+		}
 	}
-	if length < 0 {
+	if rng.Len <= 0 {
 		return f, nil
 	}
-	return &boundedFile{r: io.LimitReader(f, length), f: f}, nil
+	return &boundedFile{r: io.LimitReader(f, rng.Len), f: f}, nil
 }
 
 // boundedFile pairs a length-limited view with the file's own Close.
