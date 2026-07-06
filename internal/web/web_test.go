@@ -321,6 +321,88 @@ func TestDrillsPageRendersLedgerAndHistory(t *testing.T) {
 	}
 }
 
+// TestRunsPagination checks that /runs caps to the most recent maxListRows by
+// default, offers a "show all" link once the catalog exceeds the cap, and that
+// ?all=1 lifts the cap. A garbage query value must fall back to the capped view
+// rather than erroring.
+func TestRunsPagination(t *testing.T) {
+	src := fakeSource{}
+	for i := 0; i < maxListRows+5; i++ {
+		src.runs = append(src.runs, &catalog.Run{ID: fmt.Sprintf("run-2026-07-%02d.120000", i+1)})
+	}
+	h := NewServer(src, t.TempDir()).Handler()
+
+	code, body := get(t, h, "/runs")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d", code)
+	}
+	if got := strings.Count(body, "<tr>") - 1; got != maxListRows { // -1 for the header row
+		t.Errorf("/runs rendered %d rows, want capped to %d", got, maxListRows)
+	}
+	if !strings.Contains(body, `href="?all=1"`) {
+		t.Errorf("/runs missing the show-all link when over the cap:\n%s", body)
+	}
+
+	_, all := get(t, h, "/runs?all=1")
+	if got := strings.Count(all, "<tr>") - 1; got != maxListRows+5 {
+		t.Errorf("/runs?all=1 rendered %d rows, want all %d", got, maxListRows+5)
+	}
+
+	code, garbage := get(t, h, "/runs?all=garbage")
+	if code != http.StatusOK {
+		t.Fatalf("/runs?all=garbage code=%d, want 200 (garbage query must not 500)", code)
+	}
+	if got := strings.Count(garbage, "<tr>") - 1; got != maxListRows {
+		t.Errorf("/runs?all=garbage rendered %d rows, want capped to %d", got, maxListRows)
+	}
+}
+
+// TestReportPagination mirrors TestRunsPagination for /report.
+func TestReportPagination(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < maxListRows+3; i++ {
+		if err := report.Append(dir, report.Run{
+			Command: report.CommandDump, EndedAt: time.Now().Add(time.Duration(i) * time.Minute),
+			Outcome: report.OutcomeSuccess,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := NewServer(fakeSource{}, dir).Handler()
+
+	_, body := get(t, h, "/report")
+	if got := strings.Count(body, "<tr>") - 1; got != maxListRows {
+		t.Errorf("/report rendered %d rows, want capped to %d", got, maxListRows)
+	}
+	if !strings.Contains(body, `href="?all=1"`) {
+		t.Errorf("/report missing the show-all link when over the cap:\n%s", body)
+	}
+
+	_, all := get(t, h, "/report?all=1")
+	if got := strings.Count(all, "<tr>") - 1; got != maxListRows+3 {
+		t.Errorf("/report?all=1 rendered %d rows, want all %d", got, maxListRows+3)
+	}
+}
+
+// TestCrossLinks checks the cross-linking added between related pages: a live
+// /status per-DLE row links to its /dles/<slug> page, and a run's archive links back
+// to its DLE too.
+func TestCrossLinks(t *testing.T) {
+	dir := t.TempDir()
+	progress.NewFileSink(dir, time.Now)(progress.Snapshot{
+		RunID: "run-2026-07-03.130000", Phase: progress.PhaseRunning, Workers: 1,
+		DLEs: []progress.DLE{{Name: "local", State: progress.StateDumping, EstBytes: 1000, DoneBytes: 500}},
+	}, true)
+	h := NewServer(sampleSource(), dir).Handler()
+
+	if _, body := get(t, h, "/status"); !strings.Contains(body, `href="/dles/local"`) {
+		t.Errorf("/status per-DLE row missing link to /dles/local:\n%s", body)
+	}
+	if _, body := get(t, h, "/runs/run-2026-07-03.120000"); !strings.Contains(body, `href="/dles/local"`) {
+		t.Errorf("/runs/<id> archive missing link to its DLE:\n%s", body)
+	}
+}
+
 func TestUnknownPath404(t *testing.T) {
 	h := NewServer(sampleSource(), t.TempDir()).Handler()
 	if code, _ := get(t, h, "/nope"); code != http.StatusNotFound {

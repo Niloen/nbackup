@@ -59,7 +59,7 @@
     <td>{{.Command}}</td>
     <td class="{{if .Failed}}bad{{else}}ok{{end}}">{{if .Failed}}failure{{else}}success{{end}}</td>
     <td class="num">{{bytes .BytesMoved}}</td>
-    <td class="muted">{{if .RunID}}{{.RunID}}{{end}}{{if .Error}} · {{.Error}}{{end}}</td>
+    <td class="muted">{{if .RunID}}<a href="/runs/{{.RunID}}">{{.RunID}}</a>{{end}}{{if .Error}} · {{.Error}}{{end}}</td>
   </tr>
   {{end}}
 </table>

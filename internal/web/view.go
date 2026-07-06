@@ -90,6 +90,22 @@ type runRow struct {
 	Copies   string
 }
 
+// runsData backs /runs: the run rows plus paging info for the "show all" toggle —
+// the same recent-first cap /drills already applies to its run history
+// (maxDrillRuns), generalized here since /runs has no cap of its own otherwise.
+type runsData struct {
+	Rows  []runRow
+	Total int  // rows in the full history
+	All   bool // true when ?all=1 requested the uncapped list
+}
+
+// historyData backs /report the same way runsData backs /runs.
+type historyData struct {
+	Rows  []report.Run
+	Total int
+	All   bool
+}
+
 // runDetail backs the single-run page.
 type runDetail struct {
 	NotFound bool
@@ -314,10 +330,10 @@ func usageChartSVG(series []catalog.UsageSample, capacity int64) template.HTML {
 // drillsData backs the drills page: the coverage rollup, the per-DLE ledger, and
 // the recent drill runs.
 type drillsData struct {
-	Window                  string   // formatted coverage window (e.g. "30d")
-	Passing, Stale, Failing int      // ledger records by current health
-	Never                   []string // configured DLEs never drilled (display names)
-	Overdue                 int      // DLEs not covered within the window
+	Window                  string    // formatted coverage window (e.g. "30d")
+	Passing, Stale, Failing int       // ledger records by current health
+	Never                   []dleLink // configured DLEs never drilled
+	Overdue                 int       // DLEs not covered within the window
 	Ledger                  []drillLedgerRow
 	Runs                    []drillRunRow
 }
@@ -326,6 +342,7 @@ type drillsData struct {
 // ledger, classified against the current time (failing / stale / ok).
 type drillLedgerRow struct {
 	DLE            string
+	Slug           string // internal DLE slug, for the /dles/<slug> link
 	Status         string // "ok" | "stale" | "failing" — also the pill class
 	Failing, Stale bool
 	Tier           string
@@ -339,6 +356,12 @@ type drillLedgerRow struct {
 	Drills         int    // total applied drills of this DLE
 	Class, Detail  string // failure class + reason when failing
 	Remedy         string // operator guidance for the failure class
+}
+
+// dleLink is a display name paired with its internal slug, for the "Never drilled"
+// list to link back to /dles/<slug> rather than showing bare text.
+type dleLink struct {
+	Slug, Display string
 }
 
 // drillRunRow is one drill invocation from the run history, with its per-DLE
@@ -360,6 +383,7 @@ type drillRunRow struct {
 // drillTargetRow is one DLE's outcome within a drill run.
 type drillTargetRow struct {
 	DLE       string
+	Slug      string // internal DLE slug, for the /dles/<slug> link
 	OK        bool
 	Drilled   bool // false = skipped (needed an operator)
 	Class     string

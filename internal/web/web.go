@@ -148,7 +148,22 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	// Newest run first.
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID > rows[j].ID })
-	s.render(w, "runs", page{Title: "Runs", Active: "runs", Data: rows})
+	all := showAll(r)
+	shown := rows
+	if !all && len(shown) > maxListRows {
+		shown = shown[:maxListRows]
+	}
+	s.render(w, "runs", page{Title: "Runs", Active: "runs", Data: runsData{Rows: shown, Total: len(rows), All: all}})
+}
+
+// maxListRows caps /runs and /report to the most recent rows by default, matching
+// the /drills recent-runs cap (maxDrillRuns); ?all=1 shows the full history.
+const maxListRows = 50
+
+// showAll reports whether the request asked for the uncapped list via ?all=1. Any
+// other or missing value (including garbage) is treated as "no" rather than erroring.
+func showAll(r *http.Request) bool {
+	return r.URL.Query().Get("all") == "1"
 }
 
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
@@ -301,13 +316,14 @@ func (s *Server) handleDrills(w http.ResponseWriter, r *http.Request) {
 	never, overdue := ledger.Coverage(s.src.DLENames(), window, now)
 	data.Overdue = overdue
 	for _, slug := range never {
-		data.Never = append(data.Never, s.src.DisplayDLE(slug))
+		data.Never = append(data.Never, dleLink{Slug: slug, Display: s.src.DisplayDLE(slug)})
 	}
-	sort.Strings(data.Never)
+	sort.Slice(data.Never, func(i, j int) bool { return data.Never[i].Display < data.Never[j].Display })
 
 	for _, rec := range ledger.Sorted() {
 		row := drillLedgerRow{
 			DLE:    s.src.DisplayDLE(rec.DLE),
+			Slug:   rec.DLE,
 			Tier:   rec.Tier,
 			What:   tierWhat(rec.Tier),
 			Medium: rec.Medium,
@@ -349,7 +365,7 @@ func (s *Server) handleDrills(w http.ResponseWriter, r *http.Request) {
 				dr.Drilled++
 			}
 			dr.Targets = append(dr.Targets, drillTargetRow{
-				DLE: s.src.DisplayDLE(h.DLE), OK: h.OK, Drilled: h.Drilled,
+				DLE: s.src.DisplayDLE(h.DLE), Slug: h.DLE, OK: h.OK, Drilled: h.Drilled,
 				Class: h.Class, Degrading: h.Degrading(), Bytes: h.Bytes,
 			})
 		}
@@ -382,7 +398,13 @@ func tierWhat(tier string) string {
 }
 
 func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
-	s.render(w, "report", page{Title: "History", Active: "report", Data: s.history(0)})
+	hist := s.history(0)
+	all := showAll(r)
+	shown := hist
+	if !all && len(shown) > maxListRows {
+		shown = shown[:maxListRows]
+	}
+	s.render(w, "report", page{Title: "History", Active: "report", Data: historyData{Rows: shown, Total: len(hist), All: all}})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

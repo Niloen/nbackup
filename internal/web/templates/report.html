@@ -1,17 +1,23 @@
 {{define "content"}}
+{{$d := .Data}}
 <h1>History</h1>
+{{if gt $d.Total (len $d.Rows)}}
+<div class="muted" style="margin:0 0 .6rem">Showing the {{len $d.Rows}} most recent of {{$d.Total}} · <a href="?all=1">show all</a></div>
+{{else if and $d.All (gt $d.Total 0)}}
+<div class="muted" style="margin:0 0 .6rem">Showing all {{$d.Total}} · <a href="?">show recent</a></div>
+{{end}}
 <div class="panel scroll">
-{{if .Data}}
+{{if $d.Rows}}
 <table>
   <tr><th>Ended</th><th>Command</th><th>Outcome</th><th class="num">Bytes</th><th class="num">Archives</th><th>Detail</th></tr>
-  {{range .Data}}
+  {{range $d.Rows}}
   <tr>
     <td>{{stampsec .EndedAt}}</td>
     <td>{{.Command}}</td>
     <td class="{{if .Failed}}bad{{else}}ok{{end}}">{{if .Failed}}failure{{else}}success{{end}}</td>
     <td class="num">{{bytes .BytesMoved}}</td>
     <td class="num">{{if .Archives}}{{.Archives}}{{else}}<span class="muted">—</span>{{end}}</td>
-    <td class="muted">{{if .RunID}}{{.RunID}}{{end}}{{if .ExitClass}} · {{.ExitClass}}{{end}}{{if .Error}} · {{.Error}}{{end}}</td>
+    <td class="muted">{{if .RunID}}<a href="/runs/{{.RunID}}">{{.RunID}}</a>{{end}}{{if .ExitClass}} · {{.ExitClass}}{{end}}{{if .Error}} · {{.Error}}{{end}}</td>
   </tr>
   {{end}}
 </table>

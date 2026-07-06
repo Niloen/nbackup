@@ -18,7 +18,7 @@
   {{range .Archives}}
   <div class="dle">
     <div class="dle-head">
-      <span class="dle-name">{{.DLEID}}</span>
+      <a class="dle-name" href="/dles/{{.DLE}}">{{.DLEID}}</a>
       <span class="pill dim">{{level .Level}}</span>
     </div>
     <div class="dle-meta">{{.FileCount}} file(s) · {{bytes .Compressed}} · {{.Compress}} · {{encrypt .Encrypt}} encryption</div>
