@@ -442,6 +442,37 @@ func TestLiveStatusRenders(t *testing.T) {
 	}
 }
 
+// TestEstimatingStatusShowsSizingNotDumpTable guards against the estimating phase
+// rendering the dump view: during sizing a "done" DLE is merely measured and
+// DoneBytes is its estimate, so the dump table would misread as a previous run's
+// results. /status and the home banner must show the sizing view instead.
+func TestEstimatingStatusShowsSizingNotDumpTable(t *testing.T) {
+	dir := t.TempDir()
+	progress.NewFileSink(dir, time.Now)(progress.Snapshot{
+		RunID: "estimate", Phase: progress.PhaseEstimating, Workers: 1,
+		DLEs: []progress.DLE{
+			{Name: "local", State: progress.StateDone, DoneBytes: 4096}, // sized
+			{Name: "other", State: progress.StatePending},               // not yet
+		},
+	}, true)
+	h := NewServer(sampleSource(), dir).Handler()
+
+	code, body := get(t, h, "/status")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d", code)
+	}
+	if !strings.Contains(body, "1 of 2 DLE(s) measured") || !strings.Contains(body, "so far") {
+		t.Errorf("/status while estimating missing the sizing view:\n%s", body)
+	}
+	if strings.Contains(body, "Per-DLE") || strings.Contains(body, "dump ·") {
+		t.Errorf("/status while estimating leaked the dump table (sized DLEs read as done dumps):\n%s", body)
+	}
+
+	if _, body := get(t, h, "/"); !strings.Contains(body, "sizing 1 of 2 DLE(s)") {
+		t.Errorf("home banner while estimating missing the sizing line:\n%s", body)
+	}
+}
+
 // TestHomeRollupRedFlags seeds one instance of each broken-thing the "attention
 // needed" rollup surfaces — a failed run, a failing drill, a stale DLE, and a medium
 // over capacity — and asserts each renders as an alert (and the all-clear does not).

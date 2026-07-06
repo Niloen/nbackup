@@ -57,6 +57,15 @@ type statusView struct {
 	Snap                          *progress.Snapshot
 	Active, Done, Failed, Pending int
 
+	// Estimating flags the sizing prelude, during which the snapshot's fields mean
+	// something else — a "done" DLE is merely *sized* and DoneBytes holds its measured
+	// estimate, not dumped bytes — so the templates render the sizing view (Sized of
+	// total, EstimateSoFar) instead of a dump table full of misleading "done" rows
+	// (the same split nb status makes; see progress.renderEstimating).
+	Estimating    bool
+	Sized         int   // DLEs measured so far
+	EstimateSoFar int64 // estimate accumulated so far
+
 	DumpDone, DumpEst int64   // uncompressed: dumped so far, and the planner estimate
 	DumpRate          int64   // bytes/sec, 0 = not yet measurable
 	HasFlush          bool    // a holding-disk run: some DLEs drain to the landing
@@ -75,6 +84,13 @@ func newStatusView(snap *progress.Snapshot, now time.Time) *statusView {
 	}
 	v := &statusView{Snap: snap}
 	v.Active, v.Done, v.Failed, v.Pending = snap.Counts()
+	if snap.Phase == progress.PhaseEstimating {
+		v.Estimating = true
+		v.Sized = v.Done + v.Failed
+		v.EstimateSoFar = snap.TotalDone()
+		v.Elapsed = sizeutil.FormatElapsed(snap.Elapsed(now))
+		return v
+	}
 	v.DumpDone, v.DumpEst = snap.TotalDone(), snap.TotalEst()
 	v.ToDrain, v.Drained = snap.TotalToDrain(), snap.TotalDrained()
 	v.HasFlush = v.ToDrain > 0

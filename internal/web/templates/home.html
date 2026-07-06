@@ -24,11 +24,18 @@
     <strong>Run in progress · {{.Snap.RunID}}</strong>
     <span class="pill {{if eq (print .Snap.Phase) "failed"}}bad{{else if eq (print .Snap.Phase) "canceled"}}warn{{else}}ok{{end}}">{{.Snap.Phase}}</span>
   </div>
+  {{if .Estimating}}
+  <div class="muted" style="margin-top:.4rem;font-size:.85rem">
+    sizing {{.Sized}} of {{len .Snap.DLEs}} DLE(s) · estimate ~{{bytes .EstimateSoFar}} so far
+    · <a href="/status">details →</a>
+  </div>
+  {{else}}
   <div class="bar"><span style="width:{{pct .Snap.Pct}}"></span></div>
   <div class="muted" style="margin-top:.4rem;font-size:.85rem">
     {{pct .Snap.Pct}} · {{.Done}} done · {{.Active}} active · {{.Pending}} pending{{if .Failed}} · <span class="bad">{{.Failed}} failed</span>{{end}}
     · <a href="/status">details →</a>
   </div>
+  {{end}}
 </div>
 {{end}}
 

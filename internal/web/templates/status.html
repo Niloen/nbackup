@@ -2,6 +2,22 @@
 <h1>Status</h1>
 {{with .Data}}
 {{$p := print .Snap.Phase}}
+{{if .Estimating}}
+{{/* Sizing prelude: nothing is dumped yet — the snapshot's per-DLE fields carry
+     estimate sizes ("done" = sized), so the dump table below would misread as a
+     previous run's results. Mirror nb status: show the estimate filling in. */}}
+<div class="panel">
+  <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:.5rem;align-items:baseline">
+    <strong>{{.Snap.RunID}}</strong>
+    <span class="pill ok">{{.Snap.Phase}}</span>
+  </div>
+  <div class="stats" style="margin-top:.4rem">
+    <div><span class="k">Sizing</span><span class="v">{{.Sized}} of {{len .Snap.DLEs}} DLE(s) measured</span></div>
+    <div><span class="k">Estimate</span><span class="v">~{{bytes .EstimateSoFar}} so far</span></div>
+    <div><span class="k">Elapsed</span><span class="v">{{.Elapsed}}</span></div>
+  </div>
+</div>
+{{else}}
 <div class="panel">
   <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:.5rem;align-items:baseline">
     <strong>{{.Snap.RunID}}</strong>
@@ -44,6 +60,7 @@
   {{end}}
 </div>
 </div>
+{{end}}
 {{else}}
 <div class="panel"><div class="empty">No run in progress.<br><span style="font-size:.85rem">The last completed run is under <a href="/runs">Runs</a>.</span></div></div>
 {{end}}
