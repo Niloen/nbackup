@@ -582,9 +582,22 @@ notify:
       # template: text         # payload field the message goes in (default "text")
       # headers:               # optional extra HTTP headers
       #   Authorization: Bearer ...
+    hc:
+      type: healthcheck        # dead-man's switch (healthchecks.io-style pings)
+      url_env: HEALTHCHECKS_URL
+    hook:
+      type: command            # exec an operator script on each notification
+      command: /etc/nbackup/on-notify.sh
+      # args: [--nightly]      # optional fixed arguments
 ```
 
-Any command alerts on failure; a successful `nb dump` notifies by default. See
+Any command alerts on failure; a successful `nb dump` notifies by default. A
+`healthcheck` backend is a liveness beacon, not a report channel: it pings
+`<url>/start` when a run begins and `<url>` (success) or `<url>/fail` when it
+ends, on **every** run regardless of `on_failure`/`on_success` — a *missing*
+ping is the alarm, so routing never filters it. A `command` backend execs the
+given program directly (no shell) with `NB_COMMAND`, `NB_STATUS` (`OK`/`FAILED`),
+and `NB_SUBJECT` in the environment and the rendered report on stdin. See
 [Monitoring](../features/monitoring).
 
 ## drill
@@ -603,6 +616,21 @@ drill:
 ```
 
 See [Verification](../features/verification).
+
+## staleness
+
+An opt-in backup-freshness SLO: when set, `nb check` fails (non-zero exit) for
+any configured DLE whose newest backup at **any** level is older than the
+window, or that has never been backed up at all, and `nb report` (and the
+`--notify` digest) lists the offenders. Unset means no staleness verdict —
+there is no default window, since only you know your intended cadence.
+
+```yaml
+staleness:
+  window: 3d          # every DLE should have a backup at most this old
+```
+
+See [Monitoring](../features/monitoring).
 
 ## ssh and hosts
 

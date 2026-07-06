@@ -39,11 +39,15 @@ func skip(err error) error { return skipRun{err} }
 
 func (a *app) runReported(cfg *config.Config, seed report.Run, build func() (report.Run, error)) error {
 	start := time.Now().UTC()
+	a.dispatchNotifyStart(cfg, seed.Command)
 	rec, runErr := build()
 	// A no-op or argument-validation result is not a run: surface its error (nil for a clean
-	// no-op) but write no run record and fire no notification.
+	// no-op) but write no run record and fire no report-channel notification. A healthcheck
+	// backend already got a /start ping above, though (the skip is only known now, after
+	// build() returns), so it still needs a matching completion ping or it's left dangling.
 	var sr skipRun
 	if errors.As(runErr, &sr) {
+		a.dispatchNotifyFinish(cfg, sr.err != nil)
 		return sr.err
 	}
 	if rec.Command == "" {

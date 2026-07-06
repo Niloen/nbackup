@@ -2,8 +2,11 @@ package cli
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/Niloen/nbackup/internal/config"
@@ -83,5 +86,54 @@ func TestRunReportedRecordingErrorDoesNotChangeExit(t *testing.T) {
 	})
 	if !errors.Is(err, sentinel) {
 		t.Errorf("a recording error masked the run error: got %v, want %v", err, sentinel)
+	}
+}
+
+// TestRunReportedSkipStillClosesOutHealthcheck pins the no-op dead-man's-switch
+// fix: a build that returns skip(nil) (a clean no-op, e.g. nothing to sync) writes
+// no run record and reaches no report channel, but a configured healthcheck
+// backend already got a /start ping before build() ran — it must also get a
+// matching completion ping, or healthchecks.io flags it as started-but-unfinished
+// once its grace period lapses.
+func TestRunReportedSkipStillClosesOutHealthcheck(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfg := &config.Config{Workdir: dir, Notify: config.NotifyConfig{
+		Backends: map[string]config.NotifyBackend{"hc": {Type: "healthcheck", URL: srv.URL}},
+	}}
+	a := &app{quiet: true}
+
+	err := a.runReported(cfg, report.Run{Command: report.CommandSync}, func() (report.Run, error) {
+		return report.Run{}, skip(nil)
+	})
+	if err != nil {
+		t.Fatalf("runReported returned %v, want nil for a clean no-op", err)
+	}
+
+	runs, _ := report.Load(dir)
+	if len(runs) != 0 {
+		t.Errorf("a skipped no-op wrote %d run records, want 0", len(runs))
+	}
+
+	mu.Lock()
+	got := append([]string(nil), paths...)
+	mu.Unlock()
+	want := []string{"/start", "/"}
+	if len(got) != len(want) {
+		t.Fatalf("healthcheck paths = %v, want %v (start, then a success ping — no /fail)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("path[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }

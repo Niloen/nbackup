@@ -5,8 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 func newCheckEngine(t *testing.T, sources []config.DLE) *Engine {
@@ -174,5 +177,59 @@ func TestCheckMissingCompressorIsOneLineWithRemedy(t *testing.T) {
 	}
 	if rep.Failures == 0 {
 		t.Errorf("missing compressor must stay a hard failure: %+v", rep)
+	}
+}
+
+// TestCheckStalenessUnsetIsSilent pins the opt-in default: with no `staleness.window`
+// configured, `nb check` says nothing about staleness even though the one DLE here
+// has no archive at all — the config's Staleness field doc explains why there is no
+// non-zero default.
+func TestCheckStalenessUnsetIsSilent(t *testing.T) {
+	eng := newCheckEngine(t, []config.DLE{{Host: "localhost", Path: t.TempDir()}})
+
+	rep := &CheckReport{}
+	(&checker{cfg: eng.cfg, tc: eng.tc, dep: eng.dep, cat: eng.cat}).checkStaleness(rep)
+	if len(rep.Server) != 0 {
+		t.Errorf("checkStaleness with no window configured should report nothing, got %+v", rep.Server)
+	}
+}
+
+// TestCheckStalenessFailsPastWindow pins the exit-code path: a configured
+// `staleness.window` turns "DLE not backed up in N days" (and "never backed up at
+// all") into hard check failures, the same class of failure as an unreachable host
+// — `nb check` is what cron already gates on, so a stale DLE should trip it too.
+func TestCheckStalenessFailsPastWindow(t *testing.T) {
+	eng := newCheckEngine(t, []config.DLE{
+		{Host: "localhost", Path: "/stale"},
+		{Host: "localhost", Path: "/never"},
+		{Host: "localhost", Path: "/fresh"},
+	})
+	eng.cfg.Staleness.Window = "1d"
+
+	old := time.Now().Add(-48 * time.Hour)
+	fresh := time.Now().Add(-1 * time.Hour)
+	staleArch := record.Archive{Run: record.IDFromTime(old), DLE: config.DLE{Host: "localhost", Path: "/stale"}.Name(), Level: 0, Compressed: 10, CreatedAt: old}
+	freshArch := record.Archive{Run: record.IDFromTime(fresh), DLE: config.DLE{Host: "localhost", Path: "/fresh"}.Name(), Level: 0, Compressed: 10, CreatedAt: fresh}
+	pos := archiveio.ArchivePos{Parts: []archiveio.FilePos{{Label: "disk", Pos: 1}}, Commit: archiveio.FilePos{Label: "disk", Pos: 2}}
+	if err := eng.cat.AddArchive(staleArch, "disk", pos); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.cat.AddArchive(freshArch, "disk", pos); err != nil {
+		t.Fatal(err)
+	}
+
+	rep := &CheckReport{}
+	(&checker{cfg: eng.cfg, tc: eng.tc, dep: eng.dep, cat: eng.cat}).checkStaleness(rep)
+	if rep.Failures != 2 {
+		t.Fatalf("checkStaleness Failures = %d, want 2 (stale + never): %+v", rep.Failures, rep.Server)
+	}
+	if !anyMsg(rep.Server, "localhost:/stale") || !anyMsg(rep.Server, "last backed up") {
+		t.Errorf("expected a last-backed-up line for the stale DLE: %+v", rep.Server)
+	}
+	if !anyMsg(rep.Server, "localhost:/never") || !anyMsg(rep.Server, "never been backed up") {
+		t.Errorf("expected a never-backed-up line: %+v", rep.Server)
+	}
+	if anyMsg(rep.Server, "localhost:/fresh") {
+		t.Errorf("the freshly backed up DLE should not be reported: %+v", rep.Server)
 	}
 }

@@ -258,6 +258,18 @@ func (e *Engine) MediumStats(name string) (MediumStats, bool) { return e.acct.Me
 // over catalog.DLESummaries, which owns the computation.
 func (e *Engine) DLESummaries() []catalog.DLESummary { return e.cat.DLESummaries() }
 
+// StaleDLEs returns the configured DLEs whose newest archive predates window (or
+// that have never been backed up), as of now. It resolves the configured DLE slugs
+// and hands them to catalog.StaleDLEs, which owns the computation — the same
+// facade shape as DLESummaries above.
+func (e *Engine) StaleDLEs(window time.Duration, now time.Time) []catalog.StaleDLE {
+	dles := make([]string, 0, len(e.cfg.DLEs()))
+	for _, d := range e.cfg.DLEs() {
+		dles = append(dles, d.Name())
+	}
+	return e.cat.StaleDLEs(dles, window, now)
+}
+
 // MediumMinAge returns a medium's effective retention floor — its configured
 // minimum_age, or the dump cycle when unset — the same value pruning enforces
 // before retiring a run. An unknown name yields the default floor.

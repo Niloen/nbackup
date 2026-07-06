@@ -7,7 +7,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"time"
 
+	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/depot"
 	"github.com/Niloen/nbackup/internal/dumper"
@@ -51,6 +53,7 @@ type checker struct {
 	cfg *config.Config
 	tc  *toolchain
 	dep *depot.Depot
+	cat *catalog.Catalog
 }
 
 // Check verifies the configuration is runnable: the server side always, and each source
@@ -59,17 +62,52 @@ type checker struct {
 // host is skipped (not probed) when connect is false (the `--offline` view). It never
 // writes backup data.
 func (e *Engine) Check(connect bool) *CheckReport {
-	return (&checker{cfg: e.cfg, tc: e.tc, dep: e.dep}).Check(connect)
+	return (&checker{cfg: e.cfg, tc: e.tc, dep: e.dep, cat: e.cat}).Check(connect)
 }
 
 // Check runs the full server + per-host probe; see the Engine facade for the contract.
 func (c *checker) Check(connect bool) *CheckReport {
 	rep := &CheckReport{}
 	c.checkServer(rep)
+	c.checkStaleness(rep)
 	for _, host := range c.dleHostsInOrder() {
 		rep.Hosts = append(rep.Hosts, c.checkHost(rep, host, connect))
 	}
 	return rep
+}
+
+// checkStaleness fails the check for any configured DLE whose newest backup (at
+// any level) predates `staleness.window`, plus any DLE never backed up at all — the
+// idiomatic exit-code path for the staleness SLO, since `nb check` is already the
+// command cron gates on ("$? != 0 means don't trust last night"), and a stale DLE
+// is exactly that kind of actionable failure, not just a report-time observation.
+// It reports nothing when the window is unset (the alert is opt-in — see the
+// Staleness config field's doc for why there is no default window).
+func (c *checker) checkStaleness(rep *CheckReport) {
+	window, ok := c.cfg.StalenessWindow()
+	if !ok {
+		return
+	}
+	dles := make([]string, 0, len(c.cfg.DLEs()))
+	idOf := map[string]string{}
+	for _, d := range c.cfg.DLEs() {
+		dles = append(dles, d.Name())
+		idOf[d.Name()] = d.ID()
+	}
+	stale := c.cat.StaleDLEs(dles, window, time.Now())
+	if len(stale) == 0 {
+		rep.add(&rep.Server, true, false, fmt.Sprintf("staleness: all DLE(s) backed up within %s", sizeutil.FormatDuration(window)))
+		return
+	}
+	for _, s := range stale {
+		disp := idOf[s.DLE]
+		if s.LastBackup.IsZero() {
+			rep.add(&rep.Server, false, false, fmt.Sprintf("staleness: %s has never been backed up", disp))
+			continue
+		}
+		rep.add(&rep.Server, false, false, fmt.Sprintf("staleness: %s last backed up %s ago (window %s)",
+			disp, sizeutil.FormatDuration(time.Since(s.LastBackup)), sizeutil.FormatDuration(window)))
+	}
 }
 
 // add appends a line and counts a hard failure (not OK and not a warning).

@@ -120,6 +120,15 @@ type Config struct {
 	// `nb dump && nb sync && nb drill --unattended`.
 	Drill DrillConfig `yaml:"drill,omitempty"`
 
+	// Staleness configures the "DLE not backed up in N days" alert surfaced by
+	// `nb report` and gated on by `nb check`. It mirrors the drill block's shape,
+	// but — unlike DrillWindow — has no non-zero default: nb dump attempts every
+	// configured DLE on every run (there is no per-DLE schedule to derive a window
+	// from), so an unset window means "the operator hasn't asked for this SLO" and
+	// the check stays silent rather than guessing a threshold that could false-alarm
+	// on a legitimately irregular cron cadence.
+	Staleness StalenessConfig `yaml:"staleness,omitempty"`
+
 	// Notify configures unattended alerting: which channels fire on a run's
 	// failure/success, and which receive `nb report --notify` digests. It is what
 	// makes a cron-driven backup loud — a failed dump/sync/verify/drill reaches a
@@ -191,6 +200,12 @@ type DrillConfig struct {
 	Unattended bool   `yaml:"unattended,omitempty"` // cron mode: never prompt; skip swap-needing targets
 }
 
+// StalenessConfig is the `staleness:` block: how long a DLE may go without a
+// successful backup (at any level) before `nb report`/`nb check` flag it.
+type StalenessConfig struct {
+	Window string `yaml:"window,omitempty"` // each DLE backed up within this window (default: disabled)
+}
+
 // NotifyConfig is the `notify:` block: a set of named backends plus per-outcome
 // routing. Failures must be loud, so when on_failure is omitted every configured
 // backend fires on failure; success and digest notifications are opt-in. It mirrors
@@ -209,7 +224,7 @@ type NotifyConfig struct {
 // Secrets are NEVER stored: they are named environment variables (password_env,
 // url_env) resolved at send time, mirroring crypt's orchestrate-don't-hoard stance.
 type NotifyBackend struct {
-	Type string `yaml:"type,omitempty"` // smtp | sendmail | webhook (a registered notifier name)
+	Type string `yaml:"type,omitempty"` // smtp | sendmail | webhook | healthcheck | command (a registered notifier name)
 
 	// smtp / sendmail
 	Host        string   `yaml:"host,omitempty"`
@@ -222,11 +237,15 @@ type NotifyBackend struct {
 	// sendmail
 	SendmailPath string `yaml:"sendmail_path,omitempty"` // path to the local sendmail binary (default /usr/sbin/sendmail)
 
-	// webhook
+	// webhook / healthcheck
 	URL      string            `yaml:"url,omitempty"`      // a non-secret endpoint; prefer url_env for anything secret
-	URLEnv   string            `yaml:"url_env,omitempty"`  // env var holding the webhook URL (Slack/Discord/PagerDuty secret)
-	Headers  map[string]string `yaml:"headers,omitempty"`  // optional extra HTTP headers
-	Template string            `yaml:"template,omitempty"` // optional payload field name for the message (default "text")
+	URLEnv   string            `yaml:"url_env,omitempty"`  // env var holding the webhook/healthcheck URL (Slack/Discord/PagerDuty/healthchecks.io secret)
+	Headers  map[string]string `yaml:"headers,omitempty"`  // optional extra HTTP headers (webhook only)
+	Template string            `yaml:"template,omitempty"` // optional payload field name for the message (webhook only, default "text")
+
+	// command
+	Command string   `yaml:"command,omitempty"` // path to the operator script/binary to exec (execed directly, no shell)
+	Args    []string `yaml:"args,omitempty"`    // optional extra arguments passed to command
 }
 
 // SyncRule mirrors one medium's runs onto another. Selection bounds keep an
@@ -272,6 +291,24 @@ func (c *Config) DrillSample() int {
 		return c.Drill.Sample
 	}
 	return DefaultDrillSample
+}
+
+// StalenessWindow returns the configured staleness window and whether the alert is
+// enabled. Unlike DrillWindow, there is no non-zero default — see the Staleness
+// field's doc for why — so an unset `staleness.window` reports (0, false) and
+// callers skip the check entirely rather than falling back to a guessed duration.
+// Validate (via validateStaleness) already parsed and accepted any non-empty
+// Staleness.Window, so the parse here cannot fail; a non-positive window is not
+// rejected up-front, though, so it still falls back to disabled.
+func (c *Config) StalenessWindow() (time.Duration, bool) {
+	if c.Staleness.Window == "" {
+		return 0, false
+	}
+	d, _ := sizeutil.ParseDuration(c.Staleness.Window)
+	if d > 0 {
+		return d, true
+	}
+	return 0, false
 }
 
 // DrillTierName returns the configured drill tier token, defaulting to

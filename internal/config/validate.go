@@ -116,6 +116,9 @@ func (c *Config) Validate() error {
 	if err := c.validateDrill(); err != nil {
 		return err
 	}
+	if err := c.validateStaleness(); err != nil {
+		return err
+	}
 	if err := c.validateNotify(); err != nil {
 		return err
 	}
@@ -238,7 +241,7 @@ func validateArchiverOptions(label, typeName string, options map[string]string) 
 
 // validNotifyTypes is the accepted set for a backend's type (kept here so config
 // validation needs no dependency on package notify, which depends on config).
-var validNotifyTypes = map[string]bool{"smtp": true, "sendmail": true, "webhook": true}
+var validNotifyTypes = map[string]bool{"smtp": true, "sendmail": true, "webhook": true, "healthcheck": true, "command": true}
 
 // validateNotify checks the optional `notify:` block: every backend has a known
 // type and its required connection fields, and every routing entry names a defined
@@ -254,7 +257,7 @@ func (c *Config) validateNotify() error {
 	}
 	for name, b := range n.Backends {
 		if !validNotifyTypes[b.Type] {
-			return fmt.Errorf("notify: backend %q: unknown type %q (known: smtp, sendmail, webhook)", name, b.Type)
+			return fmt.Errorf("notify: backend %q: unknown type %q (known: smtp, sendmail, webhook, healthcheck, command)", name, b.Type)
 		}
 		switch b.Type {
 		case "smtp":
@@ -268,6 +271,14 @@ func (c *Config) validateNotify() error {
 		case "webhook":
 			if b.URLEnv == "" && b.URL == "" {
 				return fmt.Errorf("notify: webhook backend %q requires url_env (preferred for secret endpoints) or url", name)
+			}
+		case "healthcheck":
+			if b.URLEnv == "" && b.URL == "" {
+				return fmt.Errorf("notify: healthcheck backend %q requires url_env (preferred for secret endpoints) or url", name)
+			}
+		case "command":
+			if b.Command == "" {
+				return fmt.Errorf("notify: command backend %q requires command", name)
 			}
 		}
 	}
@@ -337,6 +348,17 @@ func (c *Config) validateDrill() error {
 		if _, ok := c.Media[d.From]; !ok {
 			return fmt.Errorf("drill: source %q is not a defined medium", d.From)
 		}
+	}
+	return nil
+}
+
+// validateStaleness checks the optional `staleness:` block.
+func (c *Config) validateStaleness() error {
+	if c.Staleness.Window == "" {
+		return nil
+	}
+	if _, err := sizeutil.ParseDuration(c.Staleness.Window); err != nil {
+		return fmt.Errorf("staleness: window: %w", err)
 	}
 	return nil
 }

@@ -176,6 +176,48 @@ credential in the URL), the name of an environment variable (`url_env`, preferre
 notification failure (unreachable mail server, missing secret, hung endpoint) is
 **only ever a stderr warning**: it never fails or blocks the backup.
 
+## The dead-man's switch (healthcheck)
+
+Failure alerting has a blind spot: it only fires when `nb` actually runs. If
+cron itself stops firing — a bad crontab edit, a full disk, a powered-off
+machine — nothing fails, so nothing alerts. A `healthcheck` backend closes that
+hole with [healthchecks.io](https://healthchecks.io)-style pings (any
+compatible self-hosted service works):
+
+```yaml
+notify:
+  backends:
+    hc:
+      type: healthcheck
+      url_env: HEALTHCHECKS_URL
+```
+
+Every covered run pings `<url>/start` when it begins and `<url>` on success or
+`<url>/fail` on failure. The monitoring service alarms when the pings *stop
+arriving* — which is exactly the signal `on_failure` routing can never carry,
+so a healthcheck backend deliberately ignores `on_failure`/`on_success` and
+fires on every run. A `command` backend is the escape hatch for everything
+else: it execs your script (no shell) with `NB_COMMAND`, `NB_STATUS`, and
+`NB_SUBJECT` in the environment and the rendered report on stdin.
+
+## Staleness: "is anything falling behind?"
+
+An alert on failed runs still misses the DLE that quietly stopped being backed
+up (removed from cron's reach, host renamed, forever-skipped). An opt-in
+`staleness:` window turns backup freshness into a hard verdict:
+
+```yaml
+staleness:
+  window: 3d
+```
+
+With it set, `nb check` **fails** for any configured DLE whose newest backup
+(any level — an incremental counts) is older than the window, or that has never
+been backed up, and `nb report` and the nightly digest list the offenders with
+their last-backup age. Unset, no staleness verdict is made — there is no
+default window, because only you know whether your cadence is nightly or
+weekly.
+
 ## A hands-off cron line
 
 ```sh
@@ -186,7 +228,10 @@ This dumps, replicates offsite, trims each medium to its cycle/capacity budget,
 rehearses a recovery, and mails the nightly digest — every step recording its run
 summary and alerting on failure. `nb prune` with no medium named prunes every
 configured medium against its own retention, and runs after `nb sync` so nothing
-is reclaimed before it is replicated.
+is reclaimed before it is replicated. With a `staleness:` window and a
+`healthcheck` backend configured, this one line also proves liveness (the pings)
+and freshness (`nb check`, run from cron or by hand, fails while any DLE is
+overdue).
 
 ---
 

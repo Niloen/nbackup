@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/report"
@@ -67,10 +68,15 @@ func newReportCmd(a *app) *cobra.Command {
 				return err
 			}
 			if asJSON {
-				return encodeJSON(runs)
+				stale, _ := staleDLEs(cfg, time.Now())
+				return encodeJSON(struct {
+					Runs  []report.Run       `json:"runs"`
+					Stale []catalog.StaleDLE `json:"stale,omitempty"`
+				}{runs, stale})
 			}
 			report.Render(os.Stdout, runs, time.Now())
 			renderDrillLedger(os.Stdout, cfg, time.Now())
+			renderStaleness(os.Stdout, cfg, time.Now())
 			if notify {
 				a.dispatchDigest(cfg, runs)
 			}
@@ -197,4 +203,60 @@ func drillWhen(t time.Time) string {
 		return "-"
 	}
 	return sizeutil.FormatStamp(t.Local())
+}
+
+// staleDLEs computes the staleness alert for the report/digest/--json surfaces: the
+// configured DLEs whose newest backup (at any level) predates `staleness.window`,
+// or that have never been backed up. It reads the catalog cache directly (like
+// renderDrillLedger reads the drill ledger directly) rather than building an
+// engine, so `nb report` stays lock-free and cheap. window is 0 and ok is false
+// when the alert is unset — the caller's cue to render nothing.
+func staleDLEs(cfg *config.Config, now time.Time) (stale []catalog.StaleDLE, window time.Duration) {
+	window, ok := cfg.StalenessWindow()
+	if !ok {
+		return nil, 0
+	}
+	cat, err := catalog.Open(cfg.WorkdirPath())
+	if err != nil {
+		return nil, window
+	}
+	idOf := map[string]string{}
+	dles := make([]string, 0, len(cfg.DLEs()))
+	for _, d := range cfg.DLEs() {
+		dles = append(dles, d.Name())
+		idOf[d.Name()] = d.ID()
+	}
+	stale = cat.StaleDLEs(dles, window, now)
+	for i := range stale {
+		if stale[i].Display == "" {
+			stale[i].Display = idOf[stale[i].DLE]
+		}
+	}
+	return stale, window
+}
+
+// renderStaleness prints the staleness section: DLEs not backed up within the
+// configured window, each with how long since their last backup (or "never").
+// It renders nothing when `staleness.window` is unset — the alert is opt-in (see
+// the Staleness config field's doc for why there is no default window).
+func renderStaleness(w io.Writer, cfg *config.Config, now time.Time) {
+	stale, window := staleDLEs(cfg, now)
+	if window == 0 {
+		return
+	}
+	if len(stale) == 0 {
+		fmt.Fprintf(w, "\nStaleness: all configured DLE(s) backed up within %s.\n", sizeutil.FormatDuration(window))
+		return
+	}
+	fmt.Fprintf(w, "\nSTALE DLEs (not backed up within %s)\n", sizeutil.FormatDuration(window))
+	tw := newTab(w)
+	fmt.Fprintln(tw, "  DLE\tLAST BACKUP")
+	for _, s := range stale {
+		last := "never"
+		if !s.LastBackup.IsZero() {
+			last = sizeutil.FormatDaysHours(now.Sub(s.LastBackup)) + " ago"
+		}
+		fmt.Fprintf(tw, "  %s\t%s\n", s.Display, last)
+	}
+	tw.Flush()
 }

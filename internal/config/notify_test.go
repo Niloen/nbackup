@@ -39,6 +39,25 @@ func TestValidateNotify(t *testing.T) {
 			wantErr: "requires url_env",
 		},
 		{
+			name:    "healthcheck missing url",
+			n:       NotifyConfig{Backends: map[string]NotifyBackend{"hc": {Type: "healthcheck"}}},
+			wantErr: "requires url_env",
+		},
+		{
+			name: "valid healthcheck + command",
+			n: NotifyConfig{
+				Backends: map[string]NotifyBackend{
+					"hc":  {Type: "healthcheck", URL: "https://hc.example/ping/abc"},
+					"cmd": {Type: "command", Command: "/usr/local/bin/on-notify.sh"},
+				},
+			},
+		},
+		{
+			name:    "command missing command",
+			n:       NotifyConfig{Backends: map[string]NotifyBackend{"c": {Type: "command"}}},
+			wantErr: "requires command",
+		},
+		{
 			name:    "routing references undefined backend",
 			n:       NotifyConfig{OnFailure: []string{"ghost"}, Backends: map[string]NotifyBackend{"m": {Type: "smtp", Host: "localhost", From: "a@x", To: []string{"o@x"}}}},
 			wantErr: "undefined backend",
