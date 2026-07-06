@@ -104,11 +104,30 @@ func (p Placement) Holds(dle string, level int) bool {
 }
 
 // Labels returns the distinct volume labels this placement occupies — every
-// archive part's label plus its commit footer's and index's — in first-seen order. It is what tells
-// which tapes a copy needs mounted. It is empty for address-identified media,
-// which carry no labels: a disk/s3 copy spans no tapes, and is reached by its
-// medium alone (Placement.Medium), needing no label-based mount.
+// archive's labels (see PlacedArchive.Labels), merged in first-seen order. It is
+// what tells which tapes a copy needs mounted. It is empty for address-identified
+// media, which carry no labels: a disk/s3 copy spans no tapes, and is reached by
+// its medium alone (Placement.Medium), needing no label-based mount.
 func (p Placement) Labels() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range p.Archives {
+		for _, v := range a.Labels() {
+			if !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
+// Labels returns the distinct volume labels this one archive occupies — its
+// parts' labels plus its commit footer's and index's — in first-seen order.
+// Placement.Labels aggregates this across a copy's whole archive list; per-volume
+// accounting needs the per-archive view instead, to attribute a spanned archive's
+// bytes to one volume without double-counting it against every volume it touches.
+func (a PlacedArchive) Labels() []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(v string) {
@@ -117,13 +136,11 @@ func (p Placement) Labels() []string {
 			out = append(out, v)
 		}
 	}
-	for _, a := range p.Archives {
-		for _, pt := range a.Parts {
-			add(pt.Label)
-		}
-		add(a.Commit.Label)
-		add(a.Index.Label)
+	for _, pt := range a.Parts {
+		add(pt.Label)
 	}
+	add(a.Commit.Label)
+	add(a.Index.Label)
 	return out
 }
 

@@ -239,6 +239,10 @@ type MediumStats = accounting.MediumStats
 // MediumStats.ByRun).
 type UsagePoint = accounting.UsagePoint
 
+// VolumeUsage is one labeled volume's contribution to its medium's pool (see
+// MediumStats.PerVolume). Aliased like MediumInfo so callers name the engine type.
+type VolumeUsage = accounting.VolumeUsage
+
 // UsageStats summarizes a medium's recorded usage curve (see MediumStats.Growth).
 type UsageStats = accounting.UsageStats
 

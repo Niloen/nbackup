@@ -3,6 +3,7 @@ package web
 import (
 	"fmt"
 	"html/template"
+	"sort"
 	"strings"
 	"time"
 
@@ -74,6 +75,32 @@ type statusView struct {
 	DrainRate         int64   // bytes/sec, 0 = not yet measurable
 	OnVolume          int64   // bytes landed on the authoritative volume
 	Elapsed, ETA      string  // formatted; ETA "" when unknown/terminal
+
+	// FlushLanes itemizes the flush backlog per landing, populated only for a fan-out
+	// (more than one landing) — mirroring nb status's per-landing lines (see
+	// progress.render's Flush section). A single-landing run leaves this nil; the
+	// existing Drained/ToDrain aggregate already tells the whole story there.
+	FlushLanes []flushLaneView
+
+	// The per-DLE detail is grouped by state so the page can render full cards (dump +
+	// flush bars) only for the DLEs actually in flight. Only workers-many DLEs dump at
+	// once, so a many-DLE holding-disk run would otherwise be a wall of static bars for
+	// the pending/done majority; the failed/done/pending groups render as compact rows
+	// instead. Each slice preserves Snap.DLEs order.
+	ActiveDLEs  []progress.DLE // StateDumping or StateFlushing — full cards
+	FailedDLEs  []progress.DLE // StateFailed or StateCanceled — compact rows with the error
+	DoneDLEs    []progress.DLE // StateDone — compact one-line rows
+	PendingDLEs []progress.DLE // StatePending — names only
+}
+
+// flushLaneView is one landing's flush backlog for the /status fan-out itemization —
+// the web counterpart of progress.LandingDrain, with the percent and rate the
+// template cannot compute pre-calculated.
+type flushLaneView struct {
+	Landing     string
+	Done, Total int64
+	Pct         float64
+	Rate        int64 // bytes/sec, 0 = not yet measurable
 }
 
 // newStatusView tallies a snapshot for rendering, or returns nil for no live run. now
@@ -106,7 +133,41 @@ func newStatusView(snap *progress.Snapshot, now time.Time) *statusView {
 	if eta, ok := snap.ETA(now); ok {
 		v.ETA = sizeutil.FormatElapsed(eta)
 	}
+	if drains := snap.LandingDrains(); len(drains) > 1 {
+		for _, ld := range drains {
+			lane := flushLaneView{Landing: ld.Landing, Done: ld.Done, Total: ld.Total, Pct: pctOf(ld.Done, ld.Total)}
+			if r := snap.LandingDrainRate(ld.Done, now); r > 0 {
+				lane.Rate = int64(r)
+			}
+			v.FlushLanes = append(v.FlushLanes, lane)
+		}
+	}
+	for _, d := range snap.DLEs {
+		switch d.State {
+		case progress.StateDumping, progress.StateFlushing:
+			v.ActiveDLEs = append(v.ActiveDLEs, d)
+		case progress.StateFailed, progress.StateCanceled:
+			v.FailedDLEs = append(v.FailedDLEs, d)
+		case progress.StateDone:
+			v.DoneDLEs = append(v.DoneDLEs, d)
+		case progress.StatePending:
+			v.PendingDLEs = append(v.PendingDLEs, d)
+		}
+	}
 	return v
+}
+
+// pctOf is done/total as a capped 0..100 percentage (0 when there is nothing to
+// measure) — mirrors the unexported progress.pct, needed here for the per-landing
+// flush lanes a template cannot compute itself.
+func pctOf(done, total int64) float64 {
+	if total <= 0 {
+		return 0
+	}
+	if p := float64(done) / float64(total) * 100; p < 100 {
+		return p
+	}
+	return 100
 }
 
 // runRow is one line of the runs list.
@@ -130,9 +191,65 @@ type runsData struct {
 
 // historyData backs /report the same way runsData backs /runs.
 type historyData struct {
-	Rows  []report.Run
+	Rows  []historyRow
 	Total int
 	All   bool
+}
+
+// historyRow is one /report row: the run record plus its pre-computed per-command
+// detail and wall-clock duration — the web mirror of report.detailCell (unexported,
+// so its logic is reproduced in newHistoryRow) with the dump case's run id rendered
+// as a link instead of plain text. Built here so report.html does no branching.
+type historyRow struct {
+	report.Run
+	DetailPrefix string // dump only: the run id, for the /runs/<id> link; empty otherwise
+	DetailRest   string // the rest of the detail cell (archives/bytes), or the whole cell for non-dump commands
+	Duration     string // dash when either endpoint is unrecorded
+}
+
+// newHistoryRow builds one /report row from a run record.
+func newHistoryRow(r report.Run) historyRow {
+	row := historyRow{Run: r, Duration: runDuration(r)}
+	switch r.Command {
+	case report.CommandDump:
+		if r.RunID == "" {
+			row.DetailRest = "-"
+		} else {
+			row.DetailPrefix = r.RunID
+			row.DetailRest = fmt.Sprintf("%d archive(s), %s", r.Archives, sizeutil.FormatBytes(r.BytesMoved))
+		}
+	case report.CommandSync:
+		row.DetailRest = fmt.Sprintf("%d run(s) copied, %s", r.RunsCopied, sizeutil.FormatBytes(r.BytesMoved))
+	case report.CommandPrune:
+		row.DetailRest = fmt.Sprintf("%d archive(s) pruned, %s freed", r.ArchivesPruned, sizeutil.FormatBytes(r.BytesMoved))
+	case report.CommandVerify:
+		if r.Failures > 0 {
+			row.DetailRest = fmt.Sprintf("%d run(s) failed verification", r.Failures)
+		} else {
+			row.DetailRest = "all verified"
+		}
+	case report.CommandDrill:
+		parts := []string{fmt.Sprintf("%d failure(s)", r.Failures)}
+		if r.Skipped > 0 {
+			parts = append(parts, fmt.Sprintf("%d skipped", r.Skipped))
+		}
+		if r.Overdue > 0 {
+			parts = append(parts, fmt.Sprintf("%d overdue", r.Overdue))
+		}
+		row.DetailRest = strings.Join(parts, ", ")
+	default:
+		row.DetailRest = "-"
+	}
+	return row
+}
+
+// runDuration renders a run's wall-clock span, or a dash when either endpoint is
+// unrecorded.
+func runDuration(r report.Run) string {
+	if r.StartedAt.IsZero() || r.EndedAt.IsZero() {
+		return "-"
+	}
+	return sizeutil.FormatElapsed(r.EndedAt.Sub(r.StartedAt))
 }
 
 // runDetail backs the single-run page.
@@ -145,6 +262,160 @@ type runDetail struct {
 	Partial  bool
 	Archives []record.Archive
 	Copies   []copyRow
+	Dump     *dumpReportView // the run's dump-report section, or nil when the history holds no record for it
+}
+
+// dumpReportView is the /runs/<id> mirror of `nb report --dump`: the headline, the
+// STATISTICS grid (Total/Full/Incr), and the per-DLE table. It reproduces
+// report.RenderDump's arithmetic (report.headline/renderStats/renderDumpTable are
+// unexported) so the template does none of it.
+type dumpReportView struct {
+	Headline string
+	Grid     []dumpGridRow
+	Rows     []dumpStatRow
+}
+
+// dumpGridRow is one row of the STATISTICS grid — mirrors report.renderStats.
+type dumpGridRow struct {
+	Label, Total, Full, Incr string
+}
+
+// dumpStatRow is one DLE's row of the per-DLE dump table — mirrors report.renderDumpTable.
+type dumpStatRow struct {
+	ID         string // host:path identity (falls back to the slug), via DLEStat.ID()
+	Slug       string // internal DLE slug, for the /dles/<slug> link
+	Level      int
+	Orig, Out  string
+	Comp       string // compression percent, or dash
+	Files      int
+	Time, Rate string // dash when timing was unavailable
+}
+
+// dumpAgg accumulates one column of the STATISTICS grid — mirrors report.agg.
+type dumpAgg struct {
+	n     int
+	orig  int64
+	out   int64
+	files int
+	secs  float64
+}
+
+func (a *dumpAgg) add(d report.DLEStat) {
+	a.n++
+	a.orig += d.Orig
+	a.out += d.Out
+	a.files += d.Files
+	a.secs += d.Seconds
+}
+
+// newDumpReportView builds the /runs/<id> dump-report section from a dump record,
+// or nil when it carries no per-DLE statistics (a run predating the run-log, or one
+// compacted out).
+func newDumpReportView(r report.Run) *dumpReportView {
+	if len(r.DumpStats) == 0 {
+		return nil
+	}
+	var tot, full, incr dumpAgg
+	for _, d := range r.DumpStats {
+		tot.add(d)
+		if d.Level == 0 {
+			full.add(d)
+		} else {
+			incr.add(d)
+		}
+	}
+	v := &dumpReportView{
+		Headline: dumpHeadline(r, tot),
+		Grid:     dumpStatsGrid(tot, full, incr, r.EndedAt.Sub(r.StartedAt)),
+	}
+	for _, d := range r.DumpStats {
+		v.Rows = append(v.Rows, dumpStatRow{
+			ID: d.ID(), Slug: d.DLE, Level: d.Level,
+			Orig: sizeutil.FormatBytes(d.Orig), Out: sizeutil.FormatBytes(d.Out),
+			Comp: dumpCompPct(d.Orig, d.Out), Files: d.Files,
+			Time: dumpTimeCell(d.Seconds), Rate: dumpRateCell(d.Orig, d.Seconds),
+		})
+	}
+	return v
+}
+
+// dumpHeadline is the one-line "did it work" summary — mirrors report.headline.
+func dumpHeadline(r report.Run, tot dumpAgg) string {
+	sizes := fmt.Sprintf("%s -> %s (%s)", sizeutil.FormatBytes(tot.orig), sizeutil.FormatBytes(tot.out), dumpCompPct(tot.orig, tot.out))
+	elapsed := sizeutil.FormatElapsed(r.EndedAt.Sub(r.StartedAt))
+	if r.Failed() {
+		return fmt.Sprintf("%d DLE(s) dumped, run FAILED [%s] · %s · %s elapsed", tot.n, r.ExitClass, sizes, elapsed)
+	}
+	return fmt.Sprintf("%d DLE(s) dumped OK · %s · %s elapsed", tot.n, sizes, elapsed)
+}
+
+// dumpStatsGrid builds the STATISTICS grid rows — mirrors report.renderStats,
+// including its dash rules for an empty column.
+func dumpStatsGrid(tot, full, incr dumpAgg, wall time.Duration) []dumpGridRow {
+	count := func(a dumpAgg) string {
+		if a.n == 0 {
+			return "-"
+		}
+		return fmt.Sprintf("%d", a.n)
+	}
+	size := func(a dumpAgg) string {
+		if a.n == 0 {
+			return "-"
+		}
+		return sizeutil.FormatBytes(a.orig)
+	}
+	out := func(a dumpAgg) string {
+		if a.n == 0 {
+			return "-"
+		}
+		return sizeutil.FormatBytes(a.out)
+	}
+	files := func(a dumpAgg) string {
+		if a.n == 0 {
+			return "-"
+		}
+		return fmt.Sprintf("%d", a.files)
+	}
+	rows := []dumpGridRow{
+		{"DLEs dumped", count(tot), count(full), count(incr)},
+		{"Original size", size(tot), size(full), size(incr)},
+		{"Output size", out(tot), out(full), out(incr)},
+		{"Avg compression", dumpCompPct(tot.orig, tot.out), dumpCompPct(full.orig, full.out), dumpCompPct(incr.orig, incr.out)},
+		{"Files", files(tot), files(full), files(incr)},
+		{"Dump time (sum)", dumpTimeCell(tot.secs), dumpTimeCell(full.secs), dumpTimeCell(incr.secs)},
+		{"Avg dump rate", dumpRateCell(tot.orig, tot.secs), dumpRateCell(full.orig, full.secs), dumpRateCell(incr.orig, incr.secs)},
+	}
+	if wall > 0 {
+		rows = append(rows, dumpGridRow{"Run time (wall)", sizeutil.FormatElapsed(wall), "", ""})
+	}
+	return rows
+}
+
+// dumpCompPct renders the compression ratio, or a dash when there is no original
+// size to measure against, or none was saved — mirrors report.compPct.
+func dumpCompPct(orig, out int64) string {
+	if orig <= 0 || out >= orig {
+		return "-"
+	}
+	return fmt.Sprintf("%.0f%%", float64(out)/float64(orig)*100)
+}
+
+// dumpTimeCell renders a dump duration, or a dash when timing was unavailable —
+// mirrors report.dumpTime.
+func dumpTimeCell(secs float64) string {
+	if secs <= 0 {
+		return "-"
+	}
+	return sizeutil.FormatElapsed(time.Duration(secs * float64(time.Second)))
+}
+
+// dumpRateCell renders uncompressed throughput, or a dash without timing — mirrors
+// report.dumpRate.
+func dumpRateCell(orig int64, secs float64) string {
+	if secs <= 0 || orig <= 0 {
+		return "-"
+	}
+	return sizeutil.FormatBytes(int64(float64(orig)/secs)) + "/s"
 }
 
 // copyRow is one placement of a run (a medium it was written to).
@@ -165,7 +436,197 @@ type dleRow struct {
 	Media     string
 }
 
-// dleDetail backs the single-DLE page: the rollup plus this DLE's per-run history.
+// dlesData backs the /dles page: the per-DLE rows plus the activity heatmap above
+// them (nil when the catalog has no archives, so the section is omitted).
+//
+// Rows/Heat render flat, exactly as before, whenever the catalog's DLEs span at
+// most one host (the common case). Once more than one host is present, Groups/
+// HeatGroups carry the same rows sectioned by host instead — hosts are the actual
+// failure domain (one flaky link or dead agent takes out every DLE on a box), so
+// a list this size is worth reading as groups rather than N independent rows.
+// Rows/Heat stay populated either way (some tests and any future flat consumer can
+// still use them); the templates pick Groups/HeatGroups over Rows/Heat whenever
+// the former are non-empty.
+type dlesData struct {
+	Rows []dleRow
+	Heat *heatmap
+
+	Groups     []dleGroup  // Sources rows sectioned by host; nil when ungrouped
+	HeatGroups []heatGroup // heatmap rows sectioned by host, same grouping; nil when ungrouped
+}
+
+// dleHostSummary is the compact rollup shown in a /dles host-section header: the
+// host name ("" for the trailing hostless "(other)" section), how many configured
+// DLEs it covers, the newest backup across them, and how many are currently stale.
+type dleHostSummary struct {
+	Host   string
+	Count  int
+	Newest time.Time
+	Stale  int
+}
+
+// dleGroup is one host's slice of the Sources table on /dles.
+type dleGroup struct {
+	Host dleHostSummary
+	Rows []dleRow
+}
+
+// heatGroup mirrors dleGroup for the activity heatmap — same host, same DLE
+// membership and order, just the heatRow shape instead of dleRow. Grouping only
+// sections the existing rows; the per-cell markup is untouched.
+type heatGroup struct {
+	Host dleHostSummary
+	Rows []heatRow
+}
+
+// hostOf extracts a DLE's host from its "host:path" display identity — the prefix
+// before the first ':'. A display with no ':' (the bare-slug fallback for a DLE
+// with no host segment) has no host: ok is false, and such a DLE is never grouped
+// into a host section or coalesced into a host-level stale alert.
+func hostOf(display string) (host string, ok bool) {
+	i := strings.IndexByte(display, ':')
+	if i < 0 {
+		return "", false
+	}
+	return display[:i], true
+}
+
+// partitionByHost splits DLE summaries into per-host groups (in first-seen host
+// order) and a hostless remainder, for /dles's grouping trigger and sections.
+func partitionByHost(sums []catalog.DLESummary) (order []string, byHost map[string][]catalog.DLESummary, hostless []catalog.DLESummary) {
+	byHost = map[string][]catalog.DLESummary{}
+	seen := map[string]bool{}
+	for _, d := range sums {
+		if host, ok := hostOf(d.Display); ok {
+			if !seen[host] {
+				seen[host] = true
+				order = append(order, host)
+			}
+			byHost[host] = append(byHost[host], d)
+		} else {
+			hostless = append(hostless, d)
+		}
+	}
+	return
+}
+
+// groupDLEs builds the /dles page data from the catalog's DLE summaries, the
+// currently-stale ones (for each host section's "K stale" count), and the
+// pre-built heatmap. It renders flat (Groups/HeatGroups nil) whenever the
+// summaries span at most one host — a single host, or all hostless — so that
+// common case looks exactly as it did before grouping existed.
+func groupDLEs(sums []catalog.DLESummary, stale []catalog.StaleDLE, heat *heatmap) dlesData {
+	rows := make([]dleRow, 0, len(sums))
+	for _, d := range sums {
+		rows = append(rows, dleRow{
+			Slug: d.DLE, Display: d.Display, Runs: d.Runs, LastLevel: d.LastLevel,
+			LastFull: d.LastFull, Bytes: d.Bytes, Media: strings.Join(d.Media, ", "),
+		})
+	}
+	data := dlesData{Rows: rows, Heat: heat}
+
+	order, byHost, hostless := partitionByHost(sums)
+	if len(order) <= 1 {
+		return data
+	}
+
+	// StaleDLE carries no Display for a DLE that has never been backed up at all
+	// (catalog.StaleDLEs), so fall back to the summary's, which every configured
+	// DLE has.
+	displayOf := map[string]string{}
+	for _, d := range sums {
+		displayOf[d.DLE] = d.Display
+	}
+	staleByHost := map[string]int{}
+	for _, d := range stale {
+		display := d.Display
+		if display == "" {
+			display = displayOf[d.DLE]
+		}
+		if host, ok := hostOf(display); ok {
+			staleByHost[host]++
+		}
+	}
+
+	rowBySlug := make(map[string]dleRow, len(rows))
+	for _, r := range rows {
+		rowBySlug[r.Slug] = r
+	}
+	heatBySlug := map[string]heatRow{}
+	if heat != nil {
+		for _, r := range heat.Rows {
+			heatBySlug[r.Slug] = r
+		}
+	}
+
+	build := func(members []catalog.DLESummary, host string) (dleGroup, heatGroup) {
+		hs := dleHostSummary{Host: host, Count: len(members), Stale: staleByHost[host]}
+		gr, hg := dleGroup{Host: hs}, heatGroup{Host: hs}
+		var newest time.Time
+		for _, m := range members {
+			if m.LastBackupAt.After(newest) {
+				newest = m.LastBackupAt
+			}
+			if r, ok := rowBySlug[m.DLE]; ok {
+				gr.Rows = append(gr.Rows, r)
+			}
+			if hr, ok := heatBySlug[m.DLE]; ok {
+				hg.Rows = append(hg.Rows, hr)
+			}
+		}
+		gr.Host.Newest, hg.Host.Newest = newest, newest
+		return gr, hg
+	}
+
+	for _, host := range order {
+		gr, hg := build(byHost[host], host)
+		data.Groups = append(data.Groups, gr)
+		if heat != nil {
+			data.HeatGroups = append(data.HeatGroups, hg)
+		}
+	}
+	if len(hostless) > 0 {
+		gr, hg := build(hostless, "")
+		data.Groups = append(data.Groups, gr)
+		if heat != nil {
+			data.HeatGroups = append(data.HeatGroups, hg)
+		}
+	}
+	return data
+}
+
+// stampOrDash formats a time like the "stamp" template func, for use from Go code
+// (hostLabel) rather than a template.
+func stampOrDash(t time.Time) string {
+	if t.IsZero() {
+		return "—"
+	}
+	return sizeutil.FormatStamp(t)
+}
+
+// hostLabel renders a /dles host-section header: the host name (or "(other)" for
+// the hostless trailer), its DLE count, the newest backup across them, and a
+// "K stale" note in warn color when any of its DLEs are currently stale. Shared by
+// the heatmap and Sources sections so both group the same host the same way.
+func hostLabel(h dleHostSummary) template.HTML {
+	name := h.Host
+	if name == "" {
+		name = "(other)"
+	}
+	unit := "DLEs"
+	if h.Count == 1 {
+		unit = "DLE"
+	}
+	s := fmt.Sprintf("<strong>%s</strong> · %d %s · newest %s",
+		template.HTMLEscapeString(name), h.Count, unit, template.HTMLEscapeString(stampOrDash(h.Newest)))
+	if h.Stale > 0 {
+		s += fmt.Sprintf(` · <span class="warn">%d stale</span>`, h.Stale)
+	}
+	return template.HTML(s)
+}
+
+// dleDetail backs the single-DLE page: the rollup, the size/time trend chart, the
+// recovery points, and this DLE's per-run history.
 type dleDetail struct {
 	NotFound bool
 	Slug     string
@@ -173,7 +634,282 @@ type dleDetail struct {
 	Runs     int
 	Bytes    int64
 	Media    string
+	Trend    template.HTML   // the size-over-time chart, or "" with fewer than two dump records
+	Recovery []recoveryPoint // restorable points, newest first (capped unless ?all=1)
+	RecTotal int             // recovery points in total (for the show-all toggle)
+	RecAll   bool            // true when ?all=1 lifted the cap
 	History  []dleArchiveRow
+}
+
+// recoveryPoint is one point in time a DLE can be restored to — an archive of this
+// DLE in the catalog, paired with the transitive base chain a restore replays, its
+// chain health, the media that hold it, and whether a drill has proven it. It answers
+// the product's core question: "which points can I restore to, from where, and has it
+// been proven?" The view builds it; the template only renders it.
+type recoveryPoint struct {
+	RunID    string
+	Date     string
+	Level    int
+	At       time.Time
+	Chain    string // "L2 ← L1 ← full run-…", or "full" for a level-0 point
+	Broken   bool   // a chain member is missing or has no surviving copy
+	Reason   string // when broken: which link is missing (e.g. "base run-X has no copy")
+	OnePlace bool   // the whole chain lives on a single medium (the "restore from one place" answer)
+	Media    string // the media holding the whole chain (OnePlace), else a per-member list
+	Drilled  bool   // a drill restored exactly this point and passed
+	Gloss    string // newest drilled point only: the ledger's tier gloss
+}
+
+// chainMember is one archive in a recovery point's restore chain, with the media
+// currently holding it (archive-granular, so a reclaimed copy shows as unheld).
+type chainMember struct {
+	RunID string
+	Level int
+	Media []string // media holding this archive; empty = no surviving copy
+}
+
+// chainDesc renders a restore chain tip-first with each base to its right — "L2 ← L1
+// ← full run-…" — naming the full's run (a different run than the tip) so the
+// point-in-time base reads at a glance; a lone level-0 point is just "full".
+func chainDesc(members []chainMember) string {
+	if len(members) == 1 && members[0].Level == 0 {
+		return "full"
+	}
+	parts := make([]string, 0, len(members))
+	for _, m := range members {
+		if m.Level == 0 {
+			parts = append(parts, "full "+m.RunID)
+		} else {
+			parts = append(parts, levelTag(m.Level))
+		}
+	}
+	return strings.Join(parts, " ← ")
+}
+
+// chainMedia answers "restore from one place": the media that hold every chain member
+// (a medium counts only if it holds them all). When no single medium holds the whole
+// chain it falls back to a compact per-member listing so the split is still legible.
+func chainMedia(members []chainMember) (onePlace bool, text string) {
+	if len(members) == 0 {
+		return false, "—"
+	}
+	count := map[string]int{}
+	for _, m := range members {
+		for _, name := range m.Media {
+			count[name]++
+		}
+	}
+	var whole []string
+	for name, c := range count {
+		if c == len(members) {
+			whole = append(whole, name)
+		}
+	}
+	if len(whole) > 0 {
+		sort.Strings(whole)
+		return true, strings.Join(whole, ", ")
+	}
+	segs := make([]string, 0, len(members))
+	for _, m := range members {
+		media := "none"
+		if len(m.Media) > 0 {
+			media = strings.Join(m.Media, ", ")
+		}
+		segs = append(segs, levelTag(m.Level)+": "+media)
+	}
+	return false, strings.Join(segs, " · ")
+}
+
+// heatmap is the /dles activity matrix: a DLE × day grid (amoverview, webified). Days
+// run oldest→newest left-to-right; each row is one configured DLE.
+type heatmap struct {
+	Days []heatDay
+	Rows []heatRow
+}
+
+// heatDay is one column: its date and a sparse tick label (a month on the 1st, a day
+// number on Mondays, else "").
+type heatDay struct {
+	Tick string
+}
+
+// heatRow is one DLE's row of daily cells, in Days order.
+type heatRow struct {
+	Slug    string
+	Display string
+	Cells   []heatCell
+}
+
+// heatCell is one DLE-day: the accent class driving the fill, a tooltip, and — when a
+// single run produced the day's archive — that run to link to.
+type heatCell struct {
+	Class string // "full" | "incr" | "partial" | "none"
+	Title string
+	RunID string // set only when exactly one run produced the day's archive
+}
+
+// dleTrendPoint is one dump record's statistics for a single DLE, the per-DLE series
+// drawn on /dles/<slug> — the DumpStats row (report.DLEStat) paired with the run's
+// time, oldest first.
+type dleTrendPoint struct {
+	At      time.Time
+	Orig    int64
+	Out     int64
+	Seconds float64
+	Level   int
+}
+
+// dleTrendSVG renders a DLE's dump history as an inline SVG line chart: two series
+// (original and output bytes) so the compression ratio's stability is visible, with
+// full dumps (Level==0) ringed so the cycle rhythm shows against the incrementals.
+// Mirrors usageChartSVG's conventions (baseline, end labels, date labels, ≤80
+// markers cap, per-point hover title); "" for fewer than two points or a zero span,
+// where a line would be meaningless.
+func dleTrendSVG(points []dleTrendPoint) template.HTML {
+	if len(points) < 2 {
+		return ""
+	}
+	first, last := points[0].At, points[len(points)-1].At
+	span := last.Sub(first)
+	if span <= 0 {
+		return ""
+	}
+	var peak int64
+	for _, p := range points {
+		if p.Orig > peak {
+			peak = p.Orig
+		}
+		if p.Out > peak {
+			peak = p.Out
+		}
+	}
+	if peak <= 0 {
+		return ""
+	}
+	const vw, vh = 760.0, 220.0
+	const padL, padR, padT, padB = 8.0, 8.0, 12.0, 26.0
+	plotW, plotH := vw-padL-padR, vh-padT-padB
+	baseY := padT + plotH
+	scale := int64(float64(peak) * 1.08)
+	x := func(t time.Time) float64 { return padL + float64(t.Sub(first))/float64(span)*plotW }
+	y := func(v int64) float64 { return padT + (1-float64(v)/float64(scale))*plotH }
+
+	path := func(get func(dleTrendPoint) int64) string {
+		var b strings.Builder
+		for i, p := range points {
+			cmd := "L"
+			if i == 0 {
+				cmd = "M"
+			}
+			fmt.Fprintf(&b, "%s%.1f %.1f ", cmd, x(p.At), y(get(p)))
+		}
+		return strings.TrimSpace(b.String())
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, `<svg viewBox="0 0 %.0f %.0f" style="width:100%%;height:auto;display:block" role="img" aria-label="dump size over time">`, vw, vh)
+	fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--line)" stroke-width="1"/>`, padL, baseY, vw-padR, baseY)
+	fmt.Fprintf(&b, `<path d="%s" fill="none" stroke="var(--accent)" stroke-width="2"/>`, path(func(p dleTrendPoint) int64 { return p.Orig }))
+	fmt.Fprintf(&b, `<path d="%s" fill="none" stroke="var(--ok)" stroke-width="2"/>`, path(func(p dleTrendPoint) int64 { return p.Out }))
+	if len(points) <= 80 {
+		for _, p := range points {
+			title := fmt.Sprintf("%s — %s — orig %s, out %s%s", p.At.Format("2006-01-02 15:04"), levelTag(p.Level),
+				sizeutil.FormatBytes(p.Orig), sizeutil.FormatBytes(p.Out), dumpTimeSuffix(p.Seconds))
+			ring := ""
+			if p.Level == 0 { // a full dump gets a ring so the cycle rhythm reads at a glance
+				ring = ` stroke="var(--fg)" stroke-width="1.5"`
+			}
+			fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="3" fill="var(--accent)"%s><title>%s</title></circle>`, x(p.At), y(p.Orig), ring, title)
+			fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="3" fill="var(--ok)"%s><title>%s</title></circle>`, x(p.At), y(p.Out), ring, title)
+		}
+	}
+	end := points[len(points)-1]
+	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--fg)" font-size="11" text-anchor="end">%s</text>`, x(end.At), y(end.Orig)-6, sizeutil.FormatBytes(end.Orig))
+	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--fg)" font-size="11" text-anchor="end">%s</text>`, x(end.At), y(end.Out)+14, sizeutil.FormatBytes(end.Out))
+	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11">%s</text>`, padL, vh-8, first.Format("2006-01-02"))
+	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11" text-anchor="end">%s</text>`, vw-padR, vh-8, last.Format("2006-01-02"))
+	b.WriteString(`</svg>`)
+	return template.HTML(b.String())
+}
+
+// levelTag renders a dump level for the trend chart's hover title.
+func levelTag(l int) string { return fmt.Sprintf("L%d", l) }
+
+// dumpTimeSuffix is the ", Ns dump" hover-title suffix, or "" when timing was
+// unavailable.
+func dumpTimeSuffix(secs float64) string {
+	if secs <= 0 {
+		return ""
+	}
+	return ", " + dumpTimeCell(secs) + " dump"
+}
+
+// mediaRow is one row of the /media list: a medium's summary (engine.MediumInfo)
+// enriched with the utilization fraction and growth-forecast column, which the
+// template cannot compute — the read-only merge of Media() with each medium's
+// MediumStats. For a labeled pool (Volumes > 0 — tape libraries/stations; never
+// keyed on medium type, per the media layer's neutrality) the Utilization/Projected
+// full columns are structurally misleading (a healthy rotation keeps most volumes
+// permanently near-full by design), so Pool routes the template to PoolRoom instead.
+type mediaRow struct {
+	engine.MediumInfo
+	UtilPct  float64 // 0 when unbounded
+	Over     bool    // used past a bounded capacity (sync/copy can land runs over)
+	ProjFull string  // "~Nd", or "—" when unbounded or not projected
+	Pool     bool    // this medium's pool holds one or more labeled volumes
+	PoolRoom string  // "K of N with room" — set only when Pool
+}
+
+// newMediaRows merges the medium summaries with each one's recorded growth
+// (MediumStats) into the /media list's view rows. stats is a medium-name lookup
+// (Source.MediumStats) rather than the whole Source, so this stays a pure view
+// function callable from a test fixture as well as the handler.
+func newMediaRows(media []engine.MediumInfo, stats func(string) (engine.MediumStats, bool), now time.Time) []mediaRow {
+	rows := make([]mediaRow, 0, len(media))
+	for _, m := range media {
+		row := mediaRow{MediumInfo: m, ProjFull: "—"}
+		if m.Capacity > 0 {
+			row.UtilPct = float64(m.Used) / float64(m.Capacity) * 100
+			row.Over = m.Used > m.Capacity
+		}
+		st, ok := stats(m.Name)
+		if m.Volumes > 0 {
+			row.Pool = true
+			withRoom, total := poolRoomCount(st.PerVolume, st.PoolVolumes)
+			row.PoolRoom = fmt.Sprintf("%d of %d with room", withRoom, total)
+		} else if ok && !st.Growth.ProjFull.IsZero() {
+			row.ProjFull = fmt.Sprintf("~%dd", projDays(st.Growth.ProjFull, now))
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// poolRoomCount reports how many of a pool's labeled volumes still have room to
+// write, against the pool's configured slot count (falling back to the labeled
+// count itself when no configured total is known — see MediumStats.PoolVolumes).
+func poolRoomCount(pv []engine.VolumeUsage, configured int64) (withRoom int, total int64) {
+	total = configured
+	if total == 0 {
+		total = int64(len(pv))
+	}
+	for _, v := range pv {
+		if v.HasRoom {
+			withRoom++
+		}
+	}
+	return withRoom, total
+}
+
+// projDays rounds a projected-full instant to whole days from now, floored at 0 (a
+// projection landing in the past, from a stale sample, reads as "any day now" rather
+// than a negative count).
+func projDays(projFull, now time.Time) int {
+	d := int(projFull.Sub(now).Hours()/24 + 0.5)
+	if d < 0 {
+		return 0
+	}
+	return d
 }
 
 // mediumData backs one medium's detail page: the capacity headline, the
@@ -212,6 +948,55 @@ type mediumData struct {
 
 	Chart  template.HTML   // the used-over-time area chart, or "" with fewer than two samples
 	Points []usagePointRow // the per-run retained series, newest run first
+
+	// Pool-only fields, set when the medium's pool holds one or more labeled
+	// volumes (Volumes > 0). A healthy tape rotation keeps most volumes permanently
+	// near-full by retention design, so the aggregate Used/Capacity/Growth headline
+	// above is a structurally false signal for a pool; VolumeRows is what the page
+	// renders instead.
+	Pool           bool
+	PoolVolumes    int64       // the pool's configured slot count
+	UnlabeledSlots int64       // PoolVolumes - len(VolumeRows), when positive
+	WithData       int         // labeled volumes holding at least one archive
+	WithRoom       int         // labeled volumes with room to write more
+	VolumeRows     []volumeRow // one row per labeled volume
+}
+
+// volumeRow is one labeled volume's row in a pool medium's inventory table.
+type volumeRow struct {
+	Label    string
+	Epoch    int
+	Barcode  string
+	Bytes    int64
+	Capacity int64   // 0 = unbounded (per-volume capacity not derivable)
+	FillPct  float64 // Bytes/Capacity as a percent; 0 when unbounded
+	Runs     int
+	Archives int
+	Last     time.Time // zero if the volume holds nothing yet
+	// State is the pill/bar vocabulary for the reel's no-room reason, distinguishing
+	// two very different situations accounting.VolumeUsage.HasRoom collapses into one
+	// bool: "room" (more can still be written), "used" (a non-appendable reel already
+	// holds a run — the rotation working as designed, not an error), or "full" (byte
+	// capacity actually reached). See volumeState.
+	State string
+}
+
+// volumeState classifies a labeled volume's no-room reason for display. HasRoom
+// already encodes the medium's appendable policy (see accounting.volumeHasRoom), so
+// State needs no policy input of its own: "room" whenever HasRoom is true; "full"
+// only when bytes have actually reached a known per-volume capacity (true for both
+// appendable and non-appendable media); otherwise "used" — a non-appendable reel
+// that already holds a run but isn't byte-full, which is the rotation working as
+// intended and must not read as an error state.
+func volumeState(v engine.VolumeUsage) string {
+	switch {
+	case v.HasRoom:
+		return "room"
+	case v.Capacity > 0 && v.Bytes >= v.Capacity:
+		return "full"
+	default:
+		return "used"
+	}
 }
 
 // usagePointRow is one run's contribution to a medium's usage, for the detail table.
@@ -257,7 +1042,36 @@ func newMediumData(st engine.MediumStats) mediumData {
 	if st.Growth.Samples >= 2 {
 		d.HistFirst, d.HistLast = st.Growth.First, st.Growth.Last
 	}
-	d.Chart = usageChartSVG(st.Usage, st.Capacity)
+	capLabel := "capacity"
+	d.Pool = len(st.PerVolume) > 0
+	if d.Pool {
+		capLabel = "pool capacity"
+		d.PoolVolumes = st.PoolVolumes
+		if gap := st.PoolVolumes - int64(len(st.PerVolume)); gap > 0 {
+			d.UnlabeledSlots = gap
+		}
+		// The aggregate growth/projection is suppressed for a pool (a recycling
+		// rotation's sawtooth defeats a linear fill projection); Room replaces it.
+		d.PerDay, d.ProjFull = 0, time.Time{}
+		for _, v := range st.PerVolume {
+			row := volumeRow{
+				Label: v.Label, Epoch: v.Epoch, Barcode: v.Barcode,
+				Bytes: v.Bytes, Capacity: v.Capacity, Runs: v.Runs, Archives: v.Archives,
+				Last: v.Last, State: volumeState(v),
+			}
+			if v.Capacity > 0 {
+				row.FillPct = float64(v.Bytes) / float64(v.Capacity) * 100
+			}
+			if v.Bytes > 0 || v.Archives > 0 {
+				d.WithData++
+			}
+			if v.HasRoom {
+				d.WithRoom++
+			}
+			d.VolumeRows = append(d.VolumeRows, row)
+		}
+	}
+	d.Chart = usageChartSVG(st.Usage, st.Capacity, capLabel)
 	for i := len(st.ByRun) - 1; i >= 0; i-- { // newest first for the table
 		p := st.ByRun[i]
 		row := usagePointRow{Run: p.Run, At: p.At, Added: p.Added, Used: p.Used}
@@ -276,8 +1090,10 @@ func newMediumData(st engine.MediumStats) mediumData {
 // catalog's recorded samples (not the currently-retained archives), a prune shows as
 // the curve falling. It returns "" for fewer than two samples or a zero time span,
 // where a line would be meaningless. Coordinates are safe (numbers plus datestamp
-// timestamps), so template.HTML is sound.
-func usageChartSVG(series []catalog.UsageSample, capacity int64) template.HTML {
+// timestamps), so template.HTML is sound. capLabel names the dashed ceiling line
+// ("capacity", or "pool capacity" for a labeled pool, where the number is the sum
+// of per-volume capacities rather than a single store's size).
+func usageChartSVG(series []catalog.UsageSample, capacity int64, capLabel string) template.HTML {
 	if len(series) < 2 {
 		return ""
 	}
@@ -333,7 +1149,7 @@ func usageChartSVG(series []catalog.UsageSample, capacity int64) template.HTML {
 	if drawCap {
 		cy := y(capacity)
 		fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--warn)" stroke-width="1" stroke-dasharray="4 3"/>`, padL, cy, vw-padR, cy)
-		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--warn)" font-size="11" text-anchor="end">capacity %s</text>`, vw-padR, cy-3, sizeutil.FormatBytes(capacity))
+		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--warn)" font-size="11" text-anchor="end">%s %s</text>`, vw-padR, cy-3, capLabel, sizeutil.FormatBytes(capacity))
 	}
 	// Area + line.
 	fmt.Fprintf(&b, `<path d="%s" fill="var(--accent)" fill-opacity="0.15"/>`, strings.TrimSpace(area.String()))

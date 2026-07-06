@@ -11,6 +11,42 @@
   <div class="card"><div class="k">Media</div><div class="v" style="font-size:1rem">{{if .Media}}{{.Media}}{{else}}—{{end}}</div></div>
 </div>
 
+{{if .Trend}}
+<h2>Size trend</h2>
+<div class="panel">
+{{.Trend}}
+<div class="muted" style="margin-top:.5rem;font-size:.82rem">
+  <span style="color:var(--accent)">■</span> original · <span style="color:var(--ok)">■</span> output · ringed marker = full dump
+</div>
+</div>
+{{end}}
+
+{{if .Recovery}}
+<h2>Recovery points</h2>
+<div class="panel">
+<div class="points">
+  {{range .Recovery}}
+  <div class="point">
+    <div class="point-head">
+      <a href="/runs/{{.RunID}}">{{.RunID}}</a>
+      <span class="pill dim">{{level .Level}}</span>
+      {{if .Broken}}<span class="pill bad">broken · {{.Reason}}</span>{{else}}<span class="pill ok">complete</span>{{end}}
+      {{if .Drilled}}<span class="pill active">drilled{{if .Gloss}} · {{.Gloss}}{{end}}</span>{{end}}
+      <span class="chain">{{.Chain}}</span>
+    </div>
+    <div class="point-meta">
+      {{stampsec .At}} ·
+      {{if .OnePlace}}restore from {{.Media}}{{else}}media — {{.Media}}{{end}}
+    </div>
+  </div>
+  {{end}}
+</div>
+{{if and (gt .RecTotal (len .Recovery)) (not .RecAll)}}
+<div class="muted" style="margin-top:.6rem;font-size:.85rem">Showing the {{len .Recovery}} newest of {{.RecTotal}} points · <a href="?all=1">show all →</a></div>
+{{end}}
+</div>
+{{end}}
+
 <h2>History</h2>
 <div class="panel scroll">
 {{if .History}}

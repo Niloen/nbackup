@@ -9,15 +9,15 @@
 <div class="panel scroll">
 {{if $d.Rows}}
 <table>
-  <tr><th>Ended</th><th>Command</th><th>Outcome</th><th class="num">Bytes</th><th class="num">Archives</th><th>Detail</th></tr>
+  <tr><th>Ended</th><th>Command</th><th>Outcome</th><th class="num">Archives</th><th>Detail</th><th class="num">Duration</th></tr>
   {{range $d.Rows}}
   <tr>
     <td>{{stampsec .EndedAt}}</td>
     <td>{{.Command}}</td>
     <td class="{{if .Failed}}bad{{else}}ok{{end}}">{{if .Failed}}failure{{else}}success{{end}}</td>
-    <td class="num">{{bytes .BytesMoved}}</td>
     <td class="num">{{if .Archives}}{{.Archives}}{{else}}<span class="muted">—</span>{{end}}</td>
-    <td class="muted">{{if .RunID}}<a href="/runs/{{.RunID}}">{{.RunID}}</a>{{end}}{{if .ExitClass}} · {{.ExitClass}}{{end}}{{if .Error}} · {{.Error}}{{end}}</td>
+    <td class="muted">{{if .DetailPrefix}}<a href="/runs/{{.DetailPrefix}}">{{.DetailPrefix}}</a>, {{end}}{{.DetailRest}}{{if .ExitClass}} · {{.ExitClass}}{{end}}{{if .Error}} · {{.Error}}{{end}}</td>
+    <td class="num">{{.Duration}}</td>
   </tr>
   {{end}}
 </table>

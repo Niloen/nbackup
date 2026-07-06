@@ -109,6 +109,36 @@ type MediumStats struct {
 
 	Usage  []catalog.UsageSample // the recorded used-over-time curve (the catalog's ledger)
 	Growth UsageStats            // growth/projection statistics over Usage
+
+	// PerVolume is the pool's per-volume inventory when the medium's pool holds one
+	// or more labeled volumes (tape libraries/stations, keyed on MediumInfo.Volumes
+	// > 0 — never on medium type, per the media layer's type-neutrality); nil for
+	// address-identified media (disk, s3, gdrive), which carry no volume inventory
+	// to report. A healthy rotation keeps most volumes permanently near-full by
+	// design (retention holds N-1 of N at capacity), so the aggregate Used/Capacity
+	// above is a structurally misleading capacity signal for a pool — PerVolume is
+	// what a pool page should render instead.
+	PerVolume []VolumeUsage
+	// PoolVolumes is the pool's configured volume count (media.Profile.Volumes),
+	// which may exceed len(PerVolume) when slots are configured but not yet
+	// labeled. 0 when the medium has no volume pool (address-identified) or an
+	// unbounded one (a hand-loaded drive with no fixed slot count).
+	PoolVolumes int64
+}
+
+// VolumeUsage is one labeled volume's contribution to its medium's pool: the
+// catalog's identity for it (label, epoch, barcode) plus what has actually landed
+// there (bytes, runs, archives, last write) against its per-volume capacity.
+type VolumeUsage struct {
+	Label    string
+	Epoch    int
+	Barcode  string
+	Bytes    int64
+	Runs     int
+	Archives int
+	Last     time.Time // latest archive commit landed on this volume (zero if none)
+	Capacity int64     // 0 = unbounded (the pool's per-volume capacity is not derivable)
+	HasRoom  bool      // more data could still be written here (see volumeHasRoom)
 }
 
 // MediumStats returns a medium's usage picture; ok is false if the name is unknown.
@@ -161,7 +191,99 @@ func (a *Accountant) MediumStats(name string) (MediumStats, bool) {
 	}
 	st.Usage = a.d.Cat.MediumUsage(name)
 	st.Growth = Summarize(st.Usage, info.Capacity)
+	st.PerVolume, st.PoolVolumes = a.perVolume(name, info)
 	return st, true
+}
+
+// perVolume builds a labeled pool's per-volume inventory: nil (and 0) when the
+// medium carries no volume pool at all (address-identified media). Otherwise it
+// reports every labeled volume the catalog knows of, even one the medium's
+// current archives never touch (a blank or freshly recycled reel still occupies a
+// slot and still counts against "how many have room").
+func (a *Accountant) perVolume(name string, info MediumInfo) ([]VolumeUsage, int64) {
+	pool := a.volumesInPool(name)
+	if len(pool) == 0 {
+		return nil, 0
+	}
+	var configured, perVolCap int64
+	if d, ok := a.d.Cfg.Media[name]; ok {
+		if prof, err := media.OpenProfile(d.Type, media.Options(d.ProfileOptions())); err == nil {
+			configured = prof.Volumes()
+			if configured > 0 {
+				perVolCap = prof.TotalBytes() / configured
+			}
+		}
+	}
+	appendable := a.MediumAppendable(name)
+
+	byLabel := make(map[string]*VolumeUsage, len(pool))
+	order := make([]string, 0, len(pool))
+	for _, v := range pool {
+		byLabel[v.Label.Name] = &VolumeUsage{Label: v.Label.Name, Epoch: v.Label.Epoch, Barcode: v.Barcode, Capacity: perVolCap}
+		order = append(order, v.Label.Name)
+	}
+
+	// runsOnLabel tracks which runs have already been counted against a label, so a
+	// run whose several archives land on the same volume counts once.
+	runsOnLabel := map[string]map[string]bool{}
+	for _, pai := range a.d.Cat.PlacedArchivesOn(name) {
+		labels := pai.Placed.Labels()
+		if len(labels) == 0 {
+			continue // address-identified copy; the pool is non-empty so this should not occur, but stay defensive
+		}
+		// A spanned archive's bytes are attributed to only the first label it
+		// appears on, so a multi-volume archive is never double-counted into the
+		// pool's total; every label it touches still counts the archive and its run,
+		// since each of those volumes genuinely holds part of it.
+		if vu := byLabel[labels[0]]; vu != nil {
+			vu.Bytes += pai.Archive.Compressed
+		}
+		for _, lbl := range labels {
+			vu := byLabel[lbl]
+			if vu == nil {
+				continue
+			}
+			vu.Archives++
+			if runsOnLabel[lbl] == nil {
+				runsOnLabel[lbl] = map[string]bool{}
+			}
+			if !runsOnLabel[lbl][pai.Run] {
+				runsOnLabel[lbl][pai.Run] = true
+				vu.Runs++
+			}
+			if pai.Archive.CreatedAt.After(vu.Last) {
+				vu.Last = pai.Archive.CreatedAt
+			}
+		}
+	}
+
+	out := make([]VolumeUsage, len(order))
+	for i, lbl := range order {
+		vu := *byLabel[lbl]
+		vu.HasRoom = volumeHasRoom(vu, appendable)
+		out[i] = vu
+	}
+	// An unbounded pool (media.Profile.Volumes == 0, a hand-loaded drive with no
+	// fixed slot count) has no configured total to compare the labeled count
+	// against, so report the labeled count itself — a zero headroom gap, which
+	// reads as "nothing more expected" rather than falsely as "unbounded slots
+	// still unlabeled."
+	if configured == 0 {
+		configured = int64(len(pool))
+	}
+	return out, configured
+}
+
+// volumeHasRoom reports whether a labeled volume could still take more data. An
+// appendable volume (the default) has room while its stored bytes are under its
+// per-volume capacity — or always, if that capacity is not derivable. A
+// non-appendable medium writes at most one run per volume, so any run at all
+// exhausts it regardless of how few bytes that run used.
+func volumeHasRoom(v VolumeUsage, appendable bool) bool {
+	if !appendable {
+		return v.Runs == 0
+	}
+	return v.Capacity == 0 || v.Bytes < v.Capacity
 }
 
 // UsageStats summarizes a medium's recorded usage curve: how long it has been

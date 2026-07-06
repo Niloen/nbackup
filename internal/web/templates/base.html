@@ -64,6 +64,7 @@
      forcing horizontal overflow. */
   .dles { display: flex; flex-direction: column; }
   .dle { padding: .65rem 0; border-bottom: 1px solid var(--line); }
+  .dle.slim { padding: .35rem 0; }
   .dle:first-child { padding-top: .2rem; }
   .dle:last-child { border-bottom: none; padding-bottom: .2rem; }
   .dle-head { display: flex; align-items: center; gap: .5rem; }
@@ -78,6 +79,41 @@
   .stats .k { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; min-width: 5.5rem; }
   .stats .v { font-variant-numeric: tabular-nums; }
   .muted { color: var(--muted); }
+  /* Recovery points on /dles/<slug>: a stacked list (never scrolls sideways on a
+     phone), each point a row of run id + level + chain + a health/media line. */
+  .points { display: flex; flex-direction: column; }
+  .point { padding: .6rem 0; border-bottom: 1px solid var(--line); }
+  .point:last-child { border-bottom: none; }
+  .point-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem; }
+  .point-head .chain { color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+  .point-meta { color: var(--muted); font-size: .82rem; margin-top: .3rem; }
+  /* Activity heatmap on /dles (amoverview, webified): a DLE × day matrix of fixed
+     12px cells so a week reads as a block. The panel scrolls horizontally on a phone
+     while the DLE labels stay legible; colors track the theme via the shared vars. */
+  .heat { border-collapse: separate; border-spacing: 2px; width: auto; }
+  .heat th, .heat td { padding: 0; border: none; white-space: nowrap; }
+  .heat .lbl { padding-right: .7rem; text-align: left; font-weight: 600; font-size: .85rem;
+    max-width: 14rem; overflow: hidden; text-overflow: ellipsis; }
+  .heat .tick { font-size: .66rem; color: var(--muted); height: 1.1rem; overflow: visible; }
+  .heat .cell { display: block; width: 12px; height: 12px; border-radius: 2px; background: var(--line); }
+  .heat .cell.full { background: var(--accent); }
+  .heat .cell.incr { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .heat .cell.partial { background: var(--warn); }
+  a.cell:hover { outline: 1px solid var(--fg); }
+  .heat-legend { color: var(--muted); font-size: .82rem; margin-top: .6rem;
+    display: flex; flex-wrap: wrap; gap: .1rem 1rem; }
+  .heat-legend .sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px;
+    vertical-align: -1px; margin-right: .3rem; background: var(--line); }
+  .heat-legend .sw.full { background: var(--accent); }
+  .heat-legend .sw.incr { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .heat-legend .sw.partial { background: var(--warn); }
+  /* Host-section headers on /dles when its DLEs span more than one host: a
+     compact rollup row (name, count, newest backup, stale count) separating each
+     host's rows in both the Sources table and the heatmap, so hosts read as the
+     failure domain they are instead of a flat list. */
+  .host-row td { padding: .5rem .6rem; font-size: .85rem; color: var(--muted); white-space: normal; }
+  .host-row strong { color: var(--fg); }
+  .heat .host-row td { padding: .4rem .6rem .6rem; }
   .empty { color: var(--muted); padding: 1.5rem; text-align: center; }
   footer { color: var(--muted); font-size: .8rem; text-align: center; padding: 1.5rem 1rem; }
 </style>

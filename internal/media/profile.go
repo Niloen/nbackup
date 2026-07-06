@@ -28,6 +28,12 @@ type Profile interface {
 	// operator (or robot) swap. Distinct from TotalBytes because a bare drive has a
 	// finite reel but an unbounded pool (the operator's shelf is unknowable).
 	VolumeSize() int64
+	// Volumes is the count of retainable volumes the medium's pool is configured
+	// for (0 = unbounded: an object store, which is not volume-structured, or a
+	// hand-loaded drive whose shelf is unknowable). It is the configured supply a
+	// pool inventory reports against — independent of how many the catalog has
+	// actually seen and labeled so far.
+	Volumes() int64
 	// Reclaim chooses what to delete to satisfy this medium's capacity, given the
 	// retention floor (what must never be reclaimed, computed by the retention
 	// package). It returns the reclamations to perform, in deletion order. The
@@ -86,6 +92,9 @@ func (p sizeProfile) TotalBytes() int64 { return p.capacity }
 // VolumeSize is 0: object stores are not volume-structured, so a run is bounded
 // only by the pool budget, never by a per-volume reel size.
 func (p sizeProfile) VolumeSize() int64 { return 0 }
+
+// Volumes is 0: an object store carries no volume inventory to size a pool by.
+func (p sizeProfile) Volumes() int64 { return 0 }
 
 // Reclaim deletes the oldest non-protected archives until total <= capacity.
 // Reclamation is per archive (run+DLE): because the retention floor is per-archive (a
@@ -163,6 +172,10 @@ func (p volumeProfile) usableVolumeBytes() int64 {
 func (p volumeProfile) TotalBytes() int64 { return p.volumes * p.usableVolumeBytes() }
 
 func (p volumeProfile) VolumeSize() int64 { return p.volumeSize }
+
+// Volumes is the configured reel count (0 = unbounded pool, e.g. a hand-loaded
+// drive with no fixed inventory).
+func (p volumeProfile) Volumes() int64 { return p.volumes }
 
 // Reclaim is intentionally a no-op: tape space is not reclaimed by a prune pass.
 // Whole-volume reuse is label rotation done on the *write* path — when a run needs a

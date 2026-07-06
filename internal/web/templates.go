@@ -40,6 +40,9 @@ var funcs = template.FuncMap{
 		}
 		return s
 	},
+	// hostLabel renders a /dles host-section header (view.go); a template func since
+	// it must run inside a range over dleGroup/heatGroup, not just at data-build time.
+	"hostLabel": hostLabel,
 }
 
 // pages maps each page name to its parsed template set: the shared base layout plus

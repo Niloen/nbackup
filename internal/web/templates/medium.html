@@ -7,25 +7,35 @@
 <h1>{{$d.Name}} <span class="pill dim">{{$d.Type}}</span></h1>
 
 <div class="cards">
-  <div class="card"><div class="k">Used</div>
+  <div class="card"><div class="k">{{if $d.Pool}}Volumes{{else}}Used{{end}}</div>
+    {{if $d.Pool}}
+    <div class="v">{{$d.WithData}} of {{len $d.VolumeRows}} labeled</div>
+    <div class="muted" style="font-size:.82rem">{{$d.WithRoom}} with room{{if $d.UnlabeledSlots}} · {{$d.UnlabeledSlots}} unlabeled slot(s) configured{{end}}</div>
+    {{else}}
     <div class="v {{if $d.Over}}bad{{end}}">{{bytes $d.Used}}</div>
     {{if $d.Capacity}}<div class="muted" style="font-size:.82rem">{{pct $d.UtilPct}} of {{bytes $d.Capacity}}{{if $d.Over}} · over capacity{{end}}</div>{{end}}
+    {{end}}
   </div>
   <div class="card"><div class="k">Capacity</div>
     <div class="v">{{if $d.Capacity}}{{bytes $d.Capacity}}{{else}}<span class="muted">∞</span>{{end}}</div>
-    {{if $d.Free}}<div class="muted" style="font-size:.82rem">{{bytes $d.Free}} free</div>{{end}}
+    {{if $d.Pool}}<div class="muted" style="font-size:.82rem">pool total</div>{{else if $d.Free}}<div class="muted" style="font-size:.82rem">{{bytes $d.Free}} free</div>{{end}}
   </div>
   <div class="card"><div class="k">Runs</div><div class="v">{{$d.Runs}}</div>
     <div class="muted" style="font-size:.82rem">{{$d.Archives}} archive(s)</div></div>
-  <div class="card"><div class="k">Growth</div>
+  <div class="card"><div class="k">{{if $d.Pool}}Room{{else}}Growth{{end}}</div>
+    {{if $d.Pool}}
+    <div class="v">{{$d.WithRoom}}<span class="muted" style="font-size:.9rem">/{{len $d.VolumeRows}}</span></div>
+    <div class="muted" style="font-size:.82rem">volumes with room</div>
+    {{else}}
     <div class="v">{{if $d.PerDay}}{{bytes $d.PerDay}}<span class="muted" style="font-size:.9rem">/day</span>{{else}}<span class="muted">—</span>{{end}}</div>
     {{if not $d.ProjFull.IsZero}}<div class="muted" style="font-size:.82rem">full ~{{$d.ProjFull.Format "2006-01-02"}}</div>{{end}}
+    {{end}}
   </div>
 </div>
 
-{{if $d.Capacity}}
+{{if not $d.Pool}}{{if $d.Capacity}}
 <div class="bar" style="margin-top:.9rem"><span style="width:{{pct $d.UtilPct}};{{if $d.Over}}background:var(--bad){{end}}"></span></div>
-{{end}}
+{{end}}{{end}}
 
 <h2>Used capacity over time</h2>
 <div class="panel">
@@ -46,6 +56,28 @@
   {{if $d.Volume}}<div class="muted" style="margin-top:.4rem;font-size:.85rem">volume: {{$d.Volume}}</div>{{end}}
   {{if not $d.First.IsZero}}<div class="muted" style="margin-top:.4rem;font-size:.85rem">retained data spans {{stamp $d.First}} → {{stamp $d.Last}}</div>{{end}}
 </div>
+
+{{if $d.Pool}}
+<h2>Volumes</h2>
+<div class="panel scroll">
+{{if $d.VolumeRows}}
+<table>
+  <tr><th>Label</th><th>Barcode</th><th style="min-width:100px">Fill</th><th class="num">Runs</th><th class="num">Archives</th><th>Last written</th></tr>
+  {{range $d.VolumeRows}}
+  <tr>
+    <td>{{.Label}}{{if .Epoch}} <span class="muted">(epoch {{.Epoch}})</span>{{end}}
+      {{if eq .State "room"}}<span class="pill ok">room</span>{{else if eq .State "used"}}<span class="pill dim">used</span>{{else}}<span class="pill dim">full</span>{{end}}</td>
+    <td class="muted">{{if .Barcode}}{{.Barcode}}{{else}}—{{end}}</td>
+    <td>{{if .Capacity}}<div class="bar"><span style="width:{{pct .FillPct}};{{if eq .State "full"}}background:var(--bad){{end}}"></span></div>{{else}}<span class="muted">—</span>{{end}}</td>
+    <td class="num">{{.Runs}}</td>
+    <td class="num">{{.Archives}}</td>
+    <td class="muted">{{if not .Last.IsZero}}{{stamp .Last}}{{else}}—{{end}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<div class="empty">No labeled volumes yet.</div>{{end}}
+</div>
+{{end}}
 
 <h2>Per-run usage</h2>
 <div class="panel scroll">

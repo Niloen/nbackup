@@ -3,7 +3,7 @@
 <div class="panel scroll">
 {{if .Data}}
 <table>
-  <tr><th>Medium</th><th>Type</th><th class="num">Runs</th><th class="num">Used</th><th class="num">Capacity</th><th class="num">Volumes</th><th>Volume</th></tr>
+  <tr><th>Medium</th><th>Type</th><th class="num">Runs</th><th class="num">Used</th><th class="num">Capacity</th><th>Utilization</th><th class="num">Volumes</th><th>Volume</th><th>Projected full</th></tr>
   {{range .Data}}
   <tr>
     <td><a href="/media/{{.Name}}">{{.Name}}</a></td>
@@ -11,8 +11,10 @@
     <td class="num">{{.Runs}}</td>
     <td class="num">{{bytes .Used}}</td>
     <td class="num">{{if .Capacity}}{{bytes .Capacity}}{{else}}<span class="muted">∞</span>{{end}}</td>
+    <td style="min-width:100px">{{if .Pool}}<span class="muted">{{.PoolRoom}}</span>{{else if .Capacity}}<div class="bar"><span style="width:{{pct .UtilPct}};{{if .Over}}background:var(--bad){{end}}"></span></div>{{else}}<span class="muted">—</span>{{end}}</td>
     <td class="num">{{if .Volumes}}{{.Volumes}}{{else}}<span class="muted">—</span>{{end}}</td>
     <td class="muted">{{if .Volume}}{{.Volume}}{{else}}—{{end}}</td>
+    <td class="muted">{{if .Pool}}{{.PoolRoom}}{{else}}{{.ProjFull}}{{end}}</td>
   </tr>
   {{end}}
 </table>

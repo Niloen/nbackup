@@ -12,6 +12,36 @@
   <div class="card"><div class="k">Total</div><div class="v">{{bytes .Bytes}}</div></div>
 </div>
 
+{{with .Dump}}
+<h2>Dump report</h2>
+<div class="panel">
+  <div class="muted" style="margin:0 0 .6rem">{{.Headline}}</div>
+  <table>
+    <tr><th>STATISTICS</th><th class="num">Total</th><th class="num">Full</th><th class="num">Incr</th></tr>
+    {{range .Grid}}
+    <tr><td>{{.Label}}</td><td class="num">{{.Total}}</td><td class="num">{{.Full}}</td><td class="num">{{.Incr}}</td></tr>
+    {{end}}
+  </table>
+</div>
+<div class="panel scroll" style="margin-top:1rem">
+<table>
+  <tr><th>DLE</th><th>LVL</th><th class="num">ORIG</th><th class="num">OUT</th><th class="num">COMP%</th><th class="num">FILES</th><th class="num">TIME</th><th class="num">RATE</th></tr>
+  {{range .Rows}}
+  <tr>
+    <td><a href="/dles/{{.Slug}}">{{.ID}}</a></td>
+    <td>{{level .Level}}</td>
+    <td class="num">{{.Orig}}</td>
+    <td class="num">{{.Out}}</td>
+    <td class="num">{{.Comp}}</td>
+    <td class="num">{{.Files}}</td>
+    <td class="num">{{.Time}}</td>
+    <td class="num">{{.Rate}}</td>
+  </tr>
+  {{end}}
+</table>
+</div>
+{{end}}
+
 <h2>Archives</h2>
 <div class="panel">
 <div class="dles">

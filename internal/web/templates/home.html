@@ -45,7 +45,11 @@
   {{with $d.LastDump}}
   <div class="card">
     <div class="k">Last backup</div>
+    {{if .RunID}}
+    <a class="v {{if .Failed}}bad{{else}}ok{{end}}" href="/runs/{{.RunID}}">{{if .Failed}}failed{{else}}ok{{end}}</a>
+    {{else}}
     <div class="v {{if .Failed}}bad{{else}}ok{{end}}">{{if .Failed}}failed{{else}}ok{{end}}</div>
+    {{end}}
     <div class="muted" style="font-size:.82rem">{{stamp .EndedAt}}</div>
   </div>
   <div class="card"><div class="k">Last backup size</div><div class="v">{{bytes .BytesMoved}}</div>

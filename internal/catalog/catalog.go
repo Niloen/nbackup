@@ -392,6 +392,36 @@ func (c *Catalog) ArchivesOn(medium string) []record.Archive {
 	return out
 }
 
+// PlacedArchiveInfo pairs one archive held on a medium (its record.Archive — bytes,
+// level, commit time) with its placement there (parts/labels) — the join
+// ArchivesOn already does, extended with per-archive location for a caller that
+// must attribute bytes to a specific volume label rather than just the medium as
+// a whole (per-volume accounting for a labeled pool).
+type PlacedArchiveInfo struct {
+	Run     string
+	Archive record.Archive
+	Placed  PlacedArchive
+}
+
+// PlacedArchivesOn returns, for the named medium, every archive currently held
+// there together with its placement record — ArchivesOn's archive-granular join,
+// carrying each archive's part/label positions alongside it.
+func (c *Catalog) PlacedArchivesOn(medium string) []PlacedArchiveInfo {
+	var out []PlacedArchiveInfo
+	for _, e := range c.entries {
+		p, ok := e.placementOn(medium)
+		if !ok {
+			continue
+		}
+		for _, a := range e.Run.Archives {
+			if pa, ok := p.Placed(a.DLE, a.Level); ok {
+				out = append(out, PlacedArchiveInfo{Run: e.Run.ID, Archive: a, Placed: pa})
+			}
+		}
+	}
+	return out
+}
+
 // RunIDsOnLabel returns the ids of the runs with a copy on the volume with the given label,
 // in run order — what a volume's reusability check (retention.Floor.First) consults.
 func (c *Catalog) RunIDsOnLabel(label string) []string {

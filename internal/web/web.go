@@ -20,6 +20,7 @@ import (
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/progress"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/report"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
@@ -205,21 +206,29 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		Partial:  run.Partial(),
 		Archives: run.Archives,
 		Copies:   copies,
+		Dump:     s.findDumpReport(run.ID),
 	}})
+}
+
+// findDumpReport looks up run.ID's dump record in the run history and, when found
+// with per-DLE statistics, builds the /runs/<id> dump-report section (the web mirror
+// of `nb report --dump`). A run predating the run-log, or one compacted out, simply
+// has no dump section — the archives list already shows sizes.
+func (s *Server) findDumpReport(runID string) *dumpReportView {
+	for _, r := range s.history(0) {
+		if r.Command == report.CommandDump && r.RunID == runID && len(r.DumpStats) > 0 {
+			return newDumpReportView(r)
+		}
+	}
+	return nil
 }
 
 // handleDLEs renders the DLE-major catalog view: one row per backup source, each
 // linking to its own history so an operator can drill into a single DLE.
 func (s *Server) handleDLEs(w http.ResponseWriter, r *http.Request) {
-	sums := s.src.DLESummaries()
-	rows := make([]dleRow, 0, len(sums))
-	for _, d := range sums {
-		rows = append(rows, dleRow{
-			Slug: d.DLE, Display: d.Display, Runs: d.Runs, LastLevel: d.LastLevel,
-			LastFull: d.LastFull, Bytes: d.Bytes, Media: strings.Join(d.Media, ", "),
-		})
-	}
-	s.render(w, "dles", page{Title: "DLEs", Active: "dles", Data: rows})
+	now := s.now()
+	data := groupDLEs(s.src.DLESummaries(), s.src.StaleDLEs(now), s.buildHeatmap(now))
+	s.render(w, "dles", page{Title: "DLEs", Active: "dles", Data: data})
 }
 
 // handleDLE renders one DLE's history — its archive in every run that dumped it,
@@ -244,14 +253,51 @@ func (s *Server) handleDLE(w http.ResponseWriter, r *http.Request) {
 		s.render(w, "dle", page{Title: slug, Active: "dles", Data: dleDetail{NotFound: true, Slug: slug}})
 		return
 	}
+	points := s.recoveryPoints(slug, s.drillLedger())
+	all := showAll(r)
+	shown := points
+	if !all && len(shown) > maxRecoveryPoints {
+		shown = shown[:maxRecoveryPoints]
+	}
 	s.render(w, "dle", page{Title: sum.Display, Active: "dles", Data: dleDetail{
-		Slug:    sum.DLE,
-		Display: sum.Display,
-		Runs:    sum.Runs,
-		Bytes:   sum.Bytes,
-		Media:   strings.Join(sum.Media, ", "),
-		History: s.dleHistory(slug),
+		Slug:     sum.DLE,
+		Display:  sum.Display,
+		Runs:     sum.Runs,
+		Bytes:    sum.Bytes,
+		Media:    strings.Join(sum.Media, ", "),
+		Trend:    dleTrendSVG(s.dleTrend(slug)),
+		Recovery: shown,
+		RecTotal: len(points),
+		RecAll:   all,
+		History:  s.dleHistory(slug),
 	}})
+}
+
+// maxRecoveryPoints caps the /dles/<slug> recovery-points list to the newest points by
+// default; ?all=1 shows every point, matching the paging pattern the other pages use.
+const maxRecoveryPoints = 20
+
+// dleTrend gathers a DLE's dump-history points — original/output size, dump time,
+// and level — from every dump record in the run history that dumped it, oldest
+// first, for the /dles/<slug> trend chart.
+func (s *Server) dleTrend(slug string) []dleTrendPoint {
+	var pts []dleTrendPoint
+	for _, r := range s.history(0) { // newest-first; sorted below
+		if r.Command != report.CommandDump {
+			continue
+		}
+		at := r.EndedAt
+		if at.IsZero() {
+			at = r.StartedAt
+		}
+		for _, d := range r.DumpStats {
+			if d.DLE == slug {
+				pts = append(pts, dleTrendPoint{At: at, Orig: d.Orig, Out: d.Out, Seconds: d.Seconds, Level: d.Level})
+			}
+		}
+	}
+	sort.Slice(pts, func(i, j int) bool { return pts[i].At.Before(pts[j].At) })
+	return pts
 }
 
 // dleHistory gathers a DLE's archive from every run that holds one, newest run first —
@@ -268,11 +314,7 @@ func (s *Server) dleHistory(slug string) []dleArchiveRow {
 			var media []string
 			for _, p := range s.src.Placements(run.ID) {
 				if p.Holds(a.DLE, a.Level) {
-					if labels := p.Labels(); len(labels) > 0 {
-						media = append(media, p.Medium+":"+strings.Join(labels, "+"))
-					} else {
-						media = append(media, p.Medium)
-					}
+					media = append(media, placementName(p))
 				}
 			}
 			rows = append(rows, dleArchiveRow{
@@ -291,8 +333,207 @@ func (s *Server) dleHistory(slug string) []dleArchiveRow {
 	return rows
 }
 
+// recoveryPoints builds a DLE's restorable points — one per archive of the DLE in the
+// catalog, newest run first — each with its restore chain, chain health, media
+// availability, and drill status. Reads only Runs()/Placements() and the drill ledger,
+// all read-only. ledger is passed in so the home rollup and the DLE page share one load.
+func (s *Server) recoveryPoints(slug string, ledger *drill.Ledger) []recoveryPoint {
+	// The DLE's archive in each run (a run dumps each DLE once), keyed by run id so the
+	// BaseRun walk can resolve each incremental's base.
+	archOf := map[string]record.Archive{}
+	var tips []record.Archive
+	for _, run := range s.src.Runs() {
+		for _, a := range run.Archives {
+			if a.DLE == slug {
+				archOf[a.Run] = a
+				tips = append(tips, a)
+			}
+		}
+	}
+	sort.Slice(tips, func(i, j int) bool { return tips[i].Run > tips[j].Run }) // newest first
+
+	// held names the media currently holding an archive, archive-granular — a copy
+	// reclaimed off one medium no longer counts, which is what makes a chain honestly
+	// "broken" rather than falsely restorable.
+	held := func(a record.Archive) []string {
+		var media []string
+		for _, p := range s.src.Placements(a.Run) {
+			if p.Holds(a.DLE, a.Level) {
+				media = append(media, placementName(p))
+			}
+		}
+		return media
+	}
+
+	rec, hasRec := ledger.Get(slug)
+	points := make([]recoveryPoint, 0, len(tips))
+	for i, tip := range tips {
+		members, reason := recoveryChain(tip, archOf, held)
+		onePlace, media := chainMedia(members)
+		pt := recoveryPoint{
+			RunID: tip.Run, Date: record.RunDate(tip.Run), Level: tip.Level, At: tip.CreatedAt,
+			Chain: chainDesc(members), Broken: reason != "", Reason: reason,
+			OnePlace: onePlace, Media: media,
+			Drilled: hasRec && rec.OK && rec.RunID == tip.Run,
+		}
+		if i == 0 && pt.Drilled { // the newest point carries the ledger's tier gloss
+			pt.Gloss = tierWhat(rec.Tier)
+		}
+		points = append(points, pt)
+	}
+	return points
+}
+
+// recoveryChain walks a recovery point's restore chain from the tip down the recorded
+// BaseRun links to the level-0 full, returning the chain members (tip first) and the
+// first broken link found, if any — a member with no surviving copy, or a base run
+// pruned out of the catalog. An empty reason means COMPLETE: every member exists and
+// is held. A no-copy member does not stop the walk (the chain is still describable); a
+// missing base does (there is nothing further to walk). visited guards against a
+// corrupted catalog whose BaseRun links cycle back on themselves — unlike
+// recovery.Chain's index walk (which can only ever move to a strictly earlier run and
+// so cannot cycle by construction), this walks a map keyed by run id and has no such
+// built-in guarantee.
+func recoveryChain(tip record.Archive, archOf map[string]record.Archive, held func(record.Archive) []string) (members []chainMember, reason string) {
+	visited := map[string]bool{}
+	cur := tip
+	for {
+		if visited[cur.Run] {
+			return members, "base chain cycles back to run " + cur.Run
+		}
+		visited[cur.Run] = true
+		media := held(cur)
+		members = append(members, chainMember{RunID: cur.Run, Level: cur.Level, Media: media})
+		if len(media) == 0 && reason == "" {
+			if len(members) == 1 {
+				reason = cur.Run + " has no copy"
+			} else {
+				reason = "base " + cur.Run + " has no copy"
+			}
+		}
+		if cur.Level == 0 {
+			return members, reason
+		}
+		base, ok := archOf[cur.BaseRun]
+		if !ok {
+			if reason == "" {
+				reason = "base " + cur.BaseRun + " missing"
+			}
+			return members, reason
+		}
+		cur = base
+	}
+}
+
+// buildHeatmap builds the /dles activity matrix over the last 35 days (5 weeks) ending
+// on now's local day: one row per configured DLE (DLESummaries order), one cell per
+// day colored by what landed. Returns nil when the catalog holds no archives at all, so
+// the caller can omit the whole section.
+func (s *Server) buildHeatmap(now time.Time) *heatmap {
+	const days = 35
+	loc := now.Location()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+
+	// Per DLE, per local day, what landed that day.
+	type dayAgg struct {
+		full, incr, partial bool
+		runs                map[string]bool
+		levels              map[int]bool
+		bytes               int64
+	}
+	byDLE := map[string]map[string]*dayAgg{}
+	any := false
+	for _, run := range s.src.Runs() {
+		for _, a := range run.Archives {
+			any = true
+			key := a.CreatedAt.In(loc).Format("2006-01-02")
+			perDay := byDLE[a.DLE]
+			if perDay == nil {
+				perDay = map[string]*dayAgg{}
+				byDLE[a.DLE] = perDay
+			}
+			ag := perDay[key]
+			if ag == nil {
+				ag = &dayAgg{runs: map[string]bool{}, levels: map[int]bool{}}
+				perDay[key] = ag
+			}
+			switch {
+			case a.Partial():
+				ag.partial = true
+			case a.Level == 0:
+				ag.full = true
+			default:
+				ag.incr = true
+			}
+			ag.runs[a.Run] = true
+			ag.levels[a.Level] = true
+			ag.bytes += a.Compressed
+		}
+	}
+	if !any {
+		return nil
+	}
+
+	hm := &heatmap{}
+	dates := make([]time.Time, days)
+	for i := 0; i < days; i++ {
+		d := today.AddDate(0, 0, i-(days-1)) // oldest first, today last
+		dates[i] = d
+		tick := ""
+		switch {
+		case d.Day() == 1:
+			tick = d.Format("Jan")
+		case d.Weekday() == time.Monday:
+			tick = fmt.Sprintf("%d", d.Day())
+		}
+		hm.Days = append(hm.Days, heatDay{Tick: tick})
+	}
+
+	for _, sum := range s.src.DLESummaries() {
+		row := heatRow{Slug: sum.DLE, Display: sum.Display}
+		perDay := byDLE[sum.DLE]
+		for _, d := range dates {
+			cell := heatCell{Class: "none", Title: d.Format("Mon Jan 2")}
+			if ag := perDay[d.Format("2006-01-02")]; ag != nil {
+				switch {
+				case ag.partial:
+					cell.Class = "partial"
+				case ag.full:
+					cell.Class = "full"
+				case ag.incr:
+					cell.Class = "incr"
+				}
+				cell.Title = fmt.Sprintf("%s · %s · %s", d.Format("Mon Jan 2"), heatLevels(ag.levels), sizeutil.FormatBytes(ag.bytes))
+				if len(ag.runs) == 1 {
+					for id := range ag.runs {
+						cell.RunID = id
+					}
+				}
+			}
+			row.Cells = append(row.Cells, cell)
+		}
+		hm.Rows = append(hm.Rows, row)
+	}
+	return hm
+}
+
+// heatLevels renders a day's dump levels as a sorted "L0, L1" list for the cell tooltip.
+func heatLevels(set map[int]bool) string {
+	lv := make([]int, 0, len(set))
+	for l := range set {
+		lv = append(lv, l)
+	}
+	sort.Ints(lv)
+	parts := make([]string, len(lv))
+	for i, l := range lv {
+		parts[i] = levelTag(l)
+	}
+	return strings.Join(parts, ", ")
+}
+
 func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
-	s.render(w, "media", page{Title: "Media", Active: "media", Data: s.src.Media()})
+	rows := newMediaRows(s.src.Media(), s.src.MediumStats, s.now())
+	s.render(w, "media", page{Title: "Media", Active: "media", Data: rows})
 }
 
 // handleMedium renders one medium's detail page: its capacity utilization, the
@@ -416,7 +657,11 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	if !all && len(shown) > maxListRows {
 		shown = shown[:maxListRows]
 	}
-	s.render(w, "report", page{Title: "History", Active: "report", Data: historyData{Rows: shown, Total: len(hist), All: all}})
+	rows := make([]historyRow, 0, len(shown))
+	for _, run := range shown {
+		rows = append(rows, newHistoryRow(run))
+	}
+	s.render(w, "report", page{Title: "History", Active: "report", Data: historyData{Rows: rows, Total: len(hist), All: all}})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -437,13 +682,20 @@ func (s *Server) copies(runID string) string {
 	}
 	names := make([]string, 0, len(ps))
 	for _, p := range ps {
-		if labels := p.Labels(); len(labels) > 0 {
-			names = append(names, p.Medium+":"+strings.Join(labels, "+"))
-		} else {
-			names = append(names, p.Medium)
-		}
+		names = append(names, placementName(p))
 	}
 	return strings.Join(names, ", ")
+}
+
+// placementName is a copy's compact "medium:label" identity — the medium alone for an
+// address-identified copy (disk/cloud carry no labels), the medium plus its volume
+// labels for a tape. The one place the webui formats a placement, so the run list,
+// DLE history, and recovery points all name copies identically.
+func placementName(p catalog.Placement) string {
+	if labels := p.Labels(); len(labels) > 0 {
+		return p.Medium + ":" + strings.Join(labels, "+")
+	}
+	return p.Medium
 }
 
 // lastDump returns the most recent dump record in a newest-first history, so the home
@@ -476,12 +728,57 @@ func (s *Server) rollup(now time.Time, hist []report.Run) []alert {
 			Href: runHref(run)})
 	}
 
-	// Media at or past a bounded capacity (a sync/copy can land runs over).
+	// Capacity foresight, one alert per bounded medium (unbounded media carry none):
+	// full is red and supersedes everything else. Short of that, a labeled pool
+	// (Volumes > 0 — tape libraries/stations; never keyed on medium type) gets its
+	// own native alert instead of the aggregate ≥90%-used/projected-full check: a
+	// healthy rotation keeps most volumes permanently near-full by retention design
+	// (N-1 of N at capacity), so the aggregate reading is a structurally false alarm
+	// for a pool — the real capacity event is running out of reels with room.
+	// Address-identified media (disk, s3) keep the aggregate check: warn at >=90%
+	// used, or when the medium's own recorded growth (MediumStats.Growth, the same
+	// curve /media/<name> charts) projects filling within 30 days.
 	for _, m := range s.src.Media() {
-		if m.Capacity > 0 && m.Used >= m.Capacity {
+		if m.Capacity <= 0 {
+			continue
+		}
+		if m.Used >= m.Capacity {
 			bad = append(bad, alert{Level: "bad", Tag: "over capacity",
 				Text: fmt.Sprintf("%s is full — %s of %s used", m.Name, sizeutil.FormatBytes(m.Used), sizeutil.FormatBytes(m.Capacity)),
 				Href: "/media/" + m.Name})
+			continue
+		}
+		if m.Volumes > 0 {
+			st, _ := s.src.MediumStats(m.Name)
+			withRoom, _ := poolRoomCount(st.PerVolume, st.PoolVolumes)
+			var gapText string
+			if gap := st.PoolVolumes - int64(len(st.PerVolume)); gap > 0 {
+				gapText = fmt.Sprintf(" (%d unlabeled slot(s) configured)", gap)
+			}
+			switch withRoom {
+			case 0:
+				bad = append(bad, alert{Level: "bad", Tag: "no room",
+					Text: fmt.Sprintf("%s: no volume with room — label or recycle a reel%s", m.Name, gapText),
+					Href: "/media/" + m.Name})
+			case 1:
+				warn = append(warn, alert{Level: "warn", Tag: "last volume",
+					Text: fmt.Sprintf("%s: last volume with room%s", m.Name, gapText),
+					Href: "/media/" + m.Name})
+			}
+			continue
+		}
+		switch {
+		case float64(m.Used)/float64(m.Capacity) >= 0.9:
+			warn = append(warn, alert{Level: "warn", Tag: "near capacity",
+				Text: fmt.Sprintf("%s is at %.0f%% capacity — %s of %s used", m.Name,
+					float64(m.Used)/float64(m.Capacity)*100, sizeutil.FormatBytes(m.Used), sizeutil.FormatBytes(m.Capacity)),
+				Href: "/media/" + m.Name})
+		default:
+			if st, ok := s.src.MediumStats(m.Name); ok && !st.Growth.ProjFull.IsZero() && st.Growth.ProjFull.Before(now.Add(30*24*time.Hour)) {
+				warn = append(warn, alert{Level: "warn", Tag: "capacity forecast",
+					Text: fmt.Sprintf("%s projected full in ~%dd", m.Name, projDays(st.Growth.ProjFull, now)),
+					Href: "/media/" + m.Name})
+			}
 		}
 	}
 
@@ -499,13 +796,149 @@ func (s *Server) rollup(now time.Time, hist []report.Run) []alert {
 			Href: "/drills"})
 	}
 
-	// Stale DLEs — overdue against the dump cycle, or never backed up at all.
-	for _, d := range s.src.StaleDLEs(now) {
-		warn = append(warn, alert{Level: "warn", Tag: "stale",
-			Text: staleText(d, now), Href: "/dles/" + d.DLE})
-	}
+	// Recoverability: a DLE whose NEWEST recovery point has a broken chain cannot be
+	// restored to its latest backup — red. Older broken points stay visible on the DLE
+	// page but don't spam the rollup (only the latest point is the live promise).
+	bad = append(bad, s.brokenLatestPoints()...)
+
+	// Stale DLEs — overdue against the dump cycle, or never backed up at all. Two
+	// or more stale DLEs sharing a host coalesce into one alert: correlated
+	// staleness reads as a host-level problem (network, ssh, agent down), not four
+	// independent per-DLE ones, and one smart alert beats four noisy ones. A DLE
+	// with no host in its display id (bare-slug fallback) is never grouped.
+	warn = append(warn, s.staleAlerts(now)...)
+
+	warn = append(warn, s.dumpAnomalies(hist)...)
 
 	return append(bad, warn...)
+}
+
+// brokenLatestPoints flags each configured DLE whose newest recovery point cannot be
+// restored — its restore chain is missing a member or a surviving copy. It reuses the
+// exact per-point computation the DLE page renders (recoveryPoints), so the rollup and
+// the page can never disagree about whether the latest point is restorable.
+func (s *Server) brokenLatestPoints() []alert {
+	ledger := s.drillLedger()
+	var out []alert
+	for _, sum := range s.src.DLESummaries() {
+		pts := s.recoveryPoints(sum.DLE, ledger)
+		if len(pts) == 0 || !pts[0].Broken {
+			continue
+		}
+		out = append(out, alert{Level: "bad", Tag: "unrestorable",
+			Text: fmt.Sprintf("cannot restore %s to its latest point — %s", s.src.DisplayDLE(sum.DLE), pts[0].Reason),
+			Href: "/dles/" + sum.DLE})
+	}
+	return out
+}
+
+// dumpAnomalies compares the newest dump record against each DLE's own recent
+// history and flags what looks off: a DLE's size swinging hard from its usual
+// footprint at that level, or the whole run taking much longer than usual. This is
+// deliberately coarse — a "did it look wrong" nudge, not a statistical test — so the
+// thresholds are blunt on purpose:
+//   - size: needs at least 2 priors (of up to the 5 most recent at the same level),
+//     a >2x deviation in either direction, AND an absolute delta over 64 MiB, so a
+//     tiny DLE doubling from 1 kB to 2 kB doesn't flap.
+//   - duration: needs at least 2 priors (of up to the 5 most recent dump runs), the
+//     latest taking >2x their median, AND the delta exceeding 10 minutes, so a run
+//     that was merely 3 minutes instead of 1 doesn't flap.
+//
+// hist is the full run history, newest-first.
+func (s *Server) dumpAnomalies(hist []report.Run) []alert {
+	latest, priors := latestDumpAndPriors(hist)
+	if latest == nil {
+		return nil
+	}
+	var out []alert
+
+	const minSizeDelta = 64 << 20 // 64 MiB
+	for _, d := range latest.DumpStats {
+		var sizes []int64
+		for _, r := range priors {
+			for _, pd := range r.DumpStats {
+				if pd.DLE == d.DLE && pd.Level == d.Level {
+					sizes = append(sizes, pd.Orig)
+					break
+				}
+			}
+			if len(sizes) == 5 {
+				break
+			}
+		}
+		if len(sizes) < 2 {
+			continue
+		}
+		med := medianInt64(sizes)
+		delta := d.Orig - med
+		if delta < 0 {
+			delta = -delta
+		}
+		if med <= 0 || delta <= minSizeDelta {
+			continue
+		}
+		if d.Orig > med*2 || d.Orig*2 < med {
+			out = append(out, alert{Level: "warn", Tag: "size anomaly",
+				Text: fmt.Sprintf("%s dumped %s, typically %s at this level", s.src.DisplayDLE(d.DLE), sizeutil.FormatBytes(d.Orig), sizeutil.FormatBytes(med)),
+				Href: "/dles/" + d.DLE})
+		}
+	}
+
+	const minDurationDelta = 10 * time.Minute
+	if wall := runWall(*latest); wall > 0 {
+		var durs []int64
+		for _, r := range priors {
+			if r.Command != report.CommandDump {
+				continue
+			}
+			if w := runWall(r); w > 0 {
+				durs = append(durs, int64(w))
+			}
+			if len(durs) == 5 {
+				break
+			}
+		}
+		if len(durs) >= 2 {
+			med := time.Duration(medianInt64(durs))
+			if med > 0 && wall > med*2 && wall-med > minDurationDelta {
+				out = append(out, alert{Level: "warn", Tag: "slow dump",
+					Text: fmt.Sprintf("last dump took %s, typically %s", sizeutil.FormatElapsed(wall), sizeutil.FormatElapsed(med)),
+					Href: runHref(*latest)})
+			}
+		}
+	}
+	return out
+}
+
+// latestDumpAndPriors splits a newest-first history into the newest dump record that
+// carries per-DLE statistics, and the dump records before it (also newest-first) to
+// scan for baselines. Both are nil when the history holds no such record.
+func latestDumpAndPriors(hist []report.Run) (*report.Run, []report.Run) {
+	for i := range hist {
+		if hist[i].Command == report.CommandDump && len(hist[i].DumpStats) > 0 {
+			return &hist[i], hist[i+1:]
+		}
+	}
+	return nil, nil
+}
+
+// runWall is a run's wall-clock duration, or 0 when either endpoint is unrecorded.
+func runWall(r report.Run) time.Duration {
+	if r.StartedAt.IsZero() || r.EndedAt.IsZero() {
+		return 0
+	}
+	return r.EndedAt.Sub(r.StartedAt)
+}
+
+// medianInt64 returns the median of vs, which must be non-empty.
+func medianInt64(vs []int64) int64 {
+	s := append([]int64(nil), vs...)
+	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
+	n := len(s)
+	if n%2 == 1 {
+		return s[n/2]
+	}
+	return (s[n/2-1] + s[n/2]) / 2
 }
 
 // drillHealth is the shared drill-coverage summary the home rollup and /metrics both
@@ -578,6 +1011,88 @@ func runHref(r report.Run) string {
 	default:
 		return "/report"
 	}
+}
+
+// staleAlerts builds the rollup's stale-DLE alerts: one coalesced host alert for
+// each host with two or more stale DLEs, and an individual alert for every other
+// stale DLE (a lone stale DLE on a host, or one with no host at all).
+func (s *Server) staleAlerts(now time.Time) []alert {
+	stale := s.src.StaleDLEs(now)
+
+	// StaleDLE carries no Display for a DLE that has never been backed up at all
+	// (catalog.StaleDLEs), so fall back to DisplayDLE, which always has one.
+	displayOf := func(d catalog.StaleDLE) string {
+		if d.Display != "" {
+			return d.Display
+		}
+		return s.src.DisplayDLE(d.DLE)
+	}
+
+	byHost := map[string][]catalog.StaleDLE{}
+	var hostOrder []string
+	for _, d := range stale {
+		host, ok := hostOf(displayOf(d))
+		if !ok {
+			continue
+		}
+		if _, seen := byHost[host]; !seen {
+			hostOrder = append(hostOrder, host)
+		}
+		byHost[host] = append(byHost[host], d)
+	}
+
+	var out []alert
+	grouped := map[string]bool{}
+	for _, host := range hostOrder {
+		ds := byHost[host]
+		if len(ds) < 2 {
+			continue
+		}
+		grouped[host] = true
+		out = append(out, alert{Level: "warn", Tag: "stale",
+			Text: hostStaleText(host, ds, s.hostDLECount(host), now), Href: "/dles"})
+	}
+	for _, d := range stale {
+		if host, ok := hostOf(displayOf(d)); ok && grouped[host] {
+			continue
+		}
+		out = append(out, alert{Level: "warn", Tag: "stale",
+			Text: staleText(d, now), Href: "/dles/" + d.DLE})
+	}
+	return out
+}
+
+// hostDLECount counts the configured DLEs (Source.DLENames) whose display id's
+// host prefix matches host — the "of M" denominator in a coalesced host alert.
+func (s *Server) hostDLECount(host string) int {
+	n := 0
+	for _, slug := range s.src.DLENames() {
+		if h, ok := hostOf(s.src.DisplayDLE(slug)); ok && h == host {
+			n++
+		}
+	}
+	return n
+}
+
+// hostStaleText renders a coalesced per-host stale alert: how many of the host's
+// configured DLEs are stale, and either the oldest last-backup age among them, or
+// a callout when at least one has never been backed up at all.
+func hostStaleText(host string, ds []catalog.StaleDLE, total int, now time.Time) string {
+	var oldest time.Time
+	never := false
+	for _, d := range ds {
+		if d.LastBackup.IsZero() {
+			never = true
+			continue
+		}
+		if oldest.IsZero() || d.LastBackup.Before(oldest) {
+			oldest = d.LastBackup
+		}
+	}
+	if never {
+		return fmt.Sprintf("host %s: %d of %d DLEs stale, some never backed up", host, len(ds), total)
+	}
+	return fmt.Sprintf("host %s: %d of %d DLEs stale (oldest %s)", host, len(ds), total, sizeutil.FormatDuration(now.Sub(oldest)))
 }
 
 // staleText renders a stale DLE for the rollup: its identity plus how overdue it is,
