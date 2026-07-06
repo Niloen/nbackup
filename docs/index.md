@@ -34,10 +34,6 @@ as **equal targets**, and makes the common modern shape — land fast on disk,
 then replicate offsite — a first-class operation. One static binary, driven by
 cron: no daemons, no database (the catalog is a cache one media scan rebuilds).
 
-This is a **first version** — an early release under active development. The core
-is complete and exercised by its own recovery drills, but expect rough edges; see
-[Status & limitations](https://github.com/Niloen/nbackup#status--limitations-first-version).
-
 ## What makes it different
 
 - **Recoverability is proven, not assumed.** `nb drill` actually restores a
