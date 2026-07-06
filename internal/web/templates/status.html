@@ -42,7 +42,7 @@
   {{$st := print .State}}
   <div class="dle">
     <div class="dle-head">
-      <a class="dle-name" href="/dles/{{.Name}}">{{.Name}}</a>
+      <a class="dle-name" href="/dles/{{.Slug}}">{{.Name}}</a>
       <span class="pill {{if eq $st "done"}}ok{{else if eq $st "failed"}}bad{{else if eq $st "canceled"}}warn{{else if or (eq $st "dumping") (eq $st "flushing")}}active{{else}}dim{{end}}">{{.State}}</span>
     </div>
     {{/* DUMP bar: source -> holding/landing, metered against the estimate. */}}

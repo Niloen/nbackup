@@ -44,7 +44,7 @@ func keepEstimating(file progress.Sink) progress.Sink {
 func (c *Conductor) planProgress(items []planner.Item) []progress.Plan {
 	out := make([]progress.Plan, len(items))
 	for i, it := range items {
-		out[i] = progress.Plan{Name: it.DLE.ID(), Level: it.Level, EstBytes: it.EstBytes, Landings: c.d.LandingsFor(it)}
+		out[i] = progress.Plan{Name: it.DLE.ID(), Slug: it.DLE.Name(), Level: it.Level, EstBytes: it.EstBytes, Landings: c.d.LandingsFor(it)}
 	}
 	return out
 }

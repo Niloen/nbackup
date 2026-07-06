@@ -29,7 +29,7 @@ func (s *Scheduler) estimates(dles []config.DLE, sink progress.Sink) map[string]
 	if sink != nil {
 		rows := make([]progress.Plan, len(dles))
 		for i, d := range dles {
-			rows[i] = progress.Plan{Name: d.ID()}
+			rows[i] = progress.Plan{Name: d.ID(), Slug: d.Name()}
 		}
 		tr = progress.NewTracker("estimate", progress.PhaseEstimating, workers, rows, time.Now, sink)
 	}

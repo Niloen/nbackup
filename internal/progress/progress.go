@@ -53,6 +53,7 @@ const (
 // DLE is the live progress of a single planned dump.
 type DLE struct {
 	Name      string   `json:"name"`
+	Slug      string   `json:"slug,omitempty"` // internal filesystem-safe DLE id (DLE.Name()), for catalog/URL links
 	Level     int      `json:"level"`
 	State     State    `json:"state"`
 	EstBytes  int64    `json:"est_bytes"`          // planner estimate (uncompressed)

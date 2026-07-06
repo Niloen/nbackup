@@ -395,14 +395,19 @@ func TestReportPagination(t *testing.T) {
 // to its DLE too.
 func TestCrossLinks(t *testing.T) {
 	dir := t.TempDir()
+	// The snapshot names the DLE by its host:path identity (progress.DLE.Name) but
+	// carries the internal slug separately — the /dles link must use the slug, not
+	// the unescaped host:path.
 	progress.NewFileSink(dir, time.Now)(progress.Snapshot{
 		RunID: "run-2026-07-03.130000", Phase: progress.PhaseRunning, Workers: 1,
-		DLEs: []progress.DLE{{Name: "local", State: progress.StateDumping, EstBytes: 1000, DoneBytes: 500}},
+		DLEs: []progress.DLE{{Name: "localhost:/src", Slug: "local", State: progress.StateDumping, EstBytes: 1000, DoneBytes: 500}},
 	}, true)
 	h := NewServer(sampleSource(), dir).Handler()
 
 	if _, body := get(t, h, "/status"); !strings.Contains(body, `href="/dles/local"`) {
 		t.Errorf("/status per-DLE row missing link to /dles/local:\n%s", body)
+	} else if strings.Contains(body, `href="/dles/localhost:/src"`) {
+		t.Errorf("/status per-DLE row linked to the unsluggified host:path:\n%s", body)
 	}
 	if _, body := get(t, h, "/runs/run-2026-07-03.120000"); !strings.Contains(body, `href="/dles/local"`) {
 		t.Errorf("/runs/<id> archive missing link to its DLE:\n%s", body)

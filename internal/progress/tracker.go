@@ -11,6 +11,7 @@ import (
 // package depending on the planner.
 type Plan struct {
 	Name     string
+	Slug     string // internal filesystem-safe DLE id (DLE.Name()), for catalog/URL links
 	Level    int
 	EstBytes int64
 	Landings []string // the DLE's landing route, primary first; empty = a single unnamed landing
@@ -46,7 +47,7 @@ func NewTracker(runID string, phase Phase, workers int, plan []Plan, now func() 
 	start := now()
 	dles := make([]DLE, len(plan))
 	for i, p := range plan {
-		dles[i] = DLE{Name: p.Name, Level: p.Level, State: StatePending, EstBytes: p.EstBytes, Landings: p.Landings}
+		dles[i] = DLE{Name: p.Name, Slug: p.Slug, Level: p.Level, State: StatePending, EstBytes: p.EstBytes, Landings: p.Landings}
 	}
 	byName(dles)
 	idx := make(map[string]int, len(dles))
