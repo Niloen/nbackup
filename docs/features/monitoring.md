@@ -218,6 +218,40 @@ their last-backup age. Unset, no staleness verdict is made — there is no
 default window, because only you know whether your cadence is nightly or
 weekly.
 
+## Prometheus metrics (`nb web`)
+
+If you already run Prometheus, [`nb web`](web) exposes a **`/metrics`** endpoint on
+its port (default `:8080`) in the standard text exposition format — point-in-time
+gauges read from the catalog on each scrape, so there is no daemon, no registry, and
+no extra dependency. Scrape it like any other target:
+
+```yaml
+scrape_configs:
+  - job_name: nbackup
+    static_configs:
+      - targets: ["backup-host:8080"]
+```
+
+Every metric is a gauge, prefixed `nbackup_`, with timestamps as unix seconds:
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `nbackup_last_run_success` | `command` | 1 if the most recent run of that command succeeded, 0 if it failed |
+| `nbackup_last_run_timestamp_seconds` | `command` | when that run finished |
+| `nbackup_last_run_duration_seconds` | `command` | how long it took |
+| `nbackup_dle_last_backup_timestamp_seconds` | `dle` | each DLE's newest archive (absent if never backed up) |
+| `nbackup_dle_count` | — | configured DLEs |
+| `nbackup_dle_stale_count` | — | DLEs overdue against the `staleness:` window (only when that SLO is set) |
+| `nbackup_drill_overdue_count` | — | DLEs not covered by a passing drill within the drill window |
+| `nbackup_drill_failing_count` | — | DLEs whose most recent drill failed |
+| `nbackup_medium_used_bytes` | `medium` | bytes stored on a medium |
+| `nbackup_medium_capacity_bytes` | `medium` | a bounded medium's capacity (absent for an unbounded medium) |
+
+A backup that "silently stopped" shows up three ways: `nbackup_last_run_success` goes
+to 0, `time() - nbackup_dle_last_backup_timestamp_seconds` climbs, and (with a
+`staleness:` window) `nbackup_dle_stale_count` rises — any of which makes a clean
+alerting rule. The endpoint is read-only and never errors, even on an empty catalog.
+
 ## A hands-off cron line
 
 ```sh

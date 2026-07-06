@@ -21,9 +21,11 @@ import (
 // engine. That it need implement only these read methods is the read-only guarantee
 // made concrete: there is no write verb to stub.
 type fakeSource struct {
-	runs  []*catalog.Run
-	media []engine.MediumInfo
-	usage []catalog.UsageSample // the canned ledger the medium page's chart draws
+	runs            []*catalog.Run
+	media           []engine.MediumInfo
+	usage           []catalog.UsageSample // the canned ledger the medium page's chart draws
+	stale           []catalog.StaleDLE    // overdue DLEs the staleness SLO reports
+	staleConfigured bool                  // whether the staleness SLO is set at all
 }
 
 func (f fakeSource) Runs() []*catalog.Run { return f.runs }
@@ -128,6 +130,10 @@ func (f fakeSource) DLENames() []string {
 
 func (f fakeSource) DrillWindow() time.Duration { return 30 * 24 * time.Hour }
 
+func (f fakeSource) StaleDLEs(now time.Time) ([]catalog.StaleDLE, bool) {
+	return f.stale, f.staleConfigured
+}
+
 // DLESummaries aggregates the fake's runs per DLE, mirroring catalog.DLESummaries
 // closely enough to render the DLE pages (every archive here is on "disk").
 func (f fakeSource) DLESummaries() []catalog.DLESummary {
@@ -144,6 +150,9 @@ func (f fakeSource) DLESummaries() []catalog.DLESummary {
 			s.Runs++
 			s.Bytes += a.Compressed
 			s.LastLevel = a.Level
+			if a.CreatedAt.After(s.LastBackupAt) {
+				s.LastBackupAt = a.CreatedAt
+			}
 			if a.Level == 0 {
 				s.LastFull = r.Date()
 			}
@@ -412,7 +421,7 @@ func TestUnknownPath404(t *testing.T) {
 
 func TestEmptyCatalog(t *testing.T) {
 	h := NewServer(fakeSource{}, t.TempDir()).Handler()
-	for _, p := range []string{"/", "/runs", "/dles", "/media", "/drills", "/report", "/status"} {
+	for _, p := range []string{"/", "/runs", "/dles", "/media", "/drills", "/report", "/status", "/metrics"} {
 		if code, _ := get(t, h, p); code != http.StatusOK {
 			t.Errorf("%s: code=%d, want 200 on an empty catalog", p, code)
 		}
@@ -434,4 +443,134 @@ func TestLiveStatusRenders(t *testing.T) {
 	if !strings.Contains(body, "run-2026-07-03.130000") || !strings.Contains(body, "50%") {
 		t.Errorf("status page missing live run or 50%% progress:\n%s", body)
 	}
+}
+
+// TestHomeRollupRedFlags seeds one instance of each broken-thing the "attention
+// needed" rollup surfaces — a failed run, a failing drill, a stale DLE, and a medium
+// over capacity — and asserts each renders as an alert (and the all-clear does not).
+func TestHomeRollupRedFlags(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+
+	if err := report.Append(dir, report.Run{
+		Command: report.CommandDump, Outcome: report.OutcomeFailure, ExitClass: "dump-failed",
+		Error: "tar exited 2", RunID: "run-2026-07-05.020000",
+		StartedAt: now.Add(-time.Hour), EndedAt: now.Add(-time.Hour).Add(2 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ledger := &drill.Ledger{}
+	ledger.Update(drill.Record{
+		DLE: "local", LastDrill: now.Add(-24 * time.Hour), Tier: "chain", Medium: "disk",
+		OK: false, Class: "pipeline", Detail: "gpg: decryption failed",
+	})
+	if err := ledger.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	src := sampleSource() // exposes DLE "local" and medium "disk"
+	src.staleConfigured = true
+	src.stale = []catalog.StaleDLE{{DLE: "local", Display: "localhost:/src", LastBackup: now.Add(-72 * time.Hour)}}
+	src.media = append(src.media, engine.MediumInfo{Name: "vault", Type: "disk", Used: 100, Capacity: 50})
+
+	_, body := get(t, NewServer(src, dir).Handler(), "/")
+	for _, want := range []string{
+		"last dump failed",                 // failed-run alert
+		"dump-failed",                      // exit-class detail
+		"recovery drill failing for local", // failing drill (DisplayDLE)
+		"last backed up",                   // stale DLE (localhost:/src, 3d ago)
+		"vault is full",                    // medium over capacity
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/ rollup missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "all clear") {
+		t.Errorf("/ rollup shows the all-clear line despite red flags:\n%s", body)
+	}
+}
+
+// TestHomeRollupAllClear checks that a healthy catalog — a successful last run, no
+// configured DLEs (so no drill/stale gaps), no bounded medium over capacity — shows
+// the single quiet all-clear line and no alert rows.
+func TestHomeRollupAllClear(t *testing.T) {
+	dir := t.TempDir()
+	if err := report.Append(dir, report.Run{
+		Command: report.CommandDump, Outcome: report.OutcomeSuccess, RunID: "run-2026-07-05.020000",
+		StartedAt: time.Now().Add(-time.Hour), EndedAt: time.Now().Add(-time.Hour).Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, body := get(t, NewServer(fakeSource{}, dir).Handler(), "/")
+	if !strings.Contains(body, "all clear") {
+		t.Errorf("/ rollup missing the all-clear line on a healthy catalog:\n%s", body)
+	}
+	if strings.Contains(body, `class="alert bad"`) || strings.Contains(body, `class="alert warn"`) {
+		t.Errorf("/ rollup shows alert rows on a healthy catalog:\n%s", body)
+	}
+}
+
+// TestMetrics exercises the /metrics exposition: family headers, per-command run
+// gauges, per-DLE freshness, drill/stale counts, medium capacity (omitted when
+// unbounded), and Prometheus label-value escaping.
+func TestMetrics(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	if err := report.Append(dir, report.Run{
+		Command: report.CommandDump, Outcome: report.OutcomeSuccess, RunID: "run-2026-07-05.020000",
+		StartedAt: now.Add(-10 * time.Minute), EndedAt: now.Add(-8 * time.Minute), // 120s
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := report.Append(dir, report.Run{
+		Command: report.CommandSync, Outcome: report.OutcomeFailure, ExitClass: "sync-error",
+		StartedAt: now.Add(-5 * time.Minute), EndedAt: now.Add(-4 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	src := sampleSource() // DLE "local" (last-backup set); medium "disk" 200kB/10GiB
+	src.staleConfigured = true
+	src.stale = []catalog.StaleDLE{{DLE: "local"}}
+	src.media = append(src.media, engine.MediumInfo{Name: `a"b\c`, Type: "disk", Used: 1}) // unbounded + escapable name
+
+	code, body := get(t, NewServer(src, dir).Handler(), "/metrics")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d, want 200", code)
+	}
+	for _, want := range []string{
+		"# HELP nbackup_last_run_success",
+		"# TYPE nbackup_last_run_success gauge",
+		`nbackup_last_run_success{command="dump"} 1`,
+		`nbackup_last_run_success{command="sync"} 0`,
+		`nbackup_last_run_timestamp_seconds{command="dump"} `,
+		`nbackup_last_run_duration_seconds{command="dump"} 120`,
+		`nbackup_dle_last_backup_timestamp_seconds{dle="local"} `,
+		"nbackup_dle_count 1",
+		"nbackup_dle_stale_count 1",
+		"nbackup_drill_overdue_count 1", // "local" is never drilled
+		"nbackup_drill_failing_count 0",
+		`nbackup_medium_used_bytes{medium="disk"} 200000`,
+		`nbackup_medium_capacity_bytes{medium="disk"} `,
+		`nbackup_medium_used_bytes{medium="a\"b\\c"} 1`, // label escaping
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics missing %q\n---\n%s", want, body)
+		}
+	}
+	// An unbounded medium emits no capacity series (0 = unbounded, omitted).
+	if strings.Contains(body, `nbackup_medium_capacity_bytes{medium="a\"b\\c"}`) {
+		t.Errorf("/metrics emitted a capacity series for an unbounded medium:\n%s", body)
+	}
+	// Content type carries the exposition-format version.
+	if ct := metricsContentType(t, NewServer(src, dir).Handler()); !strings.Contains(ct, "version=0.0.4") {
+		t.Errorf("/metrics Content-Type = %q, want version=0.0.4", ct)
+	}
+}
+
+func metricsContentType(t *testing.T, h http.Handler) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	return rec.Header().Get("Content-Type")
 }

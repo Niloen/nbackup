@@ -2,6 +2,22 @@
 {{$d := .Data}}
 <h1>Overview</h1>
 
+{{if $d.Alerts}}
+<div class="alerts" style="margin-bottom:1rem">
+  {{range $d.Alerts}}
+  <a class="alert {{.Level}}" href="{{.Href}}">
+    <span class="pill {{.Level}}">{{.Tag}}</span>
+    <span>{{.Text}}</span>
+  </a>
+  {{end}}
+</div>
+{{else}}
+<div class="panel allclear" style="margin-bottom:1rem">
+  <span class="pill ok">all clear</span>
+  <span class="muted">No failed runs, stale sources, capacity limits, or drill problems.</span>
+</div>
+{{end}}
+
 {{with $d.Live}}
 <div class="panel" style="margin-bottom:1rem">
   <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:.5rem;align-items:baseline">

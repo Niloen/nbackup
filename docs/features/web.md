@@ -53,13 +53,39 @@ changes on disk, so the browser always sees the latest state.
 
 | Page | What it shows |
 |---|---|
-| **Overview** (`/`) | Run count, total bytes, media summary, the last dump, and a banner while a run is in flight (auto-refreshing). |
+| **Overview** (`/`) | An **attention-needed rollup** at the top (see below), then run count, total bytes, media summary, the last dump, and a banner while a run is in flight (auto-refreshing). |
 | **Runs** (`/runs`, `/runs/<id>`) | Every run newest-first with its copies; a run detail lists its archives and each copy's medium/label. |
 | **DLEs** (`/dles`, `/dles/<slug>`) | One row per backup source, and a per-DLE archive timeline across runs. |
 | **Media** (`/media`, `/media/<name>`) | Capacity utilization per medium; a medium detail adds the full/incremental split, a growth projection, and a **used-capacity-over-time chart** — the browser view of `nb medium <name>`. |
 | **Drills** (`/drills`) | The recovery-drill coverage rollup and per-DLE ledger (what each DLE's last drill tested, against which copy, how much it read, pass/fail), plus recent drill runs. |
 | **History** (`/report`) | The recent run history — the browser view of `nb report`. |
 | **Status** (`/status`) | The live run's progress, auto-refreshing while a run is running. |
+
+## The attention-needed rollup
+
+The overview leads with a rollup of everything that needs a look, so the page is
+**glanceable-all-green** — when nothing is wrong it collapses to a single quiet
+_"all clear"_ line. Each alert is a row linking straight to the detail page for the
+problem:
+
+- **failed** — the most recent run of a command that ended in failure (last dump
+  failed, last sync failed), linking to that run (or the history).
+- **drill failing** — a DLE whose most recent recovery drill failed, and a **drill
+  overdue** count for DLEs never drilled or past the drill window (the same coverage
+  the [Drills](#pages) page computes).
+- **stale** — a DLE overdue against the [`staleness:`](monitoring#staleness-is-anything-falling-behind)
+  window (shown only when that SLO is configured).
+- **over capacity** — a bounded medium whose used bytes have reached its capacity.
+
+Red rows (a failure) sort above amber ones (a warning).
+
+## Prometheus metrics (`/metrics`)
+
+`nb web` also serves a **`/metrics`** endpoint in the Prometheus text exposition
+format (`text/plain; version=0.0.4`) on the same port — point-in-time gauges read
+from the catalog on each scrape (no daemon, no registry, no extra dependency). See
+[Monitoring → Prometheus metrics](monitoring#prometheus-metrics-nb-web) for the
+metric list and a `scrape_config` snippet.
 
 ## Security
 

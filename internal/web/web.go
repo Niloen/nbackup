@@ -10,6 +10,7 @@ package web
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -37,6 +38,10 @@ type Source interface {
 	DLESummaries() []catalog.DLESummary
 	DLENames() []string         // configured DLE slugs, for drill coverage (never-drilled)
 	DrillWindow() time.Duration // the configured drill coverage window
+	// StaleDLEs reports the DLEs overdue against the staleness SLO as of now, plus
+	// whether the SLO is configured at all — false means "no staleness window set",
+	// so the caller shows and scrapes nothing (distinct from "configured, none stale").
+	StaleDLEs(now time.Time) (stale []catalog.StaleDLE, configured bool)
 }
 
 // Server renders the status pages from a Source plus the catalog workdir, where the
@@ -66,6 +71,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/drills", s.handleDrills)
 	mux.HandleFunc("/report", s.handleReport)
 	mux.HandleFunc("/status", s.handleStatus)
+	mux.HandleFunc("/metrics", s.handleMetrics) // Prometheus text exposition (metrics.go)
 	return mux
 }
 
@@ -114,12 +120,20 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	for _, run := range runs {
 		total += run.TotalBytes()
 	}
-	hist := s.history(12)
+	// The rollup keys off the most recent run of *each* command, which a fixed recent
+	// window could miss (many dumps can bury the last sync), so it reads the full
+	// history; the "recent activity" table below shows only the newest slice.
+	histAll := s.history(0)
+	hist := histAll
+	if len(hist) > 12 {
+		hist = hist[:12]
+	}
 	// The status file persists after a run finishes (phase done/failed/canceled), so
 	// the "run in progress" banner is shown only for a genuinely in-flight run — a
 	// completed run is already summarized by the "last backup" card and the runs list.
 	data := homeData{
 		Live:       s.inProgress(),
+		Alerts:     s.rollup(s.now(), histAll),
 		RunCount:   len(runs),
 		TotalBytes: total,
 		Media:      s.src.Media(),
@@ -309,10 +323,7 @@ func (s *Server) handleDrills(w http.ResponseWriter, r *http.Request) {
 	window := s.src.DrillWindow()
 	data := drillsData{Window: sizeutil.FormatDuration(window)}
 
-	ledger, err := drill.Load(s.workdir)
-	if err != nil {
-		ledger = &drill.Ledger{} // unreadable ledger renders as never-drilled, not a 500
-	}
+	ledger := s.drillLedger()
 	never, overdue := ledger.Coverage(s.src.DLENames(), window, now)
 	data.Overdue = overdue
 	for _, slug := range never {
@@ -443,6 +454,144 @@ func lastDump(hist []report.Run) *report.Run {
 		}
 	}
 	return nil
+}
+
+// rollup gathers the home page's "attention needed" alerts from the same read-only
+// data the detail pages render — no new state, just an aggregation: the most recent
+// run of each command that failed, media at or past capacity, drill failures and
+// coverage gaps, and DLEs overdue against the staleness SLO. hist is the full
+// history, newest-first. Red (bad) alerts sort before amber (warn) ones; an empty
+// result is the glanceable all-clear the template renders as a single quiet line.
+func (s *Server) rollup(now time.Time, hist []report.Run) []alert {
+	var bad, warn []alert
+
+	// The most recent run of each command, flagged when it failed.
+	for _, run := range lastPerCommand(hist) {
+		if !run.Failed() {
+			continue
+		}
+		bad = append(bad, alert{Level: "bad", Tag: "failed",
+			Text: fmt.Sprintf("last %s failed%s", run.Command, exitDetail(run)),
+			Href: runHref(run)})
+	}
+
+	// Media at or past a bounded capacity (a sync/copy can land runs over).
+	for _, m := range s.src.Media() {
+		if m.Capacity > 0 && m.Used >= m.Capacity {
+			bad = append(bad, alert{Level: "bad", Tag: "over capacity",
+				Text: fmt.Sprintf("%s is full — %s of %s used", m.Name, sizeutil.FormatBytes(m.Used), sizeutil.FormatBytes(m.Capacity)),
+				Href: "/media/" + m.Name})
+		}
+	}
+
+	// Recovery-drill health: a failing drill is red and named; the remaining coverage
+	// gap (never-drilled or stale) is a single amber count linking to the drills page.
+	dh := s.drillHealth(now)
+	for _, f := range dh.Failing {
+		bad = append(bad, alert{Level: "bad", Tag: "drill failing",
+			Text: "recovery drill failing for " + f.Display,
+			Href: "/dles/" + f.Slug})
+	}
+	if gap := dh.Overdue - len(dh.Failing); gap > 0 {
+		warn = append(warn, alert{Level: "warn", Tag: "drill overdue",
+			Text: fmt.Sprintf("%d DLE(s) overdue for a recovery drill", gap),
+			Href: "/drills"})
+	}
+
+	// Stale DLEs — only when the staleness SLO is configured.
+	if stale, ok := s.src.StaleDLEs(now); ok {
+		for _, d := range stale {
+			warn = append(warn, alert{Level: "warn", Tag: "stale",
+				Text: staleText(d, now), Href: "/dles/" + d.DLE})
+		}
+	}
+
+	return append(bad, warn...)
+}
+
+// drillHealth is the shared drill-coverage summary the home rollup and /metrics both
+// read, computed once from the ledger's own Coverage so neither reimplements it.
+type drillHealth struct {
+	Overdue int       // configured DLEs not covered within the window (never-drilled, stale, or failing)
+	Failing []dleLink // DLEs whose most recent drill failed, sorted by display name
+}
+
+// drillHealth loads the recoverability ledger and classifies it against the drill
+// window as of now, reusing the same Coverage the /drills page computes.
+func (s *Server) drillHealth(now time.Time) drillHealth {
+	ledger := s.drillLedger()
+	_, overdue := ledger.Coverage(s.src.DLENames(), s.src.DrillWindow(), now)
+	h := drillHealth{Overdue: overdue}
+	for _, rec := range ledger.Sorted() {
+		if !rec.OK {
+			h.Failing = append(h.Failing, dleLink{Slug: rec.DLE, Display: s.src.DisplayDLE(rec.DLE)})
+		}
+	}
+	sort.Slice(h.Failing, func(i, j int) bool { return h.Failing[i].Display < h.Failing[j].Display })
+	return h
+}
+
+// drillLedger loads the recoverability ledger from the workdir, treating an
+// unreadable ledger as empty (never-drilled) rather than an error — the same
+// tolerance /drills applies, so a missing ledger never 500s a page or scrape.
+func (s *Server) drillLedger() *drill.Ledger {
+	ledger, err := drill.Load(s.workdir)
+	if err != nil {
+		return &drill.Ledger{}
+	}
+	return ledger
+}
+
+// lastPerCommand returns the most recent run of each command from a newest-first
+// history, sorted by command name so the rollup and /metrics emit a stable order.
+func lastPerCommand(hist []report.Run) []report.Run {
+	seen := map[report.Command]bool{}
+	var out []report.Run
+	for i := range hist {
+		if seen[hist[i].Command] {
+			continue
+		}
+		seen[hist[i].Command] = true
+		out = append(out, hist[i])
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Command < out[j].Command })
+	return out
+}
+
+// exitDetail is the short parenthetical the rollup appends to a failed-run alert —
+// the stable exit class when one was recorded, nothing otherwise (the full error is
+// one click away on the linked page).
+func exitDetail(r report.Run) string {
+	if r.ExitClass != "" {
+		return " (" + r.ExitClass + ")"
+	}
+	return ""
+}
+
+// runHref points a failed-run alert at the most specific page: the run itself when
+// it sealed one, the drills page for a drill (which seals no run), else the history.
+func runHref(r report.Run) string {
+	switch {
+	case r.RunID != "":
+		return "/runs/" + r.RunID
+	case r.Command == report.CommandDrill:
+		return "/drills"
+	default:
+		return "/report"
+	}
+}
+
+// staleText renders a stale DLE for the rollup: its identity plus how overdue it is,
+// or "never been backed up" for a DLE the catalog has no archive for.
+func staleText(d catalog.StaleDLE, now time.Time) string {
+	name := d.Display
+	if name == "" {
+		name = d.DLE
+	}
+	if d.LastBackup.IsZero() {
+		return name + " has never been backed up"
+	}
+	return fmt.Sprintf("%s last backed up %s ago", name, sizeutil.FormatDuration(now.Sub(d.LastBackup)))
 }
 
 // render executes a page template inside the shared layout. It buffers first so a

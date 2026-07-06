@@ -28,11 +28,24 @@ type page struct {
 // homeData backs the overview page.
 type homeData struct {
 	Live       *statusView         // a run in progress, or nil at rest
+	Alerts     []alert             // "attention needed" rollup; empty ⇒ the all-clear line
 	LastDump   *report.Run         // most recent dump record, for the headline card
 	RunCount   int                 // runs in the catalog
 	TotalBytes int64               // cataloged bytes across all runs
 	Media      []engine.MediumInfo // per-medium capacity summary
 	History    []report.Run        // recent activity, newest-first
+}
+
+// alert is one row of the home "attention needed" rollup: a severity Level driving
+// the pill/border color ("bad" red | "warn" amber), a short Tag naming the category,
+// a one-line Text, and the detail page it links to. It carries no logic — the rollup
+// computes it and the template renders it — so the visual stays consistent with the
+// status pills the drills page already uses.
+type alert struct {
+	Level string // "bad" | "warn"
+	Tag   string // short category label shown as a pill (e.g. "failed", "stale")
+	Text  string
+	Href  string
 }
 
 // statusView is a live snapshot with its run-level rollups pre-computed: the DLE

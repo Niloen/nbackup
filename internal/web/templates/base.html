@@ -47,6 +47,18 @@
   .pill.dim { background: var(--line); color: var(--muted); }
   .bar { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; margin-top: .35rem; }
   .bar > span { display: block; height: 100%; background: var(--accent); }
+  /* "Attention needed" rollup on the overview: alert rows and the all-clear line.
+     A stacked list so it never scrolls sideways on a phone; each row is a link with
+     a leading category pill, its left border tinted to the severity for a glance. */
+  .alerts { display: flex; flex-direction: column; gap: .4rem; }
+  .alert { display: flex; align-items: center; gap: .6rem; padding: .5rem .7rem;
+    background: var(--panel); border: 1px solid var(--line); border-left-width: 3px;
+    border-radius: 8px; color: var(--fg); text-decoration: none; }
+  .alert:hover { background: var(--line); }
+  .alert.bad { border-left-color: var(--bad); }
+  .alert.warn { border-left-color: var(--warn); }
+  .alert .pill { flex: none; }
+  .allclear { display: flex; align-items: center; gap: .6rem; }
   /* Live per-DLE progress: a stacked list, not a table, so it never scrolls sideways
      on a phone — each DLE gets a full-width bar and its name truncates rather than
      forcing horizontal overflow. */
