@@ -180,31 +180,18 @@ func TestCheckMissingCompressorIsOneLineWithRemedy(t *testing.T) {
 	}
 }
 
-// TestCheckStalenessUnsetIsSilent pins the opt-in default: with no `staleness.window`
-// configured, `nb check` says nothing about staleness even though the one DLE here
-// has no archive at all — the config's Staleness field doc explains why there is no
-// non-zero default.
-func TestCheckStalenessUnsetIsSilent(t *testing.T) {
-	eng := newCheckEngine(t, []config.DLE{{Host: "localhost", Path: t.TempDir()}})
-
-	rep := &CheckReport{}
-	(&checker{cfg: eng.cfg, tc: eng.tc, dep: eng.dep, cat: eng.cat}).checkStaleness(rep)
-	if len(rep.Server) != 0 {
-		t.Errorf("checkStaleness with no window configured should report nothing, got %+v", rep.Server)
-	}
-}
-
-// TestCheckStalenessFailsPastWindow pins the exit-code path: a configured
-// `staleness.window` turns "DLE not backed up in N days" (and "never backed up at
-// all") into hard check failures, the same class of failure as an unreachable host
-// — `nb check` is what cron already gates on, so a stale DLE should trip it too.
-func TestCheckStalenessFailsPastWindow(t *testing.T) {
+// TestCheckStalenessAlwaysOnDerivesFromCycle pins the zero-config exit-code path: the
+// staleness window derives from the dump cycle (no top-level config key), a DLE
+// older than one cycle is a hard FAILURE, a never-backed-up DLE is only a WARNING
+// (a fresh install must not go red before its first dump), and a DLE within the
+// cycle is not reported at all.
+func TestCheckStalenessAlwaysOnDerivesFromCycle(t *testing.T) {
 	eng := newCheckEngine(t, []config.DLE{
 		{Host: "localhost", Path: "/stale"},
 		{Host: "localhost", Path: "/never"},
 		{Host: "localhost", Path: "/fresh"},
 	})
-	eng.cfg.Staleness.Window = "1d"
+	eng.cfg.Cycle = "1d"
 
 	old := time.Now().Add(-48 * time.Hour)
 	fresh := time.Now().Add(-1 * time.Hour)
@@ -220,16 +207,40 @@ func TestCheckStalenessFailsPastWindow(t *testing.T) {
 
 	rep := &CheckReport{}
 	(&checker{cfg: eng.cfg, tc: eng.tc, dep: eng.dep, cat: eng.cat}).checkStaleness(rep)
-	if rep.Failures != 2 {
-		t.Fatalf("checkStaleness Failures = %d, want 2 (stale + never): %+v", rep.Failures, rep.Server)
+	if rep.Failures != 1 {
+		t.Fatalf("checkStaleness Failures = %d, want 1 (the overdue DLE): %+v", rep.Failures, rep.Server)
 	}
-	if !anyMsg(rep.Server, "localhost:/stale") || !anyMsg(rep.Server, "last backed up") {
-		t.Errorf("expected a last-backed-up line for the stale DLE: %+v", rep.Server)
+	if rep.Warnings != 1 {
+		t.Fatalf("checkStaleness Warnings = %d, want 1 (the never-backed-up DLE): %+v", rep.Warnings, rep.Server)
+	}
+	if !anyMsg(rep.Server, "localhost:/stale") || !anyMsg(rep.Server, "last backed up") || !anyMsg(rep.Server, "cycle") {
+		t.Errorf("expected a last-backed-up line mentioning the cycle for the stale DLE: %+v", rep.Server)
 	}
 	if !anyMsg(rep.Server, "localhost:/never") || !anyMsg(rep.Server, "never been backed up") {
 		t.Errorf("expected a never-backed-up line: %+v", rep.Server)
 	}
 	if anyMsg(rep.Server, "localhost:/fresh") {
 		t.Errorf("the freshly backed up DLE should not be reported: %+v", rep.Server)
+	}
+}
+
+// TestCheckStalenessAllCurrent pins the all-clear line, which must always run
+// (there is no way to disable the check).
+func TestCheckStalenessAllCurrent(t *testing.T) {
+	eng := newCheckEngine(t, []config.DLE{{Host: "localhost", Path: "/fresh"}})
+	fresh := time.Now().Add(-time.Hour)
+	arch := record.Archive{Run: record.IDFromTime(fresh), DLE: config.DLE{Host: "localhost", Path: "/fresh"}.Name(), Level: 0, Compressed: 10, CreatedAt: fresh}
+	pos := archiveio.ArchivePos{Parts: []archiveio.FilePos{{Label: "disk", Pos: 1}}, Commit: archiveio.FilePos{Label: "disk", Pos: 2}}
+	if err := eng.cat.AddArchive(arch, "disk", pos); err != nil {
+		t.Fatal(err)
+	}
+
+	rep := &CheckReport{}
+	(&checker{cfg: eng.cfg, tc: eng.tc, dep: eng.dep, cat: eng.cat}).checkStaleness(rep)
+	if rep.Failures != 0 || rep.Warnings != 0 {
+		t.Fatalf("checkStaleness = %+v, want no failures/warnings", rep)
+	}
+	if !anyMsg(rep.Server, "one cycle") {
+		t.Errorf("expected an all-clear line mentioning the cycle: %+v", rep.Server)
 	}
 }

@@ -21,11 +21,10 @@ import (
 // engine. That it need implement only these read methods is the read-only guarantee
 // made concrete: there is no write verb to stub.
 type fakeSource struct {
-	runs            []*catalog.Run
-	media           []engine.MediumInfo
-	usage           []catalog.UsageSample // the canned ledger the medium page's chart draws
-	stale           []catalog.StaleDLE    // overdue DLEs the staleness SLO reports
-	staleConfigured bool                  // whether the staleness SLO is set at all
+	runs  []*catalog.Run
+	media []engine.MediumInfo
+	usage []catalog.UsageSample // the canned ledger the medium page's chart draws
+	stale []catalog.StaleDLE    // overdue DLEs against the dump cycle
 }
 
 func (f fakeSource) Runs() []*catalog.Run { return f.runs }
@@ -130,9 +129,7 @@ func (f fakeSource) DLENames() []string {
 
 func (f fakeSource) DrillWindow() time.Duration { return 30 * 24 * time.Hour }
 
-func (f fakeSource) StaleDLEs(now time.Time) ([]catalog.StaleDLE, bool) {
-	return f.stale, f.staleConfigured
-}
+func (f fakeSource) StaleDLEs(now time.Time) []catalog.StaleDLE { return f.stale }
 
 // DLESummaries aggregates the fake's runs per DLE, mirroring catalog.DLESummaries
 // closely enough to render the DLE pages (every archive here is on "disk").
@@ -469,7 +466,6 @@ func TestHomeRollupRedFlags(t *testing.T) {
 	}
 
 	src := sampleSource() // exposes DLE "local" and medium "disk"
-	src.staleConfigured = true
 	src.stale = []catalog.StaleDLE{{DLE: "local", Display: "localhost:/src", LastBackup: now.Add(-72 * time.Hour)}}
 	src.media = append(src.media, engine.MediumInfo{Name: "vault", Type: "disk", Used: 100, Capacity: 50})
 
@@ -530,7 +526,6 @@ func TestMetrics(t *testing.T) {
 	}
 
 	src := sampleSource() // DLE "local" (last-backup set); medium "disk" 200kB/10GiB
-	src.staleConfigured = true
 	src.stale = []catalog.StaleDLE{{DLE: "local"}}
 	src.media = append(src.media, engine.MediumInfo{Name: `a"b\c`, Type: "disk", Used: 1}) // unbounded + escapable name
 

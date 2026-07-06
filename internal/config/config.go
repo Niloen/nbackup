@@ -120,15 +120,6 @@ type Config struct {
 	// `nb dump && nb sync && nb drill --unattended`.
 	Drill DrillConfig `yaml:"drill,omitempty"`
 
-	// Staleness configures the "DLE not backed up in N days" alert surfaced by
-	// `nb report` and gated on by `nb check`. It mirrors the drill block's shape,
-	// but — unlike DrillWindow — has no non-zero default: nb dump attempts every
-	// configured DLE on every run (there is no per-DLE schedule to derive a window
-	// from), so an unset window means "the operator hasn't asked for this SLO" and
-	// the check stays silent rather than guessing a threshold that could false-alarm
-	// on a legitimately irregular cron cadence.
-	Staleness StalenessConfig `yaml:"staleness,omitempty"`
-
 	// Notify configures unattended alerting: which channels fire on a run's
 	// failure/success, and which receive `nb report --notify` digests. It is what
 	// makes a cron-driven backup loud — a failed dump/sync/verify/drill reaches a
@@ -198,12 +189,6 @@ type DrillConfig struct {
 	Tier       string `yaml:"tier,omitempty"`       // checksum | structural | chain | stock (default structural)
 	Worm       bool   `yaml:"worm,omitempty"`       // run the WORM/immutability probe
 	Unattended bool   `yaml:"unattended,omitempty"` // cron mode: never prompt; skip swap-needing targets
-}
-
-// StalenessConfig is the `staleness:` block: how long a DLE may go without a
-// successful backup (at any level) before `nb report`/`nb check` flag it.
-type StalenessConfig struct {
-	Window string `yaml:"window,omitempty"` // each DLE backed up within this window (default: disabled)
 }
 
 // NotifyConfig is the `notify:` block: a set of named backends plus per-outcome
@@ -291,24 +276,6 @@ func (c *Config) DrillSample() int {
 		return c.Drill.Sample
 	}
 	return DefaultDrillSample
-}
-
-// StalenessWindow returns the configured staleness window and whether the alert is
-// enabled. Unlike DrillWindow, there is no non-zero default — see the Staleness
-// field's doc for why — so an unset `staleness.window` reports (0, false) and
-// callers skip the check entirely rather than falling back to a guessed duration.
-// Validate (via validateStaleness) already parsed and accepted any non-empty
-// Staleness.Window, so the parse here cannot fail; a non-positive window is not
-// rejected up-front, though, so it still falls back to disabled.
-func (c *Config) StalenessWindow() (time.Duration, bool) {
-	if c.Staleness.Window == "" {
-		return 0, false
-	}
-	d, _ := sizeutil.ParseDuration(c.Staleness.Window)
-	if d > 0 {
-		return d, true
-	}
-	return 0, false
 }
 
 // DrillTierName returns the configured drill tier token, defaulting to

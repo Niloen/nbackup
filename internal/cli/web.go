@@ -246,12 +246,8 @@ func (e *engineSource) DLENames() []string { return e.engine().DLENames() }
 
 func (e *engineSource) DrillWindow() time.Duration { return e.cfg.DrillWindow() }
 
-// StaleDLEs resolves the staleness SLO from config: unset ⇒ (nil, false) so the web
-// layer shows and scrapes nothing; otherwise the engine's overdue set as of now.
-func (e *engineSource) StaleDLEs(now time.Time) ([]catalog.StaleDLE, bool) {
-	window, ok := e.cfg.StalenessWindow()
-	if !ok {
-		return nil, false
-	}
-	return e.engine().StaleDLEs(window, now), true
+// StaleDLEs reports the engine's overdue set as of now, using the dump cycle as the
+// freshness window — always on, no separate config.
+func (e *engineSource) StaleDLEs(now time.Time) []catalog.StaleDLE {
+	return e.engine().StaleDLEs(e.cfg.CycleDuration(), now)
 }

@@ -203,20 +203,16 @@ else: it execs your script (no shell) with `NB_COMMAND`, `NB_STATUS`, and
 ## Staleness: "is anything falling behind?"
 
 An alert on failed runs still misses the DLE that quietly stopped being backed
-up (removed from cron's reach, host renamed, forever-skipped). An opt-in
-`staleness:` window turns backup freshness into a hard verdict:
+up (removed from cron's reach, host renamed, forever-skipped). There is no
+separate config for this: [`cycle`](../reference/configuration#cycle) is
+already NBackup's freshness contract — "a full never ages past one cycle" — so
+`nb check` enforces it directly, with no key to set and nothing to get wrong.
 
-```yaml
-staleness:
-  window: 3d
-```
-
-With it set, `nb check` **fails** for any configured DLE whose newest backup
-(any level — an incremental counts) is older than the window, or that has never
-been backed up, and `nb report` and the nightly digest list the offenders with
-their last-backup age. Unset, no staleness verdict is made — there is no
-default window, because only you know whether your cadence is nightly or
-weekly.
+`nb check` **fails** for any configured DLE whose newest backup (any level —
+an incremental counts) is older than one cycle; a DLE that has **never** been
+backed up is a **warning** instead, so a fresh install isn't red before its
+first dump ever runs. `nb report` and the nightly digest list the same
+offenders with their last-backup age.
 
 ## Prometheus metrics (`nb web`)
 
@@ -241,16 +237,16 @@ Every metric is a gauge, prefixed `nbackup_`, with timestamps as unix seconds:
 | `nbackup_last_run_duration_seconds` | `command` | how long it took |
 | `nbackup_dle_last_backup_timestamp_seconds` | `dle` | each DLE's newest archive (absent if never backed up) |
 | `nbackup_dle_count` | — | configured DLEs |
-| `nbackup_dle_stale_count` | — | DLEs overdue against the `staleness:` window (only when that SLO is set) |
+| `nbackup_dle_stale_count` | — | DLEs overdue against one dump cycle (never backed up, or older than one cycle) |
 | `nbackup_drill_overdue_count` | — | DLEs not covered by a passing drill within the drill window |
 | `nbackup_drill_failing_count` | — | DLEs whose most recent drill failed |
 | `nbackup_medium_used_bytes` | `medium` | bytes stored on a medium |
 | `nbackup_medium_capacity_bytes` | `medium` | a bounded medium's capacity (absent for an unbounded medium) |
 
 A backup that "silently stopped" shows up three ways: `nbackup_last_run_success` goes
-to 0, `time() - nbackup_dle_last_backup_timestamp_seconds` climbs, and (with a
-`staleness:` window) `nbackup_dle_stale_count` rises — any of which makes a clean
-alerting rule. The endpoint is read-only and never errors, even on an empty catalog.
+to 0, `time() - nbackup_dle_last_backup_timestamp_seconds` climbs, and
+`nbackup_dle_stale_count` rises — any of which makes a clean alerting rule. The
+endpoint is read-only and never errors, even on an empty catalog.
 
 ## A hands-off cron line
 
@@ -262,10 +258,9 @@ This dumps, replicates offsite, trims each medium to its cycle/capacity budget,
 rehearses a recovery, and mails the nightly digest — every step recording its run
 summary and alerting on failure. `nb prune` with no medium named prunes every
 configured medium against its own retention, and runs after `nb sync` so nothing
-is reclaimed before it is replicated. With a `staleness:` window and a
-`healthcheck` backend configured, this one line also proves liveness (the pings)
-and freshness (`nb check`, run from cron or by hand, fails while any DLE is
-overdue).
+is reclaimed before it is replicated. Add `nb check` and, with a `healthcheck`
+backend configured, this one line also proves liveness (the pings) and
+freshness (`nb check` fails while any DLE is overdue against the cycle).
 
 ---
 

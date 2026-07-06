@@ -38,10 +38,11 @@ type Source interface {
 	DLESummaries() []catalog.DLESummary
 	DLENames() []string         // configured DLE slugs, for drill coverage (never-drilled)
 	DrillWindow() time.Duration // the configured drill coverage window
-	// StaleDLEs reports the DLEs overdue against the staleness SLO as of now, plus
-	// whether the SLO is configured at all — false means "no staleness window set",
-	// so the caller shows and scrapes nothing (distinct from "configured, none stale").
-	StaleDLEs(now time.Time) (stale []catalog.StaleDLE, configured bool)
+	// StaleDLEs reports the configured DLEs overdue against the dump cycle (or
+	// never backed up at all) as of now — always on, since the cycle is the
+	// existing freshness promise ("a full never ages past one cycle") and needs
+	// no separate config to enforce.
+	StaleDLEs(now time.Time) []catalog.StaleDLE
 }
 
 // Server renders the status pages from a Source plus the catalog workdir, where the
@@ -459,7 +460,7 @@ func lastDump(hist []report.Run) *report.Run {
 // rollup gathers the home page's "attention needed" alerts from the same read-only
 // data the detail pages render — no new state, just an aggregation: the most recent
 // run of each command that failed, media at or past capacity, drill failures and
-// coverage gaps, and DLEs overdue against the staleness SLO. hist is the full
+// coverage gaps, and DLEs overdue against the dump cycle. hist is the full
 // history, newest-first. Red (bad) alerts sort before amber (warn) ones; an empty
 // result is the glanceable all-clear the template renders as a single quiet line.
 func (s *Server) rollup(now time.Time, hist []report.Run) []alert {
@@ -498,12 +499,10 @@ func (s *Server) rollup(now time.Time, hist []report.Run) []alert {
 			Href: "/drills"})
 	}
 
-	// Stale DLEs — only when the staleness SLO is configured.
-	if stale, ok := s.src.StaleDLEs(now); ok {
-		for _, d := range stale {
-			warn = append(warn, alert{Level: "warn", Tag: "stale",
-				Text: staleText(d, now), Href: "/dles/" + d.DLE})
-		}
+	// Stale DLEs — overdue against the dump cycle, or never backed up at all.
+	for _, d := range s.src.StaleDLEs(now) {
+		warn = append(warn, alert{Level: "warn", Tag: "stale",
+			Text: staleText(d, now), Href: "/dles/" + d.DLE})
 	}
 
 	return append(bad, warn...)

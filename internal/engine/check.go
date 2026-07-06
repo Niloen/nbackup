@@ -77,17 +77,15 @@ func (c *checker) Check(connect bool) *CheckReport {
 }
 
 // checkStaleness fails the check for any configured DLE whose newest backup (at
-// any level) predates `staleness.window`, plus any DLE never backed up at all — the
-// idiomatic exit-code path for the staleness SLO, since `nb check` is already the
-// command cron gates on ("$? != 0 means don't trust last night"), and a stale DLE
-// is exactly that kind of actionable failure, not just a report-time observation.
-// It reports nothing when the window is unset (the alert is opt-in — see the
-// Staleness config field's doc for why there is no default window).
+// any level) predates the dump cycle — cycle is documented as the one scheduling
+// knob ("a full never ages past one cycle"), so a DLE older than that has provably
+// broken that promise, independent of cron cadence. It is always on (zero config):
+// `nb check` is already the command cron gates on ("$? != 0 means don't trust last
+// night"), and an overdue DLE is exactly that kind of actionable failure. A DLE with
+// no archive at all is only a WARNING, not a failure — a fresh install has nothing
+// backed up yet, and that must not turn red before its first dump ever runs.
 func (c *checker) checkStaleness(rep *CheckReport) {
-	window, ok := c.cfg.StalenessWindow()
-	if !ok {
-		return
-	}
+	window := c.cfg.CycleDuration()
 	dles := make([]string, 0, len(c.cfg.DLEs()))
 	idOf := map[string]string{}
 	for _, d := range c.cfg.DLEs() {
@@ -96,16 +94,16 @@ func (c *checker) checkStaleness(rep *CheckReport) {
 	}
 	stale := c.cat.StaleDLEs(dles, window, time.Now())
 	if len(stale) == 0 {
-		rep.add(&rep.Server, true, false, fmt.Sprintf("staleness: all DLE(s) backed up within %s", sizeutil.FormatDuration(window)))
+		rep.add(&rep.Server, true, false, fmt.Sprintf("staleness: all DLE(s) backed up within one cycle (%s)", sizeutil.FormatDuration(window)))
 		return
 	}
 	for _, s := range stale {
 		disp := idOf[s.DLE]
 		if s.LastBackup.IsZero() {
-			rep.add(&rep.Server, false, false, fmt.Sprintf("staleness: %s has never been backed up", disp))
+			rep.add(&rep.Server, false, true, fmt.Sprintf("staleness: %s has never been backed up", disp))
 			continue
 		}
-		rep.add(&rep.Server, false, false, fmt.Sprintf("staleness: %s last backed up %s ago (window %s)",
+		rep.add(&rep.Server, false, false, fmt.Sprintf("staleness: %s last backed up %s ago, older than one cycle (%s)",
 			disp, sizeutil.FormatDuration(time.Since(s.LastBackup)), sizeutil.FormatDuration(window)))
 	}
 }

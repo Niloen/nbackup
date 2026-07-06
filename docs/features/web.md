@@ -73,8 +73,8 @@ problem:
 - **drill failing** — a DLE whose most recent recovery drill failed, and a **drill
   overdue** count for DLEs never drilled or past the drill window (the same coverage
   the [Drills](#pages) page computes).
-- **stale** — a DLE overdue against the [`staleness:`](monitoring#staleness-is-anything-falling-behind)
-  window (shown only when that SLO is configured).
+- **stale** — a DLE overdue against [one dump cycle](monitoring#staleness-is-anything-falling-behind)
+  (never backed up, or older than the cycle).
 - **over capacity** — a bounded medium whose used bytes have reached its capacity.
 
 Red rows (a failure) sort above amber ones (a warning).

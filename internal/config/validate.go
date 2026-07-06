@@ -116,9 +116,6 @@ func (c *Config) Validate() error {
 	if err := c.validateDrill(); err != nil {
 		return err
 	}
-	if err := c.validateStaleness(); err != nil {
-		return err
-	}
 	if err := c.validateNotify(); err != nil {
 		return err
 	}
@@ -348,17 +345,6 @@ func (c *Config) validateDrill() error {
 		if _, ok := c.Media[d.From]; !ok {
 			return fmt.Errorf("drill: source %q is not a defined medium", d.From)
 		}
-	}
-	return nil
-}
-
-// validateStaleness checks the optional `staleness:` block.
-func (c *Config) validateStaleness() error {
-	if c.Staleness.Window == "" {
-		return nil
-	}
-	if _, err := sizeutil.ParseDuration(c.Staleness.Window); err != nil {
-		return fmt.Errorf("staleness: window: %w", err)
 	}
 	return nil
 }

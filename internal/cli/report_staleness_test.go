@@ -28,20 +28,23 @@ func seedArchive(t *testing.T, dir string, dle config.DLE, createdAt time.Time) 
 	}
 }
 
-// TestRenderStalenessDisabledByDefault pins the opt-in default: with no
-// `staleness.window` configured, the section renders nothing even though a
-// configured DLE has never been backed up.
-func TestRenderStalenessDisabledByDefault(t *testing.T) {
+// TestRenderStalenessDefaultCycle pins the always-on, zero-config behavior: with no
+// `cycle` set, the window falls back to config.DefaultCycle and a DLE with no
+// archive at all is still reported (there is no way to disable this section).
+func TestRenderStalenessDefaultCycle(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{Workdir: dir, Sources: config.Sources{{Host: "web01", Path: "/srv"}}}
 	var sb strings.Builder
 	renderStaleness(&sb, cfg, time.Now())
-	if sb.Len() != 0 {
-		t.Errorf("renderStaleness with no window configured should print nothing, got %q", sb.String())
+	out := sb.String()
+	for _, want := range []string{"STALE DLEs", "web01:/srv", "never"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("staleness render missing %q\n---\n%s", want, out)
+		}
 	}
 }
 
-// TestRenderStaleness exercises the enabled case: one DLE within the window (not
+// TestRenderStaleness exercises the enabled case: one DLE within the cycle (not
 // reported), one whose last backup predates it, and one never backed up at all.
 func TestRenderStaleness(t *testing.T) {
 	dir := t.TempDir()
@@ -49,7 +52,7 @@ func TestRenderStaleness(t *testing.T) {
 	seedArchive(t, dir, config.DLE{Host: "app01", Path: "/home"}, now.Add(-1*time.Hour))
 	seedArchive(t, dir, config.DLE{Host: "db01", Path: "/data"}, now.Add(-10*24*time.Hour))
 
-	cfg := &config.Config{Workdir: dir, Staleness: config.StalenessConfig{Window: "3d"}, Sources: config.Sources{
+	cfg := &config.Config{Workdir: dir, Cycle: "3d", Sources: config.Sources{
 		{Host: "app01", Path: "/home"},
 		{Host: "db01", Path: "/data"},
 		{Host: "web01", Path: "/srv"},
@@ -64,7 +67,7 @@ func TestRenderStaleness(t *testing.T) {
 		}
 	}
 	if strings.Contains(out, "app01:/home") {
-		t.Errorf("app01:/home was backed up within the window, should not be reported:\n%s", out)
+		t.Errorf("app01:/home was backed up within the cycle, should not be reported:\n%s", out)
 	}
 }
 
@@ -73,24 +76,22 @@ func TestRenderStalenessAllCurrent(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
 	seedArchive(t, dir, config.DLE{Host: "app01", Path: "/home"}, now.Add(-time.Hour))
-	cfg := &config.Config{Workdir: dir, Staleness: config.StalenessConfig{Window: "3d"}, Sources: config.Sources{
+	cfg := &config.Config{Workdir: dir, Cycle: "3d", Sources: config.Sources{
 		{Host: "app01", Path: "/home"},
 	}}
 	var sb strings.Builder
 	renderStaleness(&sb, cfg, now)
-	if !strings.Contains(sb.String(), "all configured DLE(s) backed up within") {
+	if !strings.Contains(sb.String(), "all configured DLE(s) backed up within one cycle") {
 		t.Errorf("expected the all-current line, got %q", sb.String())
 	}
 }
 
-// TestReportJSONOmitsStaleWhenDisabled verifies `nb report --json` (via --catalog,
-// which yields a bare config with no staleness.window) omits the stale key
-// entirely (omitempty) rather than an empty list — mirroring how the text render
-// prints nothing when the alert is unset.
-func TestReportJSONOmitsStaleWhenDisabled(t *testing.T) {
+// TestReportJSONOmitsStaleWhenNoneOverdue verifies `nb report --json` (via
+// --catalog, which yields a bare config with no sources at all) omits the stale
+// key entirely (omitempty) rather than an empty list, when there is nothing to
+// report — mirroring the text render's all-clear behavior.
+func TestReportJSONOmitsStaleWhenNoneOverdue(t *testing.T) {
 	dir := t.TempDir()
-	now := time.Now()
-	seedArchive(t, dir, config.DLE{Host: "web01", Path: "/srv"}, now.Add(-10*24*time.Hour))
 
 	out := captureStdout(t, func() {
 		root := NewRootCmd()
@@ -100,7 +101,7 @@ func TestReportJSONOmitsStaleWhenDisabled(t *testing.T) {
 		}
 	})
 	if strings.Contains(out, `"stale"`) {
-		t.Errorf("stale key should be omitted when staleness is unset:\n%s", out)
+		t.Errorf("stale key should be omitted when nothing is overdue:\n%s", out)
 	}
 }
 
@@ -112,7 +113,7 @@ func TestStaleDLEsHelper(t *testing.T) {
 	now := time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC)
 	seedArchive(t, dir, config.DLE{Host: "db01", Path: "/data"}, now.Add(-10*24*time.Hour))
 
-	cfg := &config.Config{Workdir: dir, Staleness: config.StalenessConfig{Window: "3d"}, Sources: config.Sources{
+	cfg := &config.Config{Workdir: dir, Cycle: "3d", Sources: config.Sources{
 		{Host: "db01", Path: "/data"},
 		{Host: "web01", Path: "/srv"},
 	}}

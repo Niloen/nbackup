@@ -54,12 +54,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	family(&b, "nbackup_dle_count", "gauge", "Configured DLEs (backup sources).")
 	sample(&b, "nbackup_dle_count", nil, float64(len(s.src.DLENames())))
 
-	// Staleness — only when the SLO is configured (else the series is meaningless).
-	if stale, configured := s.src.StaleDLEs(now); configured {
-		family(&b, "nbackup_dle_stale_count", "gauge",
-			"Configured DLEs overdue against the staleness window (never backed up, or older than the window).")
-		sample(&b, "nbackup_dle_stale_count", nil, float64(len(stale)))
-	}
+	// Staleness — always emitted: the window is the dump cycle, which is always set.
+	family(&b, "nbackup_dle_stale_count", "gauge",
+		"Configured DLEs overdue against the dump cycle (never backed up, or older than one cycle).")
+	sample(&b, "nbackup_dle_stale_count", nil, float64(len(s.src.StaleDLEs(now))))
 
 	// Drill coverage — the same counts the home rollup shows.
 	dh := s.drillHealth(now)

@@ -33,6 +33,11 @@ bounded by free capacity.
 cycle: 7d
 ```
 
+`nb check` also enforces the cycle as a freshness bound: any configured DLE
+whose newest backup at **any** level is older than one cycle is a check
+failure (a never-backed-up DLE is a warning instead). See
+[Monitoring](../features/monitoring).
+
 `bump_percent` (default 5) is the companion knob: an incremental sits at level 1
 and only climbs to a deeper level when doing so saves at least this percent of
 the full-dump size. See [Planning](../features/planning).
@@ -616,21 +621,6 @@ drill:
 ```
 
 See [Verification](../features/verification).
-
-## staleness
-
-An opt-in backup-freshness SLO: when set, `nb check` fails (non-zero exit) for
-any configured DLE whose newest backup at **any** level is older than the
-window, or that has never been backed up at all, and `nb report` (and the
-`--notify` digest) lists the offenders. Unset means no staleness verdict —
-there is no default window, since only you know your intended cadence.
-
-```yaml
-staleness:
-  window: 3d          # every DLE should have a backup at most this old
-```
-
-See [Monitoring](../features/monitoring).
 
 ## ssh and hosts
 

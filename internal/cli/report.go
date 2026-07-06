@@ -206,16 +206,14 @@ func drillWhen(t time.Time) string {
 }
 
 // staleDLEs computes the staleness alert for the report/digest/--json surfaces: the
-// configured DLEs whose newest backup (at any level) predates `staleness.window`,
-// or that have never been backed up. It reads the catalog cache directly (like
-// renderDrillLedger reads the drill ledger directly) rather than building an
-// engine, so `nb report` stays lock-free and cheap. window is 0 and ok is false
-// when the alert is unset — the caller's cue to render nothing.
+// configured DLEs whose newest backup (at any level) predates one dump cycle — the
+// documented promise that "a full never ages past one cycle", so an older backup
+// has provably broken it, independent of cron cadence — or that have never been
+// backed up at all. It reads the catalog cache directly (like renderDrillLedger
+// reads the drill ledger directly) rather than building an engine, so `nb report`
+// stays lock-free and cheap. Always on: there is no config key to disable it.
 func staleDLEs(cfg *config.Config, now time.Time) (stale []catalog.StaleDLE, window time.Duration) {
-	window, ok := cfg.StalenessWindow()
-	if !ok {
-		return nil, 0
-	}
+	window = cfg.CycleDuration()
 	cat, err := catalog.Open(cfg.WorkdirPath())
 	if err != nil {
 		return nil, window
@@ -235,20 +233,17 @@ func staleDLEs(cfg *config.Config, now time.Time) (stale []catalog.StaleDLE, win
 	return stale, window
 }
 
-// renderStaleness prints the staleness section: DLEs not backed up within the
-// configured window, each with how long since their last backup (or "never").
-// It renders nothing when `staleness.window` is unset — the alert is opt-in (see
-// the Staleness config field's doc for why there is no default window).
+// renderStaleness prints the staleness section: DLEs older than one dump cycle (or
+// never backed up), each with how long since their last backup (or "never"). It
+// always runs — there is no config key to disable it — and prints an all-clear
+// line when nothing is overdue.
 func renderStaleness(w io.Writer, cfg *config.Config, now time.Time) {
 	stale, window := staleDLEs(cfg, now)
-	if window == 0 {
-		return
-	}
 	if len(stale) == 0 {
-		fmt.Fprintf(w, "\nStaleness: all configured DLE(s) backed up within %s.\n", sizeutil.FormatDuration(window))
+		fmt.Fprintf(w, "\nStaleness: all configured DLE(s) backed up within one cycle (%s).\n", sizeutil.FormatDuration(window))
 		return
 	}
-	fmt.Fprintf(w, "\nSTALE DLEs (not backed up within %s)\n", sizeutil.FormatDuration(window))
+	fmt.Fprintf(w, "\nSTALE DLEs (older than one cycle, %s)\n", sizeutil.FormatDuration(window))
 	tw := newTab(w)
 	fmt.Fprintln(tw, "  DLE\tLAST BACKUP")
 	for _, s := range stale {
