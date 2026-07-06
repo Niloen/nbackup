@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/Niloen/nbackup/internal/record"
@@ -156,6 +157,38 @@ func mtGetStatus(fd uintptr) (mtGet, error) {
 // immediately-readable signal that no tape is loaded.
 const gmtDROpen = 0x00040000
 
+// openBusyMaxWait bounds how long openBusyRetry keeps retrying a drive that reports
+// EBUSY; openBusyStep is the pause between attempts. Five seconds covers the st(4)
+// driver's post-close tail (a deferred filemark flush and reposition) and a media
+// changer's drive threading/rewinding after a load, without hanging a run forever on
+// a drive that is genuinely, permanently held by another process.
+const (
+	openBusyMaxWait = 5 * time.Second
+	openBusyStep    = 100 * time.Millisecond
+)
+
+// openBusyRetry opens the device, retrying on EBUSY for up to openBusyMaxWait. A tape
+// drive is transiently busy just after a close — the st driver is still flushing the
+// closing filemark and repositioning, and a real changer's drive is BUSY while it
+// threads or rewinds a freshly loaded cartridge — so an immediate reopen (which
+// NBackup does many times per run: count, label check, then each archive's append)
+// races that tail. The internal device mutex serializes NBackup's own opens but cannot
+// see this driver/hardware-level busy window, so the open itself must wait it out.
+// Only EBUSY is retried; every other error fails fast.
+func openBusyRetry(dev string, flag int) (*os.File, error) {
+	deadline := time.Now().Add(openBusyMaxWait)
+	for {
+		f, err := os.OpenFile(dev, flag, 0)
+		if err == nil {
+			return f, nil
+		}
+		if !errors.Is(err, unix.EBUSY) || !time.Now().Before(deadline) {
+			return nil, err
+		}
+		time.Sleep(openBusyStep)
+	}
+}
+
 // openDev opens the no-rewind device and puts it in variable-block mode. A write
 // path opens read-write; a read path opens read-only (so a write-protected tape is
 // still readable) and tolerates a rejected MTSETBLK, since reading a variable-block
@@ -172,7 +205,7 @@ func (m *mtDevice) openDev(write bool) (*os.File, error) {
 	if write {
 		flag = os.O_RDWR
 	}
-	f, err := os.OpenFile(m.dev, flag|unix.O_NONBLOCK, 0)
+	f, err := openBusyRetry(m.dev, flag|unix.O_NONBLOCK)
 	if err != nil {
 		return nil, err
 	}
