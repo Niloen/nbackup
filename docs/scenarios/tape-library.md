@@ -106,6 +106,19 @@ nb prune lto                 # reclaim — whole volumes only, by label rotation
 Restore loads whichever tape holds the copy it needs. A **spanned** archive reassembles
 by loading its tapes in order.
 
+## Recovering a lost catalog
+
+The catalog is a cache — the tapes are the source of truth. If the workdir is
+lost (a dead server), `nb rebuild` reconstructs it from the tapes, and it is
+**additive**: each pass merges whatever is loadable right now, so you can feed
+tapes one at a time (a robot scans every slot in one pass; on a single drive,
+insert a reel, run `nb rebuild`, repeat). Every archive's commit footer carries a
+part map naming every tape the archive spans, so after each pass NBackup prints a
+worklist: the labels it still needs (insert them and re-run) and any runs whose
+footer tape has not been fed yet. When the worklist is empty, `nb recover` has
+everything. `nb rebuild --full` instead wipes the cache first and keeps only what
+this one pass reaches — use it to reconcile after tapes have been retired.
+
 ## Real hardware: a SCSI changer
 
 The config above uses a **virtual** library (`dir:`) so it runs with no hardware. A

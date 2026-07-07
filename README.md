@@ -195,7 +195,7 @@ details one item when given an id (`nb run run-2026-06-21.020000`, `nb medium lt
 | `nb prune [medium]`   | Delete runs past each medium's cycle/capacity limits (all media if none named)  |
 | `nb reset <dle>`     | Schedule a DLE for a full on its next run (fresh chain)  |
 | `nb flush`           | Drain a holding disk's un-flushed archives to the landing |
-| `nb rebuild`         | Rebuild the local run-index cache from media            |
+| `nb rebuild`         | Rebuild the catalog from media (additive: feed tapes one at a time) |
 | `nb web`             | Serve a read-only status website (overview, runs, media, history) |
 | `nb version`         | Print the build version                                  |
 | `nb completion <shell>` | Generate shell completion (bash/zsh/fish/powershell)   |

@@ -117,6 +117,7 @@ func Spec() media.Spec {
 	return media.Spec{
 		Profile:         media.NewSizeProfile,
 		ConcurrentWrite: true,
+		RangedReads:     true, // per-file stores serve sub-ranges (seek / ranged GET)
 	}
 }
 

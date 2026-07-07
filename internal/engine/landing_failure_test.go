@@ -203,12 +203,12 @@ func TestRebuildSkipsUnopenableMedium(t *testing.T) {
 	}
 
 	cap := &capturingLogf{}
-	n, err := eng.RebuildCatalog(cap.log)
+	rep, err := eng.RebuildCatalog(true, cap.log)
 	if err != nil {
 		t.Fatalf("rebuild must not abort on one unopenable medium: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("rebuild indexed %d runs, want 1 (from the good landing)", n)
+	if rep.Runs != 1 {
+		t.Fatalf("rebuild indexed %d runs, want 1 (from the good landing)", rep.Runs)
 	}
 	if !cap.contains("skipping medium \"broken\"") {
 		t.Errorf("rebuild should warn that it skipped the broken medium; log:\n%s", cap.joined())

@@ -172,12 +172,12 @@ func TestCacheLifecycle(t *testing.T) {
 	}
 
 	// Rebuild reconciles and reports the count.
-	n, err := cat2.Rebuild(map[string]media.Volume{"disk": vol})
+	rep, err := cat2.Rebuild(map[string]media.Volume{"disk": vol}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Errorf("rebuild indexed %d, want 2", n)
+	if rep.Runs != 2 {
+		t.Errorf("rebuild indexed %d, want 2", rep.Runs)
 	}
 }
 
@@ -319,7 +319,7 @@ func TestRebuildReflectsPartiallyPrunedMedium(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cat.Rebuild(map[string]media.Volume{"mirror": full, "disk": partial}); err != nil {
+	if _, err := cat.Rebuild(map[string]media.Volume{"mirror": full, "disk": partial}, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -393,7 +393,7 @@ func TestRebuildReassemblesSpannedRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cat.Rebuild(map[string]media.Volume{"tape": open()}); err != nil {
+	if _, err := cat.Rebuild(map[string]media.Volume{"tape": open()}, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -437,7 +437,7 @@ func TestForceFullDirectivePersists(t *testing.T) {
 	if !reopened.ForcedFulls()["h-data"] {
 		t.Fatal("force-full directive should persist across Open")
 	}
-	if _, err := reopened.Rebuild(map[string]media.Volume{}); err != nil {
+	if _, err := reopened.Rebuild(map[string]media.Volume{}, true); err != nil {
 		t.Fatal(err)
 	}
 	if !reopened.ForcedFulls()["h-data"] {
@@ -549,7 +549,7 @@ func TestRebuildRestoresPartSeals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cat.Rebuild(map[string]media.Volume{"disk": vol}); err != nil {
+	if _, err := cat.Rebuild(map[string]media.Volume{"disk": vol}, true); err != nil {
 		t.Fatal(err)
 	}
 	var pa PlacedArchive

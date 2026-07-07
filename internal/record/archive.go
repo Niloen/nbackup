@@ -38,6 +38,17 @@ type Archive struct {
 	Units        []Unit     `json:"units,omitempty"`      // the archive's content inventory in the archiver's vocabulary (see Unit), sorted by Path. Rides the per-archive index like Members, never the footer; archive-invariant, so copies carry it unchanged.
 	PartSeals    []PartSeal `json:"part_seals,omitempty"` // per-part seals, index-aligned with the parts (Header.Part order). Like Parts, a fact about THIS placement's layout (a copy re-splits and re-seals its own parts): the catalog moves them onto the placement's record and strips them from the run's medium-independent content.
 	IndexSize    int64      `json:"index_size,omitempty"` // payload bytes of THIS placement's member-index file (0 = no index). A placement-layout fact like PartSeals; with them it completes what a rebuild scan needs to re-derive a volume's fill without reading payloads (the scan skips index files).
+	PartMap      []PartLoc  `json:"part_map,omitempty"`   // where each part landed (see PartLoc) — the archive's TOC, index-aligned with the parts like PartSeals and equally placement-layout. It makes the volume SET self-describing: any one tape holding the footer names every tape (and position) the archive spans, so a rebuild that has not seen a part's tape still records a complete placement and a restore can prompt for the missing reel by label.
+}
+
+// PartLoc is one part's location in the commit footer's part map (Archive.PartMap):
+// the label of the volume holding it (its epoch guarding against a relabel since)
+// and the file position on that volume. Label is empty on address-identified media
+// (disk, cloud), whose single volume needs no name.
+type PartLoc struct {
+	Label string `json:"label,omitempty"`
+	Epoch int    `json:"epoch,omitempty"`
+	Pos   int    `json:"pos"`
 }
 
 // Shape is an archive's stream shape (Archive.Shape, Header.Shape): how the encoded

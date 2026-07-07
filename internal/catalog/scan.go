@@ -35,25 +35,117 @@ func (c *Catalog) EnsureFresh(medium string, vol media.Volume) error {
 	return nil
 }
 
-// Rebuild rescans the given media (keyed by medium name) and replaces the cache.
-// A run seen on several volumes yields several placements on one logical entry.
-// Returns the number of distinct runs indexed.
-func (c *Catalog) Rebuild(volumes map[string]media.Volume) (int, error) {
-	c.entries = nil
-	c.volumes = map[string]*VolumeRecord{}
+// Rebuild rescans the given media (keyed by medium name). A run seen on several
+// volumes yields several placements on one logical entry.
+//
+// Additive by default (full=false): the scan MERGES into the existing catalog —
+// what a scanned volume shows replaces the catalog's prior beliefs about that
+// volume (a relabeled reel's stale records are dropped, an unchanged archive
+// re-records as a net no-op), while volumes the scan never reached keep their
+// records. That is the disaster-recovery flow: feed tapes one at a time, running
+// Rebuild after each, until the report lists nothing missing — the commit
+// footers' part maps name the tapes still needed. full=true wipes first and
+// rebuilds only from what is reachable now (the reconciliation of last resort;
+// it also forgets ghost registry entries a rename left behind).
+//
+// The report carries the run count and the gaps a caller should surface: runs
+// whose parts were seen but whose commit footer was not (more tapes exist).
+func (c *Catalog) Rebuild(volumes map[string]media.Volume, full bool) (RebuildReport, error) {
+	if full {
+		c.entries = nil
+		c.volumes = map[string]*VolumeRecord{}
+	}
+	var rep RebuildReport
 	for medium, vol := range volumes {
 		idx, err := scanMedium(medium, vol)
 		if err != nil {
-			return 0, err
+			return RebuildReport{}, err
+		}
+		// A scanned volume is whole-volume truth: records referencing its label at
+		// another epoch describe a reel that has been physically wiped since —
+		// drop them (giving their charges back) before absorbing the fresh scan.
+		for _, lbl := range idx.labels {
+			c.dropStaleOn(lbl)
 		}
 		c.absorb(idx)
+		rep.OrphanRuns = append(rep.OrphanRuns, idx.orphans...)
 	}
 	c.sortEntries()
 	c.loaded = true
 	if err := c.persist(); err != nil {
-		return 0, err
+		return RebuildReport{}, err
 	}
-	return len(c.entries), nil
+	rep.Runs = len(c.entries)
+	// A part-only tape of a run already indexed (its footer absorbed from another
+	// tape, possibly a previous additive pass) is resolved, not orphaned.
+	unresolved := rep.OrphanRuns[:0:0]
+	for _, o := range rep.OrphanRuns {
+		if c.entryByID(o.Run) == nil {
+			unresolved = append(unresolved, o)
+		}
+	}
+	rep.OrphanRuns = unresolved
+	sort.Slice(rep.OrphanRuns, func(i, j int) bool { return rep.OrphanRuns[i].Run < rep.OrphanRuns[j].Run })
+	return rep, nil
+}
+
+// RebuildReport is what a rebuild pass found and what it could not resolve.
+type RebuildReport struct {
+	Runs int // distinct runs now indexed
+	// OrphanRuns lists runs whose part files were scanned but whose commit footer
+	// was not found on any scanned volume: the run cannot be indexed yet, and the
+	// tape holding its footer is presumably among the ones not fed in — the cue to
+	// keep inserting tapes and re-running an additive rebuild.
+	OrphanRuns []OrphanRun
+}
+
+// OrphanRun is one such unresolved run: its id and the scanned labels holding its
+// footerless parts.
+type OrphanRun struct {
+	Run    string
+	Labels []string
+}
+
+// dropStaleOn removes placed archives referencing the given label at a different
+// epoch than the reel now carries: the reel was physically wiped (relabeled)
+// since they were recorded, so those files are provably gone. Spanning siblings
+// on other reels become orphans, exactly as a live recycle leaves them; each
+// dropped record gives its fill charges back.
+func (c *Catalog) dropStaleOn(lbl record.Label) {
+	staleRef := func(fp archiveio.FilePos) bool {
+		return fp.Label == lbl.Name && fp.Epoch != lbl.Epoch
+	}
+	stale := func(pa PlacedArchive) bool {
+		for _, pt := range pa.Parts {
+			if staleRef(pt) {
+				return true
+			}
+		}
+		return staleRef(pa.Commit) || (pa.Index.Label != "" && staleRef(pa.Index))
+	}
+	entries := c.entries[:0:0]
+	for _, e := range c.entries {
+		placements := e.Placements[:0:0]
+		for _, p := range e.Placements {
+			kept := p.Archives[:0:0]
+			for _, pa := range p.Archives {
+				if stale(pa) {
+					c.applyFill(p.Medium, e.Run, pa, -1)
+					continue
+				}
+				kept = append(kept, pa)
+			}
+			p.Archives = kept
+			if len(p.Archives) > 0 {
+				placements = append(placements, p)
+			}
+		}
+		e.Placements = placements
+		if len(e.Placements) > 0 {
+			entries = append(entries, e)
+		}
+	}
+	c.entries = entries
 }
 
 // absorb merges one medium's scanned placements and volume labels into the store, without
@@ -88,10 +180,12 @@ func findPlaced(pas []PlacedArchive, dle string, level int) (PlacedArchive, bool
 }
 
 // mediumIndex is the assembled result of scanning one medium: each run assembled from its
-// committed archives, with its placement on that medium, plus the labels of the volumes seen.
+// committed archives, with its placement on that medium, the labels of the volumes seen,
+// and the runs whose parts were seen without a commit footer (see OrphanRun).
 type mediumIndex struct {
 	placements []runPlacement
 	labels     []record.Label
+	orphans    []OrphanRun
 }
 
 // runPlacement pairs a run's content with its placement on the scanned
@@ -113,6 +207,14 @@ func scanMedium(medium string, vol media.Volume) (mediumIndex, error) {
 		if err != nil {
 			return err
 		}
+		// A labeled volume belongs to its label's pool — the medium of the same
+		// name. A cartridge from ANOTHER pool sharing this physical changer is not
+		// this medium's to absorb: skipping it keeps two pools on one library from
+		// bleeding into each other's placements and aggregates (that pool's own
+		// rebuild scans it under its own medium name).
+		if res.label != nil && res.label.Pool != "" && res.label.Pool != medium {
+			return nil
+		}
 		acc.add(res)
 		if res.label != nil {
 			labels = append(labels, *res.label)
@@ -122,7 +224,8 @@ func scanMedium(medium string, vol media.Volume) (mediumIndex, error) {
 	if err != nil {
 		return mediumIndex{}, err
 	}
-	return mediumIndex{placements: assemble(medium, acc), labels: labels}, nil
+	placements, orphans := assemble(medium, acc)
+	return mediumIndex{placements: placements, labels: labels, orphans: orphans}, nil
 }
 
 // assemble turns one medium's accumulated parts, commit footers, and member indexes into
@@ -132,7 +235,12 @@ func scanMedium(medium string, vol media.Volume) (mediumIndex, error) {
 // skipped. A part missing from the scan (a tape not present) leaves a short part list —
 // verify/restore reports the gap and fails over to another copy. Archives are ordered by
 // (dle, level) so a rebuild is deterministic.
-func assemble(medium string, acc *scanMaps) []runPlacement {
+//
+// Parts left over — sighted on a scanned volume but matched to no commit footer —
+// come back as OrphanRuns: either a crashed run's true leftovers, or (the case a
+// partial rebuild must surface) a committed run whose footer tape simply was not
+// among the volumes fed in yet.
+func assemble(medium string, acc *scanMaps) ([]runPlacement, []OrphanRun) {
 	keys := make([]archiveKey, 0, len(acc.commits))
 	for k := range acc.commits {
 		keys = append(keys, k)
@@ -149,6 +257,7 @@ func assemble(medium string, acc *scanMaps) []runPlacement {
 
 	runs := map[string]*runPlacement{}
 	var order []string // run ids in first-seen order
+	consumed := map[partKey]bool{}
 	for _, key := range keys {
 		sc := acc.commits[key]
 		sa := runs[key.run]
@@ -166,8 +275,19 @@ func assemble(medium string, acc *scanMaps) []runPlacement {
 		}
 		ap := PlacedArchive{DLE: key.dle, Level: key.level, Commit: sc.loc}
 		for part := 0; part < n; part++ {
-			if loc, ok := acc.parts[partKey{run: key.run, dle: key.dle, level: key.level, part: part}]; ok {
-				ap.Parts = append(ap.Parts, loc)
+			pk := partKey{run: key.run, dle: key.dle, level: key.level, part: part}
+			if loc, ok := acc.parts[pk]; ok {
+				consumed[pk] = true
+				ap.Parts = append(ap.Parts, loc) // a physically sighted part is the strongest truth
+				continue
+			}
+			if part < len(sc.arch.PartMap) {
+				// The scan never saw this part's volume, but the footer's part map —
+				// the archive's TOC — names it: record the location so the placement
+				// stays complete (aligned seals, correct part indexes) and a restore
+				// can prompt for the absent reel by label.
+				pm := sc.arch.PartMap[part]
+				ap.Parts = append(ap.Parts, archiveio.FilePos{Label: pm.Label, Epoch: pm.Epoch, Pos: pm.Pos})
 			}
 		}
 		if ixLoc, ok := acc.indexes[key]; ok {
@@ -183,7 +303,29 @@ func assemble(medium string, acc *scanMaps) []runPlacement {
 	for _, id := range order {
 		out = append(out, *runs[id])
 	}
-	return out
+
+	// Group the unmatched parts by run: labels holding files of runs this scan
+	// could not index (no commit footer among the scanned volumes).
+	orphanLabels := map[string]map[string]bool{}
+	for pk, loc := range acc.parts {
+		if consumed[pk] || loc.Label == "" {
+			continue
+		}
+		if orphanLabels[pk.run] == nil {
+			orphanLabels[pk.run] = map[string]bool{}
+		}
+		orphanLabels[pk.run][loc.Label] = true
+	}
+	var orphans []OrphanRun
+	for run, labels := range orphanLabels {
+		names := make([]string, 0, len(labels))
+		for l := range labels {
+			names = append(names, l)
+		}
+		sort.Strings(names)
+		orphans = append(orphans, OrphanRun{Run: run, Labels: names})
+	}
+	return out, orphans
 }
 
 // OrphanFiles returns the files on a volume that belong to no committed archive: parts and
@@ -241,7 +383,8 @@ func OrphanFiles(vol media.Volume, known map[int]bool) ([]record.FileInfo, error
 		}
 	}
 	referenced := map[int]bool{}
-	for _, sp := range assemble("", acc) {
+	assembled, _ := assemble("", acc)
+	for _, sp := range assembled {
 		for _, ap := range sp.p.Archives {
 			for _, pt := range ap.Parts {
 				referenced[pt.Pos] = true
@@ -292,7 +435,7 @@ func ScanRuns(vol media.Volume) ([]*Run, error) {
 	}
 	acc := newScanMaps()
 	acc.add(res)
-	sps := assemble("", acc)
+	sps, _ := assemble("", acc)
 	runs := make([]*Run, 0, len(sps))
 	for _, sp := range sps {
 		runs = append(runs, sp.run)

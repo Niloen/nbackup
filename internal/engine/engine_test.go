@@ -754,8 +754,8 @@ func TestCopyToTapeAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n, err := teng.RebuildCatalog(nil); err != nil || n != 1 {
-		t.Fatalf("rebuild from tape: n=%d err=%v", n, err)
+	if rep, err := teng.RebuildCatalog(true, nil); err != nil || rep.Runs != 1 {
+		t.Fatalf("rebuild from tape: runs=%d err=%v", rep.Runs, err)
 	}
 	dest := t.TempDir()
 	name := config.DLE{Host: "localhost", Path: src}.Name()
@@ -2375,7 +2375,7 @@ func TestTapeRecyclesOldestOnWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := freshEng.RebuildCatalog(logfDiscard); err != nil {
+	if _, err := freshEng.RebuildCatalog(true, logfDiscard); err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
 	if v, ok := freshEng.cat.Volume(l1); !ok || v.Label.Epoch != 2 {

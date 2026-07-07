@@ -144,7 +144,18 @@ Integrity of files a footer *does* commit (bit-rot) is verify's job, not the reb
 **The catalog is a cache; the media are the source of truth.** Every file is
 self-describing (header), every archive carries its own commit footer, every labeled
 volume carries its label — so one `Files()` scan rebuilds everything (`nb rebuild`):
-commit footers + indexes → archives grouped into runs, labels → volume registry. The
+commit footers + indexes → archives grouped into runs, labels → volume registry.
+The **volume set is self-describing too**: the footer carries the archive's
+**part map** (`Archive.PartMap` — each part's volume label, epoch, and position,
+the archive's TOC), so a scan holding only ONE tape of a spanned archive still
+records the complete placement, restores prompt for absent reels **by label**, and
+`nb rebuild` is **additive by default** — feed tapes one at a time and each pass
+merges in (a scanned reel is whole-volume truth: records referencing its label at
+an older epoch drop; unscanned reels keep their records) while the report lists
+the tapes still missing (`Catalog.MissingVolumes`, from TOC references without a
+registry entry) and the runs whose footer tape has not been fed yet
+(`RebuildReport.OrphanRuns`). `--full` wipes first — the reconciliation of last
+resort. The
 catalog lives in its **own `workdir`** (default `nbackup-catalog`), a cache over the
 whole pool *independent of any medium*. The `Entry`/`Placement` model means a run
 copied disk→tape is one Entry with two Placements; restore/verify pick any available
@@ -857,10 +868,11 @@ repeated here. The one convention that is architectural rather than procedural:
   is the drill recoverability tiers and file-level recover on the client. SSH paths are
   untested in CI (no sshd); see [docs/design/remote-sources.md](docs/design/remote-sources.md)
   for the transport, the client-vs-server encryption point, and the trust postures.
-- Real `mtDevice` hardware validation — the spanning arithmetic (fill ledger +
-  declared `volume_size`) is the same code the `dir:` emulator exercises and tests,
-  but the physical roll on a real drive (EOT margin vs the declared size, filemark
-  overhead) awaits a hardware road-test.
+- Mixed-generation libraries: a roll only tries the allocator's own drive, so a
+  library whose remaining blanks are loadable only by ANOTHER drive's generation
+  fails the run (cleanly — catalog consistent) instead of hopping drives. Problem
+  + constraints in [docs/design/mixed-generation-drives.md](docs/design/mixed-generation-drives.md)
+  (hardware-confirmed 2026-07-07; the per-slot skip on refused loads works).
 
 For user-facing usage, config, and the restore-with-stock-tools story, see the
 [README](README.md).

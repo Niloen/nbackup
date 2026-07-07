@@ -140,7 +140,7 @@ func TestPartialPruneKeepsCatalogArchiveGranular(t *testing.T) {
 
 	// (d) A rebuild from the media reproduces the same archive-granular state.
 	usedBefore := eng2.Catalog().MediumBytes("disk")
-	if _, err := eng2.RebuildCatalog(nil); err != nil {
+	if _, err := eng2.RebuildCatalog(true, nil); err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
 	if used := eng2.Catalog().MediumBytes("disk"); used != usedBefore {

@@ -104,7 +104,14 @@ type Deps struct {
 	// the libpq connection reference) — what the archiver interpreted at dump
 	// time. "" when the DLE is no longer configured. Unit export forwards it so an
 	// archiver's exporter can honor the source's own connection identity.
-	SourceOf     func(slug string) string
+	SourceOf func(slug string) string
+	// RangedCopy reports whether some copy of an archive could serve a ranged
+	// read: aligned per-part seals on a range-capable medium (media.RangedReads).
+	// It is the plan-time face of OpenRange's copy selection, so the extraction
+	// plan promises only reads the media can actually serve — an archive whose
+	// only copy is on tape plans (and prices) as a whole read. Nil = assume
+	// range-capable (tests).
+	RangedCopy   func(ref archiveio.Ref) bool
 	CompressOpts compress.Options // decompress invocation options
 	DecryptOpts  crypt.Options    // config-wide default decrypt key reference
 }

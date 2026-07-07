@@ -130,13 +130,15 @@ type CostResolver func(medium string) (func(kind string, payload int64) int64, b
 // tracking is off and Used stays 0.
 func (c *Catalog) PriceWith(costFor CostResolver) { c.costFor = costFor }
 
-// applyFill adjusts the stored fill of the labeled volumes one placed archive
-// touches, as it is recorded (sign +1) or dropped (sign -1) on medium — parts at
-// their exact seal sizes, the member index at the footer's IndexSize, the commit
-// footer at the medium's bound; a sealless record (an old footer, a partial scan)
-// charges its whole Compressed size once, conservatively. A no-op without a
-// resolver, for an unpriceable medium, or for unregistered labels.
-func (c *Catalog) applyFill(medium string, run *Run, pa PlacedArchive, sign int64) {
+// chargeFill accumulates the per-label charges of one placed archive being
+// recorded (sign +1) or dropped (sign -1) on medium into delta — parts at their
+// exact seal sizes, the member index at the footer's IndexSize, the commit footer
+// at the medium's bound; a sealless record (an old footer, a partial scan)
+// charges its whole Compressed size once, conservatively. Accumulate-then-settle
+// (settleFill) keeps a replace (drop old + record new, usually identical) a NET
+// zero per label instead of two clamped operations. A no-op without a resolver or
+// for an unpriceable medium.
+func (c *Catalog) chargeFill(medium string, run *Run, pa PlacedArchive, sign int64, delta map[string]int64) {
 	if c.costFor == nil {
 		return
 	}
@@ -146,10 +148,8 @@ func (c *Catalog) applyFill(medium string, run *Run, pa PlacedArchive, sign int6
 	}
 	arch, _ := run.Archive(pa.DLE, pa.Level)
 	add := func(label, kind string, payload int64) {
-		if v, ok := c.volumes[label]; label != "" && ok {
-			if v.Used += sign * cost(kind, payload); v.Used < 0 {
-				v.Used = 0
-			}
+		if label != "" {
+			delta[label] += sign * cost(kind, payload)
 		}
 	}
 	if len(pa.Seals) == len(pa.Parts) && len(pa.Parts) > 0 {
@@ -166,6 +166,27 @@ func (c *Catalog) applyFill(medium string, run *Run, pa PlacedArchive, sign int6
 	}
 	add(pa.Commit.Label, record.KindCommit, 0)
 	add(pa.Index.Label, record.KindIndex, arch.IndexSize)
+}
+
+// settleFill applies accumulated per-label charges to the registered volumes'
+// stored fill, flooring at zero. Unregistered labels (a TOC-referenced tape the
+// scan has not seen) carry no fill to move and are skipped — their figure starts
+// when their tape is scanned.
+func (c *Catalog) settleFill(delta map[string]int64) {
+	for label, n := range delta {
+		if v, ok := c.volumes[label]; ok {
+			if v.Used += n; v.Used < 0 {
+				v.Used = 0
+			}
+		}
+	}
+}
+
+// applyFill is the single-record convenience over chargeFill+settleFill.
+func (c *Catalog) applyFill(medium string, run *Run, pa PlacedArchive, sign int64) {
+	delta := map[string]int64{}
+	c.chargeFill(medium, run, pa, sign, delta)
+	c.settleFill(delta)
 }
 
 // AddArchive merges one archive's content and its placement position into the catalog and
@@ -207,18 +228,22 @@ func (c *Catalog) addArchive(arch record.Archive, medium string, pos archiveio.A
 		seals = nil
 	}
 	arch.PartSeals = nil
+	arch.PartMap = nil // placement layout too: PlacedArchive.Parts carries the same locations
 	e.Run.addArchive(arch)
 	// The archive's key comes from the archive record itself — pos is pure position.
 	pa := PlacedArchive{DLE: arch.DLE, Level: arch.Level, Parts: pos.Parts, Seals: seals, Commit: pos.Commit, Index: pos.Index}
 	// The stored fill moves with the placement, inside this same mutation: a
-	// replaced record (a re-copy of the same archive) gives its charge back first.
+	// replaced record (a re-copy or re-scan of the same archive) gives its charge
+	// back in the same settlement, so an unchanged record nets zero per label.
+	delta := map[string]int64{}
 	if p, ok := e.placementOn(medium); ok {
 		if old, ok := p.Placed(arch.DLE, arch.Level); ok {
-			c.applyFill(medium, e.Run, old, -1)
+			c.chargeFill(medium, e.Run, old, -1, delta)
 		}
 	}
 	e.addPlaced(medium, pa)
-	c.applyFill(medium, e.Run, pa, +1)
+	c.chargeFill(medium, e.Run, pa, +1, delta)
+	c.settleFill(delta)
 	c.loaded = true
 }
 
@@ -337,9 +362,30 @@ func (c *Catalog) upsertVolume(lbl record.Label) {
 		if old.Label.Epoch == lbl.Epoch {
 			rec.Used = old.Used
 		}
+	} else {
+		// A label registered for the first time may already be referenced by
+		// placements — a reel known only from other tapes' commit-footer part maps
+		// until now. Their charges were skipped while the reel had no record
+		// (settleFill applies only to registered volumes), so registration
+		// settles them retroactively.
+		rec.Used += c.retroFill(lbl.Name)
 	}
 	c.volumes[lbl.Name] = rec
 	c.loaded = true
+}
+
+// retroFill sums the charges existing placements hold against a label that is
+// only now entering the registry (see upsertVolume).
+func (c *Catalog) retroFill(label string) int64 {
+	delta := map[string]int64{}
+	for _, e := range c.entries {
+		for _, p := range e.Placements {
+			for _, pa := range p.Archives {
+				c.chargeFill(p.Medium, e.Run, pa, +1, delta)
+			}
+		}
+	}
+	return delta[label]
 }
 
 // labelFill is a freshly labeled reel's starting fill: its file-0 label record,
@@ -540,6 +586,46 @@ func (c *Catalog) MediumBytes(medium string) int64 {
 		total += a.Compressed
 	}
 	return total
+}
+
+// MissingVolume names a tape the catalog's placements reference but no scan has
+// ever seen: a label learned from commit footers' part maps (the TOC) whose reel
+// was not among the volumes fed to any rebuild — the worklist entry telling the
+// operator which tape to insert next.
+type MissingVolume struct {
+	Label string
+	Runs  []string // runs with files on it, sorted
+}
+
+// MissingVolumes reports the labels placements reference that are absent from the
+// volume registry, sorted by label. Empty means every referenced tape has been
+// scanned (or recorded live) — the catalog is complete for what it knows about.
+func (c *Catalog) MissingVolumes() []MissingVolume {
+	runsByLabel := map[string]map[string]bool{}
+	for _, e := range c.entries {
+		for _, p := range e.Placements {
+			for _, label := range p.Labels() {
+				if _, known := c.volumes[label]; known {
+					continue
+				}
+				if runsByLabel[label] == nil {
+					runsByLabel[label] = map[string]bool{}
+				}
+				runsByLabel[label][e.Run.ID] = true
+			}
+		}
+	}
+	out := make([]MissingVolume, 0, len(runsByLabel))
+	for label, runs := range runsByLabel {
+		ids := make([]string, 0, len(runs))
+		for id := range runs {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		out = append(out, MissingVolume{Label: label, Runs: ids})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
+	return out
 }
 
 // Volumes returns the volume registry, sorted by name.

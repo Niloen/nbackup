@@ -201,6 +201,7 @@ func build(cfg *config.Config) (*Engine, error) {
 		KnownHosts:    e.knownHosts,
 		DisplayDLE:    e.DisplayDLE,
 		SourceOf:      e.dles.source,
+		RangedCopy:    e.rangedCopy,
 		CompressOpts:  e.tc.fopts,
 		DecryptOpts:   e.tc.dcopts,
 	})
@@ -291,13 +292,15 @@ func (e *Engine) MediumMinAge(name string) time.Duration {
 	return e.cfg.MinAgeFor(e.cfg.Media[name])
 }
 
-// RebuildCatalog rescans every configured medium that can be opened and rewrites
-// the local cache, returning the number of distinct runs indexed. Media that
-// can't be opened (e.g. an offline tape) are skipped with a warning.
-func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
+// RebuildCatalog rescans every configured medium that can be opened and merges
+// the scan into the local cache (full=true wipes it first — the reconciliation
+// of last resort). Media that can't be opened (e.g. an offline tape) are skipped
+// with a warning. The report carries what a pass could not resolve; pair it with
+// Catalog().MissingVolumes() for the tapes-still-needed worklist.
+func (e *Engine) RebuildCatalog(full bool, logf Logf) (catalog.RebuildReport, error) {
 	vol, err := e.dep.Landing()
 	if err != nil {
-		return 0, err
+		return catalog.RebuildReport{}, err
 	}
 	vols := map[string]media.Volume{e.dep.LandingName(): vol}
 	for name := range e.cfg.Media {
@@ -311,7 +314,7 @@ func (e *Engine) RebuildCatalog(logf Logf) (int, error) {
 		}
 		vols[name] = vol
 	}
-	return e.cat.Rebuild(vols)
+	return e.cat.Rebuild(vols, full)
 }
 
 // writeTarget bundles a medium prepared for writing: the opened write face (whose Close
@@ -623,6 +626,25 @@ func (e *Engine) checkFromMedium(from string) error {
 
 // dleEncryption resolves a DLE's configured encryption posture (the restorer's
 // EncryptionFor dep); ok is false when the DLE is no longer in the config.
+// rangedCopy is the extraction plan's medium-capability predicate (restorer
+// Deps.RangedCopy): whether some copy of the archive could serve a ranged read —
+// aligned per-part seals (they locate the range) on a medium whose type serves
+// sub-ranges. The mirror of archivefs.OpenRange's copy qualification, answered
+// statically so `nb recover`'s plan promises only reads the media can serve.
+func (e *Engine) rangedCopy(ref archiveio.Ref) bool {
+	for _, p := range e.cat.Placements(ref.Run) {
+		pa, ok := p.Placed(ref.DLE, ref.Level)
+		if !ok || len(pa.Seals) != len(pa.Parts) || len(pa.Seals) == 0 {
+			continue
+		}
+		def, ok := e.cfg.Media[p.Medium]
+		if ok && media.RangedReadsFor(def.Type) {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Engine) dleEncryption(name string) (config.EncryptConfig, bool) {
 	for _, d := range e.cfg.DLEs() {
 		if d.Name() == name {

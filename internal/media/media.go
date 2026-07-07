@@ -412,6 +412,13 @@ type Spec struct {
 	// serial, whole-volume medium (tape) that shares one rolling volume.
 	ConcurrentWrite bool
 
+	// RangedReads marks a medium type whose volumes can serve a genuine sub-range
+	// of a file's payload (an object store's ranged GET, a disk seek) — the static
+	// face of what ReadFile answers at runtime with ErrRangeUnsupported. Plan-time
+	// callers (a recovery's extraction plan) consult it so the plan promises only
+	// reads the medium can actually serve; tape leaves it false (it streams).
+	RangedReads bool
+
 	// FileCost is the type-level face of the FileCoster capability (the type's
 	// volumes implement the interface with the same rule): the on-medium byte cost
 	// of one file, for callers that reason from configuration alone — the engine's
@@ -445,6 +452,10 @@ func LoginFor(typ string) (LoginFunc, bool) {
 	f := specs[typ].Login
 	return f, f != nil
 }
+
+// RangedReadsFor reports whether a medium type's volumes can serve ranged payload
+// reads (see Spec.RangedReads).
+func RangedReadsFor(typ string) bool { return specs[typ].RangedReads }
 
 // FileCostFor returns a medium type's registered file-cost rule (see Spec.FileCost),
 // or ok=false for media without finite labeled volumes.

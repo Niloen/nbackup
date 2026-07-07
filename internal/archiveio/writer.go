@@ -416,6 +416,13 @@ func (w *Writer) finalize(ctx context.Context, arch *record.Archive, parts []Fil
 		}
 		index = pos
 	}
+	// The part map — the archive's TOC — makes the footer name every volume the
+	// archive spans, so a rebuild holding only this tape still learns where the
+	// other parts live (and a restore can prompt for them by label).
+	arch.PartMap = make([]record.PartLoc, len(parts))
+	for i, p := range parts {
+		arch.PartMap[i] = record.PartLoc{Label: p.Label, Epoch: p.Epoch, Pos: p.Pos}
+	}
 	// The footer omits the member list and frame table (they ride in the index);
 	// marshal a copy without them.
 	footer := *arch

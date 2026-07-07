@@ -362,3 +362,35 @@ func TestSelectionReadsWholeFallback(t *testing.T) {
 		t.Fatalf("whole estimate = %d, want the full %d encoded bytes", reads[0].Bytes, encTotal)
 	}
 }
+
+// TestSelectionReadsTapeOnlyCopyPlansWhole: a rangeable FORMAT whose only copy
+// sits on a medium that cannot serve ranges (tape streams) must plan — and hence
+// price — the whole-stream read the extract will actually perform. Regression for
+// the mhvtl road-test finding where the plan printed RANGED and the execution
+// read the whole archive.
+func TestSelectionReadsTapeOnlyCopyPlansWhole(t *testing.T) {
+	dle := "app01-data"
+	store, step, _, encTotal := framedFixture(t, dle)
+	step.Members = []string{"tail.txt"}
+
+	deps := testDeps(store, []record.Archive{
+		{Run: step.RunID, DLE: dle, Level: 0, Compress: "gzip", Compressed: int64(encTotal), Parts: 1},
+	})
+	deps.RangedCopy = func(archiveio.Ref) bool { return false } // every copy on tape
+	r := New(deps)
+
+	reads := r.SelectionReads([]recovery.ExtractStep{step})
+	if len(reads) != 1 {
+		t.Fatalf("got %d reads, want 1", len(reads))
+	}
+	rd := reads[0]
+	if rd.Ranged {
+		t.Fatalf("no range-capable copy: the plan must promise a whole read, got %+v", rd)
+	}
+	if rd.Bytes != int64(encTotal) {
+		t.Fatalf("whole-read estimate = %d, want the full %d", rd.Bytes, encTotal)
+	}
+	if rd.Reason == "" {
+		t.Fatal("the plan row should say why ranging is off")
+	}
+}

@@ -70,7 +70,7 @@ func TestPartialDumpKeepsRunAndMarksArchive(t *testing.T) {
 
 	// A rebuild from the medium's own commit footers preserves the marker — the fact
 	// survives a wiped catalog.
-	if _, err := eng.RebuildCatalog(nil); err != nil {
+	if _, err := eng.RebuildCatalog(true, nil); err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
 	rebuilt, err := eng.Catalog().ReadRun(s.ID)

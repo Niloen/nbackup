@@ -194,12 +194,12 @@ func TestUnreadableFooterIsOrphan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n, err := cat.Rebuild(map[string]media.Volume{"disk": newVolume(t, dir)})
+	rep, err := cat.Rebuild(map[string]media.Volume{"disk": newVolume(t, dir)}, true)
 	if err != nil {
 		t.Fatalf("a corrupt footer must not crash the scan: %v", err)
 	}
-	if n != 0 {
-		t.Fatalf("an archive with an unreadable footer must not be indexed, got %d runs", n)
+	if rep.Runs != 0 {
+		t.Fatalf("an archive with an unreadable footer must not be indexed, got %d runs", rep.Runs)
 	}
 
 	// OrphanFiles sees both the part and the unparseable commit file as orphans

@@ -146,7 +146,7 @@ func TestUsageLedgerRebuildRecordsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cat.Rebuild(map[string]media.Volume{"disk": vol}); err != nil {
+	if _, err := cat.Rebuild(map[string]media.Volume{"disk": vol}, true); err != nil {
 		t.Fatal(err)
 	}
 	series := cat.MediumUsage("disk")

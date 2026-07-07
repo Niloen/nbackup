@@ -65,7 +65,7 @@ func TestFormatSurvivesRestore(t *testing.T) {
 			if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
 				t.Skipf("GNU tar not available")
 			}
-			if _, err := eng.RebuildCatalog(nil); err != nil {
+			if _, err := eng.RebuildCatalog(true, nil); err != nil {
 				t.Fatalf("rebuild catalog from fixture volume: %v", err)
 			}
 

@@ -56,7 +56,7 @@ equivalent.
 | `nb prune [medium]` | Delete runs past each medium's cycle/capacity limits (all media if none named) |
 | `nb flush` | Drain a holding disk's staged archives to the landing |
 | `nb reset <dle>` | Schedule a DLE for a full on its next run (fresh chain) |
-| `nb rebuild` | Rebuild the local run-index cache from media |
+| `nb rebuild` | Rebuild the catalog from media — additive, so tapes can be fed one at a time |
 | `nb init` | Write a starting `nbackup.yaml` (interactive, or via flags) |
 | `nb login` | Authenticate a medium needing an interactive credential bootstrap (Google Drive OAuth) |
 | `nb web` | Serve a read-only status website |
@@ -212,7 +212,7 @@ The source defaults to the landing medium; `--from` overrides it. See
 | `nb label` | `--relabel` | Label a volume (required for tape before its first dump); `--relabel` recycles an aged-out tape. |
 | `nb load` | `--label` | Load a volume into a medium's drive — by bay/reel id, or `--label` to match a volume label. |
 | `nb reset <dle>` | — | Schedule a DLE for a full on its next run (fresh chain). |
-| `nb rebuild` | — | Rebuild the local run-index cache from media. |
+| `nb rebuild` | `--full` | Rebuild the local run-index cache from media. Additive: each pass merges what is readable now and prints the tapes still missing — after losing the catalog, insert tapes one at a time and re-run until the worklist is empty. `--full` wipes the cache first. |
 | `nb flush` | — | Drain a holding disk's staged archives to the landing. |
 
 ```bash

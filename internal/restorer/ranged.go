@@ -318,12 +318,18 @@ func (r *Restorer) SelectionReads(steps []recovery.ExtractStep) []ArchiveRead {
 		ref := archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level}
 		size := sizes[ref]
 		rd := ArchiveRead{Ref: ref, Bytes: size.bytes, Parts: size.parts, Whole: size.bytes, Files: files}
-		if groups, _, reason, ok := r.rangedGroups(st); ok {
+		switch groups, _, reason, ok := r.rangedGroups(st); {
+		case !ok:
+			rd.Reason = reason
+		case r.deps.RangedCopy != nil && !r.deps.RangedCopy(ref):
+			// The format could range, but no copy's medium can serve one (tape
+			// streams): the extract will fall back to the whole stream, so the
+			// plan must promise — and price — exactly that.
+			rd.Reason = "no copy on a range-capable medium"
+		default:
 			rd.Bytes = groupsEgress(groups, size.bytes)
 			rd.Parts = int64(len(groups))
 			rd.Ranged = true
-		} else {
-			rd.Reason = reason
 		}
 		out = append(out, rd)
 	}
