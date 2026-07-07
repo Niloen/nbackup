@@ -11,6 +11,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
 	"golang.org/x/sys/unix"
 )
@@ -235,9 +236,18 @@ func (m *mtDevice) requireMedia(fd uintptr) error {
 		return nil
 	}
 	if g.gstat&gmtDROpen != 0 {
-		return fmt.Errorf("%s: no tape loaded. If a changer feeds this drive, check that `device:` lists the drive nodes in the library's drive order (drive 0 first): a mismatch loads a cartridge into a different drive than the one read here", m.dev)
+		return errNoTapeLoaded(m.dev)
 	}
 	return nil
+}
+
+// errNoTapeLoaded is the empty-drive refusal, wrapping media.ErrNoVolume so the
+// label protocol classifies it as "nothing loaded" (prompt for a tape) rather
+// than "unrecognized data" (whose advice — a forced relabel — is wrong and
+// alarming for an empty drive). The drive-order hint rides along because the
+// same DR_OPEN symptom is how a misordered `device:` list shows itself.
+func errNoTapeLoaded(dev string) error {
+	return fmt.Errorf("%s: %w. If a changer feeds this drive, check that `device:` lists the drive nodes in the library's drive order (drive 0 first): a mismatch loads a cartridge into a different drive than the one read here", dev, media.ErrNoVolume)
 }
 
 // clearNonblock removes O_NONBLOCK from an open fd (see openDev) so data I/O blocks.

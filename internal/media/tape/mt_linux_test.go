@@ -5,6 +5,7 @@ package tape
 import (
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/Niloen/nbackup/internal/media"
@@ -167,4 +168,19 @@ func TestGrowReadRecord(t *testing.T) {
 			t.Fatalf("err = %v, want EIO propagated (not retried)", err)
 		}
 	})
+}
+
+// TestEmptyDriveClassifiesAsNoVolume: the st DR_OPEN "no tape loaded" refusal
+// must wrap media.ErrNoVolume so the label protocol prompts for a tape instead
+// of misdiagnosing an empty drive as "unrecognized or corrupt data" (whose
+// advice — a forced relabel — is wrong and alarming). Found testing by hand.
+func TestEmptyDriveClassifiesAsNoVolume(t *testing.T) {
+	err := errNoTapeLoaded("/dev/nst0")
+	if !errors.Is(err, media.ErrNoVolume) {
+		t.Fatalf("empty-drive error must wrap media.ErrNoVolume, got: %v", err)
+	}
+	// The drive-order hint must survive the classification (same DR_OPEN symptom).
+	if !strings.Contains(err.Error(), "drive order") {
+		t.Fatalf("the device-order hint should ride along, got: %v", err)
+	}
 }
