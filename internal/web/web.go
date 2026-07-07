@@ -793,6 +793,14 @@ func (s *Server) rollup(now time.Time, hist []report.Run) []alert {
 					m.Name, sizeutil.FormatBytes(residual), sizeutil.FormatBytes(capacity)),
 				Href: "/media/" + m.Name})
 		default:
+			// The projection warn belongs to the FILLING regime only (used still
+			// under 90% of capacity): a stabilized rotation hovers near capacity by
+			// design with a sawtooth curve whose dip-to-peak reads as growth, so it
+			// would flicker "projected full" forever — past the line, the
+			// retention-pressure warn above owns the signal.
+			if float64(m.Used)/float64(m.Capacity) >= 0.9 {
+				continue
+			}
 			if st, ok := s.src.MediumStats(m.Name); ok && !st.Growth.ProjFull.IsZero() && st.Growth.ProjFull.Before(now.Add(30*24*time.Hour)) {
 				warn = append(warn, alert{Level: "warn", Tag: "capacity forecast",
 					Text: fmt.Sprintf("%s projected full in ~%dd", m.Name, projDays(st.Growth.ProjFull, now)),

@@ -1338,3 +1338,31 @@ func TestDLEsPageSingleHostIsUngrouped(t *testing.T) {
 		t.Errorf("/dles rendered host headers for a single-host catalog:\n%s", body)
 	}
 }
+
+// TestHomeRollupProjectionOnlyWhileFilling: the "projected full" warn belongs to
+// the filling regime. A stabilized rotation (>=90% used, by design under
+// capacity-as-a-promise) must not fire it even when the sawtooth's dip-to-peak
+// reads as growth — retention pressure owns that regime.
+func TestHomeRollupProjectionOnlyWhileFilling(t *testing.T) {
+	// A usage curve that projects "full in ~3d" (the fake's MediumStats summarizes
+	// f.usage against the medium's capacity).
+	usage := []catalog.UsageSample{
+		{Medium: "disk", At: time.Now().Add(-11 * 24 * time.Hour), Used: 200_000},
+		{Medium: "disk", At: time.Now().Add(-24 * time.Hour), Used: 800_000},
+	}
+	src := fakeSource{
+		media:     []engine.MediumInfo{{Name: "disk", Type: "disk", Used: 950_000, Capacity: 1_000_000}},
+		usage:     usage,
+		protected: map[string]int64{"disk": 100_000}, // comfortable protected set: retention pressure quiet too
+	}
+	_, body := get(t, NewServer(src, t.TempDir()).Handler(), "/")
+	if strings.Contains(body, "projected full") {
+		t.Fatalf("a stabilized (95%%-used) rotation must not fire the projection warn:\n%s", body)
+	}
+
+	src.media = []engine.MediumInfo{{Name: "disk", Type: "disk", Used: 500_000, Capacity: 1_000_000}}
+	_, body = get(t, NewServer(src, t.TempDir()).Handler(), "/")
+	if !strings.Contains(body, "projected full") {
+		t.Fatalf("a filling (50%%-used) medium projecting inside 30d must warn:\n%s", body)
+	}
+}

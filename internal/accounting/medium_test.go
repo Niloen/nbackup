@@ -238,3 +238,35 @@ func TestBareDriveCapacityFromRegistry(t *testing.T) {
 		t.Fatalf("capacity = %d, want the registry-derived %d (3 labeled × per-reel)", info.Capacity, want)
 	}
 }
+
+// TestSummarizeWindowsOutTheFillUpPhase: growth is measured over the recent
+// window only. A medium that filled up long ago and has been flat since must
+// project nothing — the whole-history slope would otherwise read "growing"
+// forever (decaying like 1/t) while the by-design small headroom made it
+// project "full in ~1d" indefinitely.
+func TestSummarizeWindowsOutTheFillUpPhase(t *testing.T) {
+	flatSince := []catalog.UsageSample{
+		{At: day(1), Used: 100},    // ancient fill-up start
+		{At: day(2), Used: 9_000},  // ...steep growth phase
+		{At: day(60), Used: 9_000}, // flat for two months
+		{At: day(90), Used: 9_000}, // still flat (window covers day 60-90)
+	}
+	st := Summarize(flatSince, 10_000)
+	if st.PerDay != 0 || !st.ProjFull.IsZero() {
+		t.Fatalf("a long-flat medium must not project: PerDay=%d ProjFull=%v (stale fill-up slope leaked in)", st.PerDay, st.ProjFull)
+	}
+	if st.First != day(1) || st.Last != day(90) {
+		t.Fatalf("First/Last must still describe the whole record, got %v/%v", st.First, st.Last)
+	}
+
+	// Genuine growth inside the window still projects.
+	growing := []catalog.UsageSample{
+		{At: day(1), Used: 100},
+		{At: day(80), Used: 5_000},
+		{At: day(90), Used: 8_000},
+	}
+	st = Summarize(growing, 10_000)
+	if st.PerDay != 300 || st.ProjFull.IsZero() { // (8000-5000)/10d, day(1) outside the window
+		t.Fatalf("recent growth must project from the WINDOW's slope: PerDay=%d ProjFull=%v", st.PerDay, st.ProjFull)
+	}
+}

@@ -329,17 +329,31 @@ type UsageStats struct {
 	ProjFull time.Time // projected capacity-reached date; zero when unbounded, at/over capacity, or not growing
 }
 
+// growthWindow bounds how far back Summarize measures growth: a medium's whole
+// recorded history bakes its initial fill-up phase into the slope forever (a
+// first→last measurement over a curve that long since flattened still reads as
+// growth, only decaying like 1/t), so a stabilized rotation would project
+// "full in ~1d" indefinitely — the remaining headroom is small BY DESIGN under
+// capacity-as-a-promise. Only the recent window says anything about tomorrow.
+const growthWindow = 30 * 24 * time.Hour
+
 // Summarize computes the growth statistics for a medium's usage curve against its
 // current capacity (capacity is config knowledge, so the caller passes it fresh
-// rather than reading it out of old samples). Fewer than two samples, a sub-day
-// span, or a net decline all yield no rate — the projection must never mislead.
+// rather than reading it out of old samples). Growth is measured over the last
+// growthWindow of samples — see the constant for why the full history would
+// mislead. Fewer than two samples, a sub-day span, or a net decline all yield no
+// rate — the projection must never mislead.
 func Summarize(series []catalog.UsageSample, capacity int64) UsageStats {
 	st := UsageStats{Samples: len(series)}
 	if len(series) == 0 {
 		return st
 	}
+	st.First, st.Last = series[0].At, series[len(series)-1].At
+	cutoff := series[len(series)-1].At.Add(-growthWindow)
+	for len(series) > 1 && series[0].At.Before(cutoff) {
+		series = series[1:]
+	}
 	first, last := series[0], series[len(series)-1]
-	st.First, st.Last = first.At, last.At
 	if len(series) < 2 {
 		return st
 	}
