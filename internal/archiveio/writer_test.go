@@ -154,7 +154,7 @@ func (s *memSink) NextPart() (media.Volume, int64, string, int, error) {
 // volume capacity, so only a no-cap volume with no partCap is unbounded.
 func (s *memSink) Bounded() bool { return s.partCap > 0 || s.vols[s.idx].capacity > 0 }
 
-func (s *memSink) PlaceFile(size int64) (media.Volume, string, int, error) {
+func (s *memSink) PlaceFile(_ string, size int64) (media.Volume, string, int, error) {
 	if r := s.room(); r >= 0 && size > r {
 		if err := s.advance(); err != nil {
 			return nil, "", 0, err

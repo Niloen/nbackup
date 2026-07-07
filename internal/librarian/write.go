@@ -120,6 +120,13 @@ func (l *Librarian) verifyWritable(appendable bool, now time.Time) (volName stri
 		return "", 0, err
 	}
 	l.learnLoadedBarcode(lbl.Name)
+	// Snapshot the accepted reel's fill for Remaining() — a tape cannot see its
+	// own, so it is derived from the catalog's records, priced by the medium's own
+	// cost rule (see volumeFill). Taken once per accept — the one choke point every
+	// write path (start, roll, swap, recycle) funnels through.
+	if fc, ok := l.driveVol().(media.FileCoster); ok {
+		l.fill.accept(lbl.Name, l.cat.BytesOnLabel(lbl.Name, fc.FileCost))
+	}
 	return lbl.Name, lbl.Epoch, nil
 }
 

@@ -276,10 +276,6 @@ func (m *mtDevice) count() (int, error) {
 	return n, nil
 }
 
-// bytesUsed is unknowable for a real drive: software cannot see a tape's fill
-// without hitting EOT, so capacity tracking falls back to the reactive ErrVolumeFull.
-func (m *mtDevice) bytesUsed() int64 { return 0 }
-
 // foreign is always false for a real tape: the drive cannot see what a cartridge
 // holds without reading it, so foreignness is detected by decoding the file-0
 // label (readLabel) instead.

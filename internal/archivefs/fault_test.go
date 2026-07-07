@@ -161,7 +161,7 @@ type memWriteStore struct{ vol *memVol }
 func (s *memWriteStore) NextPart() (media.Volume, int64, string, int, error) {
 	return s.vol, -1, "vol", 1, nil
 }
-func (s *memWriteStore) PlaceFile(int64) (media.Volume, string, int, error) {
+func (s *memWriteStore) PlaceFile(string, int64) (media.Volume, string, int, error) {
 	return s.vol, "vol", 1, nil
 }
 func (s *memWriteStore) Bounded() bool                       { return false }

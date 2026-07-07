@@ -37,6 +37,7 @@ type Archive struct {
 	Frames       []Frame    `json:"frames,omitempty"`     // a framed archive's decode-restart table, in stream order (see Frame). Like Members it rides the per-archive index, never the footer; unlike part seals it is archive-invariant (encoded-stream domain), so copies carry it unchanged.
 	Units        []Unit     `json:"units,omitempty"`      // the archive's content inventory in the archiver's vocabulary (see Unit), sorted by Path. Rides the per-archive index like Members, never the footer; archive-invariant, so copies carry it unchanged.
 	PartSeals    []PartSeal `json:"part_seals,omitempty"` // per-part seals, index-aligned with the parts (Header.Part order). Like Parts, a fact about THIS placement's layout (a copy re-splits and re-seals its own parts): the catalog moves them onto the placement's record and strips them from the run's medium-independent content.
+	IndexSize    int64      `json:"index_size,omitempty"` // payload bytes of THIS placement's member-index file (0 = no index). A placement-layout fact like PartSeals; with them it completes what a rebuild scan needs to re-derive a volume's fill without reading payloads (the scan skips index files).
 }
 
 // Shape is an archive's stream shape (Archive.Shape, Header.Shape): how the encoded

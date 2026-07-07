@@ -34,7 +34,10 @@ func init() {
 		// reclamation is deferred to label rotation, so no concurrent-write capability —
 		// a serial, whole-volume medium.
 		Profile: newVolumeProfile,
-		Params:  []string{"dir", "device", "changer", "slots", "drives", "manual", "volume_size", "part_size", "block_size"},
+		// The byte cost of one file against a reel's declared volume_size — the
+		// planner's face of the same rule the volumes answer as media.FileCoster.
+		FileCost: fileCost,
+		Params:   []string{"dir", "device", "changer", "slots", "drives", "manual", "volume_size", "part_size", "block_size"},
 	})
 }
 
@@ -43,8 +46,13 @@ func init() {
 // is both a media.Changer (the librarian's logistics) and a media.Volume (the active
 // drive's cartridge, so the medium handle is a Volume above the librarian).
 func newTapeVolume(opts media.Options, _ string) (media.Volume, error) {
-	// volume_size caps each emulated cartridge so it fills like a real reel; a real
-	// drive reports EOT only by hitting it, so capacity there stays 0 (use part_size).
+	// volume_size is each cartridge's DECLARED capacity (Amanda's tapetype length).
+	// A tape cannot see its own fill, so the librarian spends this against the
+	// catalog's volume fill ledger for proactive spanning; declare it a little below
+	// the cartridge's native capacity — filemarks, aborted partials, and a crashed
+	// run's orphans consume tape outside the ledger, and physical EOT is still a hard
+	// failure. The emulated library additionally enforces it (a write past it fails
+	// like EOT), standing in for the real thing.
 	var capacity int64
 	if s := opts.Get("volume_size"); s != "" {
 		c, err := sizeutil.ParseBytes(s)
@@ -56,12 +64,12 @@ func newTapeVolume(opts media.Options, _ string) (media.Volume, error) {
 	switch {
 	case opts.Get("changer") != "":
 		// A real SCSI media changer (mtx): `changer` is the control (sg) device and
-		// `device` lists the drive nodes a robot loads slots into. Like a real drive,
-		// each cartridge's fill is unknowable (capacity 0 → proactive spanning via
-		// part_size); the file-backed sim keys (dir/slots/drives/manual) do not apply.
-		for _, k := range []string{"dir", "slots", "drives", "manual", "volume_size"} {
+		// `device` lists the drive nodes a robot loads slots into. Slots and drives are
+		// discovered from the robot, so the file-backed sim keys (dir/slots/drives/manual)
+		// do not apply; volume_size (the declared per-cartridge capacity) does.
+		for _, k := range []string{"dir", "slots", "drives", "manual"} {
 			if opts.Get(k) != "" {
-				return nil, fmt.Errorf("`%s` does not apply to a SCSI changer (changer:); list the drive nodes in `device` and bound parts with `part_size`", k)
+				return nil, fmt.Errorf("`%s` does not apply to a SCSI changer (changer:): slots and drives are discovered from the robot; list the drive nodes in `device`", k)
 			}
 		}
 		block, err := blockOpt(opts.Get("block_size"))
@@ -76,7 +84,7 @@ func newTapeVolume(opts media.Options, _ string) (media.Volume, error) {
 		if err != nil {
 			return nil, err
 		}
-		return newTapeChanger(ld, 0)
+		return newTapeChanger(ld, capacity)
 	case opts.Get("dir") != "":
 		slots, err := atoiOpt(opts.Get("slots"), 1)
 		if err != nil {
@@ -101,9 +109,6 @@ func newTapeVolume(opts media.Options, _ string) (media.Volume, error) {
 				return nil, fmt.Errorf("`%s` applies only to an emulated library (dir:); a real drive (device:) is a single hand-loaded drive", k)
 			}
 		}
-		if opts.Get("volume_size") != "" {
-			return nil, fmt.Errorf("`volume_size` does not apply to a real drive (device:): the drive reports EOT only by hitting it, so capacity is unknowable; bound parts with `part_size`")
-		}
 		block, err := blockOpt(opts.Get("block_size"))
 		if err != nil {
 			return nil, err
@@ -112,7 +117,7 @@ func newTapeVolume(opts media.Options, _ string) (media.Volume, error) {
 		if err != nil {
 			return nil, err
 		}
-		return newTapeChanger(&realDriveLoader{dev: dev, node: opts.Get("device")}, 0)
+		return newTapeChanger(&realDriveLoader{dev: dev, node: opts.Get("device")}, capacity)
 	default:
 		return nil, fmt.Errorf("tape medium requires 'dir' (emulated library: a directory or bucket URL) or 'device' (real drive)")
 	}
@@ -183,9 +188,6 @@ type device interface {
 	// reset truncates the volume to empty (next write becomes file 0). It is the
 	// physical basis of (re)labeling — relabel = reset then write a new file 0.
 	reset() error
-	// bytesUsed reports the bytes written on the mounted volume, or 0 when the
-	// device cannot see its own fill (a real drive only learns it by hitting EOT).
-	bytesUsed() int64
 	// foreign reports whether the device can see, without reading file 0, that the
 	// mounted volume holds non-NBackup data (a file-backed cartridge with stray,
 	// unnumbered keys). A real tape always reports false — its foreignness is
@@ -199,6 +201,28 @@ type device interface {
 type tape struct {
 	dev device // mounted device; nil when the drive is empty
 }
+
+// fileCost is the tape medium's one accounting rule — media.FileCoster (per volume,
+// below) and media.Spec.FileCost (per type, for the planner) both answer with it:
+// what one committed file costs against a reel's declared volume_size. A tape file
+// is its fixed inline header block plus its payload; kinds whose payload size is
+// recorded nowhere (the label, the commit footer — small JSON in reality) are
+// bounded at one header block of payload, per the FileCoster contract (over-state
+// and roll early, never under-state and hit physical EOT). The bound's honest
+// limit: a commit footer only outgrows one block past roughly 250 per-part seals —
+// on tape that is an archive spanning ~250 reels, which we document rather than
+// defend against. Framing constants never leave this rule.
+func fileCost(kind string, payload int64) int64 {
+	switch kind {
+	case record.KindLabel, record.KindCommit:
+		payload = record.HeaderBlock
+	}
+	return record.HeaderBlock + payload
+}
+
+// FileCost implements media.FileCoster for the mounted cartridge — the same rule
+// the type registers as Spec.FileCost.
+func (t *tape) FileCost(kind string, payload int64) int64 { return fileCost(kind, payload) }
 
 func (t *tape) requireDev() (device, error) {
 	if t.dev == nil {
@@ -483,10 +507,12 @@ func (r *realDriveLoader) loaded(drive int) (device, string, int, bool) {
 	return r.dev, "", -1, true // the drive always has its device; whether a tape is in it is read on access
 }
 
-// deviceStatus inventories one mounted device: its label, fill, and file count.
+// deviceStatus inventories one mounted device: its label and file count. Fill is
+// deliberately absent — a tape cannot see its own; the catalog's volume ledger is
+// where a labeled volume's fill lives.
 func deviceStatus(dev device, capacity int64) media.VolumeStatus {
 	n, _ := dev.count()
-	st := media.VolumeStatus{Capacity: capacity, Files: n, Blank: n == 0, Used: dev.bytesUsed()}
+	st := media.VolumeStatus{Capacity: capacity, Files: n, Blank: n == 0}
 	lbl, ok, err := readLabel(dev)
 	switch {
 	case ok:

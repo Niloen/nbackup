@@ -34,6 +34,23 @@ type Labeled interface {
 	WriteLabel(lbl record.Label) error
 }
 
+// FileCoster is the capability of pricing files against a volume's declared
+// capacity (volume_size): the on-medium byte cost of one committed file, framing
+// included — the currency the librarian's fill arithmetic and the catalog's
+// derived volume fill spend in. Only media whose volumes are finite labeled reels
+// (tape) implement it; it is a byte cost, distinct from Spec.Cost (money).
+//
+// The contract is BOUNDED ABOVE, never under: a cost may over-state (the caller
+// then rolls to the next volume early — wasted tail), but an under-statement
+// would size a write past physical end-of-volume, which is a failed run. kind is
+// the file's record.Header.Kind; payload is its recorded payload size where the
+// kind has one (archive parts: the seal size; the member index: the footer's
+// IndexSize) — kinds whose payload is recorded nowhere (the label, the commit
+// footer) are priced at the medium's own bound and ignore payload.
+type FileCoster interface {
+	FileCost(kind string, payload int64) int64
+}
+
 // ErrForeignVolume reports a non-empty volume whose file 0 is not an NBackup
 // label (someone else's tape, or non-NBackup data).
 var ErrForeignVolume = fmt.Errorf("foreign volume: file 0 is not an NBackup label")
@@ -41,10 +58,11 @@ var ErrForeignVolume = fmt.Errorf("foreign volume: file 0 is not an NBackup labe
 // ErrVolumeFull reports that a write hit the end of the volume (a finite volume's
 // capacity, e.g. a tape). The partial file is discarded (left unsealed, so a scan
 // ignores it). Spanning is PROACTIVE: the writer sizes each archive part to fit the
-// loaded volume's known remaining capacity and rolls onto the next volume between
-// parts, so this error is the backstop for an estimate that came up short (or a
-// volume whose remaining capacity software cannot see ahead) — the caller fails with
-// an actionable message rather than recovering. Callers test it with errors.Is.
+// declared volume_size minus the catalog fill ledger's figure and rolls onto the
+// next volume between parts, so this error is the backstop for a ledger that came
+// up short (an optimistic volume_size, orphans the ledger cannot see) — the caller
+// fails with an actionable message rather than recovering. Callers test it with
+// errors.Is.
 var ErrVolumeFull = fmt.Errorf("volume full: end of volume reached")
 
 // ErrNoVolume reports that an operation needs a volume mounted in the drive, but
@@ -78,8 +96,8 @@ var ErrNoFileRemoval = fmt.Errorf("per-file removal unsupported; reuse is whole-
 // operations act on the loaded volume.
 type Drive interface {
 	Volume
-	// Loaded reports the cartridge currently in the drive (its barcode, label, fill);
-	// ok is false when the drive is empty.
+	// Loaded reports the cartridge currently in the drive (its barcode, label,
+	// capacity); ok is false when the drive is empty.
 	Loaded() (VolumeStatus, bool)
 }
 
@@ -133,7 +151,7 @@ type SlotStatus struct {
 }
 
 // DriveStatus is one data-transfer element's state: its address, what cartridge is
-// loaded (by barcode and home slot), and the loaded volume's physical fill.
+// loaded (by barcode and home slot), and the loaded volume's status.
 type DriveStatus struct {
 	Drive    int          // data-transfer-element address (0-based)
 	Node     string       // the drive's device node (e.g. /dev/nst0); "" for a file-backed library
@@ -153,7 +171,6 @@ type VolumeStatus struct {
 	Pool     string // the label's pool (the owning medium); "" when blank/foreign/unread
 	Blank    bool
 	Foreign  bool // holds non-NBackup data: not writable without a forced relabel
-	Used     int64
 	Capacity int64
 	Files    int
 }
@@ -394,6 +411,13 @@ type Spec struct {
 	// serial, whole-volume medium (tape) that shares one rolling volume.
 	ConcurrentWrite bool
 
+	// FileCost is the type-level face of the FileCoster capability (the type's
+	// volumes implement the interface with the same rule): the on-medium byte cost
+	// of one file, for callers that reason from configuration alone — the planner
+	// pricing a reel's fill without opening a drive. Nil for media without finite
+	// labeled volumes.
+	FileCost func(kind string, payload int64) int64
+
 	// Login, if non-nil, is the medium type's interactive credential bootstrap, run by
 	// `nb login <medium>`. It is headless-friendly (prints instructions and reads a
 	// pasted code from in — no browser assumption) and writes whatever credential
@@ -417,6 +441,13 @@ type LoginFunc func(ctx context.Context, opts Options, secretsDir string, args [
 // type authenticates from ambient credentials with no interactive step.
 func LoginFor(typ string) (LoginFunc, bool) {
 	f := specs[typ].Login
+	return f, f != nil
+}
+
+// FileCostFor returns a medium type's registered file-cost rule (see Spec.FileCost),
+// or ok=false for media without finite labeled volumes.
+func FileCostFor(typ string) (func(kind string, payload int64) int64, bool) {
+	f := specs[typ].FileCost
 	return f, f != nil
 }
 

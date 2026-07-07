@@ -28,6 +28,7 @@ type orchestrator struct {
 type volReq struct {
 	alloc archiveio.PartAllocator
 	place bool
+	kind  string // the placed file's record kind (place only); the allocator prices the fit by it
 	size  int64
 	reply chan volResp
 }
@@ -71,7 +72,7 @@ func (o *orchestrator) loop() {
 			var resp volResp
 			if r.place {
 				resp.max = -1
-				resp.vol, resp.name, resp.epoch, resp.err = r.alloc.PlaceFile(r.size)
+				resp.vol, resp.name, resp.epoch, resp.err = r.alloc.PlaceFile(r.kind, r.size)
 			} else {
 				resp.vol, resp.max, resp.name, resp.epoch, resp.err = r.alloc.NextPart()
 			}
@@ -111,9 +112,9 @@ func (r *routedAllocator) NextPart() (media.Volume, int64, string, int, error) {
 	return x.vol, x.max, x.name, x.epoch, x.err
 }
 
-func (r *routedAllocator) PlaceFile(size int64) (media.Volume, string, int, error) {
+func (r *routedAllocator) PlaceFile(kind string, size int64) (media.Volume, string, int, error) {
 	reply := make(chan volResp, 1)
-	r.orch.vol <- volReq{alloc: r.real, place: true, size: size, reply: reply}
+	r.orch.vol <- volReq{alloc: r.real, place: true, kind: kind, size: size, reply: reply}
 	x := <-reply
 	return x.vol, x.name, x.epoch, x.err
 }

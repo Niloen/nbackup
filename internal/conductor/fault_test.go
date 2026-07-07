@@ -173,7 +173,7 @@ type memFlushStore struct{ vol *memFlushVol }
 func (s *memFlushStore) NextPart() (media.Volume, int64, string, int, error) {
 	return s.vol, -1, "L", 1, nil
 }
-func (s *memFlushStore) PlaceFile(int64) (media.Volume, string, int, error) {
+func (s *memFlushStore) PlaceFile(string, int64) (media.Volume, string, int, error) {
 	return s.vol, "L", 1, nil
 }
 func (s *memFlushStore) Bounded() bool                       { return false }

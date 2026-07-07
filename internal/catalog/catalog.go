@@ -448,6 +448,33 @@ func (c *Catalog) MediumBytes(medium string) int64 {
 	return total
 }
 
+// BytesOnLabel derives the fill of the volume with the given label — what a
+// declared volume_size has been spent on, since a tape cannot report its own
+// fill. It is a pure walk over what the catalog already records (nothing stored,
+// so a rebuild has nothing extra to reconstruct): the reel's label file, and per
+// placed archive its parts (seal sizes), member index (the footer's IndexSize),
+// and commit footer. cost prices each file — it is the MEDIUM's rule
+// (media.FileCoster / Spec.FileCost), bounded above by contract, so the catalog
+// stays neutral about framing and bounds. Orphans of a crashed run are recorded
+// nowhere and so never counted — one reason volume_size is declared below a
+// cartridge's native capacity. A placed archive without aligned seals (an old
+// footer, a scan that saw only some parts) charges its whole Compressed size on
+// each of its volumes — an over-count, erring toward an early roll.
+func (c *Catalog) BytesOnLabel(label string, cost func(kind string, payload int64) int64) int64 {
+	if label == "" {
+		return 0 // address-identified parts carry no label; "" must not match them
+	}
+	total := cost(record.KindLabel, 0)
+	for _, e := range c.entries {
+		for _, p := range e.Placements {
+			for _, a := range p.Archives {
+				total += a.bytesOn(label, e.Run, cost)
+			}
+		}
+	}
+	return total
+}
+
 // Volumes returns the volume registry, sorted by name.
 func (c *Catalog) Volumes() []VolumeRecord {
 	out := make([]VolumeRecord, 0, len(c.volumes))

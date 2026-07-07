@@ -1362,7 +1362,7 @@ func TestHoldingDisksFlush(t *testing.T) {
 // chains must restore from the spanned tapes.
 func TestHoldingDiskDrainSpansVolumes(t *testing.T) {
 	srcA, srcB := t.TempDir(), t.TempDir()
-	// Bodies well over the 160 KiB reel so each archive rolls across volumes mid-drain.
+	// Bodies well over the 256 KiB reel so each archive rolls across volumes mid-drain.
 	write(t, filepath.Join(srcA, "a.txt"), strings.Repeat("alpha-spanning-payload-", 16*1024))
 	write(t, filepath.Join(srcB, "b.txt"), strings.Repeat("bravo-spanning-payload-", 16*1024))
 	scratchDir := t.TempDir()
@@ -1371,7 +1371,7 @@ func TestHoldingDiskDrainSpansVolumes(t *testing.T) {
 		Landing:   config.MediumList{"lto"},
 		AutoLabel: true,
 		Media: map[string]config.Media{
-			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "12", "volume_size": "163840"}},
+			"lto":     {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "12", "volume_size": "262144"}},
 			"scratch": {Type: "disk", Holding: true, Capacity: "500MB", Params: map[string]string{"path": scratchDir}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: srcA}, {Host: "localhost", Path: srcB}},
@@ -2105,7 +2105,8 @@ func recordSizedFullOn(t *testing.T, eng *Engine, date, dle, volume string, byte
 	// per archive from its landing instant, so one meant to read as dated `date` must land then.
 	at, _ := record.ParseDateField(date)
 	id := record.IDFromTime(at)
-	arch := record.Archive{Run: id, DLE: dle, Level: 0, Compressed: bytes, CreatedAt: at}
+	arch := record.Archive{Run: id, DLE: dle, Level: 0, Compressed: bytes,
+		PartSeals: []record.PartSeal{{Size: bytes}}, CreatedAt: at}
 	pos := archiveio.ArchivePos{Parts: []archiveio.FilePos{{Label: volume, Epoch: 1, Pos: 1}}, Commit: archiveio.FilePos{Label: volume, Epoch: 1, Pos: 2}}
 	if err := eng.cat.AddArchive(arch, "lto", pos); err != nil {
 		t.Fatal(err)
@@ -2222,7 +2223,7 @@ func TestExpectedTapeReportsReelFill(t *testing.T) {
 			"lto": {
 				Type:       "tape",
 				Appendable: &appendable,
-				Params:     map[string]string{"dir": t.TempDir(), "manual": "true", "slots": "2", "volume_size": "1000"},
+				Params:     map[string]string{"dir": t.TempDir(), "manual": "true", "slots": "2", "volume_size": "500000"},
 			},
 		},
 		Workdir:  t.TempDir(),
@@ -2235,7 +2236,8 @@ func TestExpectedTapeReportsReelFill(t *testing.T) {
 	}
 	now := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
 
-	recordVol(t, eng, "lto-0001", time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC))
+	labeledAt := time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)
+	recordVol(t, eng, "lto-0001", labeledAt)
 	recordSizedFullOn(t, eng, "2026-06-20", "h", "lto-0001", 600)
 
 	exp, ok := eng.ExpectedVolume(now)
@@ -2245,8 +2247,15 @@ func TestExpectedTapeReportsReelFill(t *testing.T) {
 	if exp.Label != "lto-0001" {
 		t.Fatalf("want append to lto-0001, got %+v", exp)
 	}
-	if exp.VolumeBytes != 1000 || exp.UsedBytes != 600 {
-		t.Fatalf("want a 1000-byte reel with 600 used, got VolumeBytes=%d UsedBytes=%d", exp.VolumeBytes, exp.UsedBytes)
+	// The fill is derived from the catalog, priced by the tape medium's own cost
+	// rule: the label file, the 600-byte part, and the commit footer.
+	cost, ok := media.FileCostFor("tape")
+	if !ok {
+		t.Fatal("tape should register a file-cost rule")
+	}
+	wantUsed := cost(record.KindLabel, 0) + cost(record.KindArchive, 600) + cost(record.KindCommit, 0)
+	if exp.VolumeBytes != 500000 || exp.UsedBytes != wantUsed {
+		t.Fatalf("want a 500000-byte reel with %d used, got VolumeBytes=%d UsedBytes=%d", wantUsed, exp.VolumeBytes, exp.UsedBytes)
 	}
 }
 
@@ -2474,7 +2483,7 @@ func TestDumpSpanRecyclesReusableTape(t *testing.T) {
 
 	// A run too big for one reel: it starts on the one remaining blank bay, then — with
 	// no blank left — recycles the oldest Floor-cleared tape (l1) to finish the span.
-	write(t, filepath.Join(src, "big.txt"), strings.Repeat("x", 250*1024))
+	write(t, filepath.Join(src, "big.txt"), strings.Repeat("x", 200*1024))
 	s3, err := eng.Run(context.Background(), time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC), nil)
 	if err != nil {
 		t.Fatalf("spanning run should recycle %q to finish, got: %v", l1, err)

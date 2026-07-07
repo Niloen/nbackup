@@ -214,9 +214,10 @@ func printInventory(eng *engine.Engine, name string) {
 			fmt.Fprintf(dw, "\t%d%s\t(empty)\t-\t-\t-\t-\n", d.Drive, node)
 			continue
 		}
-		label, status := volumeLabelStatus(d.Volume, name, appendable, volumeHasRuns(eng, d.Volume.Label))
+		used := volumeUsed(eng, name, d.Volume.Label)
+		label, status := volumeLabelStatus(d.Volume, name, appendable, volumeHasRuns(eng, d.Volume.Label), used)
 		fmt.Fprintf(dw, "\t%d%s\t%s\t%s\t%s\t%s\t%d\n", d.Drive, node, barcodeOr(d.Volume.Barcode), label, status,
-			sizeutil.FormatBytes(d.Volume.Used), d.Volume.Files)
+			sizeutil.FormatBytes(used), d.Volume.Files)
 	}
 	dw.Flush()
 
@@ -272,13 +273,32 @@ func volumeHasRuns(eng *engine.Engine, label string) bool {
 	return len(eng.Catalog().RunsOnLabel(label)) > 0
 }
 
+// volumeUsed is a labeled volume's catalog-derived fill, priced by its medium
+// type's own cost rule — the ON VOLUME column and the "full" refinement read it,
+// a tape being unable to report its own fill. 0 for a blank or unlabeled reel.
+func volumeUsed(eng *engine.Engine, medium, label string) int64 {
+	if label == "" {
+		return 0
+	}
+	info, ok := eng.Medium(medium)
+	if !ok {
+		return 0
+	}
+	cost, ok := media.FileCostFor(info.Type)
+	if !ok {
+		return 0
+	}
+	return eng.Catalog().BytesOnLabel(label, cost)
+}
+
 // classifyVolume renders a volume's display label and the status decidable from
-// the volume alone — foreign, blank, wrong-pool, or full; "" means a labeled
-// volume of this pool with room. medium is the medium being inspected, so a reel
-// labeled for a different pool is flagged rather than shown as one of this
-// medium's own volumes. Pure (no catalog, no medium policy): it serves both the
-// inventory listing (which refines "" and "full" via volumeLabelStatus) and the
-// operator swap prompt (reelDesc), so the two never diverge.
+// the volume alone — foreign, blank, or wrong-pool; "" means a labeled volume of
+// this pool. medium is the medium being inspected, so a reel labeled for a
+// different pool is flagged rather than shown as one of this medium's own
+// volumes. Pure (no catalog, no medium policy): it serves both the inventory
+// listing (which refines "" — including fullness, a catalog-ledger fact a tape
+// cannot report about itself — via volumeLabelStatus) and the operator swap
+// prompt (reelDesc), so the two never diverge.
 func classifyVolume(b media.VolumeStatus, medium string) (label, status string) {
 	switch {
 	case b.Foreign:
@@ -289,8 +309,6 @@ func classifyVolume(b media.VolumeStatus, medium string) (label, status string) 
 		// A valid NBackup label, but for another pool: the write guard would refuse it
 		// (wrong tape), so the inventory must not present it as this medium's own.
 		return b.Label, fmt.Sprintf("wrong-pool:%s", b.Pool)
-	case b.Capacity > 0 && b.Used >= b.Capacity:
-		return b.Label, "full"
 	default:
 		return b.Label, ""
 	}
@@ -299,12 +317,9 @@ func classifyVolume(b media.VolumeStatus, medium string) (label, status string) 
 // volumeLabelStatus is the inventory-listing refinement of classifyVolume: it adds
 // the catalog-derived states (reclaimable orphans, one-run-per-volume "used") and
 // resolves a writable volume to "append"/"writable" per the medium's appendability.
-func volumeLabelStatus(b media.VolumeStatus, medium string, appendable, hasRuns bool) (label, status string) {
+func volumeLabelStatus(b media.VolumeStatus, medium string, appendable, hasRuns bool, used int64) (label, status string) {
 	label, status = classifyVolume(b, medium)
-	switch status {
-	case "", "full":
-		// Refined below; even a full volume can instead be reclaimable.
-	default:
+	if status != "" {
 		return label, status
 	}
 	if b.Files > 1 && !hasRuns {
@@ -314,7 +329,9 @@ func volumeLabelStatus(b media.VolumeStatus, medium string, appendable, hasRuns 
 		// reclaimable rather than "full"/"used", which imply it holds real backups.
 		return label, "reclaimable"
 	}
-	if status == "full" {
+	if b.Capacity > 0 && used >= b.Capacity {
+		// Fullness is ledger arithmetic (a tape cannot report its own fill): the
+		// catalog's recorded bytes against the declared volume_size.
 		return label, "full"
 	}
 	if !appendable {

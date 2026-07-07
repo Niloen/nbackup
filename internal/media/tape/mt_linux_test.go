@@ -7,9 +7,28 @@ import (
 	"io"
 	"testing"
 
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
 	"golang.org/x/sys/unix"
 )
+
+// TestRealDriveAcceptsVolumeSize: a real drive takes volume_size as its DECLARED
+// per-cartridge capacity (Amanda's tapetype length) — the planner's reel size and
+// the librarian's ledger-based fill arithmetic both hang off it. (openMT is lazy,
+// so no hardware is needed to construct.)
+func TestRealDriveAcceptsVolumeSize(t *testing.T) {
+	v, err := newTapeVolume(media.Options{"device": "/dev/nst0", "volume_size": "4194304"}, "")
+	if err != nil {
+		t.Fatalf("a real drive should accept volume_size as declared capacity: %v", err)
+	}
+	st, ok := v.(*tapeChanger).drives[0].Loaded()
+	if !ok {
+		t.Fatal("a bare drive should always report its device")
+	}
+	if st.Capacity != 4194304 {
+		t.Fatalf("declared capacity = %d, want 4194304", st.Capacity)
+	}
+}
 
 // TestOpenMTBlockBounds covers the pure block-size validation in openMT: it defaults
 // an unset size, floors it at the header block (a smaller record could split the

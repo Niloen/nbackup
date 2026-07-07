@@ -592,18 +592,29 @@ tape emulator) — one drive, no addressable slots, a human loads it.
   prompts for a cartridge swap; an unbounded or changer-less medium writes one part. There is **no
   reactive "keep what fit on EOT"** and no holding-disk buffer (the one-pass stream
   means a part already on tape cannot be re-read to rewrite it). If a sized part *still*
-  overflows (a wrong estimate, or a real drive whose remaining capacity software cannot
-  see), `media.ErrVolumeFull` discards the partial and the run **fails** with an
-  actionable message — no recovery. The commit footer (written last) commits the archive,
-  giving an interrupted span the same per-archive atomicity as a single-volume archive
-  (orphan parts ignored by scan/rebuild, reclaimed by relabel). Because a single drive
-  cannot interleave two archives' parts, a spanning-capable landing **clamps workers to
-  1**. Reads **auto-mount** the volume holding each part, in order — `archiveio`'s
+  overflows (an optimistic `volume_size`, or orphans the catalog cannot see),
+  `media.ErrVolumeFull` discards the partial and the run **fails** with an
+  actionable message — no recovery. A tape cannot report its own fill, so remaining
+  room is **computed, never read** — and never stored: the catalog **derives** a
+  volume's fill from what its placements already record (`Catalog.BytesOnLabel` —
+  part seals, the footer's `IndexSize`), priced by the **medium's own cost rule**
+  (`media.FileCoster` / `Spec.FileCost`: framing plus payload, with the two
+  unrecorded payloads — label, commit footer — charged at an upper bound, so the
+  estimate errs toward an early roll, never toward EOT; all size constants live in
+  the tape package). The librarian spends the declared `volume_size` against a
+  derived snapshot taken at label-accept plus each file it lands after, priced by
+  the same rule (`volumeFill`/`countedVol`), so the fit check, the landing, and the
+  next accept can never disagree. One arithmetic for real drives and the `dir:` sim
+  alike — the sim's enforced capacity is only the physical-EOT stand-in — and a
+  rebuild has nothing extra to reconstruct. The commit
+  footer (written last) commits the archive, giving an interrupted span the same
+  per-archive atomicity as a single-volume archive (orphan parts ignored by
+  scan/rebuild, reclaimed by relabel). Because a single drive cannot interleave two
+  archives' parts, a spanning-capable landing **clamps workers to 1**. Reads
+  **auto-mount** the volume holding each part, in order — `archiveio`'s
   concatenating reader drains part *k* before mounting *k+1*, then reverses the scheme
   over the concatenation. The roll/mount lives in `package librarian` (`Allocator`,
-  `Advance`, `MountForRead`), the one place that dispatches on medium shape. Real-drive
-  (`device:`) spanning is proactive-via-`part_size` only (a drive cannot see its own
-  fill); the `dir:`-backed library spans on `volume_size` and is tested.
+  `Advance`, `MountForRead`), the one place that dispatches on medium shape.
 
 **Labels as a capability.** Verified before every write (refuse foreign / blank
 unless `auto_label` / wrong-pool / relabeled-since-cached). Address-identified
@@ -842,9 +853,10 @@ repeated here. The one convention that is architectural rather than procedural:
   is the drill recoverability tiers and file-level recover on the client. SSH paths are
   untested in CI (no sshd); see [docs/design/remote-sources.md](docs/design/remote-sources.md)
   for the transport, the client-vs-server encryption point, and the trust postures.
-- Real `mtDevice` hardware validation — also the only spanning path not exercised
-  (real-drive spanning is proactive-via-`part_size` and structurally complete but
-  untested; the `dir:` emulator spans and is tested).
+- Real `mtDevice` hardware validation — the spanning arithmetic (fill ledger +
+  declared `volume_size`) is the same code the `dir:` emulator exercises and tests,
+  but the physical roll on a real drive (EOT margin vs the declared size, filemark
+  overhead) awaits a hardware road-test.
 
 For user-facing usage, config, and the restore-with-stock-tools story, see the
 [README](README.md).

@@ -306,8 +306,8 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 		Cycle: "1d",
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
-			// Small tapes (256 KiB) across 4 bays: one run fits, two do not.
-			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "4", "volume_size": "262144"}},
+			// Small tapes (384 KiB) across 4 bays: one run fits, two do not.
+			"lib": {Type: "tape", Params: map[string]string{"dir": t.TempDir(), "slots": "4", "volume_size": "393216"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},
 		Workdir:  t.TempDir(),
@@ -323,7 +323,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	// Three runs, each ~90 KiB of payload (scheme none), so one fits on a 256 KiB
+	// Three runs, each ~90 KiB of payload (scheme none), so one fits on a 384 KiB
 	// tape but two do not — the second run forces a roll onto a fresh bay.
 	payloads := map[string]string{}
 	var ids []string
@@ -914,10 +914,10 @@ func TestSyncTapeMidRunFailureResumes(t *testing.T) {
 		Cycle: "1d",
 		Media: map[string]config.Media{
 			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
-			// Three bays, 512 KB reels, no auto_label: with one labeled tape the first
+			// Three bays, 640 KB reels, no auto_label: with one labeled tape the first
 			// run's copy fits, the second run's first archive fits, and its second
 			// archive needs a roll that finds no writable bay — the mid-run failure.
-			"tapes": {Type: "tape", Params: map[string]string{"dir": tapeDir, "slots": "3", "volume_size": "512000"}},
+			"tapes": {Type: "tape", Params: map[string]string{"dir": tapeDir, "slots": "3", "volume_size": "655360"}},
 		},
 		Sources:  []config.DLE{{Host: "localhost", Path: srcA}, {Host: "localhost", Path: srcB}},
 		Workdir:  t.TempDir(),

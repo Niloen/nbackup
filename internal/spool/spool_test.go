@@ -14,10 +14,10 @@ import (
 // hook (the run release) is what the test exercises.
 type fakeStore struct{}
 
-func (fakeStore) NextPart() (media.Volume, int64, string, int, error) { return nil, 0, "", 0, nil }
-func (fakeStore) PlaceFile(int64) (media.Volume, string, int, error)  { return nil, "", 0, nil }
-func (fakeStore) Bounded() bool                                       { return false }
-func (fakeStore) Record(archiveio.CommitResult) error                 { return nil }
+func (fakeStore) NextPart() (media.Volume, int64, string, int, error)        { return nil, 0, "", 0, nil }
+func (fakeStore) PlaceFile(string, int64) (media.Volume, string, int, error) { return nil, "", 0, nil }
+func (fakeStore) Bounded() bool                                              { return false }
+func (fakeStore) Record(archiveio.CommitResult) error                        { return nil }
 
 // TestDirectPermitReleasedOnCloseWithoutCommit is the regression for the landing hang: a direct write
 // that faults before Commit (the producer's deferred Close runs, Commit never does) must return its

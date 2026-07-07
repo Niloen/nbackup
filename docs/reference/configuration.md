@@ -199,8 +199,8 @@ media:
     #                             # `drives`/`manual` do not apply)
     slots: 20                     # storage slots (dir-backed library)
     drives: 1                     # data-transfer drives a robot loads slots into
-    volume_size: 6TB              # per-cartridge capacity; a write past it hits EOT
-    # part_size: 6TB              # use instead of volume_size on a real drive
+    volume_size: 6TB              # per-cartridge capacity; on a real drive declare
+    #                             #   it a bit below native (fill is catalog-tracked)
     # block_size: 64k             # (device:/changer: only) tape record size; default 64k, 32k–256k
     minimum_age: 180d
     appendable: true              # pack many runs per tape; false = one run per tape
@@ -211,8 +211,8 @@ media:
                                   #   (entry i = drive i; NOT the numeric nstN order —
                                   #   a library's drive 0 can be /dev/nst7). `nb medium`
                                   #   prints each drive's node so you can confirm it.
-                                  #   `slots`/`drives`/`manual`/`volume_size` do not apply.
-    part_size: 6TB                # bound parts (a drive can't see its own fill)
+                                  #   `slots`/`drives`/`manual` do not apply.
+    volume_size: 6TB              # declared per-cartridge capacity (a bit below native)
     minimum_age: 180d
   desk-drive:
     type: tape
@@ -224,10 +224,13 @@ media:
 ```
 
 **Tape capacity = `slots × volume_size`** (`0` = unbounded — e.g. a bare
-`device:` drive whose shelf is unknowable). A real drive sets `part_size`
-instead of `volume_size`, since end-of-tape is only hit, not read. `auto_label`
-(global, below) lets a dump label a blank tape automatically. See
-[Media](../features/media).
+`device:` drive whose shelf is unknowable). `volume_size` is a *declared*
+capacity on real hardware (a tape reports end-of-tape only by hitting it):
+NBackup derives each cartridge's fill from its catalog and spans proactively
+against the declared size, so set it a little below the native capacity and
+turn drive compression off (NBackup compresses in software). `part_size` is an
+optional extra bound on part size. `auto_label` (global, below) lets a dump
+label a blank tape automatically. See [Media](../features/media).
 
 ## landing
 

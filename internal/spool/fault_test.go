@@ -179,7 +179,7 @@ func (s *memStore) NextPart() (media.Volume, int64, string, int, error) {
 	return s.vol, cap, s.name, 1, nil
 }
 
-func (s *memStore) PlaceFile(int64) (media.Volume, string, int, error) {
+func (s *memStore) PlaceFile(string, int64) (media.Volume, string, int, error) {
 	defer s.enterCtl()()
 	return s.vol, s.name, 1, nil
 }

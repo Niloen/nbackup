@@ -119,14 +119,19 @@ media:
     type: tape
     changer: /dev/sg0              # the robot's control (sg) node — mtx talks to this
     device: /dev/nst0,/dev/nst1    # the drive nodes, IN THE LIBRARY'S DRIVE ORDER
-    part_size: 6TB                 # bound parts; a real drive can't see its own fill
+    volume_size: 6TB               # declared per-cartridge capacity (a bit below native)
     minimum_age: 180d
     appendable: true
 landing: lto
 ```
 
-`slots:`/`drives:`/`volume_size:` do not apply here — the library reports its own
-slots, drives, and barcodes (`nb medium lto` shows them). `mtx` must be on `PATH`.
+`slots:`/`drives:` do not apply here — the library reports its own slots, drives,
+and barcodes (`nb medium lto` shows them). `mtx` must be on `PATH`. `volume_size`
+is the declared per-cartridge capacity (a tape cannot report its own fill, so
+NBackup derives each cartridge's fill from its catalog and spans proactively
+against the declared size): set it a little **below** native capacity — filemarks and
+interrupted writes consume tape outside any byte count — and turn the drive's
+hardware compression off (NBackup compresses in software).
 
 **Drive order is load-bearing.** `device:` lists the drive nodes in the changer's
 own **drive order**: the first node is drive 0 (the robot's first data-transfer

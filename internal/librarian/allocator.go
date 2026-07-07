@@ -2,6 +2,7 @@
 package librarian
 
 import (
+	"context"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/media"
@@ -9,19 +10,27 @@ import (
 )
 
 // Remaining reports the writable bytes left on the volume currently in the drive,
-// when that is knowable: a finite bay/reel. ok is false for an unbounded volume, a
-// medium whose remaining capacity software cannot see (a real drive reports EOT only
-// by hitting it), or a non-changer medium — the caller then relies on the reactive
+// when that is knowable: a finite (volume_size-declared) reel the label protocol
+// has accepted for writing. A tape cannot see its own fill, so it is computed —
+// the catalog fill ledger's figure at accept plus the bytes this run has landed
+// since (see volumeFill); the emulated library runs the same arithmetic (its
+// self-enforced capacity is only the physical EOT stand-in). ok is false for an
+// unbounded volume (no volume_size), a reel not (or no longer) accepted for
+// writing, or a non-changer medium — the caller then relies on the reactive
 // media.ErrVolumeFull path instead of pre-checking.
 func (l *Librarian) Remaining() (int64, bool) {
 	st, ok := l.loaded()
 	if !ok || st.Capacity <= 0 {
 		return 0, false
 	}
-	if st.Used >= st.Capacity {
+	used, ok := l.fill.used(st.Label)
+	if !ok {
+		return 0, false
+	}
+	if used >= st.Capacity {
 		return 0, true
 	}
-	return st.Capacity - st.Used, true
+	return st.Capacity - used, true
 }
 
 // Allocator drives a multi-part, possibly multi-volume write for the archiveio writer:
@@ -97,21 +106,23 @@ func (s *Allocator) ensureStarted() error {
 }
 
 // maxPart is the payload bytes the next part may carry on the loaded volume: its
-// remaining capacity minus a header, capped by part_size; -1 when unbounded.
+// remaining capacity minus the part file's own overhead (the medium's price for a
+// zero-payload file), capped by part_size; -1 when unbounded.
 func (s *Allocator) maxPart() int64 {
+	overhead, _ := s.l.fileCost(record.KindArchive, 0) // 0 for a costless medium: part_size caps payload as-is
 	room, known := s.l.Remaining()
 	if !known {
 		if s.partSize > 0 {
-			return s.partSize - record.HeaderBlock
+			return s.partSize - overhead
 		}
 		return -1
 	}
-	avail := room - record.HeaderBlock
+	avail := room - overhead
 	if avail < 0 {
 		avail = 0
 	}
 	if s.partSize > 0 {
-		if cap := s.partSize - record.HeaderBlock; cap < avail {
+		if cap := s.partSize - overhead; cap < avail {
 			avail = cap
 		}
 	}
@@ -144,22 +155,24 @@ func (s *Allocator) NextPart() (media.Volume, int64, string, int, error) {
 			return nil, 0, "", 0, err
 		}
 	}
-	return s.l.driveVol(), s.maxPart(), s.volume, s.epoch, nil
+	return s.countVol(), s.maxPart(), s.volume, s.epoch, nil
 }
 
-// PlaceFile implements archiveio.PartAllocator: it rolls first if the record (one whole file
-// of the given payload size — an archive's index or commit footer) will not fit the loaded
-// volume.
-func (s *Allocator) PlaceFile(size int64) (media.Volume, string, int, error) {
+// PlaceFile implements archiveio.PartAllocator: it rolls first if a whole file of the given
+// kind and payload size (an archive's index or commit footer, a whole-placed atom) will not
+// fit the loaded volume. The fit test prices the file exactly as landing it will
+// (fileCost), so the check and the fill arithmetic can never disagree.
+func (s *Allocator) PlaceFile(kind string, size int64) (media.Volume, string, int, error) {
 	if err := s.ensureStarted(); err != nil {
 		return nil, "", 0, err
 	}
-	if room, known := s.l.Remaining(); known && room-record.HeaderBlock < size {
+	need, _ := s.l.fileCost(kind, size)
+	if room, known := s.l.Remaining(); known && room < need {
 		if err := s.advance(); err != nil {
 			return nil, "", 0, err
 		}
 	}
-	return s.l.driveVol(), s.volume, s.epoch, nil
+	return s.countVol(), s.volume, s.epoch, nil
 }
 
 // Bounded implements archiveio.PartAllocator: it reports whether a part's size is ever capped —
@@ -173,4 +186,63 @@ func (s *Allocator) Bounded() bool {
 	}
 	_, known := s.l.Remaining()
 	return known
+}
+
+// countVol returns the drive's volume for the next part or record, wrapped so
+// landed bytes feed the fill arithmetic — but only for a labeled medium (tape),
+// where writes are serial per drive so the plain counter needs no lock. An
+// address-identified medium (disk, cloud) has no labeled fill to track, and its
+// concurrent workers all share this one allocator — they must not share a counter.
+func (s *Allocator) countVol() media.Volume {
+	v := s.l.driveVol()
+	if s.l.Labeled() {
+		return countedVol{v, s.l}
+	}
+	return v
+}
+
+// countedVol is what the allocator hands the archiveio writer: the drive's volume
+// with every committed file landed on the librarian's fill arithmetic (volumeFill —
+// the "since accept" half; the snapshot half is taken in verifyWritable), priced by
+// the medium's own cost rule so in-flight files and the catalog-derived snapshot
+// spend in the same currency. Only allocator-vended volumes are wrapped: the label
+// file is already in the derived figure, and reads land nothing.
+type countedVol struct {
+	media.Volume
+	l *Librarian
+}
+
+func (v countedVol) AppendFile(ctx context.Context, h record.Header) (media.FileWriter, error) {
+	fw, err := v.Volume.AppendFile(ctx, h)
+	if err != nil {
+		return nil, err
+	}
+	return &countedWriter{FileWriter: fw, l: v.l, kind: h.Kind}, nil
+}
+
+// countedWriter counts the payload it carries and, on a successful Close, lands
+// the file's cost — the medium's price for its kind and payload. An aborted or
+// failed file lands nothing: on the emulator it left no bytes; on a real tape it
+// did, one of the residuals the declared volume_size's margin absorbs.
+type countedWriter struct {
+	media.FileWriter
+	l       *Librarian
+	kind    string
+	payload int64
+}
+
+func (w *countedWriter) Write(p []byte) (int, error) {
+	n, err := w.FileWriter.Write(p)
+	w.payload += int64(n)
+	return n, err
+}
+
+func (w *countedWriter) Close() error {
+	if err := w.FileWriter.Close(); err != nil {
+		return err
+	}
+	if cost, ok := w.l.fileCost(w.kind, w.payload); ok {
+		w.l.fill.land(cost)
+	}
+	return nil
 }

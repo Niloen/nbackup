@@ -93,13 +93,15 @@ type Label struct {
 	WrittenAt time.Time `json:"written_at"`
 }
 
-// HeaderBlock is the fixed size of the leading header block on every file. A
-// fixed block makes payload extraction uniform across media and keeps stock-tool
-// recovery simple: `dd bs=32k skip=1 < file | zstd -dc`.
+// HeaderBlock is the fixed size of the leading header block on every tape file. A
+// fixed block makes payload extraction uniform and keeps stock-tool recovery
+// simple: `dd bs=32k skip=1 < file | zstd -dc`.
 const HeaderBlock = 32 * 1024
 
 // EncodeHeader writes h as a fixed-size, newline-terminated JSON block — the
-// framing every Volume implementation puts at the start of a file.
+// framing a tape file starts with (a tape cannot carry a sidecar, so the header
+// rides inline; fslike media store the header as a separate .hdr sidecar instead
+// and never call this).
 func EncodeHeader(w io.Writer, h Header) error {
 	b, err := json.Marshal(h)
 	if err != nil {

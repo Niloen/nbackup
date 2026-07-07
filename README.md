@@ -987,12 +987,20 @@ holds the copy it needs. A run that **fills a tape mid-write spans onto the next
 automatically** — for both `nb dump` and `nb copy`/`nb sync`, splitting even a
 single large archive: a robot loads the next writable slot (auto-labeling a blank,
 or — when no blank is left — recycling the oldest tape past retention), a manual
-drive prompts for a swap. Spanning is **proactive** — set `volume_size` so NBackup
-sizes each chunk to fit *before* writing it (a real drive with no readable capacity
-can instead set `part_size`); if a chunk still overflows, the run fails with a
-clear message rather than guessing. A restore reassembles a spanned archive by
-loading its tapes in order. (Internals:
-[ARCHITECTURE.md](ARCHITECTURE.md).)
+drive prompts for a swap. Spanning is **proactive** — set `volume_size` to each
+cartridge's capacity and NBackup sizes each chunk to fit *before* writing it. A
+tape cannot report its own fill, so NBackup **derives** each cartridge's fill from
+its catalog records (slightly over-estimating the small bookkeeping files, so it
+always rolls early rather than hit end-of-tape) and spends the declared
+`volume_size` against it — on a real drive (`device:`) or a real SCSI library
+(`changer:`) exactly as on the file-backed sim. Declare
+`volume_size` a little **below** the cartridge's native capacity (filemarks and
+interrupted writes consume tape outside any byte count), and turn the drive's
+hardware compression off — NBackup compresses in software, and compressed
+capacity is unpredictable. If a chunk still overflows, the run fails with a clear
+message rather than guessing. `part_size` remains an optional deliberate bound on
+part size. A restore reassembles a spanned archive by loading its tapes in order.
+(Internals: [ARCHITECTURE.md](ARCHITECTURE.md).)
 
 ### Remote sources over SSH
 

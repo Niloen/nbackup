@@ -244,12 +244,6 @@ func (d *dirDevice) count() (int, error) {
 	return d.next, nil
 }
 
-func (d *dirDevice) bytesUsed() int64 {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.used
-}
-
 func (d *dirDevice) appendWriter() (deviceWriter, error) {
 	d.mu.Lock()
 	pos := d.next

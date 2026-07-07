@@ -48,10 +48,14 @@ type PartAllocator interface {
 	// unbounded — write the whole remaining stream as a single part. It errors when a
 	// roll is needed but no further writable volume is available.
 	NextPart() (vol media.Volume, max int64, label string, epoch int, err error)
-	// PlaceFile returns the volume to write a small whole file (an archive's member
-	// index or its commit footer) of the given payload size to, rolling first if it will
-	// not fit the loaded volume.
-	PlaceFile(size int64) (vol media.Volume, label string, epoch int, err error)
+	// PlaceFile returns the volume to write a small whole file of the given kind
+	// (record.Kind*: an archive's member index, its commit footer, or a whole-placed
+	// atomic part) and payload size to, rolling first if it will not fit the loaded
+	// volume. kind matters because a finite volume prices files by kind (see
+	// media.FileCoster): a payload whose size the catalog records is charged as-is,
+	// one it does not (the commit footer) is charged at the medium's bound — the
+	// placement check must use the same price the fill arithmetic will.
+	PlaceFile(kind string, size int64) (vol media.Volume, label string, epoch int, err error)
 	// Bounded reports whether this allocator ever caps a part's size — by a configured
 	// part_size or by a finite volume's remaining capacity (the dual of NextPart's "max < 0
 	// means unbounded"). When true an archive may land as several parts (cloud splitting
@@ -263,10 +267,10 @@ func (a *ArchiveWriter) nextSlot() (vol media.Volume, max int64, label string, e
 			return nil, 0, "", 0, fmt.Errorf("atomic copy of %s L%d: stream longer than its %d recorded atom(s) (source corrupt?)", a.meta.DLE, a.meta.Level, len(a.copySeals))
 		}
 		size := a.copySeals[a.part].Size
-		vol, label, epoch, err = a.w.alloc.PlaceFile(size)
+		vol, label, epoch, err = a.w.alloc.PlaceFile(record.KindArchive, size)
 		return vol, size, label, epoch, err
 	case a.atomBound > 0: // atomic fresh dump: whole-atom placement against the bound
-		vol, label, epoch, err = a.w.alloc.PlaceFile(a.atomBound)
+		vol, label, epoch, err = a.w.alloc.PlaceFile(record.KindArchive, a.atomBound)
 		return vol, -1, label, epoch, err
 	}
 	return a.w.alloc.NextPart()
@@ -366,7 +370,7 @@ func (a *ArchiveWriter) Commit(ctx context.Context, p xfer.SourceStats) error {
 		}
 		arch.Frames = nil
 	}
-	pos, err := a.w.finalize(ctx, arch, a.parts)
+	pos, err := a.w.finalize(ctx, &arch, a.parts)
 	if err != nil {
 		return err
 	}
@@ -392,18 +396,21 @@ func (a *ArchiveWriter) Close() error {
 // finalize durably finalizes an archive (all fields final): it writes the member index (the
 // gzip'd Members) then the commit footer (the metadata without members) — the footer last,
 // so a crash before it leaves orphan parts a scan ignores. It returns the archive's on-medium
-// position (parts/footer/index) for the caller to record. The Writer keeps no run state — the
-// footer makes the archive durable and the caller records it from the returned position — so
-// concurrent Commits on an unbounded medium need no coordination here. Call it once the caller has
+// position (parts/footer/index) for the caller to record, and sets arch.IndexSize — a
+// placement-layout fact the footer carries so a volume's fill stays derivable from the
+// catalog without reading index payloads. The Writer keeps no run state — the footer makes
+// the archive durable and the caller records it from the returned position — so concurrent
+// Commits on an unbounded medium need no coordination here. Call it once the caller has
 // merged the producer's stats (FileCount/Uncompressed/Members) into the archive.
-func (w *Writer) finalize(ctx context.Context, arch record.Archive, parts []FilePos) (ArchivePos, error) {
+func (w *Writer) finalize(ctx context.Context, arch *record.Archive, parts []FilePos) (ArchivePos, error) {
 	var index FilePos
 	if len(arch.Members) > 0 || len(arch.Units) > 0 {
 		var buf bytes.Buffer
 		if err := record.EncodeIndex(&buf, record.Index{Members: arch.Members, Frames: arch.Frames, Units: arch.Units}); err != nil {
 			return ArchivePos{}, err
 		}
-		pos, err := w.writeRecord(ctx, record.KindIndex, arch, buf.Bytes())
+		arch.IndexSize = int64(buf.Len())
+		pos, err := w.writeRecord(ctx, record.KindIndex, *arch, buf.Bytes())
 		if err != nil {
 			return ArchivePos{}, err
 		}
@@ -411,7 +418,7 @@ func (w *Writer) finalize(ctx context.Context, arch record.Archive, parts []File
 	}
 	// The footer omits the member list and frame table (they ride in the index);
 	// marshal a copy without them.
-	footer := arch
+	footer := *arch
 	footer.Members = nil
 	footer.Frames = nil
 	footer.Units = nil
@@ -419,7 +426,7 @@ func (w *Writer) finalize(ctx context.Context, arch record.Archive, parts []File
 	if err != nil {
 		return ArchivePos{}, err
 	}
-	commit, err := w.writeRecord(ctx, record.KindCommit, arch, data)
+	commit, err := w.writeRecord(ctx, record.KindCommit, *arch, data)
 	if err != nil {
 		return ArchivePos{}, err
 	}
@@ -434,7 +441,7 @@ func (w *Writer) finalize(ctx context.Context, arch record.Archive, parts []File
 // archive, returning where it landed. The header identifies the archive it belongs to so a
 // scan can correlate it with the archive's parts (which may be on other volumes).
 func (w *Writer) writeRecord(ctx context.Context, kind string, a record.Archive, payload []byte) (FilePos, error) {
-	vol, label, epoch, err := w.alloc.PlaceFile(int64(len(payload)))
+	vol, label, epoch, err := w.alloc.PlaceFile(kind, int64(len(payload)))
 	if err != nil {
 		return FilePos{}, fmt.Errorf("place %s record: %w", kind, err)
 	}

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/retention"
 )
 
@@ -57,8 +58,11 @@ func (a *Accountant) ExpectedVolumeFor(medium string, now time.Time) VolumeExpec
 	if exp.Appendable {
 		if n := len(pool); n > 0 {
 			exp.Label, exp.WrittenAt = pool[n-1].Label.Name, pool[n-1].Label.WrittenAt
-			for _, s := range a.d.Cat.RunsOnLabel(exp.Label) {
-				exp.UsedBytes += s.TotalBytes()
+			// The reel's derived fill, priced by the medium type's own cost rule —
+			// the same figure the librarian's Remaining() starts from, so the plan
+			// and the write agree.
+			if cost, ok := media.FileCostFor(def.Type); ok {
+				exp.UsedBytes = a.d.Cat.BytesOnLabel(exp.Label, cost)
 			}
 		} else {
 			exp.FreshVolume = true

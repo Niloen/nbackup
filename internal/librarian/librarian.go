@@ -119,6 +119,43 @@ type Librarian struct {
 	// ever pick the same cartridge. Access is serialised by the spool's single orchestrator
 	// (every roll/select crosses it), so the map needs no lock.
 	reserved map[string]bool
+
+	// fill is the fill arithmetic for the volume this handle's drive last accepted
+	// for writing — how Remaining() is answered, a tape being unable to see its own
+	// fill. Per-drive by construction: forDrive's shallow copy gives each sibling
+	// its own value. Like reserved, access is serialised (one writer per drive;
+	// spool crossings order it), so no lock.
+	fill volumeFill
+}
+
+// volumeFill tracks one accepted volume's fill: the catalog's derived figure
+// (Catalog.BytesOnLabel, priced by the medium's own cost rule) when the label
+// protocol accepted the reel (verifyWritable → accept), plus every file the
+// allocator lands on it after (countedVol → land, at the same prices). The
+// snapshot-plus-count split is what closes the mid-run gap — the catalog only
+// learns of files at archive commit, but rolls are decided between parts — while
+// never double-counting an archive once it commits (the next accept's snapshot
+// replaces the count).
+type volumeFill struct {
+	label  string // the accepted volume's label; guards against a stale/foreign mount
+	base   int64  // the catalog-derived fill at accept (BytesOnLabel)
+	landed int64  // file costs landed on it since accept, counted by the allocator
+}
+
+// accept restarts the arithmetic for a newly accepted volume.
+func (f *volumeFill) accept(label string, base int64) { *f = volumeFill{label: label, base: base} }
+
+// land counts bytes placed on the accepted volume.
+func (f *volumeFill) land(n int64) { f.landed += n }
+
+// used reports the accepted volume's fill. ok is false when vol is not the volume
+// this arithmetic was accepted for — nothing accepted yet, or the drive was
+// remounted since — so the caller treats the fill as unknowable.
+func (f *volumeFill) used(vol string) (int64, bool) {
+	if vol == "" || vol != f.label {
+		return 0, false
+	}
+	return f.base + f.landed, true
 }
 
 // New constructs a librarian for a medium's open volume. cat is the catalog the
@@ -144,6 +181,18 @@ func New(vol media.Volume, medium string, cat *catalog.Catalog, op Operator, aut
 
 // loaded reports the cartridge in this handle's drive.
 func (l *Librarian) loaded() (media.VolumeStatus, bool) { return l.changer.Drive(l.drive).Loaded() }
+
+// fileCost prices one file against the loaded volume's declared capacity, in the
+// medium's own currency (media.FileCoster — only media with finite labeled reels
+// implement it). ok is false for a costless medium (disk, cloud): there is no
+// reel to fill, so no fill arithmetic applies.
+func (l *Librarian) fileCost(kind string, payload int64) (int64, bool) {
+	fc, ok := l.driveVol().(media.FileCoster)
+	if !ok {
+		return 0, false
+	}
+	return fc.FileCost(kind, payload), true
+}
 
 // driveVol is the volume in this handle's drive — what the write path reads a label from,
 // verifies, and rolls. For the base handle (drive 0) it is the same cartridge l.vol proxies;

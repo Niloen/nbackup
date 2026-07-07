@@ -267,8 +267,12 @@ media:
 false` writes one run per tape. A run that fills a tape mid-write **spans onto the
 next automatically** — a robot loads the next writable slot (auto-labelling a
 blank, or recycling the oldest tape past retention), while a manual drive prompts
-for a swap. See [Robotic tape library](../scenarios/tape-library) for the full
-walkthrough.
+for a swap. `volume_size` is each cartridge's **declared** capacity (Amanda's
+tapetype `length`): a tape cannot report its own fill, so NBackup derives each
+volume's fill from its catalog records and sizes each chunk to fit *before*
+writing. On real hardware declare it a little below native capacity and turn the
+drive's hardware compression off (NBackup compresses in software). See
+[Robotic tape library](../scenarios/tape-library) for the full walkthrough.
 
 A tape medium's capacity derives as `slots × volume_size` (`0` = unbounded).
 
@@ -281,7 +285,7 @@ nb medium lto      # one medium's volume + runs (incl. drives + slots for tape)
 
 `nb medium` with no argument lists every medium; with a name it details that one
 — a disk or cloud medium's usage, or a tape changer's drives (each with the loaded
-cartridge's barcode, label, and fill) and its occupied slots (by barcode).
+cartridge's barcode, label, and catalog-derived fill) and its occupied slots (by barcode).
 
 ## Capacity (per medium)
 

@@ -161,7 +161,7 @@ func (s *memStore) Record(archiveio.CommitResult) error {
 func (s *memStore) NextPart() (media.Volume, int64, string, int, error) {
 	return s.vol, -1, "vol", 1, nil // unbounded single volume
 }
-func (s *memStore) PlaceFile(int64) (media.Volume, string, int, error) {
+func (s *memStore) PlaceFile(string, int64) (media.Volume, string, int, error) {
 	return s.vol, "vol", 1, nil
 }
 func (s *memStore) Bounded() bool { return false }
