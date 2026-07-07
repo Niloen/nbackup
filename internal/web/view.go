@@ -992,7 +992,7 @@ func volumeState(v engine.VolumeUsage) string {
 	switch {
 	case v.HasRoom:
 		return "room"
-	case v.Capacity > 0 && v.Bytes >= v.Capacity:
+	case v.Capacity > 0 && v.Used >= v.Capacity:
 		return "full"
 	default:
 		return "used"
@@ -1060,7 +1060,7 @@ func newMediumData(st engine.MediumStats) mediumData {
 				Last: v.Last, State: volumeState(v),
 			}
 			if v.Capacity > 0 {
-				row.FillPct = float64(v.Bytes) / float64(v.Capacity) * 100
+				row.FillPct = float64(v.Used) / float64(v.Capacity) * 100
 			}
 			if v.Bytes > 0 || v.Archives > 0 {
 				d.WithData++

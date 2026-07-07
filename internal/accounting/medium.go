@@ -61,7 +61,7 @@ func (a *Accountant) Medium(name string) (MediumInfo, bool) {
 		Used: a.d.Cat.MediumBytes(name),
 	}
 	if prof, err := media.OpenProfile(d.Type, media.Options(d.ProfileOptions())); err == nil {
-		info.Capacity = prof.TotalBytes()
+		info.Capacity = a.capacityFor(name, prof)
 	}
 	// Summarize the medium's labeled volumes from the catalog (no medium type
 	// special-casing): address-identified media (disk, s3) carry no label so the
@@ -138,7 +138,31 @@ type VolumeUsage struct {
 	Archives int
 	Last     time.Time // latest archive commit landed on this volume (zero if none)
 	Capacity int64     // 0 = unbounded (the pool's per-volume capacity is not derivable)
+	Used     int64     // the volume's stored fill (catalog VolumeRecord.Used) — what Capacity is spent against
 	HasRoom  bool      // more data could still be written here (see volumeHasRoom)
+}
+
+// capacityFor resolves a medium's pool capacity: the profile's own figure when it
+// has one, else — for a medium with a declared per-volume size but an unknowable
+// shelf (a bare hand-fed drive: the profile cannot count the operator's closet) —
+// the REGISTRY-derived figure: the labeled volumes ARE the rotation, exactly
+// Amanda's tapecycle as a declared count, so the pool's capacity grows the moment
+// a new tape is labeled and reads unbounded only before the first label.
+func (a *Accountant) capacityFor(name string, prof media.Profile) int64 {
+	if c := prof.TotalBytes(); c > 0 {
+		return c
+	}
+	vs := prof.VolumeSize()
+	if vs <= 0 {
+		return 0
+	}
+	n := len(a.volumesInPool(name))
+	if n == 0 {
+		return 0
+	}
+	// The same volumes×size arithmetic (and per-volume framing haircut) the
+	// changer profile applies, so the two shapes report comparable figures.
+	return media.NewVolumeProfile(int64(n), vs).TotalBytes()
 }
 
 // MediumStats returns a medium's usage picture; ok is false if the name is unknown.
@@ -211,6 +235,10 @@ func (a *Accountant) perVolume(name string, info MediumInfo) ([]VolumeUsage, int
 			configured = prof.Volumes()
 			if configured > 0 {
 				perVolCap = prof.TotalBytes() / configured
+			} else if vs := prof.VolumeSize(); vs > 0 {
+				// A hand-fed drive: the shelf is unknowable but each reel's size is
+				// declared — the same usable-bytes haircut as one changer slot.
+				perVolCap = media.NewVolumeProfile(1, vs).TotalBytes()
 			}
 		}
 	}
@@ -219,7 +247,7 @@ func (a *Accountant) perVolume(name string, info MediumInfo) ([]VolumeUsage, int
 	byLabel := make(map[string]*VolumeUsage, len(pool))
 	order := make([]string, 0, len(pool))
 	for _, v := range pool {
-		byLabel[v.Label.Name] = &VolumeUsage{Label: v.Label.Name, Epoch: v.Label.Epoch, Barcode: v.Barcode, Capacity: perVolCap}
+		byLabel[v.Label.Name] = &VolumeUsage{Label: v.Label.Name, Epoch: v.Label.Epoch, Barcode: v.Barcode, Capacity: perVolCap, Used: v.Used}
 		order = append(order, v.Label.Name)
 	}
 
@@ -283,7 +311,9 @@ func volumeHasRoom(v VolumeUsage, appendable bool) bool {
 	if !appendable {
 		return v.Runs == 0
 	}
-	return v.Capacity == 0 || v.Bytes < v.Capacity
+	// Fullness is the fill ledger's verdict (framing and meta charges included),
+	// not the payload attribution's — the same figure the librarian spends.
+	return v.Capacity == 0 || v.Used < v.Capacity
 }
 
 // UsageStats summarizes a medium's recorded usage curve: how long it has been

@@ -77,6 +77,21 @@ func TestMediumStatsPerVolumePool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Fullness (HasRoom) is the fill ledger's verdict, so wire the pricing the
+	// way the engine does — a tape-shaped rule: framing plus payload, unrecorded
+	// meta payloads bounded at one framing block.
+	cat.PriceWith(func(medium string) (func(kind string, payload int64) int64, bool) {
+		if medium != "pool" {
+			return nil, false
+		}
+		return func(kind string, payload int64) int64 {
+			switch kind {
+			case record.KindLabel, record.KindCommit:
+				payload = 32768
+			}
+			return 32768 + payload
+		}, true
+	})
 	for _, name := range []string{"vol-1", "vol-2", "vol-3"} {
 		if err := cat.RecordVolume(record.Label{Name: name, Pool: "pool", Epoch: 1}); err != nil {
 			t.Fatal(err)
@@ -175,5 +190,51 @@ func TestSummarizeUnboundedNoProjection(t *testing.T) {
 	}
 	if !st.ProjFull.IsZero() {
 		t.Errorf("unbounded medium projected full at %v; want none", st.ProjFull)
+	}
+}
+
+// shelffake is a bare hand-fed drive's profile shape: an unknowable shelf
+// (Volumes 0 → pool unbounded) with a declared per-reel size — the shape whose
+// pool capacity must derive from the catalog's LABELED volumes (Amanda's
+// tapecycle as a lived count) instead of reading "unbounded" forever.
+func init() {
+	media.Register(media.Spec{
+		Type: "shelffake",
+		Profile: func(media.Options) (media.Profile, error) {
+			return media.NewVolumeProfile(0, 2_000_000), nil
+		},
+	})
+}
+
+// TestBareDriveCapacityFromRegistry: a medium whose profile cannot count its
+// shelf reports capacity = labeled volumes × volume size — growing as tapes are
+// labeled, unbounded only before the first label.
+func TestBareDriveCapacityFromRegistry(t *testing.T) {
+	cat, err := catalog.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Media: map[string]config.Media{
+		"shelf": {Type: "shelffake"},
+	}}
+	acct := New(Deps{Cat: cat, Cfg: cfg})
+
+	info, ok := acct.Medium("shelf")
+	if !ok {
+		t.Fatal("medium should resolve")
+	}
+	if info.Capacity != 0 {
+		t.Fatalf("no labels yet: capacity should be unbounded (0), got %d", info.Capacity)
+	}
+
+	for i, name := range []string{"s-01", "s-02", "s-03"} {
+		if err := cat.RecordVolume(record.Label{Name: name, Pool: "shelf", Epoch: 1, WrittenAt: day(i + 1)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, _ = acct.Medium("shelf")
+	want := media.NewVolumeProfile(3, 2_000_000).TotalBytes()
+	if info.Capacity != want {
+		t.Fatalf("capacity = %d, want the registry-derived %d (3 labeled × per-reel)", info.Capacity, want)
 	}
 }

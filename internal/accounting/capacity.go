@@ -46,7 +46,7 @@ func (a *Accountant) MediumOverCapacity(name string) (over bool, used, capacity 
 	if err != nil {
 		return false, 0, 0, err
 	}
-	capacity = prof.TotalBytes()
+	capacity = a.capacityFor(name, prof)
 	used = a.d.Cat.MediumBytes(name)
 	return capacity > 0 && used > capacity, used, capacity, nil
 }
@@ -108,7 +108,7 @@ func (a *Accountant) ProjectedOverCapacity(name string, add int64) (over bool, p
 	if err != nil {
 		return false, 0, 0, err
 	}
-	capacity = prof.TotalBytes()
+	capacity = a.capacityFor(name, prof)
 	projected = a.d.Cat.MediumBytes(name) + add
 	return capacity > 0 && projected > capacity, projected, capacity, nil
 }
@@ -116,7 +116,7 @@ func (a *Accountant) ProjectedOverCapacity(name string, add int64) (over bool, p
 // PoolRoom is the retention bound: capacity minus the bytes pruning cannot
 // reclaim (the protected set). Negative = unbounded (no pool budget).
 func (a *Accountant) PoolRoom(now time.Time) int64 {
-	capacity := a.d.LandingProfile.TotalBytes()
+	capacity := a.capacityFor(a.d.Landing, a.d.LandingProfile)
 	if capacity <= 0 {
 		return -1
 	}

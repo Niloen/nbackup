@@ -1136,8 +1136,8 @@ func TestMediumPageNonAppendableUsedVsFull(t *testing.T) {
 		media: []engine.MediumInfo{poolMediumInfo("vault", 650_000, 1_000_000, 2)},
 		perVolume: map[string][]engine.VolumeUsage{
 			"vault": {
-				{Label: "lto-01", Barcode: "BC001", Bytes: 150_000, Capacity: 500_000, Runs: 1, Archives: 1, HasRoom: false},
-				{Label: "lto-02", Barcode: "BC002", Bytes: 500_000, Capacity: 500_000, Runs: 1, Archives: 1, HasRoom: false},
+				{Label: "lto-01", Barcode: "BC001", Bytes: 150_000, Used: 150_000, Capacity: 500_000, Runs: 1, Archives: 1, HasRoom: false},
+				{Label: "lto-02", Barcode: "BC002", Bytes: 500_000, Used: 500_000, Capacity: 500_000, Runs: 1, Archives: 1, HasRoom: false},
 			},
 		},
 		poolVolumes: map[string]int64{"vault": 2},
