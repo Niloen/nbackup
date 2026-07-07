@@ -175,10 +175,16 @@ func (l *Librarian) swapForWrite(appendable bool, tried map[string]bool, expect 
 		case out == swapAborted:
 			return "", 0, false, aborted(cause)
 		}
-		if tried[reel] {
-			return "", 0, false, fmt.Errorf("medium %q: volume %q was already used and is full", l.medium, reel)
+		// A named choice (a slotted station's shelf) is tracked by id; a PHYSICAL
+		// swap on a real drive returns no id — the label read below identifies the
+		// reel and acceptOrRecycle tracks it by name, so "" is never bookkept (it
+		// would false-trip this check on the second swap of a spanning run).
+		if reel != "" {
+			if tried[reel] {
+				return "", 0, false, fmt.Errorf("medium %q: volume %q was already used and is full", l.medium, reel)
+			}
+			tried[reel] = true
 		}
-		tried[reel] = true
 		name, epoch, empty, verr := l.acceptOrRecycle(appendable, tried, now, logf)
 		if verr == nil {
 			tried[name] = true // also track by label name (oldestReusable keys on names)
