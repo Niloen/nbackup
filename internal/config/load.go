@@ -27,7 +27,7 @@ func Load(path string) (*Config, error) {
 	// (a misspelled `landing`, `cycle`, a nested compress/encrypt key) is a hard
 	// error rather than a silently-ignored default. Type-specific medium and
 	// archiver options still flow through their inline maps, so connection keys
-	// (path, url, bays, tar_path, …) are unaffected.
+	// (path, url, slots, tar_path, …) are unaffected.
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil {

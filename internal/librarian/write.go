@@ -24,16 +24,16 @@ func (l *Librarian) PrepareWrite(appendable bool, expect string, now time.Time, 
 		return "", 0, err
 	}
 	// The loaded volume won't do, but loading another might. A robotic library rolls
-	// to its next writable bay on its own (auto-labeling a blank if enabled) — the
+	// to its next writable slot on its own (auto-labeling a blank if enabled) — the
 	// same selection Advance does mid-span, applied here so a run can also *start* on
-	// a blank/empty bay (e.g. nothing loaded yet, or the loaded reel already holds a
+	// a blank/empty slot (e.g. nothing loaded yet, or the loaded reel already holds a
 	// run on a one-run-per-tape medium) rather than failing with "no tape loaded".
 	if l.isChanger && !l.manual {
 		name, epoch, _, aerr := l.Advance(appendable, map[string]bool{}, expect, now, logf)
 		if aerr != nil {
 			// A full pool of still-protected tapes is the rotation's fail-loud verdict —
 			// more actionable than the loaded volume's bare "won't do" reason, so surface
-			// it. Any other advance failure (out of bays) keeps the original reason, which
+			// it. Any other advance failure (out of slots) keeps the original reason, which
 			// is more specific for a blank/foreign loaded tape ("label it first").
 			if errors.Is(aerr, ErrAllVolumesProtected) {
 				return "", 0, aerr

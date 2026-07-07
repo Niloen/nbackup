@@ -656,7 +656,7 @@ func TestRelabelRefusesProtectedSpanTape(t *testing.T) {
 }
 
 // TestSyncRunOutOfTapes checks that a run too big to fit even by spanning every
-// available tape fails with an actionable "no further writable bay" error and is not
+// available tape fails with an actionable "no further writable tape" error and is not
 // recorded — the orphaned, unsealed parts left behind are reclaimable by relabel.
 func TestSyncRunOutOfTapes(t *testing.T) {
 	src := t.TempDir()
@@ -696,7 +696,7 @@ func TestSyncRunOutOfTapes(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected sync of an oversized run to fail")
 	}
-	if !strings.Contains(err.Error(), "no further writable bay") {
+	if !strings.Contains(err.Error(), "no further writable tape") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if eng.placedOn(s.ID, "lib") {

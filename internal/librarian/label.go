@@ -109,8 +109,8 @@ func (l *Librarian) Label(name string, relabel, force bool, now time.Time, logf 
 	if got, ok, err := lv.ReadLabel(); err != nil || !ok || got.Name != name {
 		return fmt.Errorf("label write could not be confirmed (read back %q, ok=%v, err=%v)", got.Name, ok, err)
 	}
-	// Name the bay on a robotic library: a new label grabs a blank bay and mounts it,
-	// which can move the mount away from a bay the operator just loaded — say so rather
+	// Name the slot on a robotic library: a new label grabs a blank slot and mounts it,
+	// which can move the mount away from a slot the operator just loaded — say so rather
 	// than switching silently. A relabel names the label it overwrote, so the operator
 	// can tell at a glance whether the right tape was recycled.
 	switch {

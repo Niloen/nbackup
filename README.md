@@ -190,7 +190,7 @@ details one item when given an id (`nb run run-2026-06-21.020000`, `nb medium lt
 | `nb copy`            | Copy one run between media (`--from`/`--to`, e.g. disk → tape) |
 | `nb sync`            | Mirror one medium's runs onto another (disk → tape/s3)  |
 | `nb label`           | Label a volume (required for tape before its first dump) |
-| `nb load`            | Load a bay/reel into a medium's drive (by id or `--label`) |
+| `nb load`            | Load a tape into a medium's drive (by slot number or `--label`) |
 | `nb login <medium>`  | Bootstrap a medium's credentials (e.g. Google Drive OAuth) |
 | `nb prune [medium]`   | Delete runs past each medium's cycle/capacity limits (all media if none named)  |
 | `nb reset <dle>`     | Schedule a DLE for a full on its next run (fresh chain)  |

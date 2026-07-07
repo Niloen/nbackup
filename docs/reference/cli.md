@@ -52,7 +52,7 @@ equivalent.
 | `nb copy` | Copy one run between media (`--from`/`--to`, e.g. disk → tape) |
 | `nb sync` | Mirror one medium's runs onto another (disk → tape/s3) |
 | `nb label` | Label a volume (required for tape before its first dump) |
-| `nb load` | Load a volume into a medium's drive (by bay/reel id, or `--label`) |
+| `nb load` | Load a volume into a medium's drive (by slot number, or `--label`) |
 | `nb prune [medium]` | Delete runs past each medium's cycle/capacity limits (all media if none named) |
 | `nb flush` | Drain a holding disk's staged archives to the landing |
 | `nb reset <dle>` | Schedule a DLE for a full on its next run (fresh chain) |
@@ -210,7 +210,7 @@ The source defaults to the landing medium; `--from` overrides it. See
 |---|---|---|
 | `nb prune [medium]` | `-n, --dry-run`, `--date <day>` | Delete runs past the cycle/capacity limits — one named medium, or every medium if none named; `-n` previews, `--date` sets the reference "now". |
 | `nb label` | `--relabel` | Label a volume (required for tape before its first dump); `--relabel` recycles an aged-out tape. |
-| `nb load` | `--label` | Load a volume into a medium's drive — by bay/reel id, or `--label` to match a volume label. |
+| `nb load` | `--label` | Load a volume into a medium's drive — by slot number, or `--label` to match a volume label. |
 | `nb reset <dle>` | — | Schedule a DLE for a full on its next run (fresh chain). |
 | `nb rebuild` | `--full` | Rebuild the local run-index cache from media. Additive: each pass merges what is readable now and prints the tapes still missing — after losing the catalog, insert tapes one at a time and re-run until the worklist is empty. `--full` wipes the cache first. |
 | `nb flush` | — | Drain a holding disk's staged archives to the landing. |
@@ -221,7 +221,7 @@ nb prune disk
 nb prune                     # prune every configured medium (hands-off cron form)
 nb label lto lto-0001
 nb label --relabel lto lto-0042
-nb load lto bay-03
+nb load lto 3
 nb load --label lto DAILY-01
 nb reset app01:/home
 nb rebuild

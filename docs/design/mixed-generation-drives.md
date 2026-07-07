@@ -48,7 +48,7 @@ What happens today, piece by piece:
    `MountForRead`/`findSlot` load into `l.drive` too; a restore needing an L6
    cartridge must pick an L6-capable drive.
 5. Barcode suffixes (`…L6`, `…L8`) are a useful *hint* for ordering (try
-   compatible-looking bays first) but not ground truth — sites relabel media, and
+   compatible-looking slots first) but not ground truth — sites relabel media, and
    non-LTO libraries have other schemes.
 
 ## Sketch (to be designed properly)

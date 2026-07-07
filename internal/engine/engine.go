@@ -420,7 +420,7 @@ func (e *Engine) ChangerView(mediumName string) (librarian.View, error) {
 	return am.View()
 }
 
-// LoadVolume mounts a volume on a changer medium, by bay id or (byLabel) volume label.
+// LoadVolume mounts a volume on a changer medium, by slot number or (byLabel) volume label.
 func (e *Engine) LoadVolume(mediumName, target string, byLabel bool, logf Logf) error {
 	am, _, err := e.dep.OpenAdmin(mediumName)
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/sizeutil"
@@ -22,8 +23,8 @@ func newLabelCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "label <medium> <name>",
 		Short:   "Label a volume (required for tape before first dump)",
-		Long:    "Write a volume's identity label, making it writable. Refuses to overwrite foreign data, and (with --relabel) a tape that still holds protected runs — those within minimum_age or holding a DLE's last recovery path, including a run spanned across tapes. --relabel reuses an NBackup-labeled volume and --force overrides safety refusals.\n\nOn a robotic library, a new label takes a blank bay; to recycle a specific tape to a new name, `nb load <bay>` it first, then `nb label --relabel <name>` — the relabel acts on the loaded bay. A single-drive station always labels whatever reel is in the drive.",
-		Example: "  nb label tape DAILY-01\n  nb load lto bay-02\n  nb label --relabel lto DAILY-42   # recycle the loaded tape to a new name",
+		Long:    "Write a volume's identity label, making it writable. Refuses to overwrite foreign data, and (with --relabel) a tape that still holds protected runs — those within minimum_age or holding a DLE's last recovery path, including a run spanned across tapes. --relabel reuses an NBackup-labeled volume and --force overrides safety refusals.\n\nOn a robotic library, a new label takes a blank tape; to recycle a specific tape to a new name, `nb load <slot>` it first, then `nb label --relabel <name>` — the relabel acts on the loaded tape. A single-drive station always labels whatever reel is in the drive.",
+		Example: "  nb label tape DAILY-01\n  nb load lto 2\n  nb label --relabel lto DAILY-42   # recycle the loaded tape to a new name",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// An empty name would otherwise dead-end deep in the label protocol with a
@@ -132,6 +133,7 @@ func mediumDetail(eng *engine.Engine, name string) error {
 		printMediumStats(st)
 	}
 	printInventory(eng, name)
+	printVolumes(eng, name)
 	fmt.Println()
 	runs := eng.Catalog().RunsOn(name)
 	if len(runs) == 0 {
@@ -263,6 +265,57 @@ func capacityStr(c int64) string {
 	return sizeutil.FormatBytes(c)
 }
 
+// printVolumes lists the catalog's volume registry for a labeled medium's pool —
+// every label ever recorded, with its epoch, when it was (re)labeled, its stored
+// fill, and the learned barcode — the "tape catalog" an operator consults to see
+// what exists, on-site or off. Labels the placements reference that no scan has
+// ever seen (offsite tapes known only from commit footers' part maps) are listed
+// beneath, so the registry view and the rebuild worklist tell one story.
+// Address-identified media have no labels and print nothing.
+func printVolumes(eng *engine.Engine, name string) {
+	var vols []catalog.VolumeRecord
+	known := map[string]bool{}
+	for _, v := range eng.Catalog().Volumes() {
+		if v.Label.Pool == name {
+			vols = append(vols, v)
+			known[v.Label.Name] = true
+		}
+	}
+	if len(vols) == 0 {
+		return
+	}
+	fmt.Println("\nVolumes:")
+	tw := newTab(os.Stdout)
+	fmt.Fprintln(tw, "\tLABEL\tEPOCH\tLABELED\tUSED\tBARCODE")
+	for _, v := range vols {
+		fmt.Fprintf(tw, "\t%s\t%d\t%s\t%s\t%s\n", v.Label.Name, v.Label.Epoch,
+			sizeutil.FormatStamp(v.Label.WrittenAt), sizeutil.FormatBytes(v.Used), barcodeOr(v.Barcode))
+	}
+	tw.Flush()
+	// Labels this medium's placements reference that the registry has never seen.
+	missing := map[string]bool{}
+	for _, s := range eng.Catalog().RunsOn(name) {
+		for _, p := range eng.Catalog().Placements(s.ID) {
+			if p.Medium != name {
+				continue
+			}
+			for _, label := range p.Labels() {
+				if label != "" && !known[label] {
+					missing[label] = true
+				}
+			}
+		}
+	}
+	if len(missing) > 0 {
+		names := make([]string, 0, len(missing))
+		for l := range missing {
+			names = append(names, l)
+		}
+		sort.Strings(names)
+		fmt.Printf("  referenced but never scanned (offsite?): %s — insert and run `nb rebuild`\n", strings.Join(names, ", "))
+	}
+}
+
 // volumeHasRuns reports whether the catalog records any committed run on the named
 // label — false for a blank tape or one holding only orphan parts from an aborted
 // span/write. Used to mark such a tape reclaimable in the inventory.
@@ -353,16 +406,16 @@ func volumeStr(m engine.MediumInfo) string {
 }
 
 // newLoadCmd implements `nb load`: mount a volume into a changer medium's drive —
-// a robotic library bay, or a reel from a single-drive station's shelf — so the
+// a robotic library slot, or a reel from a single-drive station's shelf — so the
 // next read or write acts on it. The physical sibling of `nb label`; what's in the
 // drive is shown by `nb medium <name>`.
 func newLoadCmd(a *app) *cobra.Command {
 	var byLabel bool
 	cmd := &cobra.Command{
-		Use:     "load <medium> <bay-reel-or-label>",
+		Use:     "load <medium> <slot-or-label>",
 		Short:   "Load a volume into a medium's drive",
-		Long:    "Load a volume into the medium's drive: a bay on a robotic library, or a reel from a single-drive station's shelf. By default the argument is a bay/reel id; with --label it is matched against volume labels instead. Inventory the medium with `nb medium <name>`.",
-		Example: "  nb load lto bay-03\n  nb load --label lto DAILY-01\n  nb load vtape reel-02",
+		Long:    "Load a volume into the medium's drive by its slot number (the SLOT column of `nb medium <name>`), or with --label by its volume label. Applies to changers — a robotic library, or the file-backed manual station whose slots simulate the operator's shelf; a real single drive has no slots (insert the tape by hand).",
+		Example: "  nb load lto 3\n  nb load --label lto DAILY-01",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 2 {
 				return nil
@@ -377,7 +430,7 @@ func newLoadCmd(a *app) *cobra.Command {
 					}
 				}
 			}
-			return fmt.Errorf("load requires a medium and a bay/reel/label, e.g. `nb load lto bay-03`")
+			return fmt.Errorf("load requires a medium and a slot number or --label, e.g. `nb load lto 3`")
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.loadForWrite()
@@ -392,6 +445,6 @@ func newLoadCmd(a *app) *cobra.Command {
 			return eng.LoadVolume(args[0], args[1], byLabel, a.logf())
 		},
 	}
-	cmd.Flags().BoolVar(&byLabel, "label", false, "treat the argument as a volume label rather than a bay/reel id")
+	cmd.Flags().BoolVar(&byLabel, "label", false, "treat the argument as a volume label rather than a slot number")
 	return cmd
 }

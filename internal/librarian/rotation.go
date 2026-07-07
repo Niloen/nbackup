@@ -16,8 +16,8 @@ import (
 
 // Advance rolls a medium to its next writable volume after the loaded one filled (or
 // cannot hold the next archive), so a multi-volume copy/sync keeps going. It first
-// tries any mountable bay the run has not yet attempted — a robotic library's other
-// bays — then, on a single drive with a room, prompts the operator to load another
+// tries any mountable slot the run has not yet attempted — a robotic library's other
+// slots — then, on a single drive with a room, prompts the operator to load another
 // reel. A plain volume with no changer returns an actionable error. `tried`
 // accumulates the volumes already attempted so the loop terminates; `wasEmpty`
 // reports whether the new volume started with no runs (so the caller can tell "archive
@@ -35,10 +35,10 @@ func (l *Librarian) Advance(appendable bool, tried map[string]bool, expect strin
 	}
 }
 
-// advanceViaLibrary rolls a robotic library onto its next writable bay after the
-// loaded one filled: it marks the filled bay tried, then mounts each not-yet-tried
-// bay until one verifies writable (skipping wrong-pool / occupied bays), or reports
-// that no further bay can be written. Labeled volumes are preferred over blank reels
+// advanceViaLibrary rolls a robotic library onto its next writable slot after the
+// loaded one filled: it marks the filled slot tried, then mounts each not-yet-tried
+// slot until one verifies writable (skipping wrong-pool / occupied slots), or reports
+// that no further slot can be written. Labeled volumes are preferred over blank reels
 // — a roll spends the pool's existing (labeled, writable) capacity before consuming
 // a fresh cartridge, so blanks are deferred to a second pass (where auto_label may
 // stamp one; with auto_label off each is refused, never written).
@@ -93,7 +93,7 @@ func (l *Librarian) advanceViaLibrary(appendable bool, tried map[string]bool, no
 	if found {
 		return name, epoch, empty, nil
 	}
-	// No labeled bay verified writable: fall back to the blank reels seen above.
+	// No labeled slot verified writable: fall back to the blank reels seen above.
 	for _, slot := range blanks {
 		tried["slot:"+strconv.Itoa(slot)] = true
 		if err := l.changer.Load(slot, l.drive); err != nil {
@@ -104,7 +104,7 @@ func (l *Librarian) advanceViaLibrary(appendable bool, tried map[string]bool, no
 			return name, epoch, empty, nil
 		}
 	}
-	// No blank or empty in-pool bay left. Rather than refuse, recycle the oldest tape
+	// No blank or empty in-pool slot left. Rather than refuse, recycle the oldest tape
 	// whose every run the retention Floor leaves unprotected — the label rotation. The
 	// Floor is the safety gate (a tape holding any kept archive is never reusable); a
 	// recycle keeps the same label name, advancing only the epoch (and physically wiping
@@ -287,7 +287,7 @@ func (l *Librarian) acceptOrRecycle(appendable bool, tried map[string]bool, now 
 	return name, epoch, true, nil
 }
 
-// recycleViaLibrary mounts the bay holding the reusable volume rec and recycles it in
+// recycleViaLibrary mounts the slot holding the reusable volume rec and recycles it in
 // place — the robotic-library half of the rotation, where the software (not an operator)
 // loads the aged-out tape. The caller has already confirmed rec is Floor-cleared.
 func (l *Librarian) recycleViaLibrary(rec catalog.VolumeRecord, now time.Time, logf Logf) error {
@@ -400,12 +400,12 @@ func (l *Librarian) readLoadedLabel() (record.Label, bool, error) {
 	return lv.ReadLabel()
 }
 
-// noReusableErr crafts the fail-loud refusal when no blank bay is left and no volume can
+// noReusableErr crafts the fail-loud refusal when no blank slot is left and no volume can
 // be recycled — never an overwrite (recoverability outranks capacity). It separates two
 // causes: the rotation is *full* (every in-pool volume is still within retention), which
 // names the soonest a volume ages out so the operator knows when the rotation frees a
-// tape; or the medium is simply *out of bays/volumes* (the pre-existing failure), which
-// keeps the original "no further writable bay" wording. tried excludes volumes already
+// tape; or the medium is simply *out of slots/volumes* (the pre-existing failure), which
+// keeps the original "no further writable slot" wording. tried excludes volumes already
 // written this run (their fresh content is not yet in the catalog).
 func (l *Librarian) noReusableErr(tried map[string]bool, now time.Time, lastErr error) error {
 	protected := false
@@ -421,7 +421,7 @@ func (l *Librarian) noReusableErr(tried map[string]bool, now time.Time, lastErr 
 		}
 	}
 	if !protected {
-		return fmt.Errorf("medium %q has no further writable bay (load or relabel more volumes): %w", l.medium, lastErr)
+		return fmt.Errorf("medium %q has no further writable tape (load or relabel more volumes): %w", l.medium, lastErr)
 	}
 	// Name the actual protection: with minimum_age:0 the blocker is a DLE's live recovery
 	// chain, not age — "within retention" alone reads as minimum_age and misleads.

@@ -33,7 +33,7 @@ changed and what isn't there.
 | `amrecover` | `nb recover` | The interactive shell is deliberately familiar: `setdisk`, `setdate`, `ls`, `cd`, `add`, `extract`. No index server — browsing reads the member index each archive already carries. |
 | `amflush` | `nb flush` | Drains a holding disk's un-flushed archives to the landing. The next `nb dump` also auto-drains, so `nb flush` is the explicit form. |
 | `amlabel` | `nb label` | Same contract: a tape must be labeled before its first write, and the label is verified before every write so a foreign reel is never clobbered. `nb label --relabel` is the manual early-recycle. |
-| `amtape` | `nb medium` / `nb load` | `nb medium <name>` inventories a changer (drives + slots + barcodes); `nb load` loads a bay by id or `--label`. |
+| `amtape` | `nb medium` / `nb load` | `nb medium <name>` inventories a changer (drives + slots + barcodes); `nb load` loads a slot by number or `--label`. |
 | `amcheckdump` / `amverify` | `nb verify` | Checksum verification, plus `--deep` for a structural decode. `nb drill` goes further than Amanda ever did — see below. |
 | `amreindex` | `nb rebuild` | Same idea, wider reach: `amreindex` regenerates browse indexes from the volumes a run or a dump at a time; one `nb rebuild` scan reconstructs the whole catalog — indexes, dump history, and placements. |
 | taper | the **drainer** and the **landing** | There is no taper process. Runs are written to the `landing:` medium; with a holding disk, one drainer copies finished archives to it. The planner is medium-neutral — it never knows tape from S3. |

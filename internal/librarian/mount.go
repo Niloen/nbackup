@@ -8,7 +8,7 @@ import (
 )
 
 // MountForRead loads the named volume (a part's volume) and verifies its identity so
-// the reader can seek it. A robotic library mounts the bay automatically; a
+// the reader can seek it. A robotic library mounts the slot automatically; a
 // single-drive station prompts the operator to swap the reel in; non-changer media
 // are a no-op (a single addressable volume). Reading an archive that spans volumes
 // calls this once per part, in order — a single drive holds only one tape at a time.
@@ -95,7 +95,7 @@ func (l *Librarian) readVolumeLabel() (name string, labeled bool, err error) {
 
 // mountedMatches reports whether the volume currently in the drive carries the given
 // label. A read error, an empty drive, or address-identified media all count as no
-// match — the caller then mounts the right bay or prompts for a swap.
+// match — the caller then mounts the right slot or prompts for a swap.
 func (l *Librarian) mountedMatches(label string) bool {
 	name, labeled, err := l.readVolumeLabel()
 	return err == nil && labeled && name == label
