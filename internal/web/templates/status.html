@@ -2,25 +2,60 @@
 <h1>Status</h1>
 {{with .Data}}
 {{$p := print .Snap.Phase}}
-{{if .Estimating}}
-{{/* Sizing prelude: nothing is dumped yet — the snapshot's per-DLE fields carry
-     estimate sizes ("done" = sized), so the dump table below would misread as a
-     previous run's results. Mirror nb status: show the estimate filling in. */}}
+
+{{/* Headline: run id + phase + failure chips, and the one decision-ready number
+     (Big/Sub — the ETA when known) on the right. Everything below is detail. */}}
 <div class="panel">
-  <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:.5rem;align-items:baseline">
+  <div class="headline">
     <strong>{{.Snap.RunID}}</strong>
-    <span class="pill ok">{{.Snap.Phase}}</span>
+    <span class="pill {{if eq $p "failed"}}bad{{else if eq $p "canceled"}}warn{{else if eq $p "done"}}ok{{else}}active{{end}}">{{.Snap.Phase}}</span>
+    {{if .Failed}}<a class="pill bad" href="#failed">{{.Failed}} failed ↓</a>{{end}}
+    {{if .Canceled}}<a class="pill warn" href="#failed">{{.Canceled}} canceled ↓</a>{{end}}
+    <span class="eta"><span class="n">{{.Big}}</span><br><span class="sub">{{.Sub}}</span></span>
   </div>
-  <div class="stats" style="margin-top:.4rem">
-    <div><span class="k">Sizing</span><span class="v">{{.Sized}} of {{len .Snap.DLEs}} DLE(s) measured{{if .Active}} · {{.Active}} running{{end}}</span></div>
-    <div><span class="k">Estimate</span><span class="v">~{{bytes .EstimateSoFar}} so far</span></div>
-    <div><span class="k">Elapsed</span><span class="v">{{.Elapsed}}</span></div>
+
+  {{if not .Estimating}}
+  {{/* The pipeline bar: one stacked track of where the run's source bytes are now —
+       landed / in holding / dumping / to go (see view.go pipeView). Zero-width
+       segments are omitted entirely so the 2px flex gaps don't leave stray notches. */}}
+  <div class="pipe" role="img" aria-label="{{bytes .Pipe.Landed}} landed, {{bytes .Pipe.Holding}} in holding, {{bytes .Pipe.Dumping}} dumping, about {{bytes .Pipe.ToGo}} to go of about {{bytes .Pipe.Total}}">
+    {{if .Pipe.Landed}}<span class="landed" style="width:{{pctw .Pipe.LandedPct}}" title="landed on volume · {{bytes .Pipe.Landed}}"></span>{{end}}
+    {{if .Pipe.Holding}}<span class="holding" style="width:{{pctw .Pipe.HoldingPct}}" title="in holding, awaiting flush · {{bytes .Pipe.Holding}}"></span>{{end}}
+    {{if .Pipe.Dumping}}<span class="dumping" style="width:{{pctw .Pipe.DumpingPct}}" title="dumping now · {{bytes .Pipe.Dumping}}"></span>{{end}}
+    <span class="rest"></span>
   </div>
+  <div class="pipe-legend">
+    <span><span class="sw landed"></span>landed <b>{{bytes .Pipe.Landed}}</b></span>
+    {{if .Pipe.Holding}}<span><span class="sw holding"></span>in holding <b>{{bytes .Pipe.Holding}}</b></span>{{end}}
+    {{if .Pipe.Dumping}}<span><span class="sw dumping"></span>dumping <b>{{bytes .Pipe.Dumping}}</b></span>{{end}}
+    {{if .Pipe.ToGo}}<span><span class="sw"></span>to go <b>~{{bytes .Pipe.ToGo}}</b> of ~{{bytes .Pipe.Total}}</span>{{end}}
+  </div>
+  {{if or .DumpRate .DrainRate}}
+  <div class="rates">{{if .DumpRate}}dump {{bytes .DumpRate}}/s{{end}}{{if and .DumpRate .DrainRate}} · {{end}}{{if .DrainRate}}flush {{bytes .DrainRate}}/s{{end}}</div>
+  {{end}}
+  {{/* Per-landing flush sub-bars, itemized only for a fan-out (FlushLanes is nil
+       for a single landing — the headline bar already tells that story). */}}
+  {{if .FlushLanes}}
+  <div class="lanes">
+    {{range .FlushLanes}}
+    <div class="lane">
+      <span class="k">{{if .Landing}}{{.Landing}}{{else}}landing{{end}}</span>
+      <div class="bar"><span style="width:{{pctw .Pct}}"></span></div>
+      <span class="v">{{pct .Pct}}{{if .Rate}} · {{bytes .Rate}}/s{{end}}</span>
+    </div>
+    {{end}}
+  </div>
+  {{end}}
+  {{if .Snap.Err}}<div style="margin-top:.6rem;font-size:.85rem"><span class="bad">{{.Snap.Err}}</span></div>{{end}}
+  {{end}}
 </div>
 
-{{/* Per-DLE sizing table, actively-sizing first — mirrors nb status's estimating
-     table so a slow or stuck estimate names its culprit. */}}
-<div class="panel">
+{{if .Estimating}}
+{{/* Sizing prelude: nothing is dumped yet — the snapshot's per-DLE fields carry
+     estimate sizes ("done" = sized), so the pipeline would misread. Mirror
+     nb status: the per-DLE sizing table, actively-sizing first, so a slow or stuck
+     estimate names its culprit. */}}
+<div class="panel" style="margin-top:1rem">
 <table>
   <tr><th>DLE</th><th>State</th><th class="num">Size</th><th class="num">Time</th></tr>
   {{range .EstimateRows}}
@@ -34,102 +69,77 @@
 </table>
 </div>
 {{else}}
-<div class="panel">
-  <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:.5rem;align-items:baseline">
-    <strong>{{.Snap.RunID}}</strong>
-    <span class="pill {{if eq $p "failed"}}bad{{else if eq $p "canceled"}}warn{{else if eq $p "done"}}ok{{else}}ok{{end}}">{{.Snap.Phase}}</span>
-  </div>
-  <div class="bar"><span style="width:{{pct .Snap.Pct}}"></span></div>
-  <div class="muted" style="margin-top:.4rem;font-size:.85rem">
-    {{pct .Snap.Pct}} · {{.Done}} done · {{.Active}} active · {{.Pending}} pending{{if .Failed}} · <span class="bad">{{.Failed}} failed</span>{{end}}
-    · {{.Snap.Workers}} worker(s) · elapsed {{.Elapsed}}
-  </div>
-  {{if .Snap.Err}}<div style="margin-top:.4rem;font-size:.85rem"><span class="bad">{{.Snap.Err}}</span></div>{{end}}
-  {{range .Snap.Skipped}}<div style="margin-top:.4rem;font-size:.85rem"><span class="warn">landing {{.Landing}} skipped: {{.Reason}} — repair: nb sync --to {{.Landing}}</span></div>{{end}}
-  <div class="stats">
-    <div><span class="k">Dump</span><span class="v">{{bytes .DumpDone}} of ~{{bytes .DumpEst}}{{if .DumpRate}} · {{bytes .DumpRate}}/s{{end}}</span></div>
-    {{if .FlushLanes}}
-    {{range .FlushLanes}}
-    <div><span class="k">Flush</span><span class="v">{{.Landing}} · {{bytes .Done}} of {{bytes .Total}} ({{pct .Pct}}){{if .Rate}} · {{bytes .Rate}}/s{{end}}</span></div>
-    {{end}}
-    {{else if .HasFlush}}<div><span class="k">Flush</span><span class="v">{{bytes .Drained}} of {{bytes .ToDrain}} ({{pct .DrainPct}}){{if .DrainRate}} · {{bytes .DrainRate}}/s{{end}}</span></div>{{end}}
-    <div><span class="k">On volume</span><span class="v">{{bytes .OnVolume}}{{if .ETA}} · ETA {{.ETA}}{{end}}</span></div>
-  </div>
-</div>
 
-{{/* Active DLEs get the full card (dump bar, plus a flush bar in holding-disk mode);
-     the pending/done/failed majority render as compact rows so a many-DLE run is not a
-     wall of static bars — only workers-many DLEs are ever in flight at once. */}}
+{{/* Landings this run skipped up front: the archives are missing there until an
+     nb sync backfills them — worth a warning row even after the run finishes. */}}
+{{if .Snap.Skipped}}
+<div class="alerts" style="margin-top:1rem">
+  {{range .Snap.Skipped}}
+  <div class="alert warn">
+    <span class="pill warn">skipped</span>
+    <span>landing <strong>{{.Landing}}</strong> — {{.Reason}} · repair: <code>nb sync --to {{.Landing}}</code></span>
+  </div>
+  {{end}}
+</div>
+{{end}}
+
+{{/* Failures first: the only section demanding action. */}}
+{{if .FailedDLEs}}
+<h2 id="failed">Failed ({{len .FailedDLEs}})</h2>
+<div class="alerts">
+  {{range .FailedDLEs}}
+  <div class="alert {{if eq (print .State) "failed"}}bad{{else}}warn{{end}}">
+    <a class="dle-name" href="/dles/{{.Slug}}">{{.Name}}</a>
+    <span class="pill {{if eq (print .State) "failed"}}bad{{else}}warn{{end}}">{{.State}}</span>
+    {{if .Err}}<span class="err">{{.Err}}</span>{{end}}
+  </div>
+  {{end}}
+</div>
+{{end}}
+
+{{/* Active DLEs: a card each — a miniature of the headline pipeline bar plus one
+     quiet caption line. Only workers-many DLEs are ever in flight at once. */}}
 {{if .ActiveDLEs}}
 <h2>Active ({{len .ActiveDLEs}})</h2>
 <div class="panel">
 <div class="dles">
   {{range .ActiveDLEs}}
-  {{$st := print .State}}
   <div class="dle">
     <div class="dle-head">
       <a class="dle-name" href="/dles/{{.Slug}}">{{.Name}}</a>
-      <span class="pill {{if or (eq $st "dumping") (eq $st "flushing")}}active{{else}}dim{{end}}">{{.State}}</span>
-    </div>
-    {{/* DUMP bar: source -> holding/landing, metered against the estimate. */}}
-    <div class="bar"><span style="width:{{pct .Pct}}"></span></div>
-    <div class="dle-meta">dump · {{level .Level}} · {{pct .Pct}}{{if .DoneBytes}} · {{bytes .DoneBytes}}{{if .EstBytes}} of {{bytes .EstBytes}}{{end}}{{end}}{{if .Volume}} · volume {{.Volume}}{{end}}</div>
-    {{if .Drains}}
-    {{/* FLUSH bar: holding disk -> landing, metered against the staged (compressed) size. */}}
-    <div class="bar" style="margin-top:.5rem"><span style="width:{{pct .DrainPct}}"></span></div>
-    <div class="dle-meta">flush · {{pct .DrainPct}} · {{bytes .DrainBytes}} of {{bytes .DrainTotal}} to landing{{if .Holding}} · from {{.Holding}}{{end}}</div>
-    {{else if .ToHolding}}
-    <div class="dle-meta">staging to holding disk…</div>
-    {{end}}
-    {{if .Err}}<div class="dle-meta"><span class="bad">{{.Err}}</span></div>{{end}}
-  </div>
-  {{end}}
-</div>
-</div>
-{{end}}
-
-{{if .FailedDLEs}}
-<h2>Failed ({{len .FailedDLEs}})</h2>
-<div class="panel">
-<div class="dles">
-  {{range .FailedDLEs}}
-  <div class="dle slim">
-    <div class="dle-head">
-      <a class="dle-name" href="/dles/{{.Slug}}">{{.Name}}</a>
-      <span class="pill {{if eq (print .State) "failed"}}bad{{else}}warn{{end}}">{{.State}}</span>
-    </div>
-    {{if .Err}}<div class="dle-meta"><span class="bad">{{.Err}}</span></div>{{end}}
-  </div>
-  {{end}}
-</div>
-</div>
-{{end}}
-
-{{if .DoneDLEs}}
-<h2>Done ({{len .DoneDLEs}})</h2>
-<div class="panel">
-<div class="dles">
-  {{range .DoneDLEs}}
-  <div class="dle slim">
-    <div class="dle-head">
-      <a class="dle-name" href="/dles/{{.Slug}}">{{.Name}}</a>
-      <span class="muted" style="font-size:.85rem">{{bytes .DoneBytes}}</span>
       <span class="pill dim">{{level .Level}}</span>
+      {{if .Direct}}<span class="pill dim">direct</span>{{end}}
+      {{if .Rate}}<span class="pill dim">{{bytes .Rate}}/s</span>{{end}}
     </div>
+    <div class="pipe" style="height:8px">
+      {{if .Pipe.Landed}}<span class="landed" style="width:{{pctw .Pipe.LandedPct}}"></span>{{end}}
+      {{if .Pipe.Holding}}<span class="holding" style="width:{{pctw .Pipe.HoldingPct}}"></span>{{end}}
+      {{if .Pipe.Dumping}}<span class="dumping" style="width:{{pctw .Pipe.DumpingPct}}"></span>{{end}}
+      <span class="rest"></span>
+    </div>
+    {{if .Caption}}<div class="dle-meta">{{.Caption}}</div>{{end}}
+    {{if .Err}}<div class="dle-meta"><span class="bad">{{.Err}}</span></div>{{end}}
   </div>
   {{end}}
 </div>
 </div>
 {{end}}
 
-{{if .PendingDLEs}}
-<h2>Pending ({{len .PendingDLEs}})</h2>
+{{/* Everything, one square per DLE — the done/pending majority at a glance instead
+     of a wall of rows; each square links to its DLE page. */}}
+<h2>All DLEs <span class="count">— {{.Done}} done{{if .Active}} · {{.Active}} active{{end}}{{if .Failed}} · {{.Failed}} failed{{end}}{{if .Canceled}} · {{.Canceled}} canceled{{end}}{{if .Pending}} · {{.Pending}} pending{{end}}</span></h2>
 <div class="panel">
-  <div class="muted" style="font-size:.85rem">
-    {{range $i, $d := .PendingDLEs}}{{if $i}} · {{end}}<a href="/dles/{{$d.Slug}}">{{$d.Name}}</a>{{end}}
+  <div class="grid">
+    {{range .Grid}}<a href="/dles/{{.Slug}}" class="{{.Class}}" title="{{.Title}}"></a>{{end}}
+  </div>
+  <div class="grid-legend">
+    <span><span class="sw landed"></span>done</span>
+    <span><span class="sw holding"></span>in holding</span>
+    <span><span class="sw dumping"></span>dumping</span>
+    <span><span class="sw failed"></span>failed</span>
+    <span><span class="sw"></span>pending</span>
   </div>
 </div>
-{{end}}
 {{end}}
 {{else}}
 <div class="panel"><div class="empty">No run in progress.<br><span style="font-size:.85rem">The last completed run is under <a href="/runs">Runs</a>.</span></div></div>

@@ -29,7 +29,10 @@ var funcs = template.FuncMap{
 		}
 		return sizeutil.FormatStampSec(t)
 	},
-	"pct":   func(f float64) string { return fmt.Sprintf("%.0f%%", f) },
+	"pct": func(f float64) string { return fmt.Sprintf("%.0f%%", f) },
+	// pctw is a pipeline-segment width: two decimals so a barely-started stage still
+	// renders a sliver instead of rounding away.
+	"pctw":  func(f float64) string { return fmt.Sprintf("%.2f%%", f) },
 	"level": func(l int) string { return fmt.Sprintf("L%d", l) },
 	"lower": strings.ToLower,
 	// encrypt renders an archive's cipher, defaulting an empty field to "none" like

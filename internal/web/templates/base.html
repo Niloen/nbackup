@@ -47,11 +47,73 @@
   .pill.dim { background: var(--line); color: var(--muted); }
   .bar { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; margin-top: .35rem; }
   .bar > span { display: block; height: 100%; background: var(--accent); }
+  /* /status headline: run id + phase + failure chips on the left, the one
+     decision-ready number (ETA) on the right; stacks on a phone. */
+  .headline { display: flex; flex-wrap: wrap; align-items: baseline; gap: .4rem 1rem; }
+  .headline .eta { margin-left: auto; text-align: right; }
+  .headline .eta .n { font-size: 1.45rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .headline .eta .sub { color: var(--muted); font-size: .8rem; }
+  @media (max-width: 480px) { .headline .eta { margin-left: 0; text-align: left; width: 100%; } }
+  a.pill { text-decoration: none; }
+  /* The /status pipeline bar: one stacked track of where the run's source bytes are
+     now — landed on volume / staged in holding / dumping (in flight) / still to go.
+     The stages are one hue stepped by lightness (safest = strongest); 2px surface
+     gaps keep segment boundaries legible without relying on color alone, and the
+     in-flight segment shimmers so "what's moving" reads at a glance. */
+  :root {
+    --seg-landed: var(--accent);
+    --seg-holding: color-mix(in srgb, var(--accent) 45%, var(--panel));
+    --seg-dumping: color-mix(in srgb, var(--accent) 26%, var(--panel));
+  }
+  .pipe { display: flex; gap: 2px; height: 16px; border-radius: 999px; overflow: hidden;
+    background: var(--line); margin-top: .9rem; }
+  .pipe > span { display: block; height: 100%; }
+  .pipe .landed { background: var(--seg-landed); }
+  .pipe .holding { background: var(--seg-holding); }
+  .pipe .dumping { background: var(--seg-dumping); position: relative; overflow: hidden; }
+  .pipe .dumping::after { content: ""; position: absolute; inset: 0;
+    background: linear-gradient(100deg, transparent 30%, color-mix(in srgb, var(--accent) 35%, transparent) 50%, transparent 70%);
+    background-size: 200% 100%; animation: sweep 2.2s linear infinite; }
+  .pipe .rest { background: transparent; flex: 1; }
+  @keyframes sweep { from { background-position: 130% 0; } to { background-position: -70% 0; } }
+  @media (prefers-reduced-motion: reduce) { .pipe .dumping::after { animation: none; } }
+  /* The legend doubles as the numbers line — each stage named once, with its bytes,
+     so the faint segments never rely on color contrast alone. */
+  .pipe-legend { display: flex; flex-wrap: wrap; gap: .25rem 1.1rem; margin-top: .55rem;
+    font-size: .84rem; font-variant-numeric: tabular-nums; }
+  .pipe-legend .sw, .grid-legend .sw { display: inline-block; width: 11px; height: 11px;
+    border-radius: 3px; vertical-align: -1px; margin-right: .35rem; background: var(--line); }
+  .sw.landed { background: var(--seg-landed); } .sw.holding { background: var(--seg-holding); }
+  .sw.dumping { background: var(--seg-dumping); } .sw.failed { background: var(--bad); }
+  .pipe-legend b { font-weight: 650; }
+  .rates { color: var(--muted); font-size: .8rem; margin-top: .45rem; font-variant-numeric: tabular-nums; }
+  /* Per-landing flush sub-bars, itemized only for a fan-out. */
+  .lanes { display: flex; flex-direction: column; gap: .55rem; margin-top: .8rem; }
+  .lane { display: flex; align-items: center; gap: .7rem; }
+  .lane .k { flex: none; width: 4.5rem; color: var(--muted); font-size: .78rem;
+    text-transform: uppercase; letter-spacing: .04em; overflow: hidden; text-overflow: ellipsis; }
+  .lane .bar { flex: 1; margin-top: 0; }
+  .lane .v { flex: none; color: var(--muted); font-size: .82rem; font-variant-numeric: tabular-nums; }
+  /* The all-DLEs grid: one square per DLE, colored by state — the done/pending
+     majority as three lines of height instead of three screens of rows, with the
+     stragglers popping out by color. Same idiom as the /dles heatmap. */
+  .grid { display: flex; flex-wrap: wrap; gap: 3px; }
+  .grid a { display: block; width: 15px; height: 15px; border-radius: 3px; background: var(--line); }
+  .grid a:hover, .grid a:focus-visible { outline: 2px solid var(--fg); outline-offset: 1px; }
+  .grid a.landed { background: var(--seg-landed); }
+  .grid a.holding { background: var(--seg-holding); }
+  .grid a.dumping { background: var(--seg-dumping); box-shadow: inset 0 0 0 1.5px var(--accent); }
+  .grid a.failed { background: var(--bad); }
+  .grid-legend { display: flex; flex-wrap: wrap; gap: .25rem 1rem; margin-top: .6rem;
+    color: var(--muted); font-size: .82rem; }
+  .grid-legend .sw.dumping { box-shadow: inset 0 0 0 1.5px var(--accent); }
+  h2 .count { font-weight: 400; }
+  .alert .err { color: var(--bad); font-size: .85rem; }
   /* "Attention needed" rollup on the overview: alert rows and the all-clear line.
      A stacked list so it never scrolls sideways on a phone; each row is a link with
      a leading category pill, its left border tinted to the severity for a glance. */
   .alerts { display: flex; flex-direction: column; gap: .4rem; }
-  .alert { display: flex; align-items: center; gap: .6rem; padding: .5rem .7rem;
+  .alert { display: flex; flex-wrap: wrap; align-items: center; gap: .2rem .6rem; padding: .5rem .7rem;
     background: var(--panel); border: 1px solid var(--line); border-left-width: 3px;
     border-radius: 8px; color: var(--fg); text-decoration: none; }
   .alert:hover { background: var(--line); }
@@ -71,13 +133,6 @@
   .dle-name { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dle-head .pill { flex: none; }
   .dle-meta { color: var(--muted); font-size: .82rem; margin-top: .35rem; font-variant-numeric: tabular-nums; }
-  /* Run-level dump/flush/volume rollup: a stacked label→value list that wraps its
-     value on a phone rather than overflowing. */
-  .stats { display: flex; flex-direction: column; gap: .3rem; margin-top: .7rem;
-    border-top: 1px solid var(--line); padding-top: .6rem; }
-  .stats > div { display: flex; flex-wrap: wrap; gap: .2rem .6rem; align-items: baseline; }
-  .stats .k { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; min-width: 5.5rem; }
-  .stats .v { font-variant-numeric: tabular-nums; }
   .muted { color: var(--muted); }
   /* Recovery points on /dles/<slug>: a stacked list (never scrolls sideways on a
      phone), each point a row of run id + level + chain + a health/media line. */

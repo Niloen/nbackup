@@ -49,50 +49,196 @@ type alert struct {
 	Href  string
 }
 
-// statusView is a live snapshot with its run-level rollups pre-computed: the DLE
-// counts (a template cannot destructure Counts()'s four returns) and the
-// dump/flush/volume totals plus now-based rates and ETA (which need the clock a
-// template does not have). Per-DLE detail is read straight off Snap.DLEs, whose
-// Pct/DrainPct/Drains helpers a template can call directly.
+// statusView is a live snapshot with everything the status page shows pre-computed —
+// the headline stat, the pipeline rollup, the per-DLE cards and grid cells — so the
+// template does no arithmetic or branching (it has neither the clock the rates need
+// nor the byte math the pipeline needs).
 type statusView struct {
 	Snap                          *progress.Snapshot
 	Active, Done, Failed, Pending int
+	Canceled                      int
 
 	// Estimating flags the sizing prelude, during which the snapshot's fields mean
 	// something else — a "done" DLE is merely *sized* and DoneBytes holds its measured
-	// estimate, not dumped bytes — so the templates render the sizing view (Sized of
-	// total, EstimateSoFar, and the per-DLE EstimateRows) instead of a dump table full
-	// of misleading "done" rows (the same split nb status makes; see
-	// progress.renderEstimating).
+	// estimate, not dumped bytes — so the templates render the sizing view (the
+	// per-DLE EstimateRows) instead of a dump view full of misleading "done" DLEs
+	// (the same split nb status makes; see progress.renderEstimating).
 	Estimating    bool
 	Sized         int           // DLEs measured so far
 	EstimateSoFar int64         // estimate accumulated so far
 	EstimateRows  []estimateRow // per-DLE sizing detail, running first
 
-	DumpDone, DumpEst int64   // uncompressed: dumped so far, and the planner estimate
-	DumpRate          int64   // bytes/sec, 0 = not yet measurable
-	HasFlush          bool    // a holding-disk run: some DLEs drain to the landing
-	Drained, ToDrain  int64   // compressed: copied to the landing so far, and the staged total
-	DrainPct          float64 // 0..100
-	DrainRate         int64   // bytes/sec, 0 = not yet measurable
-	OnVolume          int64   // bytes landed on the authoritative volume
-	Elapsed, ETA      string  // formatted; ETA "" when unknown/terminal
+	// Big/Sub are the headline's right-hand stat — the one decision-ready number the
+	// page leads with (the ETA when known), and its quiet context line.
+	Big, Sub string
+
+	Pipe                pipeView // the run-level pipeline bar
+	DumpRate, DrainRate int64    // bytes/sec (uncompressed / compressed), 0 = not yet measurable
+	Elapsed, ETA        string   // formatted; ETA "" when unknown/terminal
 
 	// FlushLanes itemizes the flush backlog per landing, populated only for a fan-out
 	// (more than one landing) — mirroring nb status's per-landing lines (see
 	// progress.render's Flush section). A single-landing run leaves this nil; the
-	// existing Drained/ToDrain aggregate already tells the whole story there.
+	// pipeline bar already tells the whole story there.
 	FlushLanes []flushLaneView
 
-	// The per-DLE detail is grouped by state so the page can render full cards (dump +
-	// flush bars) only for the DLEs actually in flight. Only workers-many DLEs dump at
-	// once, so a many-DLE holding-disk run would otherwise be a wall of static bars for
-	// the pending/done majority; the failed/done/pending groups render as compact rows
-	// instead. Each slice preserves Snap.DLEs order.
-	ActiveDLEs  []progress.DLE // StateDumping or StateFlushing — full cards
-	FailedDLEs  []progress.DLE // StateFailed or StateCanceled — compact rows with the error
-	DoneDLEs    []progress.DLE // StateDone — compact one-line rows
-	PendingDLEs []progress.DLE // StatePending — names only
+	// Only workers-many DLEs are in flight at once, so they alone get cards (a
+	// miniature pipeline bar each); failures get alert rows up top, and the
+	// done/pending majority collapses into the Grid — one square per DLE — instead
+	// of a wall of rows. Each slice preserves Snap.DLEs order.
+	ActiveDLEs []activeDLE    // StateDumping or StateFlushing — cards
+	FailedDLEs []progress.DLE // StateFailed or StateCanceled — alert rows with the error
+	Grid       []gridCell     // every DLE, one square each
+}
+
+// pipeView is the stacked pipeline bar: of the run's source data, how much is landed
+// on the volume(s), staged in a holding disk, in flight, or still to go. Every
+// segment is on the source (uncompressed) axis so they are commensurate — see
+// stageSplit for how each DLE's bytes are placed. The *Pct fields are the segment
+// widths (0..100); ToGo is the untracked remainder the bar leaves as empty track.
+type pipeView struct {
+	Landed, Holding, Dumping, ToGo, Total int64
+	LandedPct, HoldingPct, DumpingPct     float64
+}
+
+// stageSplit places one DLE's bytes on the pipeline's source axis, by state:
+// pending is all still-to-go (its estimate); a dumping DLE's bytes are in flight —
+// uncommitted, whatever the route, so a direct dump's bytes hop straight from here
+// to landed when its archive commits; a flushing DLE's dump is complete (its total
+// is the actual DoneBytes, not the estimate) and splits landed/holding by its drain
+// fraction; done is fully landed. Failed and canceled DLEs leave the bar entirely —
+// they will never land, and the Failed section carries them — so a finished run's
+// bar reads full, not stuck at the failures' share.
+func stageSplit(d progress.DLE) (landed, holding, dumping, total int64) {
+	switch d.State {
+	case progress.StatePending:
+		return 0, 0, 0, d.EstBytes
+	case progress.StateDumping:
+		total = d.EstBytes
+		if d.DoneBytes > total {
+			total = d.DoneBytes
+		}
+		return 0, 0, d.DoneBytes, total
+	case progress.StateFlushing:
+		landed = int64(float64(d.DoneBytes) * d.DrainPct() / 100)
+		return landed, d.DoneBytes - landed, 0, d.DoneBytes
+	case progress.StateDone:
+		return d.DoneBytes, 0, 0, d.DoneBytes
+	}
+	return 0, 0, 0, 0
+}
+
+// newPipeView rolls the DLEs' stage splits into one bar.
+func newPipeView(dles []progress.DLE) pipeView {
+	var v pipeView
+	for _, d := range dles {
+		landed, holding, dumping, total := stageSplit(d)
+		v.Landed += landed
+		v.Holding += holding
+		v.Dumping += dumping
+		v.Total += total
+	}
+	if v.ToGo = v.Total - v.Landed - v.Holding - v.Dumping; v.ToGo < 0 {
+		v.ToGo = 0
+	}
+	v.LandedPct = pctOf(v.Landed, v.Total)
+	v.HoldingPct = pctOf(v.Holding, v.Total)
+	v.DumpingPct = pctOf(v.Dumping, v.Total)
+	return v
+}
+
+// activeDLE is one in-flight DLE's card: a miniature of the headline pipeline bar
+// (same encoding, learned once) plus a prebuilt one-line caption, so the template
+// renders it without branching.
+type activeDLE struct {
+	Name, Slug string
+	Level      int
+	State      string
+	Pipe       pipeView
+	Rate       int64  // dump throughput while dumping (bytes/sec), 0 when not measurable
+	Direct     bool   // dumping straight to the landing in a run that also stages via holding
+	Caption    string // pct/bytes/route in one quiet line
+	Err        string
+}
+
+// newActiveDLE builds one card. mixed says the run stages other DLEs via a holding
+// disk — only then does a direct dump earn its "direct" pill (it occupies a landing
+// lane alongside the flushes, worth spotting); in an all-direct run the pill would
+// be noise on every card.
+func newActiveDLE(d progress.DLE, now time.Time, mixed bool) activeDLE {
+	a := activeDLE{Name: d.Name, Slug: d.Slug, Level: d.Level, State: string(d.State),
+		Pipe: newPipeView([]progress.DLE{d}), Err: d.Err}
+	var parts []string
+	switch d.State {
+	case progress.StateDumping:
+		if d.EstBytes > 0 {
+			parts = append(parts, fmt.Sprintf("%.0f%%", d.Pct()),
+				sizeutil.FormatBytes(d.DoneBytes)+" of ~"+sizeutil.FormatBytes(d.EstBytes))
+		} else if d.DoneBytes > 0 {
+			parts = append(parts, sizeutil.FormatBytes(d.DoneBytes))
+		}
+		if secs := now.Sub(d.StartedAt).Seconds(); !d.StartedAt.IsZero() && secs > 0 {
+			a.Rate = int64(float64(d.DoneBytes) / secs)
+		}
+		switch {
+		case d.ToHolding || d.Holding != "":
+			parts = append(parts, "staging to holding")
+		case mixed:
+			a.Direct = true
+			if d.Volume != "" {
+				parts = append(parts, "direct → "+d.Volume)
+			} else {
+				parts = append(parts, "direct to landing")
+			}
+		case d.Volume != "":
+			parts = append(parts, "volume "+d.Volume)
+		}
+	case progress.StateFlushing:
+		if d.DrainBytes == 0 {
+			parts = append(parts, "dumped", sizeutil.FormatBytes(d.OutBytes)+" in holding, awaiting flush")
+		} else {
+			parts = append(parts, "flushing", sizeutil.FormatBytes(d.DrainBytes)+" of "+
+				sizeutil.FormatBytes(d.DrainTotal())+" to landing")
+			if d.Holding != "" {
+				parts = append(parts, "from "+d.Holding)
+			}
+		}
+	}
+	a.Caption = strings.Join(parts, " · ")
+	return a
+}
+
+// gridCell is one DLE's square in the all-DLEs grid: its state as a color class
+// (matching the pipeline's stage hues, plus failed red and the pending track), and
+// a hover title naming it — so the done/pending majority reads at a glance and any
+// square clicks through to its /dles page.
+type gridCell struct {
+	Slug, Class, Title string
+}
+
+// newGridCell maps one DLE to its square.
+func newGridCell(d progress.DLE) gridCell {
+	c := gridCell{Slug: d.Slug}
+	switch d.State {
+	case progress.StateDone:
+		c.Class = "landed"
+		c.Title = fmt.Sprintf("%s — done · %s", d.Name, sizeutil.FormatBytes(d.DoneBytes))
+	case progress.StateFlushing:
+		c.Class = "holding"
+		c.Title = d.Name + " — flushing"
+	case progress.StateDumping:
+		c.Class = "dumping"
+		c.Title = d.Name + " — dumping"
+	case progress.StateFailed:
+		c.Class = "failed"
+		c.Title = d.Name + " — failed"
+	case progress.StateCanceled:
+		c.Class = "failed"
+		c.Title = d.Name + " — canceled"
+	default:
+		c.Title = d.Name + " — pending"
+	}
+	return c
 }
 
 // estimateRow is one DLE's line of the /status sizing table — the web counterpart of
@@ -167,20 +313,18 @@ func newStatusView(snap *progress.Snapshot, now time.Time) *statusView {
 	}
 	v := &statusView{Snap: snap}
 	v.Active, v.Done, v.Failed, v.Pending = snap.Counts()
+	v.Canceled = snap.Canceled()
+	v.Elapsed = sizeutil.FormatElapsed(snap.Elapsed(now))
 	if snap.Phase == progress.PhaseEstimating {
 		v.Estimating = true
 		v.Sized = v.Done + v.Failed
 		v.EstimateSoFar = snap.TotalDone()
 		v.EstimateRows = estimateRows(snap.DLEs, now)
-		v.Elapsed = sizeutil.FormatElapsed(snap.Elapsed(now))
+		v.Big = fmt.Sprintf("%d of %d DLE(s) measured", v.Sized, len(snap.DLEs))
+		v.Sub = "~" + sizeutil.FormatBytes(v.EstimateSoFar) + " so far · elapsed " + v.Elapsed
 		return v
 	}
-	v.DumpDone, v.DumpEst = snap.TotalDone(), snap.TotalEst()
-	v.ToDrain, v.Drained = snap.TotalToDrain(), snap.TotalDrained()
-	v.HasFlush = v.ToDrain > 0
-	v.DrainPct = snap.DrainPct()
-	v.OnVolume = snap.TotalOnVolume()
-	v.Elapsed = sizeutil.FormatElapsed(snap.Elapsed(now))
+	v.Pipe = newPipeView(snap.DLEs)
 	if r := snap.Rate(now); r > 0 {
 		v.DumpRate = int64(r)
 	}
@@ -189,6 +333,17 @@ func newStatusView(snap *progress.Snapshot, now time.Time) *statusView {
 	}
 	if eta, ok := snap.ETA(now); ok {
 		v.ETA = sizeutil.FormatElapsed(eta)
+	}
+	switch {
+	case v.ETA != "":
+		v.Big = "~" + v.ETA + " left"
+		v.Sub = fmt.Sprintf("elapsed %s · %d worker(s)", v.Elapsed, snap.Workers)
+	case snap.Phase.Terminal():
+		v.Big = v.Elapsed
+		v.Sub = "total run time"
+	default:
+		v.Big = fmt.Sprintf("%.0f%% landed", v.Pipe.LandedPct)
+		v.Sub = fmt.Sprintf("elapsed %s · %d worker(s)", v.Elapsed, snap.Workers)
 	}
 	if drains := snap.LandingDrains(); len(drains) > 1 {
 		for _, ld := range drains {
@@ -199,16 +354,22 @@ func newStatusView(snap *progress.Snapshot, now time.Time) *statusView {
 			v.FlushLanes = append(v.FlushLanes, lane)
 		}
 	}
+	// A direct dump earns its "direct" pill only in a mixed run — one that stages
+	// other DLEs via a holding disk (see newActiveDLE).
+	mixed := false
 	for _, d := range snap.DLEs {
+		if d.ToHolding || d.Holding != "" {
+			mixed = true
+			break
+		}
+	}
+	for _, d := range snap.DLEs {
+		v.Grid = append(v.Grid, newGridCell(d))
 		switch d.State {
 		case progress.StateDumping, progress.StateFlushing:
-			v.ActiveDLEs = append(v.ActiveDLEs, d)
+			v.ActiveDLEs = append(v.ActiveDLEs, newActiveDLE(d, now, mixed))
 		case progress.StateFailed, progress.StateCanceled:
 			v.FailedDLEs = append(v.FailedDLEs, d)
-		case progress.StateDone:
-			v.DoneDLEs = append(v.DoneDLEs, d)
-		case progress.StatePending:
-			v.PendingDLEs = append(v.PendingDLEs, d)
 		}
 	}
 	return v

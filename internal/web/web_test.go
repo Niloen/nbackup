@@ -540,16 +540,16 @@ func TestEstimatingStatusShowsSizingNotDumpTable(t *testing.T) {
 	}
 }
 
-// TestStatusGroupsByState checks the active-first per-DLE layout: full cards (with
-// progress bars) only for in-flight DLEs, and the failed/done/pending majority as
-// compact rows so a many-DLE run is not a wall of static bars.
+// TestStatusGroupsByState checks the exceptions-and-activity layout: failures as
+// alert rows up top, cards (miniature pipeline bars) only for in-flight DLEs, and
+// the done/pending majority as grid squares so a many-DLE run is not a wall of rows.
 func TestStatusGroupsByState(t *testing.T) {
 	dir := t.TempDir()
 	progress.NewFileSink(dir, time.Now)(progress.Snapshot{
 		RunID: "run-2026-07-06.100000", Phase: progress.PhaseRunning, Workers: 2,
 		DLEs: []progress.DLE{
 			{Name: "dumping-dle", Slug: "d1", State: progress.StateDumping, EstBytes: 1000, DoneBytes: 500},
-			{Name: "flushing-dle", Slug: "d2", State: progress.StateFlushing, Holding: "scratch", OutBytes: 400, DrainBytes: 200},
+			{Name: "flushing-dle", Slug: "d2", State: progress.StateFlushing, Holding: "scratch", DoneBytes: 900, OutBytes: 400, DrainBytes: 200},
 			{Name: "done-dle", Slug: "d3", State: progress.StateDone, DoneBytes: 800},
 			{Name: "failed-dle", Slug: "d4", State: progress.StateFailed, Err: "tar exited 2"},
 			{Name: "pending-dle", Slug: "d5", State: progress.StatePending},
@@ -561,18 +561,25 @@ func TestStatusGroupsByState(t *testing.T) {
 		t.Fatalf("code=%d", code)
 	}
 	for _, want := range []string{
-		"Active (2)", "Failed (1)", "Done (1)", "Pending (1)", // section headers with counts
-		"tar exited 2",            // the failed DLE's error text
-		"done-dle", "pending-dle", // done and pending DLE names present
+		"Failed (1)", "Active (2)", // section headers with counts, failures first
+		"1 done · 2 active · 1 failed · 1 pending", // the All DLEs rollup line
+		"tar exited 2", // the failed DLE's error text
+		// The done/pending majority renders as grid squares: state as a color class,
+		// identity in the hover title.
+		`title="done-dle — done · 800 B"`,
+		`title="pending-dle — pending"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/status missing %q:\n%s", want, body)
 		}
 	}
-	// Progress bars render only for the active DLEs: 1 run-level + 2 active dump bars +
-	// 1 flush bar (the flushing DLE) = 4; the done/failed/pending rows carry none.
-	if got := strings.Count(body, `class="bar"`); got != 4 {
-		t.Errorf("/status rendered %d progress bars, want 4 (1 run-level + 2 dump + 1 flush)", got)
+	if failedAt, activeAt := strings.Index(body, "Failed (1)"), strings.Index(body, "Active (2)"); failedAt > activeAt {
+		t.Errorf("/status renders Failed after Active; failures must come first")
+	}
+	// Pipeline bars render for the run headline and each active DLE only: 1 + 2 = 3;
+	// the done/failed/pending majority carries none.
+	if got := strings.Count(body, `class="pipe"`); got != 3 {
+		t.Errorf("/status rendered %d pipeline bars, want 3 (1 run-level + 2 active)", got)
 	}
 }
 
@@ -621,27 +628,24 @@ func TestRunDumpReport(t *testing.T) {
 }
 
 // TestStatusFlushLanes checks the per-landing flush itemization: a two-landing
-// snapshot gets one Flush row per landing, and a single-landing snapshot keeps
-// today's one aggregate row.
+// snapshot gets one lane sub-bar per landing, and a single-landing snapshot gets
+// none — its flush shows as the pipeline bar's landed/holding split instead.
 func TestStatusFlushLanes(t *testing.T) {
-	twoLane := func(dir string) {
-		progress.NewFileSink(dir, time.Now)(progress.Snapshot{
-			RunID: "run-2026-07-06.110000", Phase: progress.PhaseRunning, Workers: 1,
-			DrainStartedAt: time.Now().Add(-time.Minute),
-			DLEs: []progress.DLE{{
-				Name: "fanout-dle", Slug: "d1", State: progress.StateFlushing, Holding: "scratch",
-				Landings: []string{"s3", "gdrive"}, OutBytes: 1000,
-				Drained: map[string]int64{"s3": 300, "gdrive": 100},
-			}},
-		}, true)
-	}
 	dir := t.TempDir()
-	twoLane(dir)
+	progress.NewFileSink(dir, time.Now)(progress.Snapshot{
+		RunID: "run-2026-07-06.110000", Phase: progress.PhaseRunning, Workers: 1,
+		DrainStartedAt: time.Now().Add(-time.Minute),
+		DLEs: []progress.DLE{{
+			Name: "fanout-dle", Slug: "d1", State: progress.StateFlushing, Holding: "scratch",
+			DoneBytes: 2000, Landings: []string{"s3", "gdrive"}, OutBytes: 1000, DrainBytes: 400,
+			Drained: map[string]int64{"s3": 300, "gdrive": 100},
+		}},
+	}, true)
 	_, body := get(t, NewServer(sampleSource(), dir).Handler(), "/status")
-	if got := strings.Count(body, ">Flush<"); got != 2 {
-		t.Errorf("/status rendered %d Flush rows for a two-landing snapshot, want 2:\n%s", got, body)
+	if got := strings.Count(body, `class="lane"`); got != 2 {
+		t.Errorf("/status rendered %d flush lanes for a two-landing snapshot, want 2:\n%s", got, body)
 	}
-	for _, want := range []string{"s3 ·", "gdrive ·", "30%", "10%"} {
+	for _, want := range []string{">s3<", ">gdrive<", "30%", "10%"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/status missing %q in the per-landing flush lanes:\n%s", want, body)
 		}
@@ -653,12 +657,19 @@ func TestStatusFlushLanes(t *testing.T) {
 		DrainStartedAt: time.Now().Add(-time.Minute),
 		DLEs: []progress.DLE{{
 			Name: "single-dle", Slug: "d2", State: progress.StateFlushing, Holding: "scratch",
-			OutBytes: 1000, DrainBytes: 400,
+			DoneBytes: 2000, OutBytes: 1000, DrainBytes: 400,
 		}},
 	}, true)
 	_, single := get(t, NewServer(sampleSource(), oneLane).Handler(), "/status")
-	if got := strings.Count(single, ">Flush<"); got != 1 {
-		t.Errorf("/status rendered %d Flush rows for a single-landing snapshot, want 1 (the aggregate):\n%s", got, single)
+	if got := strings.Count(single, `class="lane"`); got != 0 {
+		t.Errorf("/status rendered %d flush lanes for a single-landing snapshot, want 0 (the pipeline bar aggregates it):\n%s", got, single)
+	}
+	// The flush still shows in the pipeline legend: the DLE's dumped bytes split
+	// landed/holding by its 40% drain fraction.
+	for _, want := range []string{"landed <b>800 B</b>", "in holding <b>1.20 kB</b>"} {
+		if !strings.Contains(single, want) {
+			t.Errorf("/status missing %q in the pipeline legend:\n%s", want, single)
+		}
 	}
 }
 
