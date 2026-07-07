@@ -164,11 +164,16 @@ type Snapshot struct {
 	DLEs []DLE  `json:"dles"`
 }
 
-// SkippedLanding is one landing a run skipped up front, and why — the archives it
+// SkippedLanding is one landing a run could not serve, and why — the archives it
 // was routed are missing there until an `nb sync --to <landing>` backfills them.
+// Tripped distinguishes a landing that failed MID-RUN (its first failed write killed
+// the lane; copies drained before the failure exist, the rest are missing — the
+// landing stays on every DLE's route so the drain totals honestly show the shortfall)
+// from one skipped up front (removed from the routes; nothing was ever owed there).
 type SkippedLanding struct {
 	Landing string `json:"landing"`
 	Reason  string `json:"reason"`
+	Tripped bool   `json:"tripped,omitempty"`
 }
 
 // TotalEst sums the planned estimates (uncompressed).

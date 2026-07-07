@@ -493,6 +493,7 @@ func (sp *Spool) trip(l *lane, err error) {
 	sp.mu.Unlock()
 	if !seen {
 		sp.logf("WARNING landing %q failed and is skipped for the rest of the run: %v", l.name, err)
+		sp.tr.TripLanding(l.name, err.Error()) // the status file must name the trip, not just show a silent 0
 	}
 }
 

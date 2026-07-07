@@ -95,7 +95,11 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 		fmt.Fprintf(w, "ETA:      %s\n", sizeutil.FormatElapsed(eta))
 	}
 	for _, sk := range s.Skipped {
-		fmt.Fprintf(w, "SKIPPED landing %s: %s — its copies are missing this run; repair: nb sync --to %s\n", sk.Landing, sk.Reason, sk.Landing)
+		if sk.Tripped {
+			fmt.Fprintf(w, "TRIPPED landing %s mid-run: %s — copies from before the failure landed, the rest are missing; repair: nb sync --to %s\n", sk.Landing, sk.Reason, sk.Landing)
+		} else {
+			fmt.Fprintf(w, "SKIPPED landing %s: %s — its copies are missing this run; repair: nb sync --to %s\n", sk.Landing, sk.Reason, sk.Landing)
+		}
 	}
 	for _, d := range s.DLEs {
 		if d.State == StateFailed {
