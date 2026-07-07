@@ -187,6 +187,14 @@ func (l *Librarian) swapForWrite(appendable bool, tried map[string]bool, expect 
 		}
 		name, epoch, empty, verr := l.acceptOrRecycle(appendable, tried, now, logf)
 		if verr == nil {
+			if tried[name] {
+				// The reel in the drive verified fine — but it is one this run
+				// already used (typically the tape that just filled: the operator
+				// pressed Enter without swapping). Accepting it would defeat the
+				// roll, so say so and re-prompt; the robot path has the same guard.
+				cause, expect = fmt.Errorf("volume %q is still in the drive and this run already filled it; insert a different tape", name), ""
+				continue
+			}
 			tried[name] = true // also track by label name (oldestReusable keys on names)
 			l.reserve(name)    // claim it against concurrent recycling
 			return name, epoch, empty, nil

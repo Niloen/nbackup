@@ -223,3 +223,38 @@ func TestBlankDeclineReprompts(t *testing.T) {
 		t.Fatal("both queued inserts should have been consumed")
 	}
 }
+
+// TestSwapRejectsUnswappedFullReel: at a "volume full" swap prompt, pressing
+// Enter WITHOUT swapping re-presents the reel this run already filled — the
+// librarian must refuse it and re-prompt, not silently accept it (which defeated
+// the roll and let a run overshoot the reel's declared size; found testing by
+// hand). The next insert of a genuinely different reel proceeds.
+func TestSwapRejectsUnswappedFullReel(t *testing.T) {
+	now := time.Now()
+	cat, err := catalog.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t1 := record.Label{Name: "T1", Pool: "pool", Epoch: 1, WrittenAt: now}
+	reel := &fakeReel{lbl: t1, labeled: true, capacity: 1000}
+	op := &labelingOp{reel: reel, inserts: []fakeReel{
+		{lbl: t1, labeled: true, capacity: 1000}, // Enter without swapping: same reel again
+		{lbl: record.Label{Name: "T2", Pool: "pool", Epoch: 1, WrittenAt: now}, labeled: true, capacity: 1000},
+	}}
+	l := New(fakeChanger{fakeDrive{reel}}, "pool", cat, op, false, 0)
+	if _, _, err := l.PrepareWrite(true, "", now, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	tried := map[string]bool{"T1": true} // the run already filled T1 (the allocator seeds this)
+	name, _, _, err := l.Advance(true, tried, "", now, nil)
+	if err != nil {
+		t.Fatalf("the roll should survive an unswapped Enter and take the next reel: %v", err)
+	}
+	if name != "T2" {
+		t.Fatalf("accepted %q, want T2 (T1 was already filled by this run)", name)
+	}
+	if len(op.inserts) != 0 {
+		t.Fatal("both prompts should have consumed an insert (same reel, then T2)")
+	}
+}

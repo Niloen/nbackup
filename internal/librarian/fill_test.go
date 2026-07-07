@@ -167,14 +167,14 @@ func TestRemainingFromStoredFill(t *testing.T) {
 		t.Fatalf("Remaining after landing = %d (known=%v), want %d", room, known, want)
 	}
 
-	// A re-accept re-reads the stored figure: the landed bytes were never
-	// recorded (the fake discards them), so they are forgotten. This accept-time
-	// reset is what prevents double-counting once archives DO commit — the
-	// stored snapshot replaces the count.
+	// Re-accepting the SAME reel (same label and epoch — e.g. an operator who
+	// pressed Enter at a swap prompt without swapping) must KEEP the running
+	// count: the stored figure cannot include the in-flight archive's parts, so a
+	// re-snapshot here would forget them and let the write overshoot the reel.
 	if _, _, err := l.PrepareWrite(true, "", now, nil); err != nil {
 		t.Fatal(err)
 	}
-	if room, known := l.Remaining(); !known || room != wantRoom {
-		t.Fatalf("Remaining after re-accept = %d (known=%v), want %d", room, known, wantRoom)
+	if room, known := l.Remaining(); !known || room != want {
+		t.Fatalf("Remaining after same-reel re-accept = %d (known=%v), want %d (landed kept)", room, known, want)
 	}
 }

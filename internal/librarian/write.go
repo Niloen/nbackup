@@ -140,7 +140,7 @@ func (l *Librarian) verifyWritable(appendable bool, now time.Time) (volName stri
 	// VolumeRecord.Used) is the truth (see volumeFill). Taken once per accept — the
 	// one choke point every write path (start, roll, swap, recycle) funnels through.
 	if v, ok := l.cat.Volume(lbl.Name); ok {
-		l.fill.accept(lbl.Name, v.Used)
+		l.fill.accept(lbl.Name, lbl.Epoch, v.Used)
 	}
 	return lbl.Name, lbl.Epoch, nil
 }

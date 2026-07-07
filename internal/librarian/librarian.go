@@ -152,12 +152,24 @@ type Librarian struct {
 // replaces the count).
 type volumeFill struct {
 	label  string // the accepted volume's label; guards against a stale/foreign mount
+	epoch  int    // its epoch at accept; a recycle (epoch bump) is a fresh reel
 	base   int64  // the stored fill at accept (catalog VolumeRecord.Used)
 	landed int64  // file costs landed on it since accept, counted by the allocator
 }
 
-// accept restarts the arithmetic for a newly accepted volume.
-func (f *volumeFill) accept(label string, base int64) { *f = volumeFill{label: label, base: base} }
+// accept (re)starts the arithmetic for an accepted volume. Re-accepting the SAME
+// reel (label and epoch unchanged — e.g. the operator pressed Enter at a swap
+// prompt without actually swapping) keeps the running count: the catalog's
+// stored figure cannot include the in-flight archive's landed parts (they commit
+// at the end), so re-snapshotting here would forget them and let the write run
+// past the declared size. Only a different reel — or the same one at a new epoch
+// (recycled, physically wiped) — restarts from the stored figure.
+func (f *volumeFill) accept(label string, epoch int, base int64) {
+	if f.label == label && f.epoch == epoch {
+		return
+	}
+	*f = volumeFill{label: label, epoch: epoch, base: base}
+}
 
 // land counts bytes placed on the accepted volume.
 func (f *volumeFill) land(n int64) { f.landed += n }
