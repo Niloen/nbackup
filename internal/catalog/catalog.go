@@ -228,7 +228,8 @@ func (c *Catalog) addArchive(arch record.Archive, medium string, pos archiveio.A
 		seals = nil
 	}
 	arch.PartSeals = nil
-	arch.PartMap = nil // placement layout too: PlacedArchive.Parts carries the same locations
+	arch.PartMap = nil               // placement layout too: PlacedArchive.Parts carries the same locations
+	arch.IndexPos = record.FilePos{} // ditto: PlacedArchive.Index
 	e.Run.addArchive(arch)
 	// The archive's key comes from the archive record itself — pos is pure position.
 	pa := PlacedArchive{DLE: arch.DLE, Level: arch.Level, Parts: pos.Parts, Seals: seals, Commit: pos.Commit, Index: pos.Index}

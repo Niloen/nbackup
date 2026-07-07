@@ -1,9 +1,12 @@
 package archiveio
 
+import "github.com/Niloen/nbackup/internal/record"
+
 // pos.go holds the block layer's identity and location value objects — the call
-// vocabulary of reading and writing archives, distinct from the on-medium records
-// (package record) and from what a catalog persists (package catalog owns its own
-// serialized shape). None of these is itself bytes on a medium.
+// vocabulary of reading and writing archives, distinct from what a catalog
+// persists (package catalog owns its own serialized shape). The location atom
+// itself (FilePos) lives in package record — the commit footer's part map made it
+// on-medium format — and is aliased here as call vocabulary.
 
 // Ref is the logical identity of one archive — the archive fs's "filename": which
 // run, DLE, and level. The write side records it (part headers, catalog); the read
@@ -16,18 +19,11 @@ type Ref struct {
 	Level int
 }
 
-// FilePos is the location of one file on a volume: the label of the volume it is on
-// plus a file position. Label is the volume's global, device-independent identity (the
-// name on the cartridge); it is empty for address-identified media (disk, s3), which
-// carry no label — there the medium is its own sole volume, so no per-file volume id is
-// needed. It locates both an archive part (as the writer emits it) and a placement's
-// file (as the catalog persists it) — the one location atom both layers share, so it
-// carries JSON tags for the catalog's cache.
-type FilePos struct {
-	Label string `json:"label,omitempty"` // volume label name; "" for address-identified media
-	Epoch int    `json:"epoch,omitempty"` // label epoch when recorded; staleness check on read
-	Pos   int    `json:"pos"`
-}
+// FilePos is the shared location atom — one file's volume label (+epoch) and
+// position. It lives in package record (the commit footer's part map made it part
+// of the on-medium format); this alias keeps it equally the block layer's call
+// vocabulary, so writers, readers, and the catalog all spell a location one way.
+type FilePos = record.FilePos
 
 // ArchivePos is where one archive landed: the ordered locations of its parts, plus
 // where its commit footer and member index went. Pure position — the archive's

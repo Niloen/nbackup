@@ -228,8 +228,30 @@ func (stdinOperator) Swap(r librarian.SwapRequest) (string, bool) {
 		fmt.Printf("this run expects tape %q (the oldest reusable volume — load it to recycle, or a fresh tape)\n", r.Expect)
 	}
 	if len(r.Shelf) == 0 {
-		fmt.Println("no reels in the room to load")
-		return "", false
+		// A REAL drive: no addressable slots, so the shelf is the operator's own,
+		// invisible to software. Ask for the physical swap and return on Enter —
+		// insertChoice is a no-op with no slots, and the librarian re-reads the
+		// drive, so the label protocol identifies (and verifies) whatever reel the
+		// human actually inserted. The empty reel id is deliberate: an unnamed
+		// physical swap is tracked by the label read afterwards, never by id.
+		want := r.Need
+		if want == "" {
+			want = r.Expect
+		}
+		if want != "" {
+			fmt.Printf("insert tape %q into the drive and press Enter (Ctrl-D aborts): ", want)
+		} else {
+			fmt.Print("insert a writable tape into the drive and press Enter (Ctrl-D aborts): ")
+		}
+		line, err := stdinReader.ReadString('\n')
+		if err != nil || strings.TrimSpace(line) != "" {
+			// EOF, or the operator typed something — there is nothing to choose
+			// here, so any input besides a bare Enter reads as hesitation: abort
+			// rather than guess.
+			fmt.Println()
+			return "", false
+		}
+		return "", true
 	}
 	fmt.Println("reels in the room (not in the drive):")
 	for _, b := range r.Shelf {
