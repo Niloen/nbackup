@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -204,6 +205,10 @@ func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, wor
 		}
 		return c.routeFatal(plan.Items, failed)
 	}
+	// The tracker learns each skipped landing so the status file tells the truth: the
+	// landing leaves every DLE's route (no drain is owed there — nothing may read as
+	// drained to it) and the skip is surfaced with its reason and repair.
+	skipLandings(tr, roomFailed)
 	err := c.withSpool(ctx, landings, holdingNames, spec, workers, tr, now, lf, fatalOpen, func(sp *spool.Spool, _ archivefs.ReadStore) error {
 		route := func(it planner.Item) archivefs.Ingest { return sp.Ingest(c.d.LandingsFor(it)...) }
 		return c.d.Dmp.Run(ctx, plan.Items, workers, route, tr, lf) // a dump keeps no media: it only writes, and reads no medium
@@ -321,6 +326,7 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 			fail(err)
 			return err
 		}
+		skipLandings(tr, openFailed) // survived the judgment: the run proceeds without them
 	}
 
 	sp := spool.New(ctx, spool.Config{
@@ -417,6 +423,20 @@ func (c *Conductor) routeFatal(items []planner.Item, failed map[string]error) er
 		}
 	}
 	return nil
+}
+
+// skipLandings records each unusable landing on the run's tracker (removed from every DLE's
+// route, kept on the snapshot with its reason) — in name order, so the status file is stable.
+// A no-op with no failures or no tracker (copy/sync report through their own report).
+func skipLandings(tr *progress.Tracker, failed map[string]error) {
+	names := make([]string, 0, len(failed))
+	for name := range failed {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		tr.SkipLanding(name, failed[name].Error())
+	}
 }
 
 // distinctLandings returns the distinct landing media the plan's items route to, in first-seen order

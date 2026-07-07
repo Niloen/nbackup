@@ -470,3 +470,69 @@ func TestFanoutDrainProgress(t *testing.T) {
 		t.Fatalf("FinishFlush should settle to staged x landings = 1600, got %d", got)
 	}
 }
+
+// TestSkipLandingTellsTheTruth: a landing the run declared unusable up front (failed to
+// open, or refused at make-room) leaves every DLE's route and lands on the snapshot with
+// its reason — so no drain total counts it and FinishFlush cannot settle a copy that never
+// happened (the status-file lie where a skipped landing read as fully drained).
+func TestSkipLandingTellsTheTruth(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("run", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000, Landings: []string{"s3", "tape"}}}, c.now, nil)
+	tr.SkipLanding("tape", "open landing: no writable volume")
+
+	snap := tr.Snapshot()
+	if len(snap.Skipped) != 1 || snap.Skipped[0].Landing != "tape" || !strings.Contains(snap.Skipped[0].Reason, "no writable volume") {
+		t.Fatalf("skipped = %+v", snap.Skipped)
+	}
+	if got := snap.DLEs[0].Landings; len(got) != 1 || got[0] != "s3" {
+		t.Fatalf("route = %v; want the skipped landing removed", got)
+	}
+
+	// Dump and drain to the surviving lane only, exactly as the spool would.
+	tr.StartDLE("alpha")
+	tr.FinishDLE("alpha", 1, 1000, 800, nil)
+	tr.StartFlush("alpha", "scratch")
+	tr.AddDrainBytes("alpha", "s3", 800)
+	tr.FinishFlush("alpha")
+
+	d := tr.Snapshot().DLEs[0]
+	if _, lied := d.Drained["tape"]; lied {
+		t.Fatalf("drained = %v; a skipped landing must never read as drained", d.Drained)
+	}
+	if d.Drained["s3"] != 800 || d.DrainBytes != 800 || d.DrainPct() != 100 {
+		t.Fatalf("surviving lane: drained=%v drainBytes=%d pct=%.0f; want 800/800 at 100%%", d.Drained, d.DrainBytes, d.DrainPct())
+	}
+
+	var sb strings.Builder
+	Render(&sb, tr.Snapshot(), c.now())
+	out := sb.String()
+	for _, want := range []string{"SKIPPED landing tape", "nb sync --to tape"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestFinishFlushDoesNotSettleVoidedLane: a lane whose drain failed mid-run has its meter
+// voided to 0 by the spool (the failed copy never committed, so nothing of it is on the
+// landing); FinishFlush must leave it at 0 — the missing copy stays visible — instead of
+// settling it to the staged size like a landed lane.
+func TestFinishFlushDoesNotSettleVoidedLane(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("run", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000, Landings: []string{"s3", "gdrive"}}}, c.now, nil)
+	tr.StartDLE("alpha")
+	tr.FinishDLE("alpha", 1, 1000, 800, nil)
+	tr.StartFlush("alpha", "scratch")
+	tr.AddDrainBytes("alpha", "s3", 800)
+	tr.AddDrainBytes("alpha", "gdrive", 300) // partial copy...
+	tr.AddDrainBytes("alpha", "gdrive", 0)   // ...failed: the spool voids the meter
+	tr.FinishFlush("alpha")
+
+	d := tr.Snapshot().DLEs[0]
+	if d.Drained["gdrive"] != 0 || d.Drained["s3"] != 800 || d.DrainBytes != 800 {
+		t.Fatalf("drained=%v drainBytes=%d; the failed lane must stay at 0, the landed one settle to 800", d.Drained, d.DrainBytes)
+	}
+	if got := d.DrainPct(); got == 100 {
+		t.Fatalf("drain pct = %.0f; a missing copy must keep the drain short of 100%%", got)
+	}
+}

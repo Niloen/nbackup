@@ -259,6 +259,9 @@ func (t *Tracker) StartFlush(name, holding string) {
 }
 
 // FinishFlush marks a DLE done once it has landed and been reclaimed from the holding disk.
+// It settles only the lanes whose drain actually copied bytes (their meters snap to the staged
+// size): a lane that never drained — skipped at window-open, or tripped mid-run — stays at
+// whatever it truthfully reached, so the status never claims a copy that does not exist.
 // A no-op for an unknown DLE.
 func (t *Tracker) FinishFlush(name string) {
 	if t == nil {
@@ -269,15 +272,39 @@ func (t *Tracker) FinishFlush(name string) {
 	if d := t.dle(name); d != nil {
 		d.State = StateDone
 		d.EndedAt = t.now()
-		if d.OutBytes > 0 {
-			d.DrainBytes = d.toDrain() // settle the drain bar to 100%
-			for _, l := range d.Landings {
-				if d.Drained == nil {
-					d.Drained = map[string]int64{}
-				}
-				d.Drained[l] = d.OutBytes
+		var total int64
+		for l, n := range d.Drained {
+			if n > 0 && d.OutBytes > 0 {
+				d.Drained[l] = d.OutBytes // settle the lane's bar to 100%
+			}
+			total += d.Drained[l]
+		}
+		d.DrainBytes = total
+	}
+	t.flush(true)
+}
+
+// SkipLanding records that the run declared a landing unusable up front (it failed to open,
+// or could not make room) and skipped it: the landing is removed from every DLE's route — no
+// drain is owed there, so no total counts it and nothing ever reads as drained to it — and the
+// skip is kept on the snapshot with its reason, so `nb status` and the web UI surface the
+// missing copies and their repair (`nb sync --to <landing>`).
+func (t *Tracker) SkipLanding(landing, reason string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.snap.Skipped = append(t.snap.Skipped, SkippedLanding{Landing: landing, Reason: reason})
+	for i := range t.snap.DLEs {
+		d := &t.snap.DLEs[i]
+		kept := d.Landings[:0]
+		for _, l := range d.Landings {
+			if l != landing {
+				kept = append(kept, l)
 			}
 		}
+		d.Landings = kept
 	}
 	t.flush(true)
 }

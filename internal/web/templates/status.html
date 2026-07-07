@@ -45,6 +45,7 @@
     · {{.Snap.Workers}} worker(s) · elapsed {{.Elapsed}}
   </div>
   {{if .Snap.Err}}<div style="margin-top:.4rem;font-size:.85rem"><span class="bad">{{.Snap.Err}}</span></div>{{end}}
+  {{range .Snap.Skipped}}<div style="margin-top:.4rem;font-size:.85rem"><span class="warn">landing {{.Landing}} skipped: {{.Reason}} — repair: nb sync --to {{.Landing}}</span></div>{{end}}
   <div class="stats">
     <div><span class="k">Dump</span><span class="v">{{bytes .DumpDone}} of ~{{bytes .DumpEst}}{{if .DumpRate}} · {{bytes .DumpRate}}/s{{end}}</span></div>
     {{if .FlushLanes}}

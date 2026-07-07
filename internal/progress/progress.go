@@ -152,11 +152,23 @@ type Snapshot struct {
 	// concurrently, and the dump rate must not decay while a tail of drains finishes).
 	DumpEndedAt    time.Time `json:"dump_ended_at,omitempty"`
 	DrainStartedAt time.Time `json:"drain_started_at,omitempty"`
+	// Skipped names the landings this run declared unusable up front (a medium that
+	// failed to open, or one that could not make room) — each removed from every DLE's
+	// route, so no drain is owed there and nothing reads as drained to it. The archives
+	// are MISSING on a skipped landing; the repair is `nb sync --to <landing>`.
+	Skipped []SkippedLanding `json:"skipped_landings,omitempty"`
 	// Err is the run-level failure reason — a failure that belongs to the run as a
 	// whole (a preflight or make-room refusal before any dump started, a failed
 	// drain) rather than to any one DLE (those live in DLE.Err).
 	Err  string `json:"err,omitempty"`
 	DLEs []DLE  `json:"dles"`
+}
+
+// SkippedLanding is one landing a run skipped up front, and why — the archives it
+// was routed are missing there until an `nb sync --to <landing>` backfills them.
+type SkippedLanding struct {
+	Landing string `json:"landing"`
+	Reason  string `json:"reason"`
 }
 
 // TotalEst sums the planned estimates (uncompressed).

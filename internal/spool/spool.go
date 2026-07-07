@@ -380,6 +380,10 @@ func (sp *Spool) drainTo(disk *Disk, hres archiveio.CommitResult, l *lane, set *
 	l.release(drive)
 	if err != nil {
 		sp.trip(l, err)
+		// The failed copy never committed — nothing of it is on the landing, so its
+		// partial meter would be a lie. Void it; the lane's missing copy stays visible
+		// (the DLE's drain never reaches 100% there) until `nb sync` repairs it.
+		sp.tr.AddDrainBytes(dleID, l.name, 0)
 	} else {
 		atomic.AddInt32(&set.landed, 1)
 	}
