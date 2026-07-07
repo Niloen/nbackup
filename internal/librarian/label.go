@@ -56,7 +56,7 @@ func (l *Librarian) Label(name string, relabel, force bool, now time.Time, logf 
 		// Empty drive: there is nothing to label, and --force cannot conjure a tape.
 		// Surface the real condition rather than burying it in the foreign/corrupt
 		// "use --force" refusal below (which a swap, not a force, would resolve).
-		return fmt.Errorf("medium %q has no volume loaded; load one first with `nb load %s <slot>`", l.medium, l.medium)
+		return fmt.Errorf("medium %q has no volume loaded; %s first", l.medium, l.loadHint(""))
 	case errors.Is(err, media.ErrForeignVolume):
 		if !force {
 			return fmt.Errorf("volume holds non-NBackup data; refusing to overwrite (use --force)")
@@ -143,8 +143,8 @@ func (l *Librarian) duplicateLabelErr(name, current string, relabel, force bool)
 		// to a name another cartridge already carries — self-referential advice to "relabel
 		// <name>" would just re-run this. To recycle the tape that already holds the name,
 		// load THAT tape first (then --relabel bumps its epoch in place).
-		return fmt.Errorf("a volume labeled %q already exists (pool %q, epoch %d); relabel recycles the loaded tape, so renaming it to %q would duplicate that — to recycle the existing %q, load it first: `nb load --label %s %s`, then `nb label --relabel %s %s`; or pick a different name (--force overrides if that volume no longer exists)",
-			name, known.Label.Pool, known.Label.Epoch, name, name, l.medium, name, l.medium, name)
+		return fmt.Errorf("a volume labeled %q already exists (pool %q, epoch %d); relabel recycles the loaded tape, so renaming it to %q would duplicate that — to recycle the existing %q, %s, then `nb label --relabel %s %s`; or pick a different name (--force overrides if that volume no longer exists)",
+			name, known.Label.Pool, known.Label.Epoch, name, name, l.loadHint(name), l.medium, name)
 	}
 	return fmt.Errorf("a volume labeled %q already exists (pool %q, epoch %d); labeling another tape %q would create a duplicate — pick a different name, or recycle the existing tape with `nb label --relabel %s %s` (--force overrides if that volume no longer exists)",
 		name, known.Label.Pool, known.Label.Epoch, name, l.medium, name)
@@ -241,7 +241,7 @@ func (l *Librarian) chooseSlot(name string, relabel bool) (int, error) {
 	if relabel {
 		if named < 0 {
 			restore()
-			return -1, fmt.Errorf("no tape loaded and none labeled %q; run `nb load %s <slot>` to pick the tape to recycle", name, l.medium)
+			return -1, fmt.Errorf("no tape loaded and none labeled %q; %s to recycle it", name, l.loadHint(name))
 		}
 		if err := l.changer.Load(named, 0); err != nil {
 			return -1, err

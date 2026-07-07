@@ -234,6 +234,27 @@ func (l *Librarian) reserve(name string) {
 	}
 }
 
+// loadHint phrases "get a volume into the drive" for this medium's shape, for
+// error guidance: a robotic library — and the file-backed manual sim, whose
+// addressable slots make `nb load` the operator's hands — loads by slot or
+// label; a REAL hand-fed drive has no slots software can address, so telling its
+// operator to `nb load <slot>` is an instruction they cannot run — they insert
+// the tape physically. label names a specific wanted volume; "" means any.
+func (l *Librarian) loadHint(label string) string {
+	if l.manual {
+		if slots, _ := l.changer.Slots(); len(slots) == 0 { // a real drive: no addressable slots
+			if label == "" {
+				return "insert a tape into the drive"
+			}
+			return fmt.Sprintf("insert the tape labeled %q into the drive", label)
+		}
+	}
+	if label == "" {
+		return fmt.Sprintf("load one with `nb load %s <slot>`", l.medium)
+	}
+	return fmt.Sprintf("load it with `nb load --label %s %s`", l.medium, label)
+}
+
 // directChanger adapts a directly-addressed Volume (disk, s3) to media.Changer: one
 // drive permanently loaded with the one volume, no slots, no robot. Load/Unload are
 // no-ops (there is nothing to move), so the librarian's changer paths collapse to the

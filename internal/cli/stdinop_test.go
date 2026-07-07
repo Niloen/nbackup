@@ -92,16 +92,27 @@ func TestStdinOperatorEOFAborts(t *testing.T) {
 }
 
 func TestStdinOperatorEmptyShelf(t *testing.T) {
+	// An empty shelf is a REAL drive (no addressable slots): the prompt asks for
+	// the physical swap and a bare Enter proceeds unnamed — the librarian
+	// identifies the inserted reel by its label read. (It used to abort with "no
+	// reels in the room", which made multi-reel work impossible on real hardware.)
 	withStdin(t, "\n")
 	out := captureStdout(t, func() {
 		id, ok := stdinOperator{}.Swap(swapReq())
-		if ok || id != "" {
-			t.Fatalf("no reels in the room should abort, got %q ok=%v", id, ok)
+		if !ok || id != "" {
+			t.Fatalf("Enter after a physical swap should proceed unnamed, got %q ok=%v", id, ok)
 		}
 	})
-	if !strings.Contains(out, "no reels in the room") {
-		t.Errorf("expected no-reels message, got:\n%s", out)
+	if !strings.Contains(out, "insert") {
+		t.Errorf("expected a physical-insert prompt, got:\n%s", out)
 	}
+	// EOF (unattended / Ctrl-D) still aborts.
+	withStdin(t, "")
+	captureStdout(t, func() {
+		if _, ok := (stdinOperator{}).Swap(swapReq()); ok {
+			t.Fatal("EOF must abort the physical-swap prompt")
+		}
+	})
 }
 
 func TestStdinOperatorUnknownChoice(t *testing.T) {

@@ -66,7 +66,7 @@ func (l *Librarian) resolveLabel(lv media.Labeled, now time.Time) (record.Label,
 	lbl, labeled, err := lv.ReadLabel()
 	switch {
 	case errors.Is(err, media.ErrNoVolume):
-		return record.Label{}, reloadableErr("medium %q has no volume loaded; load one with `nb load %s <slot>` or label a blank one with `nb label %s <name>`", l.medium, l.medium, l.medium)
+		return record.Label{}, reloadableErr("medium %q has no volume loaded; %s, or label a blank one with `nb label %s <name>`", l.medium, l.loadHint(""), l.medium)
 	case errors.Is(err, media.ErrForeignVolume):
 		return record.Label{}, reloadableErr("medium %q holds non-NBackup data; refusing to overwrite — relabel it explicitly with `nb label --force %s <name>`", l.medium, l.medium)
 	case err != nil:

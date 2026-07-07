@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
 )
 
@@ -101,5 +102,33 @@ func TestPhysicalSwapReadMount(t *testing.T) {
 	}
 	if op.swaps != 1 {
 		t.Fatalf("operator swapped %d time(s), want 1", op.swaps)
+	}
+}
+
+// TestLoadHintMatchesShape: operator guidance must be runnable on the medium's
+// actual shape — `nb load <slot>` is a robot/sim instruction a real single-drive
+// operator cannot execute (found testing by hand: an empty real drive told the
+// operator to run `nb load`).
+func TestLoadHintMatchesShape(t *testing.T) {
+	cat, err := catalog.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A REAL drive: manual, no addressable slots → physical-insert wording.
+	real := New(fakeChanger{fakeDrive{&fakeReel{}}}, "pool", cat, nil, false, 0)
+	if got := real.loadHint(""); got != "insert a tape into the drive" {
+		t.Fatalf("real drive hint = %q", got)
+	}
+	if got := real.loadHint("T1"); got != `insert the tape labeled "T1" into the drive` {
+		t.Fatalf("real drive named hint = %q", got)
+	}
+	// The file-backed manual SIM has addressable slots — `nb load` IS its hands.
+	v, err := media.OpenVolume("tape", media.Options{"dir": t.TempDir(), "manual": "true", "slots": "2", "volume_size": "1048576"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sim := New(v, "pool", cat, nil, false, 0)
+	if got := sim.loadHint(""); got != "load one with `nb load pool <slot>`" {
+		t.Fatalf("sim hint = %q", got)
 	}
 }
