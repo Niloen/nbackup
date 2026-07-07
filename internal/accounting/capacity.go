@@ -60,15 +60,29 @@ func (a *Accountant) MediumOverCapacity(name string) (over bool, used, capacity 
 // reclaimable set is empty and the current total is already the residual). This is
 // what `nb prune` warns on, so its preview and its real run agree.
 func (a *Accountant) MediumProtectedOverCapacity(name string, now time.Time) (over bool, residual, capacity int64, err error) {
-	prof, err := a.ProfileFor(name)
+	residual, capacity, err = a.MediumProtected(name, now)
 	if err != nil {
 		return false, 0, 0, err
 	}
+	return capacity > 0 && residual > capacity, residual, capacity, nil
+}
+
+// MediumProtected computes the bytes a prune *cannot* reclaim on the named medium —
+// the protected recovery set — and the medium's capacity. It is the shared
+// computation behind MediumProtectedOverCapacity's >= comparison; callers that want
+// their own threshold (nb web's rollup warns before the residual actually exceeds
+// capacity, the way a mature address-identified medium's steady-state near-100%-used
+// reading never would) call this directly instead.
+func (a *Accountant) MediumProtected(name string, now time.Time) (residual, capacity int64, err error) {
+	prof, err := a.ProfileFor(name)
+	if err != nil {
+		return 0, 0, err
+	}
 	def, ok := a.d.Cfg.Media[name]
 	if !ok {
-		return false, 0, 0, fmt.Errorf("unknown medium %q", name)
+		return 0, 0, fmt.Errorf("unknown medium %q", name)
 	}
-	capacity = prof.TotalBytes()
+	capacity = a.capacityFor(name, prof) // registry-derived for a bare drive's pool
 	archives := a.d.Cat.ArchivesOn(name)
 	floor := retention.Compute(archives, a.d.Cfg.MinAgeFor(def), now)
 	var reclaimable int64
@@ -76,7 +90,7 @@ func (a *Accountant) MediumProtectedOverCapacity(name string, now time.Time) (ov
 		reclaimable += r.Bytes
 	}
 	residual = a.d.Cat.MediumBytes(name) - reclaimable
-	return capacity > 0 && residual > capacity, residual, capacity, nil
+	return residual, capacity, nil
 }
 
 // MediumProtectionIsAgeBound reports whether every archive pinning the medium over

@@ -35,6 +35,13 @@ type Source interface {
 	Placements(runID string) []catalog.Placement
 	Media() []engine.MediumInfo
 	MediumStats(name string) (engine.MediumStats, bool) // one medium's usage history + statistics
+	// MediumProtected reports the bytes a prune cannot reclaim on the named medium
+	// (the protected recovery set) and its capacity as of now; ok is false for an
+	// unknown medium. The rollup reads this instead of raw Used/Capacity for
+	// address-identified media (disk, s3): the planner fills free space and prune
+	// trims to capacity, so Used sits permanently near 100% at steady state — only
+	// the protected residual distinguishes "full by design" from "actually stuck."
+	MediumProtected(name string, now time.Time) (residual, capacity int64, ok bool)
 	DisplayDLE(slug string) string
 	DLESummaries() []catalog.DLESummary
 	DLENames() []string         // configured DLE slugs, for drill coverage (never-drilled)
@@ -735,17 +742,28 @@ func (s *Server) rollup(now time.Time, hist []report.Run) []alert {
 	// healthy rotation keeps most volumes permanently near-full by retention design
 	// (N-1 of N at capacity), so the aggregate reading is a structurally false alarm
 	// for a pool — the real capacity event is running out of reels with room.
-	// Address-identified media (disk, s3) keep the aggregate check: warn at >=90%
-	// used, or when the medium's own recorded growth (MediumStats.Growth, the same
-	// curve /media/<name> charts) projects filling within 30 days.
+	// Address-identified media (disk, s3) warn on the protected recovery set —
+	// the bytes a prune cannot reclaim — reaching >=90% of capacity, not on raw
+	// Used/Capacity: the planner deliberately fills free space and `nb prune` trims
+	// to capacity (a high-water trim), so a mature medium's raw Used sits
+	// permanently near 100% by design. The protected residual only grows when
+	// retention itself (the recovery chains prune must keep) is the pressure, which
+	// is the actual actionable signal. Falls back to no warn if the residual can't
+	// be computed (unknown medium). Below that, the medium's own recorded growth
+	// (MediumStats.Growth, the same curve /media/<name> charts) projecting filling
+	// within 30 days still warns, unchanged.
 	for _, m := range s.src.Media() {
 		if m.Capacity <= 0 {
 			continue
 		}
 		if m.Used >= m.Capacity {
-			bad = append(bad, alert{Level: "bad", Tag: "over capacity",
-				Text: fmt.Sprintf("%s is full — %s of %s used", m.Name, sizeutil.FormatBytes(m.Used), sizeutil.FormatBytes(m.Capacity)),
-				Href: "/media/" + m.Name})
+			text := fmt.Sprintf("%s is full — %s of %s used", m.Name, sizeutil.FormatBytes(m.Used), sizeutil.FormatBytes(m.Capacity))
+			if residual, _, ok := s.src.MediumProtected(m.Name, now); ok {
+				if reclaimable := m.Used - residual; reclaimable > 0 {
+					text += fmt.Sprintf(" — %s reclaimable, run nb prune", sizeutil.FormatBytes(reclaimable))
+				}
+			}
+			bad = append(bad, alert{Level: "bad", Tag: "over capacity", Text: text, Href: "/media/" + m.Name})
 			continue
 		}
 		if m.Volumes > 0 {
@@ -767,11 +785,12 @@ func (s *Server) rollup(now time.Time, hist []report.Run) []alert {
 			}
 			continue
 		}
+		residual, capacity, ok := s.src.MediumProtected(m.Name, now)
 		switch {
-		case float64(m.Used)/float64(m.Capacity) >= 0.9:
-			warn = append(warn, alert{Level: "warn", Tag: "near capacity",
-				Text: fmt.Sprintf("%s is at %.0f%% capacity — %s of %s used", m.Name,
-					float64(m.Used)/float64(m.Capacity)*100, sizeutil.FormatBytes(m.Used), sizeutil.FormatBytes(m.Capacity)),
+		case ok && capacity > 0 && float64(residual)/float64(capacity) >= 0.9:
+			warn = append(warn, alert{Level: "warn", Tag: "retention pressure",
+				Text: fmt.Sprintf("%s: retention needs %s of %s — pruning can no longer free a full cycle",
+					m.Name, sizeutil.FormatBytes(residual), sizeutil.FormatBytes(capacity)),
 				Href: "/media/" + m.Name})
 		default:
 			if st, ok := s.src.MediumStats(m.Name); ok && !st.Growth.ProjFull.IsZero() && st.Growth.ProjFull.Before(now.Add(30*24*time.Hour)) {

@@ -33,6 +33,11 @@ type fakeSource struct {
 	// just sets these to exercise the web layer's pool-aware rendering in isolation.
 	perVolume   map[string][]engine.VolumeUsage
 	poolVolumes map[string]int64
+	// protected cans the residual a prune cannot reclaim per medium (the accounting
+	// package's own MediumProtected has its own unit tests; the web layer only needs
+	// a canned reading to exercise the rollup's threshold logic in isolation). A
+	// medium absent from this map reports ok=false, as an unknown medium would.
+	protected map[string]int64
 }
 
 func (f fakeSource) Runs() []*catalog.Run { return f.runs }
@@ -129,6 +134,21 @@ func (f fakeSource) MediumStats(name string) (engine.MediumStats, bool) {
 	st.PerVolume = f.perVolume[name]
 	st.PoolVolumes = f.poolVolumes[name]
 	return st, true
+}
+
+// MediumProtected returns the canned residual for name (see the protected field);
+// ok is false for a medium the test never seeded, matching an unknown medium.
+func (f fakeSource) MediumProtected(name string, now time.Time) (residual, capacity int64, ok bool) {
+	residual, ok = f.protected[name]
+	if !ok {
+		return 0, 0, false
+	}
+	for _, m := range f.media {
+		if m.Name == name {
+			capacity = m.Capacity
+		}
+	}
+	return residual, capacity, true
 }
 
 // DisplayDLE resolves slug to the host:path identity of any archive of it seen in
@@ -844,17 +864,29 @@ func TestHomeRollupSizeAnomaly(t *testing.T) {
 	}
 }
 
-// TestHomeRollupCapacityForesight checks the two capacity nudges: a bounded medium
-// at 95% used warns (below the existing 100% "full" alert), and one whose recorded
-// growth projects filling within 30 days warns with the projected day count.
+// TestHomeRollupCapacityForesight checks the capacity nudges for an address-identified
+// medium (disk, s3): a 95%-used medium with a small protected (unreclaimable) set
+// stays quiet — raw Used sitting near capacity is the planner/prune steady state, not
+// a problem — while the same medium with a protected set at >=90% of capacity warns,
+// since pruning genuinely cannot free enough there. A medium whose recorded growth
+// projects filling within 30 days still warns with the projected day count either way.
 func TestHomeRollupCapacityForesight(t *testing.T) {
 	dir := t.TempDir()
+
+	quiet := sampleSource()
+	quiet.media = append(quiet.media, engine.MediumInfo{Name: "near-full", Type: "disk", Used: 95, Capacity: 100})
+	quiet.protected = map[string]int64{"near-full": 5}
+	_, qbody := get(t, NewServer(quiet, dir).Handler(), "/")
+	if strings.Contains(qbody, "near-full: retention needs") || strings.Contains(qbody, "near-full is at") {
+		t.Errorf("/ rollup warned on a 95%%-used medium whose protected set is small:\n%s", qbody)
+	}
+
 	src := sampleSource()
 	src.media = append(src.media, engine.MediumInfo{Name: "near-full", Type: "disk", Used: 95, Capacity: 100})
-
+	src.protected = map[string]int64{"near-full": 92}
 	_, body := get(t, NewServer(src, dir).Handler(), "/")
-	if !strings.Contains(body, "near-full is at 95% capacity") {
-		t.Errorf("/ rollup missing the 90%%-capacity warn:\n%s", body)
+	if !strings.Contains(body, "near-full: retention needs 92 B of 100 B") {
+		t.Errorf("/ rollup missing the protected-set warn:\n%s", body)
 	}
 
 	now := time.Now()
@@ -867,6 +899,33 @@ func TestHomeRollupCapacityForesight(t *testing.T) {
 	_, fbody := get(t, NewServer(forecast, dir).Handler(), "/")
 	if !strings.Contains(fbody, "vault projected full in ~15d") {
 		t.Errorf("/ rollup missing the growth-projection warn:\n%s", fbody)
+	}
+}
+
+// TestHomeRollupOverCapacityReclaimable checks the red "over capacity" alert's
+// reclaimable-bytes hint: it appends how much a prune could free when the protected
+// residual leaves room to reclaim, and stays unchanged (no false promise) when the
+// protected set is the entire used total — the truly stuck case a prune can't help.
+func TestHomeRollupOverCapacityReclaimable(t *testing.T) {
+	dir := t.TempDir()
+
+	src := sampleSource()
+	src.media = append(src.media, engine.MediumInfo{Name: "vault", Type: "disk", Used: 100, Capacity: 50})
+	src.protected = map[string]int64{"vault": 69} // 100 - 69 = 31 reclaimable
+	_, body := get(t, NewServer(src, dir).Handler(), "/")
+	if !strings.Contains(body, "vault is full — 100 B of 50 B used — 31 B reclaimable, run nb prune") {
+		t.Errorf("/ rollup missing the reclaimable hint on an over-capacity medium:\n%s", body)
+	}
+
+	stuck := sampleSource()
+	stuck.media = append(stuck.media, engine.MediumInfo{Name: "vault", Type: "disk", Used: 100, Capacity: 50})
+	stuck.protected = map[string]int64{"vault": 100} // nothing reclaimable
+	_, sbody := get(t, NewServer(stuck, dir).Handler(), "/")
+	if !strings.Contains(sbody, "vault is full — 100 B of 50 B used") {
+		t.Errorf("/ rollup missing the base over-capacity text:\n%s", sbody)
+	}
+	if strings.Contains(sbody, "reclaimable") {
+		t.Errorf("/ rollup claimed reclaimable bytes when the protected set is the whole total:\n%s", sbody)
 	}
 }
 

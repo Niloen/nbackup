@@ -240,6 +240,10 @@ func (e *engineSource) MediumStats(name string) (engine.MediumStats, bool) {
 	return e.engine().MediumStats(name)
 }
 
+func (e *engineSource) MediumProtected(name string, now time.Time) (residual, capacity int64, ok bool) {
+	return e.engine().MediumProtected(name, now)
+}
+
 func (e *engineSource) DisplayDLE(slug string) string { return e.engine().DisplayDLE(slug) }
 
 func (e *engineSource) DLENames() []string { return e.engine().DLENames() }

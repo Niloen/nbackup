@@ -264,6 +264,14 @@ func (e *Engine) Media() []MediumInfo { return e.acct.Media() }
 // is unknown.
 func (e *Engine) Medium(name string) (MediumInfo, bool) { return e.acct.Medium(name) }
 
+// MediumProtected reports the bytes a prune cannot reclaim on the named medium (the
+// protected recovery set) and the medium's capacity as of now; ok is false for an
+// unknown medium. See accounting.Accountant.MediumProtected.
+func (e *Engine) MediumProtected(name string, now time.Time) (residual, capacity int64, ok bool) {
+	residual, capacity, err := e.acct.MediumProtected(name, now)
+	return residual, capacity, err == nil
+}
+
 // MediumStats returns a medium's usage history and derived statistics (used-capacity
 // over time, full/incremental split, growth projection); ok is false for an unknown
 // medium.
