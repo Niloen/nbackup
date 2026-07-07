@@ -30,6 +30,23 @@ func TestOpenPlainPath(t *testing.T) {
 	}
 }
 
+// TestOpenPlainPathIgnoresTempDir: fileblob commits a write by renaming a staged temp
+// file, and a rename only works within one filesystem — so the staging must happen
+// inside the bucket directory, never os.TempDir() (a library on /opt with a tmpfs /tmp
+// would fail every write with EXDEV). An unusable TMPDIR simulates that: the write must
+// succeed anyway, proving the temp file was never staged there.
+func TestOpenPlainPathIgnoresTempDir(t *testing.T) {
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "does-not-exist"))
+	b, err := Open(context.Background(), filepath.Join(t.TempDir(), "lib"))
+	if err != nil {
+		t.Fatalf("plain path: %v", err)
+	}
+	defer b.Close()
+	if err := b.WriteAll(context.Background(), "obj", []byte("hi"), nil); err != nil {
+		t.Fatalf("write must stage inside the bucket dir, not TMPDIR: %v", err)
+	}
+}
+
 // TestOpenRelativePath exercises the filepath.Abs branch: a relative location is
 // resolved to an absolute directory (Abs succeeds for any syntactically valid path).
 func TestOpenRelativePath(t *testing.T) {

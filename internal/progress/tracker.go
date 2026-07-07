@@ -309,6 +309,22 @@ func (t *Tracker) SkipLanding(landing, reason string) {
 	t.flush(true)
 }
 
+// TripLanding records that a landing failed mid-run and was tripped for the rest of
+// the run: the failure and its repair join the snapshot's skipped list (so `nb status`
+// and the web UI name the missing copies), but — unlike SkipLanding — the landing
+// stays on every DLE's route: copies drained before the failure are real and must
+// keep reading as drained, and the copies still owed must keep the drain totals from
+// reading complete.
+func (t *Tracker) TripLanding(landing, reason string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.snap.Skipped = append(t.snap.Skipped, SkippedLanding{Landing: landing, Reason: reason, Tripped: true})
+	t.flush(true)
+}
+
 // markDumpEndIfDone stamps DumpEndedAt the first time no DLE is still pending or dumping —
 // the instant the dumping pipeline finished, which freezes the dump rate so it stops
 // decaying while the drainer flushes a remaining tail. Caller holds the lock.

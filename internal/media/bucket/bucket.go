@@ -31,6 +31,10 @@ func Open(ctx context.Context, loc string) (*blob.Bucket, error) {
 		return fileblob.OpenBucket(abs, &fileblob.Options{
 			CreateDir: true,
 			Metadata:  fileblob.MetadataDontWrite,
+			// Stage writes inside the bucket dir, not os.TempDir(): the commit is a
+			// rename, which fails across filesystems (EXDEV) — and /tmp is almost
+			// never the filesystem the library lives on.
+			NoTempDir: true,
 		})
 	}
 	return blob.OpenBucket(ctx, loc)

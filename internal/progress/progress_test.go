@@ -513,6 +513,45 @@ func TestSkipLandingTellsTheTruth(t *testing.T) {
 	}
 }
 
+// TestTripLandingIsVisible: a landing that fails MID-RUN (the spool trips it on its
+// first failed write) must land on the snapshot with its reason and repair — the trip
+// used to leave only a silent 0 meter, costing a debugging session to even notice.
+// Unlike an up-front skip, the trip keeps the landing on every DLE's route: the copies
+// it still owes must keep the drain from reading complete.
+func TestTripLandingIsVisible(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("run", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000, Landings: []string{"s3", "tape"}}}, c.now, nil)
+
+	tr.StartDLE("alpha")
+	tr.FinishDLE("alpha", 1, 1000, 800, nil)
+	tr.StartFlush("alpha", "scratch")
+	tr.AddDrainBytes("alpha", "s3", 800)
+	tr.AddDrainBytes("alpha", "tape", 0) // the spool voids the failed copy's meter...
+	tr.TripLanding("tape", "no volume loaded")
+	tr.FinishFlush("alpha")
+
+	snap := tr.Snapshot()
+	if len(snap.Skipped) != 1 || snap.Skipped[0].Landing != "tape" || !snap.Skipped[0].Tripped {
+		t.Fatalf("skipped = %+v; want the trip recorded with Tripped=true", snap.Skipped)
+	}
+	d := snap.DLEs[0]
+	if got := d.Landings; len(got) != 2 {
+		t.Fatalf("route = %v; a trip must keep the landing on the route (copies are owed)", got)
+	}
+	if d.Drained["tape"] != 0 || d.DrainBytes != 800 {
+		t.Fatalf("drained=%v drainBytes=%d; the tripped lane must stay at 0 and not settle", d.Drained, d.DrainBytes)
+	}
+
+	var sb strings.Builder
+	Render(&sb, snap, c.now())
+	out := sb.String()
+	for _, want := range []string{"TRIPPED landing tape", "no volume loaded", "nb sync --to tape"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
 // TestFinishFlushDoesNotSettleVoidedLane: a lane whose drain failed mid-run has its meter
 // voided to 0 by the spool (the failed copy never committed, so nothing of it is on the
 // landing); FinishFlush must leave it at 0 — the missing copy stays visible — instead of
