@@ -348,14 +348,15 @@ func suggestReel(r librarian.SwapRequest) string {
 // reelDesc renders a reel/drive status for the operator prompt, reusing the
 // inventory label classifier so the two never diverge. It uses the pure
 // classifier only: the catalog-derived refinements (reclaimable orphans,
-// appendability) are inventory concerns that don't belong in a swap prompt.
+// appendability, fullness) are inventory concerns that don't belong in a swap
+// prompt. A foreign or blank reel has no id and no label but IS in the drive —
+// classify it before falling back to "(empty)", or the one prompt where the
+// operator most needs to hear "this holds unrecognized data" claims emptiness
+// (found testing by hand against a dd-zeroed tape).
 func reelDesc(b media.VolumeStatus, medium string) string {
-	if b.ID == "" && b.Label == "" {
+	if !b.Foreign && !b.Blank && b.ID == "" && b.Label == "" {
 		return "(empty)"
 	}
-	label, status := classifyVolume(b, medium)
-	if status == "full" {
-		return fmt.Sprintf("%s (full)", label)
-	}
+	label, _ := classifyVolume(b, medium)
 	return label
 }
