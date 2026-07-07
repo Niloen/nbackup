@@ -89,6 +89,7 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 		dles[i] = item.DLE
 	}
 	if _, err := scheduler.Preflight(c.d.Preflight, dles, true); err != nil {
+		c.failEstimated(fileSink, plan, err)
 		return nil, err
 	}
 
@@ -96,6 +97,14 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 	// byte lands (fslike media; a labeled pool's rotation reclaims at the write
 	// itself). An unknown estimate (a first dump) contributes 0 — the reactive
 	// no-space path stays the backstop for estimate misses.
+	//
+	// Any-lane-suffices holds here just like at window-open: a landing that cannot
+	// make room (capacity vs. retention is a per-medium promise) is skipped for this
+	// run with a warning, and the dump is fatal only when some DLE's whole route is
+	// unusable — that DLE could land nowhere. Unlike a down medium, a refusal is not
+	// self-healing: the repair `nb sync --to <landing>` re-runs the same math, so it
+	// works only once capacity is increased or retention trimmed — the warning says so.
+	roomFailed := map[string]error{}
 	if c.d.MakeRoom != nil {
 		incoming := map[string]int64{}
 		var order []string
@@ -110,11 +119,17 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 		for _, landing := range order {
 			freed, err := c.d.MakeRoom(landing, incoming[landing], now, logf)
 			if err != nil {
-				return nil, fmt.Errorf("make room on %q for tonight's ~%s: %w", landing, sizeutil.FormatBytes(incoming[landing]), err)
+				roomFailed[landing] = fmt.Errorf("make room on %q for tonight's ~%s: %w", landing, sizeutil.FormatBytes(incoming[landing]), err)
+				logf.Log("WARNING landing %q cannot make room for tonight's ~%s and is skipped for this run: %v — then repair: nb sync --to %s", landing, sizeutil.FormatBytes(incoming[landing]), err, landing)
+				continue
 			}
 			if freed > 0 {
 				logf.Log("made room on %q: reclaimed %s to fit tonight's ~%s", landing, sizeutil.FormatBytes(freed), sizeutil.FormatBytes(incoming[landing]))
 			}
+		}
+		if err := c.routeFatal(plan.Items, roomFailed); err != nil {
+			c.failEstimated(fileSink, plan, err)
+			return nil, err
 		}
 	}
 
@@ -142,7 +157,7 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 		tr.SetPhase(progress.PhaseCanceled)
 		return nil, ErrCanceled
 	}
-	sealed, err := c.runOrchestrated(ctx, plan, workers, spec, holdingNames, tr, now, runLogf)
+	sealed, err := c.runOrchestrated(ctx, plan, workers, spec, holdingNames, roomFailed, tr, now, runLogf)
 	if err != nil {
 		// A failed run may still have committed archives (a partial dump, or one DLE
 		// failing while its run-mates landed) — pass the committed run through so the
@@ -162,30 +177,32 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 // runOrchestrated executes a dump: it runs the dumper as the producer over a spool spanning every
 // distinct landing the plan routes to (each DLE routed to its landing), and reports the sealed run. The
 // spool wiring — holding disks, per-landing backings, the drain lifecycle — is withSpool, shared with
-// copy/sync so that machinery lives in one place.
-func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, workers int, spec archiveio.RunSpec, holdingNames []string, tr *progress.Tracker, now time.Time, lf logf.Logf) (*catalog.Run, error) {
-	landings := distinctLandings(plan.Items, c.d.LandingsFor)
+// copy/sync so that machinery lives in one place. roomFailed names landings the make-room prelude
+// already declared unusable (warned there): they get no backing — the spool treats them as tripped
+// from the start — and they count as down in the whole-route judgment below.
+func (c *Conductor) runOrchestrated(ctx context.Context, plan *planner.Plan, workers int, spec archiveio.RunSpec, holdingNames []string, roomFailed map[string]error, tr *progress.Tracker, now time.Time, lf logf.Logf) (*catalog.Run, error) {
+	var landings []string
+	for _, l := range distinctLandings(plan.Items, c.d.LandingsFor) {
+		if _, down := roomFailed[l]; !down {
+			landings = append(landings, l)
+		}
+	}
 	if len(landings) > 1 {
 		lf.Log("run writes landings: %s", strings.Join(landings, ", "))
 	}
 	// Any-lane-suffices holds at window-open too: a landing that fails to OPEN (medium
 	// down before the run starts) is skipped with a warning, exactly like one that
-	// fails mid-run — fatal only if some item's whole route failed to open, because
-	// that item could land nowhere.
-	fatalOpen := func(failed map[string]error) error {
-		for _, it := range plan.Items {
-			route := c.d.LandingsFor(it)
-			alive := 0
-			for _, l := range route {
-				if _, down := failed[l]; !down {
-					alive++
-				}
-			}
-			if alive == 0 {
-				return fmt.Errorf("dump %s: no landing on its route could open: %w", it.DLE.ID(), failed[route[0]])
-			}
+	// fails mid-run — fatal only if some item's whole route is unusable (failed to open,
+	// or already out at make-room), because that item could land nowhere.
+	fatalOpen := func(openFailed map[string]error) error {
+		failed := make(map[string]error, len(roomFailed)+len(openFailed))
+		for l, err := range roomFailed {
+			failed[l] = err
 		}
-		return nil
+		for l, err := range openFailed {
+			failed[l] = err
+		}
+		return c.routeFatal(plan.Items, failed)
 	}
 	err := c.withSpool(ctx, landings, holdingNames, spec, workers, tr, now, lf, fatalOpen, func(sp *spool.Spool, _ archivefs.ReadStore) error {
 		route := func(it planner.Item) archivefs.Ingest { return sp.Ingest(c.d.LandingsFor(it)...) }
@@ -254,6 +271,13 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 			tr.SetPhase(p)
 		}
 	}
+	// fail marks the run failed with the run-level reason, so a failure no DLE owns
+	// (an open refusal, a drain error) still names itself in the status file.
+	fail := func(err error) {
+		if tr != nil {
+			tr.Fail(err)
+		}
+	}
 	// Each OpenWriter takes its medium's write claim; the deferred Release returns it at
 	// window end — after the drain has joined, so the claim spans every write.
 	releaseWriter := func(pw PreparedWriter) {
@@ -265,8 +289,9 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 	for i, name := range holdingNames {
 		pw, err := c.d.OpenWriter(name, spec, now, lf)
 		if err != nil {
-			setPhase(progress.PhaseFailed)
-			return fmt.Errorf("open holding disk %q: %w", name, err)
+			err = fmt.Errorf("open holding disk %q: %w", name, err)
+			fail(err)
+			return err
 		}
 		defer releaseWriter(pw)
 		disks[i] = spool.Disk{Name: name, Alloc: pw.Allocs[0], Storage: pw.Store, Capacity: pw.Capacity, Lim: pw.Lim, Writers: pw.Writers}
@@ -279,8 +304,9 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 		pw, err := c.d.OpenWriter(name, spec, now, lf)
 		if err != nil {
 			if fatalOpen == nil {
-				setPhase(progress.PhaseFailed)
-				return fmt.Errorf("open landing %q: %w", name, err)
+				err = fmt.Errorf("open landing %q: %w", name, err)
+				fail(err)
+				return err
 			}
 			openFailed[name] = err
 			lf.Log("WARNING landing %q failed to open and is skipped for this run: %v — repair: nb sync --to %s", name, err, name)
@@ -292,7 +318,7 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 	}
 	if len(openFailed) > 0 {
 		if err := fatalOpen(openFailed); err != nil {
-			setPhase(progress.PhaseFailed)
+			fail(err)
 			return err
 		}
 	}
@@ -325,7 +351,7 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 		lf.Log("WARNING %s", w)
 	}
 	if err := firstErr(runErr, drainErr); err != nil {
-		setPhase(progress.PhaseFailed)
+		fail(err)
 		return err
 	}
 	setPhase(progress.PhaseDone)
@@ -368,6 +394,29 @@ func landingWriters(pw PreparedWriter, workers int) int {
 		writers = 1
 	}
 	return writers
+}
+
+// routeFatal is the any-lane-suffices judgment: given the landings declared unusable
+// this run (failed to open, or refused at make-room), it is fatal exactly when some
+// item's whole route is down — that item could land nowhere; every landing it names
+// was already warned about individually. nil when failed is empty.
+func (c *Conductor) routeFatal(items []planner.Item, failed map[string]error) error {
+	if len(failed) == 0 {
+		return nil
+	}
+	for _, it := range items {
+		route := c.d.LandingsFor(it)
+		alive := 0
+		for _, l := range route {
+			if _, down := failed[l]; !down {
+				alive++
+			}
+		}
+		if alive == 0 {
+			return fmt.Errorf("dump %s: no landing on its route is usable: %w", it.DLE.ID(), failed[route[0]])
+		}
+	}
+	return nil
 }
 
 // distinctLandings returns the distinct landing media the plan's items route to, in first-seen order

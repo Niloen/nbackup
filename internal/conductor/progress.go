@@ -38,6 +38,17 @@ func keepEstimating(file progress.Sink) progress.Sink {
 	}
 }
 
+// failEstimated stamps the run-status file terminal for a failure in the prelude
+// between sizing and the dump — preflight or make-room — when no dump tracker
+// exists yet. The estimate phase has already written the file (non-terminal, so a
+// watcher keeps waiting); without this stamp `nb status` and the web UI would show
+// the dead run as "estimating" forever. The plan's DLEs are seeded pending —
+// nothing was dumped — and the refusal itself becomes the snapshot's run-level Err.
+func (c *Conductor) failEstimated(fileSink progress.Sink, plan *planner.Plan, err error) {
+	tr := progress.NewTracker(progress.EstimateRunID, progress.PhaseEstimating, c.d.Workers, c.planProgress(plan.Items), time.Now, fileSink)
+	tr.Fail(err)
+}
+
 // planProgress projects planner items onto the progress package's seed type,
 // keeping progress unaware of the planner. The landing route rides along so the
 // tracker can meter a fan-out's drains per landing.

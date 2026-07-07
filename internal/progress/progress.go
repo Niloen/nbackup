@@ -22,6 +22,10 @@ import (
 // relative to the catalog workdir.
 const StatusFileName = "run-status.json"
 
+// EstimateRunID is the placeholder run id the sizing prelude reports under — the
+// real id is minted only after the estimate, when the run is created.
+const EstimateRunID = "estimate"
+
 // Phase is the run's overall lifecycle stage.
 type Phase string
 
@@ -148,7 +152,11 @@ type Snapshot struct {
 	// concurrently, and the dump rate must not decay while a tail of drains finishes).
 	DumpEndedAt    time.Time `json:"dump_ended_at,omitempty"`
 	DrainStartedAt time.Time `json:"drain_started_at,omitempty"`
-	DLEs           []DLE     `json:"dles"`
+	// Err is the run-level failure reason — a failure that belongs to the run as a
+	// whole (a preflight or make-room refusal before any dump started, a failed
+	// drain) rather than to any one DLE (those live in DLE.Err).
+	Err  string `json:"err,omitempty"`
+	DLEs []DLE  `json:"dles"`
 }
 
 // TotalEst sums the planned estimates (uncompressed).

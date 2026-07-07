@@ -31,7 +31,7 @@ func (s *Scheduler) estimates(dles []config.DLE, sink progress.Sink) map[string]
 		for i, d := range dles {
 			rows[i] = progress.Plan{Name: d.ID(), Slug: d.Name()}
 		}
-		tr = progress.NewTracker("estimate", progress.PhaseEstimating, workers, rows, time.Now, sink)
+		tr = progress.NewTracker(progress.EstimateRunID, progress.PhaseEstimating, workers, rows, time.Now, sink)
 	}
 
 	// Phase 2: size in parallel (read-only). Each worker writes its own results[i]

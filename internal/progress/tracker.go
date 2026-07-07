@@ -297,6 +297,23 @@ func (t *Tracker) markDumpEndIfDone() {
 	t.snap.DumpEndedAt = t.now()
 }
 
+// Fail marks the run failed with a run-level reason — a failure that belongs to
+// the run as a whole (a preflight or make-room refusal, a failed drain) rather
+// than to any one DLE: SetPhase(PhaseFailed) plus recording why.
+func (t *Tracker) Fail(err error) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if err != nil {
+		t.snap.Err = err.Error()
+	}
+	t.snap.Phase = PhaseFailed
+	t.snap.EndedAt = t.now()
+	t.flush(true)
+}
+
 // SetPhase advances the run's overall phase; terminal phases stamp EndedAt.
 func (t *Tracker) SetPhase(p Phase) {
 	if t == nil {

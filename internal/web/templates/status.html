@@ -44,6 +44,7 @@
     {{pct .Snap.Pct}} · {{.Done}} done · {{.Active}} active · {{.Pending}} pending{{if .Failed}} · <span class="bad">{{.Failed}} failed</span>{{end}}
     · {{.Snap.Workers}} worker(s) · elapsed {{.Elapsed}}
   </div>
+  {{if .Snap.Err}}<div style="margin-top:.4rem;font-size:.85rem"><span class="bad">{{.Snap.Err}}</span></div>{{end}}
   <div class="stats">
     <div><span class="k">Dump</span><span class="v">{{bytes .DumpDone}} of ~{{bytes .DumpEst}}{{if .DumpRate}} · {{bytes .DumpRate}}/s{{end}}</span></div>
     {{if .FlushLanes}}

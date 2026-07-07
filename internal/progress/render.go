@@ -99,6 +99,9 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 			fmt.Fprintf(w, "FAILED %s: %s\n", d.Name, d.Err)
 		}
 	}
+	if s.Err != "" {
+		fmt.Fprintf(w, "FAILED: %s\n", s.Err)
+	}
 }
 
 // renderEstimating reports the sizing prelude of a run: how many DLEs have been
