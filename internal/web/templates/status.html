@@ -12,10 +12,26 @@
     <span class="pill ok">{{.Snap.Phase}}</span>
   </div>
   <div class="stats" style="margin-top:.4rem">
-    <div><span class="k">Sizing</span><span class="v">{{.Sized}} of {{len .Snap.DLEs}} DLE(s) measured</span></div>
+    <div><span class="k">Sizing</span><span class="v">{{.Sized}} of {{len .Snap.DLEs}} DLE(s) measured{{if .Active}} · {{.Active}} running{{end}}</span></div>
     <div><span class="k">Estimate</span><span class="v">~{{bytes .EstimateSoFar}} so far</span></div>
     <div><span class="k">Elapsed</span><span class="v">{{.Elapsed}}</span></div>
   </div>
+</div>
+
+{{/* Per-DLE sizing table, actively-sizing first — mirrors nb status's estimating
+     table so a slow or stuck estimate names its culprit. */}}
+<div class="panel">
+<table>
+  <tr><th>DLE</th><th>State</th><th class="num">Size</th><th class="num">Time</th></tr>
+  {{range .EstimateRows}}
+  <tr>
+    <td><a href="/dles/{{.Slug}}">{{.Name}}</a></td>
+    <td><span class="pill {{if eq .State "sizing"}}active{{else if eq .State "failed"}}bad{{else if eq .State "canceled"}}warn{{else if eq .State "sized"}}ok{{else}}dim{{end}}">{{.State}}</span>{{if .Err}} <span class="bad">{{.Err}}</span>{{end}}</td>
+    <td class="num">{{.Size}}</td>
+    <td class="num">{{.Time}}</td>
+  </tr>
+  {{end}}
+</table>
 </div>
 {{else}}
 <div class="panel">

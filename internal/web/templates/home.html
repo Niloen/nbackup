@@ -26,7 +26,7 @@
   </div>
   {{if .Estimating}}
   <div class="muted" style="margin-top:.4rem;font-size:.85rem">
-    sizing {{.Sized}} of {{len .Snap.DLEs}} DLE(s) · estimate ~{{bytes .EstimateSoFar}} so far
+    sizing {{.Sized}} of {{len .Snap.DLEs}} DLE(s){{if .Active}} · {{.Active}} running{{end}} · estimate ~{{bytes .EstimateSoFar}} so far
     · <a href="/status">details →</a>
   </div>
   {{else}}

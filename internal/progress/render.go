@@ -103,19 +103,62 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 
 // renderEstimating reports the sizing prelude of a run: how many DLEs have been
 // measured and the size accumulated so far. No bytes are dumped yet, so the dump
-// table (progress against estimate) would be a wall of zeroes — this shows the
-// estimate filling in instead. The per-DLE size lands in DoneBytes as each is sized.
+// table (progress against estimate) would be a wall of zeroes — instead the per-DLE
+// table shows each DLE's sizing state, its measured size (which lands in DoneBytes
+// as each is sized), and how long its measurement is taking/took — so a slow or
+// stuck estimate names its culprit the same way the dump table does.
 func renderEstimating(w io.Writer, s Snapshot, now time.Time) {
-	var sized int
-	for _, d := range s.DLEs {
-		if d.State == StateDone || d.State == StateFailed {
-			sized++
-		}
-	}
+	active, done, failed, _ := s.Counts()
 	fmt.Fprintf(w, "Run %s  [%s]\n", s.RunID, s.Phase)
 	fmt.Fprintf(w, "  started:  %s  (elapsed %s)\n", sizeutil.FormatStampSec(s.StartedAt.Local()), sizeutil.FormatElapsed(s.Elapsed(now)))
-	fmt.Fprintf(w, "  sizing:   %d of %d DLEs measured\n", sized, len(s.DLEs))
+	fmt.Fprintf(w, "  sizing:   %d of %d DLEs measured, %d running\n", done+failed, len(s.DLEs), active)
 	fmt.Fprintf(w, "  estimate: ~%s so far\n", sizeutil.FormatBytes(s.TotalDone()))
+	fmt.Fprintln(w)
+
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "DLE\tSTATE\tSIZE\tTIME")
+	for _, d := range s.DLEs {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", d.Name, estimateState(d), estimateSizeCell(d), estimateTimeCell(d, now))
+	}
+	tw.Flush()
+}
+
+// estimateState names a DLE's state during the sizing prelude: the tracker reuses
+// the dump-state vocabulary (StateDumping = its estimate pass is running), which
+// would mislead here — nothing is dumped while estimating.
+func estimateState(d DLE) string {
+	switch d.State {
+	case StateDumping:
+		return "sizing"
+	case StateDone:
+		return "sized"
+	default:
+		return string(d.State)
+	}
+}
+
+// estimateSizeCell renders a DLE's measured size once sized ("n/a" when the archiver
+// produced no estimate — e.g. its tool is missing), or a dash while pending/running.
+func estimateSizeCell(d DLE) string {
+	if d.State != StateDone {
+		return "-"
+	}
+	if d.DoneBytes <= 0 {
+		return "n/a"
+	}
+	return sizeutil.FormatBytes(d.DoneBytes)
+}
+
+// estimateTimeCell renders how long a DLE's measurement is taking (still running) or
+// took (finished) — the column that points at a slow estimate's culprit.
+func estimateTimeCell(d DLE, now time.Time) string {
+	switch {
+	case d.State == StateDumping && !d.StartedAt.IsZero():
+		return sizeutil.FormatElapsed(now.Sub(d.StartedAt))
+	case !d.StartedAt.IsZero() && !d.EndedAt.IsZero():
+		return sizeutil.FormatElapsed(d.EndedAt.Sub(d.StartedAt))
+	}
+	return "-"
 }
 
 // anyVolume reports whether any DLE has landed on a labelled volume, so the VOLUME column

@@ -510,8 +510,9 @@ func TestEstimatingStatusShowsSizingNotDumpTable(t *testing.T) {
 	progress.NewFileSink(dir, time.Now)(progress.Snapshot{
 		RunID: "estimate", Phase: progress.PhaseEstimating, Workers: 1,
 		DLEs: []progress.DLE{
-			{Name: "local", State: progress.StateDone, DoneBytes: 4096}, // sized
-			{Name: "other", State: progress.StatePending},               // not yet
+			{Name: "local", Slug: "local", State: progress.StateDone, DoneBytes: 4096}, // sized
+			{Name: "busy", Slug: "busy", State: progress.StateDumping},                 // being sized
+			{Name: "other", Slug: "other", State: progress.StatePending},               // not yet
 		},
 	}, true)
 	h := NewServer(sampleSource(), dir).Handler()
@@ -520,14 +521,21 @@ func TestEstimatingStatusShowsSizingNotDumpTable(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("code=%d", code)
 	}
-	if !strings.Contains(body, "1 of 2 DLE(s) measured") || !strings.Contains(body, "so far") {
+	if !strings.Contains(body, "1 of 3 DLE(s) measured") || !strings.Contains(body, "so far") {
 		t.Errorf("/status while estimating missing the sizing view:\n%s", body)
+	}
+	// The per-DLE sizing table: each DLE with its estimate-phase state, and the
+	// measured size on the sized one.
+	for _, want := range []string{">sized<", ">sizing<", ">pending<", "4.10 kB"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/status while estimating missing %q in the per-DLE sizing table:\n%s", want, body)
+		}
 	}
 	if strings.Contains(body, "Per-DLE") || strings.Contains(body, "dump ·") {
 		t.Errorf("/status while estimating leaked the dump table (sized DLEs read as done dumps):\n%s", body)
 	}
 
-	if _, body := get(t, h, "/"); !strings.Contains(body, "sizing 1 of 2 DLE(s)") {
+	if _, body := get(t, h, "/"); !strings.Contains(body, "sizing 1 of 3 DLE(s)") {
 		t.Errorf("home banner while estimating missing the sizing line:\n%s", body)
 	}
 }

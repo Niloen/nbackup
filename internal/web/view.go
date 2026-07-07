@@ -61,11 +61,13 @@ type statusView struct {
 	// Estimating flags the sizing prelude, during which the snapshot's fields mean
 	// something else — a "done" DLE is merely *sized* and DoneBytes holds its measured
 	// estimate, not dumped bytes — so the templates render the sizing view (Sized of
-	// total, EstimateSoFar) instead of a dump table full of misleading "done" rows
-	// (the same split nb status makes; see progress.renderEstimating).
+	// total, EstimateSoFar, and the per-DLE EstimateRows) instead of a dump table full
+	// of misleading "done" rows (the same split nb status makes; see
+	// progress.renderEstimating).
 	Estimating    bool
-	Sized         int   // DLEs measured so far
-	EstimateSoFar int64 // estimate accumulated so far
+	Sized         int           // DLEs measured so far
+	EstimateSoFar int64         // estimate accumulated so far
+	EstimateRows  []estimateRow // per-DLE sizing detail, running first
 
 	DumpDone, DumpEst int64   // uncompressed: dumped so far, and the planner estimate
 	DumpRate          int64   // bytes/sec, 0 = not yet measurable
@@ -93,6 +95,60 @@ type statusView struct {
 	PendingDLEs []progress.DLE // StatePending — names only
 }
 
+// estimateRow is one DLE's line of the /status sizing table — the web counterpart of
+// nb status's estimating table (progress.renderEstimating, whose state/size/time
+// helpers are unexported, so their small display rules are mirrored here). Size and
+// Time are pre-rendered: the template has neither the clock the elapsed needs nor
+// the sized-vs-n/a dash rules.
+type estimateRow struct {
+	Name, Slug string
+	State      string // "sizing" | "sized" | "pending" | "failed" | "canceled"
+	Size       string // measured size once sized ("n/a" when no estimate was produced), else "—"
+	Time       string // sizing: elapsed so far; sized/failed: how long it took; else "—"
+	Err        string
+}
+
+// newEstimateRow mirrors progress.renderEstimating's cells for one DLE.
+func newEstimateRow(d progress.DLE, now time.Time) estimateRow {
+	row := estimateRow{Name: d.Name, Slug: d.Slug, State: string(d.State), Size: "—", Time: "—", Err: d.Err}
+	switch d.State {
+	case progress.StateDumping:
+		row.State = "sizing"
+		if !d.StartedAt.IsZero() {
+			row.Time = sizeutil.FormatElapsed(now.Sub(d.StartedAt))
+		}
+	case progress.StateDone:
+		row.State = "sized"
+		if d.DoneBytes > 0 {
+			row.Size = sizeutil.FormatBytes(d.DoneBytes)
+		} else {
+			row.Size = "n/a"
+		}
+	}
+	if d.State != progress.StateDumping && !d.StartedAt.IsZero() && !d.EndedAt.IsZero() {
+		row.Time = sizeutil.FormatElapsed(d.EndedAt.Sub(d.StartedAt))
+	}
+	return row
+}
+
+// estimateRows builds the /status sizing table, actively-sizing DLEs first (they are
+// what an operator watching a slow estimate is looking for), then the rest in
+// snapshot (name) order.
+func estimateRows(dles []progress.DLE, now time.Time) []estimateRow {
+	rows := make([]estimateRow, 0, len(dles))
+	for _, d := range dles {
+		if d.State == progress.StateDumping {
+			rows = append(rows, newEstimateRow(d, now))
+		}
+	}
+	for _, d := range dles {
+		if d.State != progress.StateDumping {
+			rows = append(rows, newEstimateRow(d, now))
+		}
+	}
+	return rows
+}
+
 // flushLaneView is one landing's flush backlog for the /status fan-out itemization —
 // the web counterpart of progress.LandingDrain, with the percent and rate the
 // template cannot compute pre-calculated.
@@ -115,6 +171,7 @@ func newStatusView(snap *progress.Snapshot, now time.Time) *statusView {
 		v.Estimating = true
 		v.Sized = v.Done + v.Failed
 		v.EstimateSoFar = snap.TotalDone()
+		v.EstimateRows = estimateRows(snap.DLEs, now)
 		v.Elapsed = sizeutil.FormatElapsed(snap.Elapsed(now))
 		return v
 	}

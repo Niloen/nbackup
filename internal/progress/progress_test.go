@@ -216,6 +216,35 @@ func TestRender(t *testing.T) {
 	}
 }
 
+// TestRenderEstimating: the sizing prelude renders a per-DLE table — state, measured
+// size, and how long each measurement is taking/took — not just the done counter, so
+// a slow estimate names its culprit like the dump table does.
+func TestRenderEstimating(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("estimate", PhaseEstimating, 2, []Plan{
+		{Name: "alpha"}, {Name: "bravo"}, {Name: "charlie"},
+	}, c.now, nil)
+	tr.StartDLE("alpha")
+	c.advance(2 * time.Second)
+	tr.FinishDLE("alpha", 0, 4096, 0, nil) // sized: 4.10 kB in 2s
+	tr.StartDLE("bravo")
+	c.advance(5 * time.Second) // bravo still sizing after 5s; charlie pending
+
+	var sb strings.Builder
+	Render(&sb, tr.Snapshot(), c.now())
+	out := sb.String()
+	for _, want := range []string{
+		"1 of 3 DLEs measured, 1 running",
+		"alpha", "sized", "4.10 kB", "2s",
+		"bravo", "sizing", "5s",
+		"charlie", "pending",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("estimating render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
 // TestRenderDraining: a DLE draining off a holding disk renders its "flushing" state annotated
 // with the disk it landed on, so a multi-disk run shows where each buffered.
 func TestRenderDraining(t *testing.T) {
