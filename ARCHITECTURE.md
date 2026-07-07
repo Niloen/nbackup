@@ -595,18 +595,22 @@ tape emulator) — one drive, no addressable slots, a human loads it.
   overflows (an optimistic `volume_size`, or orphans the catalog cannot see),
   `media.ErrVolumeFull` discards the partial and the run **fails** with an
   actionable message — no recovery. A tape cannot report its own fill, so remaining
-  room is **computed, never read** — and never stored: the catalog **derives** a
-  volume's fill from what its placements already record (`Catalog.BytesOnLabel` —
-  part seals, the footer's `IndexSize`), priced by the **medium's own cost rule**
-  (`media.FileCoster` / `Spec.FileCost`: framing plus payload, with the two
-  unrecorded payloads — label, commit footer — charged at an upper bound, so the
-  estimate errs toward an early roll, never toward EOT; all size constants live in
-  the tape package). The librarian spends the declared `volume_size` against a
-  derived snapshot taken at label-accept plus each file it lands after, priced by
-  the same rule (`volumeFill`/`countedVol`), so the fit check, the landing, and the
-  next accept can never disagree. One arithmetic for real drives and the `dir:` sim
-  alike — the sim's enforced capacity is only the physical-EOT stand-in — and a
-  rebuild has nothing extra to reconstruct. The commit
+  room is **computed, never read**: the catalog keeps each reel's fill
+  (`VolumeRecord.Used`), priced by the **medium's own cost rule**
+  (`media.FileCoster` / `Spec.FileCost`: framing plus payload from part seals and
+  the footer's `IndexSize`, with the two unrecorded payloads — label, commit
+  footer — charged at an upper bound, so the figure errs toward an early roll,
+  never toward EOT; all size constants live in the tape package). The rule is
+  applied only inside the catalog's own mutators — every placement add/remove and
+  the relabel reset move their own charge (`applyFill`, resolver injected by the
+  engine via `PriceWith`) and the rebuild scan reconstructs `Used` through that
+  same path — so **no reader ever meets a cost function**: plan, `nb medium`, and
+  the librarian's accept snapshot just read the field. The librarian spends the
+  declared `volume_size` against that snapshot plus each file it lands after,
+  priced by the same rule (`volumeFill`/`countedVol`), so the record-time figure,
+  the fit check, and the landing can never disagree. One arithmetic for real
+  drives and the `dir:` sim alike — the sim's enforced capacity is only the
+  physical-EOT stand-in. The commit
   footer (written last) commits the archive, giving an interrupted span the same
   per-archive atomicity as a single-volume archive (orphan parts ignored by
   scan/rebuild, reclaimed by relabel). Because a single drive cannot interleave two

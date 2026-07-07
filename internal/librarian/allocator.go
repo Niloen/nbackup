@@ -204,9 +204,9 @@ func (s *Allocator) countVol() media.Volume {
 // countedVol is what the allocator hands the archiveio writer: the drive's volume
 // with every committed file landed on the librarian's fill arithmetic (volumeFill —
 // the "since accept" half; the snapshot half is taken in verifyWritable), priced by
-// the medium's own cost rule so in-flight files and the catalog-derived snapshot
+// the medium's own cost rule so in-flight files and the catalog's stored snapshot
 // spend in the same currency. Only allocator-vended volumes are wrapped: the label
-// file is already in the derived figure, and reads land nothing.
+// file is already in the stored figure, and reads land nothing.
 type countedVol struct {
 	media.Volume
 	l *Librarian

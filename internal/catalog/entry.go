@@ -66,36 +66,6 @@ func (a PlacedArchive) IOParts() []archiveio.Part {
 	return parts
 }
 
-// bytesOn is one placed archive's contribution to a labeled volume's derived fill
-// (Catalog.BytesOnLabel): its on-label files priced by the medium's cost rule.
-// run supplies the archive record for the recorded payload sizes (IndexSize; the
-// sealless-fallback Compressed).
-func (a PlacedArchive) bytesOn(label string, run *Run, cost func(kind string, payload int64) int64) int64 {
-	var total int64
-	arch, _ := run.Archive(a.DLE, a.Level)
-	if len(a.Seals) == len(a.Parts) && len(a.Parts) > 0 {
-		for i, pt := range a.Parts {
-			if pt.Label == label {
-				total += cost(record.KindArchive, a.Seals[i].Size)
-			}
-		}
-	} else {
-		for _, pt := range a.Parts {
-			if pt.Label == label {
-				total += cost(record.KindArchive, arch.Compressed)
-				break
-			}
-		}
-	}
-	if a.Commit.Label == label {
-		total += cost(record.KindCommit, 0)
-	}
-	if a.Index.Label == label {
-		total += cost(record.KindIndex, arch.IndexSize)
-	}
-	return total
-}
-
 // Parts returns the ordered part locations of an archive on this placement.
 func (p Placement) Parts(dle string, level int) ([]archiveio.FilePos, bool) {
 	for _, a := range p.Archives {

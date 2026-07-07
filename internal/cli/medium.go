@@ -214,7 +214,7 @@ func printInventory(eng *engine.Engine, name string) {
 			fmt.Fprintf(dw, "\t%d%s\t(empty)\t-\t-\t-\t-\n", d.Drive, node)
 			continue
 		}
-		used := volumeUsed(eng, name, d.Volume.Label)
+		used := volumeUsed(eng, d.Volume.Label)
 		label, status := volumeLabelStatus(d.Volume, name, appendable, volumeHasRuns(eng, d.Volume.Label), used)
 		fmt.Fprintf(dw, "\t%d%s\t%s\t%s\t%s\t%s\t%d\n", d.Drive, node, barcodeOr(d.Volume.Barcode), label, status,
 			sizeutil.FormatBytes(used), d.Volume.Files)
@@ -273,22 +273,16 @@ func volumeHasRuns(eng *engine.Engine, label string) bool {
 	return len(eng.Catalog().RunsOnLabel(label)) > 0
 }
 
-// volumeUsed is a labeled volume's catalog-derived fill, priced by its medium
-// type's own cost rule — the ON VOLUME column and the "full" refinement read it,
-// a tape being unable to report its own fill. 0 for a blank or unlabeled reel.
-func volumeUsed(eng *engine.Engine, medium, label string) int64 {
+// volumeUsed is a labeled volume's stored fill (VolumeRecord.Used, maintained by
+// the catalog at record time) — the ON VOLUME column and the "full" refinement
+// read it, a tape being unable to report its own fill. 0 for a blank or
+// unlabeled reel.
+func volumeUsed(eng *engine.Engine, label string) int64 {
 	if label == "" {
 		return 0
 	}
-	info, ok := eng.Medium(medium)
-	if !ok {
-		return 0
-	}
-	cost, ok := media.FileCostFor(info.Type)
-	if !ok {
-		return 0
-	}
-	return eng.Catalog().BytesOnLabel(label, cost)
+	v, _ := eng.Catalog().Volume(label)
+	return v.Used
 }
 
 // classifyVolume renders a volume's display label and the status decidable from

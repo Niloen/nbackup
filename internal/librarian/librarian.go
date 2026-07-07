@@ -128,17 +128,17 @@ type Librarian struct {
 	fill volumeFill
 }
 
-// volumeFill tracks one accepted volume's fill: the catalog's derived figure
-// (Catalog.BytesOnLabel, priced by the medium's own cost rule) when the label
-// protocol accepted the reel (verifyWritable → accept), plus every file the
-// allocator lands on it after (countedVol → land, at the same prices). The
-// snapshot-plus-count split is what closes the mid-run gap — the catalog only
+// volumeFill tracks one accepted volume's fill: the catalog's stored figure
+// (VolumeRecord.Used, maintained at record time with the medium's own cost rule)
+// when the label protocol accepted the reel (verifyWritable → accept), plus every
+// file the allocator lands on it after (countedVol → land, at the same prices).
+// The snapshot-plus-count split is what closes the mid-run gap — the catalog only
 // learns of files at archive commit, but rolls are decided between parts — while
 // never double-counting an archive once it commits (the next accept's snapshot
 // replaces the count).
 type volumeFill struct {
 	label  string // the accepted volume's label; guards against a stale/foreign mount
-	base   int64  // the catalog-derived fill at accept (BytesOnLabel)
+	base   int64  // the stored fill at accept (catalog VolumeRecord.Used)
 	landed int64  // file costs landed on it since accept, counted by the allocator
 }
 

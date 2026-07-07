@@ -37,8 +37,9 @@ type Labeled interface {
 // FileCoster is the capability of pricing files against a volume's declared
 // capacity (volume_size): the on-medium byte cost of one committed file, framing
 // included — the currency the librarian's fill arithmetic and the catalog's
-// derived volume fill spend in. Only media whose volumes are finite labeled reels
-// (tape) implement it; it is a byte cost, distinct from Spec.Cost (money).
+// stored volume fill (VolumeRecord.Used) spend in. Only media whose volumes are
+// finite labeled reels (tape) implement it; it is a byte cost, distinct from
+// Spec.Cost (money).
 //
 // The contract is BOUNDED ABOVE, never under: a cost may over-state (the caller
 // then rolls to the next volume early — wasted tail), but an under-statement
@@ -413,9 +414,10 @@ type Spec struct {
 
 	// FileCost is the type-level face of the FileCoster capability (the type's
 	// volumes implement the interface with the same rule): the on-medium byte cost
-	// of one file, for callers that reason from configuration alone — the planner
-	// pricing a reel's fill without opening a drive. Nil for media without finite
-	// labeled volumes.
+	// of one file, for callers that reason from configuration alone — the engine's
+	// catalog cost resolver, which maintains each reel's stored fill at record and
+	// scan time without opening a drive. Nil for media without finite labeled
+	// volumes.
 	FileCost func(kind string, payload int64) int64
 
 	// Login, if non-nil, is the medium type's interactive credential bootstrap, run by

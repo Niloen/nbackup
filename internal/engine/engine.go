@@ -173,6 +173,16 @@ func build(cfg *config.Config) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Wire the stored volume fill's pricing: medium name -> its type's file-cost
+	// rule. The catalog applies it inside its own mutators (and the rebuild scan);
+	// no reader ever needs a cost function.
+	cat.PriceWith(func(medium string) (func(kind string, payload int64) int64, bool) {
+		md, ok := cfg.Media[medium]
+		if !ok {
+			return nil, false
+		}
+		return media.FileCostFor(md.Type)
+	})
 	e := &Engine{
 		cfg:         cfg,
 		tc:          newToolchain(cfg),

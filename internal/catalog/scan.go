@@ -62,15 +62,18 @@ func (c *Catalog) Rebuild(volumes map[string]media.Volume) (int, error) {
 // dump uses — so a run seen on several media gathers several placements on one entry, its
 // content taken from the archives' commit footers. Each label upserts the volume registry.
 func (c *Catalog) absorb(idx mediumIndex) {
+	// Labels first: the upsert starts each reel's stored fill at its label file,
+	// then each absorbed placement adds its charge through the same addArchive
+	// pricing the live write path uses — a rebuild reconstructs Used for free.
+	for _, lbl := range idx.labels {
+		c.upsertVolume(lbl)
+	}
 	for _, sp := range idx.placements {
 		for _, arch := range sp.run.Archives {
 			if pa, ok := findPlaced(sp.p.Archives, arch.DLE, arch.Level); ok {
 				c.addArchive(arch, sp.p.Medium, pa.Pos())
 			}
 		}
-	}
-	for _, lbl := range idx.labels {
-		c.upsertVolume(lbl)
 	}
 }
 

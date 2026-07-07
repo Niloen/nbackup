@@ -79,19 +79,27 @@ func (c fakeChanger) Load(int, int) error   { return media.ErrManualLoad }
 func (c fakeChanger) Unload(int) error      { return media.ErrManualLoad }
 func (c fakeChanger) Manual() bool          { return true }
 
-// TestRemainingFromDerivedFill locks the fill arithmetic behind proactive
+// TestRemainingFromStoredFill locks the fill arithmetic behind proactive
 // spanning: with a declared volume_size (Capacity), Remaining() is unknowable
 // until the label protocol accepts the reel, then equals declared capacity minus
-// the catalog-derived fill at accept (BytesOnLabel priced by the medium's
-// FileCost), minus each file the allocator lands after — priced by the SAME rule,
-// so the placement check, the landing, and the next accept's snapshot can never
-// disagree.
-func TestRemainingFromDerivedFill(t *testing.T) {
+// the reel's stored fill at accept (VolumeRecord.Used, maintained by the catalog
+// at record time with the medium's FileCost), minus each file the allocator
+// lands after — priced by the SAME rule, so the record-time figure, the landing,
+// and the next accept's snapshot can never disagree.
+func TestRemainingFromStoredFill(t *testing.T) {
 	now := time.Now()
 	cat, err := catalog.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Wire the stored fill's pricing to the fake medium's rule, as the engine
+	// wires the real resolver — the pool name is the medium name.
+	cat.PriceWith(func(medium string) (func(kind string, payload int64) int64, bool) {
+		if medium != "pool" {
+			return nil, false
+		}
+		return fakeDrive{}.FileCost, true
+	})
 	lbl := record.Label{Name: "T1", Pool: "pool", Epoch: 1, WrittenAt: now.Add(-time.Hour)}
 	if err := cat.RecordVolume(lbl); err != nil {
 		t.Fatal(err)
@@ -123,7 +131,8 @@ func TestRemainingFromDerivedFill(t *testing.T) {
 	if name != "T1" {
 		t.Fatalf("accepted %q, want T1", name)
 	}
-	base := cat.BytesOnLabel("T1", drive.FileCost) // label + part + commit, at the fake's prices
+	v, _ := cat.Volume("T1")
+	base := v.Used // label + part + commit, priced at record time by the fake's rule
 	wantRoom := int64(capacity) - base
 	if room, known := l.Remaining(); !known || room != wantRoom {
 		t.Fatalf("Remaining after accept = %d (known=%v), want %d", room, known, wantRoom)
@@ -158,10 +167,10 @@ func TestRemainingFromDerivedFill(t *testing.T) {
 		t.Fatalf("Remaining after landing = %d (known=%v), want %d", room, known, want)
 	}
 
-	// A re-accept re-derives from the catalog: the landed bytes were never
+	// A re-accept re-reads the stored figure: the landed bytes were never
 	// recorded (the fake discards them), so they are forgotten. This accept-time
 	// reset is what prevents double-counting once archives DO commit — the
-	// derived snapshot replaces the count.
+	// stored snapshot replaces the count.
 	if _, _, err := l.PrepareWrite(true, "", now, nil); err != nil {
 		t.Fatal(err)
 	}

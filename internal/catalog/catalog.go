@@ -56,6 +56,16 @@ const CacheFile = "catalog.json"
 type VolumeRecord struct {
 	Label   record.Label `json:"label"`
 	Barcode string       `json:"barcode,omitempty"`
+	// Used is the volume's stored fill: the on-medium cost of everything recorded
+	// on the reel, priced by its medium's own cost rule (media.FileCoster's bounded
+	// contract) AT MUTATION TIME — each placement add/remove and the (re)label
+	// reset adjust it inside the catalog's own write path (applyFill), and a
+	// rebuild scan reconstructs it through that same path, so no query ever needs a
+	// cost function. It is what a declared volume_size is spent against, a tape
+	// being unable to report its own fill; orphans (a crashed run, a recycled
+	// spanning run's leftovers on surviving reels) are recorded nowhere and so not
+	// counted — one reason volume_size is declared below native capacity.
+	Used int64 `json:"used,omitempty"`
 }
 
 // Catalog is a local cache of run entries plus a registry of labeled volumes. It
@@ -69,6 +79,7 @@ type Catalog struct {
 	win     *Window // the open run window, if any — guards one-window-at-a-time; mutators persist per op as always
 
 	now       func() time.Time // injectable clock for the usage ledger's sample stamps; Open sets time.Now
+	costFor   CostResolver     // medium name -> file-cost rule, injected by PriceWith; nil = fill not tracked
 	usage     []UsageSample    // the usage ledger (usage.go), loaded at Open, appended by persist
 	usageLast map[string]int64 // each medium's last recorded stored-bytes, the persist-time diff base
 }
@@ -105,6 +116,56 @@ func Open(workdir string) (*Catalog, error) {
 	c.sortEntries()
 	c.loaded = true
 	return c, nil
+}
+
+// CostResolver resolves a medium name to its file-cost rule (media.Spec.FileCost),
+// ok=false for media without finite labeled volumes. The engine injects it via
+// PriceWith; the catalog applies it only inside its own mutators (see
+// VolumeRecord.Used), never at query time.
+type CostResolver func(medium string) (func(kind string, payload int64) int64, bool)
+
+// PriceWith injects the medium cost resolver the stored volume fill is maintained
+// with — wired once by the engine (the owner of config + the media registry), the
+// same posture as the injected clock. Without it (a bare Open in a test) fill
+// tracking is off and Used stays 0.
+func (c *Catalog) PriceWith(costFor CostResolver) { c.costFor = costFor }
+
+// applyFill adjusts the stored fill of the labeled volumes one placed archive
+// touches, as it is recorded (sign +1) or dropped (sign -1) on medium — parts at
+// their exact seal sizes, the member index at the footer's IndexSize, the commit
+// footer at the medium's bound; a sealless record (an old footer, a partial scan)
+// charges its whole Compressed size once, conservatively. A no-op without a
+// resolver, for an unpriceable medium, or for unregistered labels.
+func (c *Catalog) applyFill(medium string, run *Run, pa PlacedArchive, sign int64) {
+	if c.costFor == nil {
+		return
+	}
+	cost, ok := c.costFor(medium)
+	if !ok {
+		return
+	}
+	arch, _ := run.Archive(pa.DLE, pa.Level)
+	add := func(label, kind string, payload int64) {
+		if v, ok := c.volumes[label]; label != "" && ok {
+			if v.Used += sign * cost(kind, payload); v.Used < 0 {
+				v.Used = 0
+			}
+		}
+	}
+	if len(pa.Seals) == len(pa.Parts) && len(pa.Parts) > 0 {
+		for i, pt := range pa.Parts {
+			add(pt.Label, record.KindArchive, pa.Seals[i].Size)
+		}
+	} else {
+		for _, pt := range pa.Parts {
+			if pt.Label != "" {
+				add(pt.Label, record.KindArchive, arch.Compressed)
+				break
+			}
+		}
+	}
+	add(pa.Commit.Label, record.KindCommit, 0)
+	add(pa.Index.Label, record.KindIndex, arch.IndexSize)
 }
 
 // AddArchive merges one archive's content and its placement position into the catalog and
@@ -148,7 +209,16 @@ func (c *Catalog) addArchive(arch record.Archive, medium string, pos archiveio.A
 	arch.PartSeals = nil
 	e.Run.addArchive(arch)
 	// The archive's key comes from the archive record itself — pos is pure position.
-	e.addPlaced(medium, PlacedArchive{DLE: arch.DLE, Level: arch.Level, Parts: pos.Parts, Seals: seals, Commit: pos.Commit, Index: pos.Index})
+	pa := PlacedArchive{DLE: arch.DLE, Level: arch.Level, Parts: pos.Parts, Seals: seals, Commit: pos.Commit, Index: pos.Index}
+	// The stored fill moves with the placement, inside this same mutation: a
+	// replaced record (a re-copy of the same archive) gives its charge back first.
+	if p, ok := e.placementOn(medium); ok {
+		if old, ok := p.Placed(arch.DLE, arch.Level); ok {
+			c.applyFill(medium, e.Run, old, -1)
+		}
+	}
+	e.addPlaced(medium, pa)
+	c.applyFill(medium, e.Run, pa, +1)
 	c.loaded = true
 }
 
@@ -186,6 +256,10 @@ func (c *Catalog) RemovePlacement(runID, medium string) (gone bool, err error) {
 	for _, p := range e.Placements {
 		if p.Medium != medium {
 			kept = append(kept, p)
+			continue
+		}
+		for _, pa := range p.Archives {
+			c.applyFill(medium, e.Run, pa, -1) // the dropped copy's charge leaves its reels
 		}
 	}
 	e.Placements = kept
@@ -218,7 +292,9 @@ func (c *Catalog) RemoveArchive(runID, medium, dle string) (placementGone, entry
 		for _, a := range p.Archives {
 			if a.DLE != dle {
 				kept = append(kept, a)
+				continue
 			}
+			c.applyFill(medium, e.Run, a, -1) // the pruned image's charge leaves its reels
 		}
 		p.Archives = kept
 		break
@@ -251,14 +327,32 @@ func (c *Catalog) RecordVolume(lbl record.Label) error {
 
 // upsertVolume records a labeled volume's identity in the registry without persisting —
 // the in-memory write path shared by RecordVolume and the importer's absorb (which
-// persists once at the end of a scan).
+// persists once at the end of a scan). The stored fill follows the epoch: a
+// same-epoch re-record keeps it, while a (re)label — which physically wipes the
+// reel — restarts it at the label file's own charge.
 func (c *Catalog) upsertVolume(lbl record.Label) {
-	rec := &VolumeRecord{Label: lbl}
+	rec := &VolumeRecord{Label: lbl, Used: c.labelFill(lbl)}
 	if old, ok := c.volumes[lbl.Name]; ok {
 		rec.Barcode = old.Barcode // identity update; the learned cartridge stays
+		if old.Label.Epoch == lbl.Epoch {
+			rec.Used = old.Used
+		}
 	}
 	c.volumes[lbl.Name] = rec
 	c.loaded = true
+}
+
+// labelFill is a freshly labeled reel's starting fill: its file-0 label record,
+// priced by its pool's medium (a label's Pool IS the owning medium's name).
+func (c *Catalog) labelFill(lbl record.Label) int64 {
+	if c.costFor == nil {
+		return 0
+	}
+	cost, ok := c.costFor(lbl.Pool)
+	if !ok {
+		return 0
+	}
+	return cost(record.KindLabel, 0)
 }
 
 // SetVolumeBarcode records which cartridge (barcode) a volume's label was last
@@ -444,33 +538,6 @@ func (c *Catalog) MediumBytes(medium string) int64 {
 	var total int64
 	for _, a := range c.ArchivesOn(medium) {
 		total += a.Compressed
-	}
-	return total
-}
-
-// BytesOnLabel derives the fill of the volume with the given label — what a
-// declared volume_size has been spent on, since a tape cannot report its own
-// fill. It is a pure walk over what the catalog already records (nothing stored,
-// so a rebuild has nothing extra to reconstruct): the reel's label file, and per
-// placed archive its parts (seal sizes), member index (the footer's IndexSize),
-// and commit footer. cost prices each file — it is the MEDIUM's rule
-// (media.FileCoster / Spec.FileCost), bounded above by contract, so the catalog
-// stays neutral about framing and bounds. Orphans of a crashed run are recorded
-// nowhere and so never counted — one reason volume_size is declared below a
-// cartridge's native capacity. A placed archive without aligned seals (an old
-// footer, a scan that saw only some parts) charges its whole Compressed size on
-// each of its volumes — an over-count, erring toward an early roll.
-func (c *Catalog) BytesOnLabel(label string, cost func(kind string, payload int64) int64) int64 {
-	if label == "" {
-		return 0 // address-identified parts carry no label; "" must not match them
-	}
-	total := cost(record.KindLabel, 0)
-	for _, e := range c.entries {
-		for _, p := range e.Placements {
-			for _, a := range p.Archives {
-				total += a.bytesOn(label, e.Run, cost)
-			}
-		}
 	}
 	return total
 }
