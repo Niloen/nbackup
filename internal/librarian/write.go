@@ -33,12 +33,14 @@ func (l *Librarian) PrepareWrite(appendable bool, expect string, now time.Time, 
 		if aerr != nil {
 			// A full pool of still-protected tapes is the rotation's fail-loud verdict —
 			// more actionable than the loaded volume's bare "won't do" reason, so surface
-			// it. Any other advance failure (out of slots) keeps the original reason, which
-			// is more specific for a blank/foreign loaded tape ("label it first").
+			// it alone. Any other advance failure keeps both reasons: why the loaded
+			// volume won't do AND why rolling onward failed — the roll's failure (a slot
+			// that won't load, a label that won't write) is the actionable one, and
+			// hiding it behind the bare "won't do" reason has cost real debugging time.
 			if errors.Is(aerr, ErrAllVolumesProtected) {
 				return "", 0, aerr
 			}
-			return "", 0, err
+			return "", 0, fmt.Errorf("%v; rolling to another volume also failed: %w", err, aerr)
 		}
 		return name, epoch, nil
 	}
