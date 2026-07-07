@@ -286,12 +286,13 @@ func assemble(medium string, acc *scanMaps) ([]runPlacement, []OrphanRun) {
 				// the archive's TOC — names it: record the location so the placement
 				// stays complete (aligned seals, correct part indexes) and a restore
 				// can prompt for the absent reel by label.
-				pm := sc.arch.PartMap[part]
-				ap.Parts = append(ap.Parts, archiveio.FilePos{Label: pm.Label, Epoch: pm.Epoch, Pos: pm.Pos})
+				ap.Parts = append(ap.Parts, sc.arch.PartMap[part])
 			}
 		}
 		if ixLoc, ok := acc.indexes[key]; ok {
 			ap.Index = ixLoc // note where the member index lives; members load lazily (browse/verify)
+		} else if sc.arch.IndexPos != (record.FilePos{}) {
+			ap.Index = sc.arch.IndexPos // the index's tape was not scanned; the footer's TOC names it
 		}
 		arch := *sc.arch
 		arch.Run = key.run // the header's run tag is authoritative for grouping

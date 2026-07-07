@@ -44,11 +44,13 @@ func spanLib(t *testing.T) (open func() media.Volume, load func(v media.Volume, 
 	putCommit(t, v, "run-2026-06-21.001", record.Archive{
 		DLE: "h-data", Level: 0, Parts: 3, Compressed: 36,
 		PartSeals: []record.PartSeal{{Size: 12}, {Size: 12}, {Size: 12}},
-		PartMap: []record.PartLoc{
+		PartMap: []record.FilePos{
 			{Label: "vol-a", Epoch: 1, Pos: partPos[0]},
 			{Label: "vol-b", Epoch: 1, Pos: partPos[1]},
 			{Label: "vol-c", Epoch: 1, Pos: partPos[2]},
 		},
+		IndexSize: 300,
+		IndexPos:  record.FilePos{Label: "vol-b", Epoch: 1, Pos: 9},
 	})
 	return open, load
 }
@@ -88,6 +90,9 @@ func TestAdditiveRebuildGuidedByTOC(t *testing.T) {
 	}
 	if pa.Parts[0].Label != "vol-a" || pa.Parts[1].Label != "vol-b" || pa.Parts[2].Label != "vol-c" {
 		t.Fatalf("part order must follow the TOC, got %+v", pa.Parts)
+	}
+	if pa.Index.Label != "vol-b" || pa.Index.Pos != 9 {
+		t.Fatalf("the footer's index_pos should locate the unscanned index, got %+v", pa.Index)
 	}
 	missing := c.MissingVolumes()
 	if len(missing) != 2 || missing[0].Label != "vol-a" || missing[1].Label != "vol-b" {
