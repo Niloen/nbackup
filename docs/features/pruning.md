@@ -17,6 +17,18 @@ Per-medium retention with a safety floor that never deletes the last recovery pa
 
 ---
 
+## Writes make their own room — prune is the manual lever
+
+**Capacity is a promise**: `nb dump` and `nb sync` reclaim the oldest
+Floor-cleared runs *before* writing, so a bounded medium never exceeds its
+budget and then waits for a janitor — you do not need `nb prune` in cron.
+Because the old and the new run coexist during a write, size capacity for one
+retention window **plus the next run** (Amanda's `tapecycle ≥ runspercycle+1`,
+in bytes); `nb plan` previews what tonight's run will reclaim, and `nb check`
+warns when the protected set alone crowds the budget. `nb prune` remains the
+manual lever: trimming after you lower `capacity:` or tighten retention, and
+`--dry-run` auditing of what is reclaimable.
+
 ## Pruning is per-medium
 
 `nb prune [medium]` deletes by default; pass `--dry-run` (`-n`) to preview.

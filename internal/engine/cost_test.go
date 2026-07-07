@@ -160,9 +160,10 @@ func TestForecastCostReclaims(t *testing.T) {
 	cfg := &config.Config{
 		Landing: config.MediumList{"cloud"},
 		Media: map[string]config.Media{
-			// A tiny capacity forces the forecast over budget, and a short floor lets
+			// Capacity fits one run (make-room refuses a run that could NEVER fit)
+			// but not the forecast's accumulating dailies, and a short floor lets
 			// superseded fulls be reclaimed rather than pinned.
-			"cloud": {Type: "cloud", Capacity: "100", MinimumAge: "1s", Params: map[string]string{"url": "file://" + t.TempDir()}},
+			"cloud": {Type: "cloud", Capacity: "30000", MinimumAge: "1s", Params: map[string]string{"url": "file://" + t.TempDir()}},
 		},
 		Cycle:    "1d", // every simulated run is a fresh full, so older fulls become reclaimable
 		Sources:  []config.DLE{{Host: "localhost", Path: src}},

@@ -173,6 +173,7 @@ func (e *Engine) newConductor() *conductor.Conductor {
 		OpenWriter:   e.openWriter,
 		OpenReader:   e.openReader,
 		Preflight:    e.preflightDeps(),
+		MakeRoom:     e.acct.MakeRoom,
 		Flush:        e.Flush,
 		HoldingMedia: e.cfg.HoldingMedia(),
 		Workers:      e.cfg.Workers(),
@@ -181,4 +182,37 @@ func (e *Engine) newConductor() *conductor.Conductor {
 		RunSink:      e.runSink,
 		EstimateSink: e.estimateSink,
 	})
+}
+
+// MakeRoomForecast previews the pre-write reclamation a dump of plan would run,
+// per landing medium — `nb plan`'s window into capacity-as-a-promise: what
+// tonight's run costs in history (the archives make-room will reclaim), or the
+// fail-loud infeasibility the dump would refuse with.
+type MakeRoomForecast struct {
+	Medium   string
+	Incoming int64 // the plan's estimated bytes routed to this landing
+	Freed    int64 // bytes make-room would reclaim (0 = fits as-is)
+	Archives int   // archives those bytes come from
+	Err      error // non-nil: the dump would refuse (protected set + incoming exceed capacity)
+}
+
+// MakeRoomForecasts routes the plan's estimates to their landings (the same
+// routing the conductor uses) and previews each landing's make-room step.
+func (e *Engine) MakeRoomForecasts(plan *planner.Plan, now time.Time) []MakeRoomForecast {
+	incoming := map[string]int64{}
+	var order []string
+	for _, item := range plan.Items {
+		for _, landing := range e.landingsFor(item.DLE) {
+			if _, seen := incoming[landing]; !seen {
+				order = append(order, landing)
+			}
+			incoming[landing] += item.EstBytes
+		}
+	}
+	var out []MakeRoomForecast
+	for _, landing := range order {
+		freed, n, err := e.acct.MakeRoomPreview(landing, incoming[landing], now)
+		out = append(out, MakeRoomForecast{Medium: landing, Incoming: incoming[landing], Freed: freed, Archives: n, Err: err})
+	}
+	return out
 }

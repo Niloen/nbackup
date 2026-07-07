@@ -292,6 +292,21 @@ func (c *copier) prepareJobs(runID, fromMedia, targetMedia string, force bool, w
 // per target drive, up to `workers`, so a multi-drive library re-authors several at once. Source reads
 // run concurrently only when the source medium allows it (disk/cloud); a tape source stays serial.
 func (c *copier) runCopy(targetMedia, fromMedia string, spec archiveio.RunSpec, jobs []copyJob, logf Logf) error {
+	// Make room on a bounded target BEFORE the copy lands — capacity as a promise,
+	// and here with EXACT incoming bytes (the archives being copied are known), so
+	// no estimate risk. The one choke point both `nb copy` and `nb sync` cross;
+	// fails loud pre-write when the target's protected set cannot absorb the copy.
+	var incoming int64
+	for _, j := range jobs {
+		incoming += j.est
+	}
+	freed, err := c.acct.MakeRoom(targetMedia, incoming, spec.CreatedAt, logf)
+	if err != nil {
+		return fmt.Errorf("make room on %q for %s: %w", targetMedia, sizeutil.FormatBytes(incoming), err)
+	}
+	if freed > 0 {
+		logf.Log("made room on %q: reclaimed %s to fit the %s copy", targetMedia, sizeutil.FormatBytes(freed), sizeutil.FormatBytes(incoming))
+	}
 	return c.newConductor().CopyRun(context.Background(), targetMedia, fromMedia, spec, c.workers, spec.CreatedAt, logf, func(sp *spool.Spool, ro archivefs.ReadStore) error {
 		return c.transfer(context.Background(), jobs, fromMedia, targetMedia, sp.Ingest(targetMedia), ro, logf)
 	})

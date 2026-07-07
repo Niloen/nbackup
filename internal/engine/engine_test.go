@@ -2874,3 +2874,50 @@ func assertContent(t *testing.T, path, want string) {
 		t.Errorf("%s = %q, want %q", path, got, want)
 	}
 }
+
+// TestDumpMakesRoomOnLanding: capacity as a promise — the third daily full does
+// not fit beside the two before it, so the dump reclaims the oldest superseded
+// run BEFORE writing (no janitor prune involved), and the landing rolls to the
+// newest two runs. The floor never counts the incoming run, so old and new
+// coexist during the write: a window of N runs needs capacity for N+1.
+func TestDumpMakesRoomOnLanding(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), strings.Repeat("nightly-", 4096)) // ~33 KiB per full
+
+	cfg := &config.Config{
+		Landing: config.MediumList{"disk"},
+		Cycle:   "1d", // daily fulls: an older full is superseded and reclaimable
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Capacity: "95000", MinimumAge: "1s", Params: map[string]string{"path": t.TempDir()}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	for i, day := range []int{21, 22, 23} {
+		write(t, filepath.Join(src, "f.txt"), strings.Repeat(fmt.Sprintf("night-%d-", i), 4096))
+		if _, err := eng.Run(context.Background(), time.Date(2026, 6, day, 0, 0, 0, 0, time.UTC), nil); err != nil {
+			t.Fatalf("dump %d should make room instead of overshooting: %v", i+1, err)
+		}
+	}
+	runs := eng.cat.RunsOn("disk")
+	dates := make([]string, len(runs))
+	for i, r := range runs {
+		dates[i] = r.Date()
+	}
+	if len(runs) != 2 || dates[0] != "2026-06-22" || dates[1] != "2026-06-23" {
+		t.Fatalf("the landing should roll to the newest two runs, got %v", dates)
+	}
+	if over, used, capacity, err := eng.MediumOverCapacity("disk"); err != nil || over {
+		t.Fatalf("the landing must never exceed its capacity: used=%d capacity=%d err=%v", used, capacity, err)
+	}
+}

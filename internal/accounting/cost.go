@@ -78,7 +78,7 @@ func (a *Accountant) ForecastCost(start time.Time, plans []*planner.Plan) []Fore
 		// Reclaim against this medium's capacity, honoring the retention floor.
 		floor := retention.Compute(working, a.d.LandingMinAge, date)
 		var reclaimed int64
-		for _, r := range a.d.LandingProfile.Reclaim(working, floor, date) {
+		for _, r := range a.d.LandingProfile.Reclaim(a.d.LandingProfile.TotalBytes(), working, floor, date) {
 			reclaimed += r.Bytes
 			working = dropArchive(working, r.RunID, r.DLE)
 		}

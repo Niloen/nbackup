@@ -218,7 +218,7 @@ The source defaults to the landing medium; `--from` overrides it. See
 ```bash
 nb prune disk -n
 nb prune disk
-nb prune                     # prune every configured medium (hands-off cron form)
+nb prune                     # manually trim every configured medium (writes make their own room; not needed in cron)
 nb label lto lto-0001
 nb label --relabel lto lto-0042
 nb load lto 3

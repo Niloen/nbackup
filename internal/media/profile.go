@@ -34,14 +34,15 @@ type Profile interface {
 	// pool inventory reports against — independent of how many the catalog has
 	// actually seen and labeled so far.
 	Volumes() int64
-	// Reclaim chooses what to delete to satisfy this medium's capacity, given the
+	// Reclaim chooses what to delete to bring the medium's stored bytes down to
+	// target, given the
 	// retention floor (what must never be reclaimed, computed by the retention
 	// package). It returns the reclamations to perform, in deletion order. The
 	// granularity is the medium's own: an object store reclaims per archive
 	// (run+DLE); a whole-volume medium (tape) reclaims nothing here. It reasons over
 	// the medium's archives directly (each carrying its run tag) — a run is just
 	// their grouping, which reclamation does not need.
-	Reclaim(archives []record.Archive, keep Retention, now time.Time) []Reclamation
+	Reclaim(target int64, archives []record.Archive, keep Retention, now time.Time) []Reclamation
 }
 
 // Retention reports which archives reclamation must never delete — the floor the
@@ -96,22 +97,28 @@ func (p sizeProfile) VolumeSize() int64 { return 0 }
 // Volumes is 0: an object store carries no volume inventory to size a pool by.
 func (p sizeProfile) Volumes() int64 { return 0 }
 
-// Reclaim deletes the oldest non-protected archives until total <= capacity.
+// Reclaim deletes the oldest non-protected archives until total <= target — the
+// medium's capacity for a plain prune, capacity minus an incoming run's size for
+// the write path's make-room (capacity is a promise: room is freed BEFORE the
+// bytes land, the fslike sibling of tape's recycle-at-write rotation).
 // Reclamation is per archive (run+DLE): because the retention floor is per-archive (a
 // DLE's chain is independent of its run-mates'), an old run often holds one DLE whose
 // chain has moved on — reclaimable — beside another the chain still needs. Walking
 // archives oldest-first reclaims exactly the dead ones, freeing space a run-granular
 // pass would strand behind a single still-pinned DLE. Archives are ordered by their run
 // (run order, oldest first) then DLE for a deterministic plan.
-func (p sizeProfile) Reclaim(archives []record.Archive, keep Retention, now time.Time) []Reclamation {
+func (p sizeProfile) Reclaim(target int64, archives []record.Archive, keep Retention, now time.Time) []Reclamation {
 	if p.capacity <= 0 {
 		return nil // unbounded: nothing to reclaim
+	}
+	if target < 0 {
+		target = 0 // an incoming run larger than capacity: free everything unprotected
 	}
 	var total int64
 	for _, a := range archives {
 		total += a.Compressed
 	}
-	if total <= p.capacity {
+	if total <= target {
 		return nil
 	}
 	ordered := append([]record.Archive(nil), archives...)
@@ -123,7 +130,7 @@ func (p sizeProfile) Reclaim(archives []record.Archive, keep Retention, now time
 	})
 	var out []Reclamation
 	for _, a := range ordered {
-		if total <= p.capacity {
+		if total <= target {
 			return out
 		}
 		if keep.KeepsArchive(a.Run, a.DLE) {
@@ -183,7 +190,7 @@ func (p volumeProfile) Volumes() int64 { return p.volumes }
 // (`librarian.Advance` / `acceptOrRecycle`), keeping the same label and advancing its
 // epoch. Tape capacity is structural (the depth of the label pool is the retention), so
 // there is nothing for a capacity-driven prune to delete here.
-func (p volumeProfile) Reclaim(archives []record.Archive, keep Retention, now time.Time) []Reclamation {
+func (p volumeProfile) Reclaim(target int64, archives []record.Archive, keep Retention, now time.Time) []Reclamation {
 	return nil
 }
 

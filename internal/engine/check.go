@@ -9,6 +9,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/accounting"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/depot"
@@ -50,10 +51,11 @@ type HostCheck struct {
 // archivers, transform options) and the depot (medium opens) — and never writes
 // backup data. It is stateless; the engine builds one per Check call.
 type checker struct {
-	cfg *config.Config
-	tc  *toolchain
-	dep *depot.Depot
-	cat *catalog.Catalog
+	cfg  *config.Config
+	tc   *toolchain
+	dep  *depot.Depot
+	cat  *catalog.Catalog
+	acct *accounting.Accountant
 }
 
 // Check verifies the configuration is runnable: the server side always, and each source
@@ -62,7 +64,7 @@ type checker struct {
 // host is skipped (not probed) when connect is false (the `--offline` view). It never
 // writes backup data.
 func (e *Engine) Check(connect bool) *CheckReport {
-	return (&checker{cfg: e.cfg, tc: e.tc, dep: e.dep, cat: e.cat}).Check(connect)
+	return (&checker{cfg: e.cfg, tc: e.tc, dep: e.dep, cat: e.cat, acct: e.acct}).Check(connect)
 }
 
 // Check runs the full server + per-host probe; see the Engine facade for the contract.
@@ -70,6 +72,7 @@ func (c *checker) Check(connect bool) *CheckReport {
 	rep := &CheckReport{}
 	c.checkServer(rep)
 	c.checkStaleness(rep)
+	c.checkCapacity(rep)
 	for _, host := range c.dleHostsInOrder() {
 		rep.Hosts = append(rep.Hosts, c.checkHost(rep, host, connect))
 	}
@@ -105,6 +108,16 @@ func (c *checker) checkStaleness(rep *CheckReport) {
 		}
 		rep.add(&rep.Server, false, false, fmt.Sprintf("staleness: %s last backed up %s ago, older than one cycle (%s)",
 			disp, sizeutil.FormatDuration(time.Since(s.LastBackup)), sizeutil.FormatDuration(window)))
+	}
+}
+
+// checkCapacity surfaces each bounded medium's make-room feasibility: capacity is
+// a promise the dump keeps by reclaiming before writing, so a protected set that
+// leaves no room for a typical run is tomorrow's refusal, visible today. Warnings,
+// not failures — the next real plan may be smaller than the newest run.
+func (c *checker) checkCapacity(rep *CheckReport) {
+	for _, rc := range c.acct.RoomChecks(time.Now()) {
+		rep.add(&rep.Server, rc.OK, !rc.OK, rc.Msg)
 	}
 }
 

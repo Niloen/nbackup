@@ -16,6 +16,7 @@ import (
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/scheduler"
+	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/spool"
 )
 
@@ -89,6 +90,32 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 	}
 	if _, err := scheduler.Preflight(c.d.Preflight, dles, true); err != nil {
 		return nil, err
+	}
+
+	// Make room on each bounded landing for tonight's estimated bytes BEFORE any
+	// byte lands (fslike media; a labeled pool's rotation reclaims at the write
+	// itself). An unknown estimate (a first dump) contributes 0 — the reactive
+	// no-space path stays the backstop for estimate misses.
+	if c.d.MakeRoom != nil {
+		incoming := map[string]int64{}
+		var order []string
+		for _, item := range plan.Items {
+			for _, landing := range c.d.LandingsFor(item) {
+				if _, seen := incoming[landing]; !seen {
+					order = append(order, landing)
+				}
+				incoming[landing] += item.EstBytes
+			}
+		}
+		for _, landing := range order {
+			freed, err := c.d.MakeRoom(landing, incoming[landing], now, logf)
+			if err != nil {
+				return nil, fmt.Errorf("make room on %q for tonight's ~%s: %w", landing, sizeutil.FormatBytes(incoming[landing]), err)
+			}
+			if freed > 0 {
+				logf.Log("made room on %q: reclaimed %s to fit tonight's ~%s", landing, sizeutil.FormatBytes(freed), sizeutil.FormatBytes(incoming[landing]))
+			}
+		}
 	}
 
 	runID := c.mintRunID(now, time.Local)

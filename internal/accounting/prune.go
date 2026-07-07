@@ -19,6 +19,96 @@ import (
 // — pruning one medium never touches a copy on another. Any configured medium can
 // be pruned (not only the landing one), so an offsite tier can be trimmed too.
 func (a *Accountant) Prune(mediumName string, now time.Time, apply bool, out logf.Logf) (eligible int, swept int, freed int64, err error) {
+	profile, err := a.ProfileFor(mediumName)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return a.reclaimTo(mediumName, a.capacityFor(mediumName, profile), now, apply, out)
+}
+
+// MakeRoom frees space on a bounded medium for incoming bytes BEFORE they land —
+// capacity as a promise: the fslike sibling of tape's recycle-at-write rotation,
+// run by `nb dump` (plan estimate) and `nb copy`/`nb sync` (exact bytes) so a
+// write never overshoots the declared capacity and then waits for a janitor.
+// It reclaims the oldest Floor-cleared archives down to capacity−incoming, and
+// FAILS LOUD — before any byte is written — when the protected recovery set plus
+// the incoming bytes cannot fit (see planRoom). A no-op for an unbounded medium
+// or a labeled pool (whose rotation reclaims at the write itself).
+func (a *Accountant) MakeRoom(mediumName string, incoming int64, now time.Time, out logf.Logf) (freed int64, err error) {
+	plan, err := a.planRoom(mediumName, incoming, now)
+	if err != nil || !plan.need {
+		return 0, err
+	}
+	out.Log("make room on %q: reclaiming to fit ~%s under %s (%s used)",
+		mediumName, sizeutil.FormatBytes(incoming), sizeutil.FormatBytes(plan.capacity), sizeutil.FormatBytes(plan.used))
+	_, _, freed, err = a.reclaimTo(mediumName, plan.target, now, true, out)
+	return freed, err
+}
+
+// MakeRoomPreview reports what MakeRoom would do for incoming bytes on medium
+// without touching anything: (0, 0, nil) when the write fits as-is, the bytes and
+// archive count a reclaim would free, or the same fail-loud error MakeRoom raises
+// — `nb plan`'s dry view of the dump's pre-write step, so the plan shows what
+// tonight costs in history.
+func (a *Accountant) MakeRoomPreview(mediumName string, incoming int64, now time.Time) (freed int64, archives int, err error) {
+	plan, err := a.planRoom(mediumName, incoming, now)
+	if err != nil || !plan.need {
+		return 0, 0, err
+	}
+	profile, err := a.ProfileFor(mediumName)
+	if err != nil {
+		return 0, 0, err
+	}
+	def := a.d.Cfg.Media[mediumName]
+	all := a.d.Cat.ArchivesOn(mediumName)
+	floor := retention.Compute(all, a.d.Cfg.MinAgeFor(def), now)
+	for _, r := range profile.Reclaim(plan.target, all, floor, now) {
+		freed += r.Bytes
+		archives++
+	}
+	return freed, archives, nil
+}
+
+// roomPlan is the make-room decision MakeRoom executes and MakeRoomPreview
+// reports: whether a reclaim is needed and down to what target.
+type roomPlan struct {
+	capacity, used, target int64
+	need                   bool
+}
+
+// planRoom decides the make-room step for incoming bytes on a medium — the one
+// place the fits/reclaim/infeasible triage lives. Infeasible (the protected
+// recovery set plus the incoming bytes exceed capacity) is the returned error:
+// pruning could never free enough, so the honest answers are more capacity or
+// trimmed retention.
+func (a *Accountant) planRoom(mediumName string, incoming int64, now time.Time) (roomPlan, error) {
+	profile, err := a.ProfileFor(mediumName)
+	if err != nil {
+		return roomPlan{}, err
+	}
+	capacity := a.capacityFor(mediumName, profile)
+	if capacity <= 0 || incoming <= 0 {
+		return roomPlan{}, nil
+	}
+	used := a.d.Cat.MediumBytes(mediumName)
+	if used+incoming <= capacity {
+		return roomPlan{capacity: capacity, used: used}, nil // fits as-is
+	}
+	residual, _, err := a.MediumProtected(mediumName, now)
+	if err != nil {
+		return roomPlan{}, err
+	}
+	if residual+incoming > capacity {
+		return roomPlan{}, fmt.Errorf("medium %q: capacity %s cannot hold the incoming ~%s plus the %s retention protects — increase capacity or trim retention",
+			mediumName, sizeutil.FormatBytes(capacity), sizeutil.FormatBytes(incoming), sizeutil.FormatBytes(residual))
+	}
+	return roomPlan{capacity: capacity, used: used, target: capacity - incoming, need: true}, nil
+}
+
+// reclaimTo is the shared reclamation core behind Prune (target = capacity) and
+// MakeRoom (target = capacity − incoming): delete the oldest Floor-cleared
+// archives until the medium's stored bytes fit the target.
+func (a *Accountant) reclaimTo(mediumName string, target int64, now time.Time, apply bool, out logf.Logf) (eligible int, swept int, freed int64, err error) {
 	def, ok := a.d.Cfg.Media[mediumName]
 	if !ok {
 		return 0, 0, 0, fmt.Errorf("unknown medium %q", mediumName)
@@ -36,7 +126,7 @@ func (a *Accountant) Prune(mediumName string, now time.Time, apply bool, out log
 	// another the chain still needs. The map is keyed by archiveio.Ref with Level left
 	// zero on both sides — (run,DLE) already names an archive uniquely.
 	reclaim := map[archiveio.Ref]media.Reclamation{}
-	for _, r := range profile.Reclaim(archives, floor, now) {
+	for _, r := range profile.Reclaim(target, archives, floor, now) {
 		reclaim[archiveio.Ref{Run: r.RunID, DLE: r.DLE}] = r
 	}
 

@@ -71,8 +71,16 @@ type Deps struct {
 	// catalog; the closure reads the View's copy (sound because a session never reads
 	// its own writes). Which media it may mount is the media layer's business: a mount
 	// onto a window-written medium is refused and the read fails over to another copy.
-	OpenReader   func(view *catalog.View) archivefs.ReadStore
-	Preflight    scheduler.PreflightDeps // the shared dump pre-flight closures (run strict here)
+	OpenReader func(view *catalog.View) archivefs.ReadStore
+	Preflight  scheduler.PreflightDeps // the shared dump pre-flight closures (run strict here)
+	// MakeRoom frees space on a bounded landing for the plan's estimated bytes
+	// BEFORE the run writes — capacity as a promise (accounting.MakeRoom). Run per
+	// distinct landing, pre-window (the same claim-exempt slot a prune uses); it
+	// fails the run loud when the protected set plus tonight's estimate cannot
+	// fit. What it frees is logged into the run's own log, so the nightly report
+	// carries the reclamation that used to be a separate cron prune. Nil skips
+	// (tests).
+	MakeRoom     func(medium string, incoming int64, now time.Time, lf logf.Logf) (freed int64, err error)
 	Flush        func(now time.Time, lf logf.Logf) (int, error)
 	HoldingMedia []string
 	Workers      int

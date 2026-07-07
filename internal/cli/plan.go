@@ -87,16 +87,20 @@ func newPlanCmd(a *app) *cobra.Command {
 			fmt.Printf("\nCatalog currently stored: %s\n", sizeutil.FormatBytes(current))
 			fmt.Printf("This run (estimated): %s\n", runEstimateLine(estTotal, unknownEst))
 			if capacity > 0 {
-				over, pct := eng.CapacityStatus(current)
+				_, pct := eng.CapacityStatus(current)
 				fmt.Printf("Capacity: %s (%.1f%% used)\n", sizeutil.FormatBytes(capacity), pct)
-				if over {
-					fmt.Printf("WARNING: over capacity; run `nb prune` to reclaim oldest runs\n")
-				} else if current+estTotal > capacity {
-					// "% used" counts only what is already stored, so a run far larger
-					// than capacity can still show a small percentage — call out that
-					// this run would not fit rather than leaving the reader to compare.
-					fmt.Printf("WARNING: this run (~%s) would exceed the %s capacity — grow capacity or lengthen the cycle\n",
-						sizeutil.FormatBytes(estTotal), sizeutil.FormatBytes(capacity))
+				// Capacity is a promise: the dump makes room BEFORE writing, so the
+				// plan shows what tonight costs in history — the archives the
+				// pre-write reclaim will free per landing — or the refusal the dump
+				// would fail loud with when retention alone exceeds the budget.
+				for _, f := range eng.MakeRoomForecasts(plan, date) {
+					switch {
+					case f.Err != nil:
+						fmt.Printf("WARNING: the dump would refuse: %v\n", f.Err)
+					case f.Freed > 0:
+						fmt.Printf("Make room: will reclaim ~%s from %d archive(s) on %q before dumping\n",
+							sizeutil.FormatBytes(f.Freed), f.Archives, f.Medium)
+					}
 				}
 			} else {
 				fmt.Printf("Capacity: unbounded\n")

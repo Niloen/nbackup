@@ -16,9 +16,11 @@ package accounting
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/retention"
+	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
 // Capacity returns the landing medium's total retainable bytes (0 = unbounded).
@@ -85,8 +87,12 @@ func (a *Accountant) MediumProtected(name string, now time.Time) (residual, capa
 	capacity = a.capacityFor(name, prof) // registry-derived for a bare drive's pool
 	archives := a.d.Cat.ArchivesOn(name)
 	floor := retention.Compute(archives, a.d.Cfg.MinAgeFor(def), now)
+	// Target 0: reclaimable is everything the Floor clears, not merely what a
+	// prune-to-capacity would bother to free — the residual is the truly
+	// protected set, which is what capacity feasibility (make-room's fail-loud,
+	// the retention-pressure warn) must be measured against.
 	var reclaimable int64
-	for _, r := range prof.Reclaim(archives, floor, now) {
+	for _, r := range prof.Reclaim(0, archives, floor, now) {
 		reclaimable += r.Bytes
 	}
 	residual = a.d.Cat.MediumBytes(name) - reclaimable
@@ -111,6 +117,53 @@ func (a *Accountant) MediumProtectionIsAgeBound(name string, now time.Time) bool
 		}
 	}
 	return true
+}
+
+// RoomCheck is one bounded medium's make-room feasibility verdict, for `nb check`.
+type RoomCheck struct {
+	Medium string
+	OK     bool
+	Msg    string
+}
+
+// RoomChecks verifies, per bounded address-identified medium, that a run the size
+// of the newest one could still be made room for — capacity as a promise means
+// dumps reclaim BEFORE writing, which only works while the retention-protected
+// set leaves space for a run. Labeled pools are skipped (their rotation reclaims
+// whole volumes at the write; "no volume with room" is their failure shape), as
+// are unbounded media. Sized by the newest run's bytes as the stand-in estimate.
+func (a *Accountant) RoomChecks(now time.Time) []RoomCheck {
+	names := make([]string, 0, len(a.d.Cfg.Media))
+	for name := range a.d.Cfg.Media {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []RoomCheck
+	for _, name := range names {
+		prof, err := a.ProfileFor(name)
+		if err != nil {
+			continue
+		}
+		capacity := a.capacityFor(name, prof)
+		if capacity <= 0 || len(a.volumesInPool(name)) > 0 {
+			continue
+		}
+		var lastRun int64
+		if runs := a.d.Cat.RunsOn(name); len(runs) > 0 {
+			lastRun = runs[len(runs)-1].TotalBytes()
+		}
+		if lastRun == 0 {
+			continue // nothing to size a run by yet (fresh medium)
+		}
+		if _, _, err := a.MakeRoomPreview(name, lastRun, now); err != nil {
+			out = append(out, RoomCheck{Medium: name, OK: false,
+				Msg: fmt.Sprintf("capacity: %v (sized by the newest run, ~%s)", err, sizeutil.FormatBytes(lastRun))})
+			continue
+		}
+		out = append(out, RoomCheck{Medium: name, OK: true,
+			Msg: fmt.Sprintf("capacity: %s can absorb a run like the newest (~%s) after reclaiming", name, sizeutil.FormatBytes(lastRun))})
+	}
+	return out
 }
 
 // ProjectedOverCapacity reports whether the named medium would exceed its capacity

@@ -26,7 +26,7 @@ func TestSizeProfileReclaimsPerArchive(t *testing.T) {
 	keep := keepSet{"run-2026-01-01.001|db": true, "run-2026-02-01.001|db": true}
 	p := sizeProfile{capacity: 250} // total 400 → free 150 (two archives)
 
-	got := p.Reclaim(archives, keep, time.Time{})
+	got := p.Reclaim(p.TotalBytes(), archives, keep, time.Time{})
 	if len(got) != 2 {
 		t.Fatalf("reclaimed %d archives, want 2: %+v", len(got), got)
 	}

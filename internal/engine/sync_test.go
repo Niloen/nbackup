@@ -181,10 +181,12 @@ func TestSyncSelectionSince(t *testing.T) {
 	}
 }
 
-// TestSyncOverCapacityStillCopies exercises the capacity projection: syncing a backlog
-// bigger than the target's capacity surfaces the overshoot (OverCapacity, ProjectedBytes)
-// yet still copies — sync does not prune — recording CopiedBytes for the run record.
-func TestSyncOverCapacityStillCopies(t *testing.T) {
+// TestSyncRefusesTargetTooSmallForOneRun: capacity is a promise — a copy that
+// could NEVER fit (one run bigger than the whole target) is refused loud BEFORE
+// any byte lands, with the increase-capacity/trim-retention message, instead of
+// silently blowing the budget forever. (The old contract copied anyway and
+// warned; the honest fix for an undersized offsite target is sizing it.)
+func TestSyncRefusesTargetTooSmallForOneRun(t *testing.T) {
 	src := t.TempDir()
 	write(t, filepath.Join(src, "f.txt"), strings.Repeat("payload-", 4096)) // ~32 KiB, well past a 10-byte cap
 
@@ -212,18 +214,77 @@ func TestSyncOverCapacityStillCopies(t *testing.T) {
 		t.Fatalf("dump: %v", err)
 	}
 
-	report, err := eng.SyncTo("", "tiny", SyncSelection{}, true, false, nil)
+	_, err = eng.SyncTo("", "tiny", SyncSelection{}, true, false, nil)
+	if err == nil {
+		t.Fatal("a run that can never fit the target must refuse before writing")
+	}
+	if !strings.Contains(err.Error(), "increase capacity or trim retention") {
+		t.Fatalf("the refusal should carry the capacity remedy, got: %v", err)
+	}
+	if n := len(eng.cat.RunsOn("tiny")); n != 0 {
+		t.Fatalf("nothing may land on the refused target, got %d run(s)", n)
+	}
+}
+
+// TestSyncMakesRoomOnTarget: an offsite target sized for two runs becomes a
+// rolling window — syncing a third run reclaims the oldest superseded copy FIRST
+// (capacity as a promise: room is freed before the bytes land), rather than
+// overshooting and waiting for a janitor prune. The floor never counts the
+// incoming run (the same rule as tape's rotation), so old and new coexist during
+// the copy: a window of N runs needs capacity for N+1 — Amanda's
+// tapecycle >= runspercycle+1, in bytes.
+func TestSyncMakesRoomOnTarget(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), strings.Repeat("payload-", 4096)) // ~32 KiB per full
+
+	cfg := &config.Config{
+		Landing: config.MediumList{"disk"},
+		Cycle:   "1d", // daily fulls: yesterday's full is superseded and reclaimable
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			// Room for two ~41 KiB runs plus slack, not three.
+			"tiny": {Type: "cloud", Capacity: "95000", MinimumAge: "1s", Params: map[string]string{"url": "file://" + t.TempDir()}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
 	if err != nil {
-		t.Fatalf("sync should copy despite overshoot: %v", err)
+		t.Fatal(err)
 	}
-	if !report.OverCapacity() {
-		t.Errorf("backlog should overshoot the 10-byte target: projected=%d cap=%d", report.ProjectedBytes, report.TargetCapacity)
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
 	}
-	if report.ProjectedBytes <= report.TargetCapacity {
-		t.Errorf("projected bytes %d should exceed capacity %d", report.ProjectedBytes, report.TargetCapacity)
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("dump 1: %v", err)
 	}
-	if report.Copied() != 1 || report.CopiedBytes() <= 0 {
-		t.Errorf("sync must still copy: copied=%d bytes=%d", report.Copied(), report.CopiedBytes())
+	if _, err := eng.SyncTo("", "tiny", SyncSelection{}, true, false, nil); err != nil {
+		t.Fatalf("sync 1 should fit an empty target: %v", err)
+	}
+	write(t, filepath.Join(src, "f.txt"), strings.Repeat("PAYLOAD-", 4096)) // changed content, fresh full
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("dump 2: %v", err)
+	}
+	if _, err := eng.SyncTo("", "tiny", SyncSelection{}, true, false, nil); err != nil {
+		t.Fatalf("sync 2 should fit beside the first copy: %v", err)
+	}
+	write(t, filepath.Join(src, "f.txt"), strings.Repeat("payload+", 4096))
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("dump 3: %v", err)
+	}
+	if _, err := eng.SyncTo("", "tiny", SyncSelection{}, true, false, nil); err != nil {
+		t.Fatalf("sync 3 should make room by reclaiming the superseded oldest copy: %v", err)
+	}
+	runs := eng.cat.RunsOn("tiny")
+	dates := make([]string, len(runs))
+	for i, r := range runs {
+		dates[i] = r.Date()
+	}
+	if len(runs) != 2 || dates[0] != "2026-06-22" || dates[1] != "2026-06-23" {
+		t.Fatalf("the target should roll to the newest two runs, got %v", dates)
 	}
 }
 

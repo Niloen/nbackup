@@ -192,7 +192,7 @@ details one item when given an id (`nb run run-2026-06-21.020000`, `nb medium lt
 | `nb label`           | Label a volume (required for tape before its first dump) |
 | `nb load`            | Load a tape into a medium's drive (by slot number or `--label`) |
 | `nb login <medium>`  | Bootstrap a medium's credentials (e.g. Google Drive OAuth) |
-| `nb prune [medium]`   | Delete runs past each medium's cycle/capacity limits (all media if none named)  |
+| `nb prune [medium]`   | Manually trim runs past cycle/capacity limits — not needed in cron: writes make their own room |
 | `nb reset <dle>`     | Schedule a DLE for a full on its next run (fresh chain)  |
 | `nb flush`           | Drain a holding disk's un-flushed archives to the landing |
 | `nb rebuild`         | Rebuild the catalog from media (additive: feed tapes one at a time) |
@@ -498,7 +498,7 @@ only ever a stderr warning: it never fails or blocks the backup. So a complete
 hands-off cron line is:
 
 ```sh
-nb dump && nb sync && nb prune && nb drill --unattended; nb report --notify
+nb dump && nb sync && nb drill --unattended; nb report --notify
 ```
 
 ### Recover (restore a whole DLE, or pick files)
@@ -588,7 +588,7 @@ nb drill                       # drill the riskiest sample on the landing copy
 nb drill --dry-run             # preview: what would be drilled + a posture audit
 nb drill --from cloud --tier structural   # routine offsite check
 nb drill --tier stock          # restore via the documented gpg/zstd/tar one-liner
-nb dump && nb sync && nb prune && nb drill --unattended; nb report --notify   # hands-off cron line
+nb dump && nb sync && nb drill --unattended; nb report --notify   # hands-off cron line
 ```
 
 A drill **selects** risk-first: it rotates DLEs so each is drilled within a window,
@@ -799,7 +799,15 @@ sources:
 
 Each medium declares its **capacity** — the space NBackup may use there. Disk and
 cloud spell it directly (`capacity: 20TB`); a tape changer derives it as
-`slots × volume_size` (`0` = unbounded). Capacity is the headline knob: the planner
+`slots × volume_size` (`0` = unbounded). **Capacity is a promise**: a dump (and a
+sync onto a bounded target) reclaims the oldest runs past retention BEFORE
+writing, so a medium never exceeds its budget and then waits for a janitor —
+`nb prune` is a manual lever (after lowering capacity or tightening retention),
+not a cron job. Because the old and the new run coexist during a write, size
+capacity for one full retention window PLUS the next run (Amanda's
+`tapecycle >= runspercycle+1`, in bytes); `nb plan` previews what tonight's run
+will reclaim and `nb check` warns when retention alone is crowding the budget.
+Capacity is the headline knob: the planner
 uses it — promotion fills free space, pruning reclaims to stay within it.
 `minimum_age` is an optional per-medium safety floor (defaults to one cycle) — long
 enough that yesterday's backup never overwrites a run still inside the recovery window.
