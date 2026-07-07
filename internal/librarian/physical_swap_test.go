@@ -20,6 +20,10 @@ type handOp struct {
 	swaps int
 }
 
+// ConfirmLabel: the hand operator accepts labeling blanks (tests that decline
+// use their own operator).
+func (o *handOp) ConfirmLabel(string, string) bool { return true }
+
 func (o *handOp) Swap(r SwapRequest) (string, bool) {
 	if len(r.Shelf) != 0 {
 		panic("a real drive must present an empty shelf")
@@ -130,5 +134,92 @@ func TestLoadHintMatchesShape(t *testing.T) {
 	sim := New(v, "pool", cat, nil, false, 0)
 	if got := sim.loadHint(""); got != "load one with `nb load pool <slot>`" {
 		t.Fatalf("sim hint = %q", got)
+	}
+}
+
+// labelingOp scripts blank-label confirmations on a real drive: each Swap
+// inserts the next queued reel (possibly blank), and ConfirmLabel answers from
+// the answers queue.
+type labelingOp struct {
+	reel    *fakeReel
+	inserts []fakeReel
+	answers []bool
+	asked   []string // proposed names, for assertions
+}
+
+func (o *labelingOp) Swap(SwapRequest) (string, bool) {
+	if len(o.inserts) == 0 {
+		return "", false
+	}
+	*o.reel = o.inserts[0]
+	o.inserts = o.inserts[1:]
+	return "", true
+}
+
+func (o *labelingOp) ConfirmLabel(_, name string) bool {
+	o.asked = append(o.asked, name)
+	if len(o.answers) == 0 {
+		return false
+	}
+	a := o.answers[0]
+	o.answers = o.answers[1:]
+	return a
+}
+
+// TestBlankConfirmLabels: with auto_label OFF, a blank reel inserted at an
+// INTERACTIVE swap asks the operator instead of failing the run — a yes labels
+// it and the write proceeds; auto_label:false only forbids labeling unattended.
+func TestBlankConfirmLabels(t *testing.T) {
+	now := time.Now()
+	cat, err := catalog.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reel := &fakeReel{capacity: 1000} // empty drive... a blank reel, unlabeled
+	reel.labeled = false
+	op := &labelingOp{reel: reel, inserts: []fakeReel{{labeled: false, capacity: 1000}}, answers: []bool{true}}
+	l := New(fakeChanger{fakeDrive{reel}}, "pool", cat, op, false /* auto_label OFF */, 0)
+
+	name, _, err := l.PrepareWrite(true, "", now, nil)
+	if err != nil {
+		t.Fatalf("a confirmed blank should be labeled and accepted: %v", err)
+	}
+	if len(op.asked) == 0 {
+		t.Fatal("the operator should have been asked to confirm the label")
+	}
+	if name != op.asked[len(op.asked)-1] {
+		t.Fatalf("accepted %q, want the confirmed proposed name %q", name, op.asked[0])
+	}
+	if v, ok := cat.Volume(name); !ok || v.Label.Pool != "pool" {
+		t.Fatalf("the confirmed label should be recorded, got %+v ok=%v", v, ok)
+	}
+}
+
+// TestBlankDeclineReprompts: declining the label must NOT abort the run — the
+// swap loop re-prompts, and inserting a labeled reusable reel then proceeds.
+func TestBlankDeclineReprompts(t *testing.T) {
+	now := time.Now()
+	cat, err := catalog.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reel := &fakeReel{capacity: 1000}
+	op := &labelingOp{reel: reel,
+		inserts: []fakeReel{
+			{labeled: false, capacity: 1000}, // first insert: blank — operator declines labeling
+			{lbl: record.Label{Name: "T9", Pool: "pool", Epoch: 1, WrittenAt: now}, labeled: true, capacity: 1000},
+		},
+		answers: []bool{false}}
+	l := New(fakeChanger{fakeDrive{reel}}, "pool", cat, op, false, 0)
+
+	name, _, err := l.PrepareWrite(true, "", now, nil)
+	if err != nil {
+		t.Fatalf("declining a blank should re-prompt, not fail the run: %v", err)
+	}
+	if name != "T9" {
+		t.Fatalf("accepted %q, want the reusable T9 inserted after the decline", name)
+	}
+	if len(op.inserts) != 0 {
+		t.Fatal("both queued inserts should have been consumed")
 	}
 }

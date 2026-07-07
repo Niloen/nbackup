@@ -229,20 +229,13 @@ func (stdinOperator) Swap(r librarian.SwapRequest) (string, bool) {
 	}
 	if len(r.Shelf) == 0 {
 		// A REAL drive: no addressable slots, so the shelf is the operator's own,
-		// invisible to software. Ask for the physical swap and return on Enter —
-		// insertChoice is a no-op with no slots, and the librarian re-reads the
-		// drive, so the label protocol identifies (and verifies) whatever reel the
-		// human actually inserted. The empty reel id is deliberate: an unnamed
-		// physical swap is tracked by the label read afterwards, never by id.
-		want := r.Need
-		if want == "" {
-			want = r.Expect
-		}
-		if want != "" {
-			fmt.Printf("insert tape %q into the drive and press Enter (Ctrl-D aborts): ", want)
-		} else {
-			fmt.Print("insert a writable tape into the drive and press Enter (Ctrl-D aborts): ")
-		}
+		// invisible to software. Ask for the physical swap — enumerating the
+		// options this write actually accepts — and return on Enter: insertChoice
+		// is a no-op with no slots, and the librarian re-reads the drive, so the
+		// label protocol identifies (and verifies) whatever reel the human
+		// actually inserted. The empty reel id is deliberate: an unnamed physical
+		// swap is tracked by the label read afterwards, never by id.
+		fmt.Printf("%s, then press Enter (Ctrl-D aborts): ", insertOptions(r))
 		line, err := stdinReader.ReadString('\n')
 		if err != nil || strings.TrimSpace(line) != "" {
 			// EOF, or the operator typed something — there is nothing to choose
@@ -287,6 +280,42 @@ func (stdinOperator) Swap(r librarian.SwapRequest) (string, bool) {
 	}
 	fmt.Printf("no reel %q in the room\n", choice)
 	return "", false
+}
+
+// insertOptions phrases what the operator may physically insert for this swap.
+// A read (Need set) accepts exactly one volume; a write accepts the expected
+// reusable tape, any other reusable one, or a blank — whose consequence depends
+// on auto_label (labeled silently vs a y/N confirmation).
+func insertOptions(r librarian.SwapRequest) string {
+	if r.Need != "" {
+		return fmt.Sprintf("insert tape %q into the drive", r.Need)
+	}
+	blank := "a blank tape (you'll be asked to label it)"
+	if r.AutoLabel {
+		blank = "a blank tape (labeled automatically)"
+	}
+	if r.Expect != "" {
+		return fmt.Sprintf("insert tape %q (recycled for this run), another reusable tape, or %s", r.Expect, blank)
+	}
+	return fmt.Sprintf("insert a writable tape or %s", blank)
+}
+
+// ConfirmLabel asks the operator whether the blank reel just inserted may be
+// labeled and consumed by the pool — the interactive authorization
+// auto_label:false withholds from unattended runs. Declining re-prompts the
+// swap; it never aborts the run.
+func (stdinOperator) ConfirmLabel(medium, name string) bool {
+	fmt.Printf("the inserted tape is blank; label it %q for pool %q and continue? [y/N]: ", name, medium)
+	line, err := stdinReader.ReadString('\n')
+	if err != nil {
+		fmt.Println()
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true
+	}
+	return false
 }
 
 // suggestReel is the reel the engine would prefer: the one carrying the needed

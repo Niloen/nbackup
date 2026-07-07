@@ -66,7 +66,11 @@ func (l *Librarian) resolveLabel(lv media.Labeled, now time.Time) (record.Label,
 	lbl, labeled, err := lv.ReadLabel()
 	switch {
 	case errors.Is(err, media.ErrNoVolume):
-		return record.Label{}, reloadableErr("medium %q has no volume loaded; %s, or label a blank one with `nb label %s <name>`", l.medium, l.loadHint(""), l.medium)
+		// A bare fact: the surfaces attach the advice their context allows — the
+		// interactive prompt enumerates insertable options itself, and the
+		// unattended write wrapper says how to retry (where the run's lock is
+		// released, so `nb label` is actually runnable).
+		return record.Label{}, reloadableErr("medium %q has no volume loaded", l.medium)
 	case errors.Is(err, media.ErrForeignVolume):
 		return record.Label{}, reloadableErr("medium %q holds non-NBackup data; refusing to overwrite — relabel it explicitly with `nb label --force %s <name>`", l.medium, l.medium)
 	case err != nil:
@@ -75,10 +79,21 @@ func (l *Librarian) resolveLabel(lv media.Labeled, now time.Time) (record.Label,
 		// a clear refusal a swap can resolve, not the raw decoder error.
 		return record.Label{}, reloadableErr("medium %q holds unrecognized or corrupt data (%v); refusing to overwrite — relabel it explicitly with `nb label --force %s <name>`", l.medium, err, l.medium)
 	case !labeled: // blank volume
+		name := l.autoLabelName(now)
 		if !l.autoLabel {
-			return record.Label{}, reloadable{fmt.Errorf("medium %q has a blank/unlabeled reel loaded: %w", l.medium, errBlankNeedsLabel)}
+			// auto_label:false forbids labeling UNATTENDED; an interactive
+			// operator's explicit yes is the authorization it withholds. Declining
+			// re-prompts for a different reel (reloadable) rather than failing the
+			// whole run — only the unattended case keeps the fail-fast (see
+			// errBlankNeedsLabel: re-prompting cannot fix it without a human).
+			if l.op == nil {
+				return record.Label{}, reloadable{fmt.Errorf("medium %q has a blank/unlabeled reel loaded: %w", l.medium, errBlankNeedsLabel)}
+			}
+			if !l.op.ConfirmLabel(l.medium, name) {
+				return record.Label{}, reloadableErr("medium %q: the blank reel was not labeled; insert a different tape", l.medium)
+			}
 		}
-		lbl = record.Label{Name: l.autoLabelName(now), Pool: l.medium, Epoch: 1, WrittenAt: now}
+		lbl = record.Label{Name: name, Pool: l.medium, Epoch: 1, WrittenAt: now}
 		if err := lv.WriteLabel(lbl); err != nil {
 			return record.Label{}, err
 		}

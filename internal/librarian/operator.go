@@ -24,7 +24,7 @@ func (l *Librarian) promptSwap(need, expect string, cause error) (string, bool) 
 	if cause != nil {
 		reason = cause.Error()
 	}
-	return l.op.Swap(SwapRequest{Medium: l.medium, Reason: reason, Need: need, Expect: expect, Loaded: loaded, Shelf: room})
+	return l.op.Swap(SwapRequest{Medium: l.medium, Reason: reason, Need: need, Expect: expect, Loaded: loaded, Shelf: room, AutoLabel: l.autoLabel})
 }
 
 // room lists the cartridges available to load into the drive — every occupied slot

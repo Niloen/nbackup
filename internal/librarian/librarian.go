@@ -36,9 +36,18 @@ import (
 type Operator interface {
 	// Swap asks the operator to load a volume for the stated need and returns the
 	// chosen volume's id (from req.Shelf), or ok=false to abort (leaving the drive
-	// unchanged). (The CLI presents this as a tape/reel swap; the seam itself is
-	// medium-neutral so a future removable medium can reuse it.)
+	// unchanged). A REAL drive presents an empty Shelf — the operator swaps
+	// physically and Swap returns ("", true); the librarian identifies the reel by
+	// its label read. (The CLI presents this as a tape/reel swap; the seam itself
+	// is medium-neutral so a future removable medium can reuse it.)
 	Swap(req SwapRequest) (volume string, ok bool)
+	// ConfirmLabel asks whether a blank volume just presented for writing may be
+	// labeled name (and thus consumed by the pool). It is what makes
+	// auto_label:false mean "never label UNATTENDED" rather than "abort the run on
+	// a blank": the interactive operator's yes IS the authorization auto_label
+	// would have granted. Declining is not an abort — the swap loop re-prompts for
+	// a different reel.
+	ConfirmLabel(medium, name string) bool
 }
 
 // SwapRequest describes why a manual tape swap is needed and what is available.
@@ -49,6 +58,11 @@ type SwapRequest struct {
 	Expect string               // on a write, the label the run expects to (re)use (the oldest reusable volume); "" when a fresh tape is expected
 	Loaded media.VolumeStatus   // what is in the drive now (zero value when empty)
 	Shelf  []media.VolumeStatus // reels available to load
+	// AutoLabel reports whether a blank reel would be labeled automatically on a
+	// write, so the prompt can present a blank tape as an option with the right
+	// consequence ("labeled automatically" vs "you'll be asked to label it").
+	// Meaningless for reads (Need set): only the named volume will do.
+	AutoLabel bool
 }
 
 // Logf is an optional progress logger.

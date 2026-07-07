@@ -1865,6 +1865,8 @@ func TestTapeAppendableFalse(t *testing.T) {
 // write) and counts how many swaps it performed.
 type scriptedOperator struct{ swaps int }
 
+func (o *scriptedOperator) ConfirmLabel(string, string) bool { return true }
+
 func (o *scriptedOperator) Swap(r librarian.SwapRequest) (string, bool) {
 	o.swaps++
 	if r.Need != "" { // a read wants a specific label
