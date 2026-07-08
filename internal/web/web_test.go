@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/accounting"
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
@@ -1381,5 +1382,146 @@ func TestHomeRollupProjectionOnlyWhileFilling(t *testing.T) {
 	_, body = get(t, NewServer(src, t.TempDir()).Handler(), "/")
 	if !strings.Contains(body, "projected full") {
 		t.Fatalf("a filling (50%%-used) medium projecting inside 30d must warn:\n%s", body)
+	}
+}
+
+// TestArchiveRowLabelsAreArchiveScoped is the tape-label regression: a DLE history
+// row must name the volumes THAT archive occupies (PlacedArchive.Labels), not every
+// volume the run's tape copy spans (Placement.Labels) — a run whose copy spans
+// NB-0001+NB-0002 must not claim NB-0002 for an archive that sits entirely on
+// NB-0001.
+func TestArchiveRowLabelsAreArchiveScoped(t *testing.T) {
+	at := time.Date(2026, 7, 8, 2, 0, 0, 0, time.UTC)
+	etc := record.Archive{Run: "run-2026-07-08.020000", DLE: "etc", Host: "localhost", Path: "/etc",
+		Level: 0, Compressed: 1000, CreatedAt: at}
+	home := record.Archive{Run: "run-2026-07-08.020000", DLE: "home", Host: "localhost", Path: "/home",
+		Level: 0, Compressed: 4000, CreatedAt: at}
+	tape := catalog.Placement{Medium: "tape", Archives: []catalog.PlacedArchive{
+		{DLE: "etc", Level: 0, Parts: []archiveio.FilePos{{Label: "NB-0001", Pos: 1}},
+			Commit: archiveio.FilePos{Label: "NB-0001", Pos: 2}},
+		{DLE: "home", Level: 0, Parts: []archiveio.FilePos{{Label: "NB-0001", Pos: 3}, {Label: "NB-0002", Pos: 1}},
+			Commit: archiveio.FilePos{Label: "NB-0002", Pos: 2}},
+	}}
+	src := fakeSource{
+		runs:       []*catalog.Run{{ID: etc.Run, Archives: []record.Archive{etc, home}}},
+		media:      []engine.MediumInfo{{Name: "tape", Type: "tape", Volumes: 2}},
+		placements: map[string][]catalog.Placement{etc.Run: {tape}},
+	}
+	srv := NewServer(src, t.TempDir())
+	_, body := get(t, srv.Handler(), "/dles/etc")
+	if !strings.Contains(body, "tape:NB-0001") {
+		t.Fatalf("/dles/etc misses the archive's own volume:\n%s", body)
+	}
+	if strings.Contains(body, "NB-0002") {
+		t.Fatalf("/dles/etc claims NB-0002, which holds no archive of etc:\n%s", body)
+	}
+	// The spanned archive's own page names both volumes.
+	_, body = get(t, srv.Handler(), "/dles/home")
+	if !strings.Contains(body, "tape:NB-0001&#43;NB-0002") { // html/template escapes the + join
+		t.Fatalf("/dles/home misses the spanned archive's volume set:\n%s", body)
+	}
+}
+
+// TestRunCopiesCoverage: a placement holding only some of the run's archives (a
+// tripped fan-out lane, a per-archive prune) must read as partial on the runs list,
+// the run page's copies table, and the placement grid — not as a full copy.
+func TestRunCopiesCoverage(t *testing.T) {
+	at := time.Date(2026, 7, 8, 2, 0, 0, 0, time.UTC)
+	a1 := record.Archive{Run: "run-2026-07-08.020000", DLE: "etc", Host: "localhost", Path: "/etc",
+		Level: 0, Compressed: 1000, CreatedAt: at}
+	a2 := record.Archive{Run: "run-2026-07-08.020000", DLE: "home", Host: "localhost", Path: "/home",
+		Level: 0, Compressed: 4000, CreatedAt: at}
+	src := fakeSource{
+		runs:  []*catalog.Run{{ID: a1.Run, Archives: []record.Archive{a1, a2}}},
+		media: []engine.MediumInfo{{Name: "disk", Type: "disk"}, {Name: "s3", Type: "s3"}},
+		placements: map[string][]catalog.Placement{a1.Run: {
+			heldOn("disk", a1, a2),
+			heldOn("s3", a2), // tripped mid-run: only home landed
+		}},
+	}
+	srv := NewServer(src, t.TempDir())
+	_, body := get(t, srv.Handler(), "/runs")
+	if !strings.Contains(body, "s3 (partial 1/2)") {
+		t.Fatalf("/runs does not mark the partial copy:\n%s", body)
+	}
+	if strings.Contains(body, "disk (partial") {
+		t.Fatalf("/runs marks the complete disk copy partial:\n%s", body)
+	}
+	_, body = get(t, srv.Handler(), "/runs/"+a1.Run)
+	for _, want := range []string{"partial · 1/2", "nb sync --to s3", "complete · 2/2", "class=\"miss\""} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/runs/<id> misses %q:\n%s", want, body)
+		}
+	}
+}
+
+// TestArchivePosText covers the grid cell formatter: consecutive positions collapse
+// to a range, a span onto a later volume appends its own group, label-less parts
+// render empty (the template shows ✓).
+func TestArchivePosText(t *testing.T) {
+	pa := catalog.PlacedArchive{Parts: []archiveio.FilePos{
+		{Label: "NB-0001", Pos: 3}, {Label: "NB-0001", Pos: 4}, {Label: "NB-0001", Pos: 5},
+		{Label: "NB-0002", Pos: 1},
+	}}
+	if got, want := archivePosText(pa), "NB-0001:3–5 +NB-0002:1"; got != want {
+		t.Fatalf("archivePosText = %q, want %q", got, want)
+	}
+	if got := archivePosText(catalog.PlacedArchive{Parts: []archiveio.FilePos{{Pos: 7}}}); got != "" {
+		t.Fatalf("label-less parts should render empty, got %q", got)
+	}
+	pa = catalog.PlacedArchive{Parts: []archiveio.FilePos{{Label: "NB-0001", Pos: 2}, {Label: "NB-0001", Pos: 5}}}
+	if got, want := archivePosText(pa), "NB-0001:2,5"; got != want {
+		t.Fatalf("archivePosText = %q, want %q", got, want)
+	}
+}
+
+// TestDLEVolumeMap: the DLE page draws its archives on their volumes — own parts
+// colored, other content greyed, the newest restore chain outlined — and the medium
+// page draws the same volumes unfiltered.
+func TestDLEVolumeMap(t *testing.T) {
+	full := time.Date(2026, 7, 4, 2, 0, 0, 0, time.UTC)
+	incrAt := time.Date(2026, 7, 8, 2, 0, 0, 0, time.UTC)
+	base := record.Archive{Run: "run-2026-07-04.020000", DLE: "home", Host: "localhost", Path: "/home",
+		Level: 0, Compressed: 4000, CreatedAt: full}
+	other := record.Archive{Run: "run-2026-07-04.020000", DLE: "etc", Host: "localhost", Path: "/etc",
+		Level: 0, Compressed: 1000, CreatedAt: full}
+	incr := record.Archive{Run: "run-2026-07-08.020000", DLE: "home", Host: "localhost", Path: "/home",
+		Level: 1, BaseRun: base.Run, Compressed: 500, CreatedAt: incrAt}
+	place := func(a record.Archive, label string, pos int) catalog.PlacedArchive {
+		return catalog.PlacedArchive{DLE: a.DLE, Level: a.Level,
+			Parts:  []archiveio.FilePos{{Label: label, Pos: pos}},
+			Seals:  []record.PartSeal{{Size: a.Compressed}},
+			Commit: archiveio.FilePos{Label: label, Pos: pos + 1}}
+	}
+	src := fakeSource{
+		runs: []*catalog.Run{
+			{ID: base.Run, Archives: []record.Archive{base, other}},
+			{ID: incr.Run, Archives: []record.Archive{incr}},
+		},
+		media: []engine.MediumInfo{{Name: "tape", Type: "tape", Volumes: 2}},
+		placements: map[string][]catalog.Placement{
+			base.Run: {{Medium: "tape", Archives: []catalog.PlacedArchive{place(base, "NB-0001", 1), place(other, "NB-0001", 3)}}},
+			incr.Run: {{Medium: "tape", Archives: []catalog.PlacedArchive{place(incr, "NB-0002", 1)}}},
+		},
+		perVolume: map[string][]engine.VolumeUsage{"tape": {
+			{Label: "NB-0001", Capacity: 10000, Used: 5000},
+			{Label: "NB-0002", Capacity: 10000, Used: 500},
+		}},
+	}
+	srv := NewServer(src, t.TempDir())
+	_, body := get(t, srv.Handler(), "/dles/home")
+	for _, want := range []string{`class="volmap"`, "NB-0001", "NB-0002", `class="other"`, "chain"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/dles/home volume map misses %q:\n%s", want, body)
+		}
+	}
+	if !strings.Contains(body, "localhost:/etc L0") { // the greyed neighbor is still named on hover
+		t.Fatalf("/dles/home misses the other-content hover title:\n%s", body)
+	}
+	_, body = get(t, srv.Handler(), "/media/tape")
+	for _, want := range []string{"Volume map", `class="volmap"`, "NB-0001", "NB-0002"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/media/tape volume map misses %q:\n%s", want, body)
+		}
 	}
 }

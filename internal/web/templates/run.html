@@ -62,18 +62,46 @@
 </div>
 
 <h2>Copies ({{len .Copies}})</h2>
-<div class="panel">
+<div class="panel scroll">
 {{if .Copies}}
-<div class="dles">
+<table>
+  <tr><th>Medium</th><th>Coverage</th><th>Volumes</th><th></th></tr>
   {{range .Copies}}
-  <div class="dle">
-    <div class="dle-head"><span class="dle-name">{{.Medium}}</span></div>
-    {{if .Labels}}<div class="dle-meta">volume · {{.Labels}}</div>{{end}}
-  </div>
+  <tr>
+    <td><a href="/media/{{.Medium}}">{{.Medium}}</a></td>
+    <td>{{if .Partial}}<span class="pill warn">partial · {{.Held}}/{{.Total}}</span>{{else}}<span class="pill ok">complete · {{.Held}}/{{.Total}}</span>{{end}}</td>
+    <td class="mono-cell">{{if .Labels}}{{.Labels}}{{else}}<span class="muted">—</span>{{end}}</td>
+    <td class="muted">{{if .Partial}}missing {{.Missing}} archive(s) · <code>nb sync --to {{.Medium}}</code>{{end}}</td>
+  </tr>
   {{end}}
-</div>
+</table>
 {{else}}<div class="empty">No copies recorded.</div>{{end}}
 </div>
+
+{{with .Grid}}
+<h2>Placements</h2>
+<div class="panel scroll">
+<table class="pgrid">
+  <tr>
+    <th>Archive</th>
+    {{range .Cols}}<th class="medium">{{.Medium}} <span class="cov {{if .Partial}}warn{{else}}ok{{end}}">{{.Held}}/{{.Total}}</span></th>{{end}}
+  </tr>
+  {{range .Rows}}
+  <tr>
+    <td><a href="/dles/{{.DLE}}">{{.DLEID}}</a> <span class="pill dim">{{level .Level}}</span></td>
+    {{range .Cells}}
+    <td class="cell">{{if not .Held}}<span class="miss">✕</span>{{else if .Pos}}<span class="pos">{{.Pos}}</span>{{else}}<span class="have">✓</span>{{end}}</td>
+    {{end}}
+  </tr>
+  {{end}}
+</table>
+<div class="legend">
+  <span><span class="have">✓</span> held (label-less medium)</span>
+  <span><span class="pos">NB-0001:3–5</span> volume : file positions</span>
+  <span><span class="miss">✕</span> not on this copy</span>
+</div>
+</div>
+{{end}}
 {{end}}
 {{end}}
 {{end}}

@@ -166,7 +166,7 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 			Archives: len(run.Archives),
 			Bytes:    run.TotalBytes(),
 			At:       run.LastArchiveAt(),
-			Copies:   s.copies(run.ID),
+			Copies:   s.copies(run),
 		})
 	}
 	// Newest run first.
@@ -203,7 +203,8 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	placements := s.src.Placements(run.ID)
 	copies := make([]copyRow, 0, len(placements))
 	for _, p := range placements {
-		copies = append(copies, copyRow{Medium: p.Medium, Labels: strings.Join(p.Labels(), "+")})
+		held, total := p.Covers(run)
+		copies = append(copies, copyRow{Medium: p.Medium, Labels: strings.Join(p.Labels(), "+"), Held: held, Total: total})
 	}
 	s.render(w, "run", page{Title: run.ID, Active: "runs", Data: runDetail{
 		ID:       run.ID,
@@ -213,8 +214,31 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		Partial:  run.Partial(),
 		Archives: run.Archives,
 		Copies:   copies,
+		Grid:     buildPlacementGrid(run, placements, copies),
 		Dump:     s.findDumpReport(run.ID),
 	}})
+}
+
+// buildPlacementGrid assembles the /runs/<id> archives × placements matrix. cols are
+// the coverage rows handleRun already built, reused as column headers so the two
+// sections agree by construction.
+func buildPlacementGrid(run *catalog.Run, placements []catalog.Placement, cols []copyRow) *placementGrid {
+	if len(placements) == 0 {
+		return nil
+	}
+	g := &placementGrid{Cols: cols}
+	for _, a := range run.Archives {
+		row := placementRow{DLE: a.DLE, DLEID: a.DLEID(), Level: a.Level}
+		for _, p := range placements {
+			var cell placementCell
+			if pa, ok := p.Placed(a.DLE, a.Level); ok {
+				cell = placementCell{Held: true, Pos: archivePosText(pa)}
+			}
+			row.Cells = append(row.Cells, cell)
+		}
+		g.Rows = append(g.Rows, row)
+	}
+	return g
 }
 
 // findDumpReport looks up run.ID's dump record in the run history and, when found
@@ -276,6 +300,7 @@ func (s *Server) handleDLE(w http.ResponseWriter, r *http.Request) {
 		Recovery: shown,
 		RecTotal: len(points),
 		RecAll:   all,
+		VolMap:   s.buildDLEVolMap(slug),
 		History:  s.dleHistory(slug),
 	}})
 }
@@ -321,7 +346,7 @@ func (s *Server) dleHistory(slug string) []dleArchiveRow {
 			var media []string
 			for _, p := range s.src.Placements(run.ID) {
 				if p.Holds(a.DLE, a.Level) {
-					media = append(media, placementName(p))
+					media = append(media, archiveCopyName(p, a.DLE, a.Level))
 				}
 			}
 			rows = append(rows, dleArchiveRow{
@@ -359,17 +384,19 @@ func (s *Server) recoveryPoints(slug string, ledger *drill.Ledger) []recoveryPoi
 	}
 	sort.Slice(tips, func(i, j int) bool { return tips[i].Run > tips[j].Run }) // newest first
 
-	// held names the media currently holding an archive, archive-granular — a copy
+	// held names the copies currently holding an archive, archive-granular — a copy
 	// reclaimed off one medium no longer counts, which is what makes a chain honestly
-	// "broken" rather than falsely restorable.
-	held := func(a record.Archive) []string {
-		var media []string
+	// "broken" rather than falsely restorable. Each copy carries its medium and the
+	// archive's OWN volume labels, so chainMedia can intersect chains by medium while
+	// still naming every tape the chain needs.
+	held := func(a record.Archive) []chainCopy {
+		var copies []chainCopy
 		for _, p := range s.src.Placements(a.Run) {
-			if p.Holds(a.DLE, a.Level) {
-				media = append(media, placementName(p))
+			if pa, ok := p.Placed(a.DLE, a.Level); ok {
+				copies = append(copies, chainCopy{Medium: p.Medium, Labels: pa.Labels()})
 			}
 		}
-		return media
+		return copies
 	}
 
 	rec, hasRec := ledger.Get(slug)
@@ -401,7 +428,7 @@ func (s *Server) recoveryPoints(slug string, ledger *drill.Ledger) []recoveryPoi
 // recovery.Chain's index walk (which can only ever move to a strictly earlier run and
 // so cannot cycle by construction), this walks a map keyed by run id and has no such
 // built-in guarantee.
-func recoveryChain(tip record.Archive, archOf map[string]record.Archive, held func(record.Archive) []string) (members []chainMember, reason string) {
+func recoveryChain(tip record.Archive, archOf map[string]record.Archive, held func(record.Archive) []chainCopy) (members []chainMember, reason string) {
 	visited := map[string]bool{}
 	cur := tip
 	for {
@@ -410,7 +437,7 @@ func recoveryChain(tip record.Archive, archOf map[string]record.Archive, held fu
 		}
 		visited[cur.Run] = true
 		media := held(cur)
-		members = append(members, chainMember{RunID: cur.Run, Level: cur.Level, Media: media})
+		members = append(members, chainMember{RunID: cur.Run, Level: cur.Level, Copies: media})
 		if len(media) == 0 && reason == "" {
 			if len(members) == 1 {
 				reason = cur.Run + " has no copy"
@@ -558,7 +585,9 @@ func (s *Server) handleMedium(w http.ResponseWriter, r *http.Request) {
 		s.render(w, "medium", page{Title: name, Active: "media", Data: mediumData{NotFound: true, Name: name}})
 		return
 	}
-	s.render(w, "medium", page{Title: name, Active: "media", Data: newMediumData(st)})
+	d := newMediumData(st)
+	d.VolMap = s.buildMediumVolMap(name, st)
+	s.render(w, "medium", page{Title: name, Active: "media", Data: d})
 }
 
 // handleDrills renders the recovery-drill picture: the coverage rollup and per-DLE
@@ -681,26 +710,44 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // copies renders a run's placements as a compact "medium:label" list (matching the
-// CLI's copiesSummary), naming the volume label only when a medium carries one.
-func (s *Server) copies(runID string) string {
-	ps := s.src.Placements(runID)
+// CLI's copiesSummary), naming the volume label only when a medium carries one and
+// marking a placement that holds only some of the run's archives as partial.
+func (s *Server) copies(run *catalog.Run) string {
+	ps := s.src.Placements(run.ID)
 	if len(ps) == 0 {
 		return "—"
 	}
 	names := make([]string, 0, len(ps))
 	for _, p := range ps {
-		names = append(names, placementName(p))
+		name := placementName(p)
+		if held, total := p.Covers(run); held < total {
+			name += fmt.Sprintf(" (partial %d/%d)", held, total)
+		}
+		names = append(names, name)
 	}
 	return strings.Join(names, ", ")
 }
 
 // placementName is a copy's compact "medium:label" identity — the medium alone for an
 // address-identified copy (disk/cloud carry no labels), the medium plus its volume
-// labels for a tape. The one place the webui formats a placement, so the run list,
-// DLE history, and recovery points all name copies identically.
+// labels for a tape. Run-scoped: the labels are every volume the run's copy touches,
+// so it names whole copies (the run list); an archive-scoped row uses
+// archiveCopyName, which narrows to that archive's own volumes.
 func placementName(p catalog.Placement) string {
 	if labels := p.Labels(); len(labels) > 0 {
 		return p.Medium + ":" + strings.Join(labels, "+")
+	}
+	return p.Medium
+}
+
+// archiveCopyName names one archive's copy on a placement: the medium plus the
+// volumes THAT archive occupies — not Placement.Labels, which merges every archive
+// of the run's copy and would claim volumes this archive never touched.
+func archiveCopyName(p catalog.Placement, dle string, level int) string {
+	if pa, ok := p.Placed(dle, level); ok {
+		if labels := pa.Labels(); len(labels) > 0 {
+			return p.Medium + ":" + strings.Join(labels, "+")
+		}
 	}
 	return p.Medium
 }
@@ -1151,4 +1198,165 @@ func (s *Server) render(w http.ResponseWriter, name string, p page) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = buf.WriteTo(w)
+}
+
+// volumeSegments gathers every placed archive part that sits on a labeled volume,
+// keyed by label — the catalog facts behind the volume maps. medium narrows to one
+// medium's placements; "" gathers all. Part sizes come from the placement's per-part
+// seals when they align; a sealless record falls back to an even split of the
+// archive's compressed size, so an old placement still draws (approximately).
+func (s *Server) volumeSegments(medium string) map[string][]volSeg {
+	segs := map[string][]volSeg{}
+	for _, run := range s.src.Runs() {
+		for _, p := range s.src.Placements(run.ID) {
+			if medium != "" && p.Medium != medium {
+				continue
+			}
+			for _, pa := range p.Archives {
+				var arch *record.Archive
+				for i := range run.Archives {
+					if run.Archives[i].DLE == pa.DLE && run.Archives[i].Level == pa.Level {
+						arch = &run.Archives[i]
+						break
+					}
+				}
+				if arch == nil {
+					continue // a placement of an archive the run record no longer lists
+				}
+				sealed := len(pa.Seals) == len(pa.Parts) && len(pa.Parts) > 0
+				for i, pt := range pa.Parts {
+					if pt.Label == "" {
+						break // address-identified copy: no volume rows to draw
+					}
+					var size int64
+					if sealed {
+						size = pa.Seals[i].Size
+					} else if n := len(pa.Parts); n > 0 {
+						size = arch.Compressed / int64(n)
+					}
+					seg := volSeg{Pos: pt.Pos, RunID: run.ID, DLE: pa.DLE, DLEID: arch.DLEID(), Level: pa.Level, Bytes: size}
+					if len(pa.Parts) > 1 {
+						seg.Part, seg.Parts = i+1, len(pa.Parts)
+					}
+					segs[pt.Label] = append(segs[pt.Label], seg)
+				}
+			}
+		}
+	}
+	return segs
+}
+
+// volumeCapacities maps every labeled volume the configured pools know to its
+// capacity (absent = unknown: the bar scales to its content), for the DLE volume
+// map, which crosses media.
+func (s *Server) volumeCapacities() map[string]int64 {
+	caps := map[string]int64{}
+	for _, m := range s.src.Media() {
+		if m.Volumes == 0 {
+			continue
+		}
+		if st, ok := s.src.MediumStats(m.Name); ok {
+			for _, v := range st.PerVolume {
+				if v.Capacity > 0 {
+					caps[v.Label] = v.Capacity
+				}
+			}
+		}
+	}
+	return caps
+}
+
+// buildDLEVolMap draws the volumes holding any of the DLE's archives: its own parts
+// colored by run age (dark = newest), other runs' content greyed, and the newest
+// restore point's chain outlined — the physical answer to "which tapes hold this
+// DLE". Nil when no archive of the DLE sits on a labeled volume (disk/cloud-only
+// DLEs have no volumes to draw).
+func (s *Server) buildDLEVolMap(slug string) *volMap {
+	segs := s.volumeSegments("")
+	var labels []string
+	for label, ss := range segs {
+		for _, v := range ss {
+			if v.DLE == slug {
+				labels = append(labels, label)
+				break
+			}
+		}
+	}
+	if len(labels) == 0 {
+		return nil
+	}
+	sort.Strings(labels)
+	rank := runRank(segs, slug)
+	chain := s.chainRuns(slug)
+	caps := s.volumeCapacities()
+	classOf := func(v volSeg) string {
+		if v.DLE != slug {
+			return "other"
+		}
+		cls := ageClass(rank, v.RunID)
+		if chain[v.RunID] {
+			cls += " chain"
+		}
+		return cls
+	}
+	return buildVolMap(segs, labels, func(l string) int64 { return caps[l] }, classOf)
+}
+
+// chainRuns is the set of runs in the DLE's newest restore chain (the tip archive
+// down its BaseRun links to the level-0 full), for the volume map's chain outline.
+// A missing base or a link cycle just ends the walk — chain health is the recovery
+// points' story; the map only outlines what is walkable.
+func (s *Server) chainRuns(slug string) map[string]bool {
+	archOf := map[string]record.Archive{}
+	var tip record.Archive
+	for _, run := range s.src.Runs() {
+		for _, a := range run.Archives {
+			if a.DLE == slug {
+				archOf[a.Run] = a
+				if a.Run > tip.Run {
+					tip = a
+				}
+			}
+		}
+	}
+	set := map[string]bool{}
+	cur, ok := tip, tip.Run != ""
+	for ok && !set[cur.Run] {
+		set[cur.Run] = true
+		if cur.Level == 0 {
+			break
+		}
+		cur, ok = archOf[cur.BaseRun]
+	}
+	return set
+}
+
+// buildMediumVolMap draws everything stored on the pool's volumes, in registry order,
+// shaded by run age — nil for address-identified media, which have no volumes. A
+// label placements reference but the registry has never seen (an offsite tape) still
+// draws, after the registry's rows.
+func (s *Server) buildMediumVolMap(name string, st engine.MediumStats) *volMap {
+	if st.Volumes == 0 {
+		return nil
+	}
+	segs := s.volumeSegments(name)
+	caps := map[string]int64{}
+	known := map[string]bool{}
+	var labels []string
+	for _, v := range st.PerVolume {
+		labels = append(labels, v.Label)
+		known[v.Label] = true
+		caps[v.Label] = v.Capacity
+	}
+	var extra []string
+	for label := range segs {
+		if !known[label] {
+			extra = append(extra, label)
+		}
+	}
+	sort.Strings(extra)
+	labels = append(labels, extra...)
+	rank := runRank(segs, "")
+	classOf := func(v volSeg) string { return ageClass(rank, v.RunID) }
+	return buildVolMap(segs, labels, func(l string) int64 { return caps[l] }, classOf)
 }

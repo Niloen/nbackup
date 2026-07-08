@@ -144,6 +144,19 @@ func (a PlacedArchive) Labels() []string {
 	return out
 }
 
+// Covers counts how many of the run's archives this copy holds. A copy can be
+// partial — a fan-out lane that tripped mid-run, a per-archive prune — so "has a
+// copy" is a per-archive fact; the (held, total) pair lets a display say so
+// instead of presenting every placement as a full copy of the run.
+func (p Placement) Covers(run *Run) (held, total int) {
+	for _, a := range run.Archives {
+		if p.Holds(a.DLE, a.Level) {
+			held++
+		}
+	}
+	return held, len(run.Archives)
+}
+
 // OnLabel reports whether any file of this placement (a part, its commit footer, or
 // its index) lives on the volume with the given label.
 func (p Placement) OnLabel(label string) bool {

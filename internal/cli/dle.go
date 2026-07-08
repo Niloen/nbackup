@@ -91,12 +91,16 @@ func runDleShow(a *app, arg string) error {
 			if base == "" {
 				base = "-"
 			}
+			// Name each copy by the volumes THIS archive occupies (PlacedArchive.Labels),
+			// not the run copy's full label set — a spanned run's copy touches volumes
+			// this DLE's archive never landed on.
 			var media []string
 			for _, p := range eng.Catalog().Placements(s.ID) {
-				for _, pa := range p.Archives {
-					if pa.DLE == slug {
+				if pa, ok := p.Placed(slug, ar.Level); ok {
+					if labels := pa.Labels(); len(labels) > 0 {
+						media = append(media, p.Medium+":"+strings.Join(labels, "+"))
+					} else {
 						media = append(media, p.Medium)
-						break
 					}
 				}
 			}

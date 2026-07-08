@@ -3,6 +3,7 @@ package web
 import (
 	"fmt"
 	"html/template"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -514,6 +515,7 @@ type runDetail struct {
 	Partial  bool
 	Archives []record.Archive
 	Copies   []copyRow
+	Grid     *placementGrid  // archives × placements drill-down; nil when no copy exists
 	Dump     *dumpReportView // the run's dump-report section, or nil when the history holds no record for it
 }
 
@@ -728,10 +730,91 @@ func dumpRateCell(orig int64, secs float64) string {
 	return sizeutil.FormatBytes(int64(float64(orig)/secs)) + "/s"
 }
 
-// copyRow is one placement of a run (a medium it was written to).
+// copyRow is one placement of a run (a medium it was written to) with its coverage:
+// how many of the run's archives this copy actually holds. Held < Total is a partial
+// copy (a tripped fan-out lane, a per-archive prune) — the row says so instead of
+// presenting the placement as a full copy.
 type copyRow struct {
 	Medium string
 	Labels string
+	Held   int
+	Total  int
+}
+
+// Partial reports whether this copy misses some of the run's archives.
+func (c copyRow) Partial() bool { return c.Held < c.Total }
+
+// Missing is the count of run archives this copy lacks.
+func (c copyRow) Missing() int { return c.Total - c.Held }
+
+// placementGrid is the /runs/<id> archives × placements matrix: one row per archive
+// of the run, one column per placement, each cell the archive's own position on that
+// copy — the drill-down that answers "this DLE, this run: where exactly", and makes
+// a partial copy's holes visible at a glance.
+type placementGrid struct {
+	Cols []copyRow      // column headers: the same coverage rows the Copies table shows
+	Rows []placementRow // run.Archives order
+}
+
+// placementRow is one archive's row of the placement grid.
+type placementRow struct {
+	DLE   string // slug, for the /dles link
+	DLEID string // host:path display
+	Level int
+	Cells []placementCell // index-aligned with placementGrid.Cols
+}
+
+// placementCell is one archive × placement cell.
+type placementCell struct {
+	Held bool
+	Pos  string // the archive's volume:file positions; "" for a label-less medium (render ✓)
+}
+
+// archivePosText renders a placed archive's part positions compactly: consecutive
+// file numbers on one volume collapse to a range ("NB-0007:3–5"), a span onto a
+// later volume appends its own group ("+NB-0008:1"). Label-less media (disk/cloud)
+// return "" — files there are addressed within the medium, positions mean nothing
+// to an operator.
+func archivePosText(pa catalog.PlacedArchive) string {
+	type group struct {
+		label string
+		runs  [][2]int // consecutive [first,last] position runs
+	}
+	var groups []group
+	for _, pt := range pa.Parts {
+		if pt.Label == "" {
+			return ""
+		}
+		if n := len(groups); n > 0 && groups[n-1].label == pt.Label {
+			g := &groups[n-1]
+			if last := &g.runs[len(g.runs)-1]; pt.Pos == last[1]+1 {
+				last[1] = pt.Pos
+			} else {
+				g.runs = append(g.runs, [2]int{pt.Pos, pt.Pos})
+			}
+			continue
+		}
+		groups = append(groups, group{label: pt.Label, runs: [][2]int{{pt.Pos, pt.Pos}}})
+	}
+	var b strings.Builder
+	for i, g := range groups {
+		if i > 0 {
+			b.WriteString(" +")
+		}
+		b.WriteString(g.label)
+		b.WriteByte(':')
+		for j, r := range g.runs {
+			if j > 0 {
+				b.WriteByte(',')
+			}
+			if r[0] == r[1] {
+				fmt.Fprintf(&b, "%d", r[0])
+			} else {
+				fmt.Fprintf(&b, "%d–%d", r[0], r[1])
+			}
+		}
+	}
+	return b.String()
 }
 
 // dleRow is one line of the DLEs list — the DLE-major catalog rollup (catalog.DLESummary
@@ -948,6 +1031,7 @@ type dleDetail struct {
 	Recovery []recoveryPoint // restorable points, newest first (capped unless ?all=1)
 	RecTotal int             // recovery points in total (for the show-all toggle)
 	RecAll   bool            // true when ?all=1 lifted the cap
+	VolMap   *volMap         // the DLE's archives drawn on their volumes; nil when none sit on labeled media
 	History  []dleArchiveRow
 }
 
@@ -970,12 +1054,27 @@ type recoveryPoint struct {
 	Gloss    string // newest drilled point only: the ledger's tier gloss
 }
 
-// chainMember is one archive in a recovery point's restore chain, with the media
+// chainCopy is one copy of a chain member: its medium plus the volume labels THAT
+// archive occupies (archive-granular — not the run copy's whole label set).
+type chainCopy struct {
+	Medium string
+	Labels []string // empty for address-identified media (disk/cloud)
+}
+
+// name renders the copy as the compact "medium:label" identity the pages use.
+func (c chainCopy) name() string {
+	if len(c.Labels) > 0 {
+		return c.Medium + ":" + strings.Join(c.Labels, "+")
+	}
+	return c.Medium
+}
+
+// chainMember is one archive in a recovery point's restore chain, with the copies
 // currently holding it (archive-granular, so a reclaimed copy shows as unheld).
 type chainMember struct {
-	RunID string
-	Level int
-	Media []string // media holding this archive; empty = no surviving copy
+	RunID  string
+	Level  int
+	Copies []chainCopy // copies holding this archive; empty = no surviving copy
 }
 
 // chainDesc renders a restore chain tip-first with each base to its right — "L2 ← L1
@@ -996,23 +1095,37 @@ func chainDesc(members []chainMember) string {
 	return strings.Join(parts, " ← ")
 }
 
-// chainMedia answers "restore from one place": the media that hold every chain member
-// (a medium counts only if it holds them all). When no single medium holds the whole
-// chain it falls back to a compact per-member listing so the split is still legible.
+// chainMedia answers "restore from one place": the MEDIA that hold every chain member
+// (a medium counts only if it holds them all — the chain's archives sit at different
+// positions, so the intersection is by medium, not by volume). A whole medium is named
+// with the union of the labels the chain's archives occupy on it, in chain order —
+// "tape:NB-0006+NB-0008" is exactly the set of tapes restoring this point needs. When
+// no single medium holds the whole chain it falls back to a compact per-member listing
+// so the split is still legible.
 func chainMedia(members []chainMember) (onePlace bool, text string) {
 	if len(members) == 0 {
 		return false, "—"
 	}
 	count := map[string]int{}
+	labels := map[string][]string{} // per medium: union of chain labels, first-seen order
+	var order []string              // media in first-seen order
 	for _, m := range members {
-		for _, name := range m.Media {
-			count[name]++
+		for _, c := range m.Copies {
+			if count[c.Medium] == 0 {
+				order = append(order, c.Medium)
+			}
+			count[c.Medium]++
+			for _, l := range c.Labels {
+				if !slices.Contains(labels[c.Medium], l) {
+					labels[c.Medium] = append(labels[c.Medium], l)
+				}
+			}
 		}
 	}
 	var whole []string
-	for name, c := range count {
-		if c == len(members) {
-			whole = append(whole, name)
+	for _, medium := range order {
+		if count[medium] == len(members) {
+			whole = append(whole, chainCopy{Medium: medium, Labels: labels[medium]}.name())
 		}
 	}
 	if len(whole) > 0 {
@@ -1022,8 +1135,12 @@ func chainMedia(members []chainMember) (onePlace bool, text string) {
 	segs := make([]string, 0, len(members))
 	for _, m := range members {
 		media := "none"
-		if len(m.Media) > 0 {
-			media = strings.Join(m.Media, ", ")
+		if len(m.Copies) > 0 {
+			names := make([]string, len(m.Copies))
+			for i, c := range m.Copies {
+				names[i] = c.name()
+			}
+			media = strings.Join(names, ", ")
 		}
 		segs = append(segs, levelTag(m.Level)+": "+media)
 	}
@@ -1230,6 +1347,7 @@ type mediumData struct {
 	NotFound bool
 	Name     string
 	Type     string
+	VolMap   *volMap // the pool's volumes with everything stored on them; nil for address-identified media
 
 	Used     int64
 	Capacity int64   // 0 = unbounded
@@ -1557,4 +1675,118 @@ type dleArchiveRow struct {
 	Files   int
 	Partial bool
 	Copies  string
+}
+
+// volMap is the volume map: one bar per labeled volume, its stored files as segments
+// in file-position order, width proportional to stored bytes. Two pages render it —
+// /media/<name> shows everything on the pool (shaded by run age), /dles/<slug> shows
+// the same volumes with only that DLE's archives colored (other content greyed, the
+// newest restore chain outlined). One renderer, so the two views cannot disagree.
+type volMap struct {
+	Rows []volMapRow
+}
+
+// volMapRow is one volume's bar.
+type volMapRow struct {
+	Label string
+	Segs  []volMapSeg
+}
+
+// volMapSeg is one stored file (an archive part) on the bar.
+type volMapSeg struct {
+	WidthPct float64
+	Class    string // g0/g1/g2 (run age, dark = newest), other (not the focus DLE), + " chain"
+	Title    string // hover text: run · DLE L# [· part i/n] · bytes
+}
+
+// volSeg is one placed archive part on a labeled volume — the catalog fact the
+// volume-map builders collect before rendering (positions order the bar; bytes set
+// segment widths; run/DLE/level drive shading and hover text).
+type volSeg struct {
+	Pos   int
+	RunID string
+	DLE   string // slug
+	DLEID string // host:path display
+	Level int
+	Bytes int64
+	Part  int // 1-based part number when the archive spanned; 0 = whole archive
+	Parts int // total parts when spanned
+}
+
+// title renders the segment's hover text.
+func (v volSeg) title() string {
+	span := ""
+	if v.Parts > 1 {
+		span = fmt.Sprintf(" · part %d/%d", v.Part, v.Parts)
+	}
+	return fmt.Sprintf("%s · %s %s%s · %s", v.RunID, v.DLEID, levelTag(v.Level), span, sizeutil.FormatBytes(v.Bytes))
+}
+
+// buildVolMap renders per-label segments into bars. labels fixes the row order;
+// capOf resolves a volume's capacity (0 = unknown: the bar is scaled to its
+// content); classOf maps each segment to its color class. Labels with no segments
+// still get a row — an empty labeled volume is a fact worth seeing on a pool page.
+func buildVolMap(segs map[string][]volSeg, labels []string, capOf func(string) int64, classOf func(volSeg) string) *volMap {
+	if len(labels) == 0 {
+		return nil
+	}
+	m := &volMap{}
+	for _, label := range labels {
+		ss := append([]volSeg(nil), segs[label]...)
+		sort.Slice(ss, func(i, j int) bool { return ss[i].Pos < ss[j].Pos })
+		var sum int64
+		for _, v := range ss {
+			sum += v.Bytes
+		}
+		base := capOf(label)
+		if sum > base {
+			base = sum
+		}
+		row := volMapRow{Label: label}
+		for _, v := range ss {
+			pct := 0.0
+			if base > 0 {
+				pct = float64(v.Bytes) / float64(base) * 100
+			}
+			row.Segs = append(row.Segs, volMapSeg{WidthPct: pct, Class: classOf(v), Title: v.title()})
+		}
+		m.Rows = append(m.Rows, row)
+	}
+	return m
+}
+
+// ageClass shades a segment by its run's recency: the pool's newest run is g0, the
+// second g1, anything older g2 — run ids sort chronologically, so rank is lexical.
+func ageClass(rank map[string]int, runID string) string {
+	switch rank[runID] {
+	case 0:
+		return "g0"
+	case 1:
+		return "g1"
+	default:
+		return "g2"
+	}
+}
+
+// runRank ranks the distinct run ids newest-first for ageClass.
+func runRank(segs map[string][]volSeg, focusDLE string) map[string]int {
+	var ids []string
+	seen := map[string]bool{}
+	for _, ss := range segs {
+		for _, v := range ss {
+			if focusDLE != "" && v.DLE != focusDLE {
+				continue
+			}
+			if !seen[v.RunID] {
+				seen[v.RunID] = true
+				ids = append(ids, v.RunID)
+			}
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(ids)))
+	rank := make(map[string]int, len(ids))
+	for i, id := range ids {
+		rank[id] = i
+	}
+	return rank
 }

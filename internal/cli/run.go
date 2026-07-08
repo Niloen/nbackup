@@ -59,7 +59,7 @@ func runRunList(a *app) error {
 			committed = sizeutil.FormatStamp(t)
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", s.ID, runStatus(s), len(s.Archives),
-			sizeutil.FormatBytes(s.TotalBytes()), committed, copiesSummary(eng.Catalog().Placements(s.ID)))
+			sizeutil.FormatBytes(s.TotalBytes()), committed, copiesSummary(s, eng.Catalog().Placements(s.ID)))
 	}
 	tw.Flush()
 	return nil
@@ -75,18 +75,23 @@ func runStatus(s *catalog.Run) string {
 }
 
 // copiesSummary renders a run's placements as a compact comma list, naming the
-// volume label only when it differs from the medium (i.e. for labeled tapes).
-func copiesSummary(ps []catalog.Placement) string {
+// volume label only when it differs from the medium (i.e. for labeled tapes). A
+// placement holding only some of the run's archives (a tripped fan-out lane, a
+// per-archive prune) is marked partial — listing it bare would read as a full copy.
+func copiesSummary(s *catalog.Run, ps []catalog.Placement) string {
 	if len(ps) == 0 {
 		return "-"
 	}
 	names := make([]string, 0, len(ps))
 	for _, p := range ps {
+		name := p.Medium
 		if labels := p.Labels(); len(labels) > 0 {
-			names = append(names, p.Medium+":"+strings.Join(labels, "+"))
-		} else {
-			names = append(names, p.Medium)
+			name += ":" + strings.Join(labels, "+")
 		}
+		if held, total := p.Covers(s); held < total {
+			name += fmt.Sprintf(" (partial %d/%d)", held, total)
+		}
+		names = append(names, name)
 	}
 	return strings.Join(names, ", ")
 }

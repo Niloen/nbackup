@@ -47,6 +47,19 @@
 </div>
 {{end}}
 
+{{if .VolMap}}
+<h2>Volumes</h2>
+<div class="panel">
+{{template "volmap" .VolMap}}
+<div class="legend">
+  <span><span class="sw" style="background:var(--accent)"></span> this DLE (darker = newer run)</span>
+  <span><span class="sw" style="background:color-mix(in srgb, var(--muted) 22%, var(--panel))"></span> other content</span>
+  <span><span class="sw" style="box-shadow:inset 0 0 0 2px var(--ok)"></span> newest restore chain</span>
+  <span>hover a segment for run · archive · size</span>
+</div>
+</div>
+{{end}}
+
 <h2>History</h2>
 <div class="panel scroll">
 {{if .History}}

@@ -169,6 +169,33 @@
   .host-row td { padding: .5rem .6rem; font-size: .85rem; color: var(--muted); white-space: normal; }
   .host-row strong { color: var(--fg); }
   .heat .host-row td { padding: .4rem .6rem .6rem; }
+  /* Placement grid on /runs/<id>: archives × placements, each cell the archive's
+     own volume:file positions — a partial copy's holes read as ✕ at a glance. */
+  .pgrid th.medium { text-transform: none; letter-spacing: 0; font-size: .86rem; color: var(--fg); }
+  .pgrid th .cov { font-size: .74rem; font-weight: 600; margin-left: .25rem; }
+  .pgrid td.cell { text-align: center; }
+  .pos { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; }
+  .miss { color: var(--bad); font-weight: 700; }
+  .have { color: var(--ok); font-weight: 700; }
+  .mono-cell { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem; }
+  .legend { display: flex; gap: 1.2rem; flex-wrap: wrap; color: var(--muted); font-size: .8rem; margin-top: .7rem; }
+  .legend .sw { display: inline-block; width: 11px; height: 11px; border-radius: 3px;
+    vertical-align: -1px; margin-right: .3rem; background: var(--line); }
+  /* Volume map (/media/<name>, and /dles/<slug> filtered to one DLE): one bar per
+     volume, segments in file order, width ∝ stored bytes, shaded by run age. On the
+     DLE view other runs' content is greyed and the newest restore chain outlined. */
+  .volmap { display: flex; flex-direction: column; gap: .8rem; }
+  .volrow { display: grid; grid-template-columns: 7.5rem 1fr; gap: .8rem; align-items: center; }
+  .vollbl { font-family: ui-monospace, Menlo, monospace; font-size: .82rem; color: var(--muted); }
+  .volbar { display: flex; height: 22px; border-radius: 5px; overflow: hidden; background: var(--line); }
+  .volbar span { display: block; height: 100%; border-right: 1px solid var(--bg); min-width: 3px; }
+  .volbar span:hover { outline: 2px solid var(--fg); outline-offset: -2px; }
+  .volbar .g0 { background: var(--accent); }
+  .volbar .g1 { background: color-mix(in srgb, var(--accent) 62%, var(--panel)); }
+  .volbar .g2 { background: color-mix(in srgb, var(--accent) 34%, var(--panel)); }
+  .volbar .other { background: color-mix(in srgb, var(--muted) 22%, var(--panel)); }
+  .volbar .chain { box-shadow: inset 0 0 0 2px var(--ok); }
+  .volbar .free { background: transparent; flex: 1; border-right: none; min-width: 0; }
   .empty { color: var(--muted); padding: 1.5rem; text-align: center; }
   footer { color: var(--muted); font-size: .8rem; text-align: center; padding: 1.5rem 1rem; }
 </style>
@@ -192,3 +219,19 @@
 <footer>read-only status · {{stampsec .Now}}</footer>
 </body>
 </html>{{end}}
+
+{{/* volmap draws a volume map (view.go volMap): one bar per volume, stored files as
+     width-proportional segments in file order. Shared by /media/<name> (everything,
+     shaded by run age) and /dles/<slug> (one DLE colored, other content greyed). */}}
+{{define "volmap"}}
+<div class="volmap">
+  {{range .Rows}}
+  <div class="volrow">
+    <span class="vollbl">{{.Label}}</span>
+    <div class="volbar">
+      {{range .Segs}}<span class="{{.Class}}" style="width:{{pctw .WidthPct}}" title="{{.Title}}"></span>{{end}}<span class="free"></span>
+    </div>
+  </div>
+  {{end}}
+</div>
+{{end}}
