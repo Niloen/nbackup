@@ -304,8 +304,15 @@ source defaults to the landing medium but is configurable (`--from` / rule `from
 tape→disk, or a second offsite tier), and copy-to-landing is allowed (the old "target
 is the source" guard became a `from == to` guard). The config `sync:` rules are the
 declarative form (`{from, to, last}`) so a cron `nb dump && nb sync` mirrors offsite
-hands-off. Sync and pruning are independent (see Reclamation asymmetry): a copy
-reaching another medium never makes the original prunable. (The user-facing
+hands-off. An auto-source sync (no `--from`/`from:`) is additionally bounded by the
+*target's own retention window* (`engine.owesTo`: within the target's `minimum_age`,
+or on the DLE's live recovery chain) — media of different sizes keep different
+depths, and an archive the target's prune may delete is never copied back (that
+would churn: sync restores it, the next make-room reclaims it). Coverage judges the
+same bound (`CopyAged`), so a pruned copy reads as rotation, not "missing"; an
+explicit `--from` remains a whole-source mirror. Sync and pruning are otherwise
+independent (see Reclamation asymmetry): a copy reaching another medium never makes
+the original prunable. (The user-facing
 oldest-first / `--from` / tiering recipe is in the README.)
 
 **Holding disk = a marked medium, the orchestrator on the main goroutine (`media.<m>.holding:

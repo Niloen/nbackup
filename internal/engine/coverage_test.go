@@ -2,6 +2,7 @@ package engine
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
@@ -34,7 +35,7 @@ func covFixture() (*catalog.Run, map[string][]string, map[string][]catalog.Place
 func TestJudgeRunRoutes(t *testing.T) {
 	run, routes, placements := covFixture()
 	lookup := func(id string) []catalog.Placement { return placements[id] }
-	rc := JudgeRun(run, routes, nil, []*catalog.Run{run}, lookup)
+	rc := JudgeRun(run, routes, nil, []*catalog.Run{run}, lookup, nil, time.Time{})
 
 	byMedium := map[string]catalog.Placement{}
 	for _, p := range placements[run.ID] {
@@ -61,7 +62,7 @@ func TestJudgeRunRoutes(t *testing.T) {
 		t.Errorf("ExpectedMedia = %v, want %v", got, want)
 	}
 	// A DLE removed from the config (absent from routes) is owed nowhere.
-	rcNone := JudgeRun(run, map[string][]string{}, nil, []*catalog.Run{run}, lookup)
+	rcNone := JudgeRun(run, map[string][]string{}, nil, []*catalog.Run{run}, lookup, nil, time.Time{})
 	if got := rcNone.Judge("c2", byMedium["c2"]); got.Expected() != 0 || got.Held != 2 {
 		t.Errorf("unrouted judge = %+v, want expectation 0 with Held 2 (a bonus copy)", got)
 	}
@@ -80,7 +81,7 @@ func TestJudgeRunSyncPromises(t *testing.T) {
 		{To: "vault", From: "vtape"}, // explicit source: promises vtape's holdings
 		{To: "c2", From: "vtape"},    // routed there already: the route wins
 	}
-	rc := JudgeRun(run, routes, rules, []*catalog.Run{run}, lookup)
+	rc := JudgeRun(run, routes, rules, []*catalog.Run{run}, lookup, nil, time.Time{})
 
 	if got := rc.Judge("offsite", catalog.Placement{}); got.Promised != 2 || got.Behind() != 2 || got.Routed != 0 {
 		t.Errorf("offsite judge = %+v, want 2 promised, 2 behind", got)
@@ -110,10 +111,81 @@ func TestJudgeRunRuleLastWindow(t *testing.T) {
 	rules := []config.SyncRule{{To: "offsite", Last: 1}}
 	lookup := func(string) []catalog.Placement { return nil }
 
-	if got := JudgeRun(cur, routes, rules, runs, lookup).Judge("offsite", catalog.Placement{}); got.Promised != 1 {
+	if got := JudgeRun(cur, routes, rules, runs, lookup, nil, time.Time{}).Judge("offsite", catalog.Placement{}); got.Promised != 1 {
 		t.Errorf("newest run: offsite promised = %d, want 1", got.Promised)
 	}
-	if got := JudgeRun(old, routes, rules, runs, lookup).Judge("offsite", catalog.Placement{}); got.Promised != 0 {
+	if got := JudgeRun(old, routes, rules, runs, lookup, nil, time.Time{}).Judge("offsite", catalog.Placement{}); got.Promised != 0 {
 		t.Errorf("run outside the rule's window: offsite promised = %d, want 0", got.Promised)
 	}
+}
+
+// TestJudgeRunAgedRetention: media of different capacities keep different depths
+// of history, so the promise is time-bounded per medium — an archive off its
+// DLE's live recovery chain and past the medium's minimum_age classes CopyAged
+// (a pruned copy is rotation, not "missing"), while one still within minimum_age
+// or on the live chain stays owed.
+func TestJudgeRunAgedRetention(t *testing.T) {
+	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	mk := func(id string, age time.Duration) *catalog.Run {
+		return &catalog.Run{ID: id, Archives: []record.Archive{
+			{Run: id, DLE: "etc", Level: 0, CreatedAt: now.Add(-age)},
+		}}
+	}
+	old := mk("run-2026-06-01.000000", 37*24*time.Hour)
+	mid := mk("run-2026-07-05.000000", 3*24*time.Hour)
+	cur := mk("run-2026-07-07.000000", 24*time.Hour)
+	runs := []*catalog.Run{old, mid, cur}
+	routes := map[string][]string{"etc": {"big", "small"}}
+	lookup := func(string) []catalog.Placement { return nil }
+	week := func(string) time.Duration { return 7 * 24 * time.Hour }
+
+	// The old run is superseded (cur's full starts the live chain) and past
+	// minimum_age everywhere: aged, expected nowhere, and its absence is no gap.
+	rcOld := JudgeRun(old, routes, nil, runs, lookup, week, now)
+	if got := rcOld.Class("small", "etc", 0); got != CopyAged {
+		t.Errorf("old run on small classes %v, want CopyAged", got)
+	}
+	if media := rcOld.ExpectedMedia(); len(media) != 0 {
+		t.Errorf("ExpectedMedia = %v, want none (every expectation aged)", media)
+	}
+	j := rcOld.Judge("small", catalog.Placement{})
+	if j.MissingRouted() != 0 || j.Aged != 1 {
+		t.Errorf("aged absence judged %+v, want no missing and Aged 1", j)
+	}
+	// A copy still held is history, never a defect: Held only.
+	j = rcOld.Judge("big", heldPlacement("big", old))
+	if j.Held != 1 || j.Expected() != 0 || j.Aged != 1 {
+		t.Errorf("aged held copy judged %+v, want Held 1, no expectation", j)
+	}
+
+	// Superseded but within the medium's minimum_age: still owed (a fresh trip
+	// must not hide behind a newer full).
+	rcMid := JudgeRun(mid, routes, nil, runs, lookup, week, now)
+	if got := rcMid.Class("small", "etc", 0); got != CopyRouted {
+		t.Errorf("young superseded run classes %v, want CopyRouted (within minimum_age)", got)
+	}
+
+	// The live chain is always owed, whatever its age.
+	rcCur := JudgeRun(cur, routes, nil, runs, lookup, week, now)
+	if got := rcCur.Class("small", "etc", 0); got != CopyRouted {
+		t.Errorf("live-chain run classes %v, want CopyRouted", got)
+	}
+
+	// An auto sync rule's whole-run mirror ages the same way (SyncTo skips it too).
+	rules := []config.SyncRule{{To: "offsite"}}
+	if got := JudgeRun(old, routes, rules, runs, lookup, week, now).Class("offsite", "etc", 0); got != CopyAged {
+		t.Errorf("old run promise to offsite classes %v, want CopyAged", got)
+	}
+	if got := JudgeRun(cur, routes, rules, runs, lookup, week, now).Class("offsite", "etc", 0); got != CopyPromised {
+		t.Errorf("live-chain promise to offsite classes %v, want CopyPromised", got)
+	}
+}
+
+// heldPlacement is a placement on medium holding every archive of the run.
+func heldPlacement(medium string, s *catalog.Run) catalog.Placement {
+	p := catalog.Placement{Medium: medium}
+	for _, a := range s.Archives {
+		p.Archives = append(p.Archives, catalog.PlacedArchive{DLE: a.DLE, Level: a.Level})
+	}
+	return p
 }

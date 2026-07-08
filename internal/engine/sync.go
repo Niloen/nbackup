@@ -173,13 +173,28 @@ func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force boo
 	if auto {
 		scope = routedScope(c.cfg, target)
 	}
+	// An auto sync also tops up only what the target's retention window still
+	// owes (owesTo): an archive off its DLE's live chain and past the target's
+	// minimum_age is exactly what a prune there deletes, so copying it back would
+	// only churn — sync restores it, the next make-room reclaims it again. An
+	// explicit --run is operator intent and --force re-copies wholesale, so both
+	// bypass the bound; an explicit source is a deliberate whole-source mirror,
+	// bounded by the source's own retention instead. Coverage ages the same way
+	// (JudgeRun's CopyAged), so the display and the backlog stay one computation.
+	var owed func(runID string, a record.Archive) bool
+	if auto && len(sel.RunIDs) == 0 && !force {
+		lastFull := lastFullRuns(candidates)
+		minAge := c.cfg.MinAgeFor(c.cfg.Media[target])
+		now := time.Now()
+		owed = func(runID string, a record.Archive) bool { return owesTo(runID, a, lastFull, minAge, now) }
+	}
 
 	report := &SyncReport{From: from, To: target}
 	for _, s := range applySelection(candidates, sel) {
 		src := from
 		if auto {
 			var err error
-			if src, err = c.sourceFor(s, target, force, scope); err != nil {
+			if src, err = c.sourceFor(s, target, force, scope, owed); err != nil {
 				return nil, err
 			}
 			if src == "" {
@@ -192,6 +207,15 @@ func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force boo
 		}
 		// A forced sync re-copies the source copy's whole content.
 		want := wantArchives(scopedArchives(held, scope), scopedArchives(missing, scope), force)
+		if owed != nil {
+			kept := want[:0:0]
+			for _, a := range want {
+				if owed(s.ID, a) {
+					kept = append(kept, a)
+				}
+			}
+			want = kept
+		}
 		if len(want) == 0 {
 			continue // idempotent: the target holds everything the source copy does
 		}
@@ -241,9 +265,20 @@ func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force boo
 // target but no single medium holds them all (the operator must name a source, or
 // run twice with explicit --from). force treats the run's whole content as missing,
 // matching wantArchives' forced re-copy. A non-nil scope narrows the run's content
-// to those DLEs (the target's routed archives; see SyncTo).
-func (c *copier) sourceFor(s *catalog.Run, target string, force bool, scope map[string]bool) (string, error) {
+// to those DLEs (the target's routed archives; see SyncTo), and a non-nil owed
+// drops the archives the target's retention window no longer owes — otherwise an
+// aged, unheld archive would demand a source no medium needs to provide.
+func (c *copier) sourceFor(s *catalog.Run, target string, force bool, scope map[string]bool, owed func(string, record.Archive) bool) (string, error) {
 	missing := scopedArchives(s.Archives, scope) // force treats the run's whole (scoped) content as missing
+	if owed != nil {
+		kept := missing[:0:0]
+		for _, a := range missing {
+			if owed(s.ID, a) {
+				kept = append(kept, a)
+			}
+		}
+		missing = kept
+	}
 	if !force {
 		tgt, _ := placementOn(c.cat, s.ID, target) // a zero Placement holds nothing
 		missing = tgt.Missing(missing)

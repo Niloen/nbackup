@@ -138,6 +138,10 @@ func newSyncCmd(a *app) *cobra.Command {
 			"is resolved per run from whichever medium holds the missing archives (the landing " +
 			"first) — so repairing a tripped PRIMARY landing needs no source: " +
 			"`nb sync --run <id> --to <landing>` reads the surviving copy wherever it lives. " +
+			"Without --from the backlog is also bounded by the target's own retention window: " +
+			"a run past the target's minimum_age and superseded by a newer full is exactly what " +
+			"a prune there deletes (media of different sizes keep different depths), so it is " +
+			"not copied back — name it with --run, or use --from for a whole-source mirror. " +
 			"With --to it syncs one target; without --to it runs the `sync:` rules from the " +
 			"config. Copies by default; pass --dry-run (-n) to preview.",
 		Example: "  nb sync\n  nb sync --to lto\n  nb sync --run run-2026-07-08.010001 --to c2\n  nb sync --to glacier --last 4\n  nb sync --from lto --to disk --dry-run",

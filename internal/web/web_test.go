@@ -90,7 +90,7 @@ func (f fakeSource) RunCoverage(run *catalog.Run) *engine.RunCoverage {
 			routes[a.DLE] = media
 		}
 	}
-	return engine.JudgeRun(run, routes, f.syncRules, f.runs, f.Placements)
+	return engine.JudgeRun(run, routes, f.syncRules, f.runs, f.Placements, nil, time.Time{})
 }
 
 func (f fakeSource) SyncLags() []engine.SyncLag { return f.syncLags }
@@ -1785,5 +1785,49 @@ func TestDLEHistoryJudged(t *testing.T) {
 	}
 	if !strings.Contains(body, "phys-head\">c2") {
 		t.Fatalf("physical panel misses the c2 group:\n%s", body)
+	}
+}
+
+// TestAgedRetentionQuiet: media of different capacities keep different depths, so
+// a run that has rotated out of a smaller medium's retention window (superseded
+// by a newer full) must not warn. On the run page the absent medium earns no
+// "missing" row and the surviving copy reads aged, not complete/partial; on the
+// DLE matrix the hole renders as the quiet aged glyph, never a red ✕.
+func TestAgedRetentionQuiet(t *testing.T) {
+	at := time.Date(2026, 7, 8, 2, 0, 0, 0, time.UTC)
+	oldEtc := record.Archive{Run: "run-2026-06-01.020000", DLE: "etc", Host: "localhost", Path: "/etc",
+		Level: 0, Compressed: 1000, CreatedAt: at.AddDate(0, 0, -37)}
+	curEtc := record.Archive{Run: "run-2026-07-08.020000", DLE: "etc", Host: "localhost", Path: "/etc",
+		Level: 0, Compressed: 1000, CreatedAt: at}
+	src := fakeSource{
+		runs: []*catalog.Run{
+			{ID: oldEtc.Run, Archives: []record.Archive{oldEtc}},
+			{ID: curEtc.Run, Archives: []record.Archive{curEtc}},
+		},
+		media:  []engine.MediumInfo{{Name: "big", Type: "disk"}, {Name: "small", Type: "s3"}},
+		routes: map[string][]string{"etc": {"big", "small"}},
+		placements: map[string][]catalog.Placement{
+			oldEtc.Run: {heldOn("big", oldEtc)}, // small pruned the old run
+			curEtc.Run: {heldOn("big", curEtc), heldOn("small", curEtc)},
+		},
+	}
+	srv := NewServer(src, t.TempDir())
+
+	_, body := get(t, srv.Handler(), "/runs/"+oldEtc.Run)
+	if !strings.Contains(body, "aged · 1") {
+		t.Fatalf("/runs/<old> misses the aged pill on big's surviving copy:\n%s", body)
+	}
+	for _, reject := range []string{"missing ·", "partial ·", "--to small", `<td class="cell"><span class="miss">`} {
+		if strings.Contains(body, reject) {
+			t.Fatalf("/runs/<old> wrongly contains %q for a pruned-by-retention copy:\n%s", reject, body)
+		}
+	}
+
+	_, body = get(t, srv.Handler(), "/dles/etc")
+	if !strings.Contains(body, `class="aged"`) {
+		t.Fatalf("/dles/etc misses the aged glyph for small's rotated-out hole:\n%s", body)
+	}
+	if strings.Contains(body, `<td class="cell"><span class="miss">`) {
+		t.Fatalf("/dles/etc marks a rotated-out hole as missing:\n%s", body)
 	}
 }

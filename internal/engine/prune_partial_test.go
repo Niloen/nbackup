@@ -70,7 +70,7 @@ func TestPartialPruneKeepsCatalogArchiveGranular(t *testing.T) {
 	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil); err != nil {
 		t.Fatalf("dump 2: %v", err)
 	}
-	if _, err := eng.SyncTo("", "archive", SyncSelection{}, true, false, nil); err != nil {
+	if _, err := eng.SyncTo("disk", "archive", SyncSelection{}, true, false, nil); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 

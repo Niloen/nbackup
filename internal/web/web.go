@@ -279,6 +279,8 @@ func buildPlacementGrid(run *catalog.Run, placements []catalog.Placement, cols [
 					cell.Gap = "miss"
 				case engine.CopyPromised:
 					cell.Gap = "lag"
+				case engine.CopyAged:
+					cell.Gap = "aged"
 				}
 			}
 			row.Cells = append(row.Cells, cell)
@@ -419,9 +421,11 @@ func (s *Server) dleHistory(slug string, chain map[string]bool) (places []string
 			}
 			// Media the config expects this archive on earn a column even with no
 			// copy anywhere — a lane that tripped on every run, or a landing/sync
-			// target added since, must not stay invisible.
+			// target added since, must not stay invisible. An aged expectation
+			// earns nothing: a run rotated out of a medium's retention window is
+			// not that medium's business anymore.
 			for _, m := range rc.ExpectedMedia() {
-				if rc.Class(m, slug, a.Level) != engine.CopyNone {
+				if rc.Class(m, slug, a.Level) >= engine.CopyPromised {
 					add(m)
 				}
 			}
@@ -453,13 +457,16 @@ func (s *Server) dleHistory(slug string, chain map[string]bool) (places []string
 			}
 			if !cell.Held {
 				// Same judgment as the run page's grid: a hole is a defect only
-				// where the route owes a copy; a sync promise is lag; anything
-				// else was never this medium's to hold.
+				// where the route owes a copy; a sync promise is lag; one aged
+				// past the medium's retention window is rotation, not a defect;
+				// anything else was never this medium's to hold.
 				switch rcOf[it.run.ID].Class(medium, slug, it.a.Level) {
 				case engine.CopyRouted:
 					cell.Gap = "miss"
 				case engine.CopyPromised:
 					cell.Gap = "lag"
+				case engine.CopyAged:
+					cell.Gap = "aged"
 				}
 			}
 			row.Cells = append(row.Cells, cell)

@@ -697,6 +697,13 @@ never drags another route's DLEs along. A target on no route — the offsite vau
 case above — mirrors whole runs, and an explicit `--from` always mirrors that
 source.
 
+Without `--from` the backlog is also bounded by the **target's own retention
+window**: a run past the target's `minimum_age` and superseded by a newer full is
+exactly what `nb prune` on that target deletes, so sync never copies it back —
+media of different capacities keep different depths of history, by design (the web
+UI shows those runs as *aged out* on that medium, not missing). Name a run with
+`--run`, or use `--from`, when you deliberately want old history mirrored.
+
 It **copies by default** (pass `--dry-run`/`-n` to preview) and is **idempotent**:
 each archive copies atomically and records its placement as it commits, and a run
 counts as mirrored only once the target holds every archive of it — so re-running

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"sort"
+	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
@@ -14,6 +15,14 @@ import (
 // adding a landing or a sync rule deliberately makes existing runs read as behind
 // on the new medium (and `nb sync` is how they catch up), while a medium holding
 // archives nothing routes to it anymore holds a bonus copy, not a defect.
+//
+// The promise is also time-bounded, per medium: retention is per-medium (each
+// store prunes against its own capacity and minimum_age), so media of different
+// sizes keep different depths of history, and an archive a medium's own retention
+// may delete cannot be demanded of it. owesTo is that bound — an archive is owed
+// only while it is on its DLE's live recovery chain or within the medium's
+// minimum_age; past it, an expectation decays to CopyAged and a gap there is
+// rotation doing its job, never a "missing" defect.
 
 // CopyClass is one archive's relationship to one medium, in ascending promise
 // strength (a route outranks a sync promise when both name the same medium).
@@ -23,6 +32,12 @@ const (
 	// CopyNone: the medium is neither in the archive's landing route nor a sync
 	// target for it. A copy there is a bonus; a gap there is nobody's problem.
 	CopyNone CopyClass = iota
+	// CopyAged: the route (or an auto sync rule) once owed the archive to the
+	// medium, but it has aged out of that medium's retention window (owesTo) — a
+	// prune there may delete it at any time, so nothing may demand it. A gap is
+	// the medium's rotation, not a defect; a copy still held is history the
+	// medium simply has not needed to reclaim yet.
+	CopyAged
 	// CopyPromised: a sync rule mirrors the archive onto the medium, so a missing
 	// copy is lag, not an error — the next `nb sync` closes it.
 	CopyPromised
@@ -49,16 +64,35 @@ type RunCoverage struct {
 }
 
 // RunCoverage judges run's copies against this engine's config; see JudgeRun.
+// The judgment is a live display computation, so it reads the wall clock.
 func (e *Engine) RunCoverage(run *catalog.Run) *RunCoverage {
-	return JudgeRun(run, e.cfg.Routes(), e.cfg.Sync, e.cat.Runs(), e.cat.Placements)
+	minAge := func(medium string) time.Duration { return e.cfg.MinAgeFor(e.cfg.Media[medium]) }
+	return JudgeRun(run, e.cfg.Routes(), e.cfg.Sync, e.cat.Runs(), e.cat.Placements, minAge, time.Now())
 }
 
 // JudgeRun builds a run's expectation map from the DLE landing routes
 // (config.Routes) and the sync rules. runs and placements feed the rule
 // evaluation: a rule bounded by `last:` only promises the runs inside its
 // window, and an explicit-source rule only promises what its source copy holds.
-func JudgeRun(run *catalog.Run, routes map[string][]string, rules []config.SyncRule, runs []*catalog.Run, placements func(runID string) []catalog.Placement) *RunCoverage {
+// minAge is each medium's retention floor (nil = zero for all) and now the
+// judgment instant — together the owesTo bound that decays a stale expectation
+// to CopyAged instead of reading a pruned copy as missing.
+func JudgeRun(run *catalog.Run, routes map[string][]string, rules []config.SyncRule, runs []*catalog.Run, placements func(runID string) []catalog.Placement, minAge func(medium string) time.Duration, now time.Time) *RunCoverage {
 	rc := &RunCoverage{run: run, classes: map[string]map[archKey]CopyClass{}, syncFrom: map[string]string{}}
+	lastFull := lastFullRuns(runs)
+	for _, a := range run.Archives {
+		// The judged run itself anchors too (tests may pass it outside runs).
+		if a.Level == 0 && run.ID > lastFull[a.DLE] {
+			lastFull[a.DLE] = run.ID
+		}
+	}
+	owes := func(medium string, a record.Archive) bool {
+		age := time.Duration(0)
+		if minAge != nil {
+			age = minAge(medium)
+		}
+		return owesTo(run.ID, a, lastFull, age, now)
+	}
 	mark := func(medium string, k archKey, class CopyClass) {
 		m := rc.classes[medium]
 		if m == nil {
@@ -79,7 +113,11 @@ func JudgeRun(run *catalog.Run, routes map[string][]string, rules []config.SyncR
 	}
 	for _, a := range run.Archives {
 		for _, m := range routes[a.DLE] {
-			mark(m, archKey{a.DLE, a.Level}, CopyRouted)
+			if owes(m, a) {
+				mark(m, archKey{a.DLE, a.Level}, CopyRouted)
+			} else {
+				mark(m, archKey{a.DLE, a.Level}, CopyAged)
+			}
 		}
 	}
 	// The sync rules' promises.
@@ -95,12 +133,20 @@ func JudgeRun(run *catalog.Run, routes map[string][]string, rules []config.SyncR
 			if isLanding[r.To] {
 				continue
 			}
+			// An auto promise ages like a route does (SyncTo's auto mode skips
+			// what the target is no longer owed, so the display and the sync
+			// backlog stay one computation).
 			for _, a := range run.Archives {
-				mark(r.To, archKey{a.DLE, a.Level}, CopyPromised)
+				if owes(r.To, a) {
+					mark(r.To, archKey{a.DLE, a.Level}, CopyPromised)
+				} else {
+					mark(r.To, archKey{a.DLE, a.Level}, CopyAged)
+				}
 			}
 		} else {
 			// An explicit-source rule mirrors that medium: it promises exactly what
-			// the source copy holds today (copySets' selection).
+			// the source copy holds today (copySets' selection) — never aged, because
+			// an explicit mirror is bounded by the source's own retention instead.
 			src := placementOnMedium(placements(run.ID), r.From)
 			for _, a := range run.Archives {
 				if src.Holds(a.DLE, a.Level) {
@@ -140,6 +186,36 @@ func ruleSelects(run *catalog.Run, r config.SyncRule, runs []*catalog.Run, place
 	return false
 }
 
+// owesTo reports whether a medium with retention floor minAge is still owed an
+// archive of run runID: the archive is on its DLE's live recovery chain (at or
+// after the DLE's newest full in lastFull — the chain retention.Compute pins on
+// every medium), or still within minAge. What falls outside is exactly what a
+// prune on that medium may delete, so nothing may demand it there: coverage
+// classes it CopyAged and SyncTo's auto mode skips it (copying it back would
+// only churn — the next make-room reclaims it again). A DLE with no known full
+// is owed everywhere, the safe default.
+func owesTo(runID string, a record.Archive, lastFull map[string]string, minAge time.Duration, now time.Time) bool {
+	if lf, ok := lastFull[a.DLE]; !ok || runID >= lf {
+		return true
+	}
+	return minAge > 0 && !a.CreatedAt.IsZero() && now.Sub(a.CreatedAt) < minAge
+}
+
+// lastFullRuns maps each DLE to the run id of its newest full across runs — the
+// start of its live recovery chain, the anchor owesTo judges against. Run ids
+// are clock-minted, so string order is run order.
+func lastFullRuns(runs []*catalog.Run) map[string]string {
+	last := map[string]string{}
+	for _, s := range runs {
+		for _, a := range s.Archives {
+			if a.Level == 0 && s.ID > last[a.DLE] {
+				last[a.DLE] = s.ID
+			}
+		}
+	}
+	return last
+}
+
 // placementOnMedium finds the run's copy on a medium among its placements; the
 // zero Placement (which holds nothing) when the medium has no copy.
 func placementOnMedium(ps []catalog.Placement, medium string) catalog.Placement {
@@ -159,11 +235,18 @@ func (rc *RunCoverage) Class(medium, dle string, level int) CopyClass {
 // ExpectedMedia lists the media expected to hold any of the run's archives
 // (routed or promised), sorted — the rows a coverage display must show even when
 // a medium has no placement at all (a lane that tripped before writing anything,
-// or a landing/sync target added since the run).
+// or a landing/sync target added since the run). A medium whose every
+// expectation has decayed to CopyAged is not expected: the run has rotated out
+// of its retention window, so its absence there says nothing.
 func (rc *RunCoverage) ExpectedMedia() []string {
 	names := make([]string, 0, len(rc.classes))
-	for m := range rc.classes {
-		names = append(names, m)
+	for m, ks := range rc.classes {
+		for _, class := range ks {
+			if class >= CopyPromised {
+				names = append(names, m)
+				break
+			}
+		}
 	}
 	sort.Strings(names)
 	return names
@@ -182,6 +265,7 @@ type CopyJudgment struct {
 	RoutedHeld   int
 	Promised     int // archives a sync rule promises to the medium
 	PromisedHeld int
+	Aged         int // archives once owed here but past the medium's retention window (a gap is rotation, a copy is history)
 }
 
 // MissingRouted is the copy's real gap: routed archives the medium lacks.
@@ -216,6 +300,8 @@ func (rc *RunCoverage) Judge(medium string, p catalog.Placement) CopyJudgment {
 			if held {
 				j.PromisedHeld++
 			}
+		case CopyAged:
+			j.Aged++
 		}
 	}
 	return j

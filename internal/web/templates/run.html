@@ -101,7 +101,7 @@
   <tr>
     <td><a href="/dles/{{.DLE}}">{{.DLEID}}</a> <span class="pill dim">{{level .Level}}</span></td>
     {{range .Cells}}
-    <td class="cell">{{if .Held}}{{if .Pos}}<span class="pos">{{.Pos}}</span>{{else}}<span class="have">✓</span>{{end}}{{else if eq .Gap "miss"}}<span class="miss">✕</span>{{else if eq .Gap "lag"}}<span class="lag">◌</span>{{else}}<span class="muted">—</span>{{end}}</td>
+    <td class="cell">{{if .Held}}{{if .Pos}}<span class="pos">{{.Pos}}</span>{{else}}<span class="have">✓</span>{{end}}{{else if eq .Gap "miss"}}<span class="miss">✕</span>{{else if eq .Gap "lag"}}<span class="lag">◌</span>{{else if eq .Gap "aged"}}<span class="aged" title="aged out — past this medium's retention window">∅</span>{{else}}<span class="muted">—</span>{{end}}</td>
     {{end}}
   </tr>
   {{end}}
@@ -111,6 +111,7 @@
   <span><span class="pos">NB-0001:3–5</span> volume : file positions</span>
   <span><span class="miss">✕</span> missing (this medium's route)</span>
   <span><span class="lag">◌</span> awaiting sync</span>
+  <span><span class="aged">∅</span> aged out (this medium's retention)</span>
   <span><span class="muted">—</span> not expected here</span>
 </div>
 </div>

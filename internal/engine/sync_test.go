@@ -489,7 +489,7 @@ func TestSyncSpansLibraryVolumes(t *testing.T) {
 		t.Fatalf("load bay-01: %v", err)
 	}
 
-	report, err := eng.SyncTo("", "lib", SyncSelection{}, true, false, nil)
+	report, err := eng.SyncTo("disk", "lib", SyncSelection{}, true, false, nil)
 	if err != nil {
 		t.Fatalf("sync disk->lib: %v", err)
 	}
@@ -662,7 +662,7 @@ func TestMultiDriveSyncCrossRun(t *testing.T) {
 	}
 
 	// Sync all three runs to the library in one spool pass (the cross-run path).
-	report, err := eng.SyncTo("", "lib", SyncSelection{}, true, false, nil)
+	report, err := eng.SyncTo("disk", "lib", SyncSelection{}, true, false, nil)
 	if err != nil {
 		t.Fatalf("sync disk->lib: %v", err)
 	}
@@ -1105,7 +1105,7 @@ func TestSyncTapeMidRunFailureResumes(t *testing.T) {
 
 	// The sync fails mid-run: run 1 mirrors whole, run 2 lands only one of its two
 	// archives before the roll finds no writable bay.
-	report, err := eng.SyncTo("", "tapes", SyncSelection{}, true, false, nil)
+	report, err := eng.SyncTo("disk", "tapes", SyncSelection{}, true, false, nil)
 	if err == nil {
 		t.Fatal("sync onto a single filling tape should fail (no writable bay for the roll)")
 	}
@@ -1127,14 +1127,14 @@ func TestSyncTapeMidRunFailureResumes(t *testing.T) {
 	// The retry must NOT report up to date — the missing archive is in the backlog —
 	// and, still having no writable bay, must fail without touching the blank reels
 	// or the recorded placements.
-	dry, err := eng.SyncTo("", "tapes", SyncSelection{}, false, false, nil)
+	dry, err := eng.SyncTo("disk", "tapes", SyncSelection{}, false, false, nil)
 	if err != nil {
 		t.Fatalf("dry-run after failure: %v", err)
 	}
 	if len(dry.Items) != 1 || dry.Items[0].RunID != s2.ID || dry.Items[0].Archives != 1 {
 		t.Fatalf("backlog after failed sync = %+v, want run %s with 1 missing archive", dry.Items, s2.ID)
 	}
-	if _, err := eng.SyncTo("", "tapes", SyncSelection{}, true, false, nil); err == nil {
+	if _, err := eng.SyncTo("disk", "tapes", SyncSelection{}, true, false, nil); err == nil {
 		t.Fatal("retry without a writable bay should still fail, not silently succeed")
 	}
 	if p, _ := placementOf(eng, s2.ID, "tapes"); len(p.Archives) != 1 {
@@ -1148,7 +1148,7 @@ func TestSyncTapeMidRunFailureResumes(t *testing.T) {
 	if err := eng.LabelVolume("tapes", "T-2", false, false, time.Date(2026, 6, 22, 2, 0, 0, 0, time.UTC), nil); err != nil {
 		t.Fatalf("label T-2: %v", err)
 	}
-	report, err = eng.SyncTo("", "tapes", SyncSelection{}, true, false, nil)
+	report, err = eng.SyncTo("disk", "tapes", SyncSelection{}, true, false, nil)
 	if err != nil {
 		t.Fatalf("resume sync after labeling T-2: %v", err)
 	}
@@ -1176,7 +1176,7 @@ func TestSyncTapeMidRunFailureResumes(t *testing.T) {
 	}
 
 	// And the mirror is now genuinely complete.
-	dry, err = eng.SyncTo("", "tapes", SyncSelection{}, false, false, nil)
+	dry, err = eng.SyncTo("disk", "tapes", SyncSelection{}, false, false, nil)
 	if err != nil {
 		t.Fatalf("final dry-run: %v", err)
 	}
@@ -1310,5 +1310,75 @@ func TestSyncAutoScopedToRoute(t *testing.T) {
 	}
 	if len(report.Items) != 1 || report.Items[0].Archives != 2 {
 		t.Fatalf("mirror to vault = %+v, want 1 run with both archives", report.Items)
+	}
+}
+
+// TestSyncAgedBacklog: an auto sync tops up only what the target's retention
+// window still owes. A run superseded by a newer full and past the target's
+// minimum_age is exactly what the target's own prune deletes, so it never enters
+// the backlog — otherwise sync and make-room would churn it in and out forever
+// on a target smaller than its source. An explicit --run (operator intent) and
+// an explicit --from (a deliberate whole-source mirror) still carry it.
+func TestSyncAgedBacklog(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "age me")
+
+	cfg := &config.Config{
+		Landing: config.MediumList{"disk"},
+		Media: map[string]config.Media{
+			"disk":  {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"vault": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	// Two fulls of the same DLE, both past the default minimum_age (one cycle):
+	// run 1 is superseded — off the live chain — so the vault is not owed it.
+	s1, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump 1: %v", err)
+	}
+	if _, err := eng.ForceFull("localhost:" + src); err != nil {
+		t.Fatalf("force full: %v", err)
+	}
+	s2, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump 2: %v", err)
+	}
+
+	report, err := eng.SyncTo("", "vault", SyncSelection{}, false, false, nil)
+	if err != nil {
+		t.Fatalf("auto dry-run: %v", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].RunID != s2.ID {
+		t.Fatalf("auto backlog = %+v, want only the live-chain run %s", report.Items, s2.ID)
+	}
+
+	// The aged run is still reachable on demand: by explicit --run and by an
+	// explicit-source mirror.
+	report, err = eng.SyncTo("", "vault", SyncSelection{RunIDs: []string{s1.ID}}, false, false, nil)
+	if err != nil {
+		t.Fatalf("--run dry-run: %v", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].RunID != s1.ID {
+		t.Fatalf("--run backlog = %+v, want run %s", report.Items, s1.ID)
+	}
+	report, err = eng.SyncTo("disk", "vault", SyncSelection{}, false, false, nil)
+	if err != nil {
+		t.Fatalf("--from dry-run: %v", err)
+	}
+	if len(report.Items) != 2 {
+		t.Fatalf("--from backlog = %d run(s), want 2 (a whole-source mirror)", len(report.Items))
 	}
 }

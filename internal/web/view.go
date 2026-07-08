@@ -751,7 +751,9 @@ type copyRow struct {
 
 // State buckets the row for its pill: "partial" (missing archives its landing
 // route owes — the real defect), "behind" (only sync lag), "complete" (every
-// expectation held), or "extra" (nothing expects this copy; it is a bonus).
+// expectation held), "aged" (the run has rotated out of this medium's retention
+// window; what is still held is history, what is gone was prunable), or "extra"
+// (nothing ever expected this copy; it is a bonus).
 func (c copyRow) State() string {
 	switch {
 	case c.MissingRouted() > 0:
@@ -760,6 +762,8 @@ func (c copyRow) State() string {
 		return "behind"
 	case c.Expected() > 0:
 		return "complete"
+	case c.Aged > 0:
+		return "aged"
 	default:
 		return "extra"
 	}
