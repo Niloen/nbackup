@@ -22,20 +22,25 @@ func Render(w io.Writer, runs []Run, now time.Time) {
 		return
 	}
 
-	var failures int
+	var failures, warned int
 	var bytesMoved int64
 	for _, r := range runs {
 		if r.Failed() {
 			failures++
+		} else if r.Warned() {
+			warned++
 		}
 		bytesMoved += r.BytesMoved
 	}
 	first, last := runs[0].StartedAt, runs[len(runs)-1].StartedAt
 	fmt.Fprintf(w, "NBackup report — %d run(s) from %s to %s\n",
 		len(runs), sizeutil.FormatStamp(first.Local()), sizeutil.FormatStamp(last.Local()))
-	if failures > 0 {
+	switch {
+	case failures > 0:
 		fmt.Fprintf(w, "%d run(s) FAILED, %s moved\n\n", failures, sizeutil.FormatBytes(bytesMoved))
-	} else {
+	case warned > 0:
+		fmt.Fprintf(w, "%d run(s) with WARNINGS, %s moved\n\n", warned, sizeutil.FormatBytes(bytesMoved))
+	default:
 		fmt.Fprintf(w, "all runs OK, %s moved\n\n", sizeutil.FormatBytes(bytesMoved))
 	}
 
@@ -45,12 +50,8 @@ func Render(w io.Writer, runs []Run, now time.Time) {
 	fmt.Fprintln(tw, "WHEN\tCOMMAND\tOUTCOME\tDETAIL")
 	for i := len(runs) - 1; i >= 0; i-- {
 		r := runs[i]
-		outcome := "OK"
-		if r.Failed() {
-			outcome = "FAILED"
-		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
-			sizeutil.FormatStamp(r.StartedAt.Local()), r.Command, outcome, detailCell(r))
+			sizeutil.FormatStamp(r.StartedAt.Local()), r.Command, r.Status(), detailCell(r))
 	}
 	tw.Flush()
 
@@ -69,6 +70,23 @@ func Render(w io.Writer, runs []Run, now time.Time) {
 				sizeutil.FormatStamp(r.StartedAt.Local()), r.Command, r.ExitClass, r.Error)
 		}
 	}
+	// Warning summary: degraded runs and the repair each warning names.
+	var hasWarnings bool
+	for _, r := range runs {
+		if len(r.Warnings) > 0 {
+			hasWarnings = true
+		}
+	}
+	if hasWarnings {
+		fmt.Fprintln(w, "\nWARNINGS")
+		for i := len(runs) - 1; i >= 0; i-- {
+			r := runs[i]
+			for _, warning := range r.Warnings {
+				fmt.Fprintf(w, "  %s %s: %s\n",
+					sizeutil.FormatStamp(r.StartedAt.Local()), r.Command, warning)
+			}
+		}
+	}
 	// The recovery-health picture is rendered separately by the caller from the live
 	// drill ledger (see cli.renderDrillLedger), which reflects the current time and
 	// carries per-class remedies — richer than what a single past record holds.
@@ -77,17 +95,16 @@ func Render(w io.Writer, runs []Run, now time.Time) {
 // RenderRun writes a single run's detail to w — the body of a per-run notification.
 // It leads with the outcome so the first line of an alert says what happened.
 func RenderRun(w io.Writer, r Run) {
-	outcome := "OK"
-	if r.Failed() {
-		outcome = "FAILED"
-	}
-	fmt.Fprintf(w, "%s %s — %s\n", r.Command, outcome, sizeutil.FormatStampSec(r.StartedAt.Local()))
+	fmt.Fprintf(w, "%s %s — %s\n", r.Command, r.Status(), sizeutil.FormatStampSec(r.StartedAt.Local()))
 	fmt.Fprintf(w, "  elapsed: %s\n", sizeutil.FormatElapsed(r.EndedAt.Sub(r.StartedAt)))
 	if d := detailCell(r); d != "-" {
 		fmt.Fprintf(w, "  detail:  %s\n", d)
 	}
 	if r.Failed() {
 		fmt.Fprintf(w, "  error [%s]: %s\n", r.ExitClass, r.Error)
+	}
+	for _, warning := range r.Warnings {
+		fmt.Fprintf(w, "  WARNING: %s\n", warning)
 	}
 	renderRecovery(w, r)
 	// A dump notification carries the full per-DLE report,
@@ -117,6 +134,9 @@ func RenderDump(w io.Writer, r Run) {
 	if r.Failed() {
 		fmt.Fprintf(w, "run FAILED [%s]: %s\n", r.ExitClass, r.Error)
 	}
+	for _, warning := range r.Warnings {
+		fmt.Fprintf(w, "WARNING: %s\n", warning)
+	}
 	if len(r.DumpStats) == 0 {
 		fmt.Fprintln(w, "no per-DLE statistics recorded for this run")
 		return
@@ -142,6 +162,9 @@ func headline(r Run) string {
 	elapsed := sizeutil.FormatElapsed(r.EndedAt.Sub(r.StartedAt))
 	if r.Failed() {
 		return fmt.Sprintf("%d DLE(s) dumped, run FAILED [%s] · %s · %s elapsed", a.n, r.ExitClass, sizes, elapsed)
+	}
+	if r.Warned() {
+		return fmt.Sprintf("%d DLE(s) dumped, %d WARNING(s) · %s · %s elapsed", a.n, len(r.Warnings), sizes, elapsed)
 	}
 	return fmt.Sprintf("%d DLE(s) dumped OK · %s · %s elapsed", a.n, sizes, elapsed)
 }

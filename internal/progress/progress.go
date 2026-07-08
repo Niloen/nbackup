@@ -14,7 +14,9 @@
 package progress
 
 import (
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -196,6 +198,32 @@ type SkippedLanding struct {
 	Landing string `json:"landing"`
 	Reason  string `json:"reason"`
 	Tripped bool   `json:"tripped,omitempty"`
+}
+
+// RepairSync is the exact command that backfills a landing's missing copies — the
+// one format every hint site (status render, web UI, run log, run report) shares.
+// It scopes the sync to the run when its id is known and names no source: `nb sync`
+// resolves one from whatever media hold the missing archives, so the hint works even
+// when the failed landing is the primary (which a bare `--from`-less sync would
+// otherwise try to read from). Only a sealed-run id ("run-…") scopes the hint — a
+// copy/sync spool's synthetic id would name a run that doesn't exist.
+func RepairSync(runID, landing string) string {
+	if !strings.HasPrefix(runID, "run-") {
+		return "nb sync --to " + landing
+	}
+	return "nb sync --run " + runID + " --to " + landing
+}
+
+// Repair is the repair command for this landing's missing copies, scoped to runID.
+func (sk SkippedLanding) Repair(runID string) string { return RepairSync(runID, sk.Landing) }
+
+// Warning is the landing's one-line run-report warning: what happened, what is
+// missing, and the repair — the line a dump's report/notification carries.
+func (sk SkippedLanding) Warning(runID string) string {
+	if sk.Tripped {
+		return fmt.Sprintf("landing %s tripped mid-run: %s — copies from before the failure landed, the rest are missing; repair: %s", sk.Landing, sk.Reason, sk.Repair(runID))
+	}
+	return fmt.Sprintf("landing %s was skipped: %s — its copies are missing this run; repair: %s", sk.Landing, sk.Reason, sk.Repair(runID))
 }
 
 // TotalEst sums the planned estimates (uncompressed).

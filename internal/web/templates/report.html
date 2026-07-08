@@ -14,7 +14,7 @@
   <tr>
     <td>{{stampsec .EndedAt}}</td>
     <td>{{.Command}}</td>
-    <td class="{{if .Failed}}bad{{else}}ok{{end}}">{{if .Failed}}failure{{else}}success{{end}}</td>
+    <td class="{{if .Failed}}bad{{else if .Warned}}warn{{else}}ok{{end}}">{{if .Failed}}failure{{else if .Warned}}warning{{else}}success{{end}}</td>
     <td class="num">{{if .Archives}}{{.Archives}}{{else}}<span class="muted">—</span>{{end}}</td>
     <td class="muted">{{if .DetailPrefix}}<a href="/runs/{{.DetailPrefix}}">{{.DetailPrefix}}</a>, {{end}}{{.DetailRest}}{{if .ExitClass}} · {{.ExitClass}}{{end}}{{if .Error}} · {{.Error}}{{end}}</td>
     <td class="num">{{.Duration}}</td>

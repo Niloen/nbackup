@@ -772,14 +772,19 @@ func lastDump(hist []report.Run) *report.Run {
 func (s *Server) rollup(now time.Time, hist []report.Run) []alert {
 	var bad, warn []alert
 
-	// The most recent run of each command, flagged when it failed.
+	// The most recent run of each command, flagged when it failed — or succeeded
+	// degraded (e.g. a tripped landing left copies missing until an `nb sync`).
 	for _, run := range lastPerCommand(hist) {
-		if !run.Failed() {
-			continue
+		switch {
+		case run.Failed():
+			bad = append(bad, alert{Level: "bad", Tag: "failed",
+				Text: fmt.Sprintf("last %s failed%s", run.Command, exitDetail(run)),
+				Href: runHref(run)})
+		case run.Warned():
+			warn = append(warn, alert{Level: "warn", Tag: "warning",
+				Text: fmt.Sprintf("last %s: %s", run.Command, run.Warnings[0]),
+				Href: runHref(run)})
 		}
-		bad = append(bad, alert{Level: "bad", Tag: "failed",
-			Text: fmt.Sprintf("last %s failed%s", run.Command, exitDetail(run)),
-			Href: runHref(run)})
 	}
 
 	// Capacity foresight, one alert per bounded medium (unbounded media carry none):

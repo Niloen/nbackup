@@ -56,10 +56,13 @@ func (a *app) dispatchDigest(cfg *config.Config, runs []report.Run) {
 	report.Render(&body, runs, time.Now())
 	renderDrillLedger(&body, cfg, time.Now())
 	renderStaleness(&body, cfg, time.Now())
+	// The subject carries the date (Amanda's mail-report convention) so each
+	// digest gets its own subject instead of threading as a reply to the last one.
 	subject := "nbackup report"
 	if host := hostname(); host != "" {
 		subject += " on " + host
 	}
+	subject += " — " + time.Now().Local().Format("2006-01-02")
 	notify.DispatchDigest(context.Background(), cfg.Notify, subject, body.String(), notifyWarn)
 }
 

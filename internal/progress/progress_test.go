@@ -478,7 +478,7 @@ func TestFanoutDrainProgress(t *testing.T) {
 // happened (the status-file lie where a skipped landing read as fully drained).
 func TestSkipLandingTellsTheTruth(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("run", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000, Landings: []string{"s3", "tape"}}}, c.now, nil)
+	tr := NewTracker("run-1", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000, Landings: []string{"s3", "tape"}}}, c.now, nil)
 	tr.SkipLanding("tape", "open landing: no writable volume")
 
 	snap := tr.Snapshot()
@@ -507,7 +507,7 @@ func TestSkipLandingTellsTheTruth(t *testing.T) {
 	var sb strings.Builder
 	Render(&sb, tr.Snapshot(), c.now())
 	out := sb.String()
-	for _, want := range []string{"SKIPPED landing tape", "nb sync --to tape"} {
+	for _, want := range []string{"SKIPPED landing tape", "nb sync --run run-1 --to tape"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render missing %q in:\n%s", want, out)
 		}
@@ -521,7 +521,7 @@ func TestSkipLandingTellsTheTruth(t *testing.T) {
 // it still owes must keep the drain from reading complete.
 func TestTripLandingIsVisible(t *testing.T) {
 	c := newClock()
-	tr := NewTracker("run", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000, Landings: []string{"s3", "tape"}}}, c.now, nil)
+	tr := NewTracker("run-1", PhaseRunning, 1, []Plan{{Name: "alpha", Level: 0, EstBytes: 1000, Landings: []string{"s3", "tape"}}}, c.now, nil)
 
 	tr.StartDLE("alpha")
 	tr.FinishDLE("alpha", 1, 1000, 800, nil)
@@ -546,7 +546,7 @@ func TestTripLandingIsVisible(t *testing.T) {
 	var sb strings.Builder
 	Render(&sb, snap, c.now())
 	out := sb.String()
-	for _, want := range []string{"TRIPPED landing tape", "no volume loaded", "nb sync --to tape"} {
+	for _, want := range []string{"TRIPPED landing tape", "no volume loaded", "nb sync --run run-1 --to tape"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render missing %q in:\n%s", want, out)
 		}

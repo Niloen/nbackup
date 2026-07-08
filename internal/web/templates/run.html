@@ -14,6 +14,13 @@
 
 {{with .Dump}}
 <h2>Dump report</h2>
+{{if .Warnings}}
+<div class="alerts" style="margin:0 0 1rem">
+  {{range .Warnings}}
+  <div class="alert warn"><span class="pill warn">warning</span><span>{{.}}</span></div>
+  {{end}}
+</div>
+{{end}}
 <div class="panel">
   <div class="muted" style="margin:0 0 .6rem">{{.Headline}}</div>
   <table>

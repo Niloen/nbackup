@@ -88,6 +88,7 @@ func newDumpCmd(a *app) *cobra.Command {
 						rec.Archives = len(s.Archives)
 						rec.BytesMoved = s.TotalBytes()
 						rec.DumpStats, rec.LandingStats = dumpStats(s, cfg.WorkdirPath())
+						rec.Warnings = landingWarnings(cfg.WorkdirPath(), s.ID)
 					}
 					return rec, err
 				}
@@ -106,6 +107,7 @@ func newDumpCmd(a *app) *cobra.Command {
 					BytesMoved:   s.TotalBytes(),
 					DumpStats:    stats,
 					LandingStats: landings,
+					Warnings:     landingWarnings(cfg.WorkdirPath(), s.ID),
 				}, nil
 			})
 		},
@@ -189,6 +191,23 @@ func dumpStats(s *catalog.Run, workdir string) ([]report.DLEStat, []report.Landi
 		})
 	}
 	return stats, landings
+}
+
+// landingWarnings reads the run's landing degradations off the run-status snapshot
+// the tracker just flushed (the same file `nb status` reads, matched by run id) —
+// each landing the run skipped up front or tripped mid-run becomes one warning on
+// the run record, so the report, the notification, and the web UI say WARNING
+// instead of a clean OK while copies are missing.
+func landingWarnings(workdir, runID string) []string {
+	snap, err := progress.Load(workdir)
+	if err != nil || snap.RunID != runID {
+		return nil
+	}
+	warnings := make([]string, 0, len(snap.Skipped))
+	for _, sk := range snap.Skipped {
+		warnings = append(warnings, sk.Warning(runID))
+	}
+	return warnings
 }
 
 // runDumpDryRun previews the dump on `date` without writing: it plans that run

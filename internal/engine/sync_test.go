@@ -94,6 +94,90 @@ func TestSyncMirrorsLandingToTarget(t *testing.T) {
 	}
 }
 
+// TestSyncRunAutoSource locks the tripped-primary repair: a run whose copy is
+// missing on the primary landing but whole on another medium is healed by
+// `nb sync --run <id> --to <primary>` — no --from needed: the source is resolved
+// from whichever medium holds the missing archives, and only the named run is
+// considered (the other stale run stays untouched).
+func TestSyncRunAutoSource(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), "heal me")
+
+	cfg := &config.Config{
+		Landing: config.MediumList{"disk"},
+		Media: map[string]config.Media{
+			"disk":  {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"vault": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	s1, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump 1: %v", err)
+	}
+	write(t, filepath.Join(src, "g.txt"), "more")
+	s2, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump 2: %v", err)
+	}
+	if _, err := eng.SyncTo("", "vault", SyncSelection{}, true, false, nil); err != nil {
+		t.Fatalf("mirror to vault: %v", err)
+	}
+	// Lose both runs' primary copies — what a tripped landing leaves behind.
+	for _, id := range []string{s1.ID, s2.ID} {
+		if err := eng.acct.ReclaimCopy(id, "disk"); err != nil {
+			t.Fatalf("reclaim %s: %v", id, err)
+		}
+	}
+	if eng.placedOn(s1.ID, "disk") {
+		t.Fatal("reclaim left the disk copy in place")
+	}
+
+	// A typo'd --run is an error, never a silent "up to date".
+	if _, err := eng.SyncTo("", "disk", SyncSelection{RunIDs: []string{"no-such-run"}}, false, false, nil); err == nil {
+		t.Fatal("unknown --run id must error")
+	}
+
+	// Dry-run: the backlog is exactly the named run, sourced from the vault.
+	rep, err := eng.SyncTo("", "disk", SyncSelection{RunIDs: []string{s1.ID}}, false, false, nil)
+	if err != nil {
+		t.Fatalf("repair dry-run: %v", err)
+	}
+	if len(rep.Items) != 1 || rep.Items[0].RunID != s1.ID {
+		t.Fatalf("repair backlog = %+v, want exactly %s", rep.Items, s1.ID)
+	}
+	if rep.Items[0].Source != "vault" {
+		t.Fatalf("auto-resolved source = %q, want vault", rep.Items[0].Source)
+	}
+
+	// Apply heals the primary — and only the named run.
+	rep, err = eng.SyncTo("", "disk", SyncSelection{RunIDs: []string{s1.ID}}, true, false, nil)
+	if err != nil {
+		t.Fatalf("repair apply: %v", err)
+	}
+	if rep.Copied() != 1 {
+		t.Fatalf("copied = %d, want 1", rep.Copied())
+	}
+	if !eng.placedOn(s1.ID, "disk") {
+		t.Fatalf("run %s still missing on the primary after repair", s1.ID)
+	}
+	if eng.placedOn(s2.ID, "disk") {
+		t.Fatalf("run %s was copied despite not being named", s2.ID)
+	}
+}
+
 // TestSyncSelectionLast checks --last keeps only the most recent N runs.
 func TestSyncSelectionLast(t *testing.T) {
 	src := t.TempDir()
@@ -765,7 +849,10 @@ func TestSyncRunOutOfTapes(t *testing.T) {
 	}
 }
 
-// TestSyncTargetIsLanding rejects syncing a medium to itself.
+// TestSyncTargetIsLanding: an explicit source equal to the target is rejected, but
+// with no --from the source is auto-resolved per run, so targeting the landing is
+// legal — that is exactly the tripped-primary repair (`nb sync --run <id> --to
+// <primary>`) — and an empty catalog is simply up to date.
 func TestSyncTargetIsLanding(t *testing.T) {
 	cfg := &config.Config{
 		Landing:  config.MediumList{"disk"},
@@ -779,8 +866,15 @@ func TestSyncTargetIsLanding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := eng.SyncTo("", "disk", SyncSelection{}, false, false, nil); err == nil {
+	if _, err := eng.SyncTo("disk", "disk", SyncSelection{}, false, false, nil); err == nil {
 		t.Fatal("expected error syncing the landing medium to itself")
+	}
+	rep, err := eng.SyncTo("", "disk", SyncSelection{}, false, false, nil)
+	if err != nil {
+		t.Fatalf("auto-source sync to the landing: %v", err)
+	}
+	if len(rep.Items) != 0 {
+		t.Fatalf("empty catalog auto-sync backlog = %d item(s), want 0", len(rep.Items))
 	}
 }
 

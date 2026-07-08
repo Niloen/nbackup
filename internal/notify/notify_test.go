@@ -21,42 +21,79 @@ func failRun() report.Run {
 
 func TestRouteFor(t *testing.T) {
 	all := config.NotifyConfig{Backends: map[string]config.NotifyBackend{"mail": {Type: "smtp"}, "chat": {Type: "webhook"}}}
+	run := func(cmd report.Command, out report.Outcome) report.Run {
+		return report.Run{Command: cmd, Outcome: out}
+	}
 
 	// Failure with no on_failure → every backend (failures must be loud).
-	got := routeFor(all, report.CommandDump, report.OutcomeFailure)
+	got := routeFor(all, run(report.CommandDump, report.OutcomeFailure))
 	sort.Strings(got)
 	if strings.Join(got, ",") != "chat,mail" {
 		t.Errorf("failure routing = %v, want all backends", got)
 	}
 	// A successful dump notifies by default (the nightly "backups happened" signal).
-	got = routeFor(all, report.CommandDump, report.OutcomeSuccess)
+	got = routeFor(all, run(report.CommandDump, report.OutcomeSuccess))
 	sort.Strings(got)
 	if strings.Join(got, ",") != "chat,mail" {
 		t.Errorf("dump success routing = %v, want all backends by default", got)
 	}
 	// Other commands' success is opt-in: silent with no on_success.
-	if got := routeFor(all, report.CommandSync, report.OutcomeSuccess); len(got) != 0 {
+	if got := routeFor(all, run(report.CommandSync, report.OutcomeSuccess)); len(got) != 0 {
 		t.Errorf("sync success routing = %v, want none by default", got)
 	}
-	if got := routeFor(all, report.CommandDrill, report.OutcomeSuccess); len(got) != 0 {
+	if got := routeFor(all, run(report.CommandDrill, report.OutcomeSuccess)); len(got) != 0 {
 		t.Errorf("drill success routing = %v, want none by default", got)
 	}
 
 	// An explicit on_success overrides the default and applies to every command.
 	withSuccess := all
 	withSuccess.OnSuccess = []string{"mail"}
-	if got := routeFor(withSuccess, report.CommandDump, report.OutcomeSuccess); len(got) != 1 || got[0] != "mail" {
+	if got := routeFor(withSuccess, run(report.CommandDump, report.OutcomeSuccess)); len(got) != 1 || got[0] != "mail" {
 		t.Errorf("explicit dump success routing = %v, want [mail]", got)
 	}
-	if got := routeFor(withSuccess, report.CommandSync, report.OutcomeSuccess); len(got) != 1 || got[0] != "mail" {
+	if got := routeFor(withSuccess, run(report.CommandSync, report.OutcomeSuccess)); len(got) != 1 || got[0] != "mail" {
 		t.Errorf("explicit sync success routing = %v, want [mail]", got)
 	}
 
 	// Explicit on_failure is honored.
 	withFailure := all
 	withFailure.OnFailure = []string{"chat"}
-	if got := routeFor(withFailure, report.CommandDump, report.OutcomeFailure); len(got) != 1 || got[0] != "chat" {
+	if got := routeFor(withFailure, run(report.CommandDump, report.OutcomeFailure)); len(got) != 1 || got[0] != "chat" {
 		t.Errorf("explicit failure routing = %v, want [chat]", got)
+	}
+
+	// A warned run (success + warnings) routes like a failure: it owes the
+	// operator an action, so it must reach the loud channels.
+	warned := run(report.CommandSync, report.OutcomeSuccess)
+	warned.Warnings = []string{"landing c2 tripped mid-run"}
+	got = routeFor(all, warned)
+	sort.Strings(got)
+	if strings.Join(got, ",") != "chat,mail" {
+		t.Errorf("warned routing = %v, want all backends", got)
+	}
+	if got := routeFor(withFailure, warned); len(got) != 1 || got[0] != "chat" {
+		t.Errorf("warned routing with on_failure = %v, want [chat]", got)
+	}
+}
+
+// TestBuildEventSubject: the subject carries the three-state verdict and the run's
+// date (Amanda's convention) — a dated subject per night, so mail clients never
+// thread tonight's report as a reply to last night's, and a degraded run says
+// WARNING instead of a false OK.
+func TestBuildEventSubject(t *testing.T) {
+	rec := report.Run{Command: report.CommandDump, Outcome: report.OutcomeSuccess,
+		StartedAt: time.Date(2026, 7, 8, 1, 0, 0, 0, time.Local)}
+	ev := buildEvent("box", rec)
+	if !strings.Contains(ev.Subject, "dump OK on box") || !strings.Contains(ev.Subject, "2026-07-08") {
+		t.Errorf("subject = %q, want verdict + date", ev.Subject)
+	}
+	rec.Warnings = []string{"landing c2 tripped mid-run"}
+	ev = buildEvent("box", rec)
+	if !strings.Contains(ev.Subject, "dump WARNING on box") || !ev.Warned || ev.Failed {
+		t.Errorf("warned subject = %q (Warned=%v Failed=%v), want WARNING", ev.Subject, ev.Warned, ev.Failed)
+	}
+	if !strings.Contains(ev.Body, "landing c2 tripped mid-run") {
+		t.Errorf("body = %q, want it to carry the warning", ev.Body)
 	}
 }
 

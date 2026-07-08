@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -104,6 +105,27 @@ func runCopyDryRun(cfg *config.Config, runID, from, to string, force bool) error
 	return nil
 }
 
+// syncFromLabel names a sync's source side: the explicit --from, the distinct
+// auto-resolved item sources, or the medium-neutral "(auto)" when an auto sync
+// found nothing to copy (so it resolved no source at all).
+func syncFromLabel(r *engine.SyncReport) string {
+	if r.From != "" {
+		return r.From
+	}
+	var names []string
+	seen := map[string]bool{}
+	for _, it := range r.Items {
+		if !seen[it.Source] {
+			seen[it.Source] = true
+			names = append(names, it.Source)
+		}
+	}
+	if len(names) == 0 {
+		return "(auto)"
+	}
+	return strings.Join(names, "+")
+}
+
 // warnMediumOverCapacity prints the shared copy/sync over-capacity WARNING with its
 // prune/grow remedy. projected selects the preview phrasing ("would hold", for a
 // dry-run or a projection) over the post-copy one ("now holds").
@@ -122,6 +144,7 @@ func warnMediumOverCapacity(medium string, used, capacity int64, projected bool)
 // the config's `sync:` block. Copies by default (like `nb prune`).
 func newSyncCmd(a *app) *cobra.Command {
 	var from, to, sinceStr string
+	var runIDs []string
 	var last int
 	var dryRun, force bool
 	cmd := &cobra.Command{
@@ -129,11 +152,13 @@ func newSyncCmd(a *app) *cobra.Command {
 		Short: "Mirror one medium's runs onto another (e.g. disk -> tape/s3)",
 		Long: "Copy every run the target medium is missing from a source medium, oldest " +
 			"first. The batch, idempotent form of `nb copy`: an interrupted or repeated sync " +
-			"resumes, copying only what is not yet on the target. The source defaults to the " +
-			"landing medium and is overridden with --from. With --to it syncs one target; " +
-			"without --to it runs the `sync:` rules from the config. Copies by default; pass " +
-			"--dry-run (-n) to preview.",
-		Example: "  nb sync\n  nb sync --to lto\n  nb sync --to glacier --last 4\n  nb sync --from lto --to disk --dry-run",
+			"resumes, copying only what is not yet on the target. Without --from the source " +
+			"is resolved per run from whichever medium holds the missing archives (the landing " +
+			"first) — so repairing a tripped PRIMARY landing needs no source: " +
+			"`nb sync --run <id> --to <landing>` reads the surviving copy wherever it lives. " +
+			"With --to it syncs one target; without --to it runs the `sync:` rules from the " +
+			"config. Copies by default; pass --dry-run (-n) to preview.",
+		Example: "  nb sync\n  nb sync --to lto\n  nb sync --run run-2026-07-08.010001 --to c2\n  nb sync --to glacier --last 4\n  nb sync --from lto --to disk --dry-run",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.loadForWrite()
@@ -158,10 +183,10 @@ func newSyncCmd(a *app) *cobra.Command {
 			}
 			var targets []target
 			if to != "" {
-				targets = append(targets, target{from, to, engine.SyncSelection{Last: last, Since: since}})
+				targets = append(targets, target{from, to, engine.SyncSelection{Last: last, Since: since, RunIDs: runIDs}})
 			} else {
 				for _, r := range cfg.Sync {
-					targets = append(targets, target{r.From, r.To, engine.SyncSelection{Last: r.Last}})
+					targets = append(targets, target{r.From, r.To, engine.SyncSelection{Last: r.Last, RunIDs: runIDs}})
 				}
 				if len(targets) == 0 {
 					return fmt.Errorf("no sync target: pass --to <medium> or add a `sync:` block to the config")
@@ -201,7 +226,8 @@ func newSyncCmd(a *app) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&to, "to", "", "target medium (omit to run the config's sync: rules)")
-	cmd.Flags().StringVar(&from, "from", "", "source medium (default: the landing medium)")
+	cmd.Flags().StringVar(&from, "from", "", "source medium (default: resolved per run — the landing, else whichever medium holds the missing archives)")
+	cmd.Flags().StringArrayVar(&runIDs, "run", nil, "sync only this run (repeatable) — the surgical repair after a tripped landing")
 	cmd.Flags().IntVar(&last, "last", 0, "copy only the N most recent runs (0 = all); combined with --since, the newest N of those on/after the date")
 	cmd.Flags().StringVar(&sinceStr, "since", "", "copy only runs dated on/after this date YYYY-MM-DD (intersects with --last)")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "preview without copying")
@@ -212,17 +238,17 @@ func newSyncCmd(a *app) *cobra.Command {
 // printSyncReport renders one target's backlog, matching the prune dry-run style.
 func printSyncReport(r *engine.SyncReport, apply bool) {
 	if len(r.Items) == 0 {
-		fmt.Printf("%s -> %s: up to date\n", r.From, r.To)
+		fmt.Printf("%s -> %s: up to date\n", syncFromLabel(r), r.To)
 		return
 	}
 	if apply {
 		// Report the bytes that actually landed (copied runs), not the whole backlog —
 		// a sync that stops partway (e.g. the target filled) must not claim it moved
 		// bytes for runs it never copied.
-		fmt.Printf("%s -> %s: copied %d run(s), %s\n", r.From, r.To, r.Copied(), sizeutil.FormatBytes(r.CopiedBytes()))
+		fmt.Printf("%s -> %s: copied %d run(s), %s\n", syncFromLabel(r), r.To, r.Copied(), sizeutil.FormatBytes(r.CopiedBytes()))
 	} else {
 		fmt.Printf("%s -> %s: %d run(s) to copy, %s (dry-run; re-run without --dry-run to copy):\n",
-			r.From, r.To, len(r.Items), sizeutil.FormatBytes(r.Bytes()))
+			syncFromLabel(r), r.To, len(r.Items), sizeutil.FormatBytes(r.Bytes()))
 		for _, it := range r.Items {
 			fmt.Printf("  %-24s %2d archive(s)  %s\n", it.RunID, it.Archives, sizeutil.FormatBytes(it.Bytes))
 		}

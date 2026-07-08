@@ -46,11 +46,18 @@ nb sync --to lto                # copy the backlog
 nb sync --to glacier --last 4   # only the 4 most recent runs
 nb sync                         # run every rule in the config's sync: block
 nb sync --from lto --to disk    # un-vault: restage tape back to disk
+nb sync --run run-2026-07-08.010001 --to s3   # repair one run's missing copies
 ```
 
-The source defaults to the **landing** medium; **`--from` overrides it**, so the
-same command both pushes offsite (disk → tape/S3) and pulls back (tape → disk).
-Reading a tape source mounts the volume holding each run, just like a restore.
+Without `--from` the source is resolved **per run**: the landing when it holds
+what the target is missing, else whichever other medium does. That is what makes
+the tripped-landing repair a one-liner — when a landing fails mid-dump, the run's
+warning names exactly `nb sync --run <id> --to <landing>`, and it works even when
+the failed landing is the *primary* (the copies are read from the surviving
+landing; you never have to know which medium still holds them). **`--from`
+overrides it**, so the same command both pushes offsite (disk → tape/S3) and
+pulls back (tape → disk). Reading a tape source mounts the volume holding each
+run, just like a restore.
 
 `nb sync` **copies by default** — pass `--dry-run` (`-n`) to preview without
 writing. It is **idempotent**: each run copies atomically and records a second

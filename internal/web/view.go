@@ -525,6 +525,7 @@ type runDetail struct {
 // unexported) so the template does none of it.
 type dumpReportView struct {
 	Headline string
+	Warnings []string // the run's degradations (e.g. a tripped landing), each with its repair
 	Grid     []dumpGridRow
 	Rows     []dumpStatRow
 	// Promoted summarizes the run's promoted fulls ("N full(s), X pulled forward
@@ -591,6 +592,7 @@ func newDumpReportView(r report.Run) *dumpReportView {
 	}
 	v := &dumpReportView{
 		Headline: dumpHeadline(r, tot),
+		Warnings: r.Warnings,
 		Grid:     dumpStatsGrid(tot, full, incr, r.LandingStats, r.EndedAt.Sub(r.StartedAt)),
 	}
 	var promoted int
@@ -625,6 +627,9 @@ func dumpHeadline(r report.Run, tot dumpAgg) string {
 	elapsed := sizeutil.FormatElapsed(r.EndedAt.Sub(r.StartedAt))
 	if r.Failed() {
 		return fmt.Sprintf("%d DLE(s) dumped, run FAILED [%s] · %s · %s elapsed", tot.n, r.ExitClass, sizes, elapsed)
+	}
+	if r.Warned() {
+		return fmt.Sprintf("%d DLE(s) dumped, %d WARNING(s) · %s · %s elapsed", tot.n, len(r.Warnings), sizes, elapsed)
 	}
 	return fmt.Sprintf("%d DLE(s) dumped OK · %s · %s elapsed", tot.n, sizes, elapsed)
 }

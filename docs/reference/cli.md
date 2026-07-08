@@ -191,7 +191,7 @@ fusermount -u /mnt/backups
 | Command | Key flags | Purpose |
 |---|---|---|
 | `nb copy` | `--from <medium>`, `--to <medium>`, `--dry-run`, `--force` | Copy one run between media (e.g. disk → tape); `--force` re-copies a run already on the target. |
-| `nb sync` | `--to <medium>`, `--from <medium>`, `--last N`, `--since <day>`, `--dry-run`, `--force` | Mirror one medium's runs onto another, oldest-first; no `--to` runs every config `sync:` rule. `--since` bounds by date (intersects `--last`); `--force` re-copies runs already on the target. |
+| `nb sync` | `--to <medium>`, `--from <medium>`, `--run <id>`, `--last N`, `--since <day>`, `--dry-run`, `--force` | Mirror runs onto a medium, oldest-first; no `--to` runs every config `sync:` rule. Without `--from` the source is resolved per run (the landing, else whichever medium holds the missing archives). `--run` repairs just that run (repeatable); `--since` bounds by date (intersects `--last`); `--force` re-copies runs already on the target. |
 
 ```bash
 nb sync --to lto --dry-run
@@ -199,6 +199,7 @@ nb sync --to lto
 nb sync --to glacier --last 4
 nb sync                       # run every rule in the config's sync: block
 nb sync --from lto --to disk  # un-vault: restage tape back to disk
+nb sync --run run-2026-07-08.010001 --to c2   # repair one run (e.g. after a tripped landing)
 ```
 
 The source defaults to the landing medium; `--from` overrides it. See

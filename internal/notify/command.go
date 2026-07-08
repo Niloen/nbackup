@@ -33,8 +33,11 @@ func newCommand(b config.NotifyBackend) (Notifier, error) {
 
 func (n *commandNotifier) Notify(ctx context.Context, ev Event) error {
 	status := "OK"
-	if ev.Failed {
+	switch {
+	case ev.Failed:
 		status = "FAILED"
+	case ev.Warned:
+		status = "WARNING"
 	}
 	env := []string{
 		"NB_COMMAND=" + ev.Command,

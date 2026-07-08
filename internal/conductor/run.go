@@ -121,7 +121,7 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 			freed, err := c.d.MakeRoom(landing, incoming[landing], now, logf)
 			if err != nil {
 				roomFailed[landing] = fmt.Errorf("make room on %q for tonight's ~%s: %w", landing, sizeutil.FormatBytes(incoming[landing]), err)
-				logf.Log("WARNING landing %q cannot make room for tonight's ~%s and is skipped for this run: %v — then repair: nb sync --to %s", landing, sizeutil.FormatBytes(incoming[landing]), err, landing)
+				logf.Log("WARNING landing %q cannot make room for tonight's ~%s and is skipped for this run: %v — then repair: %s", landing, sizeutil.FormatBytes(incoming[landing]), err, progress.RepairSync("", landing))
 				continue
 			}
 			if freed > 0 {
@@ -314,7 +314,7 @@ func (c *Conductor) withSpool(ctx context.Context, landings, holdingNames []stri
 				return err
 			}
 			openFailed[name] = err
-			lf.Log("WARNING landing %q failed to open and is skipped for this run: %v — repair: nb sync --to %s", name, err, name)
+			lf.Log("WARNING landing %q failed to open and is skipped for this run: %v — repair: %s", name, err, progress.RepairSync(spec.ID, name))
 			continue
 		}
 		defer releaseWriter(pw)

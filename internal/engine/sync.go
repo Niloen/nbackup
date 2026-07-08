@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
@@ -13,11 +14,15 @@ import (
 // sealed runs onto a target by computing the backlog (runs on the source the
 // target is missing) and copying it through the same CopyRuns path as `nb copy`.
 
-// SyncSelection bounds which landing runs a sync considers. The zero value
-// selects every run on the landing medium.
+// SyncSelection bounds which runs a sync considers. The zero value selects every
+// candidate run.
 type SyncSelection struct {
-	Last  int       // 0 = all; else only the N most recent landing runs
+	Last  int       // 0 = all; else only the N most recent runs
 	Since time.Time // zero = no lower bound; else only runs created at/after this
+	// RunIDs restricts the sync to exactly these runs — the surgical repair after a
+	// tripped landing (`nb sync --run <id> --to <landing>`). An unknown id is an
+	// error, not an empty backlog.
+	RunIDs []string
 }
 
 // SyncItem is one run in a sync's backlog: a copy the target is missing — entirely, or
@@ -26,6 +31,7 @@ type SyncSelection struct {
 // that the target copy does not.
 type SyncItem struct {
 	RunID    string
+	Source   string // the medium this item's archives are read from (the --from, or the auto-resolved source)
 	Archives int
 	Bytes    int64 // compressed size of the missing archives on the volume
 	Copied   bool  // set true once the target holds the run completely (checked after a real run)
@@ -34,9 +40,9 @@ type SyncItem struct {
 // SyncReport is the backlog of one sync target (and, after a real run, what was
 // copied). It is what the CLI renders for both dry-run and apply.
 type SyncReport struct {
-	From  string
+	From  string // the named source, or "" when each item's source was auto-resolved (see SyncItem.Source)
 	To    string
-	Items []SyncItem // runs on From not yet on To, oldest-first, after selection
+	Items []SyncItem // runs not yet whole on To, oldest-first, after selection
 
 	// TargetCapacity is the target medium's retainable capacity (0 = unbounded), and
 	// ProjectedBytes is what the target would hold once this backlog lands (its
@@ -94,11 +100,16 @@ func (e *Engine) SyncTo(from, target string, sel SyncSelection, apply, force boo
 // `nb sync` is invoked without an explicit --to.
 func (e *Engine) SyncRules() []config.SyncRule { return e.cfg.Sync }
 
-// SyncTo mirrors a source medium's sealed runs onto target: every run whose copy on
-// the source holds archives the target copy does not, oldest-first. Oldest first
-// means an interrupted sync makes contiguous, replayable progress and a run's
-// full lands before the incrementals that build on it. The source defaults to the
-// landing medium when from is ""; any other medium is allowed (e.g. tape -> disk).
+// SyncTo mirrors sealed runs onto target: every run holding archives the target copy
+// does not, oldest-first. Oldest first means an interrupted sync makes contiguous,
+// replayable progress and a run's full lands before the incrementals that build on it.
+//
+// The source: an explicit from reads that one medium (any medium is allowed, e.g.
+// tape -> disk). With from == "" the source is resolved PER RUN — the landing when
+// its copy holds everything the target is missing, else whichever other medium does
+// (see sourceFor). That auto mode is what makes the trip repair work when the failed
+// landing is the primary: `nb sync --run <id> --to <primary>` reads the surviving
+// landing without the operator having to know which one that is.
 //
 // With apply==false it only computes the backlog (a dry run). With apply==true it
 // copies the backlog via CopyRuns — the same label-verified, placement-recording
@@ -111,16 +122,44 @@ func (e *Engine) SyncRules() []config.SyncRule { return e.cfg.Sync }
 // re-running copies exactly what is missing. With force==true already-present
 // runs are re-copied wholesale (CopyRun --force).
 func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force bool, logf Logf) (*SyncReport, error) {
-	if from == "" {
-		from = c.landing
-	}
-	if err := c.validatePair(from, target); err != nil {
+	auto := from == ""
+	if auto {
+		if !c.knownMedium(target) {
+			return nil, fmt.Errorf("unknown medium %q %s", target, mediaNamesHint(c.cfg))
+		}
+	} else if err := c.validatePair(from, target); err != nil {
 		return nil, err
+	}
+	// An explicitly named run must exist — a typo'd --run is an error, never a
+	// silent "up to date". With an explicit source it must have a copy there too.
+	for _, id := range sel.RunIDs {
+		if _, err := c.cat.ReadRun(id); err != nil {
+			return nil, err
+		}
+		if !auto {
+			if _, ok := placementOn(c.cat, id, from); !ok {
+				return nil, fmt.Errorf("run %s has no copy on source medium %q", id, from)
+			}
+		}
+	}
+	candidates := c.cat.Runs()
+	if !auto {
+		candidates = c.cat.RunsOn(from)
 	}
 
 	report := &SyncReport{From: from, To: target}
-	for _, s := range applySelection(c.cat.RunsOn(from), sel) {
-		held, missing, err := c.copySets(s.ID, from, target)
+	for _, s := range applySelection(candidates, sel) {
+		src := from
+		if auto {
+			var err error
+			if src, err = c.sourceFor(s, target, force); err != nil {
+				return nil, err
+			}
+			if src == "" {
+				continue // the target already holds everything this run has
+			}
+		}
+		held, missing, err := c.copySets(s.ID, src, target)
 		if err != nil {
 			return nil, err
 		}
@@ -131,6 +170,7 @@ func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force boo
 		}
 		report.Items = append(report.Items, SyncItem{
 			RunID:    s.ID,
+			Source:   src,
 			Archives: len(want),
 			Bytes:    archivesBytes(want),
 		})
@@ -144,18 +184,27 @@ func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force boo
 	if !apply {
 		return report, nil
 	}
-	runIDs := make([]string, len(report.Items))
-	for i := range report.Items {
-		runIDs[i] = report.Items[i].RunID
+	// Copy per source medium, each in one spool pass so a multi-drive target stays
+	// saturated across run boundaries (one pass total when the source was explicit).
+	// A failure aborts the sync — a hard target fault won't fix itself for the next
+	// source — and a partial sync is safe to re-run (it is idempotent).
+	var copyErr error
+	for _, src := range itemSources(report.Items) {
+		var runIDs []string
+		for _, it := range report.Items {
+			if it.Source == src {
+				runIDs = append(runIDs, it.RunID)
+			}
+		}
+		if copyErr = c.CopyRuns(runIDs, src, target, force, logf); copyErr != nil {
+			break
+		}
 	}
-	// Copy every selected run in one spool pass, so a multi-drive target stays saturated across run
-	// boundaries. A failure aborts the sync (a partial sync is safe to re-run — it is idempotent).
-	copyErr := c.CopyRuns(runIDs, from, target, force, logf)
 	// Mark what actually landed by re-reading the catalog, not by assuming success: a
 	// sync that failed partway still reports the runs that completed before the error
 	// (and the run record's BytesMoved counts them), instead of "copied 0 run(s)".
 	for i := range report.Items {
-		if _, missing, err := c.copySets(report.Items[i].RunID, from, target); err == nil && len(missing) == 0 {
+		if _, missing, err := c.copySets(report.Items[i].RunID, report.Items[i].Source, target); err == nil && len(missing) == 0 {
 			report.Items[i].Copied = true
 		}
 	}
@@ -165,8 +214,83 @@ func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force boo
 	return report, nil
 }
 
-// applySelection narrows landing runs (oldest-first) to the selection window.
+// sourceFor resolves which medium serves one run's backlog when the sync named no
+// source: the landing when its copy holds every archive the target is missing, else
+// the first other medium (alphabetical, for determinism) whose copy does. "" when
+// the target already holds everything; an error when archives are missing on the
+// target but no single medium holds them all (the operator must name a source, or
+// run twice with explicit --from). force treats the run's whole content as missing,
+// matching wantArchives' forced re-copy.
+func (c *copier) sourceFor(s *catalog.Run, target string, force bool) (string, error) {
+	tgt, _ := placementOn(c.cat, s.ID, target) // a zero Placement holds nothing
+	var missing []record.Archive
+	for _, a := range s.Archives {
+		if force || !tgt.Holds(a.DLE, a.Level) {
+			missing = append(missing, a)
+		}
+	}
+	if len(missing) == 0 {
+		return "", nil
+	}
+	holdsAll := func(medium string) bool {
+		p, ok := placementOn(c.cat, s.ID, medium)
+		if !ok {
+			return false
+		}
+		for _, a := range missing {
+			if !p.Holds(a.DLE, a.Level) {
+				return false
+			}
+		}
+		return true
+	}
+	if c.landing != target && holdsAll(c.landing) {
+		return c.landing, nil
+	}
+	var names []string
+	for name := range c.cfg.Media {
+		if name != target && name != c.landing {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if holdsAll(name) {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("run %s: %d archive(s) missing on %q, but no other medium holds them all — name a source with --from", s.ID, len(missing), target)
+}
+
+// itemSources returns the backlog's distinct source media in first-seen (oldest-run)
+// order.
+func itemSources(items []SyncItem) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, it := range items {
+		if !seen[it.Source] {
+			seen[it.Source] = true
+			out = append(out, it.Source)
+		}
+	}
+	return out
+}
+
+// applySelection narrows candidate runs (oldest-first) to the selection window.
 func applySelection(runs []*catalog.Run, sel SyncSelection) []*catalog.Run {
+	if len(sel.RunIDs) > 0 {
+		want := make(map[string]bool, len(sel.RunIDs))
+		for _, id := range sel.RunIDs {
+			want[id] = true
+		}
+		kept := runs[:0:0]
+		for _, s := range runs {
+			if want[s.ID] {
+				kept = append(kept, s)
+			}
+		}
+		runs = kept
+	}
 	if !sel.Since.IsZero() {
 		kept := runs[:0:0]
 		for _, s := range runs {

@@ -52,6 +52,11 @@ type Run struct {
 	ExitClass string `json:"exit_class,omitempty"`
 	// Error is the top-level error message when Outcome is OutcomeFailure.
 	Error string `json:"error,omitempty"`
+	// Warnings are the run's non-fatal degradations — e.g. a landing that tripped
+	// mid-run, leaving its copies missing until an `nb sync` backfills them. The run
+	// succeeded (every archive landed somewhere), but operator action is owed, so the
+	// report, its notification, and the web UI must all say WARNING rather than OK.
+	Warnings []string `json:"warnings,omitempty"`
 
 	// What ran / moved. "Bytes moved" is uniform across commands: bytes sealed
 	// (dump), copied (sync), or freed (prune) by this run.
@@ -144,3 +149,19 @@ func (h DrillHealth) Degrading() bool { return h.Drilled && !h.OK && h.WasOK }
 
 // Failed reports whether the run did not succeed.
 func (r Run) Failed() bool { return r.Outcome == OutcomeFailure }
+
+// Warned reports a run that succeeded but carries warnings — degraded, not broken.
+func (r Run) Warned() bool { return !r.Failed() && len(r.Warnings) > 0 }
+
+// Status is the run's three-state verdict for subjects, tables, and pills:
+// FAILED, WARNING, or OK. A failed run's warnings don't soften it to WARNING.
+func (r Run) Status() string {
+	switch {
+	case r.Failed():
+		return "FAILED"
+	case r.Warned():
+		return "WARNING"
+	default:
+		return "OK"
+	}
+}

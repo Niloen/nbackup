@@ -96,6 +96,47 @@ func TestRenderRunFailure(t *testing.T) {
 	}
 }
 
+// TestRenderWarnedRun: a run that succeeded with warnings (e.g. a tripped landing)
+// must say WARNING — in the per-run notification body, the dump report, and the
+// digest — and carry each warning line with its repair.
+func TestRenderWarnedRun(t *testing.T) {
+	warning := "landing c2 tripped mid-run: upload failed — repair: nb sync --run run-2026-07-08.010001 --to c2"
+	r := dumpRunFixture()
+	r.Warnings = []string{warning}
+
+	if r.Status() != "WARNING" || !r.Warned() || r.Failed() {
+		t.Fatalf("Status=%q Warned=%v Failed=%v; want WARNING/true/false", r.Status(), r.Warned(), r.Failed())
+	}
+
+	var sb strings.Builder
+	RenderRun(&sb, r)
+	out := sb.String()
+	if !strings.Contains(out, "dump WARNING") || !strings.Contains(out, "WARNING: "+warning) {
+		t.Errorf("RenderRun warned = %q, want WARNING status + warning line", out)
+	}
+
+	sb.Reset()
+	RenderDump(&sb, r)
+	out = sb.String()
+	if !strings.Contains(out, "WARNING: "+warning) || !strings.Contains(out, "1 WARNING(s)") {
+		t.Errorf("RenderDump warned = %q, want warning line + headline count", out)
+	}
+
+	sb.Reset()
+	Render(&sb, []Run{r}, time.Now())
+	out = sb.String()
+	for _, want := range []string{"1 run(s) with WARNINGS", "WARNING", warning} {
+		if !strings.Contains(out, want) {
+			t.Errorf("digest missing %q in:\n%s", want, out)
+		}
+	}
+	// A failed run's warnings must not soften it to WARNING.
+	r.Outcome = OutcomeFailure
+	if r.Status() != "FAILED" || r.Warned() {
+		t.Errorf("failed run with warnings: Status=%q Warned=%v; want FAILED/false", r.Status(), r.Warned())
+	}
+}
+
 func dumpRunFixture() Run {
 	return Run{
 		Command: CommandDump, Outcome: OutcomeSuccess, RunID: "run-2026-06-24.001",

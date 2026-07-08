@@ -41,6 +41,7 @@ type Event struct {
 	Body    string
 	Command string
 	Failed  bool
+	Warned  bool // succeeded with warnings (degraded, not broken); mutually exclusive with Failed
 }
 
 // Notifier delivers one Event over one channel.
@@ -92,7 +93,7 @@ func init() {
 // channel would silently blind it to whichever commands/outcomes the operator
 // didn't list, so it always fires — see DispatchStart for the matching start ping.
 func DispatchRun(ctx context.Context, cfg config.NotifyConfig, host string, rec report.Run, warn Warnf) {
-	names := withHealthchecks(cfg, routeFor(cfg, rec.Command, rec.Outcome))
+	names := withHealthchecks(cfg, routeFor(cfg, rec))
 	if len(names) == 0 {
 		return
 	}
@@ -178,26 +179,28 @@ func DispatchDigest(ctx context.Context, cfg config.NotifyConfig, subject, body 
 	deliver(ctx, cfg, cfg.Digest, Event{Subject: subject, Body: body}, warn)
 }
 
-// routeFor resolves which backends fire for a command's outcome.
+// routeFor resolves which backends fire for a run's outcome.
 //
-//   - Failure: every configured backend by default (failures must be loud), or the
-//     explicit on_failure list.
-//   - Success: a successful dump notifies by default — the nightly "backups happened"
-//     signal, so an empty inbox reads as a problem (cron didn't run) rather than a
-//     healthy run. The other commands' success is opt-in. An explicit on_success list
-//     overrides both, applying to every command's success.
-func routeFor(cfg config.NotifyConfig, cmd report.Command, out report.Outcome) []string {
-	switch out {
-	case report.OutcomeFailure:
+//   - Failure — and a success carrying warnings: every configured backend by default
+//     (failures must be loud, and a warned run owes the operator an action — a
+//     tripped landing's missing copies won't backfill themselves), or the explicit
+//     on_failure list.
+//   - Clean success: a successful dump notifies by default — the nightly "backups
+//     happened" signal, so an empty inbox reads as a problem (cron didn't run) rather
+//     than a healthy run. The other commands' success is opt-in. An explicit
+//     on_success list overrides both, applying to every command's success.
+func routeFor(cfg config.NotifyConfig, rec report.Run) []string {
+	switch {
+	case rec.Failed() || rec.Warned():
 		if len(cfg.OnFailure) == 0 {
 			return backendNames(cfg)
 		}
 		return cfg.OnFailure
-	case report.OutcomeSuccess:
+	case rec.Outcome == report.OutcomeSuccess:
 		if len(cfg.OnSuccess) > 0 {
 			return cfg.OnSuccess
 		}
-		if cmd == report.CommandDump {
+		if rec.Command == report.CommandDump {
 			return backendNames(cfg)
 		}
 		return nil
@@ -235,22 +238,21 @@ func deliver(ctx context.Context, cfg config.NotifyConfig, names []string, ev Ev
 }
 
 // buildEvent renders the subject and body for a run, reusing report.RenderRun so the
-// notification body matches what `nb report` shows.
+// notification body matches what `nb report` shows. The subject carries the run's
+// date (Amanda's mail-report convention): every night's mail gets its own subject,
+// so mail clients never thread tonight's report as a reply to last night's.
 func buildEvent(host string, rec report.Run) Event {
-	state := "OK"
-	if rec.Failed() {
-		state = "FAILED"
-	}
 	if host != "" {
 		host = " on " + host
 	}
 	var sb strings.Builder
 	report.RenderRun(&sb, rec)
 	return Event{
-		Subject: "nbackup " + string(rec.Command) + " " + state + host,
+		Subject: "nbackup " + string(rec.Command) + " " + rec.Status() + host + " — " + rec.StartedAt.Local().Format("2006-01-02"),
 		Body:    sb.String(),
 		Command: string(rec.Command),
 		Failed:  rec.Failed(),
+		Warned:  rec.Warned(),
 	}
 }
 

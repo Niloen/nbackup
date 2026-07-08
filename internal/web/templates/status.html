@@ -78,7 +78,7 @@
   {{range .Snap.Skipped}}
   <div class="alert {{if .Tripped}}bad{{else}}warn{{end}}">
     <span class="pill {{if .Tripped}}bad{{else}}warn{{end}}">{{if .Tripped}}tripped{{else}}skipped{{end}}</span>
-    <span>landing <strong>{{.Landing}}</strong> — {{.Reason}} · repair: <code>nb sync --to {{.Landing}}</code></span>
+    <span>landing <strong>{{.Landing}}</strong> — {{.Reason}} · repair: <code>{{.Repair $.Snap.RunID}}</code></span>
   </div>
   {{end}}
 </div>

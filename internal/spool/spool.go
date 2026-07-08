@@ -527,7 +527,7 @@ func (sp *Spool) Warnings() []string {
 	out := make([]string, len(names))
 	for i, name := range names {
 		t := sp.trips[name]
-		out[i] = fmt.Sprintf("landing %q failed (%v); %d archive(s) missing there — repair: nb sync --to %s", name, t.err, t.missing, name)
+		out[i] = fmt.Sprintf("landing %q failed (%v); %d archive(s) missing there — repair: %s", name, t.err, t.missing, progress.RepairSync(sp.spec.ID, name))
 	}
 	return out
 }
