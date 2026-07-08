@@ -27,12 +27,16 @@ import (
 // layout changes to fit the target's volumes. It depends on a narrow slice of the orchestrator:
 // the catalog (run metadata + where copies live), the fs (the read/write data path), the depot
 // (the source medium's read face), and the accountant (force-reclaim + sync's capacity
-// projection) — not the whole engine. Writes go through the conductor's spool (runCopy);
+// projection) — not the whole engine. Writes go through the conductor's spool (spoolCopy);
 // newConductor is the one injected seam.
+//
+// The flow is resolve-then-execute: a front resolves what to carry exactly once — PlanCopy for
+// `nb copy`, SyncTo's backlog for `nb sync` — into runCopy sets (run, source, the archives the
+// target is missing), and execute carries those sets, so what was priced is what is copied.
 type copier struct {
 	cfg     *config.Config
 	dep     *depot.Depot           // medium resolution: the source's read face (fail fast before reading)
-	acct    *accounting.Accountant // force-reclaim of a prior target copy; sync's capacity projection
+	acct    *accounting.Accountant // force-reclaim of a prior target copy; capacity projection
 	cat     *catalog.Catalog       // run metadata + where copies live
 	fs      *archivefs.FS          // read endpoints + write session
 	landing string                 // default source medium (the landing medium)
@@ -61,8 +65,8 @@ func (e *Engine) newCopier() *copier {
 func (c *copier) knownMedium(name string) bool { _, ok := c.cfg.Media[name]; return ok }
 
 // validatePair validates a copy/sync medium pair: both names are configured and they
-// differ. It is the one home of these checks, shared by PlanCopy (and through it
-// CopyRun), CopyRuns, and SyncTo, so the three fronts never drift.
+// differ. It is the one home of these checks, shared by PlanCopy and SyncTo, so the
+// two fronts never drift.
 func (c *copier) validatePair(from, target string) error {
 	if !c.knownMedium(from) {
 		return fmt.Errorf("unknown source medium %q %s", from, mediaNamesHint(c.cfg))
@@ -86,37 +90,67 @@ func wantArchives(held, missing []record.Archive, force bool) []record.Archive {
 	return missing
 }
 
+// runCopy is one run's resolved copy work — the currency every front produces and
+// execute consumes: the source its archives are read from and exactly the archives
+// to transfer. Resolving it once (see PlanCopy, SyncTo) is what keeps the priced
+// plan and the executed copy the same computation.
+type runCopy struct {
+	runID  string
+	source string
+	want   []record.Archive
+}
+
 // CopyPlan is the resolved, validated outcome of a would-be copy, without writing:
-// the source/target the rules picked and whether the run is already on the target.
+// the source/target the rules picked, what would be copied, whether the run is
+// already on the target, and the target's capacity projection. It is the value
+// Copy executes, so `nb copy` plans exactly once.
 type CopyPlan struct {
 	RunID           string
 	From            string   // resolved source medium (landing when --from is unset)
 	To              string   // target medium
-	Archives        int      // archives in the run
-	Bytes           int64    // the run's total bytes
+	Archives        int      // archives that would be copied
+	Bytes           int64    // their total stored bytes
 	AlreadyOnTarget bool     // a copy already exists on To (skipped unless force)
 	TargetLabels    []string // the tape labels the existing target copy spans (empty for address-identified media)
+
+	// TargetCapacity is the target medium's retainable capacity (0 = unbounded), and
+	// ProjectedBytes is what the target would hold once this copy lands — the same
+	// pair SyncReport carries, so the CLI's over-capacity warning has one feed.
+	TargetCapacity int64
+	ProjectedBytes int64
+
+	force bool
+	want  []record.Archive // the resolved archives — what Copy transfers
 }
 
-// PlanCopy resolves and validates a copy the way CopyRun would, without writing —
-// the single source of the copy-eligibility rules, shared by CopyRun and the
-// `nb copy` dry-run so the two never drift; see planCopy.
+// OverCapacity reports whether landing this copy would push the target past its
+// capacity (false for an unbounded target).
+func (p CopyPlan) OverCapacity() bool {
+	return p.TargetCapacity > 0 && p.ProjectedBytes > p.TargetCapacity
+}
+
+// TargetWhere renders the existing target copy's whereabouts for messages —
+// " (volume(s) [A B])" when it spans labeled volumes, "" for address-identified
+// media — shared by Copy's refusal and the CLI's no-op notice.
+func (p CopyPlan) TargetWhere() string {
+	if len(p.TargetLabels) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (volume(s) %v)", p.TargetLabels)
+}
+
+// PlanCopy resolves and validates a copy without writing — the single source of the
+// copy-eligibility rules, shared by Copy and the `nb copy` dry-run so the two never
+// drift. It errors on the unrunnable cases (unknown run, unknown source/target,
+// source == target, no copy on the source) and reports whether the run is already
+// on the target (force plans the re-copy anyway). Presence is archive-granular: the
+// run is "already on the target" only when the target copy holds every archive the
+// source copy holds — a partial copy (an interrupted earlier run) plans the missing
+// remainder, so Archives/Bytes are what WOULD be copied. The plan carries those
+// resolved archives, so Copy transfers exactly what its plan priced.
 func (c *copier) PlanCopy(runID, fromMedia, targetMedia string, force bool) (CopyPlan, error) {
-	plan, _, err := c.planCopy(runID, fromMedia, targetMedia, force)
-	return plan, err
-}
-
-// planCopy resolves and validates a copy without writing. It errors on the
-// unrunnable cases (unknown run, unknown source/target, source == target) and
-// reports whether the run is already on the target (force plans the re-copy
-// anyway). Presence is archive-granular: the run is "already on the target" only
-// when the target copy holds every archive the source copy holds — a partial copy
-// (an interrupted earlier run) plans the missing remainder, so Archives/Bytes are
-// what WOULD be copied. It also returns those resolved archives, so CopyRun copies
-// exactly what its plan priced rather than recomputing.
-func (c *copier) planCopy(runID, fromMedia, targetMedia string, force bool) (CopyPlan, []record.Archive, error) {
 	if _, err := c.cat.ReadRun(runID); err != nil {
-		return CopyPlan{}, nil, err
+		return CopyPlan{}, err
 	}
 	if fromMedia == "" {
 		fromMedia = c.landing
@@ -125,27 +159,115 @@ func (c *copier) planCopy(runID, fromMedia, targetMedia string, force bool) (Cop
 	// source medium" instead of slipping through to the already-on-target
 	// short-circuit and reporting a misleading no-copy-on-source.
 	if err := c.validatePair(fromMedia, targetMedia); err != nil {
-		return CopyPlan{}, nil, err
+		return CopyPlan{}, err
 	}
 	held, missing, err := c.copySets(runID, fromMedia, targetMedia)
 	if err != nil {
-		return CopyPlan{}, nil, err
+		return CopyPlan{}, err
 	}
 	if len(held) == 0 {
 		// The source holds none of the run's archives — surface that now, before the
 		// already-on-target check below, which only looks at the target and would
 		// otherwise misreport a valid-but-wrong --from as a harmless no-op.
-		return CopyPlan{}, nil, fmt.Errorf("run %s has no copy on source medium %q", runID, fromMedia)
+		return CopyPlan{}, fmt.Errorf("run %s has no copy on source medium %q", runID, fromMedia)
 	}
 	want := wantArchives(held, missing, force)
-	plan := CopyPlan{RunID: runID, From: fromMedia, To: targetMedia, Archives: len(want), Bytes: archivesBytes(want)}
+	plan := CopyPlan{
+		RunID: runID, From: fromMedia, To: targetMedia,
+		Archives: len(want), Bytes: archivesBytes(want),
+		force: force, want: want,
+	}
 	if !force && len(missing) == 0 {
 		if p, ok := placementOn(c.cat, runID, targetMedia); ok {
 			plan.AlreadyOnTarget = true
 			plan.TargetLabels = p.Labels()
 		}
 	}
-	return plan, want, nil
+	if _, projected, capacity, perr := c.acct.ProjectedOverCapacity(targetMedia, plan.Bytes); perr == nil {
+		plan.ProjectedBytes, plan.TargetCapacity = projected, capacity
+	}
+	return plan, nil
+}
+
+// Copy executes a resolved plan: it streams the planned archives from the plan's
+// source onto its target, then records the new copy in the catalog (a second
+// placement). Reading the source mounts the volume that holds the run (on a
+// changer); the write to the target runs the same label verification as a dump.
+// A run already recorded whole on the target is refused: on append-only media a
+// second copy would orphan the first (unreferenced files, reclaimable only by
+// relabel); a plan made with force re-copies deliberately.
+func (c *copier) Copy(plan CopyPlan, logf Logf) error {
+	if plan.AlreadyOnTarget {
+		return fmt.Errorf("run %s is already on medium %q%s; use --force to copy again", plan.RunID, plan.To, plan.TargetWhere())
+	}
+	if err := c.execute([]runCopy{{runID: plan.RunID, source: plan.From, want: plan.want}}, plan.To, plan.force, logf); err != nil {
+		return err
+	}
+	// No seal: each archive's copy recorded its placement on the target as it committed
+	// (NewCopy's Commit), so the copy is complete once every archive has landed.
+	logf.Log("copied %s (%d archive(s)) to %q", plan.RunID, len(plan.want), plan.To)
+	return nil
+}
+
+// execute carries resolved copy sets onto the target: one spool pass per distinct
+// source medium (first-seen order), so a multi-drive library stays saturated across
+// run boundaries rather than draining between runs. Per source it probes the read
+// side once (fail fast before any bytes flow), reclaims a prior target copy for each
+// forced run (so a re-copy does not orphan the old files — on removable media it
+// deletes them; on tape it is a no-op, orphan-until-relabel), and streams every
+// archive through one spool, one per target drive. A failure aborts the remaining
+// sources — a hard target fault won't fix itself — but each committed archive
+// already recorded its placement, so re-resolving copies exactly what is missing.
+func (c *copier) execute(sets []runCopy, target string, force bool, logf Logf) error {
+	var sources []string
+	seen := map[string]bool{}
+	for _, rc := range sets {
+		if !seen[rc.source] {
+			seen[rc.source] = true
+			sources = append(sources, rc.source)
+		}
+	}
+	for _, source := range sources {
+		if err := c.probeSource(source); err != nil {
+			return err
+		}
+		var jobs []copyJob
+		var runs []string
+		for _, rc := range sets {
+			if rc.source != source {
+				continue
+			}
+			if force {
+				// A forced re-copy rewrites the whole source copy; the reclaim (where the
+				// medium supports it) drops the prior target files so they are not orphaned.
+				if _, ok := placementOn(c.cat, rc.runID, target); ok {
+					if err := c.acct.ReclaimCopy(rc.runID, target); err != nil {
+						return err
+					}
+				}
+			}
+			jobs = append(jobs, c.jobsForRun(rc.runID, rc.want)...)
+			runs = append(runs, rc.runID)
+		}
+		if len(jobs) == 0 {
+			continue
+		}
+		// Re-author under each archive's own identity (NewCopy preserves its run,
+		// CreatedAt, checksum, and members; the member index is keyed on arch.Run and
+		// the placement on the archive), so the spec id here just tags the spool pass.
+		id := "sync"
+		if len(runs) == 1 {
+			id = runs[0]
+			logf.Log("copying %s from %q to %q", runs[0], source, target)
+		} else {
+			logf.Log("copying %d run(s) from %q to %q", len(runs), source, target)
+		}
+		spec := archiveio.RunSpec{ID: id, CreatedAt: time.Now().UTC()}
+		if err := c.spoolCopy(target, source, spec, jobs, logf); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // copySets resolves a copy archive-granularly: held is the archives the run's copy on
@@ -162,17 +284,16 @@ func (c *copier) copySets(runID, from, target string) (held, missing []record.Ar
 		return nil, nil, err
 	}
 	src, srcOK := placementOn(c.cat, runID, from)
+	if !srcOK {
+		return nil, nil, nil
+	}
 	tgt, _ := placementOn(c.cat, runID, target) // a zero Placement holds nothing
 	for _, a := range s.Archives {
-		if !srcOK || !src.Holds(a.DLE, a.Level) {
-			continue
-		}
-		held = append(held, a)
-		if !tgt.Holds(a.DLE, a.Level) {
-			missing = append(missing, a)
+		if src.Holds(a.DLE, a.Level) {
+			held = append(held, a)
 		}
 	}
-	return held, missing, nil
+	return held, tgt.Missing(held), nil
 }
 
 // archivesBytes sums the archives' stored (compressed) sizes.
@@ -184,114 +305,11 @@ func archivesBytes(archives []record.Archive) int64 {
 	return n
 }
 
-// CopyRun streams a sealed run from one configured medium to another, then
-// records the new copy in the catalog (a second placement). The source defaults to
-// the landing medium when fromMedia is ""; any other medium holding the run is
-// allowed (e.g. un-vaulting tape -> disk). Reading the source mounts the volume
-// that holds the run (on a changer); the write to the target runs the same label
-// verification as a dump.
-func (c *copier) CopyRun(runID, fromMedia, targetMedia string, force bool, logf Logf) error {
-	plan, want, err := c.planCopy(runID, fromMedia, targetMedia, force)
-	if err != nil {
-		return err
-	}
-	if plan.AlreadyOnTarget {
-		// Idempotency: a run already recorded on the target is not re-copied. On
-		// append-only media a second copy would orphan the first (unreferenced files,
-		// reclaimable only by relabel); --force overrides for a deliberate re-copy.
-		where := ""
-		if len(plan.TargetLabels) > 0 {
-			where = fmt.Sprintf(" (volume(s) %v)", plan.TargetLabels)
-		}
-		return fmt.Errorf("run %s is already on medium %q%s; use --force to copy again", runID, targetMedia, where)
-	}
-	fromMedia = plan.From
-	jobs, err := c.prepareJobs(runID, fromMedia, targetMedia, force, want)
-	if err != nil {
-		return err
-	}
-	logf.Log("copying %s from %q to %q", runID, fromMedia, targetMedia)
-	// Re-author under the source's identity so each copied archive's footer names the same logical run
-	// (NewCopy preserves each archive's run, CreatedAt, checksum, and members); the spec id here just
-	// tags the run.
-	spec := archiveio.RunSpec{ID: runID, CreatedAt: time.Now().UTC()}
-	if err := c.runCopy(targetMedia, fromMedia, spec, jobs, logf); err != nil {
-		return err
-	}
-	// No seal: each archive's copy recorded its placement on the target as it committed
-	// (NewCopy's Commit), so the copy is complete once every archive has landed.
-	logf.Log("copied %s (%d archive(s)) to %q", runID, len(jobs), targetMedia)
-	return nil
-}
-
-// CopyRuns copies several sealed runs onto the target in one spool run, so a multi-drive library
-// stays saturated across run boundaries rather than draining between runs. Each run is validated and
-// its archives gathered up front; then every archive is re-authored through one spool, one per drive.
-// It is the bulk path `nb sync` uses (which has already filtered out runs already on the target). A
-// per-run failure aborts the whole run.
-func (c *copier) CopyRuns(runIDs []string, fromMedia, targetMedia string, force bool, logf Logf) error {
-	if fromMedia == "" {
-		fromMedia = c.landing
-	}
-	if err := c.validatePair(fromMedia, targetMedia); err != nil {
-		return err
-	}
-	var jobs []copyJob
-	for _, id := range runIDs {
-		js, err := c.prepareRun(id, fromMedia, targetMedia, force)
-		if err != nil {
-			return err
-		}
-		jobs = append(jobs, js...)
-	}
-	if len(jobs) == 0 {
-		return nil
-	}
-	logf.Log("copying %d run(s) from %q to %q", len(runIDs), fromMedia, targetMedia)
-	// One spool spans every run. Each archive records under its own run (the member index is keyed on
-	// arch.Run and the placement on the archive), so the run's spec id is synthetic.
-	spec := archiveio.RunSpec{ID: "sync", CreatedAt: time.Now().UTC()}
-	return c.runCopy(targetMedia, fromMedia, spec, jobs, logf)
-}
-
-// prepareRun resolves one run's copy set (see copySets/wantArchives) and hands it to
-// prepareJobs — the per-run step of the bulk CopyRuns path (CopyRun passes the set its
-// plan already resolved instead).
-func (c *copier) prepareRun(runID, fromMedia, targetMedia string, force bool) ([]copyJob, error) {
-	held, missing, err := c.copySets(runID, fromMedia, targetMedia)
-	if err != nil {
-		return nil, err
-	}
-	return c.prepareJobs(runID, fromMedia, targetMedia, force, wantArchives(held, missing, force))
-}
-
-// prepareJobs validates one run's copy (its source copy exists and the source medium opens; on
-// --force a prior target copy is reclaimed first) and returns the per-archive jobs to transfer:
-// the archives the source copy holds that the target copy is still missing (all of them on
-// --force) — so retrying an interrupted copy transfers exactly what has not landed, never
-// duplicating an archive already committed on the target. Reclaiming a prior copy before
-// re-authoring keeps a forced re-copy from orphaning the old files (on removable media it
-// deletes them; on tape it is a no-op — orphan-until-relabel).
-func (c *copier) prepareJobs(runID, fromMedia, targetMedia string, force bool, want []record.Archive) ([]copyJob, error) {
-	if err := c.copySource(runID, fromMedia); err != nil {
-		return nil, err
-	}
-	if force {
-		// A forced re-copy rewrites the whole source copy; the reclaim (where the medium
-		// supports it) drops the prior target files so they are not orphaned.
-		if _, ok := placementOn(c.cat, runID, targetMedia); ok {
-			if err := c.acct.ReclaimCopy(runID, targetMedia); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return c.jobsForRun(runID, want), nil
-}
-
-// runCopy drives a set of copy jobs onto the target through the spool (shared with dump): one archive
-// per target drive, up to `workers`, so a multi-drive library re-authors several at once. Source reads
-// run concurrently only when the source medium allows it (disk/cloud); a tape source stays serial.
-func (c *copier) runCopy(targetMedia, fromMedia string, spec archiveio.RunSpec, jobs []copyJob, logf Logf) error {
+// spoolCopy drives a set of copy jobs onto the target through the spool (shared with dump): one
+// archive per target drive, up to `workers`, so a multi-drive library re-authors several at once.
+// Source reads run concurrently only when the source medium allows it (disk/cloud); a tape source
+// stays serial.
+func (c *copier) spoolCopy(targetMedia, fromMedia string, spec archiveio.RunSpec, jobs []copyJob, logf Logf) error {
 	// Make room on a bounded target BEFORE the copy lands — capacity as a promise,
 	// and here with EXACT incoming bytes (the archives being copied are known), so
 	// no estimate risk. The one choke point both `nb copy` and `nb sync` cross;
@@ -443,16 +461,14 @@ func (c *copier) transferOne(ctx context.Context, job copyJob, fromMedia, target
 	return nil
 }
 
-// copySource validates the read side of a copy: the run has a copy on the source medium and
-// that medium opens, so an unrunnable copy fails with a clear error before any bytes flow.
-func (c *copier) copySource(runID, fromMedia string) error {
-	if _, ok := placementOn(c.cat, runID, fromMedia); !ok {
-		return fmt.Errorf("run %s has no copy on source medium %q", runID, fromMedia)
-	}
+// probeSource validates the read side of a copy — the source medium opens — so an
+// unrunnable copy fails with a clear error before any bytes flow. (That the run HAS
+// a copy there is the resolver's job: PlanCopy errors, sync's backlog only includes
+// runs whose source copy covers what the target is missing.)
+func (c *copier) probeSource(fromMedia string) error {
 	rm, err := c.dep.OpenForRead(fromMedia)
 	if err != nil {
 		return err
 	}
-	_ = rm.Close()
-	return nil
+	return rm.Close()
 }

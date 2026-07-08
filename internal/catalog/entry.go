@@ -144,6 +144,20 @@ func (a PlacedArchive) Labels() []string {
 	return out
 }
 
+// Missing returns the subset of the given archives this copy does not hold — the
+// gap a copy or sync must carry to make this placement whole. A zero Placement
+// holds nothing, so Missing returns them all. It is the one coverage question
+// behind copy's resume set, sync's backlog, and auto source resolution.
+func (p Placement) Missing(archives []record.Archive) []record.Archive {
+	var out []record.Archive
+	for _, a := range archives {
+		if !p.Holds(a.DLE, a.Level) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // Covers counts how many of the run's archives this copy holds. A copy can be
 // partial — a fan-out lane that tripped mid-run, a per-archive prune — so "has a
 // copy" is a per-archive fact; the (held, total) pair lets a display say so

@@ -391,20 +391,27 @@ func announceExpectation(medium string, exp VolumeExpectation, logf Logf) {
 	}
 }
 
-// PlanCopy resolves and validates a copy without writing (the `nb copy` dry-run); see copier.
+// PlanCopy resolves and validates a copy without writing; see copier. The plan is
+// what Copy executes, so a front plans exactly once.
 func (e *Engine) PlanCopy(runID, fromMedia, targetMedia string, force bool) (CopyPlan, error) {
 	return e.cop.PlanCopy(runID, fromMedia, targetMedia, force)
 }
 
-// CopyRun streams a sealed run from one configured medium to another; see copier.
-func (e *Engine) CopyRun(runID, fromMedia, targetMedia string, force bool, logf Logf) error {
-	return e.cop.CopyRun(runID, fromMedia, targetMedia, force, logf)
+// Copy executes a resolved plan, streaming the planned archives onto the plan's
+// target; see copier.
+func (e *Engine) Copy(plan CopyPlan, logf Logf) error {
+	return e.cop.Copy(plan, logf)
 }
 
-// CopyRuns streams several sealed runs onto a target in one spool run (drives stay saturated across
-// runs); see copier. Used by sync.
-func (e *Engine) CopyRuns(runIDs []string, fromMedia, targetMedia string, force bool, logf Logf) error {
-	return e.cop.CopyRuns(runIDs, fromMedia, targetMedia, force, logf)
+// CopyRun plans and executes a copy of one sealed run in one call — plan-then-Copy
+// sugar for callers with no dry-run/no-op rendering of their own (tests, fixtures);
+// the CLI plans first so it can report before executing.
+func (e *Engine) CopyRun(runID, fromMedia, targetMedia string, force bool, logf Logf) error {
+	plan, err := e.cop.PlanCopy(runID, fromMedia, targetMedia, force)
+	if err != nil {
+		return err
+	}
+	return e.cop.Copy(plan, logf)
 }
 
 // LabelVolume writes (or rewrites) the identity label of a medium's volume — the
@@ -772,14 +779,6 @@ func (e *Engine) MediumProtectedOverCapacity(name string, now time.Time) (over b
 // later incrementals are pinned regardless of age — so the remedy text drops it.
 func (e *Engine) MediumProtectionIsAgeBound(name string, now time.Time) bool {
 	return e.acct.MediumProtectionIsAgeBound(name, now)
-}
-
-// ProjectedOverCapacity reports whether the named medium would exceed its capacity
-// after add more bytes land on it (a 0 capacity means unbounded) — the check
-// `nb copy` runs before/after a copy so it warns about overshooting a target's
-// budget the way `nb sync` already does.
-func (e *Engine) ProjectedOverCapacity(name string, add int64) (over bool, projected, capacity int64, err error) {
-	return e.acct.ProjectedOverCapacity(name, add)
 }
 
 // Prune reconciles a named medium to its own retention model: it computes that

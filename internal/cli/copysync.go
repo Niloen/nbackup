@@ -7,7 +7,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/report"
 	"github.com/Niloen/nbackup/internal/sizeutil"
@@ -30,42 +29,43 @@ func newCopyCmd(a *app) *cobra.Command {
 				return err
 			}
 			runID := args[0]
-			if dryRun {
-				return runCopyDryRun(cfg, runID, from, to, force)
-			}
-			eng, unlock, err := a.lockedEngine(cfg)
+			// Dry-run only reads; a real run writes media + catalog, so lock it.
+			eng, release, err := a.engineFor(cfg, !dryRun)
 			if err != nil {
 				return err
 			}
-			defer unlock()
-			attachOperator(eng)
-			// Validate/resolve up front (before the run-reporting path): an unknown run
+			defer release()
+			// Plan exactly once, up front (before the run-reporting path): an unknown run
 			// or medium is an argument error, not a failed run — it must not land in the
-			// run log or fire notify.on_failure (matching `nb prune`).
+			// run log or fire notify.on_failure (matching `nb prune`) — and Copy executes
+			// this same plan, so what the plan priced is what is copied.
 			plan, err := eng.PlanCopy(runID, from, to, force)
 			if err != nil {
 				return err
 			}
+			if dryRun {
+				printCopyPlan(plan)
+				return nil
+			}
+			attachOperator(eng)
 			// A run already on the target is an idempotent no-op (exit 0), matching
 			// `nb sync`'s "up to date" — re-running a copy in a script must not fail,
 			// and a no-op is not a run worth recording.
 			if plan.AlreadyOnTarget {
-				where := ""
-				if len(plan.TargetLabels) > 0 {
-					where = fmt.Sprintf(" (volume(s) %v)", plan.TargetLabels)
-				}
-				fmt.Printf("run %s is already on medium %q%s; nothing to copy (use --force to copy again)\n", runID, to, where)
+				fmt.Printf("run %s is already on medium %q%s; nothing to copy (use --force to copy again)\n", runID, to, plan.TargetWhere())
 				return nil
 			}
 			// Record + notify like `nb sync`: a failing cron copy must reach the run
 			// log and notify.on_failure, not just an exit code nobody reads.
 			return a.runReported(cfg, report.Run{Command: report.CommandCopy, ExitClass: "copy-error"}, func() (report.Run, error) {
-				if err := eng.CopyRun(runID, from, to, force, a.logf()); err != nil {
+				if err := eng.Copy(plan, a.logf()); err != nil {
 					return report.Run{}, err
 				}
 				fmt.Println("copy complete")
 				// Mirror `nb sync`'s over-capacity warning so the single-run sibling does
-				// not silently push a target past its budget.
+				// not silently push a target past its budget. This reads the medium's
+				// post-copy truth (not the plan's projection): make-room may have
+				// reclaimed on landing, so warning off the projection could cry wolf.
 				if over, used, capacity, cerr := eng.MediumOverCapacity(to); cerr == nil && over {
 					warnMediumOverCapacity(to, used, capacity, false)
 				}
@@ -81,49 +81,31 @@ func newCopyCmd(a *app) *cobra.Command {
 	return cmd
 }
 
-// runCopyDryRun previews `nb copy` without writing, rendering the engine's CopyPlan
-// (the same resolve/validate/already-present rules CopyRun applies) — matching the
-// dry-run shape of sync/prune.
-func runCopyDryRun(cfg *config.Config, runID, from, to string, force bool) error {
-	eng, err := engine.New(cfg)
-	if err != nil {
-		return err
-	}
-	plan, err := eng.PlanCopy(runID, from, to, force)
-	if err != nil {
-		return err
-	}
+// printCopyPlan renders the `nb copy` dry-run: the plan's resolve/validate/
+// already-present outcome, matching the dry-run shape of sync/prune.
+func printCopyPlan(plan engine.CopyPlan) {
 	if plan.AlreadyOnTarget {
-		fmt.Printf("%s -> %s: %s already on target; nothing to copy (use --force to re-copy)\n", plan.From, plan.To, runID)
-		return nil
+		fmt.Printf("%s -> %s: %s already on target; nothing to copy (use --force to re-copy)\n", plan.From, plan.To, plan.RunID)
+		return
 	}
 	fmt.Printf("%s -> %s: would copy %s (%d archive(s), %s). Re-run without --dry-run to copy.\n",
-		plan.From, plan.To, runID, plan.Archives, sizeutil.FormatBytes(plan.Bytes))
-	if over, projected, capacity, perr := eng.ProjectedOverCapacity(plan.To, plan.Bytes); perr == nil && over {
-		warnMediumOverCapacity(plan.To, projected, capacity, true)
+		plan.From, plan.To, plan.RunID, plan.Archives, sizeutil.FormatBytes(plan.Bytes))
+	if plan.OverCapacity() {
+		warnMediumOverCapacity(plan.To, plan.ProjectedBytes, plan.TargetCapacity, true)
 	}
-	return nil
 }
 
 // syncFromLabel names a sync's source side: the explicit --from, the distinct
 // auto-resolved item sources, or the medium-neutral "(auto)" when an auto sync
 // found nothing to copy (so it resolved no source at all).
 func syncFromLabel(r *engine.SyncReport) string {
+	if names := r.Sources(); len(names) > 0 {
+		return strings.Join(names, "+")
+	}
 	if r.From != "" {
 		return r.From
 	}
-	var names []string
-	seen := map[string]bool{}
-	for _, it := range r.Items {
-		if !seen[it.Source] {
-			seen[it.Source] = true
-			names = append(names, it.Source)
-		}
-	}
-	if len(names) == 0 {
-		return "(auto)"
-	}
-	return strings.Join(names, "+")
+	return "(auto)"
 }
 
 // warnMediumOverCapacity prints the shared copy/sync over-capacity WARNING with its

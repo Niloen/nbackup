@@ -167,9 +167,9 @@ func (a *Accountant) RoomChecks(now time.Time) []RoomCheck {
 }
 
 // ProjectedOverCapacity reports whether the named medium would exceed its capacity
-// after add more bytes land on it (a 0 capacity means unbounded) — the check
-// `nb copy` runs before/after a copy so it warns about overshooting a target's
-// budget the way `nb sync` already does.
+// after add more bytes land on it (a 0 capacity means unbounded) — the projection
+// CopyPlan and SyncReport carry, so `nb copy` and `nb sync` warn about overshooting
+// a target's budget off one arithmetic.
 func (a *Accountant) ProjectedOverCapacity(name string, add int64) (over bool, projected, capacity int64, err error) {
 	prof, err := a.ProfileFor(name)
 	if err != nil {
