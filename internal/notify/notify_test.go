@@ -202,6 +202,17 @@ func TestSMTPMessageIsMultipartWithMonospaceHTML(t *testing.T) {
 	}
 }
 
+func TestBuildEventSubjectIsASCII(t *testing.T) {
+	// A raw UTF-8 Subject header makes relays demand SMTPUTF8 and reject the mail, so
+	// the dated subject must stay pure ASCII (a plain hyphen, not an em-dash).
+	ev := buildEvent("host", failRun())
+	for _, r := range ev.Subject {
+		if r > 127 {
+			t.Fatalf("subject has non-ASCII rune %q: %s", r, ev.Subject)
+		}
+	}
+}
+
 func TestSMTPNotifyContextTimeout(t *testing.T) {
 	n := &smtpNotifier{
 		addr: "mail:587", from: "a@x", to: []string{"b@x"},

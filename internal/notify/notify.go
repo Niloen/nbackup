@@ -248,7 +248,7 @@ func buildEvent(host string, rec report.Run) Event {
 	var sb strings.Builder
 	report.RenderRun(&sb, rec)
 	return Event{
-		Subject: "nbackup " + string(rec.Command) + " " + rec.Status() + host + " — " + rec.StartedAt.Local().Format("2006-01-02"),
+		Subject: "nbackup " + string(rec.Command) + " " + rec.Status() + host + " - " + rec.StartedAt.Local().Format("2006-01-02"),
 		Body:    sb.String(),
 		Command: string(rec.Command),
 		Failed:  rec.Failed(),
