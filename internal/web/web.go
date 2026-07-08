@@ -1444,7 +1444,12 @@ func (s *Server) buildDLEPhysical(slug string, chain map[string]bool, places []s
 		if key.Label != "" {
 			sort.Slice(ss, func(i, j int) bool { return ss[i].Pos < ss[j].Pos })
 		} else {
-			sort.Slice(ss, func(i, j int) bool { return ss[i].DLE < ss[j].DLE })
+			sort.Slice(ss, func(i, j int) bool {
+				if ss[i].DLE != ss[j].DLE {
+					return ss[i].DLE < ss[j].DLE
+				}
+				return ss[i].Pos < ss[j].Pos // a part-split archive draws its parts in order
+			})
 		}
 		var sum int64
 		hasChain := false
@@ -1621,7 +1626,12 @@ func (s *Server) buildMediumVolMap(name string, st engine.MediumStats, all bool)
 		}
 		for _, id := range ids {
 			ss := byRun[id]
-			sort.Slice(ss, func(i, j int) bool { return ss[i].DLE < ss[j].DLE })
+			sort.Slice(ss, func(i, j int) bool {
+				if ss[i].DLE != ss[j].DLE {
+					return ss[i].DLE < ss[j].DLE
+				}
+				return ss[i].Pos < ss[j].Pos // a part-split archive draws its parts in order
+			})
 			row := volMapRow{Label: id, Href: "/runs/" + id}
 			// A partial run copy (tripped lane, per-archive prune) carries its
 			// coverage next to the label — same truth the /runs pages tell: judged

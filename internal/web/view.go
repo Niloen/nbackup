@@ -1822,7 +1822,11 @@ func (v volSeg) title() string {
 	if v.Parts > 1 {
 		span = fmt.Sprintf(" · part %d/%d", v.Part, v.Parts)
 	}
-	return fmt.Sprintf("%s · %s %s%s · %s", v.RunID, v.DLEID, levelTag(v.Level), span, sizeutil.FormatBytes(v.Bytes))
+	// The file position locates the segment on its row — the sequential file
+	// number on the volume (or within the archive on a label-less medium), the
+	// same FILE the `nb run <id>` segment table names.
+	return fmt.Sprintf("%s · %s %s%s · %s · file %d",
+		v.RunID, v.DLEID, levelTag(v.Level), span, sizeutil.FormatBytes(v.Bytes), v.Pos)
 }
 
 // physicalView is the /dles/<slug> physical panel: every container holding any

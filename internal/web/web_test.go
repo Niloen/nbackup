@@ -1596,10 +1596,12 @@ func TestCloudMediumPlacementMap(t *testing.T) {
 	at := time.Date(2026, 7, 8, 2, 0, 0, 0, time.UTC)
 	a := record.Archive{Run: "run-2026-07-08.020000", DLE: "home", Host: "localhost", Path: "/home",
 		Level: 0, Compressed: 4000, CreatedAt: at}
+	// Three parts (a part-split cloud archive): the rows must draw them in
+	// position order — the DLE sort alone leaves ties to sort.Slice's whim.
 	placed := catalog.PlacedArchive{DLE: "home", Level: 0,
-		Parts:  []archiveio.FilePos{{Pos: 1}},
-		Seals:  []record.PartSeal{{Size: 4000}},
-		Commit: archiveio.FilePos{Pos: 2}}
+		Parts:  []archiveio.FilePos{{Pos: 1}, {Pos: 2}, {Pos: 3}},
+		Seals:  []record.PartSeal{{Size: 2000}, {Size: 1500}, {Size: 500}},
+		Commit: archiveio.FilePos{Pos: 4}}
 	src := fakeSource{
 		runs:  []*catalog.Run{{ID: a.Run, Archives: []record.Archive{a}}},
 		media: []engine.MediumInfo{{Name: "s3", Type: "s3", Capacity: 10000}},
@@ -1617,6 +1619,13 @@ func TestCloudMediumPlacementMap(t *testing.T) {
 			t.Fatalf("/media/s3 placement map misses %q:\n%s", want, body)
 		}
 	}
+	if !strings.Contains(body, "part 1/3 · 2.00 kB · file 1") {
+		t.Fatalf("segment hover misses the file position:\n%s", body)
+	}
+	p1, p2, p3 := strings.Index(body, "part 1/3"), strings.Index(body, "part 2/3"), strings.Index(body, "part 3/3")
+	if p1 < 0 || p2 < 0 || p3 < 0 || !(p1 < p2 && p2 < p3) {
+		t.Fatalf("/media/s3 run row draws parts out of position order (%d, %d, %d):\n%s", p1, p2, p3, body)
+	}
 	// The physical panel draws the cloud copy as a run-directory row: the run id
 	// labels the row (linked), the chain tip's segment is green, and the row
 	// carries the chain label edge.
@@ -1629,6 +1638,10 @@ func TestCloudMediumPlacementMap(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/dles/home cloud physical panel misses %q:\n%s", want, body)
 		}
+	}
+	p1, p2, p3 = strings.Index(body, "part 1/3"), strings.Index(body, "part 2/3"), strings.Index(body, "part 3/3")
+	if p1 < 0 || p2 < 0 || p3 < 0 || !(p1 < p2 && p2 < p3) {
+		t.Fatalf("/dles/home physical row draws parts out of position order (%d, %d, %d):\n%s", p1, p2, p3, body)
 	}
 }
 
