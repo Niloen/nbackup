@@ -25,7 +25,8 @@
 </div>
 <div class="panel scroll" style="margin-top:1rem">
 <table>
-  <tr><th>DLE</th><th>LVL</th><th class="num">ORIG</th><th class="num">OUT</th><th class="num">COMP%</th><th class="num">FILES</th><th class="num">TIME</th><th class="num">RATE</th></tr>
+  {{$flushed := .Flushed}}
+  <tr><th>DLE</th><th>LVL</th><th class="num">ORIG</th><th class="num">OUT</th><th class="num">COMP%</th><th class="num">FILES</th><th class="num">TIME</th><th class="num">RATE</th>{{if $flushed}}<th class="num">FLUSH</th><th class="num">FL-RATE</th>{{end}}</tr>
   {{range .Rows}}
   <tr>
     <td><a href="/dles/{{.Slug}}">{{.ID}}</a></td>
@@ -36,6 +37,7 @@
     <td class="num">{{.Files}}</td>
     <td class="num">{{.Time}}</td>
     <td class="num">{{.Rate}}</td>
+    {{if $flushed}}<td class="num">{{.FlushTime}}</td><td class="num">{{.FlushRate}}</td>{{end}}
   </tr>
   {{end}}
 </table>

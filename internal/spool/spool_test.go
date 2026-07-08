@@ -7,6 +7,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/progress"
 )
 
 // fakeStore is a no-op allocator+store — a landing's write target. The spool builds a writer over it
@@ -61,5 +62,38 @@ func TestDirectPermitReleasedOnCloseWithoutCommit(t *testing.T) {
 
 	if err := sp.Drain(); err != nil {
 		t.Fatalf("Drain: %v", err)
+	}
+}
+
+// TestDirectWriteMetersLanding checks the landing-write meter wiring on the direct
+// path: taking a lane for a direct dump opens the landing's busy interval in the
+// tracker (so a no-holding run still shows landing throughput), and Close closes it
+// — commit or not.
+func TestDirectWriteMetersLanding(t *testing.T) {
+	clk := time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC)
+	now := func() time.Time { clk = clk.Add(time.Second); return clk }
+	tr := progress.NewTracker("run", progress.PhaseRunning, 1,
+		[]progress.Plan{{Name: "localhost:/data", EstBytes: 1, Landings: []string{"landing"}}}, now, nil)
+	sp := New(context.Background(), Config{
+		Backings: []Backing{{Name: "landing", Allocs: []archiveio.PartAllocator{fakeStore{}}, Rec: fakeStore{}, Writers: 1}},
+		Holding:  NewPool(nil), // no holding disks => direct
+		Tracker:  tr,
+	})
+	sink, err := sp.Ingest("landing").NewArchive(archiveio.ArchiveSpec{DLE: "localhost:/data", Host: "localhost", Path: "/data"}, 1<<20)
+	if err != nil {
+		t.Fatalf("NewArchive: %v", err)
+	}
+	if !tr.Snapshot().WriteActive("landing") {
+		t.Fatal("a held direct lane must read as an active landing write")
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	snap := tr.Snapshot()
+	if snap.WriteActive("landing") {
+		t.Fatal("Close must end the landing write, commit or not")
+	}
+	if snap.WriteBusy("landing", clk) <= 0 {
+		t.Fatal("the direct write's held time must accrue as landing busy time")
 	}
 }

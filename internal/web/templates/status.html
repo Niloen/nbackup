@@ -30,8 +30,8 @@
     {{if .Pipe.Dumping}}<span><span class="sw dumping"></span>dumping <b>{{bytes .Pipe.Dumping}}</b></span>{{end}}
     {{if .Pipe.ToGo}}<span><span class="sw"></span>to go <b>~{{bytes .Pipe.ToGo}}</b> of ~{{bytes .Pipe.Total}}</span>{{end}}
   </div>
-  {{if or .DumpRate .DrainRate}}
-  <div class="rates">{{if .DumpRate}}dump {{bytes .DumpRate}}/s{{end}}{{if and .DumpRate .DrainRate}} · {{end}}{{if .DrainRate}}flush {{bytes .DrainRate}}/s{{end}}</div>
+  {{if or .DumpRates .FlushRates}}
+  <div class="rates">{{if .DumpRates}}dump {{.DumpRates}}{{end}}{{if and .DumpRates .FlushRates}} — {{end}}{{if .FlushRates}}{{.FlushLabel}} {{.FlushRates}}{{end}}</div>
   {{end}}
   {{/* Per-landing flush sub-bars, itemized only for a fan-out (FlushLanes is nil
        for a single landing — the headline bar already tells that story). */}}
@@ -41,7 +41,7 @@
     <div class="lane">
       <span class="k">{{if .Landing}}{{.Landing}}{{else}}landing{{end}}</span>
       <div class="bar"><span style="width:{{pctw .Pct}}"></span></div>
-      <span class="v">{{pct .Pct}}{{if .Rate}} · {{bytes .Rate}}/s{{end}}</span>
+      <span class="v">{{pct .Pct}}{{if .Rates}} · {{.Rates}}{{end}}</span>
     </div>
     {{end}}
   </div>

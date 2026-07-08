@@ -634,7 +634,6 @@ func TestStatusFlushLanes(t *testing.T) {
 	dir := t.TempDir()
 	progress.NewFileSink(dir, time.Now)(progress.Snapshot{
 		RunID: "run-2026-07-06.110000", Phase: progress.PhaseRunning, Workers: 1,
-		DrainStartedAt: time.Now().Add(-time.Minute),
 		DLEs: []progress.DLE{{
 			Name: "fanout-dle", Slug: "d1", State: progress.StateFlushing, Holding: "scratch",
 			DoneBytes: 2000, Landings: []string{"s3", "gdrive"}, OutBytes: 1000, DrainBytes: 400,
@@ -654,7 +653,6 @@ func TestStatusFlushLanes(t *testing.T) {
 	oneLane := t.TempDir()
 	progress.NewFileSink(oneLane, time.Now)(progress.Snapshot{
 		RunID: "run-2026-07-06.120000", Phase: progress.PhaseRunning, Workers: 1,
-		DrainStartedAt: time.Now().Add(-time.Minute),
 		DLEs: []progress.DLE{{
 			Name: "single-dle", Slug: "d2", State: progress.StateFlushing, Holding: "scratch",
 			DoneBytes: 2000, OutBytes: 1000, DrainBytes: 400,

@@ -283,7 +283,7 @@ func (sp *Spool) ingest(ls []*lane, dleID string, est int64, build func(*archive
 		return nil, err
 	}
 	if direct {
-		return sp.ingestDirect(ls, build), nil
+		return sp.ingestDirect(ls, dleID, build), nil
 	}
 	// Stage onto holding disk disk; drains copy it to every landing on the route later.
 	sp.tr.MarkToHolding(dleID)
@@ -330,7 +330,7 @@ func (sp *Spool) ingest(ls []*lane, dleID string, est int64, build func(*archive
 // two producers with overlapping routes can never deadlock on each other's permits —
 // while the writers keep route order (primary first). A mid-stream lane failure
 // drops that lane from the fan and trips it; the spool learns via the Tee's onDrop.
-func (sp *Spool) ingestDirect(ls []*lane, build func(*archiveio.Writer) *archiveio.ArchiveWriter) archivefs.ArchiveSink {
+func (sp *Spool) ingestDirect(ls []*lane, dleID string, build func(*archiveio.Writer) *archiveio.ArchiveWriter) archivefs.ArchiveSink {
 	byName := append([]*lane(nil), ls...)
 	sort.Slice(byName, func(i, j int) bool { return byName[i].name < byName[j].name })
 	drives := make(map[*lane]int, len(ls))
@@ -340,6 +340,9 @@ func (sp *Spool) ingestDirect(ls []*lane, build func(*archiveio.Writer) *archive
 	writers := make([]*archiveio.ArchiveWriter, len(ls))
 	for i, l := range ls {
 		l, drive := l, drives[l]
+		// A direct dump occupies the lane for its whole stream — meter it like any
+		// other landing write, so a no-holding run still shows its landing throughput.
+		sp.tr.BeginLandingWrite(dleID, l.name)
 		aw := build(sp.writerOver(l.allocs[drive], l.rec, l.lim))
 		aw.SetCloser(func() error {
 			// Surface the landing volume(s) this drive wrote to, so `nb status` shows the
@@ -347,6 +350,7 @@ func (sp *Spool) ingestDirect(ls []*lane, build func(*archiveio.Writer) *archive
 			if res, ok := aw.Committed(); ok {
 				sp.tr.LandVolume(res.Archive.Host+":"+res.Archive.Path, landingVolume(res.Pos))
 			}
+			sp.tr.EndLandingWrite(dleID, l.name)
 			l.release(drive)
 			return nil
 		})
@@ -376,7 +380,9 @@ func (sp *Spool) drainTo(disk *Disk, hres archiveio.CommitResult, l *lane, set *
 	dleID := hres.Archive.Host + ":" + hres.Archive.Path
 	sp.tr.StartFlush(dleID, disk.Name)
 	drive := l.lease()
+	sp.tr.BeginLandingWrite(dleID, l.name) // meter only the copy, not the wait for a free drive
 	err := sp.copyOne(disk, hres, l, drive, dleID)
+	sp.tr.EndLandingWrite(dleID, l.name)
 	l.release(drive)
 	if err != nil {
 		sp.trip(l, err)

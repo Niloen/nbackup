@@ -73,6 +73,22 @@ type Run struct {
 	// level, original/output size, files, and dump time. Captured at seal time so the
 	// dump report and its notification are historical, not just the last live run.
 	DumpStats []DLEStat `json:"dump_stats,omitempty"`
+
+	// LandingStats is the per-landing write accounting of a dump (Amanda's taper
+	// stats): bytes written and the lane's *busy* seconds — time actually spent
+	// writing, drains and direct dumps alike — plus the run's dump-phase wall clock
+	// it was measured over. Bytes over busy time is the lane's real speed; busy over
+	// wall is its utilization, which names the bottleneck (a starved fast lane reads
+	// low, a saturated one reads high).
+	LandingStats []LandingStat `json:"landing_stats,omitempty"`
+}
+
+// LandingStat is one landing's write accounting within a dump run.
+type LandingStat struct {
+	Landing     string  `json:"landing"`
+	Bytes       int64   `json:"bytes"`                  // compressed bytes written to the landing
+	BusySeconds float64 `json:"busy_seconds"`           // wall-clock the lane spent actually writing
+	WallSeconds float64 `json:"wall_seconds,omitempty"` // the dump-phase wall clock the busy time is a share of
 }
 
 // DLEStat is one DLE's statistics within a dump — the row of a dump
@@ -93,6 +109,12 @@ type DLEStat struct {
 	// seal time; empty when the snapshot was unavailable (like Seconds).
 	Promoted bool   `json:"promoted,omitempty"`
 	Reason   string `json:"reason,omitempty"`
+	// FlushBytes/FlushSeconds are the DLE's holding→landing flush: compressed bytes
+	// copied (once per landing on a fan-out route) over the time its drain copies
+	// actually ran (Amanda's per-DLE taper stats). Zero for a direct dump — its
+	// landing write IS the dump, already timed by Seconds.
+	FlushBytes   int64   `json:"flush_bytes,omitempty"`
+	FlushSeconds float64 `json:"flush_seconds,omitempty"`
 }
 
 // ID returns the host:path identity for display, falling back to the

@@ -64,18 +64,20 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Dump:     %s of ~%s  (%.0f%%)",
 		sizeutil.FormatBytes(s.TotalDone()), sizeutil.FormatBytes(s.TotalEst()), s.Pct())
-	if rate := s.Rate(now); rate > 0 {
-		fmt.Fprintf(w, "   %s/s", sizeutil.FormatBytes(int64(rate)))
+	if cell := DumpRates(s, now); cell != "" {
+		fmt.Fprintf(w, "   %s", cell)
 	}
 	fmt.Fprintln(w)
 	// One aggregate Flush line for the classic single-landing run; a fan-out (a route
 	// with several landings) itemizes per landing instead — each with its own backlog
-	// and rate, so a slow secondary is visible at a glance.
+	// and rate, so a slow secondary is visible at a glance. The rates are the landing
+	// lane's (trailing-window "now" + busy-time average), so in a mixed run they also
+	// cover direct writes sharing the lane — the lane's speed, not just the drains'.
 	if drains := s.LandingDrains(); len(drains) == 1 {
 		fmt.Fprintf(w, "Flush:    %s of %s  (%.0f%%)",
 			sizeutil.FormatBytes(s.TotalDrained()), sizeutil.FormatBytes(s.TotalToDrain()), s.DrainPct())
-		if rate := s.DrainRate(now); rate > 0 {
-			fmt.Fprintf(w, "   %s/s", sizeutil.FormatBytes(int64(rate)))
+		if cell := WriteRates(s, drains[0].Landing, now); cell != "" {
+			fmt.Fprintf(w, "   %s", cell)
 		}
 		fmt.Fprintln(w)
 	} else if len(drains) > 1 {
@@ -83,8 +85,23 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 		for _, ld := range drains {
 			fmt.Fprintf(w, "%-9s %-8s  %s of %s  (%.0f%%)",
 				label, ld.Landing, sizeutil.FormatBytes(ld.Done), sizeutil.FormatBytes(ld.Total), pct(ld.Done, ld.Total))
-			if rate := s.LandingDrainRate(ld.Done, now); rate > 0 {
-				fmt.Fprintf(w, "   %s/s", sizeutil.FormatBytes(int64(rate)))
+			if cell := WriteRates(s, ld.Landing, now); cell != "" {
+				fmt.Fprintf(w, "   %s", cell)
+			}
+			fmt.Fprintln(w)
+			label = ""
+		}
+	} else if len(s.Meters) > 0 {
+		// No drains at all — an all-direct run (no holding disk, or nothing staged
+		// yet). The landing lanes are still writing; show each one's throughput.
+		label := "Landing:"
+		for _, name := range s.Landings() {
+			if _, ok := s.Meters[name]; !ok && s.WrittenTo(name) == 0 {
+				continue
+			}
+			fmt.Fprintf(w, "%-9s %-8s  %s written", label, name, sizeutil.FormatBytes(s.WrittenTo(name)))
+			if cell := WriteRates(s, name, now); cell != "" {
+				fmt.Fprintf(w, "   %s", cell)
 			}
 			fmt.Fprintln(w)
 			label = ""
@@ -109,6 +126,56 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 	if s.Err != "" {
 		fmt.Fprintf(w, "FAILED: %s\n", s.Err)
 	}
+}
+
+// DumpRates renders the dump line's rate cell — shared by `nb status` and the web
+// /status so the wording never drifts: the trailing-window rate first ("is it
+// moving right now"), the whole-window average for context. Once dumping is over
+// (or the run is), only the average remains — "now" has nothing left to say.
+func DumpRates(s Snapshot, now time.Time) string {
+	avg := s.Rate(now)
+	if !s.Phase.Terminal() && s.DumpEndedAt.IsZero() {
+		if r := s.DumpRateNow(now); r > 0 {
+			cell := sizeutil.FormatBytes(int64(r)) + "/s now"
+			if avg > 0 {
+				cell += " · avg " + sizeutil.FormatBytes(int64(avg)) + "/s"
+			}
+			return cell
+		}
+	}
+	if avg > 0 {
+		return "avg " + sizeutil.FormatBytes(int64(avg)) + "/s"
+	}
+	return ""
+}
+
+// WriteRates renders one landing lane's rate cell — shared by `nb status` and the
+// web /status so the wording never drifts. Leading part while the run is
+// live: the trailing-window rate when bytes are flowing, or the word "idle" when no
+// writer is on the lane — the honest reading of a drainer waiting for dumps, where a
+// wall-clock average would just quietly shrink. Then the busy-time average (the
+// lane's real speed while writing) with its utilization — how much of the run the
+// lane has actually spent writing.
+func WriteRates(s Snapshot, landing string, now time.Time) string {
+	var parts []string
+	if !s.Phase.Terminal() {
+		// The meter outranks the window: with no writer on the lane, "idle" is the
+		// truth right now — the trailing window would keep showing a decaying tail
+		// of the last burst for up to its whole width.
+		if !s.WriteActive(landing) {
+			parts = append(parts, "idle")
+		} else if r := s.WriteRateNow(landing, now); r > 0 {
+			parts = append(parts, sizeutil.FormatBytes(int64(r))+"/s now")
+		}
+	}
+	if avg := s.WriteRate(landing, now); avg > 0 {
+		cell := "avg " + sizeutil.FormatBytes(int64(avg)) + "/s"
+		if u := s.WriteUtilization(landing, now); u > 0 {
+			cell += fmt.Sprintf(" · busy %.0f%%", u*100)
+		}
+		parts = append(parts, cell)
+	}
+	return strings.Join(parts, " · ")
 }
 
 // renderEstimating reports the sizing prelude of a run: how many DLEs have been

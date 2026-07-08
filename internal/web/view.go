@@ -72,9 +72,15 @@ type statusView struct {
 	// page leads with (the ETA when known), and its quiet context line.
 	Big, Sub string
 
-	Pipe                pipeView // the run-level pipeline bar
-	DumpRate, DrainRate int64    // bytes/sec (uncompressed / compressed), 0 = not yet measurable
-	Elapsed, ETA        string   // formatted; ETA "" when unknown/terminal
+	Pipe pipeView // the run-level pipeline bar
+	// DumpRates/FlushRates are the headline rate cells, prebuilt by
+	// progress.DumpRates/WriteRates (shared with nb status so the wording never
+	// drifts): trailing-window "now" rate leading, busy-time average + utilization
+	// after, "idle" naming a waiting flush lane. FlushRates covers the
+	// single-landing run; a fan-out itemizes in FlushLanes instead.
+	DumpRates, FlushRates string
+	FlushLabel            string // "flush" for a draining lane, "writing" for a direct one
+	Elapsed, ETA          string // formatted; ETA "" when unknown/terminal
 
 	// FlushLanes itemizes the flush backlog per landing, populated only for a fan-out
 	// (more than one landing) — mirroring nb status's per-landing lines (see
@@ -161,11 +167,13 @@ type activeDLE struct {
 	Err        string
 }
 
-// newActiveDLE builds one card. mixed says the run stages other DLEs via a holding
-// disk — only then does a direct dump earn its "direct" pill (it occupies a landing
-// lane alongside the flushes, worth spotting); in an all-direct run the pill would
-// be noise on every card.
-func newActiveDLE(d progress.DLE, now time.Time, mixed bool) activeDLE {
+// newActiveDLE builds one card. rateNow is the DLE's trailing-window dump rate
+// (progress.DLERateNow); a card younger than a couple of samples falls back to its
+// own lifetime average, which over so short a life means the same thing. mixed says
+// the run stages other DLEs via a holding disk — only then does a direct dump earn
+// its "direct" pill (it occupies a landing lane alongside the flushes, worth
+// spotting); in an all-direct run the pill would be noise on every card.
+func newActiveDLE(d progress.DLE, now time.Time, rateNow float64, mixed bool) activeDLE {
 	a := activeDLE{Name: d.Name, Slug: d.Slug, Level: d.Level, State: string(d.State),
 		Pipe: newPipeView([]progress.DLE{d}), Err: d.Err}
 	var parts []string
@@ -177,7 +185,9 @@ func newActiveDLE(d progress.DLE, now time.Time, mixed bool) activeDLE {
 		} else if d.DoneBytes > 0 {
 			parts = append(parts, sizeutil.FormatBytes(d.DoneBytes))
 		}
-		if secs := now.Sub(d.StartedAt).Seconds(); !d.StartedAt.IsZero() && secs > 0 {
+		if rateNow > 0 {
+			a.Rate = int64(rateNow)
+		} else if secs := now.Sub(d.StartedAt).Seconds(); !d.StartedAt.IsZero() && secs > 0 {
 			a.Rate = int64(float64(d.DoneBytes) / secs)
 		}
 		switch {
@@ -302,7 +312,7 @@ type flushLaneView struct {
 	Landing     string
 	Done, Total int64
 	Pct         float64
-	Rate        int64 // bytes/sec, 0 = not yet measurable
+	Rates       string // prebuilt rate cell (progress.WriteRates), "" when nothing measurable
 }
 
 // newStatusView tallies a snapshot for rendering, or returns nil for no live run. now
@@ -325,11 +335,36 @@ func newStatusView(snap *progress.Snapshot, now time.Time) *statusView {
 		return v
 	}
 	v.Pipe = newPipeView(snap.DLEs)
-	if r := snap.Rate(now); r > 0 {
-		v.DumpRate = int64(r)
-	}
-	if r := snap.DrainRate(now); r > 0 {
-		v.DrainRate = int64(r)
+	v.DumpRates = progress.DumpRates(*snap, now)
+	// The headline flush cell covers the single-lane run (one landing drained, or an
+	// all-direct run's one metered lane); a fan-out itemizes per lane below instead.
+	drains := snap.LandingDrains()
+	switch {
+	case len(drains) == 1:
+		v.FlushLabel = "flush"
+		v.FlushRates = progress.WriteRates(*snap, drains[0].Landing, now)
+	case len(drains) == 0:
+		// All-direct so far: no drain backlog to itemize, but the landing lanes are
+		// writing — surface each metered lane's rates (named when there are several).
+		landings := snap.Landings()
+		var cells []string
+		for _, l := range landings {
+			if snap.WrittenTo(l) == 0 && !snap.WriteActive(l) {
+				continue
+			}
+			cell := progress.WriteRates(*snap, l, now)
+			if cell == "" {
+				continue
+			}
+			if len(landings) > 1 && l != "" {
+				cell = l + " " + cell
+			}
+			cells = append(cells, cell)
+		}
+		if len(cells) > 0 {
+			v.FlushLabel = "writing"
+			v.FlushRates = strings.Join(cells, " — ")
+		}
 	}
 	if eta, ok := snap.ETA(now); ok {
 		v.ETA = sizeutil.FormatElapsed(eta)
@@ -345,13 +380,12 @@ func newStatusView(snap *progress.Snapshot, now time.Time) *statusView {
 		v.Big = fmt.Sprintf("%.0f%% landed", v.Pipe.LandedPct)
 		v.Sub = fmt.Sprintf("elapsed %s · %d worker(s)", v.Elapsed, snap.Workers)
 	}
-	if drains := snap.LandingDrains(); len(drains) > 1 {
+	if len(drains) > 1 {
 		for _, ld := range drains {
-			lane := flushLaneView{Landing: ld.Landing, Done: ld.Done, Total: ld.Total, Pct: pctOf(ld.Done, ld.Total)}
-			if r := snap.LandingDrainRate(ld.Done, now); r > 0 {
-				lane.Rate = int64(r)
-			}
-			v.FlushLanes = append(v.FlushLanes, lane)
+			v.FlushLanes = append(v.FlushLanes, flushLaneView{
+				Landing: ld.Landing, Done: ld.Done, Total: ld.Total, Pct: pctOf(ld.Done, ld.Total),
+				Rates: progress.WriteRates(*snap, ld.Landing, now),
+			})
 		}
 	}
 	// A direct dump earns its "direct" pill only in a mixed run — one that stages
@@ -367,7 +401,7 @@ func newStatusView(snap *progress.Snapshot, now time.Time) *statusView {
 		v.Grid = append(v.Grid, newGridCell(d))
 		switch d.State {
 		case progress.StateDumping, progress.StateFlushing:
-			v.ActiveDLEs = append(v.ActiveDLEs, newActiveDLE(d, now, mixed))
+			v.ActiveDLEs = append(v.ActiveDLEs, newActiveDLE(d, now, snap.DLERateNow(d.Name, now), mixed))
 		case progress.StateFailed, progress.StateCanceled:
 			v.FailedDLEs = append(v.FailedDLEs, d)
 		}
@@ -495,6 +529,7 @@ type dumpReportView struct {
 	// to level the cycle"), empty when none — mirrors report.renderPromotions;
 	// each promoted row carries its own why.
 	Promoted string
+	Flushed  bool // any DLE drained via a holding disk — show the flush columns
 }
 
 // dumpGridRow is one row of the STATISTICS grid — mirrors report.renderStats.
@@ -513,6 +548,10 @@ type dumpStatRow struct {
 	Time, Rate string // dash when timing was unavailable
 	Promoted   bool   // a full pulled forward by promotion
 	Why        string // the promotion's reason, for the row's tooltip
+	// FlushTime/FlushRate are the DLE's drain copy time and its compressed rate over
+	// it (Amanda's per-DLE taper stats); dashes for a direct dump. Rendered only when
+	// the view's Flushed says any DLE drained.
+	FlushTime, FlushRate string
 }
 
 // dumpAgg accumulates one column of the STATISTICS grid — mirrors report.agg.
@@ -550,7 +589,7 @@ func newDumpReportView(r report.Run) *dumpReportView {
 	}
 	v := &dumpReportView{
 		Headline: dumpHeadline(r, tot),
-		Grid:     dumpStatsGrid(tot, full, incr, r.EndedAt.Sub(r.StartedAt)),
+		Grid:     dumpStatsGrid(tot, full, incr, r.LandingStats, r.EndedAt.Sub(r.StartedAt)),
 	}
 	var promoted int
 	var promotedBytes int64
@@ -559,12 +598,16 @@ func newDumpReportView(r report.Run) *dumpReportView {
 			promoted++
 			promotedBytes += d.Out
 		}
+		if d.FlushSeconds > 0 {
+			v.Flushed = true
+		}
 		v.Rows = append(v.Rows, dumpStatRow{
 			ID: d.ID(), Slug: d.DLE, Level: d.Level,
 			Orig: sizeutil.FormatBytes(d.Orig), Out: sizeutil.FormatBytes(d.Out),
 			Comp: dumpCompPct(d.Orig, d.Out), Files: d.Files,
 			Time: dumpTimeCell(d.Seconds), Rate: dumpRateCell(d.Orig, d.Seconds),
 			Promoted: d.Promoted, Why: report.PromotionWhy(d.Reason),
+			FlushTime: dumpTimeCell(d.FlushSeconds), FlushRate: dumpRateCell(d.FlushBytes, d.FlushSeconds),
 		})
 	}
 	if promoted > 0 {
@@ -585,8 +628,9 @@ func dumpHeadline(r report.Run, tot dumpAgg) string {
 }
 
 // dumpStatsGrid builds the STATISTICS grid rows — mirrors report.renderStats,
-// including its dash rules for an empty column.
-func dumpStatsGrid(tot, full, incr dumpAgg, wall time.Duration) []dumpGridRow {
+// including its dash rules for an empty column and the per-landing write pair
+// (busy time with utilization, rate over busy time).
+func dumpStatsGrid(tot, full, incr dumpAgg, landings []report.LandingStat, wall time.Duration) []dumpGridRow {
 	count := func(a dumpAgg) string {
 		if a.n == 0 {
 			return "-"
@@ -623,7 +667,38 @@ func dumpStatsGrid(tot, full, incr dumpAgg, wall time.Duration) []dumpGridRow {
 	if wall > 0 {
 		rows = append(rows, dumpGridRow{"Run time (wall)", sizeutil.FormatElapsed(wall), "", ""})
 	}
+	for _, ls := range landings {
+		name := ls.Landing
+		if name == "" {
+			name = "landing"
+		}
+		rows = append(rows,
+			dumpGridRow{"Write time (" + name + ")", writeTimeCell(ls), "", ""},
+			dumpGridRow{"Avg write rate (" + name + ")", writeRateCell(ls), "", ""})
+	}
 	return rows
+}
+
+// writeTimeCell renders a landing's busy time with its share of the run's wall
+// clock — mirrors report.writeTimeCell.
+func writeTimeCell(ls report.LandingStat) string {
+	if ls.BusySeconds <= 0 {
+		return "-"
+	}
+	cell := sizeutil.FormatElapsed(time.Duration(ls.BusySeconds * float64(time.Second)))
+	if ls.WallSeconds > 0 {
+		cell += fmt.Sprintf(" (%.0f%% busy)", ls.BusySeconds/ls.WallSeconds*100)
+	}
+	return cell
+}
+
+// writeRateCell renders a landing's throughput over its busy time — mirrors
+// report.writeRateCell.
+func writeRateCell(ls report.LandingStat) string {
+	if ls.BusySeconds <= 0 || ls.Bytes <= 0 {
+		return "-"
+	}
+	return sizeutil.FormatBytes(int64(float64(ls.Bytes)/ls.BusySeconds)) + "/s"
 }
 
 // dumpCompPct renders the compression ratio, or a dash when there is no original

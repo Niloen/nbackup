@@ -190,3 +190,32 @@ func TestRenderRunDumpIncludesTable(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderDumpWriteStats checks the write side of the dump report: the per-landing
+// busy-time rows (time with utilization, rate over busy time — never bytes over
+// wall clock) and the per-DLE flush columns, shown only when some DLE drained.
+func TestRenderDumpWriteStats(t *testing.T) {
+	r := dumpRunFixture()
+	r.LandingStats = []LandingStat{{Landing: "s3", Bytes: 5 << 30, BusySeconds: 300, WallSeconds: 720}}
+	r.DumpStats[0].FlushBytes = 5 << 30 // app01-home drained; the others were direct
+	r.DumpStats[0].FlushSeconds = 300
+	var sb strings.Builder
+	RenderDump(&sb, r)
+	out := sb.String()
+	for _, want := range []string{
+		"Write time (s3)", "5m00s (42% busy)",
+		"Avg write rate (s3)", "17.90 MB/s", // 5 GiB over 300 busy seconds
+		"FLUSH", "FL-RATE",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dump report missing %q\n---\n%s", want, out)
+		}
+	}
+
+	// Without any drained DLE the flush columns stay out of the table.
+	var direct strings.Builder
+	RenderDump(&direct, dumpRunFixture())
+	if strings.Contains(direct.String(), "FL-RATE") {
+		t.Errorf("all-direct run must not render flush columns:\n%s", direct.String())
+	}
+}

@@ -36,6 +36,10 @@ type Tracker struct {
 	mu   sync.Mutex
 	idx  map[string]int // DLE name -> position in snap.DLEs
 	snap Snapshot
+	// open stamps each in-flight landing write's start, keyed dle+"\x00"+landing,
+	// so EndLandingWrite can credit the DLE's WriteSeconds. Transient bookkeeping —
+	// the snapshot's per-lane open interval lives in its LandingMeter.
+	open map[string]time.Time
 }
 
 // NewTracker seeds a snapshot in phase from the plan and pushes the initial state
@@ -60,6 +64,7 @@ func NewTracker(runID string, phase Phase, workers int, plan []Plan, now func() 
 		now:  now,
 		sink: sink,
 		idx:  idx,
+		open: map[string]time.Time{},
 		snap: Snapshot{
 			RunID:     runID,
 			Phase:     phase,
@@ -134,6 +139,7 @@ func (t *Tracker) FinishDLE(name string, fileCount int, uncompressed, compressed
 	defer t.mu.Unlock()
 	if d := t.dle(name); d != nil {
 		d.EndedAt = t.now()
+		d.DumpEndedAt = d.EndedAt // EndedAt moves to the drain's end if the DLE flushes; this one stays
 		d.FileCount = fileCount
 		if uncompressed > 0 {
 			d.DoneBytes = uncompressed
@@ -253,10 +259,60 @@ func (t *Tracker) StartFlush(name, holding string) {
 		d.State = StateFlushing
 		d.Holding = holding
 	}
-	if t.snap.DrainStartedAt.IsZero() {
-		t.snap.DrainStartedAt = t.now()
-	}
 	t.markDumpEndIfDone() // a DLE entering its drain has finished dumping
+	t.flush(true)
+}
+
+// BeginLandingWrite records that a writer for the named DLE started writing to the
+// landing lane — a drain copy, or a direct dump occupying the lane. It opens the
+// lane's busy interval (overlapping writers count once: busy time is the union of
+// occupied intervals) and stamps the write's start for the DLE's WriteSeconds.
+// Call it once a lane writer is actually held, not while waiting for one.
+func (t *Tracker) BeginLandingWrite(dle, landing string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.snap.Meters == nil {
+		t.snap.Meters = map[string]LandingMeter{}
+	}
+	now := t.now()
+	m := t.snap.Meters[landing]
+	m.Active++
+	if m.Active == 1 {
+		m.ActiveSince = now
+	}
+	t.snap.Meters[landing] = m
+	t.open[dle+"\x00"+landing] = now
+	t.flush(true)
+}
+
+// EndLandingWrite closes a landing write opened by BeginLandingWrite: the lane's
+// busy interval ends when its last writer leaves, and the write's duration is
+// credited to the DLE's WriteSeconds. Unpaired calls are ignored.
+func (t *Tracker) EndLandingWrite(dle, landing string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.now()
+	if m, ok := t.snap.Meters[landing]; ok && m.Active > 0 {
+		m.Active--
+		if m.Active == 0 {
+			m.BusySeconds += now.Sub(m.ActiveSince).Seconds()
+			m.ActiveSince = time.Time{}
+		}
+		t.snap.Meters[landing] = m
+	}
+	key := dle + "\x00" + landing
+	if started, ok := t.open[key]; ok {
+		delete(t.open, key)
+		if d := t.dle(dle); d != nil {
+			d.WriteSeconds += now.Sub(started).Seconds()
+		}
+	}
 	t.flush(true)
 }
 
@@ -391,17 +447,61 @@ func (t *Tracker) dle(name string) *DLE {
 	return nil
 }
 
-// flush stamps UpdatedAt and pushes a snapshot copy to the sink. Caller holds the
-// lock; the sink is invoked under it so updates are serialized and ordered.
+// sampleEvery spaces the Recent ring's samples; sampleKeep bounds how far back it
+// reaches — comfortably past nowWindow, so a trailing-window baseline always exists.
+const (
+	sampleEvery = 2 * time.Second
+	sampleKeep  = 90 * time.Second
+)
+
+// sample appends one cumulative-counter sample to the Recent ring when the last is
+// old enough, and trims samples that have aged out. Caller holds the lock. Samples
+// only ever appear when something flushes — so when byte flow stops, the ring goes
+// quiet too, and a reader's trailing-window rate decays to zero on its own clock.
+func (t *Tracker) sample(now time.Time) {
+	r := t.snap.Recent
+	if len(r) > 0 && now.Sub(r[len(r)-1].T) < sampleEvery {
+		return
+	}
+	smp := Sample{T: now, Dumped: t.snap.TotalDone()}
+	for _, name := range t.snap.Landings() {
+		if w := t.snap.WrittenTo(name); w > 0 {
+			if smp.Written == nil {
+				smp.Written = map[string]int64{}
+			}
+			smp.Written[name] = w
+		}
+	}
+	for _, d := range t.snap.DLEs {
+		if d.State == StateDumping && d.DoneBytes > 0 {
+			if smp.Dumping == nil {
+				smp.Dumping = map[string]int64{}
+			}
+			smp.Dumping[d.Name] = d.DoneBytes
+		}
+	}
+	r = append(r, smp)
+	cut := now.Add(-sampleKeep)
+	for len(r) > 1 && r[0].T.Before(cut) {
+		r = r[1:]
+	}
+	t.snap.Recent = r
+}
+
+// flush stamps UpdatedAt, records a Recent sample when one is due, and pushes a
+// snapshot copy to the sink. Caller holds the lock; the sink is invoked under it
+// so updates are serialized and ordered.
 func (t *Tracker) flush(force bool) {
 	t.snap.UpdatedAt = t.now()
+	t.sample(t.snap.UpdatedAt)
 	if t.sink != nil {
 		t.sink(t.copy(), force)
 	}
 }
 
 // copy deep-copies the snapshot so callers and sinks never share the live slice
-// (or a DLE's live per-landing drain map).
+// (or a DLE's live per-landing drain map). Recent's elements are immutable once
+// appended, so cloning the slice header is enough.
 func (t *Tracker) copy() Snapshot {
 	s := t.snap
 	s.DLEs = append([]DLE(nil), t.snap.DLEs...)
@@ -414,5 +514,12 @@ func (t *Tracker) copy() Snapshot {
 			s.DLEs[i].Drained = m
 		}
 	}
+	if t.snap.Meters != nil {
+		s.Meters = make(map[string]LandingMeter, len(t.snap.Meters))
+		for k, v := range t.snap.Meters {
+			s.Meters[k] = v
+		}
+	}
+	s.Recent = append([]Sample(nil), t.snap.Recent...)
 	return s
 }

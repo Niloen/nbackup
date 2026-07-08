@@ -87,7 +87,7 @@ func newDumpCmd(a *app) *cobra.Command {
 						rec.RunID = s.ID
 						rec.Archives = len(s.Archives)
 						rec.BytesMoved = s.TotalBytes()
-						rec.DumpStats = dumpStats(s, cfg.WorkdirPath())
+						rec.DumpStats, rec.LandingStats = dumpStats(s, cfg.WorkdirPath())
 					}
 					return rec, err
 				}
@@ -98,12 +98,14 @@ func newDumpCmd(a *app) *cobra.Command {
 					sep = ""
 				}
 				fmt.Printf(sep+"Committed %s: %d archive(s), %s total\n", s.ID, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes()))
+				stats, landings := dumpStats(s, cfg.WorkdirPath())
 				return report.Run{
-					Command:    report.CommandDump,
-					RunID:      s.ID,
-					Archives:   len(s.Archives),
-					BytesMoved: s.TotalBytes(),
-					DumpStats:  dumpStats(s, cfg.WorkdirPath()),
+					Command:      report.CommandDump,
+					RunID:        s.ID,
+					Archives:     len(s.Archives),
+					BytesMoved:   s.TotalBytes(),
+					DumpStats:    stats,
+					LandingStats: landings,
 				}, nil
 			})
 		},
@@ -113,49 +115,80 @@ func newDumpCmd(a *app) *cobra.Command {
 	return cmd
 }
 
-// dumpStats builds the per-DLE statistics for a sealed run's record: sizes,
-// level, and files come from the seal (authoritative); the dump duration and the
-// planner's level reason come from the run-status snapshot the tracker just
-// flushed (the same file `nb status` reads), matched by DLE name and level. When
-// the snapshot is missing or stale, sizes are still recorded and timing/reason
-// are left zero (rendered as a dash / omitted).
-func dumpStats(s *catalog.Run, workdir string) []report.DLEStat {
+// dumpStats builds the per-DLE and per-landing statistics for a sealed run's record:
+// sizes, level, and files come from the seal (authoritative); every duration and the
+// planner's level reason come from the run-status snapshot the tracker just flushed
+// (the same file `nb status` reads), matched by DLE name and level. The dump duration
+// ends at the DLE's DumpEndedAt — not its EndedAt, which a flushed DLE moves to its
+// drain's end, so using it would silently fold the queue wait and the flush into
+// "dump time". The flush columns and the landing stats carry the write side: bytes
+// over *busy* seconds, so an idle-most-of-the-run drainer is never read as a slow
+// device. When the snapshot is missing or stale, sizes are still recorded and
+// timing/reason are left zero (rendered as a dash / omitted).
+func dumpStats(s *catalog.Run, workdir string) ([]report.DLEStat, []report.LandingStat) {
 	type key struct {
 		name  string
 		level int
 	}
 	type planned struct {
-		seconds  float64
-		reason   string
-		promoted bool
+		seconds      float64
+		reason       string
+		promoted     bool
+		flushBytes   int64
+		flushSeconds float64
 	}
 	plans := map[key]planned{}
+	var landings []report.LandingStat
 	if snap, err := progress.Load(workdir); err == nil && snap.RunID == s.ID {
 		for _, d := range snap.DLEs {
 			p := planned{reason: d.Reason, promoted: d.Promoted}
-			if !d.StartedAt.IsZero() && !d.EndedAt.IsZero() {
-				p.seconds = d.EndedAt.Sub(d.StartedAt).Seconds()
+			end := d.DumpEndedAt
+			if end.IsZero() {
+				end = d.EndedAt // pre-flush terminal states (failed/canceled mid-dump)
+			}
+			if !d.StartedAt.IsZero() && !end.IsZero() {
+				p.seconds = end.Sub(d.StartedAt).Seconds()
+			}
+			if d.Drains() {
+				p.flushBytes, p.flushSeconds = d.DrainBytes, d.WriteSeconds
 			}
 			plans[key{d.Name, d.Level}] = p
+		}
+		end := snap.EndedAt
+		if end.IsZero() {
+			end = snap.UpdatedAt
+		}
+		wall := snap.Elapsed(end).Seconds()
+		for _, name := range snap.Landings() {
+			busy := snap.WriteBusy(name, end)
+			written := snap.WrittenTo(name)
+			if busy <= 0 && written == 0 {
+				continue
+			}
+			landings = append(landings, report.LandingStat{
+				Landing: name, Bytes: written, BusySeconds: busy, WallSeconds: wall,
+			})
 		}
 	}
 	stats := make([]report.DLEStat, 0, len(s.Archives))
 	for _, a := range s.Archives {
 		p := plans[key{a.DLEID(), a.Level}] // progress is keyed by host:path
 		stats = append(stats, report.DLEStat{
-			DLE:      a.DLE,
-			Host:     a.Host,
-			Path:     a.Path,
-			Level:    a.Level,
-			Orig:     a.Uncompressed,
-			Out:      a.Compressed,
-			Files:    a.FileCount,
-			Seconds:  p.seconds,
-			Promoted: p.promoted,
-			Reason:   p.reason,
+			DLE:          a.DLE,
+			Host:         a.Host,
+			Path:         a.Path,
+			Level:        a.Level,
+			Orig:         a.Uncompressed,
+			Out:          a.Compressed,
+			Files:        a.FileCount,
+			Seconds:      p.seconds,
+			Promoted:     p.promoted,
+			Reason:       p.reason,
+			FlushBytes:   p.flushBytes,
+			FlushSeconds: p.flushSeconds,
 		})
 	}
-	return stats
+	return stats, landings
 }
 
 // runDumpDryRun previews the dump on `date` without writing: it plans that run

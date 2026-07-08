@@ -287,8 +287,9 @@ func TestDrainProgressAndRates(t *testing.T) {
 	// Dumping is done: the dump rate must freeze at 100 B/s regardless of later elapsed.
 	dumpEnd := c.now()
 	tr.StartFlush("alpha", "scratch")
+	tr.BeginLandingWrite("alpha", "landing")
 	c.advance(8 * time.Second)
-	tr.AddDrainBytes("alpha", "landing", 400) // 400 of 800 copied in 8s -> 50 B/s drain
+	tr.AddDrainBytes("alpha", "landing", 400) // 400 of 800 copied in 8s of busy lane -> 50 B/s
 
 	snap := tr.Snapshot()
 	now := c.now()
@@ -305,8 +306,8 @@ func TestDrainProgressAndRates(t *testing.T) {
 	if got := snap.Rate(now); got != 100 {
 		t.Fatalf("dump rate = %.2f, want 100 (frozen at dump end, %v)", got, dumpEnd)
 	}
-	if got := snap.DrainRate(now); got != 50 {
-		t.Fatalf("drain rate = %.2f, want 50", got)
+	if got := snap.WriteRate("landing", now); got != 50 {
+		t.Fatalf("write rate = %.2f, want 50 (400 bytes over 8s of busy lane)", got)
 	}
 	if got := snap.DrainPct(); got != 50 {
 		t.Fatalf("run drain pct = %.0f, want 50", got)
@@ -573,5 +574,215 @@ func TestFinishFlushDoesNotSettleVoidedLane(t *testing.T) {
 	}
 	if got := d.DrainPct(); got == 100 {
 		t.Fatalf("drain pct = %.0f; a missing copy must keep the drain short of 100%%", got)
+	}
+}
+
+// TestWriteBusyAccounting checks the per-landing meter: busy time is the union of
+// the lane's occupied intervals — an idle gap between two writes never dilutes the
+// busy-time write rate (the defect the meter exists to fix), and overlapping
+// writers count once.
+func TestWriteBusyAccounting(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("run", PhaseRunning, 2, []Plan{
+		{Name: "a", EstBytes: 100, Landings: []string{"s3"}},
+		{Name: "b", EstBytes: 100, Landings: []string{"s3"}},
+	}, c.now, nil)
+
+	// First write: 10s busy, 1000 bytes.
+	tr.StartDLE("a")
+	tr.FinishDLE("a", 1, 100, 1000, nil)
+	tr.StartFlush("a", "scratch")
+	tr.BeginLandingWrite("a", "s3")
+	c.advance(10 * time.Second)
+	tr.AddDrainBytes("a", "s3", 1000)
+	tr.EndLandingWrite("a", "s3")
+
+	// A long idle stretch — the drainer waits for the next dump to stage.
+	c.advance(100 * time.Second)
+
+	// Second write: 10s busy, another 1000 bytes.
+	tr.StartDLE("b")
+	tr.FinishDLE("b", 1, 100, 1000, nil)
+	tr.StartFlush("b", "scratch")
+	tr.BeginLandingWrite("b", "s3")
+	c.advance(10 * time.Second)
+	tr.AddDrainBytes("b", "s3", 1000)
+	tr.EndLandingWrite("b", "s3")
+
+	snap := tr.Snapshot()
+	now := c.now()
+	if got := snap.WriteBusy("s3", now); got != 20 {
+		t.Fatalf("busy = %.0fs, want 20 (idle gap must not count)", got)
+	}
+	if got := snap.WriteRate("s3", now); got != 100 {
+		t.Fatalf("write rate = %.2f, want 100 B/s over busy time (a wall-clock average would be ~16)", got)
+	}
+	if got := snap.WriteUtilization("s3", now); got < 0.16 || got > 0.17 {
+		t.Fatalf("utilization = %.3f, want ~20/120", got)
+	}
+	if snap.WriteActive("s3") {
+		t.Fatal("lane must read idle after its last writer left")
+	}
+	// Per-DLE write seconds: each drain copy was 10s.
+	for _, d := range snap.DLEs {
+		if d.WriteSeconds != 10 {
+			t.Fatalf("%s write seconds = %.0f, want 10", d.Name, d.WriteSeconds)
+		}
+	}
+
+	// Overlap: two writers on the lane at once must count the interval once.
+	tr2 := NewTracker("run2", PhaseRunning, 2, []Plan{
+		{Name: "a", EstBytes: 100, Landings: []string{"s3"}},
+		{Name: "b", EstBytes: 100, Landings: []string{"s3"}},
+	}, c.now, nil)
+	tr2.BeginLandingWrite("a", "s3")
+	c.advance(5 * time.Second)
+	tr2.BeginLandingWrite("b", "s3")
+	c.advance(5 * time.Second)
+	tr2.EndLandingWrite("a", "s3")
+	c.advance(5 * time.Second)
+	tr2.EndLandingWrite("b", "s3")
+	if got := tr2.Snapshot().WriteBusy("s3", c.now()); got != 15 {
+		t.Fatalf("overlapping busy = %.0fs, want 15 (union, not 20 writer-seconds)", got)
+	}
+}
+
+// TestRateNow checks the trailing-window rates from the Recent sample ring: they
+// track the last ~30s (not the whole run), and decay to zero on the reader's clock
+// once flow stops — a stalled run must not keep showing its last good number.
+func TestRateNow(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("run", PhaseRunning, 1, []Plan{{Name: "a", EstBytes: 1_000_000, Landings: []string{"s3"}}}, c.now, nil)
+	tr.StartDLE("a")
+
+	// 60s of steady dumping at 100 B/s, reported every 2s so samples accrue.
+	var done int64
+	for i := 0; i < 30; i++ {
+		c.advance(2 * time.Second)
+		done += 200
+		tr.AddBytes("a", done, done/2)
+	}
+	snap := tr.Snapshot()
+	now := c.now()
+	if got := snap.DumpRateNow(now); got < 95 || got > 105 {
+		t.Fatalf("dump rate now = %.2f, want ~100", got)
+	}
+	if got := snap.DLERateNow("a", now); got < 95 || got > 105 {
+		t.Fatalf("dle rate now = %.2f, want ~100", got)
+	}
+
+	// The dump accelerates to 1000 B/s: the trailing window must follow, where the
+	// lifetime average (~145 B/s after 15s of it) lags far behind.
+	for i := 0; i < 15; i++ {
+		c.advance(time.Second)
+		done += 1000
+		tr.AddBytes("a", done, done/2)
+	}
+	snap = tr.Snapshot()
+	now = c.now()
+	if got := snap.DumpRateNow(now); got < 500 {
+		t.Fatalf("dump rate now = %.2f, want the trailing window to track the acceleration (>500)", got)
+	}
+
+	// Flow stops. On the reader's clock the now-rate must decay to exactly zero
+	// once the window has emptied, even though no new snapshot was written.
+	stale := c.now()
+	if got := snap.DumpRateNow(stale.Add(45 * time.Second)); got != 0 {
+		t.Fatalf("dump rate 45s after the last byte = %.2f, want 0", got)
+	}
+
+	// A terminal run has no "now".
+	tr.SetPhase(PhaseDone)
+	if got := tr.Snapshot().DumpRateNow(c.now()); got != 0 {
+		t.Fatalf("terminal dump rate now = %.2f, want 0", got)
+	}
+}
+
+// TestWriteRateNowDirect checks that a direct dump's compressed bytes meter the
+// landing's trailing-window write rate — no drain events required.
+func TestWriteRateNowDirect(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("run", PhaseRunning, 1, []Plan{{Name: "a", EstBytes: 1_000_000, Landings: []string{"tape"}}}, c.now, nil)
+	tr.StartDLE("a")
+	tr.BeginLandingWrite("a", "tape")
+	var done int64
+	for i := 0; i < 20; i++ {
+		c.advance(2 * time.Second)
+		done += 200
+		tr.AddBytes("a", done, done/2) // compressed half: 50 B/s to the landing
+	}
+	snap := tr.Snapshot()
+	now := c.now()
+	if got := snap.WrittenTo("tape"); got != done/2 {
+		t.Fatalf("written to tape = %d, want %d (a direct dump's output bytes)", got, done/2)
+	}
+	if got := snap.WriteRateNow("tape", now); got < 45 || got > 55 {
+		t.Fatalf("write rate now = %.2f, want ~50", got)
+	}
+	if !snap.WriteActive("tape") {
+		t.Fatal("lane must read active while the direct dump holds it")
+	}
+}
+
+// TestDumpEndedAtSurvivesFlush checks the per-DLE dump window: FinishFlush moves
+// EndedAt to the drain's end, but DumpEndedAt must keep the dump's own end so a
+// report's dump time never silently includes the queue wait and the flush.
+func TestDumpEndedAtSurvivesFlush(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("run", PhaseRunning, 1, []Plan{{Name: "a", EstBytes: 100, Landings: []string{"s3"}}}, c.now, nil)
+	tr.StartDLE("a")
+	c.advance(10 * time.Second)
+	tr.FinishDLE("a", 1, 100, 80, nil)
+	dumpEnd := c.now()
+	c.advance(5 * time.Minute) // queued behind another drain
+	tr.StartFlush("a", "scratch")
+	tr.BeginLandingWrite("a", "s3")
+	c.advance(20 * time.Second)
+	tr.AddDrainBytes("a", "s3", 80)
+	tr.EndLandingWrite("a", "s3")
+	tr.FinishFlush("a")
+
+	d := tr.Snapshot().DLEs[0]
+	if !d.DumpEndedAt.Equal(dumpEnd) {
+		t.Fatalf("DumpEndedAt = %v, want %v (the dump's end, not the drain's)", d.DumpEndedAt, dumpEnd)
+	}
+	if !d.EndedAt.After(dumpEnd) {
+		t.Fatalf("EndedAt = %v, want after the drain", d.EndedAt)
+	}
+	if d.WriteSeconds != 20 {
+		t.Fatalf("write seconds = %.0f, want 20 (the copy, not the 5m queue wait)", d.WriteSeconds)
+	}
+}
+
+// TestRenderRateWording checks the live-status wording: an idle flush lane says
+// "idle" with its busy-average preserved (never a shrinking wall-clock average),
+// and an active one leads with the trailing-window rate.
+func TestRenderRateWording(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("run", PhaseRunning, 1, []Plan{
+		{Name: "a", EstBytes: 100, Landings: []string{"s3"}},
+		{Name: "b", EstBytes: 100, Landings: []string{"s3"}},
+	}, c.now, nil)
+	tr.StartDLE("a")
+	tr.FinishDLE("a", 1, 100, 1000, nil)
+	tr.StartFlush("a", "scratch")
+	tr.BeginLandingWrite("a", "s3")
+	c.advance(10 * time.Second)
+	tr.AddDrainBytes("a", "s3", 1000)
+	tr.EndLandingWrite("a", "s3")
+	tr.FinishFlush("a")
+	c.advance(60 * time.Second) // drainer waits for the next dump
+
+	var sb strings.Builder
+	Render(&sb, tr.Snapshot(), c.now())
+	out := sb.String()
+	if !strings.Contains(out, "idle") {
+		t.Errorf("an idle flush lane must say so; got:\n%s", out)
+	}
+	if !strings.Contains(out, "avg 100 B/s") {
+		t.Errorf("the busy-time average (100 B/s) must survive the idle stretch; got:\n%s", out)
+	}
+	if !strings.Contains(out, "busy 14%") {
+		t.Errorf("utilization (10s of 70s) must render; got:\n%s", out)
 	}
 }

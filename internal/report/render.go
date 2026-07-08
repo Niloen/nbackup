@@ -94,7 +94,7 @@ func RenderRun(w io.Writer, r Run) {
 	// so an operator sees what was backed up and how it compressed — not just totals.
 	if r.Command == CommandDump && len(r.DumpStats) > 0 {
 		fmt.Fprintln(w)
-		renderStats(w, r.DumpStats, r.EndedAt.Sub(r.StartedAt))
+		renderStats(w, r.DumpStats, r.LandingStats, r.EndedAt.Sub(r.StartedAt))
 		fmt.Fprintln(w)
 		renderDumpTable(w, r.DumpStats)
 		renderPromotions(w, r.DumpStats)
@@ -123,7 +123,7 @@ func RenderDump(w io.Writer, r Run) {
 	}
 	fmt.Fprintln(w, headline(r))
 	fmt.Fprintln(w)
-	renderStats(w, r.DumpStats, r.EndedAt.Sub(r.StartedAt))
+	renderStats(w, r.DumpStats, r.LandingStats, r.EndedAt.Sub(r.StartedAt))
 	fmt.Fprintln(w)
 	renderDumpTable(w, r.DumpStats)
 	renderPromotions(w, r.DumpStats)
@@ -168,7 +168,10 @@ func (a *agg) add(d DLEStat) {
 // into Total / Full / Incr columns (Amanda's STATISTICS block). Dump time is the
 // *sum* of per-DLE dump times — it exceeds wall-clock run time under parallel
 // workers — while run time is the single wall-clock span, shown only in Total.
-func renderStats(w io.Writer, stats []DLEStat, wall time.Duration) {
+// Each landing then gets its write pair (Amanda's taper stats): time actually
+// spent writing with its share of the run, and the rate over that busy time —
+// the lane's real speed, never diluted by the stretches it sat waiting for dumps.
+func renderStats(w io.Writer, stats []DLEStat, landings []LandingStat, wall time.Duration) {
 	var tot, full, incr agg
 	for _, d := range stats {
 		tot.add(d)
@@ -216,6 +219,15 @@ func renderStats(w io.Writer, stats []DLEStat, wall time.Duration) {
 	if wall > 0 {
 		rows = append(rows, [4]string{"Run time (wall)", sizeutil.FormatElapsed(wall), "", ""})
 	}
+	for _, ls := range landings {
+		name := ls.Landing
+		if name == "" {
+			name = "landing"
+		}
+		rows = append(rows,
+			[4]string{"Write time (" + name + ")", writeTimeCell(ls), "", ""},
+			[4]string{"Avg write rate (" + name + ")", writeRateCell(ls), "", ""})
+	}
 
 	// Column widths: the label column is left-justified, the three value columns
 	// right-justified so the numbers line up on their right edge (Amanda's grid).
@@ -240,20 +252,43 @@ func renderStats(w io.Writer, stats []DLEStat, wall time.Duration) {
 // renderDumpTable writes the per-DLE statistics table. The full/incremental
 // roll-up lives in the statistics grid (renderStats); this is the per-DLE detail.
 // Rate is uncompressed bytes over dump time; a row with unknown timing shows a
-// dash for time and rate.
+// dash for time and rate. When any DLE went through a holding disk, two flush
+// columns follow (Amanda's per-DLE taper stats beside its dumper stats): the
+// drain's copy time and its compressed rate over that time — a direct dump shows
+// dashes there, its landing write already being the dump itself.
 func renderDumpTable(w io.Writer, stats []DLEStat) {
+	flushed := anyFlushed(stats)
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "DLE\tLVL\tORIG\tOUT\tCOMP%\tFILES\tTIME\tRATE")
+	if flushed {
+		fmt.Fprintln(tw, "DLE\tLVL\tORIG\tOUT\tCOMP%\tFILES\tTIME\tRATE\tFLUSH\tFL-RATE")
+	} else {
+		fmt.Fprintln(tw, "DLE\tLVL\tORIG\tOUT\tCOMP%\tFILES\tTIME\tRATE")
+	}
 	for _, d := range stats {
 		lvl := fmt.Sprintf("%d", d.Level)
 		if d.Promoted {
 			lvl += "*" // a promoted full; explained by renderPromotions below the table
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s",
 			d.ID(), lvl, sizeutil.FormatBytes(d.Orig), sizeutil.FormatBytes(d.Out),
 			compPct(d.Orig, d.Out), d.Files, dumpTime(d.Seconds), dumpRate(d.Orig, d.Seconds))
+		if flushed {
+			fmt.Fprintf(tw, "\t%s\t%s", dumpTime(d.FlushSeconds), dumpRate(d.FlushBytes, d.FlushSeconds))
+		}
+		fmt.Fprintln(tw)
 	}
 	tw.Flush()
+}
+
+// anyFlushed reports whether any DLE recorded a drain, so the flush columns are
+// worth printing at all.
+func anyFlushed(stats []DLEStat) bool {
+	for _, d := range stats {
+		if d.FlushSeconds > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // renderPromotions explains the run's promoted fulls (the `*` rows of the dump
@@ -322,6 +357,27 @@ func dumpRate(orig int64, secs float64) string {
 		return "-"
 	}
 	return sizeutil.FormatBytes(int64(float64(orig)/secs)) + "/s"
+}
+
+// writeTimeCell renders a landing's busy time with its share of the run's wall
+// clock — "12m34s (40% busy)" — or a dash when nothing was timed.
+func writeTimeCell(ls LandingStat) string {
+	if ls.BusySeconds <= 0 {
+		return "-"
+	}
+	cell := sizeutil.FormatElapsed(time.Duration(ls.BusySeconds * float64(time.Second)))
+	if ls.WallSeconds > 0 {
+		cell += fmt.Sprintf(" (%.0f%% busy)", ls.BusySeconds/ls.WallSeconds*100)
+	}
+	return cell
+}
+
+// writeRateCell renders a landing's throughput over its busy time, or a dash.
+func writeRateCell(ls LandingStat) string {
+	if ls.BusySeconds <= 0 || ls.Bytes <= 0 {
+		return "-"
+	}
+	return sizeutil.FormatBytes(int64(float64(ls.Bytes)/ls.BusySeconds)) + "/s"
 }
 
 // detailCell summarizes a run's per-command outcome for the table/notification: what

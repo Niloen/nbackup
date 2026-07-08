@@ -35,7 +35,8 @@ app01:/home    L0     dumping  [####......]  42%   -       20.00 GB   8.40 GB   
 db01:/pg       L0     dumping  [##........]  18%   -       20.00 GB   3.60 GB    1.20 GB
 app01:/var     L1     pending  -                  -       80.00 kB   0 B        0 B
 
-Dump:     12.12 GB of ~62.12 GB  (20%)   48.10 MB/s
+Dump:     12.12 GB of ~62.12 GB  (20%)   48.10 MB/s now · avg 45.20 MB/s
+Landing:  disk      4.11 GB written   14.80 MB/s now · avg 15.10 MB/s · busy 92%
 Volume:   4.11 GB written
 ETA:      17m18s
 ```
@@ -51,6 +52,14 @@ metering the drain from the holding disk to the landing, and the bottom gains a
 (tape) adds a **VOLUME** column naming the volume(s) — the tape label(s) — each
 DLE's data reached; a disk or cloud landing is its own sole volume, so the column
 is dropped.
+
+Rates read as two different truths: the leading figure is the throughput **right
+now** (a trailing ~30s window), while `avg` is measured over the lane's **busy
+time** — the wall-clock it actually spent writing — with `busy N%` its share of
+the run. When a flush lane is waiting for dumps to stage, the line says `idle`
+outright instead of quietly diluting an average — so a fast tape starved by slow
+dumps reads `idle · avg 120 MB/s · busy 35%`, never a number that slanders the
+drive.
 
 A run opens in an `estimating` phase while it sizes every DLE (a pass that can
 take a while on a large source), so `nb status` shows the dump is underway rather
@@ -124,6 +133,8 @@ Files                  1249        1240            9
 Dump time (sum)      12m05s      12m04s           1s
 Avg dump rate    29.62 MB/s  29.66 MB/s  122.88 kB/s
 Run time (wall)      12m00s
+Write time (tape)    4m10s (35% busy)
+Avg write rate (tape)     21.95 MB/s
 
 DLE          LVL  ORIG       OUT       COMP%  FILES  TIME    RATE
 app01:/home  0    21.47 GB   5.37 GB   25%    1240   12m04s  29.66 MB/s
@@ -131,7 +142,15 @@ app01:/etc   1    122.88 kB  40.96 kB  33%    9      1s      122.88 kB/s
 ```
 
 Dump time is the *sum* of per-DLE dump times (it exceeds the wall-clock run time
-when workers run in parallel); run time is the single wall-clock span.
+when workers run in parallel); run time is the single wall-clock span. Each
+landing gets a write pair (Amanda's taper stats): `Write time` is the lane's
+**busy** time — what it actually spent writing, with its share of the run — and
+`Avg write rate` is bytes over that busy time, the medium's real speed. A low
+busy % with a high rate means the landing was starved (the dumps are the
+bottleneck); a busy % near 100 means the landing is. When a run drains through a
+holding disk the per-DLE table adds `FLUSH`/`FL-RATE` columns — each DLE's drain
+copy time and compressed write rate (a direct dump shows dashes: its landing
+write *is* the dump, already timed by TIME).
 
 `nb report --dump --run run-2026-06-21.020000` reports a specific dump.
 

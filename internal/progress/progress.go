@@ -75,7 +75,16 @@ type DLE struct {
 	Volume     string           `json:"volume,omitempty"`     // the landing volume(s) its archive committed to — the volume's label (or several, comma-joined, when it spanned volumes, drives, or landings); empty for an address-identified landing that carries no label
 	StartedAt  time.Time        `json:"started_at,omitempty"`
 	EndedAt    time.Time        `json:"ended_at,omitempty"`
-	Err        string           `json:"err,omitempty"`
+	// DumpEndedAt freezes the instant the DLE's dump finished. EndedAt cannot serve:
+	// a holding-disk DLE's FinishFlush moves it to the drain's end, so a dump duration
+	// derived from EndedAt would silently include the queue wait and the flush.
+	DumpEndedAt time.Time `json:"dump_ended_at,omitempty"`
+	// WriteSeconds accumulates the DLE's landing-write time: each of its landing
+	// writes (a drain copy, or a direct dump holding a lane) from the moment it holds
+	// a lane writer to the moment it releases it, summed across lanes (Amanda's
+	// per-DLE taper time). Waiting for a free lane does not count.
+	WriteSeconds float64 `json:"write_seconds,omitempty"`
+	Err          string  `json:"err,omitempty"`
 	// Reason is the planner's level explanation and Promoted marks a full pulled
 	// forward by promotion — carried through the run status so the sealed run's
 	// dump report can say why a DLE ran at its level (why tonight was big).
@@ -151,12 +160,20 @@ type Snapshot struct {
 	StartedAt time.Time `json:"started_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	EndedAt   time.Time `json:"ended_at,omitempty"`
-	// DumpEndedAt freezes the moment the last dump finished, and DrainStartedAt the
-	// moment the first drain began — so the two pipelines' rates are each measured over
-	// their own window instead of the run's whole wall-clock (dumping and draining run
-	// concurrently, and the dump rate must not decay while a tail of drains finishes).
-	DumpEndedAt    time.Time `json:"dump_ended_at,omitempty"`
-	DrainStartedAt time.Time `json:"drain_started_at,omitempty"`
+	// DumpEndedAt freezes the moment the last dump finished, so the dump rate is
+	// measured over the dumping window instead of the run's whole wall-clock (it must
+	// not decay while the drainer works through a tail of flushes).
+	DumpEndedAt time.Time `json:"dump_ended_at,omitempty"`
+	// Meters is the per-landing write accounting, keyed by landing name: how long each
+	// landing lane has actually been writing (drains and direct dumps alike), so
+	// write rates are bytes over *busy* time — never diluted by the stretches the
+	// drainer sits idle waiting for dumps to stage.
+	Meters map[string]LandingMeter `json:"meters,omitempty"`
+	// Recent is a short ring of cumulative byte samples (~the last minute), appended
+	// by the Tracker as bytes flow. It is what lets any stateless reader of the
+	// status file — `nb status`, the web poller — compute a "right now" rate over the
+	// trailing window, and lets that rate honestly decay to zero when flow stops.
+	Recent []Sample `json:"recent,omitempty"`
 	// Skipped names the landings this run declared unusable up front (a medium that
 	// failed to open, or one that could not make room) — each removed from every DLE's
 	// route, so no drain is owed there and nothing reads as drained to it. The archives
@@ -252,21 +269,202 @@ func (s Snapshot) LandingDrains() []LandingDrain {
 	return out
 }
 
-// LandingDrainRate is one landing's draining throughput in compressed bytes/sec,
-// over the same window as DrainRate.
-func (s Snapshot) LandingDrainRate(done int64, now time.Time) float64 {
-	if s.DrainStartedAt.IsZero() {
+// LandingMeter is one landing lane's write accounting: how long it has actually been
+// writing (busy time), maintained by the Tracker from Begin/EndLandingWrite events.
+// Overlapping writers on the lane count once — busy time is the union of the lane's
+// occupied intervals, so bytes over it reads as the lane's aggregate throughput.
+type LandingMeter struct {
+	BusySeconds float64   `json:"busy_seconds,omitempty"` // closed occupied intervals, summed
+	ActiveSince time.Time `json:"active_since,omitempty"` // start of the open interval, zero when idle
+	Active      int       `json:"active,omitempty"`       // writers on the lane right now
+}
+
+// busyAt is the lane's total busy time as of now, including the open interval.
+func (m LandingMeter) busyAt(now time.Time) float64 {
+	b := m.BusySeconds
+	if m.Active > 0 && !m.ActiveSince.IsZero() && now.After(m.ActiveSince) {
+		b += now.Sub(m.ActiveSince).Seconds()
+	}
+	return b
+}
+
+// Sample is one instant's cumulative byte counters, kept in Snapshot.Recent so a
+// stateless reader can difference two instants into a trailing-window rate.
+type Sample struct {
+	T      time.Time `json:"t"`
+	Dumped int64     `json:"dumped"` // Snapshot.TotalDone at T
+	// Written is the compressed bytes that had reached each landing at T
+	// (Snapshot.WrittenTo); Dumping is each then-dumping DLE's DoneBytes, so an
+	// in-flight card can show its own trailing rate.
+	Written map[string]int64 `json:"written,omitempty"`
+	Dumping map[string]int64 `json:"dumping,omitempty"`
+}
+
+// writtenTo is the compressed bytes of this DLE that have reached the landing: its
+// drained share for a holding-routed DLE, and for a direct dump its output bytes on
+// every landing of its route (a Tee writes them lockstep). A DLE with no recorded
+// route reports under "".
+func (d DLE) writtenTo(landing string) int64 {
+	if d.Drains() || d.ToHolding {
+		return d.Drained[landing]
+	}
+	if len(d.Landings) == 0 {
+		if landing == "" {
+			return d.OutBytes
+		}
 		return 0
 	}
-	end := now
+	for _, l := range d.Landings {
+		if l == landing {
+			return d.OutBytes
+		}
+	}
+	return 0
+}
+
+// WrittenTo sums the compressed bytes that have reached one landing so far —
+// drain copies and direct writes alike.
+func (s Snapshot) WrittenTo(landing string) int64 {
+	return sum(s.DLEs, func(d DLE) int64 { return d.writtenTo(landing) })
+}
+
+// clampNow substitutes the run's end for now once it is terminal, so rates and
+// busy time stop moving when the run does.
+func (s Snapshot) clampNow(now time.Time) time.Time {
 	if s.Phase.Terminal() && !s.EndedAt.IsZero() {
-		end = s.EndedAt
+		return s.EndedAt
 	}
-	secs := end.Sub(s.DrainStartedAt).Seconds()
-	if secs <= 0 {
+	return now
+}
+
+// WriteBusy is one landing lane's busy time so far: the wall-clock it has actually
+// spent writing (any writer occupying it), as opposed to waiting for dumps.
+func (s Snapshot) WriteBusy(landing string, now time.Time) float64 {
+	return s.Meters[landing].busyAt(s.clampNow(now))
+}
+
+// WriteActive reports whether some writer is on the landing lane right now.
+func (s Snapshot) WriteActive(landing string) bool { return s.Meters[landing].Active > 0 }
+
+// WriteRate is one landing's throughput in compressed bytes/sec measured over its
+// *busy* time — the lane's real speed while writing (the number to trend, and to
+// compare against the device or link), never diluted by idle stretches.
+func (s Snapshot) WriteRate(landing string, now time.Time) float64 {
+	busy := s.WriteBusy(landing, now)
+	if busy <= 0 {
 		return 0
 	}
-	return float64(done) / secs
+	return float64(s.WrittenTo(landing)) / busy
+}
+
+// WriteUtilization is the share of the run's elapsed time the landing lane spent
+// writing (0..1) — low with a fast lane starved by slow dumps, high when the lane
+// is the bottleneck.
+func (s Snapshot) WriteUtilization(landing string, now time.Time) float64 {
+	elapsed := s.Elapsed(now).Seconds()
+	if elapsed <= 0 {
+		return 0
+	}
+	if u := s.WriteBusy(landing, now) / elapsed; u < 1 {
+		return u
+	}
+	return 1
+}
+
+// nowWindow is the trailing window the "right now" rates measure over.
+const nowWindow = 30 * time.Second
+
+// baseSample picks the newest sample old enough to cover the trailing window
+// (falling back to the oldest), the baseline a now-rate differences against.
+func (s Snapshot) baseSample(now time.Time) (Sample, bool) {
+	if len(s.Recent) == 0 {
+		return Sample{}, false
+	}
+	cut := now.Add(-nowWindow)
+	base := s.Recent[0]
+	for _, smp := range s.Recent[1:] {
+		if smp.T.After(cut) {
+			break
+		}
+		base = smp
+	}
+	return base, true
+}
+
+// rateNow differences the current cumulative value cur against the baseline
+// sample's value over the trailing window. Because the denominator runs on the
+// reader's clock while the counters only move when bytes do, a stalled (or dead)
+// writer's rate honestly decays to zero. Terminal runs report 0 — "right now"
+// has no meaning once the run is over.
+func (s Snapshot) rateNow(now time.Time, cur int64, at func(Sample) int64) float64 {
+	if s.Phase.Terminal() {
+		return 0
+	}
+	// Counters only move when the snapshot does: if it last updated before the
+	// window opened, nothing flowed inside it — including any bytes that landed
+	// after the final sample, which would otherwise linger as a phantom trickle.
+	if !s.UpdatedAt.After(now.Add(-nowWindow)) {
+		return 0
+	}
+	base, ok := s.baseSample(now)
+	if !ok {
+		return 0
+	}
+	secs := now.Sub(base.T).Seconds()
+	delta := cur - at(base)
+	if secs < 1 || delta <= 0 {
+		return 0
+	}
+	return float64(delta) / secs
+}
+
+// DumpRateNow is the dumping throughput over the trailing window, in uncompressed
+// bytes/sec — "is data moving right now, and how fast".
+func (s Snapshot) DumpRateNow(now time.Time) float64 {
+	return s.rateNow(now, s.TotalDone(), func(smp Sample) int64 { return smp.Dumped })
+}
+
+// WriteRateNow is one landing's write throughput over the trailing window, in
+// compressed bytes/sec. Zero when the lane is idle — which is information (the
+// drainer is waiting for dumps), not a measurement failure.
+func (s Snapshot) WriteRateNow(landing string, now time.Time) float64 {
+	return s.rateNow(now, s.WrittenTo(landing), func(smp Sample) int64 { return smp.Written[landing] })
+}
+
+// DLERateNow is one dumping DLE's throughput over the trailing window, in
+// uncompressed bytes/sec. A DLE younger than the window is measured from its own
+// start, so a fresh dump is not underestimated against a baseline it predates.
+func (s Snapshot) DLERateNow(name string, now time.Time) float64 {
+	if s.Phase.Terminal() {
+		return 0
+	}
+	var dle *DLE
+	for i := range s.DLEs {
+		if s.DLEs[i].Name == name {
+			dle = &s.DLEs[i]
+			break
+		}
+	}
+	if dle == nil || dle.State != StateDumping {
+		return 0
+	}
+	if !s.UpdatedAt.After(now.Add(-nowWindow)) { // see rateNow: a stale snapshot has no "now"
+		return 0
+	}
+	base, ok := s.baseSample(now)
+	if !ok {
+		return 0
+	}
+	baseVal, baseT := base.Dumping[name], base.T
+	if baseVal == 0 && dle.StartedAt.After(baseT) {
+		baseT = dle.StartedAt
+	}
+	secs := now.Sub(baseT).Seconds()
+	delta := dle.DoneBytes - baseVal
+	if secs < 1 || delta <= 0 {
+		return 0
+	}
+	return float64(delta) / secs
 }
 
 // TotalOnVolume sums the bytes that have landed on the authoritative volume.
@@ -336,21 +534,37 @@ func (s Snapshot) Rate(now time.Time) float64 {
 	return float64(s.TotalDone()) / secs
 }
 
-// DrainRate is the draining throughput in compressed bytes/sec, measured from the first
-// drain to now (or the run's end). 0 before any drain has started or until time passes.
-func (s Snapshot) DrainRate(now time.Time) float64 {
-	if s.DrainStartedAt.IsZero() {
-		return 0
+// Landings names every landing the run writes to, in first-seen route order
+// (primaries lead) with metered-but-routeless lanes appended — the keys WriteRate,
+// WriteRateNow, and the meters answer for. A run whose DLEs recorded no route
+// reports the single unnamed landing "".
+func (s Snapshot) Landings() []string {
+	var order []string
+	seen := map[string]bool{}
+	note := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			order = append(order, name)
+		}
 	}
-	end := now
-	if s.Phase.Terminal() && !s.EndedAt.IsZero() {
-		end = s.EndedAt
+	for _, d := range s.DLEs {
+		if len(d.Landings) == 0 {
+			note("")
+			continue
+		}
+		for _, l := range d.Landings {
+			note(l)
+		}
 	}
-	secs := end.Sub(s.DrainStartedAt).Seconds()
-	if secs <= 0 {
-		return 0
+	meterNames := make([]string, 0, len(s.Meters))
+	for name := range s.Meters {
+		meterNames = append(meterNames, name)
 	}
-	return float64(s.TotalDrained()) / secs
+	sort.Strings(meterNames)
+	for _, name := range meterNames {
+		note(name)
+	}
+	return order
 }
 
 // Pct is the run's overall dump completion against the total estimate (0..100).
