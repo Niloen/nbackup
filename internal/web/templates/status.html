@@ -74,11 +74,12 @@
      failed write: their copies are missing until an nb sync backfills them — worth
      a warning row even after the run finishes. */}}
 {{if .Snap.Skipped}}
+{{$run := .Snap.RunID}}
 <div class="alerts" style="margin-top:1rem">
   {{range .Snap.Skipped}}
   <div class="alert {{if .Tripped}}bad{{else}}warn{{end}}">
     <span class="pill {{if .Tripped}}bad{{else}}warn{{end}}">{{if .Tripped}}tripped{{else}}skipped{{end}}</span>
-    <span>landing <strong>{{.Landing}}</strong> — {{.Reason}} · repair: <code>{{.Repair $.Snap.RunID}}</code></span>
+    <span>landing <strong>{{.Landing}}</strong> — {{.Reason}} · repair: <code>{{.Repair $run}}</code></span>
   </div>
   {{end}}
 </div>

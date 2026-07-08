@@ -502,6 +502,27 @@ func TestLiveStatusRenders(t *testing.T) {
 	}
 }
 
+// TestStatusSkippedLandings renders /status with a tripped landing — the warning row
+// interpolates the run id into the repair hint from inside a range, which once used
+// `$.Snap` ($ is the page envelope under {{with .Data}}, not the view) and crashed
+// the whole page with a template error.
+func TestStatusSkippedLandings(t *testing.T) {
+	dir := t.TempDir()
+	progress.NewFileSink(dir, time.Now)(progress.Snapshot{
+		RunID: "run-2026-07-08.090000", Phase: progress.PhaseDone, Workers: 1,
+		DLEs:    []progress.DLE{{Name: "local", Slug: "local", State: progress.StateDone, EstBytes: 1000, DoneBytes: 1000}},
+		Skipped: []progress.SkippedLanding{{Landing: "gdrive", Reason: "write failed", Tripped: true}},
+	}, true)
+
+	code, body := get(t, NewServer(sampleSource(), dir).Handler(), "/status")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d", code)
+	}
+	if !strings.Contains(body, "tripped") || !strings.Contains(body, "nb sync --run run-2026-07-08.090000 --to gdrive") {
+		t.Errorf("/status missing the tripped-landing warning with its run-scoped repair hint:\n%s", body)
+	}
+}
+
 // TestEstimatingStatusShowsSizingNotDumpTable guards against the estimating phase
 // rendering the dump view: during sizing a "done" DLE is merely measured and
 // DoneBytes is its estimate, so the dump table would misread as a previous run's
