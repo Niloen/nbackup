@@ -130,6 +130,33 @@ func TestRenderDump(t *testing.T) {
 	}
 }
 
+// TestRenderDumpPromotions checks a promoted full is marked in the per-DLE table
+// (LVL 0*) and explained in the PROMOTED FULLS note with its unwrapped reason —
+// and that a run without promotions renders no such note.
+func TestRenderDumpPromotions(t *testing.T) {
+	r := dumpRunFixture()
+	r.DumpStats[0].Promoted = true
+	r.DumpStats[0].Reason = "promoted full (due in 2d; ~40 GB of fulls crowd the next 2d, over the ~12 GB/run balanced level)"
+	var sb strings.Builder
+	RenderDump(&sb, r)
+	out := sb.String()
+	for _, want := range []string{
+		"0*", // the table marker
+		"PROMOTED FULLS (*) — 1 full(s), 5.37 GB pulled forward to level the cycle",
+		"app01-home — due in 2d; ~40 GB of fulls crowd the next 2d",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dump report missing %q\n---\n%s", want, out)
+		}
+	}
+
+	sb.Reset()
+	RenderDump(&sb, dumpRunFixture())
+	if strings.Contains(sb.String(), "PROMOTED") {
+		t.Errorf("a run without promotions must render no promotions note\n---\n%s", sb.String())
+	}
+}
+
 func TestHeadlineFailed(t *testing.T) {
 	r := dumpRunFixture()
 	r.Outcome, r.ExitClass, r.Error = OutcomeFailure, "dump-failed", "tar exited 2"

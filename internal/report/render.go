@@ -97,6 +97,7 @@ func RenderRun(w io.Writer, r Run) {
 		renderStats(w, r.DumpStats, r.EndedAt.Sub(r.StartedAt))
 		fmt.Fprintln(w)
 		renderDumpTable(w, r.DumpStats)
+		renderPromotions(w, r.DumpStats)
 	}
 }
 
@@ -125,6 +126,7 @@ func RenderDump(w io.Writer, r Run) {
 	renderStats(w, r.DumpStats, r.EndedAt.Sub(r.StartedAt))
 	fmt.Fprintln(w)
 	renderDumpTable(w, r.DumpStats)
+	renderPromotions(w, r.DumpStats)
 }
 
 // headline is the one-line "did it work" summary for a dump: DLE count, the
@@ -243,11 +245,52 @@ func renderDumpTable(w io.Writer, stats []DLEStat) {
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "DLE\tLVL\tORIG\tOUT\tCOMP%\tFILES\tTIME\tRATE")
 	for _, d := range stats {
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\t%s\t%s\n",
-			d.ID(), d.Level, sizeutil.FormatBytes(d.Orig), sizeutil.FormatBytes(d.Out),
+		lvl := fmt.Sprintf("%d", d.Level)
+		if d.Promoted {
+			lvl += "*" // a promoted full; explained by renderPromotions below the table
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+			d.ID(), lvl, sizeutil.FormatBytes(d.Orig), sizeutil.FormatBytes(d.Out),
 			compPct(d.Orig, d.Out), d.Files, dumpTime(d.Seconds), dumpRate(d.Orig, d.Seconds))
 	}
 	tw.Flush()
+}
+
+// renderPromotions explains the run's promoted fulls (the `*` rows of the dump
+// table): which DLEs the planner pulled forward of their cycle deadline, their
+// total, and each one's reason — so a night that ran big says why. Prints
+// nothing when the run had no promotions.
+func renderPromotions(w io.Writer, stats []DLEStat) {
+	var promoted []DLEStat
+	var bytes int64
+	for _, d := range stats {
+		if d.Promoted {
+			promoted = append(promoted, d)
+			bytes += d.Out
+		}
+	}
+	if len(promoted) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nPROMOTED FULLS (*) — %d full(s), %s pulled forward to level the cycle\n",
+		len(promoted), sizeutil.FormatBytes(bytes))
+	for _, d := range promoted {
+		fmt.Fprintf(w, "  %s — %s\n", d.ID(), PromotionWhy(d.Reason))
+	}
+}
+
+// PromotionWhy unwraps the planner's "promoted full (...)" reason to just the
+// why for a promotions note, where the "promoted full" part is the heading.
+// A reason in an unexpected shape (or missing) is shown as-is / as a dash.
+// Exported for the web dump report, which renders the same note.
+func PromotionWhy(reason string) string {
+	if inner, ok := strings.CutPrefix(reason, "promoted full ("); ok {
+		return strings.TrimSuffix(inner, ")")
+	}
+	if reason == "" {
+		return "-"
+	}
+	return reason
 }
 
 // compPct renders the compression ratio (output as a percent of original), or a dash

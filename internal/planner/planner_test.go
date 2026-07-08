@@ -1,6 +1,7 @@
 package planner
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -395,6 +396,117 @@ func TestPromotionPacesDestaggerByRunway(t *testing.T) {
 	// All four fulls still land within the window, one per run, by the deadline.
 	if fullDays != 4 {
 		t.Errorf("expected the 4-DLE cluster spread over 4 distinct runs, got %d", fullDays)
+	}
+}
+
+// mkFulled returns a DLE state whose last full was n days before today — the
+// promotion tests' one-liner for placing a DLE on the deadline calendar.
+func mkFulled(today time.Time, n int) *catalog.DLEState {
+	d := today.AddDate(0, 0, -n).Format("2006-01-02")
+	return &catalog.DLEState{LastFullDate: d, Runs: []catalog.RunRecord{{Date: d, Run: "run-x", Level: 0}}}
+}
+
+// TestPromotionBatchesSmallFulls checks the batch regime: a crowd of small DLEs
+// due tomorrow is relieved several per run — today fills up to the cycle-average
+// level — instead of one per day. 20×50k due tomorrow against a ~286k/run average
+// (the big DLE lifts it) means today takes 5 of them (250k ≤ avg < 300k).
+func TestPromotionBatchesSmallFulls(t *testing.T) {
+	today := time.Date(2026, 6, 27, 0, 0, 0, 0, time.UTC)
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
+	var dles []config.DLE
+	est := map[string]Estimate{}
+	for i := 0; i < 20; i++ {
+		d := dleNamed(string(rune('a' + i)))
+		hist.DLEs[d.Name()] = mkFulled(today, 6) // due tomorrow (cycle 7)
+		dles = append(dles, d)
+		est[d.Name()] = Estimate{Full: 50_000, Incr: 100}
+	}
+	big := dleNamed("big")
+	hist.DLEs[big.Name()] = mkFulled(today, 2) // mid-cycle, not a candidate for today
+	dles = append(dles, big)
+	est[big.Name()] = Estimate{Full: 1_000_000, Incr: 100}
+
+	p := Build(dles, hist, est, nil, Params{CycleDays: 7, RoomBytes: -1}, today)
+	if n := fullsIn(p); n != 5 {
+		t.Errorf("expected a batch of 5 small fulls promoted (filling today to the ~286k average), got %d", n)
+	}
+	if lvl := levelOf(p, "big-data"); lvl == 0 {
+		t.Errorf("mid-cycle big DLE promoted while destaggering smalls; want an incremental")
+	}
+	for _, it := range p.Items {
+		if it.Level == 0 && !it.Promoted {
+			t.Errorf("%s: a promoted full must carry Promoted=true", it.Name)
+		}
+		if it.Promoted && !strings.Contains(it.Reason, "promoted full") {
+			t.Errorf("%s: promoted reason %q should say so", it.Name, it.Reason)
+		}
+	}
+}
+
+// TestPromotionHoldsSmallSwarmWithRunway checks the byte-based gate: a swarm of
+// small DLEs sharing a deadline is NOT dribbled out one per run from far away —
+// counting heads (20 DLEs > 4 days) must not trigger when the bytes (20k over 4
+// days against a ~146k/run average) fit the runway comfortably.
+func TestPromotionHoldsSmallSwarmWithRunway(t *testing.T) {
+	today := time.Date(2026, 6, 27, 0, 0, 0, 0, time.UTC)
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
+	var dles []config.DLE
+	est := map[string]Estimate{}
+	for i := 0; i < 20; i++ {
+		d := dleNamed(string(rune('a' + i)))
+		hist.DLEs[d.Name()] = mkFulled(today, 3) // due in 4 days (cycle 7)
+		dles = append(dles, d)
+		est[d.Name()] = Estimate{Full: 1000, Incr: 10}
+	}
+	big := dleNamed("big")
+	hist.DLEs[big.Name()] = mkFulled(today, 1)
+	dles = append(dles, big)
+	est[big.Name()] = Estimate{Full: 1_000_000, Incr: 100}
+
+	p := Build(dles, hist, est, nil, Params{CycleDays: 7, RoomBytes: -1}, today)
+	if n := fullsIn(p); n != 0 {
+		t.Errorf("small swarm with 4 days of runway was promoted early (%d fulls); the byte gate should hold", n)
+	}
+}
+
+// TestPromotionDoesNotHalveHeavyDay is the no-halving guard: four equal big DLEs
+// sharing tomorrow's deadline must shed exactly ONE full onto today — one per run
+// is the destagger pace — not be split half-and-half across the two days (the old
+// behavior promoted until today matched the peak).
+func TestPromotionDoesNotHalveHeavyDay(t *testing.T) {
+	today := time.Date(2026, 6, 27, 0, 0, 0, 0, time.UTC)
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
+	var dles []config.DLE
+	est := map[string]Estimate{}
+	for _, h := range []string{"a", "b", "c", "d"} {
+		d := dleNamed(h)
+		hist.DLEs[d.Name()] = mkFulled(today, 6) // due tomorrow (cycle 7)
+		dles = append(dles, d)
+		est[d.Name()] = Estimate{Full: 1_000_000_000, Incr: 1000}
+	}
+	p := Build(dles, hist, est, nil, Params{CycleDays: 7, RoomBytes: -1}, today)
+	if n := fullsIn(p); n != 1 {
+		t.Errorf("a heavy shared deadline must shed one full per run, got %d fulls today", n)
+	}
+}
+
+// TestPromotionLeavesTinyAloneOnBigDay checks the batch gate ignores irreducible
+// load: a tiny DLE sharing its deadline with a dominating big one is not promoted
+// early — the big DLE's bytes crowd the horizon, but moving the tiny full cannot
+// relieve that, so it would only waste the tiny DLE's freshness.
+func TestPromotionLeavesTinyAloneOnBigDay(t *testing.T) {
+	today := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{
+		"big-data":  mkFulled(today, 3),
+		"tiny-data": mkFulled(today, 3),
+	}}
+	est := map[string]Estimate{
+		"big-data":  {Full: 3_640_000_000, Incr: 10_000},
+		"tiny-data": {Full: 10_000, Incr: 10_000},
+	}
+	p := Build([]config.DLE{dleNamed("big"), dleNamed("tiny")}, hist, est, nil, Params{CycleDays: 7, RoomBytes: -1}, today)
+	if n := fullsIn(p); n != 0 {
+		t.Errorf("expected no promotion (the crowding is the big DLE's own irreducible size), got %d fulls", n)
 	}
 }
 

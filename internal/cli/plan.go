@@ -201,7 +201,7 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 		fmt.Fprintln(tw, "DATE\tFULL\tINCR\tEST. SIZE\tFULLS")
 	}
 	var windowTotal int64
-	var totalIncrs int
+	var totalIncrs, totalPromoted int
 	for i, p := range plans {
 		var fulls, incrs int
 		var est int64
@@ -210,7 +210,12 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 			est += it.EstBytes
 			if it.Level == 0 {
 				fulls++
-				fullNames = append(fullNames, it.DLE.ID())
+				name := it.DLE.ID()
+				if it.Promoted {
+					name += "*"
+					totalPromoted++
+				}
+				fullNames = append(fullNames, name)
 			} else {
 				incrs++
 			}
@@ -231,6 +236,9 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 		}
 	}
 	tw.Flush()
+	if totalPromoted > 0 {
+		fmt.Println("\n* = a full promoted ahead of its cycle deadline to level the daily full load.")
+	}
 	if totalIncrs > 0 {
 		// The simulation replays the level schedule but never mutates the filesystem,
 		// so no bytes change between simulated runs and every forecast incremental sizes

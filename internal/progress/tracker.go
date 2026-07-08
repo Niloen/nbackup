@@ -15,6 +15,8 @@ type Plan struct {
 	Level    int
 	EstBytes int64
 	Landings []string // the DLE's landing route, primary first; empty = a single unnamed landing
+	Reason   string   // the planner's level explanation, carried so the sealed run's report can say why
+	Promoted bool     // a full pulled forward by promotion (not due today)
 }
 
 // Sink receives a snapshot whenever the run state changes. force is true for
@@ -47,7 +49,7 @@ func NewTracker(runID string, phase Phase, workers int, plan []Plan, now func() 
 	start := now()
 	dles := make([]DLE, len(plan))
 	for i, p := range plan {
-		dles[i] = DLE{Name: p.Name, Slug: p.Slug, Level: p.Level, State: StatePending, EstBytes: p.EstBytes, Landings: p.Landings}
+		dles[i] = DLE{Name: p.Name, Slug: p.Slug, Level: p.Level, State: StatePending, EstBytes: p.EstBytes, Landings: p.Landings, Reason: p.Reason, Promoted: p.Promoted}
 	}
 	byName(dles)
 	idx := make(map[string]int, len(dles))

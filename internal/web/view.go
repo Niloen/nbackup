@@ -491,6 +491,10 @@ type dumpReportView struct {
 	Headline string
 	Grid     []dumpGridRow
 	Rows     []dumpStatRow
+	// Promoted summarizes the run's promoted fulls ("N full(s), X pulled forward
+	// to level the cycle"), empty when none — mirrors report.renderPromotions;
+	// each promoted row carries its own why.
+	Promoted string
 }
 
 // dumpGridRow is one row of the STATISTICS grid — mirrors report.renderStats.
@@ -507,6 +511,8 @@ type dumpStatRow struct {
 	Comp       string // compression percent, or dash
 	Files      int
 	Time, Rate string // dash when timing was unavailable
+	Promoted   bool   // a full pulled forward by promotion
+	Why        string // the promotion's reason, for the row's tooltip
 }
 
 // dumpAgg accumulates one column of the STATISTICS grid — mirrors report.agg.
@@ -546,13 +552,24 @@ func newDumpReportView(r report.Run) *dumpReportView {
 		Headline: dumpHeadline(r, tot),
 		Grid:     dumpStatsGrid(tot, full, incr, r.EndedAt.Sub(r.StartedAt)),
 	}
+	var promoted int
+	var promotedBytes int64
 	for _, d := range r.DumpStats {
+		if d.Promoted {
+			promoted++
+			promotedBytes += d.Out
+		}
 		v.Rows = append(v.Rows, dumpStatRow{
 			ID: d.ID(), Slug: d.DLE, Level: d.Level,
 			Orig: sizeutil.FormatBytes(d.Orig), Out: sizeutil.FormatBytes(d.Out),
 			Comp: dumpCompPct(d.Orig, d.Out), Files: d.Files,
 			Time: dumpTimeCell(d.Seconds), Rate: dumpRateCell(d.Orig, d.Seconds),
+			Promoted: d.Promoted, Why: report.PromotionWhy(d.Reason),
 		})
+	}
+	if promoted > 0 {
+		v.Promoted = fmt.Sprintf("%d full(s), %s pulled forward to level the cycle",
+			promoted, sizeutil.FormatBytes(promotedBytes))
 	}
 	return v
 }

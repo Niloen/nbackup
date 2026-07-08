@@ -76,6 +76,11 @@ type DLE struct {
 	StartedAt  time.Time        `json:"started_at,omitempty"`
 	EndedAt    time.Time        `json:"ended_at,omitempty"`
 	Err        string           `json:"err,omitempty"`
+	// Reason is the planner's level explanation and Promoted marks a full pulled
+	// forward by promotion — carried through the run status so the sealed run's
+	// dump report can say why a DLE ran at its level (why tonight was big).
+	Reason   string `json:"reason,omitempty"`
+	Promoted bool   `json:"promoted,omitempty"`
 }
 
 // Pct is the DLE's dump completion against its estimate (0..100, capped). Returns 0

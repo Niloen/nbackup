@@ -114,34 +114,45 @@ func newDumpCmd(a *app) *cobra.Command {
 }
 
 // dumpStats builds the per-DLE statistics for a sealed run's record: sizes,
-// level, and files come from the seal (authoritative); the dump duration comes from
-// the run-status snapshot the tracker just flushed (the same file `nb status` reads),
-// matched by DLE name and level. When the snapshot is missing or stale, sizes are
-// still recorded and timing is left zero (rendered as a dash).
+// level, and files come from the seal (authoritative); the dump duration and the
+// planner's level reason come from the run-status snapshot the tracker just
+// flushed (the same file `nb status` reads), matched by DLE name and level. When
+// the snapshot is missing or stale, sizes are still recorded and timing/reason
+// are left zero (rendered as a dash / omitted).
 func dumpStats(s *catalog.Run, workdir string) []report.DLEStat {
 	type key struct {
 		name  string
 		level int
 	}
-	durations := map[key]float64{}
+	type planned struct {
+		seconds  float64
+		reason   string
+		promoted bool
+	}
+	plans := map[key]planned{}
 	if snap, err := progress.Load(workdir); err == nil && snap.RunID == s.ID {
 		for _, d := range snap.DLEs {
+			p := planned{reason: d.Reason, promoted: d.Promoted}
 			if !d.StartedAt.IsZero() && !d.EndedAt.IsZero() {
-				durations[key{d.Name, d.Level}] = d.EndedAt.Sub(d.StartedAt).Seconds()
+				p.seconds = d.EndedAt.Sub(d.StartedAt).Seconds()
 			}
+			plans[key{d.Name, d.Level}] = p
 		}
 	}
 	stats := make([]report.DLEStat, 0, len(s.Archives))
 	for _, a := range s.Archives {
+		p := plans[key{a.DLEID(), a.Level}] // progress is keyed by host:path
 		stats = append(stats, report.DLEStat{
-			DLE:     a.DLE,
-			Host:    a.Host,
-			Path:    a.Path,
-			Level:   a.Level,
-			Orig:    a.Uncompressed,
-			Out:     a.Compressed,
-			Files:   a.FileCount,
-			Seconds: durations[key{a.DLEID(), a.Level}], // progress is keyed by host:path
+			DLE:      a.DLE,
+			Host:     a.Host,
+			Path:     a.Path,
+			Level:    a.Level,
+			Orig:     a.Uncompressed,
+			Out:      a.Compressed,
+			Files:    a.FileCount,
+			Seconds:  p.seconds,
+			Promoted: p.promoted,
+			Reason:   p.reason,
 		})
 	}
 	return stats

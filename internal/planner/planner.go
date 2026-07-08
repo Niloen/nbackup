@@ -16,9 +16,12 @@
 // consecutive incrementals overlapping for redundancy.
 //
 // The one balancing lever is promotion: pulling a future full forward onto today
-// to level the daily full load across the cycle, paced so a deadline cluster is
-// destaggered one full per run and never past the per-run room. The guards and
-// the pacing are documented on promote.
+// to level the daily full load toward the cycle average (one full of every DLE,
+// spread over the cycle). Small fulls are pulled in batches, filling today up to
+// that average only when their deadlines genuinely crowd the days left; a full too
+// large to ever fit under the average is instead destaggered one per run near its
+// deadline. Both are bounded by the per-run room; the guards and the pacing are
+// documented on promote.
 //
 // Whether the cycle fits the medium *at all* is a separate, structural check:
 // over a cycle every DLE is fulled once, and (with minimum_age >= cycle) those
@@ -29,6 +32,7 @@ package planner
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
@@ -100,6 +104,7 @@ type Item struct {
 	EstBytes  int64  // estimated size of the chosen dump
 	FullBytes int64  // estimated size of a full dump (the cycle-deadline cost), shown so a small incremental does not hide a large pending full
 	Reason    string // human-readable explanation
+	Promoted  bool   // a full pulled forward by promotion (not due today), so reports can say why tonight was big
 	BaseRun   string // run whose state an incremental builds on
 }
 
@@ -110,6 +115,7 @@ type cand struct {
 	days      int // days since last full, -1 if never
 	full      bool
 	mandatory bool
+	promoted  bool
 	estFull   int64
 	estIncr   int64 // estimate of the chosen incremental level (set once it is decided)
 	incrLevel int   // the chosen incremental level (1..MaxLevel)
@@ -171,7 +177,7 @@ func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, fo
 			sizeutil.FormatBytes(totalFull), sizeutil.FormatBytes(p.CapacityBytes)))
 	}
 	for _, c := range cands {
-		it := Item{DLE: c.dle, Name: c.name, BaseLevel: -1, Reason: c.reason, FullBytes: c.estFull}
+		it := Item{DLE: c.dle, Name: c.name, BaseLevel: -1, Reason: c.reason, FullBytes: c.estFull, Promoted: c.promoted}
 		if c.full {
 			it.Level, it.EstBytes = 0, c.estFull
 		} else {
@@ -282,27 +288,35 @@ func runBytes(cands []*cand) int64 {
 }
 
 // promote pulls future fulls forward onto today to level the daily full load
-// across the cycle. It builds a deadline calendar — each not-yet-due DLE sits on
-// the day (an offset from today) its full is due — adds up today's already-fixed
-// load (the mandatory fulls), then repeatedly relieves the heaviest future day by
-// pulling one of its fulls onto today.
+// toward the cycle average — avg, one full of every DLE spread over the cycle
+// (Amanda's balanced size). It builds a deadline calendar — each not-yet-due DLE
+// sits on the day (an offset from today) its full is due — and adds up today's
+// already-fixed load (the mandatory fulls). avg splits the candidates into two
+// regimes, because they overload a cycle in two different ways:
 //
-// Three guards keep it from chasing an average. First, a runway gate paces the
-// destagger: a peak day is relieved only once its deadline is too close to spread
-// its cluster over distinct days (days-left < cluster-size); a peak with slack is
-// set aside for a later, closer run — promoting sooner would only waste freshness. Because each promotion shrinks the cluster,
-// the gate flips off as soon as the cluster shrinks to the days remaining, so a
-// cluster is relieved at most one full per run — quiet early, one-per-day near the
-// deadline. Second, each move must not overshoot the day it relieves — today's
-// resulting load may not exceed that day's load after the moved full leaves it — so
-// the move lowers the global peak rather than just relocating it. That means a DLE
-// dominating its own deadline day is never promoted (moving it leaves an equal peak
-// on today), and a tiny DLE merely sharing that deadline cannot inflate the peak
-// enough to unlock the big move. Third, each move must fit the per-run room, so
-// promotion spends only genuinely free capacity. When the heaviest day cannot be
-// relieved (it has runway to spare, or its fulls are too big to drop the peak or to
-// fit room) it is set aside and the next-heaviest is tried; promotion stops once
-// today is no longer lighter than any remaining peak.
+// Small fulls (<= avg) are batched: today is filled up to avg with the
+// soonest-due small fulls, but only while their deadlines genuinely crowd the
+// runway — some horizon of d days holds more than d*avg of small fulls, so
+// leaving them all to their deadlines must overload a day. The horizon gate is
+// byte-based and cumulative, so a swarm of tiny DLEs sharing a deadline is left
+// alone while the days left can absorb it, then relieved several per run — never
+// dribbled out one per day from weeks away. Promotion stops at avg: today never
+// becomes the new peak, and a heavy day is shed ~avg per run over several runs
+// rather than halved onto one.
+//
+// Oversize fulls (> avg) can never fit under the average — wherever one lands,
+// its day carries at least its size — so leveling means keeping them apart, not
+// batching them: when more oversize fulls share the next d days than there are
+// days (count > d), one is pulled onto today, at most one per run — quiet early,
+// one-per-day near the deadline. Each such move must not overshoot the day it
+// relieves (today's resulting load may not exceed that day's load after the full
+// leaves it), so a DLE dominating its own deadline day is never merely relocated,
+// and a tiny co-deadline DLE cannot unlock the big move.
+//
+// Every move, in both regimes, must also fit the per-run room, so promotion
+// spends only genuinely free capacity. And promotion only ever reacts to
+// crowding: a light day under an uncrowded calendar stays light, because pulling
+// a full forward always costs freshness (its next full comes sooner).
 func promote(cands []*cand, cycle int, room int64) {
 	// Deadline calendar: an incremental candidate last fulled `days` ago is due in
 	// `cycle-days` days (offset >= 1). byOffset groups the candidates due on each
@@ -315,8 +329,9 @@ func promote(cands []*cand, cycle int, room int64) {
 	// old before it can relieve a future peak.
 	byOffset := map[int][]*cand{}
 	load := map[int]int64{}
-	var todayLoad int64
+	var todayLoad, totalFull int64
 	for _, c := range cands {
+		totalFull += c.estFull
 		switch {
 		case c.full:
 			todayLoad += c.estFull
@@ -329,58 +344,145 @@ func promote(cands []*cand, cycle int, room int64) {
 			load[off] += c.estFull
 		}
 	}
+	// The balanced level. Zero means the estimates carry no size signal (or there
+	// are no DLEs); with nothing to level against, promotion has no basis.
+	avg := totalFull / int64(cycle)
+	if avg <= 0 {
+		return
+	}
 
 	total := runBytes(cands)
-	for {
-		// Find the heaviest future day. If today already carries at least as much, no
-		// move can lower the peak, so promotion is done.
-		peakOff, peakLoad := 0, int64(0)
-		for off, l := range load {
-			if l > peakLoad {
-				peakOff, peakLoad = off, l
+	fitsRoom := func(c *cand) bool { return room < 0 || total-c.estIncr+c.estFull <= room }
+	take := func(c *cand, off int, reason string) {
+		c.full, c.promoted, c.reason = true, true, reason
+		todayLoad += c.estFull
+		total += c.estFull - c.estIncr
+		load[off] -= c.estFull
+		cluster := byOffset[off]
+		for i, x := range cluster {
+			if x == c {
+				byOffset[off] = append(cluster[:i], cluster[i+1:]...)
+				break
 			}
 		}
-		if peakOff == 0 || todayLoad >= peakLoad {
-			return
+		if len(byOffset[off]) == 0 {
+			delete(byOffset, off)
+			delete(load, off)
 		}
-		// The runway gate (the first guard): while the days left can still hold the
-		// cluster on distinct days, defer to a later, closer run.
-		daysLeft, cluster := peakOff, byOffset[peakOff]
-		if daysLeft >= len(cluster) {
-			delete(load, peakOff)
-			delete(byOffset, peakOff)
-			continue
-		}
-		// Pull the largest full off the peak day that still leaves today below it (so
-		// the peak strictly drops) and fits the per-run room.
-		var pick *cand
-		var pickIdx int
-		for i, c := range cluster {
-			// No overshoot (the second guard). Comparing against the day's load *after
-			// this full leaves it* (peakLoad-c.estFull), not its total, is what keeps a
-			// DLE that dominates its own deadline day from being relocated just because
-			// a tiny co-deadline DLE inflated the peak above it.
-			if todayLoad+c.estFull > peakLoad-c.estFull {
-				continue
-			}
-			if room >= 0 && total-c.estIncr+c.estFull > room {
-				continue
-			}
-			if pick == nil || c.estFull > pick.estFull {
-				pick, pickIdx = c, i
-			}
-		}
-		if pick == nil {
-			// This peak can't be relieved usefully; set it aside and try the next.
-			delete(load, peakOff)
-			delete(byOffset, peakOff)
-			continue
-		}
-		pick.full = true
-		pick.reason = fmt.Sprintf("promoted full (filling a light run; %dd into a %dd cycle)", pick.days, cycle)
-		todayLoad += pick.estFull
-		total += pick.estFull - pick.estIncr
-		load[peakOff] -= pick.estFull
-		byOffset[peakOff] = append(cluster[:pickIdx], cluster[pickIdx+1:]...)
 	}
+
+	// promoteSmall makes one small-full batch pick: find the widest crowded
+	// horizon — the largest d whose fulls due within d days sum past d*avg — then
+	// pull today (up to avg) the soonest-due small full that fits. One pick per
+	// call; the horizon is recomputed after each, so the gate closes the moment
+	// the crowding is relieved. In the crowding sum an oversize full counts as
+	// avg, not its size: it consumes one run's budget on whatever day it lands
+	// (small fulls sharing its deadline must clear off), but its excess is
+	// irreducible — counting it fully would promote smalls that cannot actually
+	// relieve anything (a tiny DLE sharing a huge DLE's deadline stays put).
+	promoteSmall := func() bool {
+		if todayLoad >= avg {
+			return false
+		}
+		offsets := sortedOffsets(byOffset)
+		horizon, horizonCum := 0, int64(0)
+		var cum int64
+		for _, off := range offsets {
+			for _, c := range byOffset[off] {
+				if c.estFull <= avg {
+					cum += c.estFull
+				} else {
+					cum += avg
+				}
+			}
+			if cum > int64(off)*avg {
+				horizon, horizonCum = off, cum
+			}
+		}
+		for _, off := range offsets {
+			if off > horizon {
+				return false
+			}
+			var pick *cand
+			for _, c := range byOffset[off] {
+				if c.estFull > avg || todayLoad+c.estFull > avg || !fitsRoom(c) {
+					continue
+				}
+				if pick == nil || c.estFull > pick.estFull {
+					pick = c
+				}
+			}
+			if pick != nil {
+				take(pick, off, fmt.Sprintf(
+					"promoted full (due in %dd; ~%s of fulls crowd the next %dd, over the ~%s/run balanced level)",
+					off, sizeutil.FormatBytes(horizonCum), horizon, sizeutil.FormatBytes(avg)))
+				return true
+			}
+		}
+		return false
+	}
+
+	// promoteOversize makes the run's one oversize pick: when more oversize fulls
+	// share the next d days than there are days, they cannot each get a day of
+	// their own — pull the soonest-due one that passes the guards onto today.
+	promoteOversize := func() bool {
+		offsets := sortedOffsets(byOffset)
+		n := 0
+		for _, off := range offsets {
+			for _, c := range byOffset[off] {
+				if c.estFull > avg {
+					n++
+				}
+			}
+			if n <= off {
+				continue
+			}
+			for _, o := range offsets {
+				if o > off {
+					break
+				}
+				var pick *cand
+				for _, c := range byOffset[o] {
+					if c.estFull <= avg || !fitsRoom(c) {
+						continue
+					}
+					// No overshoot: today's resulting load may not exceed the relieved day's
+					// load *after* this full leaves it, else the move only relocates the peak.
+					if todayLoad+c.estFull > load[o]-c.estFull {
+						continue
+					}
+					if pick == nil || c.estFull > pick.estFull {
+						pick = c
+					}
+				}
+				if pick != nil {
+					take(pick, o, fmt.Sprintf(
+						"promoted full (due in %dd; %d fulls too large to batch crowd the next %dd — destaggering one per run)",
+						o, n, off))
+					return true
+				}
+			}
+			return false
+		}
+		return false
+	}
+
+	// Batch small fulls first (each pick shrinks the calendar, so this
+	// terminates); once nothing small is both crowded and fitting, allow at most
+	// one oversize destagger per run. The order cannot starve the batch: an
+	// oversize pick alone pushes today past avg, which closes the batch gate.
+	for promoteSmall() {
+	}
+	promoteOversize()
+}
+
+// sortedOffsets returns the calendar's deadline offsets in ascending order —
+// soonest-due first, the order every promotion pass scans in.
+func sortedOffsets(byOffset map[int][]*cand) []int {
+	offs := make([]int, 0, len(byOffset))
+	for off := range byOffset {
+		offs = append(offs, off)
+	}
+	sort.Ints(offs)
+	return offs
 }

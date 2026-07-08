@@ -55,7 +55,7 @@ func (c *Conductor) failEstimated(fileSink progress.Sink, plan *planner.Plan, er
 func (c *Conductor) planProgress(items []planner.Item) []progress.Plan {
 	out := make([]progress.Plan, len(items))
 	for i, it := range items {
-		out[i] = progress.Plan{Name: it.DLE.ID(), Slug: it.DLE.Name(), Level: it.Level, EstBytes: it.EstBytes, Landings: c.d.LandingsFor(it)}
+		out[i] = progress.Plan{Name: it.DLE.ID(), Slug: it.DLE.Name(), Level: it.Level, EstBytes: it.EstBytes, Landings: c.d.LandingsFor(it), Reason: it.Reason, Promoted: it.Promoted}
 	}
 	return out
 }

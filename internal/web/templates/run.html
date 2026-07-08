@@ -29,7 +29,7 @@
   {{range .Rows}}
   <tr>
     <td><a href="/dles/{{.Slug}}">{{.ID}}</a></td>
-    <td>{{level .Level}}</td>
+    <td>{{level .Level}}{{if .Promoted}} <span class="pill dim" title="{{.Why}}">promoted</span>{{end}}</td>
     <td class="num">{{.Orig}}</td>
     <td class="num">{{.Out}}</td>
     <td class="num">{{.Comp}}</td>
@@ -39,6 +39,7 @@
   </tr>
   {{end}}
 </table>
+{{if .Promoted}}<div class="muted" style="margin:.6rem 0 0">Promoted: {{.Promoted}} — hover a <em>promoted</em> pill for why.</div>{{end}}
 </div>
 {{end}}
 

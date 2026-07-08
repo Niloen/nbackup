@@ -87,6 +87,12 @@ type DLEStat struct {
 	Out     int64   `json:"out"`  // compressed bytes on the volume
 	Files   int     `json:"files"`
 	Seconds float64 `json:"seconds,omitempty"` // dump duration; 0 = unknown
+	// Promoted marks a full the planner pulled forward (not due today) and Reason
+	// carries its explanation — so a report answers "why was tonight big" instead
+	// of showing an unexplained level 0. Recorded from the run-status snapshot at
+	// seal time; empty when the snapshot was unavailable (like Seconds).
+	Promoted bool   `json:"promoted,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // ID returns the host:path identity for display, falling back to the
