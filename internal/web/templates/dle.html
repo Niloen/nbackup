@@ -63,7 +63,7 @@
     <td class="num">{{bytes .Bytes}}</td>
     <td>{{stampsec .At}}</td>
     {{range .Cells}}
-    <td class="cell">{{if not .Held}}<span class="miss">✕</span>{{else if .Pos}}<span class="pos">{{.Pos}}</span>{{else}}<span class="have">✓</span>{{end}}</td>
+    <td class="cell">{{if .Held}}{{if .Pos}}<span class="pos">{{.Pos}}</span>{{else}}<span class="have">✓</span>{{end}}{{else if eq .Gap "miss"}}<span class="miss">✕</span>{{else if eq .Gap "lag"}}<span class="lag">◌</span>{{else}}<span class="muted">—</span>{{end}}</td>
     {{end}}
     <td class="maplink"><a href="/dles/{{$slug}}?run={{.RunID}}#physical">map →</a></td>
   </tr>
@@ -72,7 +72,9 @@
 <div class="legend">
   <span><span class="have">✓</span> held</span>
   <span><span class="pos">NB-0001:3–5</span> volume : file positions</span>
-  <span><span class="miss">✕</span> no copy</span>
+  <span><span class="miss">✕</span> missing (this medium's route)</span>
+  <span><span class="lag">◌</span> awaiting sync</span>
+  <span><span class="muted">—</span> not expected here</span>
   <span><span class="sw" style="background:var(--panel);box-shadow:inset 3px 0 0 var(--ok)"></span> newest restore chain</span>
 </div>
 {{else}}<div class="empty">No archives recorded for this DLE.</div>{{end}}
@@ -82,7 +84,7 @@
 <h2 id="physical">Physical — {{if .RunID}}{{.RunID}} · {{level .Level}} · {{bytes .Bytes}} <span style="font-weight:400;font-size:.85rem">(<a href="/dles/{{$slug}}#physical">show restore chain instead</a>)</span>{{else}}newest restore chain{{end}}</h2>
 <div class="panel">
 {{range .Groups}}
-<h3 class="phys-head{{if .Missing}} bad{{end}}">{{.Medium}}{{if .Missing}} — no copy <span class="muted" style="font-weight:400">· repair: <code>nb sync --to {{.Medium}}</code></span>{{else if .Where}} — <span class="mono">{{.Where}}</span>{{end}}</h3>
+<h3 class="phys-head{{if eq .Gap "miss"}} bad{{end}}">{{.Medium}}{{if eq .Gap "miss"}} — no copy <span class="muted" style="font-weight:400">· repair: <code>nb sync --run {{.RunID}} --to {{.Medium}}</code></span>{{else if eq .Gap "lag"}} — <span class="muted" style="font-weight:400">awaiting sync (<code>nb sync</code> catches up)</span>{{else if .Where}} — <span class="mono">{{.Where}}</span>{{end}}</h3>
 {{if .Rows}}{{template "volmap" .}}{{end}}
 {{end}}
 {{if .ChainAlt}}<div class="muted" style="margin-top:.6rem;font-size:.85rem">or restore the whole chain from {{.ChainAlt}} — every member has a copy there</div>{{end}}

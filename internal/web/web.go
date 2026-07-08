@@ -407,17 +407,36 @@ func (s *Server) dleHistory(slug string, chain map[string]bool) (places []string
 		a   record.Archive
 	}
 	var items []item
+	rcOf := map[string]*engine.RunCoverage{} // per run, shared by columns and cells
 	seen := map[string]bool{}
+	add := func(medium string) {
+		if !seen[medium] {
+			seen[medium] = true
+			places = append(places, medium)
+		}
+	}
 	for _, run := range s.src.Runs() {
 		for _, a := range run.Archives {
 			if a.DLE != slug {
 				continue
 			}
 			items = append(items, item{run, a})
+			rc := rcOf[run.ID]
+			if rc == nil {
+				rc = s.src.RunCoverage(run)
+				rcOf[run.ID] = rc
+			}
 			for _, p := range s.src.Placements(run.ID) {
-				if p.Holds(a.DLE, a.Level) && !seen[p.Medium] {
-					seen[p.Medium] = true
-					places = append(places, p.Medium)
+				if p.Holds(a.DLE, a.Level) {
+					add(p.Medium)
+				}
+			}
+			// Media the config expects this archive on earn a column even with no
+			// copy anywhere — a lane that tripped on every run, or a landing/sync
+			// target added since, must not stay invisible.
+			for _, m := range rc.ExpectedMedia() {
+				if rc.Class(m, slug, a.Level) != engine.CopyNone {
+					add(m)
 				}
 			}
 		}
@@ -445,6 +464,17 @@ func (s *Server) dleHistory(slug string, chain map[string]bool) (places []string
 					cell = placementCell{Held: true, Pos: archivePosText(pa)}
 				}
 				break
+			}
+			if !cell.Held {
+				// Same judgment as the run page's grid: a hole is a defect only
+				// where the route owes a copy; a sync promise is lag; anything
+				// else was never this medium's to hold.
+				switch rcOf[it.run.ID].Class(medium, slug, it.a.Level) {
+				case engine.CopyRouted:
+					cell.Gap = "miss"
+				case engine.CopyPromised:
+					cell.Gap = "lag"
+				}
 			}
 			row.Cells = append(row.Cells, cell)
 		}
@@ -1449,6 +1479,7 @@ func (s *Server) buildDLEPhysical(slug, selRun string, chain map[string]bool, pl
 		}
 		view := &physicalView{RunID: selRun, Level: arch.Level, Bytes: arch.Compressed}
 		ps := s.src.Placements(selRun)
+		rc := s.src.RunCoverage(run)
 		for _, medium := range places {
 			var pa catalog.PlacedArchive
 			held := false
@@ -1459,7 +1490,15 @@ func (s *Server) buildDLEPhysical(slug, selRun string, chain map[string]bool, pl
 				}
 			}
 			if !held {
-				view.Groups = append(view.Groups, physGroup{Medium: medium, Missing: true})
+				// Judge the hole like the history matrix: owed here -> the red
+				// repair group; awaiting sync -> a quiet lag note; never expected
+				// here -> no group at all (the column exists for other runs).
+				switch rc.Class(medium, slug, arch.Level) {
+				case engine.CopyRouted:
+					view.Groups = append(view.Groups, physGroup{Medium: medium, Gap: "miss", RunID: selRun})
+				case engine.CopyPromised:
+					view.Groups = append(view.Groups, physGroup{Medium: medium, Gap: "lag"})
+				}
 				continue
 			}
 			g := physGroup{Medium: medium}

@@ -1721,3 +1721,50 @@ func TestMediumSyncLag(t *testing.T) {
 		t.Fatalf("/media/mirror misses the in-sync line:\n%s", body)
 	}
 }
+
+// TestDLEHistoryJudged: the DLE page's run × medium matrix judges columns and
+// holes like the run page — an expected medium with no copy anywhere still earns
+// a column (red ✕ where its route owes the archive), a sync-rule target's holes
+// read as lag, and a medium that merely holds other runs shows a dim dash for
+// runs from before it was routed, not a defect.
+func TestDLEHistoryJudged(t *testing.T) {
+	at := time.Date(2026, 7, 8, 2, 0, 0, 0, time.UTC)
+	etc1 := record.Archive{Run: "run-2026-07-07.020000", DLE: "etc", Host: "localhost", Path: "/etc",
+		Level: 0, Compressed: 1000, CreatedAt: at.AddDate(0, 0, -1)}
+	etc2 := record.Archive{Run: "run-2026-07-08.020000", DLE: "etc", Host: "localhost", Path: "/etc",
+		Level: 1, Compressed: 500, CreatedAt: at, BaseRun: etc1.Run}
+	src := fakeSource{
+		runs: []*catalog.Run{
+			{ID: etc1.Run, Archives: []record.Archive{etc1}},
+			{ID: etc2.Run, Archives: []record.Archive{etc2}},
+		},
+		media:     []engine.MediumInfo{{Name: "c2", Type: "s3"}, {Name: "gdrive", Type: "gdrive"}},
+		routes:    map[string][]string{"etc": {"c2", "gdrive"}},
+		syncRules: []config.SyncRule{{To: "offsite"}},
+		placements: map[string][]catalog.Placement{
+			etc1.Run: {heldOn("c2", etc1)},
+			etc2.Run: {heldOn("c2", etc2)}, // gdrive tripped on every run: no placement at all
+		},
+	}
+	srv := NewServer(src, t.TempDir())
+	_, body := get(t, srv.Handler(), "/dles/etc")
+	for _, want := range []string{
+		">gdrive</th>",   // the column exists though gdrive holds nothing
+		`class="miss">✕`, // its routed holes are defects
+		`class="lag">◌`,  // offsite's holes are sync lag
+		"awaiting sync",  // legend names the class
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/dles/etc misses %q:\n%s", want, body)
+		}
+	}
+	// The physical panel for a selected run classes the same way: gdrive is the
+	// red repair (run-scoped hint), offsite a quiet lag note.
+	_, body = get(t, srv.Handler(), "/dles/etc?run="+etc2.Run)
+	if !strings.Contains(body, "nb sync --run "+etc2.Run+" --to gdrive") {
+		t.Fatalf("physical panel misses the run-scoped repair hint:\n%s", body)
+	}
+	if !strings.Contains(body, "awaiting sync (<code>nb sync</code> catches up)") {
+		t.Fatalf("physical panel misses the lag note for offsite:\n%s", body)
+	}
+}

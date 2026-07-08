@@ -1839,10 +1839,14 @@ type physicalView struct {
 
 // physGroup is one copy's drawing in the physical panel — one medium.
 type physGroup struct {
-	Medium  string
-	Where   string // heading detail: positions on tape ("NB-0008:2 · commit NB-0008:3"), or the chain's volume list
-	Missing bool   // run mode: this place holds no copy of the archive (render the repair hint)
-	Rows    []volMapRow
+	Medium string
+	Where  string // heading detail: positions on tape ("NB-0008:2 · commit NB-0008:3"), or the chain's volume list
+	// Gap classes a no-copy group in run mode, judged like the grid cells:
+	// "miss" = the route owes it (red, with the repair hint), "lag" = a sync
+	// rule will bring it (quiet). "" = the copy exists.
+	Gap   string
+	RunID string // run mode with Gap "miss": the run to name in the repair hint
+	Rows  []volMapRow
 }
 
 // buildVolMap renders per-row segments into bars. keys fixes the row order; capOf
