@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
@@ -290,6 +291,21 @@ func (s *Server) handleDLE(w http.ResponseWriter, r *http.Request) {
 	if !all && len(shown) > maxRecoveryPoints {
 		shown = shown[:maxRecoveryPoints]
 	}
+	chain := s.chainRuns(slug)
+	places, history := s.dleHistory(slug, chain)
+	// ?run= selects one archive for the physical panel; anything not in the history
+	// (or absent) falls back to the newest restore chain — the default answer.
+	selRun := r.URL.Query().Get("run")
+	valid := false
+	for i := range history {
+		if history[i].RunID == selRun {
+			history[i].Selected = true
+			valid = true
+		}
+	}
+	if !valid {
+		selRun = ""
+	}
 	s.render(w, "dle", page{Title: sum.Display, Active: "dles", Data: dleDetail{
 		Slug:     sum.DLE,
 		Display:  sum.Display,
@@ -300,8 +316,9 @@ func (s *Server) handleDLE(w http.ResponseWriter, r *http.Request) {
 		Recovery: shown,
 		RecTotal: len(points),
 		RecAll:   all,
-		VolMap:   s.buildDLEVolMap(slug),
-		History:  s.dleHistory(slug),
+		Places:   places,
+		History:  history,
+		Physical: s.buildDLEPhysical(slug, selRun, chain, places),
 	}})
 }
 
@@ -333,36 +350,61 @@ func (s *Server) dleTrend(slug string) []dleTrendPoint {
 }
 
 // dleHistory gathers a DLE's archive from every run that holds one, newest run first —
-// the DLE-major slice of the same archives the run pages present run-major. Each row
-// names the media that actually hold that archive (archive-granular, matching a
-// per-archive prune), so a copy that has been reclaimed off one medium shows honestly.
-func (s *Server) dleHistory(slug string) []dleArchiveRow {
-	var rows []dleArchiveRow
+// the DLE-major slice of the same archives the run pages present run-major, as a grid:
+// one column per place that holds any of them, each cell that archive's own positions
+// (archive-granular, matching a per-archive prune), ✕ where a copy is missing. The
+// hole pattern is the point — a tripped lane or a prune reads as a gap in a column.
+func (s *Server) dleHistory(slug string, chain map[string]bool) (places []string, rows []dleArchiveRow) {
+	type item struct {
+		run *catalog.Run
+		a   record.Archive
+	}
+	var items []item
+	seen := map[string]bool{}
 	for _, run := range s.src.Runs() {
 		for _, a := range run.Archives {
 			if a.DLE != slug {
 				continue
 			}
-			var media []string
+			items = append(items, item{run, a})
 			for _, p := range s.src.Placements(run.ID) {
-				if p.Holds(a.DLE, a.Level) {
-					media = append(media, archiveCopyName(p, a.DLE, a.Level))
+				if p.Holds(a.DLE, a.Level) && !seen[p.Medium] {
+					seen[p.Medium] = true
+					places = append(places, p.Medium)
 				}
 			}
-			rows = append(rows, dleArchiveRow{
-				RunID:   run.ID,
-				Date:    run.Date(),
-				Level:   a.Level,
-				Bytes:   a.Compressed,
-				At:      a.CreatedAt,
-				Files:   a.FileCount,
-				Partial: a.Partial(),
-				Copies:  strings.Join(media, ", "),
-			})
 		}
 	}
+	sort.Strings(places)
+	for _, it := range items {
+		row := dleArchiveRow{
+			RunID:   it.run.ID,
+			Date:    it.run.Date(),
+			Level:   it.a.Level,
+			Bytes:   it.a.Compressed,
+			At:      it.a.CreatedAt,
+			Files:   it.a.FileCount,
+			Partial: it.a.Partial(),
+			Chain:   chain[it.run.ID],
+		}
+		ps := s.src.Placements(it.run.ID)
+		for _, medium := range places {
+			var cell placementCell
+			for _, p := range ps {
+				if p.Medium != medium {
+					continue
+				}
+				if pa, ok := p.Placed(slug, it.a.Level); ok {
+					cell = placementCell{Held: true, Pos: archivePosText(pa)}
+				}
+				break
+			}
+			row.Cells = append(row.Cells, cell)
+		}
+		rows = append(rows, row)
+	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].RunID > rows[j].RunID })
-	return rows
+	return places, rows
 }
 
 // recoveryPoints builds a DLE's restorable points — one per archive of the DLE in the
@@ -586,7 +628,7 @@ func (s *Server) handleMedium(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d := newMediumData(st)
-	d.VolMap = s.buildMediumVolMap(name, st)
+	d.VolMap = s.buildMediumVolMap(name, st, showAll(r))
 	s.render(w, "medium", page{Title: name, Active: "media", Data: d})
 }
 
@@ -1251,64 +1293,236 @@ func (s *Server) volumeSegments(medium string) map[volKey][]volSeg {
 	return segs
 }
 
-// volumeCapacities maps every row the configured media can draw to its capacity
-// (absent = unknown: the bar scales to its content), for the DLE placement map,
-// which crosses media — each labeled volume's registry capacity, and each
-// address-identified medium's own configured capacity.
-func (s *Server) volumeCapacities() map[volKey]int64 {
-	caps := map[volKey]int64{}
+// volumeInventory maps every labeled volume the configured pools know to its
+// registry record (fill, capacity), for the physical panel's used/free captions
+// and bar scaling.
+func (s *Server) volumeInventory() map[volKey]engine.VolumeUsage {
+	inv := map[volKey]engine.VolumeUsage{}
 	for _, m := range s.src.Media() {
 		if m.Volumes == 0 {
-			if m.Capacity > 0 {
-				caps[volKey{Medium: m.Name}] = m.Capacity
-			}
 			continue
 		}
 		if st, ok := s.src.MediumStats(m.Name); ok {
 			for _, v := range st.PerVolume {
-				if v.Capacity > 0 {
-					caps[volKey{Medium: m.Name, Label: v.Label}] = v.Capacity
-				}
+				inv[volKey{Medium: m.Name, Label: v.Label}] = v
 			}
 		}
 	}
-	return caps
+	return inv
 }
 
-// buildDLEVolMap draws every place holding any of the DLE's archives — labeled
-// volumes and address-identified media alike, so a disk/cloud copy is visible, not
-// just the tapes: its own parts colored by run age (dark = newest), other runs'
-// content greyed, and the newest restore point's chain outlined. Nil when the DLE
-// has no placed archive at all.
-func (s *Server) buildDLEVolMap(slug string) *volMap {
+// buildDLEPhysical builds the /dles/<slug> physical panel: the selected run's
+// archive (selRun != "") or, by default, the newest restore chain — drawn on the
+// actual containers, highlighted in true position and proportion among whatever
+// else those containers hold. Nil when there is nothing to draw.
+func (s *Server) buildDLEPhysical(slug, selRun string, chain map[string]bool, places []string) *physicalView {
 	segs := s.volumeSegments("")
-	var keys []volKey
-	for key, ss := range segs {
+	inv := s.volumeInventory()
+
+	// tapeRow draws one labeled volume with hiOf picking the highlight class ("" =
+	// grey). Caption: highlighted bytes against the volume's fill and free space.
+	tapeRow := func(key volKey, hiOf func(volSeg) string) volMapRow {
+		ss := append([]volSeg(nil), segs[key]...)
+		sort.Slice(ss, func(i, j int) bool { return ss[i].Pos < ss[j].Pos })
+		var sum, hi int64
 		for _, v := range ss {
-			if v.DLE == slug {
-				keys = append(keys, key)
+			sum += v.Bytes
+			if hiOf(v) != "" {
+				hi += v.Bytes
+			}
+		}
+		rec := inv[key]
+		used := rec.Used
+		if sum > used {
+			used = sum
+		}
+		base := used
+		if rec.Capacity > base {
+			base = rec.Capacity
+		}
+		row := volMapRow{Label: key.Label, Href: "/media/" + key.Medium}
+		row.Caption = sizeutil.FormatBytes(hi) + " of " + sizeutil.FormatBytes(used) + " used"
+		if rec.Capacity > used {
+			row.Caption += " · " + sizeutil.FormatBytes(rec.Capacity-used) + " free"
+		}
+		for _, v := range ss {
+			cls := hiOf(v)
+			if cls == "" {
+				cls = "other"
+			}
+			pct := 0.0
+			if base > 0 {
+				pct = float64(v.Bytes) / float64(base) * 100
+			}
+			row.Segs = append(row.Segs, volMapSeg{WidthPct: pct, Class: cls, Title: v.title()})
+		}
+		return row
+	}
+
+	if selRun != "" {
+		run, err := s.src.ReadRun(selRun)
+		if err != nil {
+			return nil
+		}
+		var arch *record.Archive
+		for i := range run.Archives {
+			if run.Archives[i].DLE == slug {
+				arch = &run.Archives[i]
 				break
 			}
 		}
+		if arch == nil {
+			return nil
+		}
+		view := &physicalView{RunID: selRun, Level: arch.Level, Bytes: arch.Compressed}
+		ps := s.src.Placements(selRun)
+		for _, medium := range places {
+			var pa catalog.PlacedArchive
+			held := false
+			for _, p := range ps {
+				if p.Medium == medium {
+					pa, held = p.Placed(slug, arch.Level)
+					break
+				}
+			}
+			if !held {
+				view.Groups = append(view.Groups, physGroup{Medium: medium, Missing: true})
+				continue
+			}
+			g := physGroup{Medium: medium}
+			if labels := pa.Labels(); len(labels) > 0 {
+				g.Where = archivePosText(pa) + " · commit " + posDesc(pa.Commit)
+				for _, label := range labels {
+					key := volKey{Medium: medium, Label: label}
+					g.Rows = append(g.Rows, tapeRow(key, func(v volSeg) string {
+						if v.RunID == selRun && v.DLE == slug {
+							return "hi"
+						}
+						return ""
+					}))
+				}
+			} else {
+				// The run's on-medium content with this archive picked out — disk and
+				// cloud stores are organized per run, so the run is the container.
+				key := volKey{Medium: medium}
+				var ss []volSeg
+				var runSum, hi int64
+				for _, v := range segs[key] {
+					if v.RunID != selRun {
+						continue
+					}
+					ss = append(ss, v)
+					runSum += v.Bytes
+					if v.DLE == slug {
+						hi += v.Bytes
+					}
+				}
+				sort.Slice(ss, func(i, j int) bool { return ss[i].DLE < ss[j].DLE })
+				row := volMapRow{Label: medium, Href: "/media/" + medium,
+					Caption: sizeutil.FormatBytes(hi) + " of the run's " + sizeutil.FormatBytes(runSum) + " on " + medium}
+				for _, v := range ss {
+					cls := "other"
+					if v.DLE == slug {
+						cls = "hi"
+					}
+					pct := 0.0
+					if runSum > 0 {
+						pct = float64(v.Bytes) / float64(runSum) * 100
+					}
+					row.Segs = append(row.Segs, volMapSeg{WidthPct: pct, Class: cls, Title: v.title()})
+				}
+				g.Rows = append(g.Rows, row)
+			}
+			view.Groups = append(view.Groups, g)
+		}
+		return view
 	}
-	if len(keys) == 0 {
+
+	// Chain mode: the newest restore chain on its labeled volumes (tip darkest), plus
+	// the address-identified media that hold every member as the stated alternative.
+	if len(chain) == 0 {
 		return nil
 	}
-	sortVolKeys(keys)
-	rank := runRank(segs, slug)
-	chain := s.chainRuns(slug)
-	caps := s.volumeCapacities()
-	classOf := func(v volSeg) string {
-		if v.DLE != slug {
-			return "other"
+	tip := ""
+	for id := range chain {
+		if id > tip {
+			tip = id
 		}
-		cls := ageClass(rank, v.RunID)
-		if chain[v.RunID] {
-			cls += " chain"
-		}
-		return cls
 	}
-	return buildVolMap(segs, keys, func(k volKey) int64 { return caps[k] }, classOf)
+	levelOf := map[string]int{} // chain member run -> the DLE's level there
+	for _, run := range s.src.Runs() {
+		if !chain[run.ID] {
+			continue
+		}
+		for _, a := range run.Archives {
+			if a.DLE == slug {
+				levelOf[run.ID] = a.Level
+			}
+		}
+	}
+	view := &physicalView{}
+	var alt []string
+	for _, medium := range places {
+		labelSet := map[string]bool{}
+		var labels []string
+		holdsAll := true
+		labelless := true
+		for id := range chain {
+			held := false
+			for _, p := range s.src.Placements(id) {
+				if p.Medium != medium {
+					continue
+				}
+				if pa, ok := p.Placed(slug, levelOf[id]); ok {
+					held = true
+					for _, l := range pa.Labels() {
+						labelless = false
+						if !labelSet[l] {
+							labelSet[l] = true
+							labels = append(labels, l)
+						}
+					}
+				}
+				break
+			}
+			if !held {
+				holdsAll = false
+			}
+		}
+		if len(labels) > 0 {
+			sort.Strings(labels)
+			g := physGroup{Medium: medium, Where: "chain: " + strings.Join(labels, " + ")}
+			for _, label := range labels {
+				key := volKey{Medium: medium, Label: label}
+				g.Rows = append(g.Rows, tapeRow(key, func(v volSeg) string {
+					if v.DLE != slug || !chain[v.RunID] {
+						return ""
+					}
+					if v.RunID == tip {
+						return "hi"
+					}
+					return "hi2"
+				}))
+			}
+			view.Groups = append(view.Groups, g)
+		} else if holdsAll && labelless {
+			alt = append(alt, medium)
+		}
+	}
+	view.ChainAlt = strings.Join(alt, ", ")
+	if len(view.Groups) == 0 && view.ChainAlt == "" {
+		return nil
+	}
+	return view
+}
+
+// posDesc renders one file position for a heading — "NB-0008:3" on a labeled
+// volume, "file 3" on an address-identified medium.
+func posDesc(pt archiveio.FilePos) string {
+	if pt.Label != "" {
+		return fmt.Sprintf("%s:%d", pt.Label, pt.Pos)
+	}
+	return fmt.Sprintf("file %d", pt.Pos)
 }
 
 // chainRuns is the set of runs in the DLE's newest restore chain (the tip archive
@@ -1340,22 +1554,73 @@ func (s *Server) chainRuns(slug string) map[string]bool {
 	return set
 }
 
-// buildMediumVolMap draws everything stored on the medium, shaded by run age. A
-// labeled pool gets one bar per volume in registry order (a label placements
-// reference but the registry has never seen — an offsite tape — still draws, after
-// the registry's rows). An address-identified medium (disk/cloud) has no volumes:
-// its archives draw on one bar, the medium itself, scaled to its configured
-// capacity — nil only when nothing is stored there yet.
-func (s *Server) buildMediumVolMap(name string, st engine.MediumStats) *volMap {
+// buildMediumVolMap draws everything stored on the medium. A labeled pool gets one
+// bar per volume in registry order, shaded by run age (a label placements reference
+// but the registry has never seen — an offsite tape — still draws, after the
+// registry's rows). An address-identified medium (disk/cloud) is physically
+// organized per run, so the run is the row: newest first on a shared byte scale
+// (row widths compare run sizes), colored full vs incremental — the row label
+// already carries the age. Capped to the newest rows unless all; nil when nothing
+// is stored yet.
+func (s *Server) buildMediumVolMap(name string, st engine.MediumStats, all bool) *volMap {
 	segs := s.volumeSegments(name)
 	if st.Volumes == 0 {
-		if len(segs) == 0 {
+		byRun := map[string][]volSeg{}
+		var ids []string
+		for _, v := range segs[volKey{Medium: name}] {
+			if byRun[v.RunID] == nil {
+				ids = append(ids, v.RunID)
+			}
+			byRun[v.RunID] = append(byRun[v.RunID], v)
+		}
+		if len(ids) == 0 {
 			return nil
 		}
-		key := volKey{Medium: name}
-		rank := runRank(segs, "")
-		classOf := func(v volSeg) string { return ageClass(rank, v.RunID) }
-		return buildVolMap(segs, []volKey{key}, func(volKey) int64 { return st.Capacity }, classOf)
+		sort.Sort(sort.Reverse(sort.StringSlice(ids))) // newest first
+		m := &volMap{Total: len(ids), All: all}
+		if !all && len(ids) > maxMapRuns {
+			ids = ids[:maxMapRuns]
+		}
+		var base int64 // the shared scale: the largest shown run
+		for _, id := range ids {
+			var sum int64
+			for _, v := range byRun[id] {
+				sum += v.Bytes
+			}
+			if sum > base {
+				base = sum
+			}
+		}
+		for _, id := range ids {
+			ss := byRun[id]
+			sort.Slice(ss, func(i, j int) bool { return ss[i].DLE < ss[j].DLE })
+			row := volMapRow{Label: id, Href: "/runs/" + id}
+			// A partial run copy (tripped lane, per-archive prune) carries its
+			// coverage next to the label — same truth the /runs pages tell.
+			if run, err := s.src.ReadRun(id); err == nil {
+				for _, p := range s.src.Placements(id) {
+					if p.Medium == name {
+						if held, total := p.Covers(run); held < total {
+							row.Pill = fmt.Sprintf("%d/%d", held, total)
+						}
+						break
+					}
+				}
+			}
+			for _, v := range ss {
+				cls := "incr"
+				if v.Level == 0 {
+					cls = "full"
+				}
+				pct := 0.0
+				if base > 0 {
+					pct = float64(v.Bytes) / float64(base) * 100
+				}
+				row.Segs = append(row.Segs, volMapSeg{WidthPct: pct, Class: cls, Title: v.title()})
+			}
+			m.Rows = append(m.Rows, row)
+		}
+		return m
 	}
 	caps := map[volKey]int64{}
 	known := map[volKey]bool{}
@@ -1378,3 +1643,7 @@ func (s *Server) buildMediumVolMap(name string, st engine.MediumStats) *volMap {
 	classOf := func(v volSeg) string { return ageClass(rank, v.RunID) }
 	return buildVolMap(segs, keys, func(k volKey) int64 { return caps[k] }, classOf)
 }
+
+// maxMapRuns caps an address-identified medium's per-run placement map to the
+// newest rows by default; ?all=1 shows every run, like the other capped lists.
+const maxMapRuns = 20

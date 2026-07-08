@@ -47,38 +47,52 @@
 </div>
 {{end}}
 
-{{if .VolMap}}
-<h2>Placement map</h2>
-<div class="panel">
-{{template "volmap" .VolMap}}
+<h2>History</h2>
+{{$places := .Places}}
+{{$slug := .Slug}}
+<div class="panel scroll">
+{{if .History}}
+<table class="pgrid">
+  <tr><th>Run</th><th>Date</th><th>Level</th><th class="num">Size</th><th>Committed</th>
+    {{range $places}}<th class="medium">{{.}}</th>{{end}}<th></th></tr>
+  {{range .History}}
+  <tr{{if .Selected}} class="sel"{{end}}>
+    <td class="{{if .Chain}}chain{{else}}nochain{{end}}"><a href="/runs/{{.RunID}}">{{.RunID}}</a></td>
+    <td>{{.Date}}</td>
+    <td><span class="pill dim">{{level .Level}}</span>{{if .Partial}} <span class="warn">partial</span>{{end}}</td>
+    <td class="num">{{bytes .Bytes}}</td>
+    <td>{{stampsec .At}}</td>
+    {{range .Cells}}
+    <td class="cell">{{if not .Held}}<span class="miss">✕</span>{{else if .Pos}}<span class="pos">{{.Pos}}</span>{{else}}<span class="have">✓</span>{{end}}</td>
+    {{end}}
+    <td class="maplink"><a href="/dles/{{$slug}}?run={{.RunID}}#physical">map →</a></td>
+  </tr>
+  {{end}}
+</table>
 <div class="legend">
-  <span><span class="sw" style="background:var(--accent)"></span> this DLE (darker = newer run)</span>
+  <span><span class="have">✓</span> held</span>
+  <span><span class="pos">NB-0001:3–5</span> volume : file positions</span>
+  <span><span class="miss">✕</span> no copy</span>
+  <span><span class="sw" style="background:var(--panel);box-shadow:inset 3px 0 0 var(--ok)"></span> newest restore chain</span>
+</div>
+{{else}}<div class="empty">No archives recorded for this DLE.</div>{{end}}
+</div>
+
+{{with .Physical}}
+<h2 id="physical">Physical — {{if .RunID}}{{.RunID}} · {{level .Level}} · {{bytes .Bytes}} <span style="font-weight:400;font-size:.85rem">(<a href="/dles/{{$slug}}#physical">show restore chain instead</a>)</span>{{else}}newest restore chain{{end}}</h2>
+<div class="panel">
+{{range .Groups}}
+<h3 class="phys-head{{if .Missing}} bad{{end}}">{{.Medium}}{{if .Missing}} — no copy <span class="muted" style="font-weight:400">· repair: <code>nb sync --to {{.Medium}}</code></span>{{else if .Where}} — <span class="mono">{{.Where}}</span>{{end}}</h3>
+{{if .Rows}}{{template "volmap" .}}{{end}}
+{{end}}
+{{if .ChainAlt}}<div class="muted" style="margin-top:.6rem;font-size:.85rem">or restore the whole chain from {{.ChainAlt}} — every member has a copy there</div>{{end}}
+<div class="legend">
+  <span><span class="sw" style="background:var(--accent)"></span> {{if .RunID}}this archive{{else}}chain tip (lighter = earlier members){{end}}</span>
   <span><span class="sw" style="background:color-mix(in srgb, var(--muted) 22%, var(--panel))"></span> other content</span>
-  <span><span class="sw" style="box-shadow:inset 0 0 0 2px var(--ok)"></span> newest restore chain</span>
   <span>hover a segment for run · archive · size</span>
 </div>
 </div>
 {{end}}
-
-<h2>History</h2>
-<div class="panel scroll">
-{{if .History}}
-<table>
-  <tr><th>Run</th><th>Date</th><th>Level</th><th class="num">Files</th><th class="num">Size</th><th>Committed</th><th>Copies</th></tr>
-  {{range .History}}
-  <tr>
-    <td><a href="/runs/{{.RunID}}">{{.RunID}}</a></td>
-    <td>{{.Date}}</td>
-    <td><span class="pill dim">{{level .Level}}</span>{{if .Partial}} <span class="warn">partial</span>{{end}}</td>
-    <td class="num">{{.Files}}</td>
-    <td class="num">{{bytes .Bytes}}</td>
-    <td>{{stampsec .At}}</td>
-    <td class="muted">{{.Copies}}</td>
-  </tr>
-  {{end}}
-</table>
-{{else}}<div class="empty">No archives recorded for this DLE.</div>{{end}}
-</div>
 {{end}}
 {{end}}
 {{end}}

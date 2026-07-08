@@ -84,10 +84,18 @@
 <div class="panel">
 {{template "volmap" $d.VolMap}}
 <div class="legend">
+  {{if $d.Pool}}
   <span><span class="sw" style="background:var(--accent)"></span> stored archives (darker = newer run)</span>
-  <span>segment width ∝ stored bytes{{if $d.Pool}}, in on-volume file order{{else}}, oldest run first{{end}}</span>
+  <span>segment width ∝ stored bytes, in on-volume file order</span>
+  {{else}}
+  <span><span class="sw" style="background:var(--accent)"></span> full (L0)</span>
+  <span><span class="sw" style="background:color-mix(in srgb, var(--accent) 40%, var(--panel))"></span> incremental</span>
+  <span>one row per run, newest first — shared scale, row width compares run sizes</span>
+  <span><span class="warn">n/m</span> = partial copy · <code>nb sync --to {{$d.Name}}</code></span>
+  {{end}}
   <span>hover a segment for run · archive · size</span>
 </div>
+{{if $d.VolMap.Capped}}<div class="muted" style="margin-top:.6rem;font-size:.85rem">Showing the {{len $d.VolMap.Rows}} newest of {{$d.VolMap.Total}} runs · <a href="?all=1">show all →</a></div>{{end}}
 </div>
 {{end}}
 

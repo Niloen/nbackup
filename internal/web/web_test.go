@@ -1530,15 +1530,40 @@ func TestDLEVolumeMap(t *testing.T) {
 		}},
 	}
 	srv := NewServer(src, t.TempDir())
+
+	// Default: the physical panel shows the newest restore chain — both volumes,
+	// the tip highlighted darkest (hi), the base lighter (hi2), neighbors greyed.
 	_, body := get(t, srv.Handler(), "/dles/home")
-	for _, want := range []string{`class="volmap"`, "NB-0001", "NB-0002", `class="other"`, "chain"} {
+	for _, want := range []string{
+		"newest restore chain", `class="volmap"`, "NB-0001", "NB-0002",
+		`class="hi"`, `class="hi2"`, `class="other"`,
+		`class="chain"`, // both history rows carry the chain edge
+	} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("/dles/home volume map misses %q:\n%s", want, body)
+			t.Fatalf("/dles/home default physical panel misses %q:\n%s", want, body)
 		}
 	}
 	if !strings.Contains(body, "localhost:/etc L0") { // the greyed neighbor is still named on hover
 		t.Fatalf("/dles/home misses the other-content hover title:\n%s", body)
 	}
+	// The history grid has a tape column with the archive's own positions.
+	if !strings.Contains(body, "NB-0002:1") {
+		t.Fatalf("/dles/home history grid misses the incr's position cell:\n%s", body)
+	}
+
+	// ?run= selects one archive: its run headlines the panel, its row highlights,
+	// and only its volume draws (the base's NB-0001 appears only as grid text).
+	_, body = get(t, srv.Handler(), "/dles/home?run="+incr.Run)
+	for _, want := range []string{
+		"Physical — " + incr.Run, `class="sel"`, "commit NB-0002:2",
+		"500 B of 500 B used", // caption: the archive's bytes against the volume fill
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/dles/home?run= physical panel misses %q:\n%s", want, body)
+		}
+	}
+
+	// The tape medium page keeps its per-volume bars.
 	_, body = get(t, srv.Handler(), "/media/tape")
 	for _, want := range []string{"Placement map", `class="volmap"`, "NB-0001", "NB-0002"} {
 		if !strings.Contains(body, want) {
@@ -1548,8 +1573,9 @@ func TestDLEVolumeMap(t *testing.T) {
 }
 
 // TestCloudMediumPlacementMap: an address-identified medium (disk/cloud) has no
-// volumes, so its archives draw on one bar — the medium itself — instead of the
-// map being absent; the DLE page likewise shows the cloud copy as a row.
+// volumes — its store is organized per run, so the map draws one row per run
+// (linked, full/incr colored); the DLE page's physical panel names the cloud copy
+// as the chain's restore alternative.
 func TestCloudMediumPlacementMap(t *testing.T) {
 	at := time.Date(2026, 7, 8, 2, 0, 0, 0, time.UTC)
 	a := record.Archive{Run: "run-2026-07-08.020000", DLE: "home", Host: "localhost", Path: "/home",
@@ -1567,15 +1593,24 @@ func TestCloudMediumPlacementMap(t *testing.T) {
 	}
 	srv := NewServer(src, t.TempDir())
 	_, body := get(t, srv.Handler(), "/media/s3")
-	for _, want := range []string{"Placement map", `class="volmap"`, `class="vollbl">s3</span>`} {
+	for _, want := range []string{"Placement map", `class="volmap"`,
+		`<a href="/runs/` + a.Run + `">` + a.Run + `</a>`, // the row IS the run, linked
+		`class="full"`, // L0 colored as full
+	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/media/s3 placement map misses %q:\n%s", want, body)
 		}
 	}
+	// The chain-mode physical panel names the cloud copy as the restore path.
 	_, body = get(t, srv.Handler(), "/dles/home")
-	for _, want := range []string{"Placement map", `class="vollbl">s3</span>`, "chain"} {
+	if !strings.Contains(body, "restore the whole chain from s3") {
+		t.Fatalf("/dles/home physical panel misses the cloud chain alternative:\n%s", body)
+	}
+	// Selecting the run draws the run-context bar with the archive highlighted.
+	_, body = get(t, srv.Handler(), "/dles/home?run="+a.Run)
+	for _, want := range []string{"Physical — " + a.Run, `class="hi"`, "of the run"} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("/dles/home placement map misses %q:\n%s", want, body)
+			t.Fatalf("/dles/home?run= cloud physical misses %q:\n%s", want, body)
 		}
 	}
 }

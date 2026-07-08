@@ -185,7 +185,8 @@
      volume, segments in file order, width ∝ stored bytes, shaded by run age. On the
      DLE view other runs' content is greyed and the newest restore chain outlined. */
   .volmap { display: flex; flex-direction: column; gap: .8rem; }
-  .volrow { display: grid; grid-template-columns: 7.5rem 1fr; gap: .8rem; align-items: center; }
+  .volrow { display: grid; grid-template-columns: 12rem 1fr; gap: .8rem; align-items: start; }
+  .volrow > .vollbl { line-height: 22px; }
   .vollbl { font-family: ui-monospace, Menlo, monospace; font-size: .82rem; color: var(--muted); }
   .volbar { display: flex; height: 22px; border-radius: 5px; overflow: hidden; background: var(--line); }
   .volbar span { display: block; height: 100%; border-right: 1px solid var(--bg); min-width: 3px; }
@@ -193,9 +194,20 @@
   .volbar .g0 { background: var(--accent); }
   .volbar .g1 { background: color-mix(in srgb, var(--accent) 62%, var(--panel)); }
   .volbar .g2 { background: color-mix(in srgb, var(--accent) 34%, var(--panel)); }
+  .volbar .full { background: var(--accent); }
+  .volbar .incr { background: color-mix(in srgb, var(--accent) 40%, var(--panel)); }
+  .volbar .hi { background: var(--accent); }
+  .volbar .hi2 { background: color-mix(in srgb, var(--accent) 55%, var(--panel)); }
   .volbar .other { background: color-mix(in srgb, var(--muted) 22%, var(--panel)); }
-  .volbar .chain { box-shadow: inset 0 0 0 2px var(--ok); }
   .volbar .free { background: transparent; flex: 1; border-right: none; min-width: 0; }
+  .volcap { color: var(--muted); font-size: .78rem; margin-top: .15rem; }
+  /* DLE history grid: chain edge on the run cell, ?run= selection, map link */
+  .pgrid td.chain { border-left: 3px solid var(--ok); }
+  .pgrid td.nochain { border-left: 3px solid transparent; }
+  .pgrid tr.sel td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .maplink { font-size: .78rem; }
+  .phys-head { font-size: .92rem; margin: 1rem 0 .5rem; font-weight: 600; }
+  .phys-head:first-child { margin-top: 0; }
   .empty { color: var(--muted); padding: 1.5rem; text-align: center; }
   footer { color: var(--muted); font-size: .8rem; text-align: center; padding: 1.5rem 1rem; }
 </style>
@@ -227,9 +239,12 @@
 <div class="volmap">
   {{range .Rows}}
   <div class="volrow">
-    <span class="vollbl">{{.Label}}</span>
-    <div class="volbar">
-      {{range .Segs}}<span class="{{.Class}}" style="width:{{pctw .WidthPct}}" title="{{.Title}}"></span>{{end}}<span class="free"></span>
+    <span class="vollbl">{{if .Href}}<a href="{{.Href}}">{{.Label}}</a>{{else}}{{.Label}}{{end}}{{if .Pill}} <span class="pill warn">{{.Pill}}</span>{{end}}</span>
+    <div>
+      <div class="volbar">
+        {{range .Segs}}<span class="{{.Class}}" style="width:{{pctw .WidthPct}}" title="{{.Title}}"></span>{{end}}<span class="free"></span>
+      </div>
+      {{if .Caption}}<div class="volcap">{{.Caption}}</div>{{end}}
     </div>
   </div>
   {{end}}
