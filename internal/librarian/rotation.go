@@ -248,7 +248,7 @@ func (l *Librarian) oldestReusable(tried map[string]bool, now time.Time) (catalo
 // keeps — with why, for a refusal message. kept=false means the whole tape is
 // Floor-cleared and the rotation may reuse it.
 func (l *Librarian) protectedRun(label string, minAge time.Duration, now time.Time) (runID, reason string, kept bool) {
-	floor := retention.Compute(l.cat.ArchivesOn(l.medium), minAge, now)
+	floor := retention.Compute(l.cat.ArchivesOn(l.medium), l.cat.Archives(), minAge, now)
 	return floor.First(l.cat.RunIDsOnLabel(label))
 }
 

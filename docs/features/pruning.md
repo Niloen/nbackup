@@ -74,7 +74,11 @@ Among the non-protected archives, the medium's retention strategy reclaims to fi
 capacity. How it reclaims depends on the medium:
 
 - **Object stores (disk, S3) reclaim per-archive** — they delete the **oldest
-  dead archives until total ≤ capacity**.
+  dead archives until total ≤ capacity**, in **chain-safe order**: an archive is
+  deleted only after every incremental that builds on it. A superseded chain loses
+  its incrementals first and its full last, so a reclaim that stops at the
+  capacity target always leaves a shorter but *restorable* chain — never a full
+  gone with a now-useless incremental left holding space.
 - **Tape reclaims whole volumes** by **label rotation** (Amanda's *tapecycle*).
   When a run needs a fresh volume and no blank is loaded, NBackup reuses the
   **oldest tape whose every run is unprotected**, keeping the same label name and
@@ -85,6 +89,35 @@ If every tape still holds a protected run, the run **fails loudly** rather than
 overwriting one — recoverability outranks capacity. `nb prune` never deletes
 individual archives from a tape; `nb label --relabel` is the manual early-recycle
 override.
+
+## Stranded archives
+
+An incremental whose base chain is broken — its full (or an intermediate
+incremental) no longer exists on *any* medium — is **stranded**: no restore can
+ever use it, so it holds capacity while protecting nothing. The chain-safe reclaim
+order above prevents new ones from being created, but history from before that
+rule (or a hand-edited catalog) can hold them. `nb prune` reclaims stranded
+archives **first, regardless of capacity pressure**, with a `WARN … unrestorable`
+line, honoring only `minimum_age` (the same WORM/Object-Lock guard as the orphan
+sweep below). `nb check` reports them too: a warning for a superseded one, a
+**hard failure** when a DLE's *latest* backup is unrestorable (recover with
+`nb reset <dle>` to force a fresh full).
+
+Strandedness is judged **catalog-wide**, not per-medium: a restore assembles its
+chain across media, so an incremental on one store whose base survives only on
+another is still restorable — and is left alone.
+
+**Labeled volumes (tape) are different by construction.** Label rotation recycles
+the *oldest* volume whole, and that is where a superseded chain's full sits — so on
+tape the base necessarily dies first (exactly Amanda's behavior), stranding the
+chain's incrementals on later tapes. That costs nothing: a labeled copy is only
+ever reclaimed by its volume's own relabel, which happens in due rotation order
+regardless, so the debris dies with its tape. The safety floor still guarantees
+this only ever happens to a chain **already superseded by a newer full** — a live
+chain's base tape is never recyclable. Because whole-volume media reclaim nothing
+per archive, `nb prune` doesn't touch stranded archives on labeled volumes — it
+reports them as retained until their volume relabels — and `nb check` reports them
+as one informational line (rotation debris), not a per-archive warning.
 
 ## Sweeping crash leftovers
 

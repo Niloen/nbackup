@@ -182,3 +182,41 @@ func TestChainIgnoresOtherDLEs(t *testing.T) {
 		t.Fatalf("chain = %v, want [s0 s2]", runIDs(steps))
 	}
 }
+
+// Stranded finds every unrestorable incremental: one whose chain to a full is
+// broken, judged transitively (an L2 whose L1 survives is still stranded when
+// the L0 under them is gone). Fulls and intact chains never appear.
+func TestStranded(t *testing.T) {
+	t.Run("intact chains report nothing", func(t *testing.T) {
+		runs := cat(
+			run("s0", arch("a", 0, "")),
+			run("s1", arch("a", 1, "s0")),
+		)
+		if got := Stranded(runs); len(got) != 0 {
+			t.Fatalf("Stranded = %+v, want none", got)
+		}
+	})
+
+	t.Run("missing base strands the incremental, not the sibling full", func(t *testing.T) {
+		runs := cat(
+			// s0 (the L0 that s1 builds on) was pruned away; s2 is a fresh full.
+			run("s1", arch("a", 1, "s0")),
+			run("s2", arch("a", 0, "")),
+		)
+		got := Stranded(runs)
+		if len(got) != 1 || got[0].Archive.Run != "s1" || got[0].Err == nil {
+			t.Fatalf("Stranded = %+v, want exactly s1 with its chain error", got)
+		}
+	})
+
+	t.Run("a missing full strands the whole chain above it", func(t *testing.T) {
+		runs := cat(
+			run("s1", arch("a", 1, "s0")), // base full s0 gone
+			run("s2", arch("a", 2, "s1")), // L1 present, but its own chain is broken
+		)
+		got := Stranded(runs)
+		if len(got) != 2 {
+			t.Fatalf("Stranded = %+v, want s1 and s2", got)
+		}
+	})
+}

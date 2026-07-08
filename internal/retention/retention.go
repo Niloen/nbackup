@@ -1,11 +1,13 @@
-// Package retention judges which backups must be kept. It does not hold a policy:
-// the knobs live in config (a medium's minimum_age) and the recovery-chain rule is
-// an invariant, not a tunable. Compute applies those rules to one medium's runs at
-// a moment in time and returns a Floor — the runs reclamation must never delete
-// (runs younger than the medium's minimum age, and every run in a DLE's live
-// recovery chain: its last full plus the later incrementals a restore replays),
-// each with the reason it is pinned. Callers build the Floor once and query it,
-// rather than threading a raw map around. It is pure and does no I/O.
+// Package retention judges which backups must be kept — and which must go. It does
+// not hold a policy: the knobs live in config (a medium's minimum_age) and the
+// recovery-chain rule is an invariant, not a tunable. Compute applies those rules to
+// one medium's runs at a moment in time and returns a Floor — the runs reclamation
+// must never delete (runs younger than the medium's minimum age, and every run in a
+// DLE's live recovery chain: its last full plus the later incrementals a restore
+// replays), each with the reason it is pinned — and the archives it CONDEMNS: those
+// no restore anywhere can use, which reclamation deletes regardless of capacity.
+// Callers build the Floor once and query it, rather than threading a raw map
+// around. It is pure and does no I/O.
 //
 // Retention is per-medium: callers pass the runs of a single medium, so "last
 // recovery path" is judged within that medium alone. A copy on another medium
@@ -20,6 +22,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
@@ -61,7 +64,8 @@ type pin struct {
 // its archives is pinned, which is what the whole-volume reclaimers (tape relabel,
 // ExpectedTape) and the cost forecast still reason in.
 type Floor struct {
-	reasons map[archiveRef]pin // (run,DLE) -> pin; absent ⇒ reclaimable
+	reasons   map[archiveRef]pin   // (run,DLE) -> pin; absent ⇒ reclaimable
+	condemned map[archiveRef]error // (run,DLE) -> why no restore can use it; see Condemned
 }
 
 // Compute applies a medium's retention rules to its runs and returns the floor —
@@ -80,36 +84,66 @@ type Floor struct {
 //
 // Pass one medium's runs to get that medium's floor.
 //
+// The floor also renders the opposite verdict: an archive of this medium that NO
+// restore anywhere can use (recovery.Stranded over catalog — pass the whole
+// catalog's archives, so a base copy on another medium keeps a copy here
+// restorable) is CONDEMNED. The catalog is evidence only — it can spare an
+// archive, never doom one, so keeping stays purely per-medium. The per-medium
+// chain-safe reclaim order already prevents stranding WITHIN a medium;
+// condemnation exists for the cross-medium seams that order cannot reach —
+// split copies (a lone incremental synced or `nb copy`-ed without its base,
+// whose base's last copy elsewhere then ages out), tape rotation retiring a
+// base volume, and history from before the ordering rule. The two verdicts are exclusive — a condemned archive
+// is never pinned, not even by the structural chain rule (recovery.Chain, which
+// follows the recorded BaseRun, is the authority on restorability) — and a
+// stranded archive never anchors a chain. One exception defers the verdict: an
+// unrestorable archive still within minimum_age keeps its age pin (the same
+// WORM/Object-Lock guard as ever, its reason saying why it lingers) and is
+// condemned by a later Compute once aged. A nil catalog renders no condemnations.
+//
 // Note: once verification status is tracked, the successor requirement should
 // tighten from "a newer full exists" to "a newer verified full exists".
-func Compute(archives []record.Archive, minAge time.Duration, now time.Time) Floor {
-	reasons := map[archiveRef]pin{}
-	keep := func(run, dle string, kind Kind, reason string) {
-		if _, ok := reasons[archiveRef{run, dle}]; !ok {
-			reasons[archiveRef{run, dle}] = pin{kind, reason}
+func Compute(archives, catalog []record.Archive, minAge time.Duration, now time.Time) Floor {
+	stranded := map[archiveRef]error{}
+	for _, s := range recovery.Stranded(catalog) {
+		stranded[archiveRef{s.Archive.Run, s.Archive.DLE}] = s.Err
+	}
+	condemned := map[archiveRef]error{}
+	for _, a := range archives {
+		if err, ok := stranded[archiveRef{a.Run, a.DLE}]; ok && !youngArchive(a, minAge, now) {
+			condemned[archiveRef{a.Run, a.DLE}] = err
 		}
 	}
-	youngArchive := func(a record.Archive) bool {
-		// Age is measured per archive from when it committed (CreatedAt), not the run's
-		// date: the date is day-granular, so comparing it would collapse every minimum_age
-		// under 24h to a whole-day step. CreatedAt is the real landing instant, so a sub-day
-		// minimum_age keeps only archives actually that recent. A zero CreatedAt (older media)
-		// reads as not-young, i.e. reclaimable.
-		return minAge > 0 && !a.CreatedAt.IsZero() && now.Sub(a.CreatedAt) < minAge
+	reasons := map[archiveRef]pin{}
+	keep := func(run, dle string, kind Kind, reason string) {
+		ref := archiveRef{run, dle}
+		if _, dead := condemned[ref]; dead {
+			return // condemned and kept are exclusive verdicts
+		}
+		if _, ok := reasons[ref]; !ok {
+			reasons[ref] = pin{kind, reason}
+		}
 	}
 	// runYoung[id] reports whether any archive of the run is within the minimum age — the
 	// run-level view the recovery-chain rule anchors on.
 	runYoung := map[string]bool{}
 	for _, a := range archives {
-		if youngArchive(a) {
+		if youngArchive(a, minAge, now) {
 			runYoung[a.Run] = true
 		}
 	}
-	// 1) Age floor: pin each archive still within the minimum age (per archive).
+	// 1) Age floor: pin each archive still within the minimum age (per archive). A
+	// young UNRESTORABLE archive says so — it is spared only by the WORM guard and
+	// is condemned once aged, and its keep line should not read like a healthy one.
 	for _, a := range archives {
-		if youngArchive(a) {
-			keep(a.Run, a.DLE, KindAge, fmt.Sprintf("within minimum age (%s)", sizeutil.FormatDuration(minAge)))
+		if !youngArchive(a, minAge, now) {
+			continue
 		}
+		if err, ok := stranded[archiveRef{a.Run, a.DLE}]; ok {
+			keep(a.Run, a.DLE, KindAge, fmt.Sprintf("unrestorable (%v) — within minimum age (%s), condemned once aged", err, sizeutil.FormatDuration(minAge)))
+			continue
+		}
+		keep(a.Run, a.DLE, KindAge, fmt.Sprintf("within minimum age (%s)", sizeutil.FormatDuration(minAge)))
 	}
 	// 2) Last-recovery floor (kept distinct so an archive that is a DLE's last full
 	// is reported by that full, not a mere incremental the run also carries).
@@ -135,12 +169,19 @@ func Compute(archives []record.Archive, minAge time.Duration, now time.Time) Flo
 	// (recoverability first), not an off-by-one on the reference date.
 	for _, dle := range dleNames(archives) {
 		ds := record.ArchivesOf(archives, dle) // the dle's archives in run order, one per run
+		// A stranded archive never anchors: its restore cannot happen, so there is
+		// no chain to keep for it — pinning from an older, unrelated full up through
+		// it would protect junk.
+		anchored := func(i int) bool {
+			_, dead := stranded[archiveRef{ds[i].Run, dle}]
+			return !dead
+		}
 		anchors := map[int]bool{}
-		if n := len(ds); n > 0 {
+		if n := len(ds); n > 0 && anchored(n-1) {
 			anchors[n-1] = true // the latest run: keeps the live chain (and its full)
 		}
 		for i, a := range ds {
-			if runYoung[a.Run] {
+			if runYoung[a.Run] && anchored(i) {
 				anchors[i] = true // a recent run: keep the base its restore needs
 			}
 		}
@@ -159,7 +200,17 @@ func Compute(archives []record.Archive, minAge time.Duration, now time.Time) Flo
 			}
 		}
 	}
-	return Floor{reasons: reasons}
+	return Floor{reasons: reasons, condemned: condemned}
+}
+
+// youngArchive reports whether the archive is still within the medium's minimum age.
+// Age is measured per archive from when it committed (CreatedAt), not the run's
+// date: the date is day-granular, so comparing it would collapse every minimum_age
+// under 24h to a whole-day step. CreatedAt is the real landing instant, so a sub-day
+// minimum_age keeps only archives actually that recent. A zero CreatedAt (older media)
+// reads as not-young, i.e. reclaimable.
+func youngArchive(a record.Archive, minAge time.Duration, now time.Time) bool {
+	return minAge > 0 && !a.CreatedAt.IsZero() && now.Sub(a.CreatedAt) < minAge
 }
 
 // dleNames returns the distinct DLEs across the archives, sorted for determinism.
@@ -194,6 +245,23 @@ func (f Floor) ReasonArchive(run, dle string) (reason string, ok bool) {
 func (f Floor) KindArchive(run, dle string) (Kind, bool) {
 	p, ok := f.reasons[archiveRef{run, dle}]
 	return p.kind, ok
+}
+
+// Condemned reports the archive the floor has given up on — no restore anywhere
+// can use it — with recovery's error naming the broken link. Condemned and kept
+// are exclusive: a condemned archive is never pinned, whatever the other rules
+// would have said.
+func (f Floor) Condemned(run, dle string) (error, bool) {
+	err, ok := f.condemned[archiveRef{run, dle}]
+	return err, ok
+}
+
+// CondemnsArchive is the predicate form of Condemned — what a medium's Reclaim
+// consults to delete unrestorable archives first, regardless of the capacity
+// target (media.Retention names it, mirroring KeepsArchive).
+func (f Floor) CondemnsArchive(run, dle string) bool {
+	_, ok := f.condemned[archiveRef{run, dle}]
+	return ok
 }
 
 // Keeps reports whether the floor pins any archive of run id — the run-level view

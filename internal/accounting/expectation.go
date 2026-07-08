@@ -72,7 +72,7 @@ func (a *Accountant) ExpectedVolumeFor(medium string, now time.Time) VolumeExpec
 	// runs. Scoping to all media's runs would recycle a tape merely
 	// because a newer full landed on disk — discarding the offsite copy and the
 	// redundancy double storage exists to provide.
-	floor := retention.Compute(a.d.Cat.ArchivesOn(medium), minAge, now)
+	floor := retention.Compute(a.d.Cat.ArchivesOn(medium), a.d.Cat.Archives(), minAge, now)
 	for _, v := range pool {
 		held := a.d.Cat.RunIDsOnLabel(v.Label.Name)
 		if _, _, ok := floor.First(held); ok {

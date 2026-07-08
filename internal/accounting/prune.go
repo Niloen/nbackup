@@ -8,6 +8,7 @@ import (
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/logf"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/retention"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
@@ -61,7 +62,7 @@ func (a *Accountant) MakeRoomPreview(mediumName string, incoming int64, now time
 	}
 	def := a.d.Cfg.Media[mediumName]
 	all := a.d.Cat.ArchivesOn(mediumName)
-	floor := retention.Compute(all, a.d.Cfg.MinAgeFor(def), now)
+	floor := retention.Compute(all, a.d.Cat.Archives(), a.d.Cfg.MinAgeFor(def), now)
 	for _, r := range profile.Reclaim(plan.target, all, floor, now) {
 		freed += r.Bytes
 		archives++
@@ -119,23 +120,40 @@ func (a *Accountant) reclaimTo(mediumName string, target int64, now time.Time, a
 	}
 	minAge := a.d.Cfg.MinAgeFor(def)
 	archives := a.d.Cat.ArchivesOn(mediumName)
-	floor := retention.Compute(archives, minAge, now)
+
+	// One floor renders both verdicts: what must be kept, and what is condemned —
+	// unrestorable everywhere, judged against the whole catalog (a base copy on
+	// another medium keeps this medium's copy restorable). The medium's Reclaim
+	// executes both in one chain-safe plan: condemned first regardless of the
+	// capacity target, then the oldest dead archives down to it. Tape's Reclaim is
+	// a no-op, so its stranded rotation debris rightly stays until its own volume
+	// relabels.
+	floor := retention.Compute(archives, a.d.Cat.Archives(), minAge, now)
 
 	// Reclamation is per archive (run+DLE): a medium's Reclaim walks the oldest
 	// non-protected archives, so an old run can lose one DLE's image while keeping
 	// another the chain still needs. The map is keyed by archiveio.Ref with Level left
 	// zero on both sides — (run,DLE) already names an archive uniquely.
-	reclaim := map[archiveio.Ref]media.Reclamation{}
-	for _, r := range profile.Reclaim(target, archives, floor, now) {
-		reclaim[archiveio.Ref{Run: r.RunID, DLE: r.DLE}] = r
+	plan := profile.Reclaim(target, archives, floor, now)
+	reclaim := map[archiveio.Ref]record.Archive{}
+	for _, ar := range archives {
+		reclaim[archiveio.Ref{Run: ar.Run, DLE: ar.DLE}] = ar
+	}
+	planned := map[archiveio.Ref]bool{}
+	for _, r := range plan {
+		planned[archiveio.Ref{Run: r.RunID, DLE: r.DLE}] = true
 	}
 
 	for _, ar := range archives {
-		if _, ok := reclaim[archiveio.Ref{Run: ar.Run, DLE: ar.DLE}]; ok {
+		if planned[archiveio.Ref{Run: ar.Run, DLE: ar.DLE}] {
 			continue // reported below
 		}
 		if reason, ok := floor.ReasonArchive(ar.Run, ar.DLE); ok {
 			out.Log("keep   %s %s  (%s)", ar.Run, a.d.DisplayDLE(ar.DLE), reason)
+		} else if cerr, dead := floor.Condemned(ar.Run, ar.DLE); dead {
+			// Condemned but not in this medium's plan: a labeled copy (tape), whose
+			// per-archive deletion is impossible — it dies with its volume at relabel.
+			out.Log("keep   %s %s  (unrestorable (%v) — out of per-archive reach, dies with its volume at relabel)", ar.Run, a.d.DisplayDLE(ar.DLE), cerr)
 		} else {
 			out.Log("keep   %s %s  (dead, retained — fits capacity)", ar.Run, a.d.DisplayDLE(ar.DLE))
 		}
@@ -143,15 +161,20 @@ func (a *Accountant) reclaimTo(mediumName string, target int64, now time.Time, a
 
 	// Open the fs's delete handle only when there is something to actually delete.
 	var rec Reclaimer
-	if apply && len(reclaim) > 0 {
+	if apply && len(plan) > 0 {
 		if rec, err = a.d.OpenReclaimer(mediumName); err != nil {
 			return eligible, swept, freed, err
 		}
 	}
-	for _, ar := range archives {
-		r, ok := reclaim[archiveio.Ref{Run: ar.Run, DLE: ar.DLE}]
-		if !ok {
-			continue
+	// Execute (and report) the plan in ITS order, not the catalog's: the medium
+	// ordered it chain-safe — dependents before their base — so an interrupted
+	// prune has only ever shortened chains, never orphaned an incremental. A
+	// condemned deletion warns with the broken link first: it should not arise
+	// anymore (the chain-safe order prevents new ones), so never delete silently.
+	for _, r := range plan {
+		ar := reclaim[archiveio.Ref{Run: r.RunID, DLE: r.DLE}]
+		if cerr, dead := floor.Condemned(ar.Run, ar.DLE); dead {
+			out.Log("WARN   %s %s is unrestorable: %v", ar.Run, a.d.DisplayDLE(ar.DLE), cerr)
 		}
 		eligible++
 		if apply {
@@ -293,14 +316,26 @@ func (a *Accountant) knownPositions(medium string) map[int]bool {
 	return known
 }
 
+// copyLabeled reports whether the run's copy on a medium lives on labeled volumes
+// (Placement.Labeled) — out of per-archive reclamation's reach; it dies with its
+// volume at relabel. False when the run has no copy there at all.
+func (a *Accountant) copyLabeled(runID, mediumName string) bool {
+	for _, p := range a.d.Cat.Placements(runID) {
+		if p.Medium == mediumName {
+			return p.Labeled()
+		}
+	}
+	return false
+}
+
 // ReclaimCopy deletes an existing copy of a run on a removable (fslike: disk
 // or cloud) medium, so a forced re-copy replaces the old files instead of orphaning
 // them (the leak a plain `nb copy --force` would otherwise cause — orphaned parts
-// that no placement references yet still consume capacity). Tape reclaims only whole
-// volumes (relabel), so its prior copy stays orphaned-until-relabel as documented and
+// that no placement references yet still consume capacity). A labeled copy (tape)
+// reclaims only at relabel, so it stays orphaned-until-relabel as documented and
 // this is a no-op there. Best-effort: it runs before the re-copy re-authors the run.
 func (a *Accountant) ReclaimCopy(runID, mediumName string) error {
-	if m, ok := a.d.Cfg.Media[mediumName]; ok && m.Type == "tape" {
+	if a.copyLabeled(runID, mediumName) {
 		return nil
 	}
 	s, err := a.d.Cat.ReadRun(runID)

@@ -17,6 +17,7 @@ import (
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
@@ -72,6 +73,7 @@ func (c *checker) Check(connect bool) *CheckReport {
 	rep := &CheckReport{}
 	c.checkServer(rep)
 	c.checkStaleness(rep)
+	c.checkRestorability(rep)
 	c.checkCapacity(rep)
 	for _, host := range c.dleHostsInOrder() {
 		rep.Hosts = append(rep.Hosts, c.checkHost(rep, host, connect))
@@ -109,6 +111,67 @@ func (c *checker) checkStaleness(rep *CheckReport) {
 		rep.add(&rep.Server, false, false, fmt.Sprintf("staleness: %s last backed up %s ago, older than one cycle (%s)",
 			disp, sizeutil.FormatDuration(time.Since(s.LastBackup)), sizeutil.FormatDuration(window)))
 	}
+}
+
+// checkRestorability surfaces stranded archives — incrementals whose base chain is
+// broken (recovery.Stranded, judged catalog-wide), which a restore would only
+// discover as a hard error on restore day. A stranded archive that is a DLE's
+// LATEST backup is a hard failure: the DLE cannot be restored to its newest state,
+// so last night must not be trusted. An older one is a warning — a superseded
+// recovery point that `nb prune` reclaims (it protects nothing and holds capacity)
+// — but only when a copy is trusted by address, where a prune can act. On labeled
+// volumes (tape) a superseded chain NECESSARILY loses its base tape first
+// (rotation recycles the oldest volume whole), so its stranded incrementals are
+// by-design rotation debris that dies with its own tape: those are reported as one
+// calm all-clear-shaped line, never a recurring per-archive alarm a healthy tape
+// rotation would trip on every night. Like staleness, it is always on: it reads
+// only the in-memory catalog.
+func (c *checker) checkRestorability(rep *CheckReport) {
+	archives := c.cat.Archives()
+	stranded := recovery.Stranded(archives)
+	if len(stranded) == 0 {
+		rep.add(&rep.Server, true, false, "restorability: every backup's recovery chain is intact")
+		return
+	}
+	newest := map[string]string{} // DLE -> its latest run holding an archive
+	for _, a := range archives {
+		if cur, ok := newest[a.DLE]; !ok || record.RunIDLess(cur, a.Run) {
+			newest[a.DLE] = a.Run
+		}
+	}
+	rotationDebris := 0
+	for _, s := range stranded {
+		if s.Archive.Run == newest[s.Archive.DLE] {
+			rep.add(&rep.Server, false, false, fmt.Sprintf("restorability: %v — the latest backup of %s cannot be restored; `nb reset %s` starts a fresh chain on the next dump",
+				s.Err, s.Archive.DLEID(), s.Archive.DLEID()))
+			continue
+		}
+		if !c.addressCopy(s.Archive) {
+			rotationDebris++
+			continue
+		}
+		rep.add(&rep.Server, false, true, fmt.Sprintf("restorability: %v — a superseded recovery point holding capacity for nothing; `nb prune` reclaims it", s.Err))
+	}
+	if rotationDebris > 0 {
+		rep.add(&rep.Server, true, false, fmt.Sprintf("restorability: %d superseded recovery point(s) on labeled volumes lost their base to tape rotation — by-design debris, reclaimed when their own volumes recycle", rotationDebris))
+	}
+}
+
+// addressCopy reports whether any copy of the archive is trusted by address
+// (Placement.Labeled false — disk, cloud): somewhere `nb prune` can actually
+// delete it. A labeled copy (tape) is out of a prune's reach by construction.
+func (c *checker) addressCopy(a record.Archive) bool {
+	for _, p := range c.cat.Placements(a.Run) {
+		if p.Labeled() {
+			continue
+		}
+		for _, pa := range p.Archives {
+			if pa.DLE == a.DLE {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // checkCapacity surfaces each bounded medium's make-room feasibility: capacity is

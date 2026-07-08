@@ -86,7 +86,7 @@ func (a *Accountant) MediumProtected(name string, now time.Time) (residual, capa
 	}
 	capacity = a.capacityFor(name, prof) // registry-derived for a bare drive's pool
 	archives := a.d.Cat.ArchivesOn(name)
-	floor := retention.Compute(archives, a.d.Cfg.MinAgeFor(def), now)
+	floor := retention.Compute(archives, a.d.Cat.Archives(), a.d.Cfg.MinAgeFor(def), now)
 	// Target 0: reclaimable is everything the Floor clears, not merely what a
 	// prune-to-capacity would bother to free — the residual is the truly
 	// protected set, which is what capacity feasibility (make-room's fail-loud,
@@ -109,7 +109,7 @@ func (a *Accountant) MediumProtectionIsAgeBound(name string, now time.Time) bool
 		return true
 	}
 	archives := a.d.Cat.ArchivesOn(name)
-	floor := retention.Compute(archives, a.d.Cfg.MinAgeFor(def), now)
+	floor := retention.Compute(archives, a.d.Cat.Archives(), a.d.Cfg.MinAgeFor(def), now)
 	for _, ar := range archives {
 		kind, ok := floor.KindArchive(ar.Run, ar.DLE)
 		if ok && kind != retention.KindAge {
@@ -188,7 +188,7 @@ func (a *Accountant) PoolRoom(now time.Time) int64 {
 		return -1
 	}
 	archives := a.d.Cat.ArchivesOn(a.d.Landing)
-	floor := retention.Compute(archives, a.d.LandingMinAge, now)
+	floor := retention.Compute(archives, a.d.Cat.Archives(), a.d.LandingMinAge, now)
 	var keptBytes int64
 	for _, ar := range archives {
 		if floor.KeepsArchive(ar.Run, ar.DLE) {

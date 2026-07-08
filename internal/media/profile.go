@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/record"
+	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
@@ -45,12 +46,17 @@ type Profile interface {
 	Reclaim(target int64, archives []record.Archive, keep Retention, now time.Time) []Reclamation
 }
 
-// Retention reports which archives reclamation must never delete — the floor the
-// retention package computes. Reclaim consults it only as a predicate, so media
-// depends on the test rather than on the retention package; retention.Floor
-// satisfies it.
+// Retention is the floor's two verdicts, as the predicates Reclaim consults —
+// which archives it must never delete, and which it must delete first because no
+// restore can use them. Media depends on the tests rather than on the retention
+// package; retention.Floor satisfies it. The verdicts are exclusive (the floor
+// never keeps a condemned archive).
 type Retention interface {
 	KeepsArchive(run, dle string) bool
+	// CondemnsArchive reports an archive retention has given up on — unrestorable
+	// everywhere — so Reclaim deletes it first, regardless of the capacity target
+	// (even an unbounded store does not keep worthless bytes).
+	CondemnsArchive(run, dle string) bool
 }
 
 // Reclamation is one archive (run+DLE) chosen for reclamation. (A whole-volume
@@ -107,19 +113,28 @@ func (p sizeProfile) Volumes() int64 { return 0 }
 // archives oldest-first reclaims exactly the dead ones, freeing space a run-granular
 // pass would strand behind a single still-pinned DLE. Archives are ordered by their run
 // (run order, oldest first) then DLE for a deterministic plan.
+//
+// The walk is chain-safe: an archive is deletable only once nothing still present
+// builds on it (recovery.BaseOf), so a base is deleted only AFTER every incremental
+// that replays it. A plain oldest-first walk is exactly backwards for a superseded
+// chain — it frees the full (the oldest, biggest archive) first and, once the target
+// is met, leaves the now-unrestorable incrementals holding capacity while protecting
+// nothing. Deleting dependents-first means stopping at the target (or anywhere) always
+// leaves a shorter but restorable chain: the recovery points age out tip-first, the
+// full last. Within that constraint the walk stays oldest-first.
+//
+// Condemned archives (Retention.CondemnsArchive — unrestorable everywhere) go first
+// and unconditionally: even an unbounded store, or one comfortably under capacity,
+// does not keep worthless bytes. The whole-volume media never get here (their
+// Reclaim is a no-op), which is what leaves tape's stranded rotation debris to die
+// with its own volume at relabel.
 func (p sizeProfile) Reclaim(target int64, archives []record.Archive, keep Retention, now time.Time) []Reclamation {
-	if p.capacity <= 0 {
-		return nil // unbounded: nothing to reclaim
-	}
 	if target < 0 {
 		target = 0 // an incoming run larger than capacity: free everything unprotected
 	}
 	var total int64
 	for _, a := range archives {
 		total += a.Compressed
-	}
-	if total <= target {
-		return nil
 	}
 	ordered := append([]record.Archive(nil), archives...)
 	sort.Slice(ordered, func(i, j int) bool {
@@ -128,18 +143,85 @@ func (p sizeProfile) Reclaim(target int64, archives []record.Archive, keep Reten
 		}
 		return ordered[i].DLE < ordered[j].DLE
 	})
+	base := baseIndexes(ordered)
+	// deps[i] counts the archives still present whose restore builds directly on
+	// ordered[i]; while nonzero, deleting i would strand a dependent, so i waits.
+	// Transitive chains need no extra bookkeeping: an L2 holds its L1, which holds
+	// the L0. A pinned dependent never leaves, so it holds its base forever — the
+	// floor pins that base too, and this keeps the two judgments from diverging.
+	deps := make([]int, len(ordered))
+	for _, b := range base {
+		if b >= 0 {
+			deps[b]++
+		}
+	}
+	deleted := make([]bool, len(ordered))
 	var out []Reclamation
-	for _, a := range ordered {
-		if total <= target {
-			return out
+	// pick returns the oldest still-present archive nothing depends on that wants
+	// deleting, or -1; del executes it, releasing its base for a later pick.
+	pick := func(want func(record.Archive) bool) int {
+		for j := range ordered {
+			if !deleted[j] && deps[j] == 0 && want(ordered[j]) {
+				return j
+			}
 		}
-		if keep.KeepsArchive(a.Run, a.DLE) {
-			continue
+		return -1
+	}
+	del := func(j int, note string) {
+		deleted[j] = true
+		if b := base[j]; b >= 0 {
+			deps[b]--
 		}
-		out = append(out, Reclamation{RunID: a.Run, DLE: a.DLE, Bytes: a.Compressed, Note: "over capacity"})
-		total -= a.Compressed
+		out = append(out, Reclamation{RunID: ordered[j].Run, DLE: ordered[j].DLE, Bytes: ordered[j].Compressed, Note: note})
+		total -= ordered[j].Compressed
+	}
+	for {
+		j := pick(func(a record.Archive) bool { return keep.CondemnsArchive(a.Run, a.DLE) })
+		if j < 0 {
+			break
+		}
+		del(j, "stranded — unrestorable")
+	}
+	if p.capacity <= 0 {
+		return out // unbounded: no capacity to reclaim to
+	}
+	for total > target {
+		j := pick(func(a record.Archive) bool { return !keep.KeepsArchive(a.Run, a.DLE) })
+		if j < 0 {
+			return out // everything left is protected or still some dependent's base
+		}
+		del(j, "over capacity")
 	}
 	return out
+}
+
+// baseIndexes maps each archive to the index (within ordered) of the archive its
+// restore directly builds on — recovery.BaseOf, applied per DLE — or -1 when it has
+// none here: a full, or an incremental whose base is not among these archives (held
+// by another medium, or already stranded) — either way nothing here to order against.
+// ordered is sorted by run then DLE, so each DLE's subsequence is already in the run
+// order BaseOf expects.
+func baseIndexes(ordered []record.Archive) []int {
+	base := make([]int, len(ordered))
+	for i := range base {
+		base[i] = -1
+	}
+	byDLE := map[string][]int{}
+	for i, a := range ordered {
+		byDLE[a.DLE] = append(byDLE[a.DLE], i)
+	}
+	for _, idxs := range byDLE {
+		ds := make([]record.Archive, len(idxs))
+		for k, i := range idxs {
+			ds[k] = ordered[i]
+		}
+		for k := range ds {
+			if b, ok := recovery.BaseOf(ds, k); ok {
+				base[idxs[k]] = idxs[b]
+			}
+		}
+	}
+	return base
 }
 
 // --- volume-based profile (libraries of removable volumes, e.g. tape) —

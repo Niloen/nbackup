@@ -244,3 +244,65 @@ func TestCheckStalenessAllCurrent(t *testing.T) {
 		t.Errorf("expected an all-clear line mentioning the cycle: %+v", rep.Server)
 	}
 }
+
+// TestCheckRestorability: a stranded incremental (its base chain broken in the
+// catalog) fails the check when it is the DLE's latest backup — the DLE cannot be
+// restored to its newest state — and only warns when a newer chain has superseded
+// it (prune will reclaim it). Intact chains report a single all-clear line.
+func TestCheckRestorability(t *testing.T) {
+	eng := newCheckEngine(t, []config.DLE{{Host: "localhost", Path: "/a"}})
+	// Positions carry the recorded fact the labeled/address split reads: an
+	// address-identified medium (disk) records empty labels, a labeled pool (vault,
+	// tape) records its volume's label — see record.FilePos.
+	diskPos := archiveio.ArchivePos{Parts: []archiveio.FilePos{{Pos: 1}}, Commit: archiveio.FilePos{Pos: 2}}
+	vaultPos := archiveio.ArchivePos{Parts: []archiveio.FilePos{{Label: "VAULT-01", Pos: 1}}, Commit: archiveio.FilePos{Label: "VAULT-01", Pos: 2}}
+	add := func(medium, run, dle string, level int, base string) {
+		t.Helper()
+		pos := diskPos
+		if medium == "vault" {
+			pos = vaultPos
+		}
+		a := record.Archive{Run: run, DLE: dle, Host: "localhost", Path: "/" + dle, Level: level, BaseRun: base, Compressed: 10, CreatedAt: time.Now()}
+		if err := eng.cat.AddArchive(a, medium, pos); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func() *CheckReport {
+		rep := &CheckReport{}
+		(&checker{cfg: eng.cfg, tc: eng.tc, dep: eng.dep, cat: eng.cat}).checkRestorability(rep)
+		return rep
+	}
+
+	// Intact: full + incremental.
+	add("disk", "run-2026-07-01.000001", "a", 0, "")
+	add("disk", "run-2026-07-02.000001", "a", 1, "run-2026-07-01.000001")
+	rep := check()
+	if rep.Failures != 0 || rep.Warnings != 0 || !anyMsg(rep.Server, "chain is intact") {
+		t.Fatalf("intact chains: %+v, want the all-clear line only", rep.Server)
+	}
+
+	// A stranded latest backup: its base was never in the catalog — hard failure.
+	add("disk", "run-2026-07-03.000001", "b", 1, "run-2026-06-01.000001")
+	rep = check()
+	if rep.Failures != 1 || !anyMsg(rep.Server, "latest backup of localhost:/b cannot be restored") {
+		t.Fatalf("stranded latest: Failures=%d %+v, want 1 hard failure naming the DLE", rep.Failures, rep.Server)
+	}
+
+	// Superseded by a fresh full: the stranded archive is only a warning now.
+	add("disk", "run-2026-07-04.000001", "b", 0, "")
+	rep = check()
+	if rep.Failures != 0 || rep.Warnings != 1 || !anyMsg(rep.Server, "superseded recovery point") {
+		t.Fatalf("stranded superseded: %+v, want 1 warning", rep.Server)
+	}
+
+	// A stranded superseded point whose only copy sits on a labeled volume is
+	// rotation debris: the base's volume was necessarily recycled first, its own
+	// tape reclaims it in due order — one calm aggregate line, not a per-archive
+	// warning.
+	add("vault", "run-2026-07-05.000001", "c", 1, "run-2026-06-01.000001")
+	add("disk", "run-2026-07-06.000001", "c", 0, "")
+	rep = check()
+	if rep.Failures != 0 || rep.Warnings != 1 || !anyMsg(rep.Server, "tape rotation") {
+		t.Fatalf("tape rotation debris: Failures=%d Warnings=%d %+v, want disk warning + one debris info line", rep.Failures, rep.Warnings, rep.Server)
+	}
+}

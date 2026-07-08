@@ -1,6 +1,7 @@
 package retention
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -49,7 +50,7 @@ func TestFloor_LiveChainKept(t *testing.T) {
 		mkRun("run-2026-01-01.001", "2026-01-01", arch("app", 0)), // the base full
 		mkRun("run-2026-01-02.001", "2026-01-02", arch("app", 1)), // tip incremental, no newer full
 	)
-	got := Compute(runs, 0, now) // minAge 0 so age never keeps
+	got := Compute(runs, nil, 0, now) // minAge 0 so age never keeps
 
 	if reason, ok := got.Reason("run-2026-01-01.001"); !ok {
 		t.Errorf("base full run must be kept as the last recovery path; got %v", got)
@@ -72,7 +73,7 @@ func TestFloor_SupersededChainReclaimable(t *testing.T) {
 		mkRun("run-2026-01-02.001", "2026-01-02", arch("app", 1)), // old incremental (superseded)
 		mkRun("run-2026-02-01.001", "2026-02-01", arch("app", 0)), // newer full
 	)
-	got := Compute(runs, 0, now) // minAge 0
+	got := Compute(runs, nil, 0, now) // minAge 0
 
 	for _, id := range []string{"run-2026-01-01.001", "run-2026-01-02.001"} {
 		if got.Keeps(id) {
@@ -93,7 +94,7 @@ func TestFloor_ReasonNamesTheProtectingFull(t *testing.T) {
 		// etc gets a later full here; home gets its only full here too.
 		mkRun("run-2026-01-02.001", "2026-01-02", arch("etc", 1), arch("home", 0)),
 	)
-	got := Compute(runs, 0, now)
+	got := Compute(runs, nil, 0, now)
 
 	if reason, _ := got.Reason("run-2026-01-02.001"); reason != "last recovery path" {
 		t.Errorf("reason = %q, want it to name home (its full), not etc (a mere incremental)", reason)
@@ -113,7 +114,7 @@ func TestFloor_PerArchiveWithinOneRun(t *testing.T) {
 		// so db's day-1 full is still its last recovery path.
 		mkRun("run-2026-02-01.001", "2026-02-01", arch("app", 0), arch("db", 1)),
 	)
-	got := Compute(runs, 0, now) // minAge 0 so only chain/last-recovery pin
+	got := Compute(runs, nil, 0, now) // minAge 0 so only chain/last-recovery pin
 
 	if got.KeepsArchive("run-2026-01-01.001", "app") {
 		t.Errorf("app's day-1 full is superseded — its archive should be reclaimable")
@@ -133,7 +134,7 @@ func TestFloor_PerArchiveWithinOneRun(t *testing.T) {
 func TestFloor_MinAgeReasonInDays(t *testing.T) {
 	now := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
 	runs := cat(mkRun("run-2026-01-04.001", "2026-01-04", arch("app", 1)))
-	got := Compute(runs, 7*24*time.Hour, now)
+	got := Compute(runs, nil, 7*24*time.Hour, now)
 
 	if reason, _ := got.Reason("run-2026-01-04.001"); reason != "within minimum age (7d)" {
 		t.Errorf("reason = %q, want \"within minimum age (7d)\"", reason)
@@ -156,7 +157,7 @@ func TestFloor_MinAgeSubDay(t *testing.T) {
 		mkRunAt("run-2026-01-04.2", "2026-01-04", time.Date(2026, 1, 4, 8, 0, 0, 0, time.UTC), arch("app", 0)),   // newer full, committed 08:00 (3h ago)
 		mkRunAt("run-2026-01-04.3", "2026-01-04", time.Date(2026, 1, 4, 10, 30, 0, 0, time.UTC), arch("app", 1)), // incremental, committed 10:30 (30m ago, young)
 	)
-	got := Compute(runs, minAge, now)
+	got := Compute(runs, nil, minAge, now)
 
 	if got.Keeps("run-2026-01-04.001") {
 		t.Errorf("old full committed 7h ago must age out under a 1h minimum_age; got %v", got)
@@ -206,7 +207,7 @@ func TestFloor_ComputeStampsKinds(t *testing.T) {
 		mkRun("run-2026-01-02.001", "2026-01-02", arch("app", 1)),
 		mkRunAt("run-2026-02-28.001", "2026-02-28", now.Add(-time.Hour), arch("db", 1)),
 	)
-	got := Compute(runs, 24*time.Hour, now)
+	got := Compute(runs, nil, 24*time.Hour, now)
 
 	if kind, ok := got.KindArchive("run-2026-02-28.001", "db"); !ok || kind != KindAge {
 		t.Errorf("young archive: kind = %v, %v; want KindAge", kind, ok)
@@ -217,4 +218,65 @@ func TestFloor_ComputeStampsKinds(t *testing.T) {
 	if kind, ok := got.KindArchive("run-2026-01-02.001", "app"); !ok || kind != KindChain {
 		t.Errorf("chain incremental: kind = %v, %v; want KindChain", kind, ok)
 	}
+}
+
+// TestComputeCondemns pins the floor's opposite verdict: an archive no restore
+// anywhere can use (judged against the corpus, so a base copy on another medium
+// spares it) is condemned — never pinned, not even by the chain rule — while a
+// young unrestorable archive keeps an age pin that says so instead.
+func TestComputeCondemns(t *testing.T) {
+	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-30 * 24 * time.Hour)
+	arch := func(run, dle string, level int, base string, created time.Time) record.Archive {
+		return record.Archive{Run: run, DLE: dle, Level: level, BaseRun: base, CreatedAt: created}
+	}
+	stranded := arch("run-2026-06-02.000001", "app", 1, "run-2026-06-01.000001", old)
+	newFull := arch("run-2026-06-10.000001", "app", 0, "", old)
+
+	t.Run("a broken chain is condemned and never pinned", func(t *testing.T) {
+		archives := []record.Archive{stranded, newFull}
+		f := Compute(archives, archives, 0, now)
+		if !f.CondemnsArchive(stranded.Run, "app") {
+			t.Fatal("the stranded incremental must be condemned")
+		}
+		if err, ok := f.Condemned(stranded.Run, "app"); !ok || err == nil {
+			t.Fatalf("Condemned = (%v, %v), want the chain error", err, ok)
+		}
+		if f.KeepsArchive(stranded.Run, "app") {
+			t.Fatal("condemned and kept are exclusive — it must not be pinned")
+		}
+		if f.CondemnsArchive(newFull.Run, "app") || !f.KeepsArchive(newFull.Run, "app") {
+			t.Fatal("the intact full must be kept, not condemned")
+		}
+	})
+
+	t.Run("a base copy elsewhere in the corpus spares the archive", func(t *testing.T) {
+		base := arch("run-2026-06-01.000001", "app", 0, "", old) // another medium: corpus-only
+		f := Compute([]record.Archive{stranded}, []record.Archive{base, stranded}, 0, now)
+		if f.CondemnsArchive(stranded.Run, "app") {
+			t.Fatal("restorable across media — must not be condemned")
+		}
+	})
+
+	t.Run("young unrestorable is age-pinned with the reason, not condemned", func(t *testing.T) {
+		fresh := arch("run-2026-07-08.000001", "app", 1, "run-2026-06-01.000001", now.Add(-time.Hour))
+		f := Compute([]record.Archive{fresh}, []record.Archive{fresh}, 24*time.Hour, now)
+		if f.CondemnsArchive(fresh.Run, "app") {
+			t.Fatal("within minimum_age: the WORM guard defers the condemnation")
+		}
+		reason, ok := f.ReasonArchive(fresh.Run, "app")
+		if !ok || !strings.Contains(reason, "unrestorable") {
+			t.Fatalf("reason = %q (%v), want an age pin saying it is unrestorable", reason, ok)
+		}
+		if kind, _ := f.KindArchive(fresh.Run, "app"); kind != KindAge {
+			t.Fatalf("kind = %v, want KindAge", kind)
+		}
+	})
+
+	t.Run("nil corpus renders no condemnations", func(t *testing.T) {
+		f := Compute([]record.Archive{stranded}, nil, 0, now)
+		if f.CondemnsArchive(stranded.Run, "app") {
+			t.Fatal("nil corpus must judge nothing")
+		}
+	})
 }

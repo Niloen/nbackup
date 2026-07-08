@@ -103,6 +103,15 @@ func (p Placement) Holds(dle string, level int) bool {
 	return false
 }
 
+// Labeled reports whether this copy lives on labeled volumes (tape) rather than at
+// addresses (disk, cloud) — the placement-side face of the media.Labeled capability,
+// read from the recorded positions alone (an address-identified medium records empty
+// labels; see record.FilePos), so no medium is opened to ask. The distinction is
+// load-bearing for reclamation: a labeled copy is out of per-archive reach by
+// construction — nothing can be deleted from the middle of a reel — so it dies only
+// with its whole volume, at relabel; a copy trusted by address is prune's to delete.
+func (p Placement) Labeled() bool { return len(p.Labels()) > 0 }
+
 // Labels returns the distinct volume labels this placement occupies — every
 // archive's labels (see PlacedArchive.Labels), merged in first-seen order. It is
 // what tells which tapes a copy needs mounted. It is empty for address-identified
