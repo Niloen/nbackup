@@ -43,6 +43,13 @@ type Source interface {
 	// trims to capacity, so Used sits permanently near 100% at steady state — only
 	// the protected residual distinguishes "full by design" from "actually stuck."
 	MediumProtected(name string, now time.Time) (residual, capacity int64, ok bool)
+	// RunCoverage judges a run's copies against the current config: which media
+	// should hold which archives (their landing routes) and which are merely
+	// promised by sync rules — the run pages render "partial" vs "behind" from it.
+	RunCoverage(run *catalog.Run) *engine.RunCoverage
+	// SyncLags reports each configured sync rule's live backlog — lag, not error;
+	// the media pages render it as a quiet "behind" line.
+	SyncLags() []engine.SyncLag
 	DisplayDLE(slug string) string
 	DLESummaries() []catalog.DLESummary
 	DLENames() []string         // configured DLE slugs, for drill coverage (never-drilled)
@@ -202,11 +209,8 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	placements := s.src.Placements(run.ID)
-	copies := make([]copyRow, 0, len(placements))
-	for _, p := range placements {
-		held, total := p.Covers(run)
-		copies = append(copies, copyRow{Medium: p.Medium, Labels: strings.Join(p.Labels(), "+"), Held: held, Total: total})
-	}
+	rc := s.src.RunCoverage(run)
+	copies, judged := buildCopyRows(run, placements, rc)
 	s.render(w, "run", page{Title: run.ID, Active: "runs", Data: runDetail{
 		ID:       run.ID,
 		Date:     run.Date(),
@@ -215,15 +219,51 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		Partial:  run.Partial(),
 		Archives: run.Archives,
 		Copies:   copies,
-		Grid:     buildPlacementGrid(run, placements, copies),
+		Grid:     buildPlacementGrid(run, judged, copies, rc),
 		Dump:     s.findDumpReport(run.ID),
 	}})
 }
 
-// buildPlacementGrid assembles the /runs/<id> archives × placements matrix. cols are
-// the coverage rows handleRun already built, reused as column headers so the two
-// sections agree by construction.
-func buildPlacementGrid(run *catalog.Run, placements []catalog.Placement, cols []copyRow) *placementGrid {
+// buildCopyRows judges each of the run's placements against the config's
+// expectation and appends a synthetic row for every expected medium with no copy
+// at all — a lane that tripped before writing anything, or a landing/sync target
+// added since the run. It returns the display rows and an index-aligned placement
+// list (zero placements for the synthetic rows) that the placement grid's columns
+// reuse, so the two sections agree by construction.
+func buildCopyRows(run *catalog.Run, placements []catalog.Placement, rc *engine.RunCoverage) ([]copyRow, []catalog.Placement) {
+	rows := make([]copyRow, 0, len(placements))
+	judged := make([]catalog.Placement, 0, len(placements))
+	placed := map[string]bool{}
+	add := func(p catalog.Placement, present bool) {
+		rows = append(rows, copyRow{
+			RunID:        run.ID,
+			Medium:       p.Medium,
+			Labels:       strings.Join(p.Labels(), "+"),
+			Placed:       present,
+			SyncFrom:     rc.SyncSource(p.Medium),
+			CopyJudgment: rc.Judge(p.Medium, p),
+		})
+		judged = append(judged, p)
+	}
+	for _, p := range placements {
+		placed[p.Medium] = true
+		add(p, true)
+	}
+	for _, m := range rc.ExpectedMedia() {
+		if !placed[m] {
+			add(catalog.Placement{Medium: m}, false)
+		}
+	}
+	return rows, judged
+}
+
+// buildPlacementGrid assembles the /runs/<id> archives × placements matrix. cols
+// are the coverage rows handleRun already built and placements is buildCopyRows'
+// index-aligned list (including the zero placements of expected-but-absent
+// media), so the grid's columns and the Copies table agree by construction. A
+// hole is colored by its expectation: a routed gap is a defect, a promised one is
+// sync lag, and an unexpected cell is simply not this medium's to hold.
+func buildPlacementGrid(run *catalog.Run, placements []catalog.Placement, cols []copyRow, rc *engine.RunCoverage) *placementGrid {
 	if len(placements) == 0 {
 		return nil
 	}
@@ -234,6 +274,13 @@ func buildPlacementGrid(run *catalog.Run, placements []catalog.Placement, cols [
 			var cell placementCell
 			if pa, ok := p.Placed(a.DLE, a.Level); ok {
 				cell = placementCell{Held: true, Pos: archivePosText(pa)}
+			} else {
+				switch rc.Class(p.Medium, a.DLE, a.Level) {
+				case engine.CopyRouted:
+					cell.Gap = "miss"
+				case engine.CopyPromised:
+					cell.Gap = "lag"
+				}
 			}
 			row.Cells = append(row.Cells, cell)
 		}
@@ -629,6 +676,13 @@ func (s *Server) handleMedium(w http.ResponseWriter, r *http.Request) {
 	}
 	d := newMediumData(st)
 	d.VolMap = s.buildMediumVolMap(name, st, showAll(r))
+	// A sync-rule target carries its live backlog as a quiet line — lag, not an
+	// alert: the next `nb sync` (usually cron's) closes it.
+	for _, lag := range s.src.SyncLags() {
+		if lag.To == name {
+			d.Syncs = append(d.Syncs, syncLagView{From: lag.From, Runs: lag.Runs, Bytes: sizeutil.FormatBytes(lag.Bytes)})
+		}
+	}
 	s.render(w, "medium", page{Title: name, Active: "media", Data: d})
 }
 
@@ -752,20 +806,39 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // copies renders a run's placements as a compact "medium:label" list (matching the
-// CLI's copiesSummary), naming the volume label only when a medium carries one and
-// marking a placement that holds only some of the run's archives as partial.
+// CLI's copiesSummary), naming the volume label only when a medium carries one.
+// Each copy is judged against the config's expectation: missing routed archives
+// mark it partial, an unmet sync promise marks it behind, and an expected medium
+// with no copy at all is listed too, so a wholly tripped lane stays visible.
 func (s *Server) copies(run *catalog.Run) string {
 	ps := s.src.Placements(run.ID)
-	if len(ps) == 0 {
-		return "—"
-	}
+	rc := s.src.RunCoverage(run)
 	names := make([]string, 0, len(ps))
+	placed := map[string]bool{}
 	for _, p := range ps {
+		placed[p.Medium] = true
 		name := placementName(p)
-		if held, total := p.Covers(run); held < total {
-			name += fmt.Sprintf(" (partial %d/%d)", held, total)
+		j := rc.Judge(p.Medium, p)
+		switch {
+		case j.MissingRouted() > 0:
+			name += fmt.Sprintf(" (partial %d/%d)", j.RoutedHeld, j.Routed)
+		case j.Behind() > 0:
+			name += fmt.Sprintf(" (behind %d)", j.Behind())
 		}
 		names = append(names, name)
+	}
+	for _, m := range rc.ExpectedMedia() {
+		if placed[m] {
+			continue
+		}
+		if rc.Judge(m, catalog.Placement{}).Routed > 0 {
+			names = append(names, m+" (missing)")
+		} else {
+			names = append(names, m+" (not yet synced)")
+		}
+	}
+	if len(names) == 0 {
+		return "—"
 	}
 	return strings.Join(names, ", ")
 }
@@ -1596,12 +1669,13 @@ func (s *Server) buildMediumVolMap(name string, st engine.MediumStats, all bool)
 			sort.Slice(ss, func(i, j int) bool { return ss[i].DLE < ss[j].DLE })
 			row := volMapRow{Label: id, Href: "/runs/" + id}
 			// A partial run copy (tripped lane, per-archive prune) carries its
-			// coverage next to the label — same truth the /runs pages tell.
+			// coverage next to the label — same truth the /runs pages tell: judged
+			// against what this medium's routes owe it, not the whole run.
 			if run, err := s.src.ReadRun(id); err == nil {
 				for _, p := range s.src.Placements(id) {
 					if p.Medium == name {
-						if held, total := p.Covers(run); held < total {
-							row.Pill = fmt.Sprintf("%d/%d", held, total)
+						if j := s.src.RunCoverage(run).Judge(name, p); j.MissingRouted() > 0 {
+							row.Pill = fmt.Sprintf("%d/%d", j.RoutedHeld, j.Routed)
 						}
 						break
 					}

@@ -37,6 +37,10 @@
 <div class="bar" style="margin-top:.9rem"><span style="width:{{pct $d.UtilPct}};{{if $d.Over}}background:var(--bad){{end}}"></span></div>
 {{end}}{{end}}
 
+{{range $d.Syncs}}
+<div class="muted" style="margin-top:.6rem">sync target{{if .From}} (from {{.From}}){{end}}: {{if .Runs}}behind {{.Runs}} run(s) · {{.Bytes}} — <code>nb sync</code> catches up{{else}}in sync{{end}}</div>
+{{end}}
+
 <h2>Used capacity over time</h2>
 <div class="panel">
 {{if $d.Chart}}

@@ -690,6 +690,13 @@ The source defaults to the landing medium; **`--from` overrides it**, so the sam
 command both pushes offsite (disk → tape/S3) and pulls back (tape → disk) —
 reading a tape source mounts the volume holding each run, just like a restore.
 
+With per-DLE landing routing (a dumptype's own `landing:` list), a target that is
+itself part of some route is **topped up route-scoped**: `nb sync --to <landing>`
+copies only the archives routed there, so backfilling one landing after a trip
+never drags another route's DLEs along. A target on no route — the offsite vault
+case above — mirrors whole runs, and an explicit `--from` always mirrors that
+source.
+
 It **copies by default** (pass `--dry-run`/`-n` to preview) and is **idempotent**:
 each archive copies atomically and records its placement as it commits, and a run
 counts as mirrored only once the target holds every archive of it — so re-running

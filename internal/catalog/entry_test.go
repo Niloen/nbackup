@@ -6,27 +6,27 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-// TestPlacementCovers: coverage is per-archive — a placement holding only some of
-// the run's archives (a tripped fan-out lane, a per-archive prune) counts as
-// partial, which is what lets the copies displays stop presenting every placement
-// as a full copy of the run.
-func TestPlacementCovers(t *testing.T) {
-	run := &Run{ID: "run-2026-07-08.020000", Archives: []record.Archive{
+// TestPlacementMissing: coverage is per-archive — a placement holding only some
+// of a run's archives (a tripped fan-out lane, a per-archive prune) reports
+// exactly the gap, which is what copy's resume set, sync's backlog, and the
+// coverage displays are all built on.
+func TestPlacementMissing(t *testing.T) {
+	archives := []record.Archive{
 		{DLE: "etc", Level: 0}, {DLE: "home", Level: 1},
-	}}
+	}
 	full := Placement{Medium: "disk", Archives: []PlacedArchive{
 		{DLE: "etc", Level: 0}, {DLE: "home", Level: 1},
 	}}
-	if held, total := full.Covers(run); held != 2 || total != 2 {
-		t.Fatalf("full copy Covers = %d/%d, want 2/2", held, total)
+	if missing := full.Missing(archives); len(missing) != 0 {
+		t.Fatalf("full copy Missing = %d, want 0", len(missing))
 	}
 	partial := Placement{Medium: "s3", Archives: []PlacedArchive{{DLE: "home", Level: 1}}}
-	if held, total := partial.Covers(run); held != 1 || total != 2 {
-		t.Fatalf("partial copy Covers = %d/%d, want 1/2", held, total)
+	if missing := partial.Missing(archives); len(missing) != 1 || missing[0].DLE != "etc" {
+		t.Fatalf("partial copy Missing = %v, want [etc L0]", missing)
 	}
 	// Same DLE at another level (a different cycle position) is a different archive.
 	stale := Placement{Medium: "s3", Archives: []PlacedArchive{{DLE: "home", Level: 0}}}
-	if held, _ := stale.Covers(run); held != 0 {
-		t.Fatalf("wrong-level archive counted as coverage: held=%d", held)
+	if missing := stale.Missing(archives); len(missing) != 2 {
+		t.Fatalf("wrong-level archive counted as coverage: missing=%d, want 2", len(missing))
 	}
 }

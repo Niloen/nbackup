@@ -385,6 +385,13 @@ and the tee are interchangeable. **Failure is any-lane-suffices**: a failed land
 continues and succeeds with a loud warning naming the repair (`nb sync --to <landing>` — the
 per-medium placements already record exactly what is missing, so nothing new is persisted);
 only an archive whose ENTIRE route is dead aborts the run (staged copy kept for `nb flush`).
+**Coverage is judged against the current config, never recorded** (`engine.RunCoverage`): a
+medium owes a run only the archives whose landing route names it, a sync rule's target is
+merely *behind* (lag, not error) until `nb sync` catches up, and any other copy is a bonus —
+so a route split never reads as a partial copy, and adding a landing deliberately makes old
+runs read as missing there until a sync backfills them. Auto-source `nb sync --to <medium>`
+is scoped the same way: a landing target is topped up with its routed archives only; a
+non-landing target (or an explicit `--from`) is a whole mirror.
 Flush generalizes the same way: copy to each landing still missing the archive, reclaim after
 the whole route is served.
 

@@ -68,7 +68,7 @@
 </div>
 </div>
 
-<h2>Copies ({{len .Copies}})</h2>
+<h2>Copies</h2>
 <div class="panel scroll">
 {{if .Copies}}
 <table>
@@ -76,9 +76,13 @@
   {{range .Copies}}
   <tr>
     <td><a href="/media/{{.Medium}}">{{.Medium}}</a></td>
-    <td>{{if .Partial}}<span class="pill warn">partial · {{.Held}}/{{.Total}}</span>{{else}}<span class="pill ok">complete · {{.Held}}/{{.Total}}</span>{{end}}</td>
+    <td><span class="pill {{.PillClass}}">{{.PillText}}</span></td>
     <td class="mono-cell">{{if .Labels}}{{.Labels}}{{else}}<span class="muted">—</span>{{end}}</td>
-    <td class="muted">{{if .Partial}}missing {{.Missing}} archive(s) · <code>nb sync --to {{.Medium}}</code>{{end}}</td>
+    <td class="muted">
+      {{if gt .MissingRouted 0}}missing {{.MissingRouted}} archive(s) · <code>nb sync --run {{.RunID}} --to {{.Medium}}</code>
+      {{else if gt .Behind 0}}behind sync: {{.Behind}} archive(s){{if .SyncFrom}} from {{.SyncFrom}}{{end}} · <code>nb sync</code> catches up
+      {{else if not .Expected}}not in any landing route — extra copy{{end}}
+    </td>
   </tr>
   {{end}}
 </table>
@@ -91,13 +95,13 @@
 <table class="pgrid">
   <tr>
     <th>Archive</th>
-    {{range .Cols}}<th class="medium">{{.Medium}} <span class="cov {{if .Partial}}warn{{else}}ok{{end}}">{{.Held}}/{{.Total}}</span></th>{{end}}
+    {{range .Cols}}<th class="medium">{{.Medium}} <span class="cov {{.PillClass}}">{{.CovText}}</span></th>{{end}}
   </tr>
   {{range .Rows}}
   <tr>
     <td><a href="/dles/{{.DLE}}">{{.DLEID}}</a> <span class="pill dim">{{level .Level}}</span></td>
     {{range .Cells}}
-    <td class="cell">{{if not .Held}}<span class="miss">✕</span>{{else if .Pos}}<span class="pos">{{.Pos}}</span>{{else}}<span class="have">✓</span>{{end}}</td>
+    <td class="cell">{{if .Held}}{{if .Pos}}<span class="pos">{{.Pos}}</span>{{else}}<span class="have">✓</span>{{end}}{{else if eq .Gap "miss"}}<span class="miss">✕</span>{{else if eq .Gap "lag"}}<span class="lag">◌</span>{{else}}<span class="muted">—</span>{{end}}</td>
     {{end}}
   </tr>
   {{end}}
@@ -105,7 +109,9 @@
 <div class="legend">
   <span><span class="have">✓</span> held (label-less medium)</span>
   <span><span class="pos">NB-0001:3–5</span> volume : file positions</span>
-  <span><span class="miss">✕</span> not on this copy</span>
+  <span><span class="miss">✕</span> missing (this medium's route)</span>
+  <span><span class="lag">◌</span> awaiting sync</span>
+  <span><span class="muted">—</span> not expected here</span>
 </div>
 </div>
 {{end}}

@@ -244,6 +244,12 @@ func (e *engineSource) MediumProtected(name string, now time.Time) (residual, ca
 	return e.engine().MediumProtected(name, now)
 }
 
+func (e *engineSource) RunCoverage(run *catalog.Run) *engine.RunCoverage {
+	return e.engine().RunCoverage(run)
+}
+
+func (e *engineSource) SyncLags() []engine.SyncLag { return e.engine().SyncLags() }
+
 func (e *engineSource) DisplayDLE(slug string) string { return e.engine().DisplayDLE(slug) }
 
 func (e *engineSource) DLENames() []string { return e.engine().DLENames() }

@@ -735,27 +735,74 @@ func dumpRateCell(orig int64, secs float64) string {
 	return sizeutil.FormatBytes(int64(float64(orig)/secs)) + "/s"
 }
 
-// copyRow is one placement of a run (a medium it was written to) with its coverage:
-// how many of the run's archives this copy actually holds. Held < Total is a partial
-// copy (a tripped fan-out lane, a per-archive prune) — the row says so instead of
-// presenting the placement as a full copy.
+// copyRow is one medium's copy of a run judged against the config's expectation
+// (engine.RunCoverage): what the copy holds, what its landing route owes it
+// (Routed), and what sync rules promise it (Promised). A row can be synthetic —
+// Placed false — for an expected medium with no copy at all (a lane that tripped
+// before writing anything, or a landing/sync target added since the run).
 type copyRow struct {
-	Medium string
-	Labels string
-	Held   int
-	Total  int
+	RunID    string
+	Medium   string
+	Labels   string
+	Placed   bool
+	SyncFrom string // the promising sync rule's source ("" = resolved per run / none)
+	engine.CopyJudgment
 }
 
-// Partial reports whether this copy misses some of the run's archives.
-func (c copyRow) Partial() bool { return c.Held < c.Total }
+// State buckets the row for its pill: "partial" (missing archives its landing
+// route owes — the real defect), "behind" (only sync lag), "complete" (every
+// expectation held), or "extra" (nothing expects this copy; it is a bonus).
+func (c copyRow) State() string {
+	switch {
+	case c.MissingRouted() > 0:
+		return "partial"
+	case c.Behind() > 0:
+		return "behind"
+	case c.Expected() > 0:
+		return "complete"
+	default:
+		return "extra"
+	}
+}
 
-// Missing is the count of run archives this copy lacks.
-func (c copyRow) Missing() int { return c.Total - c.Held }
+// PillClass maps the state to the shared pill palette: only a routed gap is a
+// warning — sync lag and bonus copies stay quiet.
+func (c copyRow) PillClass() string {
+	switch c.State() {
+	case "partial":
+		return "warn"
+	case "complete":
+		return "ok"
+	default:
+		return "dim"
+	}
+}
+
+// CovText is the coverage fraction over what the medium is expected to hold; a
+// bonus copy has no denominator and shows its plain archive count.
+func (c copyRow) CovText() string {
+	if c.Expected() > 0 {
+		return fmt.Sprintf("%d/%d", c.ExpectedHeld(), c.Expected())
+	}
+	return fmt.Sprintf("%d", c.Held)
+}
+
+// PillText is the coverage pill: the state word plus the fraction, with the
+// no-copy-at-all case named outright.
+func (c copyRow) PillText() string {
+	state := c.State()
+	if state == "partial" && !c.Placed {
+		state = "missing"
+	}
+	return state + " · " + c.CovText()
+}
 
 // placementGrid is the /runs/<id> archives × placements matrix: one row per archive
-// of the run, one column per placement, each cell the archive's own position on that
-// copy — the drill-down that answers "this DLE, this run: where exactly", and makes
-// a partial copy's holes visible at a glance.
+// of the run, one column per placement (including expected-but-absent media), each
+// cell the archive's own position on that copy — the drill-down that answers "this
+// DLE, this run: where exactly", and makes a partial copy's holes visible at a
+// glance, colored by whether each hole is owed (routed), lagging (promised), or
+// simply not that medium's to hold.
 type placementGrid struct {
 	Cols []copyRow      // column headers: the same coverage rows the Copies table shows
 	Rows []placementRow // run.Archives order
@@ -773,6 +820,7 @@ type placementRow struct {
 type placementCell struct {
 	Held bool
 	Pos  string // the archive's volume:file positions; "" for a label-less medium (render ✓)
+	Gap  string // when !Held: "miss" (routed here, a defect), "lag" (awaiting sync), "" (not expected)
 }
 
 // archivePosText renders a placed archive's part positions compactly: consecutive
@@ -1353,7 +1401,8 @@ type mediumData struct {
 	NotFound bool
 	Name     string
 	Type     string
-	VolMap   *volMap // the pool's volumes with everything stored on them; nil for address-identified media
+	VolMap   *volMap       // the pool's volumes with everything stored on them; nil for address-identified media
+	Syncs    []syncLagView // sync rules targeting this medium, each with its live backlog
 
 	Used     int64
 	Capacity int64   // 0 = unbounded
@@ -1440,6 +1489,15 @@ type usagePointRow struct {
 	Added int64
 	Used  int64   // cumulative on the medium after this run
 	Pct   float64 // cumulative as a percent of capacity; 0 when unbounded
+}
+
+// syncLagView is the medium page's quiet "sync target" line: this medium is a
+// sync rule's target, this is how far behind it runs. Lag, not error — it renders
+// muted, never as an alert.
+type syncLagView struct {
+	From  string // the rule's source ("" = resolved per run)
+	Runs  int    // runs the target has not fully mirrored yet (0 = in sync)
+	Bytes string // formatted backlog size
 }
 
 // newMediumData flattens a medium's usage picture (engine.MediumStats: the retained

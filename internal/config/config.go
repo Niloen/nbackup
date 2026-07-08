@@ -348,6 +348,21 @@ func (c *Config) LandingsFor(d DLE) ([]string, error) {
 	return c.LandingNames()
 }
 
+// Routes maps every configured DLE's slug to the media its archives land on —
+// LandingsFor keyed per DLE, for callers that judge coverage or scope a sync by
+// route. A DLE whose route cannot resolve (no landing configured at all) is
+// omitted rather than erroring: routing questions are advisory reads, and a
+// config without a landing fails loudly on the write paths instead.
+func (c *Config) Routes() map[string][]string {
+	routes := make(map[string][]string, len(c.Sources))
+	for _, d := range c.DLEs() {
+		if media, err := c.LandingsFor(d); err == nil {
+			routes[d.Name()] = media
+		}
+	}
+	return routes
+}
+
 // LandingFor resolves a DLE's primary landing — LandingsFor's first entry, for
 // consumers that need the one accounted medium.
 func (c *Config) LandingFor(d DLE) (string, error) {

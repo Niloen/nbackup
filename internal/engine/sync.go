@@ -163,17 +163,27 @@ func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force boo
 	if !auto {
 		candidates = c.cat.RunsOn(from)
 	}
+	// In auto mode the sync tops up "the landing" — and with per-DLE landing
+	// routing that means each archive's own route: syncing TO a medium that is
+	// part of some DLE's route selects only the archives routed there, so
+	// backfilling one landing never drags another route's DLEs along. A target
+	// that is no DLE's landing is a plain mirror (the ad-hoc vaulting form),
+	// unscoped — as is any explicit --from (a deliberate whole-source mirror).
+	var scope map[string]bool
+	if auto {
+		scope = routedScope(c.cfg, target)
+	}
 
 	report := &SyncReport{From: from, To: target}
 	for _, s := range applySelection(candidates, sel) {
 		src := from
 		if auto {
 			var err error
-			if src, err = c.sourceFor(s, target, force); err != nil {
+			if src, err = c.sourceFor(s, target, force, scope); err != nil {
 				return nil, err
 			}
 			if src == "" {
-				continue // the target already holds everything this run has
+				continue // the target already holds everything this run owes it
 			}
 		}
 		held, missing, err := c.copySets(s.ID, src, target)
@@ -181,7 +191,7 @@ func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force boo
 			return nil, err
 		}
 		// A forced sync re-copies the source copy's whole content.
-		want := wantArchives(held, missing, force)
+		want := wantArchives(scopedArchives(held, scope), scopedArchives(missing, scope), force)
 		if len(want) == 0 {
 			continue // idempotent: the target holds everything the source copy does
 		}
@@ -230,12 +240,13 @@ func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force boo
 // the target already holds everything; an error when archives are missing on the
 // target but no single medium holds them all (the operator must name a source, or
 // run twice with explicit --from). force treats the run's whole content as missing,
-// matching wantArchives' forced re-copy.
-func (c *copier) sourceFor(s *catalog.Run, target string, force bool) (string, error) {
-	missing := s.Archives // force treats the run's whole content as missing
+// matching wantArchives' forced re-copy. A non-nil scope narrows the run's content
+// to those DLEs (the target's routed archives; see SyncTo).
+func (c *copier) sourceFor(s *catalog.Run, target string, force bool, scope map[string]bool) (string, error) {
+	missing := scopedArchives(s.Archives, scope) // force treats the run's whole (scoped) content as missing
 	if !force {
 		tgt, _ := placementOn(c.cat, s.ID, target) // a zero Placement holds nothing
-		missing = tgt.Missing(s.Archives)
+		missing = tgt.Missing(missing)
 	}
 	if len(missing) == 0 {
 		return "", nil

@@ -1235,3 +1235,80 @@ func tapesWithFiles(t *testing.T, tapeDir string) int {
 	}
 	return n
 }
+
+// TestSyncAutoScopedToRoute: with per-DLE landing routing, an auto-source sync TO
+// a landing medium tops up only the archives routed there — backfilling one
+// landing never drags another route's DLEs along — while a non-landing target
+// stays a whole-run mirror. This is what keeps `nb sync --to gdrive` from copying
+// vtape-routed DLEs onto gdrive after a trip.
+func TestSyncAutoScopedToRoute(t *testing.T) {
+	srcA, srcB := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(srcA, "a.txt"), "core route")
+	write(t, filepath.Join(srcB, "b.txt"), "side route")
+
+	cfg := &config.Config{
+		Landing: config.MediumList{"c2"},
+		Media: map[string]config.Media{
+			"c2":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"gd":    {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"vault": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+		},
+		DumpTypes: map[string]config.DumpType{"fan": {Landing: config.MediumList{"c2", "gd"}}},
+		Sources: []config.DLE{
+			{Host: "localhost", Path: srcA},                  // routed [c2]
+			{Host: "localhost", Path: srcB, DumpType: "fan"}, // routed [c2, gd]
+		},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	s, err := eng.Run(context.Background(), time.Date(2026, 7, 8, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+	sideDLE := config.DLE{Host: "localhost", Path: srcB}.Name()
+
+	// gd holds its one routed archive — nothing to top up, even though it lacks
+	// the other DLE's archive (which was never gd's to hold).
+	report, err := eng.SyncTo("", "gd", SyncSelection{}, false, false, nil)
+	if err != nil {
+		t.Fatalf("sync --to gd dry-run: %v", err)
+	}
+	if len(report.Items) != 0 {
+		t.Fatalf("scoped sync to gd wants %d run(s), want 0 (its route is complete): %+v", len(report.Items), report.Items)
+	}
+
+	// Trip simulation: drop gd's copy of its routed archive. The backlog is now
+	// exactly that one archive, and applying restores gd's route — nothing more.
+	if _, _, err := eng.cat.RemoveArchive(s.ID, "gd", sideDLE); err != nil {
+		t.Fatal(err)
+	}
+	report, err = eng.SyncTo("", "gd", SyncSelection{}, true, false, nil)
+	if err != nil {
+		t.Fatalf("sync --to gd apply: %v", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].Archives != 1 {
+		t.Fatalf("backfill = %+v, want 1 run with exactly the 1 routed archive", report.Items)
+	}
+	p := placementOnMedium(eng.Catalog().Placements(s.ID), "gd")
+	if !p.Holds(sideDLE, 0) || len(p.Archives) != 1 {
+		t.Fatalf("gd placement after backfill = %+v, want only its routed archive back", p.Archives)
+	}
+
+	// A target on no route is a plain mirror: the whole run flows.
+	report, err = eng.SyncTo("", "vault", SyncSelection{}, false, false, nil)
+	if err != nil {
+		t.Fatalf("sync --to vault dry-run: %v", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].Archives != 2 {
+		t.Fatalf("mirror to vault = %+v, want 1 run with both archives", report.Items)
+	}
+}

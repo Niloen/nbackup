@@ -59,7 +59,7 @@ func runRunList(a *app) error {
 			committed = sizeutil.FormatStamp(t)
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", s.ID, runStatus(s), len(s.Archives),
-			sizeutil.FormatBytes(s.TotalBytes()), committed, copiesSummary(s, eng.Catalog().Placements(s.ID)))
+			sizeutil.FormatBytes(s.TotalBytes()), committed, copiesSummary(s, eng.Catalog().Placements(s.ID), eng.RunCoverage(s)))
 	}
 	tw.Flush()
 	return nil
@@ -75,23 +75,42 @@ func runStatus(s *catalog.Run) string {
 }
 
 // copiesSummary renders a run's placements as a compact comma list, naming the
-// volume label only when it differs from the medium (i.e. for labeled tapes). A
-// placement holding only some of the run's archives (a tripped fan-out lane, a
-// per-archive prune) is marked partial — listing it bare would read as a full copy.
-func copiesSummary(s *catalog.Run, ps []catalog.Placement) string {
-	if len(ps) == 0 {
-		return "-"
-	}
+// volume label only when it differs from the medium (i.e. for labeled tapes).
+// Each copy is judged against the current config's expectation (see
+// engine.RunCoverage): a copy missing archives its landing route owes is marked
+// partial (a tripped fan-out lane, a per-archive prune), one still owed by a
+// sync rule is merely behind, and an expected medium with no copy at all is
+// listed too — listing only what exists would hide a lane that never wrote.
+func copiesSummary(s *catalog.Run, ps []catalog.Placement, rc *engine.RunCoverage) string {
 	names := make([]string, 0, len(ps))
+	placed := map[string]bool{}
 	for _, p := range ps {
+		placed[p.Medium] = true
 		name := p.Medium
 		if labels := p.Labels(); len(labels) > 0 {
 			name += ":" + strings.Join(labels, "+")
 		}
-		if held, total := p.Covers(s); held < total {
-			name += fmt.Sprintf(" (partial %d/%d)", held, total)
+		j := rc.Judge(p.Medium, p)
+		switch {
+		case j.MissingRouted() > 0:
+			name += fmt.Sprintf(" (partial %d/%d)", j.RoutedHeld, j.Routed)
+		case j.Behind() > 0:
+			name += fmt.Sprintf(" (behind %d)", j.Behind())
 		}
 		names = append(names, name)
+	}
+	for _, m := range rc.ExpectedMedia() {
+		if placed[m] {
+			continue
+		}
+		if rc.Judge(m, catalog.Placement{}).Routed > 0 {
+			names = append(names, m+" (missing)")
+		} else {
+			names = append(names, m+" (not yet synced)")
+		}
+	}
+	if len(names) == 0 {
+		return "-"
 	}
 	return strings.Join(names, ", ")
 }

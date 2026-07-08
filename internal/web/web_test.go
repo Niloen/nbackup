@@ -12,6 +12,7 @@ import (
 	"github.com/Niloen/nbackup/internal/accounting"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/progress"
@@ -39,6 +40,13 @@ type fakeSource struct {
 	// a canned reading to exercise the rollup's threshold logic in isolation). A
 	// medium absent from this map reports ok=false, as an unknown medium would.
 	protected map[string]int64
+	// routes/syncRules feed RunCoverage (the config-derived expectation). A nil
+	// routes map defaults to "every archive routed to every medium the run has a
+	// copy on" — the judgment most fixtures were written against, where each
+	// placement owes the whole run.
+	routes    map[string][]string
+	syncRules []config.SyncRule
+	syncLags  []engine.SyncLag
 }
 
 func (f fakeSource) Runs() []*catalog.Run { return f.runs }
@@ -69,6 +77,23 @@ func heldOn(medium string, archs ...record.Archive) catalog.Placement {
 	}
 	return p
 }
+
+func (f fakeSource) RunCoverage(run *catalog.Run) *engine.RunCoverage {
+	routes := f.routes
+	if routes == nil {
+		var media []string
+		for _, p := range f.Placements(run.ID) {
+			media = append(media, p.Medium)
+		}
+		routes = map[string][]string{}
+		for _, a := range run.Archives {
+			routes[a.DLE] = media
+		}
+	}
+	return engine.JudgeRun(run, routes, f.syncRules, f.runs, f.Placements)
+}
+
+func (f fakeSource) SyncLags() []engine.SyncLag { return f.syncLags }
 
 func (f fakeSource) Media() []engine.MediumInfo { return f.media }
 
@@ -1469,7 +1494,7 @@ func TestRunCopiesCoverage(t *testing.T) {
 		t.Fatalf("/runs marks the complete disk copy partial:\n%s", body)
 	}
 	_, body = get(t, srv.Handler(), "/runs/"+a1.Run)
-	for _, want := range []string{"partial · 1/2", "nb sync --to s3", "complete · 2/2", "class=\"miss\""} {
+	for _, want := range []string{"partial · 1/2", "nb sync --run " + a1.Run + " --to s3", "complete · 2/2", "class=\"miss\""} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/runs/<id> misses %q:\n%s", want, body)
 		}
@@ -1612,5 +1637,87 @@ func TestCloudMediumPlacementMap(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("/dles/home?run= cloud physical misses %q:\n%s", want, body)
 		}
+	}
+}
+
+// TestRunCoverageRouted: with per-DLE landing routes, each medium is judged only
+// against what its route owes it — a side landing holding exactly its routed
+// archive reads complete (the old judgment called it partial), a wholly absent
+// routed medium gets a synthetic "missing" row with the surgical repair, and a
+// sync-rule target that has not caught up reads "behind", never as an error.
+func TestRunCoverageRouted(t *testing.T) {
+	at := time.Date(2026, 7, 8, 2, 0, 0, 0, time.UTC)
+	etc := record.Archive{Run: "run-2026-07-08.020000", DLE: "etc", Host: "localhost", Path: "/etc",
+		Level: 0, Compressed: 1000, CreatedAt: at}
+	home := record.Archive{Run: "run-2026-07-08.020000", DLE: "home", Host: "localhost", Path: "/home",
+		Level: 0, Compressed: 4000, CreatedAt: at}
+	src := fakeSource{
+		runs: []*catalog.Run{{ID: etc.Run, Archives: []record.Archive{etc, home}}},
+		media: []engine.MediumInfo{
+			{Name: "c2", Type: "s3"}, {Name: "gdrive", Type: "gdrive"}, {Name: "vtape", Type: "tape"},
+		},
+		routes: map[string][]string{
+			"etc":  {"c2", "vtape"},
+			"home": {"c2", "gdrive"},
+		},
+		syncRules: []config.SyncRule{{To: "offsite"}},
+		placements: map[string][]catalog.Placement{etc.Run: {
+			heldOn("c2", etc, home),
+			heldOn("gdrive", home),
+			// vtape wholly absent: its lane tripped before writing anything.
+		}},
+	}
+	srv := NewServer(src, t.TempDir())
+
+	_, body := get(t, srv.Handler(), "/runs/"+etc.Run)
+	for _, want := range []string{
+		"complete · 2/2", // c2: whole run routed there, held
+		"complete · 1/1", // gdrive: its routed subset is all it owes
+		"missing · 0/1",  // vtape: routed, no copy at all
+		"nb sync --run " + etc.Run + " --to vtape", // the surgical repair, route-scoped
+		"behind · 0/2", // offsite: promised by rule, not yet synced
+		"behind sync: 2 archive(s)",
+		`class="lag"`,     // grid: offsite's holes are lag, not defects
+		`class="muted">—`, // grid: etc on gdrive was never expected there
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/runs/<id> misses %q:\n%s", want, body)
+		}
+	}
+	for _, reject := range []string{"--to gdrive", "--to c2", "partial ·"} {
+		if strings.Contains(body, reject) {
+			t.Fatalf("/runs/<id> wrongly contains %q (a false coverage warning):\n%s", reject, body)
+		}
+	}
+
+	_, body = get(t, srv.Handler(), "/runs")
+	for _, want := range []string{"vtape (missing)", "offsite (not yet synced)"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/runs misses %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "gdrive (partial") {
+		t.Fatalf("/runs marks gdrive partial though its route is complete:\n%s", body)
+	}
+}
+
+// TestMediumSyncLag: a sync rule's target shows its live backlog on the medium
+// page as a quiet line — behind N runs, or in sync — never as an alert.
+func TestMediumSyncLag(t *testing.T) {
+	src := fakeSource{
+		media: []engine.MediumInfo{{Name: "offsite", Type: "s3"}, {Name: "mirror", Type: "disk"}},
+		syncLags: []engine.SyncLag{
+			{To: "offsite", From: "c2", Runs: 2, Bytes: 5 << 20},
+			{To: "mirror", Runs: 0},
+		},
+	}
+	srv := NewServer(src, t.TempDir())
+	_, body := get(t, srv.Handler(), "/media/offsite")
+	if !strings.Contains(body, "sync target (from c2): behind 2 run(s)") {
+		t.Fatalf("/media/offsite misses the sync lag line:\n%s", body)
+	}
+	_, body = get(t, srv.Handler(), "/media/mirror")
+	if !strings.Contains(body, "sync target: in sync") {
+		t.Fatalf("/media/mirror misses the in-sync line:\n%s", body)
 	}
 }
