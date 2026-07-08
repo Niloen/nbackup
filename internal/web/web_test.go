@@ -1602,11 +1602,19 @@ func TestCloudMediumPlacementMap(t *testing.T) {
 		Parts:  []archiveio.FilePos{{Pos: 1}, {Pos: 2}, {Pos: 3}},
 		Seals:  []record.PartSeal{{Size: 2000}, {Size: 1500}, {Size: 500}},
 		Commit: archiveio.FilePos{Pos: 4}}
+	// A second DLE that sorts alphabetically FIRST but was written LAST (file 5):
+	// rows must draw in write (position) order, never DLE order.
+	later := record.Archive{Run: a.Run, DLE: "aaa", Host: "localhost", Path: "/aaa",
+		Level: 0, Compressed: 1000, CreatedAt: at}
+	placedLater := catalog.PlacedArchive{DLE: "aaa", Level: 0,
+		Parts:  []archiveio.FilePos{{Pos: 5}},
+		Seals:  []record.PartSeal{{Size: 1000}},
+		Commit: archiveio.FilePos{Pos: 6}}
 	src := fakeSource{
-		runs:  []*catalog.Run{{ID: a.Run, Archives: []record.Archive{a}}},
+		runs:  []*catalog.Run{{ID: a.Run, Archives: []record.Archive{a, later}}},
 		media: []engine.MediumInfo{{Name: "s3", Type: "s3", Capacity: 10000}},
 		placements: map[string][]catalog.Placement{a.Run: {
-			{Medium: "s3", Archives: []catalog.PlacedArchive{placed}},
+			{Medium: "s3", Archives: []catalog.PlacedArchive{placed, placedLater}},
 		}},
 	}
 	srv := NewServer(src, t.TempDir())
@@ -1626,6 +1634,9 @@ func TestCloudMediumPlacementMap(t *testing.T) {
 	if p1 < 0 || p2 < 0 || p3 < 0 || !(p1 < p2 && p2 < p3) {
 		t.Fatalf("/media/s3 run row draws parts out of position order (%d, %d, %d):\n%s", p1, p2, p3, body)
 	}
+	if f5 := strings.Index(body, "file 5"); f5 < 0 || f5 < p3 {
+		t.Fatalf("/media/s3 run row draws by DLE, not write order (aaa@file5 at %d, home part3 at %d):\n%s", f5, p3, body)
+	}
 	// The physical panel draws the cloud copy as a run-directory row: the run id
 	// labels the row (linked), the chain tip's segment is green, and the row
 	// carries the chain label edge.
@@ -1642,6 +1653,9 @@ func TestCloudMediumPlacementMap(t *testing.T) {
 	p1, p2, p3 = strings.Index(body, "part 1/3"), strings.Index(body, "part 2/3"), strings.Index(body, "part 3/3")
 	if p1 < 0 || p2 < 0 || p3 < 0 || !(p1 < p2 && p2 < p3) {
 		t.Fatalf("/dles/home physical row draws parts out of position order (%d, %d, %d):\n%s", p1, p2, p3, body)
+	}
+	if f5 := strings.Index(body, "file 5"); f5 < 0 || f5 < p3 {
+		t.Fatalf("/dles/home physical row draws by DLE, not write order:\n%s", body)
 	}
 }
 
