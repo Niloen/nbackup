@@ -54,9 +54,9 @@
 {{if .History}}
 <table class="pgrid">
   <tr><th>Run</th><th>Date</th><th>Level</th><th class="num">Size</th><th>Committed</th>
-    {{range $places}}<th class="medium">{{.}}</th>{{end}}<th></th></tr>
+    {{range $places}}<th class="medium">{{.}}</th>{{end}}</tr>
   {{range .History}}
-  <tr{{if .Selected}} class="sel"{{end}}>
+  <tr>
     <td class="{{if .Chain}}chain{{else}}nochain{{end}}"><a href="/runs/{{.RunID}}">{{.RunID}}</a></td>
     <td>{{.Date}}</td>
     <td><span class="pill dim">{{level .Level}}</span>{{if .Partial}} <span class="warn">partial</span>{{end}}</td>
@@ -65,7 +65,6 @@
     {{range .Cells}}
     <td class="cell">{{if .Held}}{{if .Pos}}<span class="pos">{{.Pos}}</span>{{else}}<span class="have">✓</span>{{end}}{{else if eq .Gap "miss"}}<span class="miss">✕</span>{{else if eq .Gap "lag"}}<span class="lag">◌</span>{{else}}<span class="muted">—</span>{{end}}</td>
     {{end}}
-    <td class="maplink"><a href="/dles/{{$slug}}?run={{.RunID}}#physical">map →</a></td>
   </tr>
   {{end}}
 </table>
@@ -81,16 +80,18 @@
 </div>
 
 {{with .Physical}}
-<h2 id="physical">Physical — {{if .RunID}}{{.RunID}} · {{level .Level}} · {{bytes .Bytes}} <span style="font-weight:400;font-size:.85rem">(<a href="/dles/{{$slug}}#physical">show restore chain instead</a>)</span>{{else}}newest restore chain{{end}}</h2>
+<h2 id="physical">Physical <span class="muted" style="font-weight:400">— every container holding this DLE</span></h2>
 <div class="panel">
 {{range .Groups}}
-<h3 class="phys-head{{if eq .Gap "miss"}} bad{{end}}">{{.Medium}}{{if eq .Gap "miss"}} — no copy <span class="muted" style="font-weight:400">· repair: <code>nb sync --run {{.RunID}} --to {{.Medium}}</code></span>{{else if eq .Gap "lag"}} — <span class="muted" style="font-weight:400">awaiting sync (<code>nb sync</code> catches up)</span>{{else if .Where}} — <span class="mono">{{.Where}}</span>{{end}}</h3>
-{{if .Rows}}{{template "volmap" .}}{{end}}
+<h3 class="phys-head">{{.Medium}} <span class="muted" style="font-weight:400;font-size:.8rem">· {{.Note}}</span></h3>
+{{template "volmap" .}}
+{{if .Capped}}<div class="muted" style="margin:.4rem 0 .2rem;font-size:.82rem">showing the {{len .Rows}} newest of {{.Total}} run rows · <a href="?all=1#physical">show all →</a></div>{{end}}
 {{end}}
-{{if .ChainAlt}}<div class="muted" style="margin-top:.6rem;font-size:.85rem">or restore the whole chain from {{.ChainAlt}} — every member has a copy there</div>{{end}}
 <div class="legend">
-  <span><span class="sw" style="background:var(--accent)"></span> {{if .RunID}}this archive{{else}}chain tip (lighter = earlier members){{end}}</span>
+  <span><span class="sw" style="background:var(--ok)"></span> newest restore chain (brightest = tip)</span>
+  <span><span class="sw" style="background:var(--accent)"></span> this DLE, older archives (darker = newer run)</span>
   <span><span class="sw" style="background:color-mix(in srgb, var(--muted) 22%, var(--panel))"></span> other content</span>
+  <span><span class="sw" style="background:var(--panel);box-shadow:inset 3px 0 0 var(--ok)"></span> row needed to restore latest</span>
   <span>hover a segment for run · archive · size</span>
 </div>
 </div>

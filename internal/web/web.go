@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
@@ -340,19 +339,6 @@ func (s *Server) handleDLE(w http.ResponseWriter, r *http.Request) {
 	}
 	chain := s.chainRuns(slug)
 	places, history := s.dleHistory(slug, chain)
-	// ?run= selects one archive for the physical panel; anything not in the history
-	// (or absent) falls back to the newest restore chain — the default answer.
-	selRun := r.URL.Query().Get("run")
-	valid := false
-	for i := range history {
-		if history[i].RunID == selRun {
-			history[i].Selected = true
-			valid = true
-		}
-	}
-	if !valid {
-		selRun = ""
-	}
 	s.render(w, "dle", page{Title: sum.Display, Active: "dles", Data: dleDetail{
 		Slug:     sum.DLE,
 		Display:  sum.Display,
@@ -365,7 +351,7 @@ func (s *Server) handleDLE(w http.ResponseWriter, r *http.Request) {
 		RecAll:   all,
 		Places:   places,
 		History:  history,
-		Physical: s.buildDLEPhysical(slug, selRun, chain, places),
+		Physical: s.buildDLEPhysical(slug, chain, places, all),
 	}})
 }
 
@@ -1414,228 +1400,158 @@ func (s *Server) volumeInventory() map[volKey]engine.VolumeUsage {
 	return inv
 }
 
-// buildDLEPhysical builds the /dles/<slug> physical panel: the selected run's
-// archive (selRun != "") or, by default, the newest restore chain — drawn on the
-// actual containers, highlighted in true position and proportion among whatever
-// else those containers hold. Nil when there is nothing to draw.
-func (s *Server) buildDLEPhysical(slug, selRun string, chain map[string]bool, places []string) *physicalView {
+// buildDLEPhysical builds the /dles/<slug> physical panel: every container
+// holding any archive of the DLE, always on — one row per tape volume, and (since
+// disk/cloud stores are laid out per run) one row per medium/run directory. This
+// DLE's segments are colored by run age, the newest restore chain in the
+// restore-latest green (tip brightest), everything else greyed. The panel draws
+// only what physically exists — a routed gap or sync lag is the history grid's
+// story (its cells are judged by route); duplicating that judgment here would say
+// it twice. Nil when the DLE has no placed archive.
+func (s *Server) buildDLEPhysical(slug string, chain map[string]bool, places []string, all bool) *physicalView {
 	segs := s.volumeSegments("")
 	inv := s.volumeInventory()
-
-	// tapeRow draws one labeled volume with hiOf picking the highlight class ("" =
-	// grey). Caption: highlighted bytes against the volume's fill and free space.
-	tapeRow := func(key volKey, hiOf func(volSeg) string) volMapRow {
-		ss := append([]volSeg(nil), segs[key]...)
-		sort.Slice(ss, func(i, j int) bool { return ss[i].Pos < ss[j].Pos })
-		var sum, hi int64
-		for _, v := range ss {
-			sum += v.Bytes
-			if hiOf(v) != "" {
-				hi += v.Bytes
-			}
-		}
-		rec := inv[key]
-		used := rec.Used
-		if sum > used {
-			used = sum
-		}
-		base := used
-		if rec.Capacity > base {
-			base = rec.Capacity
-		}
-		row := volMapRow{Label: key.Label, Href: "/media/" + key.Medium}
-		row.Caption = sizeutil.FormatBytes(hi) + " of " + sizeutil.FormatBytes(used) + " used"
-		if rec.Capacity > used {
-			row.Caption += " · " + sizeutil.FormatBytes(rec.Capacity-used) + " free"
-		}
-		for _, v := range ss {
-			cls := hiOf(v)
-			if cls == "" {
-				cls = "other"
-			}
-			pct := 0.0
-			if base > 0 {
-				pct = float64(v.Bytes) / float64(base) * 100
-			}
-			row.Segs = append(row.Segs, volMapSeg{WidthPct: pct, Class: cls, Title: v.title()})
-		}
-		return row
-	}
-
-	if selRun != "" {
-		run, err := s.src.ReadRun(selRun)
-		if err != nil {
-			return nil
-		}
-		var arch *record.Archive
-		for i := range run.Archives {
-			if run.Archives[i].DLE == slug {
-				arch = &run.Archives[i]
-				break
-			}
-		}
-		if arch == nil {
-			return nil
-		}
-		view := &physicalView{RunID: selRun, Level: arch.Level, Bytes: arch.Compressed}
-		ps := s.src.Placements(selRun)
-		rc := s.src.RunCoverage(run)
-		for _, medium := range places {
-			var pa catalog.PlacedArchive
-			held := false
-			for _, p := range ps {
-				if p.Medium == medium {
-					pa, held = p.Placed(slug, arch.Level)
-					break
-				}
-			}
-			if !held {
-				// Judge the hole like the history matrix: owed here -> the red
-				// repair group; awaiting sync -> a quiet lag note; never expected
-				// here -> no group at all (the column exists for other runs).
-				switch rc.Class(medium, slug, arch.Level) {
-				case engine.CopyRouted:
-					view.Groups = append(view.Groups, physGroup{Medium: medium, Gap: "miss", RunID: selRun})
-				case engine.CopyPromised:
-					view.Groups = append(view.Groups, physGroup{Medium: medium, Gap: "lag"})
-				}
-				continue
-			}
-			g := physGroup{Medium: medium}
-			if labels := pa.Labels(); len(labels) > 0 {
-				g.Where = archivePosText(pa) + " · commit " + posDesc(pa.Commit)
-				for _, label := range labels {
-					key := volKey{Medium: medium, Label: label}
-					g.Rows = append(g.Rows, tapeRow(key, func(v volSeg) string {
-						if v.RunID == selRun && v.DLE == slug {
-							return "hi"
-						}
-						return ""
-					}))
-				}
-			} else {
-				// The run's on-medium content with this archive picked out — disk and
-				// cloud stores are organized per run, so the run is the container.
-				key := volKey{Medium: medium}
-				var ss []volSeg
-				var runSum, hi int64
-				for _, v := range segs[key] {
-					if v.RunID != selRun {
-						continue
-					}
-					ss = append(ss, v)
-					runSum += v.Bytes
-					if v.DLE == slug {
-						hi += v.Bytes
-					}
-				}
-				sort.Slice(ss, func(i, j int) bool { return ss[i].DLE < ss[j].DLE })
-				row := volMapRow{Label: medium, Href: "/media/" + medium,
-					Caption: sizeutil.FormatBytes(hi) + " of the run's " + sizeutil.FormatBytes(runSum) + " on " + medium}
-				for _, v := range ss {
-					cls := "other"
-					if v.DLE == slug {
-						cls = "hi"
-					}
-					pct := 0.0
-					if runSum > 0 {
-						pct = float64(v.Bytes) / float64(runSum) * 100
-					}
-					row.Segs = append(row.Segs, volMapSeg{WidthPct: pct, Class: cls, Title: v.title()})
-				}
-				g.Rows = append(g.Rows, row)
-			}
-			view.Groups = append(view.Groups, g)
-		}
-		return view
-	}
-
-	// Chain mode: the newest restore chain on its labeled volumes (tip darkest), plus
-	// the address-identified media that hold every member as the stated alternative.
-	if len(chain) == 0 {
-		return nil
-	}
 	tip := ""
 	for id := range chain {
 		if id > tip {
 			tip = id
 		}
 	}
-	levelOf := map[string]int{} // chain member run -> the DLE's level there
-	for _, run := range s.src.Runs() {
-		if !chain[run.ID] {
-			continue
+	// Age rank over the DLE's own runs; chain members get the green scale instead.
+	rank := runRank(segs, slug)
+	classOf := func(v volSeg) string {
+		if v.DLE != slug {
+			return "other"
 		}
-		for _, a := range run.Archives {
-			if a.DLE == slug {
-				levelOf[run.ID] = a.Level
+		if chain[v.RunID] {
+			if v.RunID == tip {
+				return "c0"
+			}
+			return "c1"
+		}
+		return ageClass(rank, v.RunID)
+	}
+	// drawRow renders one container. only != "" narrows the bar to one run's content
+	// (a cloud run-directory row); a labeled volume draws everything on it, in file
+	// order. base scales the bar (volume capacity / the group's largest run).
+	drawRow := func(key volKey, label, href, only string, base int64) volMapRow {
+		var ss []volSeg
+		for _, v := range segs[key] {
+			if only == "" || v.RunID == only {
+				ss = append(ss, v)
 			}
 		}
+		if key.Label != "" {
+			sort.Slice(ss, func(i, j int) bool { return ss[i].Pos < ss[j].Pos })
+		} else {
+			sort.Slice(ss, func(i, j int) bool { return ss[i].DLE < ss[j].DLE })
+		}
+		var sum int64
+		hasChain := false
+		for _, v := range ss {
+			sum += v.Bytes
+			if v.DLE == slug && chain[v.RunID] {
+				hasChain = true
+			}
+		}
+		if sum > base {
+			base = sum
+		}
+		row := volMapRow{Label: label, Href: href, Chain: hasChain}
+		for _, v := range ss {
+			pct := 0.0
+			if base > 0 {
+				pct = float64(v.Bytes) / float64(base) * 100
+			}
+			row.Segs = append(row.Segs, volMapSeg{WidthPct: pct, Class: classOf(v), Title: v.title()})
+		}
+		return row
 	}
+
 	view := &physicalView{}
-	var alt []string
 	for _, medium := range places {
+		// The volumes and runs holding this DLE on this medium, from its placements.
 		labelSet := map[string]bool{}
 		var labels []string
-		holdsAll := true
-		labelless := true
-		for id := range chain {
-			held := false
-			for _, p := range s.src.Placements(id) {
-				if p.Medium != medium {
+		runSet := map[string]bool{}
+		var runIDs []string
+		for _, run := range s.src.Runs() {
+			for _, a := range run.Archives {
+				if a.DLE != slug {
 					continue
 				}
-				if pa, ok := p.Placed(slug, levelOf[id]); ok {
-					held = true
-					for _, l := range pa.Labels() {
-						labelless = false
-						if !labelSet[l] {
-							labelSet[l] = true
-							labels = append(labels, l)
+				for _, p := range s.src.Placements(run.ID) {
+					if p.Medium != medium {
+						continue
+					}
+					if pa, ok := p.Placed(slug, a.Level); ok {
+						if pls := pa.Labels(); len(pls) > 0 {
+							for _, l := range pls {
+								if !labelSet[l] {
+									labelSet[l] = true
+									labels = append(labels, l)
+								}
+							}
+						} else if !runSet[run.ID] {
+							runSet[run.ID] = true
+							runIDs = append(runIDs, run.ID)
 						}
 					}
+					break
 				}
-				break
-			}
-			if !held {
-				holdsAll = false
 			}
 		}
-		if len(labels) > 0 {
+		switch {
+		case len(labels) > 0:
 			sort.Strings(labels)
-			g := physGroup{Medium: medium, Where: "chain: " + strings.Join(labels, " + ")}
+			g := physGroup{Medium: medium, Note: "one row per volume"}
 			for _, label := range labels {
 				key := volKey{Medium: medium, Label: label}
-				g.Rows = append(g.Rows, tapeRow(key, func(v volSeg) string {
-					if v.DLE != slug || !chain[v.RunID] {
-						return ""
-					}
-					if v.RunID == tip {
-						return "hi"
-					}
-					return "hi2"
-				}))
+				rec := inv[key]
+				base := rec.Used
+				if rec.Capacity > base {
+					base = rec.Capacity
+				}
+				g.Rows = append(g.Rows, drawRow(key, label, "/media/"+medium, "", base))
 			}
 			view.Groups = append(view.Groups, g)
-		} else if holdsAll && labelless {
-			alt = append(alt, medium)
+		case len(runIDs) > 0:
+			sort.Sort(sort.Reverse(sort.StringSlice(runIDs))) // newest first
+			g := physGroup{Medium: medium, Note: "one row per run", Total: len(runIDs)}
+			shown := runIDs
+			if !all && len(shown) > maxPhysRuns {
+				shown = shown[:maxPhysRuns]
+			}
+			// Shared scale: the largest shown run on this medium, so row widths
+			// compare run sizes.
+			key := volKey{Medium: medium}
+			var base int64
+			for _, id := range shown {
+				var sum int64
+				for _, v := range segs[key] {
+					if v.RunID == id {
+						sum += v.Bytes
+					}
+				}
+				if sum > base {
+					base = sum
+				}
+			}
+			for _, id := range shown {
+				g.Rows = append(g.Rows, drawRow(key, id, "/runs/"+id, id, base))
+			}
+			view.Groups = append(view.Groups, g)
 		}
 	}
-	view.ChainAlt = strings.Join(alt, ", ")
-	if len(view.Groups) == 0 && view.ChainAlt == "" {
+	if len(view.Groups) == 0 {
 		return nil
 	}
 	return view
 }
 
-// posDesc renders one file position for a heading — "NB-0008:3" on a labeled
-// volume, "file 3" on an address-identified medium.
-func posDesc(pt archiveio.FilePos) string {
-	if pt.Label != "" {
-		return fmt.Sprintf("%s:%d", pt.Label, pt.Pos)
-	}
-	return fmt.Sprintf("file %d", pt.Pos)
-}
+// maxPhysRuns caps each cloud/disk group of the DLE physical panel to the newest
+// run rows by default; the page's ?all=1 lifts it, like the recovery-points cap.
+const maxPhysRuns = 10
 
 // chainRuns is the set of runs in the DLE's newest restore chain (the tip archive
 // down its BaseRun links to the level-0 full), for the volume map's chain outline.

@@ -1731,16 +1731,15 @@ type drillTargetRow struct {
 // dleArchiveRow is one run's archive for a DLE — a row of the DLE history, linking
 // back to the run it belongs to.
 type dleArchiveRow struct {
-	RunID    string
-	Date     string
-	Level    int
-	Bytes    int64
-	At       time.Time
-	Files    int
-	Partial  bool
-	Chain    bool            // member of the newest restore chain (green edge)
-	Selected bool            // the ?run= row the physical panel is showing
-	Cells    []placementCell // per-place cells, index-aligned with dleDetail.Places
+	RunID   string
+	Date    string
+	Level   int
+	Bytes   int64
+	At      time.Time
+	Files   int
+	Partial bool
+	Chain   bool            // member of the newest restore chain (green edge)
+	Cells   []placementCell // per-place cells, index-aligned with dleDetail.Places
 }
 
 // volMap is the volume map: one bar per labeled volume, its stored files as segments
@@ -1759,11 +1758,11 @@ func (m *volMap) Capped() bool { return m.Total > len(m.Rows) && !m.All }
 
 // volMapRow is one bar of a placement map.
 type volMapRow struct {
-	Label   string
-	Href    string // optional: the row label links here (a run page, a volume's medium page)
-	Pill    string // optional warn pill next to the label (a partial run copy's "held/total")
-	Caption string // optional line under the bar (highlighted bytes, volume fill, free space)
-	Segs    []volMapSeg
+	Label string
+	Href  string // optional: the row label links here (a run page, a volume's medium page)
+	Pill  string // optional warn pill next to the label (a partial run copy's "held/total")
+	Chain bool   // holds part of the newest restore chain (green label edge)
+	Segs  []volMapSeg
 }
 
 // volMapSeg is one stored file (an archive part) on the bar.
@@ -1826,28 +1825,24 @@ func (v volSeg) title() string {
 	return fmt.Sprintf("%s · %s %s%s · %s", v.RunID, v.DLEID, levelTag(v.Level), span, sizeutil.FormatBytes(v.Bytes))
 }
 
-// physicalView is the /dles/<slug> physical panel: one archive (the ?run= row) or
-// the newest restore chain, drawn on its actual containers — the archive's bytes
-// highlighted in true position and proportion, everything else greyed.
+// physicalView is the /dles/<slug> physical panel: every container holding any
+// archive of the DLE, always on — this DLE's bytes colored in true position and
+// proportion (the newest restore chain in green, tip brightest), neighbors greyed.
+// Gaps are deliberately absent: the history grid above judges them by route.
 type physicalView struct {
-	RunID    string // the selected run; "" = chain mode
-	Level    int    // run mode: the archive's level
-	Bytes    int64  // run mode: the archive's compressed size
-	Groups   []physGroup
-	ChainAlt string // chain mode: address-identified media holding every member ("disk"); "" if none
+	Groups []physGroup // one per medium, in the grid's column order
 }
 
-// physGroup is one copy's drawing in the physical panel — one medium.
+// physGroup is one medium's containers in the physical panel.
 type physGroup struct {
 	Medium string
-	Where  string // heading detail: positions on tape ("NB-0008:2 · commit NB-0008:3"), or the chain's volume list
-	// Gap classes a no-copy group in run mode, judged like the grid cells:
-	// "miss" = the route owes it (red, with the repair hint), "lag" = a sync
-	// rule will bring it (quiet). "" = the copy exists.
-	Gap   string
-	RunID string // run mode with Gap "miss": the run to name in the repair hint
-	Rows  []volMapRow
+	Note   string // heading gloss: "one row per volume" / "one row per run"
+	Total  int    // cloud groups: run rows before the cap (0 = uncapped)
+	Rows   []volMapRow
 }
+
+// Capped reports whether run rows were held back (drives the "show all" note).
+func (g physGroup) Capped() bool { return g.Total > len(g.Rows) }
 
 // buildVolMap renders per-row segments into bars. keys fixes the row order; capOf
 // resolves a row's capacity (0 = unknown: the bar is scaled to its content);
