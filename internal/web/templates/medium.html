@@ -77,18 +77,18 @@
 </table>
 {{else}}<div class="empty">No labeled volumes yet.</div>{{end}}
 </div>
+{{end}}
 
 {{if $d.VolMap}}
-<h2>Volume map</h2>
+<h2>Placement map</h2>
 <div class="panel">
 {{template "volmap" $d.VolMap}}
 <div class="legend">
   <span><span class="sw" style="background:var(--accent)"></span> stored archives (darker = newer run)</span>
-  <span>segment width ∝ stored bytes, in on-volume file order</span>
+  <span>segment width ∝ stored bytes{{if $d.Pool}}, in on-volume file order{{else}}, oldest run first{{end}}</span>
   <span>hover a segment for run · archive · size</span>
 </div>
 </div>
-{{end}}
 {{end}}
 
 <h2>Per-run usage</h2>

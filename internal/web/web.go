@@ -1205,13 +1205,15 @@ func (s *Server) render(w http.ResponseWriter, name string, p page) {
 	_, _ = buf.WriteTo(w)
 }
 
-// volumeSegments gathers every placed archive part that sits on a labeled volume,
-// keyed by label — the catalog facts behind the volume maps. medium narrows to one
-// medium's placements; "" gathers all. Part sizes come from the placement's per-part
-// seals when they align; a sealless record falls back to an even split of the
-// archive's compressed size, so an old placement still draws (approximately).
-func (s *Server) volumeSegments(medium string) map[string][]volSeg {
-	segs := map[string][]volSeg{}
+// volumeSegments gathers every placed archive part, keyed by the row it draws on —
+// a labeled volume for tape, the medium itself for an address-identified copy
+// (disk/cloud has no volumes: the medium is the one "shelf" its archives sit on).
+// medium narrows to one medium's placements; "" gathers all. Part sizes come from
+// the placement's per-part seals when they align; a sealless record falls back to
+// an even split of the archive's compressed size, so an old placement still draws
+// (approximately).
+func (s *Server) volumeSegments(medium string) map[volKey][]volSeg {
+	segs := map[volKey][]volSeg{}
 	for _, run := range s.src.Runs() {
 		for _, p := range s.src.Placements(run.ID) {
 			if medium != "" && p.Medium != medium {
@@ -1230,9 +1232,6 @@ func (s *Server) volumeSegments(medium string) map[string][]volSeg {
 				}
 				sealed := len(pa.Seals) == len(pa.Parts) && len(pa.Parts) > 0
 				for i, pt := range pa.Parts {
-					if pt.Label == "" {
-						break // address-identified copy: no volume rows to draw
-					}
 					var size int64
 					if sealed {
 						size = pa.Seals[i].Size
@@ -1243,7 +1242,8 @@ func (s *Server) volumeSegments(medium string) map[string][]volSeg {
 					if len(pa.Parts) > 1 {
 						seg.Part, seg.Parts = i+1, len(pa.Parts)
 					}
-					segs[pt.Label] = append(segs[pt.Label], seg)
+					key := volKey{Medium: p.Medium, Label: pt.Label}
+					segs[key] = append(segs[key], seg)
 				}
 			}
 		}
@@ -1251,19 +1251,23 @@ func (s *Server) volumeSegments(medium string) map[string][]volSeg {
 	return segs
 }
 
-// volumeCapacities maps every labeled volume the configured pools know to its
-// capacity (absent = unknown: the bar scales to its content), for the DLE volume
-// map, which crosses media.
-func (s *Server) volumeCapacities() map[string]int64 {
-	caps := map[string]int64{}
+// volumeCapacities maps every row the configured media can draw to its capacity
+// (absent = unknown: the bar scales to its content), for the DLE placement map,
+// which crosses media — each labeled volume's registry capacity, and each
+// address-identified medium's own configured capacity.
+func (s *Server) volumeCapacities() map[volKey]int64 {
+	caps := map[volKey]int64{}
 	for _, m := range s.src.Media() {
 		if m.Volumes == 0 {
+			if m.Capacity > 0 {
+				caps[volKey{Medium: m.Name}] = m.Capacity
+			}
 			continue
 		}
 		if st, ok := s.src.MediumStats(m.Name); ok {
 			for _, v := range st.PerVolume {
 				if v.Capacity > 0 {
-					caps[v.Label] = v.Capacity
+					caps[volKey{Medium: m.Name, Label: v.Label}] = v.Capacity
 				}
 			}
 		}
@@ -1271,26 +1275,26 @@ func (s *Server) volumeCapacities() map[string]int64 {
 	return caps
 }
 
-// buildDLEVolMap draws the volumes holding any of the DLE's archives: its own parts
-// colored by run age (dark = newest), other runs' content greyed, and the newest
-// restore point's chain outlined — the physical answer to "which tapes hold this
-// DLE". Nil when no archive of the DLE sits on a labeled volume (disk/cloud-only
-// DLEs have no volumes to draw).
+// buildDLEVolMap draws every place holding any of the DLE's archives — labeled
+// volumes and address-identified media alike, so a disk/cloud copy is visible, not
+// just the tapes: its own parts colored by run age (dark = newest), other runs'
+// content greyed, and the newest restore point's chain outlined. Nil when the DLE
+// has no placed archive at all.
 func (s *Server) buildDLEVolMap(slug string) *volMap {
 	segs := s.volumeSegments("")
-	var labels []string
-	for label, ss := range segs {
+	var keys []volKey
+	for key, ss := range segs {
 		for _, v := range ss {
 			if v.DLE == slug {
-				labels = append(labels, label)
+				keys = append(keys, key)
 				break
 			}
 		}
 	}
-	if len(labels) == 0 {
+	if len(keys) == 0 {
 		return nil
 	}
-	sort.Strings(labels)
+	sortVolKeys(keys)
 	rank := runRank(segs, slug)
 	chain := s.chainRuns(slug)
 	caps := s.volumeCapacities()
@@ -1304,7 +1308,7 @@ func (s *Server) buildDLEVolMap(slug string) *volMap {
 		}
 		return cls
 	}
-	return buildVolMap(segs, labels, func(l string) int64 { return caps[l] }, classOf)
+	return buildVolMap(segs, keys, func(k volKey) int64 { return caps[k] }, classOf)
 }
 
 // chainRuns is the set of runs in the DLE's newest restore chain (the tip archive
@@ -1336,32 +1340,41 @@ func (s *Server) chainRuns(slug string) map[string]bool {
 	return set
 }
 
-// buildMediumVolMap draws everything stored on the pool's volumes, in registry order,
-// shaded by run age — nil for address-identified media, which have no volumes. A
-// label placements reference but the registry has never seen (an offsite tape) still
-// draws, after the registry's rows.
+// buildMediumVolMap draws everything stored on the medium, shaded by run age. A
+// labeled pool gets one bar per volume in registry order (a label placements
+// reference but the registry has never seen — an offsite tape — still draws, after
+// the registry's rows). An address-identified medium (disk/cloud) has no volumes:
+// its archives draw on one bar, the medium itself, scaled to its configured
+// capacity — nil only when nothing is stored there yet.
 func (s *Server) buildMediumVolMap(name string, st engine.MediumStats) *volMap {
-	if st.Volumes == 0 {
-		return nil
-	}
 	segs := s.volumeSegments(name)
-	caps := map[string]int64{}
-	known := map[string]bool{}
-	var labels []string
-	for _, v := range st.PerVolume {
-		labels = append(labels, v.Label)
-		known[v.Label] = true
-		caps[v.Label] = v.Capacity
+	if st.Volumes == 0 {
+		if len(segs) == 0 {
+			return nil
+		}
+		key := volKey{Medium: name}
+		rank := runRank(segs, "")
+		classOf := func(v volSeg) string { return ageClass(rank, v.RunID) }
+		return buildVolMap(segs, []volKey{key}, func(volKey) int64 { return st.Capacity }, classOf)
 	}
-	var extra []string
-	for label := range segs {
-		if !known[label] {
-			extra = append(extra, label)
+	caps := map[volKey]int64{}
+	known := map[volKey]bool{}
+	var keys []volKey
+	for _, v := range st.PerVolume {
+		key := volKey{Medium: name, Label: v.Label}
+		keys = append(keys, key)
+		known[key] = true
+		caps[key] = v.Capacity
+	}
+	var extra []volKey
+	for key := range segs {
+		if !known[key] {
+			extra = append(extra, key)
 		}
 	}
-	sort.Strings(extra)
-	labels = append(labels, extra...)
+	sortVolKeys(extra)
+	keys = append(keys, extra...)
 	rank := runRank(segs, "")
 	classOf := func(v volSeg) string { return ageClass(rank, v.RunID) }
-	return buildVolMap(segs, labels, func(l string) int64 { return caps[l] }, classOf)
+	return buildVolMap(segs, keys, func(k volKey) int64 { return caps[k] }, classOf)
 }

@@ -1519,9 +1519,42 @@ func TestDLEVolumeMap(t *testing.T) {
 		t.Fatalf("/dles/home misses the other-content hover title:\n%s", body)
 	}
 	_, body = get(t, srv.Handler(), "/media/tape")
-	for _, want := range []string{"Volume map", `class="volmap"`, "NB-0001", "NB-0002"} {
+	for _, want := range []string{"Placement map", `class="volmap"`, "NB-0001", "NB-0002"} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("/media/tape volume map misses %q:\n%s", want, body)
+			t.Fatalf("/media/tape placement map misses %q:\n%s", want, body)
+		}
+	}
+}
+
+// TestCloudMediumPlacementMap: an address-identified medium (disk/cloud) has no
+// volumes, so its archives draw on one bar — the medium itself — instead of the
+// map being absent; the DLE page likewise shows the cloud copy as a row.
+func TestCloudMediumPlacementMap(t *testing.T) {
+	at := time.Date(2026, 7, 8, 2, 0, 0, 0, time.UTC)
+	a := record.Archive{Run: "run-2026-07-08.020000", DLE: "home", Host: "localhost", Path: "/home",
+		Level: 0, Compressed: 4000, CreatedAt: at}
+	placed := catalog.PlacedArchive{DLE: "home", Level: 0,
+		Parts:  []archiveio.FilePos{{Pos: 1}},
+		Seals:  []record.PartSeal{{Size: 4000}},
+		Commit: archiveio.FilePos{Pos: 2}}
+	src := fakeSource{
+		runs:  []*catalog.Run{{ID: a.Run, Archives: []record.Archive{a}}},
+		media: []engine.MediumInfo{{Name: "s3", Type: "s3", Capacity: 10000}},
+		placements: map[string][]catalog.Placement{a.Run: {
+			{Medium: "s3", Archives: []catalog.PlacedArchive{placed}},
+		}},
+	}
+	srv := NewServer(src, t.TempDir())
+	_, body := get(t, srv.Handler(), "/media/s3")
+	for _, want := range []string{"Placement map", `class="volmap"`, `class="vollbl">s3</span>`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/media/s3 placement map misses %q:\n%s", want, body)
+		}
+	}
+	_, body = get(t, srv.Handler(), "/dles/home")
+	for _, want := range []string{"Placement map", `class="vollbl">s3</span>`, "chain"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/dles/home placement map misses %q:\n%s", want, body)
 		}
 	}
 }

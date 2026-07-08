@@ -1704,8 +1704,38 @@ type volMapSeg struct {
 	Title    string // hover text: run · DLE L# [· part i/n] · bytes
 }
 
-// volSeg is one placed archive part on a labeled volume — the catalog fact the
-// volume-map builders collect before rendering (positions order the bar; bytes set
+// volKey names one row of a placement map: a labeled volume of a pool, or — for an
+// address-identified medium (disk/cloud), which has no volumes — the medium itself
+// (Label empty), so a cloud copy draws as one bar instead of being invisible.
+type volKey struct {
+	Medium string
+	Label  string // "" = the medium's own bar
+}
+
+// display is the row's on-page name: the volume label, or the bare medium.
+func (k volKey) display() string {
+	if k.Label != "" {
+		return k.Label
+	}
+	return k.Medium
+}
+
+// sortVolKeys orders rows for a cross-media map: address-identified media first
+// (the landing reads before the vault), then labeled volumes, each alphabetical.
+func sortVolKeys(keys []volKey) {
+	sort.Slice(keys, func(i, j int) bool {
+		if (keys[i].Label == "") != (keys[j].Label == "") {
+			return keys[i].Label == ""
+		}
+		if keys[i].Label != keys[j].Label {
+			return keys[i].Label < keys[j].Label
+		}
+		return keys[i].Medium < keys[j].Medium
+	})
+}
+
+// volSeg is one placed archive part on a placement-map row — the catalog fact the
+// map builders collect before rendering (positions order the bar; bytes set
 // segment widths; run/DLE/level drive shading and hover text).
 type volSeg struct {
 	Pos   int
@@ -1727,27 +1757,43 @@ func (v volSeg) title() string {
 	return fmt.Sprintf("%s · %s %s%s · %s", v.RunID, v.DLEID, levelTag(v.Level), span, sizeutil.FormatBytes(v.Bytes))
 }
 
-// buildVolMap renders per-label segments into bars. labels fixes the row order;
-// capOf resolves a volume's capacity (0 = unknown: the bar is scaled to its
-// content); classOf maps each segment to its color class. Labels with no segments
-// still get a row — an empty labeled volume is a fact worth seeing on a pool page.
-func buildVolMap(segs map[string][]volSeg, labels []string, capOf func(string) int64, classOf func(volSeg) string) *volMap {
-	if len(labels) == 0 {
+// buildVolMap renders per-row segments into bars. keys fixes the row order; capOf
+// resolves a row's capacity (0 = unknown: the bar is scaled to its content);
+// classOf maps each segment to its color class. Keys with no segments still get a
+// row — an empty labeled volume is a fact worth seeing on a pool page. A labeled
+// volume's bar is ordered by on-volume file position; a medium's own bar (no
+// meaningful global position across archives) is ordered by run, oldest first, so
+// both read as a timeline.
+func buildVolMap(segs map[volKey][]volSeg, keys []volKey, capOf func(volKey) int64, classOf func(volSeg) string) *volMap {
+	if len(keys) == 0 {
 		return nil
 	}
 	m := &volMap{}
-	for _, label := range labels {
-		ss := append([]volSeg(nil), segs[label]...)
-		sort.Slice(ss, func(i, j int) bool { return ss[i].Pos < ss[j].Pos })
+	for _, key := range keys {
+		ss := append([]volSeg(nil), segs[key]...)
+		if key.Label != "" {
+			sort.Slice(ss, func(i, j int) bool { return ss[i].Pos < ss[j].Pos })
+		} else {
+			sort.Slice(ss, func(i, j int) bool {
+				a, b := ss[i], ss[j]
+				if a.RunID != b.RunID {
+					return a.RunID < b.RunID
+				}
+				if a.DLE != b.DLE {
+					return a.DLE < b.DLE
+				}
+				return a.Pos < b.Pos
+			})
+		}
 		var sum int64
 		for _, v := range ss {
 			sum += v.Bytes
 		}
-		base := capOf(label)
+		base := capOf(key)
 		if sum > base {
 			base = sum
 		}
-		row := volMapRow{Label: label}
+		row := volMapRow{Label: key.display()}
 		for _, v := range ss {
 			pct := 0.0
 			if base > 0 {
@@ -1774,7 +1820,7 @@ func ageClass(rank map[string]int, runID string) string {
 }
 
 // runRank ranks the distinct run ids newest-first for ageClass.
-func runRank(segs map[string][]volSeg, focusDLE string) map[string]int {
+func runRank(segs map[volKey][]volSeg, focusDLE string) map[string]int {
 	var ids []string
 	seen := map[string]bool{}
 	for _, ss := range segs {
