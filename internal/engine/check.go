@@ -97,14 +97,24 @@ func (c *checker) checkStaleness(rep *CheckReport) {
 	idOf := map[string]string{}
 	for _, d := range c.cfg.DLEs() {
 		// A wildcard (selection) source has no single catalog identity — its literal
-		// slug is never dumped, so tracking it would warn "never backed up" forever.
-		// Its children's freshness needs the per-run resolved set (a follow-on); a
+		// slug is never dumped. Its children arrive via the resolved set below; a
 		// partition BASE's slug is the rest's real catalog identity, so it stays.
 		if strings.ContainsAny(d.Path, "*?[") {
 			continue
 		}
 		dles = append(dles, d.Name())
 		idOf[d.Name()] = d.ID()
+	}
+	// The latest run's resolved set extends tracking to pattern children (and any
+	// unit config cannot name): resolved-but-aging flags loud, while a unit that
+	// stops being resolved — a deleted child — retires silently, exactly like a DLE
+	// removed from config. Absent (pre-record history, rebuilt catalog): config-only.
+	for _, r := range c.cat.LatestResolved() {
+		if _, ok := idOf[r.DLE]; ok {
+			continue
+		}
+		dles = append(dles, r.DLE)
+		idOf[r.DLE] = r.Host + ":" + r.Source
 	}
 	stale := c.cat.StaleDLEs(dles, window, time.Now())
 	if len(stale) == 0 {

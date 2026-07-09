@@ -180,6 +180,13 @@ func (e *Engine) newConductor() *conductor.Conductor {
 		Workers:      e.cfg.Workers(),
 		NewFileSink:  func() progress.Sink { return progress.NewFileSink(e.cfg.WorkdirPath(), time.Now) },
 		LandingsFor:  func(it planner.Item) []string { return e.landingsFor(it.DLE.DumpTypeName()) },
+		RecordResolved: func(runID string, items []planner.Item) error {
+			set := make([]catalog.ResolvedDLE, len(items))
+			for i, it := range items {
+				set[i] = catalog.ResolvedDLE{DLE: it.Name, Host: it.DLE.Host, Source: it.DLE.Source, DumpType: it.DLE.DumpTypeName()}
+			}
+			return e.cat.RecordResolved(runID, set)
+		},
 		RunSink:      e.runSink,
 		EstimateSink: e.estimateSink,
 	})

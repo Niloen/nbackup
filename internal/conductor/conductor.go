@@ -80,14 +80,18 @@ type Deps struct {
 	// fit. What it frees is logged into the run's own log, so the nightly report
 	// carries the reclamation that used to be a separate cron prune. Nil skips
 	// (tests).
-	MakeRoom     func(medium string, incoming int64, now time.Time, lf logf.Logf) (freed int64, err error)
-	Flush        func(now time.Time, lf logf.Logf) (int, error)
-	HoldingMedia []string
-	Workers      int
-	NewFileSink  func() progress.Sink
-	LandingsFor  func(item planner.Item) []string // the media an item's DLE lands on, primary first (dumptype override, else the default landing route)
-	RunSink      progress.Sink
-	EstimateSink progress.Sink
+	MakeRoom func(medium string, incoming int64, now time.Time, lf logf.Logf) (freed int64, err error)
+	// RecordResolved persists the run's resolved DLE set (catalog.RecordResolved) —
+	// the intent record staleness and route judgment key off for pattern children.
+	// Called once, after planning succeeds and before any dump. Nil skips (tests).
+	RecordResolved func(runID string, items []planner.Item) error
+	Flush          func(now time.Time, lf logf.Logf) (int, error)
+	HoldingMedia   []string
+	Workers        int
+	NewFileSink    func() progress.Sink
+	LandingsFor    func(item planner.Item) []string // the media an item's DLE lands on, primary first (dumptype override, else the default landing route)
+	RunSink        progress.Sink
+	EstimateSink   progress.Sink
 }
 
 // Conductor executes one plan into one sealed run. It is per-run (it carries the

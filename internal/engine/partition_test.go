@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +86,35 @@ func TestPartitionedSourceEndToEnd(t *testing.T) {
 	for _, carved := range []string{"alice", "bob"} {
 		if _, err := os.Stat(filepath.Join(dest, carved)); !os.IsNotExist(err) {
 			t.Errorf("the rest must not contain carved child %q (double-dump)", carved)
+		}
+	}
+
+	// R5: the run recorded its resolved set (intent), so the retrospective surfaces
+	// can answer what config cannot for pattern children:
+	resolved := eng.cat.LatestResolved()
+	if len(resolved) != 3 {
+		t.Fatalf("run must record its resolved set, got %v", resolved)
+	}
+	for _, r := range resolved {
+		if r.DumpType != config.DefaultDumpType {
+			t.Errorf("resolved unit %s must carry its dumptype, got %q", r.DLE, r.DumpType)
+		}
+	}
+	// …coverage judgment: a child's archives are owed to its dumptype's route even
+	// though its slug is not in config — the promise machinery works for children.
+	run, err := eng.cat.ReadRun(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := eng.RunCoverage(run)
+	if class := rc.Class("vault", aliceSlug, 0); class != CopyRouted {
+		t.Errorf("child archive must be judged ROUTED on its dumptype's landing, got %v", class)
+	}
+	// …and staleness: children are tracked (not "never backed up") via the resolved set.
+	rep := eng.Check(false)
+	for _, line := range rep.Server {
+		if !line.OK && strings.Contains(line.Msg, "staleness") {
+			t.Errorf("fresh partition run must not flag staleness: %s", line.Msg)
 		}
 	}
 }

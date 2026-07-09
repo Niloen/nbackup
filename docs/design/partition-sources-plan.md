@@ -148,10 +148,21 @@ ALSO DONE: phase 6 — `record.Archive.Archiver` renamed `ArchiverType` (wire ke
 bare-type fallbacks for pre-name artifacts, and a retyped definition never silently
 applies (type must match). Pinned by TestRestoreArchiverPrefersRecordedName.
 
-REMAINING: R5 (record the resolved set per run; staleness for pattern children + retire
-removed DLEs; `report`'s staleness/drill reroute), postgres database enumeration
-(selection), R9 doc pass (example config, README, `*` matches dot-dirs, leading-`/`
-exclude behavior change + anchored-exclude-additions re-baseline, directory-only rule).
+ALSO DONE: excludes follow the Amanda `./` convention (verbatim to tar, self-anchoring;
+absolute patterns rejected at load with the teaching message; partition ownership
+re-mapping keeps anchored excludes base-relative — partitioning never changes which
+bytes are excluded, and an anchored addition re-baselines only the owning DLE). R5 —
+the catalog records the LATEST run's resolved set ({DLE, Host, Source, DumpType},
+written at plan-commit pre-dump so a crashed run's intent stands; single-latest, the
+3rd non-rebuildable catalog record): staleness (check + report) tracks pattern children
+and retires units by omission; coverage judgment + sync auto-scoping key routes off
+promiseRoutes = config.Routes ∪ latest-resolved dumptype routes, so children's copies
+are owed, judged, and auto-synced. Degrades to config-only on pre-record/rebuilt
+catalogs (shipped behavior).
+
+REMAINING: postgres database enumeration (selection), R9 doc pass (example config,
+README, `*` matches dot-dirs, excludes-are-relative + `./` anchoring, anchored-addition
+re-baseline, directory-only rule).
 
 ## Phased build order
 

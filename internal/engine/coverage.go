@@ -63,11 +63,32 @@ type RunCoverage struct {
 	syncFrom map[string]string // promised medium -> its rule's source ("" = resolved per run)
 }
 
-// RunCoverage judges run's copies against this engine's config; see JudgeRun.
+// RunCoverage judges run's copies against this engine's current intent; see JudgeRun.
 // The judgment is a live display computation, so it reads the wall clock.
 func (e *Engine) RunCoverage(run *catalog.Run) *RunCoverage {
 	minAge := func(medium string) time.Duration { return e.cfg.MinAgeFor(e.cfg.Media[medium]) }
-	return JudgeRun(run, e.cfg.Routes(), e.cfg.Sync, e.cat.Runs(), e.cat.Placements, minAge, time.Now())
+	return JudgeRun(run, promiseRoutes(e.cfg, e.cat), e.cfg.Sync, e.cat.Runs(), e.cat.Placements, minAge, time.Now())
+}
+
+// promiseRoutes is the current-intent route map: every configured slug's route
+// (config.Routes) plus each latest-resolved unit's dumptype route — the pattern
+// children, whose slugs config structurally cannot contain (the catalog's resolved-set
+// record supplies their dumptype; see catalog.RecordResolved). Both halves express
+// CURRENT intent: a config route edit re-owes old archives immediately, and a unit that
+// stops being resolved is retired exactly like a DLE removed from config. On a catalog
+// with no resolved set (pre-record history, or rebuilt from media) this degrades to
+// config-only — the shipped behavior.
+func promiseRoutes(cfg *config.Config, cat *catalog.Catalog) map[string][]string {
+	routes := cfg.Routes()
+	for _, r := range cat.LatestResolved() {
+		if _, ok := routes[r.DLE]; ok {
+			continue
+		}
+		if media, err := cfg.LandingsForDumptype(r.DumpType); err == nil && len(media) > 0 {
+			routes[r.DLE] = media
+		}
+	}
+	return routes
 }
 
 // JudgeRun builds a run's expectation map from the DLE landing routes
@@ -309,10 +330,11 @@ func (rc *RunCoverage) Judge(medium string, p catalog.Placement) CopyJudgment {
 
 // routedScope is the set of DLE slugs whose landing route includes the medium,
 // or nil when no DLE routes there — the distinction SyncTo's auto mode keys on
-// (top up a landing's own route vs mirror a whole source onto a vault).
-func routedScope(cfg *config.Config, medium string) map[string]bool {
+// (top up a landing's own route vs mirror a whole source onto a vault). routes is
+// the current-intent map (promiseRoutes), so pattern children scope correctly.
+func routedScope(routes map[string][]string, medium string) map[string]bool {
 	var set map[string]bool
-	for dle, media := range cfg.Routes() {
+	for dle, media := range routes {
 		for _, m := range media {
 			if m == medium {
 				if set == nil {

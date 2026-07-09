@@ -142,6 +142,13 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 
 	runID := c.mintRunID(now, time.Local)
 	spec := archiveio.RunSpec{ID: runID, CreatedAt: now}
+	// Record the run's resolved set BEFORE any byte moves: a crashed run's intent
+	// still stands, so its unfinished children show up stale rather than vanishing.
+	if c.d.RecordResolved != nil {
+		if err := c.d.RecordResolved(runID, plan.Items); err != nil {
+			return nil, fmt.Errorf("record the run's resolved DLE set: %w", err)
+		}
+	}
 
 	// The producers dump every DLE; the drain consumes them — buffering each onto a holding disk
 	// (one or more media marked `holding: true`) and copying it to every landing on its route, or,
