@@ -43,13 +43,15 @@ func (g *gnutar) carvesPath(dle string, level int) string {
 	return filepath.Join(g.stateDir, dle, fmt.Sprintf("L%d.carves", level))
 }
 
-// carvesOf extracts the anchored subtree carves (leading-"/" patterns, a partition
-// remainder's) from an exclude list, leaving content globs ("*.log") behind — glob edits
-// keep the Amanda stance (no forced full); only system-derived carves are compared.
+// carvesOf extracts the anchored subtree carves ("./"-prefixed patterns — a partition
+// remainder's system carves and user-written anchored excludes alike) from an exclude
+// list, leaving content globs ("*.log") behind: glob edits keep the Amanda stance (no
+// forced full); anchored additions re-baseline, because either kind leaves a stale
+// subtree copy in the chain.
 func carvesOf(exclude []string) []string {
 	var out []string
 	for _, p := range exclude {
-		if strings.HasPrefix(p, "/") {
+		if strings.HasPrefix(p, "./") {
 			out = append(out, p)
 		}
 	}

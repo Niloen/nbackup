@@ -116,7 +116,15 @@ func splitLiteralPrefix(pattern string) (root, rel string) {
 // Expand resolves a SourcePattern into concrete Scopes over the executor. See the Archiver
 // interface. gnutar enumerates directories with `find`; a wildcard-free pattern is one Scope
 // with no I/O; a partition (Base set) also emits the remainder (Source == Base) with the
-// matches carved out via anchored (leading-"/") excludes.
+// matches carved out via "./"-anchored excludes (self-anchoring: see createArgs).
+//
+// Anchored ("./") excludes anchor at what the user wrote in `sources:`. For a plain source
+// and a selection that is each scope's own root — verbatim pass-through. For a PARTITION
+// the user named ONE source (the base), so partitioning must not change what "./x" means:
+// each anchored exclude is re-mapped onto the one derived scope that owns it by prefix —
+// re-anchored relative to that scope's root — and an exclude that swallows a whole match
+// suppresses that match entirely (the rest still carves it; excluded is never resurrected).
+// The excluded byte set is therefore identical whether or not the source is partitioned.
 func (g *gnutar) Expand(p archiver.SourcePattern) ([]archiver.Scope, error) {
 	root, rel := p.Base, p.Pattern
 	if root == "" {
@@ -136,15 +144,56 @@ func (g *gnutar) Expand(p archiver.SourcePattern) ([]archiver.Scope, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Split the configured excludes: bare globs apply to every derived scope; anchored
+	// ones are base-relative for a partition (ownership re-mapping below) and
+	// scope-relative (verbatim) for a selection.
+	var globs, anchored []string
+	for _, e := range p.Exclude {
+		if p.Base != "" && strings.HasPrefix(e, "./") {
+			anchored = append(anchored, e)
+		} else {
+			globs = append(globs, e)
+		}
+	}
 	scopes := make([]archiver.Scope, 0, len(matches)+1)
 	var carves []string
+	prefix := strings.TrimSuffix(root, "/") + "/"
 	for _, m := range matches {
-		scopes = append(scopes, archiver.Scope{Base: root, Source: m, Exclude: p.Exclude})
-		carves = append(carves, "/"+strings.TrimPrefix(m, strings.TrimSuffix(root, "/")+"/"))
+		relName := strings.TrimPrefix(m, prefix)
+		carves = append(carves, "./"+relName)
+		sc := archiver.Scope{Base: root, Source: m, Exclude: globs}
+		suppressed := false
+		for _, a := range anchored {
+			ap := strings.TrimPrefix(a, "./")
+			switch {
+			case ap == relName:
+				suppressed = true // the whole match is excluded: no DLE for it
+			case strings.HasPrefix(ap, relName+"/"):
+				sc.Exclude = append(append([]string{}, sc.Exclude...), "./"+strings.TrimPrefix(ap, relName+"/"))
+			}
+		}
+		if !suppressed {
+			scopes = append(scopes, sc)
+		}
 	}
-	if p.Base != "" { // the remainder: Source == Base, matches carved out (anchored)
+	if p.Base != "" { // the remainder: Source == Base, matches carved out
 		rest := archiver.Scope{Base: root, Source: root}
-		rest.Exclude = append(append([]string{}, p.Exclude...), carves...)
+		rest.Exclude = append([]string{}, globs...)
+		for _, a := range anchored { // anchored excludes not owned by any match stay on the rest
+			owned := false
+			ap := strings.TrimPrefix(a, "./")
+			for _, m := range matches {
+				relName := strings.TrimPrefix(m, prefix)
+				if ap == relName || strings.HasPrefix(ap, relName+"/") {
+					owned = true
+					break
+				}
+			}
+			if !owned {
+				rest.Exclude = append(rest.Exclude, a)
+			}
+		}
+		rest.Exclude = append(rest.Exclude, carves...)
 		scopes = append(scopes, rest)
 	}
 	return scopes, nil
@@ -408,27 +457,14 @@ func (g *gnutar) createArgs(r archiver.BackupRequest, fileTarget, snapshot, inde
 	if g.sparse {
 		args = append(args, "--sparse")
 	}
-	// Excludes split by anchoring: a plain glob (e.g. "*.log", a dumptype content exclude) is
-	// unanchored and matches any path component; a leading-"/" pattern (a partition's carved
-	// subtree, e.g. "/alice") is anchored at the archive root. tar runs `--directory=Source .`,
-	// so member names carry a "./" prefix ("./alice/") — the anchored pattern must too, so
-	// "/alice" is emitted as "./alice". --anchored is a positional toggle: unanchored set first.
-	var unanchored, anchored []string
+	// Excludes pass VERBATIM — the Amanda convention needs no flags: tar runs
+	// `--directory=Source .`, so member names are "./"-prefixed, and tar's unanchored
+	// matcher tries a pattern against the full name and every after-a-"/" suffix — no
+	// suffix ever starts with "./", so a "./"-prefixed pattern can only match at the
+	// root (self-anchoring), while a bare pattern ("*.log", "cache") floats to any
+	// depth. Absolute patterns are rejected at config load, so none reach here.
 	for _, p := range r.Exclude {
-		if strings.HasPrefix(p, "/") {
-			anchored = append(anchored, "."+p) // "/alice" -> "./alice"
-		} else {
-			unanchored = append(unanchored, p)
-		}
-	}
-	for _, p := range unanchored {
 		args = append(args, "--exclude="+p)
-	}
-	if len(anchored) > 0 {
-		args = append(args, "--anchored")
-		for _, p := range anchored {
-			args = append(args, "--exclude="+p)
-		}
 	}
 	if indexPath != "" {
 		args = append(args, "--verbose", "--block-number", "--index-file="+indexPath)

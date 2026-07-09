@@ -144,6 +144,18 @@ sources:
 			wantErr: `unknown key "split"`,
 		},
 		{
+			name: "absolute exclude rejected with teaching message",
+			yaml: `
+dumptypes:
+  web:
+    exclude: ["/var/cache"]
+sources:
+  web:
+    fileserver: [/srv]
+`,
+			wantErr: `write "./var/cache" to anchor it`,
+		},
+		{
 			name: "wildcard partition base rejected",
 			yaml: `
 sources:

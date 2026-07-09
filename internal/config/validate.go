@@ -74,6 +74,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	for name, dt := range c.DumpTypes {
+		if err := validateExcludes(name, dt.Exclude); err != nil {
+			return err
+		}
 		if dt.PartSize == "" {
 			continue
 		}
@@ -124,6 +127,19 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateNotify(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateExcludes rejects absolute exclude patterns: excludes are relative to each
+// source's root (Amanda semantics — a bare pattern floats to any depth, a "./" prefix
+// anchors at the source root), so an absolute path would silently never match. The
+// error teaches the two working spellings.
+func validateExcludes(name string, patterns []string) error {
+	for _, p := range patterns {
+		if strings.HasPrefix(p, "/") {
+			return fmt.Errorf("dumptype %q exclude %q: excludes are relative to the source, not absolute paths — write %q to anchor it at the source root, or a bare pattern to match at any depth", name, p, "."+p)
+		}
 	}
 	return nil
 }
