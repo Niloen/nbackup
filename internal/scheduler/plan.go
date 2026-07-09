@@ -16,6 +16,13 @@ import (
 // live snapshot as each DLE's estimate starts and finishes, for the
 // (potentially slow) estimate phase: every DLE is sized by an archiver pass, so
 // a long preview is otherwise silent.
+//
+// The error return is CONFIG-CLASS ONLY (the failure ladder's top rung): an identity
+// collision or an unresolvable archiver definition — deterministic misconfiguration an
+// operator must fix, so it blocks rather than warns. Every OPERATIONAL failure (a source
+// that cannot be enumerated, a dead estimate, later an unreachable host) becomes a
+// plan.Failed unit: reported like a dump failure while the rest of the night proceeds.
+// The pure algorithm underneath (planner.Build) has no error return at all.
 func (s *Scheduler) Plan(date time.Time, sink progress.Sink) (*planner.Plan, error) {
 	dles, srcFails, err := s.resolve()
 	if err != nil {
