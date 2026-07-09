@@ -83,8 +83,11 @@ type Deps struct {
 	MakeRoom func(medium string, incoming int64, now time.Time, lf logf.Logf) (freed int64, err error)
 	// RecordResolved persists the run's resolved DLE set (catalog.RecordResolved) —
 	// the intent record staleness and route judgment key off for pattern children.
-	// Called once, after planning succeeds and before any dump. Nil skips (tests).
-	RecordResolved func(runID string, items []planner.Item) error
+	// failed units are recorded as intended too (a planner-FAILED unit, and an
+	// unresolvable source's previously-resolved units carried forward by Origin), so
+	// the owing machinery never goes quiet during an outage. Called once, after
+	// planning succeeds and before any dump. Nil skips (tests).
+	RecordResolved func(runID string, items []planner.Item, failed []planner.FailedUnit) error
 	Flush          func(now time.Time, lf logf.Logf) (int, error)
 	HoldingMedia   []string
 	Workers        int

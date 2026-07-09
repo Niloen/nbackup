@@ -202,6 +202,18 @@ func fprintPlanItems(w io.Writer, plan *planner.Plan) (estTotal int64, unknown i
 		i = j
 	}
 	tw.Flush()
+	// Units the plan could not schedule (Amanda's "planner: FAILED"): an unresolvable
+	// source, a dead estimate, an unreachable host. The run proceeds without them and
+	// exits non-zero; they are listed here so the preview and the dry-run tell the
+	// same story the morning report will.
+	if len(plan.Failed) > 0 {
+		fmt.Fprintf(w, "\nFAILED (will not dump):\n")
+		ftw := newTab(w)
+		for _, f := range plan.Failed {
+			fmt.Fprintf(ftw, "  %s\t%s\n", f.ID, f.Reason)
+		}
+		ftw.Flush()
+	}
 	return estTotal, unknown
 }
 

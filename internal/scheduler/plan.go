@@ -17,21 +17,38 @@ import (
 // (potentially slow) estimate phase: every DLE is sized by an archiver pass, so
 // a long preview is otherwise silent.
 func (s *Scheduler) Plan(date time.Time, sink progress.Sink) (*planner.Plan, error) {
-	dles, err := s.resolve()
+	dles, srcFails, err := s.resolve()
 	if err != nil {
-		return nil, err
+		return nil, err // config-class: a collision or unresolvable definition fails the plan
 	}
-	plan := planner.Build(dles, s.d.History(), s.estimates(dles, sink), s.d.ForcedFulls(), s.plannerParams(date), date)
+	est, estFailed := s.estimates(dles, sink)
+	// The failure ladder's unit class: failed units leave the plannable set and are
+	// carried on plan.Failed — rendered by `nb plan`, marked FAILED in the run tracker,
+	// counted into the run's non-zero exit — while every healthy unit proceeds.
+	plannable := dles[:0]
+	dead := map[string]bool{}
+	for _, f := range estFailed {
+		dead[f.DLE.Name()] = true
+	}
+	for _, d := range dles {
+		if !dead[d.Name()] {
+			plannable = append(plannable, d)
+		}
+	}
+	plan := planner.Build(plannable, s.d.History(), est, s.d.ForcedFulls(), s.plannerParams(date), date)
+	for _, f := range srcFails {
+		plan.Failed = append(plan.Failed, planner.FailedUnit{ID: f.Source.ID(), Origin: f.Source.ID(), Reason: "source could not be resolved: " + f.Err.Error()})
+	}
+	plan.Failed = append(plan.Failed, estFailed...)
 	s.forceFullWhereBaseMissing(plan)
 	return plan, nil
 }
 
 // resolve expands the configured sources into the concrete DLEs to schedule (see
-// planner.Resolve). Only the live-acting paths call it; a failed enumeration is the
-// caller's failure.
-func (s *Scheduler) resolve() ([]planner.DLE, error) {
-	return planner.Resolve(s.d.DLEs(),
-		func(dt, host string) (planner.Expander, error) { return s.d.ArchiverFor(dt, host) },
+// Resolve). Only the live-acting paths call it.
+func (s *Scheduler) resolve() ([]planner.DLE, []SourceFailure, error) {
+	return Resolve(s.d.DLEs(),
+		func(dt, host string) (Expander, error) { return s.d.ArchiverFor(dt, host) },
 		s.d.ExcludeFor)
 }
 
@@ -79,9 +96,22 @@ func (s *Scheduler) plannerParams(date time.Time) planner.Params {
 // projected forward. Estimates and the capacity ceiling are sampled once at `start`
 // and held constant, so this is a schedule forecast, not a capacity timeline.
 func (s *Scheduler) Simulate(start time.Time, days int) ([]*planner.Plan, error) {
-	dles, err := s.resolve()
+	dles, _, err := s.resolve()
 	if err != nil {
 		return nil, err
 	}
-	return planner.Simulate(dles, s.d.History(), s.estimates(dles, nil), s.d.ForcedFulls(), s.plannerParams(start), start, days), nil
+	// A forecast is advisory: failed sources/estimates simply don't appear in it
+	// (the real plan reports them as FAILED units).
+	est, estFailed := s.estimates(dles, nil)
+	dead := map[string]bool{}
+	for _, f := range estFailed {
+		dead[f.DLE.Name()] = true
+	}
+	plannable := dles[:0]
+	for _, d := range dles {
+		if !dead[d.Name()] {
+			plannable = append(plannable, d)
+		}
+	}
+	return planner.Simulate(plannable, s.d.History(), est, s.d.ForcedFulls(), s.plannerParams(start), start, days), nil
 }

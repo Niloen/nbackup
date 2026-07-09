@@ -180,10 +180,34 @@ func (e *Engine) newConductor() *conductor.Conductor {
 		Workers:      e.cfg.Workers(),
 		NewFileSink:  func() progress.Sink { return progress.NewFileSink(e.cfg.WorkdirPath(), time.Now) },
 		LandingsFor:  func(it planner.Item) []string { return e.landingsFor(it.DLE.DumpTypeName()) },
-		RecordResolved: func(runID string, items []planner.Item) error {
-			set := make([]catalog.ResolvedDLE, len(items))
-			for i, it := range items {
-				set[i] = catalog.ResolvedDLE{DLE: it.Name, Host: it.DLE.Host, Source: it.DLE.Source, DumpType: it.DLE.DumpTypeName()}
+		RecordResolved: func(runID string, items []planner.Item, failed []planner.FailedUnit) error {
+			var set []catalog.ResolvedDLE
+			seen := map[string]bool{}
+			add := func(d planner.DLE) {
+				if name := d.Name(); !seen[name] {
+					seen[name] = true
+					set = append(set, catalog.ResolvedDLE{DLE: name, Host: d.Host, Source: d.Source, DumpType: d.DumpTypeName(), Origin: d.Origin})
+				}
+			}
+			for _, it := range items {
+				add(it.DLE)
+			}
+			// A unit that failed before dumping was still INTENDED — it stays owed.
+			// A source that failed to enumerate cannot name its units, so its
+			// previously-resolved ones are carried forward by Origin: intent
+			// persists through the outage without dumping on a guess.
+			prev := e.cat.LatestResolved()
+			for _, f := range failed {
+				if f.DLE.Source != "" {
+					add(f.DLE)
+					continue
+				}
+				for _, p := range prev {
+					if p.Origin == f.Origin && !seen[p.DLE] {
+						seen[p.DLE] = true
+						set = append(set, p)
+					}
+				}
 			}
 			return e.cat.RecordResolved(runID, set)
 		},

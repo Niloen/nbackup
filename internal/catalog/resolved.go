@@ -21,6 +21,11 @@ type ResolvedDLE struct {
 	Host     string `json:"host,omitempty"`
 	Source   string `json:"source,omitempty"`
 	DumpType string `json:"dumptype,omitempty"`
+	// Origin is the config source (its ID) the unit was resolved from. When a source
+	// fails to enumerate on a later run, its previous units are carried forward into
+	// that run's set BY ORIGIN — intent persists through the outage (staleness keeps
+	// flagging, coverage keeps owing) even though nothing is dumped on a guess.
+	Origin string `json:"origin,omitempty"`
 }
 
 // ResolvedSet is the latest run's resolved set, stamped with the run that recorded it.

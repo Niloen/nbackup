@@ -16,10 +16,10 @@ import (
 	"github.com/Niloen/nbackup/internal/depot"
 	"github.com/Niloen/nbackup/internal/dumper"
 	"github.com/Niloen/nbackup/internal/media"
-	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
+	"github.com/Niloen/nbackup/internal/scheduler"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 	"github.com/Niloen/nbackup/internal/transform/compress"
 	"github.com/Niloen/nbackup/internal/transform/crypt"
@@ -430,7 +430,7 @@ func (c *checker) checkHost(rep *CheckReport, host string, connect bool) HostChe
 		if err != nil {
 			continue
 		}
-		scopes, err := arch.Expand(planner.PatternOf(d, nil))
+		scopes, err := arch.Expand(scheduler.PatternOf(d, nil))
 		if err != nil {
 			rep.add(&hc.Lines, false, false, fmt.Sprintf("source %s: cannot enumerate: %v", d.Path, err))
 			continue

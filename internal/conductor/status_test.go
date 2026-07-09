@@ -54,12 +54,16 @@ func TestRunPreludeFailureStampsStatusFailed(t *testing.T) {
 		name                      string
 		preflightErr, makeRoomErr error
 		wantErr                   string
+		wantState                 progress.State
 	}{
 		// A single-landing route: the refusal downs the DLE's whole route, so the run
 		// is fatal (a multi-landing route instead skips the refusing landing; see
 		// TestRouteFatal for the judgment).
-		{"make-room refusal", nil, errors.New("capacity 400.00 GB cannot hold the incoming"), "no landing on its route is usable"},
-		{"preflight failure", errors.New("host h1 unreachable"), nil, "host h1 unreachable"},
+		{"make-room refusal", nil, errors.New("capacity 400.00 GB cannot hold the incoming"), "no landing on its route is usable", progress.StatePending},
+		// A down host is the failure ladder's UNIT class: its DLEs are marked FAILED
+		// (not pending) — here it is the only host, so nothing is plannable and the
+		// run is fatal, but the status file still tells the per-DLE truth.
+		{"preflight failure", errors.New("host h1 unreachable"), nil, "host h1 unreachable", progress.StateFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,8 +86,8 @@ func TestRunPreludeFailureStampsStatusFailed(t *testing.T) {
 			if snap.EndedAt.IsZero() {
 				t.Errorf("status file has no EndedAt; terminal snapshots must stamp one")
 			}
-			if len(snap.DLEs) != 1 || snap.DLEs[0].State != progress.StatePending {
-				t.Errorf("status file DLEs = %+v; want the planned DLE pending (nothing was dumped)", snap.DLEs)
+			if len(snap.DLEs) != 1 || snap.DLEs[0].State != tc.wantState {
+				t.Errorf("status file DLEs = %+v; want the planned DLE %q (nothing was dumped)", snap.DLEs, tc.wantState)
 			}
 		})
 	}

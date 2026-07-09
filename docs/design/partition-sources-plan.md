@@ -169,6 +169,22 @@ cluster), so identity + partition-refusal is final — the spec's earlier "scope
 database" row was wrong and is corrected; a per-database selection belongs to a future
 pg_dump-shaped archiver.
 
+ALSO DONE — the FAILURE LADDER (review follow-up: "take a step back"): one principle,
+fail at the smallest honest unit, loudly; the run fails only when it cannot proceed.
+(1) config-class (collision, bad definition) fails the command; (2) environment-class
+(no landing, window, catalog persist) fails the run; (3) UNIT-class — an unresolvable
+source (per-source, atomic: the rest can never balloon), a DEAD ESTIMATE (no more
+planning at a fictional ~0 B, which corrupted make-room's capacity promise; Amanda's
+"planner: FAILED"), an UNREACHABLE HOST at strict preflight (DEMOTED from run-fatal:
+one dead client no longer costs the night) — all become plan.Failed: rendered by
+nb plan, marked FAILED in the run tracker (status/report/mail), counted into a
+non-zero exit, and recorded as still-INTENDED in the resolved set (an unresolvable
+source's previous units carry forward BY ORIGIN) so staleness/coverage keep owing
+through the outage; (4) data-class (PARTIAL archives, Incomplete floors) stays a
+warning. Resolve/PatternOf/Expander moved planner → scheduler (the impure driver),
+restoring the documented pure-planner boundary; planner keeps only the DLE value type
+and FailedUnit. planner.DLE + catalog.ResolvedDLE gained Origin (the carry-forward key).
+
 FEATURE COMPLETE on branch worktree-auto-shard.
 
 ## Phased build order

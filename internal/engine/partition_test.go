@@ -119,6 +119,86 @@ func TestPartitionedSourceEndToEnd(t *testing.T) {
 	}
 }
 
+// TestSourceFailureContinuesAndCarriesIntent proves the failure ladder's unit class for
+// sources, end-to-end: when a partition base disappears between runs, its enumeration
+// fails — the run proceeds for every other source (sealing their archives), exits
+// non-zero, and the run's resolved set CARRIES FORWARD the dead source's previous units
+// by Origin, so staleness and coverage keep owing them through the outage. Nothing is
+// dumped on a guess; only the promise persists.
+func TestSourceFailureContinuesAndCarriesIntent(t *testing.T) {
+	healthy := t.TempDir()
+	write(t, filepath.Join(healthy, "f.txt"), "still here")
+	doomedParent := t.TempDir()
+	doomed := filepath.Join(doomedParent, "data")
+	write(t, filepath.Join(doomed, "alice", "a.txt"), "alpha")
+
+	cfg := &config.Config{
+		Landing: config.MediumList{"vault"},
+		Media: map[string]config.Media{
+			"vault": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+		},
+		Sources: []config.DLE{
+			{Host: "localhost", Path: healthy},
+			{Host: "localhost", Path: doomed, Partition: "*"},
+		},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	if _, err := eng.Run(context.Background(), time.Date(2026, 7, 9, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	aliceSlug := config.Slug("localhost", filepath.Join(doomed, "alice"))
+
+	// The base vanishes: run 2's enumeration of it fails, but the night must go on.
+	if err := os.RemoveAll(doomed); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := eng.Run(context.Background(), time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC), nil)
+	if err == nil {
+		t.Fatal("a run with an unresolvable source must exit non-zero")
+	}
+	if !strings.Contains(err.Error(), "failed before dumping") {
+		t.Fatalf("run error should name the pre-dump failure class, got: %v", err)
+	}
+	if s2 == nil {
+		t.Fatal("the sealed partial run must be returned alongside the failure")
+	}
+	var healthyDumped bool
+	for _, a := range s2.Archives {
+		if a.DLE == config.Slug("localhost", healthy) {
+			healthyDumped = true
+		}
+	}
+	if !healthyDumped {
+		t.Error("the healthy source must dump despite the dead one")
+	}
+
+	// Intent persisted: the dead source's previous units ride run 2's resolved set by
+	// Origin, so a child that can no longer even be enumerated stays owed.
+	var carried bool
+	for _, r := range eng.cat.LatestResolved() {
+		if r.DLE == aliceSlug {
+			carried = true
+			if r.Origin != "localhost:"+doomed {
+				t.Errorf("carried unit must keep its origin, got %q", r.Origin)
+			}
+		}
+	}
+	if !carried {
+		t.Error("the dead source's units must be carried forward in the resolved set")
+	}
+}
+
 // TestPartitionRestRebaselinesOnNewChild proves the re-baseline guard end-to-end: a child
 // directory created between runs graduates to its own DLE on the next run, and the rest —
 // whose carve set grew past what its base snapshot was built with (gnutar's .carves

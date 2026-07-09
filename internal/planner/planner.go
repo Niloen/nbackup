@@ -89,9 +89,10 @@ type Params struct {
 // Plan is the result of a planning run.
 type Plan struct {
 	Date     time.Time
-	Interval int // the cycle in days
-	Items    []Item
-	Warnings []string // structural problems no scheduling can fix (e.g. cycle won't fit capacity)
+	Interval int          // the cycle in days
+	Items    []Item       // the units this run will dump
+	Failed   []FailedUnit // units that failed BEFORE dumping (unresolvable source, dead estimate, unreachable host) — reported like dump failures, run exits non-zero
+	Warnings []string     // structural problems no scheduling can fix (e.g. cycle won't fit capacity)
 }
 
 // Item is the planned backup of a single DLE.

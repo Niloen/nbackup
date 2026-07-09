@@ -1706,7 +1706,11 @@ func TestHoldingDiskLandingDownFails(t *testing.T) {
 func TestDumpContinuesPastFailedDLE(t *testing.T) {
 	good := t.TempDir()
 	write(t, filepath.Join(good, "f.txt"), "i survive")
-	bad := filepath.Join(t.TempDir(), "does-not-exist") // never created -> tar fails at dump time
+	// Never created: under the failure ladder this DLE now dies at PLAN time (its
+	// estimate measures nothing -> planner-FAILED, Amanda's "FAILED" class) instead of
+	// at dump time — the contract this test pins is unchanged: the run proceeds past
+	// it, seals the good DLE, and exits non-zero.
+	bad := filepath.Join(t.TempDir(), "does-not-exist")
 
 	cfg := &config.Config{
 		Landing: config.MediumList{"disk"},
