@@ -92,6 +92,24 @@ func (g *gnutar) Check() error {
 // hasGlob reports whether s carries a shell wildcard metacharacter.
 func hasGlob(s string) bool { return strings.ContainsAny(s, "*?[") }
 
+// literalPattern escapes tar-glob metacharacters so a MACHINE-GENERATED exclude matches a
+// directory name literally: the carve for a child named "web-[a]" must exclude exactly
+// that directory — unescaped, tar reads "[a]" as a character class that never matches the
+// literal name, and the child's bytes silently duplicate into the rest, breaking the
+// partition's disjointness. User-written excludes are never escaped — their glob
+// semantics are documented and deliberate.
+func literalPattern(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\\', '*', '?', '[', ']':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 // splitLiteralPrefix splits a wildcard path into its literal directory prefix and the
 // remaining glob (relative to that prefix). "/srv/web-*" -> ("/srv", "web-*");
 // "/data/*/logs" -> ("/data", "*/logs"); a path with no wildcard -> (path, "").
@@ -160,7 +178,7 @@ func (g *gnutar) Expand(p archiver.SourcePattern) ([]archiver.Scope, error) {
 	prefix := strings.TrimSuffix(root, "/") + "/"
 	for _, m := range matches {
 		relName := strings.TrimPrefix(m, prefix)
-		carves = append(carves, "./"+relName)
+		carves = append(carves, "./"+literalPattern(relName))
 		sc := archiver.Scope{Base: root, Source: m, Exclude: globs}
 		suppressed := false
 		for _, a := range anchored {

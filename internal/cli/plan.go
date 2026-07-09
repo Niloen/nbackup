@@ -31,7 +31,7 @@ func newPlanCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "plan",
 		Short:   "Show what the next run would do",
-		Long:    "Preview the next run: which DLEs would be dumped at which level, estimated sizes, and capacity/budget status. With --days N, forecast N consecutive daily runs instead, projecting the schedule forward day-by-day (when fulls land, how incrementals climb). Reads only; nothing is written.",
+		Long:    "Preview the next run: which DLEs would be dumped at which level, estimated sizes, and capacity/budget status. With --days N, forecast N consecutive daily runs instead, projecting the schedule forward day-by-day (when fulls land, how incrementals climb). Reads only; nothing is written.\n\nThe preview exits 0 even when it lists units under FAILED (will not dump) — plan is advisory. Gate automation on `nb check` or the dump's own exit code, both of which go non-zero on unit failures.",
 		Example: "  nb plan\n  nb plan --date 2026-06-21\n  nb plan --days 30",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {

@@ -77,7 +77,7 @@ func (s *Scheduler) forceFullWhereBaseMissing(plan *planner.Plan) {
 			continue
 		}
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf(
-			"DLE %s: the L%d incremental state is missing or unusable for this dump (a prior dump may have been interrupted, state_dir moved, or a partition subtree was newly carved out of the rest) — forcing a full (L0)",
+			"DLE %s: forcing a full (L0) — its L%d incremental base is not usable for this dump. Most often this is DELIBERATE: a subtree was newly carved out (a partition child graduated, or an anchored ./ exclude was added), which re-baselines once so the old chain's stale copy ages out. Otherwise the state is genuinely missing (an interrupted prior dump, or a moved state_dir)",
 			it.DLE.ID(), it.BaseLevel))
 		it.Level, it.BaseLevel, it.BaseRun = 0, -1, ""
 		it.EstBytes = it.FullBytes

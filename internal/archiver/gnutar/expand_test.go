@@ -176,6 +176,58 @@ func TestExpandPartitionAnchoredExcludeOwnership(t *testing.T) {
 	}
 }
 
+// TestCarveEscapesGlobMetacharacters pins the road-test HIGH: a child whose NAME contains
+// tar-glob metacharacters ("web-[a]") must be carved out of the rest literally. Unescaped,
+// tar reads "[a]" as a character class that never matches the literal directory, so the
+// child's bytes silently duplicate into the rest — breaking the partition's disjointness
+// ("full coverage, guaranteed" means disjoint too). Proven against real tar: the rest's
+// members must not contain the bracket child.
+func TestCarveEscapesGlobMetacharacters(t *testing.T) {
+	root := t.TempDir()
+	mkdirs(t, root, "web-[a]", "normal")
+	write(t, filepath.Join(root, "web-[a]", "f.txt"), "brackets")
+	write(t, filepath.Join(root, "normal", "g.txt"), "plain")
+	write(t, filepath.Join(root, "loose.txt"), "loose")
+	m := newArchiver(t, t.TempDir())
+
+	scopes, err := m.Expand(archiver.SourcePattern{Base: root, Pattern: "*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rest := findScope(t, scopes, root)
+	var escaped bool
+	for _, e := range rest.Exclude {
+		if e == `./web-\[a\]` {
+			escaped = true
+		}
+		if e == "./web-[a]" {
+			t.Fatalf("machine carve must be escaped, got raw glob %q", e)
+		}
+	}
+	if !escaped {
+		t.Fatalf("rest carves missing the escaped bracket child: %v", rest.Exclude)
+	}
+
+	// The proof that matters: real tar over the rest scope excludes the bracket child.
+	out := filepath.Join(t.TempDir(), "rest.tar")
+	res := backup(t, m, archiver.BackupRequest{DLE: "rest", Scope: rest, Level: 0, BaseLevel: -1}, out)
+	for _, mem := range res.Members {
+		p := strings.TrimPrefix(mem.Path, "./")
+		if strings.HasPrefix(p, "web-[a]") {
+			t.Fatalf("bracket child leaked into the rest (coverage no longer disjoint): %v", memberPaths(res.Members))
+		}
+	}
+	var hasLoose bool
+	for _, mem := range res.Members {
+		if strings.TrimPrefix(mem.Path, "./") == "loose.txt" {
+			hasLoose = true
+		}
+	}
+	if !hasLoose {
+		t.Fatal("the rest must still contain the loose file")
+	}
+}
+
 // TestExpandPartitionLiteralToken: a literal (non-glob) partition token still enumerates —
 // the named child becomes a match with an ABSOLUTE Source and the rest carves it. This pins
 // the fix for the early-return bug that produced a relative Source and dropped the rest.
