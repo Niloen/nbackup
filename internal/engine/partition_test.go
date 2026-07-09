@@ -89,11 +89,11 @@ func TestPartitionedSourceEndToEnd(t *testing.T) {
 	}
 }
 
-// TestPartitionRestRebaselinesOnNewChild proves the R4 guard end-to-end: a child
+// TestPartitionRestRebaselinesOnNewChild proves the re-baseline guard end-to-end: a child
 // directory created between runs graduates to its own DLE on the next run, and the rest —
-// whose recorded carve set grew — is forced back to a level-0 full so the stale pre-carve
-// copy of the newcomer ages out of its chain. Also pins that Carves are recorded on the
-// rest's archives (the footer-carried comparison input).
+// whose carve set grew past what its base snapshot was built with (gnutar's .carves
+// sidecar, compared inside HasBase) — is forced back to a level-0 full so the stale
+// pre-carve copy of the newcomer ages out of its chain.
 func TestPartitionRestRebaselinesOnNewChild(t *testing.T) {
 	base := t.TempDir()
 	write(t, filepath.Join(base, "alice", "a.txt"), "alpha")
@@ -119,16 +119,8 @@ func TestPartitionRestRebaselinesOnNewChild(t *testing.T) {
 	}
 
 	restSlug := config.Slug("localhost", base)
-	s1, err := eng.Run(context.Background(), time.Date(2026, 7, 9, 0, 0, 0, 0, time.UTC), nil)
-	if err != nil {
+	if _, err := eng.Run(context.Background(), time.Date(2026, 7, 9, 0, 0, 0, 0, time.UTC), nil); err != nil {
 		t.Fatalf("run 1: %v", err)
-	}
-	for _, a := range s1.Archives {
-		if a.DLE == restSlug {
-			if len(a.Carves) != 1 || a.Carves[0] != "/alice" {
-				t.Fatalf("run 1: the rest should record carves [/alice], got %v", a.Carves)
-			}
-		}
 	}
 
 	// A new child appears; run 2's plan must graduate it AND re-baseline the rest.
@@ -142,9 +134,6 @@ func TestPartitionRestRebaselinesOnNewChild(t *testing.T) {
 		switch a.DLE {
 		case restSlug:
 			restLevel = a.Level
-			if len(a.Carves) != 2 {
-				t.Errorf("run 2: the rest should record carves [/alice /carol], got %v", a.Carves)
-			}
 		case config.Slug("localhost", filepath.Join(base, "carol")):
 			carolLevel = a.Level
 		}

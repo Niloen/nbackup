@@ -3,6 +3,8 @@ package postgres
 import (
 	"fmt"
 	"path/filepath"
+
+	"github.com/Niloen/nbackup/internal/archiver"
 )
 
 // This file is the postgres archiver's incremental-state library: the per-DLE,
@@ -33,7 +35,7 @@ func (p *postgres) workManifest(dle string, level int) string {
 // HasBase reports whether the live manifest left by a completed dump at the
 // level is a usable base for a higher incremental. Missing or empty (a killed
 // dump's residue) is not usable, so the engine forces a full instead.
-func (p *postgres) HasBase(dle string, level int) bool {
+func (p *postgres) HasBase(dle string, level int, _ archiver.Scope) bool {
 	n, err := p.ex.Size(p.manifestPath(dle, level))
 	return err == nil && n > 0
 }

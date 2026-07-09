@@ -155,13 +155,13 @@ func TestBackupStreamAndState(t *testing.T) {
 	}
 
 	// The dump's manifest landed as the work file and only Promote commits it.
-	if p.HasBase("db01-app", 0) {
+	if p.HasBase("db01-app", 0, archiver.Scope{}) {
 		t.Fatal("HasBase before promote")
 	}
 	if err := bs.Promote(); err != nil {
 		t.Fatal(err)
 	}
-	if !p.HasBase("db01-app", 0) {
+	if !p.HasBase("db01-app", 0, archiver.Scope{}) {
 		t.Fatal("HasBase after promote")
 	}
 	got, err := os.ReadFile(p.manifestPath("db01-app", 0))
@@ -565,7 +565,7 @@ func TestLiveIncrementalCycle(t *testing.T) {
 	}
 
 	full, fullRes := dump(0, -1)
-	if !p.HasBase("db01", 0) {
+	if !p.HasBase("db01", 0, archiver.Scope{}) {
 		t.Fatal("no base after promoted full")
 	}
 	var users record.Unit

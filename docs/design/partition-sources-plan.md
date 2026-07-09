@@ -86,23 +86,17 @@ remaining phases.
   scan config by slug; resolved slugs aren't there, so crash-recovery flush would fail to
   route a partition-derived archive. Also pin `ResolvedDLE.Name()` ≡ `config.DLE.Name()` for
   plain sources with a compat test (slug continuity for existing catalogs).
-- **R4 — the re-baseline (old phase 7) mechanism and timing.** The carve set is recorded on
-  `record.Archive` (an additive footer field, like `ArchiverName`) — NOT in archiver-owned
-  incremental state, which the planner cannot read. The comparison runs for **every** resolved
-  DLE (last archive's recorded carves vs the current scope's), so the partition-removed
-  migration is caught too: the reborn plain `/data` has recorded carves and an empty current
-  set. Triggers: (a) any carve **added** — a graduated child leaves a stale copy in the rest's
-  chain; (b) any carve **removed while its directory still exists** — the subtree re-enters
-  this chain's coverage, and GNU tar's behavior for a previously-excluded, not-in-snar dir on
-  the next incremental is UNPINNED (we pinned exclude-isn't-deletion, never the un-exclude
-  direction — if tar does not wholesale-dump it, the chain has a restore hole until the next
-  natural full). Phase 3 starts by pinning that behavior with a test; if tar dumps it
-  wholesale, trigger (b) can relax. A carve removed because the dir is gone from disk (the
-  date-tree churn case) fires nothing — the fresh listing makes the distinction free. "Prior
-  archives but no recorded carve set" **counts as a change** when the current set is non-empty
-  — the plain-`/data`-converted-to-partition migration, where the rest inherits the whole-DLE
-  `.snar` and would otherwise retain stale full copies of every child. Gates release: lands
-  with phase 3, not last.
+- **R4 — the re-baseline mechanism (REVISED 2026-07-09).** First shipped as a footer field
+  (`record.Archive.Carves`) + a scheduler post-pass; Marcus's review moved it INTO GNUTAR:
+  "excluded ≠ deleted" is tar-specific, so the archiver owns it. The snapshot library keeps
+  a `.carves` sidecar per level (promoted with the snar); `HasBase(dle, level, scope)` —
+  widened to be request-relative — reports a base unusable when the request carves a subtree
+  the base did not, and the existing "no base ⇒ full" pass re-baselines. Subset test:
+  additions unusable, removals fine (wholesale re-entry pinned), carve-free requests skip
+  the sidecar read (no upgrade impact on plain DLEs), carves-wanted-but-none-recorded =
+  the plain-to-partition migration, re-baselines once. No record field, no scheduler guard,
+  no engine closure; the sidecar loss mode is a spurious full (fail-safe). Executor gained
+  WriteFile (dual of ReadFile) to write it.
 - **R5 — staleness needs the resolved set recorded per run.** Catalog-only staleness alone
   flags a removed-from-config DLE stale forever, and cannot distinguish a failing partition
   child from an intentionally deleted one. Record the run's resolved DLE set (additive run
@@ -141,7 +135,7 @@ decode (mapping form only — scalar sources are never cleaned; a conninfo must 
 ## Status (2026-07-09)
 
 DONE (committed, race-green, e2e-proven): phases 1–4 plus R1, R2, R3 (routing), R4
-(carves on `record.Archive` + additions-only re-baseline, e2e-proven one-shot), R6, R7
+(gnutar `.carves` sidecar + request-relative HasBase, e2e-proven one-shot re-baseline), R6, R7
 (check resolves + probes resolved sources; directory-only `CheckSource`), R8 (ForceFull
 accepts catalog slugs), plan rendering with partition/selection groups + coverage line.
 An interim guard keeps `checkStaleness` from false-warning on selection sources.

@@ -205,9 +205,15 @@ DLE names are path-derived, and incremental state is keyed by name (`HasBase(dle
   newly-excluded on-disk subtree as a deletion (`TestNewExcludeIsNotADeletion`): it records
   "present, not dumped", so the rest's chain retains the pre-carve copy — the fail-safe
   direction (carving can never *drop* data).
-- Overlap only arises from a narrow find/dump race, and is resolved by **forcing the rest to a
-  full when its carve set changes** (a planner guard) — cheaper than, and in place of, any
-  cross-DLE recovery merge. Recovery already orders archives by global run id.
+- Overlap only arises from a narrow find/dump race, and is resolved by **re-baselining the
+  rest when its carve set grows** — implemented entirely inside gnutar: the snapshot library
+  keeps a `.carves` sidecar beside each `.snar` (promoted atomically with it), and `HasBase`
+  judges a base built with fewer carves than the request unusable, which routes through the
+  existing "no base ⇒ full" path. "Excluded ≠ deleted" is a tar-semantics fact, so the
+  knowledge lives with tar; the generic layers never compare carve sets, and nothing is
+  recorded in the artifact. Additions only — a REMOVED carve re-enters the chain wholesale
+  (pinned by test) — and a plain DLE converted to a partition base re-baselines once (its
+  base has no recorded carves). Cheaper than, and in place of, any cross-DLE recovery merge.
 
 ## Restore — the artifact is self-describing; config only for load-bearing options
 

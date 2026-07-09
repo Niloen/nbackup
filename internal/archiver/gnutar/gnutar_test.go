@@ -163,7 +163,7 @@ func TestEstimate(t *testing.T) {
 	// An unchanged incremental against a real snapshot estimates far below a full.
 	time.Sleep(1100 * time.Millisecond) // snapshot time must beat file mtimes (1s granularity)
 	backup(t, m, archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 0, BaseLevel: -1}, filepath.Join(t.TempDir(), "l0.tar"))
-	if !m.HasBase("app", 0) {
+	if !m.HasBase("app", 0, archiver.Scope{}) {
 		t.Fatal("L0 snapshot should exist after a full backup")
 	}
 	incr, err := m.Estimate(archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 1, BaseLevel: 0})
@@ -188,7 +188,7 @@ func TestSnapshotPromotionIsAtomic(t *testing.T) {
 
 	// A committed full leaves a usable base.
 	backup(t, m, archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 0, BaseLevel: -1}, filepath.Join(t.TempDir(), "l0.tar"))
-	if !m.HasBase("app", 0) {
+	if !m.HasBase("app", 0, archiver.Scope{}) {
 		t.Fatal("L0 base should exist after a committed full")
 	}
 	live := filepath.Join(stateRoot, "app", "L0.snar")
@@ -223,7 +223,7 @@ func TestSnapshotPromotionIsAtomic(t *testing.T) {
 	if string(after) != string(good) {
 		t.Fatal("committed base was mutated by an uncommitted dump (it must be untouched until promote)")
 	}
-	if !m.HasBase("app", 0) {
+	if !m.HasBase("app", 0, archiver.Scope{}) {
 		t.Fatal("base should still be usable after an uncommitted dump")
 	}
 }
@@ -242,13 +242,13 @@ func TestHasBaseRejectsEmptySnapshot(t *testing.T) {
 	if err := os.WriteFile(snap, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if m.HasBase("app", 0) {
+	if m.HasBase("app", 0, archiver.Scope{}) {
 		t.Fatal("an empty snapshot must not count as a usable base")
 	}
 	if err := os.WriteFile(snap, []byte("GNU tar-1.34-2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !m.HasBase("app", 0) {
+	if !m.HasBase("app", 0, archiver.Scope{}) {
 		t.Fatal("a non-empty snapshot should count as a usable base")
 	}
 }

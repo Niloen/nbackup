@@ -178,7 +178,7 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 	}
 	if item.Level >= 1 {
 		req.BaseLevel = item.BaseLevel
-		if !ar.HasBase(item.Name, item.BaseLevel) {
+		if !ar.HasBase(item.Name, item.BaseLevel, item.DLE.Scope) {
 			return BackupSpec{}, fmt.Errorf("DLE %s: incremental L%d needs the L%d incremental state but it is missing — "+
 				"the prior dump wrote it under the host's state_dir; if that path moved (e.g. a relative state_dir/workdir while `nb` ran from a different directory), "+
 				"set state_dir to an absolute path and re-run a full (L0)",
@@ -261,7 +261,6 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 		Shape:    shape,
 		Level:    spec.Request.Level,
 		BaseRun:  spec.BaseRun,
-		Carves:   spec.Request.Carves(), // recorded so the next plan can detect carve growth (re-baseline guard)
 	}
 	if shape == record.ShapeAtomic {
 		aspec.AtomSize = pl.AtomSize

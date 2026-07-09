@@ -95,7 +95,7 @@ func TestBackupRestoreRoundtrip(t *testing.T) {
 // withdrawn (no list, no splice, no directory destination, no stock recipe drift).
 func TestFullOnly(t *testing.T) {
 	m := open(t, archiver.Options{"backup_command": "true", "restore_command": "cat > {dest}"})
-	if m.HasBase("app", 0) {
+	if m.HasBase("app", 0, archiver.Scope{}) {
 		t.Error("pipe must never report a base")
 	}
 	if _, err := m.BackupSource(archiver.BackupRequest{DLE: "app", Level: 1, BaseLevel: 0}); err == nil {

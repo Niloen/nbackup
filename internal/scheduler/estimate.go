@@ -108,12 +108,12 @@ func (s *Scheduler) estimateDLE(d planner.DLE, st *catalog.DLEState) planner.Est
 	// exists to base it on; until then IncrNext stays 0.
 	lvl := planner.SittingLevel(st)
 	est := planner.Estimate{Full: full, Incomplete: incomplete}
-	if arch.HasBase(name, lvl-1) {
+	if arch.HasBase(name, lvl-1, d.Scope) {
 		est.Incr, _ = arch.Estimate(archiver.BackupRequest{
 			DLE: name, Scope: d.Scope, Level: lvl, BaseLevel: lvl - 1,
 		})
 	}
-	if lvl < planner.MaxLevel && arch.HasBase(name, lvl) {
+	if lvl < planner.MaxLevel && arch.HasBase(name, lvl, d.Scope) {
 		est.IncrNext, _ = arch.Estimate(archiver.BackupRequest{
 			DLE: name, Scope: d.Scope, Level: lvl + 1, BaseLevel: lvl,
 		})

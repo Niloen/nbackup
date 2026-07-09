@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/planner"
@@ -24,57 +23,7 @@ func (s *Scheduler) Plan(date time.Time, sink progress.Sink) (*planner.Plan, err
 	}
 	plan := planner.Build(dles, s.d.History(), s.estimates(dles, sink), s.d.ForcedFulls(), s.plannerParams(date), date)
 	s.forceFullWhereBaseMissing(plan)
-	s.forceFullWhereCarvesGrew(plan)
 	return plan, nil
-}
-
-// forceFullWhereCarvesGrew re-baselines a partition remainder whose carve set GAINED
-// entries since its last dump — a child graduated out of the rest, so the rest's chain
-// retains a stale pre-carve copy of it (GNU tar records an excluded subtree as "present,
-// not dumped", never as a deletion). One fresh full ages the stale copy out. Additions
-// only: a REMOVED carve re-enters the chain wholesale on the next incremental (pinned by
-// gnutar's TestUnexcludedSubtreeReentersChainWholesale), so it needs no re-baseline —
-// which keeps churn at zero for trees whose children only come and go on disk. A last
-// dump with no recorded carves (a plain DLE later converted to a partition base — the
-// rest inherits its slug and snapshot chain) counts as all-additions and re-baselines.
-func (s *Scheduler) forceFullWhereCarvesGrew(plan *planner.Plan) {
-	if s.d.LastCarves == nil {
-		return
-	}
-	for i := range plan.Items {
-		it := &plan.Items[i]
-		cur := it.DLE.Carves()
-		if it.Level < 1 || len(cur) == 0 {
-			continue // a full re-baselines by itself; no carves means nothing to compare
-		}
-		last, dumped := s.d.LastCarves(it.Name)
-		if !dumped {
-			continue // never dumped: the mandatory first full covers it
-		}
-		if added := missingFrom(cur, last); len(added) > 0 {
-			plan.Warnings = append(plan.Warnings, fmt.Sprintf(
-				"DLE %s: subtree(s) newly carved out of the rest (%s) — forcing a full so the stale pre-carve copies age out of its chain",
-				it.DLE.ID(), strings.Join(added, ", ")))
-			it.Level, it.BaseLevel, it.BaseRun = 0, -1, ""
-			it.EstBytes = it.FullBytes
-			it.Reason = "forced full: partition carves grew (re-baseline)"
-		}
-	}
-}
-
-// missingFrom returns the entries of cur not present in prev.
-func missingFrom(cur, prev []string) []string {
-	seen := make(map[string]bool, len(prev))
-	for _, p := range prev {
-		seen[p] = true
-	}
-	var out []string
-	for _, c := range cur {
-		if !seen[c] {
-			out = append(out, c)
-		}
-	}
-	return out
 }
 
 // resolve expands the configured sources into the concrete DLEs to schedule (see
@@ -100,11 +49,11 @@ func (s *Scheduler) forceFullWhereBaseMissing(plan *planner.Plan) {
 			continue
 		}
 		ar, err := s.d.ArchiverFor(it.DLE.DumpTypeName(), it.DLE.Host)
-		if err != nil || ar.HasBase(it.Name, it.BaseLevel) {
+		if err != nil || ar.HasBase(it.Name, it.BaseLevel, it.DLE.Scope) {
 			continue
 		}
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf(
-			"DLE %s: the L%d incremental state is missing or unusable (a prior dump may have been interrupted, or state_dir moved) — forcing a full (L0)",
+			"DLE %s: the L%d incremental state is missing or unusable for this dump (a prior dump may have been interrupted, state_dir moved, or a partition subtree was newly carved out of the rest) — forcing a full (L0)",
 			it.DLE.ID(), it.BaseLevel))
 		it.Level, it.BaseLevel, it.BaseRun = 0, -1, ""
 		it.EstBytes = it.FullBytes

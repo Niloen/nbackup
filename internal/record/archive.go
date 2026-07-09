@@ -31,7 +31,6 @@ type Archive struct {
 	SHA256       string     `json:"sha256"`               // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
 	Parts        int        `json:"parts,omitempty"`      // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
 	BaseRun      string     `json:"base_run,omitempty"`   // for level>=1, the run whose state this builds on (a full omits it)
-	Carves       []string   `json:"carves,omitempty"`     // the anchored subtree carves this dump excluded (a partition remainder's "/child" patterns; see archiver.Scope.Carves). Recorded so the next plan can compare carve sets and force a re-baseline full when a child graduates out of the rest — the stale-copy guard. Empty for a plain DLE and for partition matches.
 	CreatedAt    time.Time  `json:"created_at"`           // when this archive committed (landed) — per-archive, the basis for retention age and the "last archive added" display
 	Shape        Shape      `json:"shape,omitempty"`      // stream shape (see Shape): how the encoded payload is laid out. Kept in the footer — a reader decodes without config — and archive-invariant across copies (the encoded bytes are carried verbatim).
 	Members      []Member   `json:"members,omitempty"`    // members archived, in stream order (see Member); the raw path token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.

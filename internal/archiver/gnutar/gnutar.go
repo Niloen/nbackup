@@ -270,7 +270,15 @@ func (g *gnutar) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource,
 			Unreadable:   unreadable,
 		}, nil
 	}
-	promote := func() error { return g.promoteSnapshot(r.DLE, r.Level) }
+	promote := func() error {
+		if err := g.promoteSnapshot(r.DLE, r.Level); err != nil {
+			return err
+		}
+		// The carve sidecar rides the same commit: HasBase compares it so a remainder
+		// whose carve set grows re-baselines (see snapshot.go). A failed sidecar write
+		// degrades to a spurious full next run — the fail-safe direction.
+		return g.recordCarves(r.DLE, r.Level, carvesOf(r.Exclude))
+	}
 	cleanup := func() { _ = g.ex.Remove(indexPath) }
 	return &archiver.BackupSource{Stage: stage, Exec: g.ex, Finish: finish, Promote: promote, Cleanup: cleanup}, nil
 }

@@ -24,7 +24,6 @@ type ArchiveSpec struct {
 	AtomSize int64        // the atomic shape's atom bound (compressed bytes per sealed part); 0 for other shapes
 	Level    int
 	BaseRun  string
-	Carves   []string // the anchored subtree carves the dump excluded (record.Archive.Carves)
 }
 
 // CommitResult is the assembled outcome of writing one archive: the record and where it landed. The

@@ -123,7 +123,7 @@ func (p *pipe) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource, e
 }
 
 // HasBase: never — pipe keeps no incremental state, so every dump is a full.
-func (p *pipe) HasBase(string, int) bool { return false }
+func (p *pipe) HasBase(string, int, archiver.Scope) bool { return false }
 
 // RestoreStage wraps the consumer command: the archive stream arrives on stdin and
 // {dest} names the destination exactly as the caller supplied it (`--dest`, or a

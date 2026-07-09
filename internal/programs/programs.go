@@ -93,6 +93,10 @@ type Executor interface {
 	// TempFile creates an empty scratch file on this host and returns its path.
 	TempFile(pattern string) (string, error)
 	ReadFile(path string) ([]byte, error)
+	// WriteFile writes data to path on this host (creating or truncating it) — the
+	// write dual of ReadFile, for small state files an archiver keeps beside its
+	// snapshots. Not atomic; a caller needing atomicity writes a side file and Renames.
+	WriteFile(path string, data []byte) error
 }
 
 // pipeReader wraps the final stdout so Close drains/closes it; wait (returned

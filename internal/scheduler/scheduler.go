@@ -21,16 +21,12 @@ import (
 // never reaches into the engine directly. It is exported so the engine can wire one;
 // the Scheduler embeds it directly.
 type Deps struct {
-	DLEs        func() []config.DLE
-	History     func() *catalog.History
-	ForcedFulls func() map[string]bool
-	Workers     func() int
-	ArchiverFor func(dtName, host string) (archiver.Archiver, error)
-	ExcludeFor  func(dtName string) []string
-	// LastCarves returns the carve set (archiver.Scope.Carves, recorded on the archive)
-	// the DLE's most recent archive was dumped with, and whether the DLE has any archive
-	// at all — the comparison input for the partition re-baseline guard.
-	LastCarves    func(dle string) ([]string, bool)
+	DLEs          func() []config.DLE
+	History       func() *catalog.History
+	ForcedFulls   func() map[string]bool
+	Workers       func() int
+	ArchiverFor   func(dtName, host string) (archiver.Archiver, error)
+	ExcludeFor    func(dtName string) []string
 	CycleDays     func() int
 	BumpPercent   func() float64
 	Capacity      func() int64

@@ -236,6 +236,51 @@ func TestUnexcludedSubtreeReentersChainWholesale(t *testing.T) {
 	}
 }
 
+// TestHasBaseCarveComparison pins the sidecar semantics: a base is usable iff the
+// request's carves are a SUBSET of what the base was dumped with. Additions (a child
+// newly carved out) make it unusable — the base still contains that subtree, so an
+// incremental would retain a stale copy; removals are fine (un-excluded subtrees
+// re-enter wholesale, see TestUnexcludedSubtreeReentersChainWholesale); and a carve-free
+// request (every plain DLE) never reads the sidecar at all — so legacy state with no
+// sidecar stays fully usable for plain dumps and re-baselines partitioned ones.
+func TestHasBaseCarveComparison(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "alice", "f"), "a")
+	write(t, filepath.Join(src, "bob", "f"), "b")
+	m := newArchiver(t, t.TempDir())
+
+	// L0 dumped as a remainder carving /alice and /bob → sidecar records both.
+	l0 := filepath.Join(t.TempDir(), "l0.tar")
+	backup(t, m, archiver.BackupRequest{DLE: "rest", Scope: archiver.Scope{Source: src, Exclude: []string{"*.log", "/alice", "/bob"}}, Level: 0, BaseLevel: -1}, l0)
+
+	cases := []struct {
+		name   string
+		carves []string
+		usable bool
+	}{
+		{"same set", []string{"/alice", "/bob"}, true},
+		{"carve removed (bob gone)", []string{"/alice"}, true},
+		{"carve added (carol new)", []string{"/alice", "/bob", "/carol"}, false},
+		{"carve-free request skips comparison", nil, true},
+	}
+	for _, tc := range cases {
+		scope := archiver.Scope{Source: src, Exclude: tc.carves}
+		if got := m.HasBase("rest", 0, scope); got != tc.usable {
+			t.Errorf("%s: HasBase = %v, want %v", tc.name, got, tc.usable)
+		}
+	}
+
+	// Legacy state: a base with no sidecar (pre-partition snapshots). Simulate by
+	// dumping a plain DLE (no carves → sidecar written empty), then asking with carves.
+	backup(t, m, archiver.BackupRequest{DLE: "plain", Scope: archiver.Scope{Source: src}, Level: 0, BaseLevel: -1}, filepath.Join(t.TempDir(), "p.tar"))
+	if !m.HasBase("plain", 0, archiver.Scope{Source: src}) {
+		t.Error("plain request on plain base must be usable")
+	}
+	if m.HasBase("plain", 0, archiver.Scope{Source: src, Exclude: []string{"/alice"}}) {
+		t.Error("a base dumped without carves is unusable once the request carves — the migration re-baseline")
+	}
+}
+
 func memberPaths(members []record.Member) []string {
 	out := make([]string, len(members))
 	for i, m := range members {
