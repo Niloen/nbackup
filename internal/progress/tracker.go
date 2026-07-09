@@ -103,6 +103,26 @@ func (t *Tracker) AddBytes(name string, uncompressed, compressed int64) {
 	defer t.mu.Unlock()
 	if d := t.dle(name); d != nil {
 		d.DoneBytes = uncompressed
+		d.DoneApprox = false
+		d.OutBytes = compressed
+	}
+	t.flush(false)
+}
+
+// AddBytesApprox records cumulative progress for a DLE whose uncompressed count cannot
+// be measured (a client-fused remote dump: the stream is compressed before it leaves
+// the client): uncompressed is the caller's inference (compressed flow scaled by the
+// DLE's historical compression rate) and is marked approximate, so every view renders
+// it with a "~" instead of passing it off as a measurement. Throttle-eligible.
+func (t *Tracker) AddBytesApprox(name string, uncompressed, compressed int64) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if d := t.dle(name); d != nil {
+		d.DoneBytes = uncompressed
+		d.DoneApprox = true
 		d.OutBytes = compressed
 	}
 	t.flush(false)
@@ -144,6 +164,7 @@ func (t *Tracker) FinishDLE(name string, fileCount int, uncompressed, compressed
 		d.FileCount = fileCount
 		if uncompressed > 0 {
 			d.DoneBytes = uncompressed
+			d.DoneApprox = false // the committed record's tally, measured
 		}
 		if compressed > 0 {
 			d.OutBytes = compressed

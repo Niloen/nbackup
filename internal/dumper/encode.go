@@ -95,7 +95,7 @@ func (d *Dumper) dumpItem(ctx context.Context, fs archivefs.Ingest, item planner
 
 	logf("archiving %s (L%d)", item.DLE.ID(), item.Level)
 	var unreadable []string
-	committed, unreadable, err = d.dumpArchive(ctx, fs, item.EstBytes, spec, gate, func(uncompressed, compressed int64) { tr.AddBytes(pname, uncompressed, compressed) })
+	committed, unreadable, err = d.dumpArchive(ctx, fs, item.EstBytes, spec, gate, d.progressReport(tr, pname, item))
 	if err != nil {
 		// A genuinely fatal archiver error (write failure, OOM) — not a mere unreadable file,
 		// which now commits a partial archive below. Give the archiver a chance to translate
@@ -128,6 +128,32 @@ func (d *Dumper) dumpItem(ctx context.Context, fs archivefs.Ingest, item planner
 		return &PartialDumpError{DLE: item.DLE.ID(), Unreadable: unreadable}
 	}
 	return nil
+}
+
+// progressReport builds one dump's live progress callback: normally the measured
+// (uncompressed, compressed) counts feed the tracker as-is. When compressed bytes flow
+// while the uncompressed count sits at zero, the stage tap is not being honored — the
+// one pipeline shape where that happens is a client-fused remote dump, whose stream is
+// compressed before it leaves the client — so DUMPED is instead inferred: the
+// compressed flow scaled back up by the DLE's historical compression rate (Amanda's
+// curinfo comp_rate), reported as approximate so every view marks it "~". The
+// measured path always wins the moment a real uncompressed count appears (the taps
+// fire upstream of the sink meter, so a live tap is never mistaken for a dead one).
+func (d *Dumper) progressReport(tr *progress.Tracker, pname string, item planner.Item) func(uncompressed, compressed int64) {
+	rate := 0.0
+	if d.comprate != nil {
+		rate = d.comprate(item.Name, item.Level)
+	}
+	if rate <= 0 {
+		rate = 1 // no history: infer 1:1
+	}
+	return func(uncompressed, compressed int64) {
+		if uncompressed == 0 && compressed > 0 {
+			tr.AddBytesApprox(pname, int64(float64(compressed)/rate), compressed)
+			return
+		}
+		tr.AddBytes(pname, uncompressed, compressed)
+	}
 }
 
 // PartialDumpError marks a dump that committed a valid archive but omitted source files it

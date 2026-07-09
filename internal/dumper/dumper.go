@@ -41,6 +41,14 @@ type Config struct {
 	// landing's part ceiling — the dump-time hard error of the validation ladder
 	// (the engine supplies it; the dumper knows shapes, not media). nil = no check.
 	AtomCeiling func(dumpType string, atomSize int64) error
+	// Comprate is a DLE's historical compression rate — compressed/uncompressed of its
+	// last dump at the same full-vs-incremental level (Amanda's curinfo comp_rate),
+	// resolved by the engine from the catalog. The dumper consults it only when a dump's
+	// uncompressed bytes cannot be metered live (a client-fused remote dump: the stream
+	// is compressed before it leaves the client) — the live DUMPED figure is then the
+	// compressed flow scaled back up by this rate, marked approximate in the tracker.
+	// nil, or a non-positive return (no history), infers 1:1.
+	Comprate func(dle string, level int) float64
 }
 
 // Dumper archives planned items into an archivefs.Ingest. Build it with New and drive it with Run.
@@ -52,11 +60,12 @@ type Dumper struct {
 	threads      int
 	frameSize    int64
 	atomCeiling  func(dumpType string, atomSize int64) error
+	comprate     func(dle string, level int) float64
 }
 
 // New builds a Dumper from cfg.
 func New(cfg Config) *Dumper {
-	return &Dumper{archiverFor: cfg.ArchiverFor, archiverName: cfg.ArchiverName, exclude: cfg.Exclude, placement: cfg.Placement, threads: cfg.Threads, frameSize: cfg.FrameSize, atomCeiling: cfg.AtomCeiling}
+	return &Dumper{archiverFor: cfg.ArchiverFor, archiverName: cfg.ArchiverName, exclude: cfg.Exclude, placement: cfg.Placement, threads: cfg.Threads, frameSize: cfg.FrameSize, atomCeiling: cfg.AtomCeiling, comprate: cfg.Comprate}
 }
 
 // dumpGate bounds how many DLEs run the heavy transfer (the archiver source + encode pipeline) at once.

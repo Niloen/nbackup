@@ -218,6 +218,7 @@ func build(cfg *config.Config) (*Engine, error) {
 		Threads:     e.tc.fopts.Threads,
 		FrameSize:   e.cfg.FrameSizeBytes(),
 		AtomCeiling: e.atomCeilingErr,
+		Comprate:    e.cat.Comprate,
 	})
 	e.ver = e.newVerifier()
 	e.acct = e.newLedger()

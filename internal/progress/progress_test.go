@@ -68,6 +68,43 @@ func TestTrackerLifecycle(t *testing.T) {
 	}
 }
 
+// TestTrackerApproxBytes: AddBytesApprox marks DoneBytes inferred (a client-fused
+// remote dump), a real AddBytes clears the mark, and the commit's measured totals
+// clear it too — so a "~" never outlives the inference it flags.
+func TestTrackerApproxBytes(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("run-2026-06-23.001", PhaseRunning, 2, plan(), c.now, nil)
+	tr.StartDLE("alpha")
+	tr.AddBytesApprox("alpha", 150, 60)
+	snap := tr.Snapshot()
+	if a := snap.DLEs[0]; !a.DoneApprox || a.DoneBytes != 150 || a.OutBytes != 60 {
+		t.Fatalf("approx report = %+v", a)
+	}
+	if !snap.DoneApproxAny() {
+		t.Fatal("DoneApproxAny should see the inferred DLE")
+	}
+	var sb strings.Builder
+	Render(&sb, snap, c.now())
+	if out := sb.String(); !strings.Contains(out, "~150") {
+		t.Errorf("render of an inferred dump missing '~150' in DUMPED:\n%s", out)
+	}
+
+	tr.AddBytes("alpha", 200, 80) // a measured count wins
+	if a := tr.Snapshot().DLEs[0]; a.DoneApprox {
+		t.Fatalf("measured report left approx set: %+v", a)
+	}
+
+	tr.AddBytesApprox("alpha", 250, 100)
+	tr.FinishDLE("alpha", 7, 300, 120, nil) // committed totals are measured
+	snap = tr.Snapshot()
+	if a := snap.DLEs[0]; a.DoneApprox || a.DoneBytes != 300 {
+		t.Fatalf("finish left approx set: %+v", a)
+	}
+	if snap.DoneApproxAny() {
+		t.Fatal("DoneApproxAny should clear once totals are real")
+	}
+}
+
 // TestTrackerFailure records a failed DLE with its error message.
 func TestTrackerFailure(t *testing.T) {
 	c := newClock()

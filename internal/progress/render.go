@@ -53,7 +53,7 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 	for _, d := range s.DLEs {
 		fmt.Fprintf(tw, "%s\tL%d\t%s\t%s\t%s\t%s\t%s\t%s",
 			d.Name, d.Level, stateCell(d), dumpCell(d), drainCell(d),
-			estCell(d), sizeutil.FormatBytes(d.DoneBytes), sizeutil.FormatBytes(d.OnVolume()))
+			estCell(d), approxMark(d.DoneApprox)+sizeutil.FormatBytes(d.DoneBytes), sizeutil.FormatBytes(d.OnVolume()))
 		if labeled {
 			fmt.Fprintf(tw, "\t%s", volumeCell(d))
 		}
@@ -62,8 +62,8 @@ func Render(w io.Writer, s Snapshot, now time.Time) {
 	tw.Flush()
 
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "Dump:     %s of ~%s  (%.0f%%)",
-		sizeutil.FormatBytes(s.TotalDone()), sizeutil.FormatBytes(s.TotalEst()), s.Pct())
+	fmt.Fprintf(w, "Dump:     %s%s of ~%s  (%.0f%%)",
+		approxMark(s.DoneApproxAny()), sizeutil.FormatBytes(s.TotalDone()), sizeutil.FormatBytes(s.TotalEst()), s.Pct())
 	if cell := DumpRates(s, now); cell != "" {
 		fmt.Fprintf(w, "   %s", cell)
 	}
@@ -290,7 +290,23 @@ func dumpCell(d DLE) string {
 	if d.EstBytes <= 0 {
 		return "n/a"
 	}
-	return barCell(d.Pct())
+	return barCell(d.Pct()) + approxSuffix(d.DoneApprox)
+}
+
+// approxMark prefixes an inferred figure (see DLE.DoneApprox); empty for a measured one.
+func approxMark(approx bool) string {
+	if approx {
+		return "~"
+	}
+	return ""
+}
+
+// approxSuffix tags an inferred bar; empty for a measured one.
+func approxSuffix(approx bool) string {
+	if approx {
+		return " ~"
+	}
+	return ""
 }
 
 // drainCell renders the FLUSH bar for a holding-disk DLE — bytes copied to the landing against the

@@ -3,6 +3,8 @@ package catalog
 import (
 	"sort"
 	"time"
+
+	"github.com/Niloen/nbackup/internal/record"
 )
 
 // DLESummary is the per-DLE rollup behind `nb dle`: one backup source aggregated
@@ -20,6 +22,35 @@ type DLESummary struct {
 	// Rest marks a partition's remainder per the latest resolved set — its display
 	// identity (the base path) is otherwise indistinguishable from a plain source.
 	Rest bool
+}
+
+// Comprate is a DLE's most recent compression rate — compressed/uncompressed of its
+// latest archive with both sizes recorded, preferring the same full-vs-incremental
+// bucket as level (Amanda's curinfo keeps full and incremental comp_rates apart, since
+// an incremental's churn can compress differently from the whole tree) and falling
+// back to any level when that bucket has no history yet. 0 when the DLE has no usable
+// history at all — the caller then infers 1:1.
+func (c *Catalog) Comprate(dle string, level int) float64 {
+	var same, any record.Archive
+	for _, a := range c.Archives() {
+		if a.DLE != dle || a.Uncompressed <= 0 || a.Compressed <= 0 {
+			continue
+		}
+		if a.CreatedAt.After(any.CreatedAt) {
+			any = a
+		}
+		if (a.Level == 0) == (level == 0) && a.CreatedAt.After(same.CreatedAt) {
+			same = a
+		}
+	}
+	pick := same
+	if pick.Uncompressed == 0 {
+		pick = any
+	}
+	if pick.Uncompressed == 0 {
+		return 0
+	}
+	return float64(pick.Compressed) / float64(pick.Uncompressed)
 }
 
 // DLESummaries aggregates the catalog per DLE across all runs, sorted by display

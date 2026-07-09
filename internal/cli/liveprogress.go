@@ -95,11 +95,19 @@ func runLines(s progress.Snapshot) []string {
 		if d.EstBytes > 0 {
 			pct = fmt.Sprintf("  %3.0f%%", d.Pct())
 		}
-		return fmt.Sprintf("  ▸ %s L%d  %s of ~%s%s", liveName(d.Name), d.Level,
-			sizeutil.FormatBytes(d.DoneBytes), sizeutil.FormatBytes(d.EstBytes), pct)
+		approx := ""
+		if d.DoneApprox { // inferred from compressed flow (client-fused remote dump)
+			approx = "~"
+		}
+		return fmt.Sprintf("  ▸ %s L%d  %s%s of ~%s%s", liveName(d.Name), d.Level,
+			approx, sizeutil.FormatBytes(d.DoneBytes), sizeutil.FormatBytes(d.EstBytes), pct)
 	})...)
-	lines = append(lines, fmt.Sprintf("Total: %s of ~%s  (%.0f%%)",
-		sizeutil.FormatBytes(s.TotalDone()), sizeutil.FormatBytes(s.TotalEst()), s.Pct()))
+	totalApprox := ""
+	if s.DoneApproxAny() {
+		totalApprox = "~"
+	}
+	lines = append(lines, fmt.Sprintf("Total: %s%s of ~%s  (%.0f%%)",
+		totalApprox, sizeutil.FormatBytes(s.TotalDone()), sizeutil.FormatBytes(s.TotalEst()), s.Pct()))
 	if toDrain := s.TotalToDrain(); toDrain > 0 {
 		lines = append(lines, fmt.Sprintf("Flush: %s of %s  (%.0f%%)",
 			sizeutil.FormatBytes(s.TotalDrained()), sizeutil.FormatBytes(toDrain), s.DrainPct()))

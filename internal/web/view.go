@@ -181,11 +181,15 @@ func newActiveDLE(d progress.DLE, now time.Time, rateNow float64, mixed bool) ac
 	var parts []string
 	switch d.State {
 	case progress.StateDumping:
+		approx := "" // inferred DoneBytes (client-fused remote dump) reads as "~", like nb status
+		if d.DoneApprox {
+			approx = "~"
+		}
 		if d.EstBytes > 0 {
-			parts = append(parts, fmt.Sprintf("%.0f%%", d.Pct()),
-				sizeutil.FormatBytes(d.DoneBytes)+" of ~"+sizeutil.FormatBytes(d.EstBytes))
+			parts = append(parts, fmt.Sprintf("%s%.0f%%", approx, d.Pct()),
+				approx+sizeutil.FormatBytes(d.DoneBytes)+" of ~"+sizeutil.FormatBytes(d.EstBytes))
 		} else if d.DoneBytes > 0 {
-			parts = append(parts, sizeutil.FormatBytes(d.DoneBytes))
+			parts = append(parts, approx+sizeutil.FormatBytes(d.DoneBytes))
 		}
 		if rateNow > 0 {
 			a.Rate = int64(rateNow)

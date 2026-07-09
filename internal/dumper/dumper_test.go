@@ -238,6 +238,45 @@ func stateOf(tr *progress.Tracker, id string) progress.State {
 	return ""
 }
 
+// TestProgressReportApprox pins the live-progress inference for dumps whose
+// uncompressed count cannot be metered (a client-fused remote dump): compressed
+// flow with a zero uncompressed count reports an approximate DUMPED scaled up by
+// the DLE's historical compression rate, while a measured count reports as-is and
+// clears the mark.
+func TestProgressReportApprox(t *testing.T) {
+	ar := &fakeArchiver{hasBase: true}
+	d := newDumper(ar, "none")
+	d.comprate = func(dle string, level int) float64 { return 0.5 } // history: halves
+	item := testItem("h", "/data", 0, -1)
+	tr := trackerFor(item)
+	report := d.progressReport(tr, item.DLE.ID(), item)
+
+	report(0, 100) // compressed flows, no uncompressed count: infer 100/0.5
+	dle := tr.Snapshot().DLEs[0]
+	if !dle.DoneApprox || dle.DoneBytes != 200 || dle.OutBytes != 100 {
+		t.Fatalf("inferred report = %+v, want ~200/100", dle)
+	}
+
+	report(500, 250) // a measured count wins and drops the mark
+	dle = tr.Snapshot().DLEs[0]
+	if dle.DoneApprox || dle.DoneBytes != 500 {
+		t.Fatalf("measured report = %+v, want 500 unmarked", dle)
+	}
+}
+
+// TestProgressReportNoHistory: with no comprate history (or none wired), the
+// inference falls back to 1:1 rather than dividing by zero.
+func TestProgressReportNoHistory(t *testing.T) {
+	ar := &fakeArchiver{hasBase: true}
+	d := newDumper(ar, "none") // Comprate unwired
+	item := testItem("h", "/data", 0, -1)
+	tr := trackerFor(item)
+	d.progressReport(tr, item.DLE.ID(), item)(0, 100)
+	if dle := tr.Snapshot().DLEs[0]; !dle.DoneApprox || dle.DoneBytes != 100 {
+		t.Fatalf("no-history report = %+v, want ~100 (1:1)", dle)
+	}
+}
+
 // --- tests: tracker status switch ----------------------------------------------------
 
 func TestDumpItemCommitted(t *testing.T) {

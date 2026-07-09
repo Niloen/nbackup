@@ -58,15 +58,21 @@ const (
 
 // DLE is the live progress of a single planned dump.
 type DLE struct {
-	Name      string   `json:"name"`
-	Slug      string   `json:"slug,omitempty"` // internal filesystem-safe DLE id (DLE.Name()), for catalog/URL links
-	Rest      bool     `json:"rest,omitempty"` // a partition's remainder ("the rest of <base>"), for grouped live views
-	Level     int      `json:"level"`
-	State     State    `json:"state"`
-	EstBytes  int64    `json:"est_bytes"`          // planner estimate (uncompressed)
-	DoneBytes int64    `json:"done_bytes"`         // uncompressed bytes archived so far
-	OutBytes  int64    `json:"out_bytes"`          // compressed bytes produced so far (the size staged on the holding disk)
-	Landings  []string `json:"landings,omitempty"` // the DLE's landing route, primary first; its drain copies the staged bytes to every entry
+	Name      string `json:"name"`
+	Slug      string `json:"slug,omitempty"` // internal filesystem-safe DLE id (DLE.Name()), for catalog/URL links
+	Rest      bool   `json:"rest,omitempty"` // a partition's remainder ("the rest of <base>"), for grouped live views
+	Level     int    `json:"level"`
+	State     State  `json:"state"`
+	EstBytes  int64  `json:"est_bytes"`  // planner estimate (uncompressed)
+	DoneBytes int64  `json:"done_bytes"` // uncompressed bytes archived so far
+	// DoneApprox marks DoneBytes as inferred rather than measured: a client-fused remote
+	// dump compresses before the stream ever reaches the server, so no uncompressed byte
+	// count exists here — DoneBytes is then the compressed flow scaled by the DLE's
+	// historical compression rate (Amanda's curinfo comp_rate). Rendered with a "~";
+	// cleared when real totals arrive (the dump's commit).
+	DoneApprox bool     `json:"done_approx,omitempty"`
+	OutBytes   int64    `json:"out_bytes"`          // compressed bytes produced so far (the size staged on the holding disk)
+	Landings   []string `json:"landings,omitempty"` // the DLE's landing route, primary first; its drain copies the staged bytes to every entry
 	// DrainBytes sums compressed bytes copied off the holding disk so far across the whole
 	// route (a two-landing DLE drains twice, so its total-to-drain is OutBytes per landing);
 	// Drained is the per-landing share, keyed by landing name ("" for a report that named none).
@@ -232,6 +238,17 @@ func (s Snapshot) TotalEst() int64 { return sum(s.DLEs, func(d DLE) int64 { retu
 
 // TotalDone sums uncompressed bytes archived so far.
 func (s Snapshot) TotalDone() int64 { return sum(s.DLEs, func(d DLE) int64 { return d.DoneBytes }) }
+
+// DoneApproxAny reports whether any DLE's DoneBytes is currently inferred rather than
+// measured (see DLE.DoneApprox) — the run totals built on them then carry a "~" too.
+func (s Snapshot) DoneApproxAny() bool {
+	for _, d := range s.DLEs {
+		if d.DoneApprox {
+			return true
+		}
+	}
+	return false
+}
 
 // TotalToDrain sums the compressed size every drained DLE must copy to its landing(s)
 // — staged size × route length per DLE, so a fan-out counts each copy it owes.
