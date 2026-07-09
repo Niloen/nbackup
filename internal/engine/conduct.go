@@ -114,9 +114,10 @@ func (e *Engine) landingSeams(medium string, spec archiveio.RunSpec, now time.Ti
 
 // landingsFor resolves the media a DLE lands on, primary first: its dumptype's `landing` override,
 // else the run's default landing route. The route is validated against `media` at config load, so a
-// resolve error or empty result falls back to the default landing.
-func (e *Engine) landingsFor(d config.DLE) []string {
-	if names, err := e.cfg.LandingsFor(d); err == nil && len(names) > 0 {
+// resolve error or empty result falls back to the default landing. Keyed by the dumptype name —
+// a resolved (partition-derived) DLE's whole route is its dumptype's, and its slug is not in config.
+func (e *Engine) landingsFor(dumptype string) []string {
+	if names, err := e.cfg.LandingsForDumptype(dumptype); err == nil && len(names) > 0 {
 		return names
 	}
 	return []string{e.dep.LandingName()}
@@ -124,7 +125,7 @@ func (e *Engine) landingsFor(d config.DLE) []string {
 
 // landingFor is a DLE's primary landing — the accounted medium — for the single-landing consumers.
 func (e *Engine) landingFor(d config.DLE) string {
-	return e.landingsFor(d)[0]
+	return e.landingsFor(d.DumpTypeName())[0]
 }
 
 // atomCeilingErr is the dump-time half of the atom validation ladder: a hard error
@@ -154,7 +155,7 @@ func (e *Engine) atomCeilingErr(dumpType string, atomSize int64) error {
 func (e *Engine) landingsForDLEName(slug string) []string {
 	for _, d := range e.cfg.DLEs() {
 		if d.Name() == slug {
-			return e.landingsFor(d)
+			return e.landingsFor(d.DumpTypeName())
 		}
 	}
 	return []string{e.dep.LandingName()}
@@ -178,7 +179,38 @@ func (e *Engine) newConductor() *conductor.Conductor {
 		HoldingMedia: e.cfg.HoldingMedia(),
 		Workers:      e.cfg.Workers(),
 		NewFileSink:  func() progress.Sink { return progress.NewFileSink(e.cfg.WorkdirPath(), time.Now) },
-		LandingsFor:  func(it planner.Item) []string { return e.landingsFor(it.DLE) },
+		LandingsFor:  func(it planner.Item) []string { return e.landingsFor(it.DLE.DumpTypeName()) },
+		RecordResolved: func(runID string, items []planner.Item, failed []planner.FailedUnit) error {
+			var set []catalog.ResolvedDLE
+			seen := map[string]bool{}
+			add := func(d planner.DLE) {
+				if name := d.Name(); !seen[name] {
+					seen[name] = true
+					set = append(set, catalog.ResolvedDLE{DLE: name, Host: d.Host, Source: d.Source, DumpType: d.DumpTypeName(), Origin: d.Origin, Rest: d.IsRest()})
+				}
+			}
+			for _, it := range items {
+				add(it.DLE)
+			}
+			// A unit that failed before dumping was still INTENDED — it stays owed.
+			// A source that failed to enumerate cannot name its units, so its
+			// previously-resolved ones are carried forward by Origin: intent
+			// persists through the outage without dumping on a guess.
+			prev := e.cat.LatestResolved()
+			for _, f := range failed {
+				if f.DLE.Source != "" {
+					add(f.DLE)
+					continue
+				}
+				for _, p := range prev {
+					if p.Origin == f.Origin && !seen[p.DLE] {
+						seen[p.DLE] = true
+						set = append(set, p)
+					}
+				}
+			}
+			return e.cat.RecordResolved(runID, set)
+		},
 		RunSink:      e.runSink,
 		EstimateSink: e.estimateSink,
 	})
@@ -202,7 +234,7 @@ func (e *Engine) MakeRoomForecasts(plan *planner.Plan, now time.Time) []MakeRoom
 	incoming := map[string]int64{}
 	var order []string
 	for _, item := range plan.Items {
-		for _, landing := range e.landingsFor(item.DLE) {
+		for _, landing := range e.landingsFor(item.DLE.DumpTypeName()) {
 			if _, seen := incoming[landing]; !seen {
 				order = append(order, landing)
 			}

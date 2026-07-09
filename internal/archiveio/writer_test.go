@@ -192,7 +192,7 @@ func zipParts(pos []FilePos, seals []record.PartSeal) []Part {
 
 func writeOneArchive(t *testing.T, w *Writer, sink *memSink, dle string, body []byte) (record.Archive, ArchivePos) {
 	t.Helper()
-	spec := ArchiveSpec{DLE: dle, Host: "localhost", Path: "/p", Archiver: "m", Level: 0, Compress: "none"}
+	spec := ArchiveSpec{DLE: dle, Host: "localhost", Path: "/p", ArchiverType: "m", Level: 0, Compress: "none"}
 	aw := w.NewArchive(spec)
 	if err := driveArchive(aw, body); err != nil {
 		t.Fatalf("driveArchive: %v", err)
@@ -345,7 +345,7 @@ func TestCommitRecordsUnreadable(t *testing.T) {
 	w := NewWriter(sink, sink, spec, nil, nil)
 
 	body := []byte("payload of what was readable")
-	aw := w.NewArchive(ArchiveSpec{DLE: "dle1", Host: "localhost", Path: "/p", Archiver: "m", Level: 0, Compress: "none"})
+	aw := w.NewArchive(ArchiveSpec{DLE: "dle1", Host: "localhost", Path: "/p", ArchiverType: "m", Level: 0, Compress: "none"})
 	if err := driveArchive(aw, body); err != nil {
 		t.Fatalf("driveArchive: %v", err)
 	}
@@ -566,7 +566,7 @@ func TestAtomicRollByBound(t *testing.T) {
 		body[i] = byte(x >> 24)
 	}
 	const frameSize, atomSize = 16 * 1024, 64 * 1024
-	aw := w.NewArchive(ArchiveSpec{DLE: "d", Host: "h", Path: "/p", Archiver: "m", Compress: "none", Encrypt: "seal", Shape: record.ShapeAtomic, AtomSize: atomSize})
+	aw := w.NewArchive(ArchiveSpec{DLE: "d", Host: "h", Path: "/p", ArchiverType: "m", Compress: "none", Encrypt: "seal", Shape: record.ShapeAtomic, AtomSize: atomSize})
 	src := xfer.AtomicSource(xfer.Reader(io.NopCloser(bytes.NewReader(body))), xfer.NewFilters(), frameSize, programs.Cmd{Name: "cat"}, atomSize)
 	if _, err := xfer.TransferAtoms(context.Background(), src, aw); err != nil {
 		t.Fatalf("TransferAtoms: %v", err)

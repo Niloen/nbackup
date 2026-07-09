@@ -30,11 +30,12 @@ import (
 // identity bits not in the request (the DLE's host, the base run for an incremental, and the
 // dumptype that selects the transform placement). Pure intent — no storage record.
 type BackupSpec struct {
-	Archiver archiver.Archiver
-	Request  archiver.BackupRequest
-	Host     string
-	BaseRun  string
-	DumpType string
+	Archiver     archiver.Archiver
+	ArchiverName string // the config definition name the dumptype resolved to (recorded on the archive)
+	Request      archiver.BackupRequest
+	Host         string
+	BaseRun      string
+	DumpType     string
 }
 
 // EncodePlacement is the write-side transform recipe for one dumptype: which compress/encrypt
@@ -123,7 +124,7 @@ func (d *Dumper) dumpItem(ctx context.Context, fs archivefs.Ingest, item planner
 		// restorable backup of what was readable — keep it (recoverability first), but warn
 		// loudly and return a partial error so the run exits non-zero and cron notices.
 		logf("  WARNING: %d file(s) unreadable, omitted from the archive: %s", len(unreadable), summarizePaths(unreadable))
-		logf("  (run nb as a user that can read every file under %s, e.g. via sudo/root, or exclude them in the dumptype)", item.DLE.Path)
+		logf("  (run nb as a user that can read every file under %s, e.g. via sudo/root, or exclude them in the dumptype)", item.DLE.Source)
 		return &PartialDumpError{DLE: item.DLE.ID(), Unreadable: unreadable}
 	}
 	return nil
@@ -166,29 +167,36 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 	if err != nil {
 		return BackupSpec{}, err
 	}
+	// R2: the resolved Scope is complete (Expand baked in the configured excludes, and a
+	// partition's rest carries its carve excludes) — consume it VERBATIM. Rebuilding it
+	// from the path + dumptype here would silently drop the carves and dump the rest's
+	// children twice.
 	req := archiver.BackupRequest{
 		DLE:       item.Name,
-		Source:    item.DLE.Path,
+		Scope:     item.DLE.Scope,
 		Level:     item.Level,
 		BaseLevel: -1,
-		Exclude:   d.exclude(item.DLE.DumpTypeName()),
 	}
 	if item.Level >= 1 {
 		req.BaseLevel = item.BaseLevel
-		if !ar.HasBase(item.Name, item.BaseLevel) {
+		if !ar.HasBase(item.Name, item.BaseLevel, item.DLE.Scope) {
 			return BackupSpec{}, fmt.Errorf("DLE %s: incremental L%d needs the L%d incremental state but it is missing — "+
 				"the prior dump wrote it under the host's state_dir; if that path moved (e.g. a relative state_dir/workdir while `nb` ran from a different directory), "+
 				"set state_dir to an absolute path and re-run a full (L0)",
 				item.DLE.ID(), item.Level, item.BaseLevel)
 		}
 	}
-	return BackupSpec{
+	spec := BackupSpec{
 		Archiver: ar,
 		Request:  req,
 		Host:     item.DLE.Host,
 		BaseRun:  item.BaseRun,
 		DumpType: item.DLE.DumpTypeName(),
-	}, nil
+	}
+	if d.archiverName != nil {
+		spec.ArchiverName = d.archiverName(spec.DumpType)
+	}
+	return spec, nil
 }
 
 // resolveShape folds the pipeline's declared capabilities into the archive's on-medium
@@ -248,16 +256,17 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 		return record.Archive{}, nil, err
 	}
 	aspec := archiveio.ArchiveSpec{
-		DLE:      spec.Request.DLE,
-		Host:     spec.Host,
-		Path:     spec.Request.Source,
-		Archiver: spec.Archiver.Name(),
-		Ext:      spec.Archiver.Ext(),
-		Compress: pl.CompressScheme,
-		Encrypt:  pl.EncryptScheme,
-		Shape:    shape,
-		Level:    spec.Request.Level,
-		BaseRun:  spec.BaseRun,
+		DLE:          spec.Request.DLE,
+		Host:         spec.Host,
+		Path:         spec.Request.Source,
+		ArchiverType: spec.Archiver.Name(),
+		ArchiverName: spec.ArchiverName,
+		Ext:          spec.Archiver.Ext(),
+		Compress:     pl.CompressScheme,
+		Encrypt:      pl.EncryptScheme,
+		Shape:        shape,
+		Level:        spec.Request.Level,
+		BaseRun:      spec.BaseRun,
 	}
 	if shape == record.ShapeAtomic {
 		aspec.AtomSize = pl.AtomSize

@@ -104,7 +104,7 @@ func TestBackupStreamAndState(t *testing.T) {
 	state := t.TempDir()
 	p := open(t, bin, state)
 
-	bs, err := p.BackupSource(archiver.BackupRequest{DLE: "db01-app", Source: "testdb", Level: 0, BaseLevel: -1})
+	bs, err := p.BackupSource(archiver.BackupRequest{DLE: "db01-app", Scope: archiver.Scope{Source: "testdb"}, Level: 0, BaseLevel: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,13 +155,13 @@ func TestBackupStreamAndState(t *testing.T) {
 	}
 
 	// The dump's manifest landed as the work file and only Promote commits it.
-	if p.HasBase("db01-app", 0) {
+	if p.HasBase("db01-app", 0, archiver.Scope{}) {
 		t.Fatal("HasBase before promote")
 	}
 	if err := bs.Promote(); err != nil {
 		t.Fatal(err)
 	}
-	if !p.HasBase("db01-app", 0) {
+	if !p.HasBase("db01-app", 0, archiver.Scope{}) {
 		t.Fatal("HasBase after promote")
 	}
 	got, err := os.ReadFile(p.manifestPath("db01-app", 0))
@@ -175,7 +175,7 @@ func TestBackupStreamAndState(t *testing.T) {
 func TestIncrementalNeedsBase(t *testing.T) {
 	bin := t.TempDir()
 	p := open(t, bin, t.TempDir())
-	if _, err := p.BackupSource(archiver.BackupRequest{DLE: "d", Source: "db", Level: 1, BaseLevel: 0}); err == nil || !strings.Contains(err.Error(), "a full must run first") {
+	if _, err := p.BackupSource(archiver.BackupRequest{DLE: "d", Scope: archiver.Scope{Source: "db"}, Level: 1, BaseLevel: 0}); err == nil || !strings.Contains(err.Error(), "a full must run first") {
 		t.Fatalf("want missing-base error, got %v", err)
 	}
 	live := p.manifestPath("d", 0)
@@ -185,7 +185,7 @@ func TestIncrementalNeedsBase(t *testing.T) {
 	if err := os.WriteFile(live, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	bs, err := p.BackupSource(archiver.BackupRequest{DLE: "d", Source: "db", Level: 1, BaseLevel: 0})
+	bs, err := p.BackupSource(archiver.BackupRequest{DLE: "d", Scope: archiver.Scope{Source: "db"}, Level: 1, BaseLevel: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,11 +226,11 @@ func TestEstimate(t *testing.T) {
 	bin := t.TempDir()
 	fakePsql(t, bin, "on")
 	p := open(t, bin, t.TempDir())
-	n, err := p.Estimate(archiver.BackupRequest{Source: "testdb", Level: 0, BaseLevel: -1})
+	n, err := p.Estimate(archiver.BackupRequest{Scope: archiver.Scope{Source: "testdb"}, Level: 0, BaseLevel: -1})
 	if err != nil || n != 12345 {
 		t.Fatalf("estimate = %d, %v", n, err)
 	}
-	n, err = p.Estimate(archiver.BackupRequest{Source: "testdb", Level: 1, BaseLevel: 0})
+	n, err = p.Estimate(archiver.BackupRequest{Scope: archiver.Scope{Source: "testdb"}, Level: 1, BaseLevel: 0})
 	if err != nil || n != 0 {
 		t.Fatalf("incremental estimate = %d, %v (want 0: no estimator)", n, err)
 	}
@@ -447,7 +447,7 @@ func TestCombineStage(t *testing.T) {
 
 func TestExcludeRejected(t *testing.T) {
 	p := open(t, t.TempDir(), t.TempDir())
-	if _, err := p.BackupSource(archiver.BackupRequest{DLE: "d", Source: "db", Exclude: []string{"x"}}); err == nil {
+	if _, err := p.BackupSource(archiver.BackupRequest{DLE: "d", Scope: archiver.Scope{Source: "db", Exclude: []string{"x"}}}); err == nil {
 		t.Fatal("exclude must be rejected")
 	}
 }
@@ -537,7 +537,7 @@ func TestLiveIncrementalCycle(t *testing.T) {
 
 	dump := func(level, baseLevel int) ([]byte, *archiver.BackupResult) {
 		t.Helper()
-		bs, err := p.BackupSource(archiver.BackupRequest{DLE: "db01", Source: conninfo, Level: level, BaseLevel: baseLevel})
+		bs, err := p.BackupSource(archiver.BackupRequest{DLE: "db01", Scope: archiver.Scope{Source: conninfo}, Level: level, BaseLevel: baseLevel})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -565,7 +565,7 @@ func TestLiveIncrementalCycle(t *testing.T) {
 	}
 
 	full, fullRes := dump(0, -1)
-	if !p.HasBase("db01", 0) {
+	if !p.HasBase("db01", 0, archiver.Scope{}) {
 		t.Fatal("no base after promoted full")
 	}
 	var users record.Unit

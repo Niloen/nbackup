@@ -1,6 +1,7 @@
 package conductor
 
 import (
+	"errors"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/logf"
@@ -13,14 +14,26 @@ import (
 // continuous dump cycle, now under the real run ID. A live terminal sink (when attached) paints
 // the same snapshots and suppresses the per-DLE log lines (runLogf becomes nil) so they don't
 // scribble over the in-place region. Progress reporting never blocks or fails the backup.
-func (c *Conductor) progressTracker(runID string, workers int, items []planner.Item, fileSink progress.Sink, lf logf.Logf) (*progress.Tracker, logf.Logf) {
+func (c *Conductor) progressTracker(runID string, workers int, plan *planner.Plan, fileSink progress.Sink, lf logf.Logf) (*progress.Tracker, logf.Logf) {
 	sink := fileSink
 	runLogf := lf
 	if c.d.RunSink != nil {
 		sink = progress.MultiSink(fileSink, c.d.RunSink)
 		runLogf = nil
 	}
-	return progress.NewTracker(runID, progress.PhaseRunning, workers, c.planProgress(items), time.Now, sink), runLogf
+	// Units that failed BEFORE dumping (plan.Failed — unresolvable source, dead
+	// estimate, unreachable host) get their own rows, marked failed immediately, so
+	// `nb status`, the report, and the mail show them exactly like a dump-time
+	// failure rather than silently omitting them from the night.
+	rows := c.planProgress(plan.Items)
+	for _, f := range plan.Failed {
+		rows = append(rows, progress.Plan{Name: f.ID, Slug: f.DLE.Name()})
+	}
+	tr := progress.NewTracker(runID, progress.PhaseRunning, workers, rows, time.Now, sink)
+	for _, f := range plan.Failed {
+		tr.FinishDLE(f.ID, 0, 0, 0, errors.New(f.Reason))
+	}
+	return tr, runLogf
 }
 
 // keepEstimating adapts the estimate phase's status-file sink so the file stays
@@ -45,7 +58,14 @@ func keepEstimating(file progress.Sink) progress.Sink {
 // the dead run as "estimating" forever. The plan's DLEs are seeded pending —
 // nothing was dumped — and the refusal itself becomes the snapshot's run-level Err.
 func (c *Conductor) failEstimated(fileSink progress.Sink, plan *planner.Plan, err error) {
-	tr := progress.NewTracker(progress.EstimateRunID, progress.PhaseEstimating, c.d.Workers, c.planProgress(plan.Items), time.Now, fileSink)
+	rows := c.planProgress(plan.Items)
+	for _, f := range plan.Failed {
+		rows = append(rows, progress.Plan{Name: f.ID, Slug: f.DLE.Name()})
+	}
+	tr := progress.NewTracker(progress.EstimateRunID, progress.PhaseEstimating, c.d.Workers, rows, time.Now, fileSink)
+	for _, f := range plan.Failed {
+		tr.FinishDLE(f.ID, 0, 0, 0, errors.New(f.Reason))
+	}
 	tr.Fail(err)
 }
 

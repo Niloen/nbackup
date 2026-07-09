@@ -27,7 +27,7 @@ func cat(runs ...[]record.Archive) []record.Archive {
 }
 
 func arch(dle string, level int) record.Archive {
-	return record.Archive{DLE: dle, Level: level, Archiver: "gnutar", Compress: "none"}
+	return record.Archive{DLE: dle, Level: level, ArchiverType: "gnutar", Compress: "none"}
 }
 
 // TestLedgerRoundTrip checks the ledger persists and reloads, and that Drilled honors

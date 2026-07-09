@@ -180,6 +180,18 @@ func pgMajor(version string) int {
 // summarization is on, without which the server cannot take the incremental
 // (level ≥ 1) dumps this archiver schedules. All three are proven live so
 // `nb check` fails now rather than the nightly dump failing later.
+// Expand is the identity for postgres, by design rather than as a placeholder: this
+// archiver is CLUSTER-granular (pg_basebackup cannot dump one database — one DLE per
+// cluster, see the package doc), so there is nothing to enumerate and any wildcard in a
+// conninfo is literal. The partition form is refused with the reason; a per-database
+// selection belongs to a future pg_dump-shaped archiver, not this one.
+func (p *postgres) Expand(sp archiver.SourcePattern) ([]archiver.Scope, error) {
+	if sp.Base != "" {
+		return nil, fmt.Errorf("postgres archiver cannot partition: pg_basebackup dumps a whole cluster (one DLE per cluster), so there are no per-database children to split; list each cluster as a plain source")
+	}
+	return []archiver.Scope{{Source: sp.Pattern, Exclude: sp.Exclude}}, nil
+}
+
 func (p *postgres) CheckSource(source string) error {
 	if _, err := p.psql(source, "SELECT 1"); err != nil {
 		return fmt.Errorf("cannot connect: %w\n(check the server is reachable; auth is the client's own libpq config — peer auth as this identity, ~/.pgpass, or ~/.pg_service.conf; grant a role once with: CREATE ROLE <user> LOGIN REPLICATION)", err)

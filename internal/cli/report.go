@@ -221,8 +221,18 @@ func staleDLEs(cfg *config.Config, now time.Time) (stale []catalog.StaleDLE, win
 	idOf := map[string]string{}
 	dles := make([]string, 0, len(cfg.DLEs()))
 	for _, d := range cfg.DLEs() {
+		if strings.ContainsAny(d.Path, "*?[") {
+			continue // a wildcard source has no single identity; its children come from the resolved set
+		}
 		dles = append(dles, d.Name())
 		idOf[d.Name()] = d.ID()
+	}
+	for _, r := range cat.LatestResolved() { // pattern children: the latest run's resolved set
+		if _, ok := idOf[r.DLE]; ok {
+			continue
+		}
+		dles = append(dles, r.DLE)
+		idOf[r.DLE] = r.Host + ":" + r.Source
 	}
 	stale = cat.StaleDLEs(dles, window, now)
 	for i := range stale {

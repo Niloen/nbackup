@@ -96,7 +96,7 @@ func TestCheckFlagsUnreadableSource(t *testing.T) {
 		t.Fatalf("an unreadable source must fail the check: %+v", rep)
 	}
 	local, _ := hostLines(rep, "localhost")
-	if !anyMsg(local.Lines, "not readable") {
+	if !anyMsg(local.Lines, "not a directory") {
 		t.Fatalf("expected an unreadable-source line: %+v", local.Lines)
 	}
 }

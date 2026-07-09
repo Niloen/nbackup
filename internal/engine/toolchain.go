@@ -189,16 +189,23 @@ func (t *toolchain) preflightDumptype(dt, host string, checkArchiver bool, check
 // came from), a local/unlisted host ("") extracts server-side.
 //
 // The archive records its producing archiver's TYPE — how to reverse the stream —
-// but a type's options live in a config definition (a pipe definition's
-// restore_command is essential to extraction, where gnutar's flags are not). The
-// DLE's dumptype is the config's mapping to that definition, so when the DLE is
-// still configured and its dumptype still resolves to this type, restore runs
-// with the definition's current options (the same config-is-source-of-truth rule
-// decryptOptsFor applies to keys). A DLE no longer in the config — or remapped to
-// another archiver type since the dump — falls back to the bare type with default
-// options; an archiver whose options are load-bearing then errors, naming the
-// missing option.
-func (t *toolchain) restoreArchiver(typeName, dleName, host string) (archiver.Archiver, error) {
+// and (on new dumps) the config DEFINITION NAME it was resolved from: an inert
+// lookup key, never a command, so a type's load-bearing options (a pipe
+// definition's restore_command) resolve from the CURRENT config by name — the
+// same config-is-source-of-truth rule decryptOptsFor applies to keys. The name
+// works identically for every DLE, configured or not (a partition child, a
+// removed source, a fresh machine with the same config). Resolution order:
+//  1. the recorded name, when the current config still defines it with the
+//     recorded type (a renamed/retyped definition must not silently mismatch);
+//  2. the DLE's dumptype mapping (pre-name artifacts — the old derivation);
+//  3. the bare type with default options — an archiver whose options are
+//     load-bearing then errors, naming the missing option.
+func (t *toolchain) restoreArchiver(typeName, archName, dleName, host string) (archiver.Archiver, error) {
+	if archName != "" {
+		if def := t.cfg.ResolveArchiver(archName); def.Type == typeName {
+			return t.openArchiver(archName+"\x00"+host, typeName, def.Options, host)
+		}
+	}
 	for _, d := range t.cfg.DLEs() {
 		if d.Name() != dleName {
 			continue

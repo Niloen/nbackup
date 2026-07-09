@@ -235,7 +235,7 @@ func transferArchive(sink archivefs.ArchiveSink, body []byte) error {
 	return cerr
 }
 
-var archSpec = archiveio.ArchiveSpec{DLE: "localhost:/data", Host: "localhost", Path: "/data", Archiver: "m", Compress: "none", Level: 0}
+var archSpec = archiveio.ArchiveSpec{DLE: "localhost:/data", Host: "localhost", Path: "/data", ArchiverType: "m", Compress: "none", Level: 0}
 
 // stageOne routes one dump through the spool bound for lane "landing" and waits for its drain to
 // finish (Drain joins the goroutine), returning the run's error.

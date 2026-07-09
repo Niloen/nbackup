@@ -19,7 +19,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,9 +89,164 @@ func (g *gnutar) Check() error {
 	return g.checkErr
 }
 
+// hasGlob reports whether s carries a shell wildcard metacharacter.
+func hasGlob(s string) bool { return strings.ContainsAny(s, "*?[") }
+
+// literalPattern escapes tar-glob metacharacters so a MACHINE-GENERATED exclude matches a
+// directory name literally: the carve for a child named "web-[a]" must exclude exactly
+// that directory — unescaped, tar reads "[a]" as a character class that never matches the
+// literal name, and the child's bytes silently duplicate into the rest, breaking the
+// partition's disjointness. User-written excludes are never escaped — their glob
+// semantics are documented and deliberate.
+func literalPattern(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\\', '*', '?', '[', ']':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// splitLiteralPrefix splits a wildcard path into its literal directory prefix and the
+// remaining glob (relative to that prefix). "/srv/web-*" -> ("/srv", "web-*");
+// "/data/*/logs" -> ("/data", "*/logs"); a path with no wildcard -> (path, "").
+func splitLiteralPrefix(pattern string) (root, rel string) {
+	segs := strings.Split(pattern, "/")
+	i := 0
+	for ; i < len(segs); i++ {
+		if hasGlob(segs[i]) {
+			break
+		}
+	}
+	if i == len(segs) {
+		return pattern, ""
+	}
+	root = strings.Join(segs[:i], "/")
+	if root == "" {
+		root = "/"
+	}
+	return root, strings.Join(segs[i:], "/")
+}
+
+// Expand resolves a SourcePattern into concrete Scopes over the executor. See the Archiver
+// interface. gnutar enumerates directories with `find`; a wildcard-free pattern is one Scope
+// with no I/O; a partition (Base set) also emits the remainder (Source == Base) with the
+// matches carved out via "./"-anchored excludes (self-anchoring: see createArgs).
+//
+// Anchored ("./") excludes anchor at what the user wrote in `sources:`. For a plain source
+// and a selection that is each scope's own root — verbatim pass-through. For a PARTITION
+// the user named ONE source (the base), so partitioning must not change what "./x" means:
+// each anchored exclude is re-mapped onto the one derived scope that owns it by prefix —
+// re-anchored relative to that scope's root — and an exclude that swallows a whole match
+// suppresses that match entirely (the rest still carves it; excluded is never resurrected).
+// The excluded byte set is therefore identical whether or not the source is partitioned.
+func (g *gnutar) Expand(p archiver.SourcePattern) ([]archiver.Scope, error) {
+	root, rel := p.Base, p.Pattern
+	if root == "" {
+		root, rel = splitLiteralPrefix(p.Pattern)
+		if rel == "" || !hasGlob(rel) {
+			// A plain scalar source: one scope, no I/O.
+			return []archiver.Scope{{Source: p.Pattern, Exclude: p.Exclude}}, nil
+		}
+	} else if rel == "" {
+		// A partition with an empty pattern degenerates to the whole base as one plain scope.
+		return []archiver.Scope{{Source: root, Exclude: p.Exclude}}, nil
+	}
+	// With a Base set, even a literal (non-glob) token enumerates: the named child becomes a
+	// match and the rest carves it; a token matching nothing on disk leaves the rest as the
+	// whole base — coverage is preserved either way, never a relative Source.
+	matches, err := g.findDirs(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	// Split the configured excludes: bare globs apply to every derived scope; anchored
+	// ones are base-relative for a partition (ownership re-mapping below) and
+	// scope-relative (verbatim) for a selection.
+	var globs, anchored []string
+	for _, e := range p.Exclude {
+		if p.Base != "" && strings.HasPrefix(e, "./") {
+			anchored = append(anchored, e)
+		} else {
+			globs = append(globs, e)
+		}
+	}
+	scopes := make([]archiver.Scope, 0, len(matches)+1)
+	var carves []string
+	prefix := strings.TrimSuffix(root, "/") + "/"
+	for _, m := range matches {
+		relName := strings.TrimPrefix(m, prefix)
+		carves = append(carves, "./"+literalPattern(relName))
+		sc := archiver.Scope{Base: root, Source: m, Exclude: globs}
+		suppressed := false
+		for _, a := range anchored {
+			ap := strings.TrimPrefix(a, "./")
+			switch {
+			case ap == relName:
+				suppressed = true // the whole match is excluded: no DLE for it
+			case strings.HasPrefix(ap, relName+"/"):
+				sc.Exclude = append(append([]string{}, sc.Exclude...), "./"+strings.TrimPrefix(ap, relName+"/"))
+			}
+		}
+		if !suppressed {
+			scopes = append(scopes, sc)
+		}
+	}
+	if p.Base != "" { // the remainder: Source == Base, matches carved out
+		rest := archiver.Scope{Base: root, Source: root}
+		rest.Exclude = append([]string{}, globs...)
+		for _, a := range anchored { // anchored excludes not owned by any match stay on the rest
+			owned := false
+			ap := strings.TrimPrefix(a, "./")
+			for _, m := range matches {
+				relName := strings.TrimPrefix(m, prefix)
+				if ap == relName || strings.HasPrefix(ap, relName+"/") {
+					owned = true
+					break
+				}
+			}
+			if !owned {
+				rest.Exclude = append(rest.Exclude, a)
+			}
+		}
+		rest.Exclude = append(rest.Exclude, carves...)
+		scopes = append(scopes, rest)
+	}
+	return scopes, nil
+}
+
+// findDirs lists directories under root at the pattern's depth and keeps those matching the
+// relative glob (path.Match is segment-wise: "*" never crosses "/").
+func (g *gnutar) findDirs(root, rel string) ([]string, error) {
+	depth := strconv.Itoa(len(strings.Split(rel, "/")))
+	out, err := g.ex.Command("find", root, "-mindepth", depth, "-maxdepth", depth, "-type", "d").Output()
+	if err != nil {
+		return nil, fmt.Errorf("enumerate %s (%s): %w", root, rel, err)
+	}
+	prefix := strings.TrimSuffix(root, "/") + "/"
+	var matches []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		if ok, _ := path.Match(rel, strings.TrimPrefix(line, prefix)); ok {
+			matches = append(matches, line)
+		}
+	}
+	sort.Strings(matches)
+	return matches, nil
+}
+
 // CheckSource probes the DLE's source directory for readability on the executor's
-// host — the tree-archiver meaning of "source ready".
+// host — the tree-archiver meaning of "source ready". A source is always a DIRECTORY:
+// there is no such thing as a file DLE (a file source would fail at dump anyway, since
+// tar runs --directory=source; this makes the error say why).
 func (g *gnutar) CheckSource(source string) error {
+	if err := g.ex.Command("test", "-d", source).Run(); err != nil {
+		return fmt.Errorf("not a directory (a source is always a directory; files are backed up by their parent)")
+	}
 	if err := g.ex.Command("test", "-r", source).Run(); err != nil {
 		return fmt.Errorf("not readable")
 	}
@@ -180,7 +337,15 @@ func (g *gnutar) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource,
 			Unreadable:   unreadable,
 		}, nil
 	}
-	promote := func() error { return g.promoteSnapshot(r.DLE, r.Level) }
+	promote := func() error {
+		if err := g.promoteSnapshot(r.DLE, r.Level); err != nil {
+			return err
+		}
+		// The carve sidecar rides the same commit: HasBase compares it so a remainder
+		// whose carve set grows re-baselines (see snapshot.go). A failed sidecar write
+		// degrades to a spurious full next run — the fail-safe direction.
+		return g.recordCarves(r.DLE, r.Level, carvesOf(r.Exclude))
+	}
 	cleanup := func() { _ = g.ex.Remove(indexPath) }
 	return &archiver.BackupSource{Stage: stage, Exec: g.ex, Finish: finish, Promote: promote, Cleanup: cleanup}, nil
 }
@@ -310,6 +475,12 @@ func (g *gnutar) createArgs(r archiver.BackupRequest, fileTarget, snapshot, inde
 	if g.sparse {
 		args = append(args, "--sparse")
 	}
+	// Excludes pass VERBATIM — the Amanda convention needs no flags: tar runs
+	// `--directory=Source .`, so member names are "./"-prefixed, and tar's unanchored
+	// matcher tries a pattern against the full name and every after-a-"/" suffix — no
+	// suffix ever starts with "./", so a "./"-prefixed pattern can only match at the
+	// root (self-anchoring), while a bare pattern ("*.log", "cache") floats to any
+	// depth. Absolute patterns are rejected at config load, so none reach here.
 	for _, p := range r.Exclude {
 		args = append(args, "--exclude="+p)
 	}

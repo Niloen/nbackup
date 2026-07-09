@@ -12,7 +12,6 @@ import (
 	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiveio"
 	"github.com/Niloen/nbackup/internal/archiver"
-	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/programs"
@@ -42,20 +41,23 @@ type fakeArchiver struct {
 func (f *fakeArchiver) Name() string                                   { return "fake" }
 func (f *fakeArchiver) Check() error                                   { return nil }
 func (f *fakeArchiver) Estimate(archiver.BackupRequest) (int64, error) { return 0, nil }
-func (f *fakeArchiver) HasBase(string, int) bool                       { return f.hasBase }
+func (f *fakeArchiver) HasBase(string, int, archiver.Scope) bool       { return f.hasBase }
 func (f *fakeArchiver) RestoreStage(string, []string) programs.Cmd     { return programs.Cmd{} }
 func (f *fakeArchiver) List(io.Reader) ([]record.Member, error)        { return nil, nil }
 func (f *fakeArchiver) SpliceTrailer() []byte                          { return nil }
 func (f *fakeArchiver) CheckSource(string) error                       { return nil }
-func (f *fakeArchiver) DestIsDir() bool                                { return true }
-func (f *fakeArchiver) SourceIsPath() bool                             { return true }
-func (f *fakeArchiver) Ext() string                                    { return ".tar" }
-func (f *fakeArchiver) CanList() bool                                  { return true }
-func (f *fakeArchiver) StockExtract() string                           { return "cat > /dev/null" }
-func (f *fakeArchiver) RestoreIsCombine() bool                         { return false }
-func (f *fakeArchiver) CombineStage(string, []string) programs.Cmd     { return programs.Cmd{} }
-func (f *fakeArchiver) Assembler() archiver.Assembler                  { return nil }
-func (f *fakeArchiver) Exporter() archiver.Exporter                    { return nil }
+func (f *fakeArchiver) Expand(p archiver.SourcePattern) ([]archiver.Scope, error) {
+	return []archiver.Scope{{Source: p.Pattern, Exclude: p.Exclude}}, nil
+}
+func (f *fakeArchiver) DestIsDir() bool                            { return true }
+func (f *fakeArchiver) SourceIsPath() bool                         { return true }
+func (f *fakeArchiver) Ext() string                                { return ".tar" }
+func (f *fakeArchiver) CanList() bool                              { return true }
+func (f *fakeArchiver) StockExtract() string                       { return "cat > /dev/null" }
+func (f *fakeArchiver) RestoreIsCombine() bool                     { return false }
+func (f *fakeArchiver) CombineStage(string, []string) programs.Cmd { return programs.Cmd{} }
+func (f *fakeArchiver) Assembler() archiver.Assembler              { return nil }
+func (f *fakeArchiver) Exporter() archiver.Exporter                { return nil }
 
 func (f *fakeArchiver) BackupSource(r archiver.BackupRequest) (*archiver.BackupSource, error) {
 	if f.backupErr != nil {
@@ -202,7 +204,7 @@ func (f *fakeIngest) NewCopy(record.Archive, int64) (archivefs.ArchiveSink, erro
 // --- helpers -------------------------------------------------------------------------
 
 func testItem(host, path string, level, baseLevel int) planner.Item {
-	dle := config.DLE{Host: host, Path: path}
+	dle := planner.DLE{Scope: archiver.Scope{Source: path}, Host: host}
 	return planner.Item{DLE: dle, Name: dle.Name(), Level: level, BaseLevel: baseLevel}
 }
 
@@ -438,7 +440,7 @@ func TestParkedDLEHoldsNoWorkerPermit(t *testing.T) {
 	freeIngest.store.recCh = make(chan struct{}, 1)
 
 	route := func(it planner.Item) archivefs.Ingest {
-		switch it.DLE.Path {
+		switch it.DLE.Source {
 		case "/blocked1":
 			return bi1
 		case "/blocked2":

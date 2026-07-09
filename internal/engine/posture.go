@@ -7,6 +7,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"github.com/Niloen/nbackup/internal/archiver"
 	"io"
 	"time"
 
@@ -265,11 +266,13 @@ func (d *driller) postureIncrementalState() (string, PostureStatus, string) {
 		}
 		// The next incremental sits at level L (1 right after a full, else the last
 		// level) and builds on the L-1 state; without it the DLE is forced to a full.
+		// An empty Scope asks only "is state present" — the posture question — not
+		// whether it is usable for a specific dump's carve set (that is plan's call).
 		lvl := st.LastLevel()
 		if lvl < 1 {
 			lvl = 1
 		}
-		if !arch.HasBase(name, lvl-1) {
+		if !arch.HasBase(name, lvl-1, archiver.Scope{}) {
 			missing++
 		}
 	}

@@ -3,6 +3,7 @@ package gnutar
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/Niloen/nbackup/internal/archiver"
 )
@@ -32,13 +33,76 @@ func (g *gnutar) workSnap(dle string, level int) string {
 	return g.snapPath(dle, level) + ".new"
 }
 
+// carvesPath is the live snapshot's sidecar: the carve set (anchored leading-"/" subtree
+// excludes) the dump that produced L<level>.snar ran with, newline-separated. It exists
+// because tar records an excluded-but-on-disk subtree as "present, not dumped" — never a
+// deletion — so a base built with FEWER carves than the next dump wants still contains a
+// subtree that now belongs to another DLE, and an incremental on it would retain that
+// stale copy. The sidecar is what lets HasBase judge that, entirely inside gnutar.
+func (g *gnutar) carvesPath(dle string, level int) string {
+	return filepath.Join(g.stateDir, dle, fmt.Sprintf("L%d.carves", level))
+}
+
+// carvesOf extracts the anchored subtree carves ("./"-prefixed patterns — a partition
+// remainder's system carves and user-written anchored excludes alike) from an exclude
+// list, leaving content globs ("*.log") behind: glob edits keep the Amanda stance (no
+// forced full); anchored additions re-baseline, because either kind leaves a stale
+// subtree copy in the chain.
+func carvesOf(exclude []string) []string {
+	var out []string
+	for _, p := range exclude {
+		if strings.HasPrefix(p, "./") {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // HasBase reports whether the live snapshot left by a completed dump at the level is a
-// usable base for a higher incremental. A missing file — or a present but empty one, which
-// a killed dump can leave behind — is not usable, so it reports false and the engine
-// forces a full instead of building a full-sized incremental on a dead snapshot.
-func (g *gnutar) HasBase(dle string, level int) bool {
+// usable base for a higher incremental covering s. A missing file — or a present but
+// empty one, which a killed dump can leave behind — is not usable. A base is also
+// unusable when s carves out a subtree the base's dump did NOT (the sidecar comparison
+// above): the engine then forces a full, re-baselining the partition remainder after a
+// child graduates. Carves REMOVED since the base are fine — an un-excluded subtree
+// re-enters the chain wholesale on the next incremental (pinned by
+// TestUnexcludedSubtreeReentersChainWholesale) — so the test is subset, not equality,
+// and a carve-free request (every plain DLE) skips the sidecar read entirely.
+func (g *gnutar) HasBase(dle string, level int, s archiver.Scope) bool {
 	n, err := g.ex.Size(g.snapPath(dle, level))
-	return err == nil && n > 0
+	if err != nil || n == 0 {
+		return false
+	}
+	want := carvesOf(s.Exclude)
+	if len(want) == 0 {
+		return true
+	}
+	data, err := g.ex.ReadFile(g.carvesPath(dle, level))
+	if err != nil {
+		return false // carves wanted but none recorded (or unreadable): re-baseline
+	}
+	have := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			have[line] = true
+		}
+	}
+	for _, c := range want {
+		if !have[c] {
+			return false // a subtree newly carved out: the base still contains it
+		}
+	}
+	return true
+}
+
+// recordCarves commits the carve set a just-promoted dump ran with, beside its snapshot
+// (write ".new", then rename — the library's promote pattern). Always written, even
+// empty, so the recorded state is current rather than inherited from an older level.
+func (g *gnutar) recordCarves(dle string, level int, carves []string) error {
+	work := g.carvesPath(dle, level) + ".new"
+	if err := g.ex.WriteFile(work, []byte(strings.Join(carves, "\n"))); err != nil {
+		return err
+	}
+	return g.ex.Rename(work, g.carvesPath(dle, level))
 }
 
 // seedSnapshot prepares outSnap as the starting incremental state for the dump on the

@@ -40,6 +40,8 @@ func (localExec) Remove(path string) error { return os.RemoveAll(path) }
 
 func (localExec) Rename(oldpath, newpath string) error { return os.Rename(oldpath, newpath) }
 
+func (localExec) WriteFile(path string, data []byte) error { return os.WriteFile(path, data, 0o644) }
+
 func (localExec) CopyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {

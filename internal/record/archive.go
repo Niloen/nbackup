@@ -15,31 +15,32 @@ import (
 // catalog, not here, so the metadata stays portable across volumes). A "run" is just the
 // shared Run tag a run's archives carry — there is no run record on the medium.
 type Archive struct {
-	Run          string     `json:"run"`                  // the run this dump belongs to, e.g. "run-2026-06-21.031500"
-	DLE          string     `json:"dle"`                  // DLE name, e.g. "app01-home"
-	Host         string     `json:"host"`                 // source host
-	Path         string     `json:"path"`                 // source path
-	Archiver     string     `json:"archiver"`             // archiver type that produced it
-	Ext          string     `json:"ext,omitempty"`        // the archiver's raw-stream filename extension (gnutar: ".tar"); archive-invariant like Shape, so copies carry it. "" on pre-Ext archives (the media default it to ".tar")
-	Compress     string     `json:"compress"`             // compression scheme (zstd|gzip|none); reversed on restore
-	Encrypt      string     `json:"encrypt"`              // encryption scheme (gpg|none); reversed on restore. "none" = plaintext — always concrete, the peer of Compress, so the two transforms describe their off-state identically. The key is never stored — restore resolves it from the operator's keyring.
-	Level        int        `json:"level"`                // 0 = full, >=1 = incremental
-	Compressed   int64      `json:"compressed"`           // payload size on the volume
-	Uncompressed int64      `json:"uncompressed"`         // archive stream size before compression
-	FileCount    int        `json:"file_count"`           // number of member entries archived
-	Unreadable   int        `json:"unreadable,omitempty"` // source files the producer could not read, omitted from the archive (a PARTIAL dump — Amanda's "strange"); 0 = complete
-	SHA256       string     `json:"sha256"`               // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
-	Parts        int        `json:"parts,omitempty"`      // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
-	BaseRun      string     `json:"base_run,omitempty"`   // for level>=1, the run whose state this builds on (a full omits it)
-	CreatedAt    time.Time  `json:"created_at"`           // when this archive committed (landed) — per-archive, the basis for retention age and the "last archive added" display
-	Shape        Shape      `json:"shape,omitempty"`      // stream shape (see Shape): how the encoded payload is laid out. Kept in the footer — a reader decodes without config — and archive-invariant across copies (the encoded bytes are carried verbatim).
-	Members      []Member   `json:"members,omitempty"`    // members archived, in stream order (see Member); the raw path token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
-	Frames       []Frame    `json:"frames,omitempty"`     // a framed archive's decode-restart table, in stream order (see Frame). Like Members it rides the per-archive index, never the footer; unlike part seals it is archive-invariant (encoded-stream domain), so copies carry it unchanged.
-	Units        []Unit     `json:"units,omitempty"`      // the archive's content inventory in the archiver's vocabulary (see Unit), sorted by Path. Rides the per-archive index like Members, never the footer; archive-invariant, so copies carry it unchanged.
-	PartSeals    []PartSeal `json:"part_seals,omitempty"` // per-part seals, index-aligned with the parts (Header.Part order). Like Parts, a fact about THIS placement's layout (a copy re-splits and re-seals its own parts): the catalog moves them onto the placement's record and strips them from the run's medium-independent content.
-	IndexSize    int64      `json:"index_size,omitempty"` // payload bytes of THIS placement's member-index file (0 = no index). A placement-layout fact like PartSeals; with them it completes what a rebuild scan needs to re-derive a volume's fill without reading payloads (the scan skips index files).
-	PartMap      []FilePos  `json:"part_map,omitempty"`   // where each part landed — the archive's TOC, index-aligned with the parts like PartSeals and equally placement-layout. It makes the volume SET self-describing: any one tape holding the footer names every tape (and position) the archive spans, so a rebuild that has not seen a part's tape still records a complete placement and a restore can prompt for the missing reel by label.
-	IndexPos     FilePos    `json:"index_pos,omitzero"`   // where THIS placement's member-index file landed (zero = no index) — the TOC's last entry, so a rebuild holding only the footer's tape still knows which reel serves member browsing; sized by IndexSize above.
+	Run          string     `json:"run"`                     // the run this dump belongs to, e.g. "run-2026-06-21.031500"
+	DLE          string     `json:"dle"`                     // DLE name, e.g. "app01-home"
+	Host         string     `json:"host"`                    // source host
+	Path         string     `json:"path"`                    // source path
+	ArchiverType string     `json:"archiver"`                // archiver TYPE that produced it (which plugin reverses the stream) — the wire key stays "archiver" so every existing footer/catalog entry parses unchanged
+	ArchiverName string     `json:"archiver_name,omitempty"` // the config archiver DEFINITION name the dump resolved (an inert lookup key, never a command): restore prefers it to find the definition's load-bearing options (pipe's restore_command) without scanning config by DLE slug. Additive — absent on old artifacts, which fall back to the slug scan
+	Ext          string     `json:"ext,omitempty"`           // the archiver's raw-stream filename extension (gnutar: ".tar"); archive-invariant like Shape, so copies carry it. "" on pre-Ext archives (the media default it to ".tar")
+	Compress     string     `json:"compress"`                // compression scheme (zstd|gzip|none); reversed on restore
+	Encrypt      string     `json:"encrypt"`                 // encryption scheme (gpg|none); reversed on restore. "none" = plaintext — always concrete, the peer of Compress, so the two transforms describe their off-state identically. The key is never stored — restore resolves it from the operator's keyring.
+	Level        int        `json:"level"`                   // 0 = full, >=1 = incremental
+	Compressed   int64      `json:"compressed"`              // payload size on the volume
+	Uncompressed int64      `json:"uncompressed"`            // archive stream size before compression
+	FileCount    int        `json:"file_count"`              // number of member entries archived
+	Unreadable   int        `json:"unreadable,omitempty"`    // source files the producer could not read, omitted from the archive (a PARTIAL dump — Amanda's "strange"); 0 = complete
+	SHA256       string     `json:"sha256"`                  // checksum of the payload (over the whole stream, across all parts when the archive spans volumes)
+	Parts        int        `json:"parts,omitempty"`         // number of parts the payload is split into across volumes (0/1 = a single whole part); the per-part index lives in each file's Header.Part
+	BaseRun      string     `json:"base_run,omitempty"`      // for level>=1, the run whose state this builds on (a full omits it)
+	CreatedAt    time.Time  `json:"created_at"`              // when this archive committed (landed) — per-archive, the basis for retention age and the "last archive added" display
+	Shape        Shape      `json:"shape,omitempty"`         // stream shape (see Shape): how the encoded payload is laid out. Kept in the footer — a reader decodes without config — and archive-invariant across copies (the encoded bytes are carried verbatim).
+	Members      []Member   `json:"members,omitempty"`       // members archived, in stream order (see Member); the raw path token is replayed to the producing archiver on extract. Stored in the per-archive index, not the commit footer — omitempty so the footer omits it.
+	Frames       []Frame    `json:"frames,omitempty"`        // a framed archive's decode-restart table, in stream order (see Frame). Like Members it rides the per-archive index, never the footer; unlike part seals it is archive-invariant (encoded-stream domain), so copies carry it unchanged.
+	Units        []Unit     `json:"units,omitempty"`         // the archive's content inventory in the archiver's vocabulary (see Unit), sorted by Path. Rides the per-archive index like Members, never the footer; archive-invariant, so copies carry it unchanged.
+	PartSeals    []PartSeal `json:"part_seals,omitempty"`    // per-part seals, index-aligned with the parts (Header.Part order). Like Parts, a fact about THIS placement's layout (a copy re-splits and re-seals its own parts): the catalog moves them onto the placement's record and strips them from the run's medium-independent content.
+	IndexSize    int64      `json:"index_size,omitempty"`    // payload bytes of THIS placement's member-index file (0 = no index). A placement-layout fact like PartSeals; with them it completes what a rebuild scan needs to re-derive a volume's fill without reading payloads (the scan skips index files).
+	PartMap      []FilePos  `json:"part_map,omitempty"`      // where each part landed — the archive's TOC, index-aligned with the parts like PartSeals and equally placement-layout. It makes the volume SET self-describing: any one tape holding the footer names every tape (and position) the archive spans, so a rebuild that has not seen a part's tape still records a complete placement and a restore can prompt for the missing reel by label.
+	IndexPos     FilePos    `json:"index_pos,omitzero"`      // where THIS placement's member-index file landed (zero = no index) — the TOC's last entry, so a rebuild holding only the footer's tape still knows which reel serves member browsing; sized by IndexSize above.
 }
 
 // FilePos is the location of one file on a volume: the label of the volume it is

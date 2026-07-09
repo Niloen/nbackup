@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/logf"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
@@ -21,16 +21,16 @@ import (
 // behind. preflightErr/makeRoomErr choose which prelude step fails.
 func preludeDeps(t *testing.T, workdir string, preflightErr, makeRoomErr error) Deps {
 	t.Helper()
-	dle := config.DLE{Host: "h1", Path: "/data", DumpType: "std"}
+	dle := planner.DLE{Scope: archiver.Scope{Source: "/data"}, Host: "h1", DumpType: "std"}
 	return Deps{
 		Cat:   newCatalog(t),
 		Flush: func(time.Time, logf.Logf) (int, error) { return 0, nil },
-		Plan: func(date time.Time, sink progress.Sink) *planner.Plan {
+		Plan: func(date time.Time, sink progress.Sink) (*planner.Plan, error) {
 			rows := []progress.Plan{{Name: dle.ID(), Slug: dle.Name()}}
 			tr := progress.NewTracker(progress.EstimateRunID, progress.PhaseEstimating, 1, rows, time.Now, sink)
 			tr.FinishDLE(dle.ID(), 0, 100, 0, nil)
 			tr.SetPhase(progress.PhaseDone) // keepEstimating holds the file at "estimating"
-			return &planner.Plan{Date: date, Items: []planner.Item{{DLE: dle, Level: 0, EstBytes: 100}}}
+			return &planner.Plan{Date: date, Items: []planner.Item{{DLE: dle, Level: 0, EstBytes: 100}}}, nil
 		},
 		Preflight: scheduler.PreflightDeps{
 			CheckCompress:     func() error { return nil },
@@ -54,12 +54,16 @@ func TestRunPreludeFailureStampsStatusFailed(t *testing.T) {
 		name                      string
 		preflightErr, makeRoomErr error
 		wantErr                   string
+		wantState                 progress.State
 	}{
 		// A single-landing route: the refusal downs the DLE's whole route, so the run
 		// is fatal (a multi-landing route instead skips the refusing landing; see
 		// TestRouteFatal for the judgment).
-		{"make-room refusal", nil, errors.New("capacity 400.00 GB cannot hold the incoming"), "no landing on its route is usable"},
-		{"preflight failure", errors.New("host h1 unreachable"), nil, "host h1 unreachable"},
+		{"make-room refusal", nil, errors.New("capacity 400.00 GB cannot hold the incoming"), "no landing on its route is usable", progress.StatePending},
+		// A down host is the failure ladder's UNIT class: its DLEs are marked FAILED
+		// (not pending) — here it is the only host, so nothing is plannable and the
+		// run is fatal, but the status file still tells the per-DLE truth.
+		{"preflight failure", errors.New("host h1 unreachable"), nil, "host h1 unreachable", progress.StateFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,8 +86,8 @@ func TestRunPreludeFailureStampsStatusFailed(t *testing.T) {
 			if snap.EndedAt.IsZero() {
 				t.Errorf("status file has no EndedAt; terminal snapshots must stamp one")
 			}
-			if len(snap.DLEs) != 1 || snap.DLEs[0].State != progress.StatePending {
-				t.Errorf("status file DLEs = %+v; want the planned DLE pending (nothing was dumped)", snap.DLEs)
+			if len(snap.DLEs) != 1 || snap.DLEs[0].State != tc.wantState {
+				t.Errorf("status file DLEs = %+v; want the planned DLE %q (nothing was dumped)", snap.DLEs, tc.wantState)
 			}
 		})
 	}
@@ -92,7 +96,7 @@ func TestRunPreludeFailureStampsStatusFailed(t *testing.T) {
 // routeFatal is the any-lane-suffices judgment shared by make-room and window-open:
 // a downed landing is fatal only when it empties some DLE's whole route.
 func TestRouteFatal(t *testing.T) {
-	dle := config.DLE{Host: "h1", Path: "/data", DumpType: "std"}
+	dle := planner.DLE{Scope: archiver.Scope{Source: "/data"}, Host: "h1", DumpType: "std"}
 	items := []planner.Item{{DLE: dle}}
 	down := errors.New("capacity cannot hold the incoming")
 	cases := []struct {

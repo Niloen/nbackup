@@ -18,11 +18,11 @@ import (
 // requested member as "content of <member>@<run>" into the destination.
 func backend() Backend {
 	archives := []record.Archive{
-		{Run: "run-2026-06-21.001", DLE: "app", Level: 0, Archiver: "gnutar", Compress: "none",
+		{Run: "run-2026-06-21.001", DLE: "app", Level: 0, ArchiverType: "gnutar", Compress: "none",
 			Members: mems("./", "./etc/", "./etc/hosts", "./etc/passwd")},
-		{Run: "run-2026-06-21.001", DLE: "web", Level: 0, Archiver: "gnutar", Compress: "none",
+		{Run: "run-2026-06-21.001", DLE: "web", Level: 0, ArchiverType: "gnutar", Compress: "none",
 			Members: mems("./", "./index.html")},
-		{Run: "run-2026-06-22.001", DLE: "app", Level: 1, Archiver: "gnutar", Compress: "none",
+		{Run: "run-2026-06-22.001", DLE: "app", Level: 1, ArchiverType: "gnutar", Compress: "none",
 			Members: mems("./", "./etc/", "./etc/hosts", "./etc/new.conf")},
 	}
 	runs := []*catalog.Run{

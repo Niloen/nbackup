@@ -1,5 +1,14 @@
 # Spec: split sources (config-derived partition)
 
+> **Superseded by [partition-sources.md](partition-sources.md).** The main design is a
+> plan-time-resolved **partition**: an explicit base `path` plus a `partition` glob
+> (`path: /data, partition: "*"` → one DLE per child + a guaranteed rest). The static
+> declared-shard list below is fully retired — its explicit-subset case is now just a
+> template like `partition: "web-*"`. The coverage argument, anchored-exclude convention, and
+> the exclusion-is-not-deletion finding carry over verbatim and are restated there; keep this
+> doc only as history of that derivation's prose. Its load-time-pure partition is replaced by
+> the two-step load-then-plan resolution so dynamic sets work.
+
 Status: design proposal, not implemented. This specifies how a single large source is
 partitioned into several DLEs *in the config itself*, such that 100% coverage is
 guaranteed by construction — **no hidden state**: the split is declared in `sources:` and

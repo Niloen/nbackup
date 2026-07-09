@@ -1,0 +1,396 @@
+package gnutar
+
+import (
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/Niloen/nbackup/internal/archiver"
+	"github.com/Niloen/nbackup/internal/record"
+)
+
+// sources returns the Source of each scope, sorted.
+func sources(scopes []archiver.Scope) []string {
+	out := make([]string, len(scopes))
+	for i, s := range scopes {
+		out[i] = s.Source
+	}
+	sort.Strings(out)
+	return out
+}
+
+// findScope returns the scope with the given Source, or fails.
+func findScope(t *testing.T, scopes []archiver.Scope, source string) archiver.Scope {
+	t.Helper()
+	for _, s := range scopes {
+		if s.Source == source {
+			return s
+		}
+	}
+	t.Fatalf("no scope with source %q in %+v", source, scopes)
+	return archiver.Scope{}
+}
+
+func mkdirs(t *testing.T, root string, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		if err := os.MkdirAll(filepath.Join(root, n), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestExpandPlain: a wildcard-free source resolves to exactly one scope (no enumeration).
+func TestExpandPlain(t *testing.T) {
+	m := newArchiver(t, t.TempDir())
+	scopes, err := m.Expand(archiver.SourcePattern{Pattern: "/var/log", Exclude: []string{"*.gz"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scopes) != 1 || scopes[0].Source != "/var/log" || scopes[0].Base != "" {
+		t.Fatalf("plain: want one scope {Base:\"\", Source:/var/log}, got %+v", scopes)
+	}
+	if len(scopes[0].Exclude) != 1 || scopes[0].Exclude[0] != "*.gz" {
+		t.Errorf("plain: configured excludes not carried: %+v", scopes[0].Exclude)
+	}
+}
+
+// TestExpandSelection: a scalar wildcard yields one scope per matching directory, no rest.
+func TestExpandSelection(t *testing.T) {
+	root := t.TempDir()
+	mkdirs(t, root, "web-app", "web-api", "legacy")
+	if err := os.WriteFile(filepath.Join(root, "web-notes.txt"), nil, 0o644); err != nil {
+		t.Fatal(err) // a matching-name FILE must not become a scope (directories only)
+	}
+	m := newArchiver(t, t.TempDir())
+
+	scopes, err := m.Expand(archiver.SourcePattern{Pattern: filepath.Join(root, "web-*")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sources(scopes)
+	want := []string{filepath.Join(root, "web-api"), filepath.Join(root, "web-app")}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("selection web-*: want %v, got %v", want, got)
+	}
+	for _, s := range scopes {
+		if s.Base != root {
+			t.Errorf("selection: want Base=%q, got %q", root, s.Base)
+		}
+		if s.Source == root {
+			t.Errorf("selection must emit no remainder (Source==Base), got one")
+		}
+	}
+}
+
+// TestExpandPartition: the mapping form yields the matches plus the rest (Source==Base) with
+// each match carved out as an anchored (leading-"/") exclude.
+func TestExpandPartition(t *testing.T) {
+	root := t.TempDir()
+	mkdirs(t, root, "alice", "bob", "carol")
+	m := newArchiver(t, t.TempDir())
+
+	scopes, err := m.Expand(archiver.SourcePattern{Base: root, Pattern: "*", Exclude: []string{"*.log"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scopes) != 4 { // alice, bob, carol + the rest
+		t.Fatalf("partition: want 4 scopes, got %d: %+v", len(scopes), scopes)
+	}
+	// each match: Base=root, Source under root, carries the dumptype exclude only
+	alice := findScope(t, scopes, filepath.Join(root, "alice"))
+	if alice.Base != root {
+		t.Errorf("match Base: want %q, got %q", root, alice.Base)
+	}
+	if len(alice.Exclude) != 1 || alice.Exclude[0] != "*.log" {
+		t.Errorf("match excludes: want [*.log], got %v", alice.Exclude)
+	}
+	// the rest: Source == Base, excludes = dumptype glob + anchored carves for each child
+	rest := findScope(t, scopes, root)
+	if rest.Base != root {
+		t.Errorf("rest Base: want %q, got %q", root, rest.Base)
+	}
+	wantExcl := map[string]bool{"*.log": true, "./alice": true, "./bob": true, "./carol": true}
+	if len(rest.Exclude) != len(wantExcl) {
+		t.Fatalf("rest excludes: want %v, got %v", wantExcl, rest.Exclude)
+	}
+	for _, e := range rest.Exclude {
+		if !wantExcl[e] {
+			t.Errorf("rest: unexpected exclude %q (want %v)", e, wantExcl)
+		}
+	}
+}
+
+// TestExpandPartitionAnchoredExcludeOwnership pins partition transparency for anchored
+// ("./") excludes: they anchor at the BASE the user wrote in sources:, so Expand re-maps
+// each onto the one derived scope that owns it by prefix — partitioning never changes
+// which bytes are excluded. An exclude that swallows a whole match suppresses that match
+// (no DLE for it), while the rest still carves it — excluded is never resurrected.
+func TestExpandPartitionAnchoredExcludeOwnership(t *testing.T) {
+	root := t.TempDir()
+	mkdirs(t, root, "alice", "bob", "var/cache")
+	m := newArchiver(t, t.TempDir())
+
+	scopes, err := m.Expand(archiver.SourcePattern{
+		Base: root, Pattern: "*",
+		Exclude: []string{"*.log", "./var/cache", "./alice", "./loose-dir"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ./alice swallows match alice whole: suppressed, no DLE.
+	for _, s := range scopes {
+		if s.Source == filepath.Join(root, "alice") {
+			t.Fatalf("wholly excluded match must be suppressed, got scope %+v", s)
+		}
+	}
+	// ./var/cache is owned by match var: re-anchored to ./cache there; bob gets globs only.
+	varScope := findScope(t, scopes, filepath.Join(root, "var"))
+	wantVar := map[string]bool{"*.log": true, "./cache": true}
+	if len(varScope.Exclude) != len(wantVar) {
+		t.Fatalf("var scope excludes: want %v, got %v", wantVar, varScope.Exclude)
+	}
+	for _, e := range varScope.Exclude {
+		if !wantVar[e] {
+			t.Errorf("var scope: unexpected exclude %q", e)
+		}
+	}
+	bob := findScope(t, scopes, filepath.Join(root, "bob"))
+	if len(bob.Exclude) != 1 || bob.Exclude[0] != "*.log" {
+		t.Errorf("bob must carry globs only, got %v", bob.Exclude)
+	}
+	// the rest: globs + the unowned anchored exclude (./loose-dir) + carves for ALL
+	// matches including the suppressed one (excluded, never resurrected into the rest).
+	rest := findScope(t, scopes, root)
+	wantRest := map[string]bool{"*.log": true, "./loose-dir": true, "./alice": true, "./bob": true, "./var": true}
+	if len(rest.Exclude) != len(wantRest) {
+		t.Fatalf("rest excludes: want %v, got %v", wantRest, rest.Exclude)
+	}
+	for _, e := range rest.Exclude {
+		if !wantRest[e] {
+			t.Errorf("rest: unexpected exclude %q", e)
+		}
+	}
+}
+
+// TestCarveEscapesGlobMetacharacters pins the road-test HIGH: a child whose NAME contains
+// tar-glob metacharacters ("web-[a]") must be carved out of the rest literally. Unescaped,
+// tar reads "[a]" as a character class that never matches the literal directory, so the
+// child's bytes silently duplicate into the rest — breaking the partition's disjointness
+// ("full coverage, guaranteed" means disjoint too). Proven against real tar: the rest's
+// members must not contain the bracket child.
+func TestCarveEscapesGlobMetacharacters(t *testing.T) {
+	root := t.TempDir()
+	mkdirs(t, root, "web-[a]", "normal")
+	write(t, filepath.Join(root, "web-[a]", "f.txt"), "brackets")
+	write(t, filepath.Join(root, "normal", "g.txt"), "plain")
+	write(t, filepath.Join(root, "loose.txt"), "loose")
+	m := newArchiver(t, t.TempDir())
+
+	scopes, err := m.Expand(archiver.SourcePattern{Base: root, Pattern: "*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rest := findScope(t, scopes, root)
+	var escaped bool
+	for _, e := range rest.Exclude {
+		if e == `./web-\[a\]` {
+			escaped = true
+		}
+		if e == "./web-[a]" {
+			t.Fatalf("machine carve must be escaped, got raw glob %q", e)
+		}
+	}
+	if !escaped {
+		t.Fatalf("rest carves missing the escaped bracket child: %v", rest.Exclude)
+	}
+
+	// The proof that matters: real tar over the rest scope excludes the bracket child.
+	out := filepath.Join(t.TempDir(), "rest.tar")
+	res := backup(t, m, archiver.BackupRequest{DLE: "rest", Scope: rest, Level: 0, BaseLevel: -1}, out)
+	for _, mem := range res.Members {
+		p := strings.TrimPrefix(mem.Path, "./")
+		if strings.HasPrefix(p, "web-[a]") {
+			t.Fatalf("bracket child leaked into the rest (coverage no longer disjoint): %v", memberPaths(res.Members))
+		}
+	}
+	var hasLoose bool
+	for _, mem := range res.Members {
+		if strings.TrimPrefix(mem.Path, "./") == "loose.txt" {
+			hasLoose = true
+		}
+	}
+	if !hasLoose {
+		t.Fatal("the rest must still contain the loose file")
+	}
+}
+
+// TestExpandPartitionLiteralToken: a literal (non-glob) partition token still enumerates —
+// the named child becomes a match with an ABSOLUTE Source and the rest carves it. This pins
+// the fix for the early-return bug that produced a relative Source and dropped the rest.
+func TestExpandPartitionLiteralToken(t *testing.T) {
+	root := t.TempDir()
+	mkdirs(t, root, "media", "other")
+	m := newArchiver(t, t.TempDir())
+
+	scopes, err := m.Expand(archiver.SourcePattern{Base: root, Pattern: "media"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scopes) != 2 { // the match + the rest
+		t.Fatalf("literal token: want 2 scopes, got %d: %+v", len(scopes), scopes)
+	}
+	match := findScope(t, scopes, filepath.Join(root, "media"))
+	if match.Base != root {
+		t.Errorf("match Base: want %q, got %q", root, match.Base)
+	}
+	rest := findScope(t, scopes, root)
+	if len(rest.Exclude) != 1 || rest.Exclude[0] != "./media" {
+		t.Errorf("rest carves: want [./media], got %v", rest.Exclude)
+	}
+}
+
+// TestExpandPartitionTokenMatchingNothing: a typo'd literal token yields no match and the
+// rest degenerates to the whole base — coverage preserved, nothing dropped.
+func TestExpandPartitionTokenMatchingNothing(t *testing.T) {
+	root := t.TempDir()
+	mkdirs(t, root, "media")
+	m := newArchiver(t, t.TempDir())
+
+	scopes, err := m.Expand(archiver.SourcePattern{Base: root, Pattern: "nosuch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scopes) != 1 || scopes[0].Source != root || len(scopes[0].Exclude) != 0 {
+		t.Fatalf("want the whole base as the rest with no carves, got %+v", scopes)
+	}
+}
+
+// TestAnchoredCarveIsNotContentGlob proves a partition's carve exclude ("./alice") is anchored
+// at the archive root: dumping the rest of /data drops top-level /data/alice but keeps the
+// like-named /data/keep/alice deeper in the tree — an unanchored --exclude=alice would drop
+// both. This locks the createArgs anchoring the remainder relies on.
+func TestAnchoredCarveIsNotContentGlob(t *testing.T) {
+	root := t.TempDir()
+	mkdirs(t, root, "alice", "keep/alice")
+	if err := os.WriteFile(filepath.Join(root, "keep", "alice", "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := newArchiver(t, t.TempDir())
+
+	// the rest of /data with only /alice carved (keep is deliberately not a match here).
+	rest := archiver.Scope{Base: root, Source: root, Exclude: []string{"./alice"}}
+	out := filepath.Join(t.TempDir(), "rest.tar")
+	res := backup(t, m, archiver.BackupRequest{DLE: "rest", Scope: rest, Level: 0, BaseLevel: -1}, out)
+	var keptNested, carvedTop bool
+	for _, mem := range res.Members {
+		p := strings.TrimPrefix(mem.Path, "./")
+		if strings.HasPrefix(p, "keep/alice") {
+			keptNested = true
+		}
+		if p == "alice/" || p == "alice" || strings.HasPrefix(p, "alice/") {
+			carvedTop = true
+		}
+	}
+	if !keptNested {
+		t.Errorf("the rest should keep keep/alice (anchored carve of /alice only); members: %v", memberPaths(res.Members))
+	}
+	if carvedTop {
+		t.Errorf("the rest should have carved out top-level /alice; members: %v", memberPaths(res.Members))
+	}
+}
+
+// TestUnexcludedSubtreeReentersChainWholesale pins the un-exclude direction of the snar
+// semantics (the peer of TestNewExcludeIsNotADeletion): a subtree excluded at L0 and
+// un-excluded at L1 is dumped WHOLESALE at L1 (it is not in the snar, so tar treats it as
+// new), and the chain restore contains it completely. This is what lets the partition
+// re-baseline guard fire on carve ADDITIONS only — a carve removed while its directory
+// still exists re-enters the chain via a fat incremental, with no restore hole.
+func TestUnexcludedSubtreeReentersChainWholesale(t *testing.T) {
+	src := t.TempDir()
+	m := newArchiver(t, t.TempDir())
+	write(t, filepath.Join(src, "alice", "f1"), "a1")
+	write(t, filepath.Join(src, "keep", "f2"), "k1")
+
+	l0 := filepath.Join(t.TempDir(), "l0.tar")
+	backup(t, m, archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src, Exclude: []string{"./alice"}}, Level: 0, BaseLevel: -1}, l0)
+
+	// carve removed, dir untouched: L1 without the exclude must contain alice wholesale.
+	l1 := filepath.Join(t.TempDir(), "l1.tar")
+	res := backup(t, m, archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 1, BaseLevel: 0}, l1)
+	var hasAliceFile bool
+	for _, mem := range res.Members {
+		if strings.TrimPrefix(mem.Path, "./") == "alice/f1" {
+			hasAliceFile = true
+		}
+	}
+	if !hasAliceFile {
+		t.Fatalf("un-excluded subtree not dumped wholesale at L1 — the re-baseline guard must also fire on carve removals; members: %v", memberPaths(res.Members))
+	}
+
+	// and the chain restore reproduces it.
+	dest := t.TempDir()
+	restore(t, m, l0, dest)
+	restore(t, m, l1, dest)
+	got, err := os.ReadFile(filepath.Join(dest, "alice", "f1"))
+	if err != nil || string(got) != "a1" {
+		t.Fatalf("chain restore missing un-excluded subtree: %v (%q)", err, got)
+	}
+}
+
+// TestHasBaseCarveComparison pins the sidecar semantics: a base is usable iff the
+// request's carves are a SUBSET of what the base was dumped with. Additions (a child
+// newly carved out) make it unusable — the base still contains that subtree, so an
+// incremental would retain a stale copy; removals are fine (un-excluded subtrees
+// re-enter wholesale, see TestUnexcludedSubtreeReentersChainWholesale); and a carve-free
+// request (every plain DLE) never reads the sidecar at all — so legacy state with no
+// sidecar stays fully usable for plain dumps and re-baselines partitioned ones.
+func TestHasBaseCarveComparison(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "alice", "f"), "a")
+	write(t, filepath.Join(src, "bob", "f"), "b")
+	m := newArchiver(t, t.TempDir())
+
+	// L0 dumped as a remainder carving /alice and /bob → sidecar records both.
+	l0 := filepath.Join(t.TempDir(), "l0.tar")
+	backup(t, m, archiver.BackupRequest{DLE: "rest", Scope: archiver.Scope{Source: src, Exclude: []string{"*.log", "./alice", "./bob"}}, Level: 0, BaseLevel: -1}, l0)
+
+	cases := []struct {
+		name   string
+		carves []string
+		usable bool
+	}{
+		{"same set", []string{"./alice", "./bob"}, true},
+		{"carve removed (bob gone)", []string{"./alice"}, true},
+		{"carve added (carol new)", []string{"./alice", "./bob", "./carol"}, false},
+		{"carve-free request skips comparison", nil, true},
+	}
+	for _, tc := range cases {
+		scope := archiver.Scope{Source: src, Exclude: tc.carves}
+		if got := m.HasBase("rest", 0, scope); got != tc.usable {
+			t.Errorf("%s: HasBase = %v, want %v", tc.name, got, tc.usable)
+		}
+	}
+
+	// Legacy state: a base with no sidecar (pre-partition snapshots). Simulate by
+	// dumping a plain DLE (no carves → sidecar written empty), then asking with carves.
+	backup(t, m, archiver.BackupRequest{DLE: "plain", Scope: archiver.Scope{Source: src}, Level: 0, BaseLevel: -1}, filepath.Join(t.TempDir(), "p.tar"))
+	if !m.HasBase("plain", 0, archiver.Scope{Source: src}) {
+		t.Error("plain request on plain base must be usable")
+	}
+	if m.HasBase("plain", 0, archiver.Scope{Source: src, Exclude: []string{"./alice"}}) {
+		t.Error("a base dumped without carves is unusable once the request carves — the migration re-baseline")
+	}
+}
+
+func memberPaths(members []record.Member) []string {
+	out := make([]string, len(members))
+	for i, m := range members {
+		out[i] = m.Path
+	}
+	sort.Strings(out)
+	return out
+}

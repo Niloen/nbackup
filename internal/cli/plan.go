@@ -31,7 +31,7 @@ func newPlanCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "plan",
 		Short:   "Show what the next run would do",
-		Long:    "Preview the next run: which DLEs would be dumped at which level, estimated sizes, and capacity/budget status. With --days N, forecast N consecutive daily runs instead, projecting the schedule forward day-by-day (when fulls land, how incrementals climb). Reads only; nothing is written.",
+		Long:    "Preview the next run: which DLEs would be dumped at which level, estimated sizes, and capacity/budget status. With --days N, forecast N consecutive daily runs instead, projecting the schedule forward day-by-day (when fulls land, how incrementals climb). Reads only; nothing is written.\n\nThe preview exits 0 even when it lists units under FAILED (will not dump) — plan is advisory. Gate automation on `nb check` or the dump's own exit code, both of which go non-zero on unit failures.",
 		Example: "  nb plan\n  nb plan --date 2026-06-21\n  nb plan --days 30",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -70,7 +70,10 @@ func newPlanCmd(a *app) *cobra.Command {
 				return runPlanForecast(eng, date, days)
 			}
 
-			plan := eng.PlanWithProgress(date, estimateProgress(a.quiet))
+			plan, err := eng.PlanWithProgress(date, estimateProgress(a.quiet))
+			if err != nil {
+				return err
+			}
 			fmt.Printf("Plan for run %s  (cycle %dd, landing %q)\n\n",
 				record.DateString(date), plan.Interval, strings.Join(eng.Landings(), ", "))
 			for _, w := range plan.Warnings {
@@ -125,10 +128,16 @@ func newPlanCmd(a *app) *cobra.Command {
 // fprintPlanItems writes a plan's per-DLE level/size/reason table to w and returns
 // the total estimated bytes. Shared by `nb plan` and the `nb dump --dry-run`
 // preview so a single run renders identically in both.
+//
+// Resolved units of one pattern source render as a GROUP: a header naming the base, one
+// indented row per matched child, and — for a partition — the "the rest" row plus an
+// explicit coverage line, so the two questions a reader has ("is anything dropped?" /
+// "am I double-storing the base and its children?") are answered on sight. A selection
+// group says "no rest" in its header — the visible cue that only the matches are covered.
 func fprintPlanItems(w io.Writer, plan *planner.Plan) (estTotal int64, unknown int) {
 	tw := newTab(w)
 	fmt.Fprintln(tw, "DLE\tLEVEL\tEST. SIZE\tFULL SIZE\tREASON")
-	for _, item := range plan.Items {
+	row := func(label string, item planner.Item) {
 		levelStr := fmt.Sprintf("L%d (full)", item.Level)
 		// For an incremental, show the full-dump size alongside the chosen size so a
 		// small incremental does not hide a large full waiting at the cycle deadline.
@@ -147,10 +156,64 @@ func fprintPlanItems(w io.Writer, plan *planner.Plan) (estTotal int64, unknown i
 				unknown++
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", item.DLE.ID(), levelStr, estStr, fullStr, item.Reason)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", label, levelStr, estStr, fullStr, item.Reason)
 		estTotal += item.EstBytes
 	}
+	items := plan.Items
+	for i := 0; i < len(items); {
+		it := items[i]
+		if it.DLE.Base == "" { // a plain DLE: one row, exactly as before
+			row(it.DLE.ID(), it)
+			i++
+			continue
+		}
+		// A pattern group: the consecutive units resolved from one source (Resolve emits
+		// them contiguously, matches first, the rest last).
+		j, hasRest := i, false
+		for ; j < len(items) && items[j].DLE.Host == it.DLE.Host && items[j].DLE.Base == it.DLE.Base; j++ {
+			if items[j].DLE.IsRest() {
+				hasRest = true
+			}
+		}
+		groupID := it.DLE.Host + ":" + it.DLE.Base
+		if hasRest {
+			fmt.Fprintf(tw, "%s — partitioned\t\t\t\t\n", groupID)
+		} else {
+			fmt.Fprintf(tw, "%s — selection (matches only, no rest)\t\t\t\t\n", groupID)
+		}
+		matched := 0
+		for k := i; k < j; k++ {
+			m := items[k]
+			branch := "├─"
+			if k == j-1 {
+				branch = "└─"
+			}
+			label := "  " + branch + " " + strings.TrimPrefix(strings.TrimPrefix(m.DLE.Source, m.DLE.Base), "/")
+			if m.DLE.IsRest() {
+				label = "  " + branch + " the rest"
+			} else {
+				matched++
+			}
+			row(label, m)
+		}
+		if hasRest {
+			fmt.Fprintf(tw, "  ✓ covers 100%% of %s (%d matched + the rest)\t\t\t\t\n", groupID, matched)
+		}
+		i = j
+	}
 	tw.Flush()
+	// Units the plan could not schedule (Amanda's "planner: FAILED"): an unresolvable
+	// source, a dead estimate, an unreachable host. The run proceeds without them and
+	// exits non-zero; they are listed here so the preview and the dry-run tell the
+	// same story the morning report will.
+	if len(plan.Failed) > 0 {
+		fmt.Fprintf(w, "\nFAILED (will not dump):\n")
+		ftw := newTab(w)
+		for _, f := range plan.Failed {
+			fmt.Fprintf(ftw, "  %s\t%s\n", f.ID, f.Reason)
+		}
+		ftw.Flush()
+	}
 	return estTotal, unknown
 }
 
@@ -169,7 +232,10 @@ func runEstimateLine(estTotal int64, unknown int) string {
 // projecting the level schedule forward. Estimates are sampled once and held
 // constant (see engine.Simulate), so the per-day size tracks the chosen levels.
 func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
-	plans := eng.Simulate(start, days)
+	plans, err := eng.Simulate(start, days)
+	if err != nil {
+		return err
+	}
 	fmt.Printf("Forecast: %d daily runs from %s  (cycle %dd, landing %q)\n\n",
 		days, record.DateString(start), plans[0].Interval, strings.Join(eng.Landings(), ", "))
 
@@ -191,7 +257,10 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 	// The cost curve overlays the schedule: the projected $/month footprint at the
 	// end of each day as runs land and pruning reclaims. Only shown for a priced
 	// (cloud) landing medium; a local disk has no recurring bill.
-	curve := eng.ForecastCost(start, days)
+	curve, err := eng.ForecastCost(start, days)
+	if err != nil {
+		return err
+	}
 	priced := eng.CostSummary(nil).Priced
 
 	tw := newTab(os.Stdout)

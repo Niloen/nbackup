@@ -75,7 +75,12 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 	if c.d.EstimateSink != nil {
 		estSink = progress.MultiSink(estSink, c.d.EstimateSink)
 	}
-	plan := c.d.Plan(date, estSink)
+	plan, err := c.d.Plan(date, estSink)
+	if err != nil {
+		// Planning failed before a run existed — most often a source enumeration that
+		// could not run (fail loud, never guess a partition's match set).
+		return nil, err
+	}
 	forced := c.d.Cat.ForcedFulls() // captured to consume once the run seals (the lock blocks a concurrent reset)
 	for _, w := range plan.Warnings {
 		logf.Log("WARNING: %s", w)
@@ -84,12 +89,37 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 	// Pre-flight before creating a run: every source host, the compressor binary, and
 	// every archiver — the strict mode of the same check `nb plan` previews with.
 	// Resolving every archiver here also populates the archiver cache, so the parallel
-	// workers below only read it (no concurrent writes).
+	// workers below only read it (no concurrent writes). Strict preflight reads only
+	// host+dumptype, so the resolved items convert losslessly. An UNREACHABLE host is
+	// the failure ladder's unit class: its items move to plan.Failed and every other
+	// host proceeds; tool/config failures stay fatal (the run itself could not encode).
 	dles := make([]config.DLE, len(plan.Items))
 	for i, item := range plan.Items {
-		dles[i] = item.DLE
+		dles[i] = config.DLE{Host: item.DLE.Host, Path: item.DLE.Source, DumpType: item.DLE.DumpType}
 	}
-	if _, err := scheduler.Preflight(c.d.Preflight, dles, true); err != nil {
+	_, hostDown, err := scheduler.Preflight(c.d.Preflight, dles, true)
+	if err != nil {
+		c.failEstimated(fileSink, plan, err)
+		return nil, err
+	}
+	if len(hostDown) > 0 {
+		kept := plan.Items[:0]
+		for _, item := range plan.Items {
+			if perr, down := hostDown[item.DLE.Host]; down {
+				plan.Failed = append(plan.Failed, planner.FailedUnit{DLE: item.DLE, ID: item.DLE.ID(), Origin: item.DLE.Origin, Reason: "host unreachable: " + perr.Error()})
+				continue
+			}
+			kept = append(kept, item)
+		}
+		plan.Items = kept
+	}
+	for _, f := range plan.Failed {
+		logf.Log("FAILED (will not dump): %s — %s", f.ID, f.Reason)
+	}
+	if len(plan.Items) == 0 {
+		// Unit-class failures ate the whole plan: with nothing plannable the run
+		// itself cannot proceed — fail it rather than sealing an empty run.
+		err := fmt.Errorf("no unit could be planned: %d failed before dumping (first: %s — %s)", len(plan.Failed), plan.Failed[0].ID, plan.Failed[0].Reason)
 		c.failEstimated(fileSink, plan, err)
 		return nil, err
 	}
@@ -136,6 +166,16 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 
 	runID := c.mintRunID(now, time.Local)
 	spec := archiveio.RunSpec{ID: runID, CreatedAt: now}
+	// Record the run's resolved set BEFORE any byte moves: a crashed run's intent
+	// still stands, so its unfinished children show up stale rather than vanishing.
+	// Failed units ride along — a planner-FAILED unit was still intended, and an
+	// unresolvable source's previous units are carried forward by Origin — so the
+	// owing machinery (staleness, coverage) never goes quiet during an outage.
+	if c.d.RecordResolved != nil {
+		if err := c.d.RecordResolved(runID, plan.Items, plan.Failed); err != nil {
+			return nil, fmt.Errorf("record the run's resolved DLE set: %w", err)
+		}
+	}
 
 	// The producers dump every DLE; the drain consumes them — buffering each onto a holding disk
 	// (one or more media marked `holding: true`) and copying it to every landing on its route, or,
@@ -151,7 +191,7 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 	// happens off the dumper's gate, so a parked producer holds no worker permit.
 	workers := c.d.Workers
 
-	tr, runLogf := c.progressTracker(runID, workers, plan.Items, fileSink, logf)
+	tr, runLogf := c.progressTracker(runID, workers, plan, fileSink, logf)
 	// Caught here it covers a cancel during the estimate/preflight prelude (above), before any
 	// dump starts; runOrchestrated catches one during the dump itself.
 	if ctx.Err() != nil {
@@ -164,6 +204,12 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 		// failing while its run-mates landed) — pass the committed run through so the
 		// caller's failure record carries the run id and per-DLE stats, not a blank.
 		return sealed, err
+	}
+	if len(plan.Failed) > 0 {
+		// The run sealed what it could; the units that failed before dumping make it a
+		// PARTIAL night — non-zero exit, like a dump-time failure, with the forced-full
+		// directives left in place so the next run retries them.
+		return sealed, fmt.Errorf("%d unit(s) failed before dumping (see FAILED lines above; first: %s — %s)", len(plan.Failed), plan.Failed[0].ID, plan.Failed[0].Reason)
 	}
 	// The run sealed, so every planned DLE — including every forced one, which the planner
 	// scheduled at L0 — has been dumped. Consume the force-full directives now; a failed run

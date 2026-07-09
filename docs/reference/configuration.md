@@ -438,8 +438,18 @@ dumptypes:
     archiver: default
   no-logs:
     archiver: default
-    exclude: ["*.log", "*.tmp"]
+    exclude: ["*.log", "*.tmp", "./var/cache"]
 ```
+
+Excludes are **relative to each source's root** (the Amanda convention): a bare
+pattern (`*.log`, `cache`) matches at any depth, while a `./`-prefixed pattern
+(`./var/cache`) anchors — it excludes exactly that subtree under the source
+root and nothing deeper. An absolute path (`/var/cache`) is rejected at config
+load, since it would silently never match. Under a partitioned source, anchored
+excludes anchor at the **base you wrote**, applied to whichever derived DLE owns
+that subtree — partitioning never changes which bytes are excluded. Adding an
+anchored exclude re-baselines the owning DLE with one fresh full (its old chain
+still holds the now-excluded subtree); editing bare globs never forces a full.
 
 A dumptype may set its own `compress` and/or `encrypt` block to override the
 config-wide default (below) **wholesale** — there is **no field merge**, so
@@ -532,6 +542,39 @@ under the old ID until retention retires it), so prefer a stable form such as a
 `service=` name whose details live in `~/.pg_service.conf`. For any other live
 database, snapshot or dump it to a file first (or wrap the dump in a `pipe`
 archiver).
+
+### Pattern sources: one source, many DLEs
+
+A `gnutar` source can resolve into many DLEs, **re-discovered at every plan** —
+new directories are picked up with no config edit. Two forms, one rule: **the
+rest exists exactly when you name a base.**
+
+```yaml
+sources:
+  default:
+    fileserver:
+      - path: /data              # PARTITION: one DLE per child directory,
+        partition: "*"           #   plus "the rest of /data" — full coverage
+      - /srv/web-*               # SELECTION: one DLE per match, nothing else
+```
+
+The mapping form names a base, so all of it is covered: each matching child
+directory becomes its own DLE and a remainder DLE ("the rest") holds loose
+files and everything unmatched. A wildcard directly in the path is a dynamic
+*list* — exactly the matches, no remainder, like a hand-written list. `nb plan`
+renders the split with a `✓ covers 100%` line for a partition (a selection
+shows none — the visible cue that only the matches are covered).
+
+Rules: sources are **directories only** (a matching file falls to the rest, or
+is not a DLE); `*` matches **one** path segment and **does** match
+dot-directories (unlike a shell — over-matching is the safe direction for a
+backup tool); no `**`; the partition base must be a literal, non-root path; the
+partition glob is relative to it. A new child is covered by the rest the run it
+appears, then graduates to its own DLE (mandatory first full) while the rest
+re-baselines once. Resolution is live over the source host and **fails the
+command** rather than guessing; two sources resolving to the same DLE identity
+are refused with both origins named. See
+[Partitioned sources](../features/partitioned-sources) for the full story.
 
 ## sync
 

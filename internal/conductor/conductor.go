@@ -61,9 +61,14 @@ type PreparedWriter struct {
 // engine's own machinery; Workers and HoldingMedia are static run config read once.
 // It is exported so the engine can wire one; the Conductor embeds it directly.
 type Deps struct {
-	Cat        *catalog.Catalog
-	Dmp        *dumper.Dumper
-	Plan       func(date time.Time, sink progress.Sink) *planner.Plan
+	Cat *catalog.Catalog
+	Dmp *dumper.Dumper
+	// Plan is the SCHEDULER's plan (the impure driver: it resolves sources and runs
+	// estimates), not the pure planner. Its error is CONFIG-CLASS ONLY — an identity
+	// collision or an unresolvable definition, the "stop and fix the config" failures;
+	// every operational casualty (unresolvable source, dead estimate, down host) rides
+	// plan.Failed instead, and the run proceeds without those units.
+	Plan       func(date time.Time, sink progress.Sink) (*planner.Plan, error)
 	OpenWriter func(medium string, spec archiveio.RunSpec, now time.Time, lf logf.Logf) (PreparedWriter, error)
 	// OpenReader returns the read face of the archive fs over the run window's catalog
 	// View. withSpool calls it once at window-open — while no concurrent writer exists
@@ -80,14 +85,21 @@ type Deps struct {
 	// fit. What it frees is logged into the run's own log, so the nightly report
 	// carries the reclamation that used to be a separate cron prune. Nil skips
 	// (tests).
-	MakeRoom     func(medium string, incoming int64, now time.Time, lf logf.Logf) (freed int64, err error)
-	Flush        func(now time.Time, lf logf.Logf) (int, error)
-	HoldingMedia []string
-	Workers      int
-	NewFileSink  func() progress.Sink
-	LandingsFor  func(item planner.Item) []string // the media an item's DLE lands on, primary first (dumptype override, else the default landing route)
-	RunSink      progress.Sink
-	EstimateSink progress.Sink
+	MakeRoom func(medium string, incoming int64, now time.Time, lf logf.Logf) (freed int64, err error)
+	// RecordResolved persists the run's resolved DLE set (catalog.RecordResolved) —
+	// the intent record staleness and route judgment key off for pattern children.
+	// failed units are recorded as intended too (a planner-FAILED unit, and an
+	// unresolvable source's previously-resolved units carried forward by Origin), so
+	// the owing machinery never goes quiet during an outage. Called once, after
+	// planning succeeds and before any dump. Nil skips (tests).
+	RecordResolved func(runID string, items []planner.Item, failed []planner.FailedUnit) error
+	Flush          func(now time.Time, lf logf.Logf) (int, error)
+	HoldingMedia   []string
+	Workers        int
+	NewFileSink    func() progress.Sink
+	LandingsFor    func(item planner.Item) []string // the media an item's DLE lands on, primary first (dumptype override, else the default landing route)
+	RunSink        progress.Sink
+	EstimateSink   progress.Sink
 }
 
 // Conductor executes one plan into one sealed run. It is per-run (it carries the

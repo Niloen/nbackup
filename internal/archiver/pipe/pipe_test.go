@@ -38,7 +38,7 @@ func TestBackupRestoreRoundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bs, err := m.BackupSource(archiver.BackupRequest{DLE: "app", Source: src, Level: 0, BaseLevel: -1})
+	bs, err := m.BackupSource(archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 0, BaseLevel: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,13 +95,13 @@ func TestBackupRestoreRoundtrip(t *testing.T) {
 // withdrawn (no list, no splice, no directory destination, no stock recipe drift).
 func TestFullOnly(t *testing.T) {
 	m := open(t, archiver.Options{"backup_command": "true", "restore_command": "cat > {dest}"})
-	if m.HasBase("app", 0) {
+	if m.HasBase("app", 0, archiver.Scope{}) {
 		t.Error("pipe must never report a base")
 	}
 	if _, err := m.BackupSource(archiver.BackupRequest{DLE: "app", Level: 1, BaseLevel: 0}); err == nil {
 		t.Error("an incremental request must be rejected")
 	}
-	if _, err := m.BackupSource(archiver.BackupRequest{DLE: "app", Level: 0, BaseLevel: -1, Exclude: []string{"*.log"}}); err == nil {
+	if _, err := m.BackupSource(archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Exclude: []string{"*.log"}}, Level: 0, BaseLevel: -1}); err == nil {
 		t.Error("exclude patterns must be rejected")
 	}
 	if m.CanList() {
@@ -142,7 +142,7 @@ func TestOptions(t *testing.T) {
 // TestEstimate covers the optional estimate_command: absent = 0 (unknown, not an
 // error), present = its stdout parsed as a byte count, garbage = a loud error.
 func TestEstimate(t *testing.T) {
-	req := archiver.BackupRequest{DLE: "app", Source: "src", Level: 0, BaseLevel: -1}
+	req := archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: "src"}, Level: 0, BaseLevel: -1}
 	m := open(t, archiver.Options{"backup_command": "true", "restore_command": "cat"})
 	if n, err := m.Estimate(req); n != 0 || err != nil {
 		t.Errorf("no estimate_command should report 0, got %d %v", n, err)

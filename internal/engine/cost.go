@@ -30,8 +30,12 @@ func (e *Engine) CostSummary(plan *planner.Plan) CostSummary {
 
 // ForecastCost projects the landing medium's monthly storage cost forward day by
 // day, feeding the accountant the planner's run simulation; see accounting.
-func (e *Engine) ForecastCost(start time.Time, days int) []ForecastPoint {
-	return e.acct.ForecastCost(start, e.sched.Simulate(start, days))
+func (e *Engine) ForecastCost(start time.Time, days int) ([]ForecastPoint, error) {
+	plans, err := e.sched.Simulate(start, days)
+	if err != nil {
+		return nil, err
+	}
+	return e.acct.ForecastCost(start, plans), nil
 }
 
 // RestoreCost prices a whole-DLE restore (or every DLE) as of a date; see accounting.

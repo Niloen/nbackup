@@ -24,6 +24,7 @@ why it works the way it does, and how to configure and use it.
 | [Pruning & retention](pruning) | Per-medium retention, the safety floor, and capacity reclamation. |
 | [Holding disk](holding-disk) | A fast scratch buffer that feeds a slow tape or cloud at disk speed. |
 | [Remote sources over SSH](remote-sources) | Back up remote hosts with no NBackup software on the client. |
+| [Partitioned sources](partitioned-sources) | One source, many DLEs — partition a directory per child (with a guaranteed remainder) or select children by wildcard, resolved live at plan time. |
 | [Monitoring & reporting](monitoring) | `nb status`, `nb report`, and pluggable failure alerting. |
 | [Status website](web) | `nb web` — a read-only, mobile-friendly dashboard (overview, runs, media history, drills) that takes no lock. |
 

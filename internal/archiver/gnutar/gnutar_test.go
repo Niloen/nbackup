@@ -44,7 +44,7 @@ func TestBackupRestoreWithDeletion(t *testing.T) {
 	write(t, filepath.Join(src, "sub", "c.txt"), "gamma")
 
 	l0 := filepath.Join(out, "l0.tar")
-	backup(t, m, archiver.BackupRequest{DLE: "app", Source: src, Level: 0, BaseLevel: -1}, l0)
+	backup(t, m, archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 0, BaseLevel: -1}, l0)
 
 	time.Sleep(1100 * time.Millisecond) // 1s mtime granularity
 	write(t, filepath.Join(src, "a.txt"), "alpha-CHANGED")
@@ -54,7 +54,7 @@ func TestBackupRestoreWithDeletion(t *testing.T) {
 	write(t, filepath.Join(src, "d.txt"), "delta")
 
 	l1 := filepath.Join(out, "l1.tar")
-	backup(t, m, archiver.BackupRequest{DLE: "app", Source: src, Level: 1, BaseLevel: 0}, l1)
+	backup(t, m, archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 1, BaseLevel: 0}, l1)
 
 	dest := t.TempDir()
 	restore(t, m, l0, dest)
@@ -77,7 +77,7 @@ func TestExclude(t *testing.T) {
 	write(t, filepath.Join(src, "drop.log"), "drop")
 
 	l0 := filepath.Join(out, "l0.tar")
-	backup(t, m, archiver.BackupRequest{DLE: "app", Source: src, Level: 0, BaseLevel: -1, Exclude: []string{"*.log"}}, l0)
+	backup(t, m, archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src, Exclude: []string{"*.log"}}, Level: 0, BaseLevel: -1}, l0)
 
 	dest := t.TempDir()
 	restore(t, m, l0, dest)
@@ -112,12 +112,12 @@ func TestNewExcludeIsNotADeletion(t *testing.T) {
 
 	// L0: full, whole tree (the un-split "remainder" before carving).
 	l0 := filepath.Join(out, "l0.tar")
-	backup(t, m, archiver.BackupRequest{DLE: "app", Source: src, Level: 0, BaseLevel: -1}, l0)
+	backup(t, m, archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 0, BaseLevel: -1}, l0)
 
 	// L1: incremental that newly excludes datasets/ — but the subtree is STILL on
 	// disk (a carve, not a delete). No file is modified or removed.
 	l1 := filepath.Join(out, "l1.tar")
-	backup(t, m, archiver.BackupRequest{DLE: "app", Source: src, Level: 1, BaseLevel: 0, Exclude: []string{"datasets"}}, l1)
+	backup(t, m, archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src, Exclude: []string{"datasets"}}, Level: 1, BaseLevel: 0}, l1)
 
 	dest := t.TempDir()
 	restore(t, m, l0, dest)
@@ -143,7 +143,7 @@ func TestEstimate(t *testing.T) {
 	write(t, filepath.Join(src, "big.bin"), strings.Repeat("x", 200000))
 	write(t, filepath.Join(src, "small.txt"), "hi")
 
-	full, err := m.Estimate(archiver.BackupRequest{DLE: "app", Source: src, Level: 0, BaseLevel: -1})
+	full, err := m.Estimate(archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 0, BaseLevel: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestEstimate(t *testing.T) {
 	}
 
 	// Excluding the big file yields a much smaller estimate.
-	excl, err := m.Estimate(archiver.BackupRequest{DLE: "app", Source: src, Level: 0, BaseLevel: -1, Exclude: []string{"*.bin"}})
+	excl, err := m.Estimate(archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src, Exclude: []string{"*.bin"}}, Level: 0, BaseLevel: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,11 +162,11 @@ func TestEstimate(t *testing.T) {
 
 	// An unchanged incremental against a real snapshot estimates far below a full.
 	time.Sleep(1100 * time.Millisecond) // snapshot time must beat file mtimes (1s granularity)
-	backup(t, m, archiver.BackupRequest{DLE: "app", Source: src, Level: 0, BaseLevel: -1}, filepath.Join(t.TempDir(), "l0.tar"))
-	if !m.HasBase("app", 0) {
+	backup(t, m, archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 0, BaseLevel: -1}, filepath.Join(t.TempDir(), "l0.tar"))
+	if !m.HasBase("app", 0, archiver.Scope{}) {
 		t.Fatal("L0 snapshot should exist after a full backup")
 	}
-	incr, err := m.Estimate(archiver.BackupRequest{DLE: "app", Source: src, Level: 1, BaseLevel: 0})
+	incr, err := m.Estimate(archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 1, BaseLevel: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,8 +187,8 @@ func TestSnapshotPromotionIsAtomic(t *testing.T) {
 	write(t, filepath.Join(src, "a.txt"), "alpha")
 
 	// A committed full leaves a usable base.
-	backup(t, m, archiver.BackupRequest{DLE: "app", Source: src, Level: 0, BaseLevel: -1}, filepath.Join(t.TempDir(), "l0.tar"))
-	if !m.HasBase("app", 0) {
+	backup(t, m, archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 0, BaseLevel: -1}, filepath.Join(t.TempDir(), "l0.tar"))
+	if !m.HasBase("app", 0, archiver.Scope{}) {
 		t.Fatal("L0 base should exist after a committed full")
 	}
 	live := filepath.Join(stateRoot, "app", "L0.snar")
@@ -199,7 +199,7 @@ func TestSnapshotPromotionIsAtomic(t *testing.T) {
 
 	// Start a fresh L0 dump, run tar, but never promote it — the archive never committed
 	// (e.g. the medium filled). Only Cleanup runs, as on the failure path.
-	bs, err := m.BackupSource(archiver.BackupRequest{DLE: "app", Source: src, Level: 0, BaseLevel: -1})
+	bs, err := m.BackupSource(archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 0, BaseLevel: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestSnapshotPromotionIsAtomic(t *testing.T) {
 	if string(after) != string(good) {
 		t.Fatal("committed base was mutated by an uncommitted dump (it must be untouched until promote)")
 	}
-	if !m.HasBase("app", 0) {
+	if !m.HasBase("app", 0, archiver.Scope{}) {
 		t.Fatal("base should still be usable after an uncommitted dump")
 	}
 }
@@ -242,13 +242,13 @@ func TestHasBaseRejectsEmptySnapshot(t *testing.T) {
 	if err := os.WriteFile(snap, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if m.HasBase("app", 0) {
+	if m.HasBase("app", 0, archiver.Scope{}) {
 		t.Fatal("an empty snapshot must not count as a usable base")
 	}
 	if err := os.WriteFile(snap, []byte("GNU tar-1.34-2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !m.HasBase("app", 0) {
+	if !m.HasBase("app", 0, archiver.Scope{}) {
 		t.Fatal("a non-empty snapshot should count as a usable base")
 	}
 }
@@ -264,7 +264,7 @@ func TestList(t *testing.T) {
 	write(t, filepath.Join(src, "sub", "c.txt"), "gamma")
 
 	l0 := filepath.Join(out, "l0.tar")
-	backup(t, m, archiver.BackupRequest{DLE: "app", Source: src, Level: 0, BaseLevel: -1}, l0)
+	backup(t, m, archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 0, BaseLevel: -1}, l0)
 
 	f, err := os.Open(l0)
 	if err != nil {
@@ -321,7 +321,7 @@ func TestEstimateIncompleteFloor(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chmod(locked, 0o755) })
 
-	total, err := m.Estimate(archiver.BackupRequest{DLE: "app", Source: src, Level: 0, BaseLevel: -1})
+	total, err := m.Estimate(archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 0, BaseLevel: -1})
 	if err == nil {
 		t.Fatal("an unreadable source must make Estimate report incompleteness")
 	}
@@ -343,7 +343,7 @@ func TestSeedSnapshotCopyFailure(t *testing.T) {
 	// Level 1 with base level 0 present nowhere: seedSnapshot must CopyFile the (missing)
 	// L0 snapshot and fail.
 	out := filepath.Join(t.TempDir(), "work.snar")
-	err := g.seedSnapshot(archiver.BackupRequest{DLE: "app", Source: t.TempDir(), Level: 1, BaseLevel: 0}, out)
+	err := g.seedSnapshot(archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: t.TempDir()}, Level: 1, BaseLevel: 0}, out)
 	if err == nil {
 		t.Fatal("seeding an incremental with no base snapshot must fail")
 	}
@@ -495,13 +495,13 @@ func TestMemberOffsets(t *testing.T) {
 	write(t, filepath.Join(src, "sub", "c.txt"), "gamma")
 
 	l0 := filepath.Join(out, "l0.tar")
-	res0 := backup(t, m, archiver.BackupRequest{DLE: "app", Source: src, Level: 0, BaseLevel: -1}, l0)
+	res0 := backup(t, m, archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 0, BaseLevel: -1}, l0)
 	assertOffsets(t, l0, res0.Members)
 
 	time.Sleep(1100 * time.Millisecond) // 1s mtime granularity
 	write(t, filepath.Join(src, "d.txt"), "delta")
 	l1 := filepath.Join(out, "l1.tar")
-	res1 := backup(t, m, archiver.BackupRequest{DLE: "app", Source: src, Level: 1, BaseLevel: 0}, l1)
+	res1 := backup(t, m, archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 1, BaseLevel: 0}, l1)
 	assertOffsets(t, l1, res1.Members)
 
 	// List mode must agree with the create-time index, offsets included.

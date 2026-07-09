@@ -207,6 +207,12 @@ func build(cfg *config.Config) (*Engine, error) {
 	})
 	e.dmp = dumper.New(dumper.Config{
 		ArchiverFor: e.tc.archiverFor,
+		ArchiverName: func(dt string) string {
+			if name := e.cfg.ResolveDumpType(dt).Archiver; name != "" {
+				return name
+			}
+			return config.DefaultArchiver
+		},
 		Exclude:     func(dt string) []string { return e.cfg.ResolveDumpType(dt).Exclude },
 		Placement:   e.tc.encodePlacement,
 		Threads:     e.tc.fopts.Threads,
@@ -513,7 +519,7 @@ func (e *Engine) ExpectedVolume(now time.Time) (VolumeExpectation, bool) {
 // Plan builds the plan for a run date: it estimates every DLE, fulls the ones
 // due by the cycle deadline, and promotes future fulls forward to level light
 // runs (bounded by the per-run capacity room).
-func (e *Engine) Plan(date time.Time) *planner.Plan {
+func (e *Engine) Plan(date time.Time) (*planner.Plan, error) {
 	return e.sched.Plan(date, nil)
 }
 
@@ -521,7 +527,7 @@ func (e *Engine) Plan(date time.Time) *planner.Plan {
 // slow: every DLE is sized by an archiver pass, so a long preview is otherwise
 // silent. sink (nil to disable) receives a snapshot as each DLE's estimate starts
 // and finishes.
-func (e *Engine) PlanWithProgress(date time.Time, sink progress.Sink) *planner.Plan {
+func (e *Engine) PlanWithProgress(date time.Time, sink progress.Sink) (*planner.Plan, error) {
 	return e.sched.Plan(date, sink)
 }
 
@@ -543,7 +549,7 @@ func (e *Engine) ValidatePlan() (warnings []string, err error) {
 // level schedule — when each DLE's full next lands, how its incrementals climb — is
 // projected forward. Estimates and the capacity ceiling are sampled once at `start`
 // and held constant, so this is a schedule forecast, not a capacity timeline.
-func (e *Engine) Simulate(start time.Time, days int) []*planner.Plan {
+func (e *Engine) Simulate(start time.Time, days int) ([]*planner.Plan, error) {
 	return e.sched.Simulate(start, days)
 }
 
@@ -735,22 +741,28 @@ func (e *Engine) DLEDisplay() []string { return e.dles.displayAll() }
 // see dleDirectory (which also forgives a trailing slash from tab completion).
 func (e *Engine) ResolveDLE(arg string) (string, bool) { return e.dles.resolve(arg) }
 
-// ForceFull schedules a configured DLE for a full on its next run, the archiver-independent
+// ForceFull schedules a DLE for a full on its next run, the archiver-independent
 // `nb reset`: it records a force-full directive the planner honors (a mandatory L0),
 // rather than reaching into and deleting the archiver's incremental state. The forced full
 // reseeds that state itself when it runs, and — with commit-bound promotion — the old
 // chain stays intact until the new full actually commits. arg is a host:path identity or
-// the internal slug; it returns the DLE's display identity. The DLE must be configured,
-// since forcing a full only makes sense to re-dump it.
+// the internal slug. A configured DLE resolves as before; a partition-derived DLE is not
+// in config, so a catalog-recorded slug is accepted too — the directive keys by slug and
+// the next run's resolution consumes it (a slug that never resolves again just idles).
 func (e *Engine) ForceFull(arg string) (string, error) {
-	d, ok := e.dles.resolveConfigured(arg)
-	if !ok {
-		return "", fmt.Errorf("no DLE %q in the configuration", arg)
+	if d, ok := e.dles.resolveConfigured(arg); ok {
+		if err := e.cat.SetForceFull(d.Name()); err != nil {
+			return "", fmt.Errorf("force full %s: %w", d.ID(), err)
+		}
+		return d.ID(), nil
 	}
-	if err := e.cat.SetForceFull(d.Name()); err != nil {
-		return "", fmt.Errorf("force full %s: %w", d.ID(), err)
+	if slug, ok := e.dles.resolve(arg); ok { // catalog identity (e.g. a partition child)
+		if err := e.cat.SetForceFull(slug); err != nil {
+			return "", fmt.Errorf("force full %s: %w", e.dles.display(slug), err)
+		}
+		return e.dles.display(slug), nil
 	}
-	return d.ID(), nil
+	return "", fmt.Errorf("no DLE %q in the configuration or the catalog", arg)
 }
 
 // MediumOverCapacity reports whether the named medium still holds more than its

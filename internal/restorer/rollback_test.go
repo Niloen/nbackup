@@ -43,7 +43,7 @@ func scriptDeps(store *fakeStore, archives []record.Archive, stages ...func(dest
 	d := testDeps(store, archives)
 	i := 0
 	probes := 0
-	d.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) {
+	d.ArchiverFor = func(typeName, _, dle, host string) (archiver.Archiver, error) {
 		// The chain's first resolutions are the capability probes (destIsDir,
 		// then combineFor), before any extraction; they must not consume a
 		// scripted stage.

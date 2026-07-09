@@ -1,12 +1,12 @@
 package scheduler
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
-	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 )
@@ -21,7 +21,14 @@ import (
 // an independent archiver pass, and on a host with many DLEs the serial sum dominates
 // a preview. When sink is non-nil the work is tracked so a caller can paint live
 // progress. The fan-out is read-only over shared caches — see warmCaches.
-func (s *Scheduler) estimates(dles []config.DLE, sink progress.Sink) map[string]planner.Estimate {
+// estimates returns per-DLE size estimates for the plannable units, and the units whose
+// estimate FAILED outright — Amanda's "planner: FAILED" class: a dead estimate almost
+// always predicts a dead dump, and planning it anyway at a fictional ~0 B corrupts the
+// capacity math (make-room would reserve nothing for a dump that then writes plenty).
+// Failed units are dropped from planning and reported like dump failures; a MEASURED
+// floor (a partially readable source) is not a failure — it degrades to the Incomplete
+// warning as before.
+func (s *Scheduler) estimates(dles []planner.DLE, sink progress.Sink) (map[string]planner.Estimate, []planner.FailedUnit) {
 	states := s.warmCaches(dles)
 
 	workers := s.d.Workers()
@@ -37,6 +44,7 @@ func (s *Scheduler) estimates(dles []config.DLE, sink progress.Sink) map[string]
 	// Phase 2: size in parallel (read-only). Each worker writes its own results[i]
 	// (a disjoint index, no lock); the map is built serially after the fan-out joins.
 	results := make([]planner.Estimate, len(dles))
+	fails := make([]error, len(dles))
 	var (
 		wg  sync.WaitGroup
 		sem = make(chan struct{}, workers)
@@ -44,15 +52,15 @@ func (s *Scheduler) estimates(dles []config.DLE, sink progress.Sink) map[string]
 	for i, d := range dles {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(i int, d config.DLE, st *catalog.DLEState) {
+		go func(i int, d planner.DLE, st *catalog.DLEState) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			if tr != nil {
 				tr.StartDLE(d.ID()) // progress display keys by host:path, matching the dump phase
 			}
-			results[i] = s.estimateDLE(d, st)
+			results[i], fails[i] = s.estimateDLE(d, st)
 			if tr != nil {
-				tr.FinishDLE(d.ID(), 0, results[i].Full, 0, nil)
+				tr.FinishDLE(d.ID(), 0, results[i].Full, 0, fails[i])
 			}
 		}(i, d, states[i])
 	}
@@ -62,10 +70,15 @@ func (s *Scheduler) estimates(dles []config.DLE, sink progress.Sink) map[string]
 	}
 
 	out := make(map[string]planner.Estimate, len(dles))
+	var failed []planner.FailedUnit
 	for i, d := range dles {
+		if fails[i] != nil {
+			failed = append(failed, planner.FailedUnit{DLE: d, ID: d.ID(), Origin: d.Origin, Reason: fails[i].Error()})
+			continue
+		}
 		out[d.Name()] = results[i] // d.Name() is the internal slug: planner estimate key
 	}
-	return out
+	return out, failed
 }
 
 // warmCaches resolves each DLE's archiver and memoizes its history state SERIALLY,
@@ -74,7 +87,7 @@ func (s *Scheduler) estimates(dles []config.DLE, sink progress.Sink) map[string]
 // on one goroutine — the parallel workers then only ever READ them. Errors from
 // archiverFor are swallowed here (the cache warm is best-effort); estimateDLE
 // resolves the archiver again and surfaces any failure per-DLE.
-func (s *Scheduler) warmCaches(dles []config.DLE) []*catalog.DLEState {
+func (s *Scheduler) warmCaches(dles []planner.DLE) []*catalog.DLEState {
 	hist := s.d.History()
 	states := make([]*catalog.DLEState, len(dles))
 	for i, d := range dles {
@@ -84,21 +97,32 @@ func (s *Scheduler) warmCaches(dles []config.DLE) []*catalog.DLEState {
 	return states
 }
 
-func (s *Scheduler) estimateDLE(d config.DLE, st *catalog.DLEState) planner.Estimate {
+// estimateDLE sizes one unit. A non-nil error is the unit-class failure (dead archiver,
+// estimate that measured nothing): the unit is planner-FAILED, not planned at ~0 B.
+func (s *Scheduler) estimateDLE(d planner.DLE, st *catalog.DLEState) (planner.Estimate, error) {
 	name := d.Name() // the internal slug, the archiver's incremental-state key
 	arch, err := s.d.ArchiverFor(d.DumpTypeName(), d.Host)
-	if err != nil || arch.Check() != nil {
-		return planner.Estimate{} // no estimator available (e.g. the archiver's tool missing)
+	if err != nil {
+		return planner.Estimate{}, err
 	}
-	excl := s.d.ExcludeFor(d.DumpTypeName())
-	full, ferr := arch.Estimate(archiver.BackupRequest{DLE: name, Source: d.Path, Level: 0, BaseLevel: -1, Exclude: excl})
+	if cerr := arch.Check(); cerr != nil {
+		return planner.Estimate{}, fmt.Errorf("archiver unavailable: %w", cerr)
+	}
+	// R2: the resolved Scope is complete (configured excludes + any partition carves are
+	// already baked in by Expand) — consume it VERBATIM. Rebuilding it here would
+	// silently drop the rest's carves and double-count its children.
+	full, ferr := arch.Estimate(archiver.BackupRequest{DLE: name, Scope: d.Scope, Level: 0, BaseLevel: -1})
 	// A non-nil error with a non-zero floor means the archiver walked a partially-readable
-	// source (an unreadable member): the size is a floor, not exact. A zero floor is
-	// a total failure (e.g. a missing path) that ValidatePlan already reports, so we
-	// don't double-warn for it here.
+	// source (an unreadable member): the size is a MEASURED floor — degrade to the
+	// Incomplete warning. A zero floor measured nothing: the estimate is dead and the
+	// dump would almost certainly die the same way — the unit fails here, loudly,
+	// instead of being planned at a fictional ~0 B.
+	if ferr != nil && full == 0 {
+		return planner.Estimate{}, fmt.Errorf("estimate failed: %w", ferr)
+	}
 	incomplete := ferr != nil && full > 0
 	if st.LastFullDate == "" {
-		return planner.Estimate{Full: full, Incomplete: incomplete} // never fulled: only a full is possible
+		return planner.Estimate{Full: full, Incomplete: incomplete}, nil // never fulled: only a full is possible
 	}
 
 	// The DLE sits at level L (planner.SittingLevel). We estimate that level and
@@ -107,15 +131,15 @@ func (s *Scheduler) estimateDLE(d config.DLE, st *catalog.DLEState) planner.Esti
 	// exists to base it on; until then IncrNext stays 0.
 	lvl := planner.SittingLevel(st)
 	est := planner.Estimate{Full: full, Incomplete: incomplete}
-	if arch.HasBase(name, lvl-1) {
+	if arch.HasBase(name, lvl-1, d.Scope) {
 		est.Incr, _ = arch.Estimate(archiver.BackupRequest{
-			DLE: name, Source: d.Path, Level: lvl, BaseLevel: lvl - 1, Exclude: excl,
+			DLE: name, Scope: d.Scope, Level: lvl, BaseLevel: lvl - 1,
 		})
 	}
-	if lvl < planner.MaxLevel && arch.HasBase(name, lvl) {
+	if lvl < planner.MaxLevel && arch.HasBase(name, lvl, d.Scope) {
 		est.IncrNext, _ = arch.Estimate(archiver.BackupRequest{
-			DLE: name, Source: d.Path, Level: lvl + 1, BaseLevel: lvl, Exclude: excl,
+			DLE: name, Scope: d.Scope, Level: lvl + 1, BaseLevel: lvl,
 		})
 	}
-	return est
+	return est, nil
 }

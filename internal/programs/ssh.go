@@ -1,6 +1,7 @@
 package programs
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os/exec"
@@ -113,6 +114,12 @@ func (s sshExec) TempFile(pattern string) (string, error) {
 
 func (s sshExec) ReadFile(path string) ([]byte, error) {
 	return s.Command("cat", "--", path).Output()
+}
+
+func (s sshExec) WriteFile(path string, data []byte) error {
+	cmd := s.Command("sh", "-c", "cat > "+shQuote(path))
+	cmd.Stdin = bytes.NewReader(data)
+	return cmd.Run()
 }
 
 // RunPipe runs the stages as one remote pipeline so intermediate bytes never leave the

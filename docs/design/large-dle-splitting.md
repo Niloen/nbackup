@@ -1,13 +1,14 @@
 # Design note: automatic splitting of large DLEs
 
-Status: design exploration, not implemented. This maps the design space for handling
-DLEs too large to schedule, dump, or full as one unit, and records the load-bearing
-constraints + decision tree so an implementation starts from the right place. The
-**config mechanism** for the branchy case is specified separately in
-[split-sources-spec.md](split-sources-spec.md) (config-derived partition, no hidden
-state); this note holds the *why* — snapshot-as-atom, catch-all-by-exclusion, and the
-shape-aware "when *not* to split" reasoning. See ARCHITECTURE.md for the vocabulary
-(DLE / Run / Archive / snapshot / Estimate / planner).
+Status: design exploration, not implemented — **background reasoning, not the main design.**
+The shipping mechanism is [partition-sources.md](partition-sources.md) (an explicit base
+`path` + a `partition` glob → per-match DLEs + a guaranteed rest, resolved at plan time). This note is no longer a
+decision tree the product runs; it is retained only for the *why* — snapshot-as-atom,
+catch-all-by-exclusion, and the shape-aware "when *not* to split" reasoning (tree-splitting
+helps a branchy node, hurts a flat count-heavy dir → change the archiver instead). The
+`--suggest-splits` advisory tool and the `auto_split`/forced-full machinery below are
+**not** part of the pattern-sources design; treat them as ideas, not commitments. See
+ARCHITECTURE.md for the vocabulary (DLE / Run / Archive / snapshot / Estimate / planner).
 
 ## The problem
 

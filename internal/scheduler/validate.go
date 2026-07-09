@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/Niloen/nbackup/internal/config"
 )
@@ -33,42 +34,54 @@ type PreflightDeps struct {
 //     a returned warning, not an error — it may be an unmounted volume or a down
 //     client that will be back for the real run, and the preview should still show
 //     the rest of the plan (though the affected estimate reads ~0 B).
-//   - strict=true (a real dump, just before the run is created): every source host
-//     must answer (probed once per host) and every archiver binary must resolve —
-//     resolving them also populates the archiver cache, so the parallel dump
-//     workers only read it. Nothing is stat'd (the dump itself reads the source),
-//     and any failure is fatal. Warnings are always nil.
-func Preflight(d PreflightDeps, dles []config.DLE, strict bool) (warnings []string, err error) {
+//   - strict=true (a real dump, just before the run is created): every source host is
+//     probed once, and every archiver binary must resolve — resolving them also
+//     populates the archiver cache, so the parallel dump workers only read it.
+//     Nothing is stat'd (the dump itself reads the source). An UNREACHABLE HOST is
+//     the failure ladder's unit class, not run-fatal: it is returned in hostDown and
+//     the caller fails that host's units while every other host proceeds (one dead
+//     client must not cost the night's backups of the healthy ones). Tool/config
+//     failures (compressor, archiver, encryption) stay fatal — the run itself could
+//     not encode. Warnings are always nil in strict mode.
+func Preflight(d PreflightDeps, dles []config.DLE, strict bool) (warnings []string, hostDown map[string]error, err error) {
 	if err := d.CheckCompress(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	hostDown = map[string]error{}
 	checkedEnc := map[string]bool{}
 	probed := map[string]bool{}
 	for _, dle := range dles {
 		if strict {
 			if !probed[dle.Host] {
 				probed[dle.Host] = true
-				if err := d.ProbeReachable(dle.Host); err != nil {
-					return nil, err
+				if perr := d.ProbeReachable(dle.Host); perr != nil {
+					hostDown[dle.Host] = perr
 				}
 			}
+			if hostDown[dle.Host] != nil {
+				continue // the host's units fail as a unit; don't pile tool checks on
+			}
 			if err := d.PreflightDumptype(dle.DumpTypeName(), dle.Host, true, checkedEnc); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			continue
 		}
 		if err := d.PreflightDumptype(dle.DumpTypeName(), dle.Host, false, checkedEnc); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		// Only a local source can be stat'd here; a remote DLE's path lives on the
 		// client. A remote host is probed over SSH (once per host) so an unreachable
 		// client warns here rather than silently estimating ~0 B — the misleading
 		// "healthy" plan `nb check` would otherwise be the only thing to catch.
 		if _, remote := d.RemoteHost(dle.Host); !remote {
+			// A pattern source (a wildcard path, or a partition base) is never stat'd:
+			// the literal glob is not a path on disk, and its real probe is Plan's
+			// enumeration, which fails loud. Its dumptype/host checks above still apply.
+			pattern := dle.Partition != "" || strings.ContainsAny(dle.Path, "*?[")
 			// Only stat a source the archiver reads as a filesystem path; a postgres
 			// conninfo or pipe token is not a path, and its readiness is proven live by
 			// `nb check` (a connect), not a stat that would falsely warn "missing".
-			if d.SourceIsPath == nil || d.SourceIsPath(dle.DumpTypeName(), dle.Host) {
+			if !pattern && (d.SourceIsPath == nil || d.SourceIsPath(dle.DumpTypeName(), dle.Host)) {
 				if err := d.StatSource(dle.Path); err != nil {
 					warnings = append(warnings, fmt.Sprintf("DLE %s: source path %s is missing or unreadable (%v) — the real run will fail unless it becomes available", dle.ID(), dle.Path, err))
 				}
@@ -80,7 +93,7 @@ func Preflight(d PreflightDeps, dles []config.DLE, strict bool) (warnings []stri
 			}
 		}
 	}
-	return warnings, nil
+	return warnings, hostDown, nil
 }
 
 // Validate checks each DLE the way a real run would resolve it, so a preview
@@ -90,5 +103,6 @@ func Preflight(d PreflightDeps, dles []config.DLE, strict bool) (warnings []stri
 // are unavailable right now are non-fatal warnings, so a preview no longer gives
 // a green light to a run that `nb dump` will reject.
 func (s *Scheduler) Validate() (warnings []string, err error) {
-	return Preflight(s.d.PreflightDeps, s.d.DLEs(), false)
+	warnings, _, err = Preflight(s.d.PreflightDeps, s.d.DLEs(), false)
+	return warnings, err
 }

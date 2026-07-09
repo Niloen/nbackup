@@ -217,7 +217,7 @@ func (r *Restorer) rangedGroups(st recovery.ExtractStep) ([]rangeGroup, selectio
 	// independently restorable and a trailer terminates an assembled stream) — reporting
 	// offsets alone is not that promise. Splicing is a format property, so it resolves
 	// server-side ("") for both the estimate and the extract.
-	arch, err := r.deps.ArchiverFor(st.Archiver, st.DLE, "")
+	arch, err := r.deps.ArchiverFor(st.Archiver, st.ArchiverName, st.DLE, "")
 	if err != nil || arch.SpliceTrailer() == nil {
 		return nil, selectionPlan{}, "archiver cannot splice member ranges", false
 	}
@@ -257,7 +257,7 @@ func (r *Restorer) extractSelected(st recovery.ExtractStep, d dest, prog ReadPro
 	ref := archiveio.Ref{Run: st.RunID, DLE: st.DLE, Level: st.Level}
 	// The archiver reverses on the destination host; its splice trailer (a format
 	// property, so identical to rangedGroups' server-side resolve) terminates the stream.
-	arch, err := r.deps.ArchiverFor(st.Archiver, st.DLE, d.host)
+	arch, err := r.deps.ArchiverFor(st.Archiver, st.ArchiverName, st.DLE, d.host)
 	if err != nil {
 		return true, 0, err
 	}

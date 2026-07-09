@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
-	"github.com/Niloen/nbackup/internal/config"
 )
 
-func dleNamed(h string) config.DLE { return config.DLE{Host: h, Path: "/data"} }
+func dleNamed(h string) DLE { return DLE{Scope: archiver.Scope{Source: "/data"}, Host: h} }
 
 // levelOf returns the planned level for a DLE name.
 func levelOf(p *Plan, name string) int {
@@ -35,7 +35,7 @@ func TestLevelDecisions(t *testing.T) {
 	today := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	mk := func(d *catalog.DLEState) *Plan {
 		hist := &catalog.History{DLEs: map[string]*catalog.DLEState{"h-data": d}}
-		return Build([]config.DLE{dleNamed("h")}, hist, nil, nil, Params{CycleDays: 7}, today)
+		return Build([]DLE{dleNamed("h")}, hist, nil, nil, Params{CycleDays: 7}, today)
 	}
 
 	// No prior full -> mandatory full.
@@ -75,7 +75,7 @@ func TestBumpDecision(t *testing.T) {
 		}}}
 	}
 	build := func(e Estimate) *Plan {
-		return Build([]config.DLE{dleNamed("h")}, mkHist(),
+		return Build([]DLE{dleNamed("h")}, mkHist(),
 			map[string]Estimate{"h-data": e}, nil, Params{CycleDays: 7, BumpPercent: 5}, today)
 	}
 
@@ -114,7 +114,7 @@ func TestBumpDaysGuard(t *testing.T) {
 		},
 	}}}
 	est := map[string]Estimate{"h-data": {Full: 1000, Incr: 500, IncrNext: 1}}
-	p := Build([]config.DLE{dleNamed("h")}, hist, est, nil, Params{CycleDays: 7, BumpPercent: 5}, today)
+	p := Build([]DLE{dleNamed("h")}, hist, est, nil, Params{CycleDays: 7, BumpPercent: 5}, today)
 	if lvl := levelOf(p, "h-data"); lvl != 1 {
 		t.Errorf("one run at L1 should hold at L1 despite the saving, got L%d", lvl)
 	}
@@ -126,7 +126,7 @@ func TestBumpDaysGuard(t *testing.T) {
 func TestPromotionFillsLightRun(t *testing.T) {
 	today := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	var dles []config.DLE
+	var dles []DLE
 	est := map[string]Estimate{}
 	for _, h := range []string{"a", "b"} {
 		d := dleNamed(h)
@@ -150,7 +150,7 @@ func TestPromotionFillsLightRun(t *testing.T) {
 func TestPromotionBoundedByRoom(t *testing.T) {
 	today := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	var dles []config.DLE
+	var dles []DLE
 	est := map[string]Estimate{}
 	for _, h := range []string{"a", "b"} {
 		d := dleNamed(h)
@@ -185,7 +185,7 @@ func TestPromotionDoesNotChaseAverage(t *testing.T) {
 	est := map[string]Estimate{"big-data": {Full: 1_000_000_000, Incr: 1000}}
 	// A huge free room: an average-chasing planner would re-full the big DLE today
 	// to "use" it. Calendar leveling must not.
-	p := Build([]config.DLE{dleNamed("big")}, hist, est, nil, Params{CycleDays: 7, RoomBytes: -1}, today)
+	p := Build([]DLE{dleNamed("big")}, hist, est, nil, Params{CycleDays: 7, RoomBytes: -1}, today)
 	if lvl := levelOf(p, "big-data"); lvl == 0 {
 		t.Errorf("a big DLE far from its deadline was promoted (chasing an average); want an incremental")
 	}
@@ -210,7 +210,7 @@ func TestPromotionTinyCoDeadlineDoesNotUnlockBigDLE(t *testing.T) {
 		"big-data":  {Full: 3_640_000_000, Incr: 10_000},
 		"tiny-data": {Full: 10_000, Incr: 10_000},
 	}
-	p := Build([]config.DLE{dleNamed("big"), dleNamed("tiny")}, hist, est, nil, Params{CycleDays: 7, RoomBytes: -1}, today)
+	p := Build([]DLE{dleNamed("big"), dleNamed("tiny")}, hist, est, nil, Params{CycleDays: 7, RoomBytes: -1}, today)
 	if lvl := levelOf(p, "big-data"); lvl == 0 {
 		t.Errorf("big DLE re-fulled mid-cycle because a tiny DLE shared its deadline; want an incremental")
 	}
@@ -233,7 +233,7 @@ func TestPromotionSkipsJustFulledDLE(t *testing.T) {
 		"downloads-data": {Full: 3_640_000_000, Incr: 80_000},
 		"videos-data":    {Full: 2_960_000_000, Incr: 10_000},
 	}
-	p := Build([]config.DLE{dleNamed("downloads"), dleNamed("videos")}, hist, est, nil, Params{CycleDays: 7, RoomBytes: -1}, today)
+	p := Build([]DLE{dleNamed("downloads"), dleNamed("videos")}, hist, est, nil, Params{CycleDays: 7, RoomBytes: -1}, today)
 	if n := fullsIn(p); n != 0 {
 		t.Errorf("a DLE fulled today was re-fulled by promotion (%d fulls); just-fulled DLEs are not promotion targets", n)
 	}
@@ -245,7 +245,7 @@ func TestPromotionSkipsJustFulledDLE(t *testing.T) {
 func TestPromotionDoesNotOverFullBigDLE(t *testing.T) {
 	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	var dles []config.DLE
+	var dles []DLE
 	est := map[string]Estimate{}
 	dles = append(dles, dleNamed("big"))
 	est["big-data"] = Estimate{Full: 1_000_000, Incr: 1000}
@@ -278,7 +278,7 @@ func TestPromotionDoesNotOverFullBigDLE(t *testing.T) {
 func TestPromotionStaggersLockstepFulls(t *testing.T) {
 	start := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	var dles []config.DLE
+	var dles []DLE
 	est := map[string]Estimate{}
 	day0 := start.Format("2006-01-02")
 	for _, h := range []string{"downloads", "videos"} {
@@ -321,7 +321,7 @@ func TestPromotionStaggersLockstepFulls(t *testing.T) {
 func TestPromotionSpreadsClusterAcrossCycle(t *testing.T) {
 	start := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	var dles []config.DLE
+	var dles []DLE
 	est := map[string]Estimate{}
 	day0 := start.Format("2006-01-02")
 	// Five equally heavy DLEs all fulled on the same day -> one shared deadline.
@@ -361,7 +361,7 @@ func TestPromotionSpreadsClusterAcrossCycle(t *testing.T) {
 func TestPromotionPacesDestaggerByRunway(t *testing.T) {
 	start := time.Date(2026, 6, 27, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	var dles []config.DLE
+	var dles []DLE
 	est := map[string]Estimate{}
 	day0 := start.Format("2006-01-02")
 	// Four DLEs all fulled today -> one shared deadline 7 days out.
@@ -413,7 +413,7 @@ func mkFulled(today time.Time, n int) *catalog.DLEState {
 func TestPromotionBatchesSmallFulls(t *testing.T) {
 	today := time.Date(2026, 6, 27, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	var dles []config.DLE
+	var dles []DLE
 	est := map[string]Estimate{}
 	for i := 0; i < 20; i++ {
 		d := dleNamed(string(rune('a' + i)))
@@ -450,7 +450,7 @@ func TestPromotionBatchesSmallFulls(t *testing.T) {
 func TestPromotionHoldsSmallSwarmWithRunway(t *testing.T) {
 	today := time.Date(2026, 6, 27, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	var dles []config.DLE
+	var dles []DLE
 	est := map[string]Estimate{}
 	for i := 0; i < 20; i++ {
 		d := dleNamed(string(rune('a' + i)))
@@ -476,7 +476,7 @@ func TestPromotionHoldsSmallSwarmWithRunway(t *testing.T) {
 func TestPromotionDoesNotHalveHeavyDay(t *testing.T) {
 	today := time.Date(2026, 6, 27, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	var dles []config.DLE
+	var dles []DLE
 	est := map[string]Estimate{}
 	for _, h := range []string{"a", "b", "c", "d"} {
 		d := dleNamed(h)
@@ -504,7 +504,7 @@ func TestPromotionLeavesTinyAloneOnBigDay(t *testing.T) {
 		"big-data":  {Full: 3_640_000_000, Incr: 10_000},
 		"tiny-data": {Full: 10_000, Incr: 10_000},
 	}
-	p := Build([]config.DLE{dleNamed("big"), dleNamed("tiny")}, hist, est, nil, Params{CycleDays: 7, RoomBytes: -1}, today)
+	p := Build([]DLE{dleNamed("big"), dleNamed("tiny")}, hist, est, nil, Params{CycleDays: 7, RoomBytes: -1}, today)
 	if n := fullsIn(p); n != 0 {
 		t.Errorf("expected no promotion (the crowding is the big DLE's own irreducible size), got %d fulls", n)
 	}
@@ -516,7 +516,7 @@ func TestPromotionLeavesTinyAloneOnBigDay(t *testing.T) {
 func TestCycleCapacityWarning(t *testing.T) {
 	today := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	var dles []config.DLE
+	var dles []DLE
 	est := map[string]Estimate{}
 	for _, h := range []string{"a", "b", "c"} {
 		d := dleNamed(h)
@@ -554,7 +554,7 @@ func TestCycleCapacityWarning(t *testing.T) {
 func TestSimulateSchedule(t *testing.T) {
 	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	dles := []config.DLE{dleNamed("h")}
+	dles := []DLE{dleNamed("h")}
 	est := map[string]Estimate{"h-data": {Full: 100, Incr: 10}}
 
 	plans := Simulate(dles, hist, est, nil, Params{CycleDays: 7, RoomBytes: -1, BumpPercent: 5}, start, 15)
@@ -580,7 +580,7 @@ func TestSimulateSchedule(t *testing.T) {
 func TestSimulateClampsDays(t *testing.T) {
 	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
-	plans := Simulate([]config.DLE{dleNamed("h")}, hist, nil, nil, Params{CycleDays: 7}, start, 0)
+	plans := Simulate([]DLE{dleNamed("h")}, hist, nil, nil, Params{CycleDays: 7}, start, 0)
 	if len(plans) != 1 {
 		t.Fatalf("days=0 should clamp to one plan, got %d", len(plans))
 	}

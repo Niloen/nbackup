@@ -171,7 +171,7 @@ func (c *copier) SyncTo(from, target string, sel SyncSelection, apply, force boo
 	// unscoped — as is any explicit --from (a deliberate whole-source mirror).
 	var scope map[string]bool
 	if auto {
-		scope = routedScope(c.cfg, target)
+		scope = routedScope(promiseRoutes(c.cfg, c.cat), target)
 	}
 	// An auto sync also tops up only what the target's retention window still
 	// owes (owesTo): an archive off its DLE's live chain and past the target's

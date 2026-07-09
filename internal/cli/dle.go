@@ -58,7 +58,11 @@ func runDleList(a *app) error {
 		if lastFull == "" {
 			lastFull = "never"
 		}
-		fmt.Fprintf(tw, "%s\t%d\t%s\tL%d\t%s\t%s\n", g.Display, g.Runs, lastFull, g.LastLevel,
+		display := g.Display
+		if g.Rest {
+			display += "  (the rest of a partition)"
+		}
+		fmt.Fprintf(tw, "%s\t%d\t%s\tL%d\t%s\t%s\n", display, g.Runs, lastFull, g.LastLevel,
 			sizeutil.FormatBytes(g.Bytes), strings.Join(g.Media, ", "))
 	}
 	tw.Flush()
@@ -78,6 +82,11 @@ func runDleShow(a *app, arg string) error {
 	slug, display, ok := resolveDLE(runs, arg)
 	if !ok {
 		return fmt.Errorf("no DLE %q in catalog (list them with `nb dle`)", arg)
+	}
+	for _, r := range eng.Catalog().LatestResolved() {
+		if r.DLE == slug && r.Rest {
+			display += "  (the rest of a partition)"
+		}
 	}
 	fmt.Printf("DLE %s\n\n", display)
 	tw := newTab(os.Stdout)

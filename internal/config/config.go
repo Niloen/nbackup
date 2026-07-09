@@ -342,7 +342,13 @@ func (c *Config) LandingName() (string, error) {
 // medium. The override is validated against `media` at load
 // (validateDumpTypeLandings), so a run-time resolve trusts it.
 func (c *Config) LandingsFor(d DLE) ([]string, error) {
-	if l := c.ResolveDumpType(d.DumpTypeName()).Landing; len(l) > 0 {
+	return c.LandingsForDumptype(d.DumpTypeName())
+}
+
+// LandingsForDumptype is LandingsFor keyed by the dumptype name directly — the form the
+// resolved (planner) DLEs use, since a derived DLE's whole route is its dumptype's.
+func (c *Config) LandingsForDumptype(dt string) ([]string, error) {
+	if l := c.ResolveDumpType(dt).Landing; len(l) > 0 {
 		return l, nil
 	}
 	return c.LandingNames()

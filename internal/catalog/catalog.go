@@ -78,6 +78,7 @@ type Catalog struct {
 	loaded  bool
 	win     *Window // the open run window, if any — guards one-window-at-a-time; mutators persist per op as always
 
+	resolved  *ResolvedSet     // the latest run's resolved DLE set (resolved.go); nil until a run records one
 	now       func() time.Time // injectable clock for the usage ledger's sample stamps; Open sets time.Now
 	costFor   CostResolver     // medium name -> file-cost rule, injected by PriceWith; nil = fill not tracked
 	usage     []UsageSample    // the usage ledger (usage.go), loaded at Open, appended by persist
@@ -85,9 +86,10 @@ type Catalog struct {
 }
 
 type cacheFile struct {
-	Entries []*Entry                 `json:"entries"`
-	Volumes map[string]*VolumeRecord `json:"volumes,omitempty"`
-	DLEs    map[string]*DLEMeta      `json:"dles,omitempty"`
+	Entries  []*Entry                 `json:"entries"`
+	Volumes  map[string]*VolumeRecord `json:"volumes,omitempty"`
+	DLEs     map[string]*DLEMeta      `json:"dles,omitempty"`
+	Resolved *ResolvedSet             `json:"resolved,omitempty"` // the latest run's resolved DLE set (resolved.go)
 }
 
 // Open loads the catalog cache from the workdir. If the cache file is absent, the
@@ -113,6 +115,7 @@ func Open(workdir string) (*Catalog, error) {
 	if cf.DLEs != nil {
 		c.dles = cf.DLEs
 	}
+	c.resolved = cf.Resolved
 	c.sortEntries()
 	c.loaded = true
 	return c, nil
@@ -674,7 +677,7 @@ func (c *Catalog) persist() error {
 	if err := os.MkdirAll(c.workdir, 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(cacheFile{Entries: c.entries, Volumes: c.volumes, DLEs: prunedDLEMeta(c.dles)}, "", "  ")
+	data, err := json.MarshalIndent(cacheFile{Entries: c.entries, Volumes: c.volumes, DLEs: prunedDLEMeta(c.dles), Resolved: c.resolved}, "", "  ")
 	if err != nil {
 		return err
 	}

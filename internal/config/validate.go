@@ -33,9 +33,15 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("source %s: unknown dumptype %q (known: %s)", s.ID(), dt, strings.Join(known, ", "))
 			}
 		}
+		if err := validateSourcePartition(s); err != nil {
+			return err
+		}
 		if err := c.validateTransformPlacement(s); err != nil {
 			return err
 		}
+	}
+	if err := validateNoDuplicateBase(c.Sources); err != nil {
+		return err
 	}
 	if err := c.validateLandingList("", c.Landing); err != nil {
 		return err
@@ -68,6 +74,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	for name, dt := range c.DumpTypes {
+		if err := validateExcludes(name, dt.Exclude); err != nil {
+			return err
+		}
 		if dt.PartSize == "" {
 			continue
 		}
@@ -118,6 +127,70 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateNotify(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateExcludes rejects absolute exclude patterns: excludes are relative to each
+// source's root (Amanda semantics — a bare pattern floats to any depth, a "./" prefix
+// anchors at the source root), so an absolute path would silently never match. The
+// error teaches the two working spellings.
+func validateExcludes(name string, patterns []string) error {
+	for _, p := range patterns {
+		if strings.HasPrefix(p, "/") {
+			return fmt.Errorf("dumptype %q exclude %q: excludes are relative to the source, not absolute paths — write %q to anchor it at the source root, or a bare pattern to match at any depth", name, p, "."+p)
+		}
+	}
+	return nil
+}
+
+// validateSourcePartition checks a partitioned source's glob is a clean, relative token and
+// its base is not the filesystem root. The wildcard-in-Path (selection) form is unconstrained
+// here — it is an opaque pattern the archiver interprets. Both are only resolved to concrete
+// DLEs at plan time; this is the pure, load-time guard.
+func validateSourcePartition(s DLE) error {
+	if s.Partition == "" {
+		return nil
+	}
+	if s.Path == "/" {
+		return fmt.Errorf("source %s: partition base cannot be the filesystem root", s.ID())
+	}
+	if strings.ContainsAny(s.Path, "*?[") {
+		return fmt.Errorf("source %s: a partition base must be a literal path (no wildcards); a wildcard source is written as a plain path instead", s.ID())
+	}
+	p := s.Partition
+	if strings.HasPrefix(p, "/") {
+		return fmt.Errorf("source %s: partition %q must be relative (no leading /)", s.ID(), p)
+	}
+	if strings.Contains(p, "**") {
+		return fmt.Errorf("source %s: partition %q must not use ** (recursive matching is unbounded)", s.ID(), p)
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return fmt.Errorf("source %s: partition %q must not escape its base with ..", s.ID(), p)
+		}
+	}
+	return nil
+}
+
+// validateNoDuplicateBase rejects two sources that share the same host+path when either
+// declares a partition: a partition base must be unique, so it cannot also be a standalone
+// source and two partitions cannot collide on one base (they would emit colliding DLEs).
+func validateNoDuplicateBase(sources Sources) error {
+	type key struct{ host, path string }
+	seen := map[key]bool{}
+	part := map[key]bool{}
+	for _, s := range sources {
+		k := key{s.Host, s.Path}
+		if s.Partition != "" {
+			if seen[k] {
+				return fmt.Errorf("source %s: partition base is also used by another source at the same path", s.ID())
+			}
+			part[k] = true
+		} else if part[k] {
+			return fmt.Errorf("source %s: path is also a partition base elsewhere", s.ID())
+		}
+		seen[k] = true
 	}
 	return nil
 }

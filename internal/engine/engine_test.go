@@ -238,7 +238,11 @@ func TestResetForcesFullNextRun(t *testing.T) {
 
 	// Without a reset, day2 would be an incremental (a usable base exists).
 	day2 := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
-	if got := eng.Plan(day2).Items[0].Level; got != 1 {
+	pre, err := eng.Plan(day2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pre.Items[0].Level; got != 1 {
 		t.Fatalf("precondition: day2 should plan L1, got L%d", got)
 	}
 
@@ -251,7 +255,10 @@ func TestResetForcesFullNextRun(t *testing.T) {
 	}
 
 	// The directive forces the next plan to a full, labeled as such.
-	plan := eng.Plan(day2)
+	plan, err := eng.Plan(day2)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := plan.Items[0].Level; got != 0 {
 		t.Fatalf("after reset, day2 should plan L0, got L%d", got)
 	}
@@ -272,7 +279,11 @@ func TestResetForcesFullNextRun(t *testing.T) {
 	// The directive is consumed: the next plan is back on the ordinary schedule (an
 	// incremental on the fresh full), not stuck forcing fulls forever.
 	day3 := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
-	if got := eng.Plan(day3).Items[0].Level; got != 1 {
+	day3Plan, err := eng.Plan(day3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := day3Plan.Items[0].Level; got != 1 {
 		t.Fatalf("after the forced full ran, day3 should plan L1 again, got L%d", got)
 	}
 
@@ -503,7 +514,10 @@ func TestPlanWithProgress(t *testing.T) {
 		}
 	}
 
-	plan := eng.PlanWithProgress(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), sink)
+	plan, err := eng.PlanWithProgress(time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), sink)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if !terminal {
 		t.Error("sink never saw a terminal snapshot")
@@ -1465,7 +1479,10 @@ func TestHoldingDiskRoutesOversizedDirect(t *testing.T) {
 	}
 	// Guard the premise: the big DLE's estimate must exceed the capacity (routed direct) and the
 	// small one's must not — otherwise the test wouldn't exercise the direct path.
-	plan := eng.Plan(time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC))
+	plan, err := eng.Plan(time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
 	capBytes, _ := cfg.Media["scratch"].CapacityBytes()
 	var directCount int
 	for _, it := range plan.Items {
@@ -1689,7 +1706,11 @@ func TestHoldingDiskLandingDownFails(t *testing.T) {
 func TestDumpContinuesPastFailedDLE(t *testing.T) {
 	good := t.TempDir()
 	write(t, filepath.Join(good, "f.txt"), "i survive")
-	bad := filepath.Join(t.TempDir(), "does-not-exist") // never created -> tar fails at dump time
+	// Never created: under the failure ladder this DLE now dies at PLAN time (its
+	// estimate measures nothing -> planner-FAILED, Amanda's "FAILED" class) instead of
+	// at dump time — the contract this test pins is unchanged: the run proceeds past
+	// it, seals the good DLE, and exits non-zero.
+	bad := filepath.Join(t.TempDir(), "does-not-exist")
 
 	cfg := &config.Config{
 		Landing: config.MediumList{"disk"},
