@@ -45,6 +45,17 @@ type Expander interface {
 // on a host.
 type ExpanderFor func(dumptype, host string) (Expander, error)
 
+// PatternOf is the one mapping from a config source to the archiver's expansion input —
+// shared by Resolve and the live probers (`nb check`) so the two cannot drift: the
+// mapping form hands its base explicitly; a scalar's whole source is the pattern.
+func PatternOf(s config.DLE, excl []string) archiver.SourcePattern {
+	sp := archiver.SourcePattern{Pattern: s.Path, Exclude: excl}
+	if s.Partition != "" {
+		sp.Base, sp.Pattern = s.Path, s.Partition
+	}
+	return sp
+}
+
 // Resolve expands the configured sources into the concrete DLEs to schedule. A plain
 // source resolves to itself with no I/O; a wildcard or partition enumerates over the
 // archiver (its executor). Failures are the source's failures — a listing that cannot
@@ -61,11 +72,7 @@ func Resolve(sources []config.DLE, archFor ExpanderFor, exclFor func(dumptype st
 		if err != nil {
 			return nil, fmt.Errorf("source %s: %w", s.ID(), err)
 		}
-		sp := archiver.SourcePattern{Pattern: s.Path, Exclude: exclFor(dt)}
-		if s.Partition != "" {
-			sp.Base, sp.Pattern = s.Path, s.Partition
-		}
-		scopes, err := arch.Expand(sp)
+		scopes, err := arch.Expand(PatternOf(s, exclFor(dt)))
 		if err != nil {
 			return nil, fmt.Errorf("source %s: %w", s.ID(), err)
 		}

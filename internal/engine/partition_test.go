@@ -88,3 +88,83 @@ func TestPartitionedSourceEndToEnd(t *testing.T) {
 		}
 	}
 }
+
+// TestPartitionRestRebaselinesOnNewChild proves the R4 guard end-to-end: a child
+// directory created between runs graduates to its own DLE on the next run, and the rest —
+// whose recorded carve set grew — is forced back to a level-0 full so the stale pre-carve
+// copy of the newcomer ages out of its chain. Also pins that Carves are recorded on the
+// rest's archives (the footer-carried comparison input).
+func TestPartitionRestRebaselinesOnNewChild(t *testing.T) {
+	base := t.TempDir()
+	write(t, filepath.Join(base, "alice", "a.txt"), "alpha")
+	write(t, filepath.Join(base, "loose.txt"), "loose bytes")
+
+	cfg := &config.Config{
+		Landing: config.MediumList{"vault"},
+		Media: map[string]config.Media{
+			"vault": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: base, Partition: "*"}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+
+	restSlug := config.Slug("localhost", base)
+	s1, err := eng.Run(context.Background(), time.Date(2026, 7, 9, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	for _, a := range s1.Archives {
+		if a.DLE == restSlug {
+			if len(a.Carves) != 1 || a.Carves[0] != "/alice" {
+				t.Fatalf("run 1: the rest should record carves [/alice], got %v", a.Carves)
+			}
+		}
+	}
+
+	// A new child appears; run 2's plan must graduate it AND re-baseline the rest.
+	write(t, filepath.Join(base, "carol", "c.txt"), "gamma")
+	s2, err := eng.Run(context.Background(), time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	var restLevel, carolLevel = -1, -1
+	for _, a := range s2.Archives {
+		switch a.DLE {
+		case restSlug:
+			restLevel = a.Level
+			if len(a.Carves) != 2 {
+				t.Errorf("run 2: the rest should record carves [/alice /carol], got %v", a.Carves)
+			}
+		case config.Slug("localhost", filepath.Join(base, "carol")):
+			carolLevel = a.Level
+		}
+	}
+	if carolLevel != 0 {
+		t.Errorf("new child must enter at a mandatory full, got level %d", carolLevel)
+	}
+	if restLevel != 0 {
+		t.Errorf("the rest's carve set grew (/carol) — it must re-baseline to a full, got level %d", restLevel)
+	}
+
+	// Run 3, nothing changed: the rest must NOT full again (the guard is a one-shot
+	// re-baseline, not a recurring cost).
+	s3, err := eng.Run(context.Background(), time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatalf("run 3: %v", err)
+	}
+	for _, a := range s3.Archives {
+		if a.DLE == restSlug && a.Level == 0 {
+			t.Errorf("run 3: stable carve set must not re-full the rest")
+		}
+	}
+}

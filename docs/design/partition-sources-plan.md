@@ -138,6 +138,19 @@ Fixed immediately during the review (in-tree, green): the gnutar `Expand` litera
 mangling it, wildcard partition bases rejected at load, partition base paths `path.Clean`ed at
 decode (mapping form only — scalar sources are never cleaned; a conninfo must pass through).
 
+## Status (2026-07-09)
+
+DONE (committed, race-green, e2e-proven): phases 1–4 plus R1, R2, R3 (routing), R4
+(carves on `record.Archive` + additions-only re-baseline, e2e-proven one-shot), R6, R7
+(check resolves + probes resolved sources; directory-only `CheckSource`), R8 (ForceFull
+accepts catalog slugs), plan rendering with partition/selection groups + coverage line.
+An interim guard keeps `checkStaleness` from false-warning on selection sources.
+
+REMAINING: R5 (record the resolved set per run; staleness for pattern children + retire
+removed DLEs; `report`'s staleness/drill reroute), phase 6 (`ArchiverType`/`ArchiverName`
++ back-compat restore fallback), postgres database enumeration (selection), R9 doc pass
+(example config, README, `*` matches dot-dirs, leading-`/` exclude behavior change).
+
 ## Phased build order
 
 Each phase is independently testable; earlier phases don't depend on later ones.

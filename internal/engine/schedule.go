@@ -21,8 +21,24 @@ func (e *Engine) newScheduler() *scheduler.Scheduler {
 		BumpPercent:   e.cfg.BumpPercent,
 		Capacity:      e.dep.Profile().TotalBytes,
 		CapacityRoom:  e.acct.CapacityRoom,
+		LastCarves:    e.lastCarves,
 		PreflightDeps: e.preflightDeps(),
 	})
+}
+
+// lastCarves returns the carve set the DLE's most recent archive was dumped with —
+// the recorded half of the partition re-baseline comparison (scheduler.Deps.LastCarves).
+// Runs() is in run order, so the scan walks newest-first.
+func (e *Engine) lastCarves(dle string) ([]string, bool) {
+	runs := e.cat.Runs()
+	for i := len(runs) - 1; i >= 0; i-- {
+		for _, a := range runs[i].Archives {
+			if a.DLE == dle {
+				return a.Carves, true
+			}
+		}
+	}
+	return nil, false
 }
 
 // preflightDeps wires the shared dump pre-flight (scheduler.Preflight) to the

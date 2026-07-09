@@ -261,6 +261,7 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 		Shape:    shape,
 		Level:    spec.Request.Level,
 		BaseRun:  spec.BaseRun,
+		Carves:   spec.Request.Carves(), // recorded so the next plan can detect carve growth (re-baseline guard)
 	}
 	if shape == record.ShapeAtomic {
 		aspec.AtomSize = pl.AtomSize

@@ -47,6 +47,21 @@ type Scope struct {
 	Exclude []string // patterns to skip (content-dependent, so per-request, not Archiver config)
 }
 
+// Carves returns the Exclude entries that carve whole subtrees out of this scope — the
+// leading-"/" (root-anchored) patterns a partition's remainder carries, as opposed to
+// content globs ("*.log"). The convention is part of the Scope contract: Expand produces
+// them, the archiver anchors them, and the dump records them (record.Archive.Carves) so
+// the next plan can force a re-baseline when the carve set grows.
+func (s Scope) Carves() []string {
+	var out []string
+	for _, p := range s.Exclude {
+		if strings.HasPrefix(p, "/") {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // SourcePattern is the input to Expand: a Source pattern to resolve into concrete Scopes.
 // Base is the named base of a partition (config's path:) — its presence means Expand also
 // emits a remainder Scope covering everything under Base the matches don't. An empty Base is

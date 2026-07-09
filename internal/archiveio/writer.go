@@ -144,6 +144,7 @@ func (w *Writer) NewArchive(spec ArchiveSpec) *ArchiveWriter {
 		Shape:    spec.Shape,
 		Level:    spec.Level,
 		BaseRun:  spec.BaseRun,
+		Carves:   spec.Carves,
 	}
 	aw := &ArchiveWriter{w: w, base: w.archiveHeader(meta), meta: meta, h: sha256.New()}
 	if spec.Shape == record.ShapeAtomic {

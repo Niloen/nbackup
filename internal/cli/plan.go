@@ -128,10 +128,16 @@ func newPlanCmd(a *app) *cobra.Command {
 // fprintPlanItems writes a plan's per-DLE level/size/reason table to w and returns
 // the total estimated bytes. Shared by `nb plan` and the `nb dump --dry-run`
 // preview so a single run renders identically in both.
+//
+// Resolved units of one pattern source render as a GROUP: a header naming the base, one
+// indented row per matched child, and — for a partition — the "the rest" row plus an
+// explicit coverage line, so the two questions a reader has ("is anything dropped?" /
+// "am I double-storing the base and its children?") are answered on sight. A selection
+// group says "no rest" in its header — the visible cue that only the matches are covered.
 func fprintPlanItems(w io.Writer, plan *planner.Plan) (estTotal int64, unknown int) {
 	tw := newTab(w)
 	fmt.Fprintln(tw, "DLE\tLEVEL\tEST. SIZE\tFULL SIZE\tREASON")
-	for _, item := range plan.Items {
+	row := func(label string, item planner.Item) {
 		levelStr := fmt.Sprintf("L%d (full)", item.Level)
 		// For an incremental, show the full-dump size alongside the chosen size so a
 		// small incremental does not hide a large full waiting at the cycle deadline.
@@ -150,8 +156,50 @@ func fprintPlanItems(w io.Writer, plan *planner.Plan) (estTotal int64, unknown i
 				unknown++
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", item.DLE.ID(), levelStr, estStr, fullStr, item.Reason)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", label, levelStr, estStr, fullStr, item.Reason)
 		estTotal += item.EstBytes
+	}
+	items := plan.Items
+	for i := 0; i < len(items); {
+		it := items[i]
+		if it.DLE.Base == "" { // a plain DLE: one row, exactly as before
+			row(it.DLE.ID(), it)
+			i++
+			continue
+		}
+		// A pattern group: the consecutive units resolved from one source (Resolve emits
+		// them contiguously, matches first, the rest last).
+		j, hasRest := i, false
+		for ; j < len(items) && items[j].DLE.Host == it.DLE.Host && items[j].DLE.Base == it.DLE.Base; j++ {
+			if items[j].DLE.IsRest() {
+				hasRest = true
+			}
+		}
+		groupID := it.DLE.Host + ":" + it.DLE.Base
+		if hasRest {
+			fmt.Fprintf(tw, "%s — partitioned\t\t\t\t\n", groupID)
+		} else {
+			fmt.Fprintf(tw, "%s — selection (matches only, no rest)\t\t\t\t\n", groupID)
+		}
+		matched := 0
+		for k := i; k < j; k++ {
+			m := items[k]
+			branch := "├─"
+			if k == j-1 {
+				branch = "└─"
+			}
+			label := "  " + branch + " " + strings.TrimPrefix(strings.TrimPrefix(m.DLE.Source, m.DLE.Base), "/")
+			if m.DLE.IsRest() {
+				label = "  " + branch + " the rest"
+			} else {
+				matched++
+			}
+			row(label, m)
+		}
+		if hasRest {
+			fmt.Fprintf(tw, "  ✓ covers 100%% of %s (%d matched + the rest)\t\t\t\t\n", groupID, matched)
+		}
+		i = j
 	}
 	tw.Flush()
 	return estTotal, unknown

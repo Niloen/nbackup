@@ -735,22 +735,28 @@ func (e *Engine) DLEDisplay() []string { return e.dles.displayAll() }
 // see dleDirectory (which also forgives a trailing slash from tab completion).
 func (e *Engine) ResolveDLE(arg string) (string, bool) { return e.dles.resolve(arg) }
 
-// ForceFull schedules a configured DLE for a full on its next run, the archiver-independent
+// ForceFull schedules a DLE for a full on its next run, the archiver-independent
 // `nb reset`: it records a force-full directive the planner honors (a mandatory L0),
 // rather than reaching into and deleting the archiver's incremental state. The forced full
 // reseeds that state itself when it runs, and — with commit-bound promotion — the old
 // chain stays intact until the new full actually commits. arg is a host:path identity or
-// the internal slug; it returns the DLE's display identity. The DLE must be configured,
-// since forcing a full only makes sense to re-dump it.
+// the internal slug. A configured DLE resolves as before; a partition-derived DLE is not
+// in config, so a catalog-recorded slug is accepted too — the directive keys by slug and
+// the next run's resolution consumes it (a slug that never resolves again just idles).
 func (e *Engine) ForceFull(arg string) (string, error) {
-	d, ok := e.dles.resolveConfigured(arg)
-	if !ok {
-		return "", fmt.Errorf("no DLE %q in the configuration", arg)
+	if d, ok := e.dles.resolveConfigured(arg); ok {
+		if err := e.cat.SetForceFull(d.Name()); err != nil {
+			return "", fmt.Errorf("force full %s: %w", d.ID(), err)
+		}
+		return d.ID(), nil
 	}
-	if err := e.cat.SetForceFull(d.Name()); err != nil {
-		return "", fmt.Errorf("force full %s: %w", d.ID(), err)
+	if slug, ok := e.dles.resolve(arg); ok { // catalog identity (e.g. a partition child)
+		if err := e.cat.SetForceFull(slug); err != nil {
+			return "", fmt.Errorf("force full %s: %w", e.dles.display(slug), err)
+		}
+		return e.dles.display(slug), nil
 	}
-	return d.ID(), nil
+	return "", fmt.Errorf("no DLE %q in the configuration or the catalog", arg)
 }
 
 // MediumOverCapacity reports whether the named medium still holds more than its

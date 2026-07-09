@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/accounting"
@@ -15,6 +16,7 @@ import (
 	"github.com/Niloen/nbackup/internal/depot"
 	"github.com/Niloen/nbackup/internal/dumper"
 	"github.com/Niloen/nbackup/internal/media"
+	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/programs"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/recovery"
@@ -94,6 +96,13 @@ func (c *checker) checkStaleness(rep *CheckReport) {
 	dles := make([]string, 0, len(c.cfg.DLEs()))
 	idOf := map[string]string{}
 	for _, d := range c.cfg.DLEs() {
+		// A wildcard (selection) source has no single catalog identity — its literal
+		// slug is never dumped, so tracking it would warn "never backed up" forever.
+		// Its children's freshness needs the per-run resolved set (a follow-on); a
+		// partition BASE's slug is the rest's real catalog identity, so it stays.
+		if strings.ContainsAny(d.Path, "*?[") {
+			continue
+		}
 		dles = append(dles, d.Name())
 		idOf[d.Name()] = d.ID()
 	}
@@ -402,15 +411,26 @@ func (c *checker) checkHost(rep *CheckReport, host string, connect bool) HostChe
 	// directory for a tree archiver, nothing at all for pipe (its producer command
 	// owns the source), connectivity for a future db archiver. An archiver that
 	// failed to open was already reported above — don't pile a second line on.
+	// A pattern source is RESOLVED first (check is a live-acting command, like
+	// plan/dump) and each resolved unit probed; a failed enumeration is a failed
+	// check line, not an abort. A plain source expands to itself with no I/O, so
+	// this is one uniform path.
 	for _, d := range dles {
 		arch, err := c.tc.archiverFor(d.DumpTypeName(), host)
 		if err != nil {
 			continue
 		}
-		if err := arch.CheckSource(d.Path); err != nil {
-			rep.add(&hc.Lines, false, false, fmt.Sprintf("source %s: %v", d.Path, err))
-		} else {
-			rep.add(&hc.Lines, true, false, fmt.Sprintf("source %s ready", d.Path))
+		scopes, err := arch.Expand(planner.PatternOf(d, nil))
+		if err != nil {
+			rep.add(&hc.Lines, false, false, fmt.Sprintf("source %s: cannot enumerate: %v", d.Path, err))
+			continue
+		}
+		for _, sc := range scopes {
+			if err := arch.CheckSource(sc.Source); err != nil {
+				rep.add(&hc.Lines, false, false, fmt.Sprintf("source %s: %v", sc.Source, err))
+			} else {
+				rep.add(&hc.Lines, true, false, fmt.Sprintf("source %s ready", sc.Source))
+			}
 		}
 	}
 
