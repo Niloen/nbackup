@@ -20,7 +20,7 @@ The vocabulary you need to read everything else — and how the concepts nest.
 
 | Term | What it is |
 |---|---|
-| **DLE** | A **backup source**: a `host` + `path` (e.g. `app01:/home`). The thing you choose to back up. (From Amanda: *Disk List Entry*.) |
+| **DLE** | A **backup source**: a `host` + `path` (e.g. `app01:/home`). The thing you choose to back up. (From Amanda: *Disk List Entry*.) A configured source may also be a **pattern** that resolves into many DLEs at plan time — one per child directory, plus "the rest" when a base is named (see [Partitioned sources](features/partitioned-sources)). |
 | **Run** | One planner execution, typically daily — and its **primary artifact**. A run decides what to back up and at what level, then dumps it, sealing one immutable set of archives. Named `run-YYYY-MM-DD.HHMMSS`. The addressable unit for copy / restore / list. |
 | **Archive** | One **DLE's image at one level** inside a run. The unit of **retention and pruning**: an old run can shed one DLE's image while keeping a run-mate the chain still needs. |
 | **Cycle** | The **dump cycle**: the target and hard-max time between full backups of each DLE, and the window retention protects. |

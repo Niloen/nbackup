@@ -160,9 +160,16 @@ promiseRoutes = config.Routes ∪ latest-resolved dumptype routes, so children's
 are owed, judged, and auto-synced. Degrades to config-only on pre-record/rebuilt
 catalogs (shipped behavior).
 
-REMAINING: postgres database enumeration (selection), R9 doc pass (example config,
-README, `*` matches dot-dirs, excludes-are-relative + `./` anchoring, anchored-addition
-re-baseline, directory-only rule).
+ALSO DONE: R9 doc pass — docs/features/partitioned-sources.md (the full story) + index
+row, docs/reference/configuration.md (pattern-sources + excludes-are-relative sections),
+docs/concepts.md DLE row, README (short version + example), nbackup.example.yaml.
+Postgres enumeration RESOLVED AS NOT APPLICABLE: the postgres archiver is
+cluster-granular by design (pg_basebackup cannot dump one database; one DLE per
+cluster), so identity + partition-refusal is final — the spec's earlier "scope per
+database" row was wrong and is corrected; a per-database selection belongs to a future
+pg_dump-shaped archiver.
+
+FEATURE COMPLETE on branch worktree-auto-shard.
 
 ## Phased build order
 

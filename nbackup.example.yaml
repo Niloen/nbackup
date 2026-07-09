@@ -369,7 +369,9 @@ dumptypes:
     archiver: default
   no-logs:
     archiver: default
-    exclude: ["*.log", "*.tmp"]
+    exclude: ["*.log", "*.tmp"]  # bare patterns match at ANY depth; "./var/cache"
+                                 # anchors at the source root (absolute paths are
+                                 # rejected — excludes are source-relative)
   # A dumptype can route its DLEs to a different landing medium than the config-wide
   # `landing` above, so heterogeneous sources reach heterogeneous storage within one
   # run — e.g. bulky media to cheap cloud, databases to fast disk + tape. The medium
@@ -450,3 +452,10 @@ sources:
   # the `ssh:`/`hosts:` section is set up:
   # no-logs:
   #   web01: [/srv/www, /opt/app]
+  # A source can be a PATTERN, re-resolved at every plan (new directories need no
+  # config edit). The rule: the rest exists exactly when you name a base.
+  # big:
+  #   localhost:
+  #     - path: /data            # PARTITION: one DLE per child directory, PLUS
+  #       partition: "*"         #   "the rest of /data" — full coverage guaranteed
+  #     - /srv/web-*             # SELECTION: one DLE per match — and nothing else

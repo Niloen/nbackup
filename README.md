@@ -804,6 +804,11 @@ sources:
   # no-logs:                    # the no-logs dumptype in action — point it at real
   #   localhost: [/srv/www]     # paths on your host (shown commented so the minimal
                                 # config above checks green as-is)
+  # big:
+  #   localhost:
+  #     - path: /data           # PARTITION: one DLE per child directory, plus
+  #       partition: "*"        #   "the rest of /data" — new dirs picked up per run
+  #     - /srv/web-*            # SELECTION: one DLE per match, and nothing else
 ```
 
 - **Media** is a map of named definitions, each with a `type` and type-specific
@@ -821,7 +826,12 @@ sources:
   decision about the data, not how tar runs. Compression is config-wide.
 - **Sources** (the disklist) are grouped by dumptype → host → paths, so each DLE is
   just a path under the dumptype that governs it — all per-DLE tuning lives in the
-  dumptype, never on the entry.
+  dumptype, never on the entry. A source can also be a **pattern**, re-resolved at
+  every plan so new directories need no config edit: `{path: /data, partition: "*"}`
+  makes one DLE per child directory *plus "the rest of /data"* (full coverage,
+  guaranteed), while a wildcard in the path (`/srv/web-*`) selects exactly the
+  matches and nothing else — see
+  [Partitioned sources](docs/features/partitioned-sources.md).
 
 ### Capacity and retention are per-medium
 

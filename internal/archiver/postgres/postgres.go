@@ -180,13 +180,14 @@ func pgMajor(version string) int {
 // summarization is on, without which the server cannot take the incremental
 // (level ≥ 1) dumps this archiver schedules. All three are proven live so
 // `nb check` fails now rather than the nightly dump failing later.
-// Expand is the identity for postgres today: a source is a libpq connection reference, and
-// database-set enumeration (a selection over pg_database) is a follow-on. The partition
-// (mapping) form is refused rather than mangled — until enumeration exists there is nothing
-// a Base could mean here, and a discrete archiver has no remainder anyway.
+// Expand is the identity for postgres, by design rather than as a placeholder: this
+// archiver is CLUSTER-granular (pg_basebackup cannot dump one database — one DLE per
+// cluster, see the package doc), so there is nothing to enumerate and any wildcard in a
+// conninfo is literal. The partition form is refused with the reason; a per-database
+// selection belongs to a future pg_dump-shaped archiver, not this one.
 func (p *postgres) Expand(sp archiver.SourcePattern) ([]archiver.Scope, error) {
 	if sp.Base != "" {
-		return nil, fmt.Errorf("postgres archiver does not support partition (database enumeration is not implemented yet); list each database as a plain source")
+		return nil, fmt.Errorf("postgres archiver cannot partition: pg_basebackup dumps a whole cluster (one DLE per cluster), so there are no per-database children to split; list each cluster as a plain source")
 	}
 	return []archiver.Scope{{Source: sp.Pattern, Exclude: sp.Exclude}}, nil
 }

@@ -119,12 +119,15 @@ Per-archiver behaviour of the one call:
 | `SourcePattern` | gnutar (tree) | postgres (discrete) | pipe (opaque) |
 |---|---|---|---|
 | plain (`/var/log`, `mydb`) | 1 scope, no I/O | 1 scope, no I/O | 1 scope, no I/O |
-| selection (`/srv/web-*`, `app_*`) | scope per directory | scope per database | literal → 1 scope |
-| `Remainder:true` (`/data/*`) | dirs + base w/ carve | databases, no extra scope (total) | literal → 1 scope |
+| selection (`/srv/web-*`) | scope per directory | literal → 1 scope | literal → 1 scope |
+| `Remainder:true` (`/data/*`) | dirs + base w/ carve | REFUSED (cluster-granular) | REFUSED (no children) |
 
-The remainder is a **tree** concept. A discrete archiver is already total under enumeration,
-so `Remainder` is *allowed* but simply yields no extra scope — no error, no capability gate.
-pipe never partitions (its `Expand` is identity), which matters for restore (below).
+The remainder — and enumeration itself — is a **tree** concept. postgres is
+cluster-granular by design (`pg_basebackup` cannot dump one database; one DLE per
+cluster), so it has nothing to enumerate: its `Expand` is identity for a plain source and
+REFUSES the partition form, as does pipe (an opaque token has no children). Patterns are
+a gnutar-family feature; a future per-database archiver (pg_dump-shaped) could implement
+real enumeration.
 
 ## Resolution — plan/dump only, fail loud
 
