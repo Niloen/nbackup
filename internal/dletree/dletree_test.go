@@ -91,6 +91,27 @@ func TestSynthesizedSiblings(t *testing.T) {
 	})
 }
 
+// TestSynthesizedMergesUp: siblings under different subdirectories of one
+// ancestor form a single group at the shallowest shared directory, with
+// two-segment labels — not several tiny per-directory groups. (The selection
+// pattern "*/*" with no rest is exactly this shape.)
+func TestSynthesizedMergesUp(t *testing.T) {
+	check(t, []Item{
+		{Host: "h", Path: "/data/projects/alpha"},
+		{Host: "h", Path: "/data/projects/beta"},
+		{Host: "h", Path: "/data/qa/x"},
+		{Host: "h", Path: "/data/loose"},
+		{Host: "h", Path: "/home"},
+	}, []string{
+		"h:/data",
+		"  loose",
+		"  projects/alpha",
+		"  projects/beta",
+		"  qa/x",
+		"h:/home",
+	})
+}
+
 // TestNoRootGroup: top-level DLEs share only "/", which must never group them.
 func TestNoRootGroup(t *testing.T) {
 	check(t, []Item{

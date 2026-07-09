@@ -11,7 +11,6 @@ package dletree
 
 import (
 	"fmt"
-	"path"
 	"sort"
 	"strings"
 )
@@ -89,8 +88,10 @@ func Branch(i, n int) string {
 // Build arranges items into display groups, sorted by (host, path) with hostless
 // items trailing. Within a host, a DLE whose path is a path-boundary prefix of
 // the ones after it roots a group ("/data" covers "/data/x" but not "/database");
-// ≥2 DLEs sharing a parent directory with no covering DLE get a synthesized
-// header. Everything else stays flat, so a catalog without related paths renders
+// ≥2 DLEs with no covering DLE get a synthesized header at the shallowest
+// non-root directory they all share, so members carry multi-segment labels in
+// one group rather than splitting into several tiny per-directory groups.
+// Everything else stays flat, so a catalog without related paths renders
 // exactly as an ungrouped list.
 func Build(items []Item) []Group {
 	idx := make([]int, len(items))
@@ -150,24 +151,58 @@ func Build(items []Item) []Group {
 
 // groupBase decides whether the sorted run starting at position pos opens a group,
 // returning its base path ("" for a flat item). A DLE covering its successor roots
-// a group at its own path; otherwise two successors sharing a parent directory
-// (other than the root, which would swallow unrelated DLEs) synthesize one.
+// a group at its own path. Otherwise the base is synthesized as the SHALLOWEST
+// directory (never the root, which would swallow unrelated DLEs) shared by the
+// whole run of successors — one /data group whose members carry two-segment
+// labels (projects/alpha, qa/x) reads better than several two-row /data/<dir>
+// groups, and matches what a rooted group already shows for the same tree.
 func groupBase(items []Item, idx []int, pos int) (base string, rooted bool) {
 	if pos+1 >= len(idx) {
 		return "", false
 	}
-	cur, next := items[idx[pos]], items[idx[pos+1]]
-	if next.Host != cur.Host {
+	cur := items[idx[pos]]
+	p := cleanPath(cur.Path)
+	if next := items[idx[pos+1]]; next.Host != cur.Host {
 		return "", false
-	}
-	p, np := cleanPath(cur.Path), cleanPath(next.Path)
-	if covers(p, np) {
+	} else if covers(p, cleanPath(next.Path)) {
 		return p, true
 	}
-	if dir := path.Dir(p); dir != "/" && dir != "." && dir == path.Dir(np) {
-		return dir, false
+	for j := pos + 1; j < len(idx); j++ {
+		m := items[idx[j]]
+		if m.Host != cur.Host {
+			break
+		}
+		d := commonDir(p, cleanPath(m.Path))
+		// d == p would make this item the group's covering DLE mid-run (a sort
+		// quirk: "-" < "/" can order "/data-x" between "/data" and "/data/x");
+		// stop rather than fabricate a rest row the rooted path didn't claim.
+		if d == "/" || d == p {
+			break
+		}
+		base = d
 	}
-	return "", false
+	return base, false
+}
+
+// commonDir is the deepest directory containing both paths ("/" when they share
+// nothing below the root): the byte-wise common prefix cut back to a path
+// boundary, with an ancestor path counting as the directory itself.
+func commonDir(a, b string) string {
+	n := min(len(a), len(b))
+	i := 0
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	if i == len(a) && (i == len(b) || b[i] == '/') {
+		return a
+	}
+	if i == len(b) && a[i] == '/' {
+		return b
+	}
+	if j := strings.LastIndexByte(a[:i], '/'); j > 0 {
+		return a[:j]
+	}
+	return "/"
 }
 
 // covers reports whether base contains p at a path boundary: "/data" covers
