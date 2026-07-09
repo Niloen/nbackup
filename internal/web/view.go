@@ -66,9 +66,9 @@ type statusView struct {
 	// per-DLE EstimateRows) instead of a dump view full of misleading "done" DLEs
 	// (the same split nb status makes; see progress.renderEstimating).
 	Estimating    bool
-	Sized         int           // DLEs measured so far
-	EstimateSoFar int64         // estimate accumulated so far
-	EstimateRows  []estimateRow // per-DLE sizing detail, running first
+	Sized         int                         // DLEs measured so far
+	EstimateSoFar int64                       // estimate accumulated so far
+	EstimateRows  []pathGroupRow[estimateRow] // per-DLE sizing detail, path-arranged
 
 	// Big/Sub are the headline's right-hand stat — the one decision-ready number the
 	// page leads with (the ETA when known), and its quiet context line.
@@ -289,22 +289,19 @@ func newEstimateRow(d progress.DLE, now time.Time) estimateRow {
 	return row
 }
 
-// estimateRows builds the /status sizing table, actively-sizing DLEs first (they are
-// what an operator watching a slow estimate is looking for), then the rest in
-// snapshot (name) order.
-func estimateRows(dles []progress.DLE, now time.Time) []estimateRow {
+// estimateRows builds the /status sizing table, path-arranged like every other
+// per-DLE table (a partitioned source's fifty children fold under one header);
+// the actively-sizing rows read at a glance from their bright pill.
+func estimateRows(dles []progress.DLE, now time.Time) []pathGroupRow[estimateRow] {
 	rows := make([]estimateRow, 0, len(dles))
+	items := make([]dletree.Item, 0, len(dles))
 	for _, d := range dles {
-		if d.State == progress.StateDumping {
-			rows = append(rows, newEstimateRow(d, now))
-		}
+		rows = append(rows, newEstimateRow(d, now))
+		it, _ := dletree.Split(d.Name)
+		it.Rest = d.Rest
+		items = append(items, it)
 	}
-	for _, d := range dles {
-		if d.State != progress.StateDumping {
-			rows = append(rows, newEstimateRow(d, now))
-		}
-	}
-	return rows
+	return groupRowsByPath(rows, items)
 }
 
 // flushLaneView is one landing's flush backlog for the /status fan-out itemization —
@@ -528,7 +525,7 @@ type dumpReportView struct {
 	Headline string
 	Warnings []string // the run's degradations (e.g. a tripped landing), each with its repair
 	Grid     []dumpGridRow
-	Rows     []dumpStatRow
+	Rows     []pathGroupRow[dumpStatRow] // per-DLE rows, path-arranged like the CLI dump table
 	// Promoted summarizes the run's promoted fulls ("N full(s), X pulled forward
 	// to level the cycle"), empty when none — mirrors report.renderPromotions;
 	// each promoted row carries its own why.
@@ -598,6 +595,8 @@ func newDumpReportView(r report.Run) *dumpReportView {
 	}
 	var promoted int
 	var promotedBytes int64
+	rows := make([]dumpStatRow, 0, len(r.DumpStats))
+	items := make([]dletree.Item, 0, len(r.DumpStats))
 	for _, d := range r.DumpStats {
 		if d.Promoted {
 			promoted++
@@ -606,7 +605,7 @@ func newDumpReportView(r report.Run) *dumpReportView {
 		if d.FlushSeconds > 0 {
 			v.Flushed = true
 		}
-		v.Rows = append(v.Rows, dumpStatRow{
+		rows = append(rows, dumpStatRow{
 			ID: d.ID(), Slug: d.DLE, Level: d.Level,
 			Orig: sizeutil.FormatBytes(d.Orig), Out: sizeutil.FormatBytes(d.Out),
 			Comp: dumpCompPct(d.Orig, d.Out), Files: d.Files,
@@ -614,12 +613,23 @@ func newDumpReportView(r report.Run) *dumpReportView {
 			Promoted: d.Promoted, Why: report.PromotionWhy(d.Reason),
 			FlushTime: dumpTimeCell(d.FlushSeconds), FlushRate: dumpRateCell(d.FlushBytes, d.FlushSeconds),
 		})
+		items = append(items, dumpStatItem(d))
 	}
+	v.Rows = groupRowsByPath(rows, items)
 	if promoted > 0 {
 		v.Promoted = fmt.Sprintf("%d full(s), %s pulled forward to level the cycle",
 			promoted, sizeutil.FormatBytes(promotedBytes))
 	}
 	return v
+}
+
+// dumpStatItem is a dump-stat row's grouping identity; a record without host/path
+// (a bare-slug fallback) stays flat.
+func dumpStatItem(d report.DLEStat) dletree.Item {
+	if d.Host == "" && d.Path == "" {
+		return dletree.Item{Path: d.DLE}
+	}
+	return dletree.Item{Host: d.Host, Path: d.Path, Rest: d.Rest}
 }
 
 // dumpHeadline is the one-line "did it work" summary — mirrors report.headline.
@@ -809,8 +819,8 @@ func (c copyRow) PillText() string {
 // glance, colored by whether each hole is owed (routed), lagging (promised), or
 // simply not that medium's to hold.
 type placementGrid struct {
-	Cols []copyRow      // column headers: the same coverage rows the Copies table shows
-	Rows []placementRow // run.Archives order
+	Cols []copyRow                    // column headers: the same coverage rows the Copies table shows
+	Rows []pathGroupRow[placementRow] // one per archive, path-arranged like the dump table
 }
 
 // placementRow is one archive's row of the placement grid.
@@ -976,15 +986,32 @@ func partitionByHost(sums []catalog.DLESummary) (order []string, byHost map[stri
 // row — member count plus aggregate runs/newest-full/bytes/media — followed by
 // its members under short base-relative labels, "(the rest)" for a partition's
 // remainder. The heatmap gets the same arrangement (header rows carry no cells).
-func arrangeDLEs(sums []catalog.DLESummary, heatBySlug map[string]heatRow) ([]dleRow, []heatRow) {
+// hideHost drops the "host:" prefix from labels — set when the rows render
+// inside a host section, whose header already names the host.
+func arrangeDLEs(sums []catalog.DLESummary, heatBySlug map[string]heatRow, hideHost bool) ([]dleRow, []heatRow) {
 	items := make([]dletree.Item, len(sums))
 	for i, s := range sums {
 		items[i], _ = dletree.Split(s.Display)
 		items[i].Rest = s.Rest
 	}
+	// Inside a host section the section header already names the host, so labels
+	// drop the "host:" prefix rather than repeat it on every row; a hostless
+	// item (bare-slug fallback) has nothing to drop.
+	flatLabel := func(i int, s catalog.DLESummary) string {
+		if hideHost && items[i].Host != "" {
+			return items[i].Path
+		}
+		return s.Display
+	}
+	headerLabel := func(g dletree.Group) string {
+		if hideHost {
+			return g.Base
+		}
+		return g.ID()
+	}
 	dataRow := func(s catalog.DLESummary) dleRow {
 		return dleRow{
-			Slug: s.DLE, Display: s.Display, Label: s.Display, Runs: s.Runs,
+			Slug: s.DLE, Display: s.Display, Runs: s.Runs,
 			LastLevel: s.LastLevel, LastFull: s.LastFull, Bytes: s.Bytes,
 			Media: strings.Join(s.Media, ", "),
 		}
@@ -995,15 +1022,16 @@ func arrangeDLEs(sums []catalog.DLESummary, heatBySlug map[string]heatRow) ([]dl
 		if g.Children == nil {
 			s := sums[g.Index]
 			r := dataRow(s)
+			r.Label = flatLabel(g.Index, s)
 			r.RestNote = s.Rest
 			rows = append(rows, r)
 			if hr, ok := heatBySlug[s.DLE]; ok {
-				hr.Label = s.Display
+				hr.Label = flatLabel(g.Index, s)
 				hrows = append(hrows, hr)
 			}
 			continue
 		}
-		hdr := dleRow{Header: true, Group: g.ID(), Label: g.ID(), Count: len(g.Children)}
+		hdr := dleRow{Header: true, Group: g.ID(), Label: headerLabel(g), Count: len(g.Children)}
 		media := map[string]bool{}
 		for _, c := range g.Children {
 			s := sums[c.Index]
@@ -1019,7 +1047,7 @@ func arrangeDLEs(sums []catalog.DLESummary, heatBySlug map[string]heatRow) ([]dl
 		hdr.Media = strings.Join(sortedKeys(media), ", ")
 		rows = append(rows, hdr)
 		hrows = append(hrows, heatRow{Header: true, Group: g.ID(),
-			Label: fmt.Sprintf("%s · %d DLEs", g.ID(), len(g.Children))})
+			Label: fmt.Sprintf("%s · %d DLEs", headerLabel(g), len(g.Children))})
 		for i, c := range g.Children {
 			s := sums[c.Index]
 			r := dataRow(s)
@@ -1032,6 +1060,47 @@ func arrangeDLEs(sums []catalog.DLESummary, heatBySlug map[string]heatRow) ([]dl
 		}
 	}
 	return rows, hrows
+}
+
+// pathGroupRow wraps one row of a per-DLE table with its path-arranged
+// presentation (the same fold /dles uses): a group header row (Header, label +
+// member count, no payload), a member row (Twig + base-relative Label), or a
+// flat row (full identity as Label). Group is the collapse key shared by a
+// header and its members.
+type pathGroupRow[T any] struct {
+	Header bool
+	Label  string
+	Twig   string
+	Group  string
+	Count  int
+	Row    T
+}
+
+// groupRowsByPath arranges per-DLE rows with dletree; items carries each row's
+// identity, index-aligned with rows. Used by every per-DLE table outside /dles
+// (run dump report, placement grid, live sizing, drill ledger), so a partitioned
+// source folds the same way on every page.
+func groupRowsByPath[T any](rows []T, items []dletree.Item) []pathGroupRow[T] {
+	var out []pathGroupRow[T]
+	for _, g := range dletree.Build(items) {
+		if g.Children == nil {
+			it := items[g.Index]
+			label := it.Path
+			if it.Host != "" {
+				label = it.Host + ":" + it.Path
+			}
+			out = append(out, pathGroupRow[T]{Label: label, Row: rows[g.Index]})
+			continue
+		}
+		out = append(out, pathGroupRow[T]{Header: true, Label: g.ID(), Group: g.ID(), Count: len(g.Children)})
+		for i, c := range g.Children {
+			out = append(out, pathGroupRow[T]{
+				Label: g.Label(c), Twig: dletree.Branch(i, len(g.Children)),
+				Group: g.ID(), Row: rows[c.Index],
+			})
+		}
+	}
+	return out
 }
 
 // sortedKeys returns a map's keys sorted — media unions for group header rows.
@@ -1061,7 +1130,7 @@ func groupDLEs(sums []catalog.DLESummary, stale []catalog.StaleDLE, heat *heatma
 	data := dlesData{Heat: heat}
 	order, byHost, hostless := partitionByHost(sums)
 	var hrows []heatRow
-	data.Rows, hrows = arrangeDLEs(sums, heatBySlug)
+	data.Rows, hrows = arrangeDLEs(sums, heatBySlug, false)
 	if len(order) <= 1 {
 		if heat != nil {
 			heat.Rows = hrows
@@ -1096,7 +1165,7 @@ func groupDLEs(sums []catalog.DLESummary, stale []catalog.StaleDLE, heat *heatma
 				newest = m.LastBackupAt
 			}
 		}
-		gr.Rows, hg.Rows = arrangeDLEs(members, heatBySlug)
+		gr.Rows, hg.Rows = arrangeDLEs(members, heatBySlug, true)
 		gr.Host.Newest, hg.Host.Newest = newest, newest
 		return gr, hg
 	}
@@ -1751,9 +1820,9 @@ func usageChartSVG(series []catalog.UsageSample, capacity int64, capLabel string
 type drillsData struct {
 	Window                  string    // formatted coverage window (e.g. "30d")
 	Passing, Stale, Failing int       // ledger records by current health
-	Never                   []dleLink // configured DLEs never drilled
+	Never                   []dleLink // configured DLEs never drilled; path siblings folded (Slug == "")
 	Overdue                 int       // DLEs not covered within the window
-	Ledger                  []drillLedgerRow
+	Ledger                  []pathGroupRow[drillLedgerRow]
 	Runs                    []drillRunRow
 }
 

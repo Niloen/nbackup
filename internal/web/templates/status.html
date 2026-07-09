@@ -59,12 +59,16 @@
 <table>
   <tr><th>DLE</th><th>State</th><th class="num">Size</th><th class="num">Time</th></tr>
   {{range .EstimateRows}}
-  <tr>
-    <td><a href="/dles/{{.Slug}}">{{.Name}}</a></td>
-    <td><span class="pill {{if eq .State "sizing"}}active{{else if eq .State "failed"}}bad{{else if eq .State "canceled"}}warn{{else if eq .State "sized"}}ok{{else}}dim{{end}}">{{.State}}</span>{{if .Err}} <span class="bad">{{.Err}}</span>{{end}}</td>
-    <td class="num">{{.Size}}</td>
-    <td class="num">{{.Time}}</td>
+  {{if .Header}}
+  <tr class="group-row" data-g="{{.Group}}"><td colspan="99"><span class="gtog">▾</span>{{.Label}}<span class="chip">{{.Count}} DLEs</span></td></tr>
+  {{else}}
+  <tr{{if .Group}} data-in="{{.Group}}"{{end}}>
+    <td>{{if .Twig}}<span class="twig">{{.Twig}}</span> {{end}}<a href="/dles/{{.Row.Slug}}"{{if .Twig}} title="{{.Row.Name}}"{{end}}>{{.Label}}</a></td>
+    <td><span class="pill {{if eq .Row.State "sizing"}}active{{else if eq .Row.State "failed"}}bad{{else if eq .Row.State "canceled"}}warn{{else if eq .Row.State "sized"}}ok{{else}}dim{{end}}">{{.Row.State}}</span>{{if .Row.Err}} <span class="bad">{{.Row.Err}}</span>{{end}}</td>
+    <td class="num">{{.Row.Size}}</td>
+    <td class="num">{{.Row.Time}}</td>
   </tr>
+  {{end}}
   {{end}}
 </table>
 </div>

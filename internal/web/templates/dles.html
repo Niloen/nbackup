@@ -87,28 +87,4 @@
 </table>
 {{else}}<div class="empty">No DLEs in catalog.</div>{{end}}
 </div>
-
-<script>
-// Group headers toggle their member rows; groups past ten members start
-// collapsed so a partitioned source's long tail doesn't dominate the page.
-// Without JS everything simply stays visible.
-document.querySelectorAll("tr[data-g]").forEach(function (h) {
-  var table = h.closest("table");
-  var members = Array.prototype.filter.call(
-    table.querySelectorAll("tr[data-in]"),
-    function (r) { return r.getAttribute("data-in") === h.getAttribute("data-g"); });
-  var glyph = h.querySelector(".gtog");
-  var open;
-  function set(o) {
-    open = o;
-    members.forEach(function (r) { r.hidden = !o; });
-    if (glyph) glyph.textContent = o ? "▾" : "▸";
-  }
-  h.addEventListener("click", function (e) {
-    if (e.target.closest("a")) return;
-    set(!open);
-  });
-  set(members.length <= 10);
-});
-</script>
 {{end}}

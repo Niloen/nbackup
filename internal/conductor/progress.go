@@ -27,7 +27,7 @@ func (c *Conductor) progressTracker(runID string, workers int, plan *planner.Pla
 	// failure rather than silently omitting them from the night.
 	rows := c.planProgress(plan.Items)
 	for _, f := range plan.Failed {
-		rows = append(rows, progress.Plan{Name: f.ID, Slug: f.DLE.Name()})
+		rows = append(rows, progress.Plan{Name: f.ID, Slug: f.DLE.Name(), Rest: f.DLE.IsRest()})
 	}
 	tr := progress.NewTracker(runID, progress.PhaseRunning, workers, rows, time.Now, sink)
 	for _, f := range plan.Failed {
@@ -60,7 +60,7 @@ func keepEstimating(file progress.Sink) progress.Sink {
 func (c *Conductor) failEstimated(fileSink progress.Sink, plan *planner.Plan, err error) {
 	rows := c.planProgress(plan.Items)
 	for _, f := range plan.Failed {
-		rows = append(rows, progress.Plan{Name: f.ID, Slug: f.DLE.Name()})
+		rows = append(rows, progress.Plan{Name: f.ID, Slug: f.DLE.Name(), Rest: f.DLE.IsRest()})
 	}
 	tr := progress.NewTracker(progress.EstimateRunID, progress.PhaseEstimating, c.d.Workers, rows, time.Now, fileSink)
 	for _, f := range plan.Failed {
@@ -75,7 +75,7 @@ func (c *Conductor) failEstimated(fileSink progress.Sink, plan *planner.Plan, er
 func (c *Conductor) planProgress(items []planner.Item) []progress.Plan {
 	out := make([]progress.Plan, len(items))
 	for i, it := range items {
-		out[i] = progress.Plan{Name: it.DLE.ID(), Slug: it.DLE.Name(), Level: it.Level, EstBytes: it.EstBytes, Landings: c.d.LandingsFor(it), Reason: it.Reason, Promoted: it.Promoted}
+		out[i] = progress.Plan{Name: it.DLE.ID(), Slug: it.DLE.Name(), Level: it.Level, EstBytes: it.EstBytes, Landings: c.d.LandingsFor(it), Reason: it.Reason, Promoted: it.Promoted, Rest: it.DLE.IsRest()}
 	}
 	return out
 }

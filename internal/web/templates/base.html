@@ -243,6 +243,30 @@
 {{block "content" .}}{{end}}
 </main>
 <footer>read-only status · {{stampsec .Now}}</footer>
+<script>
+// Path-group header rows (any page) toggle their member rows; groups past ten
+// members start collapsed so a partitioned source's long tail doesn't dominate.
+// Scoped per table — the same group key can appear in two tables on one page.
+// Without JS everything simply stays visible.
+document.querySelectorAll("tr[data-g]").forEach(function (h) {
+  var table = h.closest("table");
+  var members = Array.prototype.filter.call(
+    table.querySelectorAll("tr[data-in]"),
+    function (r) { return r.getAttribute("data-in") === h.getAttribute("data-g"); });
+  var glyph = h.querySelector(".gtog");
+  var open;
+  function set(o) {
+    open = o;
+    members.forEach(function (r) { r.hidden = !o; });
+    if (glyph) glyph.textContent = o ? "▾" : "▸";
+  }
+  h.addEventListener("click", function (e) {
+    if (e.target.closest("a")) return;
+    set(!open);
+  });
+  set(members.length <= 10);
+});
+</script>
 </body>
 </html>{{end}}
 

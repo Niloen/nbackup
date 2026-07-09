@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/dletree"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/progress"
@@ -218,7 +219,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		Partial:  run.Partial(),
 		Archives: run.Archives,
 		Copies:   copies,
-		Grid:     buildPlacementGrid(run, judged, copies, rc),
+		Grid:     buildPlacementGrid(run, judged, copies, rc, s.restSlugsFor(run.ID)),
 		Dump:     s.findDumpReport(run.ID),
 	}})
 }
@@ -262,11 +263,13 @@ func buildCopyRows(run *catalog.Run, placements []catalog.Placement, rc *engine.
 // media), so the grid's columns and the Copies table agree by construction. A
 // hole is colored by its expectation: a routed gap is a defect, a promised one is
 // sync lag, and an unexpected cell is simply not this medium's to hold.
-func buildPlacementGrid(run *catalog.Run, placements []catalog.Placement, cols []copyRow, rc *engine.RunCoverage) *placementGrid {
+func buildPlacementGrid(run *catalog.Run, placements []catalog.Placement, cols []copyRow, rc *engine.RunCoverage, rest map[string]bool) *placementGrid {
 	if len(placements) == 0 {
 		return nil
 	}
 	g := &placementGrid{Cols: cols}
+	rows := make([]placementRow, 0, len(run.Archives))
+	items := make([]dletree.Item, 0, len(run.Archives))
 	for _, a := range run.Archives {
 		row := placementRow{DLE: a.DLE, DLEID: a.DLEID(), Level: a.Level}
 		for _, p := range placements {
@@ -285,9 +288,57 @@ func buildPlacementGrid(run *catalog.Run, placements []catalog.Placement, cols [
 			}
 			row.Cells = append(row.Cells, cell)
 		}
-		g.Rows = append(g.Rows, row)
+		rows = append(rows, row)
+		if a.Host == "" && a.Path == "" {
+			items = append(items, dletree.Item{Path: a.DLE})
+		} else {
+			items = append(items, dletree.Item{Host: a.Host, Path: a.Path, Rest: rest[a.DLE]})
+		}
 	}
+	g.Rows = groupRowsByPath(rows, items)
 	return g
+}
+
+// foldDLELinks builds an inline DLE-link list with path siblings folded: a group
+// becomes one unlinked "host:base (N DLEs)" entry (there is no single slug to
+// link), lone DLEs stay linked — the web mirror of dletree.FoldList, uncapped
+// because this page IS the full picture.
+func foldDLELinks(slugs []string, item func(string) dletree.Item) []dleLink {
+	items := make([]dletree.Item, len(slugs))
+	for i, slug := range slugs {
+		items[i] = item(slug)
+	}
+	var out []dleLink
+	for _, g := range dletree.Build(items) {
+		if g.Children == nil {
+			it := items[g.Index]
+			display := it.Path
+			if it.Host != "" {
+				display = it.Host + ":" + it.Path
+			}
+			out = append(out, dleLink{Slug: slugs[g.Index], Display: display})
+			continue
+		}
+		out = append(out, dleLink{Display: fmt.Sprintf("%s (%d DLEs)", g.ID(), len(g.Children))})
+	}
+	return out
+}
+
+// restSlugsFor collects the partition-remainder slugs recorded on runID's dump
+// record, so a historical placement grid labels "(the rest)" as it was that
+// night — not per the current config. Empty for a run predating the Rest field.
+func (s *Server) restSlugsFor(runID string) map[string]bool {
+	rest := map[string]bool{}
+	for _, r := range s.history(0) {
+		if r.Command == report.CommandDump && r.RunID == runID {
+			for _, d := range r.DumpStats {
+				if d.Rest {
+					rest[d.DLE] = true
+				}
+			}
+		}
+	}
+	return rest
 }
 
 // findDumpReport looks up run.ID's dump record in the run history and, when found
@@ -720,14 +771,27 @@ func (s *Server) handleDrills(w http.ResponseWriter, r *http.Request) {
 	window := s.src.DrillWindow()
 	data := drillsData{Window: sizeutil.FormatDuration(window)}
 
+	// Rest marks per the latest resolved set, for "(the rest)" labels in the
+	// folded lists below.
+	rest := map[string]bool{}
+	for _, sum := range s.src.DLESummaries() {
+		if sum.Rest {
+			rest[sum.DLE] = true
+		}
+	}
+	item := func(slug string) dletree.Item {
+		it, _ := dletree.Split(s.src.DisplayDLE(slug))
+		it.Rest = rest[slug]
+		return it
+	}
+
 	ledger := s.drillLedger()
 	never, overdue := ledger.Coverage(s.src.DLENames(), window, now)
 	data.Overdue = overdue
-	for _, slug := range never {
-		data.Never = append(data.Never, dleLink{Slug: slug, Display: s.src.DisplayDLE(slug)})
-	}
-	sort.Slice(data.Never, func(i, j int) bool { return data.Never[i].Display < data.Never[j].Display })
+	data.Never = foldDLELinks(never, item)
 
+	var ledgerRows []drillLedgerRow
+	var ledgerItems []dletree.Item
 	for _, rec := range ledger.Sorted() {
 		row := drillLedgerRow{
 			DLE:    s.src.DisplayDLE(rec.DLE),
@@ -755,8 +819,10 @@ func (s *Server) handleDrills(w http.ResponseWriter, r *http.Request) {
 			row.Status = "ok"
 			data.Passing++
 		}
-		data.Ledger = append(data.Ledger, row)
+		ledgerRows = append(ledgerRows, row)
+		ledgerItems = append(ledgerItems, item(rec.DLE))
 	}
+	data.Ledger = groupRowsByPath(ledgerRows, ledgerItems)
 
 	// Recent drill runs, newest first, each with its per-DLE outcomes.
 	for _, run := range s.history(0) {

@@ -35,17 +35,21 @@
   {{$flushed := .Flushed}}
   <tr><th>DLE</th><th>LVL</th><th class="num">ORIG</th><th class="num">OUT</th><th class="num">COMP%</th><th class="num">FILES</th><th class="num">TIME</th><th class="num">RATE</th>{{if $flushed}}<th class="num">FLUSH</th><th class="num">FL-RATE</th>{{end}}</tr>
   {{range .Rows}}
-  <tr>
-    <td><a href="/dles/{{.Slug}}">{{.ID}}</a></td>
-    <td>{{level .Level}}{{if .Promoted}} <span class="pill dim" title="{{.Why}}">promoted</span>{{end}}</td>
-    <td class="num">{{.Orig}}</td>
-    <td class="num">{{.Out}}</td>
-    <td class="num">{{.Comp}}</td>
-    <td class="num">{{.Files}}</td>
-    <td class="num">{{.Time}}</td>
-    <td class="num">{{.Rate}}</td>
-    {{if $flushed}}<td class="num">{{.FlushTime}}</td><td class="num">{{.FlushRate}}</td>{{end}}
+  {{if .Header}}
+  <tr class="group-row" data-g="{{.Group}}"><td colspan="99"><span class="gtog">▾</span>{{.Label}}<span class="chip">{{.Count}} DLEs</span></td></tr>
+  {{else}}
+  <tr{{if .Group}} data-in="{{.Group}}"{{end}}>
+    <td>{{if .Twig}}<span class="twig">{{.Twig}}</span> {{end}}<a href="/dles/{{.Row.Slug}}"{{if .Twig}} title="{{.Row.ID}}"{{end}}>{{.Label}}</a></td>
+    <td>{{level .Row.Level}}{{if .Row.Promoted}} <span class="pill dim" title="{{.Row.Why}}">promoted</span>{{end}}</td>
+    <td class="num">{{.Row.Orig}}</td>
+    <td class="num">{{.Row.Out}}</td>
+    <td class="num">{{.Row.Comp}}</td>
+    <td class="num">{{.Row.Files}}</td>
+    <td class="num">{{.Row.Time}}</td>
+    <td class="num">{{.Row.Rate}}</td>
+    {{if $flushed}}<td class="num">{{.Row.FlushTime}}</td><td class="num">{{.Row.FlushRate}}</td>{{end}}
   </tr>
+  {{end}}
   {{end}}
 </table>
 {{if .Promoted}}<div class="muted" style="margin:.6rem 0 0">Promoted: {{.Promoted}} — hover a <em>promoted</em> pill for why.</div>{{end}}
@@ -98,12 +102,16 @@
     {{range .Cols}}<th class="medium">{{.Medium}} <span class="cov {{.PillClass}}">{{.CovText}}</span></th>{{end}}
   </tr>
   {{range .Rows}}
-  <tr>
-    <td><a href="/dles/{{.DLE}}">{{.DLEID}}</a> <span class="pill dim">{{level .Level}}</span></td>
-    {{range .Cells}}
+  {{if .Header}}
+  <tr class="group-row" data-g="{{.Group}}"><td colspan="99"><span class="gtog">▾</span>{{.Label}}<span class="chip">{{.Count}} DLEs</span></td></tr>
+  {{else}}
+  <tr{{if .Group}} data-in="{{.Group}}"{{end}}>
+    <td>{{if .Twig}}<span class="twig">{{.Twig}}</span> {{end}}<a href="/dles/{{.Row.DLE}}"{{if .Twig}} title="{{.Row.DLEID}}"{{end}}>{{.Label}}</a> <span class="pill dim">{{level .Row.Level}}</span></td>
+    {{range .Row.Cells}}
     <td class="cell">{{if .Held}}{{if .Pos}}<span class="pos">{{.Pos}}</span>{{else}}<span class="have">✓</span>{{end}}{{else if eq .Gap "miss"}}<span class="miss">✕</span>{{else if eq .Gap "lag"}}<span class="lag">◌</span>{{else if eq .Gap "aged"}}<span class="aged" title="aged out — past this medium's retention window">∅</span>{{else}}<span class="muted">—</span>{{end}}</td>
     {{end}}
   </tr>
+  {{end}}
   {{end}}
 </table>
 <div class="legend">

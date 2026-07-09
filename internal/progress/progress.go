@@ -60,6 +60,7 @@ const (
 type DLE struct {
 	Name      string   `json:"name"`
 	Slug      string   `json:"slug,omitempty"` // internal filesystem-safe DLE id (DLE.Name()), for catalog/URL links
+	Rest      bool     `json:"rest,omitempty"` // a partition's remainder ("the rest of <base>"), for grouped live views
 	Level     int      `json:"level"`
 	State     State    `json:"state"`
 	EstBytes  int64    `json:"est_bytes"`          // planner estimate (uncompressed)

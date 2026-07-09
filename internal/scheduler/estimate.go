@@ -36,7 +36,7 @@ func (s *Scheduler) estimates(dles []planner.DLE, sink progress.Sink) (map[strin
 	if sink != nil {
 		rows := make([]progress.Plan, len(dles))
 		for i, d := range dles {
-			rows[i] = progress.Plan{Name: d.ID(), Slug: d.Name()}
+			rows[i] = progress.Plan{Name: d.ID(), Slug: d.Name(), Rest: d.IsRest()}
 		}
 		tr = progress.NewTracker(progress.EstimateRunID, progress.PhaseEstimating, workers, rows, time.Now, sink)
 	}

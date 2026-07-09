@@ -1842,11 +1842,12 @@ func TestArrangeDLEs(t *testing.T) {
 		{DLE: "a-data-x", Display: "app01:/data/x", Runs: 3, Bytes: 20, LastFull: "2026-07-09", Media: []string{"s3"}},
 		{DLE: "a-home", Display: "app01:/home", Runs: 5, Bytes: 7},
 	}
-	rows, hrows := arrangeDLEs(sums, map[string]heatRow{
+	heatBySlug := map[string]heatRow{
 		"a-data":   {Slug: "a-data", Display: "app01:/data"},
 		"a-data-x": {Slug: "a-data-x", Display: "app01:/data/x"},
 		"a-home":   {Slug: "a-home", Display: "app01:/home"},
-	})
+	}
+	rows, hrows := arrangeDLEs(sums, heatBySlug, false)
 	if len(rows) != 4 {
 		t.Fatalf("rows = %d, want header + 2 members + 1 flat", len(rows))
 	}
@@ -1866,6 +1867,19 @@ func TestArrangeDLEs(t *testing.T) {
 	}
 	if len(hrows) != 4 || !hrows[0].Header || hrows[1].Label != "x" || hrows[3].Label != "app01:/home" {
 		t.Errorf("heat rows = %+v", hrows)
+	}
+
+	// Inside a host section (hideHost) the section header already names the
+	// host, so header and flat labels drop the "host:" prefix.
+	rows, hrows = arrangeDLEs(sums, heatBySlug, true)
+	if rows[0].Label != "/data" || rows[3].Label != "/home" {
+		t.Errorf("hideHost labels: header %q, flat %q", rows[0].Label, rows[3].Label)
+	}
+	if hrows[0].Label != "/data · 2 DLEs" || hrows[3].Label != "/home" {
+		t.Errorf("hideHost heat labels = %q, %q", hrows[0].Label, hrows[3].Label)
+	}
+	if rows[0].Group != "app01:/data" {
+		t.Errorf("collapse key must stay host-qualified, got %q", rows[0].Group)
 	}
 }
 
@@ -1905,6 +1919,77 @@ func TestDLEsPathGrouping(t *testing.T) {
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/dles missing %q", want)
+		}
+	}
+}
+
+// TestRunPageGroupsPartition renders /runs/<id> for a partitioned dump and
+// checks both per-DLE tables (dump report + placement grid) fold the source
+// under one header with relative labels and "(the rest)" from the run's own
+// record — the web mirror of the grouped CLI dump table.
+func TestRunPageGroupsPartition(t *testing.T) {
+	dir := t.TempDir()
+	at := time.Date(2026, 7, 9, 2, 0, 0, 0, time.UTC)
+	runID := "run-2026-07-09.020000"
+	mk := func(dle, path string) record.Archive {
+		return record.Archive{Run: runID, DLE: dle, Host: "localhost", Path: path,
+			Level: 0, Compressed: 1000, FileCount: 1, CreatedAt: at}
+	}
+	src := fakeSource{runs: []*catalog.Run{{
+		ID: runID,
+		Archives: []record.Archive{
+			mk("l-data", "/data"),
+			mk("l-data-alpha", "/data/projects/alpha"),
+			mk("l-data-beta", "/data/projects/beta"),
+		},
+	}}}
+	if err := report.Append(dir, report.Run{
+		Command: report.CommandDump, RunID: runID,
+		StartedAt: at, EndedAt: at.Add(time.Minute), Outcome: report.OutcomeSuccess,
+		DumpStats: []report.DLEStat{
+			{DLE: "l-data", Host: "localhost", Path: "/data", Rest: true, Level: 0, Orig: 2000, Out: 1000, Files: 1, Seconds: 1},
+			{DLE: "l-data-alpha", Host: "localhost", Path: "/data/projects/alpha", Level: 0, Orig: 2000, Out: 1000, Files: 1, Seconds: 1},
+			{DLE: "l-data-beta", Host: "localhost", Path: "/data/projects/beta", Level: 0, Orig: 2000, Out: 1000, Files: 1, Seconds: 1},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	code, body := get(t, NewServer(src, dir).Handler(), "/runs/"+runID)
+	if code != http.StatusOK {
+		t.Fatalf("code=%d", code)
+	}
+	for _, want := range []string{
+		"localhost:/data",     // group header (dump table and placement grid)
+		"3 DLEs",              // member count chip
+		">projects/alpha</a>", // relative member label
+		"(the rest)",          // the remainder, from the run record's Rest mark
+		`data-g="localhost:/data"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/runs/<id> missing %q", want)
+		}
+	}
+	if strings.Count(body, "(the rest)") < 2 {
+		t.Errorf("expected the rest label in both dump table and placement grid")
+	}
+}
+
+// TestStatusEstimateGroups checks the /status sizing table folds a partitioned
+// source, with the live snapshot's Rest mark labeling the remainder.
+func TestStatusEstimateGroups(t *testing.T) {
+	dir := t.TempDir()
+	progress.NewFileSink(dir, time.Now)(progress.Snapshot{
+		RunID: progress.EstimateRunID, Phase: progress.PhaseEstimating, Workers: 1,
+		DLEs: []progress.DLE{
+			{Name: "localhost:/data", Slug: "l-data", Rest: true, State: progress.StatePending},
+			{Name: "localhost:/data/projects/alpha", Slug: "l-data-alpha", State: progress.StateDumping, StartedAt: time.Now()},
+			{Name: "localhost:/data/projects/beta", Slug: "l-data-beta", State: progress.StateDone, DoneBytes: 1000},
+		},
+	}, true)
+	_, body := get(t, NewServer(sampleSource(), dir).Handler(), "/status")
+	for _, want := range []string{"localhost:/data", "3 DLEs", ">projects/alpha</a>", "(the rest)"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/status sizing table missing %q", want)
 		}
 	}
 }

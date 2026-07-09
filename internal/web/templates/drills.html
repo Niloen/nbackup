@@ -12,7 +12,7 @@
 </div>
 
 {{if $d.Never}}
-<div class="muted" style="margin-top:.7rem">Never drilled: {{range $i, $n := $d.Never}}{{if $i}}, {{end}}<a href="/dles/{{$n.Slug}}">{{$n.Display}}</a>{{end}}</div>
+<div class="muted" style="margin-top:.7rem">Never drilled: {{range $i, $n := $d.Never}}{{if $i}}, {{end}}{{if $n.Slug}}<a href="/dles/{{$n.Slug}}">{{$n.Display}}</a>{{else}}{{$n.Display}}{{end}}{{end}}</div>
 {{end}}
 
 <h2>Ledger — each DLE's last drill</h2>
@@ -21,21 +21,25 @@
 <table>
   <tr><th>DLE</th><th>Result</th><th>Tier</th><th>Medium</th><th>As of</th><th>Run</th><th>Last drill</th><th class="num">Read</th></tr>
   {{range $d.Ledger}}
-  <tr>
-    <td><a href="/dles/{{.Slug}}">{{.DLE}}</a></td>
-    <td><span class="pill {{if .Failing}}bad{{else if .Stale}}warn{{else}}ok{{end}}">{{.Status}}</span></td>
-    <td>{{.Tier}}{{if .What}} <span class="muted" style="font-size:.82rem">· {{.What}}</span>{{end}}</td>
-    <td class="muted">{{.Medium}}</td>
-    <td>{{.AsOf}}</td>
-    <td>{{if .RunID}}<a href="/runs/{{.RunID}}">{{.RunID}}</a>{{else}}<span class="muted">—</span>{{end}}</td>
-    <td>{{stamp .At}} <span class="muted">({{.Age}} ago)</span></td>
-    <td class="num">{{if .Bytes}}{{bytes .Bytes}}{{else}}<span class="muted">—</span>{{end}}</td>
+  {{if .Header}}
+  <tr class="group-row" data-g="{{.Group}}"><td colspan="99"><span class="gtog">▾</span>{{.Label}}<span class="chip">{{.Count}} DLEs</span></td></tr>
+  {{else}}
+  <tr{{if .Group}} data-in="{{.Group}}"{{end}}>
+    <td>{{if .Twig}}<span class="twig">{{.Twig}}</span> {{end}}<a href="/dles/{{.Row.Slug}}"{{if .Twig}} title="{{.Row.DLE}}"{{end}}>{{.Label}}</a></td>
+    <td><span class="pill {{if .Row.Failing}}bad{{else if .Row.Stale}}warn{{else}}ok{{end}}">{{.Row.Status}}</span></td>
+    <td>{{.Row.Tier}}{{if .Row.What}} <span class="muted" style="font-size:.82rem">· {{.Row.What}}</span>{{end}}</td>
+    <td class="muted">{{.Row.Medium}}</td>
+    <td>{{.Row.AsOf}}</td>
+    <td>{{if .Row.RunID}}<a href="/runs/{{.Row.RunID}}">{{.Row.RunID}}</a>{{else}}<span class="muted">—</span>{{end}}</td>
+    <td>{{stamp .Row.At}} <span class="muted">({{.Row.Age}} ago)</span></td>
+    <td class="num">{{if .Row.Bytes}}{{bytes .Row.Bytes}}{{else}}<span class="muted">—</span>{{end}}</td>
   </tr>
-  {{if .Failing}}
-  <tr>
+  {{if .Row.Failing}}
+  <tr{{if .Group}} data-in="{{.Group}}"{{end}}>
     <td></td>
-    <td colspan="7" class="bad" style="white-space:normal">[{{.Class}}] {{.Detail}}{{if .Remedy}} — <span class="muted">{{.Remedy}}</span>{{end}}</td>
+    <td colspan="7" class="bad" style="white-space:normal">[{{.Row.Class}}] {{.Row.Detail}}{{if .Row.Remedy}} — <span class="muted">{{.Row.Remedy}}</span>{{end}}</td>
   </tr>
+  {{end}}
   {{end}}
   {{end}}
 </table>
