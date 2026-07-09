@@ -208,6 +208,42 @@ func TestSSHLoopbackFileOps(t *testing.T) {
 	}
 }
 
+// shimSSH puts a fake `ssh` on PATH that runs the remote command (its last
+// argument) locally under bash — so the SSH executor's local-side plumbing
+// (stdout, taps, exit codes) is testable without an sshd.
+func shimSSH(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/bash\nfor last; do :; done\nexec bash -c \"$last\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestSSHRunPipeTapLastStage guards the live-progress seam for remote dumps: the last
+// stage's output is exactly what crosses ssh's stdout, so its Tap must count it — this
+// is what feeds a remote DLE's DUMPED bytes in `nb status` (without it, a remote dump
+// shows LANDED growing while DUMPED sits at zero for the whole run).
+func TestSSHRunPipeTapLastStage(t *testing.T) {
+	shimSSH(t)
+	ex := SSH(Params{Host: "app01"})
+	var n int64
+	want := strings.Repeat("a", 4096)
+	got, err := runPipe(t, ex, strings.NewReader(want),
+		Cmd{Name: "cat", Tap: func(c int64) { n = c }},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("shimmed ssh roundtrip mismatch: %d vs %d bytes", len(got), len(want))
+	}
+	if n != int64(len(want)) {
+		t.Fatalf("tap counted %d, want %d", n, len(want))
+	}
+}
+
 func TestSSHPipelineUsesPipefail(t *testing.T) {
 	ex := SSH(Params{Host: "app01"})
 	// Two stages must be wrapped so an upstream failure is not masked.

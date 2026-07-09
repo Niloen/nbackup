@@ -124,9 +124,11 @@ func (s sshExec) WriteFile(path string, data []byte) error {
 
 // RunPipe runs the stages as one remote pipeline so intermediate bytes never leave the
 // client. A single stage runs bare; two or more run under `bash -o pipefail -c` so a
-// failing upstream stage (e.g. tar) is not masked by a succeeding downstream one. Tap is
-// not honored (the bytes are inside the remote pipe); the first stage's Stderr receives
-// the whole pipeline's standard error (where tar's `--totals` lives).
+// failing upstream stage (e.g. tar) is not masked by a succeeding downstream one. Only
+// the LAST stage's Tap is honored — its output is exactly what crosses ssh's stdout;
+// an intermediate stage's bytes stay inside the remote pipe, uncountable from here.
+// The first stage's Stderr receives the whole pipeline's standard error (where tar's
+// `--totals` lives).
 func (s sshExec) RunPipe(ctx context.Context, stdin io.Reader, progs ...Cmd) (io.ReadCloser, func() error, error) {
 	if len(progs) == 0 {
 		return io.NopCloser(stdin), func() error { return nil }, nil
@@ -166,7 +168,11 @@ func (s sshExec) RunPipe(ctx context.Context, stdin io.Reader, progs ...Cmd) (io
 		}
 		return nil
 	}
-	return pipeReader{Reader: stdout, closers: []io.Closer{stdout}}, wait, nil
+	var final io.Reader = stdout
+	if tap := progs[len(progs)-1].Tap; tap != nil {
+		final = &countReader{r: stdout, f: tap}
+	}
+	return pipeReader{Reader: final, closers: []io.Closer{stdout}}, wait, nil
 }
 
 // firstWithStderr returns a Cmd whose Stderr is the first non-nil one among the stages,
