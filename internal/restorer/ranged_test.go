@@ -102,7 +102,7 @@ func TestExtractSelectionRangedEgress(t *testing.T) {
 	step.Members = []string{"tail.txt"}
 
 	deps := testDeps(store, nil)
-	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) { return arch, nil }
+	deps.ArchiverFor = func(typeName, _, dle, host string) (archiver.Archiver, error) { return arch, nil }
 	r := New(deps)
 	dest := filepath.Join(t.TempDir(), "out")
 	files, archives, err := r.ExtractSelection([]recovery.ExtractStep{step}, nil, dest, nil, nil)
@@ -133,7 +133,7 @@ func TestExtractSelectionRangedMidMember(t *testing.T) {
 	step.Members = []string{"etc-hosts"}
 
 	deps := testDeps(store, nil)
-	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) { return arch, nil }
+	deps.ArchiverFor = func(typeName, _, dle, host string) (archiver.Archiver, error) { return arch, nil }
 	r := New(deps)
 	dest := filepath.Join(t.TempDir(), "out")
 	if _, _, err := r.ExtractSelection([]recovery.ExtractStep{step}, nil, dest, nil, nil); err != nil {
@@ -155,7 +155,7 @@ func TestExtractSelectionRangedFallback(t *testing.T) {
 	step.Members = []string{"tail.txt"}
 
 	deps := testDeps(store, nil)
-	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) { return arch, nil }
+	deps.ArchiverFor = func(typeName, _, dle, host string) (archiver.Archiver, error) { return arch, nil }
 	r := New(deps)
 	dest := filepath.Join(t.TempDir(), "out")
 	if _, _, err := r.ExtractSelection([]recovery.ExtractStep{step}, nil, dest, nil, nil); err != nil {
@@ -286,7 +286,7 @@ func TestNoSpliceDeclarationFallsBack(t *testing.T) {
 	step.Members = []string{"tail.txt"}
 
 	deps := testDeps(store, nil)
-	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) { return arch, nil }
+	deps.ArchiverFor = func(typeName, _, dle, host string) (archiver.Archiver, error) { return arch, nil }
 	r := New(deps)
 	dest := filepath.Join(t.TempDir(), "out")
 	if _, _, err := r.ExtractSelection([]recovery.ExtractStep{step}, nil, dest, nil, nil); err != nil {
@@ -351,7 +351,7 @@ func TestSelectionReadsWholeFallback(t *testing.T) {
 	deps := testDeps(store, []record.Archive{
 		{Run: step.RunID, DLE: dle, Level: 0, Compress: "gzip", Compressed: int64(encTotal), Parts: 1},
 	})
-	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) { return arch, nil }
+	deps.ArchiverFor = func(typeName, _, dle, host string) (archiver.Archiver, error) { return arch, nil }
 	r := New(deps)
 
 	reads := r.SelectionReads([]recovery.ExtractStep{step})

@@ -207,6 +207,12 @@ func build(cfg *config.Config) (*Engine, error) {
 	})
 	e.dmp = dumper.New(dumper.Config{
 		ArchiverFor: e.tc.archiverFor,
+		ArchiverName: func(dt string) string {
+			if name := e.cfg.ResolveDumpType(dt).Archiver; name != "" {
+				return name
+			}
+			return config.DefaultArchiver
+		},
 		Exclude:     func(dt string) []string { return e.cfg.ResolveDumpType(dt).Exclude },
 		Placement:   e.tc.encodePlacement,
 		Threads:     e.tc.fopts.Threads,

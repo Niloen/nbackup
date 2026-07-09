@@ -88,12 +88,12 @@ type VerifyReport struct {
 // resolution — not the whole engine, so the same path serves `nb verify` and a
 // drill's per-archive check.
 type verifier struct {
-	cat         *catalog.Catalog                                            // run list + metadata
-	store       archivefs.ReadStore                                         // byte endpoints + member index (the read face of the archive fs)
-	rst         *restorer.Restorer                                          // checksum + structural decode primitives
-	placements  func(runID string) []catalog.Placement                      // copies in read-preference order
-	archiverFor func(typeName, dle, host string) (archiver.Archiver, error) // archiver for the structural list
-	decryptOpts func(dleName string) crypt.Options                          // per-DLE decrypt key reference (per-dumptype passphrase_file)
+	cat         *catalog.Catalog                                                      // run list + metadata
+	store       archivefs.ReadStore                                                   // byte endpoints + member index (the read face of the archive fs)
+	rst         *restorer.Restorer                                                    // checksum + structural decode primitives
+	placements  func(runID string) []catalog.Placement                                // copies in read-preference order
+	archiverFor func(typeName, archName, dle, host string) (archiver.Archiver, error) // archiver for the structural list
+	decryptOpts func(dleName string) crypt.Options                                    // per-DLE decrypt key reference (per-dumptype passphrase_file)
 }
 
 // newVerifier wires a verifier to the engine's catalog, data path, decoder, and resolution.
@@ -360,7 +360,7 @@ func (v *verifier) structuralCheck(id string, a record.Archive, open func() (io.
 	// Verify is the keyless, server-side integrity primitive: structural decode runs on
 	// the server (host ""). The client-side recoverability proof (running the read
 	// pipeline on the client for a client-only key) is drill's job — see the design note.
-	arch, err := v.archiverFor(a.Archiver, a.DLE, "")
+	arch, err := v.archiverFor(a.ArchiverType, a.ArchiverName, a.DLE, "")
 	if err != nil {
 		return drill.ClassPipeline, err.Error()
 	}

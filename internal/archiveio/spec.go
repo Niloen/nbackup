@@ -13,17 +13,18 @@ import (
 // its base lives in. Only archiveio turns a spec plus the metered bytes into a record.Archive, so
 // callers describe intent and never construct the storage record themselves.
 type ArchiveSpec struct {
-	DLE      string
-	Host     string
-	Path     string
-	Archiver string
-	Ext      string // the archiver's raw-stream filename extension (".tar"), the naming peer of Compress/Encrypt
-	Compress string
-	Encrypt  string
-	Shape    record.Shape // stream shape, resolved by the dumper from the pipeline's declared capabilities
-	AtomSize int64        // the atomic shape's atom bound (compressed bytes per sealed part); 0 for other shapes
-	Level    int
-	BaseRun  string
+	DLE          string
+	Host         string
+	Path         string
+	ArchiverType string // the plugin type that produced the stream (record.Archive.ArchiverType)
+	ArchiverName string // the config definition name the dump resolved (record.Archive.ArchiverName)
+	Ext          string // the archiver's raw-stream filename extension (".tar"), the naming peer of Compress/Encrypt
+	Compress     string
+	Encrypt      string
+	Shape        record.Shape // stream shape, resolved by the dumper from the pipeline's declared capabilities
+	AtomSize     int64        // the atomic shape's atom bound (compressed bytes per sealed part); 0 for other shapes
+	Level        int
+	BaseRun      string
 }
 
 // CommitResult is the assembled outcome of writing one archive: the record and where it landed. The

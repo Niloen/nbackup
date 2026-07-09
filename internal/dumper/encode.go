@@ -30,11 +30,12 @@ import (
 // identity bits not in the request (the DLE's host, the base run for an incremental, and the
 // dumptype that selects the transform placement). Pure intent — no storage record.
 type BackupSpec struct {
-	Archiver archiver.Archiver
-	Request  archiver.BackupRequest
-	Host     string
-	BaseRun  string
-	DumpType string
+	Archiver     archiver.Archiver
+	ArchiverName string // the config definition name the dumptype resolved to (recorded on the archive)
+	Request      archiver.BackupRequest
+	Host         string
+	BaseRun      string
+	DumpType     string
 }
 
 // EncodePlacement is the write-side transform recipe for one dumptype: which compress/encrypt
@@ -185,13 +186,17 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 				item.DLE.ID(), item.Level, item.BaseLevel)
 		}
 	}
-	return BackupSpec{
+	spec := BackupSpec{
 		Archiver: ar,
 		Request:  req,
 		Host:     item.DLE.Host,
 		BaseRun:  item.BaseRun,
 		DumpType: item.DLE.DumpTypeName(),
-	}, nil
+	}
+	if d.archiverName != nil {
+		spec.ArchiverName = d.archiverName(spec.DumpType)
+	}
+	return spec, nil
 }
 
 // resolveShape folds the pipeline's declared capabilities into the archive's on-medium
@@ -251,16 +256,17 @@ func (d *Dumper) dumpArchive(ctx context.Context, fs archivefs.Ingest, est int64
 		return record.Archive{}, nil, err
 	}
 	aspec := archiveio.ArchiveSpec{
-		DLE:      spec.Request.DLE,
-		Host:     spec.Host,
-		Path:     spec.Request.Source,
-		Archiver: spec.Archiver.Name(),
-		Ext:      spec.Archiver.Ext(),
-		Compress: pl.CompressScheme,
-		Encrypt:  pl.EncryptScheme,
-		Shape:    shape,
-		Level:    spec.Request.Level,
-		BaseRun:  spec.BaseRun,
+		DLE:          spec.Request.DLE,
+		Host:         spec.Host,
+		Path:         spec.Request.Source,
+		ArchiverType: spec.Archiver.Name(),
+		ArchiverName: spec.ArchiverName,
+		Ext:          spec.Archiver.Ext(),
+		Compress:     pl.CompressScheme,
+		Encrypt:      pl.EncryptScheme,
+		Shape:        shape,
+		Level:        spec.Request.Level,
+		BaseRun:      spec.BaseRun,
 	}
 	if shape == record.ShapeAtomic {
 		aspec.AtomSize = pl.AtomSize

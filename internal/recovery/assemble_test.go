@@ -32,7 +32,7 @@ func (fakeAssembler) Assemble([]archiver.Version) (io.ReadCloser, error) {
 // copied whole; 4000 was DELETED (absent), and 5000 is new (stored whole).
 func pgScenario() []record.Archive {
 	return []record.Archive{{
-		Run: "run-2026-06-21.001", DLE: "db", Level: 0, Archiver: "postgres", Compress: "none",
+		Run: "run-2026-06-21.001", DLE: "db", Level: 0, ArchiverType: "postgres", Compress: "none",
 		Members: []record.Member{
 			{Path: "base/", Off: 0},
 			{Path: "base/5/", Off: 512},
@@ -42,7 +42,7 @@ func pgScenario() []record.Archive {
 			{Path: "postgresql.conf", Off: 4096},
 		},
 	}, {
-		Run: "run-2026-06-22.001", DLE: "db", Level: 1, Archiver: "postgres", Compress: "none",
+		Run: "run-2026-06-22.001", DLE: "db", Level: 1, ArchiverType: "postgres", Compress: "none",
 		Members: []record.Member{
 			{Path: "base/", Off: 0},
 			{Path: "base/5/", Off: 512},

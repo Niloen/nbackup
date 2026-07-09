@@ -94,7 +94,7 @@ func (r *Restorer) Inventory(dle, asOf string) ([]record.Unit, string, error) {
 // resolution error.
 func (r *Restorer) assemblerFor(dle string) recovery.AssemblerFor {
 	return func(archiverType string) archiver.Assembler {
-		arch, err := r.deps.ArchiverFor(archiverType, dle, "")
+		arch, err := r.deps.ArchiverFor(archiverType, "", dle, "")
 		if err != nil {
 			return nil
 		}
@@ -181,7 +181,7 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, asms []recover
 			prog.Finished()
 			return perr
 		}
-		if err := DecryptHint(st.Encrypt, r.dec.restoreArchive(rc, plan, st.Archiver, st.DLE, d, st.Members)); err != nil {
+		if err := DecryptHint(st.Encrypt, r.dec.restoreArchive(rc, plan, st.Archiver, st.ArchiverName, st.DLE, d, st.Members)); err != nil {
 			prog.Finished()
 			return err
 		}
@@ -213,7 +213,7 @@ func (r *Restorer) ExtractSelection(steps []recovery.ExtractStep, asms []recover
 // rebuilding the whole cluster.
 func (r *Restorer) extractAssemblies(asms []recovery.Assembly, d dest, log Logf) (int, int, error) {
 	first := asms[0].Versions[0].Src
-	arch, err := r.deps.ArchiverFor(first.Archiver, first.DLE, "")
+	arch, err := r.deps.ArchiverFor(first.Archiver, first.ArchiverName, first.DLE, "")
 	if err != nil {
 		return 0, 0, err
 	}
@@ -272,7 +272,7 @@ func (r *Restorer) extractAssemblies(asms []recovery.Assembly, d dest, log Logf)
 			rc.Close()
 			return perr
 		}
-		return DecryptHint(f.step.Encrypt, r.dec.restoreArchive(rc, plan, f.step.Archiver, f.step.DLE, dest{exec: d.exec, dir: refDir(ref)}, f.members))
+		return DecryptHint(f.step.Encrypt, r.dec.restoreArchive(rc, plan, f.step.Archiver, f.step.ArchiverName, f.step.DLE, dest{exec: d.exec, dir: refDir(ref)}, f.members))
 	})
 	if err != nil {
 		return 0, archives, err

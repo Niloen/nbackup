@@ -374,7 +374,7 @@ func (d *driller) frameSample(t drill.Target, medium string, rot int, logf Logf)
 	if !ok {
 		return drill.ClassNone, ""
 	}
-	arch, err := d.tc.restoreArchiver(a.Archiver, a.DLE, "")
+	arch, err := d.tc.restoreArchiver(a.ArchiverType, a.ArchiverName, a.DLE, "")
 	if err != nil {
 		return drill.ClassNone, ""
 	}
@@ -654,7 +654,7 @@ func shSingleQuote(s string) string {
 // pipe's consumer command). An archiver declaring none fails the stock tier with
 // that fact, rather than the tier silently exercising the wrong command.
 func (d *driller) stockTail(step recovery.Step) (string, error) {
-	arch, err := d.tc.restoreArchiver(step.Archiver, step.DLE, "")
+	arch, err := d.tc.restoreArchiver(step.Archiver, step.ArchiverName, step.DLE, "")
 	if err != nil {
 		return "", err
 	}

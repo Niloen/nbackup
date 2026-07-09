@@ -46,7 +46,7 @@ func TestExtractChainCombine(t *testing.T) {
 		ref("run-2026-06-02.001", dle, 1): []byte("incr"),
 	}}
 	deps := testDeps(store, chainArchives(dle))
-	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) {
+	deps.ArchiverFor = func(typeName, _, dle, host string) (archiver.Archiver, error) {
 		return combineArchiver{}, nil
 	}
 	r := New(deps)
@@ -83,7 +83,7 @@ func TestExtractChainCombineFailureRollsBack(t *testing.T) {
 		ref("run-2026-06-02.001", dle, 1): []byte("incr"),
 	}}
 	deps := testDeps(store, chainArchives(dle))
-	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) {
+	deps.ArchiverFor = func(typeName, _, dle, host string) (archiver.Archiver, error) {
 		return failingCombine{}, nil
 	}
 	r := New(deps)
@@ -118,7 +118,7 @@ func TestAssembledSelection(t *testing.T) {
 		refs[1]: []byte("delta-bytes"),
 	}}
 	deps := testDeps(store, chainArchives(dle))
-	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) {
+	deps.ArchiverFor = func(typeName, _, dle, host string) (archiver.Archiver, error) {
 		return assemblingArchiver{}, nil
 	}
 	r := New(deps)
@@ -239,7 +239,7 @@ func TestExportUnits(t *testing.T) {
 		},
 	}
 	deps := testDeps(store, chainArchives(dle))
-	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) {
+	deps.ArchiverFor = func(typeName, _, dle, host string) (archiver.Archiver, error) {
 		return exportingArchiver{}, nil
 	}
 	deps.SourceOf = func(slug string) string { return "host=db.internal user=bakop dbname=app" }
@@ -268,7 +268,7 @@ func TestExportUnits(t *testing.T) {
 		t.Fatalf("miss = %v", err)
 	}
 	// No exporter → a clear capability error.
-	deps.ArchiverFor = func(typeName, dle, host string) (archiver.Archiver, error) {
+	deps.ArchiverFor = func(typeName, _, dle, host string) (archiver.Archiver, error) {
 		return combineArchiver{}, nil
 	}
 	if _, err := New(deps).ExportUnits(dle, "2026-06-02", []string{"public.users"}, dest, nil); err == nil || !strings.Contains(err.Error(), "no export capability") {

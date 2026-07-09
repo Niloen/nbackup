@@ -9,7 +9,7 @@ import (
 // arch builds an archive for dleName at a level, recording the base run an
 // incremental derives from (BaseRun is empty for a full).
 func arch(dle string, level int, base string) record.Archive {
-	return record.Archive{DLE: dle, Level: level, Archiver: "gnutar", Compress: "none", BaseRun: base}
+	return record.Archive{DLE: dle, Level: level, ArchiverType: "gnutar", Compress: "none", BaseRun: base}
 }
 
 // run tags each archive with the run id and returns them (Chain works on archives,

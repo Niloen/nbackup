@@ -13,7 +13,7 @@ import (
 func TestCommitRoundTrip(t *testing.T) {
 	a := Archive{
 		Run: "run-2026-06-21.020000", DLE: "app01-home", Host: "app01", Path: "/home",
-		Archiver: "gnutar", Compress: "none", Encrypt: "none", Level: 1,
+		ArchiverType: "gnutar", Compress: "none", Encrypt: "none", Level: 1,
 		Compressed: 1024, Uncompressed: 2048, FileCount: 7, SHA256: "deadbeef",
 		Parts: 2, BaseRun: "run-2026-06-20.020000",
 		CreatedAt: time.Date(2026, 6, 21, 14, 30, 0, 0, time.UTC),

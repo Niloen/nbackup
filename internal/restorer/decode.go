@@ -61,12 +61,12 @@ type decodePlan struct {
 // keeping decompress in the filters keeps the role-tagged error contract sharp
 // (a Sink fault is a tar/composition fault, a Filters fault is a decode fault —
 // what the drill's failure taxonomy classifies on).
-func (d *decoder) restoreArchive(rc io.ReadCloser, plan decodePlan, archiverType, dle string, dst dest, members []string) error {
+func (d *decoder) restoreArchive(rc io.ReadCloser, plan decodePlan, archiverType, archName, dle string, dst dest, members []string) error {
 	if plan.atomSizes != nil && plan.decryptInSink {
 		rc.Close()
 		return fmt.Errorf("an atomic archive decrypts per atom on the server; client-held keys are not supported on this path — restore without --to (or use the documented stock file-loop on the client)")
 	}
-	arch, err := d.deps.ArchiverFor(archiverType, dle, dst.host)
+	arch, err := d.deps.ArchiverFor(archiverType, archName, dle, dst.host)
 	if err != nil {
 		rc.Close()
 		return err

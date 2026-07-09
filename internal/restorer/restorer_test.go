@@ -118,7 +118,7 @@ func testDeps(store *fakeStore, archives []record.Archive) Deps {
 		Store:    store,
 		Archives: func() []record.Archive { return archives },
 		Exec:     func(host string) programs.Executor { return programs.Local() },
-		ArchiverFor: func(typeName, dle, host string) (archiver.Archiver, error) {
+		ArchiverFor: func(typeName, _, dle, host string) (archiver.Archiver, error) {
 			return fakeArchiver{}, nil
 		},
 		EncryptionFor: func(dle string) (config.EncryptConfig, bool) { return config.EncryptConfig{}, false },
@@ -129,8 +129,8 @@ func testDeps(store *fakeStore, archives []record.Archive) Deps {
 
 func chainArchives(dle string) []record.Archive {
 	return []record.Archive{
-		{Run: "run-2026-06-01.001", DLE: dle, Level: 0, Archiver: "gnutar", Compress: "none"},
-		{Run: "run-2026-06-02.001", DLE: dle, Level: 1, Archiver: "gnutar", Compress: "none", BaseRun: "run-2026-06-01.001"},
+		{Run: "run-2026-06-01.001", DLE: dle, Level: 0, ArchiverType: "gnutar", Compress: "none"},
+		{Run: "run-2026-06-02.001", DLE: dle, Level: 1, ArchiverType: "gnutar", Compress: "none", BaseRun: "run-2026-06-01.001"},
 	}
 }
 

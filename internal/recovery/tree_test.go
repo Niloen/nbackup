@@ -23,13 +23,13 @@ func membersOf(archives []record.Archive, dle string) func(string, int) ([]recor
 
 func scenario() []record.Archive {
 	return []record.Archive{{
-		Run: "run-2026-06-21.001", DLE: "app", Level: 0, Archiver: "gnutar", Compress: "none",
+		Run: "run-2026-06-21.001", DLE: "app", Level: 0, ArchiverType: "gnutar", Compress: "none",
 		Members: mems(
 			"./", "./etc/", "./etc/hosts", "./etc/passwd",
 			"./var/", "./var/log/", "./var/log/a.log",
 		),
 	}, {
-		Run: "run-2026-06-22.001", DLE: "app", Level: 1, Archiver: "gnutar", Compress: "none",
+		Run: "run-2026-06-22.001", DLE: "app", Level: 1, ArchiverType: "gnutar", Compress: "none",
 		Members: mems("./", "./etc/", "./etc/hosts", "./etc/new.conf"),
 	}}
 }
@@ -133,7 +133,7 @@ func TestBuildTreeForRunTipAtOrBefore(t *testing.T) {
 	// A second DLE dumped only in run 1: pinning to run 2 still resolves it,
 	// via its most recent dump at or before the target run.
 	archives := append(scenario(), record.Archive{
-		Run: "run-2026-06-21.001", DLE: "web", Level: 0, Archiver: "gnutar", Compress: "none",
+		Run: "run-2026-06-21.001", DLE: "web", Level: 0, ArchiverType: "gnutar", Compress: "none",
 		Members: mems("./", "./index.html"),
 	})
 	tree, err := BuildTreeForRun(archives, "web", "run-2026-06-22.001", membersOf(archives, "web"), nil)

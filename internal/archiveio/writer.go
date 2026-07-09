@@ -133,17 +133,18 @@ func NewWriter(alloc PartAllocator, rec Recorder, spec RunSpec, lim *ratelimit.L
 // landed byte count for live progress, attach a tap with MeterArchive.
 func (w *Writer) NewArchive(spec ArchiveSpec) *ArchiveWriter {
 	meta := record.Archive{
-		Run:      w.runID,
-		DLE:      spec.DLE,
-		Host:     spec.Host,
-		Path:     spec.Path,
-		Archiver: spec.Archiver,
-		Ext:      spec.Ext,
-		Compress: spec.Compress,
-		Encrypt:  spec.Encrypt,
-		Shape:    spec.Shape,
-		Level:    spec.Level,
-		BaseRun:  spec.BaseRun,
+		Run:          w.runID,
+		DLE:          spec.DLE,
+		Host:         spec.Host,
+		Path:         spec.Path,
+		ArchiverType: spec.ArchiverType,
+		ArchiverName: spec.ArchiverName,
+		Ext:          spec.Ext,
+		Compress:     spec.Compress,
+		Encrypt:      spec.Encrypt,
+		Shape:        spec.Shape,
+		Level:        spec.Level,
+		BaseRun:      spec.BaseRun,
 	}
 	aw := &ArchiveWriter{w: w, base: w.archiveHeader(meta), meta: meta, h: sha256.New()}
 	if spec.Shape == record.ShapeAtomic {
@@ -477,7 +478,7 @@ func (w *Writer) archiveHeader(a record.Archive) record.Header {
 		DLE:      a.DLE,
 		Host:     a.Host,
 		Path:     a.Path,
-		Archiver: a.Archiver,
+		Archiver: a.ArchiverType,
 		Ext:      a.Ext,
 		Compress: a.Compress,
 		Encrypt:  a.Encrypt,

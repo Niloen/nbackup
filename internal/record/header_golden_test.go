@@ -50,7 +50,7 @@ func goldenArchive() record.Archive {
 		DLE:          "h-data",
 		Host:         "h",
 		Path:         "/data",
-		Archiver:     "gnutar",
+		ArchiverType: "gnutar",
 		Compress:     "none",
 		Encrypt:      "none",
 		Level:        1,

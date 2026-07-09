@@ -93,7 +93,7 @@ type Deps struct {
 	// The DLE rides along so the resolver can recover the archiver definition's
 	// options from the DLE's dumptype (a pipe definition's restore_command is
 	// load-bearing; the recorded type alone cannot name it).
-	ArchiverFor func(typeName, dle, host string) (archiver.Archiver, error)
+	ArchiverFor func(typeName, archName, dle, host string) (archiver.Archiver, error)
 	// EncryptionFor resolves a DLE's configured encryption posture; ok is false
 	// when the DLE is no longer in the config (an old run's DLE may be removed).
 	EncryptionFor func(dleName string) (config.EncryptConfig, bool)
@@ -292,7 +292,7 @@ func (r *Restorer) extractChain(runID string, req Request, log Logf) error {
 			rc.Close()
 			return stepErr(step, perr)
 		}
-		if xerr := r.dec.restoreArchive(rc, plan, step.Archiver, step.DLE, stepDest, nil); xerr != nil {
+		if xerr := r.dec.restoreArchive(rc, plan, step.Archiver, step.ArchiverName, step.DLE, stepDest, nil); xerr != nil {
 			return stepErr(step, DecryptHint(step.Encrypt, xerr))
 		}
 		return nil
@@ -472,7 +472,7 @@ func (r *Restorer) destIsDir(steps []recovery.Step) (bool, error) {
 	if len(steps) == 0 {
 		return false, nil
 	}
-	arch, err := r.deps.ArchiverFor(steps[0].Archiver, steps[0].DLE, "")
+	arch, err := r.deps.ArchiverFor(steps[0].Archiver, steps[0].ArchiverName, steps[0].DLE, "")
 	if err != nil {
 		return false, err
 	}
@@ -487,7 +487,7 @@ func (r *Restorer) combineFor(steps []recovery.Step, host string) (archiver.Arch
 	if len(steps) == 0 {
 		return nil, nil
 	}
-	arch, err := r.deps.ArchiverFor(steps[0].Archiver, steps[0].DLE, host)
+	arch, err := r.deps.ArchiverFor(steps[0].Archiver, steps[0].ArchiverName, steps[0].DLE, host)
 	if err != nil {
 		return nil, err
 	}

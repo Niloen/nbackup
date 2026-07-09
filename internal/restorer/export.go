@@ -46,7 +46,7 @@ func (r *Restorer) ExportUnits(dle, asOf string, names []string, destDir string,
 	if err != nil {
 		return nil, r.friendlyDLEErr(dle, err)
 	}
-	arch, err := r.deps.ArchiverFor(steps[0].Archiver, dle, "")
+	arch, err := r.deps.ArchiverFor(steps[0].Archiver, steps[0].ArchiverName, dle, "")
 	if err != nil {
 		return nil, err
 	}

@@ -15,10 +15,13 @@ type Step struct {
 	RunID    string
 	DLE      string
 	Level    int
-	Archiver string       // archiver type that produced the archive
-	Compress string       // compression scheme to reverse before extracting
-	Encrypt  string       // encryption scheme to reverse before decompressing ("" = plaintext)
-	Shape    record.Shape // recorded stream shape — selects the decode mode (one child vs per-atom loop)
+	Archiver string // archiver type that produced the archive
+	// ArchiverName is the config definition name the dump resolved ("" on old
+	// archives): restore prefers it to find the definition's load-bearing options.
+	ArchiverName string
+	Compress     string       // compression scheme to reverse before extracting
+	Encrypt      string       // encryption scheme to reverse before decompressing ("" = plaintext)
+	Shape        record.Shape // recorded stream shape — selects the decode mode (one child vs per-atom loop)
 }
 
 // Chain returns the archives needed to restore a DLE as of the target run, in
@@ -67,7 +70,7 @@ func Chain(archives []record.Archive, dleName, targetRunID string) ([]Step, erro
 	var steps []Step
 	for {
 		a := ds[cur]
-		steps = append(steps, Step{RunID: a.Run, DLE: a.DLE, Level: a.Level, Archiver: a.Archiver, Compress: a.Compress, Encrypt: a.Encrypt, Shape: a.Shape})
+		steps = append(steps, Step{RunID: a.Run, DLE: a.DLE, Level: a.Level, Archiver: a.ArchiverType, ArchiverName: a.ArchiverName, Compress: a.Compress, Encrypt: a.Encrypt, Shape: a.Shape})
 		if a.Level == 0 {
 			break
 		}

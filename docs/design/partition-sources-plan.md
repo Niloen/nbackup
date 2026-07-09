@@ -140,10 +140,18 @@ DONE (committed, race-green, e2e-proven): phases 1–4 plus R1, R2, R3 (routing)
 accepts catalog slugs), plan rendering with partition/selection groups + coverage line.
 An interim guard keeps `checkStaleness` from false-warning on selection sources.
 
+ALSO DONE: phase 6 — `record.Archive.Archiver` renamed `ArchiverType` (wire key
+"archiver" kept, so every existing footer/catalog entry parses unchanged) + additive
+`ArchiverName` (the config definition name, an inert lookup key). Dumps record the name;
+`restoreArchiver(type, name, dle, host)` prefers it — resolving load-bearing options
+(pipe's restore_command) for ANY DLE, configured or not — with the old slug-scan and
+bare-type fallbacks for pre-name artifacts, and a retyped definition never silently
+applies (type must match). Pinned by TestRestoreArchiverPrefersRecordedName.
+
 REMAINING: R5 (record the resolved set per run; staleness for pattern children + retire
-removed DLEs; `report`'s staleness/drill reroute), phase 6 (`ArchiverType`/`ArchiverName`
-+ back-compat restore fallback), postgres database enumeration (selection), R9 doc pass
-(example config, README, `*` matches dot-dirs, leading-`/` exclude behavior change).
+removed DLEs; `report`'s staleness/drill reroute), postgres database enumeration
+(selection), R9 doc pass (example config, README, `*` matches dot-dirs, leading-`/`
+exclude behavior change + anchored-exclude-additions re-baseline, directory-only rule).
 
 ## Phased build order
 
