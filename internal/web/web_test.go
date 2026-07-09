@@ -878,27 +878,93 @@ func dumpAt(t *testing.T, dir string, at time.Time, dle string, level int, orig 
 	}
 }
 
-// TestDLETrendChart checks the /dles/<slug> size-trend chart: it renders once the
-// history holds two or more dump records for the DLE, and is omitted (no empty
-// section) with fewer than two.
-func TestDLETrendChart(t *testing.T) {
+// TestDLESizeEvolution checks the /dles/<slug> size-evolution block: with enough
+// history it renders the split fulls/incrementals charts, the growth card, and
+// the note lines with the computed figures; an anomalous incremental gets the
+// spike callout; with no dump history the section is omitted entirely.
+func TestDLESizeEvolution(t *testing.T) {
 	dir := t.TempDir()
-	base := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
-	dumpAt(t, dir, base, "local", 0, 1_000_000)
-	dumpAt(t, dir, base.Add(24*time.Hour), "local", 1, 200_000)
+	base := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	day := 24 * time.Hour
+	// Two fulls 100 days apart (1 GiB → 1.5 GiB), daily incrementals around
+	// 100 MiB with one 700 MiB spike (>2× median and past the 64 MiB floor).
+	dumpAt(t, dir, base, "local", 0, 5<<30)
+	for i := 1; i <= 6; i++ {
+		sz := int64(100 << 20)
+		if i == 4 {
+			sz = 700 << 20
+		}
+		dumpAt(t, dir, base.Add(time.Duration(i)*day), "local", 1, sz*5)
+	}
+	dumpAt(t, dir, base.Add(100*day), "local", 0, int64(7.5*float64(1<<30))) // Out = orig/5 = 1.5 GiB
 
 	code, body := get(t, NewServer(sampleSource(), dir).Handler(), "/dles/local")
 	if code != http.StatusOK {
 		t.Fatalf("code=%d", code)
 	}
-	if !strings.Contains(body, "Size trend") || !strings.Contains(body, "<svg") {
-		t.Errorf("/dles/local missing the trend chart with 2 dump records:\n%s", body)
+	for _, want := range []string{
+		"Size evolution", "Fulls — dataset size", "Incrementals — churn per dump",
+		"Growth", "/day", "fulls, last 180 d",
+		"dotted line = recent median", "× median", // the spike callout
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/dles/local missing %q in the evolution block", want)
+		}
+	}
+	if got := strings.Count(body, "<svg"); got < 2 {
+		t.Errorf("/dles/local has %d charts, want the fulls and incrementals pair", got)
 	}
 
-	// Fewer than two dump records for the DLE: the section is omitted entirely.
+	// No dump history at all: the section is omitted entirely.
 	_, single := get(t, NewServer(sampleSource(), t.TempDir()).Handler(), "/dles/local")
-	if strings.Contains(single, "Size trend") || strings.Contains(single, "<svg") {
-		t.Errorf("/dles/local rendered a trend chart with fewer than 2 dump records:\n%s", single)
+	if strings.Contains(single, "Size evolution") {
+		t.Errorf("/dles/local rendered an evolution block with no dump records:\n%s", single)
+	}
+}
+
+// TestSummedFullOuts checks the group-header series merge: same-timestamp fulls
+// (one run dumping every member) coalesce into a single sample — a per-event sum
+// would count the first member's full before its siblings' land and fake growth —
+// while staggered fulls carry the other members' last-known size forward.
+func TestSummedFullOuts(t *testing.T) {
+	base := time.Date(2026, 5, 1, 2, 0, 0, 0, time.UTC)
+	day := 24 * time.Hour
+	series := summedFullOuts([][]report.TrendPoint{
+		{{At: base, Level: 0, Out: 100}, {At: base.Add(7 * day), Level: 0, Out: 110}},
+		{{At: base, Level: 0, Out: 40}, {At: base.Add(7 * day), Level: 0, Out: 44}},
+		{{At: base.Add(3 * day), Level: 0, Out: 10}}, // staggered member: carried forward
+	})
+	want := []int64{140, 150, 164}
+	if len(series) != len(want) {
+		t.Fatalf("series = %v, want %v", series, want)
+	}
+	for i := range want {
+		if series[i] != want[i] {
+			t.Fatalf("series = %v, want %v", series, want)
+		}
+	}
+}
+
+// TestDLEsTrendColumn checks the /dles list's Trend/Δ cells: a DLE with two or
+// more windowed fulls in the run history gets a sparkline and its percent change;
+// with no history the columns render but the cells stay empty.
+func TestDLEsTrendColumn(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	dumpAt(t, dir, base, "local", 0, 1_000_000_000)
+	dumpAt(t, dir, base.Add(30*24*time.Hour), "local", 0, 1_500_000_000)
+
+	_, body := get(t, NewServer(sampleSource(), dir).Handler(), "/dles")
+	// (html/template escapes the delta's "+" to &#43; in the cell.)
+	for _, want := range []string{"<th>Trend</th>", "sparkcell", "full size trend", `class="num warn">&#43;50%`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/dles missing %q in the Trend column", want)
+		}
+	}
+
+	_, bare := get(t, NewServer(sampleSource(), t.TempDir()).Handler(), "/dles")
+	if !strings.Contains(bare, "<th>Trend</th>") || strings.Contains(bare, "full size trend") {
+		t.Errorf("/dles without history: want the column, no sparkline")
 	}
 }
 
@@ -1847,7 +1913,22 @@ func TestArrangeDLEs(t *testing.T) {
 		"a-data-x": {Slug: "a-data-x", Display: "app01:/data/x"},
 		"a-home":   {Slug: "a-home", Display: "app01:/home"},
 	}
-	rows, hrows := arrangeDLEs(sums, heatBySlug, false)
+	// Trends for the Trend/Δ cells: one member growing hard (warn), the flat DLE
+	// with a single full (no cell), the header expected to sum its members.
+	day := 24 * time.Hour
+	base := time.Date(2026, 3, 1, 2, 0, 0, 0, time.UTC)
+	trends := map[string][]report.TrendPoint{
+		"a-data": {
+			{At: base, Level: 0, Out: 100},
+			{At: base.Add(30 * day), Level: 0, Out: 150},
+		},
+		"a-data-x": {
+			{At: base.Add(10 * day), Level: 0, Out: 40},
+			{At: base.Add(40 * day), Level: 0, Out: 44},
+		},
+		"a-home": {{At: base, Level: 0, Out: 7}},
+	}
+	rows, hrows := arrangeDLEs(sums, heatBySlug, false, trends)
 	if len(rows) != 4 {
 		t.Fatalf("rows = %d, want header + 2 members + 1 flat", len(rows))
 	}
@@ -1869,9 +1950,24 @@ func TestArrangeDLEs(t *testing.T) {
 		t.Errorf("heat rows = %+v", hrows)
 	}
 
+	// Trend/Δ cells: the header sums its members' fulls (100 → 150+44 = carry-forward
+	// merge, +94%), the growing member warns, and a single-full DLE gets no cell.
+	if hdr.Spark == "" || hdr.Delta != "+94%" || !hdr.DeltaWarn {
+		t.Errorf("header trend cell = %q %v (spark %d bytes)", hdr.Delta, hdr.DeltaWarn, len(hdr.Spark))
+	}
+	if rows[1].Delta != "+10%" || rows[1].DeltaWarn {
+		t.Errorf("mild member = %q warn=%v", rows[1].Delta, rows[1].DeltaWarn)
+	}
+	if rows[2].Delta != "+50%" || !rows[2].DeltaWarn || rows[2].Spark == "" {
+		t.Errorf("growing member = %q warn=%v", rows[2].Delta, rows[2].DeltaWarn)
+	}
+	if rows[3].Spark != "" || rows[3].Delta != "" {
+		t.Errorf("single-full DLE grew a trend cell: %q %q", rows[3].Spark, rows[3].Delta)
+	}
+
 	// Inside a host section (hideHost) the section header already names the
 	// host, so header and flat labels drop the "host:" prefix.
-	rows, hrows = arrangeDLEs(sums, heatBySlug, true)
+	rows, hrows = arrangeDLEs(sums, heatBySlug, true, trends)
 	if rows[0].Label != "/data" || rows[3].Label != "/home" {
 		t.Errorf("hideHost labels: header %q, flat %q", rows[0].Label, rows[3].Label)
 	}

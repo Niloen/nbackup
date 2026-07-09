@@ -358,7 +358,8 @@ func (s *Server) findDumpReport(runID string) *dumpReportView {
 // linking to its own history so an operator can drill into a single DLE.
 func (s *Server) handleDLEs(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
-	data := groupDLEs(s.src.DLESummaries(), s.src.StaleDLEs(now), s.buildHeatmap(now))
+	trends := report.DLETrends(s.history(0))
+	data := groupDLEs(s.src.DLESummaries(), s.src.StaleDLEs(now), s.buildHeatmap(now), trends)
 	s.render(w, "dles", page{Title: "DLEs", Active: "dles", Data: data})
 }
 
@@ -393,47 +394,24 @@ func (s *Server) handleDLE(w http.ResponseWriter, r *http.Request) {
 	chain := s.chainRuns(slug)
 	places, history := s.dleHistory(slug, chain)
 	s.render(w, "dle", page{Title: sum.Display, Active: "dles", Data: dleDetail{
-		Slug:     sum.DLE,
-		Display:  sum.Display,
-		Runs:     sum.Runs,
-		Bytes:    sum.Bytes,
-		Media:    strings.Join(sum.Media, ", "),
-		Trend:    dleTrendSVG(s.dleTrend(slug)),
-		Recovery: shown,
-		RecTotal: len(points),
-		RecAll:   all,
-		Places:   places,
-		History:  history,
-		Physical: s.buildDLEPhysical(slug, chain, places, all),
+		Slug:      sum.DLE,
+		Display:   sum.Display,
+		Runs:      sum.Runs,
+		Bytes:     sum.Bytes,
+		Media:     strings.Join(sum.Media, ", "),
+		Evolution: newDLEEvolution(report.DLETrend(s.history(0), slug)),
+		Recovery:  shown,
+		RecTotal:  len(points),
+		RecAll:    all,
+		Places:    places,
+		History:   history,
+		Physical:  s.buildDLEPhysical(slug, chain, places, all),
 	}})
 }
 
 // maxRecoveryPoints caps the /dles/<slug> recovery-points list to the newest points by
 // default; ?all=1 shows every point, matching the paging pattern the other pages use.
 const maxRecoveryPoints = 20
-
-// dleTrend gathers a DLE's dump-history points — original/output size, dump time,
-// and level — from every dump record in the run history that dumped it, oldest
-// first, for the /dles/<slug> trend chart.
-func (s *Server) dleTrend(slug string) []dleTrendPoint {
-	var pts []dleTrendPoint
-	for _, r := range s.history(0) { // newest-first; sorted below
-		if r.Command != report.CommandDump {
-			continue
-		}
-		at := r.EndedAt
-		if at.IsZero() {
-			at = r.StartedAt
-		}
-		for _, d := range r.DumpStats {
-			if d.DLE == slug {
-				pts = append(pts, dleTrendPoint{At: at, Orig: d.Orig, Out: d.Out, Seconds: d.Seconds, Level: d.Level})
-			}
-		}
-	}
-	sort.Slice(pts, func(i, j int) bool { return pts[i].At.Before(pts[j].At) })
-	return pts
-}
 
 // dleHistory gathers a DLE's archive from every run that holds one, newest run first —
 // the DLE-major slice of the same archives the run pages present run-major, as a grid:
@@ -1115,6 +1093,12 @@ func (s *Server) brokenLatestPoints() []alert {
 	return out
 }
 
+// anomalySizeFloor is the absolute-delta noise floor under which a size deviation
+// is never flagged, however large the ratio — a tiny DLE doubling from 1 kB to
+// 2 kB must not flap. Shared by the home rollup's size-anomaly nudge and the
+// churn chart's spike bars (view.go isSpike) so the two can't disagree.
+const anomalySizeFloor = 64 << 20 // 64 MiB
+
 // dumpAnomalies compares the newest dump record against each DLE's own recent
 // history and flags what looks off: a DLE's size swinging hard from its usual
 // footprint at that level, or the whole run taking much longer than usual. This is
@@ -1135,7 +1119,6 @@ func (s *Server) dumpAnomalies(hist []report.Run) []alert {
 	}
 	var out []alert
 
-	const minSizeDelta = 64 << 20 // 64 MiB
 	for _, d := range latest.DumpStats {
 		var sizes []int64
 		for _, r := range priors {
@@ -1157,7 +1140,7 @@ func (s *Server) dumpAnomalies(hist []report.Run) []alert {
 		if delta < 0 {
 			delta = -delta
 		}
-		if med <= 0 || delta <= minSizeDelta {
+		if med <= 0 || delta <= anomalySizeFloor {
 			continue
 		}
 		if d.Orig > med*2 || d.Orig*2 < med {

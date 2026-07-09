@@ -11,6 +11,7 @@ import (
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/dletree"
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/report"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
@@ -146,7 +147,39 @@ func runDleShow(a *app, arg string) error {
 		}
 	}
 	tw.Flush()
+	printEvolution(cfg.WorkdirPath(), slug)
 	return nil
+}
+
+// printEvolution appends the size-evolution summary line under a DLE's timeline —
+// the same figures the web detail page cards — from the run-log's dump history
+// (which outlives pruning, so it can say more than the catalog rows above it).
+// Quietly prints nothing without enough windowed fulls, or when the run-log is
+// missing or unreadable: the table already stands on its own.
+func printEvolution(workdir, slug string) {
+	runs, err := report.Load(workdir)
+	if err != nil {
+		return
+	}
+	ev, ok := report.SummarizeTrend(report.DLETrend(runs, slug))
+	if !ok {
+		return
+	}
+	line := fmt.Sprintf("\nevolution: fulls %s → %s over %.0f d (%+d%%, %s/day)",
+		sizeutil.FormatBytes(ev.From.Out), sizeutil.FormatBytes(ev.To.Out), ev.Days, ev.Pct, signedBytesCLI(ev.PerDay))
+	if ev.IncrMedian > 0 {
+		line += fmt.Sprintf(" · incrementals median %s", sizeutil.FormatBytes(ev.IncrMedian))
+	}
+	fmt.Println(line)
+}
+
+// signedBytesCLI formats a byte rate with its sign — a delta reads wrong without
+// the explicit "+".
+func signedBytesCLI(v int64) string {
+	if v < 0 {
+		return "-" + sizeutil.FormatBytes(-v)
+	}
+	return "+" + sizeutil.FormatBytes(v)
 }
 
 // resolveDLE matches a user-typed DLE identifier against the catalog's archives,

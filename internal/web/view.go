@@ -905,6 +905,12 @@ type dleRow struct {
 	LastFull  string
 	Bytes     int64
 	Media     string
+	// The Trend/Δ cells: the DLE's windowed full sizes as a sparkline (a header
+	// row carries its members' summed series) with the percent change beside it,
+	// in warn past the growth threshold. Empty with fewer than two windowed fulls.
+	Spark     template.HTML
+	Delta     string
+	DeltaWarn bool
 }
 
 // dlesData backs the /dles page: the per-DLE rows plus the activity heatmap above
@@ -988,7 +994,10 @@ func partitionByHost(sums []catalog.DLESummary) (order []string, byHost map[stri
 // remainder. The heatmap gets the same arrangement (header rows carry no cells).
 // hideHost drops the "host:" prefix from labels — set when the rows render
 // inside a host section, whose header already names the host.
-func arrangeDLEs(sums []catalog.DLESummary, heatBySlug map[string]heatRow, hideHost bool) ([]dleRow, []heatRow) {
+// trends carries every DLE's dump history (report.DLETrends) for the Trend/Δ
+// cells; a header row sums its members' series so a partitioned source reads as
+// one curve.
+func arrangeDLEs(sums []catalog.DLESummary, heatBySlug map[string]heatRow, hideHost bool, trends map[string][]report.TrendPoint) ([]dleRow, []heatRow) {
 	items := make([]dletree.Item, len(sums))
 	for i, s := range sums {
 		items[i], _ = dletree.Split(s.Display)
@@ -1010,11 +1019,13 @@ func arrangeDLEs(sums []catalog.DLESummary, heatBySlug map[string]heatRow, hideH
 		return g.ID()
 	}
 	dataRow := func(s catalog.DLESummary) dleRow {
-		return dleRow{
+		r := dleRow{
 			Slug: s.DLE, Display: s.Display, Runs: s.Runs,
 			LastLevel: s.LastLevel, LastFull: s.LastFull, Bytes: s.Bytes,
 			Media: strings.Join(s.Media, ", "),
 		}
+		r.Spark, r.Delta, r.DeltaWarn = sparkline(windowedFullOuts(trends[s.DLE]))
+		return r
 	}
 	var rows []dleRow
 	var hrows []heatRow
@@ -1033,6 +1044,7 @@ func arrangeDLEs(sums []catalog.DLESummary, heatBySlug map[string]heatRow, hideH
 		}
 		hdr := dleRow{Header: true, Group: g.ID(), Label: headerLabel(g), Count: len(g.Children)}
 		media := map[string]bool{}
+		memberTrends := make([][]report.TrendPoint, 0, len(g.Children))
 		for _, c := range g.Children {
 			s := sums[c.Index]
 			hdr.Runs += s.Runs
@@ -1043,8 +1055,10 @@ func arrangeDLEs(sums []catalog.DLESummary, heatBySlug map[string]heatRow, hideH
 			for _, m := range s.Media {
 				media[m] = true
 			}
+			memberTrends = append(memberTrends, trends[s.DLE])
 		}
 		hdr.Media = strings.Join(sortedKeys(media), ", ")
+		hdr.Spark, hdr.Delta, hdr.DeltaWarn = sparkline(summedFullOuts(memberTrends))
 		rows = append(rows, hdr)
 		hrows = append(hrows, heatRow{Header: true, Group: g.ID(),
 			Label: fmt.Sprintf("%s · %d DLEs", headerLabel(g), len(g.Children))})
@@ -1119,7 +1133,7 @@ func sortedKeys(m map[string]bool) []string {
 // that, whenever the summaries span more than one host they are sectioned into
 // per-host groups (Groups/HeatGroups) — hosts are the failure domain. With at
 // most one host the flat Rows/Heat render, exactly as before grouping existed.
-func groupDLEs(sums []catalog.DLESummary, stale []catalog.StaleDLE, heat *heatmap) dlesData {
+func groupDLEs(sums []catalog.DLESummary, stale []catalog.StaleDLE, heat *heatmap, trends map[string][]report.TrendPoint) dlesData {
 	heatBySlug := map[string]heatRow{}
 	if heat != nil {
 		for _, r := range heat.Rows {
@@ -1130,7 +1144,7 @@ func groupDLEs(sums []catalog.DLESummary, stale []catalog.StaleDLE, heat *heatma
 	data := dlesData{Heat: heat}
 	order, byHost, hostless := partitionByHost(sums)
 	var hrows []heatRow
-	data.Rows, hrows = arrangeDLEs(sums, heatBySlug, false)
+	data.Rows, hrows = arrangeDLEs(sums, heatBySlug, false, trends)
 	if len(order) <= 1 {
 		if heat != nil {
 			heat.Rows = hrows
@@ -1165,7 +1179,7 @@ func groupDLEs(sums []catalog.DLESummary, stale []catalog.StaleDLE, heat *heatma
 				newest = m.LastBackupAt
 			}
 		}
-		gr.Rows, hg.Rows = arrangeDLEs(members, heatBySlug, true)
+		gr.Rows, hg.Rows = arrangeDLEs(members, heatBySlug, true, trends)
 		gr.Host.Newest, hg.Host.Newest = newest, newest
 		return gr, hg
 	}
@@ -1217,22 +1231,22 @@ func hostLabel(h dleHostSummary) template.HTML {
 	return template.HTML(s)
 }
 
-// dleDetail backs the single-DLE page: the rollup, the size/time trend chart, the
+// dleDetail backs the single-DLE page: the rollup, the size-evolution charts, the
 // recovery points, and this DLE's per-run history.
 type dleDetail struct {
-	NotFound bool
-	Slug     string
-	Display  string
-	Runs     int
-	Bytes    int64
-	Media    string
-	Trend    template.HTML   // the size-over-time chart, or "" with fewer than two dump records
-	Recovery []recoveryPoint // restorable points, newest first (capped unless ?all=1)
-	RecTotal int             // recovery points in total (for the show-all toggle)
-	RecAll   bool            // true when ?all=1 lifted the cap
-	Places   []string        // media holding any archive of the DLE — the history grid's cell columns
-	History  []dleArchiveRow
-	Physical *physicalView // the physical panel: the ?run= archive, or the newest restore chain
+	NotFound  bool
+	Slug      string
+	Display   string
+	Runs      int
+	Bytes     int64
+	Media     string
+	Evolution dleEvolution    // the size-evolution block; zero values omit their piece
+	Recovery  []recoveryPoint // restorable points, newest first (capped unless ?all=1)
+	RecTotal  int             // recovery points in total (for the show-all toggle)
+	RecAll    bool            // true when ?all=1 lifted the cap
+	Places    []string        // media holding any archive of the DLE — the history grid's cell columns
+	History   []dleArchiveRow
+	Physical  *physicalView // the physical panel: the ?run= archive, or the newest restore chain
 }
 
 // recoveryPoint is one point in time a DLE can be restored to — an archive of this
@@ -1383,31 +1397,121 @@ type heatCell struct {
 // dleTrendPoint is one dump record's statistics for a single DLE, the per-DLE series
 // drawn on /dles/<slug> — the DumpStats row (report.DLEStat) paired with the run's
 // time, oldest first.
-type dleTrendPoint struct {
-	At      time.Time
-	Orig    int64
-	Out     int64
-	Seconds float64
-	Level   int
+// dleEvolution is the "Size evolution" block of the /dles/<slug> page: fulls and
+// incrementals charted separately — a dataset-size question and a churn question,
+// which one shared axis would bury (GiB of churn is invisible under a hundred-GiB
+// full). Each chart carries its own note line with the computed numbers, and
+// Growth is the rollup-card figure. Zero values simply omit their piece.
+type dleEvolution struct {
+	Growth    string        // the growth card: "+736 MiB/day"; "" without enough windowed fulls
+	GrowthSub string        // the card's caption, naming the window
+	Fulls     template.HTML // dataset-size chart; "" with fewer than two fulls
+	FullsNote template.HTML
+	Incr      template.HTML // churn chart over the windowed incrementals; "" with fewer than two
+	IncrNote  template.HTML
 }
 
-// dleTrendSVG renders a DLE's dump history as an inline SVG line chart: two series
-// (original and output bytes) so the compression ratio's stability is visible, with
-// full dumps (Level==0) ringed so the cycle rhythm shows against the incrementals.
-// Mirrors usageChartSVG's conventions (baseline, end labels, date labels, ≤80
-// markers cap, per-point hover title); "" for fewer than two points or a zero span,
-// where a line would be meaningless.
-func dleTrendSVG(points []dleTrendPoint) template.HTML {
-	if len(points) < 2 {
+// newDLEEvolution builds the evolution block from a DLE's dump points
+// (oldest-first). The fulls chart spans the whole recorded history — the long view
+// is its point — while the growth figures and the churn chart cover the recent
+// report.EvolutionWindow, matching SummarizeTrend so note and chart can't disagree.
+func newDLEEvolution(pts []report.TrendPoint) dleEvolution {
+	var v dleEvolution
+	if len(pts) == 0 {
+		return v
+	}
+	var fulls, incrs []report.TrendPoint
+	cutoff := pts[len(pts)-1].At.Add(-report.EvolutionWindow)
+	for _, p := range pts {
+		if p.Level == 0 {
+			fulls = append(fulls, p)
+		} else if !p.At.Before(cutoff) {
+			incrs = append(incrs, p)
+		}
+	}
+	v.Fulls = fullsTrendSVG(fulls)
+	if v.Fulls != "" {
+		v.FullsNote = template.HTML(`<span style="color:var(--accent)">■</span> output (solid) · <span style="color:var(--muted)">◦◦</span> original (dashed)`)
+	}
+	ev, ok := report.SummarizeTrend(pts)
+	if ok {
+		v.Growth = signedBytes(ev.PerDay) + "/day"
+		v.GrowthSub = fmt.Sprintf("fulls, last %d d", int(report.EvolutionWindow.Hours()/24))
+		v.FullsNote += template.HTML(fmt.Sprintf(
+			` · fulls <b>%s → %s</b> over %.0f d (%+d%%, %s/day)`,
+			sizeutil.FormatBytes(ev.From.Out), sizeutil.FormatBytes(ev.To.Out),
+			ev.Days, ev.Pct, signedBytes(ev.PerDay)))
+	}
+	v.Incr = incrTrendSVG(incrs)
+	if v.Incr != "" {
+		med := medianIncrOut(incrs)
+		note := fmt.Sprintf(`<span style="color:%s">■</span> output per incremental · dotted line = recent median (%s)`,
+			incrBarFill, sizeutil.FormatBytes(med))
+		if spike := biggestSpike(incrs, med); spike != nil {
+			note += fmt.Sprintf(` · <span class="warn">■ %s — %s, %.1f× median</span>`,
+				spike.At.Format("2006-01-02"), sizeutil.FormatBytes(spike.Out), float64(spike.Out)/float64(med))
+		}
+		v.IncrNote = template.HTML(note)
+	}
+	return v
+}
+
+// signedBytes formats a byte delta with its sign — rates and deltas read wrong
+// without the explicit "+".
+func signedBytes(v int64) string {
+	if v < 0 {
+		return "−" + sizeutil.FormatBytes(-v)
+	}
+	return "+" + sizeutil.FormatBytes(v)
+}
+
+// medianIncrOut is the median output size of a set of incrementals (non-empty) —
+// the churn chart's rule and the spike test's baseline.
+func medianIncrOut(incrs []report.TrendPoint) int64 {
+	outs := make([]int64, len(incrs))
+	for i, p := range incrs {
+		outs[i] = p.Out
+	}
+	sort.Slice(outs, func(i, j int) bool { return outs[i] < outs[j] })
+	return outs[len(outs)/2]
+}
+
+// isSpike says whether an incremental's size is anomalous against the window's
+// median — the same blunt thresholds as the home rollup's size-anomaly nudge
+// (dumpAnomalies): over 2× the baseline AND an absolute delta past the noise
+// floor, so the chart and the rollup tell one story.
+func isSpike(out, med int64) bool {
+	return med > 0 && out > med*2 && out-med > anomalySizeFloor
+}
+
+// biggestSpike returns the largest anomalous incremental, or nil when none is.
+func biggestSpike(incrs []report.TrendPoint, med int64) *report.TrendPoint {
+	var spike *report.TrendPoint
+	for i := range incrs {
+		p := &incrs[i]
+		if isSpike(p.Out, med) && (spike == nil || p.Out > spike.Out) {
+			spike = p
+		}
+	}
+	return spike
+}
+
+// fullsTrendSVG renders the dataset-size chart: the DLE's full dumps over its whole
+// recorded history, output bytes as an area+line and original bytes as a dashed
+// guide above it, so growth and compression stability read at a glance. Mirrors
+// usageChartSVG's conventions (baseline, ≤80 hover markers, end labels, date
+// labels); "" for fewer than two fulls or a zero span.
+func fullsTrendSVG(fulls []report.TrendPoint) template.HTML {
+	if len(fulls) < 2 {
 		return ""
 	}
-	first, last := points[0].At, points[len(points)-1].At
+	first, last := fulls[0].At, fulls[len(fulls)-1].At
 	span := last.Sub(first)
 	if span <= 0 {
 		return ""
 	}
 	var peak int64
-	for _, p := range points {
+	for _, p := range fulls {
 		if p.Orig > peak {
 			peak = p.Orig
 		}
@@ -1418,17 +1522,17 @@ func dleTrendSVG(points []dleTrendPoint) template.HTML {
 	if peak <= 0 {
 		return ""
 	}
-	const vw, vh = 760.0, 220.0
-	const padL, padR, padT, padB = 8.0, 8.0, 12.0, 26.0
+	const vw, vh = 760.0, 200.0
+	const padL, padR, padT, padB = 8.0, 8.0, 14.0, 26.0
 	plotW, plotH := vw-padL-padR, vh-padT-padB
 	baseY := padT + plotH
 	scale := int64(float64(peak) * 1.08)
 	x := func(t time.Time) float64 { return padL + float64(t.Sub(first))/float64(span)*plotW }
 	y := func(v int64) float64 { return padT + (1-float64(v)/float64(scale))*plotH }
 
-	path := func(get func(dleTrendPoint) int64) string {
+	path := func(get func(report.TrendPoint) int64) string {
 		var b strings.Builder
-		for i, p := range points {
+		for i, p := range fulls {
 			cmd := "L"
 			if i == 0 {
 				cmd = "M"
@@ -1439,29 +1543,237 @@ func dleTrendSVG(points []dleTrendPoint) template.HTML {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, `<svg viewBox="0 0 %.0f %.0f" style="width:100%%;height:auto;display:block" role="img" aria-label="dump size over time">`, vw, vh)
+	fmt.Fprintf(&b, `<svg viewBox="0 0 %.0f %.0f" style="width:100%%;height:auto;display:block" role="img" aria-label="full dump size over time">`, vw, vh)
 	fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--line)" stroke-width="1"/>`, padL, baseY, vw-padR, baseY)
-	fmt.Fprintf(&b, `<path d="%s" fill="none" stroke="var(--accent)" stroke-width="2"/>`, path(func(p dleTrendPoint) int64 { return p.Orig }))
-	fmt.Fprintf(&b, `<path d="%s" fill="none" stroke="var(--ok)" stroke-width="2"/>`, path(func(p dleTrendPoint) int64 { return p.Out }))
-	if len(points) <= 80 {
-		for _, p := range points {
-			title := fmt.Sprintf("%s — %s — orig %s, out %s%s", p.At.Format("2006-01-02 15:04"), levelTag(p.Level),
+	fmt.Fprintf(&b, `<path d="%s L%.1f %.1f L%.1f %.1f Z" fill="var(--accent)" fill-opacity="0.15"/>`,
+		path(func(p report.TrendPoint) int64 { return p.Out }), x(last), baseY, x(first), baseY)
+	fmt.Fprintf(&b, `<path d="%s" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="5 4"/>`,
+		path(func(p report.TrendPoint) int64 { return p.Orig }))
+	fmt.Fprintf(&b, `<path d="%s" fill="none" stroke="var(--accent)" stroke-width="2"/>`,
+		path(func(p report.TrendPoint) int64 { return p.Out }))
+	if len(fulls) <= 80 {
+		for _, p := range fulls {
+			title := fmt.Sprintf("%s — L0 — orig %s, out %s%s", p.At.Format("2006-01-02 15:04"),
 				sizeutil.FormatBytes(p.Orig), sizeutil.FormatBytes(p.Out), dumpTimeSuffix(p.Seconds))
-			ring := ""
-			if p.Level == 0 { // a full dump gets a ring so the cycle rhythm reads at a glance
-				ring = ` stroke="var(--fg)" stroke-width="1.5"`
-			}
-			fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="3" fill="var(--accent)"%s><title>%s</title></circle>`, x(p.At), y(p.Orig), ring, title)
-			fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="3" fill="var(--ok)"%s><title>%s</title></circle>`, x(p.At), y(p.Out), ring, title)
+			fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="3" fill="var(--accent)"><title>%s</title></circle>`, x(p.At), y(p.Out), title)
 		}
 	}
-	end := points[len(points)-1]
-	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--fg)" font-size="11" text-anchor="end">%s</text>`, x(end.At), y(end.Orig)-6, sizeutil.FormatBytes(end.Orig))
-	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--fg)" font-size="11" text-anchor="end">%s</text>`, x(end.At), y(end.Out)+14, sizeutil.FormatBytes(end.Out))
+	end := fulls[len(fulls)-1]
+	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--fg)" font-size="11" text-anchor="end">%s</text>`, x(end.At), y(end.Out)-6, sizeutil.FormatBytes(end.Out))
+	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11" text-anchor="end">%s orig</text>`, x(end.At), y(end.Orig)-6, sizeutil.FormatBytes(end.Orig))
 	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11">%s</text>`, padL, vh-8, first.Format("2006-01-02"))
 	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11" text-anchor="end">%s</text>`, vw-padR, vh-8, last.Format("2006-01-02"))
 	b.WriteString(`</svg>`)
 	return template.HTML(b.String())
+}
+
+// incrBarFill is the churn chart's bar color — the same faded accent the heatmap
+// and volume maps already use for "incremental".
+const incrBarFill = "color-mix(in srgb, var(--accent) 45%, var(--panel))"
+
+// incrTrendSVG renders the churn chart: each windowed incremental as a bar on its
+// own scale, a dotted rule at the window's median, and any anomalous dump (isSpike,
+// the home rollup's thresholds) in warn with its size labeled. "" for fewer than
+// two incrementals or a zero span.
+func incrTrendSVG(incrs []report.TrendPoint) template.HTML {
+	if len(incrs) < 2 {
+		return ""
+	}
+	first, last := incrs[0].At, incrs[len(incrs)-1].At
+	span := last.Sub(first)
+	if span <= 0 {
+		return ""
+	}
+	var peak int64
+	for _, p := range incrs {
+		if p.Out > peak {
+			peak = p.Out
+		}
+	}
+	if peak <= 0 {
+		return ""
+	}
+	med := medianIncrOut(incrs)
+	const vw, vh = 760.0, 130.0
+	const padL, padR, padT, padB = 8.0, 8.0, 10.0, 24.0
+	plotW, plotH := vw-padL-padR, vh-padT-padB
+	baseY := padT + plotH
+	scale := int64(float64(peak) * 1.12)
+	x := func(t time.Time) float64 { return padL + float64(t.Sub(first))/float64(span)*plotW }
+	y := func(v int64) float64 { return padT + (1-float64(v)/float64(scale))*plotH }
+	// One bar per dump, sized to the cadence so daily dumps tile the width with a
+	// 2px gap; a sparse series keeps a readable minimum.
+	bw := plotW/(span.Hours()/24) - 2
+	if bw < 3 {
+		bw = 3
+	}
+	if bw > 24 {
+		bw = 24
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, `<svg viewBox="0 0 %.0f %.0f" style="width:100%%;height:auto;display:block" role="img" aria-label="incremental dump size over time">`, vw, vh)
+	fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--line)" stroke-width="1"/>`, padL, baseY, vw-padR, baseY)
+	for _, p := range incrs {
+		fill := incrBarFill
+		suffix := ""
+		if isSpike(p.Out, med) {
+			fill = "var(--warn)"
+			suffix = fmt.Sprintf(" — %.1f× recent median", float64(p.Out)/float64(med))
+		}
+		title := fmt.Sprintf("%s — %s — out %s%s%s", p.At.Format("2006-01-02 15:04"), levelTag(p.Level),
+			sizeutil.FormatBytes(p.Out), dumpTimeSuffix(p.Seconds), suffix)
+		fmt.Fprintf(&b, `<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="1.5" fill="%s"><title>%s</title></rect>`,
+			x(p.At)-bw/2, y(p.Out), bw, baseY-y(p.Out), fill, title)
+	}
+	fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--muted)" stroke-width="1" stroke-dasharray="2 4"/>`,
+		padL, y(med), vw-padR, y(med))
+	if spike := biggestSpike(incrs, med); spike != nil {
+		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--warn)" font-size="11" text-anchor="end">%s</text>`,
+			x(spike.At)-bw/2-4, y(spike.Out)+4, sizeutil.FormatBytes(spike.Out))
+	}
+	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11">%s</text>`, padL, vh-8, first.Format("2006-01-02"))
+	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11" text-anchor="end">%s</text>`, vw-padR, vh-8, last.Format("2006-01-02"))
+	b.WriteString(`</svg>`)
+	return template.HTML(b.String())
+}
+
+// sparkGrowthWarnPct is the /dles Δ column's attention threshold: a DLE whose
+// windowed fulls grew at least this much renders its delta (and sparkline) in
+// warn. Growth only — the column's question is "which DLE is growing".
+const sparkGrowthWarnPct = 20
+
+// sparkline summarizes a DLE's windowed full sizes for the /dles Trend/Δ cells:
+// the tiny chart, the formatted percent change, and whether it crossed the warn
+// threshold. Fewer than two fulls yield an empty cell — no fake flatline.
+func sparkline(outs []int64) (svg template.HTML, delta string, warn bool) {
+	if len(outs) < 2 {
+		return "", "", false
+	}
+	pct := 0
+	if outs[0] > 0 {
+		pct = int(float64(outs[len(outs)-1]-outs[0]) / float64(outs[0]) * 100)
+	}
+	switch {
+	case pct > 0:
+		delta = fmt.Sprintf("+%d%%", pct)
+	case pct < 0:
+		delta = fmt.Sprintf("−%d%%", -pct)
+	default:
+		delta = "±0%"
+	}
+	warn = pct >= sparkGrowthWarnPct
+	return sparkSVG(outs, warn), delta, warn
+}
+
+// sparkSVG draws the Trend-cell line: 120×26, evenly spaced points. The y-range is
+// floored at 15% of the series mean so a flat DLE draws flat instead of
+// min-max-stretching its noise into a false zigzag; an end dot marks "now".
+func sparkSVG(vals []int64, warn bool) template.HTML {
+	const w, h, pad = 120.0, 26.0, 3.0
+	lo, hi := vals[0], vals[0]
+	var sum float64
+	for _, v := range vals {
+		if v < lo {
+			lo = v
+		}
+		if v > hi {
+			hi = v
+		}
+		sum += float64(v)
+	}
+	span := float64(hi - lo)
+	if floor := sum / float64(len(vals)) * 0.15; span < floor {
+		span = floor
+	}
+	if span <= 0 {
+		span = 1
+	}
+	mid := float64(hi+lo) / 2
+	x := func(i int) float64 { return pad + float64(i)/float64(len(vals)-1)*(w-2*pad) }
+	y := func(v int64) float64 { return pad + (1-((float64(v)-mid)/span+0.5))*(h-2*pad) }
+	stroke := "var(--accent)"
+	if warn {
+		stroke = "var(--warn)"
+	}
+	var d strings.Builder
+	for i, v := range vals {
+		cmd := "L"
+		if i == 0 {
+			cmd = "M"
+		}
+		fmt.Fprintf(&d, "%s%.1f %.1f ", cmd, x(i), y(v))
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, `<svg viewBox="0 0 %.0f %.0f" width="%.0f" height="%.0f" role="img" aria-label="full size trend" style="vertical-align:middle">`, w, h, w, h)
+	fmt.Fprintf(&b, `<path d="%s" fill="none" stroke="%s" stroke-width="1.5"/>`, strings.TrimSpace(d.String()), stroke)
+	fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="2.5" fill="%s"/>`, x(len(vals)-1), y(vals[len(vals)-1]), stroke)
+	b.WriteString(`</svg>`)
+	return template.HTML(b.String())
+}
+
+// windowedFullOuts extracts a DLE's spark series from its trend points: the output
+// sizes of its fulls inside the evolution window (anchored, like SummarizeTrend, at
+// the DLE's own newest point).
+func windowedFullOuts(pts []report.TrendPoint) []int64 {
+	if len(pts) == 0 {
+		return nil
+	}
+	cutoff := pts[len(pts)-1].At.Add(-report.EvolutionWindow)
+	var outs []int64
+	for _, p := range pts {
+		if p.Level == 0 && !p.At.Before(cutoff) {
+			outs = append(outs, p.Out)
+		}
+	}
+	return outs
+}
+
+// summedFullOuts merges several DLEs' trend points into one group series for a
+// path-group header's sparkline: at each member's full, the sum of every member's
+// last-known full size (carry-forward; a member with no full yet contributes 0).
+// It answers "how big is the group's dataset as known at time t", so a partitioned
+// source reads as one curve.
+func summedFullOuts(members [][]report.TrendPoint) []int64 {
+	type event struct {
+		at     time.Time
+		member int
+		out    int64
+	}
+	var events []event
+	var newest time.Time
+	for m, pts := range members {
+		for _, p := range pts {
+			if p.Level == 0 {
+				events = append(events, event{p.At, m, p.Out})
+				if p.At.After(newest) {
+					newest = p.At
+				}
+			}
+		}
+	}
+	cutoff := newest.Add(-report.EvolutionWindow)
+	sort.Slice(events, func(i, j int) bool { return events[i].at.Before(events[j].at) })
+	last := make(map[int]int64, len(members))
+	var series []int64
+	for i := 0; i < len(events); {
+		// One sample per timestamp: a run records its members' dumps at the same
+		// instant, and a per-event sum would count the first member's full before
+		// its siblings' land — fake growth on the group's first sample.
+		at := events[i].at
+		for ; i < len(events) && events[i].at.Equal(at); i++ {
+			last[events[i].member] = events[i].out
+		}
+		if at.Before(cutoff) {
+			continue // pre-window fulls only seed the carry-forward state
+		}
+		var sum int64
+		for _, v := range last {
+			sum += v
+		}
+		series = append(series, sum)
+	}
+	return series
 }
 
 // levelTag renders a dump level for the trend chart's hover title.

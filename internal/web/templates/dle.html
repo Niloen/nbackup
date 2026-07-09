@@ -8,18 +8,27 @@
 <div class="cards">
   <div class="card"><div class="k">Runs</div><div class="v">{{.Runs}}</div></div>
   <div class="card"><div class="k">Total</div><div class="v">{{bytes .Bytes}}</div></div>
+  {{with .Evolution}}{{if .Growth}}
+  <div class="card"><div class="k">Growth</div><div class="v">{{.Growth}}</div><div class="sub">{{.GrowthSub}}</div></div>
+  {{end}}{{end}}
   <div class="card"><div class="k">Media</div><div class="v" style="font-size:1rem">{{if .Media}}{{.Media}}{{else}}—{{end}}</div></div>
 </div>
 
-{{if .Trend}}
-<h2>Size trend</h2>
+{{with .Evolution}}{{if or .Fulls .Incr}}
+<h2>Size evolution</h2>
 <div class="panel">
-{{.Trend}}
-<div class="muted" style="margin-top:.5rem;font-size:.82rem">
-  <span style="color:var(--accent)">■</span> original · <span style="color:var(--ok)">■</span> output · ringed marker = full dump
-</div>
-</div>
+{{if .Fulls}}
+<div class="chart-head">Fulls — dataset size</div>
+{{.Fulls}}
+<div class="chart-note">{{.FullsNote}}</div>
 {{end}}
+{{if .Incr}}
+<div class="chart-head"{{if .Fulls}} style="margin-top:1.1rem"{{end}}>Incrementals — churn per dump</div>
+{{.Incr}}
+<div class="chart-note">{{.IncrNote}}</div>
+{{end}}
+</div>
+{{end}}{{end}}
 
 {{if .Recovery}}
 <h2>Recovery points</h2>

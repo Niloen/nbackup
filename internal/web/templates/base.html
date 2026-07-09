@@ -30,6 +30,14 @@
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: .8rem 1rem; }
   .card .k { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
   .card .v { font-size: 1.35rem; font-weight: 650; margin-top: .2rem; }
+  .card .sub { color: var(--muted); font-size: .78rem; margin-top: .15rem; }
+  /* The /dles/<slug> "Size evolution" panel: two charts (fulls, incrementals),
+     each with a sub-heading and a note line carrying the computed numbers. */
+  .chart-head { font-size: .85rem; font-weight: 600; margin-bottom: .3rem; }
+  .chart-note { color: var(--muted); font-size: .82rem; margin-top: .5rem; font-variant-numeric: tabular-nums; }
+  .chart-note b { color: var(--fg); font-weight: 650; }
+  /* The /dles Trend cell: a sparkline sits taller than text, so trim the padding. */
+  td.sparkcell { padding-top: .2rem; padding-bottom: .2rem; text-align: center; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 1rem; }
   table { width: 100%; border-collapse: collapse; }
   .scroll { overflow-x: auto; }
