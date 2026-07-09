@@ -31,19 +31,42 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-// BackupRequest describes one archive to produce. The Archiver resolves any
-// incremental state it needs from DLE + BaseLevel itself; the request carries
-// identity and levels, never file paths.
-type BackupRequest struct {
-	DLE string // DLE name; the key under which the Archiver stores incremental state
+// Scope is what one archive covers, in the archiver's own vocabulary: a Source to archive
+// plus the Exclude patterns to leave out of it. It is the addressing half of a BackupRequest,
+// factored out so an Expand result and a dump request share one excludes model. Base is the
+// partition/enumeration root the archiver derived: "" for a plain source; equal to Source for
+// a remainder ("the rest"); a strict prefix of Source for a match. It is transient plan-time
+// provenance (grouping and the remainder guard) and is not recorded.
+type Scope struct {
+	Base string
 	// Source names what to archive, in this archiver's own vocabulary: a directory
 	// for a tree archiver (gnutar), the producer command's argument for pipe, a
 	// database name or a dataset for a future db/zfs archiver. Opaque to the generic
 	// layers — only the archiver interprets it (CheckSource is its readiness probe).
-	Source    string
-	Level     int      // 0 = full, >=1 = incremental
-	BaseLevel int      // level whose state this incremental builds on; <0 for a full
-	Exclude   []string // patterns to skip (content-dependent, so per-request, not Archiver config)
+	Source  string
+	Exclude []string // patterns to skip (content-dependent, so per-request, not Archiver config)
+}
+
+// SourcePattern is the input to Expand: a Source pattern to resolve into concrete Scopes.
+// Base is the named base of a partition (config's path:) — its presence means Expand also
+// emits a remainder Scope covering everything under Base the matches don't. An empty Base is
+// a selection (a wildcard Pattern → one Scope per match, no remainder) or a plain source (no
+// wildcard → one Scope). Pattern is relative to Base when Base is set, else the whole source.
+// Exclude carries the configured (dumptype) excludes to bake into every result Scope.
+type SourcePattern struct {
+	Base    string
+	Pattern string
+	Exclude []string
+}
+
+// BackupRequest describes one archive to produce. The Archiver resolves any
+// incremental state it needs from DLE + BaseLevel itself; the request carries
+// identity and levels, never file paths.
+type BackupRequest struct {
+	Scope            // Source, Exclude (and Base) — promoted, so r.Source / r.Exclude still work
+	DLE       string // DLE name; the key under which the Archiver stores incremental state
+	Level     int    // 0 = full, >=1 = incremental
+	BaseLevel int    // level whose state this incremental builds on; <0 for a full
 }
 
 // BackupResult reports what was produced.
@@ -112,6 +135,16 @@ type Archiver interface {
 	// command owns its source). It is `nb check`'s per-DLE probe, replacing the
 	// generic "is the path readable" that assumed every source is a filesystem path.
 	CheckSource(source string) error
+	// Expand resolves a SourcePattern into the concrete Scopes to dump, in this archiver's own
+	// vocabulary. A wildcard-free pattern returns exactly one Scope (no I/O). A wildcard yields
+	// one Scope per match; when SourcePattern.Base is set it also emits a remainder Scope
+	// (Source == Base) carving out the matches with anchored excludes — a tree archiver only (a
+	// discrete archiver like postgres has no remainder and returns just the matches). Each
+	// returned Scope is complete: it carries the configured excludes (the remainder additionally
+	// carries the carve excludes) and its Base (the enumeration/partition root), so a dump hands
+	// a Scope straight into a BackupRequest. Called only at plan time; a failed enumeration is
+	// returned as an error and fails the plan.
+	Expand(p SourcePattern) ([]Scope, error)
 	// Estimate returns the uncompressed bytes the request would archive.
 	Estimate(r BackupRequest) (int64, error)
 	// BackupSource returns the producing pipeline source for one archive (see

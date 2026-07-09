@@ -49,7 +49,11 @@ func TestCostSummaryCloud(t *testing.T) {
 	now := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	eng, _ := cloudCostEngine(t, now, nil)
 
-	cs := eng.CostSummary(eng.Plan(now))
+	plan, err := eng.Plan(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := eng.CostSummary(plan)
 	if !cs.Priced {
 		t.Fatal("cloud medium should be priced")
 	}
@@ -184,7 +188,10 @@ func TestForecastCostReclaims(t *testing.T) {
 		t.Fatalf("dump: %v", err)
 	}
 
-	curve := eng.ForecastCost(start.AddDate(0, 0, 1), 6)
+	curve, err := eng.ForecastCost(start.AddDate(0, 0, 1), 6)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(curve) != 6 {
 		t.Fatalf("curve has %d points, want 6", len(curve))
 	}
@@ -205,7 +212,10 @@ func TestForecastCostGrows(t *testing.T) {
 	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	eng, _ := cloudCostEngine(t, start, nil)
 
-	curve := eng.ForecastCost(start.AddDate(0, 0, 1), 5)
+	curve, err := eng.ForecastCost(start.AddDate(0, 0, 1), 5)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(curve) != 5 {
 		t.Fatalf("curve has %d points, want 5", len(curve))
 	}

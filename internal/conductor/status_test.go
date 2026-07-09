@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/logf"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
@@ -21,16 +21,16 @@ import (
 // behind. preflightErr/makeRoomErr choose which prelude step fails.
 func preludeDeps(t *testing.T, workdir string, preflightErr, makeRoomErr error) Deps {
 	t.Helper()
-	dle := config.DLE{Host: "h1", Path: "/data", DumpType: "std"}
+	dle := planner.DLE{Scope: archiver.Scope{Source: "/data"}, Host: "h1", DumpType: "std"}
 	return Deps{
 		Cat:   newCatalog(t),
 		Flush: func(time.Time, logf.Logf) (int, error) { return 0, nil },
-		Plan: func(date time.Time, sink progress.Sink) *planner.Plan {
+		Plan: func(date time.Time, sink progress.Sink) (*planner.Plan, error) {
 			rows := []progress.Plan{{Name: dle.ID(), Slug: dle.Name()}}
 			tr := progress.NewTracker(progress.EstimateRunID, progress.PhaseEstimating, 1, rows, time.Now, sink)
 			tr.FinishDLE(dle.ID(), 0, 100, 0, nil)
 			tr.SetPhase(progress.PhaseDone) // keepEstimating holds the file at "estimating"
-			return &planner.Plan{Date: date, Items: []planner.Item{{DLE: dle, Level: 0, EstBytes: 100}}}
+			return &planner.Plan{Date: date, Items: []planner.Item{{DLE: dle, Level: 0, EstBytes: 100}}}, nil
 		},
 		Preflight: scheduler.PreflightDeps{
 			CheckCompress:     func() error { return nil },
@@ -92,7 +92,7 @@ func TestRunPreludeFailureStampsStatusFailed(t *testing.T) {
 // routeFatal is the any-lane-suffices judgment shared by make-room and window-open:
 // a downed landing is fatal only when it empties some DLE's whole route.
 func TestRouteFatal(t *testing.T) {
-	dle := config.DLE{Host: "h1", Path: "/data", DumpType: "std"}
+	dle := planner.DLE{Scope: archiver.Scope{Source: "/data"}, Host: "h1", DumpType: "std"}
 	items := []planner.Item{{DLE: dle}}
 	down := errors.New("capacity cannot hold the incoming")
 	cases := []struct {

@@ -513,7 +513,7 @@ func (e *Engine) ExpectedVolume(now time.Time) (VolumeExpectation, bool) {
 // Plan builds the plan for a run date: it estimates every DLE, fulls the ones
 // due by the cycle deadline, and promotes future fulls forward to level light
 // runs (bounded by the per-run capacity room).
-func (e *Engine) Plan(date time.Time) *planner.Plan {
+func (e *Engine) Plan(date time.Time) (*planner.Plan, error) {
 	return e.sched.Plan(date, nil)
 }
 
@@ -521,7 +521,7 @@ func (e *Engine) Plan(date time.Time) *planner.Plan {
 // slow: every DLE is sized by an archiver pass, so a long preview is otherwise
 // silent. sink (nil to disable) receives a snapshot as each DLE's estimate starts
 // and finishes.
-func (e *Engine) PlanWithProgress(date time.Time, sink progress.Sink) *planner.Plan {
+func (e *Engine) PlanWithProgress(date time.Time, sink progress.Sink) (*planner.Plan, error) {
 	return e.sched.Plan(date, sink)
 }
 
@@ -543,7 +543,7 @@ func (e *Engine) ValidatePlan() (warnings []string, err error) {
 // level schedule — when each DLE's full next lands, how its incrementals climb — is
 // projected forward. Estimates and the capacity ceiling are sampled once at `start`
 // and held constant, so this is a schedule forecast, not a capacity timeline.
-func (e *Engine) Simulate(start time.Time, days int) []*planner.Plan {
+func (e *Engine) Simulate(start time.Time, days int) ([]*planner.Plan, error) {
 	return e.sched.Simulate(start, days)
 }
 

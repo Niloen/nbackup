@@ -36,7 +36,6 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
-	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
@@ -97,7 +96,7 @@ type Plan struct {
 
 // Item is the planned backup of a single DLE.
 type Item struct {
-	DLE       config.DLE
+	DLE       DLE
 	Name      string
 	Level     int    // 0 = full, 1..9 = incremental
 	BaseLevel int    // level whose snapshot an incremental builds on (-1 for a full)
@@ -109,7 +108,7 @@ type Item struct {
 }
 
 type cand struct {
-	dle       config.DLE
+	dle       DLE
 	name      string
 	st        *catalog.DLEState
 	days      int // days since last full, -1 if never
@@ -126,7 +125,7 @@ type cand struct {
 // operator has asked to full on the next run (`nb reset`); each is scheduled a mandatory
 // level 0, overriding the cycle/bump schedule — the archiver-independent peer of Amanda's
 // FORCE_FULL, decided here rather than by deleting the archiver's incremental state.
-func Build(dles []config.DLE, hist *catalog.History, est map[string]Estimate, forced map[string]bool, p Params, today time.Time) *Plan {
+func Build(dles []DLE, hist *catalog.History, est map[string]Estimate, forced map[string]bool, p Params, today time.Time) *Plan {
 	cycle := p.CycleDays
 	if cycle < 1 {
 		cycle = 7
@@ -247,7 +246,7 @@ func chooseIncrLevel(st *catalog.DLEState, e Estimate, bumpPercent float64) (lev
 // reclamation timeline. The bump decision likewise weighs today's level sizes, so
 // a forecast past a simulated bump approximates the deeper level's size with the
 // current one's — a schedule sketch, not an exact size projection.
-func Simulate(dles []config.DLE, hist *catalog.History, est map[string]Estimate, forced map[string]bool, p Params, start time.Time, days int) []*Plan {
+func Simulate(dles []DLE, hist *catalog.History, est map[string]Estimate, forced map[string]bool, p Params, start time.Time, days int) []*Plan {
 	if days < 1 {
 		days = 1
 	}

@@ -75,6 +75,16 @@ func (p *pipe) Check() error {
 // operator's producer command.
 func (p *pipe) CheckSource(string) error { return nil }
 
+// Expand is the identity for pipe: a pipe source is an opaque token for the producer command,
+// with no notion of enumerable children, so any wildcard in it is literal. One Scope, no I/O.
+// The partition (mapping) form is refused — pipe has no children to match and no remainder.
+func (p *pipe) Expand(sp archiver.SourcePattern) ([]archiver.Scope, error) {
+	if sp.Base != "" {
+		return nil, fmt.Errorf("pipe archiver cannot partition a source (a pipe source has no children); use a plain source")
+	}
+	return []archiver.Scope{{Source: sp.Pattern, Exclude: sp.Exclude}}, nil
+}
+
 // Estimate runs the optional estimate_command (its stdout is the byte count).
 // Without one the size is unknown: report 0 rather than guess — the planner
 // already treats a zero estimate as "no estimator available".

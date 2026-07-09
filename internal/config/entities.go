@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"maps"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -61,17 +62,61 @@ func mergeSSH(base, over SSHConfig) SSHConfig {
 // dumptype, not the entry.
 type Sources []DLE
 
+// sourceItem is one entry in a host's list: either a scalar path (a whole DLE, or a
+// selection when it holds a wildcard) or a {path, partition} mapping (a partition with a
+// remainder). yaml.v3's KnownFields(true) does not propagate into this nested decode, so the
+// mapping form rejects stray keys by hand.
+type sourceItem struct {
+	Path      string
+	Partition string
+}
+
+func (si *sourceItem) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		si.Path = node.Value
+		return nil
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if k := node.Content[i].Value; k != "path" && k != "partition" {
+				return fmt.Errorf("unknown key %q in a source entry (only path, partition)", k)
+			}
+		}
+		var m struct {
+			Path      string `yaml:"path"`
+			Partition string `yaml:"partition"`
+		}
+		if err := node.Decode(&m); err != nil {
+			return err
+		}
+		if m.Path == "" {
+			return fmt.Errorf("a source entry mapping needs a path")
+		}
+		if m.Partition != "" {
+			// A partition base is definitionally a tree path — normalize it (trailing
+			// slash, doubled separators) so slugs and carve-prefix math stay canonical.
+			// Scalar sources are never cleaned: a non-path source (a conninfo, a pipe
+			// token) must pass through untouched.
+			m.Path = path.Clean(m.Path)
+		}
+		si.Path, si.Partition = m.Path, m.Partition
+		return nil
+	default:
+		return fmt.Errorf("a source entry must be a path or a {path, partition} mapping")
+	}
+}
+
 // UnmarshalYAML decodes the grouped form into a flat, sorted []DLE.
 func (s *Sources) UnmarshalYAML(node *yaml.Node) error {
-	var raw map[string]map[string][]string
+	var raw map[string]map[string][]sourceItem
 	if err := node.Decode(&raw); err != nil {
 		return fmt.Errorf("sources must be a mapping of dumptype -> {host: [paths]}: %w", err)
 	}
 	var dles []DLE
 	for dumptype, hosts := range raw {
-		for host, paths := range hosts {
-			for _, path := range paths {
-				dles = append(dles, DLE{Host: host, Path: path, DumpType: dumptype})
+		for host, items := range hosts {
+			for _, it := range items {
+				dles = append(dles, DLE{Host: host, Path: it.Path, DumpType: dumptype, Partition: it.Partition})
 			}
 		}
 	}
@@ -82,7 +127,10 @@ func (s *Sources) UnmarshalYAML(node *yaml.Node) error {
 		if dles[i].Path != dles[j].Path {
 			return dles[i].Path < dles[j].Path
 		}
-		return dles[i].DumpType < dles[j].DumpType
+		if dles[i].DumpType != dles[j].DumpType {
+			return dles[i].DumpType < dles[j].DumpType
+		}
+		return dles[i].Partition < dles[j].Partition
 	})
 	*s = dles
 	return nil
@@ -92,13 +140,17 @@ func (s *Sources) UnmarshalYAML(node *yaml.Node) error {
 // reads, so a programmatically built config (`nb init`) round-trips through the
 // real loader instead of serializing the internal flat DLE list.
 func (s Sources) MarshalYAML() (any, error) {
-	grouped := map[string]map[string][]string{}
+	grouped := map[string]map[string][]any{}
 	for _, d := range s {
 		dt := d.DumpTypeName()
 		if grouped[dt] == nil {
-			grouped[dt] = map[string][]string{}
+			grouped[dt] = map[string][]any{}
 		}
-		grouped[dt][d.Host] = append(grouped[dt][d.Host], d.Path)
+		var item any = d.Path
+		if d.Partition != "" {
+			item = map[string]string{"path": d.Path, "partition": d.Partition}
+		}
+		grouped[dt][d.Host] = append(grouped[dt][d.Host], item)
 	}
 	return grouped, nil
 }
@@ -305,25 +357,37 @@ func (e EncryptConfig) SchemeName() string {
 	return e.Scheme
 }
 
-// DLE is a backup source: a path on a host, dumped per a named dumptype.
+// DLE is a backup source: a path on a host, dumped per a named dumptype. Path may name a
+// wildcard (a selection: one DLE per match, no remainder); the {path, partition} mapping form
+// sets Partition to a glob relative to Path and yields the matches plus "the rest" of Path.
+// Both are resolved into concrete DLEs at plan time by the archiver (see planner.Resolve);
+// a DLE with an empty Partition and no wildcard in Path is a plain, single backup source.
 type DLE struct {
-	Host     string `yaml:"host,omitempty"`
-	Path     string `yaml:"path"`
-	DumpType string `yaml:"dumptype"`
+	Host      string `yaml:"host,omitempty"`
+	Path      string `yaml:"path"`
+	DumpType  string `yaml:"dumptype"`
+	Partition string `yaml:"partition,omitempty"` // glob relative to Path; its presence names a base with a remainder
 }
 
 var slugStrip = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
-// Name returns a stable, filesystem-safe identifier for the DLE, e.g.
-// host "app01" + path "/home" -> "app01-home".
-func (d DLE) Name() string {
-	p := strings.Trim(d.Path, "/")
+// Slug returns the stable, filesystem-safe identifier for a host+source pair, e.g.
+// host "app01" + source "/home" -> "app01-home". It is the ONE slug rule, shared by
+// config.DLE (the declaration) and planner.DLE (the resolved unit), so identities can
+// never drift between them — the catalog, incremental state, and routes all key on it.
+func Slug(host, source string) string {
+	p := strings.Trim(source, "/")
 	p = strings.ReplaceAll(p, "/", "-")
 	if p == "" {
 		p = "root"
 	}
-	return slugStrip.ReplaceAllString(d.Host+"-"+p, "_")
+	return slugStrip.ReplaceAllString(host+"-"+p, "_")
 }
+
+// Name returns the DLE's slug (see Slug). Meaningful only for a plain declaration:
+// a source with a wildcard or a partition has no single identity — its resolved
+// units (planner.DLE) each carry their own.
+func (d DLE) Name() string { return Slug(d.Host, d.Path) }
 
 // ID returns the host:path identity of a DLE, e.g. "app01:/home".
 // This is what users see in reports and type for `--dle`/`setdisk`; the slug from

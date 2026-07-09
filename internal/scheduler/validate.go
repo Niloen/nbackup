@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/Niloen/nbackup/internal/config"
 )
@@ -65,10 +66,14 @@ func Preflight(d PreflightDeps, dles []config.DLE, strict bool) (warnings []stri
 		// client warns here rather than silently estimating ~0 B — the misleading
 		// "healthy" plan `nb check` would otherwise be the only thing to catch.
 		if _, remote := d.RemoteHost(dle.Host); !remote {
+			// A pattern source (a wildcard path, or a partition base) is never stat'd:
+			// the literal glob is not a path on disk, and its real probe is Plan's
+			// enumeration, which fails loud. Its dumptype/host checks above still apply.
+			pattern := dle.Partition != "" || strings.ContainsAny(dle.Path, "*?[")
 			// Only stat a source the archiver reads as a filesystem path; a postgres
 			// conninfo or pipe token is not a path, and its readiness is proven live by
 			// `nb check` (a connect), not a stat that would falsely warn "missing".
-			if d.SourceIsPath == nil || d.SourceIsPath(dle.DumpTypeName(), dle.Host) {
+			if !pattern && (d.SourceIsPath == nil || d.SourceIsPath(dle.DumpTypeName(), dle.Host)) {
 				if err := d.StatSource(dle.Path); err != nil {
 					warnings = append(warnings, fmt.Sprintf("DLE %s: source path %s is missing or unreadable (%v) — the real run will fail unless it becomes available", dle.ID(), dle.Path, err))
 				}

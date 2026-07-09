@@ -123,7 +123,7 @@ func (d *Dumper) dumpItem(ctx context.Context, fs archivefs.Ingest, item planner
 		// restorable backup of what was readable — keep it (recoverability first), but warn
 		// loudly and return a partial error so the run exits non-zero and cron notices.
 		logf("  WARNING: %d file(s) unreadable, omitted from the archive: %s", len(unreadable), summarizePaths(unreadable))
-		logf("  (run nb as a user that can read every file under %s, e.g. via sudo/root, or exclude them in the dumptype)", item.DLE.Path)
+		logf("  (run nb as a user that can read every file under %s, e.g. via sudo/root, or exclude them in the dumptype)", item.DLE.Source)
 		return &PartialDumpError{DLE: item.DLE.ID(), Unreadable: unreadable}
 	}
 	return nil
@@ -166,12 +166,15 @@ func (d *Dumper) backupSpec(item planner.Item) (BackupSpec, error) {
 	if err != nil {
 		return BackupSpec{}, err
 	}
+	// R2: the resolved Scope is complete (Expand baked in the configured excludes, and a
+	// partition's rest carries its carve excludes) — consume it VERBATIM. Rebuilding it
+	// from the path + dumptype here would silently drop the carves and dump the rest's
+	// children twice.
 	req := archiver.BackupRequest{
 		DLE:       item.Name,
-		Source:    item.DLE.Path,
+		Scope:     item.DLE.Scope,
 		Level:     item.Level,
 		BaseLevel: -1,
-		Exclude:   d.exclude(item.DLE.DumpTypeName()),
 	}
 	if item.Level >= 1 {
 		req.BaseLevel = item.BaseLevel

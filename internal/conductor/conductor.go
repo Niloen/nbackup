@@ -63,7 +63,7 @@ type PreparedWriter struct {
 type Deps struct {
 	Cat        *catalog.Catalog
 	Dmp        *dumper.Dumper
-	Plan       func(date time.Time, sink progress.Sink) *planner.Plan
+	Plan       func(date time.Time, sink progress.Sink) (*planner.Plan, error)
 	OpenWriter func(medium string, spec archiveio.RunSpec, now time.Time, lf logf.Logf) (PreparedWriter, error)
 	// OpenReader returns the read face of the archive fs over the run window's catalog
 	// View. withSpool calls it once at window-open — while no concurrent writer exists

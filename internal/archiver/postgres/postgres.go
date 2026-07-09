@@ -180,6 +180,17 @@ func pgMajor(version string) int {
 // summarization is on, without which the server cannot take the incremental
 // (level ≥ 1) dumps this archiver schedules. All three are proven live so
 // `nb check` fails now rather than the nightly dump failing later.
+// Expand is the identity for postgres today: a source is a libpq connection reference, and
+// database-set enumeration (a selection over pg_database) is a follow-on. The partition
+// (mapping) form is refused rather than mangled — until enumeration exists there is nothing
+// a Base could mean here, and a discrete archiver has no remainder anyway.
+func (p *postgres) Expand(sp archiver.SourcePattern) ([]archiver.Scope, error) {
+	if sp.Base != "" {
+		return nil, fmt.Errorf("postgres archiver does not support partition (database enumeration is not implemented yet); list each database as a plain source")
+	}
+	return []archiver.Scope{{Source: sp.Pattern, Exclude: sp.Exclude}}, nil
+}
+
 func (p *postgres) CheckSource(source string) error {
 	if _, err := p.psql(source, "SELECT 1"); err != nil {
 		return fmt.Errorf("cannot connect: %w\n(check the server is reachable; auth is the client's own libpq config — peer auth as this identity, ~/.pgpass, or ~/.pg_service.conf; grant a role once with: CREATE ROLE <user> LOGIN REPLICATION)", err)

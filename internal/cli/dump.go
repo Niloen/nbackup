@@ -216,7 +216,10 @@ func landingWarnings(workdir, runID string) []string {
 // instant the run id is minted from (see newDumpCmd); a real run started later
 // would carry a later time suffix.
 func runDumpDryRun(eng *engine.Engine, date, now time.Time, validationWarnings []string) error {
-	plan := eng.Plan(date)
+	plan, err := eng.Plan(date)
+	if err != nil {
+		return err
+	}
 
 	fmt.Println("DRY RUN — no data is written.")
 	fmt.Printf("This is the run on %s.\n\n", record.DateString(date))

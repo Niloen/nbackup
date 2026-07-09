@@ -70,7 +70,10 @@ func newPlanCmd(a *app) *cobra.Command {
 				return runPlanForecast(eng, date, days)
 			}
 
-			plan := eng.PlanWithProgress(date, estimateProgress(a.quiet))
+			plan, err := eng.PlanWithProgress(date, estimateProgress(a.quiet))
+			if err != nil {
+				return err
+			}
 			fmt.Printf("Plan for run %s  (cycle %dd, landing %q)\n\n",
 				record.DateString(date), plan.Interval, strings.Join(eng.Landings(), ", "))
 			for _, w := range plan.Warnings {
@@ -169,7 +172,10 @@ func runEstimateLine(estTotal int64, unknown int) string {
 // projecting the level schedule forward. Estimates are sampled once and held
 // constant (see engine.Simulate), so the per-day size tracks the chosen levels.
 func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
-	plans := eng.Simulate(start, days)
+	plans, err := eng.Simulate(start, days)
+	if err != nil {
+		return err
+	}
 	fmt.Printf("Forecast: %d daily runs from %s  (cycle %dd, landing %q)\n\n",
 		days, record.DateString(start), plans[0].Interval, strings.Join(eng.Landings(), ", "))
 
@@ -191,7 +197,10 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 	// The cost curve overlays the schedule: the projected $/month footprint at the
 	// end of each day as runs land and pruning reclaims. Only shown for a priced
 	// (cloud) landing medium; a local disk has no recurring bill.
-	curve := eng.ForecastCost(start, days)
+	curve, err := eng.ForecastCost(start, days)
+	if err != nil {
+		return err
+	}
 	priced := eng.CostSummary(nil).Priced
 
 	tw := newTab(os.Stdout)

@@ -6,7 +6,6 @@ import (
 
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
-	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 )
@@ -21,7 +20,7 @@ import (
 // an independent archiver pass, and on a host with many DLEs the serial sum dominates
 // a preview. When sink is non-nil the work is tracked so a caller can paint live
 // progress. The fan-out is read-only over shared caches — see warmCaches.
-func (s *Scheduler) estimates(dles []config.DLE, sink progress.Sink) map[string]planner.Estimate {
+func (s *Scheduler) estimates(dles []planner.DLE, sink progress.Sink) map[string]planner.Estimate {
 	states := s.warmCaches(dles)
 
 	workers := s.d.Workers()
@@ -44,7 +43,7 @@ func (s *Scheduler) estimates(dles []config.DLE, sink progress.Sink) map[string]
 	for i, d := range dles {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(i int, d config.DLE, st *catalog.DLEState) {
+		go func(i int, d planner.DLE, st *catalog.DLEState) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			if tr != nil {
@@ -74,7 +73,7 @@ func (s *Scheduler) estimates(dles []config.DLE, sink progress.Sink) map[string]
 // on one goroutine — the parallel workers then only ever READ them. Errors from
 // archiverFor are swallowed here (the cache warm is best-effort); estimateDLE
 // resolves the archiver again and surfaces any failure per-DLE.
-func (s *Scheduler) warmCaches(dles []config.DLE) []*catalog.DLEState {
+func (s *Scheduler) warmCaches(dles []planner.DLE) []*catalog.DLEState {
 	hist := s.d.History()
 	states := make([]*catalog.DLEState, len(dles))
 	for i, d := range dles {
@@ -84,14 +83,16 @@ func (s *Scheduler) warmCaches(dles []config.DLE) []*catalog.DLEState {
 	return states
 }
 
-func (s *Scheduler) estimateDLE(d config.DLE, st *catalog.DLEState) planner.Estimate {
+func (s *Scheduler) estimateDLE(d planner.DLE, st *catalog.DLEState) planner.Estimate {
 	name := d.Name() // the internal slug, the archiver's incremental-state key
 	arch, err := s.d.ArchiverFor(d.DumpTypeName(), d.Host)
 	if err != nil || arch.Check() != nil {
 		return planner.Estimate{} // no estimator available (e.g. the archiver's tool missing)
 	}
-	excl := s.d.ExcludeFor(d.DumpTypeName())
-	full, ferr := arch.Estimate(archiver.BackupRequest{DLE: name, Source: d.Path, Level: 0, BaseLevel: -1, Exclude: excl})
+	// R2: the resolved Scope is complete (configured excludes + any partition carves are
+	// already baked in by Expand) — consume it VERBATIM. Rebuilding it here would
+	// silently drop the rest's carves and double-count its children.
+	full, ferr := arch.Estimate(archiver.BackupRequest{DLE: name, Scope: d.Scope, Level: 0, BaseLevel: -1})
 	// A non-nil error with a non-zero floor means the archiver walked a partially-readable
 	// source (an unreadable member): the size is a floor, not exact. A zero floor is
 	// a total failure (e.g. a missing path) that ValidatePlan already reports, so we
@@ -109,12 +110,12 @@ func (s *Scheduler) estimateDLE(d config.DLE, st *catalog.DLEState) planner.Esti
 	est := planner.Estimate{Full: full, Incomplete: incomplete}
 	if arch.HasBase(name, lvl-1) {
 		est.Incr, _ = arch.Estimate(archiver.BackupRequest{
-			DLE: name, Source: d.Path, Level: lvl, BaseLevel: lvl - 1, Exclude: excl,
+			DLE: name, Scope: d.Scope, Level: lvl, BaseLevel: lvl - 1,
 		})
 	}
 	if lvl < planner.MaxLevel && arch.HasBase(name, lvl) {
 		est.IncrNext, _ = arch.Estimate(archiver.BackupRequest{
-			DLE: name, Source: d.Path, Level: lvl + 1, BaseLevel: lvl, Exclude: excl,
+			DLE: name, Scope: d.Scope, Level: lvl + 1, BaseLevel: lvl,
 		})
 	}
 	return est

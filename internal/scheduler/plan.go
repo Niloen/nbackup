@@ -8,17 +8,31 @@ import (
 	"github.com/Niloen/nbackup/internal/progress"
 )
 
-// Plan builds the plan for a run date: it estimates every DLE, fulls the ones
-// due by the cycle deadline, and promotes future fulls forward to level light
+// Plan builds the plan for a run date: it resolves the configured sources into concrete
+// DLEs (expanding wildcards/partitions over each archiver — the one live enumeration,
+// which FAILS the plan on error rather than guessing), estimates every DLE, fulls the
+// ones due by the cycle deadline, and promotes future fulls forward to level light
 // runs (bounded by the per-run capacity room). sink (nil to disable) receives a
 // live snapshot as each DLE's estimate starts and finishes, for the
 // (potentially slow) estimate phase: every DLE is sized by an archiver pass, so
 // a long preview is otherwise silent.
-func (s *Scheduler) Plan(date time.Time, sink progress.Sink) *planner.Plan {
-	dles := s.d.DLEs()
+func (s *Scheduler) Plan(date time.Time, sink progress.Sink) (*planner.Plan, error) {
+	dles, err := s.resolve()
+	if err != nil {
+		return nil, err
+	}
 	plan := planner.Build(dles, s.d.History(), s.estimates(dles, sink), s.d.ForcedFulls(), s.plannerParams(date), date)
 	s.forceFullWhereBaseMissing(plan)
-	return plan
+	return plan, nil
+}
+
+// resolve expands the configured sources into the concrete DLEs to schedule (see
+// planner.Resolve). Only the live-acting paths call it; a failed enumeration is the
+// caller's failure.
+func (s *Scheduler) resolve() ([]planner.DLE, error) {
+	return planner.Resolve(s.d.DLEs(),
+		func(dt, host string) (planner.Expander, error) { return s.d.ArchiverFor(dt, host) },
+		s.d.ExcludeFor)
 }
 
 // forceFullWhereBaseMissing downgrades any planned incremental whose base incremental
@@ -64,7 +78,10 @@ func (s *Scheduler) plannerParams(date time.Time) planner.Params {
 // level schedule — when each DLE's full next lands, how its incrementals climb — is
 // projected forward. Estimates and the capacity ceiling are sampled once at `start`
 // and held constant, so this is a schedule forecast, not a capacity timeline.
-func (s *Scheduler) Simulate(start time.Time, days int) []*planner.Plan {
-	dles := s.d.DLEs()
-	return planner.Simulate(dles, s.d.History(), s.estimates(dles, nil), s.d.ForcedFulls(), s.plannerParams(start), start, days)
+func (s *Scheduler) Simulate(start time.Time, days int) ([]*planner.Plan, error) {
+	dles, err := s.resolve()
+	if err != nil {
+		return nil, err
+	}
+	return planner.Simulate(dles, s.d.History(), s.estimates(dles, nil), s.d.ForcedFulls(), s.plannerParams(start), start, days), nil
 }

@@ -75,7 +75,12 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 	if c.d.EstimateSink != nil {
 		estSink = progress.MultiSink(estSink, c.d.EstimateSink)
 	}
-	plan := c.d.Plan(date, estSink)
+	plan, err := c.d.Plan(date, estSink)
+	if err != nil {
+		// Planning failed before a run existed — most often a source enumeration that
+		// could not run (fail loud, never guess a partition's match set).
+		return nil, err
+	}
 	forced := c.d.Cat.ForcedFulls() // captured to consume once the run seals (the lock blocks a concurrent reset)
 	for _, w := range plan.Warnings {
 		logf.Log("WARNING: %s", w)
@@ -84,10 +89,11 @@ func (c *Conductor) Run(ctx context.Context, now time.Time, logf logf.Logf) (*ca
 	// Pre-flight before creating a run: every source host, the compressor binary, and
 	// every archiver — the strict mode of the same check `nb plan` previews with.
 	// Resolving every archiver here also populates the archiver cache, so the parallel
-	// workers below only read it (no concurrent writes).
+	// workers below only read it (no concurrent writes). Strict preflight reads only
+	// host+dumptype, so the resolved items convert losslessly.
 	dles := make([]config.DLE, len(plan.Items))
 	for i, item := range plan.Items {
-		dles[i] = item.DLE
+		dles[i] = config.DLE{Host: item.DLE.Host, Path: item.DLE.Source, DumpType: item.DLE.DumpType}
 	}
 	if _, err := scheduler.Preflight(c.d.Preflight, dles, true); err != nil {
 		c.failEstimated(fileSink, plan, err)
