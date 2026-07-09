@@ -17,6 +17,9 @@ type DLESummary struct {
 	LastBackupAt time.Time // commit time of its most recent archive at any level; zero if never
 	Bytes        int64     // total compressed bytes across its archives
 	Media        []string  // media holding a copy of any of its archives, sorted
+	// Rest marks a partition's remainder per the latest resolved set — its display
+	// identity (the base path) is otherwise indistinguishable from a plain source.
+	Rest bool
 }
 
 // DLESummaries aggregates the catalog per DLE across all runs, sorted by display
@@ -57,6 +60,12 @@ func (c *Catalog) DLESummaries() []DLESummary {
 		}
 	}
 	sort.Slice(order, func(i, j int) bool { return aggs[order[i]].sum.Display < aggs[order[j]].sum.Display })
+	rest := map[string]bool{}
+	for _, r := range c.LatestResolved() {
+		if r.Rest {
+			rest[r.DLE] = true
+		}
+	}
 	out := make([]DLESummary, 0, len(order))
 	for _, slug := range order {
 		g := aggs[slug]
@@ -64,6 +73,7 @@ func (c *Catalog) DLESummaries() []DLESummary {
 			g.sum.Media = append(g.sum.Media, m)
 		}
 		sort.Strings(g.sum.Media)
+		g.sum.Rest = rest[slug]
 		out = append(out, g.sum)
 	}
 	return out

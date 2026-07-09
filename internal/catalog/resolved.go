@@ -26,6 +26,10 @@ type ResolvedDLE struct {
 	// that run's set BY ORIGIN — intent persists through the outage (staleness keeps
 	// flagging, coverage keeps owing) even though nothing is dumped on a guess.
 	Origin string `json:"origin,omitempty"`
+	// Rest marks a partition's remainder ("the rest of <base>") so the read-side
+	// surfaces (nb dle, the web) can say what this unit is: its display identity is
+	// otherwise indistinguishable from a plain source at the same path.
+	Rest bool `json:"rest,omitempty"`
 }
 
 // ResolvedSet is the latest run's resolved set, stamped with the run that recorded it.

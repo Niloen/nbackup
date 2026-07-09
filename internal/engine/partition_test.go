@@ -11,6 +11,9 @@ import (
 	"github.com/Niloen/nbackup/internal/config"
 )
 
+// restSlugOf is the rest's catalog slug for a partitioned base.
+func restSlugOf(base string) string { return config.Slug("localhost", base) }
+
 // TestPartitionedSourceEndToEnd drives the whole partition loop through the real engine:
 // a {path, partition: "*"} source resolves at plan time into one DLE per child directory
 // plus "the rest" (the bare base slug), the run dumps and catalogs each under its own
@@ -98,6 +101,15 @@ func TestPartitionedSourceEndToEnd(t *testing.T) {
 	for _, r := range resolved {
 		if r.DumpType != config.DefaultDumpType {
 			t.Errorf("resolved unit %s must carry its dumptype, got %q", r.DLE, r.DumpType)
+		}
+		if r.Rest != (r.DLE == restSlugOf(base)) {
+			t.Errorf("resolved unit %s: Rest marker wrong (got %v)", r.DLE, r.Rest)
+		}
+	}
+	// ...and the DLE summaries surface it, so nb dle can say what "the rest" is.
+	for _, g := range eng.DLESummaries() {
+		if g.Rest != (g.DLE == restSlugOf(base)) {
+			t.Errorf("summary %s: Rest marker wrong (got %v)", g.DLE, g.Rest)
 		}
 	}
 	// …coverage judgment: a child's archives are owed to its dumptype's route even

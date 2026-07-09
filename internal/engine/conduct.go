@@ -186,7 +186,7 @@ func (e *Engine) newConductor() *conductor.Conductor {
 			add := func(d planner.DLE) {
 				if name := d.Name(); !seen[name] {
 					seen[name] = true
-					set = append(set, catalog.ResolvedDLE{DLE: name, Host: d.Host, Source: d.Source, DumpType: d.DumpTypeName(), Origin: d.Origin})
+					set = append(set, catalog.ResolvedDLE{DLE: name, Host: d.Host, Source: d.Source, DumpType: d.DumpTypeName(), Origin: d.Origin, Rest: d.IsRest()})
 				}
 			}
 			for _, it := range items {
