@@ -87,7 +87,7 @@ func newDumpCmd(a *app) *cobra.Command {
 						rec.RunID = s.ID
 						rec.Archives = len(s.Archives)
 						rec.BytesMoved = s.TotalBytes()
-						rec.DumpStats, rec.LandingStats = dumpStats(s, cfg.WorkdirPath())
+						rec.DumpStats, rec.LandingStats = dumpStats(s, cfg.WorkdirPath(), restSlugs(eng))
 						rec.Warnings = landingWarnings(cfg.WorkdirPath(), s.ID)
 					}
 					return rec, err
@@ -99,7 +99,7 @@ func newDumpCmd(a *app) *cobra.Command {
 					sep = ""
 				}
 				fmt.Printf(sep+"Committed %s: %d archive(s), %s total\n", s.ID, len(s.Archives), sizeutil.FormatBytes(s.TotalBytes()))
-				stats, landings := dumpStats(s, cfg.WorkdirPath())
+				stats, landings := dumpStats(s, cfg.WorkdirPath(), restSlugs(eng))
 				return report.Run{
 					Command:      report.CommandDump,
 					RunID:        s.ID,
@@ -127,7 +127,7 @@ func newDumpCmd(a *app) *cobra.Command {
 // over *busy* seconds, so an idle-most-of-the-run drainer is never read as a slow
 // device. When the snapshot is missing or stale, sizes are still recorded and
 // timing/reason are left zero (rendered as a dash / omitted).
-func dumpStats(s *catalog.Run, workdir string) ([]report.DLEStat, []report.LandingStat) {
+func dumpStats(s *catalog.Run, workdir string, rest map[string]bool) ([]report.DLEStat, []report.LandingStat) {
 	type key struct {
 		name  string
 		level int
@@ -188,9 +188,23 @@ func dumpStats(s *catalog.Run, workdir string) ([]report.DLEStat, []report.Landi
 			Reason:       p.reason,
 			FlushBytes:   p.flushBytes,
 			FlushSeconds: p.flushSeconds,
+			Rest:         rest[a.DLE],
 		})
 	}
 	return stats, landings
+}
+
+// restSlugs collects the partition-remainder slugs of the run's resolved set
+// (recorded at plan-commit, so it reflects THIS run), letting each DLEStat carry
+// its Rest mark into the historical record — the dump table's "(the rest)" label.
+func restSlugs(eng *engine.Engine) map[string]bool {
+	rest := map[string]bool{}
+	for _, r := range eng.Catalog().LatestResolved() {
+		if r.Rest {
+			rest[r.DLE] = true
+		}
+	}
+	return rest
 }
 
 // landingWarnings reads the run's landing degradations off the run-status snapshot

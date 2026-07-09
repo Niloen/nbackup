@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/dletree"
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
@@ -51,19 +52,45 @@ func runDleList(a *app) error {
 		return nil
 	}
 
+	// Rows arranged by path (dletree, the same tree `nb plan` and the report draw):
+	// a partitioned source's DLEs render under one host:base header with short
+	// relative labels and a size subtotal, so the list stays readable when one
+	// source resolves into dozens of long-named children.
 	tw := newTab(os.Stdout)
 	fmt.Fprintln(tw, "DLE\tRUNS\tLAST FULL\tLAST\tSIZE\tCOPIES")
-	for _, g := range sums {
+	row := func(label string, g catalog.DLESummary) {
 		lastFull := g.LastFull
 		if lastFull == "" {
 			lastFull = "never"
 		}
-		display := g.Display
-		if g.Rest {
-			display += "  (the rest of a partition)"
-		}
-		fmt.Fprintf(tw, "%s\t%d\t%s\tL%d\t%s\t%s\n", display, g.Runs, lastFull, g.LastLevel,
+		fmt.Fprintf(tw, "%s\t%d\t%s\tL%d\t%s\t%s\n", label, g.Runs, lastFull, g.LastLevel,
 			sizeutil.FormatBytes(g.Bytes), strings.Join(g.Media, ", "))
+	}
+	items := make([]dletree.Item, len(sums))
+	for i, s := range sums {
+		items[i], _ = dletree.Split(s.Display)
+		items[i].Rest = s.Rest
+	}
+	for _, g := range dletree.Build(items) {
+		if g.Children == nil {
+			s := sums[g.Index]
+			display := s.Display
+			if s.Rest {
+				// A remainder whose siblings left the catalog: position no longer
+				// says what it is, so the suffix still has to.
+				display += "  (the rest of a partition)"
+			}
+			row(display, s)
+			continue
+		}
+		var bytes int64
+		for _, c := range g.Children {
+			bytes += sums[c.Index].Bytes
+		}
+		fmt.Fprintf(tw, "%s · %d DLEs · %s\t\t\t\t\t\n", g.ID(), len(g.Children), sizeutil.FormatBytes(bytes))
+		for i, c := range g.Children {
+			row("  "+dletree.Branch(i, len(g.Children))+" "+g.Label(c), sums[c.Index])
+		}
 	}
 	tw.Flush()
 	return nil

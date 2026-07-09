@@ -169,6 +169,17 @@
   .host-row td { padding: .5rem .6rem; font-size: .85rem; color: var(--muted); white-space: normal; }
   .host-row strong { color: var(--fg); }
   .heat .host-row td { padding: .4rem .6rem .6rem; }
+  /* Path-group rows on /dles (dletree): a partitioned source's DLEs sit under one
+     host:base header row that aggregates them and toggles their visibility; member
+     rows are indented with a twig and short base-relative labels. */
+  .group-row td { font-weight: 600; cursor: pointer; }
+  .gtog { display: inline-block; width: 1.1rem; color: var(--muted); }
+  .twig { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  td .chip { font-size: .72rem; font-weight: 600; background: var(--line); color: var(--muted);
+    border-radius: 999px; padding: .02rem .5rem; margin-left: .45rem; }
+  tr[data-in] td:first-child { padding-left: 1.4rem; }
+  .heat .group-row td { padding: .35rem 0 .25rem; font-size: .85rem; }
+  .heat .lbl.member { padding-left: 1.1rem; }
   /* Placement grid on /runs/<id>: archives × placements, each cell the archive's
      own volume:file positions — a partial copy's holes read as ✕ at a glance. */
   .pgrid th.medium { text-transform: none; letter-spacing: 0; font-size: .86rem; color: var(--fg); }

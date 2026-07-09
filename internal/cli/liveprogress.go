@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/sizeutil"
@@ -12,6 +13,32 @@ import (
 // frame stays a fixed bounded height (it must not scroll, or the cursor rewind
 // desyncs). Excess actives collapse into a "+N more" line.
 const liveProgressRows = 8
+
+// liveNameMax caps a DLE name in the live frame, so a partitioned source's long
+// absolute path can't push the numbers after it off the terminal edge (the
+// frame's own truncation cuts the line's tail — exactly the part that matters).
+const liveNameMax = 44
+
+// liveName renders a DLE name for a live row, truncated to liveNameMax when
+// needed: the host prefix and the path's tail are kept and the cut is marked
+// with a leading "-" — amreport's convention, hosts being told apart by their
+// head and paths by their leaf.
+func liveName(name string) string {
+	if len(name) <= liveNameMax {
+		return name
+	}
+	host := ""
+	path := name
+	if i := strings.IndexByte(name, ':'); i >= 0 {
+		host, path = name[:i+1], name[i+1:]
+	}
+	keep := liveNameMax - len(host) - 1 // -1 for the "-" marker
+	if r := []rune(path); keep > 0 && keep < len(r) {
+		return host + "-" + string(r[len(r)-keep:])
+	}
+	r := []rune(name)
+	return "-" + string(r[len(r)-(liveNameMax-1):])
+}
 
 // estimateProgress returns a live sink that paints estimate progress to stderr, or
 // nil when output is quiet or stderr is not a terminal (a pipe/file/cron log), so
@@ -39,7 +66,7 @@ func estimateLines(s progress.Snapshot) []string {
 	active, done, _, _ := s.Counts()
 	lines := []string{fmt.Sprintf("Estimating sizes… %d/%d done, %d running", done, len(s.DLEs), active)}
 	return append(lines, activeRows(s, func(d progress.DLE) string {
-		return "  ▸ " + d.Name
+		return "  ▸ " + liveName(d.Name)
 	})...)
 }
 
@@ -62,13 +89,13 @@ func runLines(s progress.Snapshot) []string {
 			if d.OutBytes > 0 {
 				pct = fmt.Sprintf("  %3.0f%%", d.DrainPct())
 			}
-			return fmt.Sprintf("  ▸ %s L%d  flushing%s%s", d.Name, d.Level, from, pct)
+			return fmt.Sprintf("  ▸ %s L%d  flushing%s%s", liveName(d.Name), d.Level, from, pct)
 		}
 		pct := ""
 		if d.EstBytes > 0 {
 			pct = fmt.Sprintf("  %3.0f%%", d.Pct())
 		}
-		return fmt.Sprintf("  ▸ %s L%d  %s of ~%s%s", d.Name, d.Level,
+		return fmt.Sprintf("  ▸ %s L%d  %s of ~%s%s", liveName(d.Name), d.Level,
 			sizeutil.FormatBytes(d.DoneBytes), sizeutil.FormatBytes(d.EstBytes), pct)
 	})...)
 	lines = append(lines, fmt.Sprintf("Total: %s of ~%s  (%.0f%%)",

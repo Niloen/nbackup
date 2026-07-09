@@ -120,6 +120,10 @@ type DLEStat struct {
 	// landing write IS the dump, already timed by Seconds.
 	FlushBytes   int64   `json:"flush_bytes,omitempty"`
 	FlushSeconds float64 `json:"flush_seconds,omitempty"`
+	// Rest marks a partition's remainder (catalog.ResolvedDLE.Rest at seal time),
+	// so the dump table can label the row "(the rest)" instead of implying the
+	// base DLE covered the whole tree.
+	Rest bool `json:"rest,omitempty"`
 }
 
 // ID returns the host:path identity for display, falling back to the
@@ -136,16 +140,26 @@ func (d DLEStat) ID() string {
 // failure, or simply confirm a still-healthy DLE.
 type DrillHealth struct {
 	DLE     string `json:"dle"`
-	OK      bool   `json:"ok"`              // this run's outcome
-	Class   string `json:"class,omitempty"` // drill.Class token when !OK
-	WasOK   bool   `json:"was_ok"`          // the prior ledger record passed
-	Drilled bool   `json:"drilled"`         // actually exercised this run (vs skipped)
-	Bytes   int64  `json:"bytes,omitempty"` // egress this DLE's drill read off the medium
+	Display string `json:"display,omitempty"` // host:path identity; DLE (the slug) when unrecorded
+	OK      bool   `json:"ok"`                // this run's outcome
+	Class   string `json:"class,omitempty"`   // drill.Class token when !OK
+	WasOK   bool   `json:"was_ok"`            // the prior ledger record passed
+	Drilled bool   `json:"drilled"`           // actually exercised this run (vs skipped)
+	Bytes   int64  `json:"bytes,omitempty"`   // egress this DLE's drill read off the medium
 }
 
 // Degrading reports a DLE that was passing and is now failing — the trend a digest
 // must surface most loudly.
 func (h DrillHealth) Degrading() bool { return h.Drilled && !h.OK && h.WasOK }
+
+// Name is the identity a digest prints: the host:path display when recorded,
+// else the slug (records predating the Display field).
+func (h DrillHealth) Name() string {
+	if h.Display != "" {
+		return h.Display
+	}
+	return h.DLE
+}
 
 // Failed reports whether the run did not succeed.
 func (r Run) Failed() bool { return r.Outcome == OutcomeFailure }

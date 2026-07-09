@@ -31,6 +31,7 @@ func drillRunRecord(dr *engine.DrillReport, priorOK map[string]bool) report.Run 
 		drilled := t.Class != drill.ClassSkipped
 		h := report.DrillHealth{
 			DLE:     t.DLE,
+			Display: t.DLEDisplay,
 			OK:      t.OK,
 			Class:   t.Class.String(),
 			WasOK:   seen && was,

@@ -8,6 +8,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/dletree"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
@@ -279,6 +280,12 @@ func renderStats(w io.Writer, stats []DLEStat, landings []LandingStat, wall time
 // columns follow (Amanda's per-DLE taper stats beside its dumper stats): the
 // drain's copy time and its compressed rate over that time — a direct dump shows
 // dashes there, its landing write already being the dump itself.
+//
+// Rows are arranged by path (dletree): a partitioned source's many DLEs render
+// as one group — a header row carrying the shared host:base prefix and the
+// group's totals, then each member under a short base-relative label — so the
+// long absolute paths never set the table's column width, and a source with
+// fifty children reads as one entry with a subtotal instead of fifty repeats.
 func renderDumpTable(w io.Writer, stats []DLEStat) {
 	flushed := anyFlushed(stats)
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
@@ -287,18 +294,50 @@ func renderDumpTable(w io.Writer, stats []DLEStat) {
 	} else {
 		fmt.Fprintln(tw, "DLE\tLVL\tORIG\tOUT\tCOMP%\tFILES\tTIME\tRATE")
 	}
-	for _, d := range stats {
+	row := func(label string, d DLEStat) {
 		lvl := fmt.Sprintf("%d", d.Level)
 		if d.Promoted {
 			lvl += "*" // a promoted full; explained by renderPromotions below the table
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s",
-			d.ID(), lvl, sizeutil.FormatBytes(d.Orig), sizeutil.FormatBytes(d.Out),
+			label, lvl, sizeutil.FormatBytes(d.Orig), sizeutil.FormatBytes(d.Out),
 			compPct(d.Orig, d.Out), d.Files, dumpTime(d.Seconds), dumpRate(d.Orig, d.Seconds))
 		if flushed {
 			fmt.Fprintf(tw, "\t%s\t%s", dumpTime(d.FlushSeconds), dumpRate(d.FlushBytes, d.FlushSeconds))
 		}
 		fmt.Fprintln(tw)
+	}
+	items := make([]dletree.Item, len(stats))
+	for i, d := range stats {
+		if d.Host == "" && d.Path == "" {
+			items[i] = dletree.Item{Path: d.DLE} // bare-slug fallback: stays flat
+		} else {
+			items[i] = dletree.Item{Host: d.Host, Path: d.Path, Rest: d.Rest}
+		}
+	}
+	for _, g := range dletree.Build(items) {
+		if g.Children == nil {
+			row(stats[g.Index].ID(), stats[g.Index])
+			continue
+		}
+		var a agg
+		var flushB int64
+		var flushS float64
+		for _, c := range g.Children {
+			a.add(stats[c.Index])
+			flushB += stats[c.Index].FlushBytes
+			flushS += stats[c.Index].FlushSeconds
+		}
+		fmt.Fprintf(tw, "%s · %d DLEs\t\t%s\t%s\t%s\t%d\t%s\t%s",
+			g.ID(), a.n, sizeutil.FormatBytes(a.orig), sizeutil.FormatBytes(a.out),
+			compPct(a.orig, a.out), a.files, dumpTime(a.secs), dumpRate(a.orig, a.secs))
+		if flushed {
+			fmt.Fprintf(tw, "\t%s\t%s", dumpTime(flushS), dumpRate(flushB, flushS))
+		}
+		fmt.Fprintln(tw)
+		for i, c := range g.Children {
+			row("  "+dletree.Branch(i, len(g.Children))+" "+g.Label(c), stats[c.Index])
+		}
 	}
 	tw.Flush()
 }
@@ -436,15 +475,17 @@ func detailCell(r Run) string {
 
 // renderRecovery prints the recovery-health note for a drill run: DLEs degrading
 // (passed before, failing now), never drilled, or overdue — the "trending bad"
-// answer. It prints nothing when r carries no drill signal.
+// answer. It prints nothing when r carries no drill signal. Each list is one
+// line, so it folds path siblings and caps its length (foldDLEs) rather than
+// growing into a paragraph on a partitioned source's fifty children.
 func renderRecovery(w io.Writer, r Run) {
 	var degrading, failing []string
 	for _, h := range r.DrillHealth {
 		if !h.OK && h.Drilled {
 			if h.WasOK {
-				degrading = append(degrading, h.DLE)
+				degrading = append(degrading, h.Name())
 			} else {
-				failing = append(failing, fmt.Sprintf("%s [%s]", h.DLE, h.Class))
+				failing = append(failing, fmt.Sprintf("%s [%s]", h.Name(), h.Class))
 			}
 		}
 	}
@@ -453,15 +494,16 @@ func renderRecovery(w io.Writer, r Run) {
 	}
 	fmt.Fprintln(w, "\nRECOVERY HEALTH")
 	if len(degrading) > 0 {
-		sort.Strings(degrading)
-		fmt.Fprintf(w, "  DEGRADING (passed before, failing now): %s\n", strings.Join(degrading, ", "))
+		fmt.Fprintf(w, "  DEGRADING (passed before, failing now): %s\n", dletree.FoldList(degrading))
 	}
 	if len(failing) > 0 {
+		// Not folded: each entry carries its own failure class, which a group
+		// rollup would erase. Capped all the same.
 		sort.Strings(failing)
-		fmt.Fprintf(w, "  failing: %s\n", strings.Join(failing, ", "))
+		fmt.Fprintf(w, "  failing: %s\n", dletree.CapList(failing))
 	}
 	if n := len(r.NeverDrilled); n > 0 {
-		fmt.Fprintf(w, "  never drilled: %s\n", strings.Join(r.NeverDrilled, ", "))
+		fmt.Fprintf(w, "  never drilled: %s\n", dletree.FoldList(r.NeverDrilled))
 	}
 	if r.Overdue > 0 {
 		fmt.Fprintf(w, "  %d DLE(s) overdue for a drill\n", r.Overdue)

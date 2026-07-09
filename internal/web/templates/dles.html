@@ -1,3 +1,48 @@
+{{/* heat-rows renders one arranged run of heatmap rows: group header rows (label
+     only, toggling their members) and DLE rows whose Label is base-relative
+     inside a group — the full identity stays on the link's title. */}}
+{{define "heat-rows"}}
+{{range .}}
+{{if .Header}}
+<tr class="group-row" data-g="{{.Group}}"><td class="lbl" colspan="99"><span class="gtog">▾</span>{{.Label}}</td></tr>
+{{else}}
+<tr{{if .Group}} data-in="{{.Group}}"{{end}}>
+  <td class="lbl{{if .Group}} member{{end}}"><a href="/dles/{{.Slug}}"{{if .Group}} title="{{.Display}}"{{end}}>{{.Label}}</a></td>
+  {{range .Cells}}
+  <td>{{if .RunID}}<a class="cell {{.Class}}" href="/runs/{{.RunID}}" title="{{.Title}}"></a>{{else}}<span class="cell {{.Class}}" title="{{.Title}}"></span>{{end}}</td>
+  {{end}}
+</tr>
+{{end}}
+{{end}}
+{{end}}
+
+{{/* dle-rows renders one arranged run of Sources rows: group headers carry the
+     member count and aggregate cells (runs, newest full, total size, media
+     union); member rows show a twig plus their base-relative label. */}}
+{{define "dle-rows"}}
+{{range .}}
+{{if .Header}}
+<tr class="group-row" data-g="{{.Group}}">
+  <td><span class="gtog">▾</span>{{.Label}}<span class="chip">{{.Count}} DLEs</span></td>
+  <td class="num">{{.Runs}}</td>
+  <td></td>
+  <td>{{if .LastFull}}{{.LastFull}}{{else}}<span class="warn">never</span>{{end}}</td>
+  <td class="num">{{bytes .Bytes}}</td>
+  <td class="muted">{{.Media}}</td>
+</tr>
+{{else}}
+<tr{{if .Group}} data-in="{{.Group}}"{{end}}>
+  <td>{{if .Twig}}<span class="twig">{{.Twig}}</span> {{end}}<a href="/dles/{{.Slug}}"{{if .Twig}} title="{{.Display}}"{{end}}>{{.Label}}</a>{{if .RestNote}} <span class="muted">(the rest of a partition)</span>{{end}}</td>
+  <td class="num">{{.Runs}}</td>
+  <td><span class="pill dim">{{level .LastLevel}}</span></td>
+  <td>{{if .LastFull}}{{.LastFull}}{{else}}<span class="warn">never</span>{{end}}</td>
+  <td class="num">{{bytes .Bytes}}</td>
+  <td class="muted">{{.Media}}</td>
+</tr>
+{{end}}
+{{end}}
+{{end}}
+
 {{define "content"}}
 {{$d := .Data}}
 <h1>DLEs</h1>
@@ -10,24 +55,10 @@
   {{if $d.HeatGroups}}
   {{range $d.HeatGroups}}
   <tr class="host-row"><td class="lbl" colspan="99">{{hostLabel .Host}}</td></tr>
-  {{range .Rows}}
-  <tr>
-    <td class="lbl"><a href="/dles/{{.Slug}}">{{.Display}}</a></td>
-    {{range .Cells}}
-    <td>{{if .RunID}}<a class="cell {{.Class}}" href="/runs/{{.RunID}}" title="{{.Title}}"></a>{{else}}<span class="cell {{.Class}}" title="{{.Title}}"></span>{{end}}</td>
-    {{end}}
-  </tr>
-  {{end}}
+  {{template "heat-rows" .Rows}}
   {{end}}
   {{else}}
-  {{range .Rows}}
-  <tr>
-    <td class="lbl"><a href="/dles/{{.Slug}}">{{.Display}}</a></td>
-    {{range .Cells}}
-    <td>{{if .RunID}}<a class="cell {{.Class}}" href="/runs/{{.RunID}}" title="{{.Title}}"></a>{{else}}<span class="cell {{.Class}}" title="{{.Title}}"></span>{{end}}</td>
-    {{end}}
-  </tr>
-  {{end}}
+  {{template "heat-rows" .Rows}}
   {{end}}
 </table>
 <div class="heat-legend">
@@ -46,32 +77,38 @@
   <tr><th>DLE</th><th class="num">Runs</th><th>Last</th><th>Last full</th><th class="num">Size</th><th>Media</th></tr>
   {{range $d.Groups}}
   <tr class="host-row"><td colspan="6">{{hostLabel .Host}}</td></tr>
-  {{range .Rows}}
-  <tr>
-    <td><a href="/dles/{{.Slug}}">{{.Display}}</a></td>
-    <td class="num">{{.Runs}}</td>
-    <td><span class="pill dim">{{level .LastLevel}}</span></td>
-    <td>{{if .LastFull}}{{.LastFull}}{{else}}<span class="warn">never</span>{{end}}</td>
-    <td class="num">{{bytes .Bytes}}</td>
-    <td class="muted">{{.Media}}</td>
-  </tr>
-  {{end}}
+  {{template "dle-rows" .Rows}}
   {{end}}
 </table>
 {{else if $d.Rows}}
 <table>
   <tr><th>DLE</th><th class="num">Runs</th><th>Last</th><th>Last full</th><th class="num">Size</th><th>Media</th></tr>
-  {{range $d.Rows}}
-  <tr>
-    <td><a href="/dles/{{.Slug}}">{{.Display}}</a></td>
-    <td class="num">{{.Runs}}</td>
-    <td><span class="pill dim">{{level .LastLevel}}</span></td>
-    <td>{{if .LastFull}}{{.LastFull}}{{else}}<span class="warn">never</span>{{end}}</td>
-    <td class="num">{{bytes .Bytes}}</td>
-    <td class="muted">{{.Media}}</td>
-  </tr>
-  {{end}}
+  {{template "dle-rows" $d.Rows}}
 </table>
 {{else}}<div class="empty">No DLEs in catalog.</div>{{end}}
 </div>
+
+<script>
+// Group headers toggle their member rows; groups past ten members start
+// collapsed so a partitioned source's long tail doesn't dominate the page.
+// Without JS everything simply stays visible.
+document.querySelectorAll("tr[data-g]").forEach(function (h) {
+  var table = h.closest("table");
+  var members = Array.prototype.filter.call(
+    table.querySelectorAll("tr[data-in]"),
+    function (r) { return r.getAttribute("data-in") === h.getAttribute("data-g"); });
+  var glyph = h.querySelector(".gtog");
+  var open;
+  function set(o) {
+    open = o;
+    members.forEach(function (r) { r.hidden = !o; });
+    if (glyph) glyph.textContent = o ? "▾" : "▸";
+  }
+  h.addEventListener("click", function (e) {
+    if (e.target.closest("a")) return;
+    set(!open);
+  });
+  set(members.length <= 10);
+});
+</script>
 {{end}}

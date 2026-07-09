@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Niloen/nbackup/internal/dletree"
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/record"
@@ -291,7 +292,9 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 		}
 		windowTotal += est
 		totalIncrs += incrs
-		names := strings.Join(fullNames, ", ")
+		// Folded+capped: a partitioned source's fulls read as one "host:base
+		// (N DLEs)" entry instead of a wall of long paths on one line.
+		names := dletree.FoldList(fullNames)
 		if names == "" {
 			names = "-"
 		}

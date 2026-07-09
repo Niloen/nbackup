@@ -164,6 +164,7 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 		Apply: opts.Apply, Unattended: opts.Unattended, Ledger: ledger,
 	}
 	rep.NeverDrilled, rep.Overdue = ledger.Coverage(dles, opts.Window, opts.Now)
+	d.toDisplay(rep.NeverDrilled)
 
 	// Price the egress of reading the selected chains off the drill medium — the
 	// honest cost of an offsite drill (an encrypted+compressed archive is all-or-
@@ -247,7 +248,16 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 	rep.Posture = d.posture(rep.Worm, rep.Failures)
 	// Recompute coverage against the freshly updated ledger.
 	rep.NeverDrilled, rep.Overdue = ledger.Coverage(dles, opts.Window, opts.Now)
+	d.toDisplay(rep.NeverDrilled)
 	return rep, nil
+}
+
+// displayAll rewrites a slice of DLE slugs to their host:path display identities
+// in place — coverage lists leave the engine as the ids an operator reads.
+func (d *driller) toDisplay(slugs []string) {
+	for i, s := range slugs {
+		slugs[i] = d.dles.display(s)
+	}
 }
 
 // drillTarget exercises one target at the requested tier and classifies the outcome.

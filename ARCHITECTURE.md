@@ -79,6 +79,7 @@ registry registration, not a conditional in the core.
 | `restorer` | the read-side operation package (mirror of `dumper`): `Extract(Request)` — the one whole-DLE chain restore behind `nb recover --all` *and* the drill's chain tier — plus `ExtractSelection` (file-level recovery) and the decode primitives verify reuses. Written over `archivefs.ReadStore` + narrow resolution funcs, so it tests over fakes | amrestore / amrecover (execution) |
 | `drill` | recovery-drill ledger + risk-biased selection + failure taxonomy (pure) | amverify (orchestrated) |
 | `planner` | multilevel level scheduling (pure) | planner |
+| `dletree` | path-arranged display grouping of DLE identities (pure leaf): recovers a partitioned source's structure from names alone, so the report, `nb dle`/`nb plan`, and the web fold its many long-pathed DLEs under one `host:base` header with relative labels | amreport columnspec (display concern) |
 | `accounting` | medium capacity/retention/prune arithmetic: what a medium holds against its capacity, the protected residual a prune can't reclaim, the expected next volume + per-run room, and the prune/reclaim mutators — plus the dollar-cost overlay (`accounting/cost.go`) that prices the same bytes | (driver, capacity half) |
 | `scheduler` | the engine-side **driver** that feeds the pure `planner` its config/history/capacity inputs + the parallel size estimates, then applies the impure force-full post-pass `planner` can't (it probes the archiver's on-disk incremental state); also validates a run's config for previews | driver (planner front-end) |
 | `spool` | the run's concurrent write seam: routes each archive direct to its landing or through the holding-disk `Pool`, per-landing `writers` permits, one orchestrator goroutine as the sole catalog writer | taper (holding-disk half) |
@@ -88,7 +89,7 @@ registry registration, not a conditional in the core.
 
 Dependencies flow one way: `cli → engine → {planner, retention, archiver, xfer,
 archivefs, archiveio, depot, catalog, config, progress, recovery, restorer}` over leaf
-packages `{media, programs, sizeutil}`, all bottoming out on `record` (the on-medium
+packages `{media, programs, sizeutil, dletree}`, all bottoming out on `record` (the on-medium
 artifact format that `media`, `archiveio`, and `catalog` read and write; `archiveio`
 adds the value objects — `Ref`, the archive identity both the block layer asserts and
 the fs resolves, and `FilePos`/`ArchivePos`, its file locations; `restorer` executes

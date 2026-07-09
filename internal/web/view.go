@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/catalog"
+	"github.com/Niloen/nbackup/internal/dletree"
 	"github.com/Niloen/nbackup/internal/engine"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
@@ -875,10 +876,20 @@ func archivePosText(pa catalog.PlacedArchive) string {
 }
 
 // dleRow is one line of the DLEs list — the DLE-major catalog rollup (catalog.DLESummary
-// flattened for the template, with Media pre-joined).
+// flattened for the template, with Media pre-joined). Rows are arranged by path
+// (dletree): a partitioned source's DLEs render as one group — a header row
+// (Header, with member count and aggregate cells) followed by member rows whose
+// Label is base-relative — so long absolute paths never force the table to
+// scroll and a source's fifty children read as one entry.
 type dleRow struct {
 	Slug      string
-	Display   string
+	Display   string // full host:path identity (member rows link-title it)
+	Label     string // what the DLE cell shows: Display, a member's relative path, or a group header's host:base
+	Twig      string // tree glyph before a member label ("├─"/"└─")
+	Group     string // the group this row belongs to (its header's ID); "" for flat rows
+	Header    bool   // a group header row: Label/Count plus aggregate Runs/LastFull/Bytes/Media
+	Count     int    // header: member count
+	RestNote  bool   // a flat partition-remainder row (position no longer says it, so a note must)
 	Runs      int
 	LastLevel int
 	LastFull  string
@@ -960,23 +971,101 @@ func partitionByHost(sums []catalog.DLESummary) (order []string, byHost map[stri
 	return
 }
 
+// arrangeDLEs turns a set of DLE summaries into path-arranged table and heatmap
+// rows (dletree): flat rows for unrelated DLEs, and for each path group a header
+// row — member count plus aggregate runs/newest-full/bytes/media — followed by
+// its members under short base-relative labels, "(the rest)" for a partition's
+// remainder. The heatmap gets the same arrangement (header rows carry no cells).
+func arrangeDLEs(sums []catalog.DLESummary, heatBySlug map[string]heatRow) ([]dleRow, []heatRow) {
+	items := make([]dletree.Item, len(sums))
+	for i, s := range sums {
+		items[i], _ = dletree.Split(s.Display)
+		items[i].Rest = s.Rest
+	}
+	dataRow := func(s catalog.DLESummary) dleRow {
+		return dleRow{
+			Slug: s.DLE, Display: s.Display, Label: s.Display, Runs: s.Runs,
+			LastLevel: s.LastLevel, LastFull: s.LastFull, Bytes: s.Bytes,
+			Media: strings.Join(s.Media, ", "),
+		}
+	}
+	var rows []dleRow
+	var hrows []heatRow
+	for _, g := range dletree.Build(items) {
+		if g.Children == nil {
+			s := sums[g.Index]
+			r := dataRow(s)
+			r.RestNote = s.Rest
+			rows = append(rows, r)
+			if hr, ok := heatBySlug[s.DLE]; ok {
+				hr.Label = s.Display
+				hrows = append(hrows, hr)
+			}
+			continue
+		}
+		hdr := dleRow{Header: true, Group: g.ID(), Label: g.ID(), Count: len(g.Children)}
+		media := map[string]bool{}
+		for _, c := range g.Children {
+			s := sums[c.Index]
+			hdr.Runs += s.Runs
+			hdr.Bytes += s.Bytes
+			if s.LastFull > hdr.LastFull { // ISO dates: lexicographic max = newest
+				hdr.LastFull = s.LastFull
+			}
+			for _, m := range s.Media {
+				media[m] = true
+			}
+		}
+		hdr.Media = strings.Join(sortedKeys(media), ", ")
+		rows = append(rows, hdr)
+		hrows = append(hrows, heatRow{Header: true, Group: g.ID(),
+			Label: fmt.Sprintf("%s · %d DLEs", g.ID(), len(g.Children))})
+		for i, c := range g.Children {
+			s := sums[c.Index]
+			r := dataRow(s)
+			r.Label, r.Twig, r.Group = g.Label(c), dletree.Branch(i, len(g.Children)), g.ID()
+			rows = append(rows, r)
+			if hr, ok := heatBySlug[s.DLE]; ok {
+				hr.Label, hr.Group = g.Label(c), g.ID()
+				hrows = append(hrows, hr)
+			}
+		}
+	}
+	return rows, hrows
+}
+
+// sortedKeys returns a map's keys sorted — media unions for group header rows.
+func sortedKeys(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // groupDLEs builds the /dles page data from the catalog's DLE summaries, the
 // currently-stale ones (for each host section's "K stale" count), and the
-// pre-built heatmap. It renders flat (Groups/HeatGroups nil) whenever the
-// summaries span at most one host — a single host, or all hostless — so that
-// common case looks exactly as it did before grouping existed.
+// pre-built heatmap. Rows are always path-arranged (arrangeDLEs); on top of
+// that, whenever the summaries span more than one host they are sectioned into
+// per-host groups (Groups/HeatGroups) — hosts are the failure domain. With at
+// most one host the flat Rows/Heat render, exactly as before grouping existed.
 func groupDLEs(sums []catalog.DLESummary, stale []catalog.StaleDLE, heat *heatmap) dlesData {
-	rows := make([]dleRow, 0, len(sums))
-	for _, d := range sums {
-		rows = append(rows, dleRow{
-			Slug: d.DLE, Display: d.Display, Runs: d.Runs, LastLevel: d.LastLevel,
-			LastFull: d.LastFull, Bytes: d.Bytes, Media: strings.Join(d.Media, ", "),
-		})
+	heatBySlug := map[string]heatRow{}
+	if heat != nil {
+		for _, r := range heat.Rows {
+			heatBySlug[r.Slug] = r
+		}
 	}
-	data := dlesData{Rows: rows, Heat: heat}
 
+	data := dlesData{Heat: heat}
 	order, byHost, hostless := partitionByHost(sums)
+	var hrows []heatRow
+	data.Rows, hrows = arrangeDLEs(sums, heatBySlug)
 	if len(order) <= 1 {
+		if heat != nil {
+			heat.Rows = hrows
+		}
 		return data
 	}
 
@@ -998,17 +1087,6 @@ func groupDLEs(sums []catalog.DLESummary, stale []catalog.StaleDLE, heat *heatma
 		}
 	}
 
-	rowBySlug := make(map[string]dleRow, len(rows))
-	for _, r := range rows {
-		rowBySlug[r.Slug] = r
-	}
-	heatBySlug := map[string]heatRow{}
-	if heat != nil {
-		for _, r := range heat.Rows {
-			heatBySlug[r.Slug] = r
-		}
-	}
-
 	build := func(members []catalog.DLESummary, host string) (dleGroup, heatGroup) {
 		hs := dleHostSummary{Host: host, Count: len(members), Stale: staleByHost[host]}
 		gr, hg := dleGroup{Host: hs}, heatGroup{Host: hs}
@@ -1017,13 +1095,8 @@ func groupDLEs(sums []catalog.DLESummary, stale []catalog.StaleDLE, heat *heatma
 			if m.LastBackupAt.After(newest) {
 				newest = m.LastBackupAt
 			}
-			if r, ok := rowBySlug[m.DLE]; ok {
-				gr.Rows = append(gr.Rows, r)
-			}
-			if hr, ok := heatBySlug[m.DLE]; ok {
-				hg.Rows = append(hg.Rows, hr)
-			}
 		}
+		gr.Rows, hg.Rows = arrangeDLEs(members, heatBySlug)
 		gr.Host.Newest, hg.Host.Newest = newest, newest
 		return gr, hg
 	}
@@ -1218,10 +1291,15 @@ type heatDay struct {
 	Tick string
 }
 
-// heatRow is one DLE's row of daily cells, in Days order.
+// heatRow is one DLE's row of daily cells, in Days order. Like dleRow, rows are
+// path-arranged: a group header row (Header, no cells) precedes its members,
+// whose Label is base-relative and indented by the template.
 type heatRow struct {
 	Slug    string
 	Display string
+	Label   string // what the label cell shows (Display, relative path, or the header's rollup)
+	Group   string // the group this row belongs to; "" for flat rows
+	Header  bool   // a group header row (label only, no cells)
 	Cells   []heatCell
 }
 

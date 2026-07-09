@@ -260,3 +260,69 @@ func TestRenderDumpWriteStats(t *testing.T) {
 		t.Errorf("all-direct run must not render flush columns:\n%s", direct.String())
 	}
 }
+
+// TestRenderDumpGroupsPartition checks the dump table's path arrangement: a
+// partitioned source's DLEs render under one host:base header row carrying the
+// group's totals, members get short base-relative labels with tree glyphs, the
+// remainder is labeled "(the rest)", and unrelated DLEs stay flat.
+func TestRenderDumpGroupsPartition(t *testing.T) {
+	r := Run{
+		Command: CommandDump, Outcome: OutcomeSuccess, RunID: "run-2026-07-09.020000",
+		StartedAt: time.Date(2026, 7, 9, 2, 0, 0, 0, time.UTC), EndedAt: time.Date(2026, 7, 9, 2, 12, 0, 0, time.UTC),
+		DumpStats: []DLEStat{
+			{DLE: "app01-data-projects-alpha", Host: "app01", Path: "/data/projects/alpha", Level: 0, Orig: 10 << 30, Out: 5 << 30, Files: 100, Seconds: 100},
+			{DLE: "app01-data", Host: "app01", Path: "/data", Rest: true, Level: 1, Orig: 2 << 30, Out: 1 << 30, Files: 10, Seconds: 20},
+			{DLE: "app01-data-projects-beta", Host: "app01", Path: "/data/projects/beta", Level: 1, Orig: 4 << 30, Out: 2 << 30, Files: 40, Seconds: 40},
+			{DLE: "web01-home", Host: "web01", Path: "/home", Level: 1, Orig: 1 << 30, Out: 512 << 20, Files: 5, Seconds: 10},
+		},
+	}
+	var sb strings.Builder
+	RenderDump(&sb, r)
+	out := sb.String()
+	for _, want := range []string{
+		"app01:/data · 3 DLEs", // group header with member count
+		"17.18 GB",             // header ORIG subtotal (10+2+4 GiB)
+		"├─ projects/alpha",    // relative labels, long prefix written once
+		"├─ projects/beta",
+		"└─ (the rest)", // the remainder last, named by position
+		"web01:/home",   // unrelated DLE stays flat
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("grouped dump table missing %q\n---\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "app01:/data/projects/alpha") {
+		t.Errorf("grouped member must not repeat its full identity\n---\n%s", out)
+	}
+}
+
+// TestRenderRecoveryFoldsAndCaps checks the one-line recovery lists stay one
+// line: path siblings fold to their group with a count, and a long list caps
+// with a trailing "…and N more".
+func TestRenderRecoveryFoldsAndCaps(t *testing.T) {
+	r := Run{
+		Command: CommandDrill, Outcome: OutcomeFailure, ExitClass: "drill-failures",
+		StartedAt: time.Now(), EndedAt: time.Now().Add(time.Minute),
+		DrillHealth: []DrillHealth{
+			{DLE: "app01-data-a", Display: "app01:/data/a", OK: false, WasOK: true, Drilled: true},
+			{DLE: "app01-data-b", Display: "app01:/data/b", OK: false, WasOK: true, Drilled: true},
+			{DLE: "web01-home", Display: "web01:/home", OK: false, WasOK: true, Drilled: true},
+		},
+		NeverDrilled: []string{"h:/n1", "h2:/n2", "h3:/n3", "h4:/n4", "h5:/n5", "h6:/n6", "h7:/n7", "h8:/n8"},
+	}
+	var sb strings.Builder
+	RenderRun(&sb, r)
+	out := sb.String()
+	for _, want := range []string{
+		"app01:/data (2 DLEs)", // siblings folded to their group
+		"web01:/home",          // a lone DLE stays itself
+		"…and 3 more",          // 8 never-drilled capped at listCap
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("recovery note missing %q\n---\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "app01:/data/a") {
+		t.Errorf("folded sibling must not be listed individually\n---\n%s", out)
+	}
+}

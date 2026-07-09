@@ -1831,3 +1831,80 @@ func TestAgedRetentionQuiet(t *testing.T) {
 		t.Fatalf("/dles/etc marks a rotated-out hole as missing:\n%s", body)
 	}
 }
+
+// TestArrangeDLEs checks the path arrangement behind /dles: a partition's DLEs
+// fold under one header row (member count, aggregate cells, media union),
+// members get relative labels with twigs and the remainder is named by
+// position, while unrelated DLEs stay flat.
+func TestArrangeDLEs(t *testing.T) {
+	sums := []catalog.DLESummary{
+		{DLE: "a-data", Display: "app01:/data", Rest: true, Runs: 2, Bytes: 10, LastFull: "2026-07-02", Media: []string{"vault"}},
+		{DLE: "a-data-x", Display: "app01:/data/x", Runs: 3, Bytes: 20, LastFull: "2026-07-09", Media: []string{"s3"}},
+		{DLE: "a-home", Display: "app01:/home", Runs: 5, Bytes: 7},
+	}
+	rows, hrows := arrangeDLEs(sums, map[string]heatRow{
+		"a-data":   {Slug: "a-data", Display: "app01:/data"},
+		"a-data-x": {Slug: "a-data-x", Display: "app01:/data/x"},
+		"a-home":   {Slug: "a-home", Display: "app01:/home"},
+	})
+	if len(rows) != 4 {
+		t.Fatalf("rows = %d, want header + 2 members + 1 flat", len(rows))
+	}
+	hdr := rows[0]
+	if !hdr.Header || hdr.Label != "app01:/data" || hdr.Count != 2 ||
+		hdr.Runs != 5 || hdr.Bytes != 30 || hdr.LastFull != "2026-07-09" || hdr.Media != "s3, vault" {
+		t.Errorf("header row = %+v", hdr)
+	}
+	if rows[1].Label != "x" || rows[1].Twig != "├─" || rows[1].Group != "app01:/data" {
+		t.Errorf("member row = %+v", rows[1])
+	}
+	if rows[2].Label != "(the rest)" || rows[2].Twig != "└─" {
+		t.Errorf("rest row = %+v", rows[2])
+	}
+	if rows[3].Label != "app01:/home" || rows[3].Group != "" || rows[3].Header {
+		t.Errorf("flat row = %+v", rows[3])
+	}
+	if len(hrows) != 4 || !hrows[0].Header || hrows[1].Label != "x" || hrows[3].Label != "app01:/home" {
+		t.Errorf("heat rows = %+v", hrows)
+	}
+}
+
+// TestDLEsPathGrouping renders /dles over a partitioned-looking catalog and
+// checks the group markup reaches the page: header row with member count,
+// twigged relative labels carrying the full identity as a hover title, and the
+// collapse hooks.
+func TestDLEsPathGrouping(t *testing.T) {
+	at := time.Date(2026, 7, 9, 2, 0, 0, 0, time.UTC)
+	mk := func(dle, path string) record.Archive {
+		return record.Archive{Run: "run-2026-07-09.020000", DLE: dle, Host: "localhost", Path: path,
+			Level: 0, Compressed: 1000, FileCount: 1, CreatedAt: at}
+	}
+	src := fakeSource{runs: []*catalog.Run{{
+		ID: "run-2026-07-09.020000",
+		Archives: []record.Archive{
+			mk("l-data", "/data"),
+			mk("l-data-alpha", "/data/projects/alpha"),
+			mk("l-data-beta", "/data/projects/beta"),
+			mk("l-home", "/home"),
+		},
+	}}}
+	h := NewServer(src, t.TempDir()).Handler()
+	code, body := get(t, h, "/dles")
+	if code != http.StatusOK {
+		t.Fatalf("/dles code=%d", code)
+	}
+	for _, want := range []string{
+		"localhost:/data",                        // group header identity
+		"3 DLEs",                                 // member count chip
+		"├─",                                     // twigged member rows
+		">projects/alpha</a>",                    // relative label as the link text
+		`title="localhost:/data/projects/alpha"`, // full identity on hover
+		"all of /data",                           // covering DLE without a Rest mark
+		`data-g="localhost:/data"`,               // collapse hook
+		"localhost:/home",                        // unrelated DLE stays flat
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/dles missing %q", want)
+		}
+	}
+}

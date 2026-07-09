@@ -39,6 +39,14 @@ fs:/data — partitioned
   ✓ covers 100% of fs:/data (2 matched + the rest)
 ```
 
+The same tree follows the DLEs onto every retrospective surface, derived from their
+paths alone (so it also groups hand-written sibling DLEs, and history from before a
+source was partitioned): the dump report and `nb dle` fold a source's DLEs under one
+`host:base` header row with subtotals and short relative labels, the web DLE list and
+activity heatmap group the same way (groups past ten members collapse behind their
+header), and one-line lists — recovery health, the forecast's FULLS column — fold
+siblings to `host:base (N DLEs)`.
+
 ## Semantics worth knowing
 
 - **Sources are directories, always.** Only child *directories* become DLEs; a matching
