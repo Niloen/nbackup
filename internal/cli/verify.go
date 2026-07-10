@@ -15,6 +15,7 @@ import (
 // rather than triggered by a bare `nb verify`.
 func newVerifyCmd(a *app) *cobra.Command {
 	var all, deep bool
+	var dle string
 	cmd := &cobra.Command{
 		Use:   "verify [run-id...]",
 		Short: "Verify run integrity (checksum, or --deep structural)",
@@ -23,8 +24,11 @@ func newVerifyCmd(a *app) *cobra.Command {
 			"pipeline — decrypt, decompress, then `tar -t` (list, not extract) — and asserts the " +
 			"members match the recorded index, proving the bytes are a valid restorable stream and " +
 			"exercising the key and compression end-to-end. It writes nothing either way. Pass run ids " +
-			"to verify just those; with no ids it verifies every run (which may mount every volume in the pool).",
-		Example: "  nb verify run-2026-06-21.020000\n  nb verify --deep run-2026-06-21.020000\n  nb verify",
+			"to verify just those; with no ids it verifies every run (which may mount every volume in the pool). " +
+			"With --dle it verifies only that DLE's archives — the targeted check for confirming (or clearing " +
+			"suspicion on) a single DLE, e.g. after a drill failure — touching only the runs and media that " +
+			"hold it.",
+		Example: "  nb verify run-2026-06-21.020000\n  nb verify --deep run-2026-06-21.020000\n  nb verify --dle web01:/home --deep\n  nb verify",
 		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if all && len(args) > 0 {
@@ -52,7 +56,16 @@ func newVerifyCmd(a *app) *cobra.Command {
 			// reel swaps — give it the operator so it prompts (and reassembles a spanned
 			// run) just like restore, rather than failing at the first volume boundary.
 			attachOperator(eng)
-			if all && !a.quiet {
+			// Resolve a DLE pin to its internal slug (accepts host:path or the slug).
+			var dleSlug string
+			if dle != "" {
+				slug, ok := eng.ResolveDLE(dle)
+				if !ok {
+					return fmt.Errorf("unknown DLE %q — see `nb dle` for the catalog's DLEs", dle)
+				}
+				dleSlug = slug
+			}
+			if all && dleSlug == "" && !a.quiet {
 				mode := "checksum"
 				if deep {
 					mode = "deep (checksum + structural)"
@@ -64,7 +77,7 @@ func newVerifyCmd(a *app) *cobra.Command {
 				checks |= engine.CheckStructural
 			}
 			return a.runReported(cfg, report.Run{Command: report.CommandVerify, ExitClass: "verify-failures"}, func() (report.Run, error) {
-				vr, err := eng.Verify(args, engine.VerifyOptions{Checks: checks}, a.logf())
+				vr, err := eng.Verify(args, engine.VerifyOptions{Checks: checks, DLE: dleSlug}, a.logf())
 				if err != nil {
 					return report.Run{}, err
 				}
@@ -78,5 +91,6 @@ func newVerifyCmd(a *app) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "verify every run in the catalog (the default when no run ids are given)")
 	cmd.Flags().BoolVar(&deep, "deep", false, "also validate structure: decrypt+decompress+tar-list, members vs the recorded index")
+	cmd.Flags().StringVar(&dle, "dle", "", "verify only this DLE's archives (host:path or slug), across the given runs or every run holding it")
 	return cmd
 }

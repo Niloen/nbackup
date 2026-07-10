@@ -143,6 +143,7 @@ type DrillHealth struct {
 	Display string `json:"display,omitempty"` // host:path identity; DLE (the slug) when unrecorded
 	OK      bool   `json:"ok"`                // this run's outcome
 	Class   string `json:"class,omitempty"`   // drill.Class token when !OK
+	Detail  string `json:"detail,omitempty"`  // the actual error when !OK, so a digest names the fault
 	WasOK   bool   `json:"was_ok"`            // the prior ledger record passed
 	Drilled bool   `json:"drilled"`           // actually exercised this run (vs skipped)
 	Bytes   int64  `json:"bytes,omitempty"`   // egress this DLE's drill read off the medium

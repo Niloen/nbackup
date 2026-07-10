@@ -117,13 +117,15 @@ See [Monitoring](../features/monitoring).
 
 | Command | Key flags | Purpose |
 |---|---|---|
-| `nb verify` | `--all`, `--deep` | Re-hash archive checksums; `--all` every run, `--deep` adds a structural decrypt → decompress → `tar -t` check. |
-| `nb drill` | `--dry-run`, `--from <medium>`, `--tier <tier>`, `--sample N`, `--window <dur>`, `--as-of <date>`, `--worm`, `--unattended` | Rehearse recovery by restoring a risk-biased sample to scratch. `--sample N` sets how many DLEs to drill (default 1), `--window` the coverage window each DLE should fall within, `--worm` probes the medium for WORM/immutability. |
+| `nb verify` | `--all`, `--deep`, `--dle <dle>` | Re-hash archive checksums; `--all` every run, `--deep` adds a structural decrypt → decompress → `tar -t` check, `--dle` verifies only one DLE's archives across the runs holding it. |
+| `nb drill [dle...]` | `--dry-run`, `--from <medium>`, `--tier <tier>`, `--sample N`, `--window <dur>`, `--as-of <date>`, `--worm`, `--unattended` | Rehearse recovery by restoring a risk-biased sample to scratch. `--sample N` sets how many DLEs to drill (default 1), `--window` the coverage window each DLE should fall within, `--worm` probes the medium for WORM/immutability. Naming DLEs re-drills exactly those now (the retry after a failure); a pass clears the DLE's warning. |
 
 ```bash
 nb verify --all
 nb verify --deep
+nb verify --dle web01:/home --deep
 nb drill
+nb drill web01:/home
 nb drill --dry-run
 nb drill --from cloud --tier structural
 nb drill --tier stock

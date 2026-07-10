@@ -629,3 +629,55 @@ func TestRestoreCatchesSilentCorruption(t *testing.T) {
 		t.Fatalf("classified %s, want integrity (a damaged copy, not a chain fault)", got)
 	}
 }
+
+// TestDrillNamedRetry pins the operator's re-drill: naming a DLE drills it
+// unconditionally — bypassing the window rotation that would otherwise rank a
+// just-failed DLE (recent timestamp) behind never-drilled ones — and a passing
+// named drill overwrites the recorded failure, clearing the warning. An unknown
+// name is an error, never a silent drill of nothing.
+func TestDrillNamedRetry(t *testing.T) {
+	f := newDrillFixture(t, "none")
+	eng := f.eng
+	now := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+
+	// Seed the ledger with the shape a failed nightly leaves behind: a recent,
+	// failing record.
+	led := &drill.Ledger{}
+	led.Update(drill.Record{DLE: f.dle, LastDrill: now.Add(-time.Hour), Tier: "structural",
+		OK: false, Class: "pipeline", Detail: "seeded failure"})
+	if err := led.Save(eng.cfg.WorkdirPath()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := eng.Drill(DrillOptions{DLEs: []string{"nope:/missing"}, Apply: true, Now: now}, nil); err == nil {
+		t.Fatal("naming an unknown DLE must error")
+	}
+
+	rep, err := eng.Drill(DrillOptions{DLEs: []string{f.dle}, Tier: drill.TierStructural,
+		Window: 30 * 24 * time.Hour, Apply: true, Now: now}, nil)
+	if err != nil {
+		t.Fatalf("named drill: %v", err)
+	}
+	if len(rep.Targets) != 1 || rep.Targets[0].DLE != f.dle || rep.Failures != 0 {
+		t.Fatalf("named drill = %+v (failures %d)", rep.Targets, rep.Failures)
+	}
+	led, err = drill.Load(eng.cfg.WorkdirPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := led.Get(f.dle)
+	if !ok || !rec.OK || rec.Class != "" || rec.Detail != "" {
+		t.Fatalf("failure not cleared by the passing re-drill: %+v", rec)
+	}
+
+	// A named DLE is drilled even when its record is current and passing — the
+	// window rotation does not apply to an explicit target.
+	rep, err = eng.Drill(DrillOptions{DLEs: []string{f.dle}, Tier: drill.TierStructural,
+		Window: 30 * 24 * time.Hour, Apply: true, Now: now.Add(time.Hour)}, nil)
+	if err != nil {
+		t.Fatalf("named re-drill of a current DLE: %v", err)
+	}
+	if len(rep.Targets) != 1 {
+		t.Fatalf("named re-drill selected %d target(s), want 1", len(rep.Targets))
+	}
+}

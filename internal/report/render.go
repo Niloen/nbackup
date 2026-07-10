@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/dletree"
+	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/sizeutil"
 )
 
@@ -480,12 +481,16 @@ func detailCell(r Run) string {
 // growing into a paragraph on a partitioned source's fifty children.
 func renderRecovery(w io.Writer, r Run) {
 	var degrading, failing []string
+	var faults []DrillHealth // failures carrying the actual error, rendered individually below
 	for _, h := range r.DrillHealth {
 		if !h.OK && h.Drilled {
 			if h.WasOK {
 				degrading = append(degrading, h.Name())
 			} else {
 				failing = append(failing, fmt.Sprintf("%s [%s]", h.Name(), h.Class))
+			}
+			if h.Detail != "" {
+				faults = append(faults, h)
 			}
 		}
 	}
@@ -502,10 +507,33 @@ func renderRecovery(w io.Writer, r Run) {
 		sort.Strings(failing)
 		fmt.Fprintf(w, "  failing: %s\n", dletree.CapList(failing))
 	}
+	// The actual errors, each with its remedy and the retry that either clears the
+	// warning (a transient hiccup) or confirms the fault. Capped like the lists above.
+	const faultCap = 6
+	for i, h := range faults {
+		if i == faultCap {
+			fmt.Fprintf(w, "  …and %d more failure(s) — see `nb report` or the web /drills page\n", len(faults)-faultCap)
+			break
+		}
+		fmt.Fprintf(w, "  %s [%s]: %s\n", h.Name(), h.Class, oneLine(h.Detail))
+		fmt.Fprintf(w, "    remedy: %s\n", drill.ParseClass(h.Class).Remedy())
+		fmt.Fprintf(w, "    retry:  `nb drill %s` — a pass clears this warning\n", h.Name())
+	}
 	if n := len(r.NeverDrilled); n > 0 {
 		fmt.Fprintf(w, "  never drilled: %s\n", dletree.FoldList(r.NeverDrilled))
 	}
 	if r.Overdue > 0 {
 		fmt.Fprintf(w, "  %d DLE(s) overdue for a drill\n", r.Overdue)
 	}
+}
+
+// oneLine collapses a possibly multi-line error detail (a stock drill carries the
+// child's stderr) into a single bounded digest line.
+func oneLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	const max = 240
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max]) + "…"
+	}
+	return s
 }
