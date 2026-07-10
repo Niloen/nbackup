@@ -59,6 +59,7 @@
 <h2>History</h2>
 {{$places := .Places}}
 {{$slug := .Slug}}
+<div class="fade">
 <div class="panel scroll">
 {{if .History}}
 <table class="pgrid">
@@ -87,6 +88,7 @@
   <span><span class="sw" style="background:var(--panel);box-shadow:inset 3px 0 0 var(--ok)"></span> newest restore chain</span>
 </div>
 {{else}}<div class="empty">No archives recorded for this DLE.</div>{{end}}
+</div>
 </div>
 
 {{with .Physical}}

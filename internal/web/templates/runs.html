@@ -8,19 +8,19 @@
 {{end}}
 <div class="panel scroll">
 {{if $d.Rows}}
-<table>
-  <tr><th>Run</th><th>Status</th><th class="num">Archives</th><th class="num">Size</th><th>Committed</th><th>Copies</th></tr>
+<ul class="gt" style="grid-template-columns:minmax(9rem,1fr) repeat(5,auto)">
+  <li class="h"><div>Run</div><div>Status</div><div class="num">Archives</div><div class="num">Size</div><div>Committed</div><div>Copies</div></li>
   {{range $d.Rows}}
-  <tr>
-    <td><a href="/runs/{{.ID}}">{{.ID}}</a></td>
-    <td>{{if .Partial}}<span class="warn">committed (partial)</span>{{else}}committed{{end}}</td>
-    <td class="num">{{.Archives}}</td>
-    <td class="num">{{bytes .Bytes}}</td>
-    <td>{{stamp .At}}</td>
-    <td class="muted">{{.Copies}}</td>
-  </tr>
+  <li>
+    <div class="c-id"><a href="/runs/{{.ID}}">{{.ID}}</a></div>
+    <div>{{if .Partial}}<span class="warn">committed (partial)</span>{{else}}committed{{end}}</div>
+    <div class="num">{{.Archives}}<span class="lbl"> archive(s)</span></div>
+    <div class="num">{{bytes .Bytes}}</div>
+    <div><span class="lbl">committed </span>{{stamp .At}}</div>
+    <div class="muted">{{.Copies}}</div>
+  </li>
   {{end}}
-</table>
+</ul>
 {{else}}<div class="empty">No runs in catalog.</div>{{end}}
 </div>
 {{end}}

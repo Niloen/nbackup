@@ -42,7 +42,7 @@
 {{end}}
 
 <h2>Used capacity over time</h2>
-<div class="panel">
+<div class="panel scroll">
 {{if $d.Chart}}
 {{$d.Chart}}
 <div class="muted" style="margin-top:.5rem;font-size:.82rem">{{$d.Samples}} recorded samples, {{stamp $d.HistFirst}} → {{stamp $d.HistLast}} · captures reclamation, not just growth</div>
@@ -65,20 +65,20 @@
 <h2>Volumes</h2>
 <div class="panel scroll">
 {{if $d.VolumeRows}}
-<table>
-  <tr><th>Label</th><th>Barcode</th><th style="min-width:100px">Fill</th><th class="num">Runs</th><th class="num">Archives</th><th>Last written</th></tr>
+<ul class="gt" style="grid-template-columns:minmax(8rem,1fr) auto minmax(100px,auto) auto auto auto">
+  <li class="h"><div>Label</div><div>Barcode</div><div>Fill</div><div class="num">Runs</div><div class="num">Archives</div><div>Last written</div></li>
   {{range $d.VolumeRows}}
-  <tr>
-    <td>{{.Label}}{{if .Epoch}} <span class="muted">(epoch {{.Epoch}})</span>{{end}}
-      {{if eq .State "room"}}<span class="pill ok">room</span>{{else if eq .State "used"}}<span class="pill dim">used</span>{{else}}<span class="pill dim">full</span>{{end}}</td>
-    <td class="muted">{{if .Barcode}}{{.Barcode}}{{else}}—{{end}}</td>
-    <td>{{if .Capacity}}<div class="bar"><span style="width:{{pct .FillPct}};{{if eq .State "full"}}background:var(--bad){{end}}"></span></div>{{else}}<span class="muted">—</span>{{end}}</td>
-    <td class="num">{{.Runs}}</td>
-    <td class="num">{{.Archives}}</td>
-    <td class="muted">{{if not .Last.IsZero}}{{stamp .Last}}{{else}}—{{end}}</td>
-  </tr>
+  <li>
+    <div class="c-id"><span>{{.Label}}{{if .Epoch}} <span class="muted">(epoch {{.Epoch}})</span>{{end}}</span>
+      {{if eq .State "room"}}<span class="pill ok">room</span>{{else if eq .State "used"}}<span class="pill dim">used</span>{{else}}<span class="pill dim">full</span>{{end}}</div>
+    <div class="muted">{{if .Barcode}}{{.Barcode}}{{else}}—{{end}}</div>
+    <div class="c-bar">{{if .Capacity}}<div class="bar"><span style="width:{{pct .FillPct}};{{if eq .State "full"}}background:var(--bad){{end}}"></span></div>{{else}}<span class="muted">—</span>{{end}}</div>
+    <div class="num">{{.Runs}}<span class="lbl"> runs</span></div>
+    <div class="num">{{.Archives}}<span class="lbl"> archive(s)</span></div>
+    <div class="muted"><span class="lbl">written </span>{{if not .Last.IsZero}}{{stamp .Last}}{{else}}—{{end}}</div>
+  </li>
   {{end}}
-</table>
+</ul>
 {{else}}<div class="empty">No labeled volumes yet.</div>{{end}}
 </div>
 {{end}}
@@ -106,18 +106,18 @@
 <h2>Per-run usage</h2>
 <div class="panel scroll">
 {{if $d.Points}}
-<table>
-  <tr><th>Run</th><th>Committed</th><th class="num">Added</th><th class="num">Used</th>{{if $d.Capacity}}<th class="num">% full</th>{{end}}</tr>
+<ul class="gt" style="grid-template-columns:minmax(9rem,1fr) auto auto auto{{if $d.Capacity}} auto{{end}}">
+  <li class="h"><div>Run</div><div>Committed</div><div class="num">Added</div><div class="num">Used</div>{{if $d.Capacity}}<div class="num">% full</div>{{end}}</li>
   {{range $d.Points}}
-  <tr>
-    <td><a href="/runs/{{.Run}}">{{.Run}}</a></td>
-    <td class="muted">{{stamp .At}}</td>
-    <td class="num">{{bytes .Added}}</td>
-    <td class="num">{{bytes .Used}}</td>
-    {{if $d.Capacity}}<td class="num">{{pct .Pct}}</td>{{end}}
-  </tr>
+  <li>
+    <div class="c-id"><a href="/runs/{{.Run}}">{{.Run}}</a></div>
+    <div class="muted"><span class="lbl">committed </span>{{stamp .At}}</div>
+    <div class="num"><span class="lbl">added </span>{{bytes .Added}}</div>
+    <div class="num"><span class="lbl">used </span>{{bytes .Used}}</div>
+    {{if $d.Capacity}}<div class="num">{{pct .Pct}}<span class="lbl"> full</span></div>{{end}}
+  </li>
   {{end}}
-</table>
+</ul>
 {{else}}<div class="empty">No runs on this medium yet.</div>{{end}}
 </div>
 {{end}}

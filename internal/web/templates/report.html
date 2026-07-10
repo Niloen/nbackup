@@ -8,19 +8,19 @@
 {{end}}
 <div class="panel scroll">
 {{if $d.Rows}}
-<table>
-  <tr><th>Ended</th><th>Command</th><th>Outcome</th><th class="num">Archives</th><th>Detail</th><th class="num">Duration</th></tr>
+<ul class="gt" style="grid-template-columns:minmax(9rem,auto) auto auto auto 1fr auto">
+  <li class="h"><div>Run</div><div>Command</div><div>Outcome</div><div class="num">Archives</div><div>Detail</div><div class="num">Duration</div></li>
   {{range $d.Rows}}
-  <tr>
-    <td>{{stampsec .EndedAt}}</td>
-    <td>{{.Command}}</td>
-    <td class="{{if .Failed}}bad{{else if .Warned}}warn{{else}}ok{{end}}">{{if .Failed}}failure{{else if .Warned}}warning{{else}}success{{end}}</td>
-    <td class="num">{{if .Archives}}{{.Archives}}{{else}}<span class="muted">—</span>{{end}}</td>
-    <td class="muted">{{if .DetailPrefix}}<a href="/runs/{{.DetailPrefix}}">{{.DetailPrefix}}</a>, {{end}}{{.DetailRest}}{{if .ExitClass}} · {{.ExitClass}}{{end}}{{if .Error}} · {{.Error}}{{end}}</td>
-    <td class="num">{{.Duration}}</td>
-  </tr>
+  <li>
+    <div class="c-id">{{if .DetailPrefix}}<a href="/runs/{{.DetailPrefix}}">{{.DetailPrefix}}</a>{{else}}{{stampsec .EndedAt}}{{end}}</div>
+    <div>{{.Command}}</div>
+    <div class="{{if .Failed}}bad{{else if .Warned}}warn{{else}}ok{{end}}">{{if .Failed}}failure{{else if .Warned}}warning{{else}}success{{end}}</div>
+    <div class="num">{{if .Archives}}{{.Archives}}<span class="lbl"> archive(s)</span>{{else}}<span class="muted">—</span>{{end}}</div>
+    <div class="muted wrap">{{.DetailRest}}{{if .ExitClass}} · {{.ExitClass}}{{end}}{{if .Error}} · {{.Error}}{{end}}</div>
+    <div class="num"><span class="lbl">in </span>{{.Duration}}</div>
+  </li>
   {{end}}
-</table>
+</ul>
 {{else}}<div class="empty">No runs recorded yet.</div>{{end}}
 </div>
 {{end}}

@@ -62,34 +62,36 @@
 <h2>Media</h2>
 <div class="panel scroll">
 {{if $d.Media}}
-<table>
-  <tr><th>Medium</th><th>Type</th><th class="num">Runs</th><th class="num">Used</th><th class="num">Capacity</th></tr>
+<ul class="gt" style="grid-template-columns:minmax(8rem,1fr) repeat(4,auto)">
+  <li class="h"><div>Medium</div><div>Type</div><div class="num">Runs</div><div class="num">Used</div><div class="num">Capacity</div></li>
   {{range $d.Media}}
-  <tr>
-    <td><a href="/media/{{.Name}}">{{.Name}}</a></td><td class="muted">{{.Type}}</td>
-    <td class="num">{{.Runs}}</td><td class="num">{{bytes .Used}}</td>
-    <td class="num">{{if .Capacity}}{{bytes .Capacity}}{{else}}<span class="muted">∞</span>{{end}}</td>
-  </tr>
+  <li>
+    <div class="c-id"><a href="/media/{{.Name}}">{{.Name}}</a></div>
+    <div class="muted">{{.Type}}</div>
+    <div class="num">{{.Runs}}<span class="lbl"> runs</span></div>
+    <div class="num"><span class="lbl">used </span>{{bytes .Used}}</div>
+    <div class="num"><span class="lbl">of </span>{{if .Capacity}}{{bytes .Capacity}}{{else}}<span class="muted">∞</span>{{end}}</div>
+  </li>
   {{end}}
-</table>
+</ul>
 {{else}}<div class="empty">No media configured.</div>{{end}}
 </div>
 
 <h2>Recent activity</h2>
 <div class="panel scroll">
 {{if $d.History}}
-<table>
-  <tr><th>When</th><th>Command</th><th>Outcome</th><th class="num">Bytes</th><th>Detail</th></tr>
+<ul class="gt" style="grid-template-columns:minmax(9rem,auto) auto auto auto 1fr">
+  <li class="h"><div>Run</div><div>Command</div><div>Outcome</div><div class="num">Bytes</div><div>Detail</div></li>
   {{range $d.History}}
-  <tr>
-    <td>{{stamp .EndedAt}}</td>
-    <td>{{.Command}}</td>
-    <td class="{{if .Failed}}bad{{else if .Warned}}warn{{else}}ok{{end}}">{{if .Failed}}failure{{else if .Warned}}warning{{else}}success{{end}}</td>
-    <td class="num">{{bytes .BytesMoved}}</td>
-    <td class="muted">{{if .RunID}}<a href="/runs/{{.RunID}}">{{.RunID}}</a>{{end}}{{if .Error}} · {{.Error}}{{end}}</td>
-  </tr>
+  <li>
+    <div class="c-id">{{if .RunID}}<a href="/runs/{{.RunID}}">{{.RunID}}</a>{{else}}{{stamp .EndedAt}}{{end}}</div>
+    <div>{{.Command}}</div>
+    <div class="{{if .Failed}}bad{{else if .Warned}}warn{{else}}ok{{end}}">{{if .Failed}}failure{{else if .Warned}}warning{{else}}success{{end}}</div>
+    <div class="num">{{bytes .BytesMoved}}</div>
+    <div class="muted wrap">{{.Error}}</div>
+  </li>
   {{end}}
-</table>
+</ul>
 {{else}}<div class="empty">No runs recorded yet.</div>{{end}}
 </div>
 {{end}}

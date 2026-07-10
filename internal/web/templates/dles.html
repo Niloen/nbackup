@@ -16,33 +16,34 @@
 {{end}}
 {{end}}
 
-{{/* dle-rows renders one arranged run of Sources rows: group headers carry the
-     member count and aggregate cells (runs, newest full, total size, media
-     union); member rows show a twig plus their base-relative label. */}}
+{{/* dle-rows renders one arranged run of Sources rows (grid-list <li>s): group
+     headers carry the member count and aggregate cells (runs, newest full,
+     total size, media union); member rows show a twig plus their
+     base-relative label. */}}
 {{define "dle-rows"}}
 {{range .}}
 {{if .Header}}
-<tr class="group-row" data-g="{{.Group}}">
-  <td><span class="gtog">▾</span>{{.Label}}<span class="chip">{{.Count}} DLEs</span></td>
-  <td class="num">{{.Runs}}</td>
-  <td></td>
-  <td>{{if .LastFull}}{{.LastFull}}{{else}}<span class="warn">never</span>{{end}}</td>
-  <td class="num">{{bytes .Bytes}}</td>
-  <td class="sparkcell">{{.Spark}}</td>
-  <td class="num{{if .DeltaWarn}} warn{{end}}">{{.Delta}}</td>
-  <td class="muted">{{.Media}}</td>
-</tr>
+<li class="group" data-g="{{.Group}}">
+  <div class="c-id"><span class="gtog">▾</span><span>{{.Label}}</span><span class="chip">{{.Count}} DLEs</span></div>
+  <div class="num">{{.Runs}}<span class="lbl"> runs</span></div>
+  <div></div>
+  <div><span class="lbl">full </span>{{if .LastFull}}{{.LastFull}}{{else}}<span class="warn">never</span>{{end}}</div>
+  <div class="num">{{bytes .Bytes}}</div>
+  <div class="sparkcell">{{.Spark}}</div>
+  <div class="num{{if .DeltaWarn}} warn{{end}}">{{if .Delta}}{{.Delta}}<span class="lbl"> Δ</span>{{end}}</div>
+  <div class="muted">{{.Media}}</div>
+</li>
 {{else}}
-<tr{{if .Group}} data-in="{{.Group}}"{{end}}>
-  <td>{{if .Twig}}<span class="twig">{{.Twig}}</span> {{end}}<a href="/dles/{{.Slug}}"{{if .Twig}} title="{{.Display}}"{{end}}>{{.Label}}</a>{{if .RestNote}} <span class="muted">(the rest of a partition)</span>{{end}}</td>
-  <td class="num">{{.Runs}}</td>
-  <td><span class="pill dim">{{level .LastLevel}}</span></td>
-  <td>{{if .LastFull}}{{.LastFull}}{{else}}<span class="warn">never</span>{{end}}</td>
-  <td class="num">{{bytes .Bytes}}</td>
-  <td class="sparkcell">{{.Spark}}</td>
-  <td class="num{{if .DeltaWarn}} warn{{end}}">{{.Delta}}</td>
-  <td class="muted">{{.Media}}</td>
-</tr>
+<li{{if .Group}} data-in="{{.Group}}"{{end}}>
+  <div class="c-id">{{if .Twig}}<span class="twig">{{.Twig}}</span> {{end}}<a href="/dles/{{.Slug}}"{{if .Twig}} title="{{.Display}}"{{end}}>{{.Label}}</a>{{if .RestNote}} <span class="muted">(the rest of a partition)</span>{{end}}</div>
+  <div class="num">{{.Runs}}<span class="lbl"> runs</span></div>
+  <div><span class="lbl">last </span><span class="pill dim">{{level .LastLevel}}</span></div>
+  <div><span class="lbl">full </span>{{if .LastFull}}{{.LastFull}}{{else}}<span class="warn">never</span>{{end}}</div>
+  <div class="num">{{bytes .Bytes}}</div>
+  <div class="sparkcell">{{.Spark}}</div>
+  <div class="num{{if .DeltaWarn}} warn{{end}}">{{if .Delta}}{{.Delta}}<span class="lbl"> Δ</span>{{end}}</div>
+  <div class="muted">{{.Media}}</div>
+</li>
 {{end}}
 {{end}}
 {{end}}
@@ -53,6 +54,7 @@
 
 {{with $d.Heat}}
 <h2>Activity — last 5 weeks</h2>
+<div class="fade">
 <div class="panel scroll">
 <table class="heat">
   <tr><th class="lbl"></th>{{range .Days}}<th class="tick">{{.Tick}}</th>{{end}}</tr>
@@ -72,23 +74,24 @@
   <span><span class="sw"></span>none</span>
 </div>
 </div>
+</div>
 {{end}}
 
 <h2>Sources</h2>
 <div class="panel scroll">
 {{if $d.Groups}}
-<table>
-  <tr><th>DLE</th><th class="num">Runs</th><th>Last</th><th>Last full</th><th class="num">Size</th><th>Trend</th><th class="num">Δ</th><th>Media</th></tr>
+<ul class="gt" style="grid-template-columns:minmax(9rem,1fr) auto auto auto auto auto auto minmax(4rem,auto)">
+  <li class="h"><div>DLE</div><div class="num">Runs</div><div>Last</div><div>Last full</div><div class="num">Size</div><div>Trend</div><div class="num">Δ</div><div>Media</div></li>
   {{range $d.Groups}}
-  <tr class="host-row"><td colspan="8">{{hostLabel .Host}}</td></tr>
+  <li class="host"><div class="full">{{hostLabel .Host}}</div></li>
   {{template "dle-rows" .Rows}}
   {{end}}
-</table>
+</ul>
 {{else if $d.Rows}}
-<table>
-  <tr><th>DLE</th><th class="num">Runs</th><th>Last</th><th>Last full</th><th class="num">Size</th><th>Trend</th><th class="num">Δ</th><th>Media</th></tr>
+<ul class="gt" style="grid-template-columns:minmax(9rem,1fr) auto auto auto auto auto auto minmax(4rem,auto)">
+  <li class="h"><div>DLE</div><div class="num">Runs</div><div>Last</div><div>Last full</div><div class="num">Size</div><div>Trend</div><div class="num">Δ</div><div>Media</div></li>
   {{template "dle-rows" $d.Rows}}
-</table>
+</ul>
 {{else}}<div class="empty">No DLEs in catalog.</div>{{end}}
 </div>
 {{end}}

@@ -37,7 +37,7 @@
   .chart-note { color: var(--muted); font-size: .82rem; margin-top: .5rem; font-variant-numeric: tabular-nums; }
   .chart-note b { color: var(--fg); font-weight: 650; }
   /* The /dles Trend cell: a sparkline sits taller than text, so trim the padding. */
-  td.sparkcell { padding-top: .2rem; padding-bottom: .2rem; text-align: center; }
+  td.sparkcell, .gt > li > div.sparkcell { padding-top: .2rem; padding-bottom: .2rem; text-align: center; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 1rem; }
   table { width: 100%; border-collapse: collapse; }
   .scroll { overflow-x: auto; }
@@ -53,6 +53,67 @@
   th { color: var(--muted); font-weight: 600; font-size: .82rem; text-transform: uppercase; letter-spacing: .03em; }
   tr:last-child td { border-bottom: none; }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  /* Grid lists: the entity tables are semantic <ul>s laid out as tables via CSS
+     grid — the ul is the grid (each list sets its own grid-template-columns
+     inline) and li{display:contents} dissolves a row into the columns. Under
+     640px one rule flips: the li becomes a stacked card (title line + meta
+     line), so no row ever scrolls sideways on a phone and nothing is hidden.
+     Hierarchy rows keep their meaning in both modes: .host is the failure-
+     domain rollup, .group the path-group toggle, li[data-in] its members.
+     True matrices (.heat, .pgrid) stay tables — see the sticky rules below. */
+  ul.gt { list-style: none; margin: 0; padding: 0; display: grid; column-gap: .2rem; }
+  .gt > li { display: contents; }
+  /* display:contents beats the UA's [hidden]{display:none} — restore it for
+     the group toggle. */
+  .gt > li[hidden] { display: none; }
+  .gt > li > div { padding: .45rem .6rem; border-bottom: 1px solid var(--line);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .gt > li:last-child > div { border-bottom: none; }
+  .gt > li > div.wrap { white-space: normal; overflow-wrap: anywhere; }
+  .gt .h > div { color: var(--muted); font-weight: 600; font-size: .82rem;
+    text-transform: uppercase; letter-spacing: .03em; }
+  .gt .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .gt .full { grid-column: 1 / -1; }
+  .gt .host > div { padding-top: .55rem; font-size: .85rem; color: var(--muted); white-space: normal; }
+  .gt .host strong { color: var(--fg); }
+  .gt .group { cursor: pointer; }
+  .gt .group > div:first-child { font-weight: 600; }
+  .gt li[data-in] > div:first-child { padding-left: 1.4rem; }
+  /* card-mode column labels ("31 runs"), dormant while the header row shows */
+  .gt .lbl { display: none; }
+  @media (max-width: 640px) {
+    ul.gt { display: block; }
+    .gt > li { display: block; padding: .55rem 0; border-bottom: 1px solid var(--line); }
+    .gt > li:last-child { border-bottom: none; }
+    .gt > li > div { display: inline; padding: 0; border: none;
+      white-space: normal; overflow-wrap: anywhere; }
+    .gt > li > div:empty { display: none; }
+    .gt .h { display: none; }
+    .gt .lbl { display: inline; }
+    /* the identity cell becomes the card's title line */
+    .gt .c-id { display: flex; align-items: center; gap: .5rem; margin-bottom: .1rem; }
+    .gt .c-id.dlecell { max-width: none; } /* the card has the full width */
+    .gt .c-id a { font-weight: 600; min-width: 0; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; }
+    .gt .c-id .pill, .gt .c-id .chip { flex: none; }
+    /* the remaining cells flow as one quiet dot-separated meta line; the
+       separator leads (::before, suppressed on the first meta cell) so a
+       hidden empty cell never leaves a dangling dot */
+    .gt > li > div:not(.c-id) { color: var(--muted); font-size: .82rem;
+      font-variant-numeric: tabular-nums; }
+    .gt > li > div:not(.c-id):not(.full)::before { content: " · "; }
+    .gt > li > div.c-id + div:not(.full)::before,
+    .gt > li > div:not(.c-id):not(.full):first-child::before { content: none; }
+    /* host = section break, group = toggle row, members inset under a rule */
+    .gt .host { border-bottom: none; padding: .9rem 0 .1rem; }
+    .gt .group { border-bottom: none; padding: .55rem 0 .25rem; }
+    .gt li[data-in] { margin-left: .55rem; padding-left: .65rem;
+      border-left: 2px solid var(--line); }
+    .gt li[data-in] > div:first-child { padding-left: 0; }
+    .gt li[data-in] .twig { display: none; } /* the inset rule carries the depth */
+    /* bars (fill/utilization) need their own line to have a width */
+    .gt .c-bar { display: block; margin-top: .35rem; }
+  }
   a { color: var(--accent); }
   .pill { display: inline-block; padding: .05rem .5rem; border-radius: 999px; font-size: .78rem; font-weight: 600; }
   .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
@@ -178,6 +239,17 @@
   .heat-legend .sw.full { background: var(--accent); }
   .heat-legend .sw.incr { background: color-mix(in srgb, var(--accent) 45%, transparent); }
   .heat-legend .sw.partial { background: var(--warn); }
+  /* Matrices (.heat, .pgrid) scroll sideways by design — a DLE×day or
+     archive×medium grid has no honest stacked form. Make the scroll usable:
+     the identity column pins so you always know which row you're panning,
+     and the .fade wrapper (around the .panel.scroll) hints there's more. */
+  .heat .lbl, .pgrid th:first-child, .pgrid td:first-child {
+    position: sticky; left: 0; background: var(--panel); }
+  .fade { position: relative; }
+  .fade::after { content: ""; position: absolute; top: 1px; bottom: 1px; right: 1px;
+    width: 22px; border-radius: 0 10px 10px 0; pointer-events: none;
+    background: linear-gradient(to right, transparent, var(--panel)); }
+  @media (max-width: 640px) { .heat .lbl { max-width: 34vw; } }
   /* Host-section headers on /dles when its DLEs span more than one host: a
      compact rollup row (name, count, newest backup, stale count) separating each
      host's rows in both the Sources table and the heatmap, so hosts read as the
@@ -191,7 +263,7 @@
   .group-row td { font-weight: 600; cursor: pointer; }
   .gtog { display: inline-block; width: 1.1rem; color: var(--muted); }
   .twig { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  td .chip { font-size: .72rem; font-weight: 600; background: var(--line); color: var(--muted);
+  td .chip, .gt .chip { font-size: .72rem; font-weight: 600; background: var(--line); color: var(--muted);
     border-radius: 999px; padding: .02rem .5rem; margin-left: .45rem; }
   tr[data-in] td:first-child { padding-left: 1.4rem; }
   .heat .group-row td { padding: .35rem 0 .25rem; font-size: .85rem; }
@@ -263,12 +335,13 @@
 // Path-group header rows (any page) toggle their member rows; groups past ten
 // members start collapsed so a partitioned source's long tail doesn't dominate —
 // unless the header carries data-open (a member is failing), which starts it open.
-// Scoped per table — the same group key can appear in two tables on one page.
+// Rows are <tr> in matrices and <li> in grid lists; scoped per table/list —
+// the same group key can appear in two lists on one page.
 // Without JS everything simply stays visible.
-document.querySelectorAll("tr[data-g]").forEach(function (h) {
-  var table = h.closest("table");
+document.querySelectorAll("[data-g]").forEach(function (h) {
+  var scope = h.closest("table, ul");
   var members = Array.prototype.filter.call(
-    table.querySelectorAll("tr[data-in]"),
+    scope.querySelectorAll("[data-in]"),
     function (r) { return r.getAttribute("data-in") === h.getAttribute("data-g"); });
   var glyph = h.querySelector(".gtog");
   var open;

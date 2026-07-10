@@ -56,21 +56,21 @@
      nb status: the per-DLE sizing table, actively-sizing first, so a slow or stuck
      estimate names its culprit. */}}
 <div class="panel" style="margin-top:1rem">
-<table>
-  <tr><th>DLE</th><th>State</th><th class="num">Size</th><th class="num">Time</th></tr>
+<ul class="gt" style="grid-template-columns:minmax(9rem,1fr) repeat(3,auto)">
+  <li class="h"><div>DLE</div><div>State</div><div class="num">Size</div><div class="num">Time</div></li>
   {{range .EstimateRows}}
   {{if .Header}}
-  <tr class="group-row" data-g="{{.Group}}"><td colspan="99"><span class="gtog">▾</span>{{.Label}}<span class="chip">{{.Count}} DLEs</span></td></tr>
+  <li class="group" data-g="{{.Group}}"><div class="c-id full"><span class="gtog">▾</span><span>{{.Label}}</span><span class="chip">{{.Count}} DLEs</span></div></li>
   {{else}}
-  <tr{{if .Group}} data-in="{{.Group}}"{{end}}>
-    <td>{{if .Twig}}<span class="twig">{{.Twig}}</span> {{end}}<a href="/dles/{{.Row.Slug}}"{{if .Twig}} title="{{.Row.Name}}"{{end}}>{{.Label}}</a></td>
-    <td><span class="pill {{if eq .Row.State "sizing"}}active{{else if eq .Row.State "failed"}}bad{{else if eq .Row.State "canceled"}}warn{{else if eq .Row.State "sized"}}ok{{else}}dim{{end}}">{{.Row.State}}</span>{{if .Row.Err}} <span class="bad">{{.Row.Err}}</span>{{end}}</td>
-    <td class="num">{{.Row.Size}}</td>
-    <td class="num">{{.Row.Time}}</td>
-  </tr>
+  <li{{if .Group}} data-in="{{.Group}}"{{end}}>
+    <div class="c-id">{{if .Twig}}<span class="twig">{{.Twig}}</span> {{end}}<a href="/dles/{{.Row.Slug}}"{{if .Twig}} title="{{.Row.Name}}"{{end}}>{{.Label}}</a></div>
+    <div class="wrap"><span class="pill {{if eq .Row.State "sizing"}}active{{else if eq .Row.State "failed"}}bad{{else if eq .Row.State "canceled"}}warn{{else if eq .Row.State "sized"}}ok{{else}}dim{{end}}">{{.Row.State}}</span>{{if .Row.Err}} <span class="bad">{{.Row.Err}}</span>{{end}}</div>
+    <div class="num">{{.Row.Size}}</div>
+    <div class="num"><span class="lbl">in </span>{{.Row.Time}}</div>
+  </li>
   {{end}}
   {{end}}
-</table>
+</ul>
 </div>
 {{else}}
 

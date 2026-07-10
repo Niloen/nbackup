@@ -424,7 +424,7 @@ func TestRunsPagination(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("code=%d", code)
 	}
-	if got := strings.Count(body, "<tr>") - 1; got != maxListRows { // -1 for the header row
+	if got := strings.Count(body, "<li>"); got != maxListRows { // data rows are bare <li>; the header is <li class="h">
 		t.Errorf("/runs rendered %d rows, want capped to %d", got, maxListRows)
 	}
 	if !strings.Contains(body, `href="?all=1"`) {
@@ -432,7 +432,7 @@ func TestRunsPagination(t *testing.T) {
 	}
 
 	_, all := get(t, h, "/runs?all=1")
-	if got := strings.Count(all, "<tr>") - 1; got != maxListRows+5 {
+	if got := strings.Count(all, "<li>"); got != maxListRows+5 {
 		t.Errorf("/runs?all=1 rendered %d rows, want all %d", got, maxListRows+5)
 	}
 
@@ -440,7 +440,7 @@ func TestRunsPagination(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("/runs?all=garbage code=%d, want 200 (garbage query must not 500)", code)
 	}
-	if got := strings.Count(garbage, "<tr>") - 1; got != maxListRows {
+	if got := strings.Count(garbage, "<li>"); got != maxListRows {
 		t.Errorf("/runs?all=garbage rendered %d rows, want capped to %d", got, maxListRows)
 	}
 }
@@ -459,7 +459,7 @@ func TestReportPagination(t *testing.T) {
 	h := NewServer(fakeSource{}, dir).Handler()
 
 	_, body := get(t, h, "/report")
-	if got := strings.Count(body, "<tr>") - 1; got != maxListRows {
+	if got := strings.Count(body, "<li>"); got != maxListRows { // data rows are bare <li>; the header is <li class="h">
 		t.Errorf("/report rendered %d rows, want capped to %d", got, maxListRows)
 	}
 	if !strings.Contains(body, `href="?all=1"`) {
@@ -467,7 +467,7 @@ func TestReportPagination(t *testing.T) {
 	}
 
 	_, all := get(t, h, "/report?all=1")
-	if got := strings.Count(all, "<tr>") - 1; got != maxListRows+3 {
+	if got := strings.Count(all, "<li>"); got != maxListRows+3 {
 		t.Errorf("/report?all=1 rendered %d rows, want all %d", got, maxListRows+3)
 	}
 }
@@ -958,14 +958,14 @@ func TestDLEsTrendColumn(t *testing.T) {
 
 	_, body := get(t, NewServer(sampleSource(), dir).Handler(), "/dles")
 	// (html/template escapes the delta's "+" to &#43; in the cell.)
-	for _, want := range []string{"<th>Trend</th>", "sparkcell", "full size trend", `class="num warn">&#43;50%`} {
+	for _, want := range []string{"<div>Trend</div>", "sparkcell", "full size trend", `class="num warn">&#43;50%`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/dles missing %q in the Trend column", want)
 		}
 	}
 
 	_, bare := get(t, NewServer(sampleSource(), t.TempDir()).Handler(), "/dles")
-	if !strings.Contains(bare, "<th>Trend</th>") || strings.Contains(bare, "full size trend") {
+	if !strings.Contains(bare, "<div>Trend</div>") || strings.Contains(bare, "full size trend") {
 		t.Errorf("/dles without history: want the column, no sparkline")
 	}
 }
@@ -1449,8 +1449,11 @@ func TestDLEsPageGroupsByHost(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("code=%d", code)
 	}
-	if got := strings.Count(body, `class="host-row"`); got != 4 { // 2 hosts × (Sources + heatmap)
-		t.Errorf("/dles rendered %d host-row headers, want 4 (app01+db01, table+heatmap):\n%s", got, body)
+	if got := strings.Count(body, `class="host-row"`); got != 2 { // heatmap: app01+db01
+		t.Errorf("/dles rendered %d heatmap host-row headers, want 2 (app01+db01):\n%s", got, body)
+	}
+	if got := strings.Count(body, `<li class="host">`); got != 2 { // Sources grid list: app01+db01
+		t.Errorf("/dles rendered %d Sources host headers, want 2 (app01+db01):\n%s", got, body)
 	}
 	for _, want := range []string{">app01<", ">db01<", "3 stale"} {
 		if !strings.Contains(body, want) {
@@ -1466,7 +1469,7 @@ func TestDLEsPageSingleHostIsUngrouped(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("code=%d", code)
 	}
-	if strings.Contains(body, `class="host-row"`) {
+	if strings.Contains(body, `class="host-row"`) || strings.Contains(body, `<li class="host">`) {
 		t.Errorf("/dles rendered host headers for a single-host catalog:\n%s", body)
 	}
 }

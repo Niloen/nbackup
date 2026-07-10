@@ -2,21 +2,21 @@
 <h1>Media</h1>
 <div class="panel scroll">
 {{if .Data}}
-<table>
-  <tr><th>Medium</th><th>Type</th><th class="num">Runs</th><th class="num">Used</th><th class="num">Capacity</th><th>Utilization</th><th class="num">Volumes</th><th>Projected full</th></tr>
+<ul class="gt" style="grid-template-columns:minmax(8rem,1fr) auto auto auto auto minmax(100px,auto) auto auto">
+  <li class="h"><div>Medium</div><div>Type</div><div class="num">Runs</div><div class="num">Used</div><div class="num">Capacity</div><div>Utilization</div><div class="num">Volumes</div><div>Projected full</div></li>
   {{range .Data}}
-  <tr>
-    <td><a href="/media/{{.Name}}">{{.Name}}</a></td>
-    <td class="muted">{{.Type}}</td>
-    <td class="num">{{.Runs}}</td>
-    <td class="num">{{bytes .Used}}</td>
-    <td class="num">{{if .Capacity}}{{bytes .Capacity}}{{else}}<span class="muted">∞</span>{{end}}</td>
-    <td style="min-width:100px">{{if .Pool}}<span class="muted">{{.PoolRoom}}</span>{{else if .Capacity}}<div class="bar"><span style="width:{{pct .UtilPct}};{{if .Over}}background:var(--bad){{end}}"></span></div>{{else}}<span class="muted">—</span>{{end}}</td>
-    <td class="num">{{if .Volumes}}{{.Volumes}}{{else}}<span class="muted">—</span>{{end}}</td>
-    <td class="muted">{{if .Pool}}{{.PoolRoom}}{{else}}{{.ProjFull}}{{end}}</td>
-  </tr>
+  <li>
+    <div class="c-id"><a href="/media/{{.Name}}">{{.Name}}</a></div>
+    <div class="muted">{{.Type}}</div>
+    <div class="num">{{.Runs}}<span class="lbl"> runs</span></div>
+    <div class="num"><span class="lbl">used </span>{{bytes .Used}}</div>
+    <div class="num"><span class="lbl">of </span>{{if .Capacity}}{{bytes .Capacity}}{{else}}<span class="muted">∞</span>{{end}}</div>
+    <div class="c-bar">{{if .Pool}}<span class="muted">{{.PoolRoom}}</span>{{else if .Capacity}}<div class="bar"><span style="width:{{pct .UtilPct}};{{if .Over}}background:var(--bad){{end}}"></span></div>{{else}}<span class="muted">—</span>{{end}}</div>
+    <div class="num">{{if .Volumes}}{{.Volumes}}<span class="lbl"> volume(s)</span>{{else}}<span class="muted">—</span>{{end}}</div>
+    <div class="muted">{{if .Pool}}{{.PoolRoom}}{{else}}<span class="lbl">full </span>{{.ProjFull}}{{end}}</div>
+  </li>
   {{end}}
-</table>
+</ul>
 {{else}}<div class="empty">No media configured.</div>{{end}}
 </div>
 {{end}}

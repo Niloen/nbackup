@@ -30,36 +30,34 @@
 <h2>Ledger — each DLE's last drill</h2>
 <div class="panel scroll">
 {{if $d.Ledger}}
-<table>
-  <tr><th>DLE</th><th>Result</th><th>Tier</th><th>Medium</th><th>As of</th><th>Run</th><th>Last drill</th><th class="num">Read</th></tr>
+<ul class="gt" style="grid-template-columns:minmax(9rem,1fr) repeat(6,auto)">
+  <li class="h"><div>DLE</div><div>Tier</div><div>Medium</div><div>As of</div><div>Run</div><div>Last drill</div><div class="num">Read</div></li>
   {{range $d.Ledger}}
   {{if .Label}}
-  <tr class="host-row"><td colspan="99"><strong>{{.Label}}</strong> · {{.Count}} DLE{{if ne .Count 1}}s{{end}}{{if .Bad}} <span class="pill bad">{{.Bad}} failing</span>{{end}}{{if .Warn}} <span class="pill warn">{{.Warn}} stale</span>{{end}}</td></tr>
+  <li class="host"><div class="full"><strong>{{.Label}}</strong> · {{.Count}} DLE{{if ne .Count 1}}s{{end}}{{if .Bad}} <span class="pill bad">{{.Bad}} failing</span>{{end}}{{if .Warn}} <span class="pill warn">{{.Warn}} stale</span>{{end}}</div></li>
   {{end}}
   {{range .Rows}}
   {{if .Header}}
-  <tr class="group-row" data-g="{{.Group}}"{{if .Bad}} data-open{{end}}><td colspan="99"><span class="gtog">▾</span>{{.Label}}<span class="chip">{{.Count}} DLEs</span>{{if .Bad}} <span class="pill bad">{{.Bad}} failing</span>{{end}}{{if .Warn}} <span class="pill warn">{{.Warn}} stale</span>{{end}}</td></tr>
+  <li class="group" data-g="{{.Group}}"{{if .Bad}} data-open{{end}}><div class="c-id full"><span class="gtog">▾</span><span>{{.Label}}</span><span class="chip">{{.Count}} DLEs</span>{{if .Bad}} <span class="pill bad">{{.Bad}} failing</span>{{end}}{{if .Warn}} <span class="pill warn">{{.Warn}} stale</span>{{end}}</div></li>
   {{else}}
-  <tr{{if .Group}} data-in="{{.Group}}"{{end}}>
-    <td class="dlecell">{{if .Twig}}<span class="twig">{{.Twig}}</span> {{end}}<a href="/dles/{{.Row.Slug}}" title="{{.Row.DLE}}">{{.Label}}</a></td>
-    <td><span class="pill {{if .Row.Failing}}bad{{else if .Row.Stale}}warn{{else}}ok{{end}}">{{.Row.Status}}</span></td>
-    <td>{{.Row.Tier}}{{if .Row.What}} <span class="muted" style="font-size:.82rem">· {{.Row.What}}</span>{{end}}</td>
-    <td class="muted">{{.Row.Medium}}</td>
-    <td>{{.Row.AsOf}}</td>
-    <td>{{if .Row.RunID}}<a href="/runs/{{.Row.RunID}}">{{.Row.RunID}}</a>{{else}}<span class="muted">—</span>{{end}}</td>
-    <td>{{stamp .Row.At}} <span class="muted">({{.Row.Age}} ago)</span></td>
-    <td class="num">{{if .Row.Bytes}}{{bytes .Row.Bytes}}{{else}}<span class="muted">—</span>{{end}}</td>
-  </tr>
+  <li{{if .Group}} data-in="{{.Group}}"{{end}}>
+    <div class="c-id dlecell">{{if .Twig}}<span class="twig">{{.Twig}}</span> {{end}}<a href="/dles/{{.Row.Slug}}" title="{{.Row.DLE}}">{{.Label}}</a> <span class="pill {{if .Row.Failing}}bad{{else if .Row.Stale}}warn{{else}}ok{{end}}">{{.Row.Status}}</span></div>
+    <div><span class="lbl">tier </span>{{.Row.Tier}}{{if .Row.What}} <span class="muted" style="font-size:.82rem">· {{.Row.What}}</span>{{end}}</div>
+    <div class="muted"><span class="lbl">on </span>{{.Row.Medium}}</div>
+    <div><span class="lbl">as of </span>{{.Row.AsOf}}</div>
+    <div>{{if .Row.RunID}}<a href="/runs/{{.Row.RunID}}">{{.Row.RunID}}</a>{{else}}<span class="muted">—</span>{{end}}</div>
+    <div><span class="lbl">drilled </span>{{stamp .Row.At}} <span class="muted">({{.Row.Age}} ago)</span></div>
+    <div class="num"><span class="lbl">read </span>{{if .Row.Bytes}}{{bytes .Row.Bytes}}{{else}}<span class="muted">—</span>{{end}}</div>
+  </li>
   {{if .Row.Failing}}
-  <tr{{if .Group}} data-in="{{.Group}}"{{end}}>
-    <td></td>
-    <td colspan="7" class="bad wrap">[{{.Row.Class}}] {{.Row.Detail}}{{if .Row.Remedy}} — <span class="muted">{{.Row.Remedy}}</span>{{end}}{{if .Row.Retry}} <span class="muted">· retry: <code>{{.Row.Retry}}</code> (a pass clears this)</span>{{end}}</td>
-  </tr>
+  <li{{if .Group}} data-in="{{.Group}}"{{end}}>
+    <div class="full bad wrap">[{{.Row.Class}}] {{.Row.Detail}}{{if .Row.Remedy}} — <span class="muted">{{.Row.Remedy}}</span>{{end}}{{if .Row.Retry}} <span class="muted">· retry: <code>{{.Row.Retry}}</code> (a pass clears this)</span>{{end}}</div>
+  </li>
   {{end}}
   {{end}}
   {{end}}
   {{end}}
-</table>
+</ul>
 {{else}}<div class="empty">No drills recorded yet — run <code>nb drill</code> to rehearse recovery.</div>{{end}}
 </div>
 

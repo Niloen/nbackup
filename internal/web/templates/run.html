@@ -21,37 +21,42 @@
   {{end}}
 </div>
 {{end}}
-<div class="panel">
+<div class="panel scroll">
   <div class="muted" style="margin:0 0 .6rem">{{.Headline}}</div>
-  <table>
-    <tr><th>STATISTICS</th><th class="num">Total</th><th class="num">Full</th><th class="num">Incr</th></tr>
+  <ul class="gt" style="grid-template-columns:minmax(9rem,1fr) auto auto auto">
+    <li class="h"><div>STATISTICS</div><div class="num">Total</div><div class="num">Full</div><div class="num">Incr</div></li>
     {{range .Grid}}
-    <tr><td>{{.Label}}</td><td class="num">{{.Total}}</td><td class="num">{{.Full}}</td><td class="num">{{.Incr}}</td></tr>
+    <li>
+      <div class="c-id"><span>{{.Label}}</span></div>
+      <div class="num"><span class="lbl">total </span>{{.Total}}</div>
+      <div class="num"><span class="lbl">full </span>{{.Full}}</div>
+      <div class="num"><span class="lbl">incr </span>{{.Incr}}</div>
+    </li>
     {{end}}
-  </table>
+  </ul>
 </div>
 <div class="panel scroll" style="margin-top:1rem">
-<table>
-  {{$flushed := .Flushed}}
-  <tr><th>DLE</th><th>LVL</th><th class="num">ORIG</th><th class="num">OUT</th><th class="num">COMP%</th><th class="num">FILES</th><th class="num">TIME</th><th class="num">RATE</th>{{if $flushed}}<th class="num">FLUSH</th><th class="num">FL-RATE</th>{{end}}</tr>
+{{$flushed := .Flushed}}
+<ul class="gt" style="grid-template-columns:minmax(9rem,1fr) repeat({{if $flushed}}9{{else}}7{{end}},auto)">
+  <li class="h"><div>DLE</div><div>LVL</div><div class="num">ORIG</div><div class="num">OUT</div><div class="num">COMP%</div><div class="num">FILES</div><div class="num">TIME</div><div class="num">RATE</div>{{if $flushed}}<div class="num">FLUSH</div><div class="num">FL-RATE</div>{{end}}</li>
   {{range .Rows}}
   {{if .Header}}
-  <tr class="group-row" data-g="{{.Group}}"><td colspan="99"><span class="gtog">▾</span>{{.Label}}<span class="chip">{{.Count}} DLEs</span></td></tr>
+  <li class="group" data-g="{{.Group}}"><div class="c-id full"><span class="gtog">▾</span><span>{{.Label}}</span><span class="chip">{{.Count}} DLEs</span></div></li>
   {{else}}
-  <tr{{if .Group}} data-in="{{.Group}}"{{end}}>
-    <td>{{if .Twig}}<span class="twig">{{.Twig}}</span> {{end}}<a href="/dles/{{.Row.Slug}}"{{if .Twig}} title="{{.Row.ID}}"{{end}}>{{.Label}}</a></td>
-    <td>{{level .Row.Level}}{{if .Row.Promoted}} <span class="pill dim" title="{{.Row.Why}}">promoted</span>{{end}}</td>
-    <td class="num">{{.Row.Orig}}</td>
-    <td class="num">{{.Row.Out}}</td>
-    <td class="num">{{.Row.Comp}}</td>
-    <td class="num">{{.Row.Files}}</td>
-    <td class="num">{{.Row.Time}}</td>
-    <td class="num">{{.Row.Rate}}</td>
-    {{if $flushed}}<td class="num">{{.Row.FlushTime}}</td><td class="num">{{.Row.FlushRate}}</td>{{end}}
-  </tr>
+  <li{{if .Group}} data-in="{{.Group}}"{{end}}>
+    <div class="c-id">{{if .Twig}}<span class="twig">{{.Twig}}</span> {{end}}<a href="/dles/{{.Row.Slug}}"{{if .Twig}} title="{{.Row.ID}}"{{end}}>{{.Label}}</a></div>
+    <div>{{level .Row.Level}}{{if .Row.Promoted}} <span class="pill dim" title="{{.Row.Why}}">promoted</span>{{end}}</div>
+    <div class="num"><span class="lbl">orig </span>{{.Row.Orig}}</div>
+    <div class="num"><span class="lbl">out </span>{{.Row.Out}}</div>
+    <div class="num"><span class="lbl">comp </span>{{.Row.Comp}}</div>
+    <div class="num">{{.Row.Files}}<span class="lbl"> files</span></div>
+    <div class="num"><span class="lbl">time </span>{{.Row.Time}}</div>
+    <div class="num">{{.Row.Rate}}</div>
+    {{if $flushed}}<div class="num"><span class="lbl">flush </span>{{.Row.FlushTime}}</div><div class="num">{{.Row.FlushRate}}</div>{{end}}
+  </li>
   {{end}}
   {{end}}
-</table>
+</ul>
 {{if .Promoted}}<div class="muted" style="margin:.6rem 0 0">Promoted: {{.Promoted}} — hover a <em>promoted</em> pill for why.</div>{{end}}
 </div>
 {{end}}
@@ -75,26 +80,27 @@
 <h2>Copies</h2>
 <div class="panel scroll">
 {{if .Copies}}
-<table>
-  <tr><th>Medium</th><th>Coverage</th><th>Volumes</th><th></th></tr>
+<ul class="gt" style="grid-template-columns:auto auto 1fr">
+  <li class="h"><div>Medium</div><div>Volumes</div><div></div></li>
   {{range .Copies}}
-  <tr>
-    <td><a href="/media/{{.Medium}}">{{.Medium}}</a></td>
-    <td><span class="pill {{.PillClass}}">{{.PillText}}</span></td>
-    <td class="mono-cell">{{if .Labels}}{{.Labels}}{{else}}<span class="muted">—</span>{{end}}</td>
-    <td class="muted">
-      {{if gt .MissingRouted 0}}missing {{.MissingRouted}} archive(s) · <code>nb sync --run {{.RunID}} --to {{.Medium}}</code>
-      {{else if gt .Behind 0}}behind sync: {{.Behind}} archive(s){{if .SyncFrom}} from {{.SyncFrom}}{{end}} · <code>nb sync</code> catches up
-      {{else if not .Expected}}not in any landing route — extra copy{{end}}
-    </td>
-  </tr>
+  <li>
+    <div class="c-id"><a href="/media/{{.Medium}}">{{.Medium}}</a> <span class="pill {{.PillClass}}">{{.PillText}}</span></div>
+    <div class="mono-cell">{{if .Labels}}{{.Labels}}{{else}}<span class="muted">—</span>{{end}}</div>
+    <div class="muted wrap">
+      {{- if gt .MissingRouted 0}}missing {{.MissingRouted}} archive(s) · <code>nb sync --run {{.RunID}} --to {{.Medium}}</code>
+      {{- else if gt .Behind 0}}behind sync: {{.Behind}} archive(s){{if .SyncFrom}} from {{.SyncFrom}}{{end}} · <code>nb sync</code> catches up
+      {{- else if not .Expected}}not in any landing route — extra copy
+      {{- end -}}
+    </div>
+  </li>
   {{end}}
-</table>
+</ul>
 {{else}}<div class="empty">No copies recorded.</div>{{end}}
 </div>
 
 {{with .Grid}}
 <h2>Placements</h2>
+<div class="fade">
 <div class="panel scroll">
 <table class="pgrid">
   <tr>
@@ -121,6 +127,7 @@
   <span><span class="lag">◌</span> awaiting sync</span>
   <span><span class="aged">∅</span> aged out (this medium's retention)</span>
   <span><span class="muted">—</span> not expected here</span>
+</div>
 </div>
 </div>
 {{end}}
