@@ -86,13 +86,11 @@ func Branch(i, n int) string {
 }
 
 // Build arranges items into display groups, sorted by (host, path) with hostless
-// items trailing. Within a host, a DLE whose path is a path-boundary prefix of
-// the ones after it roots a group ("/data" covers "/data/x" but not "/database");
-// ≥2 DLEs with no covering DLE get a synthesized header at the shallowest
-// non-root directory they all share, so members carry multi-segment labels in
-// one group rather than splitting into several tiny per-directory groups.
-// Everything else stays flat, so a catalog without related paths renders
-// exactly as an ungrouped list.
+// items trailing. Within a host, consecutive DLEs sharing any non-root directory
+// form one run ("/data" relates to "/data/x" but not "/database" or "/home"),
+// and arrange decides how the run renders: one group, several per-subdirectory
+// groups, or flat rows. Items with no related path stay flat, so a catalog
+// without sibling DLEs renders exactly as an ungrouped list.
 func Build(items []Item) []Group {
 	idx := make([]int, len(items))
 	for i := range idx {
@@ -117,71 +115,117 @@ func Build(items []Item) []Group {
 			i++
 			continue
 		}
-		base, rooted := groupBase(items, idx, i)
-		if base == "" {
-			out = append(out, Group{Host: it.Host, Base: cleanPath(it.Path), Index: idx[i]})
-			i++
-			continue
-		}
-		g := Group{Host: it.Host, Base: base, Index: -1, Rooted: rooted}
-		var rest *Child
-		for ; i < len(idx); i++ {
-			m := items[idx[i]]
-			if m.Host != it.Host {
+		p := cleanPath(it.Path)
+		j := i + 1
+		for ; j < len(idx); j++ {
+			m := items[idx[j]]
+			if m.Host != it.Host || commonDir(p, cleanPath(m.Path)) == "/" {
 				break
 			}
-			p := cleanPath(m.Path)
-			if p != base && !covers(base, p) {
-				break
-			}
-			c := Child{Index: idx[i], Label: relLabel(base, p), Rest: m.Rest}
-			if p == base {
-				rest = &c // the covering DLE renders last, like nb plan's "the rest"
-				continue
-			}
-			g.Children = append(g.Children, c)
 		}
-		if rest != nil {
-			g.Children = append(g.Children, *rest)
-		}
-		out = append(out, g)
+		out = append(out, arrange(items, idx[i:j])...)
+		i = j
 	}
 	return out
 }
 
-// groupBase decides whether the sorted run starting at position pos opens a group,
-// returning its base path ("" for a flat item). A DLE covering its successor roots
-// a group at its own path. Otherwise the base is synthesized as the SHALLOWEST
-// directory (never the root, which would swallow unrelated DLEs) shared by the
-// whole run of successors — one /data group whose members carry two-segment
-// labels (projects/alpha, qa/x) reads better than several two-row /data/<dir>
-// groups, and matches what a rooted group already shows for the same tree.
-func groupBase(items []Item, idx []int, pos int) (base string, rooted bool) {
-	if pos+1 >= len(idx) {
-		return "", false
+// noiseBudget is how much repeated path text one merged group may carry: the
+// sum over members of label segments beyond the first. Under it, a merged
+// group is compact (a /data group with projects/alpha, projects/beta, qa/x
+// reads fine); past it, the repetition drowns the rows and per-subdirectory
+// groups with single-segment labels read better, even at the cost of one
+// header line per subdirectory.
+const noiseBudget = 8
+
+// arrange turns one run of members — sorted indexes into items, all sharing a
+// non-root directory — into display groups. A run whose first member covers the
+// rest stays one rooted group (partition semantics: the covering row belongs
+// with its carve-outs). Otherwise members bucket by their first path segment
+// under the run's shared directory, and readability cost decides: the merged
+// group's noise is the path text its labels repeat (segments beyond the first,
+// summed), and splitting trades that noise for a header per bucket. A small
+// cluster ("/tank/customers/{acme,globex}" next to "/tank/internal/{wiki,crm}")
+// stays one /tank group — four short two-segment labels beat two long headers —
+// but "/mnt/photo/*" next to "/mnt/docs/*" at any real size splits, since a
+// "/mnt" header lumping unrelated trees repeats its subdirectory names down
+// the whole column. Populated buckets (≥2 DLEs) recurse into their own groups, singleton
+// buckets fall back to flat rows, and a bucket carrying its own covering DLE
+// always splits out — coverage is explicit structure, never merged away.
+func arrange(items []Item, members []int) []Group {
+	if len(members) == 1 {
+		it := items[members[0]]
+		return []Group{{Host: it.Host, Base: cleanPath(it.Path), Index: members[0]}}
 	}
-	cur := items[idx[pos]]
-	p := cleanPath(cur.Path)
-	if next := items[idx[pos+1]]; next.Host != cur.Host {
-		return "", false
-	} else if covers(p, cleanPath(next.Path)) {
-		return p, true
+	d := cleanPath(items[members[0]].Path)
+	for _, m := range members[1:] {
+		d = commonDir(d, cleanPath(items[m].Path))
 	}
-	for j := pos + 1; j < len(idx); j++ {
-		m := items[idx[j]]
-		if m.Host != cur.Host {
-			break
+	if cleanPath(items[members[0]].Path) == d {
+		return []Group{group(items, members, d)}
+	}
+	var segs []string // first-appearance order ≈ sorted by each bucket's first member
+	buckets := map[string][]int{}
+	for _, m := range members {
+		s := segment(cleanPath(items[m].Path), d)
+		if _, ok := buckets[s]; !ok {
+			segs = append(segs, s)
 		}
-		d := commonDir(p, cleanPath(m.Path))
-		// d == p would make this item the group's covering DLE mid-run (a sort
-		// quirk: "-" < "/" can order "/data-x" between "/data" and "/data/x");
-		// stop rather than fabricate a rest row the rooted path didn't claim.
-		if d == "/" || d == p {
-			break
-		}
-		base = d
+		buckets[s] = append(buckets[s], m)
 	}
-	return base, false
+	populated, noise, split := 0, 0, false
+	for _, s := range segs {
+		b := buckets[s]
+		if len(b) >= 2 {
+			populated++
+			if cleanPath(items[b[0]].Path) == d+"/"+s {
+				split = true // a covering DLE deserves its own rooted group
+			}
+		}
+		for _, m := range b {
+			noise += strings.Count(relLabel(d, cleanPath(items[m].Path)), "/")
+		}
+	}
+	// Splitting needs a populated bucket to split out; without one it would
+	// only scatter singletons into full-path flat rows.
+	if !split && (populated == 0 || noise <= noiseBudget) {
+		return []Group{group(items, members, d)}
+	}
+	var out []Group
+	for _, s := range segs {
+		out = append(out, arrange(items, buckets[s])...)
+	}
+	return out
+}
+
+// group builds one display group at base d: children keep sorted order with
+// d-relative labels, and a member at d itself roots the group and renders
+// last, like nb plan's "the rest".
+func group(items []Item, members []int, d string) Group {
+	g := Group{Host: items[members[0]].Host, Base: d, Index: -1}
+	var covering []Child
+	for _, m := range members {
+		it := items[m]
+		p := cleanPath(it.Path)
+		c := Child{Index: m, Label: relLabel(d, p), Rest: it.Rest}
+		if p == d {
+			g.Rooted = true
+			covering = append(covering, c)
+			continue
+		}
+		g.Children = append(g.Children, c)
+	}
+	g.Children = append(g.Children, covering...)
+	return g
+}
+
+// segment is p's first path element below directory d ("photo" for
+// p=/mnt/photo/2024, d=/mnt). p is strictly under d.
+func segment(p, d string) string {
+	rest := p[len(d)+1:]
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		return rest[:i]
+	}
+	return rest
 }
 
 // commonDir is the deepest directory containing both paths ("/" when they share
@@ -203,16 +247,6 @@ func commonDir(a, b string) string {
 		return a[:j]
 	}
 	return "/"
-}
-
-// covers reports whether base contains p at a path boundary: "/data" covers
-// "/data/x" but not "/database", and the root never covers (it would group
-// every absolute path into one).
-func covers(base, p string) bool {
-	if base == "/" || len(p) <= len(base) {
-		return false
-	}
-	return strings.HasPrefix(p, base) && p[len(base)] == '/'
 }
 
 // relLabel is a child's label relative to the group base ("" for the base itself).
