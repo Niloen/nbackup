@@ -233,7 +233,8 @@
   .heat .cell.partial { background: var(--warn); }
   a.cell:hover { outline: 1px solid var(--fg); }
   .heat-legend { color: var(--muted); font-size: .82rem; margin-top: .6rem;
-    display: flex; flex-wrap: wrap; gap: .1rem 1rem; }
+    display: flex; flex-wrap: wrap; gap: .1rem 1rem;
+    position: sticky; left: 0; /* stays put while the grid pans (the calendar opens scrolled to today) */ }
   .heat-legend .sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px;
     vertical-align: -1px; margin-right: .3rem; background: var(--line); }
   .heat-legend .sw.full { background: var(--accent); }
@@ -242,13 +243,30 @@
   /* Matrices (.heat, .pgrid) scroll sideways by design — a DLE×day or
      archive×medium grid has no honest stacked form. Make the scroll usable:
      the identity column pins so you always know which row you're panning,
-     and the .fade wrapper (around the .panel.scroll) hints there's more. */
+     and the .fade wrapper (around the .panel.scroll) hints there's more.
+     Header rows (host/group) must pin too, but a colspan cell fills the scroll
+     width and has no room to shift, and Chromium ignores sticky on anything
+     whose containing block is a table cell — so their label rides the pinned
+     identity column instead: a zero-width .pin whose text overflows across
+     the cell-less row without widening the column. */
   .heat .lbl, .pgrid th:first-child, .pgrid td:first-child {
-    position: sticky; left: 0; background: var(--panel); }
+    position: sticky; left: 0; background: var(--panel);
+    box-shadow: -1rem 0 0 var(--panel); /* blanks the panel's left padding strip, where scrolled cells would peek out */ }
+  .heat .pin { display: block; width: 0; white-space: nowrap; }
+  .heat .hdr { overflow: visible; max-width: none; }
   .fade { position: relative; }
   .fade::after { content: ""; position: absolute; top: 1px; bottom: 1px; right: 1px;
     width: 22px; border-radius: 0 10px 10px 0; pointer-events: none;
     background: linear-gradient(to right, transparent, var(--panel)); }
+  /* Scroll-aware edge hints (script below): the right fade drops once you reach
+     the end, and content scrolled under the pinned identity column casts a
+     shadow from it — "there's more to the left". Without JS neither class is
+     set, so the fade stays as-is. Header cells (.hdr, [colspan]) are excluded:
+     their text overflows past the column, so an edge shadow would cut it. */
+  .fade.at-r::after { content: none; }
+  .fade.off-l .heat td.lbl:not(.hdr), .fade.off-l .heat th.lbl,
+  .fade.off-l .pgrid th:first-child, .fade.off-l .pgrid td:first-child:not([colspan]) {
+    box-shadow: -1rem 0 0 var(--panel), 8px 0 8px -6px color-mix(in srgb, var(--fg) 30%, transparent); }
   @media (max-width: 640px) { .heat .lbl { max-width: 34vw; } }
   /* Host-section headers on /dles when its DLEs span more than one host: a
      compact rollup row (name, count, newest backup, stale count) separating each
@@ -355,6 +373,22 @@ document.querySelectorAll("[data-g]").forEach(function (h) {
     set(!open);
   });
   set(h.hasAttribute("data-open") || members.length <= 10);
+});
+// Fade-wrapped matrices track their scroll position so the edge hints are
+// honest: off-l (content hidden under the pinned column) and at-r (nothing
+// more to the right) drive the CSS above. A data-end wrapper opens scrolled
+// to the far right — the /dles calendar lands on today, history a swipe away.
+// Without JS the calendar starts at the oldest day and the right fade stays.
+document.querySelectorAll(".fade").forEach(function (f) {
+  var p = f.querySelector(".scroll");
+  if (!p) return;
+  function edges() {
+    f.classList.toggle("off-l", p.scrollLeft > 1);
+    f.classList.toggle("at-r", p.scrollLeft + p.clientWidth >= p.scrollWidth - 1);
+  }
+  p.addEventListener("scroll", edges, { passive: true });
+  if (f.hasAttribute("data-end")) p.scrollLeft = p.scrollWidth;
+  edges();
 });
 </script>
 </body>

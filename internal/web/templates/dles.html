@@ -4,7 +4,7 @@
 {{define "heat-rows"}}
 {{range .}}
 {{if .Header}}
-<tr class="group-row" data-g="{{.Group}}"><td class="lbl" colspan="99"><span class="gtog">▾</span>{{.Label}}</td></tr>
+<tr class="group-row" data-g="{{.Group}}"><td class="lbl hdr"><span class="pin"><span class="gtog">▾</span>{{.Label}}</span></td></tr>
 {{else}}
 <tr{{if .Group}} data-in="{{.Group}}"{{end}}>
   <td class="lbl{{if .Group}} member{{end}}"><a href="/dles/{{.Slug}}"{{if .Group}} title="{{.Display}}"{{end}}>{{.Label}}</a></td>
@@ -54,13 +54,13 @@
 
 {{with $d.Heat}}
 <h2>Activity — last 5 weeks</h2>
-<div class="fade">
+<div class="fade" data-end>
 <div class="panel scroll">
 <table class="heat">
   <tr><th class="lbl"></th>{{range .Days}}<th class="tick">{{.Tick}}</th>{{end}}</tr>
   {{if $d.HeatGroups}}
   {{range $d.HeatGroups}}
-  <tr class="host-row"><td class="lbl" colspan="99">{{hostLabel .Host}}</td></tr>
+  <tr class="host-row"><td class="lbl hdr"><span class="pin">{{hostLabel .Host}}</span></td></tr>
   {{template "heat-rows" .Rows}}
   {{end}}
   {{else}}
