@@ -29,6 +29,7 @@ const maxForecastDays = 1000
 func newPlanCmd(a *app) *cobra.Command {
 	var dateStr string
 	var days int
+	var offline bool
 	cmd := &cobra.Command{
 		Use:     "plan",
 		Short:   "Show what the next run would do",
@@ -68,15 +69,24 @@ func newPlanCmd(a *app) *cobra.Command {
 				fmt.Println()
 			}
 			if days > 1 {
-				return runPlanForecast(eng, date, days)
+				return runPlanForecast(eng, date, days, offline)
 			}
 
-			plan, err := eng.PlanWithProgress(date, estimateProgress(a.quiet))
+			var plan *planner.Plan
+			if offline {
+				plan, err = eng.PlanOffline(date)
+			} else {
+				plan, err = eng.PlanWithProgress(date, estimateProgress(a.quiet))
+			}
 			if err != nil {
 				return err
 			}
 			fmt.Printf("Plan for run %s  (cycle %dd, landing %q)\n\n",
 				record.DateString(date), plan.Interval, strings.Join(eng.Landings(), ", "))
+			if offline {
+				fmt.Println("Sizes are PROJECTED from catalog history (--offline), not measured. Levels are exact.")
+				fmt.Println()
+			}
 			for _, w := range plan.Warnings {
 				fmt.Printf("WARNING: %s\n", w)
 			}
@@ -123,6 +133,7 @@ func newPlanCmd(a *app) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&dateStr, "date", "", "run date YYYY-MM-DD (default today); planning a date behind the latest committed run may show a full, since incremental state reflects the most recent dump")
 	cmd.Flags().IntVar(&days, "days", 1, "forecast this many consecutive daily runs from --date")
+	cmd.Flags().BoolVar(&offline, "offline", false, "skip the live size estimate (no SSH/tar pass): project sizes from catalog history instead. Instant; levels are exact, sizes are projections. Recommended with --days, where the live estimate is held constant anyway")
 	return cmd
 }
 
@@ -232,13 +243,21 @@ func runEstimateLine(estTotal int64, unknown int) string {
 // runPlanForecast renders an extended plan: one row per simulated daily run,
 // projecting the level schedule forward. Estimates are sampled once and held
 // constant (see engine.Simulate), so the per-day size tracks the chosen levels.
-func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
-	plans, err := eng.Simulate(start, days)
+func runPlanForecast(eng *engine.Engine, start time.Time, days int, offline bool) error {
+	simulate := eng.Simulate
+	if offline {
+		simulate = eng.SimulateOffline
+	}
+	plans, err := simulate(start, days)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("Forecast: %d daily runs from %s  (cycle %dd, landing %q)\n\n",
 		days, record.DateString(start), plans[0].Interval, strings.Join(eng.Landings(), ", "))
+	if offline {
+		fmt.Println("Sizes are PROJECTED from catalog history (--offline), not measured. The level schedule is exact.")
+		fmt.Println()
+	}
 
 	// Structural warnings (e.g. a recovery set that won't fit capacity) are
 	// constant across the window; surface each one once, above the schedule.

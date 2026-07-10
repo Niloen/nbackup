@@ -17,6 +17,7 @@ import (
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/web"
 )
 
@@ -298,4 +299,15 @@ func (e *engineSource) DrillWindow() time.Duration { return e.cfg.DrillWindow() 
 // freshness window — always on, no separate config.
 func (e *engineSource) StaleDLEs(now time.Time) []catalog.StaleDLE {
 	return e.engine().StaleDLEs(e.cfg.CycleDuration(), now)
+}
+
+// Forecast projects the next `days` runs OFFLINE (catalog + run-log only, no archiver
+// probe), so serving /dles never opens an SSH connection. Errors are advisory — a
+// forecast that cannot be built simply yields no ghost cells.
+func (e *engineSource) Forecast(start time.Time, days int) []*planner.Plan {
+	plans, err := e.engine().SimulateOffline(start, days)
+	if err != nil {
+		return nil
+	}
+	return plans
 }

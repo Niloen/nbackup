@@ -9,7 +9,7 @@
 <tr{{if .Group}} data-in="{{.Group}}"{{end}}>
   <td class="lbl{{if .Group}} member{{end}}"><a href="/dles/{{.Slug}}"{{if .Group}} title="{{.Display}}"{{end}}>{{.Label}}</a></td>
   {{range .Cells}}
-  <td>{{if .RunID}}<a class="cell {{.Class}}" href="/runs/{{.RunID}}" title="{{.Title}}"></a>{{else}}<span class="cell {{.Class}}" title="{{.Title}}"></span>{{end}}</td>
+  <td>{{if .RunID}}<a class="cell {{.Class}}" href="/runs/{{.RunID}}" title="{{.Title}}"></a>{{else}}<span class="cell {{.Class}}{{if .Ghost}} ghost{{end}}" title="{{.Title}}"></span>{{end}}</td>
   {{end}}
 </tr>
 {{end}}
@@ -53,11 +53,11 @@
 <h1>DLEs</h1>
 
 {{with $d.Heat}}
-<h2>Activity — last 5 weeks</h2>
+<h2>Activity — last 5 weeks, next 2 projected</h2>
 <div class="fade" data-end>
 <div class="panel scroll">
 <table class="heat">
-  <tr><th class="lbl"></th>{{range .Days}}<th class="tick">{{.Tick}}</th>{{end}}</tr>
+  <tr><th class="lbl"></th>{{range .Days}}<th class="tick{{if .Future}} fut{{end}}">{{.Tick}}</th>{{end}}</tr>
   {{if $d.HeatGroups}}
   {{range $d.HeatGroups}}
   <tr class="host-row"><td class="lbl hdr"><span class="pin">{{hostLabel .Host}}</span></td></tr>
@@ -72,6 +72,7 @@
   <span><span class="sw incr"></span>incremental</span>
   <span><span class="sw partial"></span>partial</span>
   <span><span class="sw"></span>none</span>
+  <span><span class="sw ghost full"></span>projected</span>
 </div>
 </div>
 </div>

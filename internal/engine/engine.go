@@ -563,6 +563,14 @@ func (e *Engine) PlanWithProgress(date time.Time, sink progress.Sink) (*planner.
 	return e.sched.Plan(date, sink)
 }
 
+// PlanOffline builds the plan without any archiver probe: sizes are projected from
+// the catalog and run-log, so the preview returns instantly (no SSH, no tar pass).
+// Levels are identical to Plan — only the byte estimates are projections, which the
+// caller flags as such. This backs `nb plan --offline` and the webui ghost calendar.
+func (e *Engine) PlanOffline(date time.Time) (*planner.Plan, error) {
+	return e.sched.PlanOffline(date, nil)
+}
+
 // ValidatePlan checks each DLE the way a real run would resolve it, so a preview
 // (`nb plan` / `nb dump --dry-run`) surfaces problems the size estimates would
 // otherwise swallow into a misleading ~0 B. It runs the same pre-flight a real run
@@ -583,6 +591,13 @@ func (e *Engine) ValidatePlan() (warnings []string, err error) {
 // and held constant, so this is a schedule forecast, not a capacity timeline.
 func (e *Engine) Simulate(start time.Time, days int) ([]*planner.Plan, error) {
 	return e.sched.Simulate(start, days)
+}
+
+// SimulateOffline forecasts like Simulate but projects sizes from history rather than
+// probing — the natural default for a multi-day preview, where the probe buys nothing
+// (Simulate holds estimates constant after day 0) yet costs a full estimate sweep.
+func (e *Engine) SimulateOffline(start time.Time, days int) ([]*planner.Plan, error) {
+	return e.sched.SimulateOffline(start, days)
 }
 
 // Run executes the plan for a date, producing one sealed run. It delegates to a

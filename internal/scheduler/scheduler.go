@@ -14,6 +14,7 @@ import (
 	"github.com/Niloen/nbackup/internal/archiver"
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/report"
 )
 
 // Deps is the slice of the orchestrator the planner needs: the inputs are closures
@@ -23,6 +24,8 @@ import (
 type Deps struct {
 	DLEs          func() []config.DLE
 	History       func() *catalog.History
+	RunLog        func() []report.Run          // the run-log (outlives pruning): size history for offline estimates
+	ResolvedSet   func() []catalog.ResolvedDLE // last run's resolved DLE set: offline enumeration without probing
 	ForcedFulls   func() map[string]bool
 	Workers       func() int
 	ArchiverFor   func(dtName, host string) (archiver.Archiver, error)

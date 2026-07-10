@@ -3,6 +3,7 @@ package engine
 import (
 	"os"
 
+	"github.com/Niloen/nbackup/internal/report"
 	"github.com/Niloen/nbackup/internal/scheduler"
 )
 
@@ -11,8 +12,19 @@ import (
 // methods are thin pass-throughs to it (see internal/scheduler).
 func (e *Engine) newScheduler() *scheduler.Scheduler {
 	return scheduler.New(scheduler.Deps{
-		DLEs:          e.cfg.DLEs,
-		History:       e.cat.History,
+		DLEs:    e.cfg.DLEs,
+		History: e.cat.History,
+		// The run-log outlives pruning, so offline estimates see full size history.
+		// Load errors degrade to an empty log: offline sizing falls back to "unknown"
+		// per DLE rather than failing the plan.
+		RunLog: func() []report.Run {
+			runs, err := report.Load(e.cfg.WorkdirPath())
+			if err != nil {
+				return nil
+			}
+			return runs
+		},
+		ResolvedSet:   e.cat.LatestResolved,
 		ForcedFulls:   e.cat.ForcedFulls,
 		Workers:       e.cfg.Workers,
 		ArchiverFor:   e.tc.archiverFor,

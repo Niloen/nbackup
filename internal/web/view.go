@@ -1398,9 +1398,11 @@ type heatmap struct {
 }
 
 // heatDay is one column: its date and a sparse tick label (a month on the 1st, a day
-// number on Mondays, else "").
+// number on Mondays, else ""). Future marks a projected column (past today), which the
+// template dims so the forecast region reads as distinct from recorded activity.
 type heatDay struct {
-	Tick string
+	Tick   string
+	Future bool
 }
 
 // heatRow is one DLE's row of daily cells, in Days order. Like dleRow, rows are
@@ -1416,11 +1418,14 @@ type heatRow struct {
 }
 
 // heatCell is one DLE-day: the accent class driving the fill, a tooltip, and — when a
-// single run produced the day's archive — that run to link to.
+// single run produced the day's archive — that run to link to. Ghost marks a PROJECTED
+// cell (a future day from the offline forecast, not a recorded run): the template
+// renders it as an outline rather than a fill so a plan can never be mistaken for a fact.
 type heatCell struct {
 	Class string // "full" | "incr" | "partial" | "none"
 	Title string
 	RunID string // set only when exactly one run produced the day's archive
+	Ghost bool   // a projected future cell (no RunID; outlined, not filled)
 }
 
 // dleTrendPoint is one dump record's statistics for a single DLE, the per-DLE series

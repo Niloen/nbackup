@@ -65,7 +65,12 @@ type Evolution struct {
 	From, To TrendPoint // first and last full inside the window
 	Days     float64    // span between them
 	PerDay   int64      // average output-bytes growth per day; negative for a shrinking dataset
-	Pct      int        // percent change From→To (output bytes); negative for shrinkage
+	// PerDayOrig is the same slope measured on UNCOMPRESSED (Orig) bytes. The
+	// display views read PerDay (what a volume actually fills with); the planner's
+	// offline estimator reads PerDayOrig, because a probe's Full is an uncompressed
+	// upper bound and the two size sources must be interchangeable.
+	PerDayOrig int64
+	Pct        int // percent change From→To (output bytes); negative for shrinkage
 	// IncrMedian is the median incremental output size in the window; 0 when the
 	// window holds no incrementals (a fulls-only schedule).
 	IncrMedian int64
@@ -100,6 +105,7 @@ func SummarizeTrend(pts []TrendPoint) (Evolution, bool) {
 		return Evolution{}, false
 	}
 	ev.PerDay = int64(float64(ev.To.Out-ev.From.Out) / ev.Days)
+	ev.PerDayOrig = int64(float64(ev.To.Orig-ev.From.Orig) / ev.Days)
 	if ev.From.Out > 0 {
 		ev.Pct = int(float64(ev.To.Out-ev.From.Out) / float64(ev.From.Out) * 100)
 	}

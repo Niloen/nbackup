@@ -20,6 +20,7 @@ import (
 	"github.com/Niloen/nbackup/internal/dletree"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/report"
@@ -59,6 +60,11 @@ type Source interface {
 	// existing freshness promise ("a full never ages past one cycle") and needs
 	// no separate config to enforce.
 	StaleDLEs(now time.Time) []catalog.StaleDLE
+	// Forecast projects the next `days` daily runs from `start` for the ghost calendar.
+	// It is OFFLINE by contract — catalog + run-log only, no archiver/SSH probe — so a
+	// browser hitting /dles can never trigger a host connection (see engine.SimulateOffline).
+	// A read-only status view stays read-only: this returns a projection, mutates nothing.
+	Forecast(start time.Time, days int) []*planner.Plan
 }
 
 // Server renders the status pages from a Source plus the catalog workdir, where the
@@ -604,6 +610,11 @@ func recoveryChain(tip record.Archive, archOf map[string]record.Archive, held fu
 // on now's local day: one row per configured DLE (DLESummaries order), one cell per
 // day colored by what landed. Returns nil when the catalog holds no archives at all, so
 // the caller can omit the whole section.
+// ghostDays is how far the /dles heatmap projects PAST today — the "ghost" forecast of
+// upcoming runs. Two weeks comfortably shows the next full of each DLE on a typical
+// cycle without letting the projected region dominate the recorded five weeks.
+const ghostDays = 14
+
 func (s *Server) buildHeatmap(now time.Time) *heatmap {
 	const days = 35
 	loc := now.Location()
@@ -649,10 +660,29 @@ func (s *Server) buildHeatmap(now time.Time) *heatmap {
 		return nil
 	}
 
+	// Per DLE, per FUTURE local day, the level the offline forecast projects. This is
+	// the ghost: a schedule projection (which day each DLE's next full/incr lands),
+	// sized nowhere and probing nothing — see engine.SimulateOffline. Presence in the
+	// map means "a run is projected that day"; the int is its level (0 = full).
+	ghost := map[string]map[string]int{}
+	for _, p := range s.src.Forecast(today.AddDate(0, 0, 1), ghostDays) {
+		key := p.Date.In(loc).Format("2006-01-02")
+		for _, it := range p.Items {
+			perDay := ghost[it.Name]
+			if perDay == nil {
+				perDay = map[string]int{}
+				ghost[it.Name] = perDay
+			}
+			perDay[key] = it.Level
+		}
+	}
+
 	hm := &heatmap{}
-	dates := make([]time.Time, days)
-	for i := 0; i < days; i++ {
-		d := today.AddDate(0, 0, i-(days-1)) // oldest first, today last
+	// Columns run oldest→today (recorded) then today+1→+ghostDays (projected). One loop
+	// covers both: index days-1 is today, anything past it is a future/ghost column.
+	dates := make([]time.Time, days+ghostDays)
+	for i := range dates {
+		d := today.AddDate(0, 0, i-(days-1))
 		dates[i] = d
 		tick := ""
 		switch {
@@ -661,28 +691,42 @@ func (s *Server) buildHeatmap(now time.Time) *heatmap {
 		case d.Weekday() == time.Monday:
 			tick = fmt.Sprintf("%d", d.Day())
 		}
-		hm.Days = append(hm.Days, heatDay{Tick: tick})
+		hm.Days = append(hm.Days, heatDay{Tick: tick, Future: i >= days})
 	}
 
 	for _, sum := range s.src.DLESummaries() {
 		row := heatRow{Slug: sum.DLE, Display: sum.Display}
 		perDay := byDLE[sum.DLE]
-		for _, d := range dates {
+		ghostDay := ghost[sum.DLE]
+		for i, d := range dates {
+			key := d.Format("2006-01-02")
 			cell := heatCell{Class: "none", Title: d.Format("Mon Jan 2")}
-			if ag := perDay[d.Format("2006-01-02")]; ag != nil {
-				switch {
-				case ag.partial:
-					cell.Class = "partial"
-				case ag.full:
-					cell.Class = "full"
-				case ag.incr:
-					cell.Class = "incr"
-				}
-				cell.Title = fmt.Sprintf("%s · %s · %s", d.Format("Mon Jan 2"), heatLevels(ag.levels), sizeutil.FormatBytes(ag.bytes))
-				if len(ag.runs) == 1 {
-					for id := range ag.runs {
-						cell.RunID = id
+			switch {
+			case i < days: // recorded activity
+				if ag := perDay[key]; ag != nil {
+					switch {
+					case ag.partial:
+						cell.Class = "partial"
+					case ag.full:
+						cell.Class = "full"
+					case ag.incr:
+						cell.Class = "incr"
 					}
+					cell.Title = fmt.Sprintf("%s · %s · %s", d.Format("Mon Jan 2"), heatLevels(ag.levels), sizeutil.FormatBytes(ag.bytes))
+					if len(ag.runs) == 1 {
+						for id := range ag.runs {
+							cell.RunID = id
+						}
+					}
+				}
+			default: // projected (ghost) — outline, never a run link
+				if lvl, ok := ghostDay[key]; ok {
+					cell.Ghost = true
+					cell.Class = "incr"
+					if lvl == 0 {
+						cell.Class = "full"
+					}
+					cell.Title = fmt.Sprintf("%s · projected %s", d.Format("Mon Jan 2"), levelTag(lvl))
 				}
 			}
 			row.Cells = append(row.Cells, cell)

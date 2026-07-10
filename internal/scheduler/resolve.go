@@ -76,3 +76,91 @@ func Resolve(sources []config.DLE, archFor ExpanderFor, exclFor func(dumptype st
 	}
 	return out, failures, nil
 }
+
+// DLESource is one of the scheduler's two online seams (the other is EstimateSource):
+// it enumerates the plannable units and, when it can, refines their bases. The live
+// source (liveDLEs) probes the archiver — enumerating over SSH/find and force-fulling a
+// DLE whose incremental base is unusable (an archiver probe of the client's state). The
+// catalog source (catalogDLEs) reads the recorded resolved set and touches no host, so
+// it cannot refine bases (it has neither host access nor the Scope excludes HasBase
+// needs) — RefineBases is a no-op. Base refinement rides here, not on a separate flag,
+// because it is a capability of live resolution, not an independent choice.
+type DLESource interface {
+	Resolve() ([]planner.DLE, []SourceFailure, error)
+	RefineBases(*planner.Plan)
+}
+
+// liveDLEs is the archiver-probing DLE source (the default). Enumeration and base
+// refinement both reach hosts.
+type liveDLEs struct{ s *Scheduler }
+
+func (l liveDLEs) Resolve() ([]planner.DLE, []SourceFailure, error) { return l.s.resolve() }
+func (l liveDLEs) RefineBases(plan *planner.Plan)                   { l.s.forceFullWhereBaseMissing(plan) }
+
+// catalogDLEs is the offline DLE source: it reconstructs the set from the catalog's
+// recorded resolved set and never touches a host, so it cannot refine bases.
+type catalogDLEs struct{ s *Scheduler }
+
+func (c catalogDLEs) Resolve() ([]planner.DLE, []SourceFailure, error) {
+	return c.s.resolveFromCatalog()
+}
+func (c catalogDLEs) RefineBases(*planner.Plan) {} // no host, no Scope: nothing to probe
+
+func (s *Scheduler) liveDLEs() DLESource    { return liveDLEs{s: s} }
+func (s *Scheduler) catalogDLEs() DLESource { return catalogDLEs{s: s} }
+
+// resolve expands the configured sources into the concrete DLEs to schedule (see
+// Resolve). Only the live-acting paths call it.
+func (s *Scheduler) resolve() ([]planner.DLE, []SourceFailure, error) {
+	return Resolve(s.d.DLEs(),
+		func(dt, host string) (Expander, error) { return s.d.ArchiverFor(dt, host) },
+		s.d.ExcludeFor)
+}
+
+// resolveFromCatalog rebuilds the plannable DLE set from the catalog's recorded
+// resolved set (LatestResolved) — the concrete units the last run resolved its
+// sources into, pattern children included — with NO archiver I/O (no SSH, no find),
+// so the offline plan and the web ghost calendar never touch a host. The recorded set
+// does not persist excludes/carves (see catalog/resolved.go), but the offline decision
+// path never consumes them: history estimates key off the slug, the level comes from
+// run history, and the archiver-probing force-full pass is skipped offline. So the
+// reconstructed Scope carries only Source and (for a partition remainder) Base.
+//
+// When no set was ever recorded (a fresh or `nb rebuild`-flattened catalog) it falls
+// back to the configured SCALAR sources, which resolve to themselves with no I/O.
+// Pattern sources cannot be enumerated without probing, so they are reported as source
+// failures (the failure ladder's unit class) — the gap is visible, never guessed.
+func (s *Scheduler) resolveFromCatalog() ([]planner.DLE, []SourceFailure, error) {
+	if set := s.d.ResolvedSet(); len(set) > 0 {
+		out := make([]planner.DLE, 0, len(set))
+		for _, r := range set {
+			base := ""
+			if r.Rest { // a remainder's Base equals its Source (see planner.DLE.IsRest)
+				base = r.Source
+			}
+			out = append(out, planner.DLE{
+				Scope:    archiver.Scope{Base: base, Source: r.Source},
+				Host:     r.Host,
+				DumpType: r.DumpType,
+				Origin:   r.Origin,
+			})
+		}
+		return out, nil, nil
+	}
+	var out []planner.DLE
+	var failures []SourceFailure
+	for _, src := range s.d.DLEs() {
+		if src.Partition != "" {
+			failures = append(failures, SourceFailure{Source: src, Err: fmt.Errorf(
+				"pattern source cannot be enumerated offline (no resolved set recorded yet); run a live `nb plan` or a dump first")})
+			continue
+		}
+		out = append(out, planner.DLE{
+			Scope:    archiver.Scope{Source: src.Path},
+			Host:     src.Host,
+			DumpType: src.DumpTypeName(),
+			Origin:   src.ID(),
+		})
+	}
+	return out, failures, nil
+}

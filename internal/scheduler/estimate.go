@@ -11,6 +11,28 @@ import (
 	"github.com/Niloen/nbackup/internal/progress"
 )
 
+// EstimateSource supplies the per-DLE size predictions planner.Build needs (a full,
+// and the incremental at the sitting level and the next). Two implementations feed
+// the SAME planner: probeSource asks the archiver live (a metadata tar pass, which
+// may SSH to the host — the accurate-but-slow default), and historySource projects
+// the sizes from recorded history with no I/O (the offline path behind `nb plan
+// --offline` and the webui ghost calendar). Because only the byte inputs differ, an
+// offline plan and a live plan pick identical LEVELS — they can disagree only on size.
+type EstimateSource interface {
+	Estimates(dles []planner.DLE, sink progress.Sink) (map[string]planner.Estimate, []planner.FailedUnit)
+}
+
+// probeSource is the live archiver probe — the historical default. It adapts the
+// Scheduler's estimates method to the EstimateSource interface.
+type probeSource struct{ s *Scheduler }
+
+func (p probeSource) Estimates(dles []planner.DLE, sink progress.Sink) (map[string]planner.Estimate, []planner.FailedUnit) {
+	return p.s.estimates(dles, sink)
+}
+
+// probe returns the live archiver estimate source.
+func (s *Scheduler) probe() EstimateSource { return probeSource{s: s} }
+
 // estimates predicts, for each DLE, the size of a full and of the incremental at
 // its current level and the next (the inputs the planner's bump decision needs),
 // by asking the archiver. For gnutar this is a fast metadata-only tar pass; see

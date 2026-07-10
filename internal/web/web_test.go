@@ -15,6 +15,7 @@ import (
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/report"
@@ -47,6 +48,7 @@ type fakeSource struct {
 	routes    map[string][]string
 	syncRules []config.SyncRule
 	syncLags  []engine.SyncLag
+	forecast  []*planner.Plan // canned offline forecast for the ghost calendar; nil = no ghosts
 }
 
 func (f fakeSource) Runs() []*catalog.Run { return f.runs }
@@ -210,6 +212,8 @@ func (f fakeSource) DLENames() []string {
 func (f fakeSource) DrillWindow() time.Duration { return 30 * 24 * time.Hour }
 
 func (f fakeSource) StaleDLEs(now time.Time) []catalog.StaleDLE { return f.stale }
+
+func (f fakeSource) Forecast(start time.Time, days int) []*planner.Plan { return f.forecast }
 
 // DLESummaries aggregates the fake's runs per DLE, mirroring catalog.DLESummaries
 // closely enough to render the DLE pages (every archive here is on "disk").
@@ -1231,6 +1235,47 @@ func TestActivityHeatmap(t *testing.T) {
 	_, empty := get(t, NewServer(fakeSource{}, t.TempDir()).Handler(), "/dles")
 	if strings.Contains(empty, "Activity") || strings.Contains(empty, `class="heat"`) {
 		t.Errorf("/dles rendered a heatmap for an empty catalog:\n%s", empty)
+	}
+}
+
+// TestGhostCalendar checks the forward projection: a future full from the offline
+// forecast renders an OUTLINED (ghost) cell, distinct from a recorded fill, and the
+// projected columns are marked so the header dims them. The forecast is offline by
+// contract, so serving /dles never probes a host (fakeSource.Forecast is pure).
+func TestGhostCalendar(t *testing.T) {
+	now := time.Now()
+	rec := record.Archive{
+		Run: "run-a", DLE: "local", Host: "localhost", Path: "/src", Level: 0,
+		Compressed: 100_000, CreatedAt: now.AddDate(0, 0, -3),
+	}
+	// Project a full three days out and an incremental tomorrow.
+	future := func(d int) time.Time { return now.AddDate(0, 0, d) }
+	src := fakeSource{
+		runs: []*catalog.Run{{ID: "run-a", Archives: []record.Archive{rec}}},
+		forecast: []*planner.Plan{
+			{Date: future(1), Items: []planner.Item{{Name: "local", Level: 1}}},
+			{Date: future(3), Items: []planner.Item{{Name: "local", Level: 0}}},
+		},
+	}
+
+	code, body := get(t, NewServer(src, t.TempDir()).Handler(), "/dles")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d", code)
+	}
+	for _, want := range []string{
+		"next 2 projected",        // heading names the forecast
+		`class="cell full ghost"`, // the projected full, outlined
+		`class="cell incr ghost"`, // the projected incremental, outlined
+		`class="tick fut"`,        // projected columns dimmed
+		">projected<",             // the legend entry
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/dles ghost calendar missing %q:\n%s", want, body)
+		}
+	}
+	// A ghost is never a run link (nothing committed to link to).
+	if strings.Contains(body, `href="/runs/"`) {
+		t.Errorf("/dles linked a ghost cell to a run:\n%s", body)
 	}
 }
 
