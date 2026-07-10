@@ -289,15 +289,46 @@ func (e *Engine) MediumStats(name string) (MediumStats, bool) { return e.acct.Me
 func (e *Engine) DLESummaries() []catalog.DLESummary { return e.cat.DLESummaries() }
 
 // StaleDLEs returns the configured DLEs whose newest archive predates window (or
-// that have never been backed up), as of now. It resolves the configured DLE slugs
-// and hands them to catalog.StaleDLEs, which owns the computation — the same
-// facade shape as DLESummaries above.
+// that have never been backed up), as of now — a thin facade over
+// StaleConfiguredDLEs, which owns the config-to-catalog resolution.
 func (e *Engine) StaleDLEs(window time.Duration, now time.Time) []catalog.StaleDLE {
-	dles := make([]string, 0, len(e.cfg.DLEs()))
-	for _, d := range e.cfg.DLEs() {
+	return StaleConfiguredDLEs(e.cfg, e.cat, window, now)
+}
+
+// StaleConfiguredDLEs is the ONE staleness computation, shared by `nb check`,
+// `nb report` (which opens the catalog without an engine), and the engine facade
+// behind the web UI: the configured DLEs whose newest archive (any level) predates
+// window, or that have never been backed up. A wildcard (selection) source has no
+// single catalog identity — its literal slug is never dumped — so it is skipped;
+// its children arrive via the latest run's resolved set, which also retires a
+// child that stops being resolved (a deleted match) silently, exactly like a DLE
+// removed from config. A partition BASE's slug is the rest's real catalog
+// identity, so it stays. Display falls back to the config/resolved identity for a
+// unit the catalog has no archive to name.
+func StaleConfiguredDLEs(cfg *config.Config, cat *catalog.Catalog, window time.Duration, now time.Time) []catalog.StaleDLE {
+	idOf := map[string]string{}
+	dles := make([]string, 0, len(cfg.DLEs()))
+	for _, d := range cfg.DLEs() {
+		if strings.ContainsAny(d.Path, "*?[") {
+			continue
+		}
 		dles = append(dles, d.Name())
+		idOf[d.Name()] = d.ID()
 	}
-	return e.cat.StaleDLEs(dles, window, now)
+	for _, r := range cat.LatestResolved() {
+		if _, ok := idOf[r.DLE]; ok {
+			continue
+		}
+		dles = append(dles, r.DLE)
+		idOf[r.DLE] = r.Host + ":" + r.Source
+	}
+	stale := cat.StaleDLEs(dles, window, now)
+	for i := range stale {
+		if stale[i].Display == "" {
+			stale[i].Display = idOf[stale[i].DLE]
+		}
+	}
+	return stale
 }
 
 // MediumMinAge returns a medium's effective retention floor — its configured

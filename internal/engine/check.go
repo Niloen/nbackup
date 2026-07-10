@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -121,36 +120,13 @@ func (c *checker) Check(connect bool) *CheckReport {
 // backed up yet, and that must not turn red before its first dump ever runs.
 func (c *checker) checkStaleness(rep *CheckReport) {
 	window := c.cfg.CycleDuration()
-	dles := make([]string, 0, len(c.cfg.DLEs()))
-	idOf := map[string]string{}
-	for _, d := range c.cfg.DLEs() {
-		// A wildcard (selection) source has no single catalog identity — its literal
-		// slug is never dumped. Its children arrive via the resolved set below; a
-		// partition BASE's slug is the rest's real catalog identity, so it stays.
-		if strings.ContainsAny(d.Path, "*?[") {
-			continue
-		}
-		dles = append(dles, d.Name())
-		idOf[d.Name()] = d.ID()
-	}
-	// The latest run's resolved set extends tracking to pattern children (and any
-	// unit config cannot name): resolved-but-aging flags loud, while a unit that
-	// stops being resolved — a deleted child — retires silently, exactly like a DLE
-	// removed from config. Absent (pre-record history, rebuilt catalog): config-only.
-	for _, r := range c.cat.LatestResolved() {
-		if _, ok := idOf[r.DLE]; ok {
-			continue
-		}
-		dles = append(dles, r.DLE)
-		idOf[r.DLE] = r.Host + ":" + r.Source
-	}
-	stale := c.cat.StaleDLEs(dles, window, time.Now())
+	stale := StaleConfiguredDLEs(c.cfg, c.cat, window, time.Now())
 	if len(stale) == 0 {
 		rep.add(&rep.Server, true, false, fmt.Sprintf("staleness: all DLE(s) backed up within one cycle (%s)", sizeutil.FormatDuration(window)))
 		return
 	}
 	for _, s := range stale {
-		disp := idOf[s.DLE]
+		disp := s.Display
 		if s.LastBackup.IsZero() {
 			rep.add(&rep.Server, false, true, fmt.Sprintf("staleness: %s has never been backed up", disp))
 			continue

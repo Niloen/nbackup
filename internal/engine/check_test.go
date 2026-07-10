@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/record"
 )
@@ -195,8 +196,8 @@ func TestCheckStalenessAlwaysOnDerivesFromCycle(t *testing.T) {
 
 	old := time.Now().Add(-48 * time.Hour)
 	fresh := time.Now().Add(-1 * time.Hour)
-	staleArch := record.Archive{Run: record.IDFromTime(old), DLE: config.DLE{Host: "localhost", Path: "/stale"}.Name(), Level: 0, Compressed: 10, CreatedAt: old}
-	freshArch := record.Archive{Run: record.IDFromTime(fresh), DLE: config.DLE{Host: "localhost", Path: "/fresh"}.Name(), Level: 0, Compressed: 10, CreatedAt: fresh}
+	staleArch := record.Archive{Run: record.IDFromTime(old), DLE: config.DLE{Host: "localhost", Path: "/stale"}.Name(), Host: "localhost", Path: "/stale", Level: 0, Compressed: 10, CreatedAt: old}
+	freshArch := record.Archive{Run: record.IDFromTime(fresh), DLE: config.DLE{Host: "localhost", Path: "/fresh"}.Name(), Host: "localhost", Path: "/fresh", Level: 0, Compressed: 10, CreatedAt: fresh}
 	pos := archiveio.ArchivePos{Parts: []archiveio.FilePos{{Label: "disk", Pos: 1}}, Commit: archiveio.FilePos{Label: "disk", Pos: 2}}
 	if err := eng.cat.AddArchive(staleArch, "disk", pos); err != nil {
 		t.Fatal(err)
@@ -221,6 +222,31 @@ func TestCheckStalenessAlwaysOnDerivesFromCycle(t *testing.T) {
 	}
 	if anyMsg(rep.Server, "localhost:/fresh") {
 		t.Errorf("the freshly backed up DLE should not be reported: %+v", rep.Server)
+	}
+}
+
+// TestStaleDLEsSkipsWildcardSource pins the engine facade (the web UI's staleness
+// source) to the shared computation: a wildcard (selection) source's literal slug
+// (its `*` sanitized to `_` by config.Slug) is never dumped, so it must never be
+// reported as "never backed up"; its children are tracked via the latest run's
+// resolved set instead, with the resolved identity as Display for a child the
+// catalog has no archive to name.
+func TestStaleDLEsSkipsWildcardSource(t *testing.T) {
+	eng := newCheckEngine(t, []config.DLE{{Host: "milo1", Path: "/srv/instances/*"}})
+	eng.cfg.Cycle = "1d"
+	child := config.Slug("milo1", "/srv/instances/mc")
+	if err := eng.cat.RecordResolved("run-2026-07-10.010101", []catalog.ResolvedDLE{
+		{DLE: child, Host: "milo1", Source: "/srv/instances/mc", Origin: "milo1:/srv/instances/*"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stale := eng.StaleDLEs(eng.cfg.CycleDuration(), time.Now())
+	if len(stale) != 1 {
+		t.Fatalf("StaleDLEs = %+v, want exactly the resolved child (never the literal wildcard slug)", stale)
+	}
+	if stale[0].DLE != child || stale[0].Display != "milo1:/srv/instances/mc" {
+		t.Errorf("StaleDLEs[0] = %+v, want DLE %q with the resolved display identity", stale[0], child)
 	}
 }
 
