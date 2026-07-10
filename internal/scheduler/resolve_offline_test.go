@@ -13,7 +13,7 @@ func TestResolveFromCatalogRebuildsRecordedSet(t *testing.T) {
 		{DLE: "localhost__data", Host: "localhost", Source: "/data", DumpType: "default", Origin: "localhost:/data", Rest: true},
 	}
 	s := New(Deps{ResolvedSet: func() []catalog.ResolvedDLE { return set }})
-	dles, fails, err := s.resolveFromCatalog()
+	dles, fails, err := s.catalogDLEs().Resolve()
 	if err != nil || len(fails) != 0 {
 		t.Fatalf("recorded-set resolve should not fail: err=%v fails=%v", err, fails)
 	}
@@ -43,7 +43,7 @@ func TestResolveFromCatalogFallsBackToScalarSources(t *testing.T) {
 		ResolvedSet: func() []catalog.ResolvedDLE { return nil },
 		DLEs:        func() []config.DLE { return cfgDLEs },
 	})
-	dles, fails, err := s.resolveFromCatalog()
+	dles, fails, err := s.catalogDLEs().Resolve()
 	if err != nil {
 		t.Fatalf("fallback should not error: %v", err)
 	}
