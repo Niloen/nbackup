@@ -221,9 +221,13 @@ each run, and climbs only when it has held the current level for `bumpDays` runs
 the next level would save at least `bump_percent` of the full size
 (`planner.chooseIncrLevel`). The threshold is a percentage so one knob fits every DLE
 regardless of size, and since the saving from climbing shrinks as levels deepen, level
-1 stays the common case and deep levels are rare. Two payoffs over a naive per-run
-climb: restore chains stay short, and consecutive same-level incrementals *overlap*,
-so losing one does not break the chain. A level-`L` dump bases on the `L-1` snapshot,
+1 stays the common case and deep levels are rare. The runs-held guard is *hysteresis* —
+a climb rests on a level's demonstrated steady state, not one run's estimate — not a
+redundancy mechanism: redundancy is copies to a second medium (multi-landing routes,
+`nb sync`), which protect the full and incrementals alike. Two payoffs over a naive
+per-run climb: restore chains stay short, and consecutive same-level incrementals
+*overlap* and stay independent, so losing one costs at most its own restore point,
+never the runs after it. A level-`L` dump bases on the `L-1` snapshot,
 so repeating a level just re-derives `L`.snar from the unchanged `L-1`.snar.
 `recovery.Chain` is a **per-level restore**: it replays exactly one archive per level —
 the tip (most recent dump at or before the target) walked back along each incremental's
@@ -233,8 +237,8 @@ idempotent across independent incremental extractions, so a second cumulative `L
 carrying the same `rename old → new` would abort the chain (`tar: Cannot rename …`).
 Walking `BaseRun` keeps the chain *consistent* (each step's base is the exact dump it
 derives from), and a `BaseRun` whose run has been pruned is a **broken-chain error**,
-never a silent partial restore. The overlap-redundancy property (fall back to an
-earlier cumulative incremental when the tip's copy is unreadable) is a deferred
+never a silent partial restore. The overlap fallback (restore an earlier cumulative
+incremental's point in time when the tip's copy is unreadable) is a deferred
 recovery feature, not the normal restore path.
 
 **Recover needs no index server.** Browsing per-dump path lists without reading the

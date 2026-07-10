@@ -60,13 +60,20 @@ A DLE does **not** climb a level every run. After a full it sits at **level 1**,
 re-dumping everything changed since the full. It climbs to a deeper level only when
 *both* hold:
 
-- it has held the current level for a couple of runs, **and**
+- it has held the current level for a couple of runs — so the climb rests on the
+  level's demonstrated steady state, not a single run's estimate — **and**
 - climbing would save at least **`bump_percent`** of the full size (default 5%).
 
 The savings from climbing shrink as levels deepen, so in practice **level 1 is the
 common case** and deep levels are earned by real savings. The payoff: restore
-chains stay short, and consecutive same-level incrementals **overlap** — losing one
-doesn't break the chain.
+chains stay short, and consecutive same-level incrementals **overlap** and stay
+independent of one another — losing one costs at most its own restore point, never
+the runs after it.
+
+The bump rule is *not* a redundancy mechanism — it can't be: the full, which every
+incremental depends on, gets no overlap. Redundancy in NBackup is **copies to a
+second medium**, which protect the full and incrementals alike; see
+[Replication](replication).
 
 ```yaml
 cycle: 7d

@@ -101,7 +101,7 @@ func TestBumpDecision(t *testing.T) {
 	}
 }
 
-// TestBumpDaysGuard checks the redundancy guard: even a huge saving cannot bump a
+// TestBumpDaysGuard checks the climb hysteresis: even a huge saving cannot bump a
 // DLE that has sat at the current level for fewer than bumpDays runs.
 func TestBumpDaysGuard(t *testing.T) {
 	today := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)

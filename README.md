@@ -277,7 +277,7 @@ primitive into N-level backups.
    the current level a couple of runs *and* when climbing would save at least
    `bump_percent` of the full size (default 5%). So L1 is the common case, deep
    levels are earned by real savings, restore chains stay short, and consecutive
-   incrementals overlap for redundancy.
+   incrementals overlap and stay independent of one another.
 3. **Promote** to balance — the *only* balancing lever, automatic (no knob). It
    builds a **deadline calendar** of upcoming fulls and pulls a full from the
    heaviest future day onto a lighter run. It promotes a DLE onto today only while

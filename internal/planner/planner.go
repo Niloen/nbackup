@@ -13,7 +13,7 @@
 // only when it has held the current one for a few runs *and* climbing saves a real
 // fraction of the full. So level 1 is the common case — a deeper level is earned by
 // genuine savings, not reached automatically — which keeps restore chains short and
-// consecutive incrementals overlapping for redundancy.
+// consecutive incrementals overlapping and independent of one another.
 //
 // The one balancing lever is promotion: pulling a future full forward onto today
 // to level the daily full load toward the cycle average (one full of every DLE,
@@ -59,9 +59,11 @@ type Estimate struct {
 	Incomplete bool
 }
 
-// bumpDays is the redundancy guard: a DLE stays at one incremental level for
-// at least this many runs before it may climb, so consecutive incrementals overlap
-// and losing one does not break the restore chain.
+// bumpDays is the climb hysteresis: a DLE stays at one incremental level for
+// at least this many runs before it may climb, so the climb decision rests on a
+// level's demonstrated steady state rather than a single run's estimate.
+// (Redundancy is not this guard's job — that is copies to a second medium,
+// which protect the full and incrementals alike.)
 const bumpDays = 2
 
 // Params are the planner's tuning inputs, derived from config and the medium.
@@ -210,9 +212,10 @@ func SittingLevel(st *catalog.DLEState) int {
 //
 // A DLE *sits* at a level: it repeats that level run after run, each time
 // re-dumping everything changed since the level below — so consecutive
-// incrementals overlap and stay independent of one another. It climbs to the next
+// incrementals overlap and stay independent of one another (losing one costs at
+// most its own restore point, never the runs after it). It climbs to the next
 // level only when both guards pass: it has sat at the current level for at
-// least bumpDays runs (redundancy), and the next level would save at least
+// least bumpDays runs (hysteresis), and the next level would save at least
 // BumpPercent of the full-dump size (a real saving). Because the saving from a
 // climb shrinks as levels deepen, a percentage threshold naturally keeps level 1
 // the common case and deeper levels rare. The first incremental after a full
