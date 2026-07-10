@@ -11,6 +11,18 @@
   <div class="card"><div class="k">Never drilled</div><div class="v {{if $d.Never}}warn{{end}}">{{len $d.Never}}</div></div>
 </div>
 
+{{if $d.FailingRows}}
+<div class="alerts" style="margin-top:.7rem">
+  {{range $d.FailingRows}}
+  <div class="alert bad wrap" style="display:block">
+    <div class="wrap"><span class="pill bad">failing</span> <a href="/dles/{{.Slug}}">{{.DLE}}</a> <span class="muted">— [{{.Class}}] last drill {{stamp .At}} ({{.Age}} ago), tier {{.Tier}} on {{.Medium}}</span></div>
+    <div class="bad wrap" style="margin-top:.25rem">{{.Detail}}</div>
+    <div class="muted wrap" style="margin-top:.25rem">{{.Remedy}} · retry: <code>{{.Retry}}</code> — a pass clears this warning</div>
+  </div>
+  {{end}}
+</div>
+{{end}}
+
 {{if $d.Never}}
 <div class="muted" style="margin-top:.7rem">Never drilled: {{range $i, $n := $d.Never}}{{if $i}}, {{end}}{{if $n.Slug}}<a href="/dles/{{$n.Slug}}">{{$n.Display}}</a>{{else}}{{$n.Display}}{{end}}{{end}}</div>
 {{end}}
@@ -21,11 +33,15 @@
 <table>
   <tr><th>DLE</th><th>Result</th><th>Tier</th><th>Medium</th><th>As of</th><th>Run</th><th>Last drill</th><th class="num">Read</th></tr>
   {{range $d.Ledger}}
+  {{if .Label}}
+  <tr class="host-row"><td colspan="99"><strong>{{.Label}}</strong> · {{.Count}} DLE{{if ne .Count 1}}s{{end}}{{if .Bad}} <span class="pill bad">{{.Bad}} failing</span>{{end}}{{if .Warn}} <span class="pill warn">{{.Warn}} stale</span>{{end}}</td></tr>
+  {{end}}
+  {{range .Rows}}
   {{if .Header}}
-  <tr class="group-row" data-g="{{.Group}}"><td colspan="99"><span class="gtog">▾</span>{{.Label}}<span class="chip">{{.Count}} DLEs</span></td></tr>
+  <tr class="group-row" data-g="{{.Group}}"{{if .Bad}} data-open{{end}}><td colspan="99"><span class="gtog">▾</span>{{.Label}}<span class="chip">{{.Count}} DLEs</span>{{if .Bad}} <span class="pill bad">{{.Bad}} failing</span>{{end}}{{if .Warn}} <span class="pill warn">{{.Warn}} stale</span>{{end}}</td></tr>
   {{else}}
   <tr{{if .Group}} data-in="{{.Group}}"{{end}}>
-    <td>{{if .Twig}}<span class="twig">{{.Twig}}</span> {{end}}<a href="/dles/{{.Row.Slug}}"{{if .Twig}} title="{{.Row.DLE}}"{{end}}>{{.Label}}</a></td>
+    <td class="dlecell">{{if .Twig}}<span class="twig">{{.Twig}}</span> {{end}}<a href="/dles/{{.Row.Slug}}" title="{{.Row.DLE}}">{{.Label}}</a></td>
     <td><span class="pill {{if .Row.Failing}}bad{{else if .Row.Stale}}warn{{else}}ok{{end}}">{{.Row.Status}}</span></td>
     <td>{{.Row.Tier}}{{if .Row.What}} <span class="muted" style="font-size:.82rem">· {{.Row.What}}</span>{{end}}</td>
     <td class="muted">{{.Row.Medium}}</td>
@@ -37,8 +53,9 @@
   {{if .Row.Failing}}
   <tr{{if .Group}} data-in="{{.Group}}"{{end}}>
     <td></td>
-    <td colspan="7" class="bad" style="white-space:normal">[{{.Row.Class}}] {{.Row.Detail}}{{if .Row.Remedy}} — <span class="muted">{{.Row.Remedy}}</span>{{end}}</td>
+    <td colspan="7" class="bad wrap">[{{.Row.Class}}] {{.Row.Detail}}{{if .Row.Remedy}} — <span class="muted">{{.Row.Remedy}}</span>{{end}}{{if .Row.Retry}} <span class="muted">· retry: <code>{{.Row.Retry}}</code> (a pass clears this)</span>{{end}}</td>
   </tr>
+  {{end}}
   {{end}}
   {{end}}
   {{end}}
@@ -63,8 +80,8 @@
     <tr><th>DLE</th><th>Result</th><th class="num">Read</th></tr>
     {{range .Targets}}
     <tr>
-      <td><a href="/dles/{{.Slug}}">{{.DLE}}</a></td>
-      <td>{{if not .Drilled}}<span class="pill dim">skipped</span>{{else if .OK}}<span class="pill ok">ok</span>{{else}}<span class="pill bad">fail · {{.Class}}</span>{{if .Degrading}} <span class="warn">degrading</span>{{end}}{{end}}</td>
+      <td class="dlecell"><a href="/dles/{{.Slug}}" title="{{.DLE}}">{{.DLE}}</a></td>
+      <td class="wrap">{{if not .Drilled}}<span class="pill dim">skipped</span>{{else if .OK}}<span class="pill ok">ok</span>{{else}}<span class="pill bad">fail · {{.Class}}</span>{{if .Degrading}} <span class="warn">degrading</span>{{end}}{{if .Detail}} <span class="muted" style="font-size:.82rem">{{.Detail}}</span>{{end}}{{end}}</td>
       <td class="num">{{if .Bytes}}{{bytes .Bytes}}{{else}}<span class="muted">—</span>{{end}}</td>
     </tr>
     {{end}}
