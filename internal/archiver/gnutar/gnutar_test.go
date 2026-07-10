@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -483,16 +484,24 @@ func TestClassifyTarStderr(t *testing.T) {
 }
 
 // TestMemberOffsets pins the --block-number member index: create mode records each
-// member's byte offset in the raw stream byte-exactly — the tar header at Off carries
-// the member's own name — for a full AND a listed-incremental archive (whose dumpdir
+// member's byte offset in the raw stream byte-exactly — the header set at Off names
+// the member itself — for a full AND a listed-incremental archive (whose dumpdir
 // payloads for directories sit between members), and list mode (`tar -tR`) reports the
-// same offsets create mode recorded.
+// same offsets create mode recorded. The long-named members (path > tar's 100-byte
+// header name field, so each is preceded by a GNU longname record) pin the
+// normalizeCreateIndex repair: without it, tar's listed-incremental create index
+// numbers a long-named DIRECTORY past its longname record, and the create/list
+// comparison below catches the skew.
 func TestMemberOffsets(t *testing.T) {
 	src := t.TempDir()
 	out := t.TempDir()
 	m := newArchiver(t, t.TempDir())
 	write(t, filepath.Join(src, "a.txt"), strings.Repeat("alpha\n", 300)) // >1 block, so offsets diverge from index order
 	write(t, filepath.Join(src, "sub", "c.txt"), "gamma")
+	// A 106-char dir path (with "./" and trailing "/") and a long-named file inside it:
+	// the dir exercises the create-index skew, the file the no-skew long-name case.
+	longDir := filepath.Join("Minecraft", "plugins", "EssentialsX-GUI", "lib", "com", "github", "InstantlyMoist", "privatebin-java-api", "master-5625a57693-1")
+	write(t, filepath.Join(src, longDir, "a-regular-file-with-a-rather-long-name-padding-padding-padding-padding.bin"), "payload")
 
 	l0 := filepath.Join(out, "l0.tar")
 	res0 := backup(t, m, archiver.BackupRequest{DLE: "app", Scope: archiver.Scope{Source: src}, Level: 0, BaseLevel: -1}, l0)
@@ -534,8 +543,10 @@ func TestMemberOffsets(t *testing.T) {
 }
 
 // assertOffsets checks every member's recorded offset against the archive bytes: the
-// 512-byte tar header at Off must name the member itself (the name field is the header's
-// first 100 bytes, NUL-terminated) — the byte-exact proof that Off = block × 512.
+// header set starting at Off must name the member itself — the byte-exact proof that
+// Off = block × 512 anchored at the member's first block. A short name sits in the
+// header's 100-byte name field directly; a long name means Off points at the GNU
+// longname record ("././@LongLink"), whose payload carries the real name.
 func assertOffsets(t *testing.T, tarFile string, members []record.Member) {
 	t.Helper()
 	data, err := os.ReadFile(tarFile)
@@ -551,8 +562,40 @@ func assertOffsets(t *testing.T, tarFile string, members []record.Member) {
 		}
 		header := data[mem.Off : mem.Off+512]
 		name := string(bytes.TrimRight(header[:100], "\x00"))
+		if name == "././@LongLink" {
+			size, err := strconv.ParseInt(strings.Trim(string(header[124:136]), " \x00"), 8, 64)
+			if err != nil || mem.Off+512+size > int64(len(data)) {
+				t.Fatalf("member %q: unreadable longname record at offset %d (size %q)", mem.Path, mem.Off, header[124:136])
+			}
+			name = string(bytes.TrimRight(data[mem.Off+512:mem.Off+512+size], "\x00"))
+		}
 		if name != mem.Path {
 			t.Errorf("member %q: header at offset %d names %q", mem.Path, mem.Off, name)
+		}
+	}
+}
+
+// TestNormalizeCreateIndex pins the longname-record arithmetic on the boundaries: the
+// subtraction applies only to directories whose name overflows the 100-byte header
+// field (one extra block per started 512 bytes of name+NUL), never to short names,
+// long-named FILES (tar numbers those correctly), or offset-less members.
+func TestNormalizeCreateIndex(t *testing.T) {
+	dir100 := "./" + strings.Repeat("d", 97) + "/"  // exactly 100: fits, no record
+	dir106 := "./" + strings.Repeat("d", 103) + "/" // 1-block name → 1024-byte record
+	dir523 := "./" + strings.Repeat("d", 520) + "/" // 2-block name → 1536-byte record
+	file106 := "./" + strings.Repeat("f", 104)
+	in := []record.Member{
+		{Path: "./short/", Off: 512},
+		{Path: dir100, Off: 5 * 512},
+		{Path: dir106, Off: 10 * 512},
+		{Path: dir523, Off: 20 * 512},
+		{Path: file106, Off: 30 * 512},
+		{Path: dir106, Off: -1}, // unreported offset stays unreported
+	}
+	want := []int64{512, 5 * 512, 10*512 - 1024, 20*512 - 1536, 30 * 512, -1}
+	for i, m := range normalizeCreateIndex(in) {
+		if m.Off != want[i] {
+			t.Errorf("member %q: Off = %d, want %d", m.Path, m.Off, want[i])
 		}
 	}
 }

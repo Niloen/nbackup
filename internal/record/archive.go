@@ -161,11 +161,15 @@ func (f *Frame) UnmarshalJSON(b []byte) error {
 
 // Member is one archive member: its path (slash-separated, directories with a trailing
 // slash — the archiver-neutral convention) and its byte offset in the raw archive stream
-// (-1 when the producing archiver cannot report offsets). A member list is in stream
-// order, and member i's extent is [Off_i, Off_{i+1}) — offset-consumers (selective
-// restore's range planning, offset-aware structural verify) rely on that invariant, so
-// never reorder a recorded list. The JSON keys are terse (p/o) because member lists are
-// the bulk of an archive's metadata.
+// (-1 when the producing archiver cannot report offsets). Off points at the FIRST byte
+// of everything the stream stores for the member — for tar, the whole header set,
+// longname records included — so a splice starting at Off reconstructs the member whole;
+// the producing archiver owns delivering that (gnutar repairs tar's one deviation in
+// normalizeCreateIndex). A member list is in stream order, and member i's extent is
+// [Off_i, Off_{i+1}) — offset-consumers (selective restore's range planning,
+// offset-aware structural verify) rely on both invariants, so never reorder a recorded
+// list. The JSON keys are terse (p/o) because member lists are the bulk of an archive's
+// metadata.
 type Member struct {
 	Path string `json:"p"`
 	Off  int64  `json:"o"`

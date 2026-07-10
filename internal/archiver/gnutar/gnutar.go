@@ -492,13 +492,55 @@ func (g *gnutar) createArgs(r archiver.BackupRequest, fileTarget, snapshot, inde
 	return append(args, ".")
 }
 
-// readIndex reads the member index tar wrote to path on the executor's host.
+// readIndex reads the member index tar wrote to path on the executor's host and repairs
+// its one offset quirk (see normalizeCreateIndex) so every recorded offset anchors at
+// the member's first block.
 func (g *gnutar) readIndex(path string) ([]record.Member, error) {
 	data, err := g.ex.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return scanMemberOffsets(bytes.NewReader(data))
+	members, err := scanMemberOffsets(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	return normalizeCreateIndex(members), nil
+}
+
+// GNU tar header-format facts behind normalizeCreateIndex: a member whose name exceeds
+// the 100-byte header name field is preceded by a longname ('L') record — one 512-byte
+// header plus the NUL-terminated name rounded up to whole blocks.
+const (
+	tarBlockSize    = 512
+	tarNameFieldLen = 100
+)
+
+// longNameRecordSize returns the on-stream size of the GNU longname record preceding a
+// member named name, or 0 when the name fits the header field and no record is written.
+func longNameRecordSize(name string) int64 {
+	if len(name) <= tarNameFieldLen {
+		return 0
+	}
+	nameBlocks := (int64(len(name)) + 1 + tarBlockSize - 1) / tarBlockSize
+	return (1 + nameBlocks) * tarBlockSize
+}
+
+// normalizeCreateIndex repairs the create-mode index so every offset honors Member.Off's
+// invariant: the first block of the member's header set, longname record included — the
+// offset list mode (`tar -tR`) reports, and the only one a ranged read can splice from
+// (a splice past the longname record restores a name truncated at 100 chars). In
+// --listed-incremental create mode — the only mode Backup runs — tar numbers a
+// long-named DIRECTORY after its longname record, while regular files (and list mode,
+// always) get the record itself. The quirk is stable (identical in tar 1.30/1.34/1.35)
+// and its size exact, so the record size is subtracted back here. Never apply this to
+// `tar -tR` output: list offsets are already correct.
+func normalizeCreateIndex(members []record.Member) []record.Member {
+	for i, m := range members {
+		if m.Off > 0 && strings.HasSuffix(m.Path, "/") {
+			members[i].Off -= longNameRecordSize(m.Path)
+		}
+	}
+	return members
 }
 
 // isWarning reports whether a tar exit was a non-fatal warning (exit code 1: "some files
