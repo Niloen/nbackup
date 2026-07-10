@@ -1,5 +1,9 @@
 # Niloen Backup (NBackup) — backups you can read, restore, and prove
 
+[![CI](https://github.com/Niloen/nbackup/actions/workflows/ci.yml/badge.svg)](https://github.com/Niloen/nbackup/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Niloen/nbackup)](https://github.com/Niloen/nbackup/releases)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
+
 NBackup backs up Unix machines — filesystem trees and **live PostgreSQL
 clusters** — to **local disk, cloud object stores (S3, GCS, Azure Blob), Google
 Drive, and tape**, treating them as equal targets and making
@@ -24,8 +28,8 @@ The design descends from **[Amanda][amanda]** — balanced multilevel scheduling
 immutable daily artifacts, and cycle-based safety — modernized: object storage
 is a peer of tape, and the whole system is one static Go binary driven by cron,
 with no daemons and no database (the catalog is a cache one media scan
-rebuilds). This is a first version — see [PRD.md](PRD.md) for the product
-vision, and the [docs site](https://backup.niloen.com) for the full manual (concepts,
+rebuilds). See [PRD.md](PRD.md) for the product vision, and the
+[docs site](https://backup.niloen.com) for the full manual (concepts,
 features, scenarios, reference). (The rest of this page assumes the Amanda
 lineage above and calls it out again only where a specific mechanism is worth
 tracing back.)
@@ -85,7 +89,11 @@ A **run** is one sealed set of archives; each archive is its payload followed by
 and checksums), the footer written last so its presence proves the archive landed
 whole. A run is complete once every archive it planned has committed. The same
 shape maps to disk, an object store, or tape; each medium frames the header its
-own way.
+own way. This format is covered by an explicit
+[compatibility promise](https://backup.niloen.com/reference/format-compatibility):
+payloads stay stock-tool-readable forever, metadata only ever grows, and every
+release reads every artifact an older release wrote — upgrades are a binary
+swap, never a migration.
 
 On **disk** the header is a separate `.hdr` sidecar so the payload stays a clean
 archive, and the files are human-friendly — one archive is three numbered files
@@ -907,7 +915,7 @@ them all to the landing.
   (`pg_basebackup`, `pg_combinebackup`) on the host that dumps — set the
   archiver's `bin_dir` if they are off `PATH`. `nb check` verifies them.
 
-## Status & limitations (first version)
+## Status & limitations
 
 Implemented: disk, tape, cloud (S3/GCS/Azure), and **Google Drive** (`gdrive`,
 personal over OAuth or a Workspace Shared Drive) Volumes, **copying runs between

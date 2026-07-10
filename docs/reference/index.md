@@ -16,6 +16,7 @@ without NBackup at all.
 | [CLI reference](cli) | Every `nb` command, its purpose, and key flags. |
 | [Configuration reference](configuration) | Every config block — media, archivers, dumptypes, sources, sync, notify, ssh — with examples. |
 | [Restore by hand](../restore-by-hand) | Recovering a backup with stock `gpg`/`zstd`/`tar` and no NBackup. |
+| [Format compatibility](format-compatibility) | The on-medium format promise: frozen payloads, additive-only metadata, no migrations. |
 
 For the conceptual background behind these, see [Concepts](../concepts) and
 [Features](../features).

@@ -1,14 +1,17 @@
 # Security Policy
 
-NBackup is early-stage software. We take security seriously — a backup tool sits
-on the integrity and confidentiality of other people's data — and we appreciate
-reports that help us keep it sound.
+We take security seriously — a backup tool sits on the integrity and
+confidentiality of other people's data — and we appreciate reports that help us
+keep it sound.
 
 ## Supported versions
 
-NBackup has not yet reached a stable release. Security fixes are applied to the
-`main` branch; there is no back-port stream for tagged releases yet. Always run
-the latest `main` until a versioned support policy is published here.
+Only the **latest tagged release** is supported. Security fixes land on `main`
+and ship in the next release; there are no back-port streams for older
+releases. If you are running an older version, upgrade to the current release —
+upgrading is a binary swap (see the
+[format compatibility promise](docs/reference/format-compatibility.md): newer
+binaries read every artifact older releases wrote).
 
 ## Reporting a vulnerability
 
@@ -24,7 +27,7 @@ Please include:
 
 - a description of the issue and the impact you foresee,
 - the steps or a proof of concept needed to reproduce it,
-- the affected commit or `main` revision,
+- the affected release version (`nb version`) or commit,
 - and any suggested remediation if you have one.
 
 ## What to expect
