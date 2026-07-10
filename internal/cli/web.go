@@ -57,7 +57,14 @@ func newWebCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			src, err := newEngineSource(cfg)
+			// Watch the config file too, so an edit to a medium's capacity, a new
+			// DLE, etc. reaches the browser like a fresh catalog does. Skip it under
+			// --catalog, where the config file is ignored entirely (nothing to reload).
+			cfgPath := a.cfgPath
+			if a.catalog != "" {
+				cfgPath = ""
+			}
+			src, err := newEngineSource(cfg, cfgPath, a.loadOrDefaultCatalog)
 			if err != nil {
 				return err
 			}
@@ -169,12 +176,24 @@ func reexec() error {
 // their workdir files per request already. Rebuilding is cheap: engine construction
 // is pure wiring plus that one JSON read (the landing volume opens lazily, and no
 // web page touches it).
+//
+// The config file gets the same treatment: an operator editing a medium's capacity,
+// adding a DLE, or changing the cycle expects the change to show up without bouncing
+// the server. The source stats the config file per read too and, when it changes,
+// reloads the whole config (via reload) before rebuilding the engine from it.
 type engineSource struct {
 	cfg *config.Config
 
-	mu    sync.Mutex
-	eng   *engine.Engine
-	stamp catalogStamp // identity of catalog.json when eng was built
+	// cfgPath is the config file to watch, and reload re-reads it into a fresh
+	// *config.Config. cfgPath is empty (and reload unused) when there is no config
+	// file to watch, e.g. under --catalog.
+	cfgPath string
+	reload  func() (*config.Config, error)
+
+	mu       sync.Mutex
+	eng      *engine.Engine
+	stamp    catalogStamp // identity of catalog.json when eng was built
+	cfgStamp catalogStamp // identity of the config file when cfg was loaded
 }
 
 // catalogStamp identifies a catalog cache file's on-disk version (zero when the
@@ -198,23 +217,42 @@ func statFile(path string) catalogStamp {
 }
 
 // newEngineSource builds the source with its first engine, so `nb web` still fails
-// loudly at startup on a broken config or catalog.
-func newEngineSource(cfg *config.Config) (*engineSource, error) {
+// loudly at startup on a broken config or catalog. cfgPath/reload watch the config
+// file for live edits; pass cfgPath == "" (reload unused) to disable that watch.
+func newEngineSource(cfg *config.Config, cfgPath string, reload func() (*config.Config, error)) (*engineSource, error) {
 	stamp := statCatalog(cfg.WorkdirPath())
 	eng, err := engine.New(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &engineSource{cfg: cfg, eng: eng, stamp: stamp}, nil
+	return &engineSource{
+		cfg:      cfg,
+		cfgPath:  cfgPath,
+		reload:   reload,
+		eng:      eng,
+		stamp:    stamp,
+		cfgStamp: statFile(cfgPath),
+	}, nil
 }
 
-// engine returns the current engine, rebuilding it first when catalog.json has
-// changed on disk since the last build. A rebuild failure (e.g. a torn read racing
-// a writer's rename) keeps serving the previous engine; the next request retries.
+// engine returns the current engine, rebuilding it first when the config file or
+// catalog.json has changed on disk since the last build. A config-file change is
+// reloaded into a fresh cfg and always forces a rebuild; a bare catalog change
+// rebuilds from the existing cfg. A reload or rebuild failure (e.g. a torn read
+// racing a writer's rename, or a mid-edit config) keeps serving the previous engine;
+// the next request retries.
 func (e *engineSource) engine() *engine.Engine {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if stamp := statCatalog(e.cfg.WorkdirPath()); stamp != e.stamp {
+	rebuild := false
+	if e.cfgPath != "" {
+		if cs := statFile(e.cfgPath); cs != e.cfgStamp {
+			if cfg, err := e.reload(); err == nil {
+				e.cfg, e.cfgStamp, rebuild = cfg, cs, true
+			}
+		}
+	}
+	if stamp := statCatalog(e.cfg.WorkdirPath()); rebuild || stamp != e.stamp {
 		if eng, err := engine.New(e.cfg); err == nil {
 			e.eng, e.stamp = eng, stamp
 		}
