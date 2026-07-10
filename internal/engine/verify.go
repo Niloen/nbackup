@@ -9,6 +9,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/Niloen/nbackup/internal/archivefs"
 	"github.com/Niloen/nbackup/internal/archiver"
@@ -49,6 +50,7 @@ type ArchiveVerdict struct {
 	OK     bool
 	Class  drill.Class // ClassNone when OK
 	Detail string      // human-readable reason when not OK
+	Bytes  int64       // bytes read off the medium performing the checks
 }
 
 // RunVerdict aggregates the per-archive verdicts for one run.
@@ -61,7 +63,8 @@ type RunVerdict struct {
 // VerifyReport is the structured outcome of a Verify call.
 type VerifyReport struct {
 	Runs     []RunVerdict
-	Failures int // runs with at least one failed archive
+	Failures int   // runs with at least one failed archive
+	Bytes    int64 // total bytes read off media — an offsite verify's egress cost
 }
 
 // verifier is NBackup's atomic verification operation: it checks individual
@@ -147,6 +150,9 @@ func (v *verifier) verify(runIDs []string, opts VerifyOptions, logf Logf) (*Veri
 			continue
 		}
 		rep.Runs = append(rep.Runs, *sv)
+		for _, avd := range sv.Archives {
+			rep.Bytes += avd.Bytes
+		}
 		if !sv.OK {
 			rep.Failures++
 		}
@@ -248,7 +254,19 @@ func (v *verifier) verifyCopy(s *catalog.Run, p catalog.Placement, opts VerifyOp
 	// every one (never stop early), collecting verdicts.
 	verdicts := make(map[archiveio.Ref]ArchiveVerdict, len(refs))
 	_, err := v.store.OpenArchives(refs, p.Medium, func(ref archiveio.Ref, open func() (io.ReadCloser, error)) error {
-		verdicts[ref] = v.verifyArchive(archByRef[ref], ref, p.Medium, opts, open, logf)
+		// Every check drains the stream off the medium, so count what each open
+		// yields — that measured total is the verdict's (and the report's) read cost.
+		var n atomic.Int64
+		counted := func() (io.ReadCloser, error) {
+			rc, oerr := open()
+			if oerr != nil {
+				return nil, oerr
+			}
+			return &countingReadCloser{rc: rc, n: &n}, nil
+		}
+		vd := v.verifyArchive(archByRef[ref], ref, p.Medium, opts, counted, logf)
+		vd.Bytes = n.Load()
+		verdicts[ref] = vd
 		return nil
 	})
 	if err != nil {
@@ -370,6 +388,22 @@ type teeReadCloser struct {
 
 func (t *teeReadCloser) Read(p []byte) (int, error) { return t.r.Read(p) }
 func (t *teeReadCloser) Close() error               { return t.c.Close() }
+
+// countingReadCloser tallies bytes as the checks drain the medium stream. The counter
+// is atomic because a structural check hands the stream to a decode pipeline whose
+// child-feeding copy runs on its own goroutine.
+type countingReadCloser struct {
+	rc io.ReadCloser
+	n  *atomic.Int64
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	m, err := c.rc.Read(p)
+	c.n.Add(int64(m))
+	return m, err
+}
+
+func (c *countingReadCloser) Close() error { return c.rc.Close() }
 
 // structuralCheck streams the archive through the real read pipeline and lists its
 // members (`tar -t`), asserting the pipeline completes cleanly and the members match

@@ -162,6 +162,35 @@ func TestVerifySkipsCopyOnUnknownMedium(t *testing.T) {
 	}
 }
 
+// TestVerifyReportsBytesRead locks verify's read accounting: every check drains the
+// archive off the medium, so the report's Bytes total must reflect that measured cost
+// (it feeds the run report's bytes-moved — a verify that read gigabytes must not show 0B).
+func TestVerifyReportsBytesRead(t *testing.T) {
+	f := newDrillFixture(t, "none")
+	eng := f.eng
+	id := "run-2026-06-21.000000"
+
+	rep, err := eng.Verify([]string{id}, VerifyOptions{}, logfDiscard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Failures != 0 {
+		t.Fatalf("failures = %d, want 0", rep.Failures)
+	}
+	if rep.Bytes <= 0 {
+		t.Fatalf("report Bytes = %d, want > 0 (verify drained the archive off the medium)", rep.Bytes)
+	}
+	var sum int64
+	for _, rv := range rep.Runs {
+		for _, avd := range rv.Archives {
+			sum += avd.Bytes
+		}
+	}
+	if sum != rep.Bytes {
+		t.Fatalf("report Bytes = %d, want the per-archive sum %d", rep.Bytes, sum)
+	}
+}
+
 // TestVerifyCopyOpenErrorIsPipeline exercises the non-unknown copy-open-error branch: a
 // copy on a medium that IS defined but cannot be opened is a real pipeline failure
 // (badCopy, ClassPipeline), distinct from the out-of-scope unknown-medium skip.

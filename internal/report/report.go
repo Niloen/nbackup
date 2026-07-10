@@ -59,10 +59,10 @@ type Run struct {
 	Warnings []string `json:"warnings,omitempty"`
 
 	// What ran / moved. "Bytes moved" is uniform across commands: bytes sealed
-	// (dump), copied (sync), or freed (prune) by this run.
+	// (dump), copied (sync), freed (prune), or read back (verify/drill) by this run.
 	RunID          string `json:"run_id,omitempty"`          // dump: the sealed run
 	Archives       int    `json:"archives,omitempty"`        // dump: archive count
-	BytesMoved     int64  `json:"bytes_moved,omitempty"`     // dump sealed / sync copied / prune freed
+	BytesMoved     int64  `json:"bytes_moved,omitempty"`     // dump sealed / sync copied / prune freed / verify+drill read
 	RunsCopied     int    `json:"runs_copied,omitempty"`     // sync
 	ArchivesPruned int    `json:"archives_pruned,omitempty"` // prune: archives reclaimed (prune's unit is the archive, not the run)
 	Failures       int    `json:"failures,omitempty"`        // verify/drill failure count

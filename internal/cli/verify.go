@@ -81,7 +81,7 @@ func newVerifyCmd(a *app) *cobra.Command {
 				if err != nil {
 					return report.Run{}, err
 				}
-				rec := report.Run{Command: report.CommandVerify, Failures: vr.Failures}
+				rec := report.Run{Command: report.CommandVerify, Failures: vr.Failures, BytesMoved: vr.Bytes}
 				if vr.Failures > 0 {
 					return rec, fmt.Errorf("%d run(s) failed verification", vr.Failures)
 				}
