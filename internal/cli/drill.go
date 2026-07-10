@@ -37,6 +37,9 @@ func drillRunRecord(dr *engine.DrillReport, priorOK map[string]bool) report.Run 
 			WasOK:   seen && was,
 			Drilled: drilled,
 		}
+		if !t.OK {
+			h.Detail = t.Detail // the actual error rides into the run record and its digest/mail
+		}
 		if drilled {
 			h.Bytes = t.Bytes
 		}
@@ -62,7 +65,7 @@ func newDrillCmd(a *app) *cobra.Command {
 		sample                   int
 	)
 	cmd := &cobra.Command{
-		Use:   "drill",
+		Use:   "drill [dle...]",
 		Short: "Rehearse recovery: prove backups are restorable, not just intact",
 		Long: "Run a recovery drill — the recoverability proof checksum verification cannot give " +
 			"(a lost key, a compression/tar drift, a broken incremental chain, an unreadable offsite copy). " +
@@ -74,14 +77,17 @@ func newDrillCmd(a *app) *cobra.Command {
 			"--dry-run (-n) to preview without cost. Use --from to drill the offsite copy, and --unattended for cron (it " +
 			"never prompts and skips any target that would need a tape swap). Exits non-zero on any " +
 			"classified drill failure.\n\n" +
+			"Pass DLE names (host:path or slug) to re-drill exactly those DLEs now, bypassing the " +
+			"window rotation and --sample — the retry after a failure: a pass overwrites the DLE's " +
+			"ledger record and clears its warning, a repeat failure confirms the fault is real.\n\n" +
 			"Tiers (cheapest → strongest), set with --tier (default structural):\n" +
 			"  sample      re-hash ONE part per archive against its per-part seal — bounded egress; successive drills rotate through the parts\n" +
 			"  checksum    re-hash stored bytes against the commit footer — integrity only, no decode\n" +
 			"  structural  decrypt+decompress+`tar -t` — proves a valid restorable stream, writes nothing\n" +
 			"  chain       real point-in-time restore (full+incrementals) to scratch — the strong proof\n" +
 			"  stock       restore via the documented gpg/zstd/tar one-liner — proves recovery needs no NBackup",
-		Example: "  nb drill\n  nb drill --dry-run\n  nb drill --from offsite --tier structural\n  nb dump && nb sync && nb drill --unattended",
-		Args:    cobra.NoArgs,
+		Example: "  nb drill\n  nb drill web01:/home\n  nb drill --dry-run\n  nb drill --from offsite --tier structural\n  nb dump && nb sync && nb drill --unattended",
+		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.loadForWrite()
 			if err != nil {
@@ -128,6 +134,7 @@ func newDrillCmd(a *app) *cobra.Command {
 
 			opts := engine.DrillOptions{
 				AsOf:       record.DateString(date),
+				DLEs:       args,
 				Window:     win,
 				Sample:     sample,
 				Medium:     from,
@@ -248,6 +255,16 @@ func printDrillReport(r *engine.DrillReport) {
 			status = "NOT MET"
 		}
 		fmt.Printf("SLO (0 failures this run): %s — %d failure(s), %d skipped\n", status, r.Failures, r.Skipped)
+		// Each failure names its remedy and the retry that either clears the warning
+		// (a transient hiccup) or confirms the fault is real.
+		for _, t := range r.Targets {
+			if !t.Class.IsFailure() {
+				continue
+			}
+			fmt.Printf("  %s: %s\n", t.DLEDisplay, t.Class.Remedy())
+			fmt.Printf("    retry: `nb drill %s` — a pass clears the warning; `nb verify --dle %s --deep` cross-checks every copy\n",
+				t.DLEDisplay, t.DLEDisplay)
+		}
 	}
 	fmt.Println()
 

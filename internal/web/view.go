@@ -1091,7 +1091,32 @@ type pathGroupRow[T any] struct {
 	Twig   string
 	Group  string
 	Count  int
+	Bad    int // members in a failing state — badged on the header (and forces the group open), so collapse cannot hide a failure
+	Warn   int // members in a warning state (e.g. stale), badged on the header
 	Row    T
+}
+
+// flagGroupHeaders rolls member health up onto each group header row: judge
+// returns (bad, warn) per member and the header accumulates the counts. Large
+// groups start collapsed, hiding member rows — without this rollup a failing DLE
+// inside one would be invisible on the page.
+func flagGroupHeaders[T any](rows []pathGroupRow[T], judge func(T) (bad, warn bool)) {
+	hdr := -1
+	for i := range rows {
+		if rows[i].Header {
+			hdr = i
+			continue
+		}
+		if hdr < 0 || rows[i].Group == "" {
+			continue
+		}
+		switch bad, warn := judge(rows[i].Row); {
+		case bad:
+			rows[hdr].Bad++
+		case warn:
+			rows[hdr].Warn++
+		}
+	}
 }
 
 // groupRowsByPath arranges per-DLE rows with dletree; items carries each row's
@@ -2134,12 +2159,85 @@ func usageChartSVG(series []catalog.UsageSample, capacity int64, capLabel string
 // drillsData backs the drills page: the coverage rollup, the per-DLE ledger, and
 // the recent drill runs.
 type drillsData struct {
-	Window                  string    // formatted coverage window (e.g. "30d")
-	Passing, Stale, Failing int       // ledger records by current health
-	Never                   []dleLink // configured DLEs never drilled; path siblings folded (Slug == "")
-	Overdue                 int       // DLEs not covered within the window
-	Ledger                  []pathGroupRow[drillLedgerRow]
+	Window                  string           // formatted coverage window (e.g. "30d")
+	Passing, Stale, Failing int              // ledger records by current health
+	FailingRows             []drillLedgerRow // failing records, leading the page: error + remedy + retry, never buried mid-ledger
+	Never                   []dleLink        // configured DLEs never drilled; path siblings folded (Slug == "")
+	Overdue                 int              // DLEs not covered within the window
+	Ledger                  []drillLedgerSection
 	Runs                    []drillRunRow
+}
+
+// drillLedgerSection is one host's slice of the ledger table. A fleet spanning
+// more than one host is sectioned per host — hosts are the failure domain, the
+// same sectioning /dles uses — with the host named once (Label set) and member
+// labels host-echo-free; a single-host fleet stays one unlabeled section with
+// full identities.
+type drillLedgerSection struct {
+	Label     string // host name for the section header ("(other)" for hostless); "" = no header (single host)
+	Count     int    // DLEs in the section
+	Bad, Warn int    // failing / stale members, badged on the header
+	Rows      []pathGroupRow[drillLedgerRow]
+}
+
+// sectionDrillLedger arranges ledger rows for display: path-folded via
+// groupRowsByPath, split into per-host sections when the fleet spans more than
+// one host, each section's labels stripped of the host echo and its header
+// carrying failing/stale rollups (so no section can hide a failure).
+func sectionDrillLedger(rows []drillLedgerRow, items []dletree.Item) []drillLedgerSection {
+	judge := func(r drillLedgerRow) (bool, bool) { return r.Failing, r.Stale }
+	var hosts []string
+	byHost := map[string][]int{}
+	for i, it := range items {
+		if _, ok := byHost[it.Host]; !ok {
+			hosts = append(hosts, it.Host)
+		}
+		byHost[it.Host] = append(byHost[it.Host], i)
+	}
+	if len(hosts) <= 1 {
+		g := groupRowsByPath(rows, items)
+		flagGroupHeaders(g, judge)
+		if g == nil {
+			return nil
+		}
+		return []drillLedgerSection{{Count: len(rows), Rows: g}}
+	}
+	// Hostless (bare-slug) records trail the named hosts, like /dles' "(other)".
+	sort.SliceStable(hosts, func(i, j int) bool {
+		if (hosts[i] == "") != (hosts[j] == "") {
+			return hosts[j] == ""
+		}
+		return hosts[i] < hosts[j]
+	})
+	var out []drillLedgerSection
+	for _, host := range hosts {
+		sec := drillLedgerSection{Label: host, Count: len(byHost[host])}
+		if host == "" {
+			sec.Label = "(other)"
+		}
+		hr := make([]drillLedgerRow, 0, sec.Count)
+		hi := make([]dletree.Item, 0, sec.Count)
+		for _, i := range byHost[host] {
+			hr = append(hr, rows[i])
+			hi = append(hi, items[i])
+			switch bad, warn := judge(rows[i]); {
+			case bad:
+				sec.Bad++
+			case warn:
+				sec.Warn++
+			}
+		}
+		sec.Rows = groupRowsByPath(hr, hi)
+		for j := range sec.Rows {
+			// The section names the host; row labels carry only the path. Group
+			// keys keep the host-qualified ID, so same-named directories on two
+			// hosts collapse independently.
+			sec.Rows[j].Label = strings.TrimPrefix(sec.Rows[j].Label, host+":")
+		}
+		flagGroupHeaders(sec.Rows, judge)
+		out = append(out, sec)
+	}
+	return out
 }
 
 // drillLedgerRow is one DLE's last drill outcome — a row of the recoverability
@@ -2160,6 +2258,7 @@ type drillLedgerRow struct {
 	Drills         int    // total applied drills of this DLE
 	Class, Detail  string // failure class + reason when failing
 	Remedy         string // operator guidance for the failure class
+	Retry          string // the re-drill command that clears the warning on a pass
 }
 
 // dleLink is a display name paired with its internal slug, for the "Never drilled"
@@ -2191,7 +2290,8 @@ type drillTargetRow struct {
 	OK        bool
 	Drilled   bool // false = skipped (needed an operator)
 	Class     string
-	Degrading bool // passed before, failing now
+	Detail    string // the actual error when failing
+	Degrading bool   // passed before, failing now
 	Bytes     int64
 }
 

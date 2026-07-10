@@ -43,13 +43,20 @@ func TestRenderRunRecovery(t *testing.T) {
 	r := Run{
 		Command: CommandDrill, Outcome: OutcomeFailure, ExitClass: "drill-failures",
 		Error: "1 drill failure(s)", Failures: 1, Overdue: 1, NeverDrilled: []string{"db01-postgres"},
-		DrillHealth: []DrillHealth{{DLE: "app01-home", OK: false, Class: "pipeline", WasOK: true, Drilled: true}},
-		StartedAt:   time.Now(), EndedAt: time.Now().Add(time.Minute),
+		DrillHealth: []DrillHealth{{DLE: "app01-home", OK: false, Class: "pipeline", WasOK: true, Drilled: true,
+			Detail: "gpg: decryption failed:\nNo secret key"}},
+		StartedAt: time.Now(), EndedAt: time.Now().Add(time.Minute),
 	}
 	var sb strings.Builder
 	RenderRun(&sb, r)
 	out := sb.String()
-	for _, want := range []string{"RECOVERY HEALTH", "DEGRADING", "app01-home", "never drilled: db01-postgres", "1 DLE(s) overdue"} {
+	for _, want := range []string{
+		"RECOVERY HEALTH", "DEGRADING", "app01-home", "never drilled: db01-postgres", "1 DLE(s) overdue",
+		// The actual error (newlines collapsed), the class remedy, and the retry command.
+		"gpg: decryption failed: No secret key",
+		"remedy: the archive would not decrypt",
+		"retry:  `nb drill app01-home`",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("RenderRun recovery missing %q\n---\n%s", want, out)
 		}

@@ -398,7 +398,9 @@ func TestDrillsPageRendersLedgerAndHistory(t *testing.T) {
 	for _, want := range []string{
 		"svc-a", "structural", "123.00 kB", // passing ledger row: tier + egress
 		"svc-b", "pipeline", "gpg: decryption failed", // failing row: class + detail
-		"Never drilled", "local", // coverage: the configured DLE with no record
+		`alert bad`,                   // the failure leads the page in its own panel…
+		`retry: <code>nb drill svc-b`, // …with the retry that clears it
+		"Never drilled", "local",      // coverage: the configured DLE with no record
 		"1 DLE(s) drilled", // the recent drill run from the history
 	} {
 		if !strings.Contains(body, want) {
@@ -2087,5 +2089,98 @@ func TestStatusEstimateGroups(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("/status sizing table missing %q", want)
 		}
+	}
+}
+
+// TestDrillsGroupHeaderFlagsFailure pins the collapse-safety of the ledger's path
+// grouping: a group past ten members starts collapsed, so a failing member must be
+// rolled up onto the header (a "failing" badge) and force the group open —
+// otherwise the only red on the page would be hidden rows.
+func TestDrillsGroupHeaderFlagsFailure(t *testing.T) {
+	dir := t.TempDir()
+	src := fakeSource{}
+	run := &catalog.Run{ID: "run-2026-07-03.120000"}
+	ledger := &drill.Ledger{}
+	for i := 0; i < 12; i++ {
+		slug := fmt.Sprintf("app01-data-%02d", i)
+		run.Archives = append(run.Archives, record.Archive{
+			Run: run.ID, DLE: slug, Host: "app01", Path: fmt.Sprintf("/data/d%02d", i),
+			Level: 0, Compressed: 1000, FileCount: 1, Compress: "none", Encrypt: "none",
+			CreatedAt: time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC),
+		})
+		rec := drill.Record{DLE: slug, LastDrill: time.Now().Add(-time.Hour), Tier: "structural",
+			Medium: "disk", AsOf: "2026-07-03", RunID: run.ID, OK: true}
+		if i == 7 {
+			rec.OK, rec.Class, rec.Detail = false, "pipeline", "gpg: decryption failed"
+		}
+		ledger.Update(rec)
+	}
+	src.runs = []*catalog.Run{run}
+	if err := ledger.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := get(t, NewServer(src, dir).Handler(), "/drills")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d", code)
+	}
+	for _, want := range []string{
+		"data-open",              // the failing group starts expanded
+		">1 failing</span>",      // header rollup badge
+		"gpg: decryption failed", // the member's actual error still renders
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/drills missing %q", want)
+		}
+	}
+}
+
+// TestDrillsLedgerHostSections pins the multi-host arrangement of the drill
+// ledger: hosts get section header rows (the failure domain, like /dles) carrying
+// failing rollups, and member labels drop the host echo the header already names.
+func TestDrillsLedgerHostSections(t *testing.T) {
+	dir := t.TempDir()
+	src := fakeSource{}
+	run := &catalog.Run{ID: "run-2026-07-03.120000"}
+	ledger := &drill.Ledger{}
+	add := func(slug, host, path string, ok bool) {
+		run.Archives = append(run.Archives, record.Archive{
+			Run: run.ID, DLE: slug, Host: host, Path: path,
+			Level: 0, Compressed: 1000, FileCount: 1, Compress: "none", Encrypt: "none",
+			CreatedAt: time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC),
+		})
+		rec := drill.Record{DLE: slug, LastDrill: time.Now().Add(-time.Hour), Tier: "structural",
+			Medium: "disk", AsOf: "2026-07-03", RunID: run.ID, OK: ok}
+		if !ok {
+			rec.Class, rec.Detail = "integrity", "member moved in the stream"
+		}
+		ledger.Update(rec)
+	}
+	add("milo1-inst-a", "milo1", "/home/amp/instances/a", true)
+	add("milo1-inst-b", "milo1", "/home/amp/instances/b", false)
+	add("web01-home", "web01", "/home", true)
+	src.runs = []*catalog.Run{run}
+	if err := ledger.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := get(t, NewServer(src, dir).Handler(), "/drills")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d", code)
+	}
+	for _, want := range []string{
+		`<strong>milo1</strong> · 2 DLEs`, // host section header with count
+		`>1 failing</span>`,               // failing rollup on the milo1 header
+		`<strong>web01</strong> · 1 DLE`,  // second host section
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/drills missing %q\n", want)
+		}
+	}
+	// The group header under a host section names the shared directory without
+	// re-echoing the host the section row already names. (The failing panel at the
+	// top deliberately keeps the full identity — it stands alone.)
+	if strings.Contains(body, "▾</span>milo1:") {
+		t.Errorf("host echo left in a sectioned group header:\n%s", body)
 	}
 }

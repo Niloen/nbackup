@@ -172,13 +172,16 @@ func renderDrillLedger(w io.Writer, cfg *config.Config, now time.Time) {
 	}
 
 	fmt.Fprintln(w, "\nDRILL COVERAGE")
-	if len(failing) > 0 {
-		tw := newTab(w)
-		fmt.Fprintln(tw, "  FAILING DLE\tCLASS\tLAST DRILL\tREMEDY")
-		for _, r := range failing {
-			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", disp(r.DLE), r.Class, drillWhen(r.LastDrill), drill.ParseClass(r.Class).Remedy())
+	// Failing DLEs render as blocks, not table rows: the recorded error is the fact
+	// an operator diagnoses from, and it is too long for a column.
+	for _, r := range failing {
+		name := disp(r.DLE)
+		fmt.Fprintf(w, "  FAILING %s [%s] — last drill %s (tier %s on %q)\n", name, r.Class, drillWhen(r.LastDrill), r.Tier, r.Medium)
+		if r.Detail != "" {
+			fmt.Fprintf(w, "    error:  %s\n", r.Detail)
 		}
-		tw.Flush()
+		fmt.Fprintf(w, "    remedy: %s\n", drill.ParseClass(r.Class).Remedy())
+		fmt.Fprintf(w, "    retry:  `nb drill %s` — a pass clears this warning; `nb verify --dle %s --deep` cross-checks every copy\n", name, name)
 	}
 	if len(stale) > 0 {
 		names := make([]string, 0, len(stale))

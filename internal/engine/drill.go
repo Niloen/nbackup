@@ -43,8 +43,9 @@ import (
 // DrillOptions controls a drill run.
 type DrillOptions struct {
 	AsOf       string        // point-in-time to drill (YYYY-MM-DD); "" = today
+	DLEs       []string      // drill exactly these DLEs (slug or host:path), bypassing selection; empty = risk-biased selection
 	Window     time.Duration // each DLE should be drilled within this window
-	Sample     int           // max DLEs to drill this run (<=0 = every due DLE)
+	Sample     int           // max DLEs to drill this run (<=0 = every due DLE); ignored for named DLEs
 	Medium     string        // source medium to read from; "" = the landing medium
 	Tier       drill.Tier    // how deeply to exercise each target
 	Worm       bool          // run the WORM/immutability probe (apply only)
@@ -157,7 +158,18 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	targets := drill.Select(dles, d.cat.Archives(), opts.AsOf, ledger, opts.Window, opts.Sample, opts.Now)
+	var targets []drill.Target
+	if len(opts.DLEs) > 0 {
+		// Named targets: the operator's re-drill ("was that failure a hiccup?").
+		// Drill exactly these DLEs now — no window rotation, no sample cap — so a
+		// pass overwrites the DLE's ledger record and clears its warning.
+		targets, err = d.namedTargets(opts.DLEs, ledger, opts)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		targets = drill.Select(dles, d.cat.Archives(), opts.AsOf, ledger, opts.Window, opts.Sample, opts.Now)
+	}
 
 	rep := &DrillReport{
 		AsOf: opts.AsOf, Window: opts.Window, Medium: medium, Tier: opts.Tier,
@@ -250,6 +262,39 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 	rep.NeverDrilled, rep.Overdue = ledger.Coverage(dles, opts.Window, opts.Now)
 	d.toDisplay(rep.NeverDrilled)
 	return rep, nil
+}
+
+// namedTargets resolves user-named DLEs (slug or host:path) into drill targets,
+// bypassing the window/sample selection: a named DLE is drilled unconditionally.
+// It reuses Select with a zero window (nothing is "covered") and no cap, then
+// insists every name survived — a named target with no recovery point is an
+// error, never a silent skip.
+func (d *driller) namedTargets(refs []string, ledger *drill.Ledger, opts DrillOptions) ([]drill.Target, error) {
+	seen := map[string]bool{}
+	slugs := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		slug, ok := d.dles.resolve(ref)
+		if !ok {
+			return nil, fmt.Errorf("unknown DLE %q — the catalog knows: %s", ref, strings.Join(d.dles.displayAll(), ", "))
+		}
+		if !seen[slug] {
+			seen[slug] = true
+			slugs = append(slugs, slug)
+		}
+	}
+	targets := drill.Select(slugs, d.cat.Archives(), opts.AsOf, ledger, 0, 0, opts.Now)
+	if len(targets) != len(slugs) {
+		got := map[string]bool{}
+		for _, t := range targets {
+			got[t.DLE] = true
+		}
+		for _, slug := range slugs {
+			if !got[slug] {
+				return nil, fmt.Errorf("DLE %s has no recovery point at or before %s — nothing to drill", d.dles.display(slug), opts.AsOf)
+			}
+		}
+	}
+	return targets, nil
 }
 
 // displayAll rewrites a slice of DLE slugs to their host:path display identities

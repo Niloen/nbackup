@@ -36,6 +36,7 @@ func (c VerifyChecks) has(x VerifyChecks) bool { return c&x != 0 }
 type VerifyOptions struct {
 	Checks VerifyChecks // zero is treated as CheckChecksum
 	Medium string       // "" = every placement; else only the copy on this medium
+	DLE    string       // "" = every archive; else only this DLE's archives (internal slug)
 }
 
 // ArchiveVerdict is the machine-readable result of verifying one archive on one
@@ -120,7 +121,15 @@ func (v *verifier) verify(runIDs []string, opts VerifyOptions, logf Logf) (*Veri
 	}
 	if len(runIDs) == 0 {
 		for _, s := range v.cat.Runs() {
+			// A DLE pin scopes the whole-catalog sweep to the runs that hold it, so a
+			// targeted verify mounts only the media that DLE's archives occupy.
+			if opts.DLE != "" && !runHoldsDLE(s, opts.DLE) {
+				continue
+			}
 			runIDs = append(runIDs, s.ID)
+		}
+		if opts.DLE != "" && len(runIDs) == 0 {
+			return nil, fmt.Errorf("no runs hold archives for DLE %q", opts.DLE)
 		}
 	}
 	rep := &VerifyReport{}
@@ -149,6 +158,12 @@ func (v *verifier) verifyRun(id string, opts VerifyOptions, logf Logf) (*RunVerd
 	s, err := v.cat.ReadRun(id)
 	if err != nil {
 		return nil, err
+	}
+	// An explicitly named run that holds nothing for the pinned DLE is out of scope,
+	// not damaged — say so instead of reporting a hollow "OK (0 archives)".
+	if opts.DLE != "" && !runArchivesHoldDLE(s.Archives, opts.DLE) {
+		logf.Log("%s: no archives for the requested DLE — skipped", id)
+		return &RunVerdict{Run: id, OK: true}, nil
 	}
 	placements := v.placements(id)
 	if opts.Medium != "" {
@@ -215,6 +230,9 @@ func (v *verifier) verifyCopy(s *catalog.Run, p catalog.Placement, opts VerifyOp
 	// copies on other media are verified on their own placements.
 	expected := make([]record.Archive, 0, len(s.Archives))
 	for _, a := range s.Archives {
+		if opts.DLE != "" && a.DLE != opts.DLE {
+			continue // a DLE pin verifies just that DLE's archives on each copy
+		}
 		if p.Holds(a.DLE, a.Level) {
 			expected = append(expected, a)
 		}
@@ -454,6 +472,18 @@ func membersDiff(want, got []record.Member) string {
 		}
 	}
 	return ""
+}
+
+// runHoldsDLE reports whether the run recorded any archive for the DLE slug.
+func runHoldsDLE(s *catalog.Run, dle string) bool { return runArchivesHoldDLE(s.Archives, dle) }
+
+func runArchivesHoldDLE(archives []record.Archive, dle string) bool {
+	for _, a := range archives {
+		if a.DLE == dle {
+			return true
+		}
+	}
+	return false
 }
 
 // placementsOnMedium keeps only the copy on the named medium (for offsite drills /

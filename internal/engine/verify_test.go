@@ -349,3 +349,39 @@ func TestOldFormatIndexDegradesGracefully(t *testing.T) {
 	}
 	assertContent(t, filepath.Join(dest, "keep.txt"), "v1")
 }
+
+// TestVerifyDLEScoped pins the targeted verify: a DLE pin checks only that DLE's
+// archives across the runs that hold it, catches a corrupt copy, and errors on a
+// DLE nothing holds (instead of a green "0 run(s) verified").
+func TestVerifyDLEScoped(t *testing.T) {
+	f := newDrillFixture(t, "none")
+	eng := f.eng
+
+	rep, err := eng.Verify(nil, VerifyOptions{DLE: f.dle}, nil)
+	if err != nil {
+		t.Fatalf("dle-scoped verify: %v", err)
+	}
+	if rep.Failures != 0 || len(rep.Runs) != 2 {
+		t.Fatalf("healthy dle-scoped verify = %d failures over %d runs, want 0 over 2", rep.Failures, len(rep.Runs))
+	}
+	for _, sv := range rep.Runs {
+		for _, av := range sv.Archives {
+			if av.DLE != f.dle {
+				t.Fatalf("verdict for foreign DLE %q leaked into a pinned verify", av.DLE)
+			}
+		}
+	}
+
+	if _, err := eng.Verify(nil, VerifyOptions{DLE: "no-such-dle"}, nil); err == nil {
+		t.Fatal("verify pinned to an unknown DLE must error")
+	}
+
+	corrupt(t, payloadFile(t, f.diskDir, "run-2026-06-21.000000", 0))
+	rep, err = eng.Verify(nil, VerifyOptions{DLE: f.dle, Medium: "disk"}, nil)
+	if err != nil {
+		t.Fatalf("dle-scoped verify of corrupt copy: %v", err)
+	}
+	if rep.Failures != 1 {
+		t.Fatalf("corrupt copy failures = %d, want 1", rep.Failures)
+	}
+}

@@ -42,6 +42,14 @@
   table { width: 100%; border-collapse: collapse; }
   .scroll { overflow-x: auto; }
   th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  /* A cell holding a DLE identity: cap it with an ellipsis (full name in the title
+     tooltip / link) so one long host:path can't shove the row's status columns
+     off-screen — on a phone that hid a failing pill behind a sideways scroll. */
+  .dlecell { max-width: 18rem; overflow: hidden; text-overflow: ellipsis; }
+  @media (max-width: 640px) { .dlecell { max-width: 38vw; } }
+  /* Long diagnostic text (error details, remedies): wrap anywhere, even inside
+     unbroken tokens like member paths, instead of widening the layout. */
+  .wrap { white-space: normal; overflow-wrap: anywhere; }
   th { color: var(--muted); font-weight: 600; font-size: .82rem; text-transform: uppercase; letter-spacing: .03em; }
   tr:last-child td { border-bottom: none; }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -253,7 +261,8 @@
 <footer>read-only status · {{stampsec .Now}}</footer>
 <script>
 // Path-group header rows (any page) toggle their member rows; groups past ten
-// members start collapsed so a partitioned source's long tail doesn't dominate.
+// members start collapsed so a partitioned source's long tail doesn't dominate —
+// unless the header carries data-open (a member is failing), which starts it open.
 // Scoped per table — the same group key can appear in two tables on one page.
 // Without JS everything simply stays visible.
 document.querySelectorAll("tr[data-g]").forEach(function (h) {
@@ -272,7 +281,7 @@ document.querySelectorAll("tr[data-g]").forEach(function (h) {
     if (e.target.closest("a")) return;
     set(!open);
   });
-  set(members.length <= 10);
+  set(h.hasAttribute("data-open") || members.length <= 10);
 });
 </script>
 </body>

@@ -18,7 +18,7 @@ func TestRenderDrillLedger(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
 	ledger := &drill.Ledger{Records: map[string]drill.Record{
-		"app01-home":  {DLE: "app01-home", OK: false, Class: "pipeline", LastDrill: now.Add(-2 * 24 * time.Hour)},
+		"app01-home":  {DLE: "app01-home", OK: false, Class: "pipeline", Detail: "gpg: decryption failed", LastDrill: now.Add(-2 * 24 * time.Hour)},
 		"app01-etc":   {DLE: "app01-etc", OK: true, LastDrill: now.Add(-40 * 24 * time.Hour)},  // stale (>30d)
 		"db01-pgdata": {DLE: "db01-pgdata", OK: true, LastDrill: now.Add(-1 * 24 * time.Hour)}, // healthy
 	}}
@@ -36,10 +36,12 @@ func TestRenderDrillLedger(t *testing.T) {
 
 	for _, want := range []string{
 		"DRILL COVERAGE",
-		"app01-home",         // failing
-		"pipeline",           // its class
-		"decrypt/decompress", // remedy text for pipeline class
-		"app01-etc",          // stale
+		"app01-home",                     // failing
+		"pipeline",                       // its class
+		"error:  gpg: decryption failed", // the recorded error, not just the class
+		"decrypt/decompress",             // remedy text for pipeline class
+		"retry:  `nb drill app01-home`",  // the re-drill that clears the warning
+		"app01-etc",                      // stale
 		"stale",
 		"never drilled: web01:/srv", // displayed as host:path, not the internal slug
 	} {

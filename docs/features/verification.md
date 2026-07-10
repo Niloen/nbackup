@@ -27,7 +27,8 @@ and keeps no ledger.
 
 ```bash
 nb verify run-2026-06-21.020000   # re-hash one run's archives
-nb verify --all                # re-check every run
+nb verify --all                   # re-check every run
+nb verify --dle web01:/home       # just one DLE's archives, across every run holding it
 ```
 
 Because a run can have several copies, `nb verify` audits **every** copy and tells
@@ -126,6 +127,22 @@ different fix:
 - **missing-copy** — no readable copy of the target could be reached.
 
 The command **exits non-zero** on any failure, so a nightly drill can page you.
+Every failure surface — the drill output, `nb report`, the mail digest, and the web
+`/drills` page — carries the **actual error**, the class remedy, and the retry command.
+
+### Retrying a failed drill
+
+Was that failure a real fault, or a transient hiccup (a flaky mount, a cloud
+timeout)? Name the DLE to re-drill exactly it, right now — bypassing the window
+rotation and `--sample`:
+
+```bash
+nb drill web01:/home                     # re-drill just this DLE
+nb verify --dle web01:/home --deep       # cross-check every copy of it, structurally
+```
+
+A **pass overwrites the DLE's ledger record and clears its warning** everywhere; a
+repeat failure confirms the fault is real — then the failure class names the fix.
 
 ### Attended vs unattended
 

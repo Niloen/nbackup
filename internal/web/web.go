@@ -789,7 +789,11 @@ func (s *Server) handleDrills(w http.ResponseWriter, r *http.Request) {
 			row.Status, row.Failing = "failing", true
 			row.Class, row.Detail = rec.Class, rec.Detail
 			row.Remedy = drill.ParseClass(rec.Class).Remedy()
+			row.Retry = "nb drill " + row.DLE
 			data.Failing++
+			// Failures lead the page in their own panel — buried mid-ledger, a red
+			// row among dozens of alphabetical DLEs is exactly what gets missed.
+			data.FailingRows = append(data.FailingRows, row)
 		case now.Sub(rec.LastDrill) >= window:
 			row.Status, row.Stale = "stale", true
 			data.Stale++
@@ -800,7 +804,7 @@ func (s *Server) handleDrills(w http.ResponseWriter, r *http.Request) {
 		ledgerRows = append(ledgerRows, row)
 		ledgerItems = append(ledgerItems, item(rec.DLE))
 	}
-	data.Ledger = groupRowsByPath(ledgerRows, ledgerItems)
+	data.Ledger = sectionDrillLedger(ledgerRows, ledgerItems)
 
 	// Recent drill runs, newest first, each with its per-DLE outcomes.
 	for _, run := range s.history(0) {
@@ -818,7 +822,7 @@ func (s *Server) handleDrills(w http.ResponseWriter, r *http.Request) {
 			}
 			dr.Targets = append(dr.Targets, drillTargetRow{
 				DLE: s.src.DisplayDLE(h.DLE), Slug: h.DLE, OK: h.OK, Drilled: h.Drilled,
-				Class: h.Class, Degrading: h.Degrading(), Bytes: h.Bytes,
+				Class: h.Class, Detail: h.Detail, Degrading: h.Degrading(), Bytes: h.Bytes,
 			})
 		}
 		data.Runs = append(data.Runs, dr)
