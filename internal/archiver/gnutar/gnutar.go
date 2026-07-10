@@ -244,13 +244,15 @@ func (g *gnutar) findDirs(root, rel string) ([]string, error) {
 // there is no such thing as a file DLE (a file source would fail at dump anyway, since
 // tar runs --directory=source; this makes the error say why).
 func (g *gnutar) CheckSource(source string) error {
+	// One combined probe on the healthy path (for a remote host each Command is a
+	// full ssh round trip); only a failure pays a second probe to say which test bit.
+	if g.ex.Command("test", "-d", source, "-a", "-r", source).Run() == nil {
+		return nil
+	}
 	if err := g.ex.Command("test", "-d", source).Run(); err != nil {
 		return fmt.Errorf("not a directory (a source is always a directory; files are backed up by their parent)")
 	}
-	if err := g.ex.Command("test", "-r", source).Run(); err != nil {
-		return fmt.Errorf("not readable")
-	}
-	return nil
+	return fmt.Errorf("not readable")
 }
 
 // Ext: the raw stream is a tar archive.

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/accounting"
@@ -77,8 +78,35 @@ func (c *checker) Check(connect bool) *CheckReport {
 	c.checkStaleness(rep)
 	c.checkRestorability(rep)
 	c.checkCapacity(rep)
-	for _, host := range c.dleHostsInOrder() {
-		rep.Hosts = append(rep.Hosts, c.checkHost(rep, host, connect))
+	hosts := c.dleHostsInOrder()
+	// Resolve every (dumptype, host) archiver up front: opening one is pure
+	// construction (no I/O), and doing it here means the toolchain's cache map is
+	// only read by the concurrent probes below. A failure resolves the same way
+	// again inside checkHost, which owns reporting it.
+	for _, host := range hosts {
+		for _, d := range c.dlesForHost(host) {
+			_, _ = c.tc.archiverFor(d.DumpTypeName(), host)
+		}
+	}
+	// Hosts are probed concurrently (as Amanda's amcheck contacts its clients): a
+	// host check is a chain of ssh round trips, so serial hosts would cost their
+	// sum. Each goroutine owns one HostCheck slot; the merge below restores config
+	// order and tallies the counters.
+	checks := make([]HostCheck, len(hosts))
+	var wg sync.WaitGroup
+	for i, host := range hosts {
+		wg.Add(1)
+		go func(i int, host string) {
+			defer wg.Done()
+			checks[i] = c.checkHost(host, connect)
+		}(i, host)
+	}
+	wg.Wait()
+	for _, hc := range checks {
+		rep.Hosts = append(rep.Hosts, hc)
+		for _, l := range hc.Lines {
+			rep.count(l)
+		}
 	}
 	return rep
 }
@@ -206,12 +234,25 @@ func (c *checker) checkCapacity(rep *CheckReport) {
 // add appends a line and counts a hard failure (not OK and not a warning).
 func (rep *CheckReport) add(lines *[]CheckLine, ok, warn bool, msg string) {
 	*lines = append(*lines, CheckLine{OK: ok, Warn: warn, Msg: msg})
+	rep.count(CheckLine{OK: ok, Warn: warn})
+}
+
+// count tallies an already-built line into the failure/warning counters — the merge
+// step for host lines built off to the side by the concurrent probes.
+func (rep *CheckReport) count(l CheckLine) {
 	switch {
-	case !ok && !warn:
+	case !l.OK && !l.Warn:
 		rep.Failures++
-	case warn:
+	case l.Warn:
 		rep.Warnings++
 	}
+}
+
+// add appends one probe line to the host's report. The run-level failure/warning
+// tally happens when the host merges back into the CheckReport (count), so a
+// HostCheck can be built concurrently with its peers.
+func (hc *HostCheck) add(ok, warn bool, msg string) {
+	hc.Lines = append(hc.Lines, CheckLine{OK: ok, Warn: warn, Msg: msg})
 }
 
 // checkAtomShapes is the config-time rung of the atom validation ladder: for each
@@ -375,13 +416,13 @@ func (c *checker) checkMedia(rep *CheckReport) {
 	}
 }
 
-func (c *checker) checkHost(rep *CheckReport, host string, connect bool) HostCheck {
+func (c *checker) checkHost(host string, connect bool) HostCheck {
 	ssh, remote := c.cfg.RemoteHost(host)
 	hc := HostCheck{Host: host, Remote: remote}
 	if remote {
 		hc.Target = sshTarget(host, ssh)
 		if !connect {
-			rep.add(&hc.Lines, false, true, "remote — not probed (drop --offline to connect)")
+			hc.add(false, true, "remote — not probed (drop --offline to connect)")
 			return hc
 		}
 	}
@@ -389,10 +430,10 @@ func (c *checker) checkHost(rep *CheckReport, host string, connect bool) HostChe
 	ex := c.tc.executorFor(host) // Local() for a local host, SSH for a remote one
 	if remote {
 		if err := ex.Command("true").Run(); err != nil {
-			rep.add(&hc.Lines, false, false, fmt.Sprintf("unreachable over SSH: %v", err))
+			hc.add(false, false, fmt.Sprintf("unreachable over SSH: %v", err))
 			return hc // nothing else is probeable
 		}
-		rep.add(&hc.Lines, true, false, "reachable over SSH")
+		hc.add(true, false, "reachable over SSH")
 	}
 
 	dles := c.dlesForHost(host)
@@ -410,11 +451,11 @@ func (c *checker) checkHost(rep *CheckReport, host string, connect bool) HostChe
 		// The checker is archiver-neutral: the archiver's own Check error names the
 		// missing tool (e.g. GNU tar), so the generic line just says "archiver".
 		if err != nil {
-			rep.add(&hc.Lines, false, false, fmt.Sprintf("archiver (dumptype %q): %v", dt, err))
+			hc.add(false, false, fmt.Sprintf("archiver (dumptype %q): %v", dt, err))
 		} else {
-			rep.add(&hc.Lines, true, false, fmt.Sprintf("archiver ready (dumptype %q)", dt))
+			hc.add(true, false, fmt.Sprintf("archiver ready (dumptype %q)", dt))
 		}
-		c.checkClientTools(rep, &hc, ex, dt)
+		c.checkClientTools(&hc, ex, dt)
 	}
 
 	// The source probe is the archiver's (CheckSource): "ready" means readable
@@ -424,24 +465,39 @@ func (c *checker) checkHost(rep *CheckReport, host string, connect bool) HostChe
 	// A pattern source is RESOLVED first (check is a live-acting command, like
 	// plan/dump) and each resolved unit probed; a failed enumeration is a failed
 	// check line, not an abort. A plain source expands to itself with no I/O, so
-	// this is one uniform path.
-	for _, d := range dles {
+	// this is one uniform path. Each DLE's probe is independent host I/O — for a
+	// remote host, one ssh round trip per source — so they run concurrently,
+	// bounded below sshd's default MaxStartups (10), and merge back in config order.
+	probes := make([]HostCheck, len(dles))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i, d := range dles {
 		arch, err := c.tc.archiverFor(d.DumpTypeName(), host)
 		if err != nil {
 			continue
 		}
-		scopes, err := arch.Expand(scheduler.PatternOf(d, nil))
-		if err != nil {
-			rep.add(&hc.Lines, false, false, fmt.Sprintf("source %s: cannot enumerate: %v", d.Path, err))
-			continue
-		}
-		for _, sc := range scopes {
-			if err := arch.CheckSource(sc.Source); err != nil {
-				rep.add(&hc.Lines, false, false, fmt.Sprintf("source %s: %v", sc.Source, err))
-			} else {
-				rep.add(&hc.Lines, true, false, fmt.Sprintf("source %s ready", sc.Source))
+		wg.Add(1)
+		go func(i int, d config.DLE) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			scopes, err := arch.Expand(scheduler.PatternOf(d, nil))
+			if err != nil {
+				probes[i].add(false, false, fmt.Sprintf("source %s: cannot enumerate: %v", d.Path, err))
+				return
 			}
-		}
+			for _, sc := range scopes {
+				if err := arch.CheckSource(sc.Source); err != nil {
+					probes[i].add(false, false, fmt.Sprintf("source %s: %v", sc.Source, err))
+				} else {
+					probes[i].add(true, false, fmt.Sprintf("source %s ready", sc.Source))
+				}
+			}
+		}(i, d)
+	}
+	wg.Wait()
+	for _, p := range probes {
+		hc.Lines = append(hc.Lines, p.Lines...)
 	}
 
 	// The incremental-state library lives on the host where the archiver runs (the client
@@ -449,15 +505,15 @@ func (c *checker) checkHost(rep *CheckReport, host string, connect bool) HostChe
 	// workdir, so verify it for every host.
 	stateDir := c.cfg.StateDirFor(host)
 	if err := ex.MkdirAll(stateDir); err != nil {
-		rep.add(&hc.Lines, false, false, fmt.Sprintf("state_dir %s not creatable: %v", stateDir, err))
+		hc.add(false, false, fmt.Sprintf("state_dir %s not creatable: %v", stateDir, err))
 	} else {
-		rep.add(&hc.Lines, true, false, fmt.Sprintf("state_dir %s writable", stateDir))
+		hc.add(true, false, fmt.Sprintf("state_dir %s writable", stateDir))
 	}
 	// A relative state_dir resolves against the working directory of whoever runs nb
 	// on this host, so a cron job started from elsewhere loses the incremental base and
 	// silently re-fulls every DLE. The catalog rebuilds from media; this state does not.
 	if !filepath.IsAbs(stateDir) {
-		rep.add(&hc.Lines, false, true, fmt.Sprintf("state_dir %q is relative; it resolves against nb's working directory on %s, so a cron job run from another directory will lose the incremental base and re-full — set an absolute `state_dir`", stateDir, host))
+		hc.add(false, true, fmt.Sprintf("state_dir %q is relative; it resolves against nb's working directory on %s, so a cron job run from another directory will lose the incremental base and re-full — set an absolute `state_dir`", stateDir, host))
 	}
 	return hc
 }
@@ -465,26 +521,26 @@ func (c *checker) checkHost(rep *CheckReport, host string, connect bool) HostChe
 // checkClientTools probes the compressor / gpg on the host when a dumptype runs them there
 // (compress/encrypt: client). For a server-side transform there is nothing to check here —
 // the server-side tools are covered in checkServer.
-func (c *checker) checkClientTools(rep *CheckReport, hc *HostCheck, ex programs.Executor, dt string) {
+func (c *checker) checkClientTools(hc *HostCheck, ex programs.Executor, dt string) {
 	if c.cfg.CompressionFor(dt).At == "client" {
 		scheme, opts := c.tc.compressionFor(dt)
 		if cmd, ok, err := compress.CompressCmd(scheme, opts); err == nil && ok {
-			c.probeTool(rep, hc, ex, cmd.Name, "compressor")
+			c.probeTool(hc, ex, cmd.Name, "compressor")
 		}
 	}
 	if c.cfg.EncryptionFor(dt).At == "client" {
 		scheme, opts := c.tc.encryptionFor(dt)
 		if cmd, ok, err := crypt.EncryptCmd(scheme, opts); err == nil && ok {
-			c.probeTool(rep, hc, ex, cmd.Name, "encryptor")
+			c.probeTool(hc, ex, cmd.Name, "encryptor")
 		}
 	}
 }
 
-func (c *checker) probeTool(rep *CheckReport, hc *HostCheck, ex programs.Executor, bin, role string) {
+func (c *checker) probeTool(hc *HostCheck, ex programs.Executor, bin, role string) {
 	if err := ex.Command(bin, "--version").Run(); err != nil {
-		rep.add(&hc.Lines, false, false, fmt.Sprintf("client %s %q: %v", role, bin, err))
+		hc.add(false, false, fmt.Sprintf("client %s %q: %v", role, bin, err))
 	} else {
-		rep.add(&hc.Lines, true, false, fmt.Sprintf("client %s %q present", role, bin))
+		hc.add(true, false, fmt.Sprintf("client %s %q present", role, bin))
 	}
 }
 
