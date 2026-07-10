@@ -81,6 +81,15 @@
   .gt li[data-in] > div:first-child { padding-left: 1.4rem; }
   /* card-mode column labels ("31 runs"), dormant while the header row shows */
   .gt .lbl { display: none; }
+  /* Desktop: the drills-ledger identity cell trails a status pill after the DLE
+     name. Lay it out as flex (mirroring the card mode below) so the name
+     truncates but the twig and pill stay put — otherwise the cell's own
+     ellipsis eats the pill and only short-named DLEs show their status. */
+  @media (min-width: 641px) {
+    .gt .c-id.dlecell { display: flex; align-items: center; gap: .4rem; max-width: none; }
+    .gt .c-id.dlecell a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .gt .c-id.dlecell .pill, .gt .c-id.dlecell .twig { flex: none; }
+  }
   @media (max-width: 640px) {
     ul.gt { display: block; }
     .gt > li { display: block; padding: .55rem 0; border-bottom: 1px solid var(--line); }
