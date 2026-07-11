@@ -25,10 +25,12 @@ import (
 // to the survivors; only the LAST live lane failing fails the transfer, because then
 // the archive would land nowhere.
 type Tee struct {
-	lanes  []*ArchiveWriter // primary first; a dropped lane goes nil
-	onDrop func(i int, err error)
-	n      int64 // landed bytes, counted once at the fan-in
-	tap    func(landed int64)
+	lanes   []*ArchiveWriter // primary first; a dropped lane goes nil
+	onDrop  func(i int, err error)
+	n       int64 // landed bytes, counted once at the fan-in
+	tap     func(landed int64)
+	landed  []int64 // per-lane committed bytes, index-aligned with lanes
+	laneTap func(i int, landed int64)
 }
 
 // NewTee builds a tee over lanes (primary first). onDrop is called once per dropped
@@ -37,7 +39,11 @@ func NewTee(lanes []*ArchiveWriter, onDrop func(i int, err error)) *Tee {
 	if onDrop == nil {
 		onDrop = func(int, error) {}
 	}
-	return &Tee{lanes: append([]*ArchiveWriter(nil), lanes...), onDrop: onDrop}
+	return &Tee{
+		lanes:  append([]*ArchiveWriter(nil), lanes...),
+		onDrop: onDrop,
+		landed: make([]int64, len(lanes)),
+	}
 }
 
 // drop abandons lane i: its writer is closed uncommitted (releasing whatever it
@@ -64,7 +70,7 @@ func (t *Tee) live() bool {
 // fanning into all of them, capped at the smallest lane cap (<0 = unbounded). A lane
 // whose NextPart fails is dropped; the last live lane failing fails the call.
 func (t *Tee) NextPart(ctx context.Context) (io.WriteCloser, int64, error) {
-	fw := &fanPartWriter{t: t, parts: make([]io.WriteCloser, len(t.lanes))}
+	fw := &fanPartWriter{t: t, parts: make([]io.WriteCloser, len(t.lanes)), wrote: make([]int64, len(t.lanes))}
 	max := int64(-1)
 	for i, lw := range t.lanes {
 		if lw == nil {
@@ -123,6 +129,23 @@ func (t *Tee) Committed() (CommitResult, bool) {
 // produced once, so its landed count is counted once, not per lane.
 func (t *Tee) Meter(tap func(landed int64)) { t.tap = tap }
 
+// MeterLane attaches a per-lane progress tap, fired with a lane's cumulative committed
+// bytes each time one of its parts closes successfully — the honest per-landing landed
+// count. Because the lanes are written one after another and a buffering medium only
+// persists a part at close, this is what lets a direct fan-out's ETA see that the slower
+// lane's second copy is still in flight; a bare tap at the fan-in cannot (it counts the
+// stream once, as produced). nil is allowed.
+func (t *Tee) MeterLane(tap func(i int, landed int64)) { t.laneTap = tap }
+
+// landPart credits lane i with a just-closed part's bytes and reports its new cumulative
+// committed total — called only for a part that closed without error.
+func (t *Tee) landPart(i int, partBytes int64) {
+	t.landed[i] += partBytes
+	if t.laneTap != nil {
+		t.laneTap(i, t.landed[i])
+	}
+}
+
 // Close closes every remaining lane writer (dropped lanes closed at drop time),
 // running each one's release hook; the first error wins.
 func (t *Tee) Close() error {
@@ -145,6 +168,7 @@ func (t *Tee) Close() error {
 type fanPartWriter struct {
 	t     *Tee
 	parts []io.WriteCloser // index-aligned with t.lanes; nil = lane not in this part
+	wrote []int64          // bytes written to each lane's part so far, credited on close
 }
 
 func (f *fanPartWriter) Write(p []byte) (int, error) {
@@ -165,6 +189,7 @@ func (f *fanPartWriter) Write(p []byte) (int, error) {
 			f.t.drop(i, err)
 			continue
 		}
+		f.wrote[i] += int64(n)
 		wrote = true
 	}
 	if !wrote {
@@ -193,6 +218,7 @@ func (f *fanPartWriter) Close() error {
 			f.t.drop(i, err)
 			continue
 		}
+		f.t.landPart(i, f.wrote[i]) // the part is now persisted on lane i — credit its bytes
 		closed = true
 	}
 	if !closed {

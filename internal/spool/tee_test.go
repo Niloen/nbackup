@@ -10,7 +10,45 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
+	"github.com/Niloen/nbackup/internal/progress"
 )
+
+// TestTeeMetersPerLaneCommitted: a direct two-landing write credits each lane its real
+// committed bytes as its parts close (Tee.MeterLane → AddDrainBytes), so WrittenTo reports
+// per-lane landed progress rather than the fan-in produced count synthesized onto both
+// lanes. That per-lane truth is what lets a direct fan-out's ETA see a slower lane's second
+// copy still in flight.
+func TestTeeMetersPerLaneCommitted(t *testing.T) {
+	clk := time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC)
+	now := func() time.Time { clk = clk.Add(time.Second); return clk }
+	tr := progress.NewTracker("run", progress.PhaseRunning, 1,
+		[]progress.Plan{{Name: "localhost:/data", EstBytes: 10, Landings: []string{"a", "b"}}}, now, nil)
+	a, b := newMemStore("a"), newMemStore("b")
+	a.partCap, b.partCap = 4, 4 // parts of 4,4,2 on both lanes
+	sp := New(context.Background(), Config{
+		Backings: []Backing{
+			{Name: "a", Allocs: []archiveio.PartAllocator{a}, Rec: a, Writers: 1},
+			{Name: "b", Allocs: []archiveio.PartAllocator{b}, Rec: b, Writers: 1},
+		},
+		Holding: NewPool(nil), // no holding => direct, the Tee path
+		Tracker: tr,
+	})
+	aw, err := sp.Ingest("a", "b").NewArchive(archSpec, 1<<20)
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if err := transferArchive(aw, []byte("ten bytes!")); err != nil { // 10 bytes
+		t.Fatalf("transfer: %v", err)
+	}
+	if err := sp.Drain(); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	snap := tr.Snapshot()
+	wa, wb := snap.WrittenTo("a"), snap.WrittenTo("b")
+	if wa != 10 || wb != 10 {
+		t.Fatalf("per-lane committed: a=%d b=%d; want 10 each (real MeterLane bytes, not a 0 fallback nor a fan-in count)", wa, wb)
+	}
+}
 
 // teeSpool wires a spool with two landing lanes and NO holding disk, so every write
 // goes direct — the Tee path.

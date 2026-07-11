@@ -271,6 +271,26 @@ func (s Snapshot) TotalDrained() int64 {
 	})
 }
 
+// LandingWork sums the compressed bytes owed to every landing across all DLEs — direct
+// writes and holding-disk drains alike — each DLE's produced size once per landing on its
+// route (a two-landing DLE owes it twice whether it fans out through a holding disk or
+// straight to the landings). TotalToDrain is the holding-only slice of this, kept for the
+// flush UI; the ETA prices the whole thing so a *direct* fan-out's second copy — the Tee
+// writes the lanes one after another — is not invisible.
+func (s Snapshot) LandingWork() int64 {
+	return sum(s.DLEs, func(d DLE) int64 { return d.toDrain() })
+}
+
+// TotalLanded sums the compressed bytes that have reached the landings so far across every
+// lane — direct writes and drain copies alike (the counterpart to LandingWork).
+func (s Snapshot) TotalLanded() int64 {
+	var t int64
+	for _, l := range s.Landings() {
+		t += s.WrittenTo(l)
+	}
+	return t
+}
+
 // LandingDrain is one landing's flush backlog across the run: bytes copied to it so
 // far against the staged bytes routed to it.
 type LandingDrain struct {
@@ -347,9 +367,11 @@ type Sample struct {
 }
 
 // writtenTo is the compressed bytes of this DLE that have reached the landing: its
-// drained share for a holding-routed DLE, and for a direct dump its output bytes on
-// every landing of its route (a Tee writes them lockstep). A DLE with no recorded
-// route reports under "".
+// drained share for a holding-routed DLE, and for a direct dump the bytes committed to
+// that lane. A direct *fan-out* (Tee) meters each lane's real committed bytes as its parts
+// close, so its slower lane honestly reads behind — the Drained share carries them; a
+// single-landing direct dump has no per-lane meter, so its one lane reports the produced
+// output. A DLE with no recorded route reports under "".
 func (d DLE) writtenTo(landing string) int64 {
 	if d.Drains() || d.ToHolding {
 		return d.Drained[landing]
@@ -359,6 +381,9 @@ func (d DLE) writtenTo(landing string) int64 {
 			return d.OutBytes
 		}
 		return 0
+	}
+	if len(d.Landings) > 1 {
+		return d.Drained[landing] // direct fan-out: per-lane committed bytes (Tee MeterLane)
 	}
 	for _, l := range d.Landings {
 		if l == landing {
@@ -475,6 +500,20 @@ func (s Snapshot) DumpRateNow(now time.Time) float64 {
 // drainer is waiting for dumps), not a measurement failure.
 func (s Snapshot) WriteRateNow(landing string, now time.Time) float64 {
 	return s.rateNow(now, s.WrittenTo(landing), func(smp Sample) int64 { return smp.Written[landing] })
+}
+
+// DrainRateNow is the run's aggregate drain throughput over the trailing window, in
+// compressed bytes/sec — every landing lane's just-now write speed summed. Measured on
+// one wall-clock window, it reports the real combined pace whether the lanes run truly
+// in parallel (a fan-out over independent links sums to their total) or serialize behind
+// a shared reader or pipe (only the active lane contributes) — the honest number for
+// pricing the drain backlog a fan-out owes. Zero while the drainer is idle.
+func (s Snapshot) DrainRateNow(now time.Time) float64 {
+	var r float64
+	for _, l := range s.Landings() {
+		r += s.WriteRateNow(l, now)
+	}
+	return r
 }
 
 // DLERateNow is one dumping DLE's throughput over the trailing window, in
@@ -620,21 +659,46 @@ func (s Snapshot) Pct() float64 { return pct(s.TotalDone(), s.TotalEst()) }
 // the compressed total to drain (0..100). 0 when nothing is staged for draining.
 func (s Snapshot) DrainPct() float64 { return pct(s.TotalDrained(), s.TotalToDrain()) }
 
-// ETA estimates remaining time from the current rate and the unfinished
-// estimate. Returns ok=false while no rate is known or the run is terminal.
+// ETA estimates remaining time until the run is *finished* — both dumped and copied to
+// every landing. A run has two overlapping backlogs: dumping the sources, and writing the
+// compressed archives out to the landings. They run concurrently (a landing lane writes
+// one archive while the next source dumps), so the run ends when the slower backlog
+// clears — the ETA is the max of the two, not their sum.
+//
+// Pricing the landing writes is what keeps a fan-out honest: writing to N landings is N×
+// the compressed bytes, whether it fans out through a holding disk (the drainer copies
+// each staged archive once per landing) or straight from the dump (the Tee writes the
+// lanes one after another). That second (third…) copy over a slow link is often the real
+// long pole, yet the dump backlog alone — uncompressed source bytes — knows nothing of it,
+// so a dump-only ETA reads about 1/N of the truth for an N-way fan-out. Returns ok=false
+// while neither backlog can be priced yet, or the run is terminal.
 func (s Snapshot) ETA(now time.Time) (d time.Duration, ok bool) {
 	if s.Phase.Terminal() {
 		return 0, false
 	}
-	rate := s.Rate(now)
-	if rate <= 0 {
-		return 0, false
+	// Dump backlog: uncompressed bytes still to archive, at the dump rate.
+	if rate := s.Rate(now); rate > 0 {
+		if remaining := s.TotalEst() - s.TotalDone(); remaining > 0 {
+			d = time.Duration(float64(remaining) / rate * float64(time.Second))
+			ok = true
+		}
 	}
-	remaining := s.TotalEst() - s.TotalDone()
-	if remaining <= 0 {
-		return 0, false
+	// Landing backlog: compressed bytes still to write across every lane, at the aggregate
+	// landing-write rate. LandingWork only carries what has been produced so far, so scale
+	// it up to the whole run by the observed landed-per-dumped-byte ratio
+	// (LandingWork/TotalDone — which folds in both compression and the fan-out's per-landing
+	// multiplier); at the tail, once everything is dumped, this reduces to the exact
+	// remaining copy work.
+	if rate := s.DrainRateNow(now); rate > 0 && s.TotalDone() > 0 {
+		total := float64(s.TotalEst()) * float64(s.LandingWork()) / float64(s.TotalDone())
+		if remaining := total - float64(s.TotalLanded()); remaining > 0 {
+			if dd := time.Duration(remaining / rate * float64(time.Second)); dd > d {
+				d = dd
+			}
+			ok = true
+		}
 	}
-	return time.Duration(float64(remaining) / rate * float64(time.Second)), true
+	return d, ok
 }
 
 func sum(ds []DLE, f func(DLE) int64) int64 {

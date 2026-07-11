@@ -359,7 +359,12 @@ func (sp *Spool) ingestDirect(ls []*lane, dleID string, build func(*archiveio.Wr
 	if len(writers) == 1 {
 		return writers[0]
 	}
-	return archiveio.NewTee(writers, func(i int, err error) { sp.trip(ls[i], err) })
+	tee := archiveio.NewTee(writers, func(i int, err error) { sp.trip(ls[i], err) })
+	// Credit each lane its real committed bytes as its parts close, so a slower landing's
+	// still-in-flight second copy shows as landed-so-far (not instantly, as the fan-in
+	// count would) — what keeps a direct fan-out's landing progress and ETA honest.
+	tee.MeterLane(func(i int, landed int64) { sp.tr.AddDrainBytes(dleID, ls[i].name, landed) })
+	return tee
 }
 
 // drainSet coordinates one staged archive's fan-out: remaining counts the drains still

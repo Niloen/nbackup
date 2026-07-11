@@ -761,6 +761,85 @@ func TestWriteRateNowDirect(t *testing.T) {
 	}
 }
 
+// TestETADrainTail checks that once a holding-disk fan-out has finished dumping, the
+// ETA prices the remaining drain to every landing (the second copy over a slow link)
+// instead of collapsing to nothing — a dump-only ETA reads ~1/N of the truth for an
+// N-landing run.
+func TestETADrainTail(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("run", PhaseRunning, 1,
+		[]Plan{{Name: "a", EstBytes: 10000, Landings: []string{"s3", "gd"}}}, c.now, nil)
+	tr.StartDLE("a")
+	c.advance(10 * time.Second)
+	// Dump completes: 10000 uncompressed -> 5000 compressed staged on holding, so the
+	// two-landing drain owes 10000 (5000 × 2 lanes).
+	tr.FinishDLE("a", 1, 10000, 5000, nil)
+	tr.StageHolding("a", "hold")
+
+	// Drain both lanes at 25 B/s each (50 B/s aggregate) for 40s — longer than the 30s
+	// "now" window, so the measured rate settles clean of the pre-drain idle stretch.
+	tr.BeginLandingWrite("a", "s3")
+	tr.BeginLandingWrite("a", "gd")
+	for i := 0; i < 40; i++ {
+		c.advance(1 * time.Second)
+		tr.AddDrainBytes("a", "s3", int64((i+1)*25))
+		tr.AddDrainBytes("a", "gd", int64((i+1)*25))
+	}
+
+	snap := tr.Snapshot()
+	now := c.now()
+	if got := snap.TotalToDrain(); got != 10000 {
+		t.Fatalf("to-drain = %d, want 10000 (5000 compressed × 2 landings)", got)
+	}
+	// 2000 of 10000 drained, 8000 left at an aggregate 50 B/s -> ~160s. A dump-only ETA
+	// would be gone (nothing left to dump), hiding the whole second copy.
+	eta, ok := snap.ETA(now)
+	if !ok {
+		t.Fatal("ETA must be known while the drain tail is still copying")
+	}
+	if eta < 150*time.Second || eta > 170*time.Second {
+		t.Fatalf("drain-tail ETA = %v, want ~160s (8000 left at 50 B/s)", eta)
+	}
+}
+
+// TestETADirectFanOut checks that a DIRECT fan-out (no holding disk) whose lanes lag
+// behind production — the Tee writes them one after another — gets an ETA that prices the
+// still-in-flight second copy, not a dump-only estimate. With per-lane committed bytes
+// (writtenTo → Drained), the landing backlog is visible; without them it read ~half.
+func TestETADirectFanOut(t *testing.T) {
+	c := newClock()
+	tr := NewTracker("run", PhaseRunning, 1,
+		[]Plan{{Name: "a", EstBytes: 10000, Landings: []string{"s3", "gd"}}}, c.now, nil)
+	tr.StartDLE("a")
+	tr.BeginLandingWrite("a", "s3")
+	tr.BeginLandingWrite("a", "gd")
+	c.advance(10 * time.Second)
+	// Production runs ahead and finishes: 10000 uncompressed -> 5000 compressed produced,
+	// so the two-lane fan-out owes 10000 landed.
+	tr.AddBytes("a", 10000, 5000)
+	// The lanes lag, each committing 25 B/s (50 B/s aggregate) for 40s — longer than the
+	// 30s "now" window so the measured rate settles clean.
+	for i := 0; i < 40; i++ {
+		c.advance(1 * time.Second)
+		tr.AddDrainBytes("a", "s3", int64((i+1)*25))
+		tr.AddDrainBytes("a", "gd", int64((i+1)*25))
+	}
+	snap := tr.Snapshot()
+	now := c.now()
+	if got := snap.TotalLanded(); got != 2000 {
+		t.Fatalf("landed = %d, want 2000 (per-lane committed, 1000 each)", got)
+	}
+	// 2000 of 10000 landed, 8000 left at 50 B/s -> ~160s. Dumping is done, so a dump-only
+	// ETA would be gone entirely, hiding the whole second copy.
+	eta, ok := snap.ETA(now)
+	if !ok {
+		t.Fatal("ETA must be known while the fan-out's lagging lanes are still writing")
+	}
+	if eta < 150*time.Second || eta > 170*time.Second {
+		t.Fatalf("direct fan-out ETA = %v, want ~160s (8000 left at 50 B/s)", eta)
+	}
+}
+
 // TestDumpEndedAtSurvivesFlush checks the per-DLE dump window: FinishFlush moves
 // EndedAt to the drain's end, but DumpEndedAt must keep the dump's own end so a
 // report's dump time never silently includes the queue wait and the flush.
