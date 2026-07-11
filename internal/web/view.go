@@ -2322,9 +2322,18 @@ func usageChartSVG(series []catalog.UsageSample, forecast, protected []engine.Fo
 				}
 			}
 		}
-		// Projection end value label.
+		// Projection end value label. It shares the right edge with the capacity-ceiling
+		// label (both text-anchor="end"), and the projected value usually lands near
+		// capacity — so when the two would collide, drop this one below its point instead
+		// of stacking it on top of the ceiling digits.
 		e := fc[len(fc)-1]
-		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11" text-anchor="end">%s</text>`, x(e.t), y(e.v)-6, sizeutil.FormatBytes(e.v))
+		ly := y(e.v) - 6
+		if drawCap {
+			if capY := y(capacity) - 3; ly > capY-11 && ly < capY+11 {
+				ly = y(e.v) + 14
+			}
+		}
+		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11" text-anchor="end">%s</text>`, x(e.t), ly, sizeutil.FormatBytes(e.v))
 	} else if hasHist {
 		end := series[len(series)-1]
 		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--fg)" font-size="11" text-anchor="end">%s</text>`, x(end.At), y(end.Used)-6, sizeutil.FormatBytes(end.Used))
