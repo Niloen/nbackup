@@ -343,26 +343,38 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int, offline bool
 		fmt.Printf("Projected storage cost at end of window: %s/month (%s stored)\n",
 			formatUSD(last.Monthly), sizeutil.FormatBytes(last.Bytes))
 	}
-	// Capacity headroom: the forecast reclaims to fit each day, so it only exceeds
-	// capacity when the retained (unreclaimable) set outgrows the medium — the real
-	// "you're going to run out of room" signal, dated.
-	if over := firstOverCapacity(curve); over != "" {
-		fmt.Printf("\nWARNING: the landing is projected to EXCEED capacity on %s even after pruning — the retained set outgrows the medium. Add capacity, shorten retention (minimum_age), or move DLEs to another landing.\n", over)
-	} else if len(curve) > 0 && curve[0].Capacity > 0 {
-		peak := curve[0].Bytes
-		for _, c := range curve {
-			if c.Bytes > peak {
-				peak = c.Bytes
-			}
+	// Per-medium capacity headroom: the forecast reclaims to fit each day, so a medium
+	// only exceeds capacity when its retained (unreclaimable) set outgrows it — the real
+	// "you're going to run out of room" signal, dated, for every landing medium. Tape
+	// (volume-structured) reclaims by rotation not prune, so it carries no byte curve.
+	caps := eng.ForecastCapacity(start, plans)
+	var within []string
+	for _, mf := range caps {
+		if mf.VolumeStructured || len(mf.Points) == 0 || mf.Points[0].Capacity <= 0 {
+			continue // unbounded, or a tape whose fill is rotation-managed
 		}
-		fmt.Printf("Landing capacity: %s — stays within it across the window (peak %s stored).\n",
-			sizeutil.FormatBytes(curve[0].Capacity), sizeutil.FormatBytes(peak))
+		if over := firstOverCapacity(mf.Points); over != "" {
+			fmt.Printf("\nWARNING: medium %q is projected to EXCEED capacity on %s even after pruning — its retained set outgrows the medium. Add capacity, shorten retention (minimum_age), or move DLEs to another landing.\n",
+				mf.Medium, over)
+		} else {
+			peak := int64(0)
+			for _, c := range mf.Points {
+				if c.Bytes > peak {
+					peak = c.Bytes
+				}
+			}
+			within = append(within, fmt.Sprintf("%s (%s cap, peak %s)",
+				mf.Medium, sizeutil.FormatBytes(mf.Points[0].Capacity), sizeutil.FormatBytes(peak)))
+		}
+	}
+	if len(within) > 0 {
+		fmt.Printf("Capacity — stays within the window: %s\n", strings.Join(within, "; "))
 	}
 	return nil
 }
 
-// firstOverCapacity returns the first day the forecast cannot fit the landing's
-// retained set under capacity, or "" if it never does.
+// firstOverCapacity returns the first day a medium's forecast cannot fit its retained
+// set under capacity, or "" if it never does.
 func firstOverCapacity(curve []engine.ForecastPoint) string {
 	for _, c := range curve {
 		if c.OverCapacity() {

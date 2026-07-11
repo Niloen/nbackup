@@ -236,3 +236,65 @@ func TestForecastCostGrows(t *testing.T) {
 		t.Errorf("unbounded footprint should not shrink: first=%d last=%d", curve[0].Bytes, curve[len(curve)-1].Bytes)
 	}
 }
+
+// TestForecastCapacityRoutesPerMedium checks that the per-medium forecast bills each
+// DLE's projected archives to the medium its dumptype lands on — not everything to the
+// landing. A "big" dumptype routes to a second medium; only its DLE should show up there.
+func TestForecastCapacityRoutesPerMedium(t *testing.T) {
+	srcA := t.TempDir()
+	srcB := t.TempDir()
+	write(t, filepath.Join(srcA, "a.txt"), strings.Repeat("home-", 400))
+	write(t, filepath.Join(srcB, "b.txt"), strings.Repeat("bulk-", 400))
+
+	cfg := &config.Config{
+		Landing: config.MediumList{"cloud"},
+		Media: map[string]config.Media{
+			"cloud":  {Type: "cloud", Capacity: "50000", MinimumAge: "1s", Params: map[string]string{"url": "file://" + t.TempDir()}},
+			"cloud2": {Type: "cloud", Capacity: "50000", MinimumAge: "1s", Params: map[string]string{"url": "file://" + t.TempDir()}},
+		},
+		DumpTypes: map[string]config.DumpType{
+			"bulk": {Landing: config.MediumList{"cloud2"}}, // routes away from the landing
+		},
+		Cycle: "1d",
+		Sources: []config.DLE{
+			{Host: "localhost", Path: srcA},                   // default dumptype -> cloud
+			{Host: "localhost", Path: srcB, DumpType: "bulk"}, // -> cloud2
+		},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	if _, err := eng.Run(context.Background(), start, nil); err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+
+	forecasts, err := eng.ForecastCapacityOffline(start.AddDate(0, 0, 1), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byMedium := map[string][]ForecastPoint{}
+	for _, mf := range forecasts {
+		if mf.VolumeStructured {
+			t.Errorf("cloud medium %q wrongly flagged volume-structured", mf.Medium)
+		}
+		byMedium[mf.Medium] = mf.Points
+	}
+	// Both media are landing routes, so both are forecast, and each is non-empty.
+	for _, name := range []string{"cloud", "cloud2"} {
+		if len(byMedium[name]) == 0 {
+			t.Fatalf("medium %q missing from per-medium forecast: %+v", name, forecasts)
+		}
+		if byMedium[name][len(byMedium[name])-1].Bytes <= 0 {
+			t.Errorf("medium %q forecast has no footprint — its routed DLE was not billed to it", name)
+		}
+	}
+}

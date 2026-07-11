@@ -1,8 +1,10 @@
 package accounting
 
 import (
-	"github.com/Niloen/nbackup/internal/archiveio"
+	"sort"
 	"time"
+
+	"github.com/Niloen/nbackup/internal/archiveio"
 
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/planner"
@@ -61,34 +63,97 @@ type ForecastPoint struct {
 // capacity on this day — true only for a bounded medium the forecast cannot fit.
 func (p ForecastPoint) OverCapacity() bool { return p.Capacity > 0 && p.Bytes > p.Capacity }
 
-// ForecastCost projects the landing medium's monthly storage cost forward day by day
-// over the given simulated plans (one per day from start; see scheduler.Simulate). It
-// maintains a footprint of runs — appending each simulated run and evicting via the
-// medium's own reclamation strategy and retention floor (the same primitives
-// `nb prune` uses) — and reprices the survivors each day, so the curve reflects
-// fulls/incrementals landing and pruning reclaiming. Pure and offline.
+// ForecastCost projects the LANDING medium's monthly storage cost and capacity
+// headroom forward day by day over the given simulated plans (one per day from start;
+// see scheduler.Simulate). See forecastMedium for the mechanics; this is the landing
+// slice of the per-medium picture ForecastCapacity draws.
 func (a *Accountant) ForecastCost(start time.Time, plans []*planner.Plan) []ForecastPoint {
-	working := append([]record.Archive(nil), a.d.Cat.ArchivesOn(a.d.Landing)...)
-	capacity := a.d.LandingProfile.TotalBytes()
+	return a.forecastMedium(a.d.Landing, start, plans)
+}
+
+// MediumForecast is one medium's projected fill over the window.
+type MediumForecast struct {
+	Medium string
+	// VolumeStructured marks a discrete-volume medium (tape): it reclaims by whole-volume
+	// rotation at write time, not by prune, so a byte fill curve is not meaningful and
+	// Points is left nil. The surface shows "N volumes" thinking instead (as pools do).
+	VolumeStructured bool
+	Points           []ForecastPoint
+}
+
+// ForecastCapacity is the per-medium generalization of ForecastCost: it projects EVERY
+// size-structured landing medium's footprint forward, routing each simulated archive to
+// its dumptype's landing medium and reclaiming each medium against its own profile and
+// retention. A medium is included when it is a landing route over the window or already
+// holds archives. Tape media are flagged (no byte curve). Sync-copy targets are not yet
+// projected — their timing needs the sync schedule — so this is landing/route capacity.
+func (a *Accountant) ForecastCapacity(start time.Time, plans []*planner.Plan) []MediumForecast {
+	targets := map[string]bool{}
+	for _, plan := range plans {
+		for _, it := range plan.Items {
+			for _, m := range a.mediaFor(it.DLE.DumpTypeName()) {
+				targets[m] = true
+			}
+		}
+	}
+	names := make([]string, 0, len(a.d.Cfg.Media))
+	for name := range a.d.Cfg.Media {
+		names = append(names, name)
+	}
+	sort.Strings(names) // deterministic order (map iteration is not)
+	var out []MediumForecast
+	for _, name := range names {
+		if !targets[name] && len(a.d.Cat.ArchivesOn(name)) == 0 {
+			continue // neither a route this window nor already holding anything
+		}
+		prof, err := a.ProfileFor(name)
+		if err != nil {
+			continue
+		}
+		mf := MediumForecast{Medium: name, VolumeStructured: prof.VolumeSize() > 0}
+		if !mf.VolumeStructured {
+			mf.Points = a.forecastMedium(name, start, plans)
+		}
+		out = append(out, mf)
+	}
+	return out
+}
+
+// forecastMedium projects one medium's footprint forward: each simulated day it adds the
+// day's archives that ROUTE to this medium (their dumptype's landing), reclaims against
+// this medium's own capacity + retention floor (the same primitives `nb prune` uses),
+// and reprices the survivors. Pure and offline — the per-medium core of ForecastCost and
+// ForecastCapacity.
+func (a *Accountant) forecastMedium(name string, start time.Time, plans []*planner.Plan) []ForecastPoint {
+	prof, err := a.ProfileFor(name)
+	if err != nil {
+		return nil
+	}
+	cost := a.CostModelFor(name)
+	minAge := a.d.Cfg.MinAgeFor(a.d.Cfg.Media[name])
+	capacity := prof.TotalBytes()
+	working := append([]record.Archive(nil), a.d.Cat.ArchivesOn(name)...)
 	points := make([]ForecastPoint, 0, len(plans))
 	for i, plan := range plans {
 		date := start.AddDate(0, 0, i)
-		ds := record.DateString(date)
 
-		// Synthesize the day's run as archives (sized from the plan's estimates), replacing
+		// Synthesize the day's routed archives (sized from the plan's estimates), replacing
 		// any existing archives of the same run id so a re-simulation is idempotent.
 		runID := record.IDFromTime(date)
 		working = dropRun(working, runID)
 		var runBytes int64
 		for _, it := range plan.Items {
+			if !contains(a.mediaFor(it.DLE.DumpTypeName()), name) {
+				continue // this DLE's authoritative copy lands elsewhere
+			}
 			working = append(working, record.Archive{Run: runID, DLE: it.Name, Level: it.Level, Compressed: it.EstBytes, CreatedAt: date})
 			runBytes += it.EstBytes
 		}
 
 		// Reclaim against this medium's capacity, honoring the retention floor.
-		floor := retention.Compute(working, working, a.d.LandingMinAge, date)
+		floor := retention.Compute(working, working, minAge, date)
 		var reclaimed int64
-		for _, r := range a.d.LandingProfile.Reclaim(capacity, working, floor, date) {
+		for _, r := range prof.Reclaim(capacity, working, floor, date) {
 			reclaimed += r.Bytes
 			working = dropArchive(working, r.RunID, r.DLE)
 		}
@@ -98,11 +163,30 @@ func (a *Accountant) ForecastCost(start time.Time, plans []*planner.Plan) []Fore
 			bytes += ar.Compressed
 		}
 		points = append(points, ForecastPoint{
-			Date: ds, Bytes: bytes, Monthly: a.d.LandingCost.MonthlyStorage(bytes),
+			Date: record.DateString(date), Bytes: bytes, Monthly: cost.MonthlyStorage(bytes),
 			RunBytes: runBytes, Reclaimed: reclaimed, Capacity: capacity,
 		})
 	}
 	return points
+}
+
+// mediaFor is the landing route for a dumptype (the media its authoritative copies are
+// written to), empty when the route cannot be resolved.
+func (a *Accountant) mediaFor(dumptype string) []string {
+	m, err := a.d.Cfg.LandingsForDumptype(dumptype)
+	if err != nil {
+		return nil
+	}
+	return m
+}
+
+func contains(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // ReadEstimate is the cost of reading a set of archives back off a medium — the
