@@ -102,12 +102,11 @@ type DepthMark struct {
 }
 
 // RestoreDepth answers "what is my capacity buying me in restore-point age": how many
-// weeks of restore history the medium's capacity retains, the marginal bytes per extra
-// week around that depth, and the per-week byte marks for the chart's right-axis ticks.
+// weeks of restore history the medium's capacity retains, and the per-week byte marks
+// (each the TOTAL capacity to keep that many weeks) for the chart's right-axis ticks.
 type RestoreDepth struct {
 	CapacityWeeks float64     // restore depth the capacity retains (weeks; interpolated)
-	PerWeekBytes  int64       // marginal bytes to buy one more week around that depth
-	Marks         []DepthMark // byte cost per week horizon (for axis ticks)
+	Marks         []DepthMark // TOTAL capacity to keep each week horizon (for axis ticks)
 }
 
 // VolumePoint is one day of a tape pool's cartridge-usage curve: how many cartridges hold
@@ -379,7 +378,7 @@ func (a *Accountant) restoreDepth(name string, start time.Time, plans []*planner
 		return RestoreDepth{}
 	}
 	rd := RestoreDepth{Marks: marks}
-	// Interpolate how many weeks the capacity buys, and the local bytes-per-week slope.
+	// Interpolate how many weeks of restore history the capacity buys (its total depth).
 	for i, m := range marks {
 		if m.Bytes > capacity {
 			break
@@ -390,14 +389,7 @@ func (a *Accountant) restoreDepth(name string, start time.Time, plans []*planner
 			if span := next.Bytes - m.Bytes; span > 0 {
 				frac := float64(capacity-m.Bytes) / float64(span)
 				rd.CapacityWeeks = float64(m.Weeks) + frac*float64(next.Weeks-m.Weeks)
-				rd.PerWeekBytes = span / int64(next.Weeks-m.Weeks)
 			}
-		}
-	}
-	if rd.PerWeekBytes == 0 && len(marks) >= 2 { // capacity below the first mark, or past the last
-		lo, hi := marks[0], marks[len(marks)-1]
-		if wk := hi.Weeks - lo.Weeks; wk > 0 {
-			rd.PerWeekBytes = (hi.Bytes - lo.Bytes) / int64(wk)
 		}
 	}
 	return rd

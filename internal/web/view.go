@@ -2268,7 +2268,7 @@ func usageChartSVG(series []catalog.UsageSample, forecast, protected []engine.Fo
 		}
 		my := y(m.Bytes)
 		fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--muted)" stroke-width="1" stroke-dasharray="1 2" opacity="0.6"/>`, vw-padR-34, my, vw-padR, my)
-		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="9" text-anchor="end" opacity="0.85"><title>capacity to keep %dw of restore points: %s</title>%dw</text>`, vw-padR-36, my+3, m.Weeks, sizeutil.FormatBytes(m.Bytes), m.Weeks)
+		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="9" text-anchor="end" opacity="0.85"><title>total capacity to keep %dw of restore points: %s</title>%dw</text>`, vw-padR-36, my+3, m.Weeks, sizeutil.FormatBytes(m.Bytes), m.Weeks)
 	}
 
 	// Protected floor: the retention minimum pruning can't reclaim, filled darker beneath
