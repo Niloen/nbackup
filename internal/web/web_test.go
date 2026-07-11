@@ -15,6 +15,7 @@ import (
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/report"
@@ -44,9 +45,12 @@ type fakeSource struct {
 	// routes map defaults to "every archive routed to every medium the run has a
 	// copy on" — the judgment most fixtures were written against, where each
 	// placement owes the whole run.
-	routes    map[string][]string
-	syncRules []config.SyncRule
-	syncLags  []engine.SyncLag
+	routes           map[string][]string
+	syncRules        []config.SyncRule
+	syncLags         []engine.SyncLag
+	forecast         []*planner.Plan                   // canned offline forecast for the ghost calendar; nil = no ghosts
+	capacityForecast []engine.MediumForecast           // canned per-medium fill forecast for /media
+	dleForecast      map[string][]engine.ForecastPoint // canned per-DLE footprint forecast for /dles/<slug>
 }
 
 func (f fakeSource) Runs() []*catalog.Run { return f.runs }
@@ -211,6 +215,16 @@ func (f fakeSource) DrillWindow() time.Duration { return 30 * 24 * time.Hour }
 
 func (f fakeSource) StaleDLEs(now time.Time) []catalog.StaleDLE { return f.stale }
 
+func (f fakeSource) Forecast(start time.Time, days int) []*planner.Plan { return f.forecast }
+
+func (f fakeSource) CapacityForecast(start time.Time, days int) []engine.MediumForecast {
+	return f.capacityForecast
+}
+
+func (f fakeSource) DLEForecast(slug string, start time.Time, days int) []engine.ForecastPoint {
+	return f.dleForecast[slug]
+}
+
 // DLESummaries aggregates the fake's runs per DLE, mirroring catalog.DLESummaries
 // closely enough to render the DLE pages (every archive here is on "disk").
 func (f fakeSource) DLESummaries() []catalog.DLESummary {
@@ -339,10 +353,10 @@ func TestMediumDetailRendersUsageChart(t *testing.T) {
 		t.Fatalf("code=%d, want 200", code)
 	}
 	for _, want := range []string{
-		"Used capacity over time", // the chart section header
-		"<svg",                    // the inline SVG chart itself
-		"3 recorded samples",      // the history caption
-		"90.00 kB",                // the final (post-prune) sample, drawn as the curve's end
+		"Used capacity", // the chart section header
+		"<svg",          // the inline SVG chart itself
+		"3 sample",      // the history caption
+		"90.00 kB",      // the final (post-prune) sample, drawn as the curve's end
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing %q:\n%s", want, body)
@@ -1231,6 +1245,132 @@ func TestActivityHeatmap(t *testing.T) {
 	_, empty := get(t, NewServer(fakeSource{}, t.TempDir()).Handler(), "/dles")
 	if strings.Contains(empty, "Activity") || strings.Contains(empty, `class="heat"`) {
 		t.Errorf("/dles rendered a heatmap for an empty catalog:\n%s", empty)
+	}
+}
+
+// TestGhostCalendar checks the forward projection: a future full from the offline
+// forecast renders an OUTLINED (ghost) cell, distinct from a recorded fill, and the
+// projected columns are marked so the header dims them. The forecast is offline by
+// contract, so serving /dles never probes a host (fakeSource.Forecast is pure).
+func TestGhostCalendar(t *testing.T) {
+	now := time.Now()
+	rec := record.Archive{
+		Run: "run-a", DLE: "local", Host: "localhost", Path: "/src", Level: 0,
+		Compressed: 100_000, CreatedAt: now.AddDate(0, 0, -3),
+	}
+	// Project a full three days out and an incremental tomorrow.
+	future := func(d int) time.Time { return now.AddDate(0, 0, d) }
+	src := fakeSource{
+		runs: []*catalog.Run{{ID: "run-a", Archives: []record.Archive{rec}}},
+		forecast: []*planner.Plan{
+			{Date: future(1), Items: []planner.Item{{Name: "local", Level: 1}}},
+			{Date: future(3), Items: []planner.Item{{Name: "local", Level: 0}}},
+		},
+	}
+
+	code, body := get(t, NewServer(src, t.TempDir()).Handler(), "/dles")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d", code)
+	}
+	for _, want := range []string{
+		"next 2 projected",        // heading names the forecast
+		`class="cell full ghost"`, // the projected full, outlined
+		`class="cell incr ghost"`, // the projected incremental, outlined
+		`class="tick fut"`,        // projected columns dimmed
+		">projected<",             // the legend entry
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/dles ghost calendar missing %q:\n%s", want, body)
+		}
+	}
+	// A ghost is never a run link (nothing committed to link to).
+	if strings.Contains(body, `href="/runs/"`) {
+		t.Errorf("/dles linked a ghost cell to a run:\n%s", body)
+	}
+}
+
+// TestMediaCapacityScheduleAware checks the schedule-aware capacity surfaces: /media
+// shows a "(sched)" projected-full date for a medium the forecast fills, "within
+// capacity" for one it doesn't, and the medium detail page carries the dated warning.
+func TestMediaCapacityScheduleAware(t *testing.T) {
+	now := time.Now()
+	today := now.Format("2006-01-02")
+	over := now.AddDate(0, 0, 20).Format("2006-01-02")
+	src := fakeSource{
+		media: []engine.MediumInfo{
+			{Name: "disk", Type: "disk", Capacity: 1000},
+			{Name: "cloud", Type: "cloud", Capacity: 1000},
+		},
+		capacityForecast: []engine.MediumForecast{
+			{Medium: "disk", Points: []engine.ForecastPoint{
+				{Date: today, Bytes: 500, Capacity: 1000},
+				{Date: over, Bytes: 1500, Capacity: 1000}, // outgrows capacity
+			}},
+			{Medium: "cloud", Points: []engine.ForecastPoint{
+				{Date: today, Bytes: 200, Capacity: 1000}, // stays within
+			}},
+		},
+	}
+	h := NewServer(src, t.TempDir()).Handler()
+
+	_, list := get(t, h, "/media")
+	if !strings.Contains(list, "(sched)") {
+		t.Errorf("/media should mark the filling medium schedule-aware:\n%s", list)
+	}
+	if !strings.Contains(list, "within capacity") {
+		t.Errorf("/media should say the clear medium stays within capacity:\n%s", list)
+	}
+
+	_, detail := get(t, h, "/media/disk")
+	if !strings.Contains(detail, "EXCEED capacity") {
+		t.Errorf("/media/disk should carry the dated over-capacity warning:\n%s", detail)
+	}
+}
+
+// TestUsageChartOverlay checks the used-capacity chart draws history and projection on
+// one set of axes: a solid history line, a dashed projection past a "now" divider, and a
+// red crossing marker where the projection pierces capacity.
+func TestUsageChartOverlay(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	series := []catalog.UsageSample{
+		{At: now.AddDate(0, 0, -2), Used: 300},
+		{At: now.AddDate(0, 0, -1), Used: 500},
+		{At: now, Used: 700},
+	}
+	forecast := []engine.ForecastPoint{
+		{Date: now.Format("2006-01-02"), Bytes: 700, Capacity: 1000},
+		{Date: now.AddDate(0, 0, 10).Format("2006-01-02"), Bytes: 1200, Capacity: 1000}, // over
+	}
+	svg := string(usageChartSVG(series, forecast, now, 1000, "capacity"))
+	for _, want := range []string{
+		`stroke-dasharray="5 4"`, // the projection curve
+		`>now</text>`,            // the divider label
+		`full ~Jul 21`,           // the dated capacity crossing
+		`var(--warn)`,            // the capacity ceiling line
+	} {
+		if !strings.Contains(svg, want) {
+			t.Errorf("usage chart overlay missing %q:\n%s", want, svg)
+		}
+	}
+}
+
+// TestDLEProjectedFootprint checks the per-DLE footprint card on /dles/<slug>: a rising
+// projected footprint shows the horizon figure with a ▲, distinct from the current size.
+func TestDLEProjectedFootprint(t *testing.T) {
+	src := sampleSource()
+	now := time.Now()
+	src.dleForecast = map[string][]engine.ForecastPoint{
+		"local": {
+			{Date: now.Format("2006-01-02"), Bytes: 100},
+			{Date: now.AddDate(0, 0, 30).Format("2006-01-02"), Bytes: 500}, // grows
+		},
+	}
+	_, body := get(t, NewServer(src, t.TempDir()).Handler(), "/dles/local")
+	if !strings.Contains(body, "Projected footprint") {
+		t.Errorf("/dles/local should show the projected footprint card:\n%s", body)
+	}
+	if !strings.Contains(body, "▲") {
+		t.Errorf("/dles/local should mark a rising footprint with ▲:\n%s", body)
 	}
 }
 

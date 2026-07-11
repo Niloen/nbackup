@@ -19,6 +19,9 @@ type CostSummary = accounting.CostSummary
 // ForecastPoint is one day of the projected cost curve.
 type ForecastPoint = accounting.ForecastPoint
 
+// MediumForecast is one medium's projected fill curve.
+type MediumForecast = accounting.MediumForecast
+
 // ReadEstimate is the cost of reading a set of archives back off a medium.
 type ReadEstimate = accounting.ReadEstimate
 
@@ -28,14 +31,41 @@ func (e *Engine) CostSummary(plan *planner.Plan) CostSummary {
 	return e.acct.CostSummary(plan)
 }
 
-// ForecastCost projects the landing medium's monthly storage cost forward day by
-// day, feeding the accountant the planner's run simulation; see accounting.
-func (e *Engine) ForecastCost(start time.Time, days int) ([]ForecastPoint, error) {
-	plans, err := e.sched.Simulate(start, days)
+// ForecastCost projects the landing medium's storage cost and capacity headroom
+// forward day by day over the caller's simulated plans (see accounting). The caller
+// passes the SAME plans it rendered the schedule from — live or offline (`--days`
+// vs `--days --offline`) — so the cost/capacity curve and the schedule always agree.
+func (e *Engine) ForecastCost(start time.Time, plans []*planner.Plan) []ForecastPoint {
+	return e.acct.ForecastCost(start, plans)
+}
+
+// ForecastCapacity projects every size-structured landing medium's fill forward over
+// the caller's simulated plans — the per-medium generalization of ForecastCost. The
+// caller passes the same plans it rendered the schedule from (live or offline).
+func (e *Engine) ForecastCapacity(start time.Time, plans []*planner.Plan) []MediumForecast {
+	return e.acct.ForecastCapacity(start, plans)
+}
+
+// ForecastCapacityOffline projects per-medium fill over `days` from `start` using the
+// OFFLINE simulation — catalog + run-log only, no archiver/SSH probe — so the web can
+// draw capacity curves without ever touching a host.
+func (e *Engine) ForecastCapacityOffline(start time.Time, days int) ([]MediumForecast, error) {
+	plans, err := e.sched.SimulateOffline(start, days)
 	if err != nil {
 		return nil, err
 	}
-	return e.acct.ForecastCost(start, plans), nil
+	return e.acct.ForecastCapacity(start, plans), nil
+}
+
+// ForecastDLEFootprintOffline projects one DLE's retained storage footprint over `days`
+// from `start` using the OFFLINE simulation (no host probe) — the per-DLE peer of the
+// per-medium capacity forecast, for the DLE detail page.
+func (e *Engine) ForecastDLEFootprintOffline(slug string, start time.Time, days int) ([]ForecastPoint, error) {
+	plans, err := e.sched.SimulateOffline(start, days)
+	if err != nil {
+		return nil, err
+	}
+	return e.acct.ForecastDLEFootprint(slug, start, plans), nil
 }
 
 // RestoreCost prices a whole-DLE restore (or every DLE) as of a date; see accounting.

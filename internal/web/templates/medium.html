@@ -36,16 +36,17 @@
 {{if not $d.Pool}}{{if $d.Capacity}}
 <div class="bar" style="margin-top:.9rem"><span style="width:{{pct $d.UtilPct}};{{if $d.Over}}background:var(--bad){{end}}"></span></div>
 {{end}}{{end}}
+{{if $d.CapacityOutlook}}<div class="{{if $d.CapacityOver}}warn{{else}}muted{{end}}" style="margin-top:.6rem;font-size:.85rem">{{if $d.CapacityOver}}⚠ {{end}}{{$d.CapacityOutlook}}</div>{{end}}
 
 {{range $d.Syncs}}
 <div class="muted" style="margin-top:.6rem">sync target{{if .From}} (from {{.From}}){{end}}: {{if .Runs}}behind {{.Runs}} run(s) · {{.Bytes}} — <code>nb sync</code> catches up{{else}}in sync{{end}}</div>
 {{end}}
 
-<h2>Used capacity over time</h2>
+<h2>Used capacity — recorded &amp; projected</h2>
 <div class="panel scroll">
 {{if $d.Chart}}
 {{$d.Chart}}
-<div class="muted" style="margin-top:.5rem;font-size:.82rem">{{$d.Samples}} recorded samples, {{stamp $d.HistFirst}} → {{stamp $d.HistLast}} · captures reclamation, not just growth</div>
+<div class="muted" style="margin-top:.5rem;font-size:.82rem">Solid = recorded usage ({{$d.Samples}} sample{{if ne $d.Samples 1}}s{{end}}, captures reclamation); dashed = schedule-aware projection past “now”, after growth and pruning.</div>
 {{else}}
 <div class="empty">Not enough recorded history yet — the usage curve is drawn from samples taken after each dump/prune, so it appears once a medium has changed at least twice.</div>
 {{end}}

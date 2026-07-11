@@ -11,7 +11,42 @@ import (
 	"github.com/Niloen/nbackup/internal/progress"
 )
 
-// estimates predicts, for each DLE, the size of a full and of the incremental at
+// EstimateSource supplies the per-DLE size predictions planner.Build needs (a full,
+// and the incremental at the sitting level and the next). Two implementations feed
+// the SAME planner: probeSource asks the archiver live (a metadata tar pass, which
+// may SSH to the host — the accurate-but-slow default), and historySource projects
+// the sizes from recorded history with no I/O (the offline path behind `nb plan
+// --offline` and the webui ghost calendar). Because only the byte inputs differ, an
+// offline plan and a live plan pick identical LEVELS — they can disagree only on size.
+type EstimateSource interface {
+	Estimates(dles []planner.DLE, sink progress.Sink) (map[string]planner.Estimate, []planner.FailedUnit)
+	// At returns the source as it would size things on day t. The live probe measures
+	// the current filesystem and ignores t (returns itself); the history projection
+	// repins to t so a forecast can grow each simulated day's sizes. This is what lets
+	// SimulateFunc size a full landing three weeks out by three weeks of growth.
+	At(t time.Time) EstimateSource
+}
+
+// probeSource is the live archiver probe — the historical default. It owns the whole
+// parallel estimate algorithm (Estimates/warmCaches/estimateDLE) and holds only the
+// three Deps closures that algorithm needs, so it stands alone: reading this type shows
+// the probe in full, without a hop back through the Scheduler.
+type probeSource struct {
+	workers     func() int
+	history     func() *catalog.History
+	archiverFor func(dtName, host string) (archiver.Archiver, error)
+}
+
+// probe returns the live archiver estimate source, wired to the scheduler's deps.
+func (s *Scheduler) probe() EstimateSource {
+	return probeSource{workers: s.d.Workers, history: s.d.History, archiverFor: s.d.ArchiverFor}
+}
+
+// At ignores the date: a live probe measures the current filesystem, which is the same
+// whatever day the forecast asks about.
+func (p probeSource) At(time.Time) EstimateSource { return p }
+
+// Estimates predicts, for each DLE, the size of a full and of the incremental at
 // its current level and the next (the inputs the planner's bump decision needs),
 // by asking the archiver. For gnutar this is a fast metadata-only tar pass; see
 // gnutar.Estimate. Sizes are uncompressed — an upper bound on the compressed bytes
@@ -21,17 +56,17 @@ import (
 // an independent archiver pass, and on a host with many DLEs the serial sum dominates
 // a preview. When sink is non-nil the work is tracked so a caller can paint live
 // progress. The fan-out is read-only over shared caches — see warmCaches.
-// estimates returns per-DLE size estimates for the plannable units, and the units whose
+// Estimates returns per-DLE size estimates for the plannable units, and the units whose
 // estimate FAILED outright — Amanda's "planner: FAILED" class: a dead estimate almost
 // always predicts a dead dump, and planning it anyway at a fictional ~0 B corrupts the
 // capacity math (make-room would reserve nothing for a dump that then writes plenty).
 // Failed units are dropped from planning and reported like dump failures; a MEASURED
 // floor (a partially readable source) is not a failure — it degrades to the Incomplete
 // warning as before.
-func (s *Scheduler) estimates(dles []planner.DLE, sink progress.Sink) (map[string]planner.Estimate, []planner.FailedUnit) {
-	states := s.warmCaches(dles)
+func (p probeSource) Estimates(dles []planner.DLE, sink progress.Sink) (map[string]planner.Estimate, []planner.FailedUnit) {
+	states := p.warmCaches(dles)
 
-	workers := s.d.Workers()
+	workers := p.workers()
 	var tr *progress.Tracker
 	if sink != nil {
 		rows := make([]progress.Plan, len(dles))
@@ -58,7 +93,7 @@ func (s *Scheduler) estimates(dles []planner.DLE, sink progress.Sink) (map[strin
 			if tr != nil {
 				tr.StartDLE(d.ID()) // progress display keys by host:path, matching the dump phase
 			}
-			results[i], fails[i] = s.estimateDLE(d, st)
+			results[i], fails[i] = p.estimateDLE(d, st)
 			if tr != nil {
 				tr.FinishDLE(d.ID(), 0, results[i].Full, 0, fails[i])
 			}
@@ -87,11 +122,11 @@ func (s *Scheduler) estimates(dles []planner.DLE, sink progress.Sink) (map[strin
 // on one goroutine — the parallel workers then only ever READ them. Errors from
 // archiverFor are swallowed here (the cache warm is best-effort); estimateDLE
 // resolves the archiver again and surfaces any failure per-DLE.
-func (s *Scheduler) warmCaches(dles []planner.DLE) []*catalog.DLEState {
-	hist := s.d.History()
+func (p probeSource) warmCaches(dles []planner.DLE) []*catalog.DLEState {
+	hist := p.history()
 	states := make([]*catalog.DLEState, len(dles))
 	for i, d := range dles {
-		_, _ = s.d.ArchiverFor(d.DumpTypeName(), d.Host)
+		_, _ = p.archiverFor(d.DumpTypeName(), d.Host)
 		states[i] = hist.DLE(d.Name())
 	}
 	return states
@@ -99,9 +134,9 @@ func (s *Scheduler) warmCaches(dles []planner.DLE) []*catalog.DLEState {
 
 // estimateDLE sizes one unit. A non-nil error is the unit-class failure (dead archiver,
 // estimate that measured nothing): the unit is planner-FAILED, not planned at ~0 B.
-func (s *Scheduler) estimateDLE(d planner.DLE, st *catalog.DLEState) (planner.Estimate, error) {
+func (p probeSource) estimateDLE(d planner.DLE, st *catalog.DLEState) (planner.Estimate, error) {
 	name := d.Name() // the internal slug, the archiver's incremental-state key
-	arch, err := s.d.ArchiverFor(d.DumpTypeName(), d.Host)
+	arch, err := p.archiverFor(d.DumpTypeName(), d.Host)
 	if err != nil {
 		return planner.Estimate{}, err
 	}

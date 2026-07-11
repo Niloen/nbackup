@@ -1269,6 +1269,9 @@ type dleDetail struct {
 	Runs      int
 	Bytes     int64
 	Media     string
+	Footprint string          // schedule-aware projected retained storage at the horizon, e.g. "~1.2 GB"; "" when not forecast
+	FootDays  int             // the forecast horizon in days (for the label)
+	FootRise  bool            // the footprint is projected to grow from now (▲ styling)
 	Evolution dleEvolution    // the size-evolution block; zero values omit their piece
 	Recovery  []recoveryPoint // restorable points, newest first (capped unless ?all=1)
 	RecTotal  int             // recovery points in total (for the show-all toggle)
@@ -1398,9 +1401,11 @@ type heatmap struct {
 }
 
 // heatDay is one column: its date and a sparse tick label (a month on the 1st, a day
-// number on Mondays, else "").
+// number on Mondays, else ""). Future marks a projected column (past today), which the
+// template dims so the forecast region reads as distinct from recorded activity.
 type heatDay struct {
-	Tick string
+	Tick   string
+	Future bool
 }
 
 // heatRow is one DLE's row of daily cells, in Days order. Like dleRow, rows are
@@ -1416,11 +1421,14 @@ type heatRow struct {
 }
 
 // heatCell is one DLE-day: the accent class driving the fill, a tooltip, and — when a
-// single run produced the day's archive — that run to link to.
+// single run produced the day's archive — that run to link to. Ghost marks a PROJECTED
+// cell (a future day from the offline forecast, not a recorded run): the template
+// renders it as an outline rather than a fill so a plan can never be mistaken for a fact.
 type heatCell struct {
 	Class string // "full" | "incr" | "partial" | "none"
 	Title string
 	RunID string // set only when exactly one run produced the day's archive
+	Ghost bool   // a projected future cell (no RunID; outlined, not filled)
 }
 
 // dleTrendPoint is one dump record's statistics for a single DLE, the per-DLE series
@@ -1826,18 +1834,21 @@ func dumpTimeSuffix(secs float64) string {
 // permanently near-full by design), so Pool routes the template to PoolRoom instead.
 type mediaRow struct {
 	engine.MediumInfo
-	UtilPct  float64 // 0 when unbounded
-	Over     bool    // used past a bounded capacity (sync/copy can land runs over)
-	ProjFull string  // "~Nd", or "—" when unbounded or not projected
-	Pool     bool    // this medium's pool holds one or more labeled volumes
-	PoolRoom string  // "K of N with room" — set only when Pool
+	UtilPct   float64 // 0 when unbounded
+	Over      bool    // used past a bounded capacity (sync/copy can land runs over)
+	ProjFull  string  // "~Nd", or "—" when unbounded or not projected
+	ProjSched bool    // ProjFull is schedule-aware (forecast) rather than naive-linear growth
+	Pool      bool    // this medium's pool holds one or more labeled volumes
+	PoolRoom  string  // "K of N with room" — set only when Pool
 }
 
-// newMediaRows merges the medium summaries with each one's recorded growth
-// (MediumStats) into the /media list's view rows. stats is a medium-name lookup
-// (Source.MediumStats) rather than the whole Source, so this stays a pure view
-// function callable from a test fixture as well as the handler.
-func newMediaRows(media []engine.MediumInfo, stats func(string) (engine.MediumStats, bool), now time.Time) []mediaRow {
+// newMediaRows merges the medium summaries with each one's growth into the /media
+// list's view rows. It prefers the SCHEDULE-AWARE fill forecast (fills, from the offline
+// simulation — accounts for the dump cycle, projected growth, and pruning) for the
+// "projected full" date, falling back to the naive linear projection from recorded usage
+// (MediumStats.Growth) for a medium the forecast doesn't cover. stats/fills are lookups
+// rather than the whole Source, so this stays a pure view function callable from a test.
+func newMediaRows(media []engine.MediumInfo, stats func(string) (engine.MediumStats, bool), fills map[string][]engine.ForecastPoint, now time.Time) []mediaRow {
 	rows := make([]mediaRow, 0, len(media))
 	for _, m := range media {
 		row := mediaRow{MediumInfo: m, ProjFull: "—"}
@@ -1846,16 +1857,39 @@ func newMediaRows(media []engine.MediumInfo, stats func(string) (engine.MediumSt
 			row.Over = m.Used > m.Capacity
 		}
 		st, ok := stats(m.Name)
-		if m.Volumes > 0 {
+		switch {
+		case m.Volumes > 0:
 			row.Pool = true
 			withRoom, total := poolRoomCount(st.PerVolume, st.PoolVolumes)
 			row.PoolRoom = fmt.Sprintf("%d of %d with room", withRoom, total)
-		} else if ok && !st.Growth.ProjFull.IsZero() {
+		case len(fills[m.Name]) > 0:
+			// Schedule-aware: the first day the medium can't fit its retained set under
+			// capacity even after pruning. No such day means it stays within the horizon.
+			row.ProjSched = true
+			if over := firstOverCapacityDate(fills[m.Name]); !over.IsZero() {
+				row.ProjFull = fmt.Sprintf("~%dd", projDays(over, now))
+			} else {
+				row.ProjFull = "clear" // stays within capacity across the forecast horizon
+			}
+		case ok && !st.Growth.ProjFull.IsZero():
 			row.ProjFull = fmt.Sprintf("~%dd", projDays(st.Growth.ProjFull, now))
 		}
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// firstOverCapacityDate returns the first day a medium's fill forecast cannot fit its
+// retained set under capacity, or the zero time if it stays within it.
+func firstOverCapacityDate(points []engine.ForecastPoint) time.Time {
+	for _, p := range points {
+		if p.OverCapacity() {
+			if t, err := time.Parse("2006-01-02", p.Date); err == nil {
+				return t
+			}
+		}
+	}
+	return time.Time{}
 }
 
 // poolRoomCount reports how many of a pool's labeled volumes still have room to
@@ -1920,6 +1954,13 @@ type mediumData struct {
 	HistLast  time.Time
 	PerDay    int64     // average recorded growth, bytes/day; 0 when not derivable
 	ProjFull  time.Time // projected capacity-reached date; zero when not projected
+
+	// CapacityOutlook is the SCHEDULE-AWARE forecast headline (dump cycle + projected
+	// growth + pruning), distinct from the naive-linear ProjFull above: a dated warning
+	// when the medium is projected to outgrow capacity, or a reassurance that it fits
+	// across the horizon. "" when the medium isn't covered (unbounded, tape, or no route).
+	CapacityOutlook string
+	CapacityOver    bool // the outlook is a warning, for styling
 
 	Chart  template.HTML   // the used-over-time area chart, or "" with fewer than two samples
 	Points []usagePointRow // the per-run retained series, newest run first
@@ -1997,7 +2038,9 @@ type syncLagView struct {
 // it) into the view model — display percentages plus the used-over-time chart drawn
 // from the ledger samples, which show the prune/relabel declines the retained
 // picture cannot.
-func newMediumData(st engine.MediumStats) mediumData {
+// newMediumData flattens a medium's stats into the detail view. forecast (may be nil)
+// is the schedule-aware fill projection overlaid on the used-capacity chart from `now`.
+func newMediumData(st engine.MediumStats, forecast []engine.ForecastPoint, now time.Time) mediumData {
 	d := mediumData{
 		Name: st.Name, Type: st.Type,
 		Used: st.Used, Capacity: st.Capacity, Over: st.Capacity > 0 && st.Used > st.Capacity,
@@ -2055,7 +2098,7 @@ func newMediumData(st engine.MediumStats) mediumData {
 			d.VolumeRows = append(d.VolumeRows, row)
 		}
 	}
-	d.Chart = usageChartSVG(st.Usage, st.Capacity, capLabel)
+	d.Chart = usageChartSVG(st.Usage, forecast, now, st.Capacity, capLabel)
 	for i := len(st.ByRun) - 1; i >= 0; i-- { // newest first for the table
 		p := st.ByRun[i]
 		row := usagePointRow{Run: p.Run, At: p.At, Added: p.Added, Used: p.Used}
@@ -2067,39 +2110,60 @@ func newMediumData(st engine.MediumStats) mediumData {
 	return d
 }
 
-// usageChartSVG renders a medium's recorded used-capacity ledger as a self-contained
-// inline SVG area chart: no external assets (the strict artifact-style CSP the webui
-// keeps), colors driven by the page's CSS variables so it tracks light/dark, and the
-// geometry computed here so the template stays declarative. Because it draws the
-// catalog's recorded samples (not the currently-retained archives), a prune shows as
-// the curve falling. It returns "" for fewer than two samples or a zero time span,
-// where a line would be meaningless. Coordinates are safe (numbers plus datestamp
-// timestamps), so template.HTML is sound. capLabel names the dashed ceiling line
-// ("capacity", or "pool capacity" for a labeled pool, where the number is the sum
-// of per-volume capacities rather than a single store's size).
-func usageChartSVG(series []catalog.UsageSample, capacity int64, capLabel string) template.HTML {
-	if len(series) < 2 {
-		return ""
+// usageChartSVG renders a medium's used-capacity over time as a self-contained inline
+// SVG: no external assets (the strict artifact-style CSP the webui keeps), colors driven
+// by the page's CSS variables so it tracks light/dark, geometry computed here so the
+// template stays declarative. The SOLID filled curve is recorded HISTORY (the catalog's
+// usage ledger, so a prune shows as it falling); the DASHED curve past the "now" divider
+// is the schedule-aware PROJECTION (forecast, if any) — the same fill forecast the
+// /media column reads, drawn on the same axes and through the capacity ceiling, with the
+// crossing point marked. It returns "" when there is neither ≥2 history samples nor a
+// projection to draw, or a zero time span. Coordinates are safe (numbers + datestamps),
+// so template.HTML is sound. capLabel names the dashed ceiling line ("capacity", or
+// "pool capacity" for a labeled pool).
+func usageChartSVG(series []catalog.UsageSample, forecast []engine.ForecastPoint, now time.Time, capacity int64, capLabel string) template.HTML {
+	// Parse the projection dates once (skip anything unparseable rather than fail).
+	type pt struct {
+		t time.Time
+		v int64
 	}
-	first, last := series[0].At, series[len(series)-1].At
-	span := last.Sub(first)
+	var fc []pt
+	for _, p := range forecast {
+		if t, err := time.Parse("2006-01-02", p.Date); err == nil {
+			fc = append(fc, pt{t, p.Bytes})
+		}
+	}
+	hasHist := len(series) >= 2
+	hasProj := len(fc) >= 2
+	if !hasHist && !hasProj {
+		return "" // nothing worth a line
+	}
+
+	// The x-axis spans all history, all projection, and "now" (the divider); the y-axis
+	// covers the taller of capacity or the highest point either series reaches.
+	xMin, xMax := now, now
+	var peak int64
+	note := func(t time.Time, v int64) {
+		if t.Before(xMin) {
+			xMin = t
+		}
+		if t.After(xMax) {
+			xMax = t
+		}
+		if v > peak {
+			peak = v
+		}
+	}
+	for _, s := range series {
+		note(s.At, s.Used)
+	}
+	for _, p := range fc {
+		note(p.t, p.v)
+	}
+	span := xMax.Sub(xMin)
 	if span <= 0 {
 		return ""
 	}
-	const vw, vh = 760.0, 220.0
-	const padL, padR, padT, padB = 8.0, 8.0, 12.0, 26.0
-	plotW, plotH := vw-padL-padR, vh-padT-padB
-	baseY := padT + plotH
-
-	var peak int64 // the tallest point the curve reaches (a prune can put it above the end)
-	for _, s := range series {
-		if s.Used > peak {
-			peak = s.Used
-		}
-	}
-	// Scale to whichever is taller — capacity as the ceiling, or (when usage has run
-	// over capacity) the peak plus headroom. Either way the capacity line stays on
-	// scale and visible, most of all in the over-capacity case.
 	scale := capacity
 	if peak > scale {
 		scale = int64(float64(peak) * 1.08)
@@ -2107,51 +2171,93 @@ func usageChartSVG(series []catalog.UsageSample, capacity int64, capLabel string
 	if scale <= 0 {
 		return ""
 	}
+
+	const vw, vh = 760.0, 220.0
+	const padL, padR, padT, padB = 8.0, 8.0, 12.0, 26.0
+	plotW, plotH := vw-padL-padR, vh-padT-padB
+	baseY := padT + plotH
 	drawCap := capacity > 0 && capacity <= scale
-	x := func(t time.Time) float64 { return padL + float64(t.Sub(first))/float64(span)*plotW }
+	x := func(t time.Time) float64 { return padL + float64(t.Sub(xMin))/float64(span)*plotW }
 	y := func(v int64) float64 { return padT + (1-float64(v)/float64(scale))*plotH }
 
-	var line, area strings.Builder
-	for i, s := range series {
-		cmd := "L"
-		if i == 0 {
-			cmd = "M"
-		}
-		fmt.Fprintf(&line, "%s%.1f %.1f ", cmd, x(s.At), y(s.Used))
-	}
-	fmt.Fprintf(&area, "M%.1f %.1f ", x(first), baseY)
-	for _, s := range series {
-		fmt.Fprintf(&area, "L%.1f %.1f ", x(s.At), y(s.Used))
-	}
-	fmt.Fprintf(&area, "L%.1f %.1f Z", x(last), baseY)
-
 	var b strings.Builder
-	fmt.Fprintf(&b, `<svg viewBox="0 0 %.0f %.0f" style="width:100%%;height:auto;display:block" role="img" aria-label="used capacity over time">`, vw, vh)
+	fmt.Fprintf(&b, `<svg viewBox="0 0 %.0f %.0f" style="width:100%%;height:auto;display:block" role="img" aria-label="used capacity over time, with projection">`, vw, vh)
 	// Baseline.
 	fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--line)" stroke-width="1"/>`, padL, baseY, vw-padR, baseY)
-	// Capacity ceiling, when a bounded medium.
+	// Capacity ceiling, across the whole width so the projection's crossing is visible.
 	if drawCap {
 		cy := y(capacity)
 		fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--warn)" stroke-width="1" stroke-dasharray="4 3"/>`, padL, cy, vw-padR, cy)
 		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--warn)" font-size="11" text-anchor="end">%s %s</text>`, vw-padR, cy-3, capLabel, sizeutil.FormatBytes(capacity))
 	}
-	// Area + line.
-	fmt.Fprintf(&b, `<path d="%s" fill="var(--accent)" fill-opacity="0.15"/>`, strings.TrimSpace(area.String()))
-	fmt.Fprintf(&b, `<path d="%s" fill="none" stroke="var(--accent)" stroke-width="2"/>`, strings.TrimSpace(line.String()))
-	// Point markers (bounded, so a long history stays light), each with a hover title.
-	if len(series) <= 80 {
+
+	// History: solid filled area + line.
+	if hasHist {
+		var line, area strings.Builder
+		for i, s := range series {
+			cmd := "L"
+			if i == 0 {
+				cmd = "M"
+			}
+			fmt.Fprintf(&line, "%s%.1f %.1f ", cmd, x(s.At), y(s.Used))
+		}
+		fmt.Fprintf(&area, "M%.1f %.1f ", x(series[0].At), baseY)
 		for _, s := range series {
-			fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="2.5" fill="var(--accent)"><title>%s — %s</title></circle>`,
-				x(s.At), y(s.Used), s.At.Format("2006-01-02 15:04"), sizeutil.FormatBytes(s.Used))
+			fmt.Fprintf(&area, "L%.1f %.1f ", x(s.At), y(s.Used))
+		}
+		fmt.Fprintf(&area, "L%.1f %.1f Z", x(series[len(series)-1].At), baseY)
+		fmt.Fprintf(&b, `<path d="%s" fill="var(--accent)" fill-opacity="0.15"/>`, strings.TrimSpace(area.String()))
+		fmt.Fprintf(&b, `<path d="%s" fill="none" stroke="var(--accent)" stroke-width="2"/>`, strings.TrimSpace(line.String()))
+		if len(series) <= 80 {
+			for _, s := range series {
+				fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="2.5" fill="var(--accent)"><title>%s — %s</title></circle>`,
+					x(s.At), y(s.Used), s.At.Format("2006-01-02 15:04"), sizeutil.FormatBytes(s.Used))
+			}
 		}
 	}
-	// End label.
-	end := series[len(series)-1]
-	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--fg)" font-size="11" text-anchor="end">%s</text>`,
-		x(end.At), y(end.Used)-6, sizeutil.FormatBytes(end.Used))
+
+	// Projection: a dashed line (no fill, so it reads as "not yet real"), continuing from
+	// the last history point (or standing alone) through the daily forecast.
+	if hasProj {
+		var proj strings.Builder
+		fmt.Fprint(&proj, "M")
+		if hasHist {
+			last := series[len(series)-1]
+			fmt.Fprintf(&proj, "%.1f %.1f L", x(last.At), y(last.Used))
+		}
+		for _, p := range fc {
+			fmt.Fprintf(&proj, "%.1f %.1f ", x(p.t), y(p.v))
+		}
+		fmt.Fprintf(&b, `<path d="%s" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="5 4" opacity="0.85"/>`, strings.TrimSpace(proj.String()))
+		// Mark the first day the projection pierces capacity — the dated "full" point.
+		if drawCap {
+			for _, p := range fc {
+				if p.v > capacity {
+					fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="3.5" fill="var(--bad)"><title>projected over capacity — %s</title></circle>`, x(p.t), y(p.v), p.t.Format("2006-01-02"))
+					fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--bad)" font-size="11" text-anchor="middle">full ~%s</text>`, x(p.t), y(p.v)-7, p.t.Format("Jan 2"))
+					break
+				}
+			}
+		}
+		// Projection end value label.
+		e := fc[len(fc)-1]
+		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11" text-anchor="end">%s</text>`, x(e.t), y(e.v)-6, sizeutil.FormatBytes(e.v))
+	} else if hasHist {
+		end := series[len(series)-1]
+		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--fg)" font-size="11" text-anchor="end">%s</text>`, x(end.At), y(end.Used)-6, sizeutil.FormatBytes(end.Used))
+	}
+
+	// "now" divider between recorded and projected — only when the projection extends
+	// past it (otherwise the whole chart is history and the divider is noise).
+	if hasProj && now.After(xMin) && now.Before(xMax) {
+		nx := x(now)
+		fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--muted)" stroke-width="1" stroke-dasharray="2 3"/>`, nx, padT, nx, baseY)
+		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="10" text-anchor="middle">now</text>`, nx, padT-2)
+	}
+
 	// X-axis end dates.
-	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11">%s</text>`, padL, vh-8, first.Format("2006-01-02"))
-	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11" text-anchor="end">%s</text>`, vw-padR, vh-8, last.Format("2006-01-02"))
+	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11">%s</text>`, padL, vh-8, xMin.Format("2006-01-02"))
+	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11" text-anchor="end">%s</text>`, vw-padR, vh-8, xMax.Format("2006-01-02"))
 	b.WriteString(`</svg>`)
 	return template.HTML(b.String())
 }

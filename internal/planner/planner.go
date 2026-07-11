@@ -244,13 +244,13 @@ func chooseIncrLevel(st *catalog.DLEState, e Estimate, bumpPercent float64) (lev
 // promotion staggers same-day deadlines apart). It writes nothing — the caller's
 // history is untouched.
 //
-// Estimates and params are sampled once and held constant across the window: this
-// forecasts the *level schedule* from today's sizes, not capacity drift as runs
-// accumulate. The per-day EstBytes therefore tracks the chosen levels, not a
-// reclamation timeline. The bump decision likewise weighs today's level sizes, so
-// a forecast past a simulated bump approximates the deeper level's size with the
-// current one's — a schedule sketch, not an exact size projection.
-func Simulate(dles []DLE, hist *catalog.History, est map[string]Estimate, forced map[string]bool, p Params, start time.Time, days int) []*Plan {
+// Params are sampled once and held constant; estimates come from estAt, evaluated per
+// simulated day. A caller that projects sizes forward (the offline history estimator)
+// makes each day's fulls/incrementals reflect dataset growth to that day; a caller with
+// no growth model returns the same map every day, and this is a pure level-schedule
+// sketch — the next full by the cycle deadline, incrementals between — from fixed sizes.
+// The bump decision weighs whichever day's sizes estAt returns.
+func SimulateFunc(dles []DLE, hist *catalog.History, estAt func(time.Time) map[string]Estimate, forced map[string]bool, p Params, start time.Time, days int) []*Plan {
 	if days < 1 {
 		days = 1
 	}
@@ -264,7 +264,7 @@ func Simulate(dles []DLE, hist *catalog.History, est map[string]Estimate, forced
 		if i > 0 {
 			dayForced = nil
 		}
-		plan := Build(dles, h, est, dayForced, p, date)
+		plan := Build(dles, h, estAt(date), dayForced, p, date)
 		plans = append(plans, plan)
 		// Advance the cloned history as if this day's run had been sealed, so the
 		// next day's DaysSinceFull / LastLevel / RunsAtCurrentLevel see it.
@@ -275,6 +275,13 @@ func Simulate(dles []DLE, hist *catalog.History, est map[string]Estimate, forced
 		}
 	}
 	return plans
+}
+
+// Simulate is SimulateFunc with a single estimate map held constant across the window —
+// the size-frozen schedule forecast (today's sizes, every day). Kept for callers (and
+// tests) that have no per-day growth model.
+func Simulate(dles []DLE, hist *catalog.History, est map[string]Estimate, forced map[string]bool, p Params, start time.Time, days int) []*Plan {
+	return SimulateFunc(dles, hist, func(time.Time) map[string]Estimate { return est }, forced, p, start, days)
 }
 
 // runBytes is the total estimated bytes the run currently writes.

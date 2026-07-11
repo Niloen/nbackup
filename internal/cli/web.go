@@ -17,6 +17,7 @@ import (
 	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/web"
 )
 
@@ -298,4 +299,34 @@ func (e *engineSource) DrillWindow() time.Duration { return e.cfg.DrillWindow() 
 // freshness window — always on, no separate config.
 func (e *engineSource) StaleDLEs(now time.Time) []catalog.StaleDLE {
 	return e.engine().StaleDLEs(e.cfg.CycleDuration(), now)
+}
+
+// Forecast projects the next `days` runs OFFLINE (catalog + run-log only, no archiver
+// probe), so serving /dles never opens an SSH connection. Errors are advisory — a
+// forecast that cannot be built simply yields no ghost cells.
+func (e *engineSource) Forecast(start time.Time, days int) []*planner.Plan {
+	plans, err := e.engine().SimulateOffline(start, days)
+	if err != nil {
+		return nil
+	}
+	return plans
+}
+
+// CapacityForecast projects per-medium fill OFFLINE (no archiver probe), so /media can
+// draw "when does this fill up" without opening an SSH connection. nil on error.
+func (e *engineSource) CapacityForecast(start time.Time, days int) []engine.MediumForecast {
+	caps, err := e.engine().ForecastCapacityOffline(start, days)
+	if err != nil {
+		return nil
+	}
+	return caps
+}
+
+// DLEForecast projects one DLE's storage footprint OFFLINE (no archiver probe). nil on error.
+func (e *engineSource) DLEForecast(slug string, start time.Time, days int) []engine.ForecastPoint {
+	fp, err := e.engine().ForecastDLEFootprintOffline(slug, start, days)
+	if err != nil {
+		return nil
+	}
+	return fp
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/Niloen/nbackup/internal/dletree"
 	"github.com/Niloen/nbackup/internal/drill"
 	"github.com/Niloen/nbackup/internal/engine"
+	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/progress"
 	"github.com/Niloen/nbackup/internal/record"
 	"github.com/Niloen/nbackup/internal/report"
@@ -59,6 +60,18 @@ type Source interface {
 	// existing freshness promise ("a full never ages past one cycle") and needs
 	// no separate config to enforce.
 	StaleDLEs(now time.Time) []catalog.StaleDLE
+	// Forecast projects the next `days` daily runs from `start` for the ghost calendar.
+	// It is OFFLINE by contract — catalog + run-log only, no archiver/SSH probe — so a
+	// browser hitting /dles can never trigger a host connection (see engine.SimulateOffline).
+	// A read-only status view stays read-only: this returns a projection, mutates nothing.
+	Forecast(start time.Time, days int) []*planner.Plan
+	// CapacityForecast projects each size-structured medium's fill forward `days` from
+	// `start` — the schedule-aware "when does this medium fill up" the /media page draws.
+	// Also OFFLINE by contract (see engine.ForecastCapacityOffline).
+	CapacityForecast(start time.Time, days int) []engine.MediumForecast
+	// DLEForecast projects one DLE's retained storage footprint forward `days` from
+	// `start` (offline) — the per-DLE peer of CapacityForecast, for the DLE detail page.
+	DLEForecast(slug string, start time.Time, days int) []engine.ForecastPoint
 }
 
 // Server renders the status pages from a Source plus the catalog workdir, where the
@@ -393,12 +406,25 @@ func (s *Server) handleDLE(w http.ResponseWriter, r *http.Request) {
 	}
 	chain := s.chainRuns(slug)
 	places, history := s.dleHistory(slug, chain)
+	// Schedule-aware projected footprint: the retained storage this DLE will occupy on
+	// its landing at the forecast horizon, after growth and pruning (offline — no probe).
+	footprint, footRise := "", false
+	if fp := s.src.DLEForecast(slug, s.now(), mediaForecastDays); len(fp) > 0 {
+		end := fp[len(fp)-1].Bytes
+		if end > 0 {
+			footprint = sizeutil.FormatBytes(end)
+			footRise = end > fp[0].Bytes
+		}
+	}
 	s.render(w, "dle", page{Title: sum.Display, Active: "dles", Data: dleDetail{
 		Slug:      sum.DLE,
 		Display:   sum.Display,
 		Runs:      sum.Runs,
 		Bytes:     sum.Bytes,
 		Media:     strings.Join(sum.Media, ", "),
+		Footprint: footprint,
+		FootDays:  mediaForecastDays,
+		FootRise:  footRise,
 		Evolution: newDLEEvolution(report.DLETrend(s.history(0), slug)),
 		Recovery:  shown,
 		RecTotal:  len(points),
@@ -604,6 +630,11 @@ func recoveryChain(tip record.Archive, archOf map[string]record.Archive, held fu
 // on now's local day: one row per configured DLE (DLESummaries order), one cell per
 // day colored by what landed. Returns nil when the catalog holds no archives at all, so
 // the caller can omit the whole section.
+// ghostDays is how far the /dles heatmap projects PAST today — the "ghost" forecast of
+// upcoming runs. Two weeks comfortably shows the next full of each DLE on a typical
+// cycle without letting the projected region dominate the recorded five weeks.
+const ghostDays = 14
+
 func (s *Server) buildHeatmap(now time.Time) *heatmap {
 	const days = 35
 	loc := now.Location()
@@ -649,10 +680,29 @@ func (s *Server) buildHeatmap(now time.Time) *heatmap {
 		return nil
 	}
 
+	// Per DLE, per FUTURE local day, the level the offline forecast projects. This is
+	// the ghost: a schedule projection (which day each DLE's next full/incr lands),
+	// sized nowhere and probing nothing — see engine.SimulateOffline. Presence in the
+	// map means "a run is projected that day"; the int is its level (0 = full).
+	ghost := map[string]map[string]int{}
+	for _, p := range s.src.Forecast(today.AddDate(0, 0, 1), ghostDays) {
+		key := p.Date.In(loc).Format("2006-01-02")
+		for _, it := range p.Items {
+			perDay := ghost[it.Name]
+			if perDay == nil {
+				perDay = map[string]int{}
+				ghost[it.Name] = perDay
+			}
+			perDay[key] = it.Level
+		}
+	}
+
 	hm := &heatmap{}
-	dates := make([]time.Time, days)
-	for i := 0; i < days; i++ {
-		d := today.AddDate(0, 0, i-(days-1)) // oldest first, today last
+	// Columns run oldest→today (recorded) then today+1→+ghostDays (projected). One loop
+	// covers both: index days-1 is today, anything past it is a future/ghost column.
+	dates := make([]time.Time, days+ghostDays)
+	for i := range dates {
+		d := today.AddDate(0, 0, i-(days-1))
 		dates[i] = d
 		tick := ""
 		switch {
@@ -661,28 +711,42 @@ func (s *Server) buildHeatmap(now time.Time) *heatmap {
 		case d.Weekday() == time.Monday:
 			tick = fmt.Sprintf("%d", d.Day())
 		}
-		hm.Days = append(hm.Days, heatDay{Tick: tick})
+		hm.Days = append(hm.Days, heatDay{Tick: tick, Future: i >= days})
 	}
 
 	for _, sum := range s.src.DLESummaries() {
 		row := heatRow{Slug: sum.DLE, Display: sum.Display}
 		perDay := byDLE[sum.DLE]
-		for _, d := range dates {
+		ghostDay := ghost[sum.DLE]
+		for i, d := range dates {
+			key := d.Format("2006-01-02")
 			cell := heatCell{Class: "none", Title: d.Format("Mon Jan 2")}
-			if ag := perDay[d.Format("2006-01-02")]; ag != nil {
-				switch {
-				case ag.partial:
-					cell.Class = "partial"
-				case ag.full:
-					cell.Class = "full"
-				case ag.incr:
-					cell.Class = "incr"
-				}
-				cell.Title = fmt.Sprintf("%s · %s · %s", d.Format("Mon Jan 2"), heatLevels(ag.levels), sizeutil.FormatBytes(ag.bytes))
-				if len(ag.runs) == 1 {
-					for id := range ag.runs {
-						cell.RunID = id
+			switch {
+			case i < days: // recorded activity
+				if ag := perDay[key]; ag != nil {
+					switch {
+					case ag.partial:
+						cell.Class = "partial"
+					case ag.full:
+						cell.Class = "full"
+					case ag.incr:
+						cell.Class = "incr"
 					}
+					cell.Title = fmt.Sprintf("%s · %s · %s", d.Format("Mon Jan 2"), heatLevels(ag.levels), sizeutil.FormatBytes(ag.bytes))
+					if len(ag.runs) == 1 {
+						for id := range ag.runs {
+							cell.RunID = id
+						}
+					}
+				}
+			default: // projected (ghost) — outline, never a run link
+				if lvl, ok := ghostDay[key]; ok {
+					cell.Ghost = true
+					cell.Class = "incr"
+					if lvl == 0 {
+						cell.Class = "full"
+					}
+					cell.Title = fmt.Sprintf("%s · projected %s", d.Format("Mon Jan 2"), levelTag(lvl))
 				}
 			}
 			row.Cells = append(row.Cells, cell)
@@ -706,8 +770,19 @@ func heatLevels(set map[int]bool) string {
 	return strings.Join(parts, ", ")
 }
 
+// mediaForecastDays is how far the /media page projects each medium's fill forward for
+// its schedule-aware "projected full" date — a season, enough to catch a medium that
+// fills within a few dump cycles without an unboundedly long simulation.
+const mediaForecastDays = 90
+
 func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
-	rows := newMediaRows(s.src.Media(), s.src.MediumStats, s.now())
+	fills := map[string][]engine.ForecastPoint{}
+	for _, mf := range s.src.CapacityForecast(s.now(), mediaForecastDays) {
+		if !mf.VolumeStructured {
+			fills[mf.Medium] = mf.Points
+		}
+	}
+	rows := newMediaRows(s.src.Media(), s.src.MediumStats, fills, s.now())
 	s.render(w, "media", page{Title: "Media", Active: "media", Data: rows})
 }
 
@@ -726,8 +801,26 @@ func (s *Server) handleMedium(w http.ResponseWriter, r *http.Request) {
 		s.render(w, "medium", page{Title: name, Active: "media", Data: mediumData{NotFound: true, Name: name}})
 		return
 	}
-	d := newMediumData(st)
+	// The schedule-aware fill forecast for this medium (offline — no host probe), reused
+	// for both the used-capacity chart's projection overlay and the outlook headline.
+	var fc []engine.ForecastPoint
+	for _, mf := range s.src.CapacityForecast(s.now(), mediaForecastDays) {
+		if mf.Medium == name && !mf.VolumeStructured {
+			fc = mf.Points
+			break
+		}
+	}
+	d := newMediumData(st, fc, s.now())
 	d.VolMap = s.buildMediumVolMap(name, st, showAll(r))
+	if len(fc) > 0 && fc[0].Capacity > 0 {
+		if over := firstOverCapacityDate(fc); !over.IsZero() {
+			d.CapacityOutlook = fmt.Sprintf("Projected to EXCEED capacity in ~%dd (%s) even after pruning — add capacity or shorten retention.",
+				projDays(over, s.now()), over.Format("Jan 2, 2006"))
+			d.CapacityOver = true
+		} else {
+			d.CapacityOutlook = fmt.Sprintf("Projected to stay within capacity over the next %dd (schedule-aware).", mediaForecastDays)
+		}
+	}
 	// A sync-rule target carries its live backlog as a quiet line — lag, not an
 	// alert: the next `nb sync` (usually cron's) closes it.
 	for _, lag := range s.src.SyncLags() {

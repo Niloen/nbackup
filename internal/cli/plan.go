@@ -29,6 +29,7 @@ const maxForecastDays = 1000
 func newPlanCmd(a *app) *cobra.Command {
 	var dateStr string
 	var days int
+	var offline bool
 	cmd := &cobra.Command{
 		Use:     "plan",
 		Short:   "Show what the next run would do",
@@ -68,15 +69,24 @@ func newPlanCmd(a *app) *cobra.Command {
 				fmt.Println()
 			}
 			if days > 1 {
-				return runPlanForecast(eng, date, days)
+				return runPlanForecast(eng, date, days, offline)
 			}
 
-			plan, err := eng.PlanWithProgress(date, estimateProgress(a.quiet))
+			var plan *planner.Plan
+			if offline {
+				plan, err = eng.PlanOffline(date)
+			} else {
+				plan, err = eng.PlanWithProgress(date, estimateProgress(a.quiet))
+			}
 			if err != nil {
 				return err
 			}
 			fmt.Printf("Plan for run %s  (cycle %dd, landing %q)\n\n",
 				record.DateString(date), plan.Interval, strings.Join(eng.Landings(), ", "))
+			if offline {
+				fmt.Println("Sizes are PROJECTED from catalog history (--offline), not measured. Levels are exact.")
+				fmt.Println()
+			}
 			for _, w := range plan.Warnings {
 				fmt.Printf("WARNING: %s\n", w)
 			}
@@ -123,6 +133,7 @@ func newPlanCmd(a *app) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&dateStr, "date", "", "run date YYYY-MM-DD (default today); planning a date behind the latest committed run may show a full, since incremental state reflects the most recent dump")
 	cmd.Flags().IntVar(&days, "days", 1, "forecast this many consecutive daily runs from --date")
+	cmd.Flags().BoolVar(&offline, "offline", false, "skip the live size estimate (no SSH/tar pass): project sizes from catalog history instead. Instant; levels are exact, sizes are projections. Recommended with --days, where the live estimate is held constant anyway")
 	return cmd
 }
 
@@ -232,13 +243,21 @@ func runEstimateLine(estTotal int64, unknown int) string {
 // runPlanForecast renders an extended plan: one row per simulated daily run,
 // projecting the level schedule forward. Estimates are sampled once and held
 // constant (see engine.Simulate), so the per-day size tracks the chosen levels.
-func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
-	plans, err := eng.Simulate(start, days)
+func runPlanForecast(eng *engine.Engine, start time.Time, days int, offline bool) error {
+	simulate := eng.Simulate
+	if offline {
+		simulate = eng.SimulateOffline
+	}
+	plans, err := simulate(start, days)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("Forecast: %d daily runs from %s  (cycle %dd, landing %q)\n\n",
 		days, record.DateString(start), plans[0].Interval, strings.Join(eng.Landings(), ", "))
+	if offline {
+		fmt.Println("Sizes are PROJECTED from catalog history (--offline), not measured. The level schedule is exact.")
+		fmt.Println()
+	}
 
 	// Structural warnings (e.g. a recovery set that won't fit capacity) are
 	// constant across the window; surface each one once, above the schedule.
@@ -255,13 +274,10 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 		fmt.Println()
 	}
 
-	// The cost curve overlays the schedule: the projected $/month footprint at the
-	// end of each day as runs land and pruning reclaims. Only shown for a priced
-	// (cloud) landing medium; a local disk has no recurring bill.
-	curve, err := eng.ForecastCost(start, days)
-	if err != nil {
-		return err
-	}
+	// The cost/capacity curve overlays the schedule: footprint, $/month, and capacity
+	// headroom at the end of each day as runs land and pruning reclaims. Fed the SAME
+	// plans as the schedule table (live or offline), so the two always agree.
+	curve := eng.ForecastCost(start, plans)
 	priced := eng.CostSummary(nil).Priced
 
 	tw := newTab(os.Stdout)
@@ -270,7 +286,7 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 	} else {
 		fmt.Fprintln(tw, "DATE\tFULL\tINCR\tEST. SIZE\tFULLS")
 	}
-	var windowTotal int64
+	var windowTotal, incrEst int64
 	var totalIncrs, totalPromoted int
 	for i, p := range plans {
 		var fulls, incrs int
@@ -278,6 +294,9 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 		var fullNames []string
 		for _, it := range p.Items {
 			est += it.EstBytes
+			if it.Level >= 1 {
+				incrEst += it.EstBytes
+			}
 			if it.Level == 0 {
 				fulls++
 				name := it.DLE.ID()
@@ -311,12 +330,12 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 	if totalPromoted > 0 {
 		fmt.Println("\n* = a full promoted ahead of its cycle deadline to level the daily full load.")
 	}
-	if totalIncrs > 0 {
-		// The simulation replays the level schedule but never mutates the filesystem,
-		// so no bytes change between simulated runs and every forecast incremental sizes
-		// to 0 B. Say so, lest a reader read "~0 B" as a broken estimate; a real
-		// incremental is a fraction of its full (shown in the FULL/INCR counts).
-		fmt.Println("\nNote: a forecast incremental over a simulated full shows ~0 B because the simulation makes no filesystem changes between runs; a real incremental is a fraction of its full.")
+	if totalIncrs > 0 && incrEst == 0 {
+		// With no incremental history to size from (or a live probe of an unchanged
+		// source), forecast incrementals show ~0 B. Say so, lest a reader read "~0 B" as
+		// a broken estimate; a real incremental is a fraction of its full. The offline
+		// projection sizes them from recorded churn medians once history exists.
+		fmt.Println("\nNote: forecast incrementals show ~0 B here (no recorded churn to size them from); a real incremental is a fraction of its full.")
 	}
 	fmt.Printf("\nWindow total (estimated): ~%s over %d run(s)\n", sizeutil.FormatBytes(windowTotal), days)
 	if priced && len(curve) > 0 {
@@ -324,7 +343,45 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int) error {
 		fmt.Printf("Projected storage cost at end of window: %s/month (%s stored)\n",
 			formatUSD(last.Monthly), sizeutil.FormatBytes(last.Bytes))
 	}
+	// Per-medium capacity headroom: the forecast reclaims to fit each day, so a medium
+	// only exceeds capacity when its retained (unreclaimable) set outgrows it — the real
+	// "you're going to run out of room" signal, dated, for every landing medium. Tape
+	// (volume-structured) reclaims by rotation not prune, so it carries no byte curve.
+	caps := eng.ForecastCapacity(start, plans)
+	var within []string
+	for _, mf := range caps {
+		if mf.VolumeStructured || len(mf.Points) == 0 || mf.Points[0].Capacity <= 0 {
+			continue // unbounded, or a tape whose fill is rotation-managed
+		}
+		if over := firstOverCapacity(mf.Points); over != "" {
+			fmt.Printf("\nWARNING: medium %q is projected to EXCEED capacity on %s even after pruning — its retained set outgrows the medium. Add capacity, shorten retention (minimum_age), or move DLEs to another landing.\n",
+				mf.Medium, over)
+		} else {
+			peak := int64(0)
+			for _, c := range mf.Points {
+				if c.Bytes > peak {
+					peak = c.Bytes
+				}
+			}
+			within = append(within, fmt.Sprintf("%s (%s cap, peak %s)",
+				mf.Medium, sizeutil.FormatBytes(mf.Points[0].Capacity), sizeutil.FormatBytes(peak)))
+		}
+	}
+	if len(within) > 0 {
+		fmt.Printf("Capacity — stays within the window: %s\n", strings.Join(within, "; "))
+	}
 	return nil
+}
+
+// firstOverCapacity returns the first day a medium's forecast cannot fit its retained
+// set under capacity, or "" if it never does.
+func firstOverCapacity(curve []engine.ForecastPoint) string {
+	for _, c := range curve {
+		if c.OverCapacity() {
+			return c.Date
+		}
+	}
+	return ""
 }
 
 // describeExpectation renders the tape the next run will write to for `nb plan`,

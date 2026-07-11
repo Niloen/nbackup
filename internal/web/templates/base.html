@@ -236,10 +236,16 @@
   .heat .lbl { padding-right: .7rem; text-align: left; font-weight: 600; font-size: .85rem;
     max-width: 14rem; overflow: hidden; text-overflow: ellipsis; }
   .heat .tick { font-size: .66rem; color: var(--muted); height: 1.1rem; overflow: visible; }
+  .heat .tick.fut { opacity: .5; font-style: italic; } /* projected columns read as forecast */
   .heat .cell { display: block; width: 12px; height: 12px; border-radius: 2px; background: var(--line); }
   .heat .cell.full { background: var(--accent); }
   .heat .cell.incr { background: color-mix(in srgb, var(--accent) 45%, transparent); }
   .heat .cell.partial { background: var(--warn); }
+  /* Ghost = a PROJECTED run: outlined, not filled, so a forecast can never be misread as
+     recorded. Inset box-shadow draws the outline without changing the 12px box size. */
+  .heat .cell.ghost { background: transparent; box-shadow: inset 0 0 0 1.5px var(--line); }
+  .heat .cell.ghost.full { box-shadow: inset 0 0 0 1.5px var(--accent); }
+  .heat .cell.ghost.incr { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 55%, transparent); }
   a.cell:hover { outline: 1px solid var(--fg); }
   .heat-legend { color: var(--muted); font-size: .82rem; margin-top: .6rem;
     display: flex; flex-wrap: wrap; gap: .1rem 1rem;
@@ -249,6 +255,7 @@
   .heat-legend .sw.full { background: var(--accent); }
   .heat-legend .sw.incr { background: color-mix(in srgb, var(--accent) 45%, transparent); }
   .heat-legend .sw.partial { background: var(--warn); }
+  .heat-legend .sw.ghost { background: transparent; box-shadow: inset 0 0 0 1.5px var(--accent); }
   /* Matrices (.heat, .pgrid) scroll sideways by design — a DLE×day or
      archive×medium grid has no honest stacked form. Make the scroll usable:
      the identity column pins so you always know which row you're panning,
