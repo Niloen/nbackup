@@ -57,6 +57,11 @@ type ForecastPoint struct {
 	// Bytes > Capacity means the protected set outgrew the medium and pruning cannot
 	// make room: the capacity-pressure signal, without a second reclaim pass.
 	Capacity int64
+	// Protected is the retention floor: bytes pruning could NOT reclaim (within minimum_age,
+	// the last recovery path, or a chain anchor). It is the MINIMUM capacity the medium
+	// needs — the footprint can never be pruned below it. Its peak over the window is the
+	// least capacity that keeps the retention promise.
+	Protected int64
 }
 
 // OverCapacity reports whether the landing's protected footprint has outgrown its
@@ -71,6 +76,10 @@ func (a *Accountant) ForecastCost(start time.Time, plans []*planner.Plan) []Fore
 	return a.forecastMedium(a.d.Landing, start, plans)
 }
 
+// forecastHistoryDays is how far the protected-floor line reconstructs backward, matched
+// to the forward projection horizon so the "minimum capacity" band spans a symmetric window.
+const forecastHistoryDays = 90
+
 // MediumForecast is one medium's projected fill over the window.
 type MediumForecast struct {
 	Medium string
@@ -78,9 +87,27 @@ type MediumForecast struct {
 	// rotation at write time, not by prune, so its capacity is measured in CARTRIDGES, not
 	// bytes. Such a medium carries Volumes (a cartridge-count curve) instead of Points.
 	VolumeStructured bool
-	Points           []ForecastPoint // byte fill curve — disk/cloud
+	Points           []ForecastPoint // byte fill curve (projection) — disk/cloud
+	History          []ForecastPoint // reconstructed protected-floor history (Bytes = floor); byte media only
+	Depth            RestoreDepth    // what the capacity buys in restore-point age; byte media only
 	Volumes          []VolumePoint   // cartridge-count curve — tape (history then projection)
 	VolumeCeiling    int64           // available cartridges (config slots); 0 = unbounded (hand-loaded)
+}
+
+// DepthMark is the capacity a medium needs to retain restore points back a given number
+// of weeks — the retention floor computed with minimum_age = Weeks. Increasing in Weeks.
+type DepthMark struct {
+	Weeks int
+	Bytes int64
+}
+
+// RestoreDepth answers "what is my capacity buying me in restore-point age": how many
+// weeks of restore history the medium's capacity retains, the marginal bytes per extra
+// week around that depth, and the per-week byte marks for the chart's right-axis ticks.
+type RestoreDepth struct {
+	CapacityWeeks float64     // restore depth the capacity retains (weeks; interpolated)
+	PerWeekBytes  int64       // marginal bytes to buy one more week around that depth
+	Marks         []DepthMark // byte cost per week horizon (for axis ticks)
 }
 
 // VolumePoint is one day of a tape pool's cartridge-usage curve: how many cartridges hold
@@ -141,6 +168,8 @@ func (a *Accountant) ForecastCapacity(start time.Time, plans []*planner.Plan) []
 			mf.VolumeCeiling = prof.Volumes()
 		} else {
 			mf.Points = a.forecastMedium(name, start, plans)
+			mf.History = a.protectedHistory(name, a.d.Cfg.MinAgeFor(a.d.Cfg.Media[name]), start)
+			mf.Depth = a.restoreDepth(name, start, plans, prof.TotalBytes())
 		}
 		out = append(out, mf)
 	}
@@ -186,16 +215,50 @@ func (a *Accountant) forecastMedium(name string, start time.Time, plans []*plann
 			working = dropArchive(working, r.RunID, r.DLE)
 		}
 
-		var bytes int64
+		var bytes, protected int64
 		for _, ar := range working {
 			bytes += ar.Compressed
+			if floor.KeepsArchive(ar.Run, ar.DLE) {
+				protected += ar.Compressed // the retention floor can't reclaim this — the irreducible minimum
+			}
 		}
 		points = append(points, ForecastPoint{
 			Date: record.DateString(date), Bytes: bytes, Monthly: cost.MonthlyStorage(bytes),
-			RunBytes: runBytes, Reclaimed: reclaimed, Capacity: capacity,
+			RunBytes: runBytes, Reclaimed: reclaimed, Capacity: capacity, Protected: protected,
 		})
 	}
 	return points
+}
+
+// protectedHistory reconstructs a byte medium's retention floor — the bytes pruning
+// could NOT reclaim — for each of the last forecastHistoryDays: the minimum-capacity line
+// beneath the recorded footprint. Same as-of-date reconstruction as tapeHistory: for each
+// past day it recomputes the Floor over the archives that existed then and sums what it
+// keeps. It flows into the projection's Protected to draw one continuous floor.
+func (a *Accountant) protectedHistory(name string, minAge time.Duration, now time.Time) []ForecastPoint {
+	onMedium := a.d.Cat.ArchivesOn(name)
+	if len(onMedium) == 0 {
+		return nil
+	}
+	pts := make([]ForecastPoint, 0, forecastHistoryDays)
+	for d := forecastHistoryDays - 1; d >= 0; d-- {
+		day := now.AddDate(0, 0, -d)
+		var asOf []record.Archive
+		for _, ar := range onMedium {
+			if !ar.CreatedAt.After(day) {
+				asOf = append(asOf, ar)
+			}
+		}
+		floor := retention.Compute(asOf, asOf, minAge, day)
+		var protected int64
+		for _, ar := range asOf {
+			if floor.KeepsArchive(ar.Run, ar.DLE) {
+				protected += ar.Compressed
+			}
+		}
+		pts = append(pts, ForecastPoint{Date: record.DateString(day), Bytes: protected})
+	}
+	return pts
 }
 
 // ForecastDLEFootprint projects one DLE's retained footprint on its landing medium
@@ -256,6 +319,80 @@ func (a *Accountant) landingForSlug(slug string, plans []*planner.Plan) string {
 		}
 	}
 	return ""
+}
+
+// depthWeeks are the restore-depth horizons the forecast prices (capped to the projected
+// window). Each answers "how much capacity to keep restore points back this many weeks."
+var depthWeeks = []int{1, 2, 4, 8, 12}
+
+// restoreDepth prices what a medium's capacity buys in restore-point age. It accumulates
+// the projection UNCAPPED (no reclaim — so it can measure depths deeper than today's
+// capacity retains), then for each horizon computes the retention floor with minimum_age
+// set to that many weeks: the capacity needed to guarantee a restore to any point that
+// far back. Where the actual capacity falls among those marks is the depth it retains, and
+// the slope there is the bytes an extra week costs. Reuses the same retention kernel, just
+// with a swapped window.
+func (a *Accountant) restoreDepth(name string, start time.Time, plans []*planner.Plan, capacity int64) RestoreDepth {
+	if capacity <= 0 || len(plans) == 0 {
+		return RestoreDepth{}
+	}
+	var sim []record.Archive
+	end := start
+	for i, plan := range plans {
+		date := start.AddDate(0, 0, i)
+		end = date
+		runID := record.IDFromTime(date)
+		for _, it := range plan.Items {
+			if !contains(a.mediaFor(it.DLE.DumpTypeName()), name) {
+				continue
+			}
+			sim = append(sim, record.Archive{Run: runID, DLE: it.Name, Level: it.Level, Compressed: it.EstBytes, CreatedAt: date})
+		}
+	}
+	if len(sim) == 0 {
+		return RestoreDepth{}
+	}
+	windowDays := end.Sub(start).Hours() / 24
+	var marks []DepthMark
+	for _, wk := range depthWeeks {
+		if float64(wk*7) > windowDays {
+			break // deeper than the projected window can measure
+		}
+		floor := retention.Compute(sim, sim, time.Duration(wk)*7*24*time.Hour, end)
+		var b int64
+		for _, ar := range sim {
+			if floor.KeepsArchive(ar.Run, ar.DLE) {
+				b += ar.Compressed
+			}
+		}
+		marks = append(marks, DepthMark{Weeks: wk, Bytes: b})
+	}
+	if len(marks) == 0 {
+		return RestoreDepth{}
+	}
+	rd := RestoreDepth{Marks: marks}
+	// Interpolate how many weeks the capacity buys, and the local bytes-per-week slope.
+	for i, m := range marks {
+		if m.Bytes > capacity {
+			break
+		}
+		rd.CapacityWeeks = float64(m.Weeks)
+		if i+1 < len(marks) {
+			next := marks[i+1]
+			if span := next.Bytes - m.Bytes; span > 0 {
+				frac := float64(capacity-m.Bytes) / float64(span)
+				rd.CapacityWeeks = float64(m.Weeks) + frac*float64(next.Weeks-m.Weeks)
+				rd.PerWeekBytes = span / int64(next.Weeks-m.Weeks)
+			}
+		}
+	}
+	if rd.PerWeekBytes == 0 && len(marks) >= 2 { // capacity below the first mark, or past the last
+		lo, hi := marks[0], marks[len(marks)-1]
+		if wk := hi.Weeks - lo.Weeks; wk > 0 {
+			rd.PerWeekBytes = (hi.Bytes - lo.Bytes) / int64(wk)
+		}
+	}
+	return rd
 }
 
 // mediaFor is the landing route for a dumptype (the media its authoritative copies are

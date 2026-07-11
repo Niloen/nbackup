@@ -1925,6 +1925,15 @@ func poolRoomCount(pv []engine.VolumeUsage, configured int64) (withRoom int, tot
 	return withRoom, total
 }
 
+// weeksLabel renders a restore-depth in weeks: whole weeks once past a couple, a decimal
+// below (where "1.5 weeks" carries more than a rounded "2").
+func weeksLabel(w float64) string {
+	if w >= 2 {
+		return fmt.Sprintf("%.0f weeks", w)
+	}
+	return fmt.Sprintf("%.1f weeks", w)
+}
+
 // projDays rounds a projected-full instant to whole days from now, floored at 0 (a
 // projection landing in the past, from a stale sample, reads as "any day now" rather
 // than a negative count).
@@ -2120,7 +2129,13 @@ func newMediumData(st engine.MediumStats, mf engine.MediumForecast, now time.Tim
 	if mf.VolumeStructured {
 		d.Chart = volumesChartSVG(mf.Volumes, mf.VolumeCeiling, now)
 	} else {
-		d.Chart = usageChartSVG(st.Usage, mf.Points, now, st.Capacity, capLabel)
+		// The protected floor (minimum capacity) is one line across the reconstructed
+		// history and the projection's per-day floor.
+		protected := append([]engine.ForecastPoint(nil), mf.History...)
+		for _, p := range mf.Points {
+			protected = append(protected, engine.ForecastPoint{Date: p.Date, Bytes: p.Protected})
+		}
+		d.Chart = usageChartSVG(st.Usage, mf.Points, protected, mf.Depth.Marks, now, st.Capacity, capLabel)
 	}
 	for i := len(st.ByRun) - 1; i >= 0; i-- { // newest first for the table
 		p := st.ByRun[i]
@@ -2144,18 +2159,23 @@ func newMediumData(st engine.MediumStats, mf engine.MediumForecast, now time.Tim
 // projection to draw, or a zero time span. Coordinates are safe (numbers + datestamps),
 // so template.HTML is sound. capLabel names the dashed ceiling line ("capacity", or
 // "pool capacity" for a labeled pool).
-func usageChartSVG(series []catalog.UsageSample, forecast []engine.ForecastPoint, now time.Time, capacity int64, capLabel string) template.HTML {
+func usageChartSVG(series []catalog.UsageSample, forecast, protected []engine.ForecastPoint, depth []engine.DepthMark, now time.Time, capacity int64, capLabel string) template.HTML {
 	// Parse the projection dates once (skip anything unparseable rather than fail).
 	type pt struct {
 		t time.Time
 		v int64
 	}
-	var fc []pt
-	for _, p := range forecast {
-		if t, err := time.Parse("2006-01-02", p.Date); err == nil {
-			fc = append(fc, pt{t, p.Bytes})
+	parse := func(ps []engine.ForecastPoint) []pt {
+		out := make([]pt, 0, len(ps))
+		for _, p := range ps {
+			if t, err := time.Parse("2006-01-02", p.Date); err == nil {
+				out = append(out, pt{t, p.Bytes})
+			}
 		}
+		return out
 	}
+	fc := parse(forecast)
+	prot := parse(protected) // the retention-floor (minimum-capacity) line across history + projection
 	hasHist := len(series) >= 2
 	hasProj := len(fc) >= 2
 	if !hasHist && !hasProj {
@@ -2237,6 +2257,45 @@ func usageChartSVG(series []catalog.UsageSample, forecast []engine.ForecastPoint
 					x(s.At), y(s.Used), s.At.Format("2006-01-02 15:04"), sizeutil.FormatBytes(s.Used))
 			}
 		}
+	}
+
+	// Restore-depth ticks on the right edge: the byte level each holds is the capacity to
+	// keep restore points back that many weeks, so the ceiling's position among them reads
+	// as "this capacity buys ~N weeks." Only those within the y-scale are drawn.
+	for _, m := range depth {
+		if m.Bytes <= 0 || m.Bytes > scale {
+			continue
+		}
+		my := y(m.Bytes)
+		fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--muted)" stroke-width="1" stroke-dasharray="1 2" opacity="0.6"/>`, vw-padR-34, my, vw-padR, my)
+		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="9" text-anchor="end" opacity="0.85"><title>capacity to keep %dw of restore points: %s</title>%dw</text>`, vw-padR-36, my+3, m.Weeks, sizeutil.FormatBytes(m.Bytes), m.Weeks)
+	}
+
+	// Protected floor: the retention minimum pruning can't reclaim, filled darker beneath
+	// the footprint across history AND projection — the least capacity the medium needs.
+	if len(prot) >= 2 {
+		var area, line strings.Builder
+		fmt.Fprintf(&area, "M%.1f %.1f ", x(prot[0].t), baseY)
+		for i, p := range prot {
+			fmt.Fprintf(&area, "L%.1f %.1f ", x(p.t), y(p.v))
+			cmd := "L"
+			if i == 0 {
+				cmd = "M"
+			}
+			fmt.Fprintf(&line, "%s%.1f %.1f ", cmd, x(p.t), y(p.v))
+		}
+		fmt.Fprintf(&area, "L%.1f %.1f Z", x(prot[len(prot)-1].t), baseY)
+		fmt.Fprintf(&b, `<path d="%s" fill="var(--accent)" fill-opacity="0.28"/>`, strings.TrimSpace(area.String()))
+		fmt.Fprintf(&b, `<path d="%s" fill="none" stroke="var(--accent)" stroke-width="1.5" opacity="0.7"/>`, strings.TrimSpace(line.String()))
+		var peakP int64
+		for _, p := range prot {
+			if p.v > peakP {
+				peakP = p.v
+			}
+		}
+		e := prot[len(prot)-1]
+		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--accent)" font-size="10" text-anchor="end" opacity="0.85"><title>minimum capacity needed — the retention floor cannot be pruned below this</title>min %s</text>`,
+			x(e.t), y(e.v)+11, sizeutil.FormatBytes(peakP))
 	}
 
 	// Projection: a dashed line (no fill, so it reads as "not yet real"), continuing from

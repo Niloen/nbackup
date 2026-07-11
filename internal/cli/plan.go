@@ -372,18 +372,25 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int, offline bool
 		if len(mf.Points) == 0 || mf.Points[0].Capacity <= 0 {
 			continue // unbounded byte medium
 		}
-		if over := firstOverCapacity(mf.Points); over != "" {
-			fmt.Printf("\nWARNING: medium %q is projected to EXCEED capacity on %s even after pruning — its retained set outgrows the medium. Add capacity, shorten retention (minimum_age), or move DLEs to another landing.\n",
-				mf.Medium, over)
-		} else {
-			peak := int64(0)
-			for _, c := range mf.Points {
-				if c.Bytes > peak {
-					peak = c.Bytes
-				}
+		peak, minNeed := int64(0), int64(0)
+		for _, c := range mf.Points {
+			if c.Bytes > peak {
+				peak = c.Bytes
 			}
-			within = append(within, fmt.Sprintf("%s (%s cap, peak %s)",
-				mf.Medium, sizeutil.FormatBytes(mf.Points[0].Capacity), sizeutil.FormatBytes(peak)))
+			if c.Protected > minNeed {
+				minNeed = c.Protected // the retention floor: minimum capacity this medium needs
+			}
+		}
+		if over := firstOverCapacity(mf.Points); over != "" {
+			fmt.Printf("\nWARNING: medium %q is projected to EXCEED capacity on %s even after pruning — its retained set outgrows the medium (minimum needed ~%s). Add capacity, shorten retention (minimum_age), or move DLEs to another landing.\n",
+				mf.Medium, over, sizeutil.FormatBytes(minNeed))
+		} else {
+			depth := ""
+			if rd := mf.Depth; rd.CapacityWeeks > 0 {
+				depth = fmt.Sprintf(", ~%.0fw restore depth", rd.CapacityWeeks)
+			}
+			within = append(within, fmt.Sprintf("%s (%s cap, peak %s, min ~%s%s)",
+				mf.Medium, sizeutil.FormatBytes(mf.Points[0].Capacity), sizeutil.FormatBytes(peak), sizeutil.FormatBytes(minNeed), depth))
 		}
 	}
 	if len(within) > 0 {

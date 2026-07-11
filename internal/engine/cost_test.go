@@ -311,6 +311,67 @@ func TestForecastCapacityRoutesPerMedium(t *testing.T) {
 	}
 }
 
+// TestForecastRestoreDepth checks the "what does capacity buy in restore-point age"
+// pricing: the forecast carries increasing per-week byte marks and reports how many weeks
+// of restore history the capacity retains.
+func TestForecastRestoreDepth(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), strings.Repeat("restore-depth-", 12000)) // ~168 KB full
+
+	cfg := &config.Config{
+		Landing: config.MediumList{"disk"},
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Capacity: "5MB", MinimumAge: "1d", Params: map[string]string{"path": t.TempDir()}},
+		},
+		Cycle:    "7d", // a full a week, so a week of restore depth is one full
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	if _, err := eng.Run(context.Background(), start, nil); err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+	slug := config.DLE{Host: "localhost", Path: src}.Name()
+	if err := report.Append(cfg.WorkdirPath(), report.Run{
+		Command: report.CommandDump, StartedAt: start, EndedAt: start,
+		DumpStats: []report.DLEStat{{DLE: slug, Level: 0, Orig: 168_000, Out: 168_000}},
+	}); err != nil {
+		t.Fatalf("seed run-log: %v", err)
+	}
+
+	forecasts, err := eng.ForecastCapacityOffline(start.AddDate(0, 0, 1), 84)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var disk *MediumForecast
+	for i := range forecasts {
+		if forecasts[i].Medium == "disk" {
+			disk = &forecasts[i]
+		}
+	}
+	if disk == nil {
+		t.Fatalf("disk forecast missing: %+v", forecasts)
+	}
+	d := disk.Depth
+	if len(d.Marks) == 0 || d.CapacityWeeks <= 0 {
+		t.Fatalf("capacity should buy measurable restore depth: %+v", d)
+	}
+	for i := 1; i < len(d.Marks); i++ { // deeper retention costs strictly more (monotone)
+		if d.Marks[i].Bytes < d.Marks[i-1].Bytes {
+			t.Errorf("restore-depth marks should increase with weeks: %+v", d.Marks)
+		}
+	}
+}
+
 // TestForecastTapeVolumes checks the tape cartridge-count forecast: a small-volume,
 // long-retention pool accumulates cartridges as daily fulls pile up faster than they age
 // out, tripping the "run out of tapes" signal past its slot count.

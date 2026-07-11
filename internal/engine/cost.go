@@ -25,6 +25,9 @@ type MediumForecast = accounting.MediumForecast
 // VolumePoint is one day of a tape pool's cartridge-usage curve.
 type VolumePoint = accounting.VolumePoint
 
+// DepthMark is the capacity needed to retain restore points back a given number of weeks.
+type DepthMark = accounting.DepthMark
+
 // ReadEstimate is the cost of reading a set of archives back off a medium.
 type ReadEstimate = accounting.ReadEstimate
 

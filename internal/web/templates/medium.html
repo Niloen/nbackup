@@ -47,7 +47,7 @@
 {{if $d.Chart}}
 {{$d.Chart}}
 {{if $d.Pool}}<div class="muted" style="margin-top:.5rem;font-size:.82rem">Solid = cartridges holding a retained run (reconstructed history); dashed = schedule-aware projection past “now”. A cartridge frees when all its runs age past retention; the marked day is when the rotation would outgrow its slots.</div>
-{{else}}<div class="muted" style="margin-top:.5rem;font-size:.82rem">Solid = recorded usage ({{$d.Samples}} sample{{if ne $d.Samples 1}}s{{end}}, captures reclamation); dashed = schedule-aware projection past “now”, after growth and pruning.</div>{{end}}
+{{else}}<div class="muted" style="margin-top:.5rem;font-size:.82rem">Solid = recorded usage ({{$d.Samples}} sample{{if ne $d.Samples 1}}s{{end}}, captures reclamation); dashed = schedule-aware projection past “now”, after growth and pruning. The shaded floor is the retention minimum — capacity can’t be pruned below it.</div>{{end}}
 {{else}}
 <div class="empty">{{if $d.Pool}}Not enough recorded history yet — the cartridge curve appears once the pool has held runs across at least two days.{{else}}Not enough recorded history yet — the usage curve is drawn from samples taken after each dump/prune, so it appears once a medium has changed at least twice.{{end}}</div>
 {{end}}
