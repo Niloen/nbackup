@@ -170,6 +170,66 @@ func (a *Accountant) forecastMedium(name string, start time.Time, plans []*plann
 	return points
 }
 
+// ForecastDLEFootprint projects one DLE's retained footprint on its landing medium
+// forward over the plans: the bytes its OWN surviving archives occupy each day, after
+// that medium's pruning (which weighs every DLE on it). It answers "how much storage
+// will this DLE need," distinct from its dataset size that the evolution charts show. It
+// shares forecastMedium's per-medium simulation but reports only the target DLE's slice;
+// nil when the DLE isn't scheduled (retired) or its route can't be resolved.
+func (a *Accountant) ForecastDLEFootprint(slug string, start time.Time, plans []*planner.Plan) []ForecastPoint {
+	medium := a.landingForSlug(slug, plans)
+	if medium == "" {
+		return nil
+	}
+	prof, err := a.ProfileFor(medium)
+	if err != nil {
+		return nil
+	}
+	minAge := a.d.Cfg.MinAgeFor(a.d.Cfg.Media[medium])
+	capacity := prof.TotalBytes()
+	working := append([]record.Archive(nil), a.d.Cat.ArchivesOn(medium)...)
+	points := make([]ForecastPoint, 0, len(plans))
+	for i, plan := range plans {
+		date := start.AddDate(0, 0, i)
+		runID := record.IDFromTime(date)
+		working = dropRun(working, runID)
+		for _, it := range plan.Items {
+			if !contains(a.mediaFor(it.DLE.DumpTypeName()), medium) {
+				continue
+			}
+			working = append(working, record.Archive{Run: runID, DLE: it.Name, Level: it.Level, Compressed: it.EstBytes, CreatedAt: date})
+		}
+		floor := retention.Compute(working, working, minAge, date)
+		for _, r := range prof.Reclaim(capacity, working, floor, date) {
+			working = dropArchive(working, r.RunID, r.DLE)
+		}
+		var bytes int64
+		for _, ar := range working {
+			if ar.DLE == slug {
+				bytes += ar.Compressed
+			}
+		}
+		points = append(points, ForecastPoint{Date: record.DateString(date), Bytes: bytes})
+	}
+	return points
+}
+
+// landingForSlug finds a DLE's authoritative (primary) landing medium from the plans,
+// which carry its resolved dumptype. "" when the slug isn't scheduled in the window.
+func (a *Accountant) landingForSlug(slug string, plans []*planner.Plan) string {
+	for _, plan := range plans {
+		for _, it := range plan.Items {
+			if it.Name == slug {
+				if ms := a.mediaFor(it.DLE.DumpTypeName()); len(ms) > 0 {
+					return ms[0]
+				}
+				return ""
+			}
+		}
+	}
+	return ""
+}
+
 // mediaFor is the landing route for a dumptype (the media its authoritative copies are
 // written to), empty when the route cannot be resolved.
 func (a *Accountant) mediaFor(dumptype string) []string {

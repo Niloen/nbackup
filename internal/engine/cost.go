@@ -57,6 +57,17 @@ func (e *Engine) ForecastCapacityOffline(start time.Time, days int) ([]MediumFor
 	return e.acct.ForecastCapacity(start, plans), nil
 }
 
+// ForecastDLEFootprintOffline projects one DLE's retained storage footprint over `days`
+// from `start` using the OFFLINE simulation (no host probe) — the per-DLE peer of the
+// per-medium capacity forecast, for the DLE detail page.
+func (e *Engine) ForecastDLEFootprintOffline(slug string, start time.Time, days int) ([]ForecastPoint, error) {
+	plans, err := e.sched.SimulateOffline(start, days)
+	if err != nil {
+		return nil, err
+	}
+	return e.acct.ForecastDLEFootprint(slug, start, plans), nil
+}
+
 // RestoreCost prices a whole-DLE restore (or every DLE) as of a date; see accounting.
 func (e *Engine) RestoreCost(dles []string, asOf string) ReadEstimate {
 	return e.acct.RestoreCost(dles, asOf)

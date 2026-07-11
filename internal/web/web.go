@@ -69,6 +69,9 @@ type Source interface {
 	// `start` — the schedule-aware "when does this medium fill up" the /media page draws.
 	// Also OFFLINE by contract (see engine.ForecastCapacityOffline).
 	CapacityForecast(start time.Time, days int) []engine.MediumForecast
+	// DLEForecast projects one DLE's retained storage footprint forward `days` from
+	// `start` (offline) — the per-DLE peer of CapacityForecast, for the DLE detail page.
+	DLEForecast(slug string, start time.Time, days int) []engine.ForecastPoint
 }
 
 // Server renders the status pages from a Source plus the catalog workdir, where the
@@ -403,12 +406,25 @@ func (s *Server) handleDLE(w http.ResponseWriter, r *http.Request) {
 	}
 	chain := s.chainRuns(slug)
 	places, history := s.dleHistory(slug, chain)
+	// Schedule-aware projected footprint: the retained storage this DLE will occupy on
+	// its landing at the forecast horizon, after growth and pruning (offline — no probe).
+	footprint, footRise := "", false
+	if fp := s.src.DLEForecast(slug, s.now(), mediaForecastDays); len(fp) > 0 {
+		end := fp[len(fp)-1].Bytes
+		if end > 0 {
+			footprint = sizeutil.FormatBytes(end)
+			footRise = end > fp[0].Bytes
+		}
+	}
 	s.render(w, "dle", page{Title: sum.Display, Active: "dles", Data: dleDetail{
 		Slug:      sum.DLE,
 		Display:   sum.Display,
 		Runs:      sum.Runs,
 		Bytes:     sum.Bytes,
 		Media:     strings.Join(sum.Media, ", "),
+		Footprint: footprint,
+		FootDays:  mediaForecastDays,
+		FootRise:  footRise,
 		Evolution: newDLEEvolution(report.DLETrend(s.history(0), slug)),
 		Recovery:  shown,
 		RecTotal:  len(points),

@@ -297,4 +297,15 @@ func TestForecastCapacityRoutesPerMedium(t *testing.T) {
 			t.Errorf("medium %q forecast has no footprint — its routed DLE was not billed to it", name)
 		}
 	}
+
+	// The per-DLE footprint of the bulk DLE (routed to cloud2) carries its own retained
+	// bytes forward — the per-DLE peer of the per-medium forecast.
+	bulkSlug := config.DLE{Host: "localhost", Path: srcB}.Name()
+	foot, ferr := eng.ForecastDLEFootprintOffline(bulkSlug, start.AddDate(0, 0, 1), 4)
+	if ferr != nil {
+		t.Fatal(ferr)
+	}
+	if len(foot) == 0 || foot[len(foot)-1].Bytes <= 0 {
+		t.Errorf("bulk DLE %q should have a projected footprint: %+v", bulkSlug, foot)
+	}
 }

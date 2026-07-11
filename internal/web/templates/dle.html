@@ -11,6 +11,9 @@
   {{with .Evolution}}{{if .Growth}}
   <div class="card"><div class="k">Growth</div><div class="v">{{.Growth}}</div><div class="sub">{{.GrowthSub}}</div></div>
   {{end}}{{end}}
+  {{if .Footprint}}
+  <div class="card"><div class="k">Projected footprint</div><div class="v">{{if .FootRise}}▲ {{end}}{{.Footprint}}</div><div class="sub">retained in {{.FootDays}}d, after pruning</div></div>
+  {{end}}
   <div class="card"><div class="k">Media</div><div class="v" style="font-size:1rem">{{if .Media}}{{.Media}}{{else}}—{{end}}</div></div>
 </div>
 

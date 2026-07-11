@@ -321,3 +321,12 @@ func (e *engineSource) CapacityForecast(start time.Time, days int) []engine.Medi
 	}
 	return caps
 }
+
+// DLEForecast projects one DLE's storage footprint OFFLINE (no archiver probe). nil on error.
+func (e *engineSource) DLEForecast(slug string, start time.Time, days int) []engine.ForecastPoint {
+	fp, err := e.engine().ForecastDLEFootprintOffline(slug, start, days)
+	if err != nil {
+		return nil
+	}
+	return fp
+}

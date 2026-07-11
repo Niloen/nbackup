@@ -48,8 +48,9 @@ type fakeSource struct {
 	routes           map[string][]string
 	syncRules        []config.SyncRule
 	syncLags         []engine.SyncLag
-	forecast         []*planner.Plan         // canned offline forecast for the ghost calendar; nil = no ghosts
-	capacityForecast []engine.MediumForecast // canned per-medium fill forecast for /media
+	forecast         []*planner.Plan                   // canned offline forecast for the ghost calendar; nil = no ghosts
+	capacityForecast []engine.MediumForecast           // canned per-medium fill forecast for /media
+	dleForecast      map[string][]engine.ForecastPoint // canned per-DLE footprint forecast for /dles/<slug>
 }
 
 func (f fakeSource) Runs() []*catalog.Run { return f.runs }
@@ -218,6 +219,10 @@ func (f fakeSource) Forecast(start time.Time, days int) []*planner.Plan { return
 
 func (f fakeSource) CapacityForecast(start time.Time, days int) []engine.MediumForecast {
 	return f.capacityForecast
+}
+
+func (f fakeSource) DLEForecast(slug string, start time.Time, days int) []engine.ForecastPoint {
+	return f.dleForecast[slug]
 }
 
 // DLESummaries aggregates the fake's runs per DLE, mirroring catalog.DLESummaries
@@ -1319,6 +1324,26 @@ func TestMediaCapacityScheduleAware(t *testing.T) {
 	_, detail := get(t, h, "/media/disk")
 	if !strings.Contains(detail, "EXCEED capacity") {
 		t.Errorf("/media/disk should carry the dated over-capacity warning:\n%s", detail)
+	}
+}
+
+// TestDLEProjectedFootprint checks the per-DLE footprint card on /dles/<slug>: a rising
+// projected footprint shows the horizon figure with a ▲, distinct from the current size.
+func TestDLEProjectedFootprint(t *testing.T) {
+	src := sampleSource()
+	now := time.Now()
+	src.dleForecast = map[string][]engine.ForecastPoint{
+		"local": {
+			{Date: now.Format("2006-01-02"), Bytes: 100},
+			{Date: now.AddDate(0, 0, 30).Format("2006-01-02"), Bytes: 500}, // grows
+		},
+	}
+	_, body := get(t, NewServer(src, t.TempDir()).Handler(), "/dles/local")
+	if !strings.Contains(body, "Projected footprint") {
+		t.Errorf("/dles/local should show the projected footprint card:\n%s", body)
+	}
+	if !strings.Contains(body, "▲") {
+		t.Errorf("/dles/local should mark a rising footprint with ▲:\n%s", body)
 	}
 }
 

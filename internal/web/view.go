@@ -1269,6 +1269,9 @@ type dleDetail struct {
 	Runs      int
 	Bytes     int64
 	Media     string
+	Footprint string          // schedule-aware projected retained storage at the horizon, e.g. "~1.2 GB"; "" when not forecast
+	FootDays  int             // the forecast horizon in days (for the label)
+	FootRise  bool            // the footprint is projected to grow from now (▲ styling)
 	Evolution dleEvolution    // the size-evolution block; zero values omit their piece
 	Recovery  []recoveryPoint // restorable points, newest first (capped unless ?all=1)
 	RecTotal  int             // recovery points in total (for the show-all toggle)
