@@ -83,17 +83,24 @@ bump_percent: 5      # climb a level only when it saves >= 5% of the full size
 ### 3. Promote to balance
 
 Promotion is the **only** balancing lever, and it is automatic — there is no knob.
-The planner builds a **deadline calendar** of every DLE's upcoming full, finds the
-heaviest future day, and pulls one of that day's fulls forward onto a lighter run.
-It promotes a DLE onto today only while all three guards hold:
+The planner builds a **deadline calendar** of every DLE's upcoming full and then, each
+run, repeatedly pulls whichever future full onto today most **flattens** the daily
+load — lowering the heaviest day first, then evening out the rest — so a clump of
+DLEs sharing a deadline is spread across distinct days instead of piled onto one
+night. Every move must clear two guards:
 
-1. today is **lighter** than that future peak;
-2. the move **strictly lowers** the peak — so a *lone* big DLE is never re-fulled
-   early, since moving it would just relocate the same peak; and
-3. it **fits** the per-run room left (see [Two capacity limits](#two-capacity-limits)).
+1. **No overshoot** — a full is pulled forward only when today ends up no heavier than
+   the day it relieves. This forbids merely *relocating* a peak: a *lone* big DLE is
+   never re-fulled early (moving it would just move the same peak onto today), and it
+   means a shared-deadline clump is a **phase-shift** onto other days, not extra
+   fulls — each DLE still fulls once per cycle.
+2. It **fits** the per-run room left (see [Two capacity limits](#two-capacity-limits)).
 
-With no free capacity, promotion does nothing; with room to spare, it keeps backups
-fresh by spreading fulls out.
+With no free capacity, promotion does nothing. Where DLEs are comparable in size,
+flattening a clump can cut the peak night dramatically (e.g. twelve equal DLEs
+sharing a deadline: a 6-high pile becomes ~2 per night). Where one DLE dominates, its
+night is the irreducible peak — promotion can't lower it, but still spreads the
+smaller fulls off it so fewer land on the same night.
 
 This is what **de-clumps the cold start**: day one fulls everything (recoverability
 first), and promotion staggers that lock-step apart over the next cycle or two, so
