@@ -320,7 +320,12 @@ func runBytes(cands []*cand) int64 {
 //
 // A DLE fulled today (days == 0) is excluded as a candidate: pulling its full
 // "forward" onto the day it already lives on is pure waste and would recur on every
-// same-day run. Staggering only buys anything across distinct days.
+// same-day run. Staggering only buys anything across distinct days. It still counts
+// toward today's load, though — a full an earlier same-day run already sealed is real
+// weight on today's calendar, so the no-overshoot guard measures against it. That is
+// what makes promotion idempotent across intraday reruns: once a run has staggered
+// part of a shared-deadline clump onto today, a later run the same day sees that load
+// and does not re-promote the rest onto the same day.
 func promote(cands []*cand, cycle int, room int64) {
 	if cycle < 1 {
 		cycle = 7
@@ -333,6 +338,15 @@ func promote(cands []*cand, cycle int, room int64) {
 	for _, c := range cands {
 		switch {
 		case c.full:
+			load[0] += c.estFull
+		case c.days == 0:
+			// Already fulled today by an earlier same-day run: the DLE now dumps only
+			// a small incremental, but its full is real load already sitting on today's
+			// calendar. Count it toward load[0] (though it is not itself a promotion
+			// candidate) so the no-overshoot guard sees today's true full load. Without
+			// this, a second run the same day would see today as empty of the fulls the
+			// first run staggered onto it and re-promote the rest of the clump, piling a
+			// whole shared-deadline clump onto one day across intraday reruns.
 			load[0] += c.estFull
 		case c.days > 0:
 			off := cycle - c.days

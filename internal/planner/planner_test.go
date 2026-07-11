@@ -239,6 +239,57 @@ func TestPromotionSkipsJustFulledDLE(t *testing.T) {
 	}
 }
 
+// TestPromotionIdempotentAcrossIntradayReruns guards against front-loading a
+// shared-deadline clump when dumps run several times the same day. A clump of five
+// equal DLEs shares a future deadline; the first run of the day promotes a couple
+// forward to stagger it. When those seal, they become fulled-today (days == 0) and
+// dump only incrementals on the next same-day run. That later run must NOT re-promote
+// the rest of the clump onto today just because today no longer shows any *due*
+// fulls: the already-sealed fulls are real load, so the no-overshoot guard must still
+// see them. Otherwise N runs a day pile the whole clump onto one day (extra fulls,
+// the opposite of leveling).
+func TestPromotionIdempotentAcrossIntradayReruns(t *testing.T) {
+	today := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
+	day0 := today.Format("2006-01-02")
+	names := []string{"a", "b", "c", "d", "e"}
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
+	var dles []DLE
+	est := map[string]Estimate{}
+	for _, h := range names {
+		d := dleNamed(h)
+		// Last full 3 days ago (7-day cycle) -> all five share the same future deadline.
+		hist.DLEs[d.Name()] = &catalog.DLEState{
+			LastFullDate: today.AddDate(0, 0, -3).Format("2006-01-02"),
+			Runs:         []catalog.RunRecord{{Date: "old", Run: "run-x", Level: 0}},
+		}
+		dles = append(dles, d)
+		est[d.Name()] = Estimate{Full: 100, Incr: 10}
+	}
+	params := Params{CycleDays: 7, RoomBytes: -1}
+
+	run1 := Build(dles, hist, est, nil, params, today)
+	promoted := fullsIn(run1)
+	if promoted == 0 {
+		t.Fatalf("setup: first run promoted nothing; expected the clump to stagger")
+	}
+
+	// Seal the first run's fulls as if they had been written this morning: each becomes
+	// fulled-today (days == 0), so the next same-day run plans it as an incremental.
+	for _, it := range run1.Items {
+		if it.Level != 0 {
+			continue
+		}
+		st := hist.DLEs[it.Name]
+		st.LastFullDate = day0
+		st.Runs = append(st.Runs, catalog.RunRecord{Date: day0, Run: "run-am", Level: 0})
+	}
+
+	run2 := Build(dles, hist, est, nil, params, today)
+	if n := fullsIn(run2); n != 0 {
+		t.Errorf("second same-day run promoted %d more fulls; a clump the morning run already staggered was re-piled onto today", n)
+	}
+}
+
 // TestPromotionDoesNotOverFullBigDLE checks the skew guard over a window: with one
 // big DLE and many small ones, the big DLE is fulled about once per cycle, not
 // repeatedly pulled forward to flatten daily volume.
