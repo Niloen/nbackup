@@ -75,10 +75,35 @@ func (a *Accountant) ForecastCost(start time.Time, plans []*planner.Plan) []Fore
 type MediumForecast struct {
 	Medium string
 	// VolumeStructured marks a discrete-volume medium (tape): it reclaims by whole-volume
-	// rotation at write time, not by prune, so a byte fill curve is not meaningful and
-	// Points is left nil. The surface shows "N volumes" thinking instead (as pools do).
+	// rotation at write time, not by prune, so its capacity is measured in CARTRIDGES, not
+	// bytes. Such a medium carries Volumes (a cartridge-count curve) instead of Points.
 	VolumeStructured bool
-	Points           []ForecastPoint
+	Points           []ForecastPoint // byte fill curve — disk/cloud
+	Volumes          []VolumePoint   // cartridge-count curve — tape (history then projection)
+	VolumeCeiling    int64           // available cartridges (config slots); 0 = unbounded (hand-loaded)
+}
+
+// VolumePoint is one day of a tape pool's cartridge-usage curve: how many cartridges hold
+// a retention-protected run that day (are "in use"), reconstructed from the catalog for
+// past days and simulated forward for future ones.
+type VolumePoint struct {
+	Date  string
+	InUse int64
+}
+
+// VolumeOver returns the first projected day the tape pool needs more cartridges than it
+// has (InUse > ceiling), or "" if it stays within its slots — the "run out of tapes"
+// signal. A zero ceiling (hand-loaded drive) never trips: its shelf is unbounded.
+func (m MediumForecast) VolumeOver() (date string, need int64) {
+	if m.VolumeCeiling <= 0 {
+		return "", 0
+	}
+	for _, p := range m.Volumes {
+		if p.InUse > m.VolumeCeiling {
+			return p.Date, p.InUse
+		}
+	}
+	return "", 0
 }
 
 // ForecastCapacity is the per-medium generalization of ForecastCost: it projects EVERY
@@ -111,7 +136,10 @@ func (a *Accountant) ForecastCapacity(start time.Time, plans []*planner.Plan) []
 			continue
 		}
 		mf := MediumForecast{Medium: name, VolumeStructured: prof.VolumeSize() > 0}
-		if !mf.VolumeStructured {
+		if mf.VolumeStructured {
+			mf.Volumes = a.forecastVolumes(name, prof, start, plans)
+			mf.VolumeCeiling = prof.Volumes()
+		} else {
 			mf.Points = a.forecastMedium(name, start, plans)
 		}
 		out = append(out, mf)
