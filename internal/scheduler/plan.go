@@ -107,8 +107,10 @@ func (s *Scheduler) simulateFrom(dsrc DLESource, esrc EstimateSource, start time
 		return nil, err
 	}
 	// A forecast is advisory: failed sources/estimates simply don't appear in it
-	// (the real plan reports them as FAILED units).
-	est, estFailed := esrc.Estimates(dles, nil)
+	// (the real plan reports them as FAILED units). The dead set is judged once at the
+	// window start — the live probe is date-independent, and the history projection
+	// never fails a unit — so per-day re-estimation below only resizes, never re-drops.
+	_, estFailed := esrc.At(start).Estimates(dles, nil)
 	dead := map[string]bool{}
 	for _, f := range estFailed {
 		dead[f.DLE.Name()] = true
@@ -119,5 +121,12 @@ func (s *Scheduler) simulateFrom(dsrc DLESource, esrc EstimateSource, start time
 			plannable = append(plannable, d)
 		}
 	}
-	return planner.Simulate(plannable, s.d.History(), est, s.d.ForcedFulls(), s.plannerParams(start), start, days), nil
+	// Size each simulated day at that day's horizon: the offline projection grows fulls
+	// across the window (dataset drift), the live probe returns its one measurement every
+	// day. This is what makes the capacity/cost forecast reflect growth, not just today.
+	estAt := func(d time.Time) map[string]planner.Estimate {
+		est, _ := esrc.At(d).Estimates(plannable, nil)
+		return est
+	}
+	return planner.SimulateFunc(plannable, s.d.History(), estAt, s.d.ForcedFulls(), s.plannerParams(start), start, days), nil
 }

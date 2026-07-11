@@ -31,6 +31,10 @@ func (s *Scheduler) history(at time.Time) EstimateSource {
 	return historySource{hist: s.d.History(), runLog: s.d.RunLog(), at: at}
 }
 
+// At repins the projection to day t (same catalog/run-log, new horizon), so a forecast
+// grows each simulated day's sizes by t's distance from the last recorded full.
+func (h historySource) At(t time.Time) EstimateSource { h.at = t; return h }
+
 // Estimates projects every DLE's sizes from history. Unlike the probe it never fails
 // a unit: absent history is not a dead source, only an unknown size (Full 0), which a
 // never-fulled DLE has anyway — the planner fulls it regardless (see planner.Build's

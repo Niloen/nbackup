@@ -188,10 +188,11 @@ func TestForecastCostReclaims(t *testing.T) {
 		t.Fatalf("dump: %v", err)
 	}
 
-	curve, err := eng.ForecastCost(start.AddDate(0, 0, 1), 6)
+	plans, err := eng.Simulate(start.AddDate(0, 0, 1), 6)
 	if err != nil {
 		t.Fatal(err)
 	}
+	curve := eng.ForecastCost(start.AddDate(0, 0, 1), plans)
 	if len(curve) != 6 {
 		t.Fatalf("curve has %d points, want 6", len(curve))
 	}
@@ -204,6 +205,12 @@ func TestForecastCostReclaims(t *testing.T) {
 	if !reclaimedSomewhere {
 		t.Fatalf("a capacity-bounded daily-full forecast should reclaim superseded fulls; curve=%+v", curve)
 	}
+	// A bounded landing carries its capacity on every point (the capacity-headroom signal).
+	for _, p := range curve {
+		if p.Capacity <= 0 {
+			t.Fatalf("bounded forecast point missing Capacity: %+v", p)
+		}
+	}
 }
 
 // TestForecastCostGrows projects the cost curve forward; with unbounded capacity the
@@ -212,10 +219,11 @@ func TestForecastCostGrows(t *testing.T) {
 	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	eng, _ := cloudCostEngine(t, start, nil)
 
-	curve, err := eng.ForecastCost(start.AddDate(0, 0, 1), 5)
+	plans, err := eng.Simulate(start.AddDate(0, 0, 1), 5)
 	if err != nil {
 		t.Fatal(err)
 	}
+	curve := eng.ForecastCost(start.AddDate(0, 0, 1), plans)
 	if len(curve) != 5 {
 		t.Fatalf("curve has %d points, want 5", len(curve))
 	}

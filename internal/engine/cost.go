@@ -28,14 +28,12 @@ func (e *Engine) CostSummary(plan *planner.Plan) CostSummary {
 	return e.acct.CostSummary(plan)
 }
 
-// ForecastCost projects the landing medium's monthly storage cost forward day by
-// day, feeding the accountant the planner's run simulation; see accounting.
-func (e *Engine) ForecastCost(start time.Time, days int) ([]ForecastPoint, error) {
-	plans, err := e.sched.Simulate(start, days)
-	if err != nil {
-		return nil, err
-	}
-	return e.acct.ForecastCost(start, plans), nil
+// ForecastCost projects the landing medium's storage cost and capacity headroom
+// forward day by day over the caller's simulated plans (see accounting). The caller
+// passes the SAME plans it rendered the schedule from — live or offline (`--days`
+// vs `--days --offline`) — so the cost/capacity curve and the schedule always agree.
+func (e *Engine) ForecastCost(start time.Time, plans []*planner.Plan) []ForecastPoint {
+	return e.acct.ForecastCost(start, plans)
 }
 
 // RestoreCost prices a whole-DLE restore (or every DLE) as of a date; see accounting.

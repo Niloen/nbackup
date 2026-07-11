@@ -20,6 +20,11 @@ import (
 // offline plan and a live plan pick identical LEVELS — they can disagree only on size.
 type EstimateSource interface {
 	Estimates(dles []planner.DLE, sink progress.Sink) (map[string]planner.Estimate, []planner.FailedUnit)
+	// At returns the source as it would size things on day t. The live probe measures
+	// the current filesystem and ignores t (returns itself); the history projection
+	// repins to t so a forecast can grow each simulated day's sizes. This is what lets
+	// SimulateFunc size a full landing three weeks out by three weeks of growth.
+	At(t time.Time) EstimateSource
 }
 
 // probeSource is the live archiver probe — the historical default. It owns the whole
@@ -36,6 +41,10 @@ type probeSource struct {
 func (s *Scheduler) probe() EstimateSource {
 	return probeSource{workers: s.d.Workers, history: s.d.History, archiverFor: s.d.ArchiverFor}
 }
+
+// At ignores the date: a live probe measures the current filesystem, which is the same
+// whatever day the forecast asks about.
+func (p probeSource) At(time.Time) EstimateSource { return p }
 
 // Estimates predicts, for each DLE, the size of a full and of the incremental at
 // its current level and the next (the inputs the planner's bump decision needs),

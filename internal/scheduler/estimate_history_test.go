@@ -51,6 +51,29 @@ func TestProjectFullGrowsBySlope(t *testing.T) {
 	}
 }
 
+func TestAtRepinGrowsFullOverHorizon(t *testing.T) {
+	// The forecast repins the projection per simulated day (historySource.At): with a
+	// positive growth slope, a full sized further out is bigger than one sized nearer —
+	// this is what makes the capacity/cost forecast reflect dataset drift.
+	const gb = int64(1) << 30
+	pts := []report.TrendPoint{
+		pt("2026-06-21", 0, 100*gb),
+		pt("2026-07-01", 0, 200*gb), // +100 GB over 10 days = 10 GB/day
+	}
+	st := &catalog.DLEState{
+		LastFullDate: "2026-07-01",
+		Runs:         []catalog.RunRecord{{Date: "2026-07-01", Level: 0}},
+	}
+	near := historySource{at: day("2026-07-11")}.project(st, pts)
+	far := historySource{at: day("2026-07-31")}.project(st, pts)
+	if !(far.Full > near.Full) {
+		t.Fatalf("a later horizon should project a bigger full: near=%d far=%d", near.Full, far.Full)
+	}
+	if want := 300 * gb; near.Full != want { // 200 + 10 days * 10 GB/day
+		t.Errorf("near full = %d, want %d", near.Full, want)
+	}
+}
+
 func TestProjectFullFlatWithoutSlope(t *testing.T) {
 	// A single full gives no slope (SummarizeTrend not ok): Full is the last full flat,
 	// not zero and not a guessed rate.

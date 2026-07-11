@@ -50,7 +50,16 @@ type ForecastPoint struct {
 	Monthly   float64 // recurring $/month for that footprint
 	RunBytes  int64   // bytes the day's run added
 	Reclaimed int64   // bytes reclaimed that day
+	// Capacity is the landing medium's total bytes (0 = unbounded). Bytes already
+	// reflects the day's reclaim, which can only free down to the retention floor — so
+	// Bytes > Capacity means the protected set outgrew the medium and pruning cannot
+	// make room: the capacity-pressure signal, without a second reclaim pass.
+	Capacity int64
 }
+
+// OverCapacity reports whether the landing's protected footprint has outgrown its
+// capacity on this day — true only for a bounded medium the forecast cannot fit.
+func (p ForecastPoint) OverCapacity() bool { return p.Capacity > 0 && p.Bytes > p.Capacity }
 
 // ForecastCost projects the landing medium's monthly storage cost forward day by day
 // over the given simulated plans (one per day from start; see scheduler.Simulate). It
@@ -60,6 +69,7 @@ type ForecastPoint struct {
 // fulls/incrementals landing and pruning reclaiming. Pure and offline.
 func (a *Accountant) ForecastCost(start time.Time, plans []*planner.Plan) []ForecastPoint {
 	working := append([]record.Archive(nil), a.d.Cat.ArchivesOn(a.d.Landing)...)
+	capacity := a.d.LandingProfile.TotalBytes()
 	points := make([]ForecastPoint, 0, len(plans))
 	for i, plan := range plans {
 		date := start.AddDate(0, 0, i)
@@ -78,7 +88,7 @@ func (a *Accountant) ForecastCost(start time.Time, plans []*planner.Plan) []Fore
 		// Reclaim against this medium's capacity, honoring the retention floor.
 		floor := retention.Compute(working, working, a.d.LandingMinAge, date)
 		var reclaimed int64
-		for _, r := range a.d.LandingProfile.Reclaim(a.d.LandingProfile.TotalBytes(), working, floor, date) {
+		for _, r := range a.d.LandingProfile.Reclaim(capacity, working, floor, date) {
 			reclaimed += r.Bytes
 			working = dropArchive(working, r.RunID, r.DLE)
 		}
@@ -89,7 +99,7 @@ func (a *Accountant) ForecastCost(start time.Time, plans []*planner.Plan) []Fore
 		}
 		points = append(points, ForecastPoint{
 			Date: ds, Bytes: bytes, Monthly: a.d.LandingCost.MonthlyStorage(bytes),
-			RunBytes: runBytes, Reclaimed: reclaimed,
+			RunBytes: runBytes, Reclaimed: reclaimed, Capacity: capacity,
 		})
 	}
 	return points
