@@ -313,10 +313,17 @@ func (d *driller) drillMedium(t drill.Target, routes map[string][]string, pin st
 // chainOn reports whether medium m holds a copy of every step in the restore chain —
 // the condition for reading the whole chain off a single medium (the drill's one-pass
 // model). A chain split across media fails here for each medium and drillMedium falls
-// back to the owed-to primary.
+// back to the owed-to primary. The test is per ARCHIVE, not per run: a run dumps many
+// DLEs and each is copied/pruned independently, so a medium can hold the run (another
+// DLE's archive) while this DLE's archive there has been pruned. Asking only whether
+// the run is on the medium would pick a medium that cannot actually read this chain.
 func (d *driller) chainOn(steps []recovery.Step, m string) bool {
 	for _, s := range steps {
-		if _, ok := placementOn(d.cat, s.RunID, m); !ok {
+		p, ok := placementOn(d.cat, s.RunID, m)
+		if !ok {
+			return false
+		}
+		if _, ok := p.Placed(s.DLE, s.Level); !ok {
 			return false
 		}
 	}

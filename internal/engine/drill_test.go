@@ -708,6 +708,79 @@ func TestDrillRoutedMediumFallback(t *testing.T) {
 	}
 }
 
+// TestDrillPrunedArchiveOnPrimary: runs are multi-DLE and each archive is copied and
+// pruned independently, so a medium can still hold a run (another DLE's archive) while
+// THIS DLE's archive there has been pruned. An unpinned drill must recognise the primary
+// cannot read this DLE's chain and follow the route to the copy that can — not pick the
+// primary just because the run (some other DLE) is on it and then false-fail "no copy on
+// medium <primary>". Regression: chainOn used a run-level placement check.
+func TestDrillPrunedArchiveOnPrimary(t *testing.T) {
+	srcA, srcB := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(srcA, "a.txt"), "dle A content")
+	write(t, filepath.Join(srcB, "b.txt"), "dle B content")
+	diskDir, offsiteDir := t.TempDir(), t.TempDir()
+
+	// Both DLEs land on both media: `landing: [disk, offsite]`.
+	cfg := &config.Config{
+		Landing: config.MediumList{"disk", "offsite"},
+		Media: map[string]config.Media{
+			"disk":    {Type: "disk", Params: map[string]string{"path": diskDir}},
+			"offsite": {Type: "disk", Params: map[string]string{"path": offsiteDir}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: srcA}, {Host: "localhost", Path: srcB}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skip("GNU tar not available")
+	}
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("full dump: %v", err)
+	}
+	now := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
+
+	// Prune ONLY DLE A's archive from the primary (disk). The run's disk placement
+	// survives because DLE B's archive is still there — the exact state that made a
+	// run-level chain check pick disk for DLE A and then fail the read.
+	run, err := eng.cat.ReadRun("run-2026-06-21.000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var slugA string
+	for _, a := range run.Archives {
+		if a.DLEID() == "localhost:"+srcA {
+			slugA = a.DLE
+		}
+	}
+	if slugA == "" {
+		t.Fatalf("DLE A not found among run archives: %+v", run.Archives)
+	}
+	if _, _, err := eng.cat.RemoveArchive("run-2026-06-21.000000", "disk", slugA); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := eng.placementOn("run-2026-06-21.000000", "disk"); !ok {
+		t.Fatal("disk placement should survive the prune (DLE B still holds it)")
+	}
+
+	// Drill DLE A by name: it must follow the route to offsite (the copy that holds this
+	// DLE's archive) and pass, not fail against disk.
+	rep, err := eng.Drill(DrillOptions{DLEs: []string{"localhost:" + srcA}, Tier: drill.TierStructural, Apply: true, Now: now}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Failures != 0 || len(rep.Targets) != 1 || !rep.Targets[0].OK {
+		t.Fatalf("drill of DLE A = %+v (failures %d)", rep.Targets, rep.Failures)
+	}
+	if rep.Targets[0].Medium != "offsite" {
+		t.Fatalf("drilled medium = %q, want offsite (disk's copy of this DLE's archive was pruned)", rep.Targets[0].Medium)
+	}
+}
+
 // named drill overwrites the recorded failure, clearing the warning. An unknown
 // name is an error, never a silent drill of nothing.
 func TestDrillNamedRetry(t *testing.T) {
