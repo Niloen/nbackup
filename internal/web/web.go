@@ -773,7 +773,7 @@ func heatLevels(set map[int]bool) string {
 // mediaForecastDays is how far the /media page projects each medium's fill forward for
 // its schedule-aware "projected full" date — a season, enough to catch a medium that
 // fills within a few dump cycles without an unboundedly long simulation.
-const mediaForecastDays = 90
+const mediaForecastDays = 60
 
 func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	forecasts := s.src.CapacityForecast(s.now(), mediaForecastDays)

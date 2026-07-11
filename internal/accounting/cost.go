@@ -79,7 +79,7 @@ func (a *Accountant) ForecastCost(start time.Time, plans []*planner.Plan) []Fore
 
 // forecastHistoryDays is how far the protected-floor line reconstructs backward, matched
 // to the forward projection horizon so the "minimum capacity" band spans a symmetric window.
-const forecastHistoryDays = 90
+const forecastHistoryDays = 60
 
 // MediumForecast is one medium's projected fill over the window.
 type MediumForecast struct {
@@ -247,8 +247,11 @@ func (a *Accountant) protectedHistory(name string, minAge time.Duration, now tim
 	if len(onMedium) == 0 {
 		return nil
 	}
-	pts := make([]ForecastPoint, 0, forecastHistoryDays)
-	for d := forecastHistoryDays - 1; d >= 0; d-- {
+	// The floor history is just a line on the chart, so sample it every historyStep days
+	// rather than daily — an O(n²) retention.Compute per point is the dominant forecast
+	// cost, and a floor that moves at the dump cadence loses nothing at this resolution.
+	pts := make([]ForecastPoint, 0, forecastHistoryDays/historyStep+1)
+	for d := forecastHistoryDays - 1; d >= 0; d -= historyStep {
 		day := now.AddDate(0, 0, -d)
 		var asOf []record.Archive
 		for _, ar := range onMedium {
@@ -267,6 +270,10 @@ func (a *Accountant) protectedHistory(name string, minAge time.Duration, now tim
 	}
 	return pts
 }
+
+// historyStep is the day interval the floor-history reconstruction samples at, trading
+// line resolution for far fewer of the O(n²) retention passes.
+const historyStep = 3
 
 // ForecastDLEFootprint projects one DLE's retained footprint on its landing medium
 // forward over the plans: the bytes its OWN surviving archives occupy each day, after

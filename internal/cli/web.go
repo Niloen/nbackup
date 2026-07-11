@@ -195,6 +195,16 @@ type engineSource struct {
 	eng      *engine.Engine
 	stamp    catalogStamp // identity of catalog.json when eng was built
 	cfgStamp catalogStamp // identity of the config file when cfg was loaded
+
+	// Cached capacity forecast. It is the same offline O(n²) computation for every
+	// /media request and every /media/<name> detail page, so memoize it: keyed by the
+	// engine it was built from (a fresh engine on any catalog/config change invalidates
+	// it), the forecast's start day, and the horizon. Repeated loads and the per-medium
+	// pages then reuse one computation instead of recomputing on each request.
+	fcEng  *engine.Engine
+	fcDay  string
+	fcDays int
+	fcCaps []engine.MediumForecast
 }
 
 // catalogStamp identifies a catalog cache file's on-disk version (zero when the
@@ -313,12 +323,27 @@ func (e *engineSource) Forecast(start time.Time, days int) []*planner.Plan {
 }
 
 // CapacityForecast projects per-medium fill OFFLINE (no archiver probe), so /media can
-// draw "when does this fill up" without opening an SSH connection. nil on error.
+// draw "when does this fill up" without opening an SSH connection. The result is memoized
+// per engine build + start day + horizon (see fcEng), so the /media list and every
+// /media/<name> detail page reuse one computation instead of recomputing it each request.
+// nil on error.
 func (e *engineSource) CapacityForecast(start time.Time, days int) []engine.MediumForecast {
-	caps, err := e.engine().ForecastCapacityOffline(start, days)
+	eng := e.engine() // may rebuild on a catalog/config change, invalidating the cache below
+	day := start.Format("2006-01-02")
+	e.mu.Lock()
+	if e.fcEng == eng && e.fcDay == day && e.fcDays == days {
+		caps := e.fcCaps
+		e.mu.Unlock()
+		return caps
+	}
+	e.mu.Unlock()
+	caps, err := eng.ForecastCapacityOffline(start, days) // computed off-lock: it is slow
 	if err != nil {
 		return nil
 	}
+	e.mu.Lock()
+	e.fcEng, e.fcDay, e.fcDays, e.fcCaps = eng, day, days, caps
+	e.mu.Unlock()
 	return caps
 }
 
