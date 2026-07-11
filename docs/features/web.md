@@ -26,6 +26,17 @@ and live progress as a mobile-friendly website. It is the browser view of the
 inspection commands you already know — an at-a-glance dashboard for when you don't
 have a shell.
 
+[![NBackup web dashboard overview](../images/webui/overview.png)](../images/webui/overview.png)
+
+The page tour below is illustrated with the DLE heatmap, run detail, media
+capacity, and drills views:
+
+| ![DLE heatmap](../images/webui/dles.png) | ![Run detail](../images/webui/run.png) |
+|:--|:--|
+| **DLEs** — recovery-point heatmap + trends | **Run detail** — dump report + placement matrix |
+| ![Media](../images/webui/media.png) | ![Drills](../images/webui/drills.png) |
+| **Media** — utilization + projected-full | **Drills** — 3-2-1-1-0 posture audit |
+
 ```bash
 nb web                       # serve on :8080 (reachable on the LAN)
 nb web --addr 127.0.0.1:8080 # loopback only, e.g. behind a reverse proxy / VPN

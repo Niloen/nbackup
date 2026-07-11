@@ -34,6 +34,14 @@ features, scenarios, reference). (The rest of this page assumes the Amanda
 lineage above and calls it out again only where a specific mechanism is worth
 tracing back.)
 
+<p align="center">
+  <a href="docs/images/webui/overview.png">
+    <img src="docs/images/webui/overview.png" alt="NBackup web dashboard — health overview, recoverability, media capacity" width="860">
+  </a>
+  <br>
+  <em><code>nb web</code> — a read-only dashboard for the whole fleet: recoverability, capacity, and every run's placement. <a href="#status-website">More below.</a></em>
+</p>
+
 ## Core ideas
 
 - **Run** — one planner execution (typically daily) and the primary artifact it
@@ -218,6 +226,35 @@ access, `nb web` serves the same information as `nb run`/`nb medium`/`nb report`
 `nb status` as a small, mobile-friendly website. It is **read-only** — it never
 starts, prunes, or alters anything and takes no lock, so it is safe to run
 alongside a scheduled dump.
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/images/webui/dles.png"><img src="docs/images/webui/dles.png" alt="Per-DLE activity heatmap across the fleet"></a>
+      <sub><b>DLEs</b> — a full/incremental recovery-point heatmap per host, with size trends and projected runs.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/images/webui/run.png"><img src="docs/images/webui/run.png" alt="One run's dump report, archives and placement matrix"></a>
+      <sub><b>Run detail</b> — one immutable run: dump report, every archive, and a placement matrix proving where each copy lives.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/images/webui/media.png"><img src="docs/images/webui/media.png" alt="Media overview with capacity utilization and projected-full"></a>
+      <sub><b>Media</b> — utilization and a projected-full forecast per medium, so capacity is a promise you can see.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/images/webui/drills.png"><img src="docs/images/webui/drills.png" alt="3-2-1-1-0 recoverability posture audit"></a>
+      <sub><b>Drills</b> — the 3-2-1-1-0 recoverability posture audit and per-DLE drill ledger.</sub>
+    </td>
+  </tr>
+</table>
+
+<p align="center">
+  <a href="docs/images/webui/overview-mobile.png"><img src="docs/images/webui/overview-mobile.png" alt="NBackup dashboard on a phone" width="300"></a>
+  <br>
+  <sub>The same dashboard reflows for a phone — glance at fleet health from anywhere.</sub>
+</p>
 
 ```bash
 nb web                       # serve on :8080 (reachable on the LAN)
