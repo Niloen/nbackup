@@ -42,13 +42,14 @@
 <div class="muted" style="margin-top:.6rem">sync target{{if .From}} (from {{.From}}){{end}}: {{if .Runs}}behind {{.Runs}} run(s) · {{.Bytes}} — <code>nb sync</code> catches up{{else}}in sync{{end}}</div>
 {{end}}
 
-<h2>Used capacity — recorded &amp; projected</h2>
+{{if $d.Pool}}<h2>Cartridges in use — recorded &amp; projected</h2>{{else}}<h2>Used capacity — recorded &amp; projected</h2>{{end}}
 <div class="panel scroll">
 {{if $d.Chart}}
 {{$d.Chart}}
-<div class="muted" style="margin-top:.5rem;font-size:.82rem">Solid = recorded usage ({{$d.Samples}} sample{{if ne $d.Samples 1}}s{{end}}, captures reclamation); dashed = schedule-aware projection past “now”, after growth and pruning.</div>
+{{if $d.Pool}}<div class="muted" style="margin-top:.5rem;font-size:.82rem">Solid = cartridges holding a retained run (reconstructed history); dashed = schedule-aware projection past “now”. A cartridge frees when all its runs age past retention; the marked day is when the rotation would outgrow its slots.</div>
+{{else}}<div class="muted" style="margin-top:.5rem;font-size:.82rem">Solid = recorded usage ({{$d.Samples}} sample{{if ne $d.Samples 1}}s{{end}}, captures reclamation); dashed = schedule-aware projection past “now”, after growth and pruning.</div>{{end}}
 {{else}}
-<div class="empty">Not enough recorded history yet — the usage curve is drawn from samples taken after each dump/prune, so it appears once a medium has changed at least twice.</div>
+<div class="empty">{{if $d.Pool}}Not enough recorded history yet — the cartridge curve appears once the pool has held runs across at least two days.{{else}}Not enough recorded history yet — the usage curve is drawn from samples taken after each dump/prune, so it appears once a medium has changed at least twice.{{end}}</div>
 {{end}}
 </div>
 

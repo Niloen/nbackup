@@ -22,6 +22,9 @@ type ForecastPoint = accounting.ForecastPoint
 // MediumForecast is one medium's projected fill curve.
 type MediumForecast = accounting.MediumForecast
 
+// VolumePoint is one day of a tape pool's cartridge-usage curve.
+type VolumePoint = accounting.VolumePoint
+
 // ReadEstimate is the cost of reading a set of archives back off a medium.
 type ReadEstimate = accounting.ReadEstimate
 

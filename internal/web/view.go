@@ -1836,8 +1836,9 @@ type mediaRow struct {
 	engine.MediumInfo
 	UtilPct   float64 // 0 when unbounded
 	Over      bool    // used past a bounded capacity (sync/copy can land runs over)
-	ProjFull  string  // "~Nd", or "—" when unbounded or not projected
+	ProjFull  string  // byte media: "~Nd"/"clear"/"—"; tape pool: "run out ~Nd"/"~M/N carts"
 	ProjSched bool    // ProjFull is schedule-aware (forecast) rather than naive-linear growth
+	ProjOver  bool    // the projection is a warning (fills / runs out of tapes) — for styling
 	Pool      bool    // this medium's pool holds one or more labeled volumes
 	PoolRoom  string  // "K of N with room" — set only when Pool
 }
@@ -1848,7 +1849,11 @@ type mediaRow struct {
 // "projected full" date, falling back to the naive linear projection from recorded usage
 // (MediumStats.Growth) for a medium the forecast doesn't cover. stats/fills are lookups
 // rather than the whole Source, so this stays a pure view function callable from a test.
-func newMediaRows(media []engine.MediumInfo, stats func(string) (engine.MediumStats, bool), fills map[string][]engine.ForecastPoint, now time.Time) []mediaRow {
+func newMediaRows(media []engine.MediumInfo, stats func(string) (engine.MediumStats, bool), forecasts []engine.MediumForecast, now time.Time) []mediaRow {
+	fc := map[string]engine.MediumForecast{}
+	for _, mf := range forecasts {
+		fc[mf.Medium] = mf
+	}
 	rows := make([]mediaRow, 0, len(media))
 	for _, m := range media {
 		row := mediaRow{MediumInfo: m, ProjFull: "—"}
@@ -1858,16 +1863,28 @@ func newMediaRows(media []engine.MediumInfo, stats func(string) (engine.MediumSt
 		}
 		st, ok := stats(m.Name)
 		switch {
-		case m.Volumes > 0:
+		case m.Volumes > 0: // tape pool — projected in CARTRIDGES, not bytes
 			row.Pool = true
 			withRoom, total := poolRoomCount(st.PerVolume, st.PoolVolumes)
 			row.PoolRoom = fmt.Sprintf("%d of %d with room", withRoom, total)
-		case len(fills[m.Name]) > 0:
+			if mf, has := fc[m.Name]; has && len(mf.Volumes) > 0 {
+				row.ProjSched = true
+				if over, need := mf.VolumeOver(); over != "" {
+					if t, err := time.Parse("2006-01-02", over); err == nil {
+						row.ProjFull = fmt.Sprintf("out ~%dd (%d>%d)", projDays(t, now), need, mf.VolumeCeiling)
+						row.ProjOver = true
+					}
+				} else {
+					row.ProjFull = "within slots"
+				}
+			}
+		case len(fc[m.Name].Points) > 0:
 			// Schedule-aware: the first day the medium can't fit its retained set under
 			// capacity even after pruning. No such day means it stays within the horizon.
 			row.ProjSched = true
-			if over := firstOverCapacityDate(fills[m.Name]); !over.IsZero() {
+			if over := firstOverCapacityDate(fc[m.Name].Points); !over.IsZero() {
 				row.ProjFull = fmt.Sprintf("~%dd", projDays(over, now))
+				row.ProjOver = true
 			} else {
 				row.ProjFull = "clear" // stays within capacity across the forecast horizon
 			}
@@ -2038,9 +2055,11 @@ type syncLagView struct {
 // it) into the view model — display percentages plus the used-over-time chart drawn
 // from the ledger samples, which show the prune/relabel declines the retained
 // picture cannot.
-// newMediumData flattens a medium's stats into the detail view. forecast (may be nil)
-// is the schedule-aware fill projection overlaid on the used-capacity chart from `now`.
-func newMediumData(st engine.MediumStats, forecast []engine.ForecastPoint, now time.Time) mediumData {
+// newMediumData flattens a medium's stats into the detail view. mf (zero if none) is the
+// schedule-aware forecast for this medium: a byte medium overlays it on the used-capacity
+// chart; a tape pool draws a cartridges-in-use chart from it instead (the byte usage chart
+// is structurally misleading for a rotating pool).
+func newMediumData(st engine.MediumStats, mf engine.MediumForecast, now time.Time) mediumData {
 	d := mediumData{
 		Name: st.Name, Type: st.Type,
 		Used: st.Used, Capacity: st.Capacity, Over: st.Capacity > 0 && st.Used > st.Capacity,
@@ -2098,7 +2117,11 @@ func newMediumData(st engine.MediumStats, forecast []engine.ForecastPoint, now t
 			d.VolumeRows = append(d.VolumeRows, row)
 		}
 	}
-	d.Chart = usageChartSVG(st.Usage, forecast, now, st.Capacity, capLabel)
+	if mf.VolumeStructured {
+		d.Chart = volumesChartSVG(mf.Volumes, mf.VolumeCeiling, now)
+	} else {
+		d.Chart = usageChartSVG(st.Usage, mf.Points, now, st.Capacity, capLabel)
+	}
 	for i := len(st.ByRun) - 1; i >= 0; i-- { // newest first for the table
 		p := st.ByRun[i]
 		row := usagePointRow{Run: p.Run, At: p.At, Added: p.Added, Used: p.Used}
@@ -2256,6 +2279,94 @@ func usageChartSVG(series []catalog.UsageSample, forecast []engine.ForecastPoint
 	}
 
 	// X-axis end dates.
+	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11">%s</text>`, padL, vh-8, xMin.Format("2006-01-02"))
+	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11" text-anchor="end">%s</text>`, vw-padR, vh-8, xMax.Format("2006-01-02"))
+	b.WriteString(`</svg>`)
+	return template.HTML(b.String())
+}
+
+// volumesChartSVG renders a tape pool's CARTRIDGES-in-use over time — the volume-
+// structured peer of usageChartSVG. Solid history (reconstructed from the catalog) runs
+// to the "now" divider, then a dashed projection continues; the slot ceiling is a dashed
+// line and the first day the projection needs more reels than slots is marked in red
+// ("run out"). Counts are integers, so the y-axis is whole cartridges.
+func volumesChartSVG(points []engine.VolumePoint, ceiling int64, now time.Time) template.HTML {
+	type pt struct {
+		t    time.Time
+		v    int64
+		proj bool
+	}
+	var pts []pt
+	var peak int64
+	for _, p := range points {
+		t, err := time.Parse("2006-01-02", p.Date)
+		if err != nil {
+			continue
+		}
+		pts = append(pts, pt{t, p.InUse, t.After(now)})
+		if p.InUse > peak {
+			peak = p.InUse
+		}
+	}
+	if len(pts) < 2 {
+		return ""
+	}
+	xMin, xMax := pts[0].t, pts[len(pts)-1].t
+	span := xMax.Sub(xMin)
+	if span <= 0 {
+		return ""
+	}
+	scale := ceiling
+	if peak >= scale {
+		scale = peak + 1 // keep the ceiling line and the peak both on-canvas
+	}
+	if scale <= 0 {
+		return ""
+	}
+
+	const vw, vh = 760.0, 200.0
+	const padL, padR, padT, padB = 8.0, 8.0, 12.0, 26.0
+	plotW, plotH := vw-padL-padR, vh-padT-padB
+	baseY := padT + plotH
+	x := func(t time.Time) float64 { return padL + float64(t.Sub(xMin))/float64(span)*plotW }
+	y := func(v int64) float64 { return padT + (1-float64(v)/float64(scale))*plotH }
+
+	var b strings.Builder
+	fmt.Fprintf(&b, `<svg viewBox="0 0 %.0f %.0f" style="width:100%%;height:auto;display:block" role="img" aria-label="cartridges in use over time, with projection">`, vw, vh)
+	fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--line)" stroke-width="1"/>`, padL, baseY, vw-padR, baseY)
+	if ceiling > 0 {
+		cy := y(ceiling)
+		fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--warn)" stroke-width="1" stroke-dasharray="4 3"/>`, padL, cy, vw-padR, cy)
+		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--warn)" font-size="11" text-anchor="end">%d slots</text>`, vw-padR, cy-3, ceiling)
+	}
+	// One polyline; the segment past "now" is dashed. Emitting per-segment keeps the
+	// solid/dashed boundary crisp without two near-duplicate paths.
+	for i := 1; i < len(pts); i++ {
+		a, c := pts[i-1], pts[i]
+		dash := ""
+		if c.proj {
+			dash = ` stroke-dasharray="5 4"`
+		}
+		fmt.Fprintf(&b, `<path d="M%.1f %.1f L%.1f %.1f" fill="none" stroke="var(--accent)" stroke-width="2"%s/>`,
+			x(a.t), y(a.v), x(c.t), y(c.v), dash)
+	}
+	// "now" divider and the first over-slots day.
+	if now.After(xMin) && now.Before(xMax) {
+		nx := x(now)
+		fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--muted)" stroke-width="1" stroke-dasharray="2 3"/>`, nx, padT, nx, baseY)
+		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="10" text-anchor="middle">now</text>`, nx, padT-2)
+	}
+	if ceiling > 0 {
+		for _, p := range pts {
+			if p.proj && p.v > ceiling {
+				fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="3.5" fill="var(--bad)"><title>needs %d cartridges — %s</title></circle>`, x(p.t), y(p.v), p.v, p.t.Format("2006-01-02"))
+				fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--bad)" font-size="11" text-anchor="middle">out ~%s</text>`, x(p.t), y(p.v)-7, p.t.Format("Jan 2"))
+				break
+			}
+		}
+	}
+	end := pts[len(pts)-1]
+	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11" text-anchor="end">%d in use</text>`, x(end.t), y(end.v)-6, end.v)
 	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11">%s</text>`, padL, vh-8, xMin.Format("2006-01-02"))
 	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11" text-anchor="end">%s</text>`, vw-padR, vh-8, xMax.Format("2006-01-02"))
 	b.WriteString(`</svg>`)

@@ -1327,6 +1327,27 @@ func TestMediaCapacityScheduleAware(t *testing.T) {
 	}
 }
 
+// TestMediaTapeCartridges checks the /media list projects a tape pool in CARTRIDGES: a
+// pool the forecast says will need more reels than it has slots shows a "tapes out ~Nd"
+// signal, not a byte projection.
+func TestMediaTapeCartridges(t *testing.T) {
+	now := time.Now()
+	src := fakeSource{
+		media: []engine.MediumInfo{{Name: "lib", Type: "tape", Volumes: 3}},
+		capacityForecast: []engine.MediumForecast{{
+			Medium: "lib", VolumeStructured: true, VolumeCeiling: 3,
+			Volumes: []engine.VolumePoint{
+				{Date: now.Format("2006-01-02"), InUse: 2},
+				{Date: now.AddDate(0, 0, 12).Format("2006-01-02"), InUse: 5}, // exceeds 3 slots
+			},
+		}},
+	}
+	_, body := get(t, NewServer(src, t.TempDir()).Handler(), "/media")
+	if !strings.Contains(body, "tapes out") {
+		t.Errorf("/media should project a tape pool running out of cartridges:\n%s", body)
+	}
+}
+
 // TestUsageChartOverlay checks the used-capacity chart draws history and projection on
 // one set of axes: a solid history line, a dashed projection past a "now" divider, and a
 // red crossing marker where the projection pierces capacity.
@@ -1350,6 +1371,29 @@ func TestUsageChartOverlay(t *testing.T) {
 	} {
 		if !strings.Contains(svg, want) {
 			t.Errorf("usage chart overlay missing %q:\n%s", want, svg)
+		}
+	}
+}
+
+// TestVolumesChartOverlay checks the tape cartridge chart draws history and projection on
+// one axis: a solid-to-dashed cartridge curve, the slot ceiling, and a red "out" marker
+// where the projection needs more reels than slots.
+func TestVolumesChartOverlay(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	points := []engine.VolumePoint{
+		{Date: now.AddDate(0, 0, -2).Format("2006-01-02"), InUse: 1},
+		{Date: now.Format("2006-01-02"), InUse: 2},
+		{Date: now.AddDate(0, 0, 10).Format("2006-01-02"), InUse: 5}, // exceeds 3 slots
+	}
+	svg := string(volumesChartSVG(points, 3, now))
+	for _, want := range []string{
+		`stroke-dasharray="5 4"`, // the projection segment
+		`>now</text>`,            // the divider
+		`3 slots`,                // the ceiling label
+		`out ~Jul 21`,            // the over-slots crossing
+	} {
+		if !strings.Contains(svg, want) {
+			t.Errorf("volumes chart missing %q:\n%s", want, svg)
 		}
 	}
 }

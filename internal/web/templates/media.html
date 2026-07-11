@@ -13,7 +13,14 @@
     <div class="num"><span class="lbl">of </span>{{if .Capacity}}{{bytes .Capacity}}{{else}}<span class="muted">∞</span>{{end}}</div>
     <div class="c-bar">{{if .Pool}}<span class="muted">{{.PoolRoom}}</span>{{else if .Capacity}}<div class="bar"><span style="width:{{pct .UtilPct}};{{if .Over}}background:var(--bad){{end}}"></span></div>{{else}}<span class="muted">—</span>{{end}}</div>
     <div class="num">{{if .Volumes}}{{.Volumes}}<span class="lbl"> volume(s)</span>{{else}}<span class="muted">—</span>{{end}}</div>
-    <div class="muted">{{if .Pool}}{{.PoolRoom}}{{else if eq .ProjFull "clear"}}<span class="ok" title="schedule-aware forecast: fits within capacity across the horizon, after growth and pruning">within capacity</span>{{else if eq .ProjFull "—"}}—{{else}}<span class="lbl">full </span>{{.ProjFull}}{{if .ProjSched}} <span class="lbl" title="schedule-aware: accounts for the dump cycle, projected growth, and pruning">(sched)</span>{{end}}{{end}}</div>
+    <div class="muted">
+    {{- if .Pool -}}
+      {{if not .ProjSched}}{{.PoolRoom}}
+      {{else if eq .ProjFull "within slots"}}<span class="ok" title="schedule-aware: the retained runs fit the pool's slots across the horizon">within slots</span>
+      {{else}}<span class="{{if .ProjOver}}warn{{end}}" title="schedule-aware: projected to need more cartridges than the pool has slots">tapes {{.ProjFull}}</span>{{end}}
+    {{- else if eq .ProjFull "clear" -}}<span class="ok" title="schedule-aware forecast: fits within capacity across the horizon, after growth and pruning">within capacity</span>
+    {{- else if eq .ProjFull "—" -}}—
+    {{- else -}}<span class="lbl">full </span>{{.ProjFull}}{{if .ProjSched}} <span class="lbl" title="schedule-aware: accounts for the dump cycle, projected growth, and pruning">(sched)</span>{{end}}{{end}}</div>
   </li>
   {{end}}
 </ul>

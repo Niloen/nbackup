@@ -9,6 +9,7 @@ import (
 
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/recovery"
+	"github.com/Niloen/nbackup/internal/report"
 )
 
 // cloudCostEngine lands one DLE on a file://-backed cloud medium (no network), with
@@ -307,5 +308,75 @@ func TestForecastCapacityRoutesPerMedium(t *testing.T) {
 	}
 	if len(foot) == 0 || foot[len(foot)-1].Bytes <= 0 {
 		t.Errorf("bulk DLE %q should have a projected footprint: %+v", bulkSlug, foot)
+	}
+}
+
+// TestForecastTapeVolumes checks the tape cartridge-count forecast: a small-volume,
+// long-retention pool accumulates cartridges as daily fulls pile up faster than they age
+// out, tripping the "run out of tapes" signal past its slot count.
+func TestForecastTapeVolumes(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), strings.Repeat("tape-forecast-", 12000)) // ~168 KB full
+
+	cfg := &config.Config{
+		Landing: config.MediumList{"lib"},
+		Media: map[string]config.Media{
+			// 1 MB reels, 3 slots, retain everything for a long window → the retained
+			// fulls need far more than 3 cartridges over the horizon.
+			"lib": {Type: "tape", MinimumAge: "60d", Params: map[string]string{
+				"dir": t.TempDir(), "slots": "3", "volume_size": "1048576"}},
+		},
+		Cycle:    "1d", // every simulated run is a fresh full
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	if err := eng.LabelVolume("lib", "lib-0001", false, false, start, nil); err != nil {
+		t.Fatalf("label: %v", err)
+	}
+	if _, err := eng.Run(context.Background(), start, nil); err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+	// The run-log (which historySource sizes projected fulls from) is written by the CLI
+	// dump path, not eng.Run — seed it so the simulated fulls carry ~168 KB each.
+	slug := config.DLE{Host: "localhost", Path: src}.Name()
+	if err := report.Append(cfg.WorkdirPath(), report.Run{
+		Command: report.CommandDump, StartedAt: start, EndedAt: start,
+		DumpStats: []report.DLEStat{{DLE: slug, Level: 0, Orig: 168_000, Out: 168_000}},
+	}); err != nil {
+		t.Fatalf("seed run-log: %v", err)
+	}
+
+	forecasts, err := eng.ForecastCapacityOffline(start.AddDate(0, 0, 1), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tape *MediumForecast
+	for i := range forecasts {
+		if forecasts[i].Medium == "lib" {
+			tape = &forecasts[i]
+		}
+	}
+	if tape == nil {
+		t.Fatalf("tape pool missing from forecast: %+v", forecasts)
+	}
+	if !tape.VolumeStructured || tape.VolumeCeiling != 3 {
+		t.Errorf("tape forecast should be volume-structured with a 3-slot ceiling: %+v", *tape)
+	}
+	if len(tape.Volumes) == 0 || tape.Points != nil {
+		t.Fatalf("tape forecast should carry a Volumes curve and no byte Points: %+v", *tape)
+	}
+	if over, need := tape.VolumeOver(); over == "" || need <= 3 {
+		t.Errorf("a 3-slot pool retaining 60 days of daily fulls should run out of tapes: over=%q need=%d curve=%+v", over, need, tape.Volumes)
 	}
 }
