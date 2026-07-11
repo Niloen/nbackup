@@ -776,13 +776,8 @@ func heatLevels(set map[int]bool) string {
 const mediaForecastDays = 90
 
 func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
-	fills := map[string][]engine.ForecastPoint{}
-	for _, mf := range s.src.CapacityForecast(s.now(), mediaForecastDays) {
-		if !mf.VolumeStructured {
-			fills[mf.Medium] = mf.Points
-		}
-	}
-	rows := newMediaRows(s.src.Media(), s.src.MediumStats, fills, s.now())
+	forecasts := s.src.CapacityForecast(s.now(), mediaForecastDays)
+	rows := newMediaRows(s.src.Media(), s.src.MediumStats, forecasts, s.now())
 	s.render(w, "media", page{Title: "Media", Active: "media", Data: rows})
 }
 

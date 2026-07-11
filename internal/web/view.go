@@ -1836,8 +1836,9 @@ type mediaRow struct {
 	engine.MediumInfo
 	UtilPct   float64 // 0 when unbounded
 	Over      bool    // used past a bounded capacity (sync/copy can land runs over)
-	ProjFull  string  // "~Nd", or "—" when unbounded or not projected
+	ProjFull  string  // byte media: "~Nd"/"clear"/"—"; tape pool: "run out ~Nd"/"~M/N carts"
 	ProjSched bool    // ProjFull is schedule-aware (forecast) rather than naive-linear growth
+	ProjOver  bool    // the projection is a warning (fills / runs out of tapes) — for styling
 	Pool      bool    // this medium's pool holds one or more labeled volumes
 	PoolRoom  string  // "K of N with room" — set only when Pool
 }
@@ -1848,7 +1849,11 @@ type mediaRow struct {
 // "projected full" date, falling back to the naive linear projection from recorded usage
 // (MediumStats.Growth) for a medium the forecast doesn't cover. stats/fills are lookups
 // rather than the whole Source, so this stays a pure view function callable from a test.
-func newMediaRows(media []engine.MediumInfo, stats func(string) (engine.MediumStats, bool), fills map[string][]engine.ForecastPoint, now time.Time) []mediaRow {
+func newMediaRows(media []engine.MediumInfo, stats func(string) (engine.MediumStats, bool), forecasts []engine.MediumForecast, now time.Time) []mediaRow {
+	fc := map[string]engine.MediumForecast{}
+	for _, mf := range forecasts {
+		fc[mf.Medium] = mf
+	}
 	rows := make([]mediaRow, 0, len(media))
 	for _, m := range media {
 		row := mediaRow{MediumInfo: m, ProjFull: "—"}
@@ -1858,16 +1863,28 @@ func newMediaRows(media []engine.MediumInfo, stats func(string) (engine.MediumSt
 		}
 		st, ok := stats(m.Name)
 		switch {
-		case m.Volumes > 0:
+		case m.Volumes > 0: // tape pool — projected in CARTRIDGES, not bytes
 			row.Pool = true
 			withRoom, total := poolRoomCount(st.PerVolume, st.PoolVolumes)
 			row.PoolRoom = fmt.Sprintf("%d of %d with room", withRoom, total)
-		case len(fills[m.Name]) > 0:
+			if mf, has := fc[m.Name]; has && len(mf.Volumes) > 0 {
+				row.ProjSched = true
+				if over, need := mf.VolumeOver(); over != "" {
+					if t, err := time.Parse("2006-01-02", over); err == nil {
+						row.ProjFull = fmt.Sprintf("out ~%dd (%d>%d)", projDays(t, now), need, mf.VolumeCeiling)
+						row.ProjOver = true
+					}
+				} else {
+					row.ProjFull = "within slots"
+				}
+			}
+		case len(fc[m.Name].Points) > 0:
 			// Schedule-aware: the first day the medium can't fit its retained set under
 			// capacity even after pruning. No such day means it stays within the horizon.
 			row.ProjSched = true
-			if over := firstOverCapacityDate(fills[m.Name]); !over.IsZero() {
+			if over := firstOverCapacityDate(fc[m.Name].Points); !over.IsZero() {
 				row.ProjFull = fmt.Sprintf("~%dd", projDays(over, now))
+				row.ProjOver = true
 			} else {
 				row.ProjFull = "clear" // stays within capacity across the forecast horizon
 			}

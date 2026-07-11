@@ -1327,6 +1327,27 @@ func TestMediaCapacityScheduleAware(t *testing.T) {
 	}
 }
 
+// TestMediaTapeCartridges checks the /media list projects a tape pool in CARTRIDGES: a
+// pool the forecast says will need more reels than it has slots shows a "tapes out ~Nd"
+// signal, not a byte projection.
+func TestMediaTapeCartridges(t *testing.T) {
+	now := time.Now()
+	src := fakeSource{
+		media: []engine.MediumInfo{{Name: "lib", Type: "tape", Volumes: 3}},
+		capacityForecast: []engine.MediumForecast{{
+			Medium: "lib", VolumeStructured: true, VolumeCeiling: 3,
+			Volumes: []engine.VolumePoint{
+				{Date: now.Format("2006-01-02"), InUse: 2},
+				{Date: now.AddDate(0, 0, 12).Format("2006-01-02"), InUse: 5}, // exceeds 3 slots
+			},
+		}},
+	}
+	_, body := get(t, NewServer(src, t.TempDir()).Handler(), "/media")
+	if !strings.Contains(body, "tapes out") {
+		t.Errorf("/media should project a tape pool running out of cartridges:\n%s", body)
+	}
+}
+
 // TestUsageChartOverlay checks the used-capacity chart draws history and projection on
 // one set of axes: a solid history line, a dashed projection past a "now" divider, and a
 // red crossing marker where the projection pierces capacity.

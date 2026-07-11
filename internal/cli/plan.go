@@ -350,8 +350,27 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int, offline bool
 	caps := eng.ForecastCapacity(start, plans)
 	var within []string
 	for _, mf := range caps {
-		if mf.VolumeStructured || len(mf.Points) == 0 || mf.Points[0].Capacity <= 0 {
-			continue // unbounded, or a tape whose fill is rotation-managed
+		if mf.VolumeStructured { // tape: measured in cartridges, not bytes
+			peak := int64(0)
+			for _, v := range mf.Volumes {
+				if v.InUse > peak {
+					peak = v.InUse
+				}
+			}
+			if over, need := mf.VolumeOver(); over != "" {
+				fmt.Printf("\nWARNING: tape pool %q is projected to need %d cartridges by %s but has only %d slot(s) — load or buy more tapes, or shorten retention (minimum_age).\n",
+					mf.Medium, need, over, mf.VolumeCeiling)
+			} else if len(mf.Volumes) > 0 {
+				if mf.VolumeCeiling > 0 {
+					within = append(within, fmt.Sprintf("%s (peak %d of %d cartridges)", mf.Medium, peak, mf.VolumeCeiling))
+				} else {
+					within = append(within, fmt.Sprintf("%s (peak %d cartridges, hand-loaded)", mf.Medium, peak))
+				}
+			}
+			continue
+		}
+		if len(mf.Points) == 0 || mf.Points[0].Capacity <= 0 {
+			continue // unbounded byte medium
 		}
 		if over := firstOverCapacity(mf.Points); over != "" {
 			fmt.Printf("\nWARNING: medium %q is projected to EXCEED capacity on %s even after pruning — its retained set outgrows the medium. Add capacity, shorten retention (minimum_age), or move DLEs to another landing.\n",
