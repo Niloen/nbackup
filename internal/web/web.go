@@ -835,9 +835,9 @@ func (s *Server) handleMedium(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		min := fmt.Sprintf(" Minimum capacity needed: ~%s (the retention floor).", sizeutil.FormatBytes(minNeed))
-		if rd := mf.Depth; rd.CapacityWeeks > 0 {
-			min += fmt.Sprintf(" This capacity keeps ~%s of restore history; the week marks on the chart show the TOTAL capacity each depth needs.",
-				weeksLabel(rd.CapacityWeeks))
+		if rd := mf.Depth; rd.CapacityCycles > 0 {
+			min += fmt.Sprintf(" This capacity keeps ~%s of restore history; the cycle marks on the chart show the TOTAL capacity each depth needs.",
+				cyclesLabel(rd.CapacityCycles))
 		}
 		if over := firstOverCapacityDate(mf.Points); !over.IsZero() {
 			d.CapacityOutlook = fmt.Sprintf("Projected to EXCEED capacity in ~%dd (%s) even after pruning — add capacity or shorten retention.%s",

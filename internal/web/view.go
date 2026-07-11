@@ -1925,13 +1925,13 @@ func poolRoomCount(pv []engine.VolumeUsage, configured int64) (withRoom int, tot
 	return withRoom, total
 }
 
-// weeksLabel renders a restore-depth in weeks: whole weeks once past a couple, a decimal
-// below (where "1.5 weeks" carries more than a rounded "2").
-func weeksLabel(w float64) string {
-	if w >= 2 {
-		return fmt.Sprintf("%.0f weeks", w)
+// cyclesLabel renders a restore-depth in dump cycles: whole cycles once past a couple, a
+// decimal below (where "1.5 cycles" carries more than a rounded "2").
+func cyclesLabel(c float64) string {
+	if c >= 2 {
+		return fmt.Sprintf("%.0f cycles", c)
 	}
-	return fmt.Sprintf("%.1f weeks", w)
+	return fmt.Sprintf("%.1f cycles", c)
 }
 
 // projDays rounds a projected-full instant to whole days from now, floored at 0 (a
@@ -2268,7 +2268,7 @@ func usageChartSVG(series []catalog.UsageSample, forecast, protected []engine.Fo
 		}
 		my := y(m.Bytes)
 		fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--muted)" stroke-width="1" stroke-dasharray="1 2" opacity="0.6"/>`, vw-padR-34, my, vw-padR, my)
-		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="9" text-anchor="end" opacity="0.85"><title>total capacity to keep %dw of restore points: %s</title>%dw</text>`, vw-padR-36, my+3, m.Weeks, sizeutil.FormatBytes(m.Bytes), m.Weeks)
+		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="9" text-anchor="end" opacity="0.85"><title>total capacity to keep restore points back %d cycle(s): %s</title>%dc</text>`, vw-padR-36, my+3, m.Cycles, sizeutil.FormatBytes(m.Bytes), m.Cycles)
 	}
 
 	// Protected floor: the retention minimum pruning can't reclaim, filled darker beneath

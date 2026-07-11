@@ -362,7 +362,7 @@ func TestForecastRestoreDepth(t *testing.T) {
 		t.Fatalf("disk forecast missing: %+v", forecasts)
 	}
 	d := disk.Depth
-	if len(d.Marks) == 0 || d.CapacityWeeks <= 0 {
+	if len(d.Marks) == 0 || d.CapacityCycles <= 0 {
 		t.Fatalf("capacity should buy measurable restore depth: %+v", d)
 	}
 	for i := 1; i < len(d.Marks); i++ { // deeper retention costs strictly more (monotone)

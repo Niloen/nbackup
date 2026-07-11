@@ -386,8 +386,8 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int, offline bool
 				mf.Medium, over, sizeutil.FormatBytes(minNeed))
 		} else {
 			depth := ""
-			if rd := mf.Depth; rd.CapacityWeeks > 0 {
-				depth = fmt.Sprintf(", ~%.0fw restore depth", rd.CapacityWeeks)
+			if rd := mf.Depth; rd.CapacityCycles > 0 {
+				depth = fmt.Sprintf(", ~%.0f cycles restore depth", rd.CapacityCycles)
 			}
 			within = append(within, fmt.Sprintf("%s (%s cap, peak %s, min ~%s%s)",
 				mf.Medium, sizeutil.FormatBytes(mf.Points[0].Capacity), sizeutil.FormatBytes(peak), sizeutil.FormatBytes(minNeed), depth))

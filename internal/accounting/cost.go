@@ -95,19 +95,22 @@ type MediumForecast struct {
 	VolumeCeiling    int64           // available cartridges (config slots); 0 = unbounded (hand-loaded)
 }
 
-// DepthMark is the capacity a medium needs to retain restore points back a given number
-// of weeks — the retention floor computed with minimum_age = Weeks. Increasing in Weeks.
+// DepthMark is the TOTAL capacity a medium needs to keep restore points back a given
+// number of CYCLES — the cumulative size of that many most-recent recovery chains (a full
+// plus its incrementals). Measured in cycles, not weeks, so one cycle is exactly one
+// recovery chain: no calendar-window double-count where a 7-day window straddles a full
+// boundary and has to keep two fulls. Increasing in Cycles.
 type DepthMark struct {
-	Weeks int
-	Bytes int64
+	Cycles int
+	Bytes  int64
 }
 
 // RestoreDepth answers "what is my capacity buying me in restore-point age": how many
-// weeks of restore history the medium's capacity retains, and the per-week byte marks
-// (each the TOTAL capacity to keep that many weeks) for the chart's right-axis ticks.
+// dump cycles of restore history the medium's capacity retains, and the per-cycle byte
+// marks (each the TOTAL capacity to keep that many cycles) for the chart's ticks.
 type RestoreDepth struct {
-	CapacityWeeks float64     // restore depth the capacity retains (weeks; interpolated)
-	Marks         []DepthMark // TOTAL capacity to keep each week horizon (for axis ticks)
+	CapacityCycles float64     // restore depth the capacity retains (cycles; interpolated)
+	Marks          []DepthMark // TOTAL capacity to keep each cycle horizon (for axis ticks)
 }
 
 // VolumePoint is one day of a tape pool's cartridge-usage curve: how many cartridges hold
@@ -325,28 +328,23 @@ func (a *Accountant) landingForSlug(slug string, plans []*planner.Plan) string {
 	return ""
 }
 
-// depthWeeks are the restore-depth horizons the forecast prices (capped to the projected
-// window). Each answers "how much capacity to keep restore points back this many weeks."
-var depthWeeks = []int{1, 2, 4, 8, 12}
+// depthCycles are the restore-depth horizons the forecast prices, in dump CYCLES. Each
+// answers "how much capacity to keep restore points back this many cycles."
+var depthCycles = []int{1, 2, 4, 8}
 
-// restoreDepth prices what a medium's capacity buys in restore-point age. It accumulates
-// the projection UNCAPPED (no reclaim — so it can measure depths deeper than today's
-// capacity retains), then for each horizon computes the retention floor with minimum_age
-// set to that many weeks: the capacity needed to guarantee a restore to any point that
-// far back. Where the actual capacity falls among those marks is the depth it retains, and
-// the slope there is the bytes an extra week costs. Reuses the same retention kernel, just
-// with a swapped window.
+// restoreDepth prices what a medium's capacity buys in restore-point age, measured in dump
+// CYCLES. It groups the projected runs into RECOVERY CHAINS (a full plus the incrementals
+// that build on it — the unit you must keep whole to restore to any point in that cycle),
+// then a depth of N cycles is the cumulative size of the N most-recent chains per DLE. So
+// one cycle is exactly one chain: no calendar-window double-count where "1 week" straddles
+// a full boundary and needs two fulls, and depth of one cycle lines up with the protected
+// floor. Runs are sized at the CURRENT rate (earliest estimate per DLE+level), so this is a
+// current-state question, not a growth projection.
 func (a *Accountant) restoreDepth(name string, start time.Time, plans []*planner.Plan, capacity int64) RestoreDepth {
 	if capacity <= 0 || len(plans) == 0 {
 		return RestoreDepth{}
 	}
 	limit, capped := a.mediumRunCap(name)
-	// Restore depth is a CURRENT-rate question ("how far back does my capacity let me
-	// restore"), not a growth projection: sizing the accumulation by the grown per-day
-	// estimate would price a week at run sizes months out and make floor(1 week) sit well
-	// above today's protected set. So size every run at its level's CURRENT size — the
-	// first (earliest) estimate seen for that DLE and level — so floor(N weeks) reflects N
-	// weeks at today's rate and floor(1 week) ≈ the current retention floor.
 	cur := map[string]int64{}
 	curKey := func(it planner.Item) string { return it.Name + "\x00" + strconv.Itoa(it.Level) }
 	for _, plan := range plans {
@@ -357,10 +355,8 @@ func (a *Accountant) restoreDepth(name string, start time.Time, plans []*planner
 		}
 	}
 	var sim []record.Archive
-	end := start
 	for i, plan := range plans {
 		date := start.AddDate(0, 0, i)
-		end = date
 		runID := record.IDFromTime(date)
 		for _, it := range plan.Items {
 			if !contains(a.copyMediaFor(it.DLE.DumpTypeName()), name) {
@@ -370,41 +366,71 @@ func (a *Accountant) restoreDepth(name string, start time.Time, plans []*planner
 		}
 	}
 	if capped {
-		sim = capRuns(sim, limit) // a last-N sync target caps how deep restore history goes
+		sim = capRuns(sim, limit)
 	}
 	if len(sim) == 0 {
 		return RestoreDepth{}
 	}
-	windowDays := end.Sub(start).Hours() / 24
-	var marks []DepthMark
-	for _, wk := range depthWeeks {
-		if float64(wk*7) > windowDays {
-			break // deeper than the projected window can measure
+
+	// Per DLE, split the run stream into chains (a full opens one; incrementals join the
+	// open chain), then keep chain sizes newest-first. A DLE's k-th newest chain is its
+	// restore depth k cycles back.
+	byDLE := map[string][]record.Archive{}
+	for _, ar := range sim {
+		byDLE[ar.DLE] = append(byDLE[ar.DLE], ar)
+	}
+	chainsByDLE := map[string][]int64{}
+	maxCycles := 0
+	for dle, arcs := range byDLE {
+		sort.Slice(arcs, func(i, j int) bool { return arcs[i].CreatedAt.Before(arcs[j].CreatedAt) })
+		var chains []int64
+		for _, ar := range arcs {
+			if ar.Level == 0 || len(chains) == 0 {
+				chains = append(chains, 0)
+			}
+			chains[len(chains)-1] += ar.Compressed
 		}
-		floor := retention.Compute(sim, sim, time.Duration(wk)*7*24*time.Hour, end)
+		for i, j := 0, len(chains)-1; i < j; i, j = i+1, j-1 { // reverse -> newest first
+			chains[i], chains[j] = chains[j], chains[i]
+		}
+		chainsByDLE[dle] = chains
+		if len(chains) > maxCycles {
+			maxCycles = len(chains)
+		}
+	}
+
+	var marks []DepthMark
+	for _, nc := range depthCycles {
+		if nc > maxCycles {
+			break // deeper than the projected window has chains for
+		}
 		var b int64
-		for _, ar := range sim {
-			if floor.KeepsArchive(ar.Run, ar.DLE) {
-				b += ar.Compressed
+		for _, chains := range chainsByDLE {
+			k := nc
+			if k > len(chains) {
+				k = len(chains)
+			}
+			for i := 0; i < k; i++ {
+				b += chains[i]
 			}
 		}
-		marks = append(marks, DepthMark{Weeks: wk, Bytes: b})
+		marks = append(marks, DepthMark{Cycles: nc, Bytes: b})
 	}
 	if len(marks) == 0 {
 		return RestoreDepth{}
 	}
 	rd := RestoreDepth{Marks: marks}
-	// Interpolate how many weeks of restore history the capacity buys (its total depth).
+	// Interpolate how many cycles of restore history the capacity buys.
 	for i, m := range marks {
 		if m.Bytes > capacity {
 			break
 		}
-		rd.CapacityWeeks = float64(m.Weeks)
+		rd.CapacityCycles = float64(m.Cycles)
 		if i+1 < len(marks) {
 			next := marks[i+1]
 			if span := next.Bytes - m.Bytes; span > 0 {
 				frac := float64(capacity-m.Bytes) / float64(span)
-				rd.CapacityWeeks = float64(m.Weeks) + frac*float64(next.Weeks-m.Weeks)
+				rd.CapacityCycles = float64(m.Cycles) + frac*float64(next.Cycles-m.Cycles)
 			}
 		}
 	}
