@@ -2,6 +2,7 @@ package accounting
 
 import (
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/Niloen/nbackup/internal/archiveio"
@@ -340,6 +341,21 @@ func (a *Accountant) restoreDepth(name string, start time.Time, plans []*planner
 		return RestoreDepth{}
 	}
 	limit, capped := a.mediumRunCap(name)
+	// Restore depth is a CURRENT-rate question ("how far back does my capacity let me
+	// restore"), not a growth projection: sizing the accumulation by the grown per-day
+	// estimate would price a week at run sizes months out and make floor(1 week) sit well
+	// above today's protected set. So size every run at its level's CURRENT size — the
+	// first (earliest) estimate seen for that DLE and level — so floor(N weeks) reflects N
+	// weeks at today's rate and floor(1 week) ≈ the current retention floor.
+	cur := map[string]int64{}
+	curKey := func(it planner.Item) string { return it.Name + "\x00" + strconv.Itoa(it.Level) }
+	for _, plan := range plans {
+		for _, it := range plan.Items {
+			if k := curKey(it); cur[k] == 0 {
+				cur[k] = it.EstBytes
+			}
+		}
+	}
 	var sim []record.Archive
 	end := start
 	for i, plan := range plans {
@@ -350,7 +366,7 @@ func (a *Accountant) restoreDepth(name string, start time.Time, plans []*planner
 			if !contains(a.copyMediaFor(it.DLE.DumpTypeName()), name) {
 				continue
 			}
-			sim = append(sim, record.Archive{Run: runID, DLE: it.Name, Level: it.Level, Compressed: it.EstBytes, CreatedAt: date})
+			sim = append(sim, record.Archive{Run: runID, DLE: it.Name, Level: it.Level, Compressed: cur[curKey(it)], CreatedAt: date})
 		}
 	}
 	if capped {
