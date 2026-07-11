@@ -1359,15 +1359,22 @@ func TestUsageChartOverlay(t *testing.T) {
 		{At: now, Used: 700},
 	}
 	forecast := []engine.ForecastPoint{
-		{Date: now.Format("2006-01-02"), Bytes: 700, Capacity: 1000},
-		{Date: now.AddDate(0, 0, 10).Format("2006-01-02"), Bytes: 1200, Capacity: 1000}, // over
+		{Date: now.Format("2006-01-02"), Bytes: 700, Capacity: 1000, Protected: 400},
+		{Date: now.AddDate(0, 0, 10).Format("2006-01-02"), Bytes: 1200, Capacity: 1000, Protected: 600}, // over
 	}
-	svg := string(usageChartSVG(series, forecast, now, 1000, "capacity"))
+	protected := []engine.ForecastPoint{
+		{Date: now.AddDate(0, 0, -2).Format("2006-01-02"), Bytes: 300},
+		{Date: now.Format("2006-01-02"), Bytes: 400},
+		{Date: now.AddDate(0, 0, 10).Format("2006-01-02"), Bytes: 600},
+	}
+	svg := string(usageChartSVG(series, forecast, protected, now, 1000, "capacity"))
 	for _, want := range []string{
 		`stroke-dasharray="5 4"`, // the projection curve
 		`>now</text>`,            // the divider label
 		`full ~Jul 21`,           // the dated capacity crossing
 		`var(--warn)`,            // the capacity ceiling line
+		`min 600 B`,              // the protected-floor minimum-capacity label
+		`fill-opacity="0.28"`,    // the protected floor band
 	} {
 		if !strings.Contains(svg, want) {
 			t.Errorf("usage chart overlay missing %q:\n%s", want, svg)

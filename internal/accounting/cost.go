@@ -57,6 +57,11 @@ type ForecastPoint struct {
 	// Bytes > Capacity means the protected set outgrew the medium and pruning cannot
 	// make room: the capacity-pressure signal, without a second reclaim pass.
 	Capacity int64
+	// Protected is the retention floor: bytes pruning could NOT reclaim (within minimum_age,
+	// the last recovery path, or a chain anchor). It is the MINIMUM capacity the medium
+	// needs — the footprint can never be pruned below it. Its peak over the window is the
+	// least capacity that keeps the retention promise.
+	Protected int64
 }
 
 // OverCapacity reports whether the landing's protected footprint has outgrown its
@@ -71,6 +76,10 @@ func (a *Accountant) ForecastCost(start time.Time, plans []*planner.Plan) []Fore
 	return a.forecastMedium(a.d.Landing, start, plans)
 }
 
+// forecastHistoryDays is how far the protected-floor line reconstructs backward, matched
+// to the forward projection horizon so the "minimum capacity" band spans a symmetric window.
+const forecastHistoryDays = 90
+
 // MediumForecast is one medium's projected fill over the window.
 type MediumForecast struct {
 	Medium string
@@ -78,7 +87,8 @@ type MediumForecast struct {
 	// rotation at write time, not by prune, so its capacity is measured in CARTRIDGES, not
 	// bytes. Such a medium carries Volumes (a cartridge-count curve) instead of Points.
 	VolumeStructured bool
-	Points           []ForecastPoint // byte fill curve — disk/cloud
+	Points           []ForecastPoint // byte fill curve (projection) — disk/cloud
+	History          []ForecastPoint // reconstructed protected-floor history (Bytes = floor); byte media only
 	Volumes          []VolumePoint   // cartridge-count curve — tape (history then projection)
 	VolumeCeiling    int64           // available cartridges (config slots); 0 = unbounded (hand-loaded)
 }
@@ -141,6 +151,7 @@ func (a *Accountant) ForecastCapacity(start time.Time, plans []*planner.Plan) []
 			mf.VolumeCeiling = prof.Volumes()
 		} else {
 			mf.Points = a.forecastMedium(name, start, plans)
+			mf.History = a.protectedHistory(name, a.d.Cfg.MinAgeFor(a.d.Cfg.Media[name]), start)
 		}
 		out = append(out, mf)
 	}
@@ -186,16 +197,50 @@ func (a *Accountant) forecastMedium(name string, start time.Time, plans []*plann
 			working = dropArchive(working, r.RunID, r.DLE)
 		}
 
-		var bytes int64
+		var bytes, protected int64
 		for _, ar := range working {
 			bytes += ar.Compressed
+			if floor.KeepsArchive(ar.Run, ar.DLE) {
+				protected += ar.Compressed // the retention floor can't reclaim this — the irreducible minimum
+			}
 		}
 		points = append(points, ForecastPoint{
 			Date: record.DateString(date), Bytes: bytes, Monthly: cost.MonthlyStorage(bytes),
-			RunBytes: runBytes, Reclaimed: reclaimed, Capacity: capacity,
+			RunBytes: runBytes, Reclaimed: reclaimed, Capacity: capacity, Protected: protected,
 		})
 	}
 	return points
+}
+
+// protectedHistory reconstructs a byte medium's retention floor — the bytes pruning
+// could NOT reclaim — for each of the last forecastHistoryDays: the minimum-capacity line
+// beneath the recorded footprint. Same as-of-date reconstruction as tapeHistory: for each
+// past day it recomputes the Floor over the archives that existed then and sums what it
+// keeps. It flows into the projection's Protected to draw one continuous floor.
+func (a *Accountant) protectedHistory(name string, minAge time.Duration, now time.Time) []ForecastPoint {
+	onMedium := a.d.Cat.ArchivesOn(name)
+	if len(onMedium) == 0 {
+		return nil
+	}
+	pts := make([]ForecastPoint, 0, forecastHistoryDays)
+	for d := forecastHistoryDays - 1; d >= 0; d-- {
+		day := now.AddDate(0, 0, -d)
+		var asOf []record.Archive
+		for _, ar := range onMedium {
+			if !ar.CreatedAt.After(day) {
+				asOf = append(asOf, ar)
+			}
+		}
+		floor := retention.Compute(asOf, asOf, minAge, day)
+		var protected int64
+		for _, ar := range asOf {
+			if floor.KeepsArchive(ar.Run, ar.DLE) {
+				protected += ar.Compressed
+			}
+		}
+		pts = append(pts, ForecastPoint{Date: record.DateString(day), Bytes: protected})
+	}
+	return pts
 }
 
 // ForecastDLEFootprint projects one DLE's retained footprint on its landing medium

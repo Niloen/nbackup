@@ -828,12 +828,19 @@ func (s *Server) handleMedium(w http.ResponseWriter, r *http.Request) {
 			d.CapacityOutlook = fmt.Sprintf("Projected to keep ~%d cartridges in rotation over the next %dd (hand-loaded — no fixed slot count).", peak, mediaForecastDays)
 		}
 	case len(mf.Points) > 0 && mf.Points[0].Capacity > 0:
+		var minNeed int64
+		for _, p := range mf.Points {
+			if p.Protected > minNeed {
+				minNeed = p.Protected
+			}
+		}
+		min := fmt.Sprintf(" Minimum capacity needed: ~%s (the retention floor).", sizeutil.FormatBytes(minNeed))
 		if over := firstOverCapacityDate(mf.Points); !over.IsZero() {
-			d.CapacityOutlook = fmt.Sprintf("Projected to EXCEED capacity in ~%dd (%s) even after pruning — add capacity or shorten retention.",
-				projDays(over, s.now()), over.Format("Jan 2, 2006"))
+			d.CapacityOutlook = fmt.Sprintf("Projected to EXCEED capacity in ~%dd (%s) even after pruning — add capacity or shorten retention.%s",
+				projDays(over, s.now()), over.Format("Jan 2, 2006"), min)
 			d.CapacityOver = true
 		} else {
-			d.CapacityOutlook = fmt.Sprintf("Projected to stay within capacity over the next %dd (schedule-aware).", mediaForecastDays)
+			d.CapacityOutlook = fmt.Sprintf("Projected to stay within capacity over the next %dd (schedule-aware).%s", mediaForecastDays, min)
 		}
 	}
 	// A sync-rule target carries its live backlog as a quiet line — lag, not an
