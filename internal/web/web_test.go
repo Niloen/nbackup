@@ -353,10 +353,10 @@ func TestMediumDetailRendersUsageChart(t *testing.T) {
 		t.Fatalf("code=%d, want 200", code)
 	}
 	for _, want := range []string{
-		"Used capacity over time", // the chart section header
-		"<svg",                    // the inline SVG chart itself
-		"3 recorded samples",      // the history caption
-		"90.00 kB",                // the final (post-prune) sample, drawn as the curve's end
+		"Used capacity", // the chart section header
+		"<svg",          // the inline SVG chart itself
+		"3 sample",      // the history caption
+		"90.00 kB",      // the final (post-prune) sample, drawn as the curve's end
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing %q:\n%s", want, body)
@@ -1324,6 +1324,33 @@ func TestMediaCapacityScheduleAware(t *testing.T) {
 	_, detail := get(t, h, "/media/disk")
 	if !strings.Contains(detail, "EXCEED capacity") {
 		t.Errorf("/media/disk should carry the dated over-capacity warning:\n%s", detail)
+	}
+}
+
+// TestUsageChartOverlay checks the used-capacity chart draws history and projection on
+// one set of axes: a solid history line, a dashed projection past a "now" divider, and a
+// red crossing marker where the projection pierces capacity.
+func TestUsageChartOverlay(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	series := []catalog.UsageSample{
+		{At: now.AddDate(0, 0, -2), Used: 300},
+		{At: now.AddDate(0, 0, -1), Used: 500},
+		{At: now, Used: 700},
+	}
+	forecast := []engine.ForecastPoint{
+		{Date: now.Format("2006-01-02"), Bytes: 700, Capacity: 1000},
+		{Date: now.AddDate(0, 0, 10).Format("2006-01-02"), Bytes: 1200, Capacity: 1000}, // over
+	}
+	svg := string(usageChartSVG(series, forecast, now, 1000, "capacity"))
+	for _, want := range []string{
+		`stroke-dasharray="5 4"`, // the projection curve
+		`>now</text>`,            // the divider label
+		`full ~Jul 21`,           // the dated capacity crossing
+		`var(--warn)`,            // the capacity ceiling line
+	} {
+		if !strings.Contains(svg, want) {
+			t.Errorf("usage chart overlay missing %q:\n%s", want, svg)
+		}
 	}
 }
 

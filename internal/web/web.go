@@ -801,15 +801,19 @@ func (s *Server) handleMedium(w http.ResponseWriter, r *http.Request) {
 		s.render(w, "medium", page{Title: name, Active: "media", Data: mediumData{NotFound: true, Name: name}})
 		return
 	}
-	d := newMediumData(st)
-	d.VolMap = s.buildMediumVolMap(name, st, showAll(r))
-	// Schedule-aware capacity outlook: does the dump cycle + projected growth outgrow
-	// this medium within the horizon, after pruning? Offline (no host probe).
+	// The schedule-aware fill forecast for this medium (offline — no host probe), reused
+	// for both the used-capacity chart's projection overlay and the outlook headline.
+	var fc []engine.ForecastPoint
 	for _, mf := range s.src.CapacityForecast(s.now(), mediaForecastDays) {
-		if mf.Medium != name || mf.VolumeStructured || len(mf.Points) == 0 || mf.Points[0].Capacity <= 0 {
-			continue
+		if mf.Medium == name && !mf.VolumeStructured {
+			fc = mf.Points
+			break
 		}
-		if over := firstOverCapacityDate(mf.Points); !over.IsZero() {
+	}
+	d := newMediumData(st, fc, s.now())
+	d.VolMap = s.buildMediumVolMap(name, st, showAll(r))
+	if len(fc) > 0 && fc[0].Capacity > 0 {
+		if over := firstOverCapacityDate(fc); !over.IsZero() {
 			d.CapacityOutlook = fmt.Sprintf("Projected to EXCEED capacity in ~%dd (%s) even after pruning — add capacity or shorten retention.",
 				projDays(over, s.now()), over.Format("Jan 2, 2006"))
 			d.CapacityOver = true
