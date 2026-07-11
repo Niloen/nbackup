@@ -173,7 +173,10 @@ func printMediumStats(st engine.MediumStats) {
 	if g.PerDay > 0 {
 		line := fmt.Sprintf("  growth:  ~%s/day", sizeutil.FormatBytes(g.PerDay))
 		if !g.ProjFull.IsZero() {
-			line += fmt.Sprintf("  (reaches capacity ~%s)", g.ProjFull.Format("2006-01-02"))
+			// Raw-growth extrapolation — ignores the pruning that keeps a bounded
+			// medium under capacity. `nb plan` and the webui carry the schedule-aware
+			// verdict; this is the naked slope, labeled so the two never seem to disagree.
+			line += fmt.Sprintf("  (at this rate, ~%s before pruning)", g.ProjFull.Format("2006-01-02"))
 		}
 		fmt.Println(line)
 	}

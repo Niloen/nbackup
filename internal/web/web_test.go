@@ -1071,8 +1071,9 @@ func TestHomeRollupSizeAnomaly(t *testing.T) {
 // medium (disk, s3): a 95%-used medium with a small protected (unreclaimable) set
 // stays quiet — raw Used sitting near capacity is the planner/prune steady state, not
 // a problem — while the same medium with a protected set at >=90% of capacity warns,
-// since pruning genuinely cannot free enough there. A medium whose recorded growth
-// projects filling within 30 days still warns with the projected day count either way.
+// since pruning genuinely cannot free enough there. A filling medium whose
+// schedule-aware forecast (growth net of pruning) still crosses capacity within the
+// horizon warns; one the forecast keeps under capacity stays silent.
 func TestHomeRollupCapacityForesight(t *testing.T) {
 	dir := t.TempDir()
 
@@ -1092,16 +1093,33 @@ func TestHomeRollupCapacityForesight(t *testing.T) {
 		t.Errorf("/ rollup missing the protected-set warn:\n%s", body)
 	}
 
+	// A filling medium (under 90% used) whose SCHEDULE-AWARE forecast crosses capacity
+	// within the horizon warns — the breach survives the pruning the forecast models.
+	// A medium whose forecast stays under capacity (pruning keeps up) stays silent, even
+	// though its raw bytes are growing: growth alone is not the signal.
 	now := time.Now()
+	today := now.Format("2006-01-02")
+	over := now.AddDate(0, 0, 15).Format("2006-01-02")
 	forecast := sampleSource()
-	forecast.media = append(forecast.media, engine.MediumInfo{Name: "vault", Type: "disk", Used: 700_000_000, Capacity: 1_000_000_000})
-	forecast.usage = []catalog.UsageSample{
-		{At: now.Add(-10 * 24 * time.Hour), Medium: "vault", Used: 500_000_000, Runs: 1},
-		{At: now, Medium: "vault", Used: 700_000_000, Runs: 2},
+	forecast.media = append(forecast.media,
+		engine.MediumInfo{Name: "vault", Type: "disk", Used: 700_000_000, Capacity: 1_000_000_000},
+		engine.MediumInfo{Name: "roomy", Type: "disk", Used: 400_000_000, Capacity: 1_000_000_000})
+	forecast.capacityForecast = []engine.MediumForecast{
+		{Medium: "vault", Points: []engine.ForecastPoint{
+			{Date: today, Bytes: 700_000_000, Capacity: 1_000_000_000},
+			{Date: over, Bytes: 1_200_000_000, Capacity: 1_000_000_000}, // outruns pruning
+		}},
+		{Medium: "roomy", Points: []engine.ForecastPoint{
+			{Date: today, Bytes: 400_000_000, Capacity: 1_000_000_000},
+			{Date: over, Bytes: 600_000_000, Capacity: 1_000_000_000}, // pruning keeps it under
+		}},
 	}
 	_, fbody := get(t, NewServer(forecast, dir).Handler(), "/")
-	if !strings.Contains(fbody, "vault projected full in ~15d") {
-		t.Errorf("/ rollup missing the growth-projection warn:\n%s", fbody)
+	if !strings.Contains(fbody, "vault projected full in ~") || !strings.Contains(fbody, "despite pruning") {
+		t.Errorf("/ rollup missing the schedule-aware capacity-forecast warn:\n%s", fbody)
+	}
+	if strings.Contains(fbody, "roomy projected full") {
+		t.Errorf("/ rollup warned on a growing medium the forecast keeps under capacity:\n%s", fbody)
 	}
 }
 
@@ -1729,16 +1747,18 @@ func TestDLEsPageSingleHostIsUngrouped(t *testing.T) {
 // capacity-as-a-promise) must not fire it even when the sawtooth's dip-to-peak
 // reads as growth — retention pressure owns that regime.
 func TestHomeRollupProjectionOnlyWhileFilling(t *testing.T) {
-	// A usage curve that projects "full in ~3d" (the fake's MediumStats summarizes
-	// f.usage against the medium's capacity).
-	usage := []catalog.UsageSample{
-		{Medium: "disk", At: time.Now().Add(-11 * 24 * time.Hour), Used: 200_000},
-		{Medium: "disk", At: time.Now().Add(-24 * time.Hour), Used: 800_000},
-	}
+	now := time.Now()
+	// A schedule-aware forecast that crosses capacity within the horizon — the warn
+	// the filling regime is meant to raise. The regime gate, not the forecast, decides
+	// whether it fires: a >=90%-used medium skips the forecast branch entirely.
+	forecast := []engine.MediumForecast{{Medium: "disk", Points: []engine.ForecastPoint{
+		{Date: now.Format("2006-01-02"), Bytes: 500_000, Capacity: 1_000_000},
+		{Date: now.AddDate(0, 0, 20).Format("2006-01-02"), Bytes: 1_200_000, Capacity: 1_000_000},
+	}}}
 	src := fakeSource{
-		media:     []engine.MediumInfo{{Name: "disk", Type: "disk", Used: 950_000, Capacity: 1_000_000}},
-		usage:     usage,
-		protected: map[string]int64{"disk": 100_000}, // comfortable protected set: retention pressure quiet too
+		media:            []engine.MediumInfo{{Name: "disk", Type: "disk", Used: 950_000, Capacity: 1_000_000}},
+		capacityForecast: forecast,
+		protected:        map[string]int64{"disk": 100_000}, // comfortable protected set: retention pressure quiet too
 	}
 	_, body := get(t, NewServer(src, t.TempDir()).Handler(), "/")
 	if strings.Contains(body, "projected full") {

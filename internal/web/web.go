@@ -1115,9 +1115,16 @@ func (s *Server) rollup(now time.Time, hist []report.Run) []alert {
 	// permanently near 100% by design. The protected residual only grows when
 	// retention itself (the recovery chains prune must keep) is the pressure, which
 	// is the actual actionable signal. Falls back to no warn if the residual can't
-	// be computed (unknown medium). Below that, the medium's own recorded growth
-	// (MediumStats.Growth, the same curve /media/<name> charts) projecting filling
-	// within 30 days still warns, unchanged.
+	// be computed (unknown medium). Below that (still filling), the SCHEDULE-AWARE
+	// forecast — growth AND the pruning designed to absorb it, the same simulation
+	// /media renders — warns only when it projects the medium over capacity anyway:
+	// raw growth alone (which every healthy medium has) is not a signal, an
+	// out-runs-pruning breach is. Self-clears the day the forecast shows pruning
+	// keeping up; no naive-slope nag.
+	fc := map[string]engine.MediumForecast{}
+	for _, mf := range s.src.CapacityForecast(now, mediaForecastDays) {
+		fc[mf.Medium] = mf
+	}
 	for _, m := range s.src.Media() {
 		if m.Capacity <= 0 {
 			continue
@@ -1167,10 +1174,16 @@ func (s *Server) rollup(now time.Time, hist []report.Run) []alert {
 			if float64(m.Used)/float64(m.Capacity) >= 0.9 {
 				continue
 			}
-			if st, ok := s.src.MediumStats(m.Name); ok && !st.Growth.ProjFull.IsZero() && st.Growth.ProjFull.Before(now.Add(30*24*time.Hour)) {
-				warn = append(warn, alert{Level: "warn", Tag: "capacity forecast",
-					Text: fmt.Sprintf("%s projected full in ~%dd", m.Name, projDays(st.Growth.ProjFull, now)),
-					Href: "/media/" + m.Name})
+			// Warn only when the schedule-aware forecast (growth net of pruning)
+			// still crosses capacity within the near-term horizon — a genuine
+			// out-runs-pruning breach, with a remedy. Growth that pruning absorbs
+			// yields no over-capacity day and stays silent.
+			if mf, has := fc[m.Name]; has {
+				if over := firstOverCapacityDate(mf.Points); !over.IsZero() && over.Before(now.Add(30*24*time.Hour)) {
+					warn = append(warn, alert{Level: "warn", Tag: "capacity forecast",
+						Text: fmt.Sprintf("%s projected full in ~%dd despite pruning — add capacity or a landing, or shorten retention", m.Name, projDays(over, now)),
+						Href: "/media/" + m.Name})
+				}
 			}
 		}
 	}
