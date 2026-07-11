@@ -204,8 +204,13 @@ func printDrillReport(r *engine.DrillReport) {
 	if r.Apply {
 		mode = "apply"
 	}
-	fmt.Printf("Recovery drill — %s (as of %s, medium %q, tier %s%s)\n\n",
-		mode, r.AsOf, r.Medium, r.Tier, unattendedTag(r.Unattended))
+	mediumFraming := fmt.Sprintf("medium %q", r.Medium)
+	if r.PerRoute {
+		// No --from pin: each DLE was drilled off its own landing route (shown per row).
+		mediumFraming = "medium per DLE route"
+	}
+	fmt.Printf("Recovery drill — %s (as of %s, %s, tier %s%s)\n\n",
+		mode, r.AsOf, mediumFraming, r.Tier, unattendedTag(r.Unattended))
 
 	if len(r.Targets) == 0 {
 		fmt.Printf("No DLEs due to drill (every DLE drilled within %s).\n", sizeutil.FormatDuration(r.Window))
@@ -217,8 +222,14 @@ func printDrillReport(r *engine.DrillReport) {
 		}
 		fmt.Printf("%s %d DLE(s) (window %s, sample of the riskiest):\n", verb, len(r.Targets), sizeutil.FormatDuration(r.Window))
 		tw := newTab(os.Stdout)
+		// Show the per-DLE MEDIUM column only when routing chose it — a --from pin is
+		// already named once in the header, so repeating it on every row is noise.
 		if r.Apply {
-			fmt.Fprintln(tw, "  DLE\tAS-OF\tRUN\tEGRESS\tRESULT")
+			if r.PerRoute {
+				fmt.Fprintln(tw, "  DLE\tAS-OF\tRUN\tMEDIUM\tEGRESS\tRESULT")
+			} else {
+				fmt.Fprintln(tw, "  DLE\tAS-OF\tRUN\tEGRESS\tRESULT")
+			}
 			for _, t := range r.Targets {
 				result := "OK"
 				if t.Class == drill.ClassSkipped {
@@ -226,20 +237,36 @@ func printDrillReport(r *engine.DrillReport) {
 				} else if !t.OK {
 					result = fmt.Sprintf("FAIL [%s]: %s", t.Class, t.Detail)
 				}
-				fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n", t.DLEDisplay, t.AsOf, t.RunID, sizeutil.FormatBytes(t.Bytes), result)
+				if r.PerRoute {
+					fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\t%s\n", t.DLEDisplay, t.AsOf, t.RunID, t.Medium, sizeutil.FormatBytes(t.Bytes), result)
+				} else {
+					fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n", t.DLEDisplay, t.AsOf, t.RunID, sizeutil.FormatBytes(t.Bytes), result)
+				}
 			}
 		} else {
-			fmt.Fprintln(tw, "  DLE\tAS-OF\tRUN\tEGRESS")
+			if r.PerRoute {
+				fmt.Fprintln(tw, "  DLE\tAS-OF\tRUN\tMEDIUM\tEGRESS")
+			} else {
+				fmt.Fprintln(tw, "  DLE\tAS-OF\tRUN\tEGRESS")
+			}
 			for _, t := range r.Targets {
-				fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", t.DLEDisplay, t.AsOf, t.RunID, sizeutil.FormatBytes(t.Bytes))
+				if r.PerRoute {
+					fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n", t.DLEDisplay, t.AsOf, t.RunID, t.Medium, sizeutil.FormatBytes(t.Bytes))
+				} else {
+					fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", t.DLEDisplay, t.AsOf, t.RunID, sizeutil.FormatBytes(t.Bytes))
+				}
 			}
 		}
 		tw.Flush()
+		readOff := fmt.Sprintf("off %q", r.Medium)
+		if r.PerRoute {
+			readOff = "off each DLE's route"
+		}
 		if r.Priced {
-			fmt.Printf("Forecast egress (drilled bytes read off %q): %s — ~%s (%s)\n\n",
-				r.Medium, sizeutil.FormatBytes(r.ForecastBytes), formatUSD(r.ForecastCost), r.Provider)
+			fmt.Printf("Forecast egress (drilled bytes read %s): %s — ~%s (%s)\n\n",
+				readOff, sizeutil.FormatBytes(r.ForecastBytes), formatUSD(r.ForecastCost), r.Provider)
 		} else {
-			fmt.Printf("Forecast egress (drilled bytes read off %q): %s\n\n", r.Medium, sizeutil.FormatBytes(r.ForecastBytes))
+			fmt.Printf("Forecast egress (drilled bytes read %s): %s\n\n", readOff, sizeutil.FormatBytes(r.ForecastBytes))
 		}
 	}
 

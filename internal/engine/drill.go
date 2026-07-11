@@ -73,7 +73,8 @@ type DrillResult struct {
 type DrillReport struct {
 	AsOf          string
 	Window        time.Duration
-	Medium        string
+	Medium        string // the run-wide framing medium: the --from pin, else the primary landing
+	PerRoute      bool   // no --from pin: each target was drilled off its own landing route (Medium is only the default framing)
 	Tier          drill.Tier
 	Apply         bool
 	Unattended    bool
@@ -145,12 +146,24 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 	if opts.AsOf == "" {
 		opts.AsOf = record.DateString(opts.Now)
 	}
-	medium := opts.Medium
-	if medium == "" {
-		medium = d.dep.LandingName()
+	// The drill medium is resolved PER DLE, not once. With --from unset, each DLE is
+	// drilled off its own landing route (primary first), narrowed to the media that
+	// actually hold its chain — so a DLE with two landings passes if EITHER copy is
+	// good, and only a DLE with no routed copy anywhere is ClassMissing. An explicit
+	// --from pins every target to that one medium (prove THAT copy; absent = a real
+	// missing). See drillMedium.
+	pin := opts.Medium
+	if pin != "" {
+		if _, ok := d.cfg.Media[pin]; !ok {
+			return nil, fmt.Errorf("unknown drill medium %q %s", pin, mediaNamesHint(d.cfg))
+		}
 	}
-	if _, ok := d.cfg.Media[medium]; !ok {
-		return nil, fmt.Errorf("unknown drill medium %q %s", medium, mediaNamesHint(d.cfg))
+	routes := promiseRoutes(d.cfg, d.cat)
+	// The concrete medium the run-wide framing names (header, WORM probe): the pin,
+	// else the primary landing. Per-target reads use drillMedium, not this.
+	defaultMedium := pin
+	if defaultMedium == "" {
+		defaultMedium = d.dep.LandingName()
 	}
 
 	dles := d.dles.names()
@@ -172,7 +185,7 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 	}
 
 	rep := &DrillReport{
-		AsOf: opts.AsOf, Window: opts.Window, Medium: medium, Tier: opts.Tier,
+		AsOf: opts.AsOf, Window: opts.Window, Medium: defaultMedium, PerRoute: pin == "", Tier: opts.Tier,
 		Apply: opts.Apply, Unattended: opts.Unattended, Ledger: ledger,
 	}
 	rep.NeverDrilled, rep.Overdue = ledger.Coverage(dles, opts.Window, opts.Now)
@@ -182,34 +195,41 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 	// honest cost of an offsite drill (an encrypted+compressed archive is all-or-
 	// nothing, so a structural/chain drill spends the full bytes; the sample tier
 	// reads one sealed part per archive, so it is priced on those parts alone).
-	if cm := d.acct.CostModelFor(medium); cm.Priced() {
+	// Price each target on the medium it will actually be read from — a cloud-routed
+	// DLE prices its provider's egress even when the run's default medium is a free
+	// local disk, and vice versa. Providers can differ across DLEs, so the run total
+	// aggregates them ("mixed" when it spans more than one paid provider).
+	for _, t := range targets {
+		m := d.drillMedium(t, routes, pin)
+		cm := d.acct.CostModelFor(m)
+		if !cm.Priced() {
+			continue
+		}
 		rep.Priced = true
-		rep.Provider = cm.Provider
+		if rep.Provider == "" {
+			rep.Provider = cm.Provider
+		} else if rep.Provider != cm.Provider {
+			rep.Provider = "mixed"
+		}
 		if opts.Tier == drill.TierSample {
 			var bytes, gets int64
-			for _, t := range targets {
-				rec, _ := ledger.Get(t.DLE)
-				if choices, ok := d.samplePlan(t.Steps, medium, rec.Drills); ok {
-					for _, c := range choices {
-						bytes += c.size
-						gets++
-					}
-				} else { // sealless copy: sampling falls back to the full checksum read
-					bytes += d.chainBytes(t.Steps)
-					gets += int64(len(t.Steps))
+			rec, _ := ledger.Get(t.DLE)
+			if choices, ok := d.samplePlan(t.Steps, m, rec.Drills); ok {
+				for _, c := range choices {
+					bytes += c.size
+					gets++
 				}
+			} else { // sealless copy: sampling falls back to the full checksum read
+				bytes += d.chainBytes(t.Steps)
+				gets += int64(len(t.Steps))
 			}
-			rep.ForecastCost = cm.ReadCost(bytes, gets)
+			rep.ForecastCost += cm.ReadCost(bytes, gets)
 		} else {
-			var refs []archiveio.Ref
-			for _, t := range targets {
-				for _, s := range t.Steps {
-					refs = append(refs, archiveio.Ref{Run: s.RunID, DLE: s.DLE, Level: s.Level})
-				}
+			refs := make([]archiveio.Ref, 0, len(t.Steps))
+			for _, s := range t.Steps {
+				refs = append(refs, archiveio.Ref{Run: s.RunID, DLE: s.DLE, Level: s.Level})
 			}
-			est := d.acct.EstimateRead(refs, medium)
-			rep.Provider = est.Provider
-			rep.ForecastCost = est.Cost
+			rep.ForecastCost += d.acct.EstimateRead(refs, m).Cost
 		}
 	}
 
@@ -218,20 +238,22 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 		// no ledger. The WORM probe is detect-only here (no probe object written).
 		for _, t := range targets {
 			rec, _ := ledger.Get(t.DLE)
-			b := d.targetBytes(t, medium, opts.Tier, rec.Drills)
+			m := d.drillMedium(t, routes, pin)
+			b := d.targetBytes(t, m, opts.Tier, rec.Drills)
 			rep.Targets = append(rep.Targets, DrillResult{
-				DLE: t.DLE, DLEDisplay: d.dles.display(t.DLE), RunID: t.RunID, AsOf: t.AsOf, Medium: medium, Tier: opts.Tier, Bytes: b,
+				DLE: t.DLE, DLEDisplay: d.dles.display(t.DLE), RunID: t.RunID, AsOf: t.AsOf, Medium: m, Tier: opts.Tier, Bytes: b,
 			})
 			rep.ForecastBytes += b
 		}
-		rep.Worm = d.wormProbe(medium, false, opts.Now)
+		rep.Worm = d.wormProbe(defaultMedium, false, opts.Now)
 		rep.Posture = d.posture(rep.Worm, 0)
 		return rep, nil
 	}
 
 	for _, t := range targets {
 		prev, _ := ledger.Get(t.DLE)
-		res := d.drillTarget(t, medium, prev.Drills, opts, logf)
+		m := d.drillMedium(t, routes, pin)
+		res := d.drillTarget(t, m, prev.Drills, opts, logf)
 		rep.Targets = append(rep.Targets, res)
 		rep.ForecastBytes += res.Bytes
 		switch {
@@ -244,7 +266,7 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 				rep.Failures++
 			}
 			ledger.Update(drill.Record{
-				DLE: t.DLE, LastDrill: opts.Now, Tier: opts.Tier.String(), Medium: medium,
+				DLE: t.DLE, LastDrill: opts.Now, Tier: opts.Tier.String(), Medium: m,
 				AsOf: t.AsOf, RunID: t.RunID, OK: res.OK,
 				Class: failureToken(res), Detail: res.Detail,
 				Bytes:  res.Bytes,
@@ -256,12 +278,49 @@ func (d *driller) Drill(opts DrillOptions, logf Logf) (*DrillReport, error) {
 		}
 	}
 
-	rep.Worm = d.wormProbe(medium, opts.Worm, opts.Now)
+	rep.Worm = d.wormProbe(defaultMedium, opts.Worm, opts.Now)
 	rep.Posture = d.posture(rep.Worm, rep.Failures)
 	// Recompute coverage against the freshly updated ledger.
 	rep.NeverDrilled, rep.Overdue = ledger.Coverage(dles, opts.Window, opts.Now)
 	d.toDisplay(rep.NeverDrilled)
 	return rep, nil
+}
+
+// drillMedium picks the medium to read a target from. A --from pin drills that one
+// medium for every target — the "prove THAT copy" mode, where a DLE absent from it is
+// a real ClassMissing. Otherwise it resolves per DLE: the DLE's configured landing
+// route (primary first, from promiseRoutes), narrowed to the media that actually hold
+// the whole chain, so a DLE with two landings drills whichever copy exists. When no
+// routed medium holds the chain it falls back to the route's primary (else the default
+// landing), so the resulting "no copy on medium %q" names the medium the copy was owed
+// to — an honest replication gap, not a lookup on the wrong medium.
+func (d *driller) drillMedium(t drill.Target, routes map[string][]string, pin string) string {
+	if pin != "" {
+		return pin
+	}
+	route := routes[t.DLE]
+	for _, m := range route {
+		if d.chainOn(t.Steps, m) {
+			return m
+		}
+	}
+	if len(route) > 0 {
+		return route[0]
+	}
+	return d.dep.LandingName()
+}
+
+// chainOn reports whether medium m holds a copy of every step in the restore chain —
+// the condition for reading the whole chain off a single medium (the drill's one-pass
+// model). A chain split across media fails here for each medium and drillMedium falls
+// back to the owed-to primary.
+func (d *driller) chainOn(steps []recovery.Step, m string) bool {
+	for _, s := range steps {
+		if _, ok := placementOn(d.cat, s.RunID, m); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // namedTargets resolves user-named DLEs (slug or host:path) into drill targets,

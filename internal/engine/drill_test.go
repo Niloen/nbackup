@@ -633,6 +633,81 @@ func TestRestoreCatchesSilentCorruption(t *testing.T) {
 // TestDrillNamedRetry pins the operator's re-drill: naming a DLE drills it
 // unconditionally — bypassing the window rotation that would otherwise rank a
 // just-failed DLE (recent timestamp) behind never-drilled ones — and a passing
+// TestDrillRoutedMediumFallback: a DLE with two landings whose copy is absent from
+// the PRIMARY landing but present on the secondary must still pass an unpinned drill —
+// the drill's job is to prove the DLE is recoverable, and either copy proves it. It
+// drills whichever landing holds the chain (recording that medium), and only an
+// explicit --from at the empty medium reports the copy missing there.
+func TestDrillRoutedMediumFallback(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "a.txt"), "full content")
+	diskDir, offsiteDir := t.TempDir(), t.TempDir()
+
+	// Both media are landings: `landing: [disk, offsite]` fans every dump out to both.
+	cfg := &config.Config{
+		Landing: config.MediumList{"disk", "offsite"},
+		Media: map[string]config.Media{
+			"disk":    {Type: "disk", Params: map[string]string{"path": diskDir}},
+			"offsite": {Type: "disk", Params: map[string]string{"path": offsiteDir}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skip("GNU tar not available")
+	}
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("full dump: %v", err)
+	}
+	write(t, filepath.Join(src, "b.txt"), "incremental content")
+	if _, err := eng.Run(context.Background(), time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC), nil); err != nil {
+		t.Fatalf("incremental dump: %v", err)
+	}
+	now := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+
+	// Drop the PRIMARY (disk) copies of the whole chain: the DLE now lives only on the
+	// secondary landing — exactly the state that used to false-fail as "no copy on disk".
+	for _, run := range []string{"run-2026-06-21.000000", "run-2026-06-22.000000"} {
+		if _, err := eng.cat.RemovePlacement(run, "disk"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Unpinned: the drill follows the route to the copy on offsite and passes.
+	rep, err := eng.Drill(DrillOptions{Tier: drill.TierStructural, Sample: 1, Window: 30 * 24 * time.Hour, Apply: true, Now: now}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.PerRoute {
+		t.Fatal("unpinned drill should be PerRoute")
+	}
+	if rep.Failures != 0 || len(rep.Targets) != 1 || !rep.Targets[0].OK {
+		t.Fatalf("routed drill = %+v (failures %d)", rep.Targets, rep.Failures)
+	}
+	if rep.Targets[0].Medium != "offsite" {
+		t.Fatalf("drilled medium = %q, want offsite (the landing that holds the copy)", rep.Targets[0].Medium)
+	}
+
+	// Pinning the empty medium still reports the copy genuinely missing there. Window 0
+	// forces reselection — the DLE was just drilled OK, so the rotation would skip it.
+	rep, err = eng.Drill(DrillOptions{Tier: drill.TierStructural, Medium: "disk", Sample: 1, Window: 0, Apply: true, Now: now.Add(time.Hour)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.PerRoute {
+		t.Fatal("a --from pin is not PerRoute")
+	}
+	if rep.Failures != 1 || rep.Targets[0].Class != drill.ClassMissing {
+		t.Fatalf("pinned-to-empty drill = %+v (failures %d)", rep.Targets, rep.Failures)
+	}
+}
+
 // named drill overwrites the recorded failure, clearing the warning. An unknown
 // name is an error, never a silent drill of nothing.
 func TestDrillNamedRetry(t *testing.T) {
