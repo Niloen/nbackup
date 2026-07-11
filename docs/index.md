@@ -34,6 +34,12 @@ as **equal targets**, and makes the common modern shape — land fast on disk,
 then replicate offsite — a first-class operation. One static binary, driven by
 cron: no daemons, no database (the catalog is a cache one media scan rebuilds).
 
+[![NBackup web dashboard — health overview, recoverability, and media capacity](images/webui/overview.png)](features/web){: .mt-4 }
+
+*`nb web` — a read-only dashboard for the whole fleet: recoverability, capacity,
+and every run's placement. [Take the tour](features/web).*
+{: .fs-3 .fw-300 }
+
 ## What makes it different
 
 - **Recoverability is proven, not assumed.** `nb drill` actually restores a
