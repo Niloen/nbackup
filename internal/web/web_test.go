@@ -45,10 +45,11 @@ type fakeSource struct {
 	// routes map defaults to "every archive routed to every medium the run has a
 	// copy on" — the judgment most fixtures were written against, where each
 	// placement owes the whole run.
-	routes    map[string][]string
-	syncRules []config.SyncRule
-	syncLags  []engine.SyncLag
-	forecast  []*planner.Plan // canned offline forecast for the ghost calendar; nil = no ghosts
+	routes           map[string][]string
+	syncRules        []config.SyncRule
+	syncLags         []engine.SyncLag
+	forecast         []*planner.Plan         // canned offline forecast for the ghost calendar; nil = no ghosts
+	capacityForecast []engine.MediumForecast // canned per-medium fill forecast for /media
 }
 
 func (f fakeSource) Runs() []*catalog.Run { return f.runs }
@@ -214,6 +215,10 @@ func (f fakeSource) DrillWindow() time.Duration { return 30 * 24 * time.Hour }
 func (f fakeSource) StaleDLEs(now time.Time) []catalog.StaleDLE { return f.stale }
 
 func (f fakeSource) Forecast(start time.Time, days int) []*planner.Plan { return f.forecast }
+
+func (f fakeSource) CapacityForecast(start time.Time, days int) []engine.MediumForecast {
+	return f.capacityForecast
+}
 
 // DLESummaries aggregates the fake's runs per DLE, mirroring catalog.DLESummaries
 // closely enough to render the DLE pages (every archive here is on "disk").
@@ -1276,6 +1281,44 @@ func TestGhostCalendar(t *testing.T) {
 	// A ghost is never a run link (nothing committed to link to).
 	if strings.Contains(body, `href="/runs/"`) {
 		t.Errorf("/dles linked a ghost cell to a run:\n%s", body)
+	}
+}
+
+// TestMediaCapacityScheduleAware checks the schedule-aware capacity surfaces: /media
+// shows a "(sched)" projected-full date for a medium the forecast fills, "within
+// capacity" for one it doesn't, and the medium detail page carries the dated warning.
+func TestMediaCapacityScheduleAware(t *testing.T) {
+	now := time.Now()
+	today := now.Format("2006-01-02")
+	over := now.AddDate(0, 0, 20).Format("2006-01-02")
+	src := fakeSource{
+		media: []engine.MediumInfo{
+			{Name: "disk", Type: "disk", Capacity: 1000},
+			{Name: "cloud", Type: "cloud", Capacity: 1000},
+		},
+		capacityForecast: []engine.MediumForecast{
+			{Medium: "disk", Points: []engine.ForecastPoint{
+				{Date: today, Bytes: 500, Capacity: 1000},
+				{Date: over, Bytes: 1500, Capacity: 1000}, // outgrows capacity
+			}},
+			{Medium: "cloud", Points: []engine.ForecastPoint{
+				{Date: today, Bytes: 200, Capacity: 1000}, // stays within
+			}},
+		},
+	}
+	h := NewServer(src, t.TempDir()).Handler()
+
+	_, list := get(t, h, "/media")
+	if !strings.Contains(list, "(sched)") {
+		t.Errorf("/media should mark the filling medium schedule-aware:\n%s", list)
+	}
+	if !strings.Contains(list, "within capacity") {
+		t.Errorf("/media should say the clear medium stays within capacity:\n%s", list)
+	}
+
+	_, detail := get(t, h, "/media/disk")
+	if !strings.Contains(detail, "EXCEED capacity") {
+		t.Errorf("/media/disk should carry the dated over-capacity warning:\n%s", detail)
 	}
 }
 

@@ -65,6 +65,10 @@ type Source interface {
 	// browser hitting /dles can never trigger a host connection (see engine.SimulateOffline).
 	// A read-only status view stays read-only: this returns a projection, mutates nothing.
 	Forecast(start time.Time, days int) []*planner.Plan
+	// CapacityForecast projects each size-structured medium's fill forward `days` from
+	// `start` — the schedule-aware "when does this medium fill up" the /media page draws.
+	// Also OFFLINE by contract (see engine.ForecastCapacityOffline).
+	CapacityForecast(start time.Time, days int) []engine.MediumForecast
 }
 
 // Server renders the status pages from a Source plus the catalog workdir, where the
@@ -750,8 +754,19 @@ func heatLevels(set map[int]bool) string {
 	return strings.Join(parts, ", ")
 }
 
+// mediaForecastDays is how far the /media page projects each medium's fill forward for
+// its schedule-aware "projected full" date — a season, enough to catch a medium that
+// fills within a few dump cycles without an unboundedly long simulation.
+const mediaForecastDays = 90
+
 func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
-	rows := newMediaRows(s.src.Media(), s.src.MediumStats, s.now())
+	fills := map[string][]engine.ForecastPoint{}
+	for _, mf := range s.src.CapacityForecast(s.now(), mediaForecastDays) {
+		if !mf.VolumeStructured {
+			fills[mf.Medium] = mf.Points
+		}
+	}
+	rows := newMediaRows(s.src.Media(), s.src.MediumStats, fills, s.now())
 	s.render(w, "media", page{Title: "Media", Active: "media", Data: rows})
 }
 
@@ -772,6 +787,20 @@ func (s *Server) handleMedium(w http.ResponseWriter, r *http.Request) {
 	}
 	d := newMediumData(st)
 	d.VolMap = s.buildMediumVolMap(name, st, showAll(r))
+	// Schedule-aware capacity outlook: does the dump cycle + projected growth outgrow
+	// this medium within the horizon, after pruning? Offline (no host probe).
+	for _, mf := range s.src.CapacityForecast(s.now(), mediaForecastDays) {
+		if mf.Medium != name || mf.VolumeStructured || len(mf.Points) == 0 || mf.Points[0].Capacity <= 0 {
+			continue
+		}
+		if over := firstOverCapacityDate(mf.Points); !over.IsZero() {
+			d.CapacityOutlook = fmt.Sprintf("Projected to EXCEED capacity in ~%dd (%s) even after pruning — add capacity or shorten retention.",
+				projDays(over, s.now()), over.Format("Jan 2, 2006"))
+			d.CapacityOver = true
+		} else {
+			d.CapacityOutlook = fmt.Sprintf("Projected to stay within capacity over the next %dd (schedule-aware).", mediaForecastDays)
+		}
+	}
 	// A sync-rule target carries its live backlog as a quiet line — lag, not an
 	// alert: the next `nb sync` (usually cron's) closes it.
 	for _, lag := range s.src.SyncLags() {

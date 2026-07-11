@@ -311,3 +311,13 @@ func (e *engineSource) Forecast(start time.Time, days int) []*planner.Plan {
 	}
 	return plans
 }
+
+// CapacityForecast projects per-medium fill OFFLINE (no archiver probe), so /media can
+// draw "when does this fill up" without opening an SSH connection. nil on error.
+func (e *engineSource) CapacityForecast(start time.Time, days int) []engine.MediumForecast {
+	caps, err := e.engine().ForecastCapacityOffline(start, days)
+	if err != nil {
+		return nil
+	}
+	return caps
+}

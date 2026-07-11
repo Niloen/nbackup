@@ -1831,18 +1831,21 @@ func dumpTimeSuffix(secs float64) string {
 // permanently near-full by design), so Pool routes the template to PoolRoom instead.
 type mediaRow struct {
 	engine.MediumInfo
-	UtilPct  float64 // 0 when unbounded
-	Over     bool    // used past a bounded capacity (sync/copy can land runs over)
-	ProjFull string  // "~Nd", or "—" when unbounded or not projected
-	Pool     bool    // this medium's pool holds one or more labeled volumes
-	PoolRoom string  // "K of N with room" — set only when Pool
+	UtilPct   float64 // 0 when unbounded
+	Over      bool    // used past a bounded capacity (sync/copy can land runs over)
+	ProjFull  string  // "~Nd", or "—" when unbounded or not projected
+	ProjSched bool    // ProjFull is schedule-aware (forecast) rather than naive-linear growth
+	Pool      bool    // this medium's pool holds one or more labeled volumes
+	PoolRoom  string  // "K of N with room" — set only when Pool
 }
 
-// newMediaRows merges the medium summaries with each one's recorded growth
-// (MediumStats) into the /media list's view rows. stats is a medium-name lookup
-// (Source.MediumStats) rather than the whole Source, so this stays a pure view
-// function callable from a test fixture as well as the handler.
-func newMediaRows(media []engine.MediumInfo, stats func(string) (engine.MediumStats, bool), now time.Time) []mediaRow {
+// newMediaRows merges the medium summaries with each one's growth into the /media
+// list's view rows. It prefers the SCHEDULE-AWARE fill forecast (fills, from the offline
+// simulation — accounts for the dump cycle, projected growth, and pruning) for the
+// "projected full" date, falling back to the naive linear projection from recorded usage
+// (MediumStats.Growth) for a medium the forecast doesn't cover. stats/fills are lookups
+// rather than the whole Source, so this stays a pure view function callable from a test.
+func newMediaRows(media []engine.MediumInfo, stats func(string) (engine.MediumStats, bool), fills map[string][]engine.ForecastPoint, now time.Time) []mediaRow {
 	rows := make([]mediaRow, 0, len(media))
 	for _, m := range media {
 		row := mediaRow{MediumInfo: m, ProjFull: "—"}
@@ -1851,16 +1854,39 @@ func newMediaRows(media []engine.MediumInfo, stats func(string) (engine.MediumSt
 			row.Over = m.Used > m.Capacity
 		}
 		st, ok := stats(m.Name)
-		if m.Volumes > 0 {
+		switch {
+		case m.Volumes > 0:
 			row.Pool = true
 			withRoom, total := poolRoomCount(st.PerVolume, st.PoolVolumes)
 			row.PoolRoom = fmt.Sprintf("%d of %d with room", withRoom, total)
-		} else if ok && !st.Growth.ProjFull.IsZero() {
+		case len(fills[m.Name]) > 0:
+			// Schedule-aware: the first day the medium can't fit its retained set under
+			// capacity even after pruning. No such day means it stays within the horizon.
+			row.ProjSched = true
+			if over := firstOverCapacityDate(fills[m.Name]); !over.IsZero() {
+				row.ProjFull = fmt.Sprintf("~%dd", projDays(over, now))
+			} else {
+				row.ProjFull = "clear" // stays within capacity across the forecast horizon
+			}
+		case ok && !st.Growth.ProjFull.IsZero():
 			row.ProjFull = fmt.Sprintf("~%dd", projDays(st.Growth.ProjFull, now))
 		}
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// firstOverCapacityDate returns the first day a medium's fill forecast cannot fit its
+// retained set under capacity, or the zero time if it stays within it.
+func firstOverCapacityDate(points []engine.ForecastPoint) time.Time {
+	for _, p := range points {
+		if p.OverCapacity() {
+			if t, err := time.Parse("2006-01-02", p.Date); err == nil {
+				return t
+			}
+		}
+	}
+	return time.Time{}
 }
 
 // poolRoomCount reports how many of a pool's labeled volumes still have room to
@@ -1925,6 +1951,13 @@ type mediumData struct {
 	HistLast  time.Time
 	PerDay    int64     // average recorded growth, bytes/day; 0 when not derivable
 	ProjFull  time.Time // projected capacity-reached date; zero when not projected
+
+	// CapacityOutlook is the SCHEDULE-AWARE forecast headline (dump cycle + projected
+	// growth + pruning), distinct from the naive-linear ProjFull above: a dated warning
+	// when the medium is projected to outgrow capacity, or a reassurance that it fits
+	// across the horizon. "" when the medium isn't covered (unbounded, tape, or no route).
+	CapacityOutlook string
+	CapacityOver    bool // the outlook is a warning, for styling
 
 	Chart  template.HTML   // the used-over-time area chart, or "" with fewer than two samples
 	Points []usagePointRow // the per-run retained series, newest run first
