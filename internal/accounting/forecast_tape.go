@@ -102,6 +102,7 @@ func (a *Accountant) tapeHistory(name string, minAge time.Duration, now time.Tim
 // rotation needs, whether or not a freed reel is physically relabeled.
 func (a *Accountant) tapeProjection(name string, minAge time.Duration, usable int64, start time.Time, plans []*planner.Plan) []VolumePoint {
 	appendable := a.MediumAppendable(name)
+	limit, capped := a.mediumRunCap(name)
 	type reel struct {
 		remaining int64
 		runs      map[string]bool
@@ -152,14 +153,18 @@ func (a *Accountant) tapeProjection(name string, minAge time.Duration, usable in
 		runID := record.IDFromTime(date)
 		fresh := true
 		for _, it := range plan.Items {
-			if !contains(a.mediaFor(it.DLE.DumpTypeName()), name) {
-				continue // this DLE lands on another medium
+			if !contains(a.copyMediaFor(it.DLE.DumpTypeName()), name) {
+				continue // this medium neither routes nor receives a sync copy of this DLE
 			}
 			pack(runID, it.EstBytes, fresh)
 			fresh = false
 			sim = append(sim, record.Archive{Run: runID, DLE: it.Name, Level: it.Level, Compressed: it.EstBytes, CreatedAt: date})
 		}
-		floor := retention.Compute(sim, sim, minAge, date)
+		kept := sim
+		if capped { // a last-N sync tape counts only its most recent runs as in use
+			kept = capRuns(sim, limit)
+		}
+		floor := retention.Compute(kept, kept, minAge, date)
 		var inUse int64
 		for _, rl := range reels {
 			for r := range rl.runs {

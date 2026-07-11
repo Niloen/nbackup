@@ -372,6 +372,63 @@ func TestForecastRestoreDepth(t *testing.T) {
 	}
 }
 
+// TestForecastSyncTargetProjected checks that a medium which only ever RECEIVES sync
+// copies (never a landing route) is now forecast: an auto-mirror rule copies the landing
+// to a vault, and the vault's capacity forecast holds those copies.
+func TestForecastSyncTargetProjected(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), strings.Repeat("sync-copy-", 12000)) // ~120 KB full
+
+	cfg := &config.Config{
+		Landing: config.MediumList{"disk"},
+		Media: map[string]config.Media{
+			"disk":  {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"vault": {Type: "cloud", Capacity: "50MB", MinimumAge: "30d", Params: map[string]string{"url": "file://" + t.TempDir()}},
+		},
+		Sync:     []config.SyncRule{{To: "vault"}}, // auto-mirror the landing offsite
+		Cycle:    "7d",
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	if _, err := eng.Run(context.Background(), start, nil); err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+	slug := config.DLE{Host: "localhost", Path: src}.Name()
+	if err := report.Append(cfg.WorkdirPath(), report.Run{
+		Command: report.CommandDump, StartedAt: start, EndedAt: start,
+		DumpStats: []report.DLEStat{{DLE: slug, Level: 0, Orig: 120_000, Out: 120_000}},
+	}); err != nil {
+		t.Fatalf("seed run-log: %v", err)
+	}
+
+	forecasts, err := eng.ForecastCapacityOffline(start.AddDate(0, 0, 1), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vault *MediumForecast
+	for i := range forecasts {
+		if forecasts[i].Medium == "vault" {
+			vault = &forecasts[i]
+		}
+	}
+	if vault == nil {
+		t.Fatalf("sync target 'vault' is not forecast: %+v", forecasts)
+	}
+	if len(vault.Points) == 0 || vault.Points[len(vault.Points)-1].Bytes <= 0 {
+		t.Errorf("vault should accumulate the sync copies it receives: %+v", vault.Points)
+	}
+}
+
 // TestForecastTapeVolumes checks the tape cartridge-count forecast: a small-volume,
 // long-retention pool accumulates cartridges as daily fulls pile up faster than they age
 // out, tripping the "run out of tapes" signal past its slot count.

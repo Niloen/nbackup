@@ -143,8 +143,8 @@ func (a *Accountant) ForecastCapacity(start time.Time, plans []*planner.Plan) []
 	targets := map[string]bool{}
 	for _, plan := range plans {
 		for _, it := range plan.Items {
-			for _, m := range a.mediaFor(it.DLE.DumpTypeName()) {
-				targets[m] = true
+			for _, m := range a.copyMediaFor(it.DLE.DumpTypeName()) {
+				targets[m] = true // landing routes AND sync targets — so a copy-only tier is forecast
 			}
 		}
 	}
@@ -189,6 +189,7 @@ func (a *Accountant) forecastMedium(name string, start time.Time, plans []*plann
 	cost := a.CostModelFor(name)
 	minAge := a.d.Cfg.MinAgeFor(a.d.Cfg.Media[name])
 	capacity := prof.TotalBytes()
+	limit, capped := a.mediumRunCap(name)
 	working := append([]record.Archive(nil), a.d.Cat.ArchivesOn(name)...)
 	points := make([]ForecastPoint, 0, len(plans))
 	for i, plan := range plans {
@@ -200,11 +201,14 @@ func (a *Accountant) forecastMedium(name string, start time.Time, plans []*plann
 		working = dropRun(working, runID)
 		var runBytes int64
 		for _, it := range plan.Items {
-			if !contains(a.mediaFor(it.DLE.DumpTypeName()), name) {
-				continue // this DLE's authoritative copy lands elsewhere
+			if !contains(a.copyMediaFor(it.DLE.DumpTypeName()), name) {
+				continue // this medium neither routes nor receives a sync copy of this DLE
 			}
 			working = append(working, record.Archive{Run: runID, DLE: it.Name, Level: it.Level, Compressed: it.EstBytes, CreatedAt: date})
 			runBytes += it.EstBytes
+		}
+		if capped {
+			working = capRuns(working, limit) // a sync target mirrors only its last N runs
 		}
 
 		// Reclaim against this medium's capacity, honoring the retention floor.
@@ -336,6 +340,7 @@ func (a *Accountant) restoreDepth(name string, start time.Time, plans []*planner
 	if capacity <= 0 || len(plans) == 0 {
 		return RestoreDepth{}
 	}
+	limit, capped := a.mediumRunCap(name)
 	var sim []record.Archive
 	end := start
 	for i, plan := range plans {
@@ -343,11 +348,14 @@ func (a *Accountant) restoreDepth(name string, start time.Time, plans []*planner
 		end = date
 		runID := record.IDFromTime(date)
 		for _, it := range plan.Items {
-			if !contains(a.mediaFor(it.DLE.DumpTypeName()), name) {
+			if !contains(a.copyMediaFor(it.DLE.DumpTypeName()), name) {
 				continue
 			}
 			sim = append(sim, record.Archive{Run: runID, DLE: it.Name, Level: it.Level, Compressed: it.EstBytes, CreatedAt: date})
 		}
+	}
+	if capped {
+		sim = capRuns(sim, limit) // a last-N sync target caps how deep restore history goes
 	}
 	if len(sim) == 0 {
 		return RestoreDepth{}
@@ -403,6 +411,114 @@ func (a *Accountant) mediaFor(dumptype string) []string {
 		return nil
 	}
 	return m
+}
+
+// copyMediaFor returns every medium that will hold a copy of a dumptype's archives: its
+// landing route PLUS every sync target reachable from those media through the sync rules
+// (transitive closure). An auto rule (from: "") mirrors the config landing. This is the
+// routing the capacity forecast uses so a sync-target medium — an offsite/archive tier
+// that never appears in a landing route — is projected too, not just the landing.
+//
+// Approximations (documented, conservative): auto rules are sourced from the config
+// landing (a dumptype routed only to a custom medium is not auto-mirrored); a rule's
+// `last:` window is applied as a per-target run cap (see mediumRunCap), not modeled per
+// hop; per-run source selection (sourceFor) is not replayed. The per-medium retention in
+// forecastMedium ages the projected copies exactly as it does routed archives.
+func (a *Accountant) copyMediaFor(dumptype string) []string {
+	set := map[string]bool{}
+	for _, m := range a.mediaFor(dumptype) {
+		set[m] = true
+	}
+	landings, _ := a.d.Cfg.LandingNames()
+	for changed := true; changed; {
+		changed = false
+		for _, r := range a.d.Cfg.Sync {
+			if r.To == "" || set[r.To] {
+				continue
+			}
+			from := false
+			if r.From == "" { // auto: mirrors the landing
+				for _, l := range landings {
+					if set[l] {
+						from = true
+						break
+					}
+				}
+			} else {
+				from = set[r.From]
+			}
+			if from {
+				set[r.To] = true
+				changed = true
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for m := range set {
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// mediumRunCap reports the most-recent-run limit a PURE sync target holds — the loosest
+// `last:` among the rules feeding it — so an expensive tier (a `last: 30` tape) is not
+// projected holding its whole retention window. A landing route, or a target fed by any
+// unbounded (last: 0) rule, is uncapped: it holds everything its own retention keeps.
+func (a *Accountant) mediumRunCap(name string) (limit int, capped bool) {
+	dts := []string{""}
+	for dt := range a.d.Cfg.DumpTypes {
+		dts = append(dts, dt)
+	}
+	for _, dt := range dts {
+		if contains(a.mediaFor(dt), name) {
+			return 0, false // a landing route holds all its routed runs
+		}
+	}
+	for _, r := range a.d.Cfg.Sync {
+		if r.To != name {
+			continue
+		}
+		if r.Last <= 0 {
+			return 0, false // an unbounded rule feeds it — no run cap
+		}
+		capped = true
+		if r.Last > limit {
+			limit = r.Last
+		}
+	}
+	return limit, capped
+}
+
+// capRuns keeps only the `limit` most-recent runs' archives (run ids sort chronologically),
+// modelling a sync target that mirrors just the last N runs of its source.
+func capRuns(working []record.Archive, limit int) []record.Archive {
+	if limit <= 0 {
+		return working
+	}
+	ids := map[string]bool{}
+	for _, a := range working {
+		ids[a.Run] = true
+	}
+	if len(ids) <= limit {
+		return working
+	}
+	sorted := make([]string, 0, len(ids))
+	for id := range ids {
+		sorted = append(sorted, id)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(sorted))) // newest first
+	keep := map[string]bool{}
+	for i := 0; i < limit; i++ {
+		keep[sorted[i]] = true
+	}
+	out := make([]record.Archive, 0, len(working)) // fresh slice: never alias the caller's backing
+	for _, a := range working {
+		if keep[a.Run] {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func contains(ss []string, s string) bool {
