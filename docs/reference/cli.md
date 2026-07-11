@@ -70,7 +70,7 @@ before or after the subcommand and its arguments.
 
 | Flag | Purpose |
 |---|---|
-| `-c, --config` | Path to config file (default `nbackup.yaml`) |
+| `-c, --config` | Path to config file (default `nbackup.yaml`, or `$NBACKUP_CONFIG` if set) |
 | `--catalog` | Catalog directory (overrides config); no short flag |
 | `-q, --quiet` | Suppress progress output |
 

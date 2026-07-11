@@ -19,8 +19,12 @@ import (
 	"github.com/Niloen/nbackup/internal/record"
 )
 
-// DefaultConfigPath is used when -c is not given.
+// DefaultConfigPath is used when neither -c nor $NBACKUP_CONFIG is given.
 const DefaultConfigPath = "nbackup.yaml"
+
+// ConfigEnv seeds the -c default so a cron/systemd unit can set the config path
+// once in the environment. An explicit -c flag overrides it.
+const ConfigEnv = "NBACKUP_CONFIG"
 
 // DefaultCatalog is used when neither --catalog nor config provides a catalog path.
 const DefaultCatalog = "nbackup-catalog"

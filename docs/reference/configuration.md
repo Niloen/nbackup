@@ -18,7 +18,9 @@ Every `nbackup.yaml` block, top to bottom, with a faithful example for each.
 ---
 
 NBackup reads a single YAML file (default `nbackup.yaml`, override with
-`-c/--config`). The blocks below are listed in the order they appear in the
+`-c/--config` or the `NBACKUP_CONFIG` environment variable — handy for a
+cron/systemd unit that sets the path once; an explicit `-c` still wins). The
+blocks below are listed in the order they appear in the
 shipped [`nbackup.example.yaml`](../../nbackup.example.yaml). Unknown keys are
 rejected, so a typo fails loudly rather than being ignored.
 

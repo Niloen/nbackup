@@ -80,7 +80,15 @@ func NewRootCmd() *cobra.Command {
 	})
 
 	pf := root.PersistentFlags()
-	pf.StringVarP(&a.cfgPath, "config", "c", DefaultConfigPath, "path to config file")
+	// $NBACKUP_CONFIG seeds the -c default so a cron/systemd unit can point at its
+	// config once in the environment; an explicit -c still overrides it. A path from
+	// the env is treated like an explicit one (loadConfigOrDefaultCatalog hard-errors
+	// if it is absent), so a typo'd unit setting can't masquerade as an empty catalog.
+	cfgDefault := DefaultConfigPath
+	if v := os.Getenv(ConfigEnv); v != "" {
+		cfgDefault = v
+	}
+	pf.StringVarP(&a.cfgPath, "config", "c", cfgDefault, "path to config file ($"+ConfigEnv+")")
 	// --catalog has no short flag: a `-C`/`-c` pair distinguished only by case is
 	// an easy slip on two heavily-used globals.
 	pf.StringVar(&a.catalog, "catalog", "", "catalog directory (overrides config)")
