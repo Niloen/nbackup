@@ -89,8 +89,25 @@ type MediumForecast struct {
 	VolumeStructured bool
 	Points           []ForecastPoint // byte fill curve (projection) — disk/cloud
 	History          []ForecastPoint // reconstructed protected-floor history (Bytes = floor); byte media only
+	Depth            RestoreDepth    // what the capacity buys in restore-point age; byte media only
 	Volumes          []VolumePoint   // cartridge-count curve — tape (history then projection)
 	VolumeCeiling    int64           // available cartridges (config slots); 0 = unbounded (hand-loaded)
+}
+
+// DepthMark is the capacity a medium needs to retain restore points back a given number
+// of weeks — the retention floor computed with minimum_age = Weeks. Increasing in Weeks.
+type DepthMark struct {
+	Weeks int
+	Bytes int64
+}
+
+// RestoreDepth answers "what is my capacity buying me in restore-point age": how many
+// weeks of restore history the medium's capacity retains, the marginal bytes per extra
+// week around that depth, and the per-week byte marks for the chart's right-axis ticks.
+type RestoreDepth struct {
+	CapacityWeeks float64     // restore depth the capacity retains (weeks; interpolated)
+	PerWeekBytes  int64       // marginal bytes to buy one more week around that depth
+	Marks         []DepthMark // byte cost per week horizon (for axis ticks)
 }
 
 // VolumePoint is one day of a tape pool's cartridge-usage curve: how many cartridges hold
@@ -152,6 +169,7 @@ func (a *Accountant) ForecastCapacity(start time.Time, plans []*planner.Plan) []
 		} else {
 			mf.Points = a.forecastMedium(name, start, plans)
 			mf.History = a.protectedHistory(name, a.d.Cfg.MinAgeFor(a.d.Cfg.Media[name]), start)
+			mf.Depth = a.restoreDepth(name, start, plans, prof.TotalBytes())
 		}
 		out = append(out, mf)
 	}
@@ -301,6 +319,80 @@ func (a *Accountant) landingForSlug(slug string, plans []*planner.Plan) string {
 		}
 	}
 	return ""
+}
+
+// depthWeeks are the restore-depth horizons the forecast prices (capped to the projected
+// window). Each answers "how much capacity to keep restore points back this many weeks."
+var depthWeeks = []int{1, 2, 4, 8, 12}
+
+// restoreDepth prices what a medium's capacity buys in restore-point age. It accumulates
+// the projection UNCAPPED (no reclaim — so it can measure depths deeper than today's
+// capacity retains), then for each horizon computes the retention floor with minimum_age
+// set to that many weeks: the capacity needed to guarantee a restore to any point that
+// far back. Where the actual capacity falls among those marks is the depth it retains, and
+// the slope there is the bytes an extra week costs. Reuses the same retention kernel, just
+// with a swapped window.
+func (a *Accountant) restoreDepth(name string, start time.Time, plans []*planner.Plan, capacity int64) RestoreDepth {
+	if capacity <= 0 || len(plans) == 0 {
+		return RestoreDepth{}
+	}
+	var sim []record.Archive
+	end := start
+	for i, plan := range plans {
+		date := start.AddDate(0, 0, i)
+		end = date
+		runID := record.IDFromTime(date)
+		for _, it := range plan.Items {
+			if !contains(a.mediaFor(it.DLE.DumpTypeName()), name) {
+				continue
+			}
+			sim = append(sim, record.Archive{Run: runID, DLE: it.Name, Level: it.Level, Compressed: it.EstBytes, CreatedAt: date})
+		}
+	}
+	if len(sim) == 0 {
+		return RestoreDepth{}
+	}
+	windowDays := end.Sub(start).Hours() / 24
+	var marks []DepthMark
+	for _, wk := range depthWeeks {
+		if float64(wk*7) > windowDays {
+			break // deeper than the projected window can measure
+		}
+		floor := retention.Compute(sim, sim, time.Duration(wk)*7*24*time.Hour, end)
+		var b int64
+		for _, ar := range sim {
+			if floor.KeepsArchive(ar.Run, ar.DLE) {
+				b += ar.Compressed
+			}
+		}
+		marks = append(marks, DepthMark{Weeks: wk, Bytes: b})
+	}
+	if len(marks) == 0 {
+		return RestoreDepth{}
+	}
+	rd := RestoreDepth{Marks: marks}
+	// Interpolate how many weeks the capacity buys, and the local bytes-per-week slope.
+	for i, m := range marks {
+		if m.Bytes > capacity {
+			break
+		}
+		rd.CapacityWeeks = float64(m.Weeks)
+		if i+1 < len(marks) {
+			next := marks[i+1]
+			if span := next.Bytes - m.Bytes; span > 0 {
+				frac := float64(capacity-m.Bytes) / float64(span)
+				rd.CapacityWeeks = float64(m.Weeks) + frac*float64(next.Weeks-m.Weeks)
+				rd.PerWeekBytes = span / int64(next.Weeks-m.Weeks)
+			}
+		}
+	}
+	if rd.PerWeekBytes == 0 && len(marks) >= 2 { // capacity below the first mark, or past the last
+		lo, hi := marks[0], marks[len(marks)-1]
+		if wk := hi.Weeks - lo.Weeks; wk > 0 {
+			rd.PerWeekBytes = (hi.Bytes - lo.Bytes) / int64(wk)
+		}
+	}
+	return rd
 }
 
 // mediaFor is the landing route for a dumptype (the media its authoritative copies are

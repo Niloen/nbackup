@@ -385,8 +385,12 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int, offline bool
 			fmt.Printf("\nWARNING: medium %q is projected to EXCEED capacity on %s even after pruning — its retained set outgrows the medium (minimum needed ~%s). Add capacity, shorten retention (minimum_age), or move DLEs to another landing.\n",
 				mf.Medium, over, sizeutil.FormatBytes(minNeed))
 		} else {
-			within = append(within, fmt.Sprintf("%s (%s cap, peak %s, min ~%s)",
-				mf.Medium, sizeutil.FormatBytes(mf.Points[0].Capacity), sizeutil.FormatBytes(peak), sizeutil.FormatBytes(minNeed)))
+			depth := ""
+			if rd := mf.Depth; rd.CapacityWeeks > 0 {
+				depth = fmt.Sprintf(", ~%.0fw restore depth", rd.CapacityWeeks)
+			}
+			within = append(within, fmt.Sprintf("%s (%s cap, peak %s, min ~%s%s)",
+				mf.Medium, sizeutil.FormatBytes(mf.Points[0].Capacity), sizeutil.FormatBytes(peak), sizeutil.FormatBytes(minNeed), depth))
 		}
 	}
 	if len(within) > 0 {

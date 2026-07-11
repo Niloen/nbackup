@@ -1925,6 +1925,15 @@ func poolRoomCount(pv []engine.VolumeUsage, configured int64) (withRoom int, tot
 	return withRoom, total
 }
 
+// weeksLabel renders a restore-depth in weeks: whole weeks once past a couple, a decimal
+// below (where "1.5 weeks" carries more than a rounded "2").
+func weeksLabel(w float64) string {
+	if w >= 2 {
+		return fmt.Sprintf("%.0f weeks", w)
+	}
+	return fmt.Sprintf("%.1f weeks", w)
+}
+
 // projDays rounds a projected-full instant to whole days from now, floored at 0 (a
 // projection landing in the past, from a stale sample, reads as "any day now" rather
 // than a negative count).
@@ -2126,7 +2135,7 @@ func newMediumData(st engine.MediumStats, mf engine.MediumForecast, now time.Tim
 		for _, p := range mf.Points {
 			protected = append(protected, engine.ForecastPoint{Date: p.Date, Bytes: p.Protected})
 		}
-		d.Chart = usageChartSVG(st.Usage, mf.Points, protected, now, st.Capacity, capLabel)
+		d.Chart = usageChartSVG(st.Usage, mf.Points, protected, mf.Depth.Marks, now, st.Capacity, capLabel)
 	}
 	for i := len(st.ByRun) - 1; i >= 0; i-- { // newest first for the table
 		p := st.ByRun[i]
@@ -2150,7 +2159,7 @@ func newMediumData(st engine.MediumStats, mf engine.MediumForecast, now time.Tim
 // projection to draw, or a zero time span. Coordinates are safe (numbers + datestamps),
 // so template.HTML is sound. capLabel names the dashed ceiling line ("capacity", or
 // "pool capacity" for a labeled pool).
-func usageChartSVG(series []catalog.UsageSample, forecast, protected []engine.ForecastPoint, now time.Time, capacity int64, capLabel string) template.HTML {
+func usageChartSVG(series []catalog.UsageSample, forecast, protected []engine.ForecastPoint, depth []engine.DepthMark, now time.Time, capacity int64, capLabel string) template.HTML {
 	// Parse the projection dates once (skip anything unparseable rather than fail).
 	type pt struct {
 		t time.Time
@@ -2248,6 +2257,18 @@ func usageChartSVG(series []catalog.UsageSample, forecast, protected []engine.Fo
 					x(s.At), y(s.Used), s.At.Format("2006-01-02 15:04"), sizeutil.FormatBytes(s.Used))
 			}
 		}
+	}
+
+	// Restore-depth ticks on the right edge: the byte level each holds is the capacity to
+	// keep restore points back that many weeks, so the ceiling's position among them reads
+	// as "this capacity buys ~N weeks." Only those within the y-scale are drawn.
+	for _, m := range depth {
+		if m.Bytes <= 0 || m.Bytes > scale {
+			continue
+		}
+		my := y(m.Bytes)
+		fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--muted)" stroke-width="1" stroke-dasharray="1 2" opacity="0.6"/>`, vw-padR-34, my, vw-padR, my)
+		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="9" text-anchor="end" opacity="0.85"><title>capacity to keep %dw of restore points: %s</title>%dw</text>`, vw-padR-36, my+3, m.Weeks, sizeutil.FormatBytes(m.Bytes), m.Weeks)
 	}
 
 	// Protected floor: the retention minimum pruning can't reclaim, filled darker beneath
