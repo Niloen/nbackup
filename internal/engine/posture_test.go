@@ -139,6 +139,37 @@ func TestPostureDegradedNoCopies(t *testing.T) {
 	}
 }
 
+// TestPostureViewOffline checks the webui's offline audit: it carries the 3-2-1 core
+// and "0 errors"/key/capacity, reports "1 immutable" as INFO (it cannot probe a
+// medium), and — the offline contract — omits the incremental-state digit (a remote
+// DLE's .snar lives host-side) so a browser hitting /drills never opens a connection.
+func TestPostureViewOffline(t *testing.T) {
+	eng := postureEngine(t)
+
+	p := eng.PostureView(2) // 2 failing drills feed "0 errors"
+	statuses := map[string]PostureStatus{}
+	for _, c := range p.Checks {
+		statuses[c.Name] = c.Status
+	}
+	want := map[string]PostureStatus{
+		"3 copies":      PostureFail, // no dump run: no backup copy
+		"2 media":       PostureWarn,
+		"1 offsite":     PostureWarn,
+		"1 immutable":   PostureInfo, // not probed offline
+		"0 errors":      PostureFail, // 2 failing drills
+		"key reachable": PostureOK,
+		"capacity OK":   PostureOK,
+	}
+	for name, st := range want {
+		if statuses[name] != st {
+			t.Errorf("check %q = %v, want %v", name, statuses[name], st)
+		}
+	}
+	if _, ok := statuses["incremental state present"]; ok {
+		t.Errorf("offline PostureView must omit the host-probing incremental-state digit")
+	}
+}
+
 // TestPostureSingleCopyWarns exercises the 1-backup-copy degraded branch: a single dump
 // leaves one placement, so "3 copies" warns that 3-2-1 wants a second backup.
 func TestPostureSingleCopyWarns(t *testing.T) {

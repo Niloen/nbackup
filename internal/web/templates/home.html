@@ -42,6 +42,13 @@
 <div class="cards">
   <div class="card"><div class="k">Runs</div><div class="v">{{$d.RunCount}}</div></div>
   <div class="card"><div class="k">Cataloged</div><div class="v">{{bytes $d.TotalBytes}}</div></div>
+  {{with $d.Posture}}
+  <div class="card">
+    <div class="k">Recoverability</div>
+    <a class="v {{.WorstClass}}" href="/drills">{{.Summary}}</a>
+    <div class="muted" style="font-size:.82rem">3-2-1-1-0 checks</div>
+  </div>
+  {{end}}
   {{with $d.LastDump}}
   <div class="card">
     <div class="k">Last backup</div>

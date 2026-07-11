@@ -116,6 +116,11 @@ const (
 	PostureOK PostureStatus = iota
 	PostureWarn
 	PostureFail
+	// PostureInfo is a check that could not be evaluated in this context (rather than
+	// pass/fail) — e.g. the offline webui posture cannot run the WORM probe, so it
+	// reports "1 immutable" as informational and points at `nb drill`. It never counts
+	// against the audit; the CLI drill never emits it.
+	PostureInfo
 )
 
 func (s PostureStatus) String() string {
@@ -126,6 +131,8 @@ func (s PostureStatus) String() string {
 		return "WARN"
 	case PostureFail:
 		return "FAIL"
+	case PostureInfo:
+		return "INFO"
 	default:
 		return "?"
 	}
@@ -151,6 +158,68 @@ type Posture struct {
 
 // posture computes the recoverability audit. failures is this run's drill failures.
 func (d *driller) posture(worm WormResult, failures int) Posture {
+	var p Posture
+	add := func(name string, st PostureStatus, detail string) {
+		p.Checks = append(p.Checks, PostureCheck{Name: name, Status: st, Detail: detail})
+	}
+	p.Copies, p.Media, p.Offsite = d.core321(add)
+	p.Immutable = worm.Enforced
+	switch {
+	case worm.Enforced:
+		add("1 immutable", PostureOK, worm.Detail)
+	default:
+		add("1 immutable", PostureWarn, worm.Detail)
+	}
+	if failures == 0 {
+		add("0 errors", PostureOK, "no drill failures this run")
+	} else {
+		add("0 errors", PostureFail, fmt.Sprintf("%d drill failure(s) this run", failures))
+	}
+
+	// Extras beyond the 3-2-1-1-0 core.
+	add(d.postureKey())
+	add(d.postureIncrementalState())
+	add(d.postureCapacity())
+	return p
+}
+
+// PostureView is the offline (read-only, no medium open, no host probe) subset of
+// the 3-2-1-1-0 audit the webui renders: the 3-2-1 copies/media/offsite core (pure
+// catalog math), the local encryption-key check, the landing capacity check, and the
+// "0 errors" digit fed by `failing` (the ledger's current failing-drill count). The
+// two probe-dependent digits are handled without touching a medium or a host: WORM
+// immutability needs an active medium probe, and a remote DLE's incremental-state
+// (.snar) lives host-side — so "1 immutable" is reported as informational (pointing
+// at `nb drill --worm`) and incremental-state is left off the browser view entirely.
+// This keeps a browser hitting /drills offline, matching Forecast's contract.
+func (e *Engine) PostureView(failing int) Posture {
+	d := e.newDriller()
+	var p Posture
+	add := func(name string, st PostureStatus, detail string) {
+		p.Checks = append(p.Checks, PostureCheck{Name: name, Status: st, Detail: detail})
+	}
+	p.Copies, p.Media, p.Offsite = d.core321(add)
+	add("1 immutable", PostureInfo, "not verified here — run `nb drill --worm` to test immutability")
+	if failing == 0 {
+		add("0 errors", PostureOK, "no failing recovery drills")
+	} else {
+		add("0 errors", PostureFail, fmt.Sprintf("%d recovery drill(s) failing", failing))
+	}
+	add(d.postureKey())
+	add(d.postureCapacity())
+	return p
+}
+
+// core321 computes the 3-2-1 core — copies, media, offsite — from the catalog alone
+// (no medium open, no host probe), appending the three checks and returning the
+// tallies for the Posture header. Shared by the full drill posture and the offline
+// PostureView so the two can never tell a different copies/media/offsite story.
+//
+// The live dump source is copy #1 in the canonical 3-2-1 rule (production data + 2
+// backups = 3), so a run is compliant once it has 2 backup copies. We count catalog
+// placements — the verifiable backup copies; the source is the implicit third
+// NBackup can never drill, so it is never enough on its own.
+func (d *driller) core321(add func(name string, st PostureStatus, detail string)) (copies, media int, offsite bool) {
 	runs := d.cat.Runs()
 	mediaSet := map[string]bool{}
 	minCopies := -1
@@ -169,21 +238,11 @@ func (d *driller) posture(worm WormResult, failures int) Posture {
 	if minCopies < 0 {
 		minCopies = 0
 	}
-	offsite := false
 	for m := range mediaSet {
 		if m != d.dep.LandingName() {
 			offsite = true
 		}
 	}
-	p := Posture{Copies: minCopies, Media: len(mediaSet), Offsite: offsite, Immutable: worm.Enforced}
-	add := func(name string, st PostureStatus, detail string) {
-		p.Checks = append(p.Checks, PostureCheck{Name: name, Status: st, Detail: detail})
-	}
-
-	// The live dump source is copy #1 in the canonical 3-2-1 rule (production data
-	// + 2 backups = 3), so a run is compliant once it has 2 backup copies. We count
-	// catalog placements — the verifiable backup copies; the source is the implicit
-	// third NBackup can never drill, so it is never enough on its own.
 	switch {
 	case minCopies >= 2:
 		add("3 copies", PostureOK, fmt.Sprintf("source + %d backup copies (3-2-1 satisfied)", minCopies))
@@ -202,23 +261,7 @@ func (d *driller) posture(worm WormResult, failures int) Posture {
 	} else {
 		add("1 offsite", PostureWarn, "no offsite copy (only the landing medium)")
 	}
-	switch {
-	case worm.Enforced:
-		add("1 immutable", PostureOK, worm.Detail)
-	default:
-		add("1 immutable", PostureWarn, worm.Detail)
-	}
-	if failures == 0 {
-		add("0 errors", PostureOK, "no drill failures this run")
-	} else {
-		add("0 errors", PostureFail, fmt.Sprintf("%d drill failure(s) this run", failures))
-	}
-
-	// Extras beyond the 3-2-1-1-0 core.
-	add(d.postureKey())
-	add(d.postureIncrementalState())
-	add(d.postureCapacity())
-	return p
+	return minCopies, len(mediaSet), offsite
 }
 
 // postureKey checks that, where encryption is configured, the decryptor binary and

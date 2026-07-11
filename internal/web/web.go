@@ -55,6 +55,10 @@ type Source interface {
 	DLESummaries() []catalog.DLESummary
 	DLENames() []string         // configured DLE slugs, for drill coverage (never-drilled)
 	DrillWindow() time.Duration // the configured drill coverage window
+	// Posture computes the 3-2-1-1-0 recoverability audit OFFLINE (catalog + config
+	// only, no medium open or host probe), the browser peer of `nb drill`'s posture.
+	// `failing` is the current failing-drill count, feeding the "0 errors" digit.
+	Posture(failing int) engine.Posture
 	// StaleDLEs reports the configured DLEs overdue against the dump cycle (or
 	// never backed up at all) as of now — always on, since the cycle is the
 	// existing freshness promise ("a full never ages past one cycle") and needs
@@ -169,6 +173,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		Media:      s.src.Media(),
 		History:    hist,
 		LastDump:   lastDump(hist),
+		Posture:    posture(s.src.Posture(len(s.drillHealth(s.now()).Failing))),
 	}
 	refresh := 0
 	if data.Live != nil {
@@ -925,6 +930,10 @@ func (s *Server) handleDrills(w http.ResponseWriter, r *http.Request) {
 	}
 	data.Ledger = sectionDrillLedger(ledgerRows, ledgerItems)
 
+	// The 3-2-1-1-0 posture leads the page — the recoverability headline the CLI's
+	// `nb drill` prints, fed the current failing-drill count for its "0 errors" digit.
+	data.Posture = posture(s.src.Posture(data.Failing))
+
 	// Recent drill runs, newest first, each with its per-DLE outcomes.
 	for _, run := range s.history(0) {
 		if run.Command != report.CommandDrill || len(data.Runs) == maxDrillRuns {
@@ -1193,6 +1202,25 @@ func (s *Server) rollup(now time.Time, hist []report.Run) []alert {
 	warn = append(warn, s.staleAlerts(now)...)
 
 	warn = append(warn, s.dumpAnomalies(hist)...)
+
+	// 3-2-1-1-0 posture: the copies/media/offsite core is not surfaced anywhere else
+	// in the rollup (capacity and drill health above own their own digits), so a run
+	// with too few copies, a single-medium footprint, or no offsite copy would be
+	// invisible on the home page. A FAIL (a run with no backup copy) is red; a WARN
+	// (below the 3-2-1 target) is amber. Both link to the drills page's posture panel.
+	for _, row := range posture(s.src.Posture(0)).Rows {
+		switch row.Name {
+		case "3 copies", "2 media", "1 offsite":
+		default:
+			continue
+		}
+		switch row.Class {
+		case "bad":
+			bad = append(bad, alert{Level: "bad", Tag: "recoverability", Text: row.Detail, Href: "/drills"})
+		case "warn":
+			warn = append(warn, alert{Level: "warn", Tag: "recoverability", Text: row.Detail, Href: "/drills"})
+		}
+	}
 
 	return append(bad, warn...)
 }

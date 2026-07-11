@@ -305,6 +305,10 @@ func (e *engineSource) DLENames() []string { return e.engine().DLENames() }
 
 func (e *engineSource) DrillWindow() time.Duration { return e.cfg.DrillWindow() }
 
+// Posture computes the 3-2-1-1-0 audit OFFLINE (no medium open, no host probe), so
+// serving it never blocks on a medium or opens an SSH connection (see engine.PostureView).
+func (e *engineSource) Posture(failing int) engine.Posture { return e.engine().PostureView(failing) }
+
 // StaleDLEs reports the engine's overdue set as of now, using the dump cycle as the
 // freshness window — always on, no separate config.
 func (e *engineSource) StaleDLEs(now time.Time) []catalog.StaleDLE {

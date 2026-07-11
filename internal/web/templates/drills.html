@@ -2,6 +2,25 @@
 {{$d := .Data}}
 <h1>Drills</h1>
 
+{{with $d.Posture}}
+<div class="panel" style="margin-bottom:1rem">
+  <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:.5rem;align-items:baseline">
+    <strong>Recoverability posture · 3-2-1-1-0</strong>
+    <span class="pill {{.WorstClass}}">{{.Summary}} checks passing</span>
+  </div>
+  <ul class="gt" style="grid-template-columns:auto minmax(6rem,auto) 1fr;margin-top:.6rem">
+    {{range .Rows}}
+    <li>
+      <div><span class="pill {{.Class}}">{{.Label}}</span></div>
+      <div>{{.Name}}</div>
+      <div class="muted">{{.Detail}}</div>
+    </li>
+    {{end}}
+  </ul>
+  <div class="muted" style="font-size:.82rem;margin-top:.5rem">The "3" counts backup copies (your live source is the implicit +1): 3-2-1 wants 2 backups on every run. Add a <code>sync:</code> rule to mirror the landing to a second medium.</div>
+</div>
+{{end}}
+
 <div class="cards">
   <div class="card"><div class="k">Passing</div><div class="v {{if $d.Passing}}ok{{end}}">{{$d.Passing}}</div>
     <div class="muted" style="font-size:.82rem">drilled within {{$d.Window}}</div></div>

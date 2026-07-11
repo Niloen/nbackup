@@ -37,6 +37,7 @@ type homeData struct {
 	TotalBytes int64               // cataloged bytes across all runs
 	Media      []engine.MediumInfo // per-medium capacity summary
 	History    []report.Run        // recent activity, newest-first
+	Posture    postureView         // the 3-2-1-1-0 recoverability audit, summarized on a card
 }
 
 // alert is one row of the home "attention needed" rollup: a severity Level driving
@@ -2440,9 +2441,70 @@ type drillsData struct {
 	FailingRows             []drillLedgerRow // failing records, leading the page: error + remedy + retry, never buried mid-ledger
 	Never                   []dleLink        // configured DLEs never drilled; path siblings folded (Slug == "")
 	Overdue                 int              // DLEs not covered within the window
+	Posture                 postureView      // the 3-2-1-1-0 recoverability audit, led on the page
 	Ledger                  []drillLedgerSection
 	Runs                    []drillRunRow
 }
+
+// postureView renders the 3-2-1-1-0 recoverability audit: one row per check plus a
+// headline summary (how many of the graded digits pass) and a worst-case pill for
+// the home-page card. It carries no logic beyond mapping engine.PostureStatus to the
+// shared pill palette — the engine computes the checks (engine.PostureView).
+type postureView struct {
+	Rows       []postureRow
+	Passing    int    // graded checks (OK/WARN/FAIL, not INFO) that pass
+	Graded     int    // graded checks in total — the summary reads "Passing/Graded"
+	WorstClass string // "ok" | "warn" | "bad" — the worst graded status, for the card pill
+}
+
+// postureRow is one audit line with its pill label + class precomputed for the template.
+type postureRow struct {
+	Name, Detail string
+	Label        string // pill text: OK | WARN | FAIL | INFO
+	Class        string // pill palette: ok | warn | bad | dim
+}
+
+// posture builds the view from the engine's audit. INFO checks (e.g. immutability,
+// which the offline webui cannot probe) render dim and are excluded from the
+// pass/fail tally so they never drag the summary or the card pill.
+func posture(p engine.Posture) postureView {
+	v := postureView{WorstClass: "ok"}
+	for _, c := range p.Checks {
+		v.Rows = append(v.Rows, postureRow{Name: c.Name, Detail: c.Detail, Label: c.Status.String(), Class: postureClass(c.Status)})
+		if c.Status == engine.PostureInfo {
+			continue
+		}
+		v.Graded++
+		switch c.Status {
+		case engine.PostureOK:
+			v.Passing++
+		case engine.PostureWarn:
+			if v.WorstClass == "ok" {
+				v.WorstClass = "warn"
+			}
+		case engine.PostureFail:
+			v.WorstClass = "bad"
+		}
+	}
+	return v
+}
+
+// postureClass maps a check's status to the shared pill palette.
+func postureClass(st engine.PostureStatus) string {
+	switch st {
+	case engine.PostureOK:
+		return "ok"
+	case engine.PostureWarn:
+		return "warn"
+	case engine.PostureFail:
+		return "bad"
+	default:
+		return "dim"
+	}
+}
+
+// Summary is the card/headline readout, e.g. "4/5" graded checks passing.
+func (v postureView) Summary() string { return fmt.Sprintf("%d/%d", v.Passing, v.Graded) }
 
 // drillLedgerSection is one host's slice of the ledger table. A fleet spanning
 // more than one host is sectioned per host — hosts are the failure domain, the

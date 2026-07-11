@@ -51,6 +51,7 @@ type fakeSource struct {
 	forecast         []*planner.Plan                   // canned offline forecast for the ghost calendar; nil = no ghosts
 	capacityForecast []engine.MediumForecast           // canned per-medium fill forecast for /media
 	dleForecast      map[string][]engine.ForecastPoint // canned per-DLE footprint forecast for /dles/<slug>
+	posture          engine.Posture                    // canned 3-2-1-1-0 audit; zero value = no checks
 }
 
 func (f fakeSource) Runs() []*catalog.Run { return f.runs }
@@ -212,6 +213,8 @@ func (f fakeSource) DLENames() []string {
 }
 
 func (f fakeSource) DrillWindow() time.Duration { return 30 * 24 * time.Hour }
+
+func (f fakeSource) Posture(failing int) engine.Posture { return f.posture }
 
 func (f fakeSource) StaleDLEs(now time.Time) []catalog.StaleDLE { return f.stale }
 
@@ -419,6 +422,60 @@ func TestDrillsPageRendersLedgerAndHistory(t *testing.T) {
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/drills missing %q", want)
+		}
+	}
+}
+
+// TestDrillsPageRendersPosture checks the 3-2-1-1-0 posture panel: each check's
+// name + detail + pill class renders, the INFO (unprobed immutability) digit shows
+// dim, and the headline summary counts only graded checks (the INFO digit excluded).
+func TestDrillsPageRendersPosture(t *testing.T) {
+	src := sampleSource()
+	src.posture = engine.Posture{Checks: []engine.PostureCheck{
+		{Name: "3 copies", Status: engine.PostureWarn, Detail: "source + 1 backup copy; 3-2-1 wants 2 backups"},
+		{Name: "2 media", Status: engine.PostureOK, Detail: "3 media hold copies"},
+		{Name: "1 offsite", Status: engine.PostureOK, Detail: "a non-landing medium holds copies"},
+		{Name: "1 immutable", Status: engine.PostureInfo, Detail: "not verified here — run `nb drill --worm`"},
+		{Name: "0 errors", Status: engine.PostureOK, Detail: "no failing recovery drills"},
+	}}
+
+	code, body := get(t, NewServer(src, t.TempDir()).Handler(), "/drills")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d", code)
+	}
+	for _, want := range []string{
+		"Recoverability posture · 3-2-1-1-0",
+		"3-2-1 wants 2 backups", // the WARN detail
+		`<span class="pill warn">WARN`,
+		`<span class="pill dim">INFO`, // unprobed immutability shows dim, not a failure
+		"3/4 checks passing",          // WARN isn't passing; INFO excluded from the graded tally
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/drills posture panel missing %q", want)
+		}
+	}
+}
+
+// TestHomeCardShowsPosture checks the home overview carries a Recoverability card
+// summarizing the posture and linking to the drills page, colored by the worst
+// graded check (a FAIL → bad).
+func TestHomeCardShowsPosture(t *testing.T) {
+	src := sampleSource()
+	src.posture = engine.Posture{Checks: []engine.PostureCheck{
+		{Name: "3 copies", Status: engine.PostureFail, Detail: "no backup copy recorded for some run"},
+		{Name: "2 media", Status: engine.PostureOK, Detail: "2 media hold copies"},
+	}}
+
+	code, body := get(t, NewServer(src, t.TempDir()).Handler(), "/")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d", code)
+	}
+	for _, want := range []string{
+		"Recoverability",
+		`<a class="v bad" href="/drills">1/2`, // worst graded check is a FAIL → bad pill, links to /drills
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("home posture card missing %q", want)
 		}
 	}
 }
