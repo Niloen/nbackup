@@ -17,7 +17,7 @@ import (
 )
 
 // maxForecastDays bounds `nb plan --days`: the per-day forecast cost (Simulate's
-// bounded history scans, and ForecastCost's per-day scan of the accumulating
+// bounded history scans, and ForecastCapacity's per-day scan of the accumulating
 // working set of archives) grows with both the window and the medium's archive/DLE
 // count, so an unbounded --days can turn a routine capacity preview into a command
 // that runs for minutes with no output. 1000 days (~2.7 years) comfortably covers
@@ -274,11 +274,21 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int, offline bool
 		fmt.Println()
 	}
 
-	// The cost/capacity curve overlays the schedule: footprint, $/month, and capacity
-	// headroom at the end of each day as runs land and pruning reclaims. Fed the SAME
-	// plans as the schedule table (live or offline), so the two always agree.
-	curve := eng.ForecastCost(start, plans)
-	priced := eng.CostSummary(nil).Priced
+	// The per-medium capacity forecast: footprint, $/month, and capacity headroom at
+	// the end of each day as runs land and pruning reclaims. Fed the SAME plans as
+	// the schedule table (live or offline), so the two always agree. Computed ONCE:
+	// the landing's cost curve for the table below is its slice of the result.
+	caps := eng.ForecastCapacity(start, plans)
+	var curve []engine.ForecastPoint
+	if landings := eng.Landings(); len(landings) > 0 {
+		for _, mf := range caps {
+			if mf.Medium == landings[0] {
+				curve = mf.Points
+				break
+			}
+		}
+	}
+	priced := eng.CostSummary(nil).Priced && len(curve) == len(plans)
 
 	tw := newTab(os.Stdout)
 	if priced {
@@ -347,7 +357,6 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int, offline bool
 	// only exceeds capacity when its retained (unreclaimable) set outgrows it — the real
 	// "you're going to run out of room" signal, dated, for every landing medium. Tape
 	// (volume-structured) reclaims by rotation not prune, so it carries no byte curve.
-	caps := eng.ForecastCapacity(start, plans)
 	var within []string
 	for _, mf := range caps {
 		if mf.VolumeStructured { // tape: measured in cartridges, not bytes

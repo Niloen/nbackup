@@ -60,7 +60,7 @@ func (a *Accountant) Medium(name string) (MediumInfo, bool) {
 		Runs: len(a.d.Cat.RunsOn(name)),
 		Used: a.d.Cat.MediumBytes(name),
 	}
-	if prof, err := media.OpenProfile(d.Type, media.Options(d.ProfileOptions())); err == nil {
+	if prof, err := a.ProfileFor(name); err == nil {
 		info.Capacity = a.capacityFor(name, prof)
 	}
 	// Summarize the medium's labeled volumes from the catalog (no medium type
@@ -230,16 +230,14 @@ func (a *Accountant) perVolume(name string, info MediumInfo) ([]VolumeUsage, int
 		return nil, 0
 	}
 	var configured, perVolCap int64
-	if d, ok := a.d.Cfg.Media[name]; ok {
-		if prof, err := media.OpenProfile(d.Type, media.Options(d.ProfileOptions())); err == nil {
-			configured = prof.Volumes()
-			if configured > 0 {
-				perVolCap = prof.TotalBytes() / configured
-			} else if vs := prof.VolumeSize(); vs > 0 {
-				// A hand-fed drive: the shelf is unknowable but each reel's size is
-				// declared — the same usable-bytes haircut as one changer slot.
-				perVolCap = media.NewVolumeProfile(1, vs).TotalBytes()
-			}
+	if prof, err := a.ProfileFor(name); err == nil {
+		configured = prof.Volumes()
+		if configured > 0 {
+			perVolCap = prof.TotalBytes() / configured
+		} else if vs := prof.VolumeSize(); vs > 0 {
+			// A hand-fed drive: the shelf is unknowable but each reel's size is
+			// declared — the same usable-bytes haircut as one changer slot.
+			perVolCap = media.NewVolumeProfile(1, vs).TotalBytes()
 		}
 	}
 	appendable := a.MediumAppendable(name)

@@ -60,9 +60,8 @@ func (a *Accountant) MakeRoomPreview(mediumName string, incoming int64, now time
 	if err != nil {
 		return 0, 0, err
 	}
-	def := a.d.Cfg.Media[mediumName]
 	all := a.d.Cat.ArchivesOn(mediumName)
-	floor := retention.Compute(all, a.d.Cat.Archives(), a.d.Cfg.MinAgeFor(def), now)
+	floor := retention.Compute(all, a.d.Cat.Archives(), a.minAgeFor(mediumName), now)
 	for _, r := range profile.Reclaim(plan.target, all, floor, now) {
 		freed += r.Bytes
 		archives++
@@ -95,7 +94,7 @@ func (a *Accountant) planRoom(mediumName string, incoming int64, now time.Time) 
 	if used+incoming <= capacity {
 		return roomPlan{capacity: capacity, used: used}, nil // fits as-is
 	}
-	residual, _, err := a.MediumProtected(mediumName, now)
+	residual, _, err := a.MediumResidual(mediumName, now)
 	if err != nil {
 		return roomPlan{}, err
 	}

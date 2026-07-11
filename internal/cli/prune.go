@@ -243,12 +243,12 @@ func warnIfOverCapacity(eng *engine.Engine, medium string, now time.Time) {
 	// Use the post-reclamation residual (the protected set), not the raw catalog
 	// total, so the dry-run preview and the real run report the same thing — a
 	// dry-run still has the would-delete archives in the catalog.
-	over, residual, capacity, err := eng.MediumProtectedOverCapacity(medium, now)
+	over, residual, capacity, err := eng.MediumResidualOverCapacity(medium, now)
 	if err != nil || !over {
 		return
 	}
 	remedy := "raise its capacity or shorten minimum_age"
-	if !eng.MediumProtectionIsAgeBound(medium, now) {
+	if !eng.MediumResidualIsAgeBound(medium, now) {
 		// The binding pins are live recovery chains, which shortening minimum_age
 		// cannot release — only more capacity or a longer cycle helps.
 		remedy = "raise its capacity or lengthen the cycle"

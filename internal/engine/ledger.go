@@ -6,17 +6,14 @@ import (
 )
 
 // newLedger wires an accounting.Accountant to the engine's catalog, config, landing
-// profile, and the few closures the capacity/retention arithmetic cannot derive on
+// name, and the few closures the capacity/retention arithmetic cannot derive on
 // its own. The engine's capacity/retention methods are thin pass-throughs to it
 // (see internal/accounting).
 func (e *Engine) newLedger() *accounting.Accountant {
 	return accounting.New(accounting.Deps{
-		Cat:            e.cat,
-		Cfg:            e.cfg,
-		Landing:        e.dep.LandingName(),
-		LandingProfile: e.dep.Profile(),
-		LandingCost:    e.landingCost,
-		LandingMinAge:  e.dep.MinAge(),
+		Cat:     e.cat,
+		Cfg:     e.cfg,
+		Landing: e.dep.LandingName(),
 		OpenVolume: func(n string) (media.Volume, error) {
 			v, _, _, err := e.dep.MediumVolume(n)
 			return v, err

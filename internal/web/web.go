@@ -37,13 +37,13 @@ type Source interface {
 	Placements(runID string) []catalog.Placement
 	Media() []engine.MediumInfo
 	MediumStats(name string) (engine.MediumStats, bool) // one medium's usage history + statistics
-	// MediumProtected reports the bytes a prune cannot reclaim on the named medium
+	// MediumResidual reports the bytes a prune cannot reclaim on the named medium
 	// (the protected recovery set) and its capacity as of now; ok is false for an
 	// unknown medium. The rollup reads this instead of raw Used/Capacity for
 	// address-identified media (disk, s3): the planner fills free space and prune
 	// trims to capacity, so Used sits permanently near 100% at steady state — only
 	// the protected residual distinguishes "full by design" from "actually stuck."
-	MediumProtected(name string, now time.Time) (residual, capacity int64, ok bool)
+	MediumResidual(name string, now time.Time) (residual, capacity int64, ok bool)
 	// RunCoverage judges a run's copies against the current config: which media
 	// should hold which archives (their landing routes) and which are merely
 	// promised by sync rules — the run pages render "partial" vs "behind" from it.
@@ -1115,7 +1115,7 @@ func (s *Server) rollup(now time.Time, hist []report.Run) []alert {
 		}
 		if m.Used >= m.Capacity {
 			text := fmt.Sprintf("%s is full — %s of %s used", m.Name, sizeutil.FormatBytes(m.Used), sizeutil.FormatBytes(m.Capacity))
-			if residual, _, ok := s.src.MediumProtected(m.Name, now); ok {
+			if residual, _, ok := s.src.MediumResidual(m.Name, now); ok {
 				if reclaimable := m.Used - residual; reclaimable > 0 {
 					text += fmt.Sprintf(" — %s reclaimable, run nb prune", sizeutil.FormatBytes(reclaimable))
 				}
@@ -1142,7 +1142,7 @@ func (s *Server) rollup(now time.Time, hist []report.Run) []alert {
 			}
 			continue
 		}
-		residual, capacity, ok := s.src.MediumProtected(m.Name, now)
+		residual, capacity, ok := s.src.MediumResidual(m.Name, now)
 		switch {
 		case ok && capacity > 0 && float64(residual)/float64(capacity) >= 0.9:
 			warn = append(warn, alert{Level: "warn", Tag: "retention pressure",

@@ -37,7 +37,7 @@ type fakeSource struct {
 	perVolume   map[string][]engine.VolumeUsage
 	poolVolumes map[string]int64
 	// protected cans the residual a prune cannot reclaim per medium (the accounting
-	// package's own MediumProtected has its own unit tests; the web layer only needs
+	// package's own MediumResidual has its own unit tests; the web layer only needs
 	// a canned reading to exercise the rollup's threshold logic in isolation). A
 	// medium absent from this map reports ok=false, as an unknown medium would.
 	protected map[string]int64
@@ -166,9 +166,9 @@ func (f fakeSource) MediumStats(name string) (engine.MediumStats, bool) {
 	return st, true
 }
 
-// MediumProtected returns the canned residual for name (see the protected field);
+// MediumResidual returns the canned residual for name (see the protected field);
 // ok is false for a medium the test never seeded, matching an unknown medium.
-func (f fakeSource) MediumProtected(name string, now time.Time) (residual, capacity int64, ok bool) {
+func (f fakeSource) MediumResidual(name string, now time.Time) (residual, capacity int64, ok bool) {
 	residual, ok = f.protected[name]
 	if !ok {
 		return 0, 0, false

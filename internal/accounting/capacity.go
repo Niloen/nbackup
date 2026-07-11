@@ -1,18 +1,11 @@
 package accounting
 
-// Capacity arithmetic. The queries here sit on three axes the callers keep distinct:
-//   - scope: the landing medium only (Capacity/CapacityStatus/StoredBytes/PoolRoom)
-//     vs any configured medium by name (the Medium*OverCapacity family);
-//   - the byte figure: raw used (MediumOverCapacity), the protected residual a prune
-//     cannot reclaim (MediumProtectedOverCapacity / PoolRoom), or a projected total
-//     after a pending write (ProjectedOverCapacity);
-//   - 0 capacity always means unbounded, never "full".
-//
-// The two "protected bytes" figures are deliberately different quantities:
-// MediumProtectedOverCapacity is the residual left after a capacity-fitting prune
-// (current total minus what Reclaim would free — which may leave unprotected bytes
-// a prune had no need to delete), while PoolRoom counts only the floor-pinned bytes
-// themselves (the hard minimum no prune can ever go below).
+// Capacity arithmetic — the "does it fit" queries. Two distinct byte figures appear
+// here, distinguished by name: PROTECTED bytes are what the retention floor keeps
+// (the irreducible minimum, PoolRoom / ForecastPoint.Protected), while the RESIDUAL
+// is what remains after a full prune (the MediumResidual* family) — which on a
+// per-archive medium equals the protected set, but on tape (whose Reclaim is a
+// no-op) is everything. A 0 capacity always means unbounded, never "full".
 
 import (
 	"fmt"
@@ -24,12 +17,18 @@ import (
 )
 
 // Capacity returns the landing medium's total retainable bytes (0 = unbounded).
-func (a *Accountant) Capacity() int64 { return a.d.LandingProfile.TotalBytes() }
+func (a *Accountant) Capacity() int64 {
+	prof, err := a.ProfileFor(a.d.Landing)
+	if err != nil {
+		return 0
+	}
+	return prof.TotalBytes()
+}
 
 // CapacityStatus reports whether current usage exceeds capacity and the percent
 // used (0 when unbounded).
 func (a *Accountant) CapacityStatus(current int64) (over bool, pct float64) {
-	c := a.d.LandingProfile.TotalBytes()
+	c := a.Capacity()
 	if c <= 0 {
 		return false, 0
 	}
@@ -53,40 +52,36 @@ func (a *Accountant) MediumOverCapacity(name string) (over bool, used, capacity 
 	return capacity > 0 && used > capacity, used, capacity, nil
 }
 
-// MediumProtectedOverCapacity reports whether the bytes a prune *cannot* reclaim —
-// the protected recovery set — still exceed the medium's capacity. It subtracts
-// everything Reclaim would free from the current total, so the answer is the same
-// whether or not a real prune has run: a dry-run still sees the would-delete archives
-// in the catalog while a completed prune has already removed them, but
+// MediumResidualOverCapacity reports whether the bytes a prune *cannot* reclaim —
+// the residual — still exceed the medium's capacity. It subtracts everything
+// Reclaim would free from the current total, so the answer is the same whether or
+// not a real prune has run: a dry-run still sees the would-delete archives in the
+// catalog while a completed prune has already removed them, but
 // `residual = current − reclaimable` is identical either way (after a real prune the
 // reclaimable set is empty and the current total is already the residual). This is
 // what `nb prune` warns on, so its preview and its real run agree.
-func (a *Accountant) MediumProtectedOverCapacity(name string, now time.Time) (over bool, residual, capacity int64, err error) {
-	residual, capacity, err = a.MediumProtected(name, now)
+func (a *Accountant) MediumResidualOverCapacity(name string, now time.Time) (over bool, residual, capacity int64, err error) {
+	residual, capacity, err = a.MediumResidual(name, now)
 	if err != nil {
 		return false, 0, 0, err
 	}
 	return capacity > 0 && residual > capacity, residual, capacity, nil
 }
 
-// MediumProtected computes the bytes a prune *cannot* reclaim on the named medium —
-// the protected recovery set — and the medium's capacity. It is the shared
-// computation behind MediumProtectedOverCapacity's >= comparison; callers that want
-// their own threshold (nb web's rollup warns before the residual actually exceeds
-// capacity, the way a mature address-identified medium's steady-state near-100%-used
-// reading never would) call this directly instead.
-func (a *Accountant) MediumProtected(name string, now time.Time) (residual, capacity int64, err error) {
+// MediumResidual computes the bytes a prune *cannot* reclaim on the named medium and
+// the medium's capacity. It is the shared computation behind
+// MediumResidualOverCapacity's >= comparison; callers that want their own threshold
+// (nb web's rollup warns before the residual actually exceeds capacity, the way a
+// mature address-identified medium's steady-state near-100%-used reading never
+// would) call this directly instead.
+func (a *Accountant) MediumResidual(name string, now time.Time) (residual, capacity int64, err error) {
 	prof, err := a.ProfileFor(name)
 	if err != nil {
 		return 0, 0, err
 	}
-	def, ok := a.d.Cfg.Media[name]
-	if !ok {
-		return 0, 0, fmt.Errorf("unknown medium %q", name)
-	}
 	capacity = a.capacityFor(name, prof) // registry-derived for a bare drive's pool
 	archives := a.d.Cat.ArchivesOn(name)
-	floor := retention.Compute(archives, a.d.Cat.Archives(), a.d.Cfg.MinAgeFor(def), now)
+	floor := retention.Compute(archives, a.d.Cat.Archives(), a.minAgeFor(name), now)
 	// Target 0: reclaimable is everything the Floor clears, not merely what a
 	// prune-to-capacity would bother to free — the residual is the truly
 	// protected set, which is what capacity feasibility (make-room's fail-loud,
@@ -99,17 +94,13 @@ func (a *Accountant) MediumProtected(name string, now time.Time) (residual, capa
 	return residual, capacity, nil
 }
 
-// MediumProtectionIsAgeBound reports whether every archive pinning the medium over
+// MediumResidualIsAgeBound reports whether every archive pinning the medium over
 // capacity is held by the minimum_age floor (vs a live recovery chain). When false,
 // advising the operator to shorten minimum_age is useless — a DLE's last full and its
 // later incrementals are pinned regardless of age — so the remedy text drops it.
-func (a *Accountant) MediumProtectionIsAgeBound(name string, now time.Time) bool {
-	def, ok := a.d.Cfg.Media[name]
-	if !ok {
-		return true
-	}
+func (a *Accountant) MediumResidualIsAgeBound(name string, now time.Time) bool {
 	archives := a.d.Cat.ArchivesOn(name)
-	floor := retention.Compute(archives, a.d.Cat.Archives(), a.d.Cfg.MinAgeFor(def), now)
+	floor := retention.Compute(archives, a.d.Cat.Archives(), a.minAgeFor(name), now)
 	for _, ar := range archives {
 		kind, ok := floor.KindArchive(ar.Run, ar.DLE)
 		if ok && kind != retention.KindAge {
@@ -183,12 +174,16 @@ func (a *Accountant) ProjectedOverCapacity(name string, add int64) (over bool, p
 // PoolRoom is the retention bound: capacity minus the bytes pruning cannot
 // reclaim (the protected set). Negative = unbounded (no pool budget).
 func (a *Accountant) PoolRoom(now time.Time) int64 {
-	capacity := a.capacityFor(a.d.Landing, a.d.LandingProfile)
+	prof, err := a.ProfileFor(a.d.Landing)
+	if err != nil {
+		return -1
+	}
+	capacity := a.capacityFor(a.d.Landing, prof)
 	if capacity <= 0 {
 		return -1
 	}
 	archives := a.d.Cat.ArchivesOn(a.d.Landing)
-	floor := retention.Compute(archives, a.d.Cat.Archives(), a.d.LandingMinAge, now)
+	floor := retention.Compute(archives, a.d.Cat.Archives(), a.minAgeFor(a.d.Landing), now)
 	var keptBytes int64
 	for _, ar := range archives {
 		if floor.KeepsArchive(ar.Run, ar.DLE) {

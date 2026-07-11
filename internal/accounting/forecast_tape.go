@@ -9,12 +9,6 @@ import (
 	"github.com/Niloen/nbackup/internal/retention"
 )
 
-// tapeHistoryDays is how far the cartridge-usage curve reconstructs backward. It only
-// needs to span the retention window — older cartridges have recycled and dropped out of
-// the catalog (their runs aged out by definition) — so a season covers a monthly-full
-// rotation comfortably.
-const tapeHistoryDays = 60
-
 // forecastVolumes builds a tape pool's cartridge-usage curve: RECORDED history
 // reconstructed from the catalog (how many cartridges held a retention-protected run on
 // each past day), then a forward PACKING + RECYCLING simulation. The two meet at `start`
@@ -30,17 +24,18 @@ func (a *Accountant) forecastVolumes(name string, prof media.Profile, start time
 	if usable <= 0 {
 		return nil
 	}
-	minAge := a.d.Cfg.MinAgeFor(a.d.Cfg.Media[name])
+	minAge := a.minAgeFor(name)
 	pts := a.tapeHistory(name, minAge, start)
 	return append(pts, a.tapeProjection(name, minAge, usable, start, plans)...)
 }
 
-// tapeHistory reconstructs cartridges-in-use for each of the last tapeHistoryDays: for
-// each past day it recomputes the retention Floor as of that day (over the archives that
-// existed then) and counts the pool's current cartridges holding a run the Floor keeps.
-// Cartridges that have since recycled are gone from the catalog, but their runs had aged
-// out — so the count is faithful across the retention window, which is the part that
-// determines how many tapes the rotation needs.
+// tapeHistory reconstructs cartridges-in-use over the last forecastHistoryDays (sampled
+// every historyStep, like protectedHistory — cartridge counts move at the dump cadence):
+// for each sampled day it recomputes the retention Floor as of that day (over the
+// archives that existed then) and counts the pool's current cartridges holding a run the
+// Floor keeps. Cartridges that have since recycled are gone from the catalog, but their
+// runs had aged out — so the count is faithful across the retention window, which is the
+// part that determines how many tapes the rotation needs.
 func (a *Accountant) tapeHistory(name string, minAge time.Duration, now time.Time) []VolumePoint {
 	onMedium := a.d.Cat.ArchivesOn(name)
 	if len(onMedium) == 0 {
@@ -66,15 +61,10 @@ func (a *Accountant) tapeHistory(name string, minAge time.Duration, now time.Tim
 	if len(vols) == 0 {
 		return nil
 	}
-	pts := make([]VolumePoint, 0, tapeHistoryDays)
-	for d := tapeHistoryDays - 1; d >= 0; d-- {
+	pts := make([]VolumePoint, 0, forecastHistoryDays/historyStep+1)
+	for d := forecastHistoryDays - 1; d >= 0; d -= historyStep {
 		day := now.AddDate(0, 0, -d)
-		var asOf []record.Archive
-		for _, ar := range onMedium {
-			if !ar.CreatedAt.After(day) {
-				asOf = append(asOf, ar)
-			}
-		}
+		asOf := archivesAsOf(onMedium, day)
 		floor := retention.Compute(asOf, asOf, minAge, day)
 		var inUse int64
 		for _, v := range vols {
@@ -95,11 +85,12 @@ func (a *Accountant) tapeHistory(name string, minAge time.Duration, now time.Tim
 
 // tapeProjection simulates the pool forward: it seeds reels from the current cartridges
 // (each with its remaining room and the runs it holds), then packs each simulated day's
-// routed archives onto the open reel — spilling to a fresh reel when one fills (runs span
-// volumes), or starting a fresh reel per run on a non-appendable medium — and counts the
-// reels the retention Floor still keeps a run on. As runs age past minimum_age and are
-// superseded the Floor releases their reels, so the count is the concurrent cartridges the
-// rotation needs, whether or not a freed reel is physically relabeled.
+// routed archives (routedDay — the same routing every projection uses) onto the open
+// reel — spilling to a fresh reel when one fills (runs span volumes), or starting a
+// fresh reel per run on a non-appendable medium — and counts the reels the retention
+// Floor still keeps a run on. As runs age past minimum_age and are superseded the Floor
+// releases their reels, so the count is the concurrent cartridges the rotation needs,
+// whether or not a freed reel is physically relabeled.
 func (a *Accountant) tapeProjection(name string, minAge time.Duration, usable int64, start time.Time, plans []*planner.Plan) []VolumePoint {
 	appendable := a.MediumAppendable(name)
 	limit, capped := a.mediumRunCap(name)
@@ -150,15 +141,11 @@ func (a *Accountant) tapeProjection(name string, minAge time.Duration, usable in
 	pts := make([]VolumePoint, 0, len(plans))
 	for i, plan := range plans {
 		date := start.AddDate(0, 0, i)
-		runID := record.IDFromTime(date)
 		fresh := true
-		for _, it := range plan.Items {
-			if !contains(a.copyMediaFor(it.DLE.DumpTypeName()), name) {
-				continue // this medium neither routes nor receives a sync copy of this DLE
-			}
-			pack(runID, it.EstBytes, fresh)
+		for _, ar := range a.routedDay(name, date, plan, planEstimate) {
+			pack(ar.Run, ar.Compressed, fresh)
 			fresh = false
-			sim = append(sim, record.Archive{Run: runID, DLE: it.Name, Level: it.Level, Compressed: it.EstBytes, CreatedAt: date})
+			sim = append(sim, ar)
 		}
 		kept := sim
 		if capped { // a last-N sync tape counts only its most recent runs as in use

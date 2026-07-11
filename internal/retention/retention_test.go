@@ -198,7 +198,7 @@ func TestFloor_KindDrivesRankAndClassification(t *testing.T) {
 }
 
 // Compute stamps the Kind the callers classify on: an age pin is KindAge (the one
-// MediumProtectionIsAgeBound treats as releasable by shortening minimum_age),
+// MediumResidualIsAgeBound treats as releasable by shortening minimum_age),
 // a last-full pin is KindLastFull, a chain pin is KindChain.
 func TestFloor_ComputeStampsKinds(t *testing.T) {
 	now := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)

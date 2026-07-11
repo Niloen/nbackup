@@ -57,13 +57,12 @@ type Logf = logf.Logf
 // and one lane per operation. Its methods are the command surface — thin
 // delegations; the behavior is in the lanes.
 type Engine struct {
-	cfg         *config.Config
-	tc          *toolchain   // host/tool resolution: executors, archivers, transform options
-	dep         *depot.Depot // medium resolution: volumes, librarians, write knobs
-	cat         *catalog.Catalog
-	dles        *dleDirectory // DLE slug ↔ host:path identity mapping
-	fs          *archivefs.FS // the archive data path (read+write composer)
-	landingCost media.Cost    // landing medium's pricing (dollar peer of the depot's profile)
+	cfg  *config.Config
+	tc   *toolchain   // host/tool resolution: executors, archivers, transform options
+	dep  *depot.Depot // medium resolution: volumes, librarians, write knobs
+	cat  *catalog.Catalog
+	dles *dleDirectory // DLE slug ↔ host:path identity mapping
+	fs   *archivefs.FS // the archive data path (read+write composer)
 
 	runSink      progress.Sink // optional: live run-progress sink (nil = status file only)
 	estimateSink progress.Sink // optional: live estimate-progress sink (nil = status file only)
@@ -133,9 +132,13 @@ func build(cfg *config.Config) (*Engine, error) {
 		if err := media.ValidateParams(def.Type, def.Params); err != nil {
 			return nil, fmt.Errorf("media %s: %w", mname, err)
 		}
-		// Surface a bad cost override (unknown provider, malformed rate) at load time,
-		// like a param typo, rather than at first cost calculation.
+		// Surface a bad cost override (unknown provider, malformed rate) or profile
+		// option at load time, like a param typo, rather than at first use — the
+		// accountant resolves both per medium on demand and relies on this validation.
 		if _, err := media.OpenCost(def.Type, media.Options(def.CostOptions())); err != nil {
+			return nil, fmt.Errorf("media %s: %w", mname, err)
+		}
+		if _, err := media.OpenProfile(def.Type, media.Options(def.ProfileOptions())); err != nil {
 			return nil, fmt.Errorf("media %s: %w", mname, err)
 		}
 		// One shared limiter per medium, built once: the same instance throttles a
@@ -165,10 +168,6 @@ func build(cfg *config.Config) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	costModel, err := media.OpenCost(mediaDef.Type, media.Options(mediaDef.CostOptions()))
-	if err != nil {
-		return nil, err
-	}
 	cat, err := catalog.Open(cfg.WorkdirPath())
 	if err != nil {
 		return nil, err
@@ -184,12 +183,11 @@ func build(cfg *config.Config) (*Engine, error) {
 		return media.FileCostFor(md.Type)
 	})
 	e := &Engine{
-		cfg:         cfg,
-		tc:          newToolchain(cfg),
-		dep:         depot.New(cfg, cat, name, mediaDef, profile, cfg.MinAgeFor(mediaDef), limiters),
-		cat:         cat,
-		dles:        &dleDirectory{cfg: cfg, cat: cat},
-		landingCost: costModel,
+		cfg:  cfg,
+		tc:   newToolchain(cfg),
+		dep:  depot.New(cfg, cat, name, mediaDef, profile, cfg.MinAgeFor(mediaDef), limiters),
+		cat:  cat,
+		dles: &dleDirectory{cfg: cfg, cat: cat},
 	}
 	e.fs = archivefs.New(fsDeps{e}, fsDeps{e}, catalog.OpenMemberIndex(cfg.WorkdirPath()))
 	e.rst = restorer.New(restorer.Deps{
@@ -271,11 +269,11 @@ func (e *Engine) Media() []MediumInfo { return e.acct.Media() }
 // is unknown.
 func (e *Engine) Medium(name string) (MediumInfo, bool) { return e.acct.Medium(name) }
 
-// MediumProtected reports the bytes a prune cannot reclaim on the named medium (the
-// protected recovery set) and the medium's capacity as of now; ok is false for an
-// unknown medium. See accounting.Accountant.MediumProtected.
-func (e *Engine) MediumProtected(name string, now time.Time) (residual, capacity int64, ok bool) {
-	residual, capacity, err := e.acct.MediumProtected(name, now)
+// MediumResidual reports the bytes a prune cannot reclaim on the named medium (the
+// residual) and the medium's capacity as of now; ok is false for an unknown medium.
+// See accounting.Accountant.MediumResidual.
+func (e *Engine) MediumResidual(name string, now time.Time) (residual, capacity int64, ok bool) {
+	residual, capacity, err := e.acct.MediumResidual(name, now)
 	return residual, capacity, err == nil
 }
 
@@ -820,24 +818,24 @@ func (e *Engine) MediumOverCapacity(name string) (over bool, used, capacity int6
 	return e.acct.MediumOverCapacity(name)
 }
 
-// MediumProtectedOverCapacity reports whether the bytes a prune *cannot* reclaim —
-// the protected recovery set — still exceed the medium's capacity. It subtracts
-// everything Reclaim would free from the current total, so the answer is the same
-// whether or not a real prune has run: a dry-run still sees the would-delete archives
-// in the catalog while a completed prune has already removed them, but
+// MediumResidualOverCapacity reports whether the bytes a prune *cannot* reclaim —
+// the residual — still exceed the medium's capacity. It subtracts everything
+// Reclaim would free from the current total, so the answer is the same whether or
+// not a real prune has run: a dry-run still sees the would-delete archives in the
+// catalog while a completed prune has already removed them, but
 // `residual = current − reclaimable` is identical either way (after a real prune the
 // reclaimable set is empty and the current total is already the residual). This is
 // what `nb prune` warns on, so its preview and its real run agree.
-func (e *Engine) MediumProtectedOverCapacity(name string, now time.Time) (over bool, residual, capacity int64, err error) {
-	return e.acct.MediumProtectedOverCapacity(name, now)
+func (e *Engine) MediumResidualOverCapacity(name string, now time.Time) (over bool, residual, capacity int64, err error) {
+	return e.acct.MediumResidualOverCapacity(name, now)
 }
 
-// MediumProtectionIsAgeBound reports whether every archive pinning the medium over
+// MediumResidualIsAgeBound reports whether every archive pinning the medium over
 // capacity is held by the minimum_age floor (vs a live recovery chain). When false,
 // advising the operator to shorten minimum_age is useless — a DLE's last full and its
 // later incrementals are pinned regardless of age — so the remedy text drops it.
-func (e *Engine) MediumProtectionIsAgeBound(name string, now time.Time) bool {
-	return e.acct.MediumProtectionIsAgeBound(name, now)
+func (e *Engine) MediumResidualIsAgeBound(name string, now time.Time) bool {
+	return e.acct.MediumResidualIsAgeBound(name, now)
 }
 
 // Prune reconciles a named medium to its own retention model: it computes that

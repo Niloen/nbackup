@@ -289,8 +289,8 @@ func (e *engineSource) MediumStats(name string) (engine.MediumStats, bool) {
 	return e.engine().MediumStats(name)
 }
 
-func (e *engineSource) MediumProtected(name string, now time.Time) (residual, capacity int64, ok bool) {
-	return e.engine().MediumProtected(name, now)
+func (e *engineSource) MediumResidual(name string, now time.Time) (residual, capacity int64, ok bool) {
+	return e.engine().MediumResidual(name, now)
 }
 
 func (e *engineSource) RunCoverage(run *catalog.Run) *engine.RunCoverage {

@@ -25,7 +25,7 @@ type MediumForecast = accounting.MediumForecast
 // VolumePoint is one day of a tape pool's cartridge-usage curve.
 type VolumePoint = accounting.VolumePoint
 
-// DepthMark is the capacity needed to retain restore points back a given number of weeks.
+// DepthMark is the capacity needed to retain restore points back a given number of cycles.
 type DepthMark = accounting.DepthMark
 
 // ReadEstimate is the cost of reading a set of archives back off a medium.
@@ -37,17 +37,10 @@ func (e *Engine) CostSummary(plan *planner.Plan) CostSummary {
 	return e.acct.CostSummary(plan)
 }
 
-// ForecastCost projects the landing medium's storage cost and capacity headroom
-// forward day by day over the caller's simulated plans (see accounting). The caller
-// passes the SAME plans it rendered the schedule from — live or offline (`--days`
-// vs `--days --offline`) — so the cost/capacity curve and the schedule always agree.
-func (e *Engine) ForecastCost(start time.Time, plans []*planner.Plan) []ForecastPoint {
-	return e.acct.ForecastCost(start, plans)
-}
-
-// ForecastCapacity projects every size-structured landing medium's fill forward over
-// the caller's simulated plans — the per-medium generalization of ForecastCost. The
-// caller passes the same plans it rendered the schedule from (live or offline).
+// ForecastCapacity projects every medium's fill forward over the caller's simulated
+// plans (see accounting). The caller passes the SAME plans it rendered the schedule
+// from — live or offline (`--days` vs `--days --offline`) — so the capacity curves
+// and the schedule always agree; the landing's cost curve is its slice of the result.
 func (e *Engine) ForecastCapacity(start time.Time, plans []*planner.Plan) []MediumForecast {
 	return e.acct.ForecastCapacity(start, plans)
 }

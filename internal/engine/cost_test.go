@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Niloen/nbackup/internal/config"
+	"github.com/Niloen/nbackup/internal/planner"
 	"github.com/Niloen/nbackup/internal/recovery"
 	"github.com/Niloen/nbackup/internal/report"
 )
@@ -154,11 +155,22 @@ func TestSelectionCostEgress(t *testing.T) {
 	}
 }
 
-// TestForecastCostReclaims exercises the forecast's per-archive reclamation (dropArchive):
+// landingCurve picks the landing medium's byte curve out of the per-medium capacity
+// forecast — the slice `nb plan --days` renders its cost/footprint columns from.
+func landingCurve(eng *Engine, start time.Time, plans []*planner.Plan) []ForecastPoint {
+	for _, mf := range eng.ForecastCapacity(start, plans) {
+		if mf.Medium == eng.Landings()[0] {
+			return mf.Points
+		}
+	}
+	return nil
+}
+
+// TestForecastReclaims exercises the forecast's per-archive reclamation (dropArchive):
 // a small-capacity, daily-full landing must, over the projected days, reclaim superseded
 // fulls once they age past the retention floor — so at least one point reports reclaimed
 // bytes rather than a monotonically growing footprint.
-func TestForecastCostReclaims(t *testing.T) {
+func TestForecastReclaims(t *testing.T) {
 	src := t.TempDir()
 	write(t, filepath.Join(src, "f.txt"), strings.Repeat("forecast-reclaim-", 512)) // a non-trivial full
 
@@ -193,7 +205,7 @@ func TestForecastCostReclaims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	curve := eng.ForecastCost(start.AddDate(0, 0, 1), plans)
+	curve := landingCurve(eng, start.AddDate(0, 0, 1), plans)
 	if len(curve) != 6 {
 		t.Fatalf("curve has %d points, want 6", len(curve))
 	}
@@ -214,9 +226,9 @@ func TestForecastCostReclaims(t *testing.T) {
 	}
 }
 
-// TestForecastCostGrows projects the cost curve forward; with unbounded capacity the
-// footprint and its monthly cost only grow as runs land.
-func TestForecastCostGrows(t *testing.T) {
+// TestForecastGrows projects the landing's cost curve forward; with unbounded
+// capacity the footprint and its monthly cost only grow as runs land.
+func TestForecastGrows(t *testing.T) {
 	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	eng, _ := cloudCostEngine(t, start, nil)
 
@@ -224,7 +236,7 @@ func TestForecastCostGrows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	curve := eng.ForecastCost(start.AddDate(0, 0, 1), plans)
+	curve := landingCurve(eng, start.AddDate(0, 0, 1), plans)
 	if len(curve) != 5 {
 		t.Fatalf("curve has %d points, want 5", len(curve))
 	}
