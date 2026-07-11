@@ -2228,11 +2228,25 @@ func usageChartSVG(series []catalog.UsageSample, forecast, protected []engine.Fo
 	fmt.Fprintf(&b, `<svg viewBox="0 0 %.0f %.0f" style="width:100%%;height:auto;display:block" role="img" aria-label="used capacity over time, with projection">`, vw, vh)
 	// Baseline.
 	fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--line)" stroke-width="1"/>`, padL, baseY, vw-padR, baseY)
+
+	// Several value labels share the right edge (capacity ceiling, projection-end value,
+	// retention-floor "min") and all cluster near capacity when a medium is near-full — so
+	// their digits print on top of each other. Rather than dodge pairwise, collect every
+	// right-edge label here with its ideal baseline and lay them out with one declutter pass
+	// at the end (see below) that pushes overlapping baselines apart.
+	type edgeLabel struct {
+		y    float64          // ideal baseline (may be shifted by the declutter pass)
+		emit func(yy float64) // draws the <text> at the resolved baseline
+	}
+	var edge []edgeLabel
+
 	// Capacity ceiling, across the whole width so the projection's crossing is visible.
 	if drawCap {
 		cy := y(capacity)
 		fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--warn)" stroke-width="1" stroke-dasharray="4 3"/>`, padL, cy, vw-padR, cy)
-		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--warn)" font-size="11" text-anchor="end">%s %s</text>`, vw-padR, cy-3, capLabel, sizeutil.FormatBytes(capacity))
+		edge = append(edge, edgeLabel{cy - 3, func(yy float64) {
+			fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--warn)" font-size="11" text-anchor="end">%s %s</text>`, vw-padR, yy, capLabel, sizeutil.FormatBytes(capacity))
+		}})
 	}
 
 	// History: solid filled area + line.
@@ -2295,8 +2309,11 @@ func usageChartSVG(series []catalog.UsageSample, forecast, protected []engine.Fo
 			}
 		}
 		e := prot[len(prot)-1]
-		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--accent)" font-size="10" text-anchor="end" opacity="0.85"><title>minimum capacity needed — the retention floor cannot be pruned below this</title>min %s</text>`,
-			x(e.t), y(e.v)+11, sizeutil.FormatBytes(peakP))
+		ex := x(e.t)
+		edge = append(edge, edgeLabel{y(e.v) + 11, func(yy float64) {
+			fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--accent)" font-size="10" text-anchor="end" opacity="0.85"><title>minimum capacity needed — the retention floor cannot be pruned below this</title>min %s</text>`,
+				ex, yy, sizeutil.FormatBytes(peakP))
+		}})
 	}
 
 	// Projection: a dashed line (no fill, so it reads as "not yet real"), continuing from
@@ -2322,21 +2339,19 @@ func usageChartSVG(series []catalog.UsageSample, forecast, protected []engine.Fo
 				}
 			}
 		}
-		// Projection end value label. It shares the right edge with the capacity-ceiling
-		// label (both text-anchor="end"), and the projected value usually lands near
-		// capacity — so when the two would collide, drop this one below its point instead
-		// of stacking it on top of the ceiling digits.
+		// Projection-end value label — shares the right edge with the ceiling and "min"
+		// labels; the declutter pass below spaces it clear of them.
 		e := fc[len(fc)-1]
-		ly := y(e.v) - 6
-		if drawCap {
-			if capY := y(capacity) - 3; ly > capY-11 && ly < capY+11 {
-				ly = y(e.v) + 14
-			}
-		}
-		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11" text-anchor="end">%s</text>`, x(e.t), ly, sizeutil.FormatBytes(e.v))
+		ex, ev := x(e.t), e.v
+		edge = append(edge, edgeLabel{y(ev) - 6, func(yy float64) {
+			fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11" text-anchor="end">%s</text>`, ex, yy, sizeutil.FormatBytes(ev))
+		}})
 	} else if hasHist {
 		end := series[len(series)-1]
-		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--fg)" font-size="11" text-anchor="end">%s</text>`, x(end.At), y(end.Used)-6, sizeutil.FormatBytes(end.Used))
+		ex, ev := x(end.At), end.Used
+		edge = append(edge, edgeLabel{y(ev) - 6, func(yy float64) {
+			fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--fg)" font-size="11" text-anchor="end">%s</text>`, ex, yy, sizeutil.FormatBytes(ev))
+		}})
 	}
 
 	// "now" divider between recorded and projected — only when the projection extends
@@ -2350,6 +2365,25 @@ func usageChartSVG(series []catalog.UsageSample, forecast, protected []engine.Fo
 	// X-axis end dates.
 	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11">%s</text>`, padL, vh-8, xMin.Format("2006-01-02"))
 	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--muted)" font-size="11" text-anchor="end">%s</text>`, vw-padR, vh-8, xMax.Format("2006-01-02"))
+
+	// Declutter the shared right-edge labels: sort by ideal baseline and push any that sit
+	// within one line-height (~12px for font-size 11) of the one above it downward, so no
+	// two sets of digits print on top of each other. Emitted last so they sit above the
+	// lines and areas. Greedy-down is enough here — these labels live near capacity (top of
+	// the plot), so there is room below; the final one is clamped inside the plot as a guard.
+	sort.SliceStable(edge, func(i, j int) bool { return edge[i].y < edge[j].y })
+	const edgeGap = 12.0
+	for i := 1; i < len(edge); i++ {
+		if edge[i].y < edge[i-1].y+edgeGap {
+			edge[i].y = edge[i-1].y + edgeGap
+		}
+	}
+	if n := len(edge); n > 0 && edge[n-1].y > baseY {
+		edge[n-1].y = baseY // never spill a label below the axis
+	}
+	for _, e := range edge {
+		e.emit(e.y)
+	}
 	b.WriteString(`</svg>`)
 	return template.HTML(b.String())
 }

@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1455,6 +1457,50 @@ func TestUsageChartOverlay(t *testing.T) {
 	} {
 		if !strings.Contains(svg, want) {
 			t.Errorf("usage chart overlay missing %q:\n%s", want, svg)
+		}
+	}
+}
+
+// TestUsageChartLabelDeclutter drives the near-full case that used to print digits on top
+// of each other: capacity, the projection-end value, and the retention-floor "min" all land
+// close to the ceiling, so all three right-edge labels share the same y band. The declutter
+// pass must push their baselines apart — no two right-edge (text-anchor="end") labels at the
+// right margin may sit within a line-height of each other.
+func TestUsageChartLabelDeclutter(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	const cap = 1000
+	series := []catalog.UsageSample{
+		{At: now.AddDate(0, 0, -2), Used: 900},
+		{At: now.AddDate(0, 0, -1), Used: 920},
+		{At: now, Used: 940},
+	}
+	forecast := []engine.ForecastPoint{
+		{Date: now.Format("2006-01-02"), Bytes: 940, Capacity: cap, Protected: 900},
+		{Date: now.AddDate(0, 0, 10).Format("2006-01-02"), Bytes: 985, Capacity: cap, Protected: 950}, // near, not over
+	}
+	protected := []engine.ForecastPoint{
+		{Date: now.AddDate(0, 0, -2).Format("2006-01-02"), Bytes: 900},
+		{Date: now.Format("2006-01-02"), Bytes: 930},
+		{Date: now.AddDate(0, 0, 10).Format("2006-01-02"), Bytes: 950},
+	}
+	svg := string(usageChartSVG(series, forecast, protected, nil, now, cap, "capacity"))
+
+	// Collect the baselines of every right-margin, end-anchored label (x = vw-padR = 752.0).
+	re := regexp.MustCompile(`<text x="752\.0" y="([0-9.]+)"[^>]*text-anchor="end"`)
+	var ys []float64
+	for _, m := range re.FindAllStringSubmatch(svg, -1) {
+		v, _ := strconv.ParseFloat(m[1], 64)
+		ys = append(ys, v)
+	}
+	if len(ys) < 3 {
+		t.Fatalf("expected the ceiling, projection-end and min labels on the right edge, got %d:\n%s", len(ys), svg)
+	}
+	sort.Float64s(ys)
+	const minGap = 11.5 // just under the 12px line-height the declutter enforces
+	for i := 1; i < len(ys); i++ {
+		if ys[i]-ys[i-1] < minGap {
+			t.Errorf("right-edge labels overlap: baselines %.1f and %.1f are %.1fpx apart (want ≥ %.1f)\n%s",
+				ys[i-1], ys[i], ys[i]-ys[i-1], minGap, svg)
 		}
 	}
 }
