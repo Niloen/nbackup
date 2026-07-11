@@ -429,6 +429,72 @@ func TestForecastSyncTargetProjected(t *testing.T) {
 	}
 }
 
+// TestRestoreDepthCurrentRate checks that restore-depth marks are priced at the CURRENT
+// run rate, not the grown projected size: with a fast-growing dataset, floor(1 week)
+// must reflect this week's cost (near the recorded full), not a full months out — so it
+// stays close to the current retention floor rather than ballooning above it.
+func TestRestoreDepthCurrentRate(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "f.txt"), strings.Repeat("depth-", 30000)) // ~180 KB now
+
+	cfg := &config.Config{
+		Landing: config.MediumList{"disk"},
+		Media: map[string]config.Media{
+			"disk": {Type: "disk", Capacity: "500MB", Params: map[string]string{"path": t.TempDir()}},
+		},
+		Cycle:    "7d", // weekly full, so one week of restore depth ≈ one full
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := eng.tc.archiverFor(config.DefaultDumpType, ""); err != nil || m.Check() != nil {
+		t.Skipf("GNU tar not available")
+	}
+	start := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	if _, err := eng.Run(context.Background(), start, nil); err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+	// A fast-growing history: 100 KB two weeks ago -> 200 KB now (a steep slope). Left to
+	// grow over the 12-week projection, a "week" would be sized several times larger.
+	slug := config.DLE{Host: "localhost", Path: src}.Name()
+	for _, s := range []struct {
+		at   time.Time
+		orig int64
+	}{{start.AddDate(0, 0, -14), 100_000}, {start, 200_000}} {
+		if err := report.Append(cfg.WorkdirPath(), report.Run{
+			Command: report.CommandDump, StartedAt: s.at, EndedAt: s.at,
+			DumpStats: []report.DLEStat{{DLE: slug, Level: 0, Orig: s.orig, Out: s.orig}},
+		}); err != nil {
+			t.Fatalf("seed run-log: %v", err)
+		}
+	}
+
+	forecasts, err := eng.ForecastCapacityOffline(start.AddDate(0, 0, 1), 84)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var disk *MediumForecast
+	for i := range forecasts {
+		if forecasts[i].Medium == "disk" {
+			disk = &forecasts[i]
+		}
+	}
+	if disk == nil || len(disk.Depth.Marks) == 0 {
+		t.Fatalf("no restore-depth marks: %+v", disk)
+	}
+	oneWeek := disk.Depth.Marks[0].Bytes // the 1w mark
+	// Priced at the current ~200 KB full (plus its chain), one week stays well under
+	// ~500 KB. Grown to 12 weeks out it would blow past that — this pins the current-rate fix.
+	if oneWeek <= 0 || oneWeek > 500_000 {
+		t.Errorf("floor(1 week) should be priced at the current rate (~200 KB), got %d", oneWeek)
+	}
+}
+
 // TestForecastTapeVolumes checks the tape cartridge-count forecast: a small-volume,
 // long-retention pool accumulates cartridges as daily fulls pile up faster than they age
 // out, tripping the "run out of tapes" signal past its slot count.
