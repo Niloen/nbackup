@@ -796,19 +796,39 @@ func (s *Server) handleMedium(w http.ResponseWriter, r *http.Request) {
 		s.render(w, "medium", page{Title: name, Active: "media", Data: mediumData{NotFound: true, Name: name}})
 		return
 	}
-	// The schedule-aware fill forecast for this medium (offline — no host probe), reused
-	// for both the used-capacity chart's projection overlay and the outlook headline.
-	var fc []engine.ForecastPoint
-	for _, mf := range s.src.CapacityForecast(s.now(), mediaForecastDays) {
-		if mf.Medium == name && !mf.VolumeStructured {
-			fc = mf.Points
+	// The schedule-aware forecast for this medium (offline — no host probe), reused for
+	// both the chart's projection overlay and the outlook headline. Byte media carry a
+	// fill curve; a tape pool carries a cartridge-count curve instead.
+	var mf engine.MediumForecast
+	for _, f := range s.src.CapacityForecast(s.now(), mediaForecastDays) {
+		if f.Medium == name {
+			mf = f
 			break
 		}
 	}
-	d := newMediumData(st, fc, s.now())
+	d := newMediumData(st, mf, s.now())
 	d.VolMap = s.buildMediumVolMap(name, st, showAll(r))
-	if len(fc) > 0 && fc[0].Capacity > 0 {
-		if over := firstOverCapacityDate(fc); !over.IsZero() {
+	switch {
+	case mf.VolumeStructured && len(mf.Volumes) > 0:
+		peak := int64(0)
+		for _, v := range mf.Volumes {
+			if v.InUse > peak {
+				peak = v.InUse
+			}
+		}
+		if over, need := mf.VolumeOver(); over != "" {
+			if t, err := time.Parse("2006-01-02", over); err == nil {
+				d.CapacityOutlook = fmt.Sprintf("Projected to need %d cartridges by %s but the pool has only %d slot(s) — load or buy more tapes, or shorten retention.",
+					need, t.Format("Jan 2, 2006"), mf.VolumeCeiling)
+				d.CapacityOver = true
+			}
+		} else if mf.VolumeCeiling > 0 {
+			d.CapacityOutlook = fmt.Sprintf("Projected to stay within its %d slots over the next %dd (peak %d cartridges).", mf.VolumeCeiling, mediaForecastDays, peak)
+		} else {
+			d.CapacityOutlook = fmt.Sprintf("Projected to keep ~%d cartridges in rotation over the next %dd (hand-loaded — no fixed slot count).", peak, mediaForecastDays)
+		}
+	case len(mf.Points) > 0 && mf.Points[0].Capacity > 0:
+		if over := firstOverCapacityDate(mf.Points); !over.IsZero() {
 			d.CapacityOutlook = fmt.Sprintf("Projected to EXCEED capacity in ~%dd (%s) even after pruning — add capacity or shorten retention.",
 				projDays(over, s.now()), over.Format("Jan 2, 2006"))
 			d.CapacityOver = true

@@ -1375,6 +1375,29 @@ func TestUsageChartOverlay(t *testing.T) {
 	}
 }
 
+// TestVolumesChartOverlay checks the tape cartridge chart draws history and projection on
+// one axis: a solid-to-dashed cartridge curve, the slot ceiling, and a red "out" marker
+// where the projection needs more reels than slots.
+func TestVolumesChartOverlay(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	points := []engine.VolumePoint{
+		{Date: now.AddDate(0, 0, -2).Format("2006-01-02"), InUse: 1},
+		{Date: now.Format("2006-01-02"), InUse: 2},
+		{Date: now.AddDate(0, 0, 10).Format("2006-01-02"), InUse: 5}, // exceeds 3 slots
+	}
+	svg := string(volumesChartSVG(points, 3, now))
+	for _, want := range []string{
+		`stroke-dasharray="5 4"`, // the projection segment
+		`>now</text>`,            // the divider
+		`3 slots`,                // the ceiling label
+		`out ~Jul 21`,            // the over-slots crossing
+	} {
+		if !strings.Contains(svg, want) {
+			t.Errorf("volumes chart missing %q:\n%s", want, svg)
+		}
+	}
+}
+
 // TestDLEProjectedFootprint checks the per-DLE footprint card on /dles/<slug>: a rising
 // projected footprint shows the horizon figure with a ▲, distinct from the current size.
 func TestDLEProjectedFootprint(t *testing.T) {
