@@ -405,6 +405,48 @@ func TestPromotionSpreadsClusterAcrossCycle(t *testing.T) {
 	}
 }
 
+// TestPromotionNoRapidRefull guards the recency floor: staggering a lock-step clump
+// resets each pulled-forward DLE to the back of the cycle window, where — without the
+// floor — the next day's greedy pass would re-promote it one or two days after its
+// full (a useless double promotion the forecast surfaced as two near-adjacent ghost
+// fulls). No DLE may be fulled twice within half a cycle: promotion phase-shifts a
+// full, it does not re-full a fresh DLE.
+func TestPromotionNoRapidRefull(t *testing.T) {
+	cycle := 14
+	start := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+	hist := &catalog.History{DLEs: map[string]*catalog.DLEState{}}
+	var dles []DLE
+	est := map[string]Estimate{}
+	day0 := start.Format("2006-01-02")
+	names := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"}
+	for _, h := range names {
+		d := dleNamed(h)
+		hist.DLEs[d.Name()] = &catalog.DLEState{
+			LastFullDate: day0,
+			LastFullRun:  "run-x",
+			Runs:         []catalog.RunRecord{{Date: day0, Run: "run-x", Level: 0}},
+		}
+		dles = append(dles, d)
+		est[d.Name()] = Estimate{Full: 1_000_000_000, Incr: 50_000}
+	}
+
+	plans := Simulate(dles, hist, est, nil, Params{CycleDays: cycle, RoomBytes: -1}, start, 30)
+	for _, h := range names {
+		name := dleNamed(h).Name()
+		last := -1
+		for day, p := range plans {
+			if levelOf(p, name) != 0 {
+				continue
+			}
+			if last >= 0 && day-last < cycle/2 {
+				t.Errorf("DLE %s fulled on day %d then day %d (gap %d < cycle/2 %d): a just-fulled DLE was re-promoted",
+					name, last, day, day-last, cycle/2)
+			}
+			last = day
+		}
+	}
+}
+
 // TestPromotionSpreadsClusterEagerly checks the leveler flattens a shared-deadline
 // cluster across distinct days rather than piling it onto the deadline. The variance
 // leveler does not "hold" a cluster that has runway (the old peak-shaver deferred

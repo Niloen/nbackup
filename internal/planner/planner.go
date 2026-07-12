@@ -309,9 +309,12 @@ func runBytes(cands []*cand) int64 {
 // means "smaller Σ load²". It stops when no admissible move improves either metric.
 //
 // A move is admissible only when it fits the per-run room (promotion spends only
-// genuinely free capacity) and it does not overshoot: today's load *after* the move
-// may not exceed the relieved day's load *after* the full leaves it. The
-// no-overshoot guard is what keeps promotion honest. It forbids merely relocating a
+// genuinely free capacity), the DLE was last fulled at least half a cycle ago (the
+// recency floor — a just-fulled DLE sitting at the back of the window is not due
+// soon, so pulling its full forward would spend a whole full for near-zero freshness
+// and, worse, re-full it a day after its last full), and it does not overshoot:
+// today's load *after* the move may not exceed the relieved day's load *after* the
+// full leaves it. The no-overshoot guard is what keeps promotion honest. It forbids merely relocating a
 // peak onto today — pulling a lone big DLE forward would move its whole size onto
 // today for no net flattening, so a lone DLE (or one dominating its own deadline
 // day) is never promoted. And it never pulls a full forward earlier than the
@@ -425,6 +428,16 @@ func promote(cands []*cand, cycle int, room int64) {
 			for _, c := range byOffset[off] {
 				s := c.estFull
 				if !fitsRoom(c) {
+					continue
+				}
+				// Recency floor: pulling this full onto today shortens its cycle to
+				// c.days (it was last fulled c.days ago). A DLE less than half a cycle
+				// past its full is not "due soon" — it is freshly done, sitting at the
+				// back of the window — so promoting it spends a whole full to buy
+				// near-zero freshness. Forbid it. Without this, staggering a clump refills
+				// the far offset with just-fulled DLEs every day, and the greedy pass
+				// re-promotes them one day after their full (a useless double promotion).
+				if c.days < cycle/2 {
 					continue
 				}
 				// No overshoot: today-after may not exceed the relieved day-after.
