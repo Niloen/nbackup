@@ -116,10 +116,37 @@ func TestProjectIncrPerLevel(t *testing.T) {
 	}
 }
 
-func TestMedianOrigAtLevelEmpty(t *testing.T) {
-	// No dumps at the level → 0, which the planner reads as "not yet estimable" and
-	// holds the level (the safe default).
-	if got := medianOrigAtLevel(nil, 3); got != 0 {
-		t.Fatalf("median of no L3 points = %d, want 0", got)
+func TestMedianIncrSinceFullEmpty(t *testing.T) {
+	// No incrementals since the full → 0, which the planner reads as "not yet estimable"
+	// and holds the level (the safe default, and honest right after a full).
+	if got := medianIncrSinceFull(nil, 3, day("2026-07-01")); got != 0 {
+		t.Fatalf("incr since full of no L3 points = %d, want 0", got)
+	}
+}
+
+// TestProjectIncrSinceLastFull pins the rule that only incrementals since the last full
+// size the recurring estimate. The shape is from a real partitioned photo DLE: a ~15 GB
+// full, and TWO ~14.85 GB "L1" dumps a couple days BEFORE it (one growth event that
+// re-dumped nearly the whole dataset over two runs) plus the real daily churn of ~140 kB
+// AFTER it. Folding the pre-full re-dumps in would project ~15 GB onto every incremental
+// night; scoping to dumps since the last full leaves only the ~140 kB, the true churn
+// against the current baseline (the re-dumps' bytes are already in that full).
+func TestProjectIncrSinceLastFull(t *testing.T) {
+	const kb, mb, gb = int64(1) << 10, int64(1) << 20, int64(1) << 30
+	rebaseline := 14*gb + 850*mb // ~14.85 GB, before the last full
+	pts := []report.TrendPoint{
+		pt("2026-07-08", 0, 8*gb),
+		pt("2026-07-09", 1, rebaseline),
+		pt("2026-07-09", 1, rebaseline),
+		pt("2026-07-11", 0, 15*gb),  // the last full re-bases the dataset
+		pt("2026-07-13", 1, 142*kb), // the real recurring churn, since that full
+	}
+	st := &catalog.DLEState{
+		LastFullDate: "2026-07-11",
+		Runs:         []catalog.RunRecord{{Level: 0}, {Level: 1}},
+	}
+	est := historySource{at: day("2026-07-14")}.project(st, pts)
+	if est.Incr > 10*mb {
+		t.Errorf("Incr = %d B (~%d MB); a pre-full re-dump leaked into the recurring estimate", est.Incr, est.Incr/mb)
 	}
 }

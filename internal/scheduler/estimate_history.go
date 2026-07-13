@@ -68,9 +68,9 @@ func (h historySource) project(st *catalog.DLEState, pts []report.TrendPoint) pl
 	}
 	est := planner.Estimate{Full: full}
 	lvl := planner.SittingLevel(st)
-	est.Incr = medianOrigAtLevel(pts, lvl)
+	est.Incr = medianIncrSinceFull(pts, lvl, last.At)
 	if lvl < planner.MaxLevel {
-		est.IncrNext = medianOrigAtLevel(pts, lvl+1)
+		est.IncrNext = medianIncrSinceFull(pts, lvl+1, last.At)
 	}
 	return est
 }
@@ -85,13 +85,23 @@ func lastFull(pts []report.TrendPoint) *report.TrendPoint {
 	return nil
 }
 
-// medianOrigAtLevel is the median uncompressed size of the DLE's dumps at level lvl,
-// or 0 when none were recorded — the planner reads 0 as "not yet estimable" and holds
-// the level (chooseIncrLevel), the safe default when history can't judge a climb.
-func medianOrigAtLevel(pts []report.TrendPoint, lvl int) int64 {
+// medianIncrSinceFull estimates a DLE's RECURRING incremental size at level lvl from the
+// incrementals recorded SINCE its last full (on or after lastFullAt) — the churn against
+// the CURRENT dataset baseline. An incremental only ever means "changes since its base",
+// so once a new full re-bases the dataset everything before it describes a superseded
+// era: a smaller dataset, or a one-time re-baseline / bulk catch-up whose bytes the new
+// full has already absorbed (and whose growth the full's slope carries). Folding those
+// in would size a normal night by an old or exceptional era — which is what let a single
+// pre-full 15 GB re-dump project onto every incremental day. The last full is the
+// natural boundary; no size threshold is needed.
+//
+// Returns 0 when no incremental has been taken since the full — the planner reads 0 as
+// "not yet estimable" and holds the level (chooseIncrLevel). That is the safe default,
+// and the honest one right after a full: the churn against the new base is not yet known.
+func medianIncrSinceFull(pts []report.TrendPoint, lvl int, lastFullAt time.Time) int64 {
 	var sizes []int64
 	for _, p := range pts {
-		if p.Level == lvl {
+		if p.Level == lvl && !p.At.Before(lastFullAt) {
 			sizes = append(sizes, p.Orig)
 		}
 	}
