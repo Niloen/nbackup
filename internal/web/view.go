@@ -933,8 +933,9 @@ type dlesData struct {
 	Rows []dleRow
 	Heat *heatmap
 
-	Groups     []dleGroup  // Sources rows sectioned by host; nil when ungrouped
-	HeatGroups []heatGroup // heatmap rows sectioned by host, same grouping; nil when ungrouped
+	Groups     []dleGroup   // Sources rows sectioned by host; nil when ungrouped
+	HeatGroups []heatGroup  // heatmap rows sectioned by host, same grouping; nil when ungrouped
+	Balance    *loadBalance // daily-load balance tiles above the calendar; nil without a forecast
 }
 
 // dleHostSummary is the compact rollup shown in a /dles host-section header: the
@@ -1172,6 +1173,9 @@ func groupDLEs(sums []catalog.DLESummary, stale []catalog.StaleDLE, heat *heatma
 	}
 
 	data := dlesData{Heat: heat}
+	if heat != nil {
+		data.Balance = heat.Balance
+	}
 	order, byHost, hostless := partitionByHost(sums)
 	var hrows []heatRow
 	data.Rows, hrows = arrangeDLEs(sums, heatBySlug, false, trends)
@@ -1399,14 +1403,48 @@ func chainMedia(members []chainMember) (onePlace bool, text string) {
 type heatmap struct {
 	Days []heatDay
 	Rows []heatRow
+	// Load is the daily-load strip under the calendar: one bar per column (parallel
+	// to Days) totalling that day's dump volume — recorded actuals to the left of
+	// today, the offline forecast to the right. Nil when there is no forecast to draw.
+	Load    []heatLoad
+	MeanTop int          // px from the top of the load track to the mean line (the leveling target)
+	Balance *loadBalance // the peak/mean/spread tiles above the calendar; nil without a forecast
 }
 
 // heatDay is one column: its date and a sparse tick label (a month on the 1st, a day
 // number on Mondays, else ""). Future marks a projected column (past today), which the
-// template dims so the forecast region reads as distinct from recorded activity.
+// template dims so the forecast region reads as distinct from recorded activity. Seam
+// marks the first future column, drawn with a divider between recorded and projected.
 type heatDay struct {
 	Tick   string
 	Future bool
+	Seam   bool
+}
+
+// heatLoad is one column of the daily-load strip: the full/incr bytes drawn as stacked
+// bar heights (pixels within the fixed track), whether it is projected, and the seam
+// flag. Title carries the exact bytes for the hover tooltip.
+type heatLoad struct {
+	FullH  int
+	IncrH  int
+	Future bool
+	Seam   bool
+	Title  string
+}
+
+// loadBalance is the daily-load headline shown as tiles above the calendar: the peak
+// day, the mean, the spread verdict (backed by CV), and how many fulls the leveler
+// promoted to reach it — all pre-formatted for display.
+type loadBalance struct {
+	PeakBytes string
+	PeakWhen  string
+	PeakRatio string
+	MeanBytes string
+	Verdict   string
+	VerdictOK bool
+	CV        string
+	Promoted  int
+	Window    int
 }
 
 // heatRow is one DLE's row of daily cells, in Days order. Like dleRow, rows are
@@ -1426,10 +1464,12 @@ type heatRow struct {
 // cell (a future day from the offline forecast, not a recorded run): the template
 // renders it as an outline rather than a fill so a plan can never be mistaken for a fact.
 type heatCell struct {
-	Class string // "full" | "incr" | "partial" | "none"
-	Title string
-	RunID string // set only when exactly one run produced the day's archive
-	Ghost bool   // a projected future cell (no RunID; outlined, not filled)
+	Class  string // "full" | "incr" | "partial" | "none"
+	Title  string
+	RunID  string // set only when exactly one run produced the day's archive
+	Ghost  bool   // a projected future cell (no RunID; outlined, not filled)
+	Weight int    // 1..4 for a ghost cell, tinting its outline by projected volume; 0 = untinted
+	Seam   bool   // the first future column, drawn with a recorded/projected divider
 }
 
 // dleTrendPoint is one dump record's statistics for a single DLE, the per-DLE series

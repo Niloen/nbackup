@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -290,11 +291,22 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int, offline bool
 	}
 	priced := eng.CostSummary(nil).Priced && len(curve) == len(plans)
 
+	// The daily-load balance: the same per-day dump volumes the table shows, folded
+	// for the LOAD sparkbar (scaled to the window's peak) and the closing summary.
+	loads := engine.DailyLoad(plans)
+	bal := engine.Balance(loads)
+	var maxLoad int64
+	for _, d := range loads {
+		if d.Total() > maxLoad {
+			maxLoad = d.Total()
+		}
+	}
+
 	tw := newTab(os.Stdout)
 	if priced {
-		fmt.Fprintln(tw, "DATE\tFULL\tINCR\tEST. SIZE\t$/MONTH\tFULLS")
+		fmt.Fprintln(tw, "DATE\tFULL\tINCR\tEST. SIZE\tLOAD\t$/MONTH\tFULLS")
 	} else {
-		fmt.Fprintln(tw, "DATE\tFULL\tINCR\tEST. SIZE\tFULLS")
+		fmt.Fprintln(tw, "DATE\tFULL\tINCR\tEST. SIZE\tLOAD\tFULLS")
 	}
 	var windowTotal, incrEst int64
 	var totalIncrs, totalPromoted int
@@ -327,18 +339,30 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int, offline bool
 		if names == "" {
 			names = "-"
 		}
+		bar := loadBar(loads[i], maxLoad)
 		if priced {
-			fmt.Fprintf(tw, "%s\t%d\t%d\t~%s\t%s\t%s\n",
+			fmt.Fprintf(tw, "%s\t%d\t%d\t~%s\t%s\t%s\t%s\n",
 				record.DateString(p.Date), fulls, incrs, sizeutil.FormatBytes(est),
-				formatUSD(curve[i].Monthly), names)
+				bar, formatUSD(curve[i].Monthly), names)
 		} else {
-			fmt.Fprintf(tw, "%s\t%d\t%d\t~%s\t%s\n",
-				record.DateString(p.Date), fulls, incrs, sizeutil.FormatBytes(est), names)
+			fmt.Fprintf(tw, "%s\t%d\t%d\t~%s\t%s\t%s\n",
+				record.DateString(p.Date), fulls, incrs, sizeutil.FormatBytes(est), bar, names)
 		}
 	}
 	tw.Flush()
 	if totalPromoted > 0 {
 		fmt.Println("\n* = a full promoted ahead of its cycle deadline to level the daily full load.")
+	}
+	// Daily-load balance: peak vs. mean and the spread (CV) the leveling shrinks — the
+	// one-line answer to "is the load balanced across the window?"
+	if bal.Days > 1 && bal.Mean > 0 {
+		line := fmt.Sprintf("\nDaily load: peak ~%s on %s (%.1f× mean) · mean ~%s/day · CV %.2f",
+			sizeutil.FormatBytes(bal.Peak.Total()), record.DateString(bal.Peak.Date), bal.PeakRatio(),
+			sizeutil.FormatBytes(bal.Mean), bal.CV)
+		if bal.Promoted > 0 {
+			line += fmt.Sprintf(" · %d full(s) promoted to flatten", bal.Promoted)
+		}
+		fmt.Println(line)
 	}
 	if totalIncrs > 0 && incrEst == 0 {
 		// With no incremental history to size from (or a live probe of an unchanged
@@ -406,6 +430,26 @@ func runPlanForecast(eng *engine.Engine, start time.Time, days int, offline bool
 		fmt.Printf("Capacity — stays within the window: %s\n", strings.Join(within, "; "))
 	}
 	return nil
+}
+
+// loadBar renders a day's projected dump volume as a fixed-width bar, scaled to the
+// window's busiest day: the full portion in solid blocks over the incremental
+// baseline in a lighter shade. It puts the daily-load balance beside the exact sizes
+// so a lopsided calendar (one tall bar among short ones) reads at a glance.
+func loadBar(d engine.DayLoad, max int64) string {
+	const width = 12
+	if max <= 0 || d.Total() <= 0 {
+		return ""
+	}
+	cells := int(math.Round(float64(d.Total()) / float64(max) * width))
+	if cells < 1 {
+		cells = 1
+	}
+	full := int(math.Round(float64(d.FullBytes) / float64(max) * width))
+	if full > cells {
+		full = cells
+	}
+	return strings.Repeat("█", full) + strings.Repeat("░", cells-full)
 }
 
 // firstOverCapacity returns the first day a medium's forecast cannot fit its retained

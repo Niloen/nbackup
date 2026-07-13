@@ -9,7 +9,7 @@
 <tr{{if .Group}} data-in="{{.Group}}"{{end}}>
   <td class="lbl{{if .Group}} member{{end}}"><a href="/dles/{{.Slug}}"{{if .Group}} title="{{.Display}}"{{end}}>{{.Label}}</a></td>
   {{range .Cells}}
-  <td>{{if .RunID}}<a class="cell {{.Class}}" href="/runs/{{.RunID}}" title="{{.Title}}"></a>{{else}}<span class="cell {{.Class}}{{if .Ghost}} ghost{{end}}" title="{{.Title}}"></span>{{end}}</td>
+  <td{{if .Seam}} class="seam"{{end}}>{{if .RunID}}<a class="cell {{.Class}}" href="/runs/{{.RunID}}" title="{{.Title}}"></a>{{else}}<span class="cell {{.Class}}{{if .Ghost}} ghost{{if .Weight}} w{{.Weight}}{{end}}{{end}}" title="{{.Title}}"></span>{{end}}</td>
   {{end}}
 </tr>
 {{end}}
@@ -52,12 +52,22 @@
 {{$d := .Data}}
 <h1>DLEs</h1>
 
+{{with $d.Balance}}
+<h2>Daily load <span class="count">· next {{.Window}} days projected</span></h2>
+<div class="cards">
+  <div class="card"><div class="k">Peak day</div><div class="v">{{.PeakBytes}}</div><div class="sub">{{.PeakWhen}} · {{.PeakRatio}}</div></div>
+  <div class="card"><div class="k">Mean / day</div><div class="v">{{.MeanBytes}}</div><div class="sub">{{.Window}}-day window</div></div>
+  <div class="card"><div class="k">Balance</div><div class="v{{if .VerdictOK}} ok{{end}}">{{.Verdict}}</div><div class="sub">CV {{.CV}}</div></div>
+  {{if .Promoted}}<div class="card"><div class="k">Promoted fulls</div><div class="v">{{.Promoted}}</div><div class="sub">pulled forward to flatten</div></div>{{end}}
+</div>
+{{end}}
+
 {{with $d.Heat}}
-<h2>Activity — last 5 weeks, next 2 projected</h2>
+<h2>Activity &amp; load <span class="count">· last 5 weeks, next 2 projected</span></h2>
 <div class="fade" data-end>
 <div class="panel scroll">
 <table class="heat">
-  <tr><th class="lbl"></th>{{range .Days}}<th class="tick{{if .Future}} fut{{end}}">{{.Tick}}</th>{{end}}</tr>
+  <tr><th class="lbl"></th>{{range .Days}}<th class="tick{{if .Future}} fut{{end}}{{if .Seam}} seam{{end}}">{{.Tick}}</th>{{end}}</tr>
   {{if $d.HeatGroups}}
   {{range $d.HeatGroups}}
   <tr class="host-row"><td class="lbl hdr"><span class="pin">{{hostLabel .Host}}</span></td></tr>
@@ -66,13 +76,18 @@
   {{else}}
   {{template "heat-rows" .Rows}}
   {{end}}
+  {{if .Load}}
+  <tr class="meanrow"><td class="lbl"></td><td colspan="{{len .Days}}"><div class="meanline" style="top:{{.MeanTop}}px"></div></td></tr>
+  <tr class="loadrow"><td class="lbl">Load</td>{{range .Load}}<td{{if .Seam}} class="seam"{{end}}><div class="loadbar{{if .Future}} fut{{end}}" title="{{.Title}}"><span class="lf" style="height:{{.FullH}}px"></span><span class="li" style="height:{{.IncrH}}px"></span></div></td>{{end}}</tr>
+  {{end}}
 </table>
 <div class="heat-legend">
   <span><span class="sw full"></span>full</span>
   <span><span class="sw incr"></span>incremental</span>
   <span><span class="sw partial"></span>partial</span>
   <span><span class="sw"></span>none</span>
-  <span><span class="sw ghost full"></span>projected</span>
+  <span><span class="sw ghost full"></span>projected (fill = volume)</span>
+  {{if .Load}}<span><span class="sw load"></span>daily load</span><span style="opacity:.7">- - mean (leveling target)</span>{{end}}
 </div>
 </div>
 </div>

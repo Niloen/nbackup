@@ -11,6 +11,7 @@ package web
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -652,7 +653,11 @@ func (s *Server) buildHeatmap(now time.Time) *heatmap {
 		levels              map[int]bool
 		bytes               int64
 	}
+	// loadAgg is one day's total dump volume split full vs. incremental — the recorded
+	// side of the daily-load strip (the forecast side is folded from the plans below).
+	type loadAgg struct{ full, incr int64 }
 	byDLE := map[string]map[string]*dayAgg{}
+	recLoad := map[string]*loadAgg{}
 	any := false
 	for _, run := range s.src.Runs() {
 		for _, a := range run.Archives {
@@ -679,26 +684,56 @@ func (s *Server) buildHeatmap(now time.Time) *heatmap {
 			ag.runs[a.Run] = true
 			ag.levels[a.Level] = true
 			ag.bytes += a.Compressed
+			la := recLoad[key]
+			if la == nil {
+				la = &loadAgg{}
+				recLoad[key] = la
+			}
+			if a.Level == 0 {
+				la.full += a.Compressed
+			} else {
+				la.incr += a.Compressed
+			}
 		}
 	}
 	if !any {
 		return nil
 	}
 
-	// Per DLE, per FUTURE local day, the level the offline forecast projects. This is
-	// the ghost: a schedule projection (which day each DLE's next full/incr lands),
-	// sized nowhere and probing nothing — see engine.SimulateOffline. Presence in the
-	// map means "a run is projected that day"; the int is its level (0 = full).
-	ghost := map[string]map[string]int{}
-	for _, p := range s.src.Forecast(today.AddDate(0, 0, 1), ghostDays) {
+	// Per DLE, per FUTURE local day, what the offline forecast projects. This is the
+	// ghost: a schedule projection (which day each DLE's next full/incr lands, and its
+	// projected bytes), sized from history and probing nothing — see engine.SimulateOffline.
+	// Presence means "a run is projected that day"; the bytes tint the cell by volume.
+	type ghostCell struct {
+		level int
+		bytes int64
+	}
+	ghost := map[string]map[string]ghostCell{}
+	foreLoad := map[string]*loadAgg{}
+	var maxGhost int64
+	fore := s.src.Forecast(today.AddDate(0, 0, 1), ghostDays)
+	for _, p := range fore {
 		key := p.Date.In(loc).Format("2006-01-02")
+		la := foreLoad[key]
+		if la == nil {
+			la = &loadAgg{}
+			foreLoad[key] = la
+		}
 		for _, it := range p.Items {
 			perDay := ghost[it.Name]
 			if perDay == nil {
-				perDay = map[string]int{}
+				perDay = map[string]ghostCell{}
 				ghost[it.Name] = perDay
 			}
-			perDay[key] = it.Level
+			perDay[key] = ghostCell{level: it.Level, bytes: it.EstBytes}
+			if it.EstBytes > maxGhost {
+				maxGhost = it.EstBytes
+			}
+			if it.Level == 0 {
+				la.full += it.EstBytes
+			} else {
+				la.incr += it.EstBytes
+			}
 		}
 	}
 
@@ -716,7 +751,7 @@ func (s *Server) buildHeatmap(now time.Time) *heatmap {
 		case d.Weekday() == time.Monday:
 			tick = fmt.Sprintf("%d", d.Day())
 		}
-		hm.Days = append(hm.Days, heatDay{Tick: tick, Future: i >= days})
+		hm.Days = append(hm.Days, heatDay{Tick: tick, Future: i >= days, Seam: i == days})
 	}
 
 	for _, sum := range s.src.DLESummaries() {
@@ -725,7 +760,7 @@ func (s *Server) buildHeatmap(now time.Time) *heatmap {
 		ghostDay := ghost[sum.DLE]
 		for i, d := range dates {
 			key := d.Format("2006-01-02")
-			cell := heatCell{Class: "none", Title: d.Format("Mon Jan 2")}
+			cell := heatCell{Class: "none", Title: d.Format("Mon Jan 2"), Seam: i == days}
 			switch {
 			case i < days: // recorded activity
 				if ag := perDay[key]; ag != nil {
@@ -744,21 +779,111 @@ func (s *Server) buildHeatmap(now time.Time) *heatmap {
 						}
 					}
 				}
-			default: // projected (ghost) — outline, never a run link
-				if lvl, ok := ghostDay[key]; ok {
+			default: // projected (ghost) — outline tinted by volume, never a run link
+				if g, ok := ghostDay[key]; ok {
 					cell.Ghost = true
 					cell.Class = "incr"
-					if lvl == 0 {
+					if g.level == 0 {
 						cell.Class = "full"
 					}
-					cell.Title = fmt.Sprintf("%s · projected %s", d.Format("Mon Jan 2"), levelTag(lvl))
+					cell.Weight = weightBucket(g.bytes, maxGhost)
+					cell.Title = fmt.Sprintf("%s · projected %s · ~%s", d.Format("Mon Jan 2"), levelTag(g.level), sizeutil.FormatBytes(g.bytes))
 				}
 			}
 			row.Cells = append(row.Cells, cell)
 		}
 		hm.Rows = append(hm.Rows, row)
 	}
+
+	// The daily-load strip + balance tiles, drawn only when there is a forecast to
+	// level: one bar per column (recorded actuals left of today, projected right),
+	// all on one byte scale so the seam is the only boundary. The mean line is the
+	// leveling target the promoter flattens toward; the tiles headline the spread.
+	if len(fore) > 0 {
+		const trackPx = 46
+		colFull := make([]int64, len(dates))
+		colIncr := make([]int64, len(dates))
+		var maxLoad int64
+		for i, d := range dates {
+			key := d.Format("2006-01-02")
+			la := recLoad[key]
+			if i >= days {
+				la = foreLoad[key]
+			}
+			if la != nil {
+				colFull[i], colIncr[i] = la.full, la.incr
+			}
+			if t := colFull[i] + colIncr[i]; t > maxLoad {
+				maxLoad = t
+			}
+		}
+		for i, d := range dates {
+			total := colFull[i] + colIncr[i]
+			hl := heatLoad{Future: i >= days, Seam: i == days,
+				Title: fmt.Sprintf("%s · ~%s", d.Format("Mon Jan 2"), sizeutil.FormatBytes(total))}
+			if maxLoad > 0 {
+				th := int(math.Round(float64(total) / float64(maxLoad) * trackPx))
+				fh := int(math.Round(float64(colFull[i]) / float64(maxLoad) * trackPx))
+				if fh > th {
+					fh = th
+				}
+				hl.FullH, hl.IncrH = fh, th-fh
+			}
+			hm.Load = append(hm.Load, hl)
+		}
+
+		// Balance stats fold from the SAME plans (offline sim) the ghost cells use, so
+		// tiles, strip, and calendar can never disagree. The mean line and tiles both
+		// speak to the forecast window — the part the leveler actually shapes.
+		bal := engine.Balance(engine.DailyLoad(fore))
+		if maxLoad > 0 && bal.Mean > 0 {
+			meanPx := int(math.Round(float64(bal.Mean) / float64(maxLoad) * trackPx))
+			hm.MeanTop = 7 + trackPx - meanPx // 7px: the border-spacing + loadrow padding above the track
+		}
+		if bal.Days > 0 && bal.Mean > 0 {
+			verdict, ok := balanceVerdict(bal.CV)
+			hm.Balance = &loadBalance{
+				PeakBytes: sizeutil.FormatBytes(bal.Peak.Total()),
+				PeakWhen:  bal.Peak.Date.Format("Mon 01-02"),
+				PeakRatio: fmt.Sprintf("%.1f× mean", bal.PeakRatio()),
+				MeanBytes: sizeutil.FormatBytes(bal.Mean),
+				Verdict:   verdict,
+				VerdictOK: ok,
+				CV:        fmt.Sprintf("%.2f", bal.CV),
+				Promoted:  bal.Promoted,
+				Window:    bal.Days,
+			}
+		}
+	}
 	return hm
+}
+
+// weightBucket maps a projected cell's bytes to a 1..4 tint bucket (0 when unsized),
+// relative to the heaviest projected dump — so the ghost calendar shows not just when
+// a run lands but roughly how big it is.
+func weightBucket(b, max int64) int {
+	if b <= 0 || max <= 0 {
+		return 0
+	}
+	w := 1 + int(3*float64(b)/float64(max))
+	if w > 4 {
+		w = 4
+	}
+	return w
+}
+
+// balanceVerdict turns the load's coefficient of variation into a plain-language
+// verdict for the balance tile: below ~a third is a flat calendar, the middle band
+// is uneven, and a high spread is lumpy (one or two days carry the window).
+func balanceVerdict(cv float64) (string, bool) {
+	switch {
+	case cv < 0.35:
+		return "Even", true
+	case cv < 0.6:
+		return "Uneven", false
+	default:
+		return "Lumpy", false
+	}
 }
 
 // heatLevels renders a day's dump levels as a sorted "L0, L1" list for the cell tooltip.

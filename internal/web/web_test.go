@@ -1408,11 +1408,11 @@ func TestGhostCalendar(t *testing.T) {
 		t.Fatalf("code=%d", code)
 	}
 	for _, want := range []string{
-		"next 2 projected",        // heading names the forecast
-		`class="cell full ghost"`, // the projected full, outlined
-		`class="cell incr ghost"`, // the projected incremental, outlined
-		`class="tick fut"`,        // projected columns dimmed
-		">projected<",             // the legend entry
+		"next 2 projected",            // heading names the forecast
+		`class="cell full ghost"`,     // the projected full, outlined
+		`class="cell incr ghost"`,     // the projected incremental, outlined
+		`class="tick fut"`,            // projected columns dimmed
+		">projected (fill = volume)<", // the legend entry
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/dles ghost calendar missing %q:\n%s", want, body)

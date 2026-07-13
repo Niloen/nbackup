@@ -256,6 +256,36 @@
   .heat-legend .sw.incr { background: color-mix(in srgb, var(--accent) 45%, transparent); }
   .heat-legend .sw.partial { background: var(--warn); }
   .heat-legend .sw.ghost { background: transparent; box-shadow: inset 0 0 0 1.5px var(--accent); }
+  .heat-legend .sw.load { background: var(--accent); border-radius: 1px; width: 7px; height: 13px; vertical-align: -2px; }
+  /* Byte-weighted ghost fill: a projected run stays outlined (never misread as
+     recorded) but gains an interior tint whose alpha tracks that day's projected
+     volume — so a heavy full reads darker than a light incremental. */
+  .heat .cell.ghost.full.w1 { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .heat .cell.ghost.full.w2 { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+  .heat .cell.ghost.full.w3 { background: color-mix(in srgb, var(--accent) 42%, transparent); }
+  .heat .cell.ghost.full.w4 { background: color-mix(in srgb, var(--accent) 60%, transparent); }
+  .heat .cell.ghost.incr.w1 { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .heat .cell.ghost.incr.w2 { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  .heat .cell.ghost.incr.w3, .heat .cell.ghost.incr.w4 { background: color-mix(in srgb, var(--accent) 24%, transparent); }
+  /* The today-seam: the divider between recorded history and the forecast, drawn as
+     a left border on the first projected column across every row (header, cells, strip). */
+  .heat td.seam, .heat th.seam { border-left: 2px solid color-mix(in srgb, var(--fg) 25%, transparent); }
+  /* Daily-load strip: a per-column total under the calendar, aligned to the same 12px
+     grid. Recorded days show actual bytes moved; projected days the forecast load. Bar
+     height ∝ bytes within a fixed track; the full portion (accent) stacks over the
+     incremental baseline. The mean line is the leveling target the promoter flattens to. */
+  .heat tr.loadrow td { vertical-align: bottom; height: 46px; padding-top: .3rem; }
+  .heat .loadbar { display: flex; flex-direction: column-reverse; width: 12px; height: 46px; }
+  .heat .loadbar span { display: block; width: 12px; border-radius: 2px 2px 0 0; }
+  .heat .loadbar .lf { background: var(--accent); }
+  .heat .loadbar .li { background: color-mix(in srgb, var(--accent) 40%, transparent); }
+  .heat .loadbar.fut .lf { background: color-mix(in srgb, var(--accent) 70%, transparent); }
+  .heat .loadbar.fut .li { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+  .heat tr.loadrow td.lbl { vertical-align: bottom; color: var(--muted); font-weight: 600;
+    font-size: .72rem; text-transform: uppercase; letter-spacing: .03em; }
+  .heat tr.meanrow td { height: 0; padding: 0; position: relative; }
+  .heat .meanline { position: absolute; left: 0; right: -2px;
+    border-top: 1px dashed color-mix(in srgb, var(--fg) 40%, transparent); }
   /* Matrices (.heat, .pgrid) scroll sideways by design — a DLE×day or
      archive×medium grid has no honest stacked form. Make the scroll usable:
      the identity column pins so you always know which row you're panning,
