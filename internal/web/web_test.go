@@ -1069,6 +1069,64 @@ func TestHomeRollupSizeAnomaly(t *testing.T) {
 	}
 }
 
+// dumpAtSecs is dumpAt with an explicit dump duration, for exercising the rate
+// (throughput) anomaly independently of the run's wall clock.
+func dumpAtSecs(t *testing.T, dir string, at time.Time, dle string, level int, orig int64, secs float64) {
+	t.Helper()
+	if err := report.Append(dir, report.Run{
+		Command: report.CommandDump, RunID: "run-" + at.Format("20060102.150405"),
+		StartedAt: at, EndedAt: at.Add(time.Minute), Outcome: report.OutcomeSuccess,
+		DumpStats: []report.DLEStat{{DLE: dle, Level: level, Orig: orig, Out: orig / 5, Seconds: secs}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHomeRollupSlowDump(t *testing.T) {
+	base := time.Now().Add(-96 * time.Hour)
+	day := 24 * time.Hour
+
+	// A DLE dumping ~100 MB at a steady 10 MB/s (10s), then a night it crawls: same
+	// 100 MB but 400s (250 kB/s) — under half the usual rate, costing ~6.5 min of
+	// extra wall. That is a genuinely slow dump and warns.
+	slow := t.TempDir()
+	for i := 0; i < 3; i++ {
+		dumpAtSecs(t, slow, base.Add(time.Duration(i)*day), "local", 1, 100_000_000, 10)
+	}
+	dumpAtSecs(t, slow, base.Add(3*day), "local", 1, 100_000_000, 400)
+	_, body := get(t, NewServer(sampleSource(), slow).Handler(), "/")
+	for _, want := range []string{"slow dump", "/s, typically", `href="/dles/local"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/ rollup missing %q for a collapsed dump rate:\n%s", want, body)
+		}
+	}
+
+	// A big full — 10× the bytes, so far longer in wall clock — but dumped at the
+	// SAME 10 MB/s must NOT warn: it's more data, not a slow dump. This is the
+	// varying-DLE-size false positive the rate test exists to kill.
+	big := t.TempDir()
+	for i := 0; i < 3; i++ {
+		dumpAtSecs(t, big, base.Add(time.Duration(i)*day), "local", 0, 100_000_000, 10)
+	}
+	dumpAtSecs(t, big, base.Add(3*day), "local", 0, 1_000_000_000, 100)
+	_, bigBody := get(t, NewServer(sampleSource(), big).Handler(), "/")
+	if strings.Contains(bigBody, "slow dump") {
+		t.Errorf("/ rollup emitted a slow dump for a same-rate big full:\n%s", bigBody)
+	}
+
+	// A quick dump wobbling 10s→25s (under half the rate, but only 15s of extra
+	// wall) stays under the 5-minute floor and must not flap.
+	wobble := t.TempDir()
+	for i := 0; i < 3; i++ {
+		dumpAtSecs(t, wobble, base.Add(time.Duration(i)*day), "local", 1, 100_000_000, 10)
+	}
+	dumpAtSecs(t, wobble, base.Add(3*day), "local", 1, 100_000_000, 25)
+	_, wobbleBody := get(t, NewServer(sampleSource(), wobble).Handler(), "/")
+	if strings.Contains(wobbleBody, "slow dump") {
+		t.Errorf("/ rollup emitted a slow dump for a 15s wobble under the floor:\n%s", wobbleBody)
+	}
+}
+
 // TestHomeRollupCapacityForesight checks the capacity nudges for an address-identified
 // medium (disk, s3): a 95%-used medium with a small protected (unreclaimable) set
 // stays quiet — raw Used sitting near capacity is the planner/prune steady state, not

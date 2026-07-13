@@ -1265,15 +1265,17 @@ const anomalySizeFloor = 64 << 20 // 64 MiB
 
 // dumpAnomalies compares the newest dump record against each DLE's own recent
 // history and flags what looks off: a DLE's size swinging hard from its usual
-// footprint at that level, or the whole run taking much longer than usual. This is
-// deliberately coarse — a "did it look wrong" nudge, not a statistical test — so the
-// thresholds are blunt on purpose:
+// footprint at that level, or a DLE's dump rate collapsing from its usual throughput.
+// Both tests are per-DLE and size-normalized on purpose — with DLEs of varying size a
+// whole-run test (total bytes, total wall) flaps every night a big full is promoted.
+// This is deliberately coarse — a "did it look wrong" nudge, not a statistical test —
+// so the thresholds are blunt:
 //   - size: needs at least 2 priors (of up to the 5 most recent at the same level),
 //     a >2x deviation in either direction, AND an absolute delta over 64 MiB, so a
 //     tiny DLE doubling from 1 kB to 2 kB doesn't flap.
-//   - duration: needs at least 2 priors (of up to the 5 most recent dump runs), the
-//     latest taking >2x their median, AND the delta exceeding 10 minutes, so a run
-//     that was merely 3 minutes instead of 1 doesn't flap.
+//   - rate: needs at least 2 priors (of up to the 5 most recent at the same level),
+//     this dump's bytes/sec down to under half their median, AND the slowdown costing
+//     over 5 minutes of extra wall, so a quick dump wobbling from 2s to 5s doesn't flap.
 //
 // hist is the full run history, newest-first.
 func (s *Server) dumpAnomalies(hist []report.Run) []alert {
@@ -1314,28 +1316,45 @@ func (s *Server) dumpAnomalies(hist []report.Run) []alert {
 		}
 	}
 
-	const minDurationDelta = 10 * time.Minute
-	if wall := runWall(*latest); wall > 0 {
-		var durs []int64
+	// A slow dump is a per-DLE throughput collapse, NOT a long run: with DLEs of
+	// varying size the run's wall clock swings with which fulls got promoted that
+	// night (more bytes, legitimately longer), so a whole-run duration test flaps
+	// constantly. Rate (bytes/sec at the same level) is size-independent, so it
+	// isolates a genuinely slow dump — a degraded link or disk — from a merely big one.
+	const slowdownFloor = 5 * time.Minute // extra wall the collapse must have cost before we nudge
+	for _, d := range latest.DumpStats {
+		if d.Orig <= 0 || d.Seconds <= 0 {
+			continue
+		}
+		var rates []int64 // bytes/sec at this level, newest-first
 		for _, r := range priors {
-			if r.Command != report.CommandDump {
-				continue
+			for _, pd := range r.DumpStats {
+				if pd.DLE == d.DLE && pd.Level == d.Level {
+					if pd.Orig > 0 && pd.Seconds > 0 {
+						rates = append(rates, int64(float64(pd.Orig)/pd.Seconds))
+					}
+					break
+				}
 			}
-			if w := runWall(r); w > 0 {
-				durs = append(durs, int64(w))
-			}
-			if len(durs) == 5 {
+			if len(rates) == 5 {
 				break
 			}
 		}
-		if len(durs) >= 2 {
-			med := time.Duration(medianInt64(durs))
-			if med > 0 && wall > med*2 && wall-med > minDurationDelta {
-				out = append(out, alert{Level: "warn", Tag: "slow dump",
-					Text: fmt.Sprintf("last dump took %s, typically %s", sizeutil.FormatElapsed(wall), sizeutil.FormatElapsed(med)),
-					Href: runHref(*latest)})
-			}
+		if len(rates) < 2 {
+			continue
 		}
+		med := medianInt64(rates)
+		rate := int64(float64(d.Orig) / d.Seconds)
+		if med <= 0 || rate*2 >= med {
+			continue // not down to under half the usual rate
+		}
+		expected := float64(d.Orig) / float64(med) // seconds it should have taken at the usual rate
+		if time.Duration((d.Seconds-expected)*float64(time.Second)) <= slowdownFloor {
+			continue // the collapse cost too little wall to be worth a nudge
+		}
+		out = append(out, alert{Level: "warn", Tag: "slow dump",
+			Text: fmt.Sprintf("%s dumped %s/s, typically %s/s", s.src.DisplayDLE(d.DLE), sizeutil.FormatBytes(rate), sizeutil.FormatBytes(med)),
+			Href: "/dles/" + d.DLE})
 	}
 	return out
 }
@@ -1350,14 +1369,6 @@ func latestDumpAndPriors(hist []report.Run) (*report.Run, []report.Run) {
 		}
 	}
 	return nil, nil
-}
-
-// runWall is a run's wall-clock duration, or 0 when either endpoint is unrecorded.
-func runWall(r report.Run) time.Duration {
-	if r.StartedAt.IsZero() || r.EndedAt.IsZero() {
-		return 0
-	}
-	return r.EndedAt.Sub(r.StartedAt)
 }
 
 // medianInt64 returns the median of vs, which must be non-empty.
