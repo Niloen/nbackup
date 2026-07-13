@@ -277,6 +277,54 @@ func (rc *RunCoverage) ExpectedMedia() []string {
 // ("" when the rule resolves its source per run, or when nothing is promised).
 func (rc *RunCoverage) SyncSource(medium string) string { return rc.syncFrom[medium] }
 
+// ArchiveShortfall explains, for one archive of the run, why the given
+// placements hold fewer than two copies of it — the per-archive view the 3-2-1
+// posture check needs (a fan-out lane trips one archive of a run, not the whole
+// run, so a run-level copy count would miss it when siblings still populate both
+// media).
+type ArchiveShortfall struct {
+	// MissingRouted names a medium the archive is routed to but that lacks it —
+	// the real gap `nb sync` backfills from another copy (a tripped fan-out lane,
+	// or a landing added since the run). "" when every routed copy is held.
+	MissingRouted string
+	// RoutedMedia is how many media the archive is routed to; fewer than two means
+	// no second copy is even promised, so a single copy is a design choice, not a
+	// failure — the structural gap only a config change closes.
+	RoutedMedia int
+	// AgedGap is set when an owed copy is absent only because it has aged out of a
+	// medium's retention window — rotation doing its job, never a defect (see
+	// CopyAged) — separating an old run rotated down to one copy from a DLE that
+	// only ever had one destination.
+	AgedGap bool
+}
+
+// ArchiveShortfall classifies one archive's copy gap against the placements. Media
+// are visited in sorted order so the sampled MissingRouted medium is deterministic.
+func (rc *RunCoverage) ArchiveShortfall(dle string, level int, ps []catalog.Placement) ArchiveShortfall {
+	var sf ArchiveShortfall
+	k := archKey{dle, level}
+	media := make([]string, 0, len(rc.classes))
+	for m := range rc.classes {
+		media = append(media, m)
+	}
+	sort.Strings(media)
+	for _, m := range media {
+		held := placementOnMedium(ps, m).Holds(dle, level)
+		switch rc.classes[m][k] {
+		case CopyRouted:
+			sf.RoutedMedia++
+			if sf.MissingRouted == "" && !held {
+				sf.MissingRouted = m
+			}
+		case CopyAged:
+			if !held {
+				sf.AgedGap = true
+			}
+		}
+	}
+	return sf
+}
+
 // CopyJudgment weighs one medium's copy of a run against its expectation. Held
 // counts every archive the copy holds, expected there or not; the Routed and
 // Promised pairs count the expectation and how much of it is met.

@@ -11,6 +11,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
@@ -150,7 +151,7 @@ type PostureCheck struct {
 // framing around the per-DLE drill outcomes.
 type Posture struct {
 	Checks    []PostureCheck
-	Copies    int // backup copies of the weakest-covered run (the live source is the implicit +1)
+	Copies    int // backup copies of the weakest-covered archive (the live source is the implicit +1)
 	Media     int // distinct media holding copies
 	Offsite   bool
 	Immutable bool
@@ -218,39 +219,28 @@ func (e *Engine) PostureView(failing int) Posture {
 // The live dump source is copy #1 in the canonical 3-2-1 rule (production data + 2
 // backups = 3), so a run is compliant once it has 2 backup copies. We count catalog
 // placements — the verifiable backup copies; the source is the implicit third
-// NBackup can never drill, so it is never enough on its own.
+// NBackup can never drill, so it is never enough on its own. The copies digit is
+// judged PER ARCHIVE, not per run: a fan-out lane trips one archive of a run while
+// its siblings still reach both media, so a run-level count would read two copies
+// and hide the gap. diagnoseCopies does that per-archive reasoning and, on a
+// single-copy archive, attributes the gap so the verdict can name a remedy.
 func (d *driller) core321(add func(name string, st PostureStatus, detail string)) (copies, media int, offsite bool) {
-	runs := d.cat.Runs()
 	mediaSet := map[string]bool{}
-	minCopies := -1
-	for _, s := range runs {
-		ps := d.cat.Placements(s.ID)
-		if len(ps) == 0 {
-			continue
-		}
-		if minCopies < 0 || len(ps) < minCopies {
-			minCopies = len(ps)
-		}
-		for _, p := range ps {
+	for _, s := range d.cat.Runs() {
+		for _, p := range d.cat.Placements(s.ID) {
 			mediaSet[p.Medium] = true
 		}
-	}
-	if minCopies < 0 {
-		minCopies = 0
 	}
 	for m := range mediaSet {
 		if m != d.dep.LandingName() {
 			offsite = true
 		}
 	}
-	switch {
-	case minCopies >= 2:
-		add("3 copies", PostureOK, fmt.Sprintf("source + %d backup copies (3-2-1 satisfied)", minCopies))
-	case minCopies == 1:
-		add("3 copies", PostureWarn, "source + 1 backup copy; 3-2-1 wants 2 backups")
-	default:
-		add("3 copies", PostureFail, "only the live source — no backup copy recorded for some run")
-	}
+
+	cd := d.diagnoseCopies()
+	st, detail := cd.verdict()
+	add("3 copies", st, detail)
+
 	if len(mediaSet) >= 2 {
 		add("2 media", PostureOK, fmt.Sprintf("%d media hold copies", len(mediaSet)))
 	} else {
@@ -261,7 +251,135 @@ func (d *driller) core321(add func(name string, st PostureStatus, detail string)
 	} else {
 		add("1 offsite", PostureWarn, "no offsite copy (only the landing medium)")
 	}
+	minCopies := cd.minCopies
+	if minCopies < 0 {
+		minCopies = 0
+	}
 	return minCopies, len(mediaSet), offsite
+}
+
+// runCoverage judges one run's copies against the current config — the same live
+// computation Engine.RunCoverage exposes, built from the driller's own config and
+// catalog so the posture diagnosis and the coverage display never disagree.
+func (d *driller) runCoverage(run *catalog.Run) *RunCoverage {
+	minAge := func(medium string) time.Duration { return d.cfg.MinAgeFor(d.cfg.Media[medium]) }
+	return JudgeRun(run, promiseRoutes(d.cfg, d.cat), d.cfg.Sync, d.cat.Runs(), d.cat.Placements, minAge, time.Now())
+}
+
+// copyDiag is why the catalog holds archives with fewer than two backup copies,
+// split by remedy: a backfillable gap `nb sync` closes vs a structural gap only a
+// config change (a second landing) closes, the no-copy-at-all case that fails the
+// audit, and the count that is merely retention having rotated an archive down to
+// one copy. It shapes the "3 copies" verdict. Counts are per archive (an archive
+// is one DLE's dump in one run), so a fan-out lane that trips one archive registers
+// even when its run's siblings still hold two copies.
+type copyDiag struct {
+	minCopies      int    // fewest copies any archive holds; -1 when nothing is backed up
+	none           int    // archives with no copy on any medium — only the live source
+	noneDLE        string // a sample DLE naming the first no-copy archive
+	backfill       int    // archives short a routed copy — a tripped lane or sync lag
+	backfillDLE    string // a sample DLE + medium naming the first such gap
+	backfillMedium string
+	structural     int    // archives routed to a single medium (no 2nd copy promised)
+	structuralDLE  string // a sample DLE naming the first such archive
+	aged           int    // archives short only because an owed copy rotated out of retention
+}
+
+// diagnoseCopies walks every archive in the catalog, counts its copies, and — for
+// any holding fewer than two — attributes the gap so the "3 copies" verdict can
+// name a remedy instead of a bare "3-2-1 wants 2 backups". Working per archive (not
+// per run) is what lets it catch a single fan-out lane that tripped one archive
+// while the rest of the run reached both media.
+func (d *driller) diagnoseCopies() copyDiag {
+	cd := copyDiag{minCopies: -1}
+	for _, s := range d.cat.Runs() {
+		ps := d.cat.Placements(s.ID)
+		var rc *RunCoverage // built lazily — only when an archive is short
+		for _, a := range s.Archives {
+			copies := 0
+			for _, p := range ps {
+				if p.Holds(a.DLE, a.Level) {
+					copies++
+				}
+			}
+			if cd.minCopies < 0 || copies < cd.minCopies {
+				cd.minCopies = copies
+			}
+			if copies >= 2 {
+				continue
+			}
+			if copies == 0 {
+				cd.none++
+				if cd.noneDLE == "" {
+					cd.noneDLE = a.DLE
+				}
+				continue
+			}
+			if rc == nil {
+				rc = d.runCoverage(s)
+			}
+			sf := rc.ArchiveShortfall(a.DLE, a.Level, ps)
+			switch {
+			case sf.MissingRouted != "":
+				cd.backfill++
+				if cd.backfillDLE == "" {
+					cd.backfillDLE, cd.backfillMedium = a.DLE, sf.MissingRouted
+				}
+			case sf.RoutedMedia < 2 && !sf.AgedGap:
+				cd.structural++
+				if cd.structuralDLE == "" {
+					cd.structuralDLE = a.DLE
+				}
+			default:
+				cd.aged++
+			}
+		}
+	}
+	return cd
+}
+
+// verdict turns the diagnosis into the "3 copies" status and detail. An archive
+// with no copy at all fails; a real (backfillable or structural) single-copy gap
+// warns with the matching remedy; a catalog whose only single-copy archives have
+// rotated there passes — retention doing its job is not a recoverability defect.
+func (cd copyDiag) verdict() (PostureStatus, string) {
+	if cd.minCopies < 0 {
+		return PostureFail, "only the live source — no backup copy recorded"
+	}
+	if cd.none > 0 {
+		return PostureFail, fmt.Sprintf("%s has no backup copy in %s — only the live source; check the run for a failed landing",
+			cd.noneDLE, archivesPhrase(cd.none))
+	}
+	var remedies []string
+	if cd.backfill > 0 {
+		remedies = append(remedies, fmt.Sprintf("%s is short its %s copy in %s (a fan-out lane tripped or sync is behind) — run `nb sync` to backfill",
+			cd.backfillDLE, cd.backfillMedium, archivesPhrase(cd.backfill)))
+	}
+	if cd.structural > 0 {
+		remedies = append(remedies, fmt.Sprintf("%s routes to a single medium in %s — add a second landing/copy for 3-2-1",
+			cd.structuralDLE, archivesPhrase(cd.structural)))
+	}
+	if len(remedies) == 0 {
+		if cd.aged > 0 {
+			// Only rotated-down archives remain: current copies are intact, and an older
+			// copy aging out of a medium's retention is rotation, not a defect.
+			return PostureOK, fmt.Sprintf("every current archive holds a second backup copy; %s rotated to a single copy by retention", archivesPhrase(cd.aged))
+		}
+		return PostureOK, fmt.Sprintf("source + %d backup copies (3-2-1 satisfied)", cd.minCopies)
+	}
+	detail := "source + 1 backup copy; " + remedies[0]
+	if len(remedies) > 1 {
+		detail += "; also " + remedies[1]
+	}
+	return PostureWarn, detail
+}
+
+// archivesPhrase renders an archive count as "1 archive" / "N archives".
+func archivesPhrase(n int) string {
+	if n == 1 {
+		return "1 archive"
+	}
+	return fmt.Sprintf("%d archives", n)
 }
 
 // postureKey checks that, where encryption is configured, the decryptor binary and

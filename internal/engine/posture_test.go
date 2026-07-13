@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Niloen/nbackup/internal/catalog"
 	"github.com/Niloen/nbackup/internal/config"
 	"github.com/Niloen/nbackup/internal/media"
 	"github.com/Niloen/nbackup/internal/record"
@@ -201,6 +202,135 @@ func TestPostureSingleCopyWarns(t *testing.T) {
 	for _, c := range p.Checks {
 		if c.Name == "3 copies" && c.Status != PostureWarn {
 			t.Errorf("single-copy '3 copies' = %v, want WARN", c.Status)
+		}
+	}
+}
+
+// placeArchive records one archive of a run on a single medium — a catalog-only
+// copy (no bucket opened), the primitive the copy-diagnosis tests build runs from.
+func placeArchive(t *testing.T, cat *catalog.Catalog, slug string, level int, at time.Time, medium string) {
+	t.Helper()
+	arch := record.Archive{Run: record.IDFromTime(at), DLE: slug, Level: level, CreatedAt: at}
+	pos := archiveio.ArchivePos{Parts: []archiveio.FilePos{{Label: medium, Pos: 1}}, Commit: archiveio.FilePos{Label: medium, Pos: 2}}
+	if err := cat.AddArchive(arch, medium, pos); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// twoLandingEngine builds an engine whose one DLE fans out to two disk landings —
+// the fan-out shape the copy-diagnosis tests reason over.
+func twoLandingEngine(t *testing.T) (*Engine, string) {
+	t.Helper()
+	src := t.TempDir()
+	cfg := &config.Config{
+		Landing: config.MediumList{"disk", "disk2"},
+		Media: map[string]config.Media{
+			"disk":  {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+			"disk2": {Type: "disk", Params: map[string]string{"path": t.TempDir()}},
+		},
+		Sources:  []config.DLE{{Host: "localhost", Path: src}},
+		Workdir:  t.TempDir(),
+		StateDir: t.TempDir(),
+	}
+	cfg.Compress.Scheme = "none"
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return eng, config.Slug("localhost", src)
+}
+
+// TestPostureTrippedLaneBackfillable is the user-reported case: a DLE fans out to
+// two landings but one lane failed once, so a run holds only its first copy. The
+// "3 copies" check must still WARN (a single-copy window is real), but attribute
+// the gap to the missing medium and point at `nb sync` — not the bare "3-2-1
+// wants 2 backups" that reads as a misconfiguration.
+func TestPostureTrippedLaneBackfillable(t *testing.T) {
+	eng, slug := twoLandingEngine(t)
+	// The fan-out landed on disk; the disk2 lane tripped, so no disk2 copy exists.
+	placeArchive(t, eng.cat, slug, 0, time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC), "disk")
+
+	p := eng.drl.posture(WormResult{}, 0)
+	if p.Copies != 1 {
+		t.Fatalf("weakest-covered copies = %d, want 1", p.Copies)
+	}
+	var got PostureCheck
+	for _, c := range p.Checks {
+		if c.Name == "3 copies" {
+			got = c
+		}
+	}
+	if got.Status != PostureWarn {
+		t.Fatalf("'3 copies' = %v, want WARN", got.Status)
+	}
+	for _, want := range []string{"disk2", "nb sync", "backfill"} {
+		if !strings.Contains(got.Detail, want) {
+			t.Errorf("detail %q missing %q — should name the tripped medium and the remedy", got.Detail, want)
+		}
+	}
+	if strings.Contains(got.Detail, "add a second landing") {
+		t.Errorf("detail %q offers the structural remedy, but this is a backfillable gap", got.Detail)
+	}
+}
+
+// TestPostureTrippedLaneAmongSiblings is the exact reported case: a run dumps two
+// DLEs to two landings, and one DLE's archive fails to land on disk2 while the
+// other DLE reaches both media. The run still has a placement on disk2 (its
+// sibling), so a run-level copy count reads two and stays silent — only per-archive
+// reasoning sees that one archive holds a single copy, WARNs, and names it.
+func TestPostureTrippedLaneAmongSiblings(t *testing.T) {
+	eng, _ := twoLandingEngine(t)
+	// A second DLE on the same host so the run carries two archives.
+	eng.cfg.Sources = append(eng.cfg.Sources, config.DLE{Host: "localhost", Path: t.TempDir()})
+	full, tripped := eng.cfg.DLEs()[0].Name(), eng.cfg.DLEs()[1].Name()
+	at := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	// full lands on both media; tripped only reaches disk (its disk2 lane failed).
+	placeArchive(t, eng.cat, full, 0, at, "disk")
+	placeArchive(t, eng.cat, full, 0, at, "disk2")
+	placeArchive(t, eng.cat, tripped, 0, at, "disk")
+
+	p := eng.drl.posture(WormResult{}, 0)
+	if p.Copies != 1 {
+		t.Fatalf("weakest-covered copies = %d, want 1 (the tripped archive)", p.Copies)
+	}
+	var got PostureCheck
+	for _, c := range p.Checks {
+		if c.Name == "3 copies" {
+			got = c
+		}
+	}
+	if got.Status != PostureWarn {
+		t.Fatalf("'3 copies' = %v (%q), want WARN — one archive holds a single copy", got.Status, got.Detail)
+	}
+	if !strings.Contains(got.Detail, tripped) || !strings.Contains(got.Detail, "disk2") || !strings.Contains(got.Detail, "nb sync") {
+		t.Errorf("detail %q should name the tripped DLE %q, its missing medium disk2, and `nb sync`", got.Detail, tripped)
+	}
+	if strings.Contains(got.Detail, full) {
+		t.Errorf("detail %q should not implicate the fully-copied DLE %q", got.Detail, full)
+	}
+}
+
+// TestPostureRotatedCopyOK guards the false-positive the other direction: an older
+// run whose second copy has aged out of a medium's retention is retention working,
+// not a defect. With the current run fully fanned out, "3 copies" must read OK
+// even though the weakest run holds a single copy.
+func TestPostureRotatedCopyOK(t *testing.T) {
+	eng, slug := twoLandingEngine(t)
+	old := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	recent := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
+	// The old full has rotated down to a single copy on disk; the recent full still
+	// carries both copies — so disk2's absence on the old run is retention, not a gap.
+	placeArchive(t, eng.cat, slug, 0, old, "disk")
+	placeArchive(t, eng.cat, slug, 0, recent, "disk")
+	placeArchive(t, eng.cat, slug, 0, recent, "disk2")
+
+	p := eng.drl.posture(WormResult{}, 0)
+	if p.Copies != 1 {
+		t.Fatalf("weakest-covered copies = %d, want 1 (the rotated old run)", p.Copies)
+	}
+	for _, c := range p.Checks {
+		if c.Name == "3 copies" && c.Status != PostureOK {
+			t.Errorf("'3 copies' = %v (%q), want OK — a rotated-out copy is retention, not a defect", c.Status, c.Detail)
 		}
 	}
 }
