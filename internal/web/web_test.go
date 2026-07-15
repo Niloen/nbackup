@@ -1069,6 +1069,45 @@ func TestHomeRollupSizeAnomaly(t *testing.T) {
 	}
 }
 
+// TestHomeRollupSizeAnomalyCalibration checks the noise cures on the size nudge:
+// a DLE whose size naturally swings wide (large MAD) does NOT flap on an ordinary
+// 2× jump, and a shrink is nudged only for a full — a light incremental is a quiet
+// day, not an event.
+func TestHomeRollupSizeAnomalyCalibration(t *testing.T) {
+	base := time.Now().Add(-96 * time.Hour)
+	at := func(i int) time.Time { return base.Add(time.Duration(i) * 24 * time.Hour) }
+
+	// Naturally-noisy full: priors 100M/900M/500M (median 500M, MAD 400M), latest
+	// 1.1G. It clears the 2× ratio but sits inside 3×MAD, so it must stay quiet —
+	// the old ratio-only test would have flagged it.
+	noisy := t.TempDir()
+	for i, sz := range []int64{100_000_000, 900_000_000, 500_000_000, 1_100_000_000} {
+		dumpAt(t, noisy, at(i), "local", 0, sz)
+	}
+	if _, body := get(t, NewServer(sampleSource(), noisy).Handler(), "/"); strings.Contains(body, "size anomaly") {
+		t.Errorf("/ rollup flagged a 2× jump on a naturally-noisy DLE:\n%s", body)
+	}
+
+	// A steady incremental that collapses to a tenth (500M → 50M) is a quiet day,
+	// not an event: no nudge.
+	incr := t.TempDir()
+	for i, sz := range []int64{500_000_000, 520_000_000, 490_000_000, 50_000_000} {
+		dumpAt(t, incr, at(i), "local", 1, sz)
+	}
+	if _, body := get(t, NewServer(sampleSource(), incr).Handler(), "/"); strings.Contains(body, "size anomaly") {
+		t.Errorf("/ rollup flagged a shrinking incremental (quiet day):\n%s", body)
+	}
+
+	// The same collapse on a FULL can mean a source path went missing — flag it.
+	full := t.TempDir()
+	for i, sz := range []int64{500_000_000, 520_000_000, 490_000_000, 50_000_000} {
+		dumpAt(t, full, at(i), "local", 0, sz)
+	}
+	if _, body := get(t, NewServer(sampleSource(), full).Handler(), "/"); !strings.Contains(body, "size anomaly") {
+		t.Errorf("/ rollup missed a shrinking full:\n%s", body)
+	}
+}
+
 // dumpAtSecs is dumpAt with an explicit dump duration, for exercising the rate
 // (throughput) anomaly independently of the run's wall clock.
 func dumpAtSecs(t *testing.T, dir string, at time.Time, dle string, level int, orig int64, secs float64) {

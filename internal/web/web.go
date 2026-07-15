@@ -1388,6 +1388,51 @@ func (s *Server) brokenLatestPoints() []alert {
 // churn chart's spike bars (view.go isSpike) so the two can't disagree.
 const anomalySizeFloor = 64 << 20 // 64 MiB
 
+// anomalyMADs is how many of a DLE's own median-absolute-deviations a size must
+// swing past — on top of the 2× ratio and the absolute floor — before it flags.
+// This is the noise cure: a rock-steady DLE has a near-zero MAD, so a real 2×
+// jump still trips; a DLE whose sizes routinely swing wide has a large MAD, so
+// ordinary churn no longer nags. It can only ever suppress an old ratio-only
+// alert, never invent one.
+const anomalyMADs = 3
+
+// sizeAnomalous reports whether cur sits outside the calibrated band around med:
+// past the 2× ratio AND past the absolute floor AND past anomalyMADs of the
+// priors' own spread. It is symmetric — callers gate which direction counts.
+// med and mad must come from the same prior set (medianInt64 / madInt64).
+func sizeAnomalous(cur, med, mad int64) bool {
+	if med <= 0 {
+		return false
+	}
+	delta := cur - med
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta <= anomalySizeFloor {
+		return false
+	}
+	if cur <= med*2 && cur*2 >= med {
+		return false // inside the 2× ratio band
+	}
+	return delta > anomalyMADs*mad
+}
+
+// madInt64 is the median absolute deviation of vs about med — a spread measure a
+// lone outlier can't inflate the way it would a standard deviation, so a DLE
+// whose size naturally swings wide reads as noisy rather than anomalous. vs must
+// be non-empty.
+func madInt64(vs []int64, med int64) int64 {
+	devs := make([]int64, len(vs))
+	for i, v := range vs {
+		d := v - med
+		if d < 0 {
+			d = -d
+		}
+		devs[i] = d
+	}
+	return medianInt64(devs)
+}
+
 // dumpAnomalies compares the newest dump record against each DLE's own recent
 // history and flags what looks off: a DLE's size swinging hard from its usual
 // footprint at that level, or a DLE's dump rate collapsing from its usual throughput.
@@ -1396,8 +1441,11 @@ const anomalySizeFloor = 64 << 20 // 64 MiB
 // This is deliberately coarse — a "did it look wrong" nudge, not a statistical test —
 // so the thresholds are blunt:
 //   - size: needs at least 2 priors (of up to the 5 most recent at the same level),
-//     a >2x deviation in either direction, AND an absolute delta over 64 MiB, so a
-//     tiny DLE doubling from 1 kB to 2 kB doesn't flap.
+//     a >2x deviation past the DLE's own spread (sizeAnomalous), AND an absolute
+//     delta over 64 MiB, so a tiny DLE doubling from 1 kB to 2 kB doesn't flap and a
+//     DLE whose size naturally swings wide doesn't nag. A shrink is only flagged for
+//     a full (level 0): a light incremental just means a quiet day, whereas a full
+//     that suddenly shrinks can mean a source path went missing.
 //   - rate: needs at least 2 priors (of up to the 5 most recent at the same level),
 //     this dump's bytes/sec down to under half their median, AND the slowdown costing
 //     over 5 minutes of extra wall, so a quick dump wobbling from 2s to 5s doesn't flap.
@@ -1427,18 +1475,15 @@ func (s *Server) dumpAnomalies(hist []report.Run) []alert {
 			continue
 		}
 		med := medianInt64(sizes)
-		delta := d.Orig - med
-		if delta < 0 {
-			delta = -delta
-		}
-		if med <= 0 || delta <= anomalySizeFloor {
+		if !sizeAnomalous(d.Orig, med, madInt64(sizes, med)) {
 			continue
 		}
-		if d.Orig > med*2 || d.Orig*2 < med {
-			out = append(out, alert{Level: "warn", Tag: "size anomaly",
-				Text: fmt.Sprintf("%s dumped %s, typically %s at this level", s.src.DisplayDLE(d.DLE), sizeutil.FormatBytes(d.Orig), sizeutil.FormatBytes(med)),
-				Href: "/dles/" + d.DLE})
+		if d.Orig < med && d.Level != 0 {
+			continue // a light incremental is a quiet day, not an event; only a shrinking full is worth a look
 		}
+		out = append(out, alert{Level: "warn", Tag: "size anomaly",
+			Text: fmt.Sprintf("%s dumped %s, typically %s at this level", s.src.DisplayDLE(d.DLE), sizeutil.FormatBytes(d.Orig), sizeutil.FormatBytes(med)),
+			Href: "/dles/" + d.DLE})
 	}
 
 	// A slow dump is a per-DLE throughput collapse, NOT a long run: with DLEs of

@@ -1523,9 +1523,10 @@ func newDLEEvolution(pts []report.TrendPoint) dleEvolution {
 	v.Incr = incrTrendSVG(incrs)
 	if v.Incr != "" {
 		med := medianIncrOut(incrs)
+		mad := madIncrOut(incrs, med)
 		note := fmt.Sprintf(`<span style="color:%s">■</span> output per incremental · dotted line = recent median (%s)`,
 			incrBarFill, sizeutil.FormatBytes(med))
-		if spike := biggestSpike(incrs, med); spike != nil {
+		if spike := biggestSpike(incrs, med, mad); spike != nil {
 			note += fmt.Sprintf(` · <span class="warn">■ %s — %s, %.1f× median</span>`,
 				spike.At.Format("2006-01-02"), sizeutil.FormatBytes(spike.Out), float64(spike.Out)/float64(med))
 		}
@@ -1554,20 +1555,30 @@ func medianIncrOut(incrs []report.TrendPoint) int64 {
 	return outs[len(outs)/2]
 }
 
+// madIncrOut is the median absolute deviation of the incrementals' output sizes
+// about med — the spread that calibrates the spike test to this DLE's own noise.
+func madIncrOut(incrs []report.TrendPoint, med int64) int64 {
+	outs := make([]int64, len(incrs))
+	for i, p := range incrs {
+		outs[i] = p.Out
+	}
+	return madInt64(outs, med)
+}
+
 // isSpike says whether an incremental's size is anomalous against the window's
-// median — the same blunt thresholds as the home rollup's size-anomaly nudge
-// (dumpAnomalies): over 2× the baseline AND an absolute delta past the noise
-// floor, so the chart and the rollup tell one story.
-func isSpike(out, med int64) bool {
-	return med > 0 && out > med*2 && out-med > anomalySizeFloor
+// median — the growth side of the home rollup's calibrated size test
+// (sizeAnomalous): over 2× the baseline, past the absolute noise floor, AND past
+// the DLE's own spread (mad), so the chart and the rollup tell one story.
+func isSpike(out, med, mad int64) bool {
+	return out > med && sizeAnomalous(out, med, mad)
 }
 
 // biggestSpike returns the largest anomalous incremental, or nil when none is.
-func biggestSpike(incrs []report.TrendPoint, med int64) *report.TrendPoint {
+func biggestSpike(incrs []report.TrendPoint, med, mad int64) *report.TrendPoint {
 	var spike *report.TrendPoint
 	for i := range incrs {
 		p := &incrs[i]
-		if isSpike(p.Out, med) && (spike == nil || p.Out > spike.Out) {
+		if isSpike(p.Out, med, mad) && (spike == nil || p.Out > spike.Out) {
 			spike = p
 		}
 	}
@@ -1672,6 +1683,7 @@ func incrTrendSVG(incrs []report.TrendPoint) template.HTML {
 		return ""
 	}
 	med := medianIncrOut(incrs)
+	mad := madIncrOut(incrs, med)
 	const vw, vh = 760.0, 130.0
 	const padL, padR, padT, padB = 8.0, 8.0, 10.0, 24.0
 	plotW, plotH := vw-padL-padR, vh-padT-padB
@@ -1695,7 +1707,7 @@ func incrTrendSVG(incrs []report.TrendPoint) template.HTML {
 	for _, p := range incrs {
 		fill := incrBarFill
 		suffix := ""
-		if isSpike(p.Out, med) {
+		if isSpike(p.Out, med, mad) {
 			fill = "var(--warn)"
 			suffix = fmt.Sprintf(" — %.1f× recent median", float64(p.Out)/float64(med))
 		}
@@ -1706,7 +1718,7 @@ func incrTrendSVG(incrs []report.TrendPoint) template.HTML {
 	}
 	fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(--muted)" stroke-width="1" stroke-dasharray="2 4"/>`,
 		padL, y(med), vw-padR, y(med))
-	if spike := biggestSpike(incrs, med); spike != nil {
+	if spike := biggestSpike(incrs, med, mad); spike != nil {
 		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="var(--warn)" font-size="11" text-anchor="end">%s</text>`,
 			x(spike.At)-bw/2-4, y(spike.Out)+4, sizeutil.FormatBytes(spike.Out))
 	}
