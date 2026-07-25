@@ -45,7 +45,10 @@ func TestPartitionedSourceEndToEnd(t *testing.T) {
 		t.Skipf("GNU tar not available")
 	}
 
-	s, err := eng.Run(context.Background(), time.Date(2026, 7, 9, 0, 0, 0, 0, time.UTC), nil)
+	// Dump "today": the staleness assertion below compares LastBackup to wall-clock
+	// time.Now(), so a date-pinned run would fall out of the cycle window as real time
+	// marches past it — keep the run recent so the freshness check stays meaningful.
+	s, err := eng.Run(context.Background(), time.Now(), nil)
 	if err != nil {
 		t.Fatalf("partitioned dump: %v", err)
 	}
