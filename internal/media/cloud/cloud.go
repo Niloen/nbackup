@@ -123,6 +123,15 @@ func (s blobStore) Open(key string, rng media.Range) (io.ReadCloser, error) {
 	return s.bucket.NewRangeReader(s.ctx, key, rng.Off, length, nil)
 }
 
+// RemoveTree deletes every object under a run's prefix, one Remove per listed key —
+// deliberately the SAME tolerant delete Remove uses, because a listing is a snapshot,
+// not a lock: a key can be gone by the time its turn comes (another handle on the same
+// medium reclaiming the same run — every non-landing open mints a fresh volume with its
+// own index — or a bucket index that still advertises an object the store has already
+// dropped). Deleting straight through bucket.Delete made that race fatal: gocloud's S3
+// driver HEADs before it deletes, so a vanished key surfaced as a NotFound that failed
+// the reclaim, the make-room, and with it the whole night's dump — for a file whose
+// absence was exactly the outcome asked for.
 func (s blobStore) RemoveTree(run string) error {
 	prefix := path.Join(runsPrefix, run) + "/"
 	iter := s.bucket.List(&blob.ListOptions{Prefix: prefix})
@@ -137,13 +146,17 @@ func (s blobStore) RemoveTree(run string) error {
 		if obj.IsDir {
 			continue
 		}
-		if err := s.bucket.Delete(s.ctx, obj.Key); err != nil {
+		if err := s.Remove(obj.Key); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// Remove is the store's one delete rule (RemoveTree defers to it): an object that is
+// already gone is the goal state, not an error. The tolerance has to live here rather
+// than at the caller because gocloud's S3 driver checks existence with a HeadObject
+// before DeleteObject, so unlike a bare S3 delete it does report NotFound.
 func (s blobStore) Remove(key string) error {
 	if err := s.bucket.Delete(s.ctx, key); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
 		return err

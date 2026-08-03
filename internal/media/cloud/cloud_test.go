@@ -226,6 +226,53 @@ func TestRemoveFile(t *testing.T) {
 	}
 }
 
+// TestConcurrentReclaimSameRun guards the reclaim against a second handle on the same
+// medium: every non-landing open mints a fresh volume with its own index, so two of them
+// can reclaim the same run's files at once (a prune and a make-room, say). Each object
+// then dies once and 404s for the loser — including inside the last file's RemoveTree,
+// whose listing is a snapshot and not a lock. Reclaiming an already-reclaimed file is the
+// goal state, so both handles must come back clean; a fatal NotFound here would fail the
+// make-room and with it the whole night's dump. Run under -race.
+func TestConcurrentReclaimSameRun(t *testing.T) {
+	const rounds, files = 8, 6
+	for round := 0; round < rounds; round++ {
+		url := "file://" + t.TempDir()
+		v1, err := media.OpenVolume("cloud", media.Options{"url": url}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var positions []int
+		for i := 0; i < files; i++ {
+			positions = append(positions, appendArchive(t, v1, "run-a", fmt.Sprintf("dle-%d", i), 0, "payload"))
+		}
+		// A second handle indexes the same objects, so both believe they own every file.
+		v2, err := media.OpenVolume("cloud", media.Options{"url": url}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		errs := make(chan error, 2)
+		var wg sync.WaitGroup
+		for _, v := range []media.Volume{v1, v2} {
+			wg.Add(1)
+			go func(v media.Volume) {
+				defer wg.Done()
+				for _, pos := range positions {
+					if err := v.RemoveFile(pos); err != nil {
+						errs <- err
+						return
+					}
+				}
+			}(v)
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			t.Fatalf("concurrent reclaim of the same run failed: %v", err)
+		}
+	}
+}
+
 // TestAbortedWriteLeavesNoObject confirms an aborted write — the ctx canceled before Close — does
 // not commit a file: no header sidecar is written, so the orphan payload is skipped by the scan,
 // the same atomicity the disk and tape media rely on.
