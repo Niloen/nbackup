@@ -584,6 +584,13 @@ func TestNormalizeCreateIndex(t *testing.T) {
 	dir106 := "./" + strings.Repeat("d", 103) + "/" // 1-block name → 1024-byte record
 	dir523 := "./" + strings.Repeat("d", 520) + "/" // 2-block name → 1536-byte record
 	file106 := "./" + strings.Repeat("f", 104)
+	// Escaped listings: the on-stream length governs, not the listed string's. A name of
+	// 97 on-stream bytes listed as 109 chars (two \ooo escapes) fits the header field —
+	// no record, no subtraction; one of 103 on-stream bytes overflows it regardless of
+	// how long its escaped listing is; \\ is one on-stream byte.
+	dirEsc100 := "./" + strings.Repeat("e", 90) + `\303\245\303\245` + "/"            // 97 on-stream, 109 listed: fits
+	dirEsc106 := "./" + strings.Repeat("e", 84) + strings.Repeat(`\303\245`, 8) + "/" // 103 on-stream, 151 listed: 1-block record
+	dirBack99 := "./" + strings.Repeat("b", 94) + `\\` + `\\` + "/"                   // 99 on-stream, 101 listed: fits
 	in := []record.Member{
 		{Path: "./short/", Off: 512},
 		{Path: dir100, Off: 5 * 512},
@@ -591,11 +598,34 @@ func TestNormalizeCreateIndex(t *testing.T) {
 		{Path: dir523, Off: 20 * 512},
 		{Path: file106, Off: 30 * 512},
 		{Path: dir106, Off: -1}, // unreported offset stays unreported
+		{Path: dirEsc100, Off: 40 * 512},
+		{Path: dirEsc106, Off: 50 * 512},
+		{Path: dirBack99, Off: 60 * 512},
 	}
-	want := []int64{512, 5 * 512, 10*512 - 1024, 20*512 - 1536, 30 * 512, -1}
+	want := []int64{512, 5 * 512, 10*512 - 1024, 20*512 - 1536, 30 * 512, -1, 40 * 512, 50*512 - 1024, 60 * 512}
 	for i, m := range normalizeCreateIndex(in) {
 		if m.Off != want[i] {
 			t.Errorf("member %q: Off = %d, want %d", m.Path, m.Off, want[i])
+		}
+	}
+}
+
+// TestUnquoteName pins the decoding of tar's listing quoting back to on-stream bytes:
+// 3-digit octal escapes become one byte, C escapes their character, verbatim names pass
+// through, and an unrecognized backslash sequence stays literal.
+func TestUnquoteName(t *testing.T) {
+	cases := []struct{ listed, want string }{
+		{"./plain/name.txt", "./plain/name.txt"},
+		{`./sm\303\245/v\303\244g/`, "./små/väg/"},
+		{`./tab\there`, "./tab\there"},
+		{`./back\\slash`, `./back\slash`},
+		{`./quote\"mark\?`, `./quote"mark?`},
+		{`./trailing\`, `./trailing\`},
+		{`./not-octal\39x`, `./not-octal\39x`},
+	}
+	for _, c := range cases {
+		if got := string(unquoteName(c.listed)); got != c.want {
+			t.Errorf("unquoteName(%q) = %q, want %q", c.listed, got, c.want)
 		}
 	}
 }

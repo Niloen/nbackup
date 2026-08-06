@@ -517,12 +517,51 @@ const (
 
 // longNameRecordSize returns the on-stream size of the GNU longname record preceding a
 // member named name, or 0 when the name fits the header field and no record is written.
+// name is the listing form; the threshold and block count are governed by the length of
+// the name as tar wrote it on stream, which unquoteName recovers. Measuring the listed
+// string instead once shifted a name across the 100-byte threshold (93 raw bytes, 105
+// with two \ooo escapes) and subtracted a longname record that was never written.
 func longNameRecordSize(name string) int64 {
-	if len(name) <= tarNameFieldLen {
+	n := int64(len(unquoteName(name)))
+	if n <= tarNameFieldLen {
 		return 0
 	}
-	nameBlocks := (int64(len(name)) + 1 + tarBlockSize - 1) / tarBlockSize
+	nameBlocks := (n + 1 + tarBlockSize - 1) / tarBlockSize
 	return (1 + nameBlocks) * tarBlockSize
+}
+
+// unquoteEscapes maps the C-style escape letters of tar's listing quoting to the bytes
+// they stand for (quotearg's escape_quoting_style: C quoting minus the surrounding
+// double quotes, so \" and \? are produced too).
+var unquoteEscapes = map[byte]byte{'\\': '\\', 'a': '\a', 'b': '\b', 'f': '\f', 'n': '\n', 'r': '\r', 't': '\t', 'v': '\v', '?': '?', '"': '"'}
+
+// unquoteName decodes a listed member name back to the bytes tar wrote on stream. tar
+// runs every listing line — `tar -tR` and --index-file alike — through its default
+// escape quoting: a non-printable byte (in a non-UTF-8 locale, any non-ASCII byte)
+// prints as 3-digit octal \ooo and backslash/control characters as C escapes, so the
+// listed string can be longer than the on-stream name. Names tar printed verbatim
+// decode to themselves; an unrecognized backslash sequence is kept literally rather
+// than guessed at.
+func unquoteName(listed string) []byte {
+	isOctal := func(c byte) bool { return c >= '0' && c <= '7' }
+	out := make([]byte, 0, len(listed))
+	for i := 0; i < len(listed); i++ {
+		c := listed[i]
+		if c != '\\' {
+			out = append(out, c)
+			continue
+		}
+		if i+3 < len(listed) && isOctal(listed[i+1]) && isOctal(listed[i+2]) && isOctal(listed[i+3]) {
+			out = append(out, (listed[i+1]-'0')<<6|(listed[i+2]-'0')<<3|(listed[i+3]-'0'))
+			i += 3
+		} else if i+1 < len(listed) && unquoteEscapes[listed[i+1]] != 0 {
+			out = append(out, unquoteEscapes[listed[i+1]])
+			i++
+		} else {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // normalizeCreateIndex repairs the create-mode index so every offset honors Member.Off's
